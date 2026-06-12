@@ -1,7 +1,8 @@
 //! Service layer for the messages block.
 //!
-//! Plain async functions — no HTTP awareness. Both REST and A2A handlers
-//! call these. All database interactions live here.
+//! Plain async functions — no HTTP awareness. Shared by the REST, A2A,
+//! and SSR-page handlers. Pure-CRUD REST shells with no business logic
+//! (get context/entry, delete entry) go through `blocks::crud` instead.
 
 use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
 use wafer_core::clients::database as db;
@@ -173,10 +174,6 @@ pub async fn add_entry(
     Ok(record)
 }
 
-pub async fn get_entry(ctx: &dyn Context, id: &str) -> Result<db::Record, WaferError> {
-    db::get(ctx, ENTRIES_TABLE, id).await
-}
-
 pub struct ListEntriesParams {
     pub kind: Option<String>,
     pub role: Option<String>,
@@ -222,8 +219,4 @@ pub async fn list_entries(
     };
 
     db::list(ctx, ENTRIES_TABLE, &opts).await
-}
-
-pub async fn delete_entry(ctx: &dyn Context, id: &str) -> Result<(), WaferError> {
-    db::delete(ctx, ENTRIES_TABLE, id).await
 }

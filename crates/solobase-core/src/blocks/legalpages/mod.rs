@@ -2,8 +2,6 @@ mod migrations;
 mod pages;
 mod service;
 
-use std::collections::HashMap;
-
 use maud::{html, Markup, PreEscaped};
 use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
 use wafer_core::clients::database as db;
@@ -13,8 +11,11 @@ use wafer_run::{
 };
 
 use crate::{
-    blocks::helpers::{
-        self, err_bad_request, err_internal, err_not_found, json_map, ok_json, ResponseBuilder,
+    blocks::{
+        crud,
+        helpers::{
+            self, err_bad_request, err_internal, err_not_found, json_map, ok_json, ResponseBuilder,
+        },
     },
     ui::{self, templates, SiteConfig},
 };
@@ -35,18 +36,22 @@ impl Default for LegalPagesBlock {
 
 pub(crate) const COLLECTION: &str = "suppers_ai__legalpages__documents";
 
-/// Extract document ID from path like `/b/legalpages/api/documents/{id}` or
+/// Path prefix preceding the document id in the JSON API routes.
+const API_DOC_PREFIX: &str = "/b/legalpages/api/documents/";
+
+/// Extract document ID from a publish path like
 /// `/b/legalpages/api/documents/{id}/publish`.
+///
+/// The pure-CRUD routes go through `blocks::crud` (which extracts the id
+/// itself); this stays only for the publish route, which has a trailing
+/// `/publish` segment to strip.
 fn extract_doc_id(msg: &Message) -> &str {
     // Try router-extracted var first (native axum), fall back to path parsing (CF)
     let var = msg.var("id");
     if !var.is_empty() {
         return var;
     }
-    let path = msg.path();
-    let suffix = path
-        .strip_prefix("/b/legalpages/api/documents/")
-        .unwrap_or("");
+    let suffix = msg.path().strip_prefix(API_DOC_PREFIX).unwrap_or("");
     // Strip trailing /publish or /
     suffix.split('/').next().unwrap_or("")
 }
@@ -152,7 +157,6 @@ impl LegalPagesBlock {
     }
 
     async fn handle_admin_list(&self, ctx: &dyn Context, msg: &Message) -> OutputStream {
-        let (_, page_size, offset) = msg.pagination_params(20);
         let doc_type = msg.query("type");
         let mut filters = Vec::new();
         if !doc_type.is_empty() {
@@ -162,32 +166,11 @@ impl LegalPagesBlock {
                 value: serde_json::Value::String(doc_type.to_string()),
             });
         }
-        let opts = ListOptions {
-            filters,
-            sort: vec![SortField {
-                field: "updated_at".to_string(),
-                desc: true,
-            }],
-            limit: page_size as i64,
-            offset: offset as i64,
-            skip_count: false,
-        };
-        match db::list(ctx, COLLECTION, &opts).await {
-            Ok(result) => ok_json(&result),
-            Err(e) => err_internal("Database error", e),
-        }
-    }
-
-    async fn handle_admin_get(&self, ctx: &dyn Context, msg: &Message) -> OutputStream {
-        let id = extract_doc_id(msg);
-        if id.is_empty() {
-            return err_bad_request("Missing document ID");
-        }
-        match db::get(ctx, COLLECTION, id).await {
-            Ok(record) => ok_json(&record),
-            Err(e) if e.code == ErrorCode::NotFound => err_not_found("Document not found"),
-            Err(e) => err_internal("Database error", e),
-        }
+        let sort = vec![SortField {
+            field: "updated_at".to_string(),
+            desc: true,
+        }];
+        crud::crud_list(ctx, msg, COLLECTION, filters, Some(sort)).await
     }
 
     async fn handle_admin_create(
@@ -220,33 +203,6 @@ impl LegalPagesBlock {
 
         match db::create(ctx, COLLECTION, data).await {
             Ok(record) => ok_json(&record),
-            Err(e) => err_internal("Database error", e),
-        }
-    }
-
-    async fn handle_admin_update(
-        &self,
-        ctx: &dyn Context,
-        msg: &Message,
-        input: InputStream,
-    ) -> OutputStream {
-        let id = extract_doc_id(msg);
-        if id.is_empty() {
-            return err_bad_request("Missing document ID");
-        }
-
-        let raw = input.collect_to_bytes().await;
-        let body: HashMap<String, serde_json::Value> = match serde_json::from_slice(&raw) {
-            Ok(b) => b,
-            Err(e) => return err_bad_request(&format!("Invalid body: {e}")),
-        };
-
-        let mut data = body;
-        helpers::stamp_updated(&mut data);
-
-        match db::update(ctx, COLLECTION, id, data).await {
-            Ok(record) => ok_json(&record),
-            Err(e) if e.code == ErrorCode::NotFound => err_not_found("Document not found"),
             Err(e) => err_internal("Database error", e),
         }
     }
@@ -284,18 +240,6 @@ impl LegalPagesBlock {
         .await
         {
             Ok(published) => ok_json(&published.record),
-            Err(e) => err_internal("Database error", e),
-        }
-    }
-
-    async fn handle_admin_delete(&self, ctx: &dyn Context, msg: &Message) -> OutputStream {
-        let id = extract_doc_id(msg);
-        if id.is_empty() {
-            return err_bad_request("Missing document ID");
-        }
-        match db::delete(ctx, COLLECTION, id).await {
-            Ok(()) => ok_json(&serde_json::json!({"deleted": true})),
-            Err(e) if e.code == ErrorCode::NotFound => err_not_found("Document not found"),
             Err(e) => err_internal("Database error", e),
         }
     }
@@ -577,23 +521,20 @@ impl Block for LegalPagesBlock {
 
             // JSON API at /b/legalpages/api/documents/...
             ("retrieve", "/b/legalpages/api/documents") => self.handle_admin_list(ctx, &msg).await,
-            ("retrieve", _) if path.starts_with("/b/legalpages/api/documents/") => {
-                self.handle_admin_get(ctx, &msg).await
+            ("retrieve", _) if path.starts_with(API_DOC_PREFIX) => {
+                crud::crud_get(ctx, &msg, COLLECTION, API_DOC_PREFIX, "Document").await
             }
             ("create", "/b/legalpages/api/documents") => {
                 self.handle_admin_create(ctx, &msg, input).await
             }
-            ("update", _)
-                if path.starts_with("/b/legalpages/api/documents/")
-                    && path.ends_with("/publish") =>
-            {
+            ("update", _) if path.starts_with(API_DOC_PREFIX) && path.ends_with("/publish") => {
                 self.handle_admin_publish(ctx, &msg).await
             }
-            ("update", _) if path.starts_with("/b/legalpages/api/documents/") => {
-                self.handle_admin_update(ctx, &msg, input).await
+            ("update", _) if path.starts_with(API_DOC_PREFIX) => {
+                crud::crud_update(ctx, &msg, input, COLLECTION, API_DOC_PREFIX, "Document").await
             }
-            ("delete", _) if path.starts_with("/b/legalpages/api/documents/") => {
-                self.handle_admin_delete(ctx, &msg).await
+            ("delete", _) if path.starts_with(API_DOC_PREFIX) => {
+                crud::crud_delete(ctx, &msg, COLLECTION, API_DOC_PREFIX, "Document").await
             }
             _ => ui::not_found_response(&msg),
         }
