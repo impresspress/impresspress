@@ -262,7 +262,7 @@ async fn handle_list_products(ctx: &dyn Context, msg: &Message) -> OutputStream 
         });
     }
 
-    crud::crud_list(ctx, msg, PRODUCTS_TABLE, filters).await
+    crud::crud_list(ctx, msg, PRODUCTS_TABLE, filters, None).await
 }
 
 async fn handle_get_product(ctx: &dyn Context, msg: &Message) -> OutputStream {
@@ -323,7 +323,7 @@ async fn handle_delete_product(ctx: &dyn Context, msg: &Message) -> OutputStream
 // --- Groups ---
 
 async fn handle_list_groups(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    crud::crud_list(ctx, msg, GROUPS_TABLE, vec![]).await
+    crud::crud_list(ctx, msg, GROUPS_TABLE, vec![], None).await
 }
 
 async fn handle_create_group(ctx: &dyn Context, msg: &Message, input: InputStream) -> OutputStream {
@@ -354,7 +354,7 @@ async fn handle_delete_group(ctx: &dyn Context, msg: &Message) -> OutputStream {
 // --- Types ---
 
 async fn handle_list_types(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    crud::crud_list(ctx, msg, TYPES_TABLE, vec![]).await
+    crud::crud_list(ctx, msg, TYPES_TABLE, vec![], None).await
 }
 
 async fn handle_create_type(ctx: &dyn Context, msg: &Message, input: InputStream) -> OutputStream {
@@ -368,7 +368,7 @@ async fn handle_delete_type(ctx: &dyn Context, msg: &Message) -> OutputStream {
 // --- Pricing Templates ---
 
 async fn handle_list_pricing(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    crud::crud_list(ctx, msg, PRICING_TABLE, vec![]).await
+    crud::crud_list(ctx, msg, PRICING_TABLE, vec![], None).await
 }
 
 async fn handle_create_pricing(

@@ -22,18 +22,22 @@ use super::helpers::{
 // CRUD helpers
 // ---------------------------------------------------------------------------
 
-/// List records with pagination, optional extra filters, and default sort by created_at desc.
+/// List records with pagination, optional extra filters, and optional sort
+/// (`None` = newest first by `created_at`).
 pub async fn crud_list(
     ctx: &dyn Context,
     msg: &Message,
     collection: &str,
     extra_filters: Vec<Filter>,
+    sort: Option<Vec<SortField>>,
 ) -> OutputStream {
     let (page, page_size, _) = msg.pagination_params(20);
-    let sort = vec![SortField {
-        field: "created_at".to_string(),
-        desc: true,
-    }];
+    let sort = sort.unwrap_or_else(|| {
+        vec![SortField {
+            field: "created_at".to_string(),
+            desc: true,
+        }]
+    });
     match db::paginated_list(
         ctx,
         collection,
