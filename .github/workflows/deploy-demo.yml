@@ -52,7 +52,7 @@ jobs:
         uses: peaceiris/actions-gh-pages@v4
         with:
           personal_token: ${{ secrets.DEMO_PAT }}
-          external_repository: suppers-ai/solobase-demo
+          external_repository: impresspress/impresspress-demo
           publish_branch: gh-pages
           publish_dir: crates/impresspress-web/pkg
           force_orphan: true
