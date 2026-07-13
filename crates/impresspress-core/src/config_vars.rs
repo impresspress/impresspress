@@ -70,7 +70,7 @@ pub fn shared_config_vars() -> Vec<ConfigVar> {
         ConfigVar::new(
             "WAFER_RUN_SHARED__SITE_URL",
             "Marketing site URL for docs and pricing links",
-            "https://impresspress.dev",
+            "https://impresspress.org",
         )
         .name("Site URL")
         .input_type(InputType::Url),

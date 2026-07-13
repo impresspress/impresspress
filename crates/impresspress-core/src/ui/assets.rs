@@ -15,13 +15,13 @@ const CHARTS_CSS: &str = include_str!("assets/charts.css");
 
 /// Itim font binaries, sourced from `impresspress/site-kit`'s `/fonts/` mirror
 /// and committed here so every impresspress deployment ships its own glyphs
-/// (no cross-origin runtime dependency, no `https://impresspress.dev/fonts/` 404).
+/// (no cross-origin runtime dependency, no `https://impresspress.org/fonts/` 404).
 const ITIM_LATIN_WOFF2: &[u8] = include_bytes!("assets/fonts/itim-latin.woff2");
 const ITIM_LATIN_EXT_WOFF2: &[u8] = include_bytes!("assets/fonts/itim-latin-ext.woff2");
 
 /// Square Impresspress mark used as the sidebar/login icon. Bundled locally so
 /// the admin renders correctly without internet (the previous default pointed
-/// at `https://impresspress.dev/images/logo.png` which 404s offline).
+/// at `https://impresspress.org/images/logo.png` which 404s offline).
 const LOGO_ICON_PNG: &[u8] = include_bytes!("assets/impresspress-logo.png");
 /// Impresspress wordmark/long logo — used in the sidebar brand and login splash.
 const LOGO_LONG_PNG: &[u8] = include_bytes!("assets/impresspress-logo-long.png");
@@ -416,8 +416,8 @@ mod tests {
         );
         // No reference to the old hardcoded external host.
         assert!(
-            !s.contains("impresspress.dev/fonts/"),
-            "stale impresspress.dev font URL still in bundle"
+            !s.contains("impresspress.org/fonts/"),
+            "stale impresspress.org font URL still in bundle"
         );
         // The hashed worker-bundled URLs are present.
         assert!(
