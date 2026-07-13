@@ -18,6 +18,10 @@ pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> Out
         .config_get("WAFER_RUN_SHARED__AUTH_LOGO_URL")
         .unwrap_or("")
         .to_string();
+    let app_name = ctx
+        .config_get("WAFER_RUN_SHARED__APP_NAME")
+        .unwrap_or("Impresspress")
+        .to_string();
 
     // Token comes from query param or body
     let token = {
@@ -52,6 +56,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> Out
             "This verification link is invalid or has expired. Please request a new one.",
             false,
             &logo_url,
+            &app_name,
         );
     };
 
@@ -61,6 +66,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> Out
             "Your email has already been verified. You can sign in now.",
             true,
             &logo_url,
+            &app_name,
         );
     }
 
@@ -74,6 +80,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> Out
         "Your email has been verified successfully. You can now sign in.",
         true,
         &logo_url,
+        &app_name,
     )
 }
 
@@ -136,10 +143,16 @@ pub async fn handle_resend(ctx: &dyn Context, input: InputStream) -> OutputStrea
 }
 
 /// Return an HTML page response (for verify endpoints opened in browser).
-fn html_respond(title: &str, message: &str, success: bool, logo_url: &str) -> OutputStream {
+fn html_respond(
+    title: &str,
+    message: &str,
+    success: bool,
+    logo_url: &str,
+    app_name: &str,
+) -> OutputStream {
     let color = if success { "#10b981" } else { "#ef4444" };
     let config = ui::SiteConfig {
-        app_name: "Impresspress".into(),
+        app_name: app_name.to_string(),
         logo_url: logo_url.to_string(),
         logo_icon_url: String::new(),
         favicon_url: crate::ui::assets::favicon_url().to_string(),
@@ -154,7 +167,7 @@ fn html_respond(title: &str, message: &str, success: bool, logo_url: &str) -> Ou
                 div .login-container {
                     div .login-logo {
                         @if !logo_url.is_empty() {
-                            img .logo-image src=(logo_url) alt="Impresspress";
+                            img .logo-image src=(logo_url) alt=(app_name);
                         }
                     }
                     div style="text-align:center" {

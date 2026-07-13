@@ -59,6 +59,7 @@ pub fn sidebar_grouped(
     current_path: &str,
     logo_url: &str,
     logo_icon_url: &str,
+    app_name: &str,
 ) -> maud::Markup {
     use maud::html;
 
@@ -69,9 +70,9 @@ pub fn sidebar_grouped(
                     img src=(logo_icon_url) alt="" .sidebar__brand-icon;
                 }
                 @if !logo_url.is_empty() {
-                    img src=(logo_url) alt="Impresspress" .sidebar__brand-wordmark;
+                    img src=(logo_url) alt=(app_name) .sidebar__brand-wordmark;
                 } @else {
-                    span .sidebar__brand-name { "Impresspress" }
+                    span .sidebar__brand-name { (app_name) }
                 }
             }
             div .sidebar__panel {
@@ -204,7 +205,7 @@ mod tests {
                 items: vec![item("Blocks", "/b/admin/blocks")],
             },
         ];
-        let s = sidebar_grouped(&groups, None, "/b/admin/users", "", "").into_string();
+        let s = sidebar_grouped(&groups, None, "/b/admin/users", "", "", "Impresspress").into_string();
         assert!(s.contains(">Workspace<"));
         assert!(s.contains(">Data<"));
         assert!(s.contains("/b/admin/users"));
@@ -217,7 +218,7 @@ mod tests {
             label: None,
             items: vec![item("Storage", "/b/storage")],
         }];
-        let s = sidebar_grouped(&groups, None, "/b/storage/files/foo.png", "", "").into_string();
+        let s = sidebar_grouped(&groups, None, "/b/storage/files/foo.png", "", "", "Impresspress").into_string();
         assert!(s.contains("is-active"));
     }
 
@@ -263,7 +264,7 @@ mod tests {
         // (`M7 11V7…`) is absent from the package SVG, so its presence proves
         // the lock — not the package fallback — now renders.
         let groups = crate::ui::nav_groups::portal();
-        let s = sidebar_grouped(&groups, None, "/b/userportal/security", "", "").into_string();
+        let s = sidebar_grouped(&groups, None, "/b/userportal/security", "", "", "Impresspress").into_string();
         assert!(
             s.contains("M7 11V7a5 5 0 0 1 10 0v4"),
             "Security nav must render the lock icon (shackle path), got: {s}"

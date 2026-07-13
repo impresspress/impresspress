@@ -174,6 +174,7 @@ impl<'a> Page<'a> {
                     self.current_path,
                     &self.config.logo_url,
                     &self.config.logo_icon_url,
+                    &self.config.app_name,
                     self.topbar,
                     self.body,
                 ))

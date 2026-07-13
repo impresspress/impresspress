@@ -103,6 +103,7 @@ pub fn shell(
     current_path: &str,
     logo_url: &str,
     logo_icon_url: &str,
+    app_name: &str,
     topbar: Topbar<'_>,
     body: Markup,
 ) -> Markup {
@@ -116,7 +117,7 @@ pub fn shell(
                 {
                     "☰"
                 }
-                span .shell__mobile-title { "Impresspress" }
+                span .shell__mobile-title { (app_name) }
                 @if topbar.show_palette {
                     button .shell__palette-icon type="button"
                         data-action="palette-open"
@@ -128,7 +129,7 @@ pub fn shell(
                 }
             }
             div .shell__overlay data-action="drawer-close" {}
-            (sidebar_grouped(nav_groups, user, current_path, logo_url, logo_icon_url))
+            (sidebar_grouped(nav_groups, user, current_path, logo_url, logo_icon_url, app_name))
             div .shell__main {
                 (render_topbar(&topbar))
                 div .shell__body #content { (body) }
@@ -179,7 +180,7 @@ mod tests {
             show_palette: true,
         };
         let body = html! { p { "page body" } };
-        let s = shell(&groups, None, "/b/admin/users", "", "", topbar, body).into_string();
+        let s = shell(&groups, None, "/b/admin/users", "", "", "Impresspress", topbar, body).into_string();
         assert!(s.contains("topbar__crumbs"));
         assert!(s.contains(">Workspace<"));
         // The current page renders as the h1, after the breadcrumb nav.
@@ -212,6 +213,7 @@ mod tests {
             "/b/admin/users",
             "",
             "",
+            "Impresspress",
             topbar,
             html! { p { "body" } },
         )
@@ -243,7 +245,7 @@ mod tests {
             }],
             ..Topbar::default()
         };
-        let s = shell(&groups, None, "/x", "", "", tb, html! {}).into_string();
+        let s = shell(&groups, None, "/x", "", "", "Impresspress", tb, html! {}).into_string();
         assert!(s.contains(r#"<h1 class="topbar__title">Dashboard</h1>"#));
         // No ancestors -> no empty breadcrumb nav.
         assert!(!s.contains("topbar__crumbs"));
@@ -268,7 +270,7 @@ mod tests {
             Some("Product catalog statistics"),
             None,
         );
-        let s = shell(&groups, None, "/b/products/", "", "", tb, body).into_string();
+        let s = shell(&groups, None, "/b/products/", "", "", "Impresspress", tb, body).into_string();
         assert_eq!(
             s.matches("<h1").count(),
             1,
@@ -290,7 +292,7 @@ mod tests {
             }],
             ..Default::default()
         };
-        let s = shell(&groups, None, "/x", "", "", tb, html! {}).into_string();
+        let s = shell(&groups, None, "/x", "", "", "Impresspress", tb, html! {}).into_string();
         assert!(!s.contains("topbar__palette"));
         // The single crumb renders as the page h1 (no ancestor nav needed).
         assert!(s.contains(r#"<h1 class="topbar__title">X</h1>"#));
@@ -305,6 +307,7 @@ mod tests {
             "/x",
             "",
             "",
+            "Impresspress",
             Topbar::default(),
             html! { "body" },
         )
@@ -328,7 +331,7 @@ mod tests {
             show_palette: false,
             ..Default::default()
         };
-        let s = shell(&groups, None, "/x", "", "", tb, html! {}).into_string();
+        let s = shell(&groups, None, "/x", "", "", "Impresspress", tb, html! {}).into_string();
         // Mobile header itself is always rendered…
         assert!(s.contains("shell__mobile-header"));
         // …but the ⌘K icon-button inside it isn't, when the page disables the palette.
@@ -342,7 +345,7 @@ mod tests {
             show_palette: false,
             ..Default::default()
         };
-        let s = shell(&groups, None, "/x", "", "", tb, html! { "body" }).into_string();
+        let s = shell(&groups, None, "/x", "", "", "Impresspress", tb, html! { "body" }).into_string();
         // No topbar element at all when there's nothing to render in it.
         assert!(!s.contains(r#"class="topbar""#));
         assert!(s.contains(">body<") || s.contains(">body</"));
