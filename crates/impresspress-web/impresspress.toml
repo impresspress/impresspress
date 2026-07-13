@@ -9,7 +9,7 @@ title = "Impresspress"
 boot_redirect = "/"
 
 [assets]
-# `demo.impresspress.dev` ships throwaway OPFS data — admin defaults are
+# `demo.impresspress.org` ships throwaway OPFS data — admin defaults are
 # auto-seeded, every visit is essentially demo state. Opting into the
 # OPFS-wipe-on-recovery path means a schema-drift class of bug that takes
 # the SW into a self-destruct loop self-resolves on the next reload

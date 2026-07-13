@@ -50,7 +50,7 @@ pub struct AssetsConfig {
     /// Whether `loader.js`'s recovery path wipes OPFS when the SW
     /// self-destructs. Defaults to **false** — apps that store user data
     /// in OPFS shouldn't lose it on a transient init failure. Set to
-    /// `true` for throwaway-data deployments like `demo.impresspress.dev`
+    /// `true` for throwaway-data deployments like `demo.impresspress.org`
     /// where a stale-schema loop should self-resolve without manual
     /// `chrome://settings/siteData` cleanup. See
     /// `crates/impresspress-bundle/assets/loader.js.tmpl` for the runtime

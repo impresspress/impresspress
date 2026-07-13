@@ -43,7 +43,7 @@ jobs:
         run: impresspress build --target web --release
 
       - name: Add CNAME
-        run: echo "demo.impresspress.dev" > crates/impresspress-web/pkg/CNAME
+        run: echo "demo.impresspress.org" > crates/impresspress-web/pkg/CNAME
 
       - name: Remove wasm-pack .gitignore (blocks gh-pages deploy)
         run: rm -f crates/impresspress-web/pkg/.gitignore
