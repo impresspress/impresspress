@@ -615,9 +615,23 @@ resolve_token() {
   echo "<unresolved:$tok>"
 }
 
+# Block-directory name → registered block id, for the handful of blocks whose
+# id is NOT `impresspress/{dir}`. The runtime de-leak (2026-07) moved the auth
+# *service* into the runtime's own namespace: the code under `blocks/auth/`
+# registers as `wafer-run/auth` (see `AUTH_BLOCK_ID` in `blocks/auth/mod.rs`)
+# and owns the `wafer_run__auth__*` tables. Attributing both its `db::*`
+# callsites and its `ResourceGrant` decls to that id is what makes its
+# own-table access read as OWN and its cross-block grants match the real
+# table owner — without this, every auth-table access is a false "missing
+# grant". Const resolution still keys off the raw dir name (`file_to_block_name`
+# is deliberately left untouched).
+declare -A BLOCK_ID_OVERRIDE=(
+  [auth]="wafer-run/auth"
+)
+
 # Convert a file path like crates/impresspress-core/src/blocks/files/mod.rs or
 # crates/impresspress-core/src/blocks/network.rs into the block id
-# `impresspress/{name}`.
+# `impresspress/{name}` (or a `BLOCK_ID_OVERRIDE` entry).
 file_to_block_id() {
   local path="$1"
   # Strip the prefix to get blocks/<rest>
@@ -625,6 +639,10 @@ file_to_block_id() {
   # Take the first path segment, stripping trailing .rs
   local first="${rel%%/*}"
   first="${first%.rs}"
+  if [ -n "${BLOCK_ID_OVERRIDE[$first]:-}" ]; then
+    echo "${BLOCK_ID_OVERRIDE[$first]}"
+    return
+  fi
   echo "impresspress/${first//_/-}"
 }
 
