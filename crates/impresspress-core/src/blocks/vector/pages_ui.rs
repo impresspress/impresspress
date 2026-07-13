@@ -351,7 +351,10 @@ mod tests {
         let row = sample_index("impresspress__vector__docs", "fastembed", 384, 0, false);
         let html = render_index_list_table(&[row]).into_string();
         assert!(html.contains(">docs<"), "prefix not stripped: {html}");
-        assert!(!html.contains("impresspress__vector__"), "raw prefix leaked");
+        assert!(
+            !html.contains("impresspress__vector__"),
+            "raw prefix leaked"
+        );
     }
 
     fn join(sections: &[Markup]) -> String {

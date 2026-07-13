@@ -182,7 +182,10 @@ mod tests {
 
     #[test]
     fn screaming_block_handles_org_only() {
-        assert_eq!(D1ConfigSource::screaming_block("impresspress"), "IMPRESSPRESS");
+        assert_eq!(
+            D1ConfigSource::screaming_block("impresspress"),
+            "IMPRESSPRESS"
+        );
     }
 
     #[test]

@@ -28,7 +28,10 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("asset-manifest.json");
         let mut assets = BTreeMap::new();
-        assets.insert("impresspress_web.js".into(), "/impresspress_web-a1b2c3d4.js".into());
+        assets.insert(
+            "impresspress_web.js".into(),
+            "/impresspress_web-a1b2c3d4.js".into(),
+        );
         let m = AssetManifest {
             build_id: "a1b2c3d4".into(),
             assets,

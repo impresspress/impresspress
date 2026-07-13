@@ -29,9 +29,8 @@ mod tests {
 
     #[test]
     fn postgres_script_creates_buttons_table_and_sort_order_index() {
-        assert!(
-            SQL_001_POSTGRES.contains("CREATE TABLE IF NOT EXISTS impresspress__userportal__buttons")
-        );
+        assert!(SQL_001_POSTGRES
+            .contains("CREATE TABLE IF NOT EXISTS impresspress__userportal__buttons"));
         assert!(SQL_001_POSTGRES.contains("impresspress__userportal__buttons_sort_order_idx"));
     }
 }

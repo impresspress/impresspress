@@ -41,8 +41,13 @@ pub(crate) const POSTGRES_MIGRATIONS: &[&str] =
 /// rule (CLAUDE.md).
 pub async fn apply(ctx: &dyn wafer_run::context::Context) -> Result<(), String> {
     let sqlite: Vec<&str> = SQLITE_MIGRATIONS.iter().map(|(_, sql)| *sql).collect();
-    crate::migration_helper::apply_migrations(ctx, "impresspress/admin", &sqlite, POSTGRES_MIGRATIONS)
-        .await
+    crate::migration_helper::apply_migrations(
+        ctx,
+        "impresspress/admin",
+        &sqlite,
+        POSTGRES_MIGRATIONS,
+    )
+    .await
 }
 
 /// The admin migration SQL files for the given `db_type`, in apply order —

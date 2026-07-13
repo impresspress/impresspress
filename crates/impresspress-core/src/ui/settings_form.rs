@@ -485,7 +485,10 @@ mod tests {
     #[tokio::test]
     async fn render_sections_never_leaks_a_stored_secret_into_the_html() {
         let mut ctx = TestContext::new().await;
-        ctx.set_config("IMPRESSPRESS__EMAIL__MAILGUN_API_KEY", "key-abcdef0123456789");
+        ctx.set_config(
+            "IMPRESSPRESS__EMAIL__MAILGUN_API_KEY",
+            "key-abcdef0123456789",
+        );
         let v = var(
             "IMPRESSPRESS__EMAIL__MAILGUN_API_KEY",
             "Mailgun API Key",

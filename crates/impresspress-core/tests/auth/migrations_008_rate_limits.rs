@@ -7,8 +7,8 @@
 //! missing table, the caller's `let _ =` swallowed the error, and rate
 //! limiting silently never triggered.
 
-use serde_json::json;
 use impresspress_core::blocks::auth::migrations;
+use serde_json::json;
 use wafer_block::{
     db::{Filter, FilterOp},
     wire::database::OnConflict,

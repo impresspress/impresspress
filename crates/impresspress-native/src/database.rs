@@ -47,8 +47,9 @@ pub async fn make_database_service(
 async fn make_postgres_database_service_dispatch(
     db_url: Option<&str>,
 ) -> Result<Arc<dyn DatabaseService>> {
-    let url = db_url
-        .ok_or_else(|| anyhow!("IMPRESSPRESS_DB_TYPE=postgres requires IMPRESSPRESS_DB_URL to be set"))?;
+    let url = db_url.ok_or_else(|| {
+        anyhow!("IMPRESSPRESS_DB_TYPE=postgres requires IMPRESSPRESS_DB_URL to be set")
+    })?;
     make_postgres_database_service(url).await
 }
 

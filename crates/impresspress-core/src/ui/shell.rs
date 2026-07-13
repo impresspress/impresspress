@@ -180,7 +180,17 @@ mod tests {
             show_palette: true,
         };
         let body = html! { p { "page body" } };
-        let s = shell(&groups, None, "/b/admin/users", "", "", "Impresspress", topbar, body).into_string();
+        let s = shell(
+            &groups,
+            None,
+            "/b/admin/users",
+            "",
+            "",
+            "Impresspress",
+            topbar,
+            body,
+        )
+        .into_string();
         assert!(s.contains("topbar__crumbs"));
         assert!(s.contains(">Workspace<"));
         // The current page renders as the h1, after the breadcrumb nav.
@@ -270,7 +280,17 @@ mod tests {
             Some("Product catalog statistics"),
             None,
         );
-        let s = shell(&groups, None, "/b/products/", "", "", "Impresspress", tb, body).into_string();
+        let s = shell(
+            &groups,
+            None,
+            "/b/products/",
+            "",
+            "",
+            "Impresspress",
+            tb,
+            body,
+        )
+        .into_string();
         assert_eq!(
             s.matches("<h1").count(),
             1,
@@ -345,7 +365,17 @@ mod tests {
             show_palette: false,
             ..Default::default()
         };
-        let s = shell(&groups, None, "/x", "", "", "Impresspress", tb, html! { "body" }).into_string();
+        let s = shell(
+            &groups,
+            None,
+            "/x",
+            "",
+            "",
+            "Impresspress",
+            tb,
+            html! { "body" },
+        )
+        .into_string();
         // No topbar element at all when there's nothing to render in it.
         assert!(!s.contains(r#"class="topbar""#));
         assert!(s.contains(">body<") || s.contains(">body</"));

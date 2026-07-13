@@ -389,7 +389,10 @@ mod tests {
     async fn oauth_provider_configured_requires_all_three_keys() {
         let mut ctx = TestContext::new().await;
         ctx.set_config("IMPRESSPRESS__AUTH_UI__OAUTH_GITHUB_CLIENT_ID", "id");
-        ctx.set_config("IMPRESSPRESS__AUTH_UI__OAUTH_GITHUB_CLIENT_SECRET", "secret");
+        ctx.set_config(
+            "IMPRESSPRESS__AUTH_UI__OAUTH_GITHUB_CLIENT_SECRET",
+            "secret",
+        );
         assert!(
             !oauth_provider_configured(&ctx, "github"),
             "should be false without REDIRECT_URI"

@@ -326,10 +326,7 @@ mod tests {
 
     #[test]
     fn write_key_variables_extracts_block() {
-        let r = row(
-            "block",
-            serde_json::Value::String("WAFER_RUN__AUTH".into()),
-        );
+        let r = row("block", serde_json::Value::String("WAFER_RUN__AUTH".into()));
         assert_eq!(
             write_key(CachedTable::Variables, &r),
             Some("cfg:v1:variables:WAFER_RUN__AUTH".to_string())
@@ -430,10 +427,7 @@ mod tests {
 
     #[test]
     fn invalidate_keys_variables_only_per_row() {
-        let r = row(
-            "block",
-            serde_json::Value::String("WAFER_RUN__AUTH".into()),
-        );
+        let r = row("block", serde_json::Value::String("WAFER_RUN__AUTH".into()));
         assert_eq!(
             invalidate_keys(CachedTable::Variables, &r),
             vec!["cfg:v1:variables:WAFER_RUN__AUTH".to_string()]

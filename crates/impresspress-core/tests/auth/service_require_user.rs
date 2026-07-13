@@ -3,12 +3,12 @@
 
 use std::sync::Arc;
 
-use sha2::{Digest, Sha256};
 use impresspress_core::blocks::auth::{
     migrations,
     repo::{pats, sessions, users},
     service::{hash_token, AuthServiceImpl, BlockState},
 };
+use sha2::{Digest, Sha256};
 use wafer_core::interfaces::auth::service::{AuthError, AuthService};
 use wafer_run::{context::Context, Message};
 

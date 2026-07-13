@@ -137,13 +137,21 @@ pub const ROUTES: &[Route] = &[
     // Auth — SSR pages + API under /b/auth/
     Route::new("/b/auth/", RouteAccess::Public, "impresspress/auth-ui"),
     // Admin settings — more specific prefix must come before the /b/admin/ catch-all
-    Route::new("/b/admin/settings", RouteAccess::Admin, "impresspress/admin"),
+    Route::new(
+        "/b/admin/settings",
+        RouteAccess::Admin,
+        "impresspress/admin",
+    ),
     // Admin — SSR pages + API under /b/admin/
     Route::new("/b/admin/", RouteAccess::Admin, "impresspress/admin"),
     Route::new("/b/admin", RouteAccess::Admin, "impresspress/admin"),
     // Feature blocks — SSR + API under /b/{block}/
     Route::new("/b/storage/", RouteAccess::Public, "impresspress/files"),
-    Route::new("/b/cloudstorage/", RouteAccess::Public, "impresspress/files"),
+    Route::new(
+        "/b/cloudstorage/",
+        RouteAccess::Public,
+        "impresspress/files",
+    ),
     Route::new("/b/products", RouteAccess::Public, "impresspress/products"),
     // Legalpages — public reads + admin writes/UI.
     // Admin and API prefixes must come BEFORE the bare `/b/legalpages` entry
@@ -738,8 +746,8 @@ mod tests {
         // A block that owns a built-in prefix route ("/b/vector/") contributes
         // its declared endpoints to the inspector view even though the route
         // table has a single collapsed prefix entry.
-        let info =
-            BlockInfo::new("impresspress/vector", "0.0.1", "http-handler@v1", "v").endpoints(vec![
+        let info = BlockInfo::new("impresspress/vector", "0.0.1", "http-handler@v1", "v")
+            .endpoints(vec![
                 BlockEndpoint::post("/b/vector/api/query").auth(AuthLevel::Authenticated),
                 BlockEndpoint::get("/b/vector/").auth(AuthLevel::Admin),
             ]);

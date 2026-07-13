@@ -670,10 +670,11 @@ mod api_key_lifecycle_tests {
         use crate::blocks::admin::AdminBlock;
 
         let grants = AdminBlock::new().info().grants;
-        let ctx =
-            TestContext::with_auth()
-                .await
-                .with_wrap("wafer-run/auth", grants, "impresspress/admin");
+        let ctx = TestContext::with_auth().await.with_wrap(
+            "wafer-run/auth",
+            grants,
+            "impresspress/admin",
+        );
         let uid = seed_user_and_key(&ctx, "raw-active-key").await;
 
         let mut msg = Message::new("http");
@@ -685,10 +686,11 @@ mod api_key_lifecycle_tests {
     async fn disabled_user_key_is_rejected() {
         use wafer_core::clients::database as db;
 
-        let ctx =
-            TestContext::with_auth()
-                .await
-                .with_wrap("wafer-run/auth", vec![], "impresspress/admin");
+        let ctx = TestContext::with_auth().await.with_wrap(
+            "wafer-run/auth",
+            vec![],
+            "impresspress/admin",
+        );
         let uid = seed_user_and_key(&ctx, "raw-disabled-key").await;
 
         let mut patch = std::collections::HashMap::new();

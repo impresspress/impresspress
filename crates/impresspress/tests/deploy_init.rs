@@ -104,7 +104,9 @@ async fn build_runtime(
         .storage(storage)
         .config(Arc::new(config_service))
         .config_source(Arc::new(wafer_run::StaticConfigSource::new(vars.clone())))
-        .crypto(impresspress_native::make_jwt_crypto_service(jwt_secret).expect("jwt crypto service"))
+        .crypto(
+            impresspress_native::make_jwt_crypto_service(jwt_secret).expect("jwt crypto service"),
+        )
         .network(impresspress_native::make_fetch_network_service())
         .logger(impresspress_native::make_tracing_logger())
         .block_settings(features)
@@ -162,7 +164,8 @@ async fn deploy_init_first_run_ok_and_second_run_idempotent() {
     let admin_row = rows
         .iter()
         .find(|r| {
-            r.data["block_name"] == serde_json::json!(impresspress_core::blocks::admin::ADMIN_BLOCK_ID)
+            r.data["block_name"]
+                == serde_json::json!(impresspress_core::blocks::admin::ADMIN_BLOCK_ID)
         })
         .expect("admin row stamped");
     let cur = admin_row.data["current_hash"]

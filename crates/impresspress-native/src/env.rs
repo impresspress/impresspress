@@ -70,12 +70,12 @@ mod tests {
                 "admin@example.com".to_string(),
             ),
             // Block-scoped — keep.
-            (
-                "WAFER_RUN__AUTH__JWT_SECRET".to_string(),
-                "abc".to_string(),
-            ),
+            ("WAFER_RUN__AUTH__JWT_SECRET".to_string(), "abc".to_string()),
             // Infra — drop.
-            ("IMPRESSPRESS_LISTEN".to_string(), "0.0.0.0:8090".to_string()),
+            (
+                "IMPRESSPRESS_LISTEN".to_string(),
+                "0.0.0.0:8090".to_string(),
+            ),
             (
                 "IMPRESSPRESS_DB_PATH".to_string(),
                 "data/impresspress.db".to_string(),

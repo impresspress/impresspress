@@ -241,8 +241,12 @@ async fn handle_send_template(
         "http://localhost:5173",
     )
     .await;
-    let site_url =
-        config::get_default(ctx, "WAFER_RUN_SHARED__SITE_URL", "https://impresspress.org").await;
+    let site_url = config::get_default(
+        ctx,
+        "WAFER_RUN_SHARED__SITE_URL",
+        "https://impresspress.org",
+    )
+    .await;
     let app_name = config::get_default(ctx, "WAFER_RUN_SHARED__APP_NAME", "Impresspress").await;
 
     let (subject, html, text) = match req.template.as_str() {

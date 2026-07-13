@@ -7,12 +7,12 @@
 //! Plan A2: `seed_password_user` applies migrations before inserting so the
 //! typed schema (with `NOT NULL` constraints) is in place.
 
-use serde_json::json;
 use impresspress_core::blocks::{
     auth::{repo::sessions, service::hash_token, AUTH_BLOCK_ID},
     auth_ui::AuthUiBlock,
     userportal::UserPortalBlock,
 };
+use serde_json::json;
 use wafer_core::clients::crypto;
 use wafer_run::{
     streams::output::{BufferedResponse, TerminalNotResponse},
