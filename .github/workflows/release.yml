@@ -17,24 +17,24 @@ jobs:
         include:
           - target: x86_64-unknown-linux-gnu
             os: ubuntu-latest
-            name: solobase-linux-amd64
+            name: impresspress-linux-amd64
             ext: tar.gz
           - target: aarch64-unknown-linux-gnu
             os: ubuntu-latest
-            name: solobase-linux-arm64
+            name: impresspress-linux-arm64
             ext: tar.gz
             cross: true
           - target: aarch64-apple-darwin
             os: macos-latest
-            name: solobase-darwin-arm64
+            name: impresspress-darwin-arm64
             ext: tar.gz
           - target: x86_64-apple-darwin
             os: macos-latest
-            name: solobase-darwin-amd64
+            name: impresspress-darwin-amd64
             ext: tar.gz
           - target: x86_64-pc-windows-gnu
             os: ubuntu-latest
-            name: solobase-windows-amd64
+            name: impresspress-windows-amd64
             ext: zip
             cross: true
 
@@ -70,20 +70,20 @@ jobs:
           sudo apt-get install -y -qq gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
 
       - name: Build
-        run: cargo build -p solobase --release --target ${{ matrix.target }}
+        run: cargo build -p impresspress --release --target ${{ matrix.target }}
 
       - name: Package (tar.gz)
         if: matrix.ext == 'tar.gz'
         run: |
           cd target/${{ matrix.target }}/release
-          tar czf /tmp/${{ matrix.name }}.tar.gz solobase
+          tar czf /tmp/${{ matrix.name }}.tar.gz impresspress
           echo "ASSET=/tmp/${{ matrix.name }}.tar.gz" >> $GITHUB_ENV
 
       - name: Package (zip)
         if: matrix.ext == 'zip'
         run: |
           cd target/${{ matrix.target }}/release
-          zip /tmp/${{ matrix.name }}.zip solobase.exe
+          zip /tmp/${{ matrix.name }}.zip impresspress.exe
           echo "ASSET=/tmp/${{ matrix.name }}.zip" >> $GITHUB_ENV
 
       - uses: actions/upload-artifact@v4

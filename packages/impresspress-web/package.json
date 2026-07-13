@@ -1,0 +1,38 @@
+{
+  "name": "impresspress-web",
+  "version": "0.2.0",
+  "description": "Impresspress backend running in the browser via Service Worker + WASM",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "import": "./dist/index.js",
+      "types": "./dist/index.d.ts"
+    },
+    "./worker": {
+      "import": "./dist/worker.js",
+      "types": "./dist/worker.d.ts"
+    }
+  },
+  "files": [
+    "dist/"
+  ],
+  "scripts": {
+    "build:wasm": "cd ../../crates/impresspress-web && wasm-pack build --target web --out-dir ../../packages/impresspress-web/dist/wasm",
+    "build:ts": "tsc",
+    "build": "npm run build:wasm && npm run build:ts"
+  },
+  "devDependencies": {
+    "@types/node": "^25.6.0",
+    "typescript": "^5.0.0",
+    "vitest": "^4.1.4"
+  },
+  "keywords": [
+    "impresspress",
+    "wasm",
+    "service-worker",
+    "backend"
+  ],
+  "license": "MIT"
+}

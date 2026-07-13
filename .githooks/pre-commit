@@ -9,7 +9,7 @@ if [ -n "$RS_FILES" ]; then
   git add $RS_FILES
 
   echo "Running cargo clippy --fix..."
-  cargo clippy -p solobase-core -p solobase --fix --allow-dirty --allow-staged -- -D warnings 2>&1 || {
+  cargo clippy -p impresspress-core -p impresspress --fix --allow-dirty --allow-staged -- -D warnings 2>&1 || {
     echo "❌ clippy found warnings it couldn't auto-fix. Please fix manually and re-stage."
     exit 1
   }

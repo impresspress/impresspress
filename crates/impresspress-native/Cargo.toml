@@ -1,0 +1,50 @@
+[package]
+name = "impresspress-native"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Native platform services + bootstrap helpers for WAFER-based server apps"
+
+[features]
+default = []
+postgres = ["dep:wafer-block-postgres"]
+s3 = ["dep:wafer-block-s3"]
+otel = [
+    "dep:opentelemetry",
+    "dep:opentelemetry_sdk",
+    "dep:opentelemetry-otlp",
+    "dep:tracing-opentelemetry",
+]
+
+[dependencies]
+anyhow = "1"
+
+wafer-run = { workspace = true, features = ["full"] }
+wafer-core = { workspace = true }
+
+# wafer-block hosts the `use_static_blocks!` macro used in serve.rs.
+wafer-block = { workspace = true }
+
+wafer-block-sqlite = { workspace = true }
+wafer-block-local-storage = { workspace = true }
+wafer-block-network = { workspace = true }
+wafer-block-crypto = { workspace = true }
+wafer-block-http-listener = { workspace = true }
+
+wafer-block-postgres = { workspace = true, optional = true }
+wafer-block-s3 = { workspace = true, optional = true }
+
+tokio = { workspace = true, features = ["full"] }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+opentelemetry = { workspace = true, optional = true }
+opentelemetry_sdk = { workspace = true, optional = true }
+opentelemetry-otlp = { workspace = true, optional = true }
+tracing-opentelemetry = { workspace = true, optional = true }
+
+dotenvy = { workspace = true }
+
+serde_json = { workspace = true }
+
+[dev-dependencies]
+tempfile = "3"

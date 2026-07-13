@@ -1,13 +1,13 @@
 # Local development override for wafer-run crates.
 #
 # Copy this file to `.cargo/config.toml` (which is gitignored) to build
-# solobase against a sibling `wafer-run` checkout instead of the git-pinned
+# impresspress against a sibling `wafer-run` checkout instead of the git-pinned
 # version in Cargo.toml. Removing the copy reverts to the git source — no
 # changes to Cargo.toml are needed.
 #
 # Expected layout:
 #   workspace/
-#     solobase/       <- this repo
+#     impresspress/       <- this repo
 #     wafer-run/      <- sibling checkout
 #
 # Uses `[patch]` in config (stable since Cargo 1.84) rather than the

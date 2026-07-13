@@ -1,0 +1,184 @@
+// @generated build: __BUILD_ID__ — Service Worker that runs Impresspress via WASM
+import init, { initialize, handle_request } from '__WASM_JS__';
+
+let initialized = false;
+let initPromise = null;
+// Set after a fatal wasm error (init failure or runtime trap). A poisoned SW
+// stops handling fetches with wasm and unregisters itself so the next page
+// load picks up a fresh registration. Without this, a stale SW from a prior
+// deploy whose hashed asset URL no longer exists keeps returning 5xx forever
+// — the user has to manually unregister via DevTools to recover.
+let poisoned = false;
+
+async function selfDestruct(reason) {
+    if (poisoned) return;
+    poisoned = true;
+    console.error('[__APP_NAME__] SW self-destructing:', reason);
+    try {
+        await self.registration.unregister();
+        const clients = await self.clients.matchAll({ type: 'window' });
+        for (const c of clients) {
+            // Notify the page so loader.js sets its sessionStorage breaker
+            // BEFORE the navigation below. The breaker routes the next load
+            // through a recovery path (clear caches, drop any lingering SW,
+            // bust the document cache, reload once) — that breaks
+            // stale-module loops where a fresh `*_bg.wasm` can't link
+            // against a browser-cached previous-build `*.js`.
+            try {
+                c.postMessage({ type: 'sw-self-destruct', reason });
+            } catch (e) {
+                console.warn('[__APP_NAME__] postMessage failed:', e);
+            }
+            try {
+                c.navigate(c.url);
+            } catch (e) {
+                console.warn('[__APP_NAME__] navigate() failed:', e);
+            }
+        }
+    } catch (e) {
+        console.error('[__APP_NAME__] self-destruct cleanup failed:', e);
+    }
+}
+
+async function ensureInitialized() {
+    if (initialized) return;
+    if (initPromise) return await initPromise;
+    initPromise = (async () => {
+        console.log('[__APP_NAME__] Loading WASM module...');
+        try {
+            await init();
+        } catch (e) {
+            await selfDestruct(`wasm module load failed: ${e}`);
+            throw e;
+        }
+        console.log('[__APP_NAME__] Initializing runtime...');
+        try {
+            await initialize();
+        } catch (e) {
+            await selfDestruct(`runtime initialize() failed: ${e}`);
+            throw e;
+        }
+        initialized = true;
+        console.log('[__APP_NAME__] Runtime ready.');
+    })();
+    await initPromise;
+}
+
+self.addEventListener('install', (event) => {
+    console.log('[__APP_NAME__] Service Worker installing...');
+    event.waitUntil(self.skipWaiting());
+});
+
+self.addEventListener('activate', (event) => {
+    console.log('[__APP_NAME__] Service Worker activating...');
+    event.waitUntil(self.clients.claim());
+});
+
+// ---------------------------------------------------------------------------
+// Message bridge — asset-loader replies from the main thread.
+// ---------------------------------------------------------------------------
+
+self.addEventListener('message', (event) => {
+    const msg = event.data;
+    if (!msg) return;
+
+    // Asset loader bridge: route reply to bridge.js's pending-load map.
+    // bridge.js exposes the resolver on globalThis because this script
+    // (sw.js) doesn't import the wasm-bindgen-generated bridge module.
+    if (msg.type === 'load-asset-response') {
+        if (typeof globalThis.__impresspressCompleteAssetLoad === 'function') {
+            globalThis.__impresspressCompleteAssetLoad(msg.id, {
+                status: msg.ok ? 'ready' : 'failed',
+                error: msg.ok ? undefined : msg.error,
+            });
+        }
+        return;
+    }
+
+    // LLM bridge: route all llm-* replies from the page to bridge.js's handler.
+    if (typeof msg.type === 'string' && msg.type.startsWith('llm-')) {
+        if (typeof globalThis.__impresspressCompleteLlmMessage === 'function') {
+            globalThis.__impresspressCompleteLlmMessage(msg);
+        }
+        return;
+    }
+
+    // Embed bridge: route all embed-*-response replies from the page to bridge.js's handler.
+    if (typeof msg.type === 'string' && msg.type.startsWith('embed-') && msg.type.endsWith('-response')) {
+        if (typeof globalThis.__impresspressCompleteEmbedMessage === 'function') {
+            globalThis.__impresspressCompleteEmbedMessage(msg);
+        }
+        return;
+    }
+
+    // Image bridge: route all image-* replies (one-shot responses and stream
+    // frames) from the page to bridge.js's handler.
+    if (typeof msg.type === 'string' && msg.type.startsWith('image-')) {
+        if (typeof globalThis.__impresspressCompleteImageMessage === 'function') {
+            globalThis.__impresspressCompleteImageMessage(msg);
+        }
+        return;
+    }
+});
+
+// ---------------------------------------------------------------------------
+// Fetch handler
+// ---------------------------------------------------------------------------
+
+self.addEventListener('fetch', (event) => {
+    const url = new URL(event.request.url);
+    // Only intercept same-origin requests
+    if (url.origin !== self.location.origin) return;
+    // Don't intercept requests for the SW's own script, the boot loader, the
+    // PWA manifest (which the browser fetches as metadata), or the wasm-pack /
+    // bundler output. `/` and `/index.html` are intentionally INTERCEPTED so
+    // the consumer's router can render a UI block at root.
+    //
+    // Consumers inject additional app-specific bypass prefixes via the
+    // `--extra-bypass-prefix` flag on export-assets; those get appended to
+    // the last line of the `if` expression below as further `startsWith`
+    // clauses. That's where app-level static assets (custom JS / CSS)
+    // should be listed.
+    if (url.pathname === '/sw.js' ||
+        url.pathname === '/loader.js' ||
+        url.pathname === '/manifest.json' ||
+        url.pathname === '/asset-manifest.json' ||
+        url.pathname === '/webllm-engine.js' ||
+        url.pathname === '/embed-engine.js' ||
+        url.pathname === '/t2i-engine.js' ||
+        url.pathname.startsWith('__WASM_JS_PREFIX__') ||
+        url.pathname.startsWith('/snippets/') ||
+        url.pathname.startsWith('/vendor/') ||
+        url.pathname.startsWith('/sql-')__EXTRA_BYPASS____EXTRA_BYPASS_EXACT__) {
+        return;
+    }
+    event.respondWith(handleFetch(event.request));
+});
+
+async function handleFetch(request) {
+    if (poisoned) {
+        // wasm is dead — let the network serve this. The page should already
+        // be in the middle of a re-navigation triggered by selfDestruct().
+        return fetch(request);
+    }
+    try {
+        await ensureInitialized();
+        return await handle_request(request);
+    } catch (error) {
+        console.error('[__APP_NAME__] Error handling request:', error);
+        // wasm-bindgen surfaces a `RuntimeError` for an `unreachable` trap;
+        // ensureInitialized() also synthesises errors for `init()` /
+        // `initialize()` failures (most often caused by a stale browser
+        // module cache pointing at filenames the new build no longer has).
+        // Both modes mean the wasm instance is unusable for the rest of
+        // this SW's life, so self-destruct (which posts the breaker
+        // message and triggers a re-navigation) and fall through to
+        // network — that lets the browser fetch the static boot HTML
+        // instead of seeing the raw error JSON, which is what runs
+        // loader.js's recovery path.
+        if (!poisoned) {
+            await selfDestruct(`error handling request: ${error}`);
+        }
+        return fetch(request);
+    }
+}

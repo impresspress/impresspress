@@ -9,15 +9,15 @@ dist/
 # Data & test artifacts
 /data/
 /.data/
-crates/solobase/data/
+crates/impresspress/data/
 *.db
 *.db-shm
 *.db-wal
 test-results/
 playwright-report/
 # Playwright globalSetup writes a real session token here (see
-# crates/solobase-web/tests/e2e/fixtures/global-setup.ts). Never commit.
-crates/solobase-web/tests/.auth/
+# crates/impresspress-web/tests/e2e/fixtures/global-setup.ts). Never commit.
+crates/impresspress-web/tests/.auth/
 
 # Env
 .env

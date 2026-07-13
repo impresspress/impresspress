@@ -1,8 +1,8 @@
-# WebAssembly Optimization Plan: Solobase Wasm Size & Speed Reduction
+# WebAssembly Optimization Plan: Impresspress Wasm Size & Speed Reduction
 
 ## Executive Summary
 
-A comprehensive review of the `solobase` workspace shows that the compiled browser WebAssembly binary (`solobase_web_bg.wasm`) currently stands at **15,012,784 bytes (~15.0 MB)**. This size is extremely large for a browser Service Worker and negatively impacts page-load speed, network consumption, and initial boot time.
+A comprehensive review of the `impresspress` workspace shows that the compiled browser WebAssembly binary (`impresspress_web_bg.wasm`) currently stands at **15,012,784 bytes (~15.0 MB)**. This size is extremely large for a browser Service Worker and negatively impacts page-load speed, network consumption, and initial boot time.
 
 By implementing the optimizations proposed below, the binary size can be realistically reduced to **3.0 MB – 5.0 MB (a 65% to 80% reduction)** while simultaneously improving execution speed.
 
@@ -25,7 +25,7 @@ gantt
 ## 1. Enable `wasm-opt` (The #1 Optimization)
 
 ### The Problem
-In `crates/solobase-web/Cargo.toml` and `crates/solobase-browser/Cargo.toml`, `wasm-opt = false` is explicitly set under the `wasm-pack` release profile:
+In `crates/impresspress-web/Cargo.toml` and `crates/impresspress-browser/Cargo.toml`, `wasm-opt = false` is explicitly set under the `wasm-pack` release profile:
 ```toml
 [package.metadata.wasm-pack.profile.release]
 wasm-opt = false
@@ -47,19 +47,19 @@ Ensure `binaryen` (which contains `wasm-opt`) is installed on the build machine:
 Edit your `justfile` to run `wasm-opt` directly after `wasm-pack` finishes compiling:
 
 ```diff
- # Build solobase-web wasm via wasm-pack (gets wasm-opt automatically),
- # then the solobase CLI binary which include_bytes!s the wasm.
+ # Build impresspress-web wasm via wasm-pack (gets wasm-opt automatically),
+ # then the impresspress CLI binary which include_bytes!s the wasm.
  build:
-     cd crates/solobase-web && RUSTFLAGS="-C target-feature=+simd128" wasm-pack build --target web --release --out-dir pkg
-+    wasm-opt -Oz crates/solobase-web/pkg/solobase_web_bg.wasm -o crates/solobase-web/pkg/solobase_web_bg.wasm
-     cargo build -p solobase --release
+     cd crates/impresspress-web && RUSTFLAGS="-C target-feature=+simd128" wasm-pack build --target web --release --out-dir pkg
++    wasm-opt -Oz crates/impresspress-web/pkg/impresspress_web_bg.wasm -o crates/impresspress-web/pkg/impresspress_web_bg.wasm
+     cargo build -p impresspress --release
  
  # Build the CLI in debug profile. Wasm stays release-built (no point
  # shipping a debug wasm — it's data baked into the binary).
  build-debug:
-     cd crates/solobase-web && RUSTFLAGS="-C target-feature=+simd128" wasm-pack build --target web --release --out-dir pkg
-+    wasm-opt -O3 crates/solobase-web/pkg/solobase_web_bg.wasm -o crates/solobase-web/pkg/solobase_web_bg.wasm
-     cargo build -p solobase
+     cd crates/impresspress-web && RUSTFLAGS="-C target-feature=+simd128" wasm-pack build --target web --release --out-dir pkg
++    wasm-opt -O3 crates/impresspress-web/pkg/impresspress_web_bg.wasm -o crates/impresspress-web/pkg/impresspress_web_bg.wasm
+     cargo build -p impresspress
 ```
 > [!NOTE]
 > `-Oz` optimizes strictly for binary size, while `-O3` optimizes for speed with strong size considerations. For a browser Service Worker, `-Oz` is highly recommended.
@@ -69,23 +69,23 @@ Edit your `justfile` to run `wasm-opt` directly after `wasm-pack` finishes compi
 ## 2. Gate and Strip the `reqwest` Dependency
 
 ### The Problem
-In `crates/solobase-core/Cargo.toml`, `reqwest` is pulled in as a mandatory, unconditional dependency:
+In `crates/impresspress-core/Cargo.toml`, `reqwest` is pulled in as a mandatory, unconditional dependency:
 ```toml
 reqwest = { workspace = true }
 ```
-The comments state `reqwest` is always on for OAuth provider implementations. However, a grep search shows that **no OAuth or authorization modules in `solobase-core` actually use `reqwest`**. All OAuth logic relies on `wafer`'s standard HTTP routing and pipeline abstractions.
+The comments state `reqwest` is always on for OAuth provider implementations. However, a grep search shows that **no OAuth or authorization modules in `impresspress-core` actually use `reqwest`**. All OAuth logic relies on `wafer`'s standard HTTP routing and pipeline abstractions.
 
-The **only** file in `solobase-core` that imports `reqwest` is `src/blocks/llm/providers/mod.rs` (the LLM providers streaming transport). This module is gated behind the `llm` feature:
+The **only** file in `impresspress-core` that imports `reqwest` is `src/blocks/llm/providers/mod.rs` (the LLM providers streaming transport). This module is gated behind the `llm` feature:
 ```rust
 #[cfg(feature = "llm")]
 pub mod providers;
 ```
-Because the `reqwest` dependency is declared unconditionally in `Cargo.toml`, the Rust compiler compiles and links the entire `reqwest` crate (and all its transitives like `h2`, `http-body`, `percent-encoding`, `tower`, etc.) into `solobase-web`'s Wasm binary, even though the `llm` feature is turned off in `solobase-web`!
+Because the `reqwest` dependency is declared unconditionally in `Cargo.toml`, the Rust compiler compiles and links the entire `reqwest` crate (and all its transitives like `h2`, `http-body`, `percent-encoding`, `tower`, etc.) into `impresspress-web`'s Wasm binary, even though the `llm` feature is turned off in `impresspress-web`!
 
 ### The Solution
-Make `reqwest` an optional dependency in `crates/solobase-core/Cargo.toml` and gate it under the `llm` feature.
+Make `reqwest` an optional dependency in `crates/impresspress-core/Cargo.toml` and gate it under the `llm` feature.
 
-#### Step 1: Modify `crates/solobase-core/Cargo.toml`
+#### Step 1: Modify `crates/impresspress-core/Cargo.toml`
 Update the `reqwest` dependency to be `optional = true`, and append `dep:reqwest` to the `llm` feature array:
 
 ```diff
@@ -109,7 +109,7 @@ Update the `reqwest` dependency to be `optional = true`, and append `dep:reqwest
 +reqwest = { workspace = true, optional = true }
 ```
 
-This ensures that if a crate compiles `solobase-core` with `default-features = false` and omits `"llm"` (which `solobase-web` explicitly does!), `reqwest` is completely omitted from the compile graph. This alone will strip out **several megabytes** of compiled HTTP client machinery.
+This ensures that if a crate compiles `impresspress-core` with `default-features = false` and omits `"llm"` (which `impresspress-web` explicitly does!), `reqwest` is completely omitted from the compile graph. This alone will strip out **several megabytes** of compiled HTTP client machinery.
 
 ---
 
@@ -148,7 +148,7 @@ Add `panic = "abort"` to your root `Cargo.toml`:
 ## 4. Architectural Split: Separate Host-Only Tools from Wasm Crate
 
 ### The Problem
-`crates/solobase-browser` contains both the browser runtime Service Worker code (targeting Wasm) and `tools/bundle` (host-only native Rust code for packaging assets).
+`crates/impresspress-browser` contains both the browser runtime Service Worker code (targeting Wasm) and `tools/bundle` (host-only native Rust code for packaging assets).
 Because they reside in the same crate, the browser-targeting crate's manifest must declare heavy native-only dependencies:
 - `anyhow = "1"`
 - `clap = { version = "4", features = ["derive"] }`
@@ -158,15 +158,15 @@ Even though the compiler tries to tree-shake native-only modules when building `
 2. **Build Time:** Increases compilation time for the Wasm target since the compiler must compute and check these native dependency graphs.
 
 ### The Solution
-Move `tools/bundle` and the `export-assets` binary into a separate crate, e.g. `crates/solobase-bundler` or `crates/solobase-cli-tools`.
-Keep `crates/solobase-browser` strictly focused on Wasm target code (containing only `database.rs`, `storage.rs`, `network.rs`, `crypto.rs`, etc.) with zero dependencies on `clap` or `anyhow`.
+Move `tools/bundle` and the `export-assets` binary into a separate crate, e.g. `crates/impresspress-bundler` or `crates/impresspress-cli-tools`.
+Keep `crates/impresspress-browser` strictly focused on Wasm target code (containing only `database.rs`, `storage.rs`, `network.rs`, `crypto.rs`, etc.) with zero dependencies on `clap` or `anyhow`.
 
 ---
 
 ## 5. Leverage Browser Native Web Crypto API for JWTs
 
 ### The Problem
-In `crates/solobase-browser/src/crypto.rs`, the signing and verification of JWTs are delegated to `wafer_block_crypto::service::Argon2JwtCryptoService`:
+In `crates/impresspress-browser/src/crypto.rs`, the signing and verification of JWTs are delegated to `wafer_block_crypto::service::Argon2JwtCryptoService`:
 ```rust
     fn sign(&self, claims: HashMap<String, serde_json::Value>, expiry: Duration) -> Result<String, CryptoError> {
         wafer_block_crypto::service::Argon2JwtCryptoService::new(self.jwt_secret())?
@@ -189,7 +189,7 @@ By calling the native `crypto.subtle.sign` and `crypto.subtle.verify` via `web-s
 | Priority | Optimization | Location | Type | Est. Size Saved |
 | :--- | :--- | :--- | :--- | :--- |
 | 🥇 **1** | Enable `wasm-opt -Oz` | `justfile` / `Cargo.toml` | Build Config | **6.0 MB – 8.0 MB** |
-| 🥈 **2** | Make `reqwest` optional | `crates/solobase-core/Cargo.toml` | Dependency Refactor | **2.0 MB – 3.0 MB** |
+| 🥈 **2** | Make `reqwest` optional | `crates/impresspress-core/Cargo.toml` | Dependency Refactor | **2.0 MB – 3.0 MB** |
 | 🥉 **3** | Add `panic = "abort"` | Root `Cargo.toml` | Profile Config | **0.5 MB – 1.0 MB** |
-| 🛠️ **4** | Separate host-only crates | `crates/solobase-browser` | Architecture | **0.2 MB – 0.5 MB** |
-| ⚡ **5** | Move JWTs to Web Crypto API | `solobase-browser/src/crypto.rs` | Code Refactor | **0.2 MB** |
+| 🛠️ **4** | Separate host-only crates | `crates/impresspress-browser` | Architecture | **0.2 MB – 0.5 MB** |
+| ⚡ **5** | Move JWTs to Web Crypto API | `impresspress-browser/src/crypto.rs` | Code Refactor | **0.2 MB** |

@@ -10,7 +10,7 @@ test("blog-web bundle serves index + wasm", async ({ page, request }) => {
   const manifestRes = await request.get(`${BASE}/asset-manifest.json`);
   expect(manifestRes.status()).toBe(200);
   const manifest = await manifestRes.json();
-  const wasmPath = manifest.assets["solobase_web_bg.wasm"];
+  const wasmPath = manifest.assets["impresspress_web_bg.wasm"];
   expect(wasmPath).toBeTruthy();
 
   const wasm = await request.get(`${BASE}${wasmPath}`);
@@ -19,5 +19,5 @@ test("blog-web bundle serves index + wasm", async ({ page, request }) => {
 
   await page.goto(BASE);
   // Service worker activation can be slow; check the title is set.
-  await expect(page).toHaveTitle(/blog|inkwell|solobase/i, { timeout: 15_000 });
+  await expect(page).toHaveTitle(/blog|inkwell|impresspress/i, { timeout: 15_000 });
 });

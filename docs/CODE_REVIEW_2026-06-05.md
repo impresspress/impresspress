@@ -1,4 +1,4 @@
-# Solobase Code & Architecture Review
+# Impresspress Code & Architecture Review
 
 ## Executive summary
 
@@ -12,7 +12,7 @@ The two LLM bugs (`key_var` never resolved into `api_key`; streaming chat never 
 This is the single most repeated structural problem. The same logical value or transform is independently re-derived in multiple files, already drifting in several cases:
 
 - **Config-var metadata re-declared in feature blocks** instead of driven from `config_vars.rs`/`ConfigVar`: `userportal::portal_settings_keys()` (`userportal/mod.rs:649-700`, FAVICON_URL default already wrong), `auth_ui SETTINGS_KEYS` (`auth_ui/pages/settings.rs:18-108`), and `llm` constants re-declared in `pages.rs:28-30` shadowing `mod.rs:44-46`. `userportal` even ships a *second admin UI* for the shared branding `_URL` vars that bypasses the SSRF/URL validation the admin block enforces (`userportal/mod.rs:702-783`).
-- **Block-name ↔ identifier encoding** computed inline three+ ways (`permissions.rs:236-247` reimplements the existing `wafer_block::wrap::resource_prefix`; `blocks.rs` URL form; `database.rs::group_label`; `solobase-cloudflare/config_source.rs:69-78` `screaming_block`).
+- **Block-name ↔ identifier encoding** computed inline three+ ways (`permissions.rs:236-247` reimplements the existing `wafer_block::wrap::resource_prefix`; `blocks.rs` URL form; `database.rs::group_label`; `impresspress-cloudflare/config_source.rs:69-78` `screaming_block`).
 - **Timestamp formatting**: identical `now_iso()` copy-pasted across 10 auth repo modules (`auth/repo/users.rs:35-39` et al), with `tokens.rs` diverging to `now_rfc3339()` — two ISO spellings coexist in one block.
 - **Boolean JSON decode** hand-rolled in 5 sites (`auth/repo/users.rs:45-50`, `orgs.rs`, `local_credentials.rs`, `llm/schema.rs`, `llm/migrations`) with three different semantics for `"TRUE"`/missing, ignoring the canonical `RecordExt::bool_field`.
 - **Error `[code]` decoration**: `errors::error_response` (`blocks/errors.rs:188-196`) bakes the machine code into the human message *and* sets a structured wafer code; `rate_limit.rs:260-275` re-implements the same formatting.
@@ -40,15 +40,15 @@ Several blocks maintain two divergent implementations of the same thing: legalpa
 |---|---|---|
 | Hand-written `json_extract` raw SQL in a request handler | `vector/pages.rs:697-715` | Not an allowed exception; reaches into backend-owned `_meta` table. Fix: add metadata-filtered delete op or a sql-utils builder. |
 | Hand-written `sqlite_master` existence probe | `vector/pages.rs:598-609` | Comment admits the missing builder; per CLAUDE.md, add `introspect::build_table_exists` to wafer-sql-utils. |
-| Hardcoded `"Solobase"` brand in email from-address | `email.rs:344-351` | Config var `SOLOBASE_SHARED__APP_NAME` already exists; thread it in. |
+| Hardcoded `"Impresspress"` brand in email from-address | `email.rs:344-351` | Config var `WAFER_RUN_SHARED__APP_NAME` already exists; thread it in. |
 | Config-var metadata hardcoded in blocks | `userportal/mod.rs:649-700`, `auth_ui/pages/settings.rs:18-108` | "No hardcoded lists" — drive from `ConfigVar` declarations. |
-| Magic byte-offset + legacy meta prefixes | `solobase-browser/convert.rs:170-198` | `&k[17..]` magic number; sibling cloudflare uses `strip_prefix`. Likely dead legacy branches. |
+| Magic byte-offset + legacy meta prefixes | `impresspress-browser/convert.rs:170-198` | `&k[17..]` magic number; sibling cloudflare uses `strip_prefix`. Likely dead legacy branches. |
 | `COLLECTION` const naming | `legalpages/mod.rs:37` | Only block not using `pub const TABLE`. |
 | `BLOCK_SETTINGS_TABLE` re-declared to dodge a (non-real) circular dep | `migration_helper.rs:31-33` | Move const to `features.rs`; cross-module refs are legal in Rust. |
 | DB-write failure returns 400 + leaks raw error | `legalpages/pages.rs:694-718` | Should be `err_internal` (500, sanitized) per #249; sibling `handle_save` does it right. |
 | WaferError → String flattening forcing wrong HTTP status | `messages/service.rs:33-105` | NotFound/PermissionDenied become 500; return `WaferError` and map at the boundary. |
-| Self-flagged legacy DROP/CREATE compat shim | `solobase-web/config.rs:152-199` | CLAUDE.md forbids compat shims; deprecation window can close (OPFS-local, wipeable). |
-| Legacy `resource_type` missing-column compat shim | `solobase/cli/server_config.rs:97-129` | Canonical migration always provides the column; delete the fallback. |
+| Self-flagged legacy DROP/CREATE compat shim | `impresspress-web/config.rs:152-199` | CLAUDE.md forbids compat shims; deprecation window can close (OPFS-local, wipeable). |
+| Legacy `resource_type` missing-column compat shim | `impresspress/cli/server_config.rs:97-129` | Canonical migration always provides the column; delete the fallback. |
 
 **Allowed exceptions (correctly used — not violations):** admin DB explorer raw SQL (`admin/pages/database.rs`), test-fixture `exec_raw` (`auth_ui/pages/orgs.rs:84-98`, provider_links tests), boot-time rusqlite reads before the data layer exists, the vector block's other raw introspection going through `introspect::*` builders, and the cloudflare/browser backend `DatabaseService` impls (raw SQL is expected at the backend layer).
 
@@ -68,9 +68,9 @@ Several blocks maintain two divergent implementations of the same thing: legalpa
 
 **Wall-clock duration subtraction (low):** `storage.rs:312-336,373,391` does `(now_millis() - start) as i64` on wall-clock time — wraps/panics on clock step-back. The codebase already has the correct `saturating_sub`+`try_from` idiom in `pipeline.rs:189-194`; apply it (don't use `Instant` — it panics on wasm32).
 
-**Request-body limit checked after buffering (medium):** `solobase-cloudflare/convert.rs:35-40` reads the full body into memory *then* checks the cap; bounded by CF's edge limit but still a per-request OOM vector. Check `content-length` first or stream.
+**Request-body limit checked after buffering (medium):** `impresspress-cloudflare/convert.rs:35-40` reads the full body into memory *then* checks the cap; bounded by CF's edge limit but still a per-request OOM vector. Check `content-length` first or stream.
 
-**Dead code / stale comments:** `ErrorCode::status_code()` (`errors.rs:80-111`, zero callers, already drifts from the real mapping), `solobase-cloudflare/helpers.rs::json_response` + unused `maud` dep, 5 unused icon fns (`icons.rs`), `wafer_info::handle_flows` hardcoded list (`wafer_info.rs:40-58`, the live `FlowIntrospection` API already exists), and several stale doc comments (vector "Unimplemented" claims, provider_links "raw SQL", legalpages "Quill editor", `is_expired` mixed-format claim).
+**Dead code / stale comments:** `ErrorCode::status_code()` (`errors.rs:80-111`, zero callers, already drifts from the real mapping), `impresspress-cloudflare/helpers.rs::json_response` + unused `maud` dep, 5 unused icon fns (`icons.rs`), `wafer_info::handle_flows` hardcoded list (`wafer_info.rs:40-58`, the live `FlowIntrospection` API already exists), and several stale doc comments (vector "Unimplemented" claims, provider_links "raw SQL", legalpages "Quill editor", `is_expired` mixed-format claim).
 
 **God-files / large functions (low):** `builder.rs::build` (~320-line 12-phase method), `files/pages_user.rs` (1659 lines), `email.rs::handle_send_template` (inline HTML templates), `cloudflare/runner.rs::load_block_settings` (~150 lines).
 
@@ -86,7 +86,7 @@ Several blocks maintain two divergent implementations of the same thing: legalpa
 
 **files:** No repo layer; download serves user content-type inline (residual XSS mitigated by the global nosniff+CSP from `security-headers`, so low); `i64_field` doesn't coerce TEXT integers so admin/quota render 0 (`pages_admin.rs:448,553-556`).
 
-**vector:** Two raw-SQL convention violations + the `_meta` count reaching around the backend (`service.rs:137-150`). Global unscoped index namespace — any authenticated user can read/delete any index (`pages.rs`), though this mirrors the `messages` block and solobase has no tenancy model, so it's a design observation.
+**vector:** Two raw-SQL convention violations + the `_meta` count reaching around the backend (`service.rs:137-150`). Global unscoped index namespace — any authenticated user can read/delete any index (`pages.rs`), though this mirrors the `messages` block and impresspress has no tenancy model, so it's a design observation.
 
 **userportal:** Duplicate branding config metadata + a second admin settings UI bypassing URL validation (`mod.rs:649-783`).
 
@@ -119,8 +119,8 @@ Several blocks maintain two divergent implementations of the same thing: legalpa
 | **P1** | Config-var/branding metadata duplication | `userportal/mod.rs:649-783`, `auth_ui/pages/settings.rs:18-108`, `llm/pages.rs:28-30` | M | Drift + URL-validation bypass; drive from `ConfigVar`. |
 | **P1** | Cross-repo HKDF key duplication | `crypto.rs:153-165` | M | Comment-only coupling already broke prod once; expose/verify-via wafer-block-crypto or add a shared test vector. |
 | **P1** | Native boot hand-mirrors variables schema | `cli/server.rs:215-241` | M | Re-introduces the schema-drift footgun the browser path removed; missing `block` column already. |
-| **P1** | Compat shims to delete | `solobase-web/config.rs:152-199`, `cli/server_config.rs:97-129` | S | Self-flagged; canonical migration is now the source of truth. **Quick wins.** |
-| **P1** | Request-body limit after buffering | `solobase-cloudflare/convert.rs:35-40` | M | Per-request OOM vector; pre-check `content-length`. |
+| **P1** | Compat shims to delete | `impresspress-web/config.rs:152-199`, `cli/server_config.rs:97-129` | S | Self-flagged; canonical migration is now the source of truth. **Quick wins.** |
+| **P1** | Request-body limit after buffering | `impresspress-cloudflare/convert.rs:35-40` | M | Per-request OOM vector; pre-check `content-length`. |
 | **P2** | Block-name encoding centralization | `permissions.rs:236-247`, `blocks.rs`, `database.rs`, `cloudflare/config_source.rs:69-78` | S | Use existing `wafer_block::wrap::resource_prefix`. |
 | **P2** | Timestamp/bool/decode helper consolidation | auth repos (10× `now_iso`), 5× bool decode | S | Move to `blocks/helpers.rs`, delete copies. |
 | **P2** | Adopt existing shared abstractions | `crud.rs`, `ui::components::tab_navigation`, tab bars | M–L | Helpers built but unused; migrate + add `crud.rs` tests. |

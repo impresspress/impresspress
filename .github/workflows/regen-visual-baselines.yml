@@ -59,33 +59,33 @@ jobs:
         with:
           node-version: 20
 
-      - name: Pre-build solobase-web wasm (build.rs prereq)
-        working-directory: crates/solobase-web
+      - name: Pre-build impresspress-web wasm (build.rs prereq)
+        working-directory: crates/impresspress-web
         run: wasm-pack build --target web --release --out-dir pkg
 
-      - name: Install solobase CLI
-        run: cargo install --path crates/solobase --locked
+      - name: Install impresspress CLI
+        run: cargo install --path crates/impresspress --locked
 
-      - name: Build solobase-web (framework assets + hashed pkg/)
-        working-directory: crates/solobase-web
-        run: solobase build --target web --release
+      - name: Build impresspress-web (framework assets + hashed pkg/)
+        working-directory: crates/impresspress-web
+        run: impresspress build --target web --release
 
       - name: Install Playwright
-        working-directory: crates/solobase-web
+        working-directory: crates/impresspress-web
         run: |
           npm install
           npx playwright install chromium --with-deps
 
-      - name: Start native solobase server in background
+      - name: Start native impresspress server in background
         run: |
           cd /tmp
-          SOLOBASE_LISTEN="127.0.0.1:8093" \
-          SOLOBASE_DB_PATH="/tmp/solobase-visual-baseline.db" \
-          SOLOBASE_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL="admin@example.com" \
-          SOLOBASE_SHARED__AUTH__BOOTSTRAP_ADMIN_PASSWORD="admin123" \
-          SOLOBASE_BLOCK_ENABLED="suppers-ai/userportal,suppers-ai/vector" \
-            solobase > /tmp/solobase-baseline.log 2>&1 &
-          echo $! > /tmp/solobase-pid
+          IMPRESSPRESS_LISTEN="127.0.0.1:8093" \
+          IMPRESSPRESS_DB_PATH="/tmp/impresspress-visual-baseline.db" \
+          WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL="admin@example.com" \
+          WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_PASSWORD="admin123" \
+          IMPRESSPRESS_BLOCK_ENABLED="impresspress/userportal,impresspress/vector" \
+            impresspress > /tmp/impresspress-baseline.log 2>&1 &
+          echo $! > /tmp/impresspress-pid
           for i in $(seq 1 60); do
             if curl -sf http://127.0.0.1:8093/b/auth/login -o /dev/null; then
               echo "server ready after ${i}s"
@@ -94,13 +94,13 @@ jobs:
             sleep 1
           done
           if ! curl -sf http://127.0.0.1:8093/b/auth/login -o /dev/null; then
-            echo "::error::native solobase did not start within 60s"
-            tail -50 /tmp/solobase-baseline.log
+            echo "::error::native impresspress did not start within 60s"
+            tail -50 /tmp/impresspress-baseline.log
             exit 1
           fi
 
       - name: Run visual-baseline tests with --update-snapshots
-        working-directory: crates/solobase-web
+        working-directory: crates/impresspress-web
         env:
           TEST_PORT: 8093
         # `--update-snapshots` overwrites mismatched PNGs in place.
@@ -110,8 +110,8 @@ jobs:
       - name: Stop servers
         if: always()
         run: |
-          if [ -f /tmp/solobase-pid ]; then
-            kill "$(cat /tmp/solobase-pid)" 2>/dev/null || true
+          if [ -f /tmp/impresspress-pid ]; then
+            kill "$(cat /tmp/impresspress-pid)" 2>/dev/null || true
           fi
 
       - name: Commit and push regenerated baselines

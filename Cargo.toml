@@ -1,26 +1,26 @@
 [workspace]
 resolver = "2"
 members = [
-    "crates/solobase-browser",
-    "crates/solobase-bundle",
-    "crates/solobase-cloudflare",
-    "crates/solobase-core",
-    "crates/solobase-native",
-    "crates/solobase",
-    "crates/solobase-web",
+    "crates/impresspress-browser",
+    "crates/impresspress-bundle",
+    "crates/impresspress-cloudflare",
+    "crates/impresspress-core",
+    "crates/impresspress-native",
+    "crates/impresspress",
+    "crates/impresspress-web",
     "examples/minimal-browser",
 ]
-# solobase-cloudflare is wasm32-only (depends on `worker`/`wasm-bindgen`,
+# impresspress-cloudflare is wasm32-only (depends on `worker`/`wasm-bindgen`,
 # whose StorageService futures wrap `!Send` JsFuture). Excluded from
 # default-members so host `cargo test`/`cargo check` skip it; build it
-# explicitly with `cargo <cmd> -p solobase-cloudflare --target wasm32-unknown-unknown`.
+# explicitly with `cargo <cmd> -p impresspress-cloudflare --target wasm32-unknown-unknown`.
 default-members = [
-    "crates/solobase-browser",
-    "crates/solobase-bundle",
-    "crates/solobase-core",
-    "crates/solobase-native",
-    "crates/solobase",
-    "crates/solobase-web",
+    "crates/impresspress-browser",
+    "crates/impresspress-bundle",
+    "crates/impresspress-core",
+    "crates/impresspress-native",
+    "crates/impresspress",
+    "crates/impresspress-web",
     "examples/minimal-browser",
 ]
 
@@ -71,7 +71,7 @@ getrandom = { version = "0.2" }
 dotenvy = "0.15"
 rusqlite = { version = "0.32", features = ["bundled"] }
 
-# Cloudflare Workers SDK (wasm-only crates; only used by solobase-cloudflare)
+# Cloudflare Workers SDK (wasm-only crates; only used by impresspress-cloudflare)
 worker = { version = "0.7.5", features = ["d1"] }
 wasm-bindgen = "0.2"
 js-sys = "0.3"

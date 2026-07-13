@@ -1,8 +1,8 @@
-# Releasing Solobase
+# Releasing Impresspress
 
 ## Version Scheme
 
-Solobase uses [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH`
+Impresspress uses [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH`
 
 - **MAJOR** — breaking changes to CLI flags, config format, or stored data
 - **MINOR** — new features, new blocks, new config options
@@ -18,8 +18,8 @@ Before tagging a release, verify:
 - [ ] No known critical bugs (check [open issues](../../issues))
 - [ ] Test the binary locally:
   ```bash
-  cargo build -p solobase --release
-  ./target/release/solobase
+  cargo build -p impresspress --release
+  ./target/release/impresspress
   ```
 - [ ] If this release changes config variables or CLI flags, update the docs
 

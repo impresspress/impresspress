@@ -1,0 +1,15 @@
+{
+  "name": "vite-app-fixture",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "build": "vite build",
+    "verify": "node verify.mjs"
+  },
+  "devDependencies": {
+    "vite": "^5.0.0"
+  },
+  "dependencies": {
+    "impresspress-web": "file:../../"
+  }
+}

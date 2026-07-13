@@ -1,0 +1,80 @@
+-- Legacy table drops — spec §6 migration 001 note.
+DROP TABLE IF EXISTS iam_user_roles;
+DROP TABLE IF EXISTS api_keys;
+DROP TABLE IF EXISTS auth_sessions;
+DROP TABLE IF EXISTS oauth_states;
+
+CREATE TABLE IF NOT EXISTS wafer_run__auth__users (
+    id              TEXT PRIMARY KEY,
+    email           TEXT NOT NULL UNIQUE,
+    display_name    TEXT NOT NULL,
+    avatar_url      TEXT,
+    role            TEXT NOT NULL DEFAULT 'user',
+    email_verified  BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at      TEXT NOT NULL,
+    updated_at      TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS wafer_run__auth__local_credentials (
+    id             TEXT PRIMARY KEY,
+    user_id        TEXT NOT NULL UNIQUE REFERENCES wafer_run__auth__users(id) ON DELETE CASCADE,
+    password_hash  TEXT NOT NULL,
+    must_reset     BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at     TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS wafer_run__auth__provider_links (
+    id             TEXT PRIMARY KEY,
+    provider       TEXT NOT NULL,
+    provider_ref   TEXT NOT NULL,
+    user_id        TEXT NOT NULL REFERENCES wafer_run__auth__users(id) ON DELETE CASCADE,
+    provider_login TEXT NOT NULL,
+    access_token   TEXT NOT NULL,
+    linked_at      TEXT NOT NULL,
+    UNIQUE (provider, provider_ref)
+);
+
+CREATE TABLE IF NOT EXISTS wafer_run__auth__orgs (
+    id             TEXT PRIMARY KEY,
+    name           TEXT NOT NULL UNIQUE,
+    owner_user_id  TEXT REFERENCES wafer_run__auth__users(id) ON DELETE SET NULL,
+    verified_via   TEXT,
+    verified_ref   TEXT,
+    is_reserved    BOOLEAN NOT NULL DEFAULT FALSE,
+    created_at     TEXT NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS wafer_run__auth__orgs_verified_uniq
+    ON wafer_run__auth__orgs (verified_via, verified_ref)
+    WHERE is_reserved = FALSE;
+
+CREATE TABLE IF NOT EXISTS wafer_run__auth__sessions (
+    token_hash     BYTEA PRIMARY KEY,
+    user_id        TEXT NOT NULL REFERENCES wafer_run__auth__users(id) ON DELETE CASCADE,
+    created_at     TEXT NOT NULL,
+    last_used_at   TEXT NOT NULL,
+    expires_at     TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS wafer_run__auth__sessions_user_id_idx
+    ON wafer_run__auth__sessions (user_id);
+CREATE INDEX IF NOT EXISTS wafer_run__auth__sessions_expires_at_idx
+    ON wafer_run__auth__sessions (expires_at);
+
+CREATE TABLE IF NOT EXISTS wafer_run__auth__personal_access_tokens (
+    token_hash     BYTEA PRIMARY KEY,
+    user_id        TEXT NOT NULL REFERENCES wafer_run__auth__users(id) ON DELETE CASCADE,
+    name           TEXT NOT NULL,
+    scopes         TEXT NOT NULL,
+    created_at     TEXT NOT NULL,
+    last_used_at   TEXT,
+    expires_at     TEXT
+);
+CREATE INDEX IF NOT EXISTS wafer_run__auth__personal_access_tokens_user_id_idx
+    ON wafer_run__auth__personal_access_tokens (user_id);
+
+CREATE TABLE IF NOT EXISTS wafer_run__auth__bootstrap_tokens (
+    id             TEXT PRIMARY KEY,
+    token_hash     TEXT NOT NULL UNIQUE,
+    created_at     TEXT NOT NULL,
+    expires_at     TEXT NOT NULL
+);
+

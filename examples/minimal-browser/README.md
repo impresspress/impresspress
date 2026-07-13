@@ -1,7 +1,7 @@
 # minimal-browser
 
-Smallest possible consumer of `solobase-browser`. Demonstrates that the
-framework can be used without pulling in `solobase` or `solobase-core`.
+Smallest possible consumer of `impresspress-browser`. Demonstrates that the
+framework can be used without pulling in `impresspress` or `impresspress-core`.
 
 Build:
 

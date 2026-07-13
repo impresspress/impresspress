@@ -1,17 +1,17 @@
 # Default: full build (wasm + native).
 default: build
 
-# Build solobase-web wasm via wasm-pack (gets wasm-opt automatically),
-# then the solobase CLI binary which include_bytes!s the wasm.
+# Build impresspress-web wasm via wasm-pack (gets wasm-opt automatically),
+# then the impresspress CLI binary which include_bytes!s the wasm.
 build:
-    cd crates/solobase-web && RUSTFLAGS="-C target-feature=+simd128" wasm-pack build --target web --release --out-dir pkg
-    cargo build -p solobase --release
+    cd crates/impresspress-web && RUSTFLAGS="-C target-feature=+simd128" wasm-pack build --target web --release --out-dir pkg
+    cargo build -p impresspress --release
 
 # Build the CLI in debug profile. Wasm stays release-built (no point
 # shipping a debug wasm — it's data baked into the binary).
 build-debug:
-    cd crates/solobase-web && RUSTFLAGS="-C target-feature=+simd128" wasm-pack build --target web --release --out-dir pkg
-    cargo build -p solobase
+    cd crates/impresspress-web && RUSTFLAGS="-C target-feature=+simd128" wasm-pack build --target web --release --out-dir pkg
+    cargo build -p impresspress
 
 # Run the workspace test suite.
 test:
@@ -24,9 +24,9 @@ test-unit:
 # Clean all build artifacts.
 clean:
     cargo clean
-    rm -rf crates/solobase-web/pkg
+    rm -rf crates/impresspress-web/pkg
 
-# Pull bundled font binaries from suppers-ai/site-kit. Run when site-kit
+# Pull bundled font binaries from impresspress/site-kit. Run when site-kit
 # ships a font update, then commit the changed binaries.
 sync-fonts:
     ./scripts/sync-fonts.sh

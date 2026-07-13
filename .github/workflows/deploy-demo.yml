@@ -4,8 +4,8 @@ on:
   push:
     branches: [main]
     paths:
-      - 'crates/solobase-web/**'
-      - 'crates/solobase-core/**'
+      - 'crates/impresspress-web/**'
+      - 'crates/impresspress-core/**'
       - '.github/workflows/deploy-demo.yml'
   workflow_dispatch:
 
@@ -25,28 +25,28 @@ jobs:
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
-      # `cargo install --path crates/solobase` runs the solobase build.rs,
-      # which `include_bytes!`s the solobase-web wasm. Build it first so
+      # `cargo install --path crates/impresspress` runs the impresspress build.rs,
+      # which `include_bytes!`s the impresspress-web wasm. Build it first so
       # build.rs finds it in the canonical pkg/ location.
-      - name: Pre-build solobase-web wasm (build.rs prereq)
-        working-directory: crates/solobase-web
+      - name: Pre-build impresspress-web wasm (build.rs prereq)
+        working-directory: crates/impresspress-web
         run: wasm-pack build --target web --release --out-dir pkg
 
-      - name: Install solobase CLI
-        run: cargo install --path crates/solobase --locked
+      - name: Install impresspress CLI
+        run: cargo install --path crates/impresspress --locked
 
-      # Embed × web flow (Cargo.toml + solobase.toml present): the unified
-      # CLI re-runs wasm-pack, then `solobase_bundle::bundle::run`
+      # Embed × web flow (Cargo.toml + impresspress.toml present): the unified
+      # CLI re-runs wasm-pack, then `impresspress_bundle::bundle::run`
       # to drop sw.js / loader.js / index.html / hashed assets into pkg/.
-      - name: Build solobase-web (framework assets + hashed pkg/)
-        working-directory: crates/solobase-web
-        run: solobase build --target web --release
+      - name: Build impresspress-web (framework assets + hashed pkg/)
+        working-directory: crates/impresspress-web
+        run: impresspress build --target web --release
 
       - name: Add CNAME
-        run: echo "demo.solobase.dev" > crates/solobase-web/pkg/CNAME
+        run: echo "demo.impresspress.dev" > crates/impresspress-web/pkg/CNAME
 
       - name: Remove wasm-pack .gitignore (blocks gh-pages deploy)
-        run: rm -f crates/solobase-web/pkg/.gitignore
+        run: rm -f crates/impresspress-web/pkg/.gitignore
 
       - name: Deploy to GitHub Pages
         uses: peaceiris/actions-gh-pages@v4
@@ -54,5 +54,5 @@ jobs:
           personal_token: ${{ secrets.DEMO_PAT }}
           external_repository: suppers-ai/solobase-demo
           publish_branch: gh-pages
-          publish_dir: crates/solobase-web/pkg
+          publish_dir: crates/impresspress-web/pkg
           force_orphan: true

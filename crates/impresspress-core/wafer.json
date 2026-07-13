@@ -1,0 +1,22 @@
+{
+  "name": "impresspress-blocks",
+  "version": "0.0.1",
+  "blocks": [
+    { "name": "admin", "source": "src/blocks/admin", "interface": "http.handler", "summary": "Admin panel: users, database, IAM, logs, settings", "runtime": "native", "build": { "type": "cargo", "crate": "impresspress-core", "git": "https://github.com/impresspress/impresspress", "register": "impresspress_core::blocks::admin::register(&mut wafer)" } },
+    { "name": "auth", "source": "src/blocks/auth", "interface": "http.handler", "summary": "User authentication, registration, and JWT sessions", "runtime": "native", "build": { "type": "cargo", "crate": "impresspress-core", "git": "https://github.com/impresspress/impresspress", "register": "impresspress_core::blocks::auth::register(&mut wafer)" } },
+    { "name": "deployments", "source": "src/blocks/deployments", "interface": "http.handler", "summary": "Deployment management and versioning", "runtime": "native", "build": { "type": "cargo", "crate": "impresspress-core", "git": "https://github.com/impresspress/impresspress", "register": "impresspress_core::blocks::deployments::register(&mut wafer)" } },
+    { "name": "files", "source": "src/blocks/files", "interface": "http.handler", "summary": "File storage, sharing, quotas, and access logging", "runtime": "native", "build": { "type": "cargo", "crate": "impresspress-core", "git": "https://github.com/impresspress/impresspress", "register": "impresspress_core::blocks::files::register(&mut wafer)" } },
+    { "name": "legalpages", "source": "src/blocks/legalpages.rs", "interface": "http.handler", "summary": "Legal pages (terms, privacy policy)", "runtime": "native", "build": { "type": "cargo", "crate": "impresspress-core", "git": "https://github.com/impresspress/impresspress", "register": "impresspress_core::blocks::legalpages::register(&mut wafer)" } },
+    { "name": "products", "source": "src/blocks/products", "interface": "http.handler", "summary": "Products, pricing, purchases, and payment integration", "runtime": "native", "build": { "type": "cargo", "crate": "impresspress-core", "git": "https://github.com/impresspress/impresspress", "register": "impresspress_core::blocks::products::register(&mut wafer)" } },
+{ "name": "system", "source": "src/blocks/system.rs", "interface": "http.handler", "summary": "System status and health checks", "runtime": "native", "build": { "type": "cargo", "crate": "impresspress-core", "git": "https://github.com/impresspress/impresspress", "register": "impresspress_core::blocks::system::register(&mut wafer)" } },
+    { "name": "userportal", "source": "src/blocks/userportal.rs", "interface": "http.handler", "summary": "User self-service portal", "runtime": "native", "build": { "type": "cargo", "crate": "impresspress-core", "git": "https://github.com/impresspress/impresspress", "register": "impresspress_core::blocks::userportal::register(&mut wafer)" } }
+  ],
+  "flows": [],
+  "publish": {
+    "repo": "impresspress/impresspress-blocks",
+    "blocks": [
+      "admin", "auth", "deployments", "files", "legalpages",
+      "products", "system", "userportal"
+    ]
+  }
+}

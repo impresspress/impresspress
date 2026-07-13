@@ -1,0 +1,113 @@
+[package]
+name = "impresspress"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Impresspress native binary — standalone server with tokio, SQLite, local storage"
+build = "build.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[[bin]]
+name = "impresspress"
+path = "src/main.rs"
+
+[features]
+# Defaults pull every impresspress-core feature block that was unconditionally
+# compiled before the Phase 0b feature split (block-fastembed stays opt-in
+# via `native-embedding`, matching its pre-split behaviour). `impresspress-core`
+# is depended on with `default-features = false`, so each `block-*` feature
+# we want must be passed through explicitly below.
+default = [
+    "sqlite",
+    "storage-local",
+    "llm",
+    "block-files",
+    "block-messages",
+    "block-vector",
+    "block-llm",
+    "block-legalpages",
+    "block-userportal",
+    "block-products",
+]
+sqlite = ["impresspress-core/sqlite"]
+storage-local = ["impresspress-core/storage-local"]
+otel = ["impresspress-native/otel"]
+storage-s3 = ["impresspress-core/storage-s3", "impresspress-native/s3"]
+postgres = ["impresspress-core/postgres", "impresspress-native/postgres"]
+# Provider-backed LLM block (impresspress/llm). Native default — enables
+# the chat surface at /b/llm/.
+llm = ["impresspress-core/llm"]
+# Native ONNX-backed embedding + SQLite vector service. Propagates to the
+# impresspress library so `ImpresspressBuilder::build()` will register the
+# `wafer-run/vector` runtime block and the `impresspress/vector` feature
+# block at startup. Pulls block-fastembed + block-vector via impresspress-core's
+# own `native-embedding` -> block-fastembed/block-vector chain.
+native-embedding = ["impresspress-core/native-embedding"]
+# Per-block passthroughs. `impresspress-core` declares the actual `#[cfg]`s;
+# these features forward the toggle so the native binary picks up matching
+# block-* features when its own `[features].default` enables them.
+block-files = ["impresspress-core/block-files"]
+block-messages = ["impresspress-core/block-messages"]
+block-vector = ["impresspress-core/block-vector"]
+block-llm = ["impresspress-core/block-llm"]
+block-legalpages = ["impresspress-core/block-legalpages"]
+block-userportal = ["impresspress-core/block-userportal"]
+block-products = ["impresspress-core/block-products"]
+block-fastembed = ["impresspress-core/block-fastembed"]
+
+[dependencies]
+# Impresspress shared core (platform-agnostic builder + flows + router +
+# feature blocks). Absorbed today's impresspress (lib) crate.
+impresspress-core = { path = "../impresspress-core", default-features = false }
+impresspress-native = { path = "../impresspress-native" }
+# Browser-shell asset writer + bundle/template runner used by the
+# sealed × web and embed × web flows. Native std::fs tooling — lives in its
+# own crate so the native binary doesn't compile the wasm-bindgen `impresspress-browser`.
+impresspress-bundle = { path = "../impresspress-bundle" }
+
+# WAFER runtime
+wafer-run = { workspace = true, features = ["full"] }
+wafer-core = { workspace = true }
+# `wafer_async_trait` macro for the native `BootHooks` impl (the macro's
+# expansion references the `async-trait` crate directly).
+wafer-block = { workspace = true }
+async-trait = { workspace = true }
+
+# Native config service
+
+# Async runtime
+tokio = { workspace = true, features = ["full"] }
+
+# HTTP client for `impresspress deploy`'s post-upload `/_deploy/init` gate call.
+reqwest = { workspace = true }
+
+# Observability
+tracing = { workspace = true }
+
+# Config loading
+rusqlite = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Random / UUIDs (used in variable seeding)
+getrandom = "0.2"
+uuid = { workspace = true }
+
+# Absorbed from impresspress-cli (legacy_* CLI modules under src/cli/).
+# Task 7 of the unified-CLI plan replaces these with the new verb-based
+# CLI; until then they stay as a regression baseline (not currently
+# wired into the binary).
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+glob = "0.3"
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
+
+[lints]
+workspace = true

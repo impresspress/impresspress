@@ -2967,7 +2967,7 @@ dependencies = [
 name = "minimal-browser"
 version = "0.1.0"
 dependencies = [
- "solobase-browser",
+ "impresspress-browser",
  "wafer-run",
  "wasm-bindgen",
  "wasm-bindgen-futures",
@@ -4635,7 +4635,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "solobase"
+name = "impresspress"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -4647,9 +4647,9 @@ dependencies = [
  "rusqlite",
  "serde",
  "serde_json",
- "solobase-bundle",
- "solobase-core",
- "solobase-native",
+ "impresspress-bundle",
+ "impresspress-core",
+ "impresspress-native",
  "tempfile",
  "tokio",
  "toml",
@@ -4661,7 +4661,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "solobase-browser"
+name = "impresspress-browser"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -4694,7 +4694,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "solobase-bundle"
+name = "impresspress-bundle"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -4706,7 +4706,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "solobase-cloudflare"
+name = "impresspress-cloudflare"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -4716,7 +4716,7 @@ dependencies = [
  "maud",
  "serde",
  "serde_json",
- "solobase-core",
+ "impresspress-core",
  "tracing",
  "uuid",
  "wafer-block",
@@ -4729,7 +4729,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "solobase-core"
+name = "impresspress-core"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -4748,7 +4748,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2 0.10.9",
- "solobase-core",
+ "impresspress-core",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -4775,7 +4775,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "solobase-native"
+name = "impresspress-native"
 version = "0.1.0"
 dependencies = [
  "anyhow",
@@ -4802,7 +4802,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "solobase-web"
+name = "impresspress-web"
 version = "0.1.0"
 dependencies = [
  "async-trait",
@@ -4811,8 +4811,8 @@ dependencies = [
  "js-sys",
  "serde",
  "serde_json",
- "solobase-browser",
- "solobase-core",
+ "impresspress-browser",
+ "impresspress-core",
  "tokio-util",
  "uuid",
  "wafer-block",

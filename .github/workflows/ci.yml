@@ -23,13 +23,13 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # The solobase crate's build.rs `include_bytes!`s the solobase-web wasm, so
+  # The impresspress crate's build.rs `include_bytes!`s the impresspress-web wasm, so
   # every job that compiles the workspace (check/test/e2e-build) previously ran
   # `wasm-pack build --release` itself — six redundant wasm-opt passes per run.
   # Build it once here, publish `pkg/` as an artifact, and have downstream jobs
   # download it instead of rebuilding.
   build-wasm:
-    name: Build solobase-web wasm
+    name: Build impresspress-web wasm
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -51,13 +51,13 @@ jobs:
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
       - name: Build WASM
-        run: cd crates/solobase-web && wasm-pack build --target web --release --out-dir pkg
+        run: cd crates/impresspress-web && wasm-pack build --target web --release --out-dir pkg
 
       - name: Upload pkg/ artifact
         uses: actions/upload-artifact@v4
         with:
-          name: solobase-web-pkg
-          path: crates/solobase-web/pkg/
+          name: impresspress-web-pkg
+          path: crates/impresspress-web/pkg/
           retention-days: 1
 
   check:
@@ -92,16 +92,16 @@ jobs:
       - name: Check formatting
         run: cargo +nightly fmt --all -- --check
 
-      # clippy compiles solobase, whose build.rs `include_bytes!`s the
-      # solobase-web wasm. Download the prebuilt pkg/ so build.rs finds it.
-      - name: Download solobase-web pkg/
+      # clippy compiles impresspress, whose build.rs `include_bytes!`s the
+      # impresspress-web wasm. Download the prebuilt pkg/ so build.rs finds it.
+      - name: Download impresspress-web pkg/
         uses: actions/download-artifact@v4
         with:
-          name: solobase-web-pkg
-          path: crates/solobase-web/pkg
+          name: impresspress-web-pkg
+          path: crates/impresspress-web/pkg
 
       - name: Run clippy
-        run: cargo clippy --workspace --exclude solobase-web --exclude solobase-cloudflare
+        run: cargo clippy --workspace --exclude impresspress-web --exclude impresspress-cloudflare
 
   test:
     name: Tests
@@ -121,17 +121,17 @@ jobs:
         with:
           prefix-key: test
 
-      # The solobase crate's build.rs `include_bytes!`s the solobase-web wasm;
+      # The impresspress crate's build.rs `include_bytes!`s the impresspress-web wasm;
       # without it `cargo test --workspace` fails before any test runs.
-      - name: Download solobase-web pkg/
+      - name: Download impresspress-web pkg/
         uses: actions/download-artifact@v4
         with:
-          name: solobase-web-pkg
-          path: crates/solobase-web/pkg
+          name: impresspress-web-pkg
+          path: crates/impresspress-web/pkg
 
       # Auth tests (tests/auth, tests/auth_http) run against in-memory
       # SQLite only. A dual-backend matrix (sqlite + postgres) for the
-      # `suppers_ai__auth__*` tables is deferred until a postgres-backed
+      # `wafer_run__auth__*` tables is deferred until a postgres-backed
       # test context lands in wafer-block-postgres — Plan A did not wire
       # one, and Plans B + C reuse the same MigrationTestCtx shape so
       # the deferral still stands. In particular the partial unique
@@ -141,7 +141,7 @@ jobs:
       # the harness is the right root-cause fix rather than bolting a
       # separate job on here.
       - name: Run tests
-        run: cargo test --workspace --exclude solobase-web --exclude solobase-cloudflare
+        run: cargo test --workspace --exclude impresspress-web --exclude impresspress-cloudflare
 
   cloudflare:
     name: Cloudflare wasm32 check
@@ -163,26 +163,26 @@ jobs:
         with:
           prefix-key: cloudflare
 
-      # build.rs prereq for any solobase crate pulled into the cloudflare build.
-      - name: Download solobase-web pkg/
+      # build.rs prereq for any impresspress crate pulled into the cloudflare build.
+      - name: Download impresspress-web pkg/
         uses: actions/download-artifact@v4
         with:
-          name: solobase-web-pkg
-          path: crates/solobase-web/pkg
+          name: impresspress-web-pkg
+          path: crates/impresspress-web/pkg
 
-      # solobase-cloudflare is wasm-only (cdylib targeting CF Workers).
+      # impresspress-cloudflare is wasm-only (cdylib targeting CF Workers).
       # Excluded from host `cargo test`/`clippy` because its R2/D1 services
       # wrap `!Send` JsFutures that violate wafer-core's Send-bound traits
       # on host. Verify the crate compiles for wasm32 here.
-      - name: Check solobase-cloudflare (wasm32)
-        run: cargo check -p solobase-cloudflare --target wasm32-unknown-unknown
+      - name: Check impresspress-cloudflare (wasm32)
+        run: cargo check -p impresspress-cloudflare --target wasm32-unknown-unknown
 
       # Browser-target crates are also wasm-only consumers of wafer-run, and
       # nothing else in CI builds them for wasm32 — a set_asset_loader
       # signature break sat silently red on main for 5 days before the
-      # solobase #253 review caught it.
-      - name: Check solobase-browser + minimal-browser (wasm32)
-        run: cargo check -p solobase-browser -p minimal-browser --target wasm32-unknown-unknown
+      # impresspress #253 review caught it.
+      - name: Check impresspress-browser + minimal-browser (wasm32)
+        run: cargo check -p impresspress-browser -p minimal-browser --target wasm32-unknown-unknown
 
   # E2E is split into a single build stage plus two independent test stages so
   # the browser-WASM smoke tests (port 8080) and the native-server visual
@@ -210,44 +210,44 @@ jobs:
       - name: Install wasm-pack
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
-      # build.rs prereq: the solobase build.rs `include_bytes!`s this wasm.
+      # build.rs prereq: the impresspress build.rs `include_bytes!`s this wasm.
       # Download the shared artifact instead of rebuilding it here.
-      - name: Download solobase-web pkg/
+      - name: Download impresspress-web pkg/
         uses: actions/download-artifact@v4
         with:
-          name: solobase-web-pkg
-          path: crates/solobase-web/pkg
+          name: impresspress-web-pkg
+          path: crates/impresspress-web/pkg
 
       # Debug build (not `--release`): the visual-baseline server serves
       # server-rendered HTML and the smoke flow is browser-WASM, so the native
       # binary's runtime speed is irrelevant — a debug compile is far cheaper.
-      # `--root out` lands the binary at out/bin/solobase for artifact upload.
-      - name: Install solobase CLI (debug)
-        run: cargo install --path crates/solobase --locked --debug --root "$GITHUB_WORKSPACE/out"
+      # `--root out` lands the binary at out/bin/impresspress for artifact upload.
+      - name: Install impresspress CLI (debug)
+        run: cargo install --path crates/impresspress --locked --debug --root "$GITHUB_WORKSPACE/out"
 
-      - name: Put solobase on PATH
+      - name: Put impresspress on PATH
         run: echo "$GITHUB_WORKSPACE/out/bin" >> "$GITHUB_PATH"
 
-      # Embed × web flow (Cargo.toml + solobase.toml present): the unified
-      # CLI runs wasm-pack, then `solobase_bundle::bundle::run` to drop
+      # Embed × web flow (Cargo.toml + impresspress.toml present): the unified
+      # CLI runs wasm-pack, then `impresspress_bundle::bundle::run` to drop
       # sw.js / loader.js / index.html / hashed assets into pkg/. This produces
       # the served bundle for the smoke tests, overwriting the prereq pkg/.
-      - name: Build solobase-web (framework assets + hashed pkg/)
-        working-directory: crates/solobase-web
-        run: solobase build --target web --release
+      - name: Build impresspress-web (framework assets + hashed pkg/)
+        working-directory: crates/impresspress-web
+        run: impresspress build --target web --release
 
       - name: Upload bundled web dist
         uses: actions/upload-artifact@v4
         with:
-          name: solobase-web-dist
-          path: crates/solobase-web/pkg/
+          name: impresspress-web-dist
+          path: crates/impresspress-web/pkg/
           retention-days: 1
 
-      - name: Upload solobase binary
+      - name: Upload impresspress binary
         uses: actions/upload-artifact@v4
         with:
-          name: solobase-bin
-          path: out/bin/solobase
+          name: impresspress-bin
+          path: out/bin/impresspress
           retention-days: 1
 
   e2e-smoke:
@@ -260,8 +260,8 @@ jobs:
       - name: Download bundled web dist
         uses: actions/download-artifact@v4
         with:
-          name: solobase-web-dist
-          path: crates/solobase-web/pkg
+          name: impresspress-web-dist
+          path: crates/impresspress-web/pkg
 
       - name: Setup Node
         uses: actions/setup-node@v4
@@ -272,16 +272,16 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('crates/solobase-web/package-lock.json') }}
+          key: playwright-${{ runner.os }}-${{ hashFiles('crates/impresspress-web/package-lock.json') }}
 
       - name: Install Playwright
-        working-directory: crates/solobase-web
+        working-directory: crates/impresspress-web
         run: |
           npm ci
           npx playwright install chromium --with-deps
 
       - name: Serve pkg/ in background (smoke tests)
-        working-directory: crates/solobase-web
+        working-directory: crates/impresspress-web
         run: |
           python3 -m http.server 8080 -d pkg &
           echo $! > /tmp/http-pid
@@ -294,7 +294,7 @@ jobs:
           done
 
       - name: Run smoke tests (browser WASM, port 8080)
-        working-directory: crates/solobase-web
+        working-directory: crates/impresspress-web
         run: npx playwright test --config=tests/playwright.config.ts tests/e2e/smoke.spec.ts
 
       - name: Stop server
@@ -309,7 +309,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report-smoke
-          path: crates/solobase-web/playwright-report/
+          path: crates/impresspress-web/playwright-report/
           retention-days: 7
 
   e2e-visual:
@@ -319,15 +319,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Download solobase binary
+      - name: Download impresspress binary
         uses: actions/download-artifact@v4
         with:
-          name: solobase-bin
+          name: impresspress-bin
           path: out/bin
 
-      - name: Put solobase on PATH
+      - name: Put impresspress on PATH
         run: |
-          chmod +x "$GITHUB_WORKSPACE/out/bin/solobase"
+          chmod +x "$GITHUB_WORKSPACE/out/bin/impresspress"
           echo "$GITHUB_WORKSPACE/out/bin" >> "$GITHUB_PATH"
 
       - name: Setup Node
@@ -339,28 +339,28 @@ jobs:
         uses: actions/cache@v4
         with:
           path: ~/.cache/ms-playwright
-          key: playwright-${{ runner.os }}-${{ hashFiles('crates/solobase-web/package-lock.json') }}
+          key: playwright-${{ runner.os }}-${{ hashFiles('crates/impresspress-web/package-lock.json') }}
 
       - name: Install Playwright
-        working-directory: crates/solobase-web
+        working-directory: crates/impresspress-web
         run: |
           npm ci
           npx playwright install chromium --with-deps
 
-      - name: Start native solobase server in background (visual-baseline tests)
+      - name: Start native impresspress server in background (visual-baseline tests)
         run: |
-          # Run from /tmp so solobase auto-detects "sealed" mode (no
+          # Run from /tmp so impresspress auto-detects "sealed" mode (no
           # ancestor Cargo.toml). Running from inside the repo triggers
           # embed_native flow which `cargo build`s the whole workspace
           # before the server starts, busting the wait loop.
           cd /tmp
-          SOLOBASE_LISTEN="127.0.0.1:8093" \
-          SOLOBASE_DB_PATH="/tmp/solobase-visual-baseline.db" \
-          SOLOBASE_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL="admin@example.com" \
-          SOLOBASE_SHARED__AUTH__BOOTSTRAP_ADMIN_PASSWORD="admin123" \
-          SOLOBASE_BLOCK_ENABLED="suppers-ai/userportal,suppers-ai/vector" \
-            solobase > /tmp/solobase-baseline.log 2>&1 &
-          echo $! > /tmp/solobase-pid
+          IMPRESSPRESS_LISTEN="127.0.0.1:8093" \
+          IMPRESSPRESS_DB_PATH="/tmp/impresspress-visual-baseline.db" \
+          WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL="admin@example.com" \
+          WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_PASSWORD="admin123" \
+          IMPRESSPRESS_BLOCK_ENABLED="impresspress/userportal,impresspress/vector" \
+            impresspress > /tmp/impresspress-baseline.log 2>&1 &
+          echo $! > /tmp/impresspress-pid
           # Wait for native server to accept connections (60s; sealed-mode
           # boot is fast — SQLite seed + WAFER init only).
           for i in $(seq 1 60); do
@@ -372,13 +372,13 @@ jobs:
           done
           # Fail fast if server never came up (don't hand a dead port to playwright).
           if ! curl -sf http://127.0.0.1:8093/b/auth/login -o /dev/null; then
-            echo "::error::native solobase did not start within 60s"
-            tail -50 /tmp/solobase-baseline.log
+            echo "::error::native impresspress did not start within 60s"
+            tail -50 /tmp/impresspress-baseline.log
             exit 1
           fi
 
       - name: Run visual-baseline tests (native server, port 8093)
-        working-directory: crates/solobase-web
+        working-directory: crates/impresspress-web
         env:
           TEST_PORT: 8093
         run: npx playwright test --config=tests/playwright.visual-baseline.config.ts tests/e2e/visual-baseline.spec.ts
@@ -386,8 +386,8 @@ jobs:
       - name: Stop server
         if: always()
         run: |
-          if [ -f /tmp/solobase-pid ]; then
-            kill "$(cat /tmp/solobase-pid)" 2>/dev/null || true
+          if [ -f /tmp/impresspress-pid ]; then
+            kill "$(cat /tmp/impresspress-pid)" 2>/dev/null || true
           fi
 
       - name: Upload Playwright report on failure
@@ -395,7 +395,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: playwright-report-visual
-          path: crates/solobase-web/playwright-report/
+          path: crates/impresspress-web/playwright-report/
           retention-days: 7
 
   audit:
@@ -425,7 +425,7 @@ jobs:
       - name: Check for SDK changes
         id: sdk-changes
         run: |
-          CHANGED=$(git diff --name-only ${{ github.event.pull_request.base.sha }}..HEAD -- packages/solobase-js/)
+          CHANGED=$(git diff --name-only ${{ github.event.pull_request.base.sha }}..HEAD -- packages/impresspress-js/)
           if [ -z "$CHANGED" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
@@ -451,7 +451,7 @@ jobs:
 
       - name: Install and build SDK
         if: steps.sdk-changes.outputs.skip != 'true'
-        working-directory: packages/solobase-js
+        working-directory: packages/impresspress-js
         run: |
           npm ci
           npm run build

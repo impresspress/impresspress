@@ -1,11 +1,11 @@
 #!/bin/bash
 #
-# sync-fonts.sh — pull bundled font binaries from suppers-ai/site-kit
+# sync-fonts.sh — pull bundled font binaries from impresspress/site-kit
 #
 # The Itim woff2 files served by the admin chrome (CSS at
 # tokens.css → /b/static/itim-latin-{hash}.woff2) are bundled into the
 # worker via include_bytes! at compile time. The canonical source of
-# truth is suppers-ai/site-kit's `/fonts/` directory.
+# truth is impresspress/site-kit's `/fonts/` directory.
 #
 # Run this script when site-kit ships a font update (rare — Itim is a
 # stable Google font), then commit the changed binaries.
@@ -17,8 +17,8 @@
 set -euo pipefail
 
 REF="${REF:-main}"
-REPO="suppers-ai/site-kit"
-DEST="crates/solobase-core/src/ui/assets/fonts"
+REPO="impresspress/site-kit"
+DEST="crates/impresspress-core/src/ui/assets/fonts"
 FONTS=(
     "itim-latin.woff2"
     "itim-latin-ext.woff2"

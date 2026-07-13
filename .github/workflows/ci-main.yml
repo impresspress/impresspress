@@ -18,11 +18,11 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
-  # The solobase crate's build.rs `include_bytes!`s the solobase-web wasm, so
+  # The impresspress crate's build.rs `include_bytes!`s the impresspress-web wasm, so
   # every job that compiles the workspace previously ran `wasm-pack build
   # --release` itself. Build it once here and share `pkg/` as an artifact.
   build-wasm:
-    name: Build solobase-web wasm
+    name: Build impresspress-web wasm
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -44,13 +44,13 @@ jobs:
         run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
 
       - name: Build WASM
-        run: cd crates/solobase-web && wasm-pack build --target web --release --out-dir pkg
+        run: cd crates/impresspress-web && wasm-pack build --target web --release --out-dir pkg
 
       - name: Upload pkg/ artifact
         uses: actions/upload-artifact@v4
         with:
-          name: solobase-web-pkg
-          path: crates/solobase-web/pkg/
+          name: impresspress-web-pkg
+          path: crates/impresspress-web/pkg/
           retention-days: 1
 
   check:
@@ -79,16 +79,16 @@ jobs:
       - name: Check formatting
         run: cargo +nightly fmt --all -- --check
 
-      # clippy compiles solobase, whose build.rs `include_bytes!`s the
-      # solobase-web wasm. Download the prebuilt pkg/ so build.rs finds it.
-      - name: Download solobase-web pkg/
+      # clippy compiles impresspress, whose build.rs `include_bytes!`s the
+      # impresspress-web wasm. Download the prebuilt pkg/ so build.rs finds it.
+      - name: Download impresspress-web pkg/
         uses: actions/download-artifact@v4
         with:
-          name: solobase-web-pkg
-          path: crates/solobase-web/pkg
+          name: impresspress-web-pkg
+          path: crates/impresspress-web/pkg
 
       - name: Run clippy
-        run: cargo clippy --workspace --exclude solobase-web --exclude solobase-cloudflare
+        run: cargo clippy --workspace --exclude impresspress-web --exclude impresspress-cloudflare
 
   test:
     name: Tests
@@ -108,16 +108,16 @@ jobs:
         with:
           prefix-key: test
 
-      # The solobase crate's build.rs `include_bytes!`s the solobase-web wasm;
+      # The impresspress crate's build.rs `include_bytes!`s the impresspress-web wasm;
       # without it `cargo test --workspace` fails before any test runs.
-      - name: Download solobase-web pkg/
+      - name: Download impresspress-web pkg/
         uses: actions/download-artifact@v4
         with:
-          name: solobase-web-pkg
-          path: crates/solobase-web/pkg
+          name: impresspress-web-pkg
+          path: crates/impresspress-web/pkg
 
       - name: Run tests
-        run: cargo test --workspace --exclude solobase-web --exclude solobase-cloudflare
+        run: cargo test --workspace --exclude impresspress-web --exclude impresspress-cloudflare
 
   wasm:
     name: Cloudflare wasm32 check
@@ -139,23 +139,23 @@ jobs:
         with:
           prefix-key: cloudflare
 
-      # build.rs prereq for any solobase crate pulled into the cloudflare build.
-      - name: Download solobase-web pkg/
+      # build.rs prereq for any impresspress crate pulled into the cloudflare build.
+      - name: Download impresspress-web pkg/
         uses: actions/download-artifact@v4
         with:
-          name: solobase-web-pkg
-          path: crates/solobase-web/pkg
+          name: impresspress-web-pkg
+          path: crates/impresspress-web/pkg
 
-      # solobase-cloudflare is wasm-only (cdylib targeting CF Workers).
-      - name: Check solobase-cloudflare (wasm32)
-        run: cargo check -p solobase-cloudflare --target wasm32-unknown-unknown
+      # impresspress-cloudflare is wasm-only (cdylib targeting CF Workers).
+      - name: Check impresspress-cloudflare (wasm32)
+        run: cargo check -p impresspress-cloudflare --target wasm32-unknown-unknown
 
       # Browser-target crates are also wasm-only consumers of wafer-run, and
       # nothing else in CI builds them for wasm32 — a set_asset_loader
       # signature break sat silently red on main for 5 days before the
-      # solobase #253 review caught it.
-      - name: Check solobase-browser + minimal-browser (wasm32)
-        run: cargo check -p solobase-browser -p minimal-browser --target wasm32-unknown-unknown
+      # impresspress #253 review caught it.
+      - name: Check impresspress-browser + minimal-browser (wasm32)
+        run: cargo check -p impresspress-browser -p minimal-browser --target wasm32-unknown-unknown
 
   audit:
     name: Security Audit
@@ -194,7 +194,7 @@ jobs:
           npm run build
 
       - name: Install and build SDK
-        working-directory: packages/solobase-js
+        working-directory: packages/impresspress-js
         run: |
           npm ci
           npm run build
@@ -256,17 +256,17 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
 
-      # solobase's build.rs `include_bytes!`s the solobase-web wasm; the wasm is
+      # impresspress's build.rs `include_bytes!`s the impresspress-web wasm; the wasm is
       # platform-independent, so download the shared artifact rather than
       # rebuilding it on every target (including the macOS runners).
-      - name: Download solobase-web pkg/
+      - name: Download impresspress-web pkg/
         uses: actions/download-artifact@v4
         with:
-          name: solobase-web-pkg
-          path: crates/solobase-web/pkg
+          name: impresspress-web-pkg
+          path: crates/impresspress-web/pkg
 
       - name: Build
-        run: cargo build -p solobase --release --target ${{ matrix.target }}
+        run: cargo build -p impresspress --release --target ${{ matrix.target }}
 
   coverage:
     name: Coverage
@@ -289,16 +289,16 @@ jobs:
         with:
           prefix-key: coverage
 
-      # solobase's build.rs `include_bytes!`s the solobase-web wasm;
+      # impresspress's build.rs `include_bytes!`s the impresspress-web wasm;
       # llvm-cov compiles the workspace, so the prebuilt pkg/ must be present.
-      - name: Download solobase-web pkg/
+      - name: Download impresspress-web pkg/
         uses: actions/download-artifact@v4
         with:
-          name: solobase-web-pkg
-          path: crates/solobase-web/pkg
+          name: impresspress-web-pkg
+          path: crates/impresspress-web/pkg
 
       - name: Generate coverage
-        run: cargo llvm-cov --workspace --exclude solobase-web --exclude solobase-cloudflare --lcov --output-path lcov.info
+        run: cargo llvm-cov --workspace --exclude impresspress-web --exclude impresspress-cloudflare --lcov --output-path lcov.info
 
       - name: Upload coverage
         uses: codecov/codecov-action@v4

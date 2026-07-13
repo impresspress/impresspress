@@ -1,14 +1,14 @@
 #!/usr/bin/env bash
-# Rebuild sql.js with FTS5 enabled and vendor the artifacts into solobase-browser.
+# Rebuild sql.js with FTS5 enabled and vendor the artifacts into impresspress-browser.
 #
 # Why: the upstream sql.js npm package ships a build with FTS3/FTS4 only.
-# Browser vector keyword/hybrid search (suppers-ai/vector) needs FTS5 syntax
+# Browser vector keyword/hybrid search (impresspress/vector) needs FTS5 syntax
 # (MATCH ... ORDER BY rank, BM25). We rebuild from the same upstream tag the
 # vendored 1.11.0 came from, with one extra Emscripten define.
 #
 # Inputs: none. Idempotent. Writes to:
-#   - crates/solobase-bundle/assets/vendor/sql-wasm.wasm
-#   - crates/solobase-bundle/assets/vendor/sql-wasm-esm.js
+#   - crates/impresspress-bundle/assets/vendor/sql-wasm.wasm
+#   - crates/impresspress-bundle/assets/vendor/sql-wasm-esm.js
 
 set -euo pipefail
 
@@ -17,7 +17,7 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 # Work under $HOME because Docker Desktop file-sharing typically excludes
 # /tmp; $HOME is always allowed.
 WORK_DIR="$(mktemp -d -p "$HOME" sqljs-fts5-build.XXXXXX)"
-VENDOR_DIR="${SCRIPT_DIR}/../crates/solobase-bundle/assets/vendor"
+VENDOR_DIR="${SCRIPT_DIR}/../crates/impresspress-bundle/assets/vendor"
 
 trap 'rm -rf "${WORK_DIR}"' EXIT
 

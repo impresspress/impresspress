@@ -1,9 +1,9 @@
 #!/bin/bash
 #
-# audit-wrap-grants.sh — static-analysis WRAP-grant coverage for solobase-core
+# audit-wrap-grants.sh — static-analysis WRAP-grant coverage for impresspress-core
 #
 # Walks every `db::{list,create,update,delete,count,get,find_one}` callsite
-# in `crates/solobase-core/src/blocks/`, derives the calling block from the
+# in `crates/impresspress-core/src/blocks/`, derives the calling block from the
 # file path and the table-owning block from the table's `{org}__{block}__`
 # prefix, and verifies the owning block declares a `ResourceGrant` covering
 # the call.
@@ -25,13 +25,13 @@
 #     don't set `wrap.resource` meta, so WRAP doesn't gate them today.
 #     That's a separate design question; see PR #81 description.
 #   - Storage grants are audited in Phase 3.5 (added 2026-05-29).
-#   - Network grants are NOT audited. solobase/blocks/admin/mod.rs declares a
+#   - Network grants are NOT audited. impresspress/blocks/admin/mod.rs declares a
 #     default-allow `ResourceGrant::read("*", "*").typed(Network)`, which makes
 #     a meaningful "missing grant" finding impossible until the policy is
 #     locked down. See docs/superpowers/specs/2026-05-29-wave-23-wrap-audit-
 #     storage-design.md for the deferred-Network rationale.
 #   - Tables outside the `{org}__{block}__` convention (none currently exist
-#     in solobase-core but flagged if found).
+#     in impresspress-core but flagged if found).
 #
 # Pragmas to silence individual findings (use sparingly, always with a reason):
 #   // audit-allow: <reason>          — preceding line: skips one db::* callsite
@@ -46,18 +46,18 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-BLOCKS_DIR="crates/solobase-core/src/blocks"
+BLOCKS_DIR="crates/impresspress-core/src/blocks"
 
 if [ ! -d "$BLOCKS_DIR" ]; then
-  echo "::error::$BLOCKS_DIR not found — run from a solobase repo root."
+  echo "::error::$BLOCKS_DIR not found — run from a impresspress repo root."
   exit 2
 fi
 
 # ---------- Phase 1: collect all string constants ----------
-# Two const shapes used in solobase-core:
-#   pub const TABLE: &str = "suppers_ai__auth__users";
-#   const FOO_COLLECTION: &str = "suppers_ai__foo__bar";
-#   pub const AUTH_BLOCK_ID: &str = "suppers-ai/auth";
+# Two const shapes used in impresspress-core:
+#   pub const TABLE: &str = "wafer_run__auth__users";
+#   const FOO_COLLECTION: &str = "impresspress__foo__bar";
+#   pub const AUTH_BLOCK_ID: &str = "wafer-run/auth";
 #
 # We index ALL of them globally by bare name. When a callsite refers to
 # `module::TABLE`, we keep only the trailing identifier (`TABLE`) — the
@@ -77,9 +77,9 @@ declare -A MODULE_REEXPORT      # "${block_name}::${alias}" -> value (from `pub 
 declare -A FILE_USE_VALUE       # "${file}::${alias}" -> directly-resolved value (when Phase 1.6 could resolve the `use` target deterministically; skips the ambiguous bare-name fallback for cases like `use repo::users::TABLE as USERS_TABLE` where multiple files declare `pub const TABLE`)
 
 # Strip the absolute prefix from a file path to get the block directory name.
-# e.g. crates/solobase-core/src/blocks/admin/mod.rs   -> admin
-#      crates/solobase-core/src/blocks/admin/pages/x.rs -> admin
-#      crates/solobase-core/src/blocks/network.rs    -> network
+# e.g. crates/impresspress-core/src/blocks/admin/mod.rs   -> admin
+#      crates/impresspress-core/src/blocks/admin/pages/x.rs -> admin
+#      crates/impresspress-core/src/blocks/network.rs    -> network
 file_to_block_name() {
   local path="$1"
   local rel="${path#$BLOCKS_DIR/}"
@@ -615,9 +615,9 @@ resolve_token() {
   echo "<unresolved:$tok>"
 }
 
-# Convert a file path like crates/solobase-core/src/blocks/files/mod.rs or
-# crates/solobase-core/src/blocks/network.rs into the block id
-# `suppers-ai/{name}`.
+# Convert a file path like crates/impresspress-core/src/blocks/files/mod.rs or
+# crates/impresspress-core/src/blocks/network.rs into the block id
+# `impresspress/{name}`.
 file_to_block_id() {
   local path="$1"
   # Strip the prefix to get blocks/<rest>
@@ -625,11 +625,11 @@ file_to_block_id() {
   # Take the first path segment, stripping trailing .rs
   local first="${rel%%/*}"
   first="${first%.rs}"
-  echo "suppers-ai/${first//_/-}"
+  echo "impresspress/${first//_/-}"
 }
 
-# Convert a table name (e.g. suppers_ai__auth__sessions) to its owner block
-# id (suppers-ai/auth). Returns empty string if the name doesn't follow
+# Convert a table name (e.g. wafer_run__auth__sessions) to its owner block
+# id (wafer-run/auth). Returns empty string if the name doesn't follow
 # the {org}__{block}__{rest} convention.
 table_to_owner() {
   local table="$1"
@@ -642,8 +642,8 @@ table_to_owner() {
   echo ""
 }
 
-# Convert a storage path (e.g. "suppers-ai/files/cloud/key.png" or
-# "@suppers-ai/files/foo") to its owner block id (suppers-ai/files).
+# Convert a storage path (e.g. "impresspress/files/cloud/key.png" or
+# "@impresspress/files/foo") to its owner block id (impresspress/files).
 # Returns empty string if the path doesn't have at least two slash segments.
 storage_path_to_owner() {
   local path="$1"

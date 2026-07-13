@@ -1,0 +1,90 @@
+[package]
+name = "impresspress-cloudflare"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Cloudflare Workers adapter for impresspress (D1, R2, wasm crypto/network, worker entry helpers)"
+
+[lib]
+# `rlib` so the `pub async fn run` worker entry shim is consumable from
+# other Rust crates (e.g. wafer-site's cloudflare cdylib calling
+# `impresspress_cloudflare::run` from its `#[event(fetch)]` handler).
+# `cdylib` retained for direct use by `worker-build`.
+crate-type = ["cdylib", "rlib"]
+
+[features]
+# Default = the full feature-block set wafer.run ships today. Consumers
+# that embed `impresspress-cloudflare` can `default-features = false` and
+# re-enable a subset to trim WASM size — e.g. dropping `block-legalpages`
+# strips `pulldown-cmark` + its html5ever transitive subtree entirely.
+default = [
+    "block-files",
+    "block-legalpages",
+    "block-messages",
+    "block-products",
+    "block-userportal",
+]
+# Passthrough block features → forwarded to `impresspress-core`. The block
+# register sites in impresspress-core are `#[cfg(feature = "block-X")]`-gated
+# (`register_all_static_blocks`), so enabling these here is what makes the
+# corresponding `impresspress/<name>` routes resolve. Keep in sync with the
+# `impresspress-web/Cargo.toml` block set.
+block-files = ["impresspress-core/block-files"]
+block-legalpages = ["impresspress-core/block-legalpages"]
+block-messages = ["impresspress-core/block-messages"]
+block-products = ["impresspress-core/block-products"]
+block-userportal = ["impresspress-core/block-userportal"]
+
+[dependencies]
+# WAFER runtime
+wafer-run = { workspace = true }
+wafer-block = { workspace = true }
+wafer-core = { workspace = true }
+# Shared SQL planning (DbExec primitives call introspect::build_table_exists).
+wafer-sql-utils = { workspace = true }
+
+# Impresspress shared core. `default-features = false` strips the native
+# block set (sqlite/storage-local/llm/etc.); the wasm32-clean feature
+# blocks are pulled back in via this crate's own passthrough block
+# features (see `[features]` above), which default-enable the full set.
+# Without an enabled `block-X` every `impresspress/<name>` route returns
+# "block not found" — the linkme `register_static_block!` path doesn't
+# emit on wasm32, so `register_all_static_blocks` is the only
+# registration site and every entry there is `#[cfg(feature =
+# "block-X")]`-gated on impresspress-core.
+#
+# `block-llm` / `block-vector` are excluded for now — the LlmBlock
+# module is gated on `feature = "llm"`, which pulls in tokio/reqwest
+# and is wasm32-incompatible. Closes via the LlmService trait refactor.
+impresspress-core = { path = "../impresspress-core", default-features = false }
+
+# Cloudflare Workers SDK
+worker = { workspace = true }
+wasm-bindgen = { workspace = true }
+js-sys = { workspace = true }
+
+# Serialization
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Crypto (wasm-compatible). JWT + argon2 policy delegates to
+# wafer-block-crypto's pure-Rust primitives — same engine as native.
+wafer-block-crypto = { workspace = true }
+getrandom = { workspace = true, features = ["js"] }
+# uuid needs the "js" feature for wasm (uses js_sys random); inherit v4+v7 from workspace
+uuid = { workspace = true, features = ["js"] }
+
+# Time
+chrono = { workspace = true }
+
+# Async
+async-trait = { workspace = true }
+
+# Observability
+tracing = { workspace = true }
+
+# Templating
+maud = { workspace = true }
+
+[lints]
+workspace = true
