@@ -159,7 +159,7 @@
 }
 
 .badge-success { background: #10b98119; color: var(--accent-success); }
-.badge-primary { background: #fe662719; color: var(--primary-color); }
+.badge-primary { background: #f0480f19; color: var(--primary-color); }
 .badge-danger { background: #ef444419; color: var(--accent-danger); }
 .badge-warning { background: #f59e0b19; color: var(--accent-warning); }
 .badge-info { background: #3b82f619; color: var(--accent-info); }
@@ -528,7 +528,7 @@ dialog.modal .modal-error[hidden] { display: none; }
 }
 
 .form-checkbox input, .form-radio input {
-	width: 1rem; height: 1rem; cursor: pointer; accent-color: #fe6627;
+	width: 1rem; height: 1rem; cursor: pointer; accent-color: #f0480f;
 }
 
 .input-group { display: flex; gap: 0.5rem; }
