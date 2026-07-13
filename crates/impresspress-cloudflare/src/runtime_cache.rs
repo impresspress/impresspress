@@ -54,7 +54,9 @@ async fn current_version(kv: &Arc<dyn impresspress_core::kv::KvBackend>) -> Stri
         Ok(Some(v)) => v,
         _ => {
             let v = crate::kv_cached_db::new_version_stamp();
-            if let Err(e) = impresspress_core::kv::put_version_stamp_with_retry(kv.as_ref(), &v).await {
+            if let Err(e) =
+                impresspress_core::kv::put_version_stamp_with_retry(kv.as_ref(), &v).await
+            {
                 tracing::warn!(error = %e, "config-version stamp persist failed; runtime tagged with local stamp only (KV unstamped; re-mints until a put lands)");
             }
             v
@@ -73,7 +75,9 @@ pub(crate) async fn get_or_build<F, G>(
     register_post_build: G,
 ) -> Result<Rc<ReadyRuntime>, Box<dyn std::error::Error>>
 where
-    F: FnOnce(crate::ImpresspressBuilder) -> Result<crate::ImpresspressBuilder, Box<dyn std::error::Error>>,
+    F: FnOnce(
+        crate::ImpresspressBuilder,
+    ) -> Result<crate::ImpresspressBuilder, Box<dyn std::error::Error>>,
     G: FnOnce(
         &mut wafer_run::Wafer,
         Arc<dyn wafer_core::interfaces::storage::service::StorageService>,

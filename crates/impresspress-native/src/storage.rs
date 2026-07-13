@@ -41,8 +41,9 @@ pub async fn make_storage_service(
 /// `IMPRESSPRESS_S3_PREFIX`, `IMPRESSPRESS_S3_ENDPOINT`, and `IMPRESSPRESS_S3_REGION`.
 #[cfg(feature = "s3")]
 async fn make_s3_storage_service_dispatch() -> Result<Arc<dyn StorageService>> {
-    let bucket = std::env::var("IMPRESSPRESS_S3_BUCKET")
-        .map_err(|_| anyhow!("IMPRESSPRESS_STORAGE_TYPE=s3 requires IMPRESSPRESS_S3_BUCKET to be set"))?;
+    let bucket = std::env::var("IMPRESSPRESS_S3_BUCKET").map_err(|_| {
+        anyhow!("IMPRESSPRESS_STORAGE_TYPE=s3 requires IMPRESSPRESS_S3_BUCKET to be set")
+    })?;
     let config = S3Config {
         bucket,
         prefix: std::env::var("IMPRESSPRESS_S3_PREFIX").unwrap_or_default(),

@@ -182,11 +182,17 @@ pub fn auth_grants() -> Vec<wafer_block::types::ResourceGrant> {
         // sessions and revokes individual rows. Read+write because revoke
         // deletes the row; reads are scoped to the caller's user_id by
         // the repo helper.
-        wafer_run::ResourceGrant::read_write("impresspress/userportal", "wafer_run__auth__sessions"),
+        wafer_run::ResourceGrant::read_write(
+            "impresspress/userportal",
+            "wafer_run__auth__sessions",
+        ),
         // Userportal `/b/userportal/security` lists the caller's
         // linked OAuth providers. Read-only — unlinking goes
         // through an auth POST endpoint, not the userportal block.
-        wafer_run::ResourceGrant::read("impresspress/userportal", "wafer_run__auth__provider_links"),
+        wafer_run::ResourceGrant::read(
+            "impresspress/userportal",
+            "wafer_run__auth__provider_links",
+        ),
         wafer_run::ResourceGrant::read_write("impresspress/userportal", "wafer_run__auth__users"),
         wafer_run::ResourceGrant::read("impresspress/products", "wafer_run__auth__users"),
         // Wave 3: rate_limit.rs (called from products + files blocks) writes to
@@ -601,10 +607,11 @@ mod tests {
 
         use crate::test_support::TestContext;
 
-        let ctx =
-            TestContext::with_auth()
-                .await
-                .with_wrap("wafer-run/auth", vec![], "impresspress/admin");
+        let ctx = TestContext::with_auth().await.with_wrap(
+            "wafer-run/auth",
+            vec![],
+            "impresspress/admin",
+        );
 
         let live = users::insert(
             &ctx,

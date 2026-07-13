@@ -405,7 +405,11 @@ mod tests {
         seed_user(&ctx, "user-a").await;
         insert(&ctx, fake_session("user-a", 0x01)).await.unwrap();
 
-        let ctx = ctx.with_wrap("impresspress/userportal", auth_grants(), "impresspress/admin");
+        let ctx = ctx.with_wrap(
+            "impresspress/userportal",
+            auth_grants(),
+            "impresspress/admin",
+        );
 
         let rows = sessions::list_for_user(&ctx, "user-a")
             .await
@@ -421,7 +425,11 @@ mod tests {
         seed_user(&ctx, "user-a").await;
         insert(&ctx, fake_session("user-a", 0x01)).await.unwrap();
 
-        let ctx = ctx.with_wrap("impresspress/userportal", auth_grants(), "impresspress/admin");
+        let ctx = ctx.with_wrap(
+            "impresspress/userportal",
+            auth_grants(),
+            "impresspress/admin",
+        );
 
         let removed = sessions::delete_for_user(&ctx, "user-a", &[0x01u8; 32])
             .await

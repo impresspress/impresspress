@@ -21,7 +21,13 @@ async fn cancel_and_reset_addons_zeroes_addons_and_cancels() {
     sd.insert("addon_requests".to_string(), serde_json::json!(1000));
     sd.insert("addon_r2_bytes".to_string(), serde_json::json!(42));
     sd.insert("addon_d1_bytes".to_string(), serde_json::json!(7));
-    seed(&ctx, "impresspress__products__subscriptions", "sub_db_1", sd).await;
+    seed(
+        &ctx,
+        "impresspress__products__subscriptions",
+        "sub_db_1",
+        sd,
+    )
+    .await;
 
     let rows = repo::subscriptions::cancel_and_reset_addons(&ctx, "sub_stripe_1")
         .await

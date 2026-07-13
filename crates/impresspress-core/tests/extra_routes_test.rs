@@ -380,15 +380,17 @@ use wafer_run::{AuthLevel, BlockEndpoint, BlockInfo};
 /// `Admin` and the public terms page as `Public` — exactly as the block's
 /// `info()` does.
 fn legalpages_infos() -> Vec<BlockInfo> {
-    vec![
-        BlockInfo::new("impresspress/legalpages", "0.0.1", "http-handler@v1", "legal").endpoints(
-            vec![
-                BlockEndpoint::get("/b/legalpages/terms").auth(AuthLevel::Public),
-                BlockEndpoint::get("/b/legalpages/admin").auth(AuthLevel::Admin),
-                BlockEndpoint::patch("/b/legalpages/api/documents/{id}").auth(AuthLevel::Admin),
-            ],
-        ),
-    ]
+    vec![BlockInfo::new(
+        "impresspress/legalpages",
+        "0.0.1",
+        "http-handler@v1",
+        "legal",
+    )
+    .endpoints(vec![
+        BlockEndpoint::get("/b/legalpages/terms").auth(AuthLevel::Public),
+        BlockEndpoint::get("/b/legalpages/admin").auth(AuthLevel::Admin),
+        BlockEndpoint::patch("/b/legalpages/api/documents/{id}").auth(AuthLevel::Admin),
+    ])]
 }
 
 #[tokio::test]
@@ -638,14 +640,16 @@ async fn auth_ui_admin_settings_rejects_non_admin() {
     // Public — so the declared level is the sole gate (the deleted inline
     // `is_admin` check). A non-admin must be 403'd before dispatch.
     let ctx = RecordingContext::new();
-    let infos = vec![
-        BlockInfo::new("impresspress/auth-ui", "0.0.1", "http-handler@v1", "auth-ui").endpoints(
-            vec![
-                BlockEndpoint::get("/b/auth/admin/settings").auth(AuthLevel::Admin),
-                BlockEndpoint::get("/b/auth/login").auth(AuthLevel::Public),
-            ],
-        ),
-    ];
+    let infos = vec![BlockInfo::new(
+        "impresspress/auth-ui",
+        "0.0.1",
+        "http-handler@v1",
+        "auth-ui",
+    )
+    .endpoints(vec![
+        BlockEndpoint::get("/b/auth/admin/settings").auth(AuthLevel::Admin),
+        BlockEndpoint::get("/b/auth/login").auth(AuthLevel::Public),
+    ])];
 
     let msg = make_msg_with_user("/b/auth/admin/settings", "user-1");
     let s =

@@ -429,8 +429,11 @@ mod tests {
 
     #[test]
     fn delete_by_ids_uses_in_clause() {
-        let (sqls, params) =
-            build_delete_ids_sql("impresspress__vector__docs", &["a".into(), "b".into()], true);
+        let (sqls, params) = build_delete_ids_sql(
+            "impresspress__vector__docs",
+            &["a".into(), "b".into()],
+            true,
+        );
         assert_eq!(sqls.len(), 3);
         assert!(sqls[0]
             .contains(r#"DELETE FROM "impresspress__vector__docs_vectors" WHERE id IN (?, ?)"#));

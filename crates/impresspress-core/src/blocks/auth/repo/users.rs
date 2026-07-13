@@ -382,10 +382,11 @@ mod typed_client_tests {
     /// rewrite.
     #[tokio::test]
     async fn insert_succeeds_under_wrap_for_auth_block() {
-        let ctx =
-            TestContext::with_auth()
-                .await
-                .with_wrap("wafer-run/auth", vec![], "impresspress/admin");
+        let ctx = TestContext::with_auth().await.with_wrap(
+            "wafer-run/auth",
+            vec![],
+            "impresspress/admin",
+        );
         let user = insert(
             &ctx,
             NewUser {
@@ -403,10 +404,11 @@ mod typed_client_tests {
 
     #[tokio::test]
     async fn find_by_email_returns_inserted_row_under_wrap() {
-        let ctx =
-            TestContext::with_auth()
-                .await
-                .with_wrap("wafer-run/auth", vec![], "impresspress/admin");
+        let ctx = TestContext::with_auth().await.with_wrap(
+            "wafer-run/auth",
+            vec![],
+            "impresspress/admin",
+        );
         insert(
             &ctx,
             NewUser {
@@ -425,10 +427,11 @@ mod typed_client_tests {
 
     #[tokio::test]
     async fn count_reports_zero_then_one() {
-        let ctx =
-            TestContext::with_auth()
-                .await
-                .with_wrap("wafer-run/auth", vec![], "impresspress/admin");
+        let ctx = TestContext::with_auth().await.with_wrap(
+            "wafer-run/auth",
+            vec![],
+            "impresspress/admin",
+        );
         assert_eq!(count(&ctx).await.unwrap(), 0);
         insert(
             &ctx,
@@ -461,10 +464,11 @@ mod typed_client_tests {
 
     #[tokio::test]
     async fn verification_token_round_trip_and_mark_verified() {
-        let ctx =
-            TestContext::with_auth()
-                .await
-                .with_wrap("wafer-run/auth", vec![], "impresspress/admin");
+        let ctx = TestContext::with_auth().await.with_wrap(
+            "wafer-run/auth",
+            vec![],
+            "impresspress/admin",
+        );
         let id = seed_one(&ctx).await;
 
         set_verification_token(&ctx, &id, "vhash", "2026-06-01T00:00:00Z")
@@ -492,10 +496,11 @@ mod typed_client_tests {
 
     #[tokio::test]
     async fn reset_token_round_trip_and_clear() {
-        let ctx =
-            TestContext::with_auth()
-                .await
-                .with_wrap("wafer-run/auth", vec![], "impresspress/admin");
+        let ctx = TestContext::with_auth().await.with_wrap(
+            "wafer-run/auth",
+            vec![],
+            "impresspress/admin",
+        );
         let id = seed_one(&ctx).await;
 
         set_reset_token(&ctx, &id, "rhash", "2099-01-01T00:00:00Z")
@@ -514,10 +519,11 @@ mod typed_client_tests {
 
     #[tokio::test]
     async fn update_profile_dual_writes_name_and_avatar() {
-        let ctx =
-            TestContext::with_auth()
-                .await
-                .with_wrap("wafer-run/auth", vec![], "impresspress/admin");
+        let ctx = TestContext::with_auth().await.with_wrap(
+            "wafer-run/auth",
+            vec![],
+            "impresspress/admin",
+        );
         let id = seed_one(&ctx).await;
 
         let updated = update_profile(&ctx, &id, Some("New Name"), Some("https://a/b.png"))
@@ -549,10 +555,11 @@ mod typed_client_tests {
 
     #[tokio::test]
     async fn fresh_user_is_active() {
-        let ctx =
-            TestContext::with_auth()
-                .await
-                .with_wrap("wafer-run/auth", vec![], "impresspress/admin");
+        let ctx = TestContext::with_auth().await.with_wrap(
+            "wafer-run/auth",
+            vec![],
+            "impresspress/admin",
+        );
         let id = seed_active(&ctx).await;
         let row = find_by_id(&ctx, &id).await.unwrap().unwrap();
         assert!(row.is_active());
@@ -562,10 +569,11 @@ mod typed_client_tests {
 
     #[tokio::test]
     async fn disabled_user_is_not_active() {
-        let ctx =
-            TestContext::with_auth()
-                .await
-                .with_wrap("wafer-run/auth", vec![], "impresspress/admin");
+        let ctx = TestContext::with_auth().await.with_wrap(
+            "wafer-run/auth",
+            vec![],
+            "impresspress/admin",
+        );
         let id = seed_active(&ctx).await;
         let mut patch = std::collections::HashMap::new();
         patch.insert("disabled".to_string(), serde_json::json!(true));
@@ -578,10 +586,11 @@ mod typed_client_tests {
 
     #[tokio::test]
     async fn soft_deleted_user_is_not_active() {
-        let ctx =
-            TestContext::with_auth()
-                .await
-                .with_wrap("wafer-run/auth", vec![], "impresspress/admin");
+        let ctx = TestContext::with_auth().await.with_wrap(
+            "wafer-run/auth",
+            vec![],
+            "impresspress/admin",
+        );
         let id = seed_active(&ctx).await;
         let mut patch = std::collections::HashMap::new();
         patch.insert(

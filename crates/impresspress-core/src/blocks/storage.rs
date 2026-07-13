@@ -594,7 +594,8 @@ mod tests {
             content_type: "image/png".into(),
         })
         .unwrap();
-        let (_, resolved) = rewrite_request_body("storage.put", &body, "impresspress/files").unwrap();
+        let (_, resolved) =
+            rewrite_request_body("storage.put", &body, "impresspress/files").unwrap();
         assert_eq!(resolved.wrap_resource, "impresspress/files/smoke/a.png");
 
         // Cross-block object op — wrap_resource uses the post-resolution path
@@ -603,7 +604,8 @@ mod tests {
             key: "index.html".into(),
         })
         .unwrap();
-        let (_, resolved) = rewrite_request_body("storage.get", &body, "impresspress/files").unwrap();
+        let (_, resolved) =
+            rewrite_request_body("storage.get", &body, "impresspress/files").unwrap();
         assert_eq!(resolved.wrap_resource, "wafer-run/web/public/index.html");
         assert!(resolved.cross_block);
 

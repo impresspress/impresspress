@@ -141,10 +141,11 @@ mod typed_client_tests {
 
     #[tokio::test]
     async fn find_by_unknown_user_returns_none() {
-        let ctx =
-            TestContext::with_auth()
-                .await
-                .with_wrap("wafer-run/auth", vec![], "impresspress/admin");
+        let ctx = TestContext::with_auth().await.with_wrap(
+            "wafer-run/auth",
+            vec![],
+            "impresspress/admin",
+        );
         assert!(find_by_user_id(&ctx, "ghost").await.unwrap().is_none());
     }
 

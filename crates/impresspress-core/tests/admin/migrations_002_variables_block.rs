@@ -6,11 +6,11 @@
 
 use std::collections::HashMap;
 
-use serde_json::json;
 use impresspress_core::{
     blocks::admin::{migrations, VARIABLES_TABLE},
     test_support::TestContext,
 };
+use serde_json::json;
 use wafer_block::db::ListOptions;
 use wafer_core::clients::database as db;
 
@@ -59,9 +59,13 @@ async fn migration_002_adds_block_column_and_index() {
     migrations::apply(&ctx).await.expect("apply migrations");
 
     // PRAGMA table_info verifies the column was added.
-    let cols = db::query_raw(&ctx, "PRAGMA table_info(impresspress__admin__variables)", &[])
-        .await
-        .expect("pragma table_info");
+    let cols = db::query_raw(
+        &ctx,
+        "PRAGMA table_info(impresspress__admin__variables)",
+        &[],
+    )
+    .await
+    .expect("pragma table_info");
     let col_names: Vec<String> = cols
         .iter()
         .filter_map(|r| {

@@ -148,9 +148,10 @@ pub async fn run(repo_root: &Path, run_migrations: bool) -> anyhow::Result<()> {
     // cargo feature is off, is a hard boot error — the boot path no longer
     // logs `storage = s3` while silently running local disk. (The database
     // service was already constructed above and reused here.)
-    let storage = impresspress_native::make_storage_service(&infra.storage_type, &infra.storage_root)
-        .await
-        .context("construct storage service")?;
+    let storage =
+        impresspress_native::make_storage_service(&infra.storage_type, &infra.storage_root)
+            .await
+            .context("construct storage service")?;
 
     let (mut wafer, storage_block) = ImpresspressBuilder::new()
         .database(database)

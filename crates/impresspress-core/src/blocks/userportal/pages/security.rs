@@ -299,7 +299,11 @@ mod tests {
         .await
         .unwrap();
 
-        let ctx = ctx.with_wrap("impresspress/userportal", auth_grants(), "impresspress/admin");
+        let ctx = ctx.with_wrap(
+            "impresspress/userportal",
+            auth_grants(),
+            "impresspress/admin",
+        );
 
         use crate::blocks::auth::repo::provider_links;
         let links = provider_links::list_for_user(&ctx, "user-a")

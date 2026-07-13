@@ -172,7 +172,11 @@ impl builder::BootHooks for BrowserBootHooks {
     async fn seed_after_admin_init(&self, _wafer: &wafer_run::Wafer) -> Result<(), String> {
         let vars = config::seed_and_load_variables(&self.db).await?;
         web_sys::console::log_1(
-            &format!("impresspress: {} variables loaded from database", vars.len()).into(),
+            &format!(
+                "impresspress: {} variables loaded from database",
+                vars.len()
+            )
+            .into(),
         );
         let features = config::load_block_settings(&self.db).await;
 

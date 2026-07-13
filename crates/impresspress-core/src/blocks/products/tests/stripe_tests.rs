@@ -334,7 +334,13 @@ async fn checkout_enforces_requires_on_every_line_item_not_just_the_first() {
     gated.insert("base_price".to_string(), serde_json::json!(50.0));
     gated.insert("status".to_string(), serde_json::json!("active"));
     gated.insert("requires".to_string(), serde_json::json!("prod_prereq"));
-    seed(&ctx, "impresspress__products__products", "prod_gated", gated).await;
+    seed(
+        &ctx,
+        "impresspress__products__products",
+        "prod_gated",
+        gated,
+    )
+    .await;
 
     // Build the purchase through the real create-purchase path so line items
     // land in request-body order (filler, then gated) exactly like a live

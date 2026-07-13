@@ -12,4 +12,5 @@ pub static IMPRESSPRESS_WEB_WASM: &[u8] =
 
 /// Precompiled impresspress-web JS glue, baked at build time. The CLI's sealed
 /// × web flow uses this as the default when `IMPRESSPRESS_WEB_JS` is unset.
-pub static IMPRESSPRESS_WEB_JS: &[u8] = include_bytes!(concat!(env!("OUT_DIR"), "/impresspress-web.js"));
+pub static IMPRESSPRESS_WEB_JS: &[u8] =
+    include_bytes!(concat!(env!("OUT_DIR"), "/impresspress-web.js"));

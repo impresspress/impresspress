@@ -205,7 +205,8 @@ mod tests {
                 items: vec![item("Blocks", "/b/admin/blocks")],
             },
         ];
-        let s = sidebar_grouped(&groups, None, "/b/admin/users", "", "", "Impresspress").into_string();
+        let s =
+            sidebar_grouped(&groups, None, "/b/admin/users", "", "", "Impresspress").into_string();
         assert!(s.contains(">Workspace<"));
         assert!(s.contains(">Data<"));
         assert!(s.contains("/b/admin/users"));
@@ -218,7 +219,15 @@ mod tests {
             label: None,
             items: vec![item("Storage", "/b/storage")],
         }];
-        let s = sidebar_grouped(&groups, None, "/b/storage/files/foo.png", "", "", "Impresspress").into_string();
+        let s = sidebar_grouped(
+            &groups,
+            None,
+            "/b/storage/files/foo.png",
+            "",
+            "",
+            "Impresspress",
+        )
+        .into_string();
         assert!(s.contains("is-active"));
     }
 
@@ -264,7 +273,15 @@ mod tests {
         // (`M7 11V7…`) is absent from the package SVG, so its presence proves
         // the lock — not the package fallback — now renders.
         let groups = crate::ui::nav_groups::portal();
-        let s = sidebar_grouped(&groups, None, "/b/userportal/security", "", "", "Impresspress").into_string();
+        let s = sidebar_grouped(
+            &groups,
+            None,
+            "/b/userportal/security",
+            "",
+            "",
+            "Impresspress",
+        )
+        .into_string();
         assert!(
             s.contains("M7 11V7a5 5 0 0 1 10 0v4"),
             "Security nav must render the lock icon (shackle path), got: {s}"

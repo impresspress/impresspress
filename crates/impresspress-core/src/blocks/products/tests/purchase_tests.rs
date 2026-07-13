@@ -99,7 +99,13 @@ async fn create_purchase_with_pricing_template() {
         serde_json::json!("tmpl_1"),
     );
     product.insert("status".to_string(), serde_json::json!("active"));
-    seed(&ctx, "impresspress__products__products", "prod_svc", product).await;
+    seed(
+        &ctx,
+        "impresspress__products__products",
+        "prod_svc",
+        product,
+    )
+    .await;
 
     let (msg, input) = create_msg(
         "/b/products/purchases",
@@ -454,7 +460,13 @@ async fn refund_without_reason() {
     let mut pd = HashMap::new();
     pd.insert("user_id".to_string(), serde_json::json!("user_1"));
     pd.insert("status".to_string(), serde_json::json!("completed"));
-    seed(&ctx, "impresspress__products__purchases", "pur_noreason", pd).await;
+    seed(
+        &ctx,
+        "impresspress__products__purchases",
+        "pur_noreason",
+        pd,
+    )
+    .await;
 
     let (mut msg, input) = create_msg(
         "/admin/b/products/purchases/pur_noreason/refund",
