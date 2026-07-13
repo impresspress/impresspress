@@ -23,6 +23,10 @@ pub struct SiteConfig {
     pub logo_url: String,
     pub logo_icon_url: String,
     pub favicon_url: String,
+    /// Optional brand accent (`--primary-color`) override. Empty = keep the
+    /// bundled default. Lets an app built on impresspress-core (e.g. a site)
+    /// theme the chrome to its own brand instead of inheriting ours.
+    pub primary_color: String,
     /// Extra module-type script URLs appended to every rendered page.
     /// Browser targets populate this (e.g. `/webllm-engine.js` for the
     /// page-side LLM engine); native targets leave it empty.
@@ -54,6 +58,7 @@ impl SiteConfig {
                 assets::favicon_url(),
             )
             .await,
+            primary_color: config::get_default(ctx, "WAFER_RUN_SHARED__PRIMARY_COLOR", "").await,
             embedded_scripts: scripts_raw
                 .split(',')
                 .map(str::trim)
@@ -290,6 +295,7 @@ fn minimal_config() -> SiteConfig {
         logo_url: String::new(),
         logo_icon_url: String::new(),
         favicon_url: assets::favicon_url().to_string(),
+        primary_color: String::new(),
         embedded_scripts: Vec::new(),
     }
 }
@@ -432,6 +438,7 @@ mod tests {
             logo_url: String::new(),
             logo_icon_url: String::new(),
             favicon_url: String::new(),
+            primary_color: String::new(),
             embedded_scripts: Vec::new(),
         }
     }

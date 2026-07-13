@@ -732,6 +732,7 @@ mod tests {
             logo_url: String::new(),
             logo_icon_url: String::new(),
             favicon_url: "/favicon.ico".to_string(),
+            primary_color: String::new(),
             embedded_scripts: Vec::new(),
         }
     }
@@ -830,6 +831,7 @@ mod tests {
             logo_url: String::new(),
             logo_icon_url: String::new(),
             favicon_url: String::new(),
+            primary_color: String::new(),
             embedded_scripts: Vec::new(),
         };
         let opts = PublicPage {

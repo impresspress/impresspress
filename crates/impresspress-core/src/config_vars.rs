@@ -82,6 +82,13 @@ pub fn shared_config_vars() -> Vec<ConfigVar> {
         .name("Logo URL")
         .input_type(InputType::Url),
         ConfigVar::new(
+            "WAFER_RUN_SHARED__PRIMARY_COLOR",
+            "Brand accent (CSS color) for buttons, links, and highlights; blank keeps the default",
+            "",
+        )
+        .name("Primary Color")
+        .input_type(InputType::Text),
+        ConfigVar::new(
             "WAFER_RUN_SHARED__LOGO_ICON_URL",
             "Small icon logo (used when sidebar is collapsed)",
             crate::ui::assets::logo_icon_url(),
