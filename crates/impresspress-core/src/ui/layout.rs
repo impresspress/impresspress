@@ -10,6 +10,19 @@ use super::{assets, SiteConfig};
 
 /// Render a full HTML page with head (CSS + htmx) and body.
 pub fn page(title: &str, config: &SiteConfig, body: Markup) -> Markup {
+    // Brand accent override. Sanitized to a safe CSS-color charset so a
+    // stored value can't break out of the <style> tag. `--primary-hover`
+    // derives from it so a single config var re-themes the whole chrome.
+    let primary_override = if config.primary_color.trim().is_empty() {
+        String::new()
+    } else {
+        let c: String = config
+            .primary_color
+            .chars()
+            .filter(|ch| ch.is_ascii_alphanumeric() || "#(),%. -".contains(*ch))
+            .collect();
+        format!(":root{{--primary-color:{c};--primary-hover:color-mix(in srgb,{c} 82%,#000)}}")
+    };
     html! {
         (DOCTYPE)
         html lang="en" {
@@ -18,6 +31,9 @@ pub fn page(title: &str, config: &SiteConfig, body: Markup) -> Markup {
                 meta name="viewport" content="width=device-width,initial-scale=1";
                 title { (title) " — " (config.app_name) }
                 link rel="stylesheet" href=(assets::css_url());
+                @if !primary_override.is_empty() {
+                    style { (PreEscaped(&primary_override)) }
+                }
                 @if !config.favicon_url.is_empty() {
                     link rel="icon" href=(config.favicon_url);
                 }

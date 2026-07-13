@@ -56,6 +56,10 @@ pub(super) fn site_config(ctx: &dyn Context) -> SiteConfig {
             .config_get("WAFER_RUN_SHARED__FAVICON_URL")
             .unwrap_or_else(|| ui::assets::favicon_url())
             .to_string(),
+        primary_color: ctx
+            .config_get("WAFER_RUN_SHARED__PRIMARY_COLOR")
+            .unwrap_or("")
+            .to_string(),
         embedded_scripts,
     }
 }

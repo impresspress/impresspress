@@ -156,6 +156,7 @@ fn html_respond(
         logo_url: logo_url.to_string(),
         logo_icon_url: String::new(),
         favicon_url: crate::ui::assets::favicon_url().to_string(),
+        primary_color: String::new(),
         embedded_scripts: Vec::new(),
     };
     let markup = ui::layout::page(
