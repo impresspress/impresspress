@@ -49,3 +49,26 @@ test('boot redirect lands on the auth login page', async ({ page }) => {
   await expect(page.locator('input#email')).toBeVisible();
   await expect(page.locator('input#password')).toBeVisible();
 });
+
+test('admin can log in and reach the dashboard', async ({ page }) => {
+  // Regression guard for the browser-only JWT bug: the pipeline verified
+  // access tokens against a secret snapshotted at build time. In the browser
+  // target `WAFER_RUN__AUTH__JWT_SECRET` is auto-generated AFTER the runtime
+  // is built, so that snapshot was the empty string while login signed with
+  // the real seeded secret. Login returned a token, but every authenticated
+  // request then 403'd and the user was bounced back to /b/auth/login.
+  //
+  // This is the only browser-WASM test that exercises a *protected* route
+  // post-login — the anonymous boot smoke above can't catch a verify bug.
+  await page.goto('/', { waitUntil: 'commit' });
+  await page.waitForURL(/\/b\/auth\/login/, { timeout: 30_000 });
+
+  await page.locator('input#email').fill('admin@example.com');
+  await page.locator('input#password').fill('admin123');
+  await page.getByRole('button', { name: /sign in/i }).click();
+
+  // A usable session lands on the admin dashboard; the regression instead
+  // redirected back to /b/auth/login?redirect=%2Fb%2Fadmin%2F.
+  await page.waitForURL(/\/b\/admin\//, { timeout: 30_000 });
+  await expect(page).toHaveURL(/\/b\/admin\//);
+});

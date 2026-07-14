@@ -40,6 +40,13 @@ pub struct ImpresspressBuilder {
     network: Option<Arc<dyn NetworkService>>,
     logger: Option<Arc<dyn LoggerService>>,
     block_settings: Arc<std::sync::RwLock<BlockSettings>>,
+    /// JWT secret shared with the router behind a lock so builds that only
+    /// learn it *after* `build()` (browser/OPFS — the secret is auto-generated
+    /// into the variables table during boot) can populate it via
+    /// [`Self::jwt_secret_handle`]. Native/Cloudflare read it from config at
+    /// build time and never rotate. `build()` seeds it from
+    /// `WAFER_RUN__AUTH__JWT_SECRET`.
+    jwt_secret: Arc<std::sync::RwLock<String>>,
     block_configs: Vec<(String, serde_json::Value)>,
     extra_blocks: Vec<(String, Arc<dyn Block>)>,
     /// Additional LLM backends to register on the `MultiBackendLlmService`
@@ -101,6 +108,7 @@ impl ImpresspressBuilder {
             block_settings: Arc::new(std::sync::RwLock::new(BlockSettings::from_map(
                 HashMap::new(),
             ))),
+            jwt_secret: Arc::new(std::sync::RwLock::new(String::new())),
             block_configs: Vec::new(),
             extra_blocks: Vec::new(),
             extra_llm_services: Vec::new(),
@@ -169,6 +177,20 @@ impl ImpresspressBuilder {
     /// rows. The handle remains valid for the lifetime of the wafer.
     pub fn block_settings_handle(&self) -> Arc<std::sync::RwLock<BlockSettings>> {
         self.block_settings.clone()
+    }
+
+    /// Return a shared handle to the runtime's JWT secret.
+    ///
+    /// Same rationale as [`Self::block_settings_handle`]: the browser/OPFS
+    /// build only learns `WAFER_RUN__AUTH__JWT_SECRET` after `init_block(admin)`
+    /// seeds it, so it grabs this handle before `build()` and writes the real
+    /// value through it once seeding runs. The router holds the same
+    /// `Arc<RwLock<String>>` and reads it per request, so verification always
+    /// uses the current secret — matching the crypto service, which is rotated
+    /// the same way in the same boot hook. Builds that have the secret in
+    /// config up-front never need to touch this.
+    pub fn jwt_secret_handle(&self) -> Arc<std::sync::RwLock<String>> {
+        self.jwt_secret.clone()
     }
 
     pub fn extra_block(mut self, name: impl Into<String>, block: Arc<dyn Block>) -> Self {
@@ -309,8 +331,16 @@ impl ImpresspressBuilder {
             .logger
             .ok_or_else(|| RuntimeError::Config("logger service required".into()))?;
 
-        // 2. Read JWT secret before registering config block
-        let jwt_secret = config
+        // 2. Seed the shared JWT secret from config before registering the
+        // config block. Native/Cloudflare have the value now, so the router
+        // reads it as-is. The browser build has no secret yet (auto-generated
+        // into the variables table during boot); it grabbed `jwt_secret_handle`
+        // before `build()` and rotates this same lock once seeding runs, so the
+        // router's per-request read then sees the real value.
+        *self
+            .jwt_secret
+            .write()
+            .expect("builder jwt_secret RwLock poisoned during build") = config
             .get(crate::blocks::auth::JWT_SECRET_KEY)
             .unwrap_or_default();
 
@@ -548,7 +578,7 @@ impl ImpresspressBuilder {
         let block_infos = wafer.block_infos();
         let routes_cfg = crate::routing::routes_config(&block_infos);
         let router = ImpresspressRouterBlock::with_extra_routes(
-            jwt_secret,
+            self.jwt_secret.clone(),
             feature_config,
             block_infos,
             self.extra_routes,
