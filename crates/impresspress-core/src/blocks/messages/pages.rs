@@ -108,12 +108,18 @@ pub async fn context_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream
                     hx-swap="afterbegin"
                     hx-on--after-request="if(event.detail.successful){this.reset()}"
                 {
-                    select .form-input .messages-new__type name="type" {
-                        option value="conversation" { "Conversation" }
-                        option value="task" { "Task" }
-                        option value="notification" { "Notification" }
+                    div .form-group {
+                        label .form-label for="new-context-type" { "Type" }
+                        select .form-input .messages-new__type #new-context-type name="type" {
+                            option value="conversation" { "Conversation" }
+                            option value="task" { "Task" }
+                            option value="notification" { "Notification" }
+                        }
                     }
-                    input .form-input .messages-new__title type="text" name="title" placeholder="Title" required;
+                    div .form-group {
+                        label .form-label for="new-context-title" { "Title" }
+                        input .form-input .messages-new__title #new-context-title type="text" name="title" placeholder="e.g. Deploy planning" required;
+                    }
                     button .btn .btn-primary type="submit" { "Create" }
                 }
             }

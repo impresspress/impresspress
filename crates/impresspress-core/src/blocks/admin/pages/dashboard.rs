@@ -433,7 +433,7 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let charts_section = html! {
         div .dashboard-charts {
             (bar_chart_card("New users", "Last 30 days", &new_users_daily, "var(--primary-color)", "/b/admin/users"))
-            (bar_chart_card("Requests", "Last 30 days", &requests_daily, "var(--accent-info)", "/b/admin/logs"))
+            (bar_chart_card("Requests", "Last 30 days", &requests_daily, "var(--accent-warning)", "/b/admin/logs"))
             (bar_chart_card("Errors", "Last 30 days", &errors_daily, "var(--accent-danger)", "/b/admin/logs?status=ERROR"))
         }
     };
