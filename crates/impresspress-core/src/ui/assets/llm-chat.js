@@ -22,6 +22,16 @@
     return escHtml(text).replace(/\n/g, '<br>');
   }
 
+  // Scroll the chat pane to the newest message. The scroll container is the
+  // chat_page template's `.chat-messages` wrapper — #messages-area is just
+  // the htmx/JS insertion target inside it (no overflow of its own).
+  function scrollChatToBottom() {
+    var area = document.getElementById('messages-area');
+    if (!area) return;
+    var pane = area.closest('.chat-messages') || area;
+    pane.scrollTop = pane.scrollHeight;
+  }
+
   function escHtml(s) {
     return String(s)
       .replace(/&/g, '&amp;')
@@ -39,24 +49,27 @@
     var isMarkdown = (role === 'assistant');
     var rendered = isMarkdown ? renderMarkdown(content) : escHtml(content);
 
+    // Brand-consistent card accents — keep in sync with `entry_card` in
+    // blocks/messages/pages.rs (the SSR renderer of the same cards): user =
+    // brand tint, assistant = neutral, system = warning yellow.
     var bg, badge;
     if (role === 'user') {
-      bg = 'background:#eff6ff;border-left:3px solid #3b82f6';
-      badge = 'badge-info';
+      bg = 'background:#fff1e6;border-left:3px solid var(--primary-color)';
+      badge = 'badge';
     } else if (role === 'assistant') {
-      bg = 'background:#f8fafc;border-left:3px solid var(--text-muted)';
+      bg = 'background:var(--surface-3);border-left:3px solid var(--border-color)';
       badge = 'badge';
     } else if (role === 'system') {
       bg = 'background:#fefce8;border-left:3px solid #eab308';
       badge = 'badge-warning';
     } else {
-      bg = 'background:#f0fdf4;border-left:3px solid #22c55e';
-      badge = 'badge-success';
+      bg = 'background:var(--surface-3);border-left:3px solid var(--border-color)';
+      badge = 'badge';
     }
 
     var modelBadge = '';
     if (opts.model) {
-      modelBadge = ' <span class="badge badge-info" style="font-size:0.7rem">' + escHtml(opts.model) + '</span>';
+      modelBadge = ' <span class="badge" style="font-size:0.7rem">' + escHtml(opts.model) + '</span>';
     }
 
     var contentStyle = isMarkdown
@@ -86,7 +99,7 @@
     wrapper.innerHTML = messageCardHtml(role, content, date, opts);
     var card = wrapper.firstChild;
     area.appendChild(card);
-    area.scrollTop = area.scrollHeight;
+    scrollChatToBottom();
     return card;
   }
 
@@ -258,8 +271,7 @@
           setSendStatus('AI is typing...');
           if (contentDiv) {
             contentDiv.innerHTML = renderMarkdown(full) + '<span class="typing-cursor"></span>';
-            var area = document.getElementById('messages-area');
-            if (area) area.scrollTop = area.scrollHeight;
+            scrollChatToBottom();
           }
         });
       })
@@ -412,7 +424,7 @@
           }).join('');
           area.innerHTML = html;
         }
-        area.scrollTop = area.scrollHeight;
+        scrollChatToBottom();
       })
       .catch(function (err) {
         console.error('[impresspress] Error loading messages:', err);
@@ -452,7 +464,7 @@
       var date = (m.created_at || '').slice(0, 10);
       return messageCardHtml(m.role, m.content, date);
     }).join('');
-    area.scrollTop = area.scrollHeight;
+    scrollChatToBottom();
   }
 
   // -------------------------------------------------------------------------

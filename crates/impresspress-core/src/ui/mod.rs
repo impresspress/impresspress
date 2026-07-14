@@ -124,6 +124,13 @@ pub struct NavItem {
     /// both the sidebar and the ⌘K palette. Used for cross-block links
     /// that have their own chrome (e.g. Inspector).
     pub external: bool,
+    /// The `{org}/{block}` that serves this item's page, when that block is
+    /// optional (feature-gated per target: e.g. `impresspress/vector` isn't
+    /// compiled into the browser demo, `impresspress/llm` isn't on
+    /// Cloudflare). [`shell_page`] drops items whose block isn't in
+    /// `ctx.registered_blocks()` so the nav never links to a route that
+    /// would 404. `None` = always shown (backing block is unconditional).
+    pub block: Option<&'static str>,
 }
 
 pub use sidebar::NavGroup;
@@ -267,7 +274,15 @@ pub async fn shell_page(
 ) -> wafer_run::OutputStream {
     let config = SiteConfig::load(ctx).await;
     let user = UserInfo::from_message(msg);
-    let groups = shell.nav.groups();
+    let mut groups = shell.nav.groups();
+    // Hide nav items whose backing block isn't registered on this target
+    // (feature-gated blocks vary per deployment — see NavItem::block).
+    let registered: std::collections::HashSet<&str> = ctx
+        .registered_blocks()
+        .iter()
+        .map(|b| b.name.as_str())
+        .collect();
+    nav_groups::retain_registered(&mut groups, &registered);
     let path = msg.path().to_string();
     Page {
         config: &config,

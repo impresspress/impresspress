@@ -190,6 +190,7 @@ mod tests {
             href: href.to_string(),
             icon: icons::package,
             external: false,
+            block: None,
         }
     }
 

@@ -426,7 +426,11 @@
 .dashboard-wide > * { width: 100%; }
 
 /* ===== Chat page ===== */
-.page--chat { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 0; height: calc(100vh - 2rem); }
+/* Fill the shell body exactly: `.shell__body` is the height-constrained flex
+   child (flex:1 + min-height:0 up the chain), so 100% pins the composer to
+   its bottom edge. The old `calc(100vh - 2rem)` ignored the topbar + shell
+   gaps and pushed the composer below the fold. */
+.page--chat { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 0; height: 100%; }
 .page--chat:has(.chat-rail) { grid-template-columns: 280px minmax(0,1fr) 320px; }
 @media (max-width: 720px) {
 	/* Mobile: stack threads above chat so the "+ new thread" control stays
@@ -555,24 +559,18 @@
 .sidebar.collapsed .sidebar__nav-label,
 .sidebar.collapsed .sidebar__user-text { display: none; }
 .sidebar.collapsed .sidebar__brand-icon { display: block; }
-.sidebar.collapsed .sidebar__brand {
-	justify-content: center; padding: 0;
-	/* Merge with the panel card below so the brand icon doesn't read as a
-	   disconnected element floating above the dashboard. */
-	background: var(--surface-1);
-	border: 1px solid var(--border-color);
-	border-bottom: none;
-	border-radius: var(--radius-lg) var(--radius-lg) 0 0;
-	margin-bottom: calc(-1 * var(--spacing-md));
-}
-.sidebar.collapsed .sidebar__panel {
-	border-top: none;
-	border-top-left-radius: 0;
-	border-top-right-radius: 0;
-}
+/* Collapsed keeps the exact expanded structure — transparent brand row above
+   the rounded panel card — just narrower with the icon mark. (An earlier
+   attempt merged the brand INTO the panel with a negative margin; that
+   produced one full-height slab and read as broken.) */
+.sidebar.collapsed .sidebar__brand { justify-content: center; padding: 0; }
 .sidebar.collapsed .sidebar__nav-item { justify-content: center; padding: 0.4rem 0; }
 .sidebar.collapsed .sidebar__user { justify-content: center; }
+/* The toggle centers in the collapsed rail; reserve a row for it at the top
+   of the panel so it doesn't sit on top of the first nav icon (the group
+   labels that pad that area when expanded are display:none here). */
 .sidebar.collapsed .sidebar__collapse-toggle { left: 50%; right: auto; transform: translateX(-50%); }
+.sidebar.collapsed .sidebar__groups { padding-top: 2.75rem; }
 
 /* ===== Shell + topbar (Phase 1) ===== */
 .shell { display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); height: 100vh; gap: var(--spacing-md); padding: var(--spacing-md); background: var(--surface-2); }

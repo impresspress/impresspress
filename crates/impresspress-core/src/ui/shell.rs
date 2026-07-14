@@ -158,6 +158,7 @@ mod tests {
             href: href.to_string(),
             icon: crate::ui::icons::package,
             external: false,
+            block: None,
         }
     }
 

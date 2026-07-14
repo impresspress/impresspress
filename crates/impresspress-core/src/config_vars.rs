@@ -47,13 +47,6 @@ pub fn shared_config_vars() -> Vec<ConfigVar> {
         .name("Enable OAuth")
         .input_type(InputType::Toggle),
         ConfigVar::new(
-            "WAFER_RUN_SHARED__PRIMARY_COLOR",
-            "Brand color used in the UI",
-            "#6366f1",
-        )
-        .name("Primary Color")
-        .input_type(InputType::Color),
-        ConfigVar::new(
             "WAFER_RUN_SHARED__POST_LOGIN_REDIRECT",
             "URL to redirect to after login",
             "/b/admin/",
@@ -251,6 +244,30 @@ pub fn key_block_prefix(key: &str) -> String {
     match key[first + 2..].find("__") {
         Some(rel) => key[..first + 2 + rel].to_string(),
         None => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod shared_vars_tests {
+    use super::shared_config_vars;
+
+    /// Every shared var must be declared exactly once. A duplicate key means
+    /// two competing defaults for the same setting — which one the seeder
+    /// writes and which one `shared_var()` (first-match `.find()`) shows in
+    /// the settings UI silently diverge. This happened for real:
+    /// `WAFER_RUN_SHARED__PRIMARY_COLOR` was declared twice, once with the
+    /// pre-rebrand indigo `#6366f1` and once blank, leaking blue accents.
+    #[test]
+    fn shared_config_vars_have_unique_keys() {
+        let vars = shared_config_vars();
+        let mut seen = std::collections::HashSet::new();
+        for v in &vars {
+            assert!(
+                seen.insert(v.key.clone()),
+                "duplicate shared config var declaration: {}",
+                v.key
+            );
+        }
     }
 }
 

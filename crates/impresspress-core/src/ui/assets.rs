@@ -30,6 +30,12 @@ const LOGO_LONG_PNG: &[u8] = include_bytes!("assets/impresspress-logo-long.png")
 /// browser fallback to `/favicon.ico` (which 404s by default).
 const FAVICON_ICO: &[u8] = include_bytes!("assets/favicon.ico");
 
+/// The built-in brand accent, as a hex literal for surfaces that can't use
+/// CSS variables (email inline styles). Must match `--primary-color` in
+/// `assets/tokens.css` — the `brand_accent_matches_tokens_css` test pins the
+/// two together so they can't drift.
+pub const BRAND_ACCENT_HEX: &str = "#f0480f";
+
 /// Impresspress square logo bytes.
 pub fn logo_icon_png() -> &'static [u8] {
     LOGO_ICON_PNG
@@ -400,6 +406,17 @@ mod tests {
             "components layer missing"
         );
         assert!(s.contains(".shell"), "layout layer missing");
+    }
+
+    #[test]
+    fn brand_accent_matches_tokens_css() {
+        // BRAND_ACCENT_HEX exists for CSS-var-less surfaces (emails). It must
+        // stay byte-identical to the stylesheet's --primary-color default.
+        assert!(
+            super::TOKENS_CSS.contains(&format!("--primary-color: {}", super::BRAND_ACCENT_HEX)),
+            "BRAND_ACCENT_HEX ({}) does not match --primary-color in tokens.css",
+            super::BRAND_ACCENT_HEX
+        );
     }
 
     #[test]
