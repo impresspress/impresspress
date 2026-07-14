@@ -6,7 +6,7 @@
 //! `wafer-run/infra`, but routing, feature gates, admin checks, and JWT validation
 //! are handled by the shared pipeline.
 
-use std::sync::Arc;
+use std::sync::{Arc, RwLock};
 
 use wafer_run::{
     context::Context, Block, BlockInfo, InputStream, InstanceMode, LifecycleEvent, Message,
@@ -18,7 +18,16 @@ use crate::{features::FeatureConfig, routing::ExtraRoute};
 /// The impresspress router block — dispatches all API requests via the shared
 /// `crate::handle_request()` pipeline.
 pub struct ImpresspressRouterBlock {
-    jwt_secret: String,
+    /// JWT signing/verify secret behind a shared lock so it can be populated
+    /// *after* the runtime is built. The browser/OPFS build auto-generates
+    /// `WAFER_RUN__AUTH__JWT_SECRET` into the variables table only during boot
+    /// (after `build()`), so at build time this is empty and the real value is
+    /// written through [`ImpresspressBuilder::jwt_secret_handle`] once seeding
+    /// runs — the same shape as `block_settings`. Native/Cloudflare have the
+    /// secret in config at build time and never rotate it. Read per request so
+    /// the pipeline always verifies against the current value (matching the
+    /// crypto service, which is rotated the same way).
+    jwt_secret: Arc<RwLock<String>>,
     features: Arc<dyn FeatureConfig>,
     /// BlockInfo for all registered impresspress blocks — used by the discovery
     /// endpoints (`/openapi.json`, `/.well-known/agent.json`). Populated from
@@ -32,7 +41,7 @@ pub struct ImpresspressRouterBlock {
 impl ImpresspressRouterBlock {
     /// Construct a router with no extra routes (backward-compatible).
     pub fn new(
-        jwt_secret: String,
+        jwt_secret: Arc<RwLock<String>>,
         features: Arc<dyn FeatureConfig>,
         block_infos: Vec<BlockInfo>,
     ) -> Self {
@@ -42,7 +51,7 @@ impl ImpresspressRouterBlock {
     /// Construct a router with project-registered extra routes appended after
     /// the built-in `ROUTES` table.
     pub fn with_extra_routes(
-        jwt_secret: String,
+        jwt_secret: Arc<RwLock<String>>,
         features: Arc<dyn FeatureConfig>,
         block_infos: Vec<BlockInfo>,
         extra_routes: Vec<ExtraRoute>,
@@ -91,12 +100,21 @@ impl Block for ImpresspressRouterBlock {
             }
         };
 
+        // Read the current secret through the lock: the browser build rotates
+        // it after boot-time seeding (see the field doc), so a snapshot taken at
+        // construction would verify against the wrong key.
+        let jwt_secret = self
+            .jwt_secret
+            .read()
+            .expect("router jwt_secret RwLock poisoned")
+            .clone();
+
         crate::handle_request(
             ctx,
             msg,
             input,
             auth_value.as_deref(),
-            &self.jwt_secret,
+            &jwt_secret,
             self.features.as_ref(),
             &self.block_infos,
             &self.extra_routes,

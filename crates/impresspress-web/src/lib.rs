@@ -111,6 +111,11 @@ pub async fn initialize() -> Result<(), JsValue> {
         )
         .config_source(cfg_source);
     let block_settings_handle = builder.block_settings_handle();
+    // The router verifies JWTs against this secret. It's empty at build time
+    // (the variables table doesn't exist yet), so grab the handle and rotate
+    // it to the seeded value in `seed_after_admin_init`, alongside the crypto
+    // service that signs with it.
+    let jwt_secret_handle = builder.jwt_secret_handle();
 
     let (mut wafer, storage_block) = builder
         .build()
@@ -132,6 +137,7 @@ pub async fn initialize() -> Result<(), JsValue> {
         db: impresspress_browser::make_database_service(),
         config_svc: config_svc.clone(),
         block_settings_handle: block_settings_handle.clone(),
+        jwt_secret_handle: jwt_secret_handle.clone(),
         crypto: crypto_concrete.clone(),
     };
     builder::boot(&mut wafer, &storage_block, &hooks)
@@ -164,6 +170,7 @@ struct BrowserBootHooks {
     db: Arc<dyn wafer_core::interfaces::database::service::DatabaseService>,
     config_svc: Arc<dyn ConfigService>,
     block_settings_handle: Arc<std::sync::RwLock<impresspress_core::features::BlockSettings>>,
+    jwt_secret_handle: Arc<std::sync::RwLock<String>>,
     crypto: Arc<impresspress_browser::crypto::BrowserCryptoService>,
 }
 
@@ -192,7 +199,16 @@ impl builder::BootHooks for BrowserBootHooks {
             .write()
             .expect("BlockSettings RwLock poisoned") = features;
         if let Some(secret) = vars.get(impresspress_core::blocks::auth::JWT_SECRET_KEY) {
+            // Rotate BOTH holders of the secret to the seeded value: the crypto
+            // service that SIGNS tokens and the router lock the pipeline VERIFIES
+            // against. Rotating only the crypto service (the old bug) left the
+            // router verifying with the empty build-time secret, so every
+            // authenticated request 403'd after a successful login.
             self.crypto.set_jwt_secret(secret.clone());
+            *self
+                .jwt_secret_handle
+                .write()
+                .expect("jwt_secret handle RwLock poisoned") = secret.clone();
         }
         Ok(())
     }
