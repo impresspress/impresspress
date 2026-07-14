@@ -248,6 +248,18 @@ async fn handle_send_template(
     )
     .await;
     let app_name = config::get_default(ctx, "WAFER_RUN_SHARED__APP_NAME", "Impresspress").await;
+    // Brand accent for CTA buttons and links. Same contract as the admin
+    // chrome: a configured PRIMARY_COLOR wins, blank means the built-in
+    // brand accent. (The old hardcoded `#0ea5e9` sky-blue predated the
+    // rebrand and clashed with every other surface.)
+    let accent = {
+        let c = config::get_default(ctx, "WAFER_RUN_SHARED__PRIMARY_COLOR", "").await;
+        if c.trim().is_empty() {
+            crate::ui::assets::BRAND_ACCENT_HEX.to_string()
+        } else {
+            c
+        }
+    };
 
     let (subject, html, text) = match req.template.as_str() {
         "verification" => {
@@ -259,7 +271,7 @@ async fn handle_send_template(
                     "Verify your email",
                     "#1e293b",
                     r#"<p style="color:#64748b;line-height:1.6">Click the button below to verify your email address. This link expires in 24 hours.</p>"#,
-                    Some((&url, "Verify Email", "#0ea5e9")),
+                    Some((&url, "Verify Email", &accent)),
                     Some("If you didn't create an account, you can ignore this email."),
                 ),
                 format!("Verify your {app_name} email: {url}"),
@@ -278,7 +290,7 @@ async fn handle_send_template(
                     "Reset your password",
                     "#1e293b",
                     r#"<p style="color:#64748b;line-height:1.6">Click the button below to reset your password. This link expires in 1 hour.</p>"#,
-                    Some((&url, "Reset Password", "#0ea5e9")),
+                    Some((&url, "Reset Password", &accent)),
                     Some("If you didn't request a password reset, you can ignore this email."),
                 ),
                 format!("Reset your {app_name} password: {url}"),
@@ -319,9 +331,9 @@ async fn handle_send_template(
             let body = format!(
                 r#"<p style="color:#64748b;line-height:1.6">Your {app_name} account is ready. Here's how to get started:</p>
 <ol style="color:#64748b;line-height:1.8">
-<li>Choose a plan on the <a href="{pricing_url}" style="color:#0ea5e9">pricing page</a></li>
-<li>Create your first project from the <a href="{dashboard_url}" style="color:#0ea5e9">dashboard</a></li>
-<li>Read the <a href="{docs_url}" style="color:#0ea5e9">documentation</a></li>
+<li>Choose a plan on the <a href="{pricing_url}" style="color:{accent}">pricing page</a></li>
+<li>Create your first project from the <a href="{dashboard_url}" style="color:{accent}">dashboard</a></li>
+<li>Read the <a href="{docs_url}" style="color:{accent}">documentation</a></li>
 </ol>"#
             );
             (

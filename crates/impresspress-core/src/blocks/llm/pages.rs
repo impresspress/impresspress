@@ -263,9 +263,12 @@ fn thread_list_items(threads: &[db::Record], active_id: Option<&str>) -> Markup 
 /// carrier emitted by `render_page_body`.
 fn render_messages_pane(_entries: &[db::Record], thread_id: Option<&str>) -> Markup {
     html! {
-        div #messages-area
-            style="height:100%;overflow-y:auto;padding:0.5rem;background:var(--bg-secondary);border-radius:0.5rem"
-        {
+        // The chat_page template's `.chat-messages` wrapper owns scroll,
+        // padding, and surface for this pane (same lesson as the Messages
+        // block — see render_conversation_messages there). The old inline
+        // `height:100%;overflow-y:auto;background:var(--bg-secondary)` painted
+        // a grey slab inside the white pane and double-scrolled.
+        div #messages-area {
             @if thread_id.is_none() {
                 div #no-thread-prompt .text-center style="padding:3rem 1rem" {
                     div style="font-size:2.5rem;margin-bottom:0.75rem" { "\u{1f4ac}" }
@@ -357,7 +360,10 @@ fn render_right_rail(models: &[ModelInfo], default_model: &str) -> Markup {
                         }
                     }
                     div style="background:var(--bg-secondary);border-radius:0.25rem;height:6px;overflow:hidden" {
-                        div #model-progress-bar style="height:100%;background:var(--primary, #3b82f6);width:0%;transition:width 0.3s" {}
+                        // NB: the token is `--primary-color` — the old
+                        // `var(--primary, #3b82f6)` referenced a nonexistent
+                        // var, so the blue fallback ALWAYS won.
+                        div #model-progress-bar style="height:100%;background:var(--primary-color);width:0%;transition:width 0.3s" {}
                     }
                     div #model-progress-text .text-muted style="font-size:0.75rem;margin-top:0.25rem" { "" }
                 }

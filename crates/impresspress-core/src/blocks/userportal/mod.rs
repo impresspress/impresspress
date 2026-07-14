@@ -148,7 +148,10 @@ impl UserPortalBlock {
         let config_val = serde_json::json!({
             "logo_url": config::get_default(ctx, "WAFER_RUN_SHARED__LOGO_URL", crate::ui::assets::logo_long_url()).await,
             "app_name": config::get_default(ctx, "WAFER_RUN_SHARED__APP_NAME", "Impresspress").await,
-            "primary_color": config::get_default(ctx, "WAFER_RUN_SHARED__PRIMARY_COLOR", "#6366f1").await,
+            // Blank = "use the built-in brand accent" (same contract as the
+            // admin chrome; see layout::page). The old `#6366f1` fallback here
+            // was the pre-rebrand indigo leaking into portal clients.
+            "primary_color": config::get_default(ctx, "WAFER_RUN_SHARED__PRIMARY_COLOR", "").await,
             "enable_oauth": config::get_default(ctx, "WAFER_RUN_SHARED__ENABLE_OAUTH", "false").await,
             "allow_signup": config::get_default(ctx, "WAFER_RUN_SHARED__ALLOW_SIGNUP", "true").await,
             "show_powered_by": true,

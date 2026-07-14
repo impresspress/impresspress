@@ -23,26 +23,32 @@ pub fn entry_card(record: &db::Record) -> Markup {
     let created_at = record.str_field("created_at");
     let date = created_at.get(..10).unwrap_or(created_at);
 
+    // Card accents follow the brand: user entries get the brand tint (same
+    // pair as `.sidebar__nav-item.is-active`), machine entries stay neutral,
+    // and only genuinely semantic kinds keep a semantic hue (notification/
+    // system = warning yellow). The old palette hardcoded sky/indigo blues
+    // that clashed with the orange brand. Keep in sync with
+    // `messageCardHtml` in ui/assets/llm-chat.js — same cards, JS-rendered.
     let (bg_style, badge_class) = match kind {
         "artifact" => (
-            "background:#fdf4ff;border-left:3px solid #a855f7",
-            "badge-warning",
+            "background:var(--surface-3);border-left:3px solid var(--border-color)",
+            "badge",
         ),
         "notification" => (
             "background:#fefce8;border-left:3px solid #eab308",
             "badge-warning",
         ),
         "status" => (
-            "background:#f0f9ff;border-left:3px solid #0ea5e9",
-            "badge-info",
+            "background:var(--surface-3);border-left:3px solid var(--border-color)",
+            "badge",
         ),
         _ => match role {
             "user" => (
-                "background:#eff6ff;border-left:3px solid #3b82f6",
-                "badge-info",
+                "background:#fff1e6;border-left:3px solid var(--primary-color)",
+                "badge",
             ),
             "agent" | "assistant" => (
-                "background:#f8fafc;border-left:3px solid var(--text-muted)",
+                "background:var(--surface-3);border-left:3px solid var(--border-color)",
                 "badge",
             ),
             "system" => (
@@ -50,8 +56,8 @@ pub fn entry_card(record: &db::Record) -> Markup {
                 "badge-warning",
             ),
             _ => (
-                "background:#f0fdf4;border-left:3px solid #22c55e",
-                "badge-success",
+                "background:var(--surface-3);border-left:3px solid var(--border-color)",
+                "badge",
             ),
         },
     };
@@ -127,7 +133,7 @@ pub async fn context_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream
                     @let updated_at = context.str_field("updated_at");
                     @let date = updated_at.get(..10).unwrap_or(updated_at);
                     a .messages-list__item href={"/b/messages/contexts/" (id)} {
-                        span .badge .badge-info .messages-list__type { (context_type) }
+                        span .badge .messages-list__type { (context_type) }
                         span .messages-list__title {
                             @if title.is_empty() { "Untitled" } @else { (title) }
                         }

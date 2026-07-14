@@ -1265,7 +1265,9 @@ dialog.modal .modal-error[hidden] { display: none; }
 	color: var(--text-muted);
 	border: 1px dashed var(--border-light);
 	border-radius: var(--radius-lg);
-	background: var(--surface-2);
+	/* surface-3, not surface-2 — the darker grey read as a heavy dead slab
+	   against the white page card. */
+	background: var(--surface-3);
 }
 .messages-list__item {
 	display: grid;

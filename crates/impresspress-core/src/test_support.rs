@@ -242,13 +242,20 @@ impl TestContext {
     /// skipped.
     #[cfg(feature = "block-products")]
     pub async fn with_products() -> Self {
-        let ctx = Self::with_admin().await;
+        let mut ctx = Self::with_admin().await;
         ctx.apply_block_migrations(
             "impresspress/products",
             crate::blocks::products::migrations::SQLITE_MIGRATIONS,
             crate::blocks::products::migrations::POSTGRES_MIGRATIONS,
         )
         .await;
+        // Register the real block so `registered_blocks()` reports it — the
+        // context IS a products deployment (its migrations just ran). Nav
+        // rendering gates the Products sidebar item on this signal.
+        ctx.register_block(
+            "impresspress/products",
+            Arc::new(crate::blocks::products::ProductsBlock::new()),
+        );
         ctx
     }
 

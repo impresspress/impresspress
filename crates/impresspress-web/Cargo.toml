@@ -43,9 +43,9 @@ wafer-block = { workspace = true }
 # `#[cfg(feature = "block-X")]`-gated. Keep in sync with
 # `impresspress-cloudflare/Cargo.toml`.
 #
-# `block-llm` / `block-vector` are excluded for now — the LlmBlock
-# module is gated on `feature = "llm"`, which pulls in tokio/reqwest
-# and is wasm32-incompatible. Closes via the LlmService trait refactor.
+# (`block-llm`/`block-vector` were once excluded here because the old
+# LlmBlock pulled tokio/reqwest on wasm32; the LlmService trait refactor
+# made both wasm32-clean and they're now part of the demo's block set.)
 impresspress-core = { path = "../impresspress-core", default-features = false, features = [
     "block-files",
     "block-legalpages",
@@ -57,6 +57,11 @@ impresspress-core = { path = "../impresspress-core", default-features = false, f
     "block-messages",
     "block-products",
     "block-userportal",
+    # `block-vector`: the vector-indexes admin UI (`impresspress/vector`). The
+    # browser provides real vector + embedding services (BrowserVectorService +
+    # transformers-embed), so the page is fully functional in the demo. The old
+    # exclusion predates the LlmService refactor that made this wasm32-clean.
+    "block-vector",
 ] }
 
 # Config service (needed for EnvConfigService::new() and ConfigService::set())

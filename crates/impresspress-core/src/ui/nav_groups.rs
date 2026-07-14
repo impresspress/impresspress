@@ -11,7 +11,31 @@ fn item(label: &str, href: &str, icon: fn() -> Markup) -> NavItem {
         href: href.to_string(),
         icon,
         external: false,
+        block: None,
     }
+}
+
+/// A nav item backed by an optional (feature-gated) block. The item only
+/// renders when its block is registered — see [`retain_registered`].
+fn block_item(label: &str, href: &str, icon: fn() -> Markup, block: &'static str) -> NavItem {
+    NavItem {
+        block: Some(block),
+        ..item(label, href, icon)
+    }
+}
+
+/// Drop nav items whose backing block isn't registered in this deployment,
+/// then drop groups left empty. Which blocks exist varies per target
+/// (`impresspress/vector` isn't compiled into every wasm build; Cloudflare
+/// ships without `impresspress/llm`) — a static nav that ignores that links
+/// straight into "block not found". Called by `ui::shell_page` with
+/// `ctx.registered_blocks()`.
+pub fn retain_registered(groups: &mut Vec<NavGroup>, registered: &std::collections::HashSet<&str>) {
+    for g in groups.iter_mut() {
+        g.items
+            .retain(|i| i.block.is_none_or(|b| registered.contains(b)));
+    }
+    groups.retain(|g| !g.items.is_empty());
 }
 
 /// Admin sidebar groups.
@@ -29,14 +53,24 @@ pub fn admin() -> Vec<NavGroup> {
             items: vec![
                 item("Storage", "/b/storage/admin/", icons::hard_drive),
                 item("Database", "/b/admin/database", icons::server),
-                item("Vector indexes", "/b/vector/", icons::network),
+                block_item(
+                    "Vector indexes",
+                    "/b/vector/",
+                    icons::network,
+                    "impresspress/vector",
+                ),
             ],
         },
         NavGroup {
             label: Some("Communication".to_string()),
             items: vec![
-                item("Messages", "/b/messages/", icons::file_text),
-                item("LLM", "/b/llm/", icons::robot),
+                block_item(
+                    "Messages",
+                    "/b/messages/",
+                    icons::file_text,
+                    "impresspress/messages",
+                ),
+                block_item("LLM", "/b/llm/", icons::robot, "impresspress/llm"),
             ],
         },
         NavGroup {
@@ -65,10 +99,26 @@ pub fn portal() -> Vec<NavGroup> {
         NavGroup {
             label: Some("Apps".to_string()),
             items: vec![
-                item("Products", "/b/products/", icons::package),
+                block_item(
+                    "Products",
+                    "/b/products/",
+                    icons::package,
+                    "impresspress/products",
+                ),
                 item("Files", "/b/storage/", icons::folder),
-                item("Shares", "/b/cloudstorage/", icons::link),
-                item("Legal", "/b/legalpages/admin/privacy", icons::file_text),
+                // `/b/cloudstorage/` routes to the files block (see routing.rs).
+                block_item(
+                    "Shares",
+                    "/b/cloudstorage/",
+                    icons::link,
+                    "impresspress/files",
+                ),
+                block_item(
+                    "Legal",
+                    "/b/legalpages/admin/privacy",
+                    icons::file_text,
+                    "impresspress/legalpages",
+                ),
             ],
         },
     ]
@@ -198,6 +248,50 @@ mod tests {
             .find(|i| i.label == "Shares")
             .expect("Shares entry exists");
         assert_eq!(shares.href, "/b/cloudstorage/");
+    }
+
+    #[test]
+    fn retain_registered_drops_unregistered_blocks_and_empty_groups() {
+        // A deployment without vector/llm/messages (e.g. Cloudflare) must not
+        // show nav links into "block not found" — and the Communication group,
+        // left empty, must disappear entirely.
+        let mut groups = admin();
+        let registered: std::collections::HashSet<&str> =
+            ["impresspress/admin", "impresspress/files"].into();
+        retain_registered(&mut groups, &registered);
+
+        let labels: Vec<&str> = groups
+            .iter()
+            .flat_map(|g| g.items.iter())
+            .map(|i| i.label.as_str())
+            .collect();
+        assert!(!labels.contains(&"Vector indexes"), "vector not registered");
+        assert!(!labels.contains(&"LLM"), "llm not registered");
+        assert!(!labels.contains(&"Messages"), "messages not registered");
+        // Ungated items survive regardless.
+        assert!(labels.contains(&"Dashboard"));
+        assert!(labels.contains(&"Storage"));
+        assert!(
+            !groups
+                .iter()
+                .any(|g| g.label.as_deref() == Some("Communication")),
+            "emptied group must be dropped"
+        );
+    }
+
+    #[test]
+    fn retain_registered_keeps_everything_when_all_blocks_present() {
+        let mut groups = admin();
+        let registered: std::collections::HashSet<&str> = [
+            "impresspress/vector",
+            "impresspress/messages",
+            "impresspress/llm",
+        ]
+        .into();
+        let before: usize = groups.iter().map(|g| g.items.len()).sum();
+        retain_registered(&mut groups, &registered);
+        let after: usize = groups.iter().map(|g| g.items.len()).sum();
+        assert_eq!(before, after, "fully-featured deployment keeps every item");
     }
 
     #[test]
