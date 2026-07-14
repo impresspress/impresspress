@@ -86,7 +86,7 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let page_action = html! {
         div style="display:flex;gap:8px" {
             a .btn .btn-sm .btn-secondary href="https://wafer.run/registry" target="_blank"
-                style="display:inline-flex;align-items:center;gap:4px;background:#f5f3ff;color:#6d28d9;border-color:#ddd6fe"
+                style="display:inline-flex;align-items:center;gap:4px"
             {
                 (icons::arrow_up_right()) " Explore WASM blocks"
             }
@@ -378,7 +378,7 @@ pub async fn handle_block_detail(
                                 tr {
                                     td {
                                         span .badge style={"font-size:11px;" (match ep.method {
-                                            wafer_run::HttpMethod::Get => "background:#dbeafe;color:#1d4ed8",
+                                            wafer_run::HttpMethod::Get => "background:#fff1e6;color:var(--primary-hover)",
                                             wafer_run::HttpMethod::Post => "background:#dcfce7;color:#166534",
                                             wafer_run::HttpMethod::Patch => "background:#fef3c7;color:#92400e",
                                             wafer_run::HttpMethod::Delete => "background:#fce4ec;color:#c62828",

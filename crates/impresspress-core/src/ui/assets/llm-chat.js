@@ -226,10 +226,10 @@
 
     var chatPromise;
     if (model.startsWith('local:')) {
-      chatPromise = fetch('/b/messages/api/threads/' + threadId + '/messages', {
+      chatPromise = fetch('/b/messages/api/contexts/' + threadId + '/entries', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ role: 'user', content: userText })
+        body: JSON.stringify({ kind: 'message', role: 'user', content: userText })
       }).then(function () {
         return handleLocalChat(threadId, model.slice(6));
       });
@@ -253,7 +253,7 @@
       return Promise.resolve();
     }
 
-    return fetch('/b/messages/api/threads/' + threadId + '/messages')
+    return fetch('/b/messages/api/contexts/' + threadId + '/entries?kind=message')
       .then(function (r) { return r.json(); })
       .then(function (data) {
         var records = data.records || [];
@@ -285,10 +285,10 @@
           if (cd && result.content) cd.innerHTML = renderMarkdown(result.content);
         }
 
-        return fetch('/b/messages/api/threads/' + threadId + '/messages', {
+        return fetch('/b/messages/api/contexts/' + threadId + '/entries', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ role: 'assistant', content: result.content })
+          body: JSON.stringify({ kind: 'message', role: 'assistant', content: result.content })
         });
       });
   }
@@ -323,7 +323,7 @@
           var header = streamCard.querySelector('div:first-child');
           if (header) {
             var badge = document.createElement('span');
-            badge.className = 'badge badge-info';
+            badge.className = 'badge';
             badge.style.fontSize = '0.7rem';
             badge.textContent = data.model;
             header.appendChild(badge);
@@ -357,10 +357,13 @@
   // -------------------------------------------------------------------------
 
   function createNewThread() {
-    fetch('/b/messages/api/threads', {
+    // LLM threads ARE messages contexts of type "conversation" (the thread
+    // list is served from the same store). The old `/b/messages/api/threads`
+    // endpoint never existed — the + button 404'd silently.
+    fetch('/b/messages/api/contexts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ title: 'New Chat' })
+      body: JSON.stringify({ type: 'conversation', title: 'New Chat' })
     })
     .then(function (r) { return r.json(); })
     .then(function (data) {
@@ -405,7 +408,7 @@
     var prompt = document.getElementById('no-thread-prompt');
     if (prompt) prompt.remove();
 
-    fetch('/b/messages/api/threads/' + id + '/messages')
+    fetch('/b/messages/api/contexts/' + id + '/entries?kind=message')
       .then(function (r) { return r.json(); })
       .then(function (data) {
         var records = data.records || [];
@@ -430,14 +433,11 @@
         console.error('[impresspress] Error loading messages:', err);
       });
 
+    // Toggle the same attribute the server renders — the highlight colors
+    // live in one CSS rule (`.chat-threads .card[data-active="true"]`), so
+    // SSR and client-side switching can't drift.
     document.querySelectorAll('[data-thread-id]').forEach(function (el) {
-      if (el.dataset.threadId === id) {
-        el.style.borderColor = 'var(--primary)';
-        el.style.background = 'var(--primary-light, #eff6ff)';
-      } else {
-        el.style.borderColor = '';
-        el.style.background = '';
-      }
+      el.dataset.active = el.dataset.threadId === id ? 'true' : 'false';
     });
 
     history.replaceState({}, '', '/b/llm/threads/' + id);

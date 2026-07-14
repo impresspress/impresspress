@@ -162,7 +162,7 @@
 .badge-primary { background: #f0480f19; color: var(--primary-color); }
 .badge-danger { background: #ef444419; color: var(--accent-danger); }
 .badge-warning { background: #f59e0b19; color: var(--accent-warning); }
-.badge-info { background: #3b82f619; color: var(--accent-info); }
+.badge-info { background: var(--accent-info-bg); color: var(--accent-info); }
 .badge-secondary { background: #e2e8f0; color: #334155; }
 
 /* Pagination */
@@ -397,7 +397,7 @@ dialog.modal .modal-error[hidden] { display: none; }
 .toast-success { background: #10b981; color: white; }
 .toast-error { background: #ef4444; color: white; }
 .toast-warning { background: #f59e0b; color: white; }
-.toast-info { background: #3b82f6; color: white; }
+.toast-info { background: var(--accent-info); color: white; }
 
 .toast-dismiss {
 	margin-left: auto; background: none; border: none;
@@ -1192,7 +1192,7 @@ dialog.modal .modal-error[hidden] { display: none; }
 	padding: 2px 8px; border-radius: var(--radius-sm);
 	font-weight: 500;
 }
-.block-card__runtime--wasm { background: #8b5cf619; color: #6d28d9; }
+.block-card__runtime--wasm { background: var(--accent-info-bg); color: var(--primary-hover); }
 .block-card__version { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .block-card__open {
 	margin-left: auto;
@@ -1249,8 +1249,11 @@ dialog.modal .modal-error[hidden] { display: none; }
 	display: grid;
 	grid-template-columns: 1fr 2fr auto;
 	gap: var(--spacing-sm);
-	align-items: center;
+	/* Labeled form-groups: align the Create button with the control row,
+	   not the label row. */
+	align-items: end;
 }
+.messages-new__form .form-group { margin-bottom: 0; }
 @media (max-width: 720px) {
 	.messages-new__form { grid-template-columns: 1fr; }
 }

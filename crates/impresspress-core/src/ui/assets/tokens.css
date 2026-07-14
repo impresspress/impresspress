@@ -15,7 +15,13 @@
 	--accent-success: #10b981;
 	--accent-warning: #f59e0b;
 	--accent-danger: #ef4444;
-	--accent-info: #3b82f6;
+	/* "Info" reads as the brand accent, not blue — success/warning/danger
+	   keep their universal hues, but informational chips/toasts/charts must
+	   sit inside the warm brand palette (the old #3b82f6 blue clashed on
+	   every page it appeared). --accent-info-bg is its 10%-alpha tint for
+	   chip backgrounds. */
+	--accent-info: #f0480f;
+	--accent-info-bg: #f0480f19;
 
 	--bg-primary: #ffffff;
 	--bg-secondary: #f0f0f0;

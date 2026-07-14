@@ -448,6 +448,12 @@
 	.chat-rail { display: none; }
 }
 .chat-threads { background: var(--surface-3); border-right: 1px solid var(--border-light); overflow-y: auto; }
+/* Active thread/conversation card — brand tint, same pair as the active
+   sidebar item. One rule serves both SSR (data-active from the server) and
+   the LLM page's client-side thread switcher (llm-chat.js toggles the same
+   attribute; it previously painted inline styles via a nonexistent
+   `--primary-light` token whose blue fallback always won). */
+.chat-threads .card[data-active="true"] { border-color: var(--primary-color); background: #fff1e6; }
 .chat-main { display: flex; flex-direction: column; min-height: 0; }
 .chat-messages { flex: 1; overflow-y: auto; padding: var(--spacing-md) var(--spacing-lg); }
 .chat-composer { border-top: 1px solid var(--border-light); padding: var(--spacing-md); background: var(--surface-1); }
