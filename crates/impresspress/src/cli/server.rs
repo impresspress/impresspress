@@ -159,7 +159,10 @@ pub async fn run(repo_root: &Path, run_migrations: bool) -> anyhow::Result<()> {
         .config(Arc::new(config_service))
         .config_source(Arc::new(wafer_run::StaticConfigSource::new(vars.clone())))
         .crypto(impresspress_native::make_jwt_crypto_service(jwt_secret)?)
-        .network(impresspress_native::make_fetch_network_service())
+        .network(
+            impresspress_native::make_fetch_network_service()
+                .context("construct network service")?,
+        )
         .logger(impresspress_native::make_tracing_logger())
         .block_settings(features)
         // Hand the SQLite path to the builder so the `native-embedding`

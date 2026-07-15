@@ -107,7 +107,7 @@ async fn build_runtime(
         .crypto(
             impresspress_native::make_jwt_crypto_service(jwt_secret).expect("jwt crypto service"),
         )
-        .network(impresspress_native::make_fetch_network_service())
+        .network(impresspress_native::make_fetch_network_service().expect("network service"))
         .logger(impresspress_native::make_tracing_logger())
         .block_settings(features)
         .sqlite_db_path(db_path_str)
