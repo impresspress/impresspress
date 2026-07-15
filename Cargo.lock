@@ -2588,6 +2588,195 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "40fac9d56ed6437b198fddba683305e8e2d651aa42647f00f5ae542e7f5c94a2"
 
 [[package]]
+name = "impresspress"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "async-trait",
+ "clap",
+ "getrandom 0.2.17",
+ "glob",
+ "impresspress-bundle",
+ "impresspress-core",
+ "impresspress-native",
+ "reqwest",
+ "rusqlite",
+ "serde",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "toml",
+ "tracing",
+ "uuid",
+ "wafer-block",
+ "wafer-core",
+ "wafer-run",
+]
+
+[[package]]
+name = "impresspress-browser"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "base64ct",
+ "bytemuck",
+ "chrono",
+ "futures",
+ "getrandom 0.2.17",
+ "hex",
+ "hmac 0.12.1",
+ "js-sys",
+ "pbkdf2",
+ "serde",
+ "serde-wasm-bindgen",
+ "serde_json",
+ "sha2 0.10.9",
+ "subtle",
+ "tokio-util",
+ "uuid",
+ "wafer-block",
+ "wafer-block-crypto",
+ "wafer-core",
+ "wafer-run",
+ "wafer-sql-utils",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "wasm-bindgen-test",
+ "wasm-streams 0.4.2",
+ "web-sys",
+]
+
+[[package]]
+name = "impresspress-bundle"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "hex",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+]
+
+[[package]]
+name = "impresspress-cloudflare"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "chrono",
+ "getrandom 0.2.17",
+ "impresspress-core",
+ "js-sys",
+ "maud",
+ "serde",
+ "serde_json",
+ "tracing",
+ "uuid",
+ "wafer-block",
+ "wafer-block-crypto",
+ "wafer-core",
+ "wafer-run",
+ "wafer-sql-utils",
+ "wasm-bindgen",
+ "worker",
+]
+
+[[package]]
+name = "impresspress-core"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "axum 0.8.9",
+ "base64ct",
+ "chrono",
+ "futures",
+ "getrandom 0.2.17",
+ "impresspress-core",
+ "js-sys",
+ "maud",
+ "percent-encoding",
+ "pulldown-cmark",
+ "reqwest",
+ "rusqlite",
+ "sea-query",
+ "serde",
+ "serde_json",
+ "sha2 0.10.9",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tokio-stream",
+ "tokio-util",
+ "tracing",
+ "url",
+ "uuid",
+ "wafer-block",
+ "wafer-block-cors",
+ "wafer-block-crypto",
+ "wafer-block-fastembed",
+ "wafer-block-http-listener",
+ "wafer-block-inspector",
+ "wafer-block-readonly-guard",
+ "wafer-block-router",
+ "wafer-block-security-headers",
+ "wafer-block-sqlite",
+ "wafer-block-web",
+ "wafer-core",
+ "wafer-run",
+ "wafer-sql-utils",
+ "wiremock",
+]
+
+[[package]]
+name = "impresspress-native"
+version = "0.1.0"
+dependencies = [
+ "anyhow",
+ "dotenvy",
+ "opentelemetry",
+ "opentelemetry-otlp",
+ "opentelemetry_sdk",
+ "serde_json",
+ "tempfile",
+ "tokio",
+ "tracing",
+ "tracing-opentelemetry",
+ "tracing-subscriber",
+ "wafer-block",
+ "wafer-block-crypto",
+ "wafer-block-http-listener",
+ "wafer-block-local-storage",
+ "wafer-block-network",
+ "wafer-block-postgres",
+ "wafer-block-s3",
+ "wafer-block-sqlite",
+ "wafer-core",
+ "wafer-run",
+]
+
+[[package]]
+name = "impresspress-web"
+version = "0.1.0"
+dependencies = [
+ "async-trait",
+ "futures",
+ "getrandom 0.2.17",
+ "impresspress-browser",
+ "impresspress-core",
+ "js-sys",
+ "serde",
+ "serde_json",
+ "tokio-util",
+ "uuid",
+ "wafer-block",
+ "wafer-core",
+ "wafer-run",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
+]
+
+[[package]]
 name = "indexmap"
 version = "1.9.3"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4430,6 +4619,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_bytes"
+version = "0.11.19"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "a5d440709e79d88e51ac01c4b72fc6cb7314017bb7da9eeff678aa94c10e3ea8"
+dependencies = [
+ "serde",
+ "serde_core",
+]
+
+[[package]]
 name = "serde_core"
 version = "1.0.228"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4632,195 +4831,6 @@ dependencies = [
  "byteorder",
  "libc",
  "winapi",
-]
-
-[[package]]
-name = "impresspress"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "async-trait",
- "clap",
- "getrandom 0.2.17",
- "glob",
- "reqwest",
- "rusqlite",
- "serde",
- "serde_json",
- "impresspress-bundle",
- "impresspress-core",
- "impresspress-native",
- "tempfile",
- "tokio",
- "toml",
- "tracing",
- "uuid",
- "wafer-block",
- "wafer-core",
- "wafer-run",
-]
-
-[[package]]
-name = "impresspress-browser"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "base64ct",
- "bytemuck",
- "chrono",
- "futures",
- "getrandom 0.2.17",
- "hex",
- "hmac 0.12.1",
- "js-sys",
- "pbkdf2",
- "serde",
- "serde-wasm-bindgen",
- "serde_json",
- "sha2 0.10.9",
- "subtle",
- "tokio-util",
- "uuid",
- "wafer-block",
- "wafer-block-crypto",
- "wafer-core",
- "wafer-run",
- "wafer-sql-utils",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "wasm-bindgen-test",
- "wasm-streams 0.4.2",
- "web-sys",
-]
-
-[[package]]
-name = "impresspress-bundle"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "hex",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "tempfile",
-]
-
-[[package]]
-name = "impresspress-cloudflare"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "chrono",
- "getrandom 0.2.17",
- "js-sys",
- "maud",
- "serde",
- "serde_json",
- "impresspress-core",
- "tracing",
- "uuid",
- "wafer-block",
- "wafer-block-crypto",
- "wafer-core",
- "wafer-run",
- "wafer-sql-utils",
- "wasm-bindgen",
- "worker",
-]
-
-[[package]]
-name = "impresspress-core"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "axum 0.8.9",
- "base64ct",
- "chrono",
- "futures",
- "getrandom 0.2.17",
- "js-sys",
- "maud",
- "percent-encoding",
- "pulldown-cmark",
- "reqwest",
- "rusqlite",
- "sea-query",
- "serde",
- "serde_json",
- "sha2 0.10.9",
- "impresspress-core",
- "tempfile",
- "thiserror 2.0.18",
- "tokio",
- "tokio-stream",
- "tokio-util",
- "tracing",
- "url",
- "uuid",
- "wafer-block",
- "wafer-block-cors",
- "wafer-block-crypto",
- "wafer-block-fastembed",
- "wafer-block-http-listener",
- "wafer-block-inspector",
- "wafer-block-readonly-guard",
- "wafer-block-router",
- "wafer-block-security-headers",
- "wafer-block-sqlite",
- "wafer-block-web",
- "wafer-core",
- "wafer-run",
- "wafer-sql-utils",
- "wiremock",
-]
-
-[[package]]
-name = "impresspress-native"
-version = "0.1.0"
-dependencies = [
- "anyhow",
- "dotenvy",
- "opentelemetry",
- "opentelemetry-otlp",
- "opentelemetry_sdk",
- "serde_json",
- "tempfile",
- "tokio",
- "tracing",
- "tracing-opentelemetry",
- "tracing-subscriber",
- "wafer-block",
- "wafer-block-crypto",
- "wafer-block-http-listener",
- "wafer-block-local-storage",
- "wafer-block-network",
- "wafer-block-postgres",
- "wafer-block-s3",
- "wafer-block-sqlite",
- "wafer-core",
- "wafer-run",
-]
-
-[[package]]
-name = "impresspress-web"
-version = "0.1.0"
-dependencies = [
- "async-trait",
- "futures",
- "getrandom 0.2.17",
- "js-sys",
- "serde",
- "serde_json",
- "impresspress-browser",
- "impresspress-core",
- "tokio-util",
- "uuid",
- "wafer-block",
- "wafer-core",
- "wafer-run",
- "wasm-bindgen",
- "wasm-bindgen-futures",
- "web-sys",
 ]
 
 [[package]]
@@ -5850,7 +5860,7 @@ checksum = "5c3082ca00d5a5ef149bb8b555a72ae84c9c59f7250f013ac822ac2e49b19c64"
 [[package]]
 name = "wafer-block"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?branch=main#0d902ea54a56db99b9cc666ad4a6b924eacdd3e4"
+source = "git+https://github.com/wafer-run/wafer-run?branch=main#d834b34d00ac4bb5cbfadf2679ad5949ff4ccfcc"
 dependencies = [
  "async-trait",
  "chrono",
@@ -5859,6 +5869,7 @@ dependencies = [
  "linkme",
  "rmp-serde",
  "serde",
+ "serde_bytes",
  "serde_json",
  "sha2 0.10.9",
  "thiserror 2.0.18",
@@ -5874,7 +5885,7 @@ dependencies = [
 [[package]]
 name = "wafer-block-cors"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?branch=main#0d902ea54a56db99b9cc666ad4a6b924eacdd3e4"
+source = "git+https://github.com/wafer-run/wafer-run?branch=main#d834b34d00ac4bb5cbfadf2679ad5949ff4ccfcc"
 dependencies = [
  "async-trait",
  "serde_json",
@@ -5886,7 +5897,7 @@ dependencies = [
 [[package]]
 name = "wafer-block-crypto"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?branch=main#0d902ea54a56db99b9cc666ad4a6b924eacdd3e4"
+source = "git+https://github.com/wafer-run/wafer-run?branch=main#d834b34d00ac4bb5cbfadf2679ad5949ff4ccfcc"
 dependencies = [
  "argon2",
  "async-trait",
@@ -5907,10 +5918,11 @@ dependencies = [
 [[package]]
 name = "wafer-block-fastembed"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?branch=main#0d902ea54a56db99b9cc666ad4a6b924eacdd3e4"
+source = "git+https://github.com/wafer-run/wafer-run?branch=main#d834b34d00ac4bb5cbfadf2679ad5949ff4ccfcc"
 dependencies = [
  "async-trait",
  "fastembed",
+ "tokenizers",
  "tokio",
  "wafer-core",
 ]
@@ -5918,11 +5930,12 @@ dependencies = [
 [[package]]
 name = "wafer-block-http-listener"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?branch=main#0d902ea54a56db99b9cc666ad4a6b924eacdd3e4"
+source = "git+https://github.com/wafer-run/wafer-run?branch=main#d834b34d00ac4bb5cbfadf2679ad5949ff4ccfcc"
 dependencies = [
  "async-trait",
  "axum 0.8.9",
  "http-body-util",
+ "ipnet",
  "parking_lot",
  "tokio",
  "tracing",
@@ -5933,7 +5946,7 @@ dependencies = [
 [[package]]
 name = "wafer-block-inspector"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?branch=main#0d902ea54a56db99b9cc666ad4a6b924eacdd3e4"
+source = "git+https://github.com/wafer-run/wafer-run?branch=main#d834b34d00ac4bb5cbfadf2679ad5949ff4ccfcc"
 dependencies = [
  "async-trait",
  "percent-encoding",
@@ -5946,10 +5959,11 @@ dependencies = [
 [[package]]
 name = "wafer-block-local-storage"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?branch=main#0d902ea54a56db99b9cc666ad4a6b924eacdd3e4"
+source = "git+https://github.com/wafer-run/wafer-run?branch=main#d834b34d00ac4bb5cbfadf2679ad5949ff4ccfcc"
 dependencies = [
  "async-trait",
  "chrono",
+ "tokio",
  "tracing",
  "wafer-block-macro",
  "wafer-core",
@@ -5958,7 +5972,7 @@ dependencies = [
 [[package]]
 name = "wafer-block-macro"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?branch=main#0d902ea54a56db99b9cc666ad4a6b924eacdd3e4"
+source = "git+https://github.com/wafer-run/wafer-run?branch=main#d834b34d00ac4bb5cbfadf2679ad5949ff4ccfcc"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -5969,7 +5983,7 @@ dependencies = [
 [[package]]
 name = "wafer-block-network"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?branch=main#0d902ea54a56db99b9cc666ad4a6b924eacdd3e4"
+source = "git+https://github.com/wafer-run/wafer-run?branch=main#d834b34d00ac4bb5cbfadf2679ad5949ff4ccfcc"
 dependencies = [
  "async-trait",
  "futures",
@@ -5986,7 +6000,7 @@ dependencies = [
 [[package]]
 name = "wafer-block-postgres"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?branch=main#0d902ea54a56db99b9cc666ad4a6b924eacdd3e4"
+source = "git+https://github.com/wafer-run/wafer-run?branch=main#d834b34d00ac4bb5cbfadf2679ad5949ff4ccfcc"
 dependencies = [
  "async-trait",
  "base64ct",
@@ -6007,7 +6021,7 @@ dependencies = [
 [[package]]
 name = "wafer-block-readonly-guard"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?branch=main#0d902ea54a56db99b9cc666ad4a6b924eacdd3e4"
+source = "git+https://github.com/wafer-run/wafer-run?branch=main#d834b34d00ac4bb5cbfadf2679ad5949ff4ccfcc"
 dependencies = [
  "async-trait",
  "wafer-block",
@@ -6017,7 +6031,7 @@ dependencies = [
 [[package]]
 name = "wafer-block-router"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?branch=main#0d902ea54a56db99b9cc666ad4a6b924eacdd3e4"
+source = "git+https://github.com/wafer-run/wafer-run?branch=main#d834b34d00ac4bb5cbfadf2679ad5949ff4ccfcc"
 dependencies = [
  "async-trait",
  "serde_json",
@@ -6029,7 +6043,7 @@ dependencies = [
 [[package]]
 name = "wafer-block-s3"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?branch=main#0d902ea54a56db99b9cc666ad4a6b924eacdd3e4"
+source = "git+https://github.com/wafer-run/wafer-run?branch=main#d834b34d00ac4bb5cbfadf2679ad5949ff4ccfcc"
 dependencies = [
  "async-trait",
  "aws-config",
@@ -6045,7 +6059,7 @@ dependencies = [
 [[package]]
 name = "wafer-block-security-headers"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?branch=main#0d902ea54a56db99b9cc666ad4a6b924eacdd3e4"
+source = "git+https://github.com/wafer-run/wafer-run?branch=main#d834b34d00ac4bb5cbfadf2679ad5949ff4ccfcc"
 dependencies = [
  "async-trait",
  "wafer-block",
@@ -6055,7 +6069,7 @@ dependencies = [
 [[package]]
 name = "wafer-block-sqlite"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?branch=main#0d902ea54a56db99b9cc666ad4a6b924eacdd3e4"
+source = "git+https://github.com/wafer-run/wafer-run?branch=main#d834b34d00ac4bb5cbfadf2679ad5949ff4ccfcc"
 dependencies = [
  "async-trait",
  "base64ct",
@@ -6065,6 +6079,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sqlite-vec",
+ "tokio",
  "tracing",
  "uuid",
  "wafer-block",
@@ -6076,7 +6091,7 @@ dependencies = [
 [[package]]
 name = "wafer-block-web"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?branch=main#0d902ea54a56db99b9cc666ad4a6b924eacdd3e4"
+source = "git+https://github.com/wafer-run/wafer-run?branch=main#d834b34d00ac4bb5cbfadf2679ad5949ff4ccfcc"
 dependencies = [
  "async-trait",
  "tracing",
@@ -6088,7 +6103,7 @@ dependencies = [
 [[package]]
 name = "wafer-core"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?branch=main#0d902ea54a56db99b9cc666ad4a6b924eacdd3e4"
+source = "git+https://github.com/wafer-run/wafer-run?branch=main#d834b34d00ac4bb5cbfadf2679ad5949ff4ccfcc"
 dependencies = [
  "async-trait",
  "chrono",
@@ -6097,6 +6112,7 @@ dependencies = [
  "serde",
  "serde_json",
  "thiserror 2.0.18",
+ "tokio",
  "tokio-util",
  "tracing",
  "url",
@@ -6110,7 +6126,7 @@ dependencies = [
 [[package]]
 name = "wafer-flow"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?branch=main#0d902ea54a56db99b9cc666ad4a6b924eacdd3e4"
+source = "git+https://github.com/wafer-run/wafer-run?branch=main#d834b34d00ac4bb5cbfadf2679ad5949ff4ccfcc"
 dependencies = [
  "serde",
  "serde_json",
@@ -6120,7 +6136,7 @@ dependencies = [
 [[package]]
 name = "wafer-run"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?branch=main#0d902ea54a56db99b9cc666ad4a6b924eacdd3e4"
+source = "git+https://github.com/wafer-run/wafer-run?branch=main#d834b34d00ac4bb5cbfadf2679ad5949ff4ccfcc"
 dependencies = [
  "async-trait",
  "base64ct",
@@ -6150,7 +6166,7 @@ dependencies = [
 [[package]]
 name = "wafer-schema"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?branch=main#0d902ea54a56db99b9cc666ad4a6b924eacdd3e4"
+source = "git+https://github.com/wafer-run/wafer-run?branch=main#d834b34d00ac4bb5cbfadf2679ad5949ff4ccfcc"
 dependencies = [
  "serde",
  "serde_json",
@@ -6160,7 +6176,7 @@ dependencies = [
 [[package]]
 name = "wafer-sql-utils"
 version = "0.1.0"
-source = "git+https://github.com/wafer-run/wafer-run?branch=main#0d902ea54a56db99b9cc666ad4a6b924eacdd3e4"
+source = "git+https://github.com/wafer-run/wafer-run?branch=main#d834b34d00ac4bb5cbfadf2679ad5949ff4ccfcc"
 dependencies = [
  "sea-query",
  "serde_json",

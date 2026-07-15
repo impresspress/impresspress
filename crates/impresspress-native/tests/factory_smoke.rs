@@ -21,7 +21,8 @@ fn local_storage_factory_returns_service() {
 
 #[test]
 fn network_factory_returns_service() {
-    let _svc = impresspress_native::make_fetch_network_service();
+    let _svc = impresspress_native::make_fetch_network_service()
+        .expect("network factory should succeed with default env");
 }
 
 #[test]
