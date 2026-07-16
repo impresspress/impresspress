@@ -253,16 +253,36 @@ where
     init_isolate();
     let result = run_inner(req, env, register_blocks, register_post_build).await;
 
-    // Persist any audit rows queued during this dispatch off the response
-    // path. Rows are self-contained data; attaching them to *this* request's
-    // waitUntil is correct even if they were queued by an interleaved one.
     if let Some(rt) = runtime_cache::peek() {
+        // Persist any audit rows queued during this dispatch off the
+        // response path. Rows are self-contained data; attaching them to
+        // *this* request's waitUntil is correct even if they were queued by
+        // an interleaved one.
         let rows = impresspress_core::pipeline::drain_queued_request_logs();
         if !rows.is_empty() {
             let db = rt.db.clone();
             ctx.wait_until(async move {
                 for row in rows {
                     let _ = db.create(row.table, row.data).await;
+                }
+            });
+        }
+
+        // A config-version KV PUT failed earlier in this dispatch (most
+        // likely KV's 1-write/sec/key throttle) and was queued for a
+        // delayed retry instead of retrying immediately into the same
+        // throttle window — see kv_cached_db::bump_config_version. Retry it
+        // off the response path, after a delay comfortably past that
+        // window.
+        if let Some(stamp) = kv_cached_db::take_pending_version_retry() {
+            let kv = rt.kv.clone();
+            ctx.wait_until(async move {
+                worker::Delay::from(std::time::Duration::from_millis(1_100)).await;
+                if let Err(e) = kv
+                    .put(impresspress_core::cache_key::CONFIG_VERSION_KEY, &stamp)
+                    .await
+                {
+                    worker::console_log!("delayed config-version retry failed: {e}");
                 }
             });
         }

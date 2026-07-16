@@ -140,8 +140,15 @@ impl KvCachedD1DatabaseService {
 
     /// Rewrite the config-version stamp after a write to a table whose
     /// contents a cached runtime bakes in (variables / block_settings /
-    /// wrap_grants). Best-effort with one retry: a failed put leaves live
-    /// isolates on the old runtime until the next successful bump.
+    /// wrap_grants).
+    ///
+    /// Coalesces to at most one KV PUT attempt per second per isolate (KV
+    /// throttles a key to one write/sec) and never retries immediately: an
+    /// immediate retry after a throttled write lands in the exact same
+    /// one-second window and fails the same way. A failed attempt instead
+    /// queues a delayed retry — see [`take_pending_version_retry`], drained
+    /// by `lib.rs::run()` through `ctx.wait_until` well outside the
+    /// throttle window.
     async fn bump_config_version(&self, collection: &str, op: &str) {
         if !self.mode.bump_on_write || !cache_key::bumps_config_version(collection) {
             return;
@@ -151,14 +158,72 @@ impl KvCachedD1DatabaseService {
         // up to the runtime cache's jittered probe window, regardless of
         // whether the KV stamp below lands or is still eventually
         // consistent even for the writer. See runtime_cache's DIRTY flag.
+        // Unconditional (not gated on the coalescing window below): every
+        // caller of this function represents a real local write, and the
+        // isolate must self-heal from it regardless of whether THIS call
+        // also gets to touch KV.
         crate::runtime_cache::mark_dirty();
+
+        let now = impresspress_core::util::now_millis();
+        let last = LAST_BUMP_ATTEMPT_MS.with(std::cell::Cell::get);
+        if now.saturating_sub(last) < BUMP_COALESCE_WINDOW_MS {
+            // A bump was attempted within the last second — KV would
+            // throttle another PUT to the same key anyway. This isolate is
+            // already marked dirty above; whichever attempt lands (this
+            // one, or a queued delayed retry) carries a fresh-enough stamp
+            // for every OTHER isolate. Skip the redundant PUT.
+            tracing::debug!(
+                table = %collection,
+                op,
+                "config-version bump coalesced (< 1s since last attempt)"
+            );
+            return;
+        }
+        LAST_BUMP_ATTEMPT_MS.with(|c| c.set(now));
+
         let stamp = new_version_stamp();
-        if let Err(e) = put_version_stamp_with_retry(self.kv.as_ref(), &stamp).await {
-            tracing::warn!(table = %collection, error = %e, op, "config-version bump failed");
+        if let Err(e) = self.kv.put(cache_key::CONFIG_VERSION_KEY, &stamp).await {
+            tracing::warn!(
+                table = %collection,
+                error = %e,
+                op,
+                "config-version bump failed; queuing delayed retry"
+            );
+            note_pending_version_retry(stamp);
         } else {
             tracing::debug!(table = %collection, version = %stamp, op, "config_version_bump");
         }
     }
+}
+
+thread_local! {
+    /// Wall-clock ms (`now_millis()`) of the last config-version KV PUT
+    /// *attempt* in this isolate. Coalescing gate for
+    /// [`KvCachedD1DatabaseService::bump_config_version`] — see
+    /// [`BUMP_COALESCE_WINDOW_MS`].
+    static LAST_BUMP_ATTEMPT_MS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
+    /// A version stamp whose KV PUT failed (most likely the 1-write/sec/key
+    /// throttle) and is waiting for a delayed retry. Drained by
+    /// [`take_pending_version_retry`] — `lib.rs::run()` calls it after
+    /// dispatch and retries through `ctx.wait_until`, off the response path
+    /// and comfortably past the throttle window.
+    static PENDING_VERSION_RETRY: std::cell::RefCell<Option<String>> =
+        const { std::cell::RefCell::new(None) };
+}
+
+/// Minimum spacing between config-version KV PUT *attempts* in one isolate.
+/// Matches Cloudflare KV's documented one-write-per-second-per-key limit —
+/// see "Fix KV version-write throttling and invalidation".
+const BUMP_COALESCE_WINDOW_MS: u64 = 1_000;
+
+fn note_pending_version_retry(stamp: String) {
+    PENDING_VERSION_RETRY.with(|p| *p.borrow_mut() = Some(stamp));
+}
+
+/// Take (and clear) any version stamp whose PUT failed and needs a delayed
+/// retry. See the `PENDING_VERSION_RETRY` thread_local's doc.
+pub(crate) fn take_pending_version_retry() -> Option<String> {
+    PENDING_VERSION_RETRY.with(|p| p.borrow_mut().take())
 }
 
 /// Mint and persist a fresh config-version stamp unconditionally.
@@ -448,26 +513,40 @@ impl DatabaseService for KvCachedD1DatabaseService {
         data: HashMap<String, serde_json::Value>,
     ) -> Result<Record, DatabaseError> {
         let cached = cache_key::classify_table(collection);
-        let invalidate = if let Some(t) = cached {
+        // Pre-read the OLD row so we can invalidate its cache key even if
+        // the update changes the identity column the key is derived from
+        // (`block` for Variables, `block_name` for BlockSettings) — see
+        // `cache_key::invalidate_keys_for_update`.
+        let old_row = if cached.is_some() {
             match self.inner.get(collection, id).await {
-                Ok(row) => cache_key::invalidate_keys(t, &row.data),
+                Ok(row) => Some(row.data),
                 Err(e) => {
                     tracing::warn!(
                         table = %collection,
                         id = %id,
                         error = %e,
-                        "pre-read for cache-key failed; skipping invalidation"
+                        "pre-read for cache-key failed; only post-update keys will be invalidated"
                     );
-                    Vec::new()
+                    None
                 }
             }
         } else {
-            Vec::new()
+            None
         };
 
         let record = self.inner.update(collection, id, data).await?;
 
-        self.invalidate_all(collection, &invalidate, "update").await;
+        if let Some(t) = cached {
+            // Invalidate the UNION of the old-row-derived keys and the
+            // new (post-update) row-derived keys, not just one side — an
+            // identity-field change otherwise leaves the other key stale
+            // for up to the 24h cache TTL.
+            let invalidate = match &old_row {
+                Some(old) => cache_key::invalidate_keys_for_update(t, old, &record.data),
+                None => cache_key::invalidate_keys(t, &record.data),
+            };
+            self.invalidate_all(collection, &invalidate, "update").await;
+        }
         self.bump_config_version(collection, "update").await;
 
         Ok(record)

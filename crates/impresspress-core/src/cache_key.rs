@@ -167,6 +167,32 @@ pub fn invalidate_keys(
     keys
 }
 
+/// All KV keys an `update` must invalidate: the union of the keys the OLD
+/// row would invalidate and the keys the NEW (post-update) row would
+/// invalidate, deduplicated.
+///
+/// A plain single-row `invalidate_keys` call on just the old row (or just
+/// the new one) misses the other row's key whenever the update changed the
+/// identity column the cache key is derived from (`block` for `Variables`,
+/// `block_name` for `BlockSettings`): the row moves to a fresh cache key,
+/// and whichever key isn't invalidated keeps serving a stale/mismatched
+/// entry until its 24h TTL expires. Invalidating the union covers both the
+/// vacated old key and the (possibly not-yet-cached, but worth dropping
+/// pre-emptively) new key.
+pub fn invalidate_keys_for_update(
+    table: CachedTable,
+    old_row: &HashMap<String, serde_json::Value>,
+    new_row: &HashMap<String, serde_json::Value>,
+) -> Vec<String> {
+    let mut keys = invalidate_keys(table, old_row);
+    for k in invalidate_keys(table, new_row) {
+        if !keys.contains(&k) {
+            keys.push(k);
+        }
+    }
+    keys
+}
+
 /// The `(key_column, sensitive_flag_column)` pair `row_is_sensitive` reads to
 /// decide whether a row must never be written to the KV cache. `None` when
 /// `table` has no notion of a sensitive row (`block_settings` rows are
@@ -514,6 +540,49 @@ mod tests {
         assert!(!bumps_config_version("impresspress__admin__permissions"));
         assert!(!bumps_config_version("wafer_run__auth__users"));
         assert!(!bumps_config_version(""));
+    }
+
+    // --- invalidate_keys_for_update ---
+
+    #[test]
+    fn invalidate_keys_for_update_unions_old_and_new_identity() {
+        let old = row("block", serde_json::Value::String("WAFER_RUN__AUTH".into()));
+        let new = row("block", serde_json::Value::String("WAFER_RUN__STRIPE".into()));
+        let keys = invalidate_keys_for_update(CachedTable::Variables, &old, &new);
+        assert_eq!(
+            keys,
+            vec![
+                "cfg:v1:variables:WAFER_RUN__AUTH".to_string(),
+                "cfg:v1:variables:WAFER_RUN__STRIPE".to_string(),
+            ],
+            "an identity-field change must invalidate both the vacated old \
+             key and the new key, not just one"
+        );
+    }
+
+    #[test]
+    fn invalidate_keys_for_update_dedupes_when_identity_unchanged() {
+        let old = row("block", serde_json::Value::String("WAFER_RUN__AUTH".into()));
+        let new = old.clone();
+        let keys = invalidate_keys_for_update(CachedTable::Variables, &old, &new);
+        assert_eq!(keys, vec!["cfg:v1:variables:WAFER_RUN__AUTH".to_string()]);
+    }
+
+    #[test]
+    fn invalidate_keys_for_update_block_settings_all_rows_key_not_duplicated() {
+        let old = row(
+            "block_name",
+            serde_json::Value::String("wafer-run/registry".into()),
+        );
+        let new = old.clone();
+        let keys = invalidate_keys_for_update(CachedTable::BlockSettings, &old, &new);
+        assert_eq!(
+            keys,
+            vec![
+                "cfg:v1:block_settings:wafer-run/registry".to_string(),
+                "cfg:v1:block_settings:__all__".to_string(),
+            ]
+        );
     }
 
     // --- row_is_sensitive ---
