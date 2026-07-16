@@ -258,7 +258,7 @@ crate::impresspress_feature_block! {
             Route::ContextListPage => pages::context_list_page(ctx, &msg).await,
             Route::ContextDetailPage => pages::context_detail_page(ctx, &msg).await,
             Route::ListContexts => rest::list_contexts(ctx, &msg).await,
-            Route::CreateContext => rest::create_context(ctx, input).await,
+            Route::CreateContext => rest::create_context(ctx, &msg, input).await,
             Route::GetContext => rest::get_context(ctx, &msg).await,
             Route::UpdateContext => rest::update_context(ctx, &msg, input).await,
             Route::DeleteContext => rest::delete_context(ctx, &msg).await,

@@ -33,6 +33,7 @@ fn maybe_eq(field: &str, value: Option<&str>) -> Option<Filter> {
 
 pub async fn create_context(
     ctx: &dyn Context,
+    owner_id: &str,
     context_type: &str,
     title: &str,
     sender_id: &str,
@@ -46,6 +47,7 @@ pub async fn create_context(
         "type": context_type,
         "status": "active",
         "title": title,
+        "owner_id": owner_id,
         "sender_id": sender_id,
         "recipient_id": recipient_id,
         "metadata": metadata,
@@ -65,6 +67,7 @@ pub async fn get_context(ctx: &dyn Context, id: &str) -> Result<db::Record, Wafe
 }
 
 pub struct ListContextsParams {
+    pub owner_id: Option<String>,
     pub context_type: Option<String>,
     pub status: Option<String>,
     pub sender_id: Option<String>,
@@ -78,6 +81,7 @@ pub async fn list_contexts(
     params: &ListContextsParams,
 ) -> Result<db::RecordList, WaferError> {
     let filters = [
+        ("owner_id", params.owner_id.as_deref()),
         ("type", params.context_type.as_deref()),
         ("status", params.status.as_deref()),
         ("sender_id", params.sender_id.as_deref()),
@@ -143,6 +147,7 @@ pub async fn delete_context(ctx: &dyn Context, id: &str) -> Result<(), WaferErro
 #[allow(clippy::too_many_arguments)]
 pub async fn add_entry(
     ctx: &dyn Context,
+    owner_id: &str,
     context_id: &str,
     kind: &str,
     role: &str,
@@ -160,6 +165,7 @@ pub async fn add_entry(
         "kind": kind,
         "role": role,
         "status": "",
+        "owner_id": owner_id,
         "sender_id": sender_id,
         "content": content,
         "content_type": content_type,
