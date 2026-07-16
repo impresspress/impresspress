@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
+use wafer_block::wire::database::OnConflict;
 use wafer_block_crypto::primitives;
 use wafer_core::clients::{config, database as db, network};
-use wafer_run::{context::Context, InputStream, Message, OutputStream};
+use wafer_run::{context::Context, InputStream, Message, OutputStream, WaferError};
 
 use super::{repo, PRODUCTS_TABLE};
 use crate::{
@@ -12,6 +13,100 @@ use crate::{
     },
     util::hex_encode,
 };
+
+/// Recorded Stripe webhook event ids (code review 2026-07-16: "Stripe
+/// webhooks lack event idempotency"; I1 follow-up 2026-07-17: "recording
+/// event before side effects drops the event on transient failure"). See
+/// `003_stripe_events.sqlite.sql` for the schema and full rationale.
+const STRIPE_EVENTS_TABLE: &str = "impresspress__products__stripe_events";
+
+/// `status` column values on [`STRIPE_EVENTS_TABLE`].
+const EVENT_STATUS_PENDING: &str = "pending";
+const EVENT_STATUS_PROCESSED: &str = "processed";
+
+/// Outcome of recording a Stripe event id before running its side effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EventRecordState {
+    /// First time seeing this event id — a row was just inserted with
+    /// `status = "pending"`. The caller should run side effects.
+    New,
+    /// A row already existed with `status = "pending"` — a PRIOR delivery
+    /// recorded the event but its side effects never completed (process
+    /// crash, transient DB error, …) before this one arrived. The caller
+    /// should RE-run side effects rather than drop them.
+    PendingRetry,
+    /// A row already existed with `status = "processed"` — the side effects
+    /// already completed. A true duplicate; the caller must skip.
+    AlreadyProcessed,
+}
+
+/// Record `event_id` before running its side effects via `INSERT ... ON
+/// CONFLICT (id) DO NOTHING` (`status = "pending"`) — a single atomic round
+/// trip, so two concurrent first-sight deliveries of the same event can't
+/// both observe "not yet seen" (unlike a separate existence check + insert).
+///
+/// A conflict means a row already exists; its `status` then distinguishes a
+/// true duplicate (`"processed"` — side effects already succeeded, skip)
+/// from a retry of an attempt that died mid-way (`"pending"` — the row was
+/// recorded but [`mark_event_processed`] was never reached, so the caller
+/// must re-process). This is what keeps a transient side-effect failure from
+/// permanently dropping the event: recording happens up front for the
+/// atomic-insert dedup guarantee, but only [`mark_event_processed`] (called
+/// after side effects SUCCEED) makes the dedup final.
+async fn record_event(
+    ctx: &dyn Context,
+    event_id: &str,
+    event_type: &str,
+) -> Result<EventRecordState, WaferError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let rows = db::upsert(
+        ctx,
+        STRIPE_EVENTS_TABLE,
+        vec![
+            ("id".to_string(), serde_json::json!(event_id)),
+            ("event_type".to_string(), serde_json::json!(event_type)),
+            (
+                "status".to_string(),
+                serde_json::json!(EVENT_STATUS_PENDING),
+            ),
+            ("created_at".to_string(), serde_json::json!(now)),
+        ],
+        vec!["id".to_string()],
+        OnConflict::SetColumns(vec![]),
+    )
+    .await?;
+    if rows > 0 {
+        return Ok(EventRecordState::New);
+    }
+
+    // Conflict: a row for this event id already exists. Read its status to
+    // tell a true duplicate apart from a prior attempt that died mid-way.
+    let existing = db::get(ctx, STRIPE_EVENTS_TABLE, event_id).await?;
+    let status = existing
+        .data
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or(EVENT_STATUS_PENDING);
+    if status == EVENT_STATUS_PROCESSED {
+        Ok(EventRecordState::AlreadyProcessed)
+    } else {
+        Ok(EventRecordState::PendingRetry)
+    }
+}
+
+/// Flip a recorded event's `status` to `"processed"` — called only after its
+/// side effects have SUCCEEDED. A transient failure between [`record_event`]
+/// and this call leaves the row `"pending"`, so Stripe's next retry of the
+/// same event id re-processes it instead of silently no-oping.
+async fn mark_event_processed(ctx: &dyn Context, event_id: &str) -> Result<(), WaferError> {
+    let mut data: HashMap<String, serde_json::Value> = HashMap::new();
+    data.insert(
+        "status".to_string(),
+        serde_json::json!(EVENT_STATUS_PROCESSED),
+    );
+    db::update(ctx, STRIPE_EVENTS_TABLE, event_id, data).await?;
+    Ok(())
+}
 
 pub async fn handle_checkout(ctx: &dyn Context, msg: &Message, input: InputStream) -> OutputStream {
     let Ok(stripe_key) = config::get(ctx, "IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY").await else {
@@ -253,6 +348,52 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
 
     let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
+    // Idempotency: persist the top-level Stripe event id under a UNIQUE
+    // constraint BEFORE running any side effect, as `status = "pending"`.
+    // Stripe retries undelivered/non-2xx webhooks, and the signature
+    // timestamp window above itself accepts up to 5 minutes of replay —
+    // both redeliver the same `id`. Real Stripe events always carry one; a
+    // signed body without one (synthetic/malformed) can't be deduped, so
+    // it's processed as-is rather than rejected outright — the signature
+    // already establishes it came from a holder of the webhook secret.
+    //
+    // `should_mark_processed` gates the post-processing `mark_event_processed`
+    // call below: only set when this delivery actually owns running side
+    // effects for `event_id` (a fresh event, or a retry of a previously
+    // `pending` one) — never for a true duplicate (which returns early) or a
+    // that-lacks-an-id delivery (which can't be deduped in either direction).
+    let event_id = event.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let mut should_mark_processed = false;
+    if !event_id.is_empty() {
+        match record_event(ctx, event_id, event_type).await {
+            Ok(EventRecordState::New) => {
+                should_mark_processed = true;
+            }
+            Ok(EventRecordState::PendingRetry) => {
+                tracing::info!(
+                    event_id = %event_id,
+                    event_type = %event_type,
+                    "re-processing Stripe webhook event left pending by a prior failed attempt"
+                );
+                should_mark_processed = true;
+            }
+            Ok(EventRecordState::AlreadyProcessed) => {
+                tracing::info!(
+                    event_id = %event_id,
+                    event_type = %event_type,
+                    "duplicate Stripe webhook event — skipping side effects"
+                );
+                return ok_json(&serde_json::json!({"received": true, "duplicate": true}));
+            }
+            Err(e) => return err_internal("Failed to record webhook event", e),
+        }
+    } else {
+        tracing::warn!(
+            event_type = %event_type,
+            "Stripe webhook event missing top-level id — cannot dedupe replay/retry for this delivery"
+        );
+    }
+
     let data_object = event
         .get("data")
         .and_then(|d| d.get("object"))
@@ -445,6 +586,25 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
 
         _ => {
             // Ignore unhandled event types
+        }
+    }
+
+    // Side effects above either completed (including the soft-fail branches
+    // that only log a warning) or this function already returned early via
+    // `err_internal` on a hard failure — reaching here means it's safe to
+    // seal the dedup: flip the row to `processed` so a future redelivery of
+    // this exact `event_id` is skipped as a true duplicate rather than
+    // re-run. If this update itself fails, log loudly rather than fail the
+    // webhook outright — the row stays `pending` and a future retry simply
+    // re-runs side effects, which are already safe to repeat (the atomic
+    // status-transition guards in `repo::purchases` / `repo::subscriptions`).
+    if should_mark_processed {
+        if let Err(e) = mark_event_processed(ctx, event_id).await {
+            tracing::error!(
+                event_id = %event_id,
+                error = %e,
+                "failed to mark Stripe webhook event processed"
+            );
         }
     }
 
@@ -775,6 +935,217 @@ mod tests {
         assert_eq!(
             url_path_encode("https://example.com"),
             "https%3A%2F%2Fexample.com"
+        );
+    }
+
+    // --- Webhook event idempotency (code review 2026-07-16) ---
+
+    use crate::test_support::{output_json, TestContext};
+
+    /// Build a signed webhook request `(Message, InputStream)` for `body`,
+    /// using `secret` to compute the `Stripe-Signature` header the same way
+    /// `verify_stripe_signature` expects it.
+    fn signed_webhook_request(body: &serde_json::Value, secret: &str) -> (Message, InputStream) {
+        let payload = serde_json::to_vec(body).unwrap();
+        let timestamp = chrono::Utc::now().timestamp() as u64;
+        let signed_payload = build_signed_payload(timestamp, &payload);
+        let computed = primitives::hmac_sha256(secret.as_bytes(), &signed_payload);
+        let sig_header = format!("t={timestamp},v1={}", hex_encode(&computed));
+
+        let mut msg = Message::new("http.request");
+        msg.set_meta("req.action", "create");
+        msg.set_meta("req.resource", "/b/products/webhooks");
+        msg.set_meta("http.header.stripe-signature", sig_header);
+        (msg, InputStream::from_bytes(payload))
+    }
+
+    #[tokio::test]
+    async fn handle_webhook_is_idempotent_on_replayed_event_id() {
+        let mut ctx = TestContext::with_products().await;
+        let secret = "whsec_test_idempotency";
+        ctx.set_config("IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET", secret);
+
+        // `charge.refunded` with no matching purchase: the event-type match
+        // arm runs (purchase lookup misses, so no further side effect) — this
+        // isolates the assertion to the idempotency mechanism itself rather
+        // than a specific business side effect.
+        let body = serde_json::json!({
+            "id": "evt_replay_test_1",
+            "type": "charge.refunded",
+            "data": { "object": { "payment_intent": "pi_does_not_exist" } }
+        });
+
+        // First delivery: processed normally, no `duplicate` marker.
+        let (msg1, input1) = signed_webhook_request(&body, secret);
+        let json1 = output_json(handle_webhook(&ctx, &msg1, input1).await).await;
+        assert_eq!(json1["received"], true);
+        assert!(
+            json1.get("duplicate").is_none(),
+            "first delivery must not be marked duplicate: {json1:?}"
+        );
+
+        // Replay: identical event id — must ack 200 and skip processing.
+        let (msg2, input2) = signed_webhook_request(&body, secret);
+        let json2 = output_json(handle_webhook(&ctx, &msg2, input2).await).await;
+        assert_eq!(json2["received"], true);
+        assert_eq!(
+            json2["duplicate"], true,
+            "replayed event id must be acked as a duplicate no-op: {json2:?}"
+        );
+
+        // Exactly one row recorded for this event id — proves the UNIQUE
+        // constraint (not just app-level logic) is what's deduping.
+        let count = db::count_by_field(
+            &ctx,
+            "impresspress__products__stripe_events",
+            "id",
+            serde_json::json!("evt_replay_test_1"),
+        )
+        .await
+        .expect("count stripe_events rows");
+        assert_eq!(
+            count, 1,
+            "exactly one row should exist for the replayed event id"
+        );
+    }
+
+    #[tokio::test]
+    async fn handle_webhook_processes_distinct_event_ids_independently() {
+        let mut ctx = TestContext::with_products().await;
+        let secret = "whsec_test_idempotency_2";
+        ctx.set_config("IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET", secret);
+
+        for id in ["evt_distinct_1", "evt_distinct_2"] {
+            let body = serde_json::json!({
+                "id": id,
+                "type": "charge.refunded",
+                "data": { "object": { "payment_intent": "pi_does_not_exist" } }
+            });
+            let (msg, input) = signed_webhook_request(&body, secret);
+            let json = output_json(handle_webhook(&ctx, &msg, input).await).await;
+            assert_eq!(json["received"], true);
+            assert!(
+                json.get("duplicate").is_none(),
+                "a fresh, distinct event id must not be marked duplicate: {json:?}"
+            );
+        }
+    }
+
+    /// An event with no top-level `id` can't be deduped, but must still be
+    /// processed (not rejected) — this preserves existing behavior for
+    /// synthetic/malformed-but-signed payloads, since the HMAC signature
+    /// already establishes the caller holds the webhook secret.
+    #[tokio::test]
+    async fn handle_webhook_processes_event_with_no_id_without_erroring() {
+        let mut ctx = TestContext::with_products().await;
+        let secret = "whsec_test_idempotency_3";
+        ctx.set_config("IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET", secret);
+
+        let body = serde_json::json!({ "type": "charge.refunded", "data": {} });
+        let (msg, input) = signed_webhook_request(&body, secret);
+        let json = output_json(handle_webhook(&ctx, &msg, input).await).await;
+        assert_eq!(json["received"], true);
+        assert!(json.get("duplicate").is_none());
+    }
+
+    // --- Pending/processed status (I1 follow-up 2026-07-17: "recording
+    // event before side effects drops the event on transient failure") ---
+
+    /// Seed a row directly in `impresspress__products__stripe_events`,
+    /// simulating a delivery recorded by [`record_event`] at some earlier
+    /// point (either a prior attempt that died mid-way, or one that already
+    /// completed) — without going through `handle_webhook` itself.
+    async fn seed_stripe_event_row(
+        ctx: &crate::test_support::TestContext,
+        event_id: &str,
+        status: &str,
+    ) {
+        let mut row = HashMap::new();
+        row.insert("id".to_string(), serde_json::json!(event_id));
+        row.insert(
+            "event_type".to_string(),
+            serde_json::json!("charge.refunded"),
+        );
+        row.insert("status".to_string(), serde_json::json!(status));
+        row.insert(
+            "created_at".to_string(),
+            serde_json::json!(chrono::Utc::now().to_rfc3339()),
+        );
+        db::create(ctx, STRIPE_EVENTS_TABLE, row)
+            .await
+            .expect("seed stripe_events row");
+    }
+
+    /// A `pending` row (a prior attempt that recorded the event but died
+    /// before its side effects completed — process crash, transient DB
+    /// error, …) must be RE-processed on the next delivery of the same
+    /// event id, not silently skipped as a duplicate. Once that delivery
+    /// completes, the row must flip to `processed` so a THIRD delivery is
+    /// then correctly skipped.
+    #[tokio::test]
+    async fn handle_webhook_reprocesses_a_previously_pending_event() {
+        let mut ctx = TestContext::with_products().await;
+        let secret = "whsec_test_pending_retry";
+        ctx.set_config("IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET", secret);
+
+        seed_stripe_event_row(&ctx, "evt_pending_retry", EVENT_STATUS_PENDING).await;
+
+        let body = serde_json::json!({
+            "id": "evt_pending_retry",
+            "type": "charge.refunded",
+            "data": { "object": { "payment_intent": "pi_does_not_exist" } }
+        });
+
+        // Delivery must re-process (not skip) a still-pending event.
+        let (msg, input) = signed_webhook_request(&body, secret);
+        let json = output_json(handle_webhook(&ctx, &msg, input).await).await;
+        assert_eq!(json["received"], true);
+        assert!(
+            json.get("duplicate").is_none(),
+            "a previously-pending event must be RE-processed, not skipped as a duplicate: {json:?}"
+        );
+
+        // The row must now be sealed as processed.
+        let row = db::get(&ctx, STRIPE_EVENTS_TABLE, "evt_pending_retry")
+            .await
+            .expect("row exists after processing");
+        assert_eq!(
+            row.data.get("status").and_then(|v| v.as_str()),
+            Some(EVENT_STATUS_PROCESSED),
+            "row must be sealed processed once side effects succeed"
+        );
+
+        // A THIRD delivery of the same event id is now a true duplicate.
+        let (msg2, input2) = signed_webhook_request(&body, secret);
+        let json2 = output_json(handle_webhook(&ctx, &msg2, input2).await).await;
+        assert_eq!(json2["received"], true);
+        assert_eq!(
+            json2["duplicate"], true,
+            "a processed event must be skipped on a later redelivery: {json2:?}"
+        );
+    }
+
+    /// A `processed` row is a true duplicate and must be skipped outright —
+    /// the counterpart to the `pending` re-process case above.
+    #[tokio::test]
+    async fn handle_webhook_skips_an_already_processed_event() {
+        let mut ctx = TestContext::with_products().await;
+        let secret = "whsec_test_already_processed";
+        ctx.set_config("IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET", secret);
+
+        seed_stripe_event_row(&ctx, "evt_already_processed", EVENT_STATUS_PROCESSED).await;
+
+        let body = serde_json::json!({
+            "id": "evt_already_processed",
+            "type": "charge.refunded",
+            "data": { "object": { "payment_intent": "pi_does_not_exist" } }
+        });
+        let (msg, input) = signed_webhook_request(&body, secret);
+        let json = output_json(handle_webhook(&ctx, &msg, input).await).await;
+        assert_eq!(json["received"], true);
+        assert_eq!(
+            json["duplicate"], true,
+            "an already-processed event must be skipped, not re-run: {json:?}"
         );
     }
 }

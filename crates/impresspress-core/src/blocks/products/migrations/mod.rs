@@ -16,6 +16,8 @@ const SQL_001_SQLITE: &str = include_str!("001_products_schema.sqlite.sql");
 const SQL_001_POSTGRES: &str = include_str!("001_products_schema.postgres.sql");
 const SQL_002_SQLITE: &str = include_str!("002_default_templates.sqlite.sql");
 const SQL_002_POSTGRES: &str = include_str!("002_default_templates.postgres.sql");
+const SQL_003_SQLITE: &str = include_str!("003_stripe_events.sqlite.sql");
+const SQL_003_POSTGRES: &str = include_str!("003_stripe_events.postgres.sql");
 
 /// Ordered SQLite migration scripts for this block, as `(basename, content)`
 /// pairs. Feeds the runtime `lifecycle_init` apply path.
@@ -23,7 +25,9 @@ const SQL_002_POSTGRES: &str = include_str!("002_default_templates.postgres.sql"
 pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
     ("001_products_schema", SQL_001_SQLITE),
     ("002_default_templates", SQL_002_SQLITE),
+    ("003_stripe_events", SQL_003_SQLITE),
 ];
 
 /// Ordered PostgreSQL migration scripts, matching [`SQLITE_MIGRATIONS`].
-pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[SQL_001_POSTGRES, SQL_002_POSTGRES];
+pub(crate) const POSTGRES_MIGRATIONS: &[&str] =
+    &[SQL_001_POSTGRES, SQL_002_POSTGRES, SQL_003_POSTGRES];

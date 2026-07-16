@@ -239,7 +239,18 @@ pub fn url_path_encode(s: &str) -> String {
 /// Empty values are allowed (clears the setting). Relative paths starting with
 /// a single `/` are allowed. Otherwise the value must be HTTPS (or
 /// `http://localhost` for local development), must not contain newlines (header
-/// injection), and must not resolve to a private/internal/loopback IP.
+/// injection), and must not resolve to a private/internal/loopback IP —
+/// including the IPv6 unique-local (`fc00::/7`) and link-local (`fe80::/10`)
+/// ranges alongside their IPv4 counterparts.
+///
+/// This validator only covers literal IP addresses and the IPv4-mapped IPv6
+/// form. It intentionally does NOT resolve hostnames or revalidate redirect
+/// destinations — a hostname that resolves to a private/internal address at
+/// connect time (DNS rebinding), or a redirect Location that points at one,
+/// both bypass this check. Those require a resolve-before-connect +
+/// redirect-revalidation guard at the network/fetch layer (the actual
+/// outbound HTTP call site), not at config-write time, since the resolved
+/// address can differ from what it resolved to when this value was saved.
 ///
 /// Parses with [`url::Url`] rather than hand-rolled string splitting: `Url`
 /// canonicalizes the scheme/host and `Url::host()` strips userinfo and port
@@ -304,6 +315,17 @@ pub(crate) fn validate_url_value(value: &str) -> Result<(), String> {
         Some(url::Host::Ipv6(v6)) => {
             if v6.is_loopback() {
                 return Err("URL must not point to loopback address".to_string());
+            }
+            // Unique-local (`fc00::/7`, almost always seen as `fd00::/8`) is
+            // the IPv6 analogue of the v4 private ranges blocked above.
+            if v6.is_unique_local() {
+                return Err("URL must not point to private/internal IP addresses".to_string());
+            }
+            // Link-local (`fe80::/10`) is the IPv6 analogue of the v4
+            // `169.254.x` block above — also how instance-metadata endpoints
+            // are reached on some cloud providers.
+            if v6.is_unicast_link_local() {
+                return Err("URL must not point to link-local addresses".to_string());
             }
             // Block IPv4-mapped IPv6 addresses (::ffff:10.x.x.x etc.)
             if let Some(v4) = v6.to_ipv4_mapped() {
@@ -784,6 +806,34 @@ mod tests {
     #[test]
     fn rejects_userinfo_localhost_with_external_host() {
         assert!(validate_url_value("http://localhost@evil.com").is_err());
+    }
+
+    /// IPv6 unique-local addresses (`fc00::/7`, in practice almost always
+    /// seen as `fd00::/8`) are the IPv6 analogue of the RFC 1918 private
+    /// IPv4 ranges the v4 branch already blocks (`10.x`, `172.16-31.x`,
+    /// `192.168.x`) — internal-network-only, never a legitimate HTTPS
+    /// destination. Previously unchecked for v6 literals.
+    #[test]
+    fn rejects_ipv6_unique_local() {
+        assert!(validate_url_value("https://[fd00::1]/x").is_err());
+        assert!(validate_url_value("https://[fc00::1]/x").is_err());
+    }
+
+    /// IPv6 link-local (`fe80::/10`) is the v6 analogue of the v4 branch's
+    /// `169.254.x` link-local block — which on many cloud providers is also
+    /// how the instance-metadata endpoint is reached. Previously unchecked
+    /// for v6 literals.
+    #[test]
+    fn rejects_ipv6_link_local() {
+        assert!(validate_url_value("https://[fe80::1]/x").is_err());
+        assert!(validate_url_value("https://[fe80::abcd:1234]/x").is_err());
+    }
+
+    /// Sanity check: a real, routable IPv6 address must still be allowed —
+    /// the new unique-local/link-local checks must not overreject.
+    #[test]
+    fn allows_real_ipv6_address() {
+        assert!(validate_url_value("https://[2606:4700:4700::1111]/x").is_ok());
     }
 
     #[test]
