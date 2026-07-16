@@ -459,44 +459,38 @@ impl VectorService for BrowserVectorService {
 /// A loaded vector row: `(id, vector, metadata)`.
 type VectorRow = (String, Vec<f32>, Option<serde_json::Value>);
 
+/// Raw shape of one `_vectors` table row, decoded straight off the
+/// `serde_wasm_bindgen` boundary — NOT via the generic
+/// `db_codec::rows_from_js`/`serde_json::Value` row decode.
+///
+/// sql.js resolves the `vector` BLOB column as a real `Uint8Array`.
+/// `serde_json::Value`'s `Deserialize` impl has no `visit_bytes`/
+/// `visit_byte_buf`, so decoding a row containing a BLOB column generically
+/// as `serde_json::Value` always fails (`invalid type: byte array`) — this
+/// broke `query()` on every non-empty index. Declaring `vector: Vec<u8>` on
+/// a concrete struct and decoding via `serde_wasm_bindgen::from_value`
+/// directly sidesteps that: `serde_wasm_bindgen` deserializes a `Uint8Array`
+/// straight into `Vec<u8>` in one step, exactly like `storage.rs`'s
+/// `GetResponse.data` and `network.rs`'s `FetchResponse.body`.
+#[derive(serde::Deserialize)]
+struct VectorBlobRow {
+    id: String,
+    vector: Vec<u8>,
+    metadata: Option<String>,
+}
+
 fn load_all_vectors(index: &str, dims: u32, f: &MetadataFilter) -> VResult<Vec<VectorRow>> {
     let s = format!(r#"SELECT id, vector, metadata FROM "{index}_vectors""#);
     let value = bridge::db_query_raw(&s, db_codec::empty_params())
         .map_err(|e| VectorError::Internal(js_err(e)))?;
-    let rows = db_codec::rows_from_js(value).map_err(VectorError::Internal)?;
+    let rows: Vec<VectorBlobRow> = serde_wasm_bindgen::from_value(value)
+        .map_err(|e| VectorError::Internal(format!("decode vector rows: {e}")))?;
 
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
-        let id = r
-            .get("id")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .to_string();
-        // sql.js returns BLOBs as a real `Uint8Array`. `db_codec::rows_from_js`
-        // decodes the row generically as `serde_json::Value` (it doesn't know
-        // any particular column is binary), and `serde_wasm_bindgen` visits a
-        // `Uint8Array` under that generic decode as a byte buffer, which
-        // `serde_json::Value`'s own `Deserialize` impl turns into a JSON array
-        // of small integers — so this always takes the array-of-numbers arm
-        // below. The base64-string arm is kept as a defensive fallback only
-        // (e.g. a future caller that pre-encodes the blob as base64 text).
-        let bytes: Vec<u8> = match r.get("vector") {
-            Some(serde_json::Value::Array(arr)) => arr
-                .iter()
-                .filter_map(|v| v.as_u64().map(|x| x as u8))
-                .collect(),
-            Some(serde_json::Value::String(b64)) => {
-                use base64ct::{Base64, Encoding};
-                Base64::decode_vec(b64)
-                    .map_err(|e| VectorError::Internal(format!("blob b64: {e}")))?
-            }
-            _ => continue,
-        };
-        let vector = sql::parse_vector_blob(&bytes, dims).map_err(VectorError::Internal)?;
-        let metadata: Option<serde_json::Value> = r
-            .get("metadata")
-            .and_then(|v| v.as_str())
-            .and_then(|s| serde_json::from_str(s).ok());
+        let (id, vector, metadata) =
+            sql::decode_vector_row(r.id, &r.vector, r.metadata.as_deref(), dims)
+                .map_err(VectorError::Internal)?;
         if !matches_filter(metadata.as_ref(), f) {
             continue;
         }

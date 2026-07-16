@@ -262,6 +262,36 @@ pub fn parse_vector_blob(bytes: &[u8], expected_dims: u32) -> Result<Vec<f32>, S
     Ok(floats.to_vec())
 }
 
+/// Reconstruct one `_vectors` table row — `(id, vector, metadata)` — from
+/// the raw pieces already pulled off the JS bridge boundary.
+///
+/// `service.rs::load_all_vectors` decodes the `vector` BLOB column as a
+/// typed `Vec<u8>` field via `serde_wasm_bindgen::from_value` directly
+/// (mirroring `storage.rs`'s `GetResponse`/`network.rs`'s `FetchResponse`),
+/// NOT via the generic `db_codec::rows_from_js`/`serde_json::Value` row
+/// decode — sql.js resolves BLOB columns as a real `Uint8Array`, and
+/// `serde_json::Value`'s `Deserialize` impl has no `visit_bytes`/
+/// `visit_byte_buf`, so decoding a row with a BLOB column through that
+/// generic path always errors.
+///
+/// This function is the pure remainder once those raw bytes are in hand:
+/// unpack them into `Vec<f32>` via [`parse_vector_blob`] and parse the
+/// `metadata` TEXT column as JSON (silently `None` on absence or on
+/// malformed JSON — matches `load_metadata_for_ids`'s existing behavior for
+/// the same column elsewhere). Kept in this module (no `wasm_bindgen`
+/// involved) so it's host-testable even though its only real caller is
+/// wasm32-only.
+pub fn decode_vector_row(
+    id: String,
+    vector_bytes: &[u8],
+    metadata_json: Option<&str>,
+    dims: u32,
+) -> Result<(String, Vec<f32>, Option<serde_json::Value>), String> {
+    let vector = parse_vector_blob(vector_bytes, dims)?;
+    let metadata = metadata_json.and_then(|s| serde_json::from_str(s).ok());
+    Ok((id, vector, metadata))
+}
+
 #[derive(Clone, Debug)]
 pub struct SqlUpsertEntry {
     pub id: String,
@@ -486,6 +516,44 @@ mod tests {
         let v = vec![0.1f32; 4];
         let packed = pack_vector_blob(&v);
         assert!(parse_vector_blob(&packed, 5).is_err());
+    }
+
+    // ─── decode_vector_row (BLOB-column row reconstruction) ────────────────
+
+    #[test]
+    fn decode_vector_row_reconstructs_vector_and_metadata() {
+        let v = vec![0.25f32, -1.5, 3.0];
+        let bytes = pack_vector_blob(&v);
+        let (id, vector, metadata) =
+            decode_vector_row("doc1".into(), &bytes, Some(r#"{"k":"v"}"#), v.len() as u32)
+                .expect("decode succeeds");
+        assert_eq!(id, "doc1");
+        assert_eq!(vector, v);
+        assert_eq!(metadata, Some(serde_json::json!({"k":"v"})));
+    }
+
+    #[test]
+    fn decode_vector_row_missing_metadata_is_none() {
+        let v = vec![1.0f32, 2.0];
+        let bytes = pack_vector_blob(&v);
+        let (_, _, metadata) =
+            decode_vector_row("doc1".into(), &bytes, None, v.len() as u32).unwrap();
+        assert_eq!(metadata, None);
+    }
+
+    #[test]
+    fn decode_vector_row_malformed_metadata_json_is_none_not_error() {
+        let v = vec![1.0f32];
+        let bytes = pack_vector_blob(&v);
+        let (_, _, metadata) =
+            decode_vector_row("doc1".into(), &bytes, Some("not json"), v.len() as u32).unwrap();
+        assert_eq!(metadata, None);
+    }
+
+    #[test]
+    fn decode_vector_row_propagates_blob_length_mismatch() {
+        let bytes = vec![0u8; 3]; // not divisible by 4, and wrong for dims=1
+        assert!(decode_vector_row("doc1".into(), &bytes, None, 1).is_err());
     }
 
     #[test]
