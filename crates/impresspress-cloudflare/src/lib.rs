@@ -271,8 +271,17 @@ where
     match result {
         Ok(response) => Ok(response),
         Err(e) => {
-            worker::console_log!("impresspress-cloudflare run error: {e}");
-            worker::Response::error(format!("impresspress: {e}"), 500)
+            // Never return the real cause to the client — `e` can carry
+            // SQL, binding, schema, or other configuration detail. Log it
+            // (with a correlation id) and return an opaque 500; an operator
+            // greps the isolate's console log for the same id to find the
+            // real error.
+            let correlation_id = uuid::Uuid::new_v4();
+            worker::console_log!("impresspress-cloudflare run error [{correlation_id}]: {e}");
+            worker::Response::error(
+                format!("internal server error (reference: {correlation_id})"),
+                500,
+            )
         }
     }
 }
