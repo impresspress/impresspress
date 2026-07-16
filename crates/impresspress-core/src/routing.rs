@@ -915,8 +915,12 @@ mod tests {
         // `impresspress/vector` owns a real Public-tier prefix route
         // (`/b/vector/`) but this BlockInfo declares no endpoints at all —
         // simulating a forgotten declaration for a brand-new handler.
-        let block_infos =
-            vec![wafer_run::BlockInfo::new("impresspress/vector", "0.0.1", "http-handler@v1", "t")];
+        let block_infos = vec![wafer_run::BlockInfo::new(
+            "impresspress/vector",
+            "0.0.1",
+            "http-handler@v1",
+            "t",
+        )];
 
         let out = route_to_block(
             &ctx,
@@ -938,9 +942,16 @@ mod tests {
         use crate::test_support::{auth_msg, TestContext};
 
         let mut ctx = TestContext::new().await;
-        ctx.register_block("impresspress/vector", std::sync::Arc::new(DispatchProbeBlock));
-        let block_infos =
-            vec![wafer_run::BlockInfo::new("impresspress/vector", "0.0.1", "http-handler@v1", "t")];
+        ctx.register_block(
+            "impresspress/vector",
+            std::sync::Arc::new(DispatchProbeBlock),
+        );
+        let block_infos = vec![wafer_run::BlockInfo::new(
+            "impresspress/vector",
+            "0.0.1",
+            "http-handler@v1",
+            "t",
+        )];
 
         let out = route_to_block(
             &ctx,
@@ -963,7 +974,10 @@ mod tests {
         use crate::test_support::{anon_msg, TestContext};
 
         let mut ctx = TestContext::new().await;
-        ctx.register_block("impresspress/system", std::sync::Arc::new(DispatchProbeBlock));
+        ctx.register_block(
+            "impresspress/system",
+            std::sync::Arc::new(DispatchProbeBlock),
+        );
 
         // No `BlockInfo` passed at all — proves the fix doesn't depend on
         // `declared_access` matching. `SystemBlock::info().endpoints` uses
@@ -1036,8 +1050,12 @@ mod tests {
         use crate::test_support::{anon_msg, TestContext};
 
         let ctx = TestContext::new().await;
-        let block_infos =
-            vec![wafer_run::BlockInfo::new("impresspress/products", "0.0.1", "http-handler@v1", "t")];
+        let block_infos = vec![wafer_run::BlockInfo::new(
+            "impresspress/products",
+            "0.0.1",
+            "http-handler@v1",
+            "t",
+        )];
 
         // Same general `/b/products` prefix as the webhook carve-out, but NOT
         // one of the router-declared-public paths — must still require auth.

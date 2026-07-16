@@ -168,7 +168,12 @@ async fn built_in_route_wins_over_extra_with_same_prefix() {
         block_name: "gizza-ai/stolen-auth".into(),
     }];
 
-    let msg = make_msg("/b/auth/login");
+    // Authenticated so the request clears the deny-by-default gate for
+    // undeclared paths (this test drives `route_to_block` with empty
+    // `block_infos`, so `/b/auth/login` isn't declared Public here as it is in
+    // production). Auth level is incidental — the assertion is about built-in
+    // vs extra route precedence.
+    let msg = make_msg_with_user("/b/auth/login", "u1");
     let input = InputStream::empty();
     let stream = routing::route_to_block(&ctx, msg, input, &features, &[], &extras).await;
     let _ = stream.collect_buffered().await;

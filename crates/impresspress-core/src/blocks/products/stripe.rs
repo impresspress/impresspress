@@ -65,7 +65,10 @@ async fn record_event(
         vec![
             ("id".to_string(), serde_json::json!(event_id)),
             ("event_type".to_string(), serde_json::json!(event_type)),
-            ("status".to_string(), serde_json::json!(EVENT_STATUS_PENDING)),
+            (
+                "status".to_string(),
+                serde_json::json!(EVENT_STATUS_PENDING),
+            ),
             ("created_at".to_string(), serde_json::json!(now)),
         ],
         vec!["id".to_string()],
@@ -1000,7 +1003,10 @@ mod tests {
         )
         .await
         .expect("count stripe_events rows");
-        assert_eq!(count, 1, "exactly one row should exist for the replayed event id");
+        assert_eq!(
+            count, 1,
+            "exactly one row should exist for the replayed event id"
+        );
     }
 
     #[tokio::test]
@@ -1049,10 +1055,17 @@ mod tests {
     /// simulating a delivery recorded by [`record_event`] at some earlier
     /// point (either a prior attempt that died mid-way, or one that already
     /// completed) — without going through `handle_webhook` itself.
-    async fn seed_stripe_event_row(ctx: &crate::test_support::TestContext, event_id: &str, status: &str) {
+    async fn seed_stripe_event_row(
+        ctx: &crate::test_support::TestContext,
+        event_id: &str,
+        status: &str,
+    ) {
         let mut row = HashMap::new();
         row.insert("id".to_string(), serde_json::json!(event_id));
-        row.insert("event_type".to_string(), serde_json::json!("charge.refunded"));
+        row.insert(
+            "event_type".to_string(),
+            serde_json::json!("charge.refunded"),
+        );
         row.insert("status".to_string(), serde_json::json!(status));
         row.insert(
             "created_at".to_string(),
