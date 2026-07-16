@@ -20,7 +20,6 @@ use std::{
 };
 
 use impresspress_core::cache_key::CONFIG_VERSION_KEY;
-use wafer_core::interfaces::database::service::DatabaseService;
 
 /// Floor of the isolate-local warm-hit probe window (ms) — see
 /// [`next_probe_deadline_ms`].
@@ -31,7 +30,14 @@ const PROBE_INTERVAL_JITTER_MS: u64 = 30_000;
 
 pub(crate) struct ReadyRuntime {
     pub wafer: wafer_run::Wafer,
-    pub db: Arc<dyn DatabaseService>,
+    /// Concrete D1 handle underneath the KV-cache wrapper `wafer`'s blocks
+    /// dispatch through — used by the audit-log batch-insert path
+    /// (`lib.rs::run`'s `waitUntil` drain) for D1's native `batch()` API.
+    /// See `database::D1DatabaseService::create_many`. `request_logs` is
+    /// never a KV-cached table, so writing through this concrete handle
+    /// instead of the type-erased `DatabaseService` the wafer holds is
+    /// equivalent to going through the wrapper.
+    pub batch_db: Arc<crate::database::D1DatabaseService>,
     /// KV backend this runtime was built with. Held so the config-version
     /// probe on the request hot path reuses it instead of constructing a fresh
     /// `KvStore` handle from `env` on every request.
@@ -217,7 +223,7 @@ where
 
     let rt = Rc::new(ReadyRuntime {
         wafer: built.wafer,
-        db: built.db,
+        batch_db: built.batch_db,
         kv: built.kv,
         version: probed_version,
         probe_deadline_ms: Cell::new(next_probe_deadline_ms(now)),

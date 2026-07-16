@@ -49,6 +49,104 @@ impl D1DatabaseService {
         let js_params: Vec<JsValue> = params.iter().map(json_value_to_js).collect();
         self.db.prepare(sql).bind(&js_params).map_err(db_err)
     }
+
+    /// Batch-insert `rows` into `collection` via D1's native `batch()` API —
+    /// one D1 round trip for the whole set instead of one `create()` (one
+    /// prepare+run each) per row. Used by the Cloudflare audit-log drain
+    /// (`lib.rs::run`'s post-dispatch `waitUntil`), which previously issued
+    /// one `create()` per queued `request_logs` row — see "Batch audit-log
+    /// persistence".
+    ///
+    /// Every row must resolve to the identical column set after stamping
+    /// (audit-log rows always do — `pipeline.rs` builds them from the same
+    /// fixed field list) since this method plans one INSERT *shape* for the
+    /// whole batch rather than re-planning per row; a row with a different
+    /// column set is rejected rather than silently producing a
+    /// short/misaligned INSERT.
+    ///
+    /// Mirrors `DbExec::create`'s per-row policy — synthesizes a UUID v4
+    /// `id` when absent (D1 never overrides `table_autogenerates_id`, so
+    /// ids are always caller/UUID-supplied) and stamps `created_at`/
+    /// `updated_at` when absent — but adds missing columns only ONCE for
+    /// the whole batch (via the first row, which is representative since
+    /// every row shares the same shape) rather than per row: the audit-log
+    /// table's schema is migration-owned, so this is a safety net, not the
+    /// steady-state path.
+    pub async fn create_many(
+        &self,
+        collection: &str,
+        rows: Vec<std::collections::HashMap<String, serde_json::Value>>,
+    ) -> Result<i64, DatabaseError> {
+        if rows.is_empty() {
+            return Ok(0);
+        }
+        let table = wafer_sql_utils::ident::sanitize_ident(collection);
+
+        let mut prepared: Vec<Vec<(String, serde_json::Value)>> = Vec::with_capacity(rows.len());
+        let mut shape: Option<Vec<String>> = None;
+        for mut data in rows {
+            if !data.contains_key("id") {
+                data.insert(
+                    "id".to_string(),
+                    serde_json::Value::String(uuid::Uuid::new_v4().to_string()),
+                );
+            }
+            let now = chrono::Utc::now().to_rfc3339();
+            data.entry("created_at".to_string())
+                .or_insert_with(|| serde_json::Value::String(now.clone()));
+            data.entry("updated_at".to_string())
+                .or_insert_with(|| serde_json::Value::String(now));
+
+            let mut pairs: Vec<(String, serde_json::Value)> = data
+                .into_iter()
+                .map(|(k, v)| (wafer_sql_utils::ident::sanitize_ident(&k), v))
+                .collect();
+            pairs.sort_by(|a, b| a.0.cmp(&b.0));
+
+            let cols: Vec<String> = pairs.iter().map(|(k, _)| k.clone()).collect();
+            match &shape {
+                None => shape = Some(cols),
+                Some(expected) if expected == &cols => {}
+                Some(_) => {
+                    return Err(DatabaseError::Internal(
+                        "create_many requires every row to share the same column set".into(),
+                    ));
+                }
+            }
+            prepared.push(pairs);
+        }
+
+        // Lazy column-add once (request_logs' schema is migration-owned;
+        // this is a safety net, not the steady-state path) — every row has
+        // the same shape, so the first is representative.
+        if let Some(first) = prepared.first() {
+            let sample: std::collections::HashMap<String, serde_json::Value> =
+                first.iter().cloned().collect();
+            DbExec::ensure_data_columns(self, &table, &sample).await?;
+        }
+
+        let mut statements = Vec::with_capacity(prepared.len());
+        for pairs in &prepared {
+            // D1 is always SQLite — same dialect `DbExec::BACKEND` declares
+            // for this backend below.
+            let stmt = wafer_sql_utils::query::build_insert(&table, pairs, Backend::Sqlite);
+            statements.push(self.prepare_bind(
+                &stmt.sql,
+                &wafer_sql_utils::value::sea_values_to_json(stmt.values),
+            )?);
+        }
+
+        let results = self.db.batch(statements).await.map_err(db_err)?;
+        for r in &results {
+            if !r.success() {
+                return Err(DatabaseError::Internal(format!(
+                    "batch insert into {collection}: {}",
+                    r.error().unwrap_or_else(|| "unknown error".to_string())
+                )));
+            }
+        }
+        Ok(results.len() as i64)
+    }
 }
 
 // SAFETY: `D1DatabaseService` holds a `D1Database` handle scoped to a single
