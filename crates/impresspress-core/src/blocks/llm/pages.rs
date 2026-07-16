@@ -60,7 +60,12 @@ fn render_page_body(
             })
         })
         .collect();
-    let messages_json_str = serde_json::to_string(&messages_json).unwrap_or_else(|_| "[]".into());
+    // Escape `<` so no `</script>` can terminate the application/json carrier
+    // element. serde_json does not escape `<`; the browser terminates a
+    // <script> element on literal `</script>` regardless of the type attribute.
+    let messages_json_str = serde_json::to_string(&messages_json)
+        .unwrap_or_else(|_| "[]".into())
+        .replace('<', "\\u003c");
 
     let thread_list = render_thread_list_pane(threads, thread_id);
     let messages_pane = render_messages_pane(entries, thread_id);
@@ -78,10 +83,12 @@ fn render_page_body(
         // marked.js for markdown rendering — self-hosted (vendored), content-hashed.
         script src=(crate::ui::assets::marked_js_url()) {}
 
-        // Server-rendered initial state for the chat module. Carrier is
-        // type="application/json" so the browser does NOT parse the body as JS —
-        // any `</script>` or `<` in user-typed message content is inert. The
-        // JS module reads it via JSON.parse on init().
+        // Server-rendered initial state for the chat module. `messages_json_str`
+        // has every literal `<` replaced with the JSON escape sequence
+        // "backslash u 0 0 3 c" (see above) so a `</script>` in user-typed
+        // message content cannot terminate this element —
+        // `type="application/json"` does NOT prevent element termination on
+        // its own. The JS module reads it via JSON.parse on init().
         script type="application/json" id="llm-chat-bootstrap" {
             (maud::PreEscaped(messages_json_str))
         }
@@ -903,59 +910,48 @@ mod tests {
         }
     }
 
-    /// XSS regression — a thread whose message content contains a
-    /// `</script>` sequence MUST NOT terminate the bootstrap script tag
-    /// prematurely. With the `type="application/json"` carrier, the body
-    /// is inert — the browser does not parse it as JS — so the literal
-    /// sequence appearing in textContent is safe. We also assert the dead
-    /// `_activeThreadId` / `_defaultModel` JS bootstrap fields are gone.
-    #[test]
-    fn render_page_body_carrier_escapes_user_content_safely() {
+    /// Build a `db::Record` with the given `content` field (role/created_at
+    /// filled with placeholder values), mirroring the fixture the carrier
+    /// tests need. Mirrors `make_thread`'s construction style above.
+    fn record_with_content(content: &str) -> db::Record {
         let mut data = std::collections::HashMap::new();
         data.insert("role".to_string(), serde_json::json!("user"));
-        data.insert(
-            "content".to_string(),
-            serde_json::json!("hello </script><script>alert(1)</script>"),
-        );
+        data.insert("content".to_string(), serde_json::json!(content));
         data.insert(
             "created_at".to_string(),
             serde_json::json!("2026-05-05T10:00:00Z"),
         );
-        let entry = db::Record {
+        db::Record {
             id: "e-1".to_string(),
             data,
-        };
+        }
+    }
 
-        let html = render_page_body(
-            &[],
-            &[entry],
-            &[],
-            "",
-            Some("t-1"),
-            "/b/static/llm-chat-test.js",
-        )
-        .into_string();
-
-        // Carrier present.
+    /// XSS regression — a thread whose message content contains a literal
+    /// `</script>` sequence must NOT appear verbatim in the rendered page.
+    /// serde_json does not escape `<`, and the browser terminates a
+    /// `<script>` element on the first literal `</script>` byte sequence
+    /// regardless of the `type="application/json"` attribute — so an
+    /// unescaped `<` would close the carrier early and let the rest of the
+    /// entry content run as live script.
+    #[test]
+    fn render_page_body_carrier_escapes_script_close() {
+        // An entry whose content contains a literal </script> must NOT appear
+        // verbatim in the rendered page — it would terminate the JSON carrier
+        // and inject live script. `type="application/json"` does NOT prevent
+        // element termination.
+        let entries = vec![record_with_content(
+            "</script><img src=x onerror=alert(1)>",
+        )];
+        let markup = render_page_body(&[], &entries, &[], "", None, "/x.js");
+        let html = markup.into_string();
         assert!(
-            html.contains(r#"<script type="application/json" id="llm-chat-bootstrap">"#),
-            "expected JSON carrier block: {html}"
-        );
-        // The dangerous content is INSIDE a non-JS-parsed block. We don't
-        // assert the absence of the literal bytes (they're allowed to appear
-        // in JSON text inside a type="application/json" block — they're inert).
-        // We assert that the JS bootstrap line that USED to inline values is gone.
-        assert!(
-            !html.contains("window._threadMessages = "),
-            "JS bootstrap line should be removed in favor of carrier: {html}"
-        );
-        assert!(
-            !html.contains("window._activeThreadId"),
-            "_activeThreadId was dead — should be removed entirely"
+            !html.contains("</script><img"),
+            "raw </script> must not survive into the carrier: {html}"
         );
         assert!(
-            !html.contains("window._defaultModel"),
-            "_defaultModel was dead — should be removed entirely"
+            html.contains("\\u003c/script"),
+            "the < of </script> must be JSON-escaped as \\u003c"
         );
     }
 
