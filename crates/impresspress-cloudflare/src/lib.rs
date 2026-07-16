@@ -312,9 +312,15 @@ where
         return worker::Response::error("not found", 404);
     };
     let presented = req.headers().get("x-deploy-token")?.unwrap_or_default();
+    // Hash both sides (sidesteps timing on the raw secret length/content),
+    // then compare the fixed-size digest *bytes* in constant time — hex
+    // strings compared with `!=` short-circuit on the first differing
+    // character, which leaks a per-character timing oracle on the digest
+    // (and, transitively, on the secret) despite the hash step.
+    let presented_digest = wafer_run::sha256(presented.as_bytes());
+    let expected_digest = wafer_run::sha256(secret.to_string().as_bytes());
     if presented.is_empty()
-        || wafer_run::sha256_hex(presented.as_bytes())
-            != wafer_run::sha256_hex(secret.to_string().as_bytes())
+        || !wafer_block_crypto::primitives::constant_time_eq(&presented_digest, &expected_digest)
     {
         return worker::Response::error("unauthorized", 401);
     }
