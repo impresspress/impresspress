@@ -43,9 +43,12 @@ extern "C" {
     ) -> Result<JsValue, JsValue>;
 
     /// Read file + metadata from OPFS.
-    /// Returns JSON string: `{ data: number[], meta: { content_type, size } }`.
-    /// Rejects with a `NotFoundError` `DOMException` if the folder or key
-    /// doesn't exist.
+    /// Returns a plain JS object `{ data: Uint8Array, meta: { content_type,
+    /// size } }` — NOT a JSON string. Decode directly with
+    /// `serde_wasm_bindgen::from_value` (`data` deserializes straight into a
+    /// `Vec<u8>` from the real `Uint8Array`, matching `network.rs`'s
+    /// `FetchResponse.body` pattern). Rejects with a `NotFoundError`
+    /// `DOMException` if the folder or key doesn't exist.
     #[wasm_bindgen(catch, js_name = storageGet)]
     pub async fn storage_get(folder: &str, key: &str) -> Result<JsValue, JsValue>;
 

@@ -163,7 +163,11 @@ export async function storagePut(folder, key, data, contentType) {
  * Read file + metadata from OPFS.
  * @param {string} folder
  * @param {string} key
- * @returns {string} JSON string: { data: number[], meta: { content_type, size } }
+ * @returns {{data: Uint8Array, meta: {content_type: string, size: number}}}
+ *   A plain JS object — NOT a JSON string. `storage.rs` decodes it directly
+ *   with `serde_wasm_bindgen::from_value`; `data` deserializes straight into
+ *   a Rust `Vec<u8>` from the real `Uint8Array` here, with no
+ *   Uint8Array→Array<number>→JSON round trip in either direction.
  */
 export async function storageGet(folder, key) {
     const storageRoot = await getStorageRoot();
@@ -173,10 +177,10 @@ export async function storageGet(folder, key) {
     const fileHandle = await folderHandle.getFileHandle(key);
     const file = await fileHandle.getFile();
     const buffer = await file.arrayBuffer();
-    const dataArray = Array.from(new Uint8Array(buffer));
+    const data = new Uint8Array(buffer);
 
     // Read metadata
-    let meta = { content_type: 'application/octet-stream', size: dataArray.length };
+    let meta = { content_type: 'application/octet-stream', size: data.length };
     try {
         const metaHandle = await folderHandle.getFileHandle(`${key}.__meta__`);
         const metaFile = await metaHandle.getFile();
@@ -186,7 +190,7 @@ export async function storageGet(folder, key) {
         // No metadata file — use defaults
     }
 
-    return JSON.stringify({ data: dataArray, meta });
+    return { data, meta };
 }
 
 /**

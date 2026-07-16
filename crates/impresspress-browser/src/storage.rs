@@ -18,13 +18,18 @@ unsafe impl Sync for BrowserStorageService {}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Convert a *resolved* JsValue to a String. Bridge storage calls resolve
-/// either `undefined` (mutating calls with no payload) or a plain/JSON
-/// string. Anything else would mean bridge.js resolved instead of rejected
-/// with something unexpected — surface its message rather than silently
-/// losing it (shares `bridge::describe`'s message extraction with the
-/// rejection path in `await_bridge` below, so both use the same
+/// Convert a *resolved* JsValue to a String. The mutating bridge storage
+/// calls that still route through `await_bridge` (`put`/`delete`/`list`/
+/// `list_folders`/`create_folder`/`delete_folder`) always resolve
+/// `undefined` or a JSON string. Anything else would mean bridge.js
+/// resolved with something unexpected — surface its message rather than
+/// silently losing it (shares `bridge::describe`'s message extraction with
+/// the rejection path in `await_bridge` below, so both use the same
 /// Error/DOMException `.message` lookup).
+///
+/// `get` resolves a structured JS object instead and decodes it directly
+/// with `serde_wasm_bindgen`, bypassing this string-shaped helper entirely —
+/// see its own method below.
 fn jsvalue_to_string(val: wasm_bindgen::JsValue) -> Result<String, StorageError> {
     if val.is_null() || val.is_undefined() {
         return Ok(String::new());
@@ -66,10 +71,12 @@ async fn await_bridge(
     }
 }
 
-// ─── JSON shapes returned by the bridge ──────────────────────────────────────
+// ─── Structured shapes decoded from the bridge (serde_wasm_bindgen, not JSON) ─
 
 #[derive(Deserialize)]
 struct GetResponse {
+    /// Deserializes straight from the JS object's real `Uint8Array` field —
+    /// no `Array<number>`/JSON round trip.
     data: Vec<u8>,
     meta: GetMeta,
 }
@@ -98,15 +105,18 @@ impl StorageService for BrowserStorageService {
     }
 
     async fn get(&self, folder: &str, key: &str) -> Result<(Vec<u8>, ObjectInfo), StorageError> {
-        // `await_bridge` already maps a missing folder/key to
-        // `StorageError::NotFound` via the OPFS `NotFoundError` DOMException
-        // rejection (see its doc comment) — bridge.js's `storageGet` never
-        // resolves an empty string on success, it always resolves a JSON
-        // payload, so there is no separate empty-string case to guard here.
-        let json = await_bridge(bridge::storage_get(folder, key)).await?;
+        // `storageGet` resolves a plain JS object `{ data: Uint8Array, meta }`
+        // (see `bridge::storage_get`'s doc comment) — not a string, so this
+        // bypasses `await_bridge`/`jsvalue_to_string` and maps the rejection
+        // directly, then decodes the resolved object with
+        // `serde_wasm_bindgen` in one step (no JSON round trip either
+        // direction).
+        let val = bridge::storage_get(folder, key)
+            .await
+            .map_err(map_rejection)?;
 
-        let resp: GetResponse = serde_json::from_str(&json)
-            .map_err(|e| StorageError::Internal(format!("parse error: {e}")))?;
+        let resp: GetResponse = serde_wasm_bindgen::from_value(val)
+            .map_err(|e| StorageError::Internal(format!("decode storage get response: {e}")))?;
 
         let info = ObjectInfo {
             key: key.to_string(),
@@ -210,7 +220,7 @@ mod tests {
     use wasm_bindgen::JsValue;
     use wasm_bindgen_test::wasm_bindgen_test;
 
-    use super::{jsvalue_to_string, map_rejection};
+    use super::{jsvalue_to_string, map_rejection, GetResponse};
 
     /// Build a JS object shaped like a rejected `DOMException`/`Error`:
     /// `{ name, message }`. This is exactly what OPFS's
@@ -274,5 +284,66 @@ mod tests {
             jsvalue_to_string(JsValue::from_str("hello")).unwrap(),
             "hello"
         );
+    }
+
+    // ── GetResponse decode (the structured `storageGet` shape) ──────────────
+    //
+    // `bridge::storage_get` used to resolve a JSON string that `get()`
+    // re-parsed with `serde_json::from_str`; it now resolves the plain JS
+    // object below, decoded in one step with `serde_wasm_bindgen`. These
+    // tests exercise exactly the decode step `get()` performs, using the
+    // same `Uint8Array`-in-a-plain-object shape `storageGet` in bridge.js
+    // actually resolves.
+
+    fn make_get_response_object(data: &[u8], content_type: &str, size: i64) -> JsValue {
+        use js_sys::Uint8Array;
+
+        let meta = Object::new();
+        Reflect::set(
+            &meta,
+            &JsValue::from_str("content_type"),
+            &JsValue::from_str(content_type),
+        )
+        .unwrap();
+        Reflect::set(
+            &meta,
+            &JsValue::from_str("size"),
+            &JsValue::from_f64(size as f64),
+        )
+        .unwrap();
+
+        let obj = Object::new();
+        Reflect::set(
+            &obj,
+            &JsValue::from_str("data"),
+            &Uint8Array::from(data).into(),
+        )
+        .unwrap();
+        Reflect::set(&obj, &JsValue::from_str("meta"), &meta).unwrap();
+        obj.into()
+    }
+
+    #[wasm_bindgen_test]
+    fn decodes_get_response_with_real_uint8array_in_one_step() {
+        let bytes = b"hello world";
+        let js_val = make_get_response_object(bytes, "text/plain", bytes.len() as i64);
+
+        let decoded: GetResponse =
+            serde_wasm_bindgen::from_value(js_val).expect("decode storage get response");
+
+        assert_eq!(decoded.data, bytes.to_vec());
+        assert_eq!(decoded.meta.content_type, "text/plain");
+        assert_eq!(decoded.meta.size, bytes.len() as i64);
+    }
+
+    #[wasm_bindgen_test]
+    fn decodes_get_response_with_empty_data() {
+        let js_val = make_get_response_object(&[], "application/octet-stream", 0);
+
+        let decoded: GetResponse =
+            serde_wasm_bindgen::from_value(js_val).expect("decode storage get response");
+
+        assert!(decoded.data.is_empty());
+        assert_eq!(decoded.meta.size, 0);
     }
 }
