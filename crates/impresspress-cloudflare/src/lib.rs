@@ -44,6 +44,18 @@ pub fn make_d1_database_service(
     env: &worker::Env,
     binding: &str,
 ) -> Result<Arc<dyn DatabaseService>, worker::Error> {
+    Ok(make_d1_database_service_concrete(env, binding)?)
+}
+
+/// Concrete-typed variant of [`make_d1_database_service`]. Used internally
+/// where a caller needs D1-specific capabilities beyond the
+/// `DatabaseService` trait object — e.g. the audit-log batch-insert path in
+/// `run()`, which needs D1's native `batch()` API via
+/// [`database::D1DatabaseService::create_many`].
+fn make_d1_database_service_concrete(
+    env: &worker::Env,
+    binding: &str,
+) -> Result<Arc<database::D1DatabaseService>, worker::Error> {
     let db = env.d1(binding)?;
     Ok(Arc::new(database::D1DatabaseService::new(db)))
 }
@@ -64,7 +76,7 @@ pub fn make_kv_cached_database_service(
     d1_binding: &str,
     kv_binding: &str,
 ) -> Result<Arc<dyn DatabaseService>, worker::Error> {
-    let (db, _backend) = make_kv_cached_database_service_with_backend(
+    let (db, _backend, _batch_db) = make_kv_cached_database_service_with_backend(
         env,
         d1_binding,
         kv_binding,
@@ -77,14 +89,20 @@ pub fn make_kv_cached_database_service(
 /// the `KvBackend` handle it constructs — the per-isolate runtime cache
 /// (task-7) needs the backend itself (not just the `DatabaseService` it's
 /// wrapped into) so it can probe the KV config-version stamp without re-deriving
-/// a `KvStore` handle from `env` on every request. The `/_deploy/init`
-/// endpoint re-derives its own handle via `make_kv_backend` for its
-/// post-funnel config-version bump.
+/// a `KvStore` handle from `env` on every request — and the concrete D1
+/// handle underneath the KV-cache wrapper, which the audit-log batch-insert
+/// path (`run()`'s `waitUntil` drain) needs for D1's native `batch()` API
+/// (`request_logs` is never a KV-cached table, so going around the wrapper
+/// for this one write path is equivalent to going through it). The
+/// `/_deploy/init` endpoint re-derives its own KV handle via
+/// `make_kv_backend` for its post-funnel config-version bump.
 /// Return type of [`make_kv_cached_database_service_with_backend`]: the
-/// wrapped `DatabaseService` alongside the raw `KvBackend` it was built from.
+/// wrapped `DatabaseService`, the raw `KvBackend` it was built from, and the
+/// concrete D1 handle underneath it.
 type KvCachedDbServiceWithBackend = (
     Arc<dyn DatabaseService>,
     Arc<dyn impresspress_core::kv::KvBackend>,
+    Arc<database::D1DatabaseService>,
 );
 
 fn make_kv_cached_database_service_with_backend(
@@ -93,7 +111,8 @@ fn make_kv_cached_database_service_with_backend(
     kv_binding: &str,
     mode: kv_cached_db::CacheMode,
 ) -> Result<KvCachedDbServiceWithBackend, worker::Error> {
-    let inner = make_d1_database_service(env, d1_binding)?;
+    let d1 = make_d1_database_service_concrete(env, d1_binding)?;
+    let inner: Arc<dyn DatabaseService> = d1.clone();
     let backend = make_kv_backend(env, kv_binding)?;
     // `DatabaseService` only requires `MaybeSend + MaybeSync` (real
     // `Send + Sync` on native, a no-op marker on wasm32 — see
@@ -105,7 +124,7 @@ fn make_kv_cached_database_service_with_backend(
         backend.clone(),
         mode,
     ));
-    Ok((db, backend))
+    Ok((db, backend, d1))
 }
 
 /// Construct a raw [`KvBackend`](impresspress_core::kv::KvBackend) from a worker
@@ -253,16 +272,51 @@ where
     init_isolate();
     let result = run_inner(req, env, register_blocks, register_post_build).await;
 
-    // Persist any audit rows queued during this dispatch off the response
-    // path. Rows are self-contained data; attaching them to *this* request's
-    // waitUntil is correct even if they were queued by an interleaved one.
     if let Some(rt) = runtime_cache::peek() {
+        // Persist any audit rows queued during this dispatch off the
+        // response path. Rows are self-contained data; attaching them to
+        // *this* request's waitUntil is correct even if they were queued by
+        // an interleaved one. Batched via D1's native `batch()` API
+        // (`create_many`) — one D1 round trip per table instead of one
+        // `create()` (one prepare+run) per row — and any persistence
+        // failure is logged rather than silently dropped.
         let rows = impresspress_core::pipeline::drain_queued_request_logs();
         if !rows.is_empty() {
-            let db = rt.db.clone();
+            let batch_db = rt.batch_db.clone();
             ctx.wait_until(async move {
+                let mut by_table: std::collections::HashMap<
+                    &'static str,
+                    Vec<std::collections::HashMap<String, serde_json::Value>>,
+                > = std::collections::HashMap::new();
                 for row in rows {
-                    let _ = db.create(row.table, row.data).await;
+                    by_table.entry(row.table).or_default().push(row.data);
+                }
+                for (table, rows) in by_table {
+                    let n = rows.len();
+                    if let Err(e) = batch_db.create_many(table, rows).await {
+                        worker::console_log!(
+                            "audit-log batch persistence failed ({n} rows into {table}): {e}"
+                        );
+                    }
+                }
+            });
+        }
+
+        // A config-version KV PUT failed earlier in this dispatch (most
+        // likely KV's 1-write/sec/key throttle) and was queued for a
+        // delayed retry instead of retrying immediately into the same
+        // throttle window — see kv_cached_db::bump_config_version. Retry it
+        // off the response path, after a delay comfortably past that
+        // window.
+        if let Some(stamp) = kv_cached_db::take_pending_version_retry() {
+            let kv = rt.kv.clone();
+            ctx.wait_until(async move {
+                worker::Delay::from(std::time::Duration::from_millis(1_100)).await;
+                if let Err(e) = kv
+                    .put(impresspress_core::cache_key::CONFIG_VERSION_KEY, &stamp)
+                    .await
+                {
+                    worker::console_log!("delayed config-version retry failed: {e}");
                 }
             });
         }
@@ -271,8 +325,17 @@ where
     match result {
         Ok(response) => Ok(response),
         Err(e) => {
-            worker::console_log!("impresspress-cloudflare run error: {e}");
-            worker::Response::error(format!("impresspress: {e}"), 500)
+            // Never return the real cause to the client — `e` can carry
+            // SQL, binding, schema, or other configuration detail. Log it
+            // (with a correlation id) and return an opaque 500; an operator
+            // greps the isolate's console log for the same id to find the
+            // real error.
+            let correlation_id = uuid::Uuid::new_v4();
+            worker::console_log!("impresspress-cloudflare run error [{correlation_id}]: {e}");
+            worker::Response::error(
+                format!("internal server error (reference: {correlation_id})"),
+                500,
+            )
         }
     }
 }
@@ -303,9 +366,15 @@ where
         return worker::Response::error("not found", 404);
     };
     let presented = req.headers().get("x-deploy-token")?.unwrap_or_default();
+    // Hash both sides (sidesteps timing on the raw secret length/content),
+    // then compare the fixed-size digest *bytes* in constant time — hex
+    // strings compared with `!=` short-circuit on the first differing
+    // character, which leaks a per-character timing oracle on the digest
+    // (and, transitively, on the secret) despite the hash step.
+    let presented_digest = wafer_run::sha256(presented.as_bytes());
+    let expected_digest = wafer_run::sha256(secret.to_string().as_bytes());
     if presented.is_empty()
-        || wafer_run::sha256_hex(presented.as_bytes())
-            != wafer_run::sha256_hex(secret.to_string().as_bytes())
+        || !wafer_block_crypto::primitives::constant_time_eq(&presented_digest, &expected_digest)
     {
         return worker::Response::error("unauthorized", 401);
     }
@@ -404,6 +473,10 @@ struct BuiltRuntime {
     wafer: wafer_run::Wafer,
     storage_block: Arc<impresspress_core::blocks::storage::ImpresspressStorageBlock>,
     db: Arc<dyn DatabaseService>,
+    /// Concrete D1 handle underneath `db`'s KV-cache wrapper — used by the
+    /// audit-log batch-insert path (`run()`'s `waitUntil` drain) for D1's
+    /// native `batch()` API. See `database::D1DatabaseService::create_many`.
+    batch_db: Arc<database::D1DatabaseService>,
     /// KV backend the DB service is cached through — reused by the per-isolate
     /// runtime cache (`runtime_cache`) to probe the config-version stamp
     /// without re-deriving a second `KvStore` handle from `env`.
@@ -456,7 +529,7 @@ where
     ) -> Result<(), Box<dyn std::error::Error>>,
 {
     // 1. Construct D1 service (with KV cache) first — env vars live in D1.
-    let (db, kv) = make_kv_cached_database_service_with_backend(
+    let (db, kv, batch_db) = make_kv_cached_database_service_with_backend(
         env,
         runner::D1_BINDING,
         runner::KV_BINDING,
@@ -584,6 +657,7 @@ where
         wafer,
         storage_block,
         db,
+        batch_db,
         kv,
     })
 }

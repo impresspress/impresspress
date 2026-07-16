@@ -24,20 +24,42 @@ use wafer_core::interfaces::crypto::service::{CryptoError, CryptoService};
 /// CryptoService backing the CF Worker runtime. See module docs for policy.
 pub struct ImpresspressCryptoService {
     jwt_secret: String,
+    /// Lazily constructed once, on first use, instead of once per
+    /// sign/verify/sign_for/verify_for call — `Argon2JwtCryptoService::new`
+    /// re-clones `jwt_secret` and re-validates its length every time it's
+    /// called, which is pure overhead after the first (successful or
+    /// failed) construction. `OnceLock` degrades to a plain guarded cell on
+    /// wasm32 (single-threaded), so this is safe despite every
+    /// `CryptoService` method taking `&self`.
+    ///
+    /// The error side is stored pre-stringified (`String`, not
+    /// `CryptoError`) because `CryptoError` isn't `Clone`; a fresh
+    /// `CryptoError::Other` is rebuilt from the cached message on every
+    /// call after the first, so a missing/short secret still fails
+    /// consistently rather than only on the first call.
+    jwt_engine: std::sync::OnceLock<Result<Argon2JwtCryptoService, String>>,
 }
 
 impl ImpresspressCryptoService {
     pub fn new(jwt_secret: String) -> Self {
-        Self { jwt_secret }
+        Self {
+            jwt_secret,
+            jwt_engine: std::sync::OnceLock::new(),
+        }
     }
 
-    /// Build the shared JWT engine. Fails when the secret is missing or
-    /// shorter than `MIN_JWT_SECRET_LEN` — surfaced per operation rather
-    /// than at worker boot, because the worker constructs this service
-    /// before config is necessarily complete and a broken-auth deployment
-    /// beats a boot-looping one.
-    fn jwt(&self) -> Result<Argon2JwtCryptoService, CryptoError> {
-        Argon2JwtCryptoService::new(self.jwt_secret.clone())
+    /// Borrow the shared JWT engine, constructing it on first use. Fails
+    /// when the secret is missing or shorter than `MIN_JWT_SECRET_LEN` —
+    /// surfaced per operation rather than at worker boot, because the
+    /// worker constructs this service before config is necessarily
+    /// complete and a broken-auth deployment beats a boot-looping one.
+    fn jwt(&self) -> Result<&Argon2JwtCryptoService, CryptoError> {
+        self.jwt_engine
+            .get_or_init(|| {
+                Argon2JwtCryptoService::new(self.jwt_secret.clone()).map_err(|e| e.to_string())
+            })
+            .as_ref()
+            .map_err(|msg| CryptoError::Other(msg.clone()))
     }
 }
 

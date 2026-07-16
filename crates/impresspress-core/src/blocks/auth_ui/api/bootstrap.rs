@@ -52,8 +52,17 @@ pub async fn handle(ctx: &dyn Context, input: InputStream) -> OutputStream {
 
     let token_hash = hash_token(&token);
 
-    // 1. Verify the token row exists and hasn't expired.
-    match bootstrap_tokens::is_valid(ctx, &token_hash).await {
+    // 1. Atomically validate AND consume the token in a single
+    //    `DELETE ... RETURNING` round trip (`take_valid_by_hash`), *before*
+    //    creating the admin account. This closes the redemption race the old
+    //    validate → create-admin → best-effort-delete sequence had: two
+    //    concurrent requests presenting the same raw token could both pass
+    //    the (separate) `is_valid` read and both create an admin user before
+    //    either got around to deleting the row. Because the read and the
+    //    delete are now the same SQL statement, the database serializes the
+    //    two attempts — only one caller can ever observe `true` here, so
+    //    only one can proceed past this point.
+    match bootstrap_tokens::take_valid_by_hash(ctx, &token_hash).await {
         Ok(true) => {}
         Ok(false) => return err_unauthorized("invalid or expired bootstrap token"),
         Err(e) => return err_internal("bootstrap_tokens lookup", e),
@@ -62,18 +71,11 @@ pub async fn handle(ctx: &dyn Context, input: InputStream) -> OutputStream {
     // 2. Create the admin user via the same code path bootstrap-on-init uses.
     //    Reusing this keeps the legacy companion columns (`name`, `disabled`,
     //    `deleted_at`) and the local_credentials row consistent with the
-    //    env-var path.
+    //    env-var path. The token is already consumed (step 1), so a failure
+    //    here just means the caller needs a fresh token from an operator —
+    //    it can't reopen the single-use race.
     if let Err(e) = bootstrap::bootstrap_with_email_password(ctx, &email, &password).await {
         return err_internal("create admin", e);
-    }
-
-    // 3. Consume the token row. Best-effort: the admin user already exists,
-    //    so a delete failure here just leaves a stale row that will expire on
-    //    its own.
-    if let Err(e) = bootstrap_tokens::delete_by_hash(ctx, &token_hash).await {
-        tracing::warn!(
-            "bootstrap_tokens::delete_by_hash after redemption failed (admin already created): {e}"
-        );
     }
 
     // 4. Look up the just-created user so we have its id for session minting.
@@ -173,6 +175,125 @@ mod tests {
 
         // Bootstrap-token row consumed.
         assert!(!bootstrap_tokens::is_valid(&ctx, &hash).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn second_redemption_of_same_token_fails_and_does_not_double_create() {
+        // Reproduces the single-use race directly (not just the repo-level
+        // primitive): the same raw token, redeemed a second time, must be
+        // rejected rather than creating a second admin — proving
+        // `take_valid_by_hash`'s atomic consume is actually wired into the
+        // handler in the "consume before create" order.
+        let ctx = ctx_with_crypto().await;
+
+        let raw = "single-use-token";
+        let hash = hash_token(raw);
+        let expires = (chrono::Utc::now() + chrono::Duration::hours(24))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        bootstrap_tokens::insert(&ctx, hash.clone(), &expires)
+            .await
+            .unwrap();
+
+        let form = format!("token={raw}&email=admin@example.com&password=test1234");
+
+        let first = handle(&ctx, InputStream::from_bytes(form.clone().into_bytes())).await;
+        assert_eq!(
+            crate::test_support::output_status(first).await,
+            302,
+            "first redemption of a fresh token must succeed"
+        );
+
+        // Same raw token again — the row is already gone.
+        let second = handle(&ctx, InputStream::from_bytes(form.into_bytes())).await;
+        assert!(
+            crate::test_support::output_is_error(second, "Unauthenticated").await,
+            "a second redemption of an already-consumed token must be rejected"
+        );
+
+        // Only one admin user exists — the second attempt never reached
+        // `bootstrap_with_email_password`.
+        let count =
+            wafer_core::clients::database::count(&ctx, crate::blocks::auth::USERS_TABLE, &[])
+                .await
+                .unwrap();
+        assert_eq!(
+            count, 1,
+            "the second redemption must not create a second user"
+        );
+    }
+
+    #[tokio::test]
+    async fn concurrent_redemption_of_same_token_creates_at_most_one_admin() {
+        // Reproduces the actual race from the finding: two concurrent
+        // requests presenting the SAME raw token but DIFFERENT emails. The
+        // SQLite backend's write path is a genuine async round trip through
+        // a dedicated worker thread (see `wafer-block-sqlite`'s
+        // `ConnWorker`), so `tokio::join!`ing two `handle()` calls really
+        // does interleave their DB round trips rather than running them
+        // back-to-back. A non-atomic validate → create → delete sequence
+        // can let both requests observe the token as valid before either
+        // deletes it, minting two admin accounts from one single-use token.
+        let ctx = ctx_with_crypto().await;
+
+        let raw = "concurrent-token";
+        let hash = hash_token(raw);
+        let expires = (chrono::Utc::now() + chrono::Duration::hours(24))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        bootstrap_tokens::insert(&ctx, hash.clone(), &expires)
+            .await
+            .unwrap();
+
+        let form_a = format!("token={raw}&email=admin-a@example.com&password=test1234");
+        let form_b = format!("token={raw}&email=admin-b@example.com&password=test1234");
+
+        let (out_a, out_b) = tokio::join!(
+            handle(&ctx, InputStream::from_bytes(form_a.into_bytes())),
+            handle(&ctx, InputStream::from_bytes(form_b.into_bytes())),
+        );
+        // One of the two concurrent redemptions is expected to come back as
+        // an error terminal (the loser observes the token already
+        // consumed), so this can't use `output_status`/`collect_or_panic` —
+        // those panic on an error-shaped `OutputStream`. Collect each
+        // outcome as either a status code (success) or an error code
+        // (rejection) without asserting per-branch which one it is; the
+        // real assertion is the aggregate "exactly one success" below.
+        async fn outcome(out: OutputStream) -> Result<u16, String> {
+            match out.collect_buffered().await {
+                Ok(buf) => Ok(buf
+                    .meta
+                    .iter()
+                    .find(|m| m.key == "resp.status")
+                    .and_then(|m| m.value.parse::<u16>().ok())
+                    .unwrap_or(200)),
+                Err(wafer_run::streams::output::TerminalNotResponse::Error(e)) => {
+                    Err(format!("{:?}", e.code))
+                }
+                Err(other) => panic!("unexpected terminal: {other:?}"),
+            }
+        }
+        let outcome_a = outcome(out_a).await;
+        let outcome_b = outcome(out_b).await;
+
+        let successes = [&outcome_a, &outcome_b]
+            .iter()
+            .filter(|o| matches!(o, Ok(302)))
+            .count();
+        assert_eq!(
+            successes, 1,
+            "exactly one concurrent redemption of the same token may succeed \
+             (got {outcome_a:?} and {outcome_b:?})"
+        );
+
+        let count =
+            wafer_core::clients::database::count(&ctx, crate::blocks::auth::USERS_TABLE, &[])
+                .await
+                .unwrap();
+        assert_eq!(
+            count, 1,
+            "a single bootstrap token must create at most one admin account"
+        );
     }
 
     #[tokio::test]
