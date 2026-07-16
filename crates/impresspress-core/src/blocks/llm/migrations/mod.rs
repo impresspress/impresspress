@@ -8,6 +8,7 @@
 //! `ensure-table-removal-in-progress`).
 
 const SQL_001_SQLITE: &str = include_str!("001_llm_schema.sqlite.sql");
+#[cfg(feature = "postgres")]
 const SQL_001_POSTGRES: &str = include_str!("001_llm_schema.postgres.sql");
 
 /// Ordered SQLite migration scripts for this block, as `(basename, content)`
@@ -20,12 +21,19 @@ const SQL_001_POSTGRES: &str = include_str!("001_llm_schema.postgres.sql");
 /// applies them on every deploy).
 pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[("001_llm_schema", SQL_001_SQLITE)];
 
-/// Ordered PostgreSQL migration scripts, matching [`SQLITE_MIGRATIONS`].
+/// Ordered PostgreSQL migration scripts, matching [`SQLITE_MIGRATIONS`]. Empty
+/// when the `postgres` feature is off — see `files::migrations`'s doc for the
+/// rationale (Cloudflare/D1 never selects postgres; don't embed dead SQL).
+#[cfg(feature = "postgres")]
 pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[SQL_001_POSTGRES];
+#[cfg(not(feature = "postgres"))]
+pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[];
 
 #[cfg(test)]
 mod tests {
-    use super::{SQL_001_POSTGRES, SQL_001_SQLITE};
+    #[cfg(feature = "postgres")]
+    use super::SQL_001_POSTGRES;
+    use super::SQL_001_SQLITE;
 
     fn split_statements(sql: &str) -> usize {
         // Inline mirror of `migration_helper::split_statements`'s
@@ -55,6 +63,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "postgres")]
     fn postgres_sql_splits_into_expected_chunks() {
         assert_eq!(
             split_statements(SQL_001_POSTGRES),
@@ -77,6 +86,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "postgres")]
     fn postgres_creates_both_tables() {
         assert!(SQL_001_POSTGRES.contains("impresspress__llm__settings"));
         assert!(SQL_001_POSTGRES.contains("impresspress__llm__providers"));
