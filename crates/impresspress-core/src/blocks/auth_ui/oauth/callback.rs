@@ -417,15 +417,8 @@ async fn resolve_user(
         // No link yet. Try email-based account merging.
         match users::find_by_email(ctx, &info.email).await {
             Ok(Some(existing_user)) => {
-                // Check if the existing user account is disabled. The
-                // authoritative flag is `UserRow.disabled`; the previous
-                // `role == "disabled"` check tested a value nothing ever
-                // writes, so disabled accounts could still authenticate via
-                // OAuth.
-                if !existing_user.is_active() {
-                    return Err(err_forbidden("Account is disabled"));
-                }
-                // Reuse this account; the upsert below will create the new link.
+                // (removed) the per-branch `if !existing_user.is_active()` check
+                // — the shared gate below now covers every branch.
                 existing_user.id
             }
             Ok(None) => {
@@ -481,6 +474,19 @@ async fn resolve_user(
             Err(e) => return Err(err_internal("User lookup failed", e)),
         }
     };
+
+    // --- Lifecycle gate (single enforcement point) ---
+    // Every branch above (existing link, email merge, new signup) converges
+    // here. Verify the resolved account may authenticate BEFORE mutating the
+    // provider link or issuing tokens. `is_active()` covers both `disabled`
+    // and soft-delete (`deleted_at`). The existing-link branch previously
+    // skipped this, letting disabled/deleted linked accounts re-authenticate.
+    match users::find_by_id(ctx, &user_id).await {
+        Ok(Some(u)) if u.is_active() => {}
+        Ok(Some(_)) => return Err(err_forbidden("Account is disabled")),
+        Ok(None) => return Err(err_forbidden("Account not found")),
+        Err(e) => return Err(err_internal("User lookup failed", e)),
+    }
 
     // --- Step 4: upsert the provider_links row ---
     if let Err(e) = provider_links::upsert(
@@ -937,6 +943,125 @@ mod security_regression_tests {
         assert!(
             session_rows.is_empty(),
             "no session may be created for a soft-deleted OAuth login"
+        );
+    }
+
+    /// Whole-branch regression: the existing-provider-link path reused
+    /// `link.user_id` with NO lifecycle check. A disabled user who already had
+    /// a provider link could re-authenticate and mint fresh tokens. The shared
+    /// post-resolution gate must reject them.
+    #[tokio::test]
+    async fn disabled_pre_linked_user_cannot_oauth_in() {
+        let email = "disabled-linked@example.com";
+        let ctx = ctx_for_oauth(email, &[]).await;
+
+        let user = users::insert(
+            &ctx,
+            users::NewUser {
+                email: email.to_string(),
+                display_name: "Disabled Linked User".to_string(),
+                avatar_url: None,
+                role: "user".to_string(),
+            },
+        )
+        .await
+        .expect("seed user");
+
+        // Pre-existing provider link → callback takes the existing-link branch.
+        // provider_ref must match the mock userinfo `sub` ("google-user-123").
+        crate::blocks::auth::repo::provider_links::upsert(
+            &ctx,
+            crate::blocks::auth::repo::provider_links::NewLink {
+                provider: "google",
+                provider_ref: "google-user-123",
+                user_id: &user.id,
+                provider_login: "disabled-linked",
+                access_token: "old-token",
+            },
+        )
+        .await
+        .expect("seed provider link");
+
+        // Disable AFTER linking.
+        let mut upd = crate::util::json_map(serde_json::json!({ "disabled": true }));
+        crate::util::stamp_updated(&mut upd);
+        wafer_core::clients::database::update(
+            &ctx,
+            crate::blocks::auth::USERS_TABLE,
+            &user.id,
+            upd,
+        )
+        .await
+        .expect("disable user");
+
+        let out = handle(&ctx, &callback_msg()).await;
+        assert!(
+            crate::test_support::output_is_error(out, "PermissionDenied").await,
+            "disabled pre-linked account must be rejected (regression: it logged in)"
+        );
+        let session_rows = sessions::list_for_user(&ctx, &user.id)
+            .await
+            .expect("list sessions ok");
+        assert!(
+            session_rows.is_empty(),
+            "no session for disabled pre-linked login"
+        );
+    }
+
+    /// Same, but soft-deleted (deleted_at set, disabled=false) and pre-linked.
+    #[tokio::test]
+    async fn soft_deleted_pre_linked_user_cannot_oauth_in() {
+        let email = "softdel-linked@example.com";
+        let ctx = ctx_for_oauth(email, &[]).await;
+
+        let user = users::insert(
+            &ctx,
+            users::NewUser {
+                email: email.to_string(),
+                display_name: "Soft Deleted Linked User".to_string(),
+                avatar_url: None,
+                role: "user".to_string(),
+            },
+        )
+        .await
+        .expect("seed user");
+        crate::blocks::auth::repo::provider_links::upsert(
+            &ctx,
+            crate::blocks::auth::repo::provider_links::NewLink {
+                provider: "google",
+                provider_ref: "google-user-123",
+                user_id: &user.id,
+                provider_login: "softdel-linked",
+                access_token: "old-token",
+            },
+        )
+        .await
+        .expect("seed provider link");
+
+        let mut upd = crate::util::json_map(serde_json::json!({
+            "deleted_at": "2026-01-01T00:00:00Z"
+        }));
+        crate::util::stamp_updated(&mut upd);
+        wafer_core::clients::database::update(
+            &ctx,
+            crate::blocks::auth::USERS_TABLE,
+            &user.id,
+            upd,
+        )
+        .await
+        .expect("soft-delete user");
+
+        let out = handle(&ctx, &callback_msg()).await;
+        assert!(
+            crate::test_support::output_is_error(out, "PermissionDenied").await,
+            "soft-deleted pre-linked account must be rejected (regression: it logged in)"
+        );
+        let session_rows = sessions::list_for_user(&ctx, &user.id)
+            .await
+            .expect("list sessions ok");
+        assert!(
+            session_rows.is_empty(),
+            "no session for soft-deleted pre-linked login"
         );
     }
 }
