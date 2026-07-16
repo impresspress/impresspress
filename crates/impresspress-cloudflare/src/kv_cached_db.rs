@@ -148,6 +148,12 @@ impl KvCachedD1DatabaseService {
     /// one-second window and fails the same way. A failed attempt instead
     /// queues a delayed retry — see [`take_pending_version_retry`], drained
     /// by `lib.rs::run()` through `ctx.wait_until` well outside the
+    /// throttle window. A coalesce-SKIP (this call landed inside another
+    /// call's throttle window, so it never even attempts a PUT) *also*
+    /// mints and stashes a fresh stamp for that same delayed-retry queue —
+    /// otherwise only the first write of a sub-second burst gets a stamp,
+    /// and a runtime that rebuilds mid-burst could stay pinned to a stale
+    /// version until an unrelated future write happens to land outside a
     /// throttle window.
     async fn bump_config_version(&self, collection: &str, op: &str) {
         if !self.mode.bump_on_write || !cache_key::bumps_config_version(collection) {
@@ -172,10 +178,26 @@ impl KvCachedD1DatabaseService {
             // already marked dirty above; whichever attempt lands (this
             // one, or a queued delayed retry) carries a fresh-enough stamp
             // for every OTHER isolate. Skip the redundant PUT.
+            //
+            // But mint-and-stash a fresh stamp for the delayed-retry drain
+            // regardless: in a burst of writes inside one coalesce window,
+            // only the first write's PUT actually lands — writes 2..N all
+            // take this branch and none of them get their own KV stamp. If
+            // we didn't stash anything here, a rebuild that happens to land
+            // mid-burst (after write 1's stamp, before write N's) would see
+            // no further version bump until some unrelated future write
+            // finally attempts (and lands) a PUT outside the window. Reuse
+            // the same single-slot pending-retry queue the failed-PUT path
+            // below feeds — `run()` unconditionally drains it via
+            // `take_pending_version_retry` and PUTs it ~1.1s later, past the
+            // throttle window, so the post-burst state still gets one fresh
+            // stamp even though no coalesced write got to PUT its own.
+            note_pending_version_retry(new_version_stamp());
             tracing::debug!(
                 table = %collection,
                 op,
-                "config-version bump coalesced (< 1s since last attempt)"
+                "config-version bump coalesced (< 1s since last attempt); \
+                 stashed fresh stamp for delayed retry"
             );
             return;
         }
@@ -202,11 +224,14 @@ thread_local! {
     /// [`KvCachedD1DatabaseService::bump_config_version`] — see
     /// [`BUMP_COALESCE_WINDOW_MS`].
     static LAST_BUMP_ATTEMPT_MS: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
-    /// A version stamp whose KV PUT failed (most likely the 1-write/sec/key
-    /// throttle) and is waiting for a delayed retry. Drained by
-    /// [`take_pending_version_retry`] — `lib.rs::run()` calls it after
-    /// dispatch and retries through `ctx.wait_until`, off the response path
-    /// and comfortably past the throttle window.
+    /// A version stamp waiting for a delayed retry PUT — either because its
+    /// own KV PUT failed (most likely the 1-write/sec/key throttle), or
+    /// because it was minted fresh by a coalesce-SKIP that never attempted a
+    /// PUT at all (see `bump_config_version`'s coalescing gate). Single
+    /// slot, last-wins: only the most recent pending stamp needs to land.
+    /// Drained by [`take_pending_version_retry`] — `lib.rs::run()` calls it
+    /// after dispatch and retries through `ctx.wait_until`, off the response
+    /// path and comfortably past the throttle window.
     static PENDING_VERSION_RETRY: std::cell::RefCell<Option<String>> =
         const { std::cell::RefCell::new(None) };
 }
@@ -220,8 +245,8 @@ fn note_pending_version_retry(stamp: String) {
     PENDING_VERSION_RETRY.with(|p| *p.borrow_mut() = Some(stamp));
 }
 
-/// Take (and clear) any version stamp whose PUT failed and needs a delayed
-/// retry. See the `PENDING_VERSION_RETRY` thread_local's doc.
+/// Take (and clear) any version stamp still needing a delayed retry PUT. See
+/// the `PENDING_VERSION_RETRY` thread_local's doc.
 pub(crate) fn take_pending_version_retry() -> Option<String> {
     PENDING_VERSION_RETRY.with(|p| p.borrow_mut().take())
 }

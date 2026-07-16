@@ -216,12 +216,22 @@ fn sensitive_check_columns(table: CachedTable) -> Option<(&'static str, &'static
 /// drift from the display-masking policy: a row is sensitive when its
 /// `sensitive` flag is set OR its key follows the `_SECRET`/`_KEY` suffix
 /// convention.
+///
+/// Uses [`crate::util::json_as_i64`] (not a bare `v.as_i64()`) for the
+/// `sensitive` column so this stays in exact parity with the display-masking
+/// path: the SQLite service can round-trip a lazily-added column as a TEXT
+/// `"1"` string, and a flag-only-sensitive row stored that way must still be
+/// treated as sensitive here, or it would leak into KV while the display
+/// path correctly masks it.
 pub fn row_is_sensitive(table: CachedTable, row: &HashMap<String, serde_json::Value>) -> bool {
     let Some((key_col, sensitive_col)) = sensitive_check_columns(table) else {
         return false;
     };
     let key = row.get(key_col).and_then(|v| v.as_str()).unwrap_or("");
-    let sensitive_flag = row.get(sensitive_col).and_then(|v| v.as_i64()).unwrap_or(0);
+    let sensitive_flag = row
+        .get(sensitive_col)
+        .and_then(crate::util::json_as_i64)
+        .unwrap_or(0);
     crate::util::is_sensitive_key(key, sensitive_flag)
 }
 
@@ -624,6 +634,22 @@ mod tests {
             CachedTable::Variables,
             &variables_row("SITE_NAME", 0)
         ));
+    }
+
+    #[test]
+    fn row_is_sensitive_true_when_flag_set_as_string() {
+        // A lazily-added column can round-trip as TEXT ("1") rather than a
+        // JSON number. `row_is_sensitive` must accept that the same way the
+        // display-masking path (`crate::util::json_as_i64`) does, or a
+        // string-stored sensitive flag would leak into the KV cache while
+        // still being masked on display — see the parity note on
+        // `row_is_sensitive`.
+        let mut r = variables_row("SITE_NAME", 0);
+        r.insert(
+            "sensitive".into(),
+            serde_json::Value::String("1".to_string()),
+        );
+        assert!(row_is_sensitive(CachedTable::Variables, &r));
     }
 
     #[test]
