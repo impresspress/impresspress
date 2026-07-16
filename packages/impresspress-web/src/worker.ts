@@ -13,15 +13,24 @@ let routes: string[] = ['/b/', '/health', '/openapi.json', '/.well-known/agent.j
  * events arriving before the first `initialize()` call resolves) — only
  * the first call does work; every other caller awaits the same in-flight
  * promise instead of racing a second `init()`/`wasmInitialize()` pass.
+ *
+ * On failure, the cached promise is cleared so the NEXT call retries from
+ * scratch instead of permanently replaying the same rejection (which would
+ * 503 the worker forever after one transient init failure).
  */
 export async function initialize(): Promise<void> {
   if (initialized) return;
   if (initPromise) return initPromise;
 
   initPromise = (async () => {
-    await init();
-    await wasmInitialize();
-    initialized = true;
+    try {
+      await init();
+      await wasmInitialize();
+      initialized = true;
+    } catch (err) {
+      initPromise = null;
+      throw err;
+    }
   })();
 
   return initPromise;
