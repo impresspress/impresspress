@@ -11,17 +11,27 @@ use crate::{
         },
     },
     crypto::{META_AUTH_EXP, META_AUTH_JTI},
-    http::ResponseBuilder,
+    http::{err_internal, ResponseBuilder},
 };
 
 pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let user_id = msg.user_id();
     if !user_id.is_empty() {
         // SEC-032/039: revoke (don't delete) the user's refresh-token rows
-        // so the tombstones remain available for reuse detection. The
-        // browser drops its cookie below either way; this just invalidates
-        // any in-flight refresh attempts on other clients.
-        tokens::revoke_all_for_user(ctx, user_id).await.ok();
+        // so the tombstones remain available for reuse detection. A
+        // revocation failure must NOT be reported as a successful logout —
+        // the whole point of this call is invalidating refresh tokens on
+        // every device; silently discarding the failure here (the old
+        // `.ok()`) left revocable-in-name-only sessions live everywhere
+        // while telling the caller everything worked.
+        if let Err(e) = tokens::revoke_all_for_user(ctx, user_id).await {
+            tracing::error!(
+                user_id = %user_id,
+                error = %e,
+                "logout: refresh-token revocation failed"
+            );
+            return err_internal("Logout could not fully revoke the session", e);
+        }
 
         // SEC-042: the currently-presented access JWT stays structurally
         // valid until its natural exp. Blocklist its `jti` so subsequent
@@ -49,7 +59,11 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     chrono::Utc::now() + chrono::Duration::seconds(access_lifetime as i64)
                 });
             let expires_at_iso = expires_at.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-            let _ = jwt_blocklist::insert(
+            // Same fail-closed treatment as the refresh-token revocation
+            // above: if the currently-presented JWT can't be blocklisted,
+            // it stays valid until its natural exp — logout must not claim
+            // success in that case.
+            if let Err(e) = jwt_blocklist::insert(
                 ctx,
                 NewBlocklistEntry {
                     jti,
@@ -57,7 +71,16 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     expires_at: &expires_at_iso,
                 },
             )
-            .await;
+            .await
+            {
+                tracing::error!(
+                    user_id = %user_id,
+                    jti = %jti,
+                    error = %e,
+                    "logout: jwt blocklist insert failed"
+                );
+                return err_internal("Logout could not fully revoke the session", e);
+            }
         }
     }
 
@@ -67,4 +90,68 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
         .status(303)
         .set_header("Location", "/b/auth/login")
         .json(&serde_json::json!({"message": "Logged out successfully"}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::test_support::{
+        auth_msg, output_is_error, output_status, FailingDbOpContext, TestContext,
+    };
+
+    #[tokio::test]
+    async fn anonymous_logout_still_succeeds() {
+        // No auth.user_id meta at all — nothing to revoke, must still
+        // clear the cookie and redirect (existing behavior).
+        let ctx = TestContext::with_auth().await;
+        let msg = crate::test_support::anon_msg("update", "/b/auth/api/logout");
+        let out = handle(&ctx, &msg).await;
+        assert_eq!(output_status(out).await, 303);
+    }
+
+    #[tokio::test]
+    async fn refresh_token_revocation_failure_does_not_report_success() {
+        let ctx = TestContext::with_auth().await;
+        let failing = FailingDbOpContext::new(ctx, vec![("database.update_where", tokens::TABLE)]);
+
+        let msg = auth_msg("update", "/b/auth/api/logout", "user-1");
+        let out = handle(&failing, &msg).await;
+
+        assert!(
+            output_is_error(out, "Internal").await,
+            "a refresh-token revocation failure must not be reported as a successful logout"
+        );
+    }
+
+    #[tokio::test]
+    async fn jwt_blocklist_insert_failure_does_not_report_success() {
+        let ctx = TestContext::with_auth().await;
+        let failing = FailingDbOpContext::new(ctx, vec![("database.create", jwt_blocklist::TABLE)]);
+
+        let mut msg = auth_msg("update", "/b/auth/api/logout", "user-1");
+        msg.set_meta(META_AUTH_JTI, "jti-1");
+        msg.set_meta(
+            META_AUTH_EXP,
+            (chrono::Utc::now().timestamp() + 3600).to_string(),
+        );
+        let out = handle(&failing, &msg).await;
+
+        assert!(
+            output_is_error(out, "Internal").await,
+            "a JWT blocklist insert failure must not be reported as a successful logout"
+        );
+    }
+
+    #[tokio::test]
+    async fn successful_revocation_still_redirects() {
+        let ctx = TestContext::with_auth().await;
+        let mut msg = auth_msg("update", "/b/auth/api/logout", "user-1");
+        msg.set_meta(META_AUTH_JTI, "jti-1");
+        msg.set_meta(
+            META_AUTH_EXP,
+            (chrono::Utc::now().timestamp() + 3600).to_string(),
+        );
+        let out = handle(&ctx, &msg).await;
+        assert_eq!(output_status(out).await, 303);
+    }
 }
