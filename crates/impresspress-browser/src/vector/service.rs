@@ -11,7 +11,7 @@ use wafer_core::interfaces::vector::service::{
     VectorIndexConfig, VectorMatch, VectorService,
 };
 
-use crate::{bridge, vector::sql};
+use crate::{bridge, db_codec, vector::sql};
 
 fn js_err(e: wasm_bindgen::JsValue) -> String {
     e.as_string().unwrap_or_else(|| format!("{e:?}"))
@@ -114,7 +114,7 @@ impl BrowserVectorService {
         // Idempotent — guarantees the table exists so the SELECT below
         // can't fail with "no such table" on a DB that has never had any
         // index created in it yet.
-        bridge::db_exec_raw(&sql::build_registry_ddl(), "[]")
+        bridge::db_exec_raw(&sql::build_registry_ddl(), db_codec::empty_params())
             .map_err(|e| VectorError::Internal(js_err(e)))?;
 
         let Some(state) = self.read_registry_row(name)? else {
@@ -133,10 +133,10 @@ impl BrowserVectorService {
     /// rebuild) and `create_index` (re-create guard).
     fn read_registry_row(&self, name: &str) -> VResult<Option<IndexState>> {
         let (query, params) = sql::build_registry_select_sql(name);
-        let json =
-            bridge::db_query_raw(&query, &params).map_err(|e| VectorError::Internal(js_err(e)))?;
-        let rows: Vec<serde_json::Value> = serde_json::from_str(&json)
-            .map_err(|e| VectorError::Internal(format!("parse registry row: {e}")))?;
+        let params_js = db_codec::params_to_js(&params).map_err(VectorError::Internal)?;
+        let value = bridge::db_query_raw(&query, params_js)
+            .map_err(|e| VectorError::Internal(js_err(e)))?;
+        let rows = db_codec::rows_from_js(value).map_err(VectorError::Internal)?;
         let Some(row) = rows.first() else {
             return Ok(None);
         };
@@ -155,7 +155,7 @@ impl VectorService for BrowserVectorService {
     async fn create_index(&self, config: VectorIndexConfig) -> VResult<()> {
         // Idempotent — ensures the registry table exists before the select
         // and upsert below, on the very first index ever created in this DB.
-        bridge::db_exec_raw(&sql::build_registry_ddl(), "[]")
+        bridge::db_exec_raw(&sql::build_registry_ddl(), db_codec::empty_params())
             .map_err(|e| VectorError::Internal(js_err(e)))?;
 
         // Guard against a silent config-mismatched overwrite: the
@@ -187,7 +187,8 @@ impl VectorService for BrowserVectorService {
 
         let stmts = sql::build_create_index_sql(&config.name, config.keyword_search);
         for s in stmts {
-            bridge::db_exec_raw(&s, "[]").map_err(|e| VectorError::Internal(js_err(e)))?;
+            bridge::db_exec_raw(&s, db_codec::empty_params())
+                .map_err(|e| VectorError::Internal(js_err(e)))?;
         }
 
         // Persist the config so a future cold cache (post-SW-restart) can
@@ -198,8 +199,8 @@ impl VectorService for BrowserVectorService {
             config.metric,
             config.keyword_search,
         );
-        bridge::db_exec_raw(&reg.sql, &reg.params_json)
-            .map_err(|e| VectorError::Internal(js_err(e)))?;
+        let reg_params = db_codec::params_to_js(&reg.params).map_err(VectorError::Internal)?;
+        bridge::db_exec_raw(&reg.sql, reg_params).map_err(|e| VectorError::Internal(js_err(e)))?;
 
         bridge::dbFlush()
             .await
@@ -224,7 +225,8 @@ impl VectorService for BrowserVectorService {
             .ok_or_else(|| VectorError::IndexNotFound(name.into()))?;
         let stmts = sql::build_delete_index_sql(name, state.keyword_search);
         for s in stmts {
-            bridge::db_exec_raw(&s, "[]").map_err(|e| VectorError::Internal(js_err(e)))?;
+            bridge::db_exec_raw(&s, db_codec::empty_params())
+                .map_err(|e| VectorError::Internal(js_err(e)))?;
         }
 
         // Clear the registry row too — otherwise a later `lookup` miss
@@ -232,7 +234,9 @@ impl VectorService for BrowserVectorService {
         // exist, turning what should be `IndexNotFound` into an
         // `Internal` "no such table" error on the next call.
         let (del_sql, del_params) = sql::build_registry_delete_sql(name);
-        bridge::db_exec_raw(&del_sql, &del_params).map_err(|e| VectorError::Internal(js_err(e)))?;
+        let del_params_js = db_codec::params_to_js(&del_params).map_err(VectorError::Internal)?;
+        bridge::db_exec_raw(&del_sql, del_params_js)
+            .map_err(|e| VectorError::Internal(js_err(e)))?;
 
         bridge::dbFlush()
             .await
@@ -278,7 +282,8 @@ impl VectorService for BrowserVectorService {
         let prepared = prepared?;
 
         for stmt in sql::build_upsert_sql_stmts(index, state.keyword_search, &prepared) {
-            bridge::db_exec_raw(&stmt.sql, &stmt.params_json)
+            let params_js = db_codec::params_to_js(&stmt.params).map_err(VectorError::Internal)?;
+            bridge::db_exec_raw(&stmt.sql, params_js)
                 .map_err(|e| VectorError::Internal(js_err(e)))?;
         }
         bridge::dbFlush()
@@ -418,10 +423,15 @@ impl VectorService for BrowserVectorService {
         if ids.is_empty() {
             return Ok(());
         }
-        let (stmts, params) = sql::build_delete_ids_sql(index, &ids, state.keyword_search);
-        let params_json = serde_json::to_string(&params).unwrap_or_else(|_| "[]".into());
+        let (stmts, id_params) = sql::build_delete_ids_sql(index, &ids, state.keyword_search);
+        let params: Vec<serde_json::Value> = id_params
+            .into_iter()
+            .map(serde_json::Value::String)
+            .collect();
+        let params_js = db_codec::params_to_js(&params).map_err(VectorError::Internal)?;
         for s in stmts {
-            bridge::db_exec_raw(&s, &params_json).map_err(|e| VectorError::Internal(js_err(e)))?;
+            bridge::db_exec_raw(&s, params_js.clone())
+                .map_err(|e| VectorError::Internal(js_err(e)))?;
         }
         bridge::dbFlush()
             .await
@@ -433,11 +443,10 @@ impl VectorService for BrowserVectorService {
         if self.lookup(index)?.is_none() {
             return Err(VectorError::IndexNotFound(index.into()));
         }
-        let row_json = bridge::db_query_raw(&sql::build_count_sql(index), "[]")
+        let value = bridge::db_query_raw(&sql::build_count_sql(index), db_codec::empty_params())
             .map_err(|e| VectorError::Internal(js_err(e)))?;
         // sql.js returns rows as `[{ "n": <number> }]`.
-        let rows: Vec<serde_json::Value> = serde_json::from_str(&row_json)
-            .map_err(|e| VectorError::Internal(format!("parse count: {e}")))?;
+        let rows = db_codec::rows_from_js(value).map_err(VectorError::Internal)?;
         let n = rows
             .first()
             .and_then(|r| r.get("n"))
@@ -452,9 +461,9 @@ type VectorRow = (String, Vec<f32>, Option<serde_json::Value>);
 
 fn load_all_vectors(index: &str, dims: u32, f: &MetadataFilter) -> VResult<Vec<VectorRow>> {
     let s = format!(r#"SELECT id, vector, metadata FROM "{index}_vectors""#);
-    let json = bridge::db_query_raw(&s, "[]").map_err(|e| VectorError::Internal(js_err(e)))?;
-    let rows: Vec<serde_json::Value> = serde_json::from_str(&json)
-        .map_err(|e| VectorError::Internal(format!("parse vectors: {e}")))?;
+    let value = bridge::db_query_raw(&s, db_codec::empty_params())
+        .map_err(|e| VectorError::Internal(js_err(e)))?;
+    let rows = db_codec::rows_from_js(value).map_err(VectorError::Internal)?;
 
     let mut out = Vec::with_capacity(rows.len());
     for r in rows {
@@ -463,9 +472,14 @@ fn load_all_vectors(index: &str, dims: u32, f: &MetadataFilter) -> VResult<Vec<V
             .and_then(|v| v.as_str())
             .unwrap_or("")
             .to_string();
-        // sql.js returns BLOBs as `Uint8Array`, which serializes as JSON
-        // arrays of integers when shipped through JSON.stringify. We accept
-        // both: array of numbers OR base64 string (forward compat).
+        // sql.js returns BLOBs as a real `Uint8Array`. `db_codec::rows_from_js`
+        // decodes the row generically as `serde_json::Value` (it doesn't know
+        // any particular column is binary), and `serde_wasm_bindgen` visits a
+        // `Uint8Array` under that generic decode as a byte buffer, which
+        // `serde_json::Value`'s own `Deserialize` impl turns into a JSON array
+        // of small integers — so this always takes the array-of-numbers arm
+        // below. The base64-string arm is kept as a defensive fallback only
+        // (e.g. a future caller that pre-encodes the blob as base64 text).
         let bytes: Vec<u8> = match r.get("vector") {
             Some(serde_json::Value::Array(arr)) => arr
                 .iter()
@@ -495,10 +509,11 @@ fn fts_search(index: &str, query: &str, limit: usize) -> VResult<Vec<String>> {
     let s = format!(
         r#"SELECT id FROM "{index}_fts" WHERE "{index}_fts" MATCH ? ORDER BY rank LIMIT ?"#
     );
-    let params = serde_json::json!([query, limit]).to_string();
-    let json = bridge::db_query_raw(&s, &params).map_err(|e| VectorError::Internal(js_err(e)))?;
-    let rows: Vec<serde_json::Value> = serde_json::from_str(&json)
-        .map_err(|e| VectorError::Internal(format!("parse fts: {e}")))?;
+    let params = vec![serde_json::json!(query), serde_json::json!(limit)];
+    let params_js = db_codec::params_to_js(&params).map_err(VectorError::Internal)?;
+    let value =
+        bridge::db_query_raw(&s, params_js).map_err(|e| VectorError::Internal(js_err(e)))?;
+    let rows = db_codec::rows_from_js(value).map_err(VectorError::Internal)?;
     Ok(rows
         .into_iter()
         .filter_map(|r| r.get("id").and_then(|v| v.as_str()).map(String::from))
@@ -514,10 +529,12 @@ fn load_metadata_for_ids(
     }
     let placeholders = vec!["?"; ids.len()].join(", ");
     let s = format!(r#"SELECT id, metadata FROM "{index}_meta" WHERE id IN ({placeholders})"#);
-    let params = serde_json::to_string(ids).unwrap_or_else(|_| "[]".into());
-    let json = bridge::db_query_raw(&s, &params).map_err(|e| VectorError::Internal(js_err(e)))?;
-    let rows: Vec<serde_json::Value> = serde_json::from_str(&json)
-        .map_err(|e| VectorError::Internal(format!("parse meta: {e}")))?;
+    let params: Vec<serde_json::Value> =
+        ids.iter().cloned().map(serde_json::Value::String).collect();
+    let params_js = db_codec::params_to_js(&params).map_err(VectorError::Internal)?;
+    let value =
+        bridge::db_query_raw(&s, params_js).map_err(|e| VectorError::Internal(js_err(e)))?;
+    let rows = db_codec::rows_from_js(value).map_err(VectorError::Internal)?;
     Ok(rows
         .into_iter()
         .filter_map(|r| {

@@ -78,31 +78,32 @@ pub fn build_registry_upsert_sql(
         sql: format!(
             r#"INSERT OR REPLACE INTO "{REGISTRY_TABLE}" (name, dimensions, metric, keyword_search) VALUES (?, ?, ?, ?)"#
         ),
-        params_json: serde_json::json!([
-            name,
-            dimensions,
-            metric_to_storage_str(metric),
-            keyword_search as i64
-        ])
-        .to_string(),
+        params: vec![
+            serde_json::json!(name),
+            serde_json::json!(dimensions),
+            serde_json::json!(metric_to_storage_str(metric)),
+            serde_json::json!(keyword_search as i64),
+        ],
     }
 }
 
-/// `(sql, params_json)` to look up one index's persisted config row by name.
-pub fn build_registry_select_sql(name: &str) -> (String, String) {
+/// `(sql, params)` to look up one index's persisted config row by name.
+/// `params` is the plain bind-value list — encode via
+/// `db_codec::params_to_js` at the bridge boundary, no JSON-string step.
+pub fn build_registry_select_sql(name: &str) -> (String, Vec<serde_json::Value>) {
     (
         format!(
             r#"SELECT dimensions, metric, keyword_search FROM "{REGISTRY_TABLE}" WHERE name = ?"#
         ),
-        serde_json::json!([name]).to_string(),
+        vec![serde_json::json!(name)],
     )
 }
 
-/// `(sql, params_json)` to remove an index's persisted config row.
-pub fn build_registry_delete_sql(name: &str) -> (String, String) {
+/// `(sql, params)` to remove an index's persisted config row.
+pub fn build_registry_delete_sql(name: &str) -> (String, Vec<serde_json::Value>) {
     (
         format!(r#"DELETE FROM "{REGISTRY_TABLE}" WHERE name = ?"#),
-        serde_json::json!([name]).to_string(),
+        vec![serde_json::json!(name)],
     )
 }
 
@@ -171,10 +172,10 @@ fn metric_from_storage_str(s: &str) -> Option<DistanceMetric> {
     }
 }
 
-/// Parses one registry row — a JSON object as returned by `db_query_raw`
-/// for the query built by [`build_registry_select_sql`] (see
-/// `bridge::db_query_raw`'s doc comment for the row-object JSON shape) —
-/// into `(dimensions, metric, keyword_search)`.
+/// Parses one registry row — a JSON object decoded (via
+/// `db_codec::rows_from_js`) from the row `bridge::db_query_raw` resolves
+/// for the query built by [`build_registry_select_sql`] — into
+/// `(dimensions, metric, keyword_search)`.
 ///
 /// Pulled out of `service.rs` (which is wasm32-only, since it calls the
 /// `bridge` extern functions) so the row-shape parsing — including its
@@ -273,8 +274,10 @@ pub struct SqlUpsertEntry {
 #[derive(Debug, Clone)]
 pub struct PreparedStmt {
     pub sql: String,
-    /// JSON array string (the format `bridge::db_exec_raw` expects).
-    pub params_json: String,
+    /// Positional bind values, in `?`-placeholder order — encode via
+    /// `db_codec::params_to_js` at the bridge boundary (`bridge::db_exec_raw`
+    /// takes a structured JS array, not a JSON string).
+    pub params: Vec<serde_json::Value>,
 }
 
 /// Builds `INSERT OR REPLACE` statements. One statement per table per row
@@ -293,24 +296,28 @@ pub fn build_upsert_sql_stmts(
                 format!(
                     r#"INSERT OR REPLACE INTO "{prefixed_name}_vectors" (id, vector, metadata, text) VALUES (?, base64_decode(?), ?, ?)"#
                 ),
-                serde_json::json!([
-                    e.id,
-                    e.vector_blob_b64,
-                    e.metadata_json,
-                    e.text.clone().unwrap_or_default()
-                ]),
+                vec![
+                    serde_json::json!(e.id),
+                    serde_json::json!(e.vector_blob_b64),
+                    serde_json::json!(e.metadata_json),
+                    serde_json::json!(e.text.clone().unwrap_or_default()),
+                ],
             )
         } else {
             (
                 format!(
                     r#"INSERT OR REPLACE INTO "{prefixed_name}_vectors" (id, vector, metadata) VALUES (?, base64_decode(?), ?)"#
                 ),
-                serde_json::json!([e.id, e.vector_blob_b64, e.metadata_json]),
+                vec![
+                    serde_json::json!(e.id),
+                    serde_json::json!(e.vector_blob_b64),
+                    serde_json::json!(e.metadata_json),
+                ],
             )
         };
         out.push(PreparedStmt {
             sql: sql_v,
-            params_json: params_v.to_string(),
+            params: params_v,
         });
 
         if keyword_search {
@@ -318,8 +325,10 @@ pub fn build_upsert_sql_stmts(
                 sql: format!(
                     r#"INSERT OR REPLACE INTO "{prefixed_name}_fts" (id, text) VALUES (?, ?)"#
                 ),
-                params_json: serde_json::json!([e.id, e.text.clone().unwrap_or_default()])
-                    .to_string(),
+                params: vec![
+                    serde_json::json!(e.id),
+                    serde_json::json!(e.text.clone().unwrap_or_default()),
+                ],
             });
         }
 
@@ -328,19 +337,23 @@ pub fn build_upsert_sql_stmts(
                 format!(
                     r#"INSERT OR REPLACE INTO "{prefixed_name}_meta" (id, rowid, metadata, text) VALUES (?, NULL, ?, ?)"#
                 ),
-                serde_json::json!([e.id, e.metadata_json, e.text.clone().unwrap_or_default()]),
+                vec![
+                    serde_json::json!(e.id),
+                    serde_json::json!(e.metadata_json),
+                    serde_json::json!(e.text.clone().unwrap_or_default()),
+                ],
             )
         } else {
             (
                 format!(
                     r#"INSERT OR REPLACE INTO "{prefixed_name}_meta" (id, rowid, metadata) VALUES (?, NULL, ?)"#
                 ),
-                serde_json::json!([e.id, e.metadata_json]),
+                vec![serde_json::json!(e.id), serde_json::json!(e.metadata_json)],
             )
         };
         out.push(PreparedStmt {
             sql: sql_m,
-            params_json: params_m.to_string(),
+            params: params_m,
         });
     }
     out
@@ -531,18 +544,29 @@ mod tests {
         );
         assert!(stmt.sql.contains("INSERT OR REPLACE INTO"));
         assert!(stmt.sql.contains(REGISTRY_TABLE));
-        let params: serde_json::Value = serde_json::from_str(&stmt.params_json).unwrap();
         assert_eq!(
-            params,
-            serde_json::json!(["impresspress__vector__docs", 384, "cosine", 1])
+            stmt.params,
+            vec![
+                serde_json::json!("impresspress__vector__docs"),
+                serde_json::json!(384),
+                serde_json::json!("cosine"),
+                serde_json::json!(1),
+            ]
         );
     }
 
     #[test]
     fn registry_upsert_encodes_keyword_search_false_as_zero() {
         let stmt = build_registry_upsert_sql("idx", 3, DistanceMetric::Euclidean, false);
-        let params: serde_json::Value = serde_json::from_str(&stmt.params_json).unwrap();
-        assert_eq!(params, serde_json::json!(["idx", 3, "euclidean", 0]));
+        assert_eq!(
+            stmt.params,
+            vec![
+                serde_json::json!("idx"),
+                serde_json::json!(3),
+                serde_json::json!("euclidean"),
+                serde_json::json!(0),
+            ]
+        );
     }
 
     #[test]
@@ -550,7 +574,7 @@ mod tests {
         let (sql, params) = build_registry_select_sql("idx");
         assert!(sql.contains(REGISTRY_TABLE));
         assert!(sql.contains("WHERE name = ?"));
-        assert_eq!(params, serde_json::json!(["idx"]).to_string());
+        assert_eq!(params, vec![serde_json::json!("idx")]);
     }
 
     #[test]
@@ -558,7 +582,7 @@ mod tests {
         let (sql, params) = build_registry_delete_sql("idx");
         assert!(sql.starts_with("DELETE FROM"));
         assert!(sql.contains(REGISTRY_TABLE));
-        assert_eq!(params, serde_json::json!(["idx"]).to_string());
+        assert_eq!(params, vec![serde_json::json!("idx")]);
     }
 
     // ─── create_index re-create guard (registry conflict classification) ──

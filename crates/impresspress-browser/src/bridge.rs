@@ -11,16 +11,20 @@ extern "C" {
     pub async fn dbInit() -> Result<JsValue, JsValue>;
 
     /// Execute SQL that modifies data (INSERT/UPDATE/DELETE/DDL).
-    /// `params_json` is a JSON array of parameters.
-    /// Returns rows-modified count as a string. Throws on SQL error.
+    /// `params` is a structured JS array of bind values — build via
+    /// `db_codec::params_to_js`/`empty_params`, not a JSON string. Returns
+    /// the rows-modified count. Throws on SQL error. Does NOT flush to
+    /// OPFS — see `BrowserDatabaseService::with_flush` in `database.rs` for
+    /// the coalesced-flush durability contract.
     #[wasm_bindgen(catch, js_name = dbExecRaw)]
-    pub fn db_exec_raw(sql: &str, params_json: &str) -> Result<String, JsValue>;
+    pub fn db_exec_raw(sql: &str, params: JsValue) -> Result<f64, JsValue>;
 
-    /// Execute a SELECT SQL query.
-    /// `params_json` is a JSON array of parameters.
-    /// Returns JSON array of row objects as a string. Throws on SQL error.
+    /// Execute a SELECT SQL query. `params` as above.
+    /// Returns a JS array of plain row objects — NOT a JSON string. Decode
+    /// with `db_codec::parse_rows`/`rows_from_js`
+    /// (`serde_wasm_bindgen::from_value`).
     #[wasm_bindgen(catch, js_name = dbQueryRaw)]
-    pub fn db_query_raw(sql: &str, params_json: &str) -> Result<String, JsValue>;
+    pub fn db_query_raw(sql: &str, params: JsValue) -> Result<JsValue, JsValue>;
 
     /// Export the sql.js DB to OPFS at `impresspress.db`. Rejects on an OPFS
     /// write failure (e.g. `QuotaExceededError`).
