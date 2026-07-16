@@ -165,7 +165,9 @@ impl DbExec for BrowserDatabaseService {
 // in `with_flush` so exactly one OPFS flush happens per logical call,
 // regardless of how many `run_execute` statements the shared default issued
 // internally. Read-only methods (`get`/`list`/`count`/`sum`/`query_raw`/
-// `take_where`/`aggregate`) forward directly — nothing to flush.
+// `aggregate`) forward directly — nothing to flush. `take_where` is a
+// mutator (`DELETE ... RETURNING`) despite its read-shaped return value, so
+// it is flushed like the other mutators below.
 
 #[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
@@ -257,7 +259,8 @@ impl DatabaseService for BrowserDatabaseService {
         collection: &str,
         filters: &[Filter],
     ) -> Result<Vec<Record>, DatabaseError> {
-        DbExec::take_where(self, collection, filters).await
+        self.with_flush(DbExec::take_where(self, collection, filters))
+            .await
     }
 
     async fn update_where(
