@@ -4,19 +4,24 @@
 
 const SQL_001_SQLITE: &str = include_str!("001_messages_schema.sqlite.sql");
 const SQL_001_POSTGRES: &str = include_str!("001_messages_schema.postgres.sql");
+const SQL_002_SQLITE: &str = include_str!("002_owner_id.sqlite.sql");
+const SQL_002_POSTGRES: &str = include_str!("002_owner_id.postgres.sql");
 
 /// Ordered SQLite migration scripts for this block, as `(basename, content)`
 /// pairs. Feeds the runtime `lifecycle_init` apply path.
-pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[("001_messages_schema", SQL_001_SQLITE)];
+pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
+    ("001_messages_schema", SQL_001_SQLITE),
+    ("002_owner_id", SQL_002_SQLITE),
+];
 
 /// Ordered PostgreSQL migration scripts, matching [`SQLITE_MIGRATIONS`] one
 /// for one. Selected at runtime by `apply_migrations` when the deployment's
 /// `WAFER_RUN_SHARED__DATABASE__BACKEND` is `postgres`.
-pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[SQL_001_POSTGRES];
+pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[SQL_001_POSTGRES, SQL_002_POSTGRES];
 
 #[cfg(test)]
 mod tests {
-    use super::{SQL_001_POSTGRES, SQL_001_SQLITE};
+    use super::{SQL_001_POSTGRES, SQL_001_SQLITE, SQL_002_SQLITE, SQL_002_POSTGRES};
 
     /// The migration_helper statement splitter splits on bare `;` outside
     /// `--` line comments. Make sure every embedded statement parses into
@@ -53,5 +58,14 @@ mod tests {
         assert_eq!(count_create_index(SQL_001_POSTGRES), 9);
         assert!(SQL_001_POSTGRES.contains("impresspress__messages__contexts"));
         assert!(SQL_001_POSTGRES.contains("impresspress__messages__entries"));
+    }
+
+    #[test]
+    fn owner_id_migration_adds_column_and_index_both_dialects() {
+        for sql in [SQL_002_SQLITE, SQL_002_POSTGRES] {
+            assert!(sql.contains("ADD COLUMN") && sql.contains("owner_id"));
+            assert!(sql.contains("idx_messages_contexts_owner_id"));
+            assert!(sql.contains("idx_messages_entries_owner_id"));
+        }
     }
 }
