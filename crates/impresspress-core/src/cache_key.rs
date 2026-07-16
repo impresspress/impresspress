@@ -167,6 +167,38 @@ pub fn invalidate_keys(
     keys
 }
 
+/// The `(key_column, sensitive_flag_column)` pair `row_is_sensitive` reads to
+/// decide whether a row must never be written to the KV cache. `None` when
+/// `table` has no notion of a sensitive row (`block_settings` rows are
+/// per-block enablement/migration flags, not secrets).
+fn sensitive_check_columns(table: CachedTable) -> Option<(&'static str, &'static str)> {
+    match table {
+        CachedTable::Variables => Some(("key", "sensitive")),
+        CachedTable::BlockSettings => None,
+    }
+}
+
+/// True when `row` in `table` holds a value that must never be written to
+/// the KV cache (Cloudflare KV is a globally replicated, eventually
+/// consistent store with no encryption-at-rest guarantee this runtime
+/// controls — OAuth/Stripe/email credentials must not be duplicated into
+/// it, even for up to the 24h row-cache TTL).
+///
+/// Reuses the exact SEC-060 rule the admin Variables page and the generic
+/// `ConfigVar`-driven settings form use to mask/redact secrets
+/// ([`crate::util::is_sensitive_key`]), so the cache-write policy can never
+/// drift from the display-masking policy: a row is sensitive when its
+/// `sensitive` flag is set OR its key follows the `_SECRET`/`_KEY` suffix
+/// convention.
+pub fn row_is_sensitive(table: CachedTable, row: &HashMap<String, serde_json::Value>) -> bool {
+    let Some((key_col, sensitive_col)) = sensitive_check_columns(table) else {
+        return false;
+    };
+    let key = row.get(key_col).and_then(|v| v.as_str()).unwrap_or("");
+    let sensitive_flag = row.get(sensitive_col).and_then(|v| v.as_i64()).unwrap_or(0);
+    crate::util::is_sensitive_key(key, sensitive_flag)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -482,6 +514,64 @@ mod tests {
         assert!(!bumps_config_version("impresspress__admin__permissions"));
         assert!(!bumps_config_version("wafer_run__auth__users"));
         assert!(!bumps_config_version(""));
+    }
+
+    // --- row_is_sensitive ---
+
+    fn variables_row(key: &str, sensitive: i64) -> HashMap<String, serde_json::Value> {
+        let mut m = HashMap::new();
+        m.insert("key".into(), serde_json::Value::String(key.into()));
+        m.insert("sensitive".into(), serde_json::Value::from(sensitive));
+        m
+    }
+
+    #[test]
+    fn row_is_sensitive_true_when_flag_set() {
+        assert!(row_is_sensitive(
+            CachedTable::Variables,
+            &variables_row("SITE_NAME", 1)
+        ));
+    }
+
+    #[test]
+    fn row_is_sensitive_true_for_secret_suffix_even_if_flag_unset() {
+        assert!(row_is_sensitive(
+            CachedTable::Variables,
+            &variables_row("STRIPE_SECRET", 0)
+        ));
+    }
+
+    #[test]
+    fn row_is_sensitive_true_for_key_suffix_even_if_flag_unset() {
+        assert!(row_is_sensitive(
+            CachedTable::Variables,
+            &variables_row("JWT_KEY", 0)
+        ));
+    }
+
+    #[test]
+    fn row_is_sensitive_false_for_plain_row() {
+        assert!(!row_is_sensitive(
+            CachedTable::Variables,
+            &variables_row("SITE_NAME", 0)
+        ));
+    }
+
+    #[test]
+    fn row_is_sensitive_false_for_missing_columns() {
+        let r: HashMap<String, serde_json::Value> = HashMap::new();
+        assert!(!row_is_sensitive(CachedTable::Variables, &r));
+    }
+
+    #[test]
+    fn row_is_sensitive_always_false_for_block_settings() {
+        // block_settings rows have no "sensitive"/"key" columns at all —
+        // they're per-block enablement flags, never secrets.
+        let r = row(
+            "block_name",
+            serde_json::Value::String("wafer-run/registry".into()),
+        );
+        assert!(!row_is_sensitive(CachedTable::BlockSettings, &r));
     }
 
     #[test]

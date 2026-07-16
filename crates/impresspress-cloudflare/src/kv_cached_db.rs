@@ -297,10 +297,10 @@ impl DatabaseService for KvCachedD1DatabaseService {
         collection: &str,
         opts: &ListOptions,
     ) -> Result<RecordList, DatabaseError> {
-        let cache_key_opt =
-            cache_key::classify_table(collection).and_then(|t| cache_key::read_key(t, opts));
+        let table = cache_key::classify_table(collection);
+        let cache_key_opt = table.and_then(|t| cache_key::read_key(t, opts));
 
-        let Some(key) = cache_key_opt else {
+        let (Some(table), Some(key)) = (table, cache_key_opt) else {
             return self.inner.list(collection, opts).await;
         };
 
@@ -310,15 +310,39 @@ impl DatabaseService for KvCachedD1DatabaseService {
             match self.kv.get(&key).await {
                 Ok(Some(body)) => match serde_json::from_str::<Vec<Record>>(&body) {
                     Ok(records) => {
-                        let page_size = opts.limit;
-                        let total_count = records.len() as i64;
-                        tracing::debug!(table = %collection, key = %key, "cache_hit");
-                        return Ok(RecordList {
-                            records,
-                            total_count,
-                            page: 1,
-                            page_size,
-                        });
+                        // Defense in depth: a cached payload written before
+                        // this check existed (or written by a future bug)
+                        // must never be *served*, sensitive-config-in-KV or
+                        // not. Treat it as stale, best-effort scrub it, and
+                        // fall through to D1 rather than trust it.
+                        if records
+                            .iter()
+                            .any(|r| cache_key::row_is_sensitive(table, &r.data))
+                        {
+                            tracing::warn!(
+                                table = %collection,
+                                key = %key,
+                                "cached payload contains a sensitive row; treating as stale"
+                            );
+                            if let Err(e) = self.kv.delete(&key).await {
+                                tracing::warn!(
+                                    table = %collection,
+                                    key = %key,
+                                    error = %e,
+                                    "stale sensitive cache-entry cleanup failed; relying on TTL"
+                                );
+                            }
+                        } else {
+                            let page_size = opts.limit;
+                            let total_count = records.len() as i64;
+                            tracing::debug!(table = %collection, key = %key, "cache_hit");
+                            return Ok(RecordList {
+                                records,
+                                total_count,
+                                page: 1,
+                                page_size,
+                            });
+                        }
                     }
                     Err(e) => {
                         tracing::warn!(
@@ -345,6 +369,25 @@ impl DatabaseService for KvCachedD1DatabaseService {
 
         // Fall through to D1 and populate cache.
         let result = self.inner.list(collection, opts).await?;
+
+        // SEC: never let a sensitive row (OAuth/Stripe/email secrets, or any
+        // `_SECRET`/`_KEY`-suffixed or explicitly-flagged config var) land in
+        // KV — a globally replicated, eventually consistent store — even for
+        // the row-cache's 24h TTL. Skip the cache write entirely; this block
+        // is simply never served from cache and always reads through to D1.
+        if result
+            .records
+            .iter()
+            .any(|r| cache_key::row_is_sensitive(table, &r.data))
+        {
+            tracing::debug!(
+                table = %collection,
+                key = %key,
+                "sensitive row present; skipping KV cache write"
+            );
+            return Ok(result);
+        }
+
         let payload = match serde_json::to_string(&result.records) {
             Ok(s) => s,
             Err(e) => {
