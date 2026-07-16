@@ -496,7 +496,7 @@ mod wrap_grants_tests {
 
     use wafer_block::db::Filter;
     use wafer_core::interfaces::database::service::{
-        Column, DatabaseError, Record, RecordList, Table,
+        AggregateSpec, Column, DatabaseError, Record, RecordList, Table, UpsertSpec,
     };
 
     /// A [`DatabaseService`] whose existence check fails hard and whose every
@@ -581,6 +581,18 @@ mod wrap_grants_tests {
             _query: &str,
             _args: &[serde_json::Value],
         ) -> Result<i64, DatabaseError> {
+            unreachable!()
+        }
+
+        async fn upsert(&self, _collection: &str, _spec: UpsertSpec) -> Result<i64, DatabaseError> {
+            unreachable!()
+        }
+
+        async fn aggregate(
+            &self,
+            _collection: &str,
+            _spec: AggregateSpec,
+        ) -> Result<Vec<Record>, DatabaseError> {
             unreachable!()
         }
 

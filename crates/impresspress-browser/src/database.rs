@@ -18,7 +18,10 @@ use std::collections::HashMap;
 use wafer_block::db::{Filter, ListOptions};
 use wafer_core::interfaces::database::{
     exec::DbExec,
-    service::{Column, DatabaseError, DatabaseService, Record, RecordList, Table},
+    service::{
+        AggregateSpec, Column, DatabaseError, DatabaseService, Record, RecordList, Table,
+        UpsertSpec,
+    },
 };
 use wafer_sql_utils::{introspect, Backend};
 
@@ -216,6 +219,27 @@ impl DatabaseService for BrowserDatabaseService {
         filters: &[Filter],
     ) -> Result<i64, DatabaseError> {
         DbExec::increment_field_where(self, collection, col, delta, filters).await
+    }
+
+    async fn upsert(&self, collection: &str, spec: UpsertSpec) -> Result<i64, DatabaseError> {
+        DbExec::upsert(self, collection, spec).await
+    }
+
+    async fn aggregate(
+        &self,
+        collection: &str,
+        spec: AggregateSpec,
+    ) -> Result<Vec<Record>, DatabaseError> {
+        DbExec::aggregate(self, collection, spec).await
+    }
+
+    async fn update_where_count(
+        &self,
+        collection: &str,
+        filters: &[Filter],
+        data: HashMap<String, serde_json::Value>,
+    ) -> Result<i64, DatabaseError> {
+        DbExec::update_where_count(self, collection, filters, data).await
     }
 
     // --- Schema management ---
