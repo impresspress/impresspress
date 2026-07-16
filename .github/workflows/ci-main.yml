@@ -211,6 +211,14 @@ jobs:
           npm run build
           npm run lint
 
+      - name: Test SDK
+        working-directory: packages/impresspress-js
+        run: npm test
+
+      - name: Smoke-test clean pack/install
+        working-directory: packages/impresspress-js
+        run: npm run test:pack-install
+
   cross-compile:
     name: Cross-Compile (${{ matrix.name }})
     needs: build-wasm

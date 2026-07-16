@@ -1,5 +1,6 @@
-import { WaferClient, WaferError } from "wafer-client-js";
-import { ImpresspressConfig, ApiResponse } from "../types";
+import { HttpClient } from "../http-client";
+import { ImpresspressError } from "../error";
+import { ImpresspressConfig } from "../types";
 
 export interface RequestConfig {
   method: string;
@@ -7,100 +8,50 @@ export interface RequestConfig {
   data?: any;
   headers?: Record<string, string>;
   params?: Record<string, any>;
-  responseType?: string;
 }
 
 export class BaseService {
-  protected wafer: WaferClient;
+  protected http: HttpClient;
   protected config: ImpresspressConfig;
 
   constructor(config: ImpresspressConfig) {
     this.config = config;
-    this.wafer = new WaferClient({
+    this.http = new HttpClient({
       url: config.url,
       apiKey: config.apiKey,
-      headers: {
-        "Content-Type": "application/json",
-        ...config.headers,
-      },
-      timeout: config.timeout || 30000,
-      credentials:
-        typeof globalThis.window !== "undefined" ? "include" : undefined,
+      headers: config.headers,
+      timeout: config.timeout,
     });
   }
 
+  /**
+   * The real server has no response envelope: a success response IS the
+   * JSON value (`ok_json(&value)` serializes `value` directly, not
+   * `{success, data: value}`), and a failure is a non-2xx status whose body
+   * is `{error, message}` — already thrown as an `ImpresspressError` by
+   * `HttpClient`. So this is a thin pass-through, not an unwrapper.
+   */
   protected async request<T>(config: RequestConfig): Promise<T> {
-    // Build the full API path
-    let path = config.url;
-
-    // Append params as query string
-    if (config.params) {
-      const qs = this.buildQueryString(config.params);
-      if (qs) {
-        path += (path.includes("?") ? "&" : "?") + qs;
-      }
-    }
-
-    try {
-      const options = config.headers ? { headers: config.headers } : undefined;
-      let result;
-
-      switch (config.method.toUpperCase()) {
-        case "GET":
-          result = await this.wafer.get<ApiResponse<T>>(path, options);
-          break;
-        case "POST":
-          result = await this.wafer.post<ApiResponse<T>>(
-            path,
-            config.data,
-            options,
-          );
-          break;
-        case "PUT":
-          result = await this.wafer.put<ApiResponse<T>>(
-            path,
-            config.data,
-            options,
-          );
-          break;
-        case "PATCH":
-          result = await this.wafer.patch<ApiResponse<T>>(
-            path,
-            config.data,
-            options,
-          );
-          break;
-        case "DELETE":
-          result = await this.wafer.delete<ApiResponse<T>>(path, options);
-          break;
-        default:
-          throw new Error(`Unsupported HTTP method: ${config.method}`);
-      }
-
-      const apiResp = result.data;
-      if (apiResp?.success === false) {
-        throw apiResp;
-      }
-      return (apiResp?.data !== undefined ? apiResp.data : apiResp) as T;
-    } catch (error) {
-      if (error instanceof WaferError) {
-        const apiError: ApiResponse = {
-          success: false,
-          error: {
-            code: error.code || "UNKNOWN_ERROR",
-            message: error.message,
-            details: error.data,
-          },
-        };
-        throw apiError;
-      }
-      throw error;
+    const options = config.headers || config.params ? { headers: config.headers, params: config.params } : undefined;
+    switch (config.method.toUpperCase()) {
+      case "GET":
+        return this.http.get<T>(config.url, options);
+      case "POST":
+        return this.http.post<T>(config.url, config.data, options);
+      case "PUT":
+        return this.http.put<T>(config.url, config.data, options);
+      case "PATCH":
+        return this.http.patch<T>(config.url, config.data, options);
+      case "DELETE":
+        return this.http.delete<T>(config.url, options);
+      default:
+        throw new Error(`Unsupported HTTP method: ${config.method}`);
     }
   }
 
   /**
-   * Send a FormData request (for file uploads).
-   * Uses fetch directly since WaferClient's transport JSON-stringifies bodies.
+   * Send a FormData request (for file uploads). Uses `fetch` directly since
+   * `HttpClient` always JSON-encodes the body.
    */
   protected async requestFormData<T>(
     url: string,
@@ -109,11 +60,10 @@ export class BaseService {
   ): Promise<T> {
     const fullUrl = this.config.url + url;
     const fetchHeaders: Record<string, string> = { ...headers };
-
     if (this.config.apiKey) {
       fetchHeaders["Authorization"] = `Bearer ${this.config.apiKey}`;
     }
-    // Don't set Content-Type — fetch auto-sets multipart/form-data with boundary
+    // Don't set Content-Type — fetch auto-sets multipart/form-data with boundary.
 
     const fetchOpts: RequestInit = {
       method: "POST",
@@ -125,52 +75,50 @@ export class BaseService {
     }
 
     const res = await globalThis.fetch(fullUrl, fetchOpts);
-    const data = await res.json();
+    const contentType = res.headers.get("content-type") ?? "";
+    const data = contentType.includes("application/json") ? await res.json() : null;
 
-    if (!res.ok || data.success === false) {
-      const apiError: ApiResponse = {
-        success: false,
-        error: {
-          code: data?.error?.code || data?.error || "UPLOAD_ERROR",
-          message:
-            data?.error?.message || data?.message || `HTTP ${res.status}`,
-          details: data,
-        },
-      };
-      throw apiError;
+    if (!res.ok) {
+      const body = (data ?? {}) as Record<string, unknown>;
+      throw new ImpresspressError(
+        typeof body.error === "string" ? body.error : "internal_error",
+        typeof body.message === "string" ? body.message : `HTTP ${res.status}`,
+        res.status,
+        data,
+      );
     }
-    return (data?.data !== undefined ? data.data : data) as T;
+    return data as T;
   }
 
-  /**
-   * Fetch a response as a Blob (for file downloads).
-   */
+  /** Fetch a response as a Blob (for file downloads). */
   protected async requestBlob(url: string): Promise<Blob> {
     const fullUrl = this.config.url + url;
     const headers: Record<string, string> = {};
-
     if (this.config.apiKey) {
       headers["Authorization"] = `Bearer ${this.config.apiKey}`;
     }
 
-    const fetchOpts: RequestInit = {
-      method: "GET",
-      headers,
-    };
+    const fetchOpts: RequestInit = { method: "GET", headers };
     if (typeof globalThis.window !== "undefined") {
       fetchOpts.credentials = "include";
     }
 
     const res = await globalThis.fetch(fullUrl, fetchOpts);
     if (!res.ok) {
-      const apiError: ApiResponse = {
-        success: false,
-        error: {
-          code: "DOWNLOAD_ERROR",
-          message: `HTTP ${res.status}`,
-        },
-      };
-      throw apiError;
+      let message = `HTTP ${res.status}`;
+      let code = "internal_error";
+      const contentType = res.headers.get("content-type") ?? "";
+      if (contentType.includes("application/json")) {
+        try {
+          const body = await res.json();
+          if (typeof body?.message === "string") message = body.message;
+          if (typeof body?.error === "string") code = body.error;
+        } catch {
+          // Body wasn't valid JSON despite the content-type — fall back to
+          // the generic HTTP-status message above.
+        }
+      }
+      throw new ImpresspressError(code, message, res.status);
     }
     return res.blob();
   }
@@ -195,7 +143,7 @@ export class BaseService {
    */
   public setApiKey(apiKey: string) {
     this.config.apiKey = apiKey;
-    this.wafer.setApiKey(apiKey);
+    this.http.setApiKey(apiKey);
   }
 
   /**
@@ -204,6 +152,6 @@ export class BaseService {
    */
   public removeApiKey() {
     delete this.config.apiKey;
-    this.wafer.removeApiKey();
+    this.http.removeApiKey();
   }
 }
