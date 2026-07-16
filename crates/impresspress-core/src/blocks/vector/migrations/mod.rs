@@ -14,18 +14,26 @@
 //! header for the long-form rationale.
 
 const SQL_001_SQLITE: &str = include_str!("001_vector_schema.sqlite.sql");
+#[cfg(feature = "postgres")]
 const SQL_001_POSTGRES: &str = include_str!("001_vector_schema.postgres.sql");
 
 /// Ordered SQLite migration scripts for this block, as `(basename, content)`
 /// pairs. Feeds the runtime `lifecycle_init` apply path.
 pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[("001_vector_schema", SQL_001_SQLITE)];
 
-/// Ordered PostgreSQL migration scripts, matching [`SQLITE_MIGRATIONS`].
+/// Ordered PostgreSQL migration scripts, matching [`SQLITE_MIGRATIONS`]. Empty
+/// when the `postgres` feature is off — see `files::migrations`'s doc for the
+/// rationale (Cloudflare/D1 never selects postgres; don't embed dead SQL).
+#[cfg(feature = "postgres")]
 pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[SQL_001_POSTGRES];
+#[cfg(not(feature = "postgres"))]
+pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[];
 
 #[cfg(test)]
 mod tests {
-    use super::{SQL_001_POSTGRES, SQL_001_SQLITE};
+    #[cfg(feature = "postgres")]
+    use super::SQL_001_POSTGRES;
+    use super::SQL_001_SQLITE;
 
     /// The migration_helper statement splitter splits on bare `;` outside
     /// `--` line comments. Make sure every embedded statement parses into
@@ -49,6 +57,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "postgres")]
     fn postgres_script_has_expected_tables_and_indexes() {
         assert_eq!(count_create_table(SQL_001_POSTGRES), 1);
         assert_eq!(count_create_index(SQL_001_POSTGRES), 1);

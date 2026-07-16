@@ -13,11 +13,22 @@ description = "Cloudflare Workers adapter for impresspress (D1, R2, wasm crypto/
 crate-type = ["cdylib", "rlib"]
 
 [features]
-# Default = the full feature-block set wafer.run ships today. Consumers
-# that embed `impresspress-cloudflare` can `default-features = false` and
-# re-enable a subset to trim WASM size — e.g. dropping `block-legalpages`
+# Lean-by-default: `default = []` ships only the always-on core blocks
+# (admin/auth-ui/email/system/auth — registered unconditionally by
+# `impresspress-core::blocks::register_feature_blocks`, no `block-*` feature
+# needed). A representative consumer (wafer-site's Cloudflare target) enables
+# zero optional blocks — measured at 14.5% bloat when this default pulled
+# files/legalpages/messages/products/userportal in anyway because the
+# consumer forgot `default-features = false`. `default = []` makes "forgot to
+# opt out" fail safe (lean) instead of fail bloated.
+#
+# Consumers that DO want the full block set take `features = ["full"]`
+# (or `default-features = false, features = ["full"]` to be explicit).
+default = []
+# Convenience preset: every optional block, matching the set this crate used
+# to enable by default. Dropping `block-legalpages` alone (from either preset)
 # strips `pulldown-cmark` + its html5ever transitive subtree entirely.
-default = [
+full = [
     "block-files",
     "block-legalpages",
     "block-messages",
@@ -26,7 +37,7 @@ default = [
 ]
 # Passthrough block features → forwarded to `impresspress-core`. The block
 # register sites in impresspress-core are `#[cfg(feature = "block-X")]`-gated
-# (`register_all_static_blocks`), so enabling these here is what makes the
+# (`register_feature_blocks`), so enabling these here is what makes the
 # corresponding `impresspress/<name>` routes resolve. Keep in sync with the
 # `impresspress-web/Cargo.toml` block set.
 block-files = ["impresspress-core/block-files"]

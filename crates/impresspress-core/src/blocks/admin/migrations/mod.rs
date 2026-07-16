@@ -9,10 +9,13 @@
 //! queries/day on wafer.run — see the 2026-05-14 config-snapshot spec).
 
 const SQL_001_SQLITE: &str = include_str!("001_admin_schema.sqlite.sql");
+#[cfg(feature = "postgres")]
 const SQL_001_POSTGRES: &str = include_str!("001_admin_schema.postgres.sql");
 const SQL_002_SQLITE: &str = include_str!("002_variables_block_column.sqlite.sql");
+#[cfg(feature = "postgres")]
 const SQL_002_POSTGRES: &str = include_str!("002_variables_block_column.postgres.sql");
 const SQL_003_SQLITE: &str = include_str!("003_block_settings_seed_hash.sqlite.sql");
+#[cfg(feature = "postgres")]
 const SQL_003_POSTGRES: &str = include_str!("003_block_settings_seed_hash.postgres.sql");
 
 /// Ordered SQLite migration scripts for this block, as `(basename, content)`
@@ -26,9 +29,14 @@ pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
 
 /// Ordered PostgreSQL migration scripts, matching [`SQLITE_MIGRATIONS`] one
 /// for one. Selected at runtime by `apply_migrations` and reused by
-/// [`ddl_files`] for the pre-wafer native CLI path.
+/// [`ddl_files`] for the pre-wafer native CLI path. Empty when the `postgres`
+/// feature is off — see `files::migrations`'s doc for the rationale
+/// (Cloudflare/D1 never selects postgres; don't embed dead SQL).
+#[cfg(feature = "postgres")]
 pub(crate) const POSTGRES_MIGRATIONS: &[&str] =
     &[SQL_001_POSTGRES, SQL_002_POSTGRES, SQL_003_POSTGRES];
+#[cfg(not(feature = "postgres"))]
+pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[];
 
 /// Apply the admin schema through the shared migration-state gate.
 ///
@@ -70,10 +78,9 @@ pub fn ddl_files(db_type: &str) -> &'static [&'static str] {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        SQL_001_POSTGRES, SQL_001_SQLITE, SQL_002_POSTGRES, SQL_002_SQLITE, SQL_003_POSTGRES,
-        SQL_003_SQLITE,
-    };
+    #[cfg(feature = "postgres")]
+    use super::{SQL_001_POSTGRES, SQL_002_POSTGRES, SQL_003_POSTGRES};
+    use super::{SQL_001_SQLITE, SQL_002_SQLITE, SQL_003_SQLITE};
 
     #[test]
     fn sqlite_migrations_contain_expected_ddl() {
@@ -87,6 +94,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "postgres")]
     fn postgres_migrations_contain_expected_ddl() {
         assert!(SQL_001_POSTGRES.contains("impresspress__admin__variables_key_uniq"));
         assert!(SQL_002_POSTGRES.contains("ADD COLUMN"));

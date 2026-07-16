@@ -3,8 +3,10 @@
 //! gates the apply through [`crate::migration_helper::apply_migrations`].
 
 const SQL_001_SQLITE: &str = include_str!("001_messages_schema.sqlite.sql");
+#[cfg(feature = "postgres")]
 const SQL_001_POSTGRES: &str = include_str!("001_messages_schema.postgres.sql");
 const SQL_002_SQLITE: &str = include_str!("002_owner_id.sqlite.sql");
+#[cfg(feature = "postgres")]
 const SQL_002_POSTGRES: &str = include_str!("002_owner_id.postgres.sql");
 
 /// Ordered SQLite migration scripts for this block, as `(basename, content)`
@@ -16,12 +18,19 @@ pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
 
 /// Ordered PostgreSQL migration scripts, matching [`SQLITE_MIGRATIONS`] one
 /// for one. Selected at runtime by `apply_migrations` when the deployment's
-/// `WAFER_RUN_SHARED__DATABASE__BACKEND` is `postgres`.
+/// `WAFER_RUN_SHARED__DATABASE__BACKEND` is `postgres`. Empty when the
+/// `postgres` cargo feature is off — see `files::migrations`'s doc for the
+/// rationale (Cloudflare/D1 never selects postgres; don't embed dead SQL).
+#[cfg(feature = "postgres")]
 pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[SQL_001_POSTGRES, SQL_002_POSTGRES];
+#[cfg(not(feature = "postgres"))]
+pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[];
 
 #[cfg(test)]
 mod tests {
-    use super::{SQL_001_POSTGRES, SQL_001_SQLITE, SQL_002_POSTGRES, SQL_002_SQLITE};
+    #[cfg(feature = "postgres")]
+    use super::{SQL_001_POSTGRES, SQL_002_POSTGRES};
+    use super::{SQL_001_SQLITE, SQL_002_SQLITE};
 
     /// The migration_helper statement splitter splits on bare `;` outside
     /// `--` line comments. Make sure every embedded statement parses into
@@ -66,6 +75,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "postgres")]
     fn postgres_script_has_expected_tables_and_indexes() {
         assert_eq!(count_create_table(SQL_001_POSTGRES), 2);
         assert_eq!(count_create_index(SQL_001_POSTGRES), 9);
@@ -73,23 +83,33 @@ mod tests {
         assert!(SQL_001_POSTGRES.contains("impresspress__messages__entries"));
     }
 
+    /// Shared assertions for the `002_owner_id` migration, run against
+    /// whichever dialect's SQL the caller passes in.
+    fn assert_owner_id_migration_adds_column_and_index(sql: &str) {
+        // Exactly 2 ALTER TABLE ... ADD COLUMN statements: contexts +
+        // entries. A dropped ALTER changes this count instead of being
+        // masked by the header comment's prose.
+        assert_eq!(count_alter_add_column(sql), 2);
+        // Backfill #1: contexts.owner_id from historical sender_id.
+        assert!(sql.contains("owner_id = sender_id"));
+        // Backfill #2: entries.owner_id from the parent context's
+        // owner_id, correlated on context_id. Deleting either backfill
+        // statement drops one of these substrings.
+        assert!(sql.contains("UPDATE impresspress__messages__entries"));
+        assert!(sql.contains("c.owner_id"));
+        assert!(sql.contains("context_id"));
+        assert!(sql.contains("idx_messages_contexts_owner_id"));
+        assert!(sql.contains("idx_messages_entries_owner_id"));
+    }
+
     #[test]
-    fn owner_id_migration_adds_column_and_index_both_dialects() {
-        for sql in [SQL_002_SQLITE, SQL_002_POSTGRES] {
-            // Exactly 2 ALTER TABLE ... ADD COLUMN statements: contexts +
-            // entries. A dropped ALTER changes this count instead of being
-            // masked by the header comment's prose.
-            assert_eq!(count_alter_add_column(sql), 2);
-            // Backfill #1: contexts.owner_id from historical sender_id.
-            assert!(sql.contains("owner_id = sender_id"));
-            // Backfill #2: entries.owner_id from the parent context's
-            // owner_id, correlated on context_id. Deleting either backfill
-            // statement drops one of these substrings.
-            assert!(sql.contains("UPDATE impresspress__messages__entries"));
-            assert!(sql.contains("c.owner_id"));
-            assert!(sql.contains("context_id"));
-            assert!(sql.contains("idx_messages_contexts_owner_id"));
-            assert!(sql.contains("idx_messages_entries_owner_id"));
-        }
+    fn owner_id_migration_adds_column_and_index_sqlite() {
+        assert_owner_id_migration_adds_column_and_index(SQL_002_SQLITE);
+    }
+
+    #[test]
+    #[cfg(feature = "postgres")]
+    fn owner_id_migration_adds_column_and_index_postgres() {
+        assert_owner_id_migration_adds_column_and_index(SQL_002_POSTGRES);
     }
 }

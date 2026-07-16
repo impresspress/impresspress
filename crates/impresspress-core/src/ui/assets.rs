@@ -166,11 +166,18 @@ pub fn htmx_js_url() -> &'static str {
 /// marked.js (markdown parser), vendored from marked@14 — self-hosted instead of
 /// a jsdelivr CDN `<script>` so there's no external runtime fetch (CSP-friendly,
 /// no third-party availability/supply-chain dependency at page load).
+///
+/// Only consumed by the LLM chat page (`blocks::llm::pages`), which is itself
+/// gated behind `block-llm` — feature-gated here too so a build without the
+/// LLM block (e.g. Cloudflare, which can't enable `block-llm`: the provider
+/// service isn't wasm32-compatible) doesn't embed this JS.
+#[cfg(feature = "block-llm")]
 pub fn marked_js() -> &'static str {
     include_str!("assets/marked.min.js")
 }
 
 /// marked.js URL with content hash, e.g. `/b/static/marked-a1b2c3d4.min.js`
+#[cfg(feature = "block-llm")]
 pub fn marked_js_url() -> &'static str {
     static URL: OnceLock<String> = OnceLock::new();
     URL.get_or_init(|| {
@@ -181,19 +188,25 @@ pub fn marked_js_url() -> &'static str {
     })
 }
 
-const PURIFY_JS: &str = include_str!("assets/purify.min.js");
-
 /// DOMPurify (HTML sanitizer), vendored from DOMPurify 3.2.4 — self-hosted
 /// instead of a CDN `<script>` so there's no external runtime fetch
 /// (CSP-friendly, no third-party availability/supply-chain dependency at
 /// page load). Loaded before `marked.js`/`llm-chat.js` so `renderMarkdown`
 /// can sanitize the parsed markdown before it reaches `innerHTML`
 /// (P0 stored-XSS fix).
+///
+/// Like `marked_js`, only the LLM chat page loads this — gated behind
+/// `block-llm` for the same reason.
+#[cfg(feature = "block-llm")]
+const PURIFY_JS: &str = include_str!("assets/purify.min.js");
+
+#[cfg(feature = "block-llm")]
 pub fn purify_js() -> &'static str {
     PURIFY_JS
 }
 
 /// DOMPurify JS URL with content hash, e.g. `/b/static/purify-a1b2c3d4.js`
+#[cfg(feature = "block-llm")]
 pub fn purify_js_url() -> &'static str {
     static URL: OnceLock<String> = OnceLock::new();
     URL.get_or_init(|| {
@@ -204,12 +217,18 @@ pub fn purify_js_url() -> &'static str {
     })
 }
 
-const LLM_CHAT_JS: &str = include_str!("assets/llm-chat.js");
-
 /// Embedded vanilla-JS bundle for the LLM chat surface — markdown, message
 /// rendering, model management, chat submission, thread creation/selection.
 /// Consumed by the unified LLM page handler and (for the conversation lens)
 /// by the Messages context_detail handler.
+///
+/// Gated behind `block-llm`: Cloudflare currently cannot enable `block-llm`
+/// (the provider service isn't wasm32-compatible), so this JS has no
+/// consumer there — embedding it unconditionally was pure bloat.
+#[cfg(feature = "block-llm")]
+const LLM_CHAT_JS: &str = include_str!("assets/llm-chat.js");
+
+#[cfg(feature = "block-llm")]
 pub fn llm_chat_js() -> &'static str {
     LLM_CHAT_JS
 }
@@ -217,6 +236,7 @@ pub fn llm_chat_js() -> &'static str {
 /// LLM chat JS URL with content hash, e.g. `/b/static/llm-chat-a1b2c3d4.js`.
 /// Not minified — readability matters for a script that's debugged in
 /// Chrome devtools.
+#[cfg(feature = "block-llm")]
 pub fn llm_chat_js_url() -> &'static str {
     static URL: OnceLock<String> = OnceLock::new();
     URL.get_or_init(|| {
@@ -227,17 +247,22 @@ pub fn llm_chat_js_url() -> &'static str {
     })
 }
 
-const FILES_BROWSER_JS: &str = include_str!("assets/files-browser.js");
-
 /// Embedded vanilla-JS bundle for the file-browser surfaces — drag-drop
 /// upload, bulk select, kebab menus, share modal, upload modal,
 /// confirm-delete. Consumed by `pages_user::object_list_page` and
-/// `cloudstorage_page`.
+/// `cloudstorage_page`, both in the `block-files`-gated `blocks::files`
+/// module — gated here to match, so a build without the Files block drops
+/// this JS too.
+#[cfg(feature = "block-files")]
+const FILES_BROWSER_JS: &str = include_str!("assets/files-browser.js");
+
+#[cfg(feature = "block-files")]
 pub fn files_browser_js() -> &'static str {
     FILES_BROWSER_JS
 }
 
 /// Files-browser JS URL with content hash, e.g. `/b/static/files-browser-a1b2c3d4.js`.
+#[cfg(feature = "block-files")]
 pub fn files_browser_js_url() -> &'static str {
     static URL: OnceLock<String> = OnceLock::new();
     URL.get_or_init(|| {
@@ -529,6 +554,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "block-llm")]
     fn llm_chat_js_is_self_invoking_and_exposes_init() {
         let js = super::llm_chat_js();
         assert!(js.contains("(function ()") || js.contains("(function()"));
@@ -549,6 +575,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "block-llm")]
     fn purify_js_url_has_content_hash() {
         let url = super::purify_js_url();
         assert!(url.starts_with("/b/static/purify-"));
@@ -561,6 +588,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "block-llm")]
     fn purify_js_is_dompurify_umd_build() {
         let js = super::purify_js();
         assert!(
@@ -578,6 +606,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "block-files")]
     fn files_browser_js_exposes_init_and_handles_drag_drop() {
         let js = super::files_browser_js();
         assert!(
@@ -596,6 +625,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "block-files")]
     fn files_browser_js_url_has_content_hash() {
         let url = super::files_browser_js_url();
         assert!(url.starts_with("/b/static/files-browser-"));
@@ -607,6 +637,7 @@ mod tests {
     }
 
     #[test]
+    #[cfg(feature = "block-llm")]
     fn llm_chat_js_url_has_content_hash() {
         let url = super::llm_chat_js_url();
         assert!(url.starts_with("/b/static/llm-chat-"));

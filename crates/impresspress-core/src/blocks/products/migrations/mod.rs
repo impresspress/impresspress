@@ -13,10 +13,13 @@
 //! `impresspress__admin__block_settings` once applied.
 
 const SQL_001_SQLITE: &str = include_str!("001_products_schema.sqlite.sql");
+#[cfg(feature = "postgres")]
 const SQL_001_POSTGRES: &str = include_str!("001_products_schema.postgres.sql");
 const SQL_002_SQLITE: &str = include_str!("002_default_templates.sqlite.sql");
+#[cfg(feature = "postgres")]
 const SQL_002_POSTGRES: &str = include_str!("002_default_templates.postgres.sql");
 const SQL_003_SQLITE: &str = include_str!("003_stripe_events.sqlite.sql");
+#[cfg(feature = "postgres")]
 const SQL_003_POSTGRES: &str = include_str!("003_stripe_events.postgres.sql");
 
 /// Ordered SQLite migration scripts for this block, as `(basename, content)`
@@ -28,6 +31,11 @@ pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
     ("003_stripe_events", SQL_003_SQLITE),
 ];
 
-/// Ordered PostgreSQL migration scripts, matching [`SQLITE_MIGRATIONS`].
+/// Ordered PostgreSQL migration scripts, matching [`SQLITE_MIGRATIONS`]. Empty
+/// when the `postgres` feature is off — see `files::migrations`'s doc for the
+/// rationale (Cloudflare/D1 never selects postgres; don't embed dead SQL).
+#[cfg(feature = "postgres")]
 pub(crate) const POSTGRES_MIGRATIONS: &[&str] =
     &[SQL_001_POSTGRES, SQL_002_POSTGRES, SQL_003_POSTGRES];
+#[cfg(not(feature = "postgres"))]
+pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[];

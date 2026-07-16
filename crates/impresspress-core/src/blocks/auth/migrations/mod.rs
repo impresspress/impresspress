@@ -8,20 +8,28 @@
 //! all migration scripts is hashed and tracked.
 
 const SQL_001_SQLITE: &str = include_str!("001_auth_schema.sqlite.sql");
+#[cfg(feature = "postgres")]
 const SQL_001_POSTGRES: &str = include_str!("001_auth_schema.postgres.sql");
 const SQL_002_SQLITE: &str = include_str!("002_reserved_orgs.sqlite.sql");
+#[cfg(feature = "postgres")]
 const SQL_002_POSTGRES: &str = include_str!("002_reserved_orgs.postgres.sql");
 const SQL_003_SQLITE: &str = include_str!("003_oauth_pkce_states.sqlite.sql");
+#[cfg(feature = "postgres")]
 const SQL_003_POSTGRES: &str = include_str!("003_oauth_pkce_states.postgres.sql");
 const SQL_004_SQLITE: &str = include_str!("004_refresh_tokens.sqlite.sql");
+#[cfg(feature = "postgres")]
 const SQL_004_POSTGRES: &str = include_str!("004_refresh_tokens.postgres.sql");
 const SQL_005_SQLITE: &str = include_str!("005_jwt_blocklist.sqlite.sql");
+#[cfg(feature = "postgres")]
 const SQL_005_POSTGRES: &str = include_str!("005_jwt_blocklist.postgres.sql");
 const SQL_006_SQLITE: &str = include_str!("006_user_extended_fields.sqlite.sql");
+#[cfg(feature = "postgres")]
 const SQL_006_POSTGRES: &str = include_str!("006_user_extended_fields.postgres.sql");
 const SQL_007_SQLITE: &str = include_str!("007_api_keys.sqlite.sql");
+#[cfg(feature = "postgres")]
 const SQL_007_POSTGRES: &str = include_str!("007_api_keys.postgres.sql");
 const SQL_008_SQLITE: &str = include_str!("008_rate_limits.sqlite.sql");
+#[cfg(feature = "postgres")]
 const SQL_008_POSTGRES: &str = include_str!("008_rate_limits.postgres.sql");
 
 /// Ordered SQLite migration scripts for this block, as `(basename, content)`
@@ -39,7 +47,10 @@ pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
 ];
 
 /// Ordered PostgreSQL migration scripts, matching [`SQLITE_MIGRATIONS`] one
-/// for one. Selected at runtime by `apply_migrations`.
+/// for one. Selected at runtime by `apply_migrations`. Empty when the
+/// `postgres` feature is off — see `files::migrations`'s doc for the
+/// rationale (Cloudflare/D1 never selects postgres; don't embed dead SQL).
+#[cfg(feature = "postgres")]
 pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[
     SQL_001_POSTGRES,
     SQL_002_POSTGRES,
@@ -50,6 +61,8 @@ pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[
     SQL_007_POSTGRES,
     SQL_008_POSTGRES,
 ];
+#[cfg(not(feature = "postgres"))]
+pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[];
 
 /// Apply the auth schema through the shared migration-state gate.
 ///
