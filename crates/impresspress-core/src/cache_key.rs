@@ -557,7 +557,10 @@ mod tests {
     #[test]
     fn invalidate_keys_for_update_unions_old_and_new_identity() {
         let old = row("block", serde_json::Value::String("WAFER_RUN__AUTH".into()));
-        let new = row("block", serde_json::Value::String("WAFER_RUN__STRIPE".into()));
+        let new = row(
+            "block",
+            serde_json::Value::String("WAFER_RUN__STRIPE".into()),
+        );
         let keys = invalidate_keys_for_update(CachedTable::Variables, &old, &new);
         assert_eq!(
             keys,
