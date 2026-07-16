@@ -10,10 +10,16 @@
 
 use std::path::{Path, PathBuf};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{anyhow, bail, Context, Result};
 use serde::Deserialize;
 
 use super::wrangler::{CloudflareConfig, D1Config, R2Config};
+
+/// Default Workers Observability head sampling rate when neither
+/// `IMPRESSPRESS_CLOUDFLARE_HEAD_SAMPLING_RATE` nor `impresspress.toml`'s
+/// `[cloudflare].head_sampling_rate` is set. `1.0` (100%) preserves the
+/// previous hardcoded behavior for existing consumers.
+const DEFAULT_HEAD_SAMPLING_RATE: f64 = 1.0;
 
 /// Toml-shaped, pre-resolution. Every field that can be supplied via env
 /// is `Option<String>`.
@@ -25,6 +31,10 @@ pub struct RawCloudflareConfig {
     pub d1: RawD1Config,
     pub r2: RawR2Config,
     pub wrangler_overrides_path: Option<PathBuf>,
+    /// Workers Observability head sampling rate, `0.0..=1.0`. Optional —
+    /// defaults to [`DEFAULT_HEAD_SAMPLING_RATE`] when unset by both toml
+    /// and env.
+    pub head_sampling_rate: Option<f64>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -106,6 +116,10 @@ impl RawCloudflareConfig {
             "r2.bucket_name",
             "IMPRESSPRESS_CLOUDFLARE_R2_BUCKET_NAME",
         )?;
+        let head_sampling_rate = resolve_head_sampling_rate(
+            env("IMPRESSPRESS_CLOUDFLARE_HEAD_SAMPLING_RATE"),
+            self.head_sampling_rate,
+        )?;
         Ok(CloudflareConfig {
             account_id,
             worker_name,
@@ -120,8 +134,32 @@ impl RawCloudflareConfig {
                 bucket_name: r2_bucket_name,
             },
             wrangler_overrides_path: self.wrangler_overrides_path,
+            head_sampling_rate,
         })
     }
+}
+
+/// Resolve the Workers Observability head sampling rate: env > toml >
+/// [`DEFAULT_HEAD_SAMPLING_RATE`] (unlike the required identifiers `pick()`
+/// handles, an unset sampling rate is not an error — 100% is a reasonable
+/// default, just no longer a hardcoded one).
+fn resolve_head_sampling_rate(env_val: Option<String>, toml_val: Option<f64>) -> Result<f64> {
+    let rate = match env_val {
+        Some(s) => s.trim().parse::<f64>().map_err(|_| {
+            anyhow!(
+                "IMPRESSPRESS_CLOUDFLARE_HEAD_SAMPLING_RATE={s:?} is not a valid \
+                 number (expected 0.0-1.0)"
+            )
+        })?,
+        None => toml_val.unwrap_or(DEFAULT_HEAD_SAMPLING_RATE),
+    };
+    if !(0.0..=1.0).contains(&rate) {
+        bail!(
+            "cloudflare.head_sampling_rate = {rate} is out of range — \
+             must be between 0.0 and 1.0"
+        );
+    }
+    Ok(rate)
 }
 
 fn pick(

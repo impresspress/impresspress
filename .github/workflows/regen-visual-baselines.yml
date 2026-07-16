@@ -52,7 +52,11 @@ jobs:
           prefix-key: e2e
 
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          # Pin explicitly — unpinned "latest" falls back to v0.9.1 on a GitHub
+          # API flake, which can't parse `license.workspace = true`. Matches ci.yml.
+          version: 'v0.15.0'
 
       - name: Setup Node
         uses: actions/setup-node@v4

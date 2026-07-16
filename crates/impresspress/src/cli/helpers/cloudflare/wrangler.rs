@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use super::build::WORKER_BUILD_VERSION;
+
 #[derive(Debug, Clone)]
 pub struct CloudflareConfig {
     pub account_id: String,
@@ -18,6 +20,14 @@ pub struct CloudflareConfig {
     /// Path (relative to consumer repo root) to a TOML file whose contents
     /// are deep-merged over the generated defaults. None means "no overrides."
     pub wrangler_overrides_path: Option<PathBuf>,
+    /// Workers Observability head sampling rate (`0.0..=1.0`), resolved by
+    /// [`super::env::RawCloudflareConfig::resolve`] from
+    /// `IMPRESSPRESS_CLOUDFLARE_HEAD_SAMPLING_RATE` / `impresspress.toml`'s
+    /// `[cloudflare].head_sampling_rate`, defaulting to `1.0` (100%) when
+    /// neither is set. Explicit and configurable rather than hardcoded, so a
+    /// deployment that outgrows 100%-capture traffic doesn't have to reach
+    /// for a `wrangler_overrides_path` file to dial it down.
+    pub head_sampling_rate: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -73,20 +83,28 @@ fn base_toml(cfg: &CloudflareConfig) -> toml::Value {
     root.insert("preview_urls".into(), Value::Boolean(true));
 
     let mut build = toml::map::Map::new();
-    // Pin to ^0.7 — worker-build 0.8.x rejects consumers using
-    // `worker < 0.8` (hard version check) and changed its output layout
-    // from `build/worker/shim.mjs` (which `main` points to) to
-    // `build/index.js`. Until we upgrade the `worker` crate, lock the
-    // toolchain to 0.7.x for both the local build and the wrangler-driven
-    // rebuild during deploy.
+    // Pinned to an exact version (`WORKER_BUILD_VERSION`, shared with the
+    // local `impresspress build --target cloudflare` path in
+    // `build::ensure_worker_build_installed`) — worker-build 0.8.x rejects
+    // consumers using `worker < 0.8` (hard version check) and changed its
+    // output layout from `build/worker/shim.mjs` (which `main` points to)
+    // to `build/index.js`. Until we upgrade the `worker` crate, lock the
+    // toolchain to this exact version for both the local build and the
+    // wrangler-driven rebuild during deploy.
+    //
+    // The `command -v ... && [ ... ] ||` guard skips `cargo install`
+    // outright when the pinned version is already on `PATH` (e.g. a build
+    // environment that persists `~/.cargo/bin` across runs), instead of
+    // reinstalling unconditionally on every build.
     build.insert(
         "command".into(),
-        Value::String(
-            "cargo install worker-build --version ^0.7 --quiet && \
+        Value::String(format!(
+            "((command -v worker-build >/dev/null 2>&1 && \
+             [ \"$(worker-build --version)\" = \"{WORKER_BUILD_VERSION}\" ]) || \
+             cargo install worker-build --version \"={WORKER_BUILD_VERSION}\" --quiet) && \
              worker-build --release --no-default-features \
              --features target-cloudflare"
-                .into(),
-        ),
+        )),
     );
     root.insert("build".into(), Value::Table(build));
 
@@ -118,12 +136,18 @@ fn base_toml(cfg: &CloudflareConfig) -> toml::Value {
 
     // Workers Logs (a.k.a. Workers Observability). Off by default at the
     // platform; we turn it on so dashboard logs + the `wrangler tail`
-    // request envelope are populated. `head_sampling_rate = 1.0` captures
-    // every invocation — fine at wafer-site's traffic, dial down via
-    // `wrangler_overrides_path` if a deployment grows.
+    // request envelope are populated. `head_sampling_rate` is an explicit,
+    // configurable knob (`cfg.head_sampling_rate`, see
+    // `CloudflareConfig::head_sampling_rate`) rather than hardcoded — set
+    // `[cloudflare].head_sampling_rate` in impresspress.toml or
+    // `IMPRESSPRESS_CLOUDFLARE_HEAD_SAMPLING_RATE` for a deployment whose
+    // traffic has outgrown 100% capture.
     let mut obs = toml::map::Map::new();
     obs.insert("enabled".into(), Value::Boolean(true));
-    obs.insert("head_sampling_rate".into(), Value::Float(1.0));
+    obs.insert(
+        "head_sampling_rate".into(),
+        Value::Float(cfg.head_sampling_rate),
+    );
     root.insert("observability".into(), Value::Table(obs));
 
     Value::Table(root)

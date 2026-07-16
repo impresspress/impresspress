@@ -23,7 +23,12 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          # Pin explicitly — unpinned "latest" falls back to v0.9.1 on a GitHub
+          # API flake, and v0.9.1 can't parse `license.workspace = true`.
+          # This is live push-to-main infra; matches ci.yml's pin.
+          version: 'v0.15.0'
 
       # `cargo install --path crates/impresspress` runs the impresspress build.rs,
       # which `include_bytes!`s the impresspress-web wasm. Build it first so

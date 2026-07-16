@@ -1,7 +1,8 @@
 use std::fs;
 
-use impresspress::cli::helpers::cloudflare::wrangler::{
-    generate, CloudflareConfig, D1Config, R2Config,
+use impresspress::cli::helpers::cloudflare::{
+    build::WORKER_BUILD_VERSION,
+    wrangler::{generate, CloudflareConfig, D1Config, R2Config},
 };
 use tempfile::tempdir;
 
@@ -20,6 +21,7 @@ fn sample_cfg() -> CloudflareConfig {
             bucket_name: "wafer-site-assets".into(),
         },
         wrangler_overrides_path: None,
+        head_sampling_rate: 1.0,
     }
 }
 
@@ -50,6 +52,52 @@ fn generate_writes_wrangler_toml_with_required_fields() {
         !body.contains("migrations_dir"),
         "deploy toml must not declare a wrangler migrations ledger — \
          schema funnels through /_deploy/init"
+    );
+}
+
+#[test]
+fn generate_writes_configured_head_sampling_rate() {
+    let tmp = tempdir().unwrap();
+    let repo_root = tmp.path();
+    let out = repo_root.join("target/impresspress-cloudflare");
+    fs::create_dir_all(&out).unwrap();
+
+    let mut cfg = sample_cfg();
+    cfg.head_sampling_rate = 0.1;
+    let path = generate(&cfg, repo_root, &out).unwrap();
+    let body = fs::read_to_string(&path).unwrap();
+
+    assert!(
+        body.contains("head_sampling_rate = 0.1"),
+        "generated toml should reflect the configured sampling rate, not a \
+         hardcoded 1.0:\n{body}"
+    );
+}
+
+#[test]
+fn generate_pins_worker_build_and_skips_reinstall_when_present() {
+    let tmp = tempdir().unwrap();
+    let repo_root = tmp.path();
+    let out = repo_root.join("target/impresspress-cloudflare");
+    fs::create_dir_all(&out).unwrap();
+
+    let path = generate(&sample_cfg(), repo_root, &out).unwrap();
+    let body = fs::read_to_string(&path).unwrap();
+
+    let expected_pin = format!(r#"--version "={WORKER_BUILD_VERSION}""#);
+    assert!(
+        body.contains(&expected_pin),
+        "build command must pin the exact worker-build version, not a \
+         floating semver range:\n{body}"
+    );
+    assert!(
+        body.contains(&format!(r#"= "{WORKER_BUILD_VERSION}""#)),
+        "build command must check the installed version before deciding \
+         whether to reinstall:\n{body}"
+    );
+    assert!(
+        body.contains("worker-build --release --no-default-features"),
+        "build command must still run worker-build after the check:\n{body}"
     );
 }
 

@@ -93,6 +93,68 @@ fn resolve_uses_toml_when_env_empty() {
 }
 
 #[test]
+fn resolve_defaults_head_sampling_rate_to_one_when_unset() {
+    let raw = parse_str(FULL_TOML);
+    let cfg = raw.resolve(fake_env(&[])).unwrap();
+    assert_eq!(cfg.head_sampling_rate, 1.0);
+}
+
+#[test]
+fn resolve_uses_toml_head_sampling_rate() {
+    let raw = parse_str(
+        r#"
+[cloudflare]
+account_id = "acct-toml"
+worker_name = "x"
+compatibility_date = "2026-05-01"
+head_sampling_rate = 0.25
+
+[cloudflare.d1]
+binding = "DB"
+database_name = "x"
+database_id = "00000000-0000-0000-0000-000000000000"
+
+[cloudflare.r2]
+binding = "STORAGE"
+bucket_name = "x-bucket"
+"#,
+    );
+    let cfg = raw.resolve(fake_env(&[])).unwrap();
+    assert_eq!(cfg.head_sampling_rate, 0.25);
+}
+
+#[test]
+fn resolve_env_overrides_toml_head_sampling_rate() {
+    let raw = parse_str(FULL_TOML);
+    let env = fake_env(&[("IMPRESSPRESS_CLOUDFLARE_HEAD_SAMPLING_RATE", "0.05")]);
+    let cfg = raw.resolve(env).unwrap();
+    assert_eq!(cfg.head_sampling_rate, 0.05);
+}
+
+#[test]
+fn resolve_rejects_out_of_range_head_sampling_rate() {
+    let raw = parse_str(FULL_TOML);
+    let env = fake_env(&[("IMPRESSPRESS_CLOUDFLARE_HEAD_SAMPLING_RATE", "1.5")]);
+    let err = raw.resolve(env).unwrap_err();
+    assert!(
+        err.to_string().contains("out of range"),
+        "expected an out-of-range error, got: {err}"
+    );
+}
+
+#[test]
+fn resolve_rejects_unparseable_head_sampling_rate() {
+    let raw = parse_str(FULL_TOML);
+    let env = fake_env(&[("IMPRESSPRESS_CLOUDFLARE_HEAD_SAMPLING_RATE", "not-a-number")]);
+    let err = raw.resolve(env).unwrap_err();
+    assert!(
+        err.to_string()
+            .contains("IMPRESSPRESS_CLOUDFLARE_HEAD_SAMPLING_RATE"),
+        "expected the env var name in the error, got: {err}"
+    );
+}
+
+#[test]
 fn resolve_env_overrides_toml() {
     let raw = parse_str(FULL_TOML);
     let env = fake_env(&[
