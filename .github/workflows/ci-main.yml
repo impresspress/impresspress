@@ -160,7 +160,6 @@ jobs:
   audit:
     name: Security Audit
     runs-on: ubuntu-latest
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 
@@ -170,6 +169,9 @@ jobs:
       - name: Install cargo-audit
         run: cargo install cargo-audit --quiet
 
+      # Blocking: a new, un-reviewed advisory fails CI. Known-acceptable
+      # exceptions (with owner + expiry) live in .cargo/audit.toml — see
+      # that file for the review/renewal process.
       - name: Run audit
         run: cargo audit
 

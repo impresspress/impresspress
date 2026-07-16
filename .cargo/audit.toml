@@ -1,13 +1,65 @@
+# cargo-audit exception policy
+#
+# CI runs `cargo audit` as a BLOCKING check (ci.yml / ci-main.yml — no more
+# `continue-on-error`). A new advisory that isn't listed below fails CI.
+#
+# Every entry in `ignore` must carry an owner + expiry so it gets
+# re-triaged instead of living here forever: run `cargo audit --no-fetch`
+# (or drop `--no-fetch` for a live advisory-db pull) locally, cross-check
+# each listed ID still matches a crate/version actually in Cargo.lock
+# (`grep -A2 'name = "<crate>"' Cargo.lock`), and either renew the expiry
+# (with a reason) or drop the entry once the dependency is upgraded past
+# the affected range. owner = @impresspress-maintainers unless noted.
+#
+# Verified 2026-07-17 against Cargo.lock: of the 9 IDs previously listed
+# here (all without owner/expiry), 6 no longer match anything in the
+# dependency tree — the underlying crates were already upgraded past the
+# affected version range (lru 0.16.4, rand 0.8.6/0.9.4, rustls-webpki
+# 0.103.13 all satisfy their advisories' `patched` ranges; `number_prefix`
+# isn't even in Cargo.lock anymore). Pruned rather than kept as inert
+# entries — a stale "temporary exception" that matches nothing is clutter,
+# not an accepted risk. Only the 3 below still match a real advisory today.
 [advisories]
 ignore = [
-    "RUSTSEC-2023-0071", # rsa timing side-channel — no fix available
-    "RUSTSEC-2026-0002", # lru stacked borrows — pinned by aws-sdk-s3
-    "RUSTSEC-2026-0098", # rustls-webpki 0.101.7 URI name constraints — pinned by AWS SDK rustls 0.21
-    "RUSTSEC-2026-0099", # rustls-webpki 0.101.7 wildcard name constraints — pinned by AWS SDK rustls 0.21
-    "RUSTSEC-2026-0097", # rand — waiting for upstream fix
-    "RUSTSEC-2024-0370", # proc-macro-error unmaintained — transitive dep
-    "RUSTSEC-2026-0104", # rustls-webpki panic on malformed CRL — 0.101.7 pinned by aws-sdk-s3 chain (DoS-only, no code exec); 0.103.x already at patched 0.103.13
-    "RUSTSEC-2025-0119", # number_prefix unmaintained — transitive via fastembed → hf-hub → indicatif
-    "RUSTSEC-2024-0436", # paste unmaintained — transitive via fastembed → tokenizers
+    "RUSTSEC-2023-0071", # rsa timing side-channel — no fix available upstream (sqlx-mysql -> rsa 0.9.10). The only entry here that's an actual "vulnerability" (not just a Warning); without it, plain `cargo audit` fails. owner=@impresspress-maintainers expiry=2026-10-15
+    "RUSTSEC-2024-0370", # proc-macro-error unmaintained — transitive via maud_macros, no direct usage. owner=@impresspress-maintainers expiry=2026-10-15
+    "RUSTSEC-2024-0436", # paste unmaintained — transitive via fastembed -> tokenizers/rav1e. owner=@impresspress-maintainers expiry=2026-10-15
 ]
-informational_warnings = ["unmaintained"]
+# Deliberately NOT setting `informational_warnings`: it acts as an allowlist
+# — advisories whose `informational` field isn't in the list are dropped
+# from the report entirely, not just treated as non-blocking. The previous
+# `informational_warnings = ["unmaintained"]` here silently hid `anyhow`
+# 1.0.102's RUSTSEC-2026-0190 ("unsound", not "unmaintained") from every
+# `cargo audit` run — a real, un-reviewed finding with zero visibility.
+# Leaving this unset shows every informational category; none of them
+# block CI by default (only actual vulnerabilities and an explicit `-D` do),
+# so nothing here changes pass/fail — it only restores visibility.
+
+# Yanked releases we've reviewed and accept for now.
+#
+# cargo-audit's `ignore` list above only takes RUSTSEC advisory IDs — a
+# yanked-crate warning has no such ID, so it can't be silenced the same way.
+# `cargo audit` (as CI runs it, with no `-D`/`--deny` flag) does NOT fail on
+# yanked warnings by default; only `-D yanked` / `-D warnings` would. CI
+# intentionally does not pass either, so these are non-blocking today. This
+# block exists so a human (or a future `-D yanked` change) has a paper trail
+# instead of two unexplained warnings.
+#
+#   spin 0.9.8  — yanked by its author. Pulled in transitively via wasmi
+#                 0.44.1 (wafer-run's WASM runtime) and a few dev/test-only
+#                 chains (lazy_static -> sharded-slab/num-bigint-dig/deadpool,
+#                 flume -> sqlx-sqlite). No advisory, no known vulnerability —
+#                 just withdrawn. owner=@impresspress-maintainers
+#                 expiry=2026-10-15 (re-check whether wasmi has bumped its
+#                 spin dependency).
+#   spin 0.10.0 — yanked by its author. Pulled in transitively via
+#                 aws-sdk-s3's crc-fast -> aws-smithy-checksums chain.
+#                 owner=@impresspress-maintainers expiry=2026-10-15
+#                 (re-check the aws-sdk-s3 upgrade path).
+#
+# Not (yet) tracked here: `anyhow` 1.0.102 currently carries an informational
+# "unsound" advisory (RUSTSEC-2026-0190, `Error::downcast_mut()`). It is a
+# live finding as of this writing but — like the yanked crates above — is a
+# Warning, not a Vulnerability, so it does not block plain `cargo audit` and
+# needs no `ignore` entry to keep CI green. Left un-ignored deliberately so
+# it stays visible in `cargo audit` output rather than being suppressed.
