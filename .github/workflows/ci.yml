@@ -456,3 +456,13 @@ jobs:
           npm ci
           npm run build
           npm run lint
+
+      - name: Test SDK
+        if: steps.sdk-changes.outputs.skip != 'true'
+        working-directory: packages/impresspress-js
+        run: npm test
+
+      - name: Smoke-test clean pack/install
+        if: steps.sdk-changes.outputs.skip != 'true'
+        working-directory: packages/impresspress-js
+        run: npm run test:pack-install
