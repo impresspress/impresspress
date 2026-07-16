@@ -90,6 +90,41 @@ pub async fn delete_by_hash(ctx: &dyn Context, token_hash: &[u8]) -> Result<(), 
     Ok(())
 }
 
+/// Atomically validate-and-consume an unexpired bootstrap token in a single
+/// `DELETE ... RETURNING` round trip (`db::take_by_filters` /
+/// `ServiceOp::DATABASE_TAKE_WHERE`, built via
+/// `wafer_sql_utils::query::build_delete_where_returning`). Returns `true`
+/// iff a row was actually deleted (i.e. the token existed and had not
+/// expired).
+///
+/// This closes the redemption race the old validate-then-create-then-delete
+/// sequence had: because the "is it still valid" read and the "remove it"
+/// write are the same SQL statement, two concurrent redemption attempts for
+/// the same raw token cannot both see it as valid — the database itself
+/// serializes the two `DELETE`s, so at most one caller's `take_valid_by_hash`
+/// returns `true`. Callers MUST perform this consumption *before* creating
+/// the privileged account, so only the winner of the atomic take proceeds.
+pub async fn take_valid_by_hash(ctx: &dyn Context, token_hash: &[u8]) -> Result<bool, RepoError> {
+    let now = now_iso();
+    let hex = hex_encode(token_hash);
+    let filters = vec![
+        Filter {
+            field: "token_hash".into(),
+            operator: FilterOp::Equal,
+            value: json!(hex),
+        },
+        Filter {
+            field: "expires_at".into(),
+            operator: FilterOp::GreaterEqual,
+            value: json!(now),
+        },
+    ];
+    let records = db::take_by_filters(ctx, TABLE, filters)
+        .await
+        .map_err(|e| RepoError::Db(format!("bootstrap_tokens take_valid_by_hash: {e}")))?;
+    Ok(!records.is_empty())
+}
+
 #[cfg(test)]
 mod typed_client_tests {
     use super::*;
@@ -153,6 +188,54 @@ mod typed_client_tests {
         insert(&ctx, hash.clone(), &future_iso(3600)).await.unwrap();
         assert!(is_valid(&ctx, &hash).await.unwrap());
         delete_by_hash(&ctx, &hash).await.unwrap();
+        assert!(!is_valid(&ctx, &hash).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn take_valid_by_hash_consumes_the_row_exactly_once() {
+        let ctx = TestContext::with_auth().await.with_wrap(
+            "wafer-run/auth",
+            vec![],
+            "impresspress/admin",
+        );
+        let hash = vec![0x11_u8; 32];
+        insert(&ctx, hash.clone(), &future_iso(3600)).await.unwrap();
+
+        assert!(
+            take_valid_by_hash(&ctx, &hash).await.unwrap(),
+            "first take must consume a valid, unexpired row"
+        );
+        assert!(
+            !take_valid_by_hash(&ctx, &hash).await.unwrap(),
+            "second take on the same hash must find nothing left to consume"
+        );
+    }
+
+    #[tokio::test]
+    async fn take_valid_by_hash_unknown_hash_returns_false() {
+        let ctx = TestContext::with_auth().await.with_wrap(
+            "wafer-run/auth",
+            vec![],
+            "impresspress/admin",
+        );
+        let hash = vec![0x22_u8; 32];
+        assert!(!take_valid_by_hash(&ctx, &hash).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn take_valid_by_hash_does_not_consume_an_expired_row() {
+        let ctx = TestContext::with_auth().await.with_wrap(
+            "wafer-run/auth",
+            vec![],
+            "impresspress/admin",
+        );
+        let hash = vec![0x33_u8; 32];
+        insert(&ctx, hash.clone(), &past_iso(3600)).await.unwrap();
+
+        assert!(!take_valid_by_hash(&ctx, &hash).await.unwrap());
+        // The expired row is untouched by the failed take (its filter
+        // excludes it), so a plain lookup still finds it in the table —
+        // just still (correctly) reported invalid by `is_valid`.
         assert!(!is_valid(&ctx, &hash).await.unwrap());
     }
 }
