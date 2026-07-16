@@ -246,7 +246,18 @@ pub async fn handle_toggle_feature(
     // Read current state and toggle via shared helper (audit finding #12).
     let current_enabled = super::super::settings::block_settings::is_enabled(ctx, block_name).await;
     let new_enabled = !current_enabled;
-    let _ = super::super::settings::block_settings::set_enabled(ctx, block_name, new_enabled).await;
+
+    // Persist first. Only write the audit event — and only re-render the
+    // page as a success — after a confirmed successful write. Previously
+    // `let _ = set_enabled(..)` discarded the persistence result, so a
+    // failed toggle still logged "block.enable"/"block.disable" as if it
+    // had happened and re-rendered the page showing the new (unpersisted)
+    // state.
+    if let Err(e) =
+        super::super::settings::block_settings::set_enabled(ctx, block_name, new_enabled).await
+    {
+        return crate::http::err_internal("Failed to persist block setting", e);
+    }
 
     let admin_id = msg.user_id().to_string();
     let ip = msg.remote_addr().to_string();
@@ -484,5 +495,87 @@ fn custom_tab_content() -> maud::Markup {
                 }
             }
         }
+    }
+}
+
+/// Regression coverage for the swallowed-failure finding: block enable/disable
+/// must check the persistence result instead of discarding it
+/// (`let _ = set_enabled(..)`), and must only write the audit-log row after a
+/// confirmed successful write — a failed persist must not report success or
+/// log "block.enable"/"block.disable" as if it happened.
+#[cfg(test)]
+mod toggle_feature_tests {
+    use wafer_core::clients::database as db;
+
+    use super::*;
+    use crate::test_support::{admin_msg, TestContext};
+
+    async fn audit_count(ctx: &dyn Context, action: &str) -> usize {
+        db::list_all(
+            ctx,
+            crate::blocks::admin::AUDIT_LOGS_TABLE,
+            vec![wafer_block::db::Filter {
+                field: "action".to_string(),
+                operator: wafer_block::db::FilterOp::Equal,
+                value: serde_json::Value::String(action.to_string()),
+            }],
+        )
+        .await
+        .map(|rows| rows.len())
+        .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn toggle_success_persists_and_audits() {
+        let ctx = TestContext::with_admin().await;
+        let msg = admin_msg("create", "/admin/blocks/impresspress--files/toggle");
+
+        assert!(
+            super::super::super::settings::block_settings::is_enabled(&ctx, "impresspress/files")
+                .await,
+            "no row yet ⇒ defaults enabled"
+        );
+
+        let _ = handle_toggle_feature(&ctx, &msg, "impresspress/files")
+            .await
+            .collect_buffered()
+            .await
+            .expect("toggle against a healthy database must succeed");
+
+        assert!(
+            !super::super::super::settings::block_settings::is_enabled(&ctx, "impresspress/files")
+                .await,
+            "toggle must have persisted the disabled state"
+        );
+        assert_eq!(audit_count(&ctx, "block.disable").await, 1);
+    }
+
+    /// The core regression: a genuine persistence failure during the toggle
+    /// must surface as an error response and must NOT write a
+    /// "block.enable"/"block.disable" audit row claiming success. Before this
+    /// fix, `let _ = set_enabled(..)` discarded the error and the handler
+    /// unconditionally logged the audit event and re-rendered the blocks page
+    /// as if the toggle had taken effect.
+    #[tokio::test]
+    async fn toggle_persist_failure_returns_error_without_audit() {
+        let ctx = TestContext::with_admin().await.break_writes();
+        let msg = admin_msg("create", "/admin/blocks/impresspress--files/toggle");
+
+        let out = handle_toggle_feature(&ctx, &msg, "impresspress/files").await;
+        assert!(
+            crate::test_support::output_is_error(out, "Internal").await,
+            "a genuine persistence failure must surface as an error, not a fabricated success"
+        );
+
+        assert_eq!(
+            audit_count(&ctx, "block.disable").await,
+            0,
+            "a failed persist must not write a success audit row"
+        );
+        assert_eq!(
+            audit_count(&ctx, "block.enable").await,
+            0,
+            "a failed persist must not write a success audit row"
+        );
     }
 }
