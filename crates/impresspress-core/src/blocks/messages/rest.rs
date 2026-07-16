@@ -226,9 +226,6 @@ pub async fn add_entry(ctx: &dyn Context, msg: &Message, input: InputStream) -> 
         Ok(b) => b,
         Err(e) => return err_bad_request(&format!("Invalid body: {e}")),
     };
-    if matches!(body.role.as_str(), "assistant" | "system") {
-        return err_bad_request("role 'assistant' and 'system' are reserved for internal use");
-    }
     match service::add_entry(
         ctx,
         msg.user_id(), // owner derived server-side, never from body
@@ -570,15 +567,33 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn authenticated_api_rejects_reserved_roles() {
+    async fn authenticated_api_accepts_assistant_role() {
+        // Regression test for the LLM block's own assistant-message
+        // persistence path: `blocks/llm/mod.rs::messages_create` builds
+        // `{role: "assistant"}` and dispatches through this same
+        // `rest::add_entry` handler via `ctx.call_block`. A prior commit
+        // rejected `role in {assistant, system}` with 400, which silently
+        // broke multi-turn chat by dropping every assistant reply. That
+        // guard is gone; this locks in that assistant-role entries into a
+        // context the caller owns succeed and round-trip the role.
         let ctx = messages_ctx().await;
 
         let created = create_as(&ctx, "user-a", serde_json::json!({"type": "conversation"})).await;
         let cid = created["id"].as_str().expect("id").to_string();
 
         for role in ["assistant", "system"] {
-            let out = add_entry_as(&ctx, "user-a", &cid, serde_json::json!({"role": role, "content": "x"})).await;
-            assert_eq!(status_of(out).await, 400, "role {role} must be rejected");
+            let out = add_entry_as(
+                &ctx,
+                "user-a",
+                &cid,
+                serde_json::json!({"role": role, "content": "x"}),
+            )
+            .await;
+            let entry = crate::test_support::output_json(out).await;
+            assert_eq!(
+                entry["data"]["role"], role,
+                "role {role} must be accepted and round-trip"
+            );
         }
     }
 }
