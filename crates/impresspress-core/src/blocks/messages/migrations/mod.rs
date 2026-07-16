@@ -36,6 +36,19 @@ mod tests {
     fn count_create_index(sql: &str) -> usize {
         sql.match_indices("CREATE INDEX IF NOT EXISTS ").count()
     }
+    // Match against the "ALTER TABLE " DDL prefix with an "ADD COLUMN" body,
+    // not a bare `contains("ADD COLUMN")` — the 002 header comment
+    // descriptively mentions "ALTER ADD COLUMN" (no "TABLE"), so a naive
+    // contains() check is trivially satisfied by prose and never actually
+    // looks at the DDL. This scans each real `ALTER TABLE ...;` statement.
+    fn count_alter_add_column(sql: &str) -> usize {
+        sql.match_indices("ALTER TABLE ")
+            .filter(|(idx, _)| {
+                let stmt_end = sql[*idx..].find(';').map(|i| idx + i).unwrap_or(sql.len());
+                sql[*idx..stmt_end].contains("ADD COLUMN")
+            })
+            .count()
+    }
 
     #[test]
     fn sqlite_script_has_expected_tables_and_indexes() {
@@ -63,7 +76,18 @@ mod tests {
     #[test]
     fn owner_id_migration_adds_column_and_index_both_dialects() {
         for sql in [SQL_002_SQLITE, SQL_002_POSTGRES] {
-            assert!(sql.contains("ADD COLUMN") && sql.contains("owner_id"));
+            // Exactly 2 ALTER TABLE ... ADD COLUMN statements: contexts +
+            // entries. A dropped ALTER changes this count instead of being
+            // masked by the header comment's prose.
+            assert_eq!(count_alter_add_column(sql), 2);
+            // Backfill #1: contexts.owner_id from historical sender_id.
+            assert!(sql.contains("owner_id = sender_id"));
+            // Backfill #2: entries.owner_id from the parent context's
+            // owner_id, correlated on context_id. Deleting either backfill
+            // statement drops one of these substrings.
+            assert!(sql.contains("UPDATE impresspress__messages__entries"));
+            assert!(sql.contains("c.owner_id"));
+            assert!(sql.contains("context_id"));
             assert!(sql.contains("idx_messages_contexts_owner_id"));
             assert!(sql.contains("idx_messages_entries_owner_id"));
         }

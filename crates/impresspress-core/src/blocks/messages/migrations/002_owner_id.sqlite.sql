@@ -11,7 +11,11 @@ UPDATE impresspress__messages__entries
        SELECT c.owner_id FROM impresspress__messages__contexts c
        WHERE c.id = impresspress__messages__entries.context_id
    )
- WHERE owner_id = '';
+ WHERE owner_id = ''
+   AND EXISTS (
+       SELECT 1 FROM impresspress__messages__contexts c
+       WHERE c.id = impresspress__messages__entries.context_id
+   );
 
 CREATE INDEX IF NOT EXISTS idx_messages_contexts_owner_id
     ON impresspress__messages__contexts (owner_id);
