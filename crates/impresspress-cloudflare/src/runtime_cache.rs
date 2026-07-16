@@ -13,10 +13,21 @@
 //! of an isolate's life. (YAGNI: no async build-guard until measurement
 //! says otherwise.)
 
-use std::{cell::RefCell, rc::Rc, sync::Arc};
+use std::{
+    cell::{Cell, RefCell},
+    rc::Rc,
+    sync::Arc,
+};
 
 use impresspress_core::cache_key::CONFIG_VERSION_KEY;
 use wafer_core::interfaces::database::service::DatabaseService;
+
+/// Floor of the isolate-local warm-hit probe window (ms) — see
+/// [`next_probe_deadline_ms`].
+const PROBE_INTERVAL_FLOOR_MS: u64 = 30_000;
+/// Width of the jitter added on top of the floor (ms) — see
+/// [`next_probe_deadline_ms`].
+const PROBE_INTERVAL_JITTER_MS: u64 = 30_000;
 
 pub(crate) struct ReadyRuntime {
     pub wafer: wafer_run::Wafer,
@@ -26,10 +37,56 @@ pub(crate) struct ReadyRuntime {
     /// `KvStore` handle from `env` on every request.
     pub kv: Arc<dyn impresspress_core::kv::KvBackend>,
     pub version: String,
+    /// Absolute wall-clock deadline (ms since epoch, `now_millis()`-scale)
+    /// after which the next request in this isolate re-probes the KV
+    /// config-version stamp instead of trusting this cached runtime
+    /// outright. Reset to a fresh jittered window after every probe (hit
+    /// or rebuild). See "Remove the KV read from nearly every warm
+    /// request" — Cloudflare KV is already eventually consistent (changes
+    /// can take 60s+ to propagate), so probing more often than this floor
+    /// buys no real freshness.
+    probe_deadline_ms: Cell<u64>,
 }
 
 thread_local! {
     static RUNTIME: RefCell<Option<Rc<ReadyRuntime>>> = const { RefCell::new(None) };
+    /// Set by `KvCachedD1DatabaseService::bump_config_version` /
+    /// `force_bump_config_version` (kv_cached_db.rs) immediately after a
+    /// LOCAL write to a config-version-bumping table (variables /
+    /// block_settings / wrap_grants) in THIS isolate. Forces the next
+    /// `get_or_build` call to probe (and rebuild) regardless of the
+    /// jittered deadline below — a request that just wrote new config must
+    /// not keep serving the pre-write runtime for up to a minute just
+    /// because the deadline hasn't elapsed yet. Consumed (cleared) by the
+    /// next `get_or_build` call, whether or not that call ends up
+    /// rebuilding.
+    static DIRTY: Cell<bool> = const { Cell::new(false) };
+}
+
+/// Mark the per-isolate runtime dirty: the next [`get_or_build`] call in
+/// this isolate probes the KV config-version stamp — and rebuilds
+/// unconditionally, regardless of what that probe reads back — rather than
+/// trusting the jittered deadline. See the `DIRTY` thread_local's doc.
+pub(crate) fn mark_dirty() {
+    DIRTY.with(|d| d.set(true));
+}
+
+/// Read and clear the dirty flag.
+fn take_dirty() -> bool {
+    DIRTY.with(|d| d.replace(false))
+}
+
+/// A fresh probe deadline: `now` plus a jittered 30-60s window. Jitter
+/// avoids every isolate that warmed at the same instant re-probing KV in
+/// lockstep after exactly the same interval.
+fn next_probe_deadline_ms(now: u64) -> u64 {
+    let mut buf = [0u8; 2];
+    let jitter_ms = if getrandom::getrandom(&mut buf).is_ok() {
+        u64::from(u16::from_le_bytes(buf)) % PROBE_INTERVAL_JITTER_MS
+    } else {
+        0
+    };
+    now + PROBE_INTERVAL_FLOOR_MS + jitter_ms
 }
 
 fn cached() -> Option<Rc<ReadyRuntime>> {
@@ -83,6 +140,8 @@ where
         Arc<dyn wafer_core::interfaces::storage::service::StorageService>,
     ) -> Result<(), Box<dyn std::error::Error>>,
 {
+    let now = impresspress_core::util::now_millis();
+
     // Every path probes the config-version BEFORE building, so the stored
     // ReadyRuntime is always tagged with a version no newer than the config
     // generation it was actually built from. Version stamps are monotonic,
@@ -101,11 +160,29 @@ where
     // failed row-invalidate would bake stale rows under the new stamp).
     // Cold builds keep the cache (cold-start latency is its remaining value).
     let (probed_version, read_through) = if let Some(rt) = cached() {
-        let version = current_version(&rt.kv).await;
-        if rt.version == version {
+        let dirty = take_dirty();
+
+        // Fast path: no local write since the runtime was built, and the
+        // jittered probe window hasn't elapsed yet — skip the KV read
+        // entirely. This is the case for nearly every warm request.
+        if !dirty && now < rt.probe_deadline_ms.get() {
             return Ok(rt);
         }
-        tracing::info!(old = %rt.version, new = %version, "config version moved; rebuilding runtime");
+
+        let version = current_version(&rt.kv).await;
+
+        // A pure deadline-elapsed probe (not dirty) that finds the version
+        // unchanged just extends the window — no rebuild needed. A LOCAL
+        // write (`dirty`) always falls through to a rebuild below, even if
+        // this same read happens to still report the old version: KV is
+        // eventually consistent even for the writer, so trusting this read
+        // alone would reintroduce the exact staleness window `mark_dirty`
+        // exists to close.
+        if !dirty && rt.version == version {
+            rt.probe_deadline_ms.set(next_probe_deadline_ms(now));
+            return Ok(rt);
+        }
+        tracing::info!(old = %rt.version, new = %version, dirty, "config version moved or local write pending; rebuilding runtime");
         (version, true)
     } else {
         // Cold isolate: nothing cached to probe through. Construct a
@@ -143,6 +220,7 @@ where
         db: built.db,
         kv: built.kv,
         version: probed_version,
+        probe_deadline_ms: Cell::new(next_probe_deadline_ms(now)),
     });
     store(rt.clone());
     Ok(rt)

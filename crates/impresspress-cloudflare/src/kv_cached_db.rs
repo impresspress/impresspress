@@ -146,6 +146,12 @@ impl KvCachedD1DatabaseService {
         if !self.mode.bump_on_write || !cache_key::bumps_config_version(collection) {
             return;
         }
+        // This isolate's local D1 state just changed — the next request
+        // here must not keep serving a runtime built before this write for
+        // up to the runtime cache's jittered probe window, regardless of
+        // whether the KV stamp below lands or is still eventually
+        // consistent even for the writer. See runtime_cache's DIRTY flag.
+        crate::runtime_cache::mark_dirty();
         let stamp = new_version_stamp();
         if let Err(e) = put_version_stamp_with_retry(self.kv.as_ref(), &stamp).await {
             tracing::warn!(table = %collection, error = %e, op, "config-version bump failed");
@@ -159,6 +165,11 @@ impl KvCachedD1DatabaseService {
 /// Deploy-init calls this once after the funnel (per-write bumps are
 /// suppressed during it — see [`CacheMode::bump_on_write`]).
 pub(crate) async fn force_bump_config_version(kv: &dyn KvBackend) -> Result<(), String> {
+    // The isolate handling `/_deploy/init` may also hold a pre-deploy
+    // cached runtime from earlier ordinary requests; mark it dirty so this
+    // isolate rebuilds on its next ordinary request instead of serving
+    // stale (pre-migration/pre-reseed) state for up to the probe window.
+    crate::runtime_cache::mark_dirty();
     put_version_stamp_with_retry(kv, &new_version_stamp()).await
 }
 
