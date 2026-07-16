@@ -106,7 +106,13 @@ pub async fn run(repo_root: &Path, run_migrations: bool) -> anyhow::Result<()> {
             impresspress_core::blocks::auth::JWT_SECRET_KEY
         ));
     }
-    let features = impresspress_core::features::load_and_seed_block_settings(&database).await;
+    // A read error here is always a genuine operational failure (backend
+    // outage/corruption) — `load_and_seed_block_settings` never fabricates
+    // "every block enabled" out of one. Bail rather than boot with a
+    // security-relevant setting silently defaulted open.
+    let features = impresspress_core::features::load_and_seed_block_settings(&database)
+        .await
+        .map_err(|e| anyhow!("load block settings: {e}"))?;
 
     // 7. Build WAFER runtime via ImpresspressBuilder
     let config_service = wafer_core::service_blocks::config::EnvConfigService::new();

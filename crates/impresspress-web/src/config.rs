@@ -67,8 +67,15 @@ pub async fn seed_and_load_variables(
 /// the shared `impresspress_core::features::load_and_seed_block_settings` over
 /// `BrowserDatabaseService`, so the browser runs the exact #222 hash-gate
 /// Cloudflare and native do.
+///
+/// A read error is always a genuine operational failure (OPFS/sql.js
+/// corruption, quota exhaustion) — never the missing-table cold-start case,
+/// which `DatabaseService::list` already tolerates internally. Propagates
+/// rather than fabricating "every block enabled".
 pub async fn load_block_settings(
     db: &Arc<dyn DatabaseService>,
-) -> impresspress_core::features::BlockSettings {
-    impresspress_core::features::load_and_seed_block_settings(db).await
+) -> Result<impresspress_core::features::BlockSettings, String> {
+    impresspress_core::features::load_and_seed_block_settings(db)
+        .await
+        .map_err(|e| format!("load block settings: {e}"))
 }
