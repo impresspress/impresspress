@@ -20,6 +20,14 @@ pub struct CloudflareConfig {
     /// Path (relative to consumer repo root) to a TOML file whose contents
     /// are deep-merged over the generated defaults. None means "no overrides."
     pub wrangler_overrides_path: Option<PathBuf>,
+    /// Workers Observability head sampling rate (`0.0..=1.0`), resolved by
+    /// [`super::env::RawCloudflareConfig::resolve`] from
+    /// `IMPRESSPRESS_CLOUDFLARE_HEAD_SAMPLING_RATE` / `impresspress.toml`'s
+    /// `[cloudflare].head_sampling_rate`, defaulting to `1.0` (100%) when
+    /// neither is set. Explicit and configurable rather than hardcoded, so a
+    /// deployment that outgrows 100%-capture traffic doesn't have to reach
+    /// for a `wrangler_overrides_path` file to dial it down.
+    pub head_sampling_rate: f64,
 }
 
 #[derive(Debug, Clone)]
@@ -128,12 +136,18 @@ fn base_toml(cfg: &CloudflareConfig) -> toml::Value {
 
     // Workers Logs (a.k.a. Workers Observability). Off by default at the
     // platform; we turn it on so dashboard logs + the `wrangler tail`
-    // request envelope are populated. `head_sampling_rate = 1.0` captures
-    // every invocation — fine at wafer-site's traffic, dial down via
-    // `wrangler_overrides_path` if a deployment grows.
+    // request envelope are populated. `head_sampling_rate` is an explicit,
+    // configurable knob (`cfg.head_sampling_rate`, see
+    // `CloudflareConfig::head_sampling_rate`) rather than hardcoded — set
+    // `[cloudflare].head_sampling_rate` in impresspress.toml or
+    // `IMPRESSPRESS_CLOUDFLARE_HEAD_SAMPLING_RATE` for a deployment whose
+    // traffic has outgrown 100% capture.
     let mut obs = toml::map::Map::new();
     obs.insert("enabled".into(), Value::Boolean(true));
-    obs.insert("head_sampling_rate".into(), Value::Float(1.0));
+    obs.insert(
+        "head_sampling_rate".into(),
+        Value::Float(cfg.head_sampling_rate),
+    );
     root.insert("observability".into(), Value::Table(obs));
 
     Value::Table(root)

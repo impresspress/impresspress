@@ -21,6 +21,7 @@ fn sample_cfg() -> CloudflareConfig {
             bucket_name: "wafer-site-assets".into(),
         },
         wrangler_overrides_path: None,
+        head_sampling_rate: 1.0,
     }
 }
 
@@ -51,6 +52,25 @@ fn generate_writes_wrangler_toml_with_required_fields() {
         !body.contains("migrations_dir"),
         "deploy toml must not declare a wrangler migrations ledger — \
          schema funnels through /_deploy/init"
+    );
+}
+
+#[test]
+fn generate_writes_configured_head_sampling_rate() {
+    let tmp = tempdir().unwrap();
+    let repo_root = tmp.path();
+    let out = repo_root.join("target/impresspress-cloudflare");
+    fs::create_dir_all(&out).unwrap();
+
+    let mut cfg = sample_cfg();
+    cfg.head_sampling_rate = 0.1;
+    let path = generate(&cfg, repo_root, &out).unwrap();
+    let body = fs::read_to_string(&path).unwrap();
+
+    assert!(
+        body.contains("head_sampling_rate = 0.1"),
+        "generated toml should reflect the configured sampling rate, not a \
+         hardcoded 1.0:\n{body}"
     );
 }
 
