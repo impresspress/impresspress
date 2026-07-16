@@ -378,6 +378,102 @@ impl Context for TestContext {
     }
 }
 
+/// Test double that wraps a [`TestContext`] and turns specific
+/// `"wafer-run/database"` service-op calls, scoped to a specific collection
+/// (table), into a simulated infra failure — while every other call
+/// (including other tables under the same op, and every other database op)
+/// passes through to the real in-memory SQLite context untouched.
+///
+/// Scoping by collection (not just op) matters because many different repo
+/// calls share the same wire op kind — e.g. every `update_by_filters` caller
+/// sends `"database.update_where"` regardless of which table it targets, so
+/// failing the op alone would also break unrelated calls to other tables in
+/// the same request flow.
+///
+/// Used to reproduce "a downstream DB call fails" fault-injection scenarios
+/// — e.g. a guard read that must fail closed, or a revocation write whose
+/// failure must not be swallowed as success — without needing a fake
+/// database backend. Match `(op, collection)` against [`Message::action`]
+/// (the wire service-op string, e.g. `"database.get"`,
+/// `"database.update_where"` — see `wafer_block::common::ServiceOp`) and the
+/// request body's `collection` field.
+#[derive(Clone)]
+pub struct FailingDbOpContext {
+    inner: TestContext,
+    failing: Vec<(&'static str, &'static str)>,
+}
+
+/// Request-body shape shared by every `wafer-run/database` wire request:
+/// they all carry a `collection` field, and serde ignores the other
+/// (irrelevant) fields on decode.
+#[derive(serde::Deserialize)]
+struct CollectionPeek {
+    collection: String,
+}
+
+impl FailingDbOpContext {
+    /// Wrap `inner`, failing every `"wafer-run/database"` call whose
+    /// `(msg.action(), request.collection)` matches an entry in `failing`
+    /// with a simulated [`ErrorCode::Internal`] error. All other calls pass
+    /// through untouched.
+    pub fn new(inner: TestContext, failing: Vec<(&'static str, &'static str)>) -> Self {
+        Self { inner, failing }
+    }
+}
+
+#[async_trait::async_trait]
+impl Context for FailingDbOpContext {
+    fn check_resource_access(
+        &self,
+        resource: &str,
+        resource_type: wafer_run::ResourceType,
+        is_write: bool,
+    ) -> Result<(), WaferError> {
+        self.inner
+            .check_resource_access(resource, resource_type, is_write)
+    }
+
+    async fn call_block(&self, name: &str, msg: Message, input: InputStream) -> OutputStream {
+        if name == "wafer-run/database" && self.failing.iter().any(|(op, _)| *op == msg.action()) {
+            let bytes = input.collect_to_bytes().await;
+            let collection = wafer_block::codec::decode::<CollectionPeek>(&bytes)
+                .map(|p| p.collection)
+                .unwrap_or_default();
+            if self
+                .failing
+                .iter()
+                .any(|(op, table)| *op == msg.action() && *table == collection)
+            {
+                return OutputStream::error(WaferError::new(
+                    ErrorCode::Internal,
+                    "simulated database outage",
+                ));
+            }
+            return self
+                .inner
+                .call_block(name, msg, InputStream::from_bytes(bytes))
+                .await;
+        }
+        self.inner.call_block(name, msg, input).await
+    }
+
+    fn is_cancelled(&self) -> bool {
+        self.inner.is_cancelled()
+    }
+
+    fn registered_blocks(&self) -> &[wafer_run::BlockInfo] {
+        self.inner.registered_blocks()
+    }
+
+    fn config_get(&self, key: &str) -> Option<&str> {
+        self.inner.config_get(key)
+    }
+
+    fn clone_arc(&self) -> Arc<dyn Context> {
+        Arc::new(self.clone())
+    }
+}
+
 /// Build an anonymous request `Message`. No `auth.user_id` meta set.
 pub fn anon_msg(action: &str, path: &str) -> Message {
     let mut m = Message::new("http.request");
