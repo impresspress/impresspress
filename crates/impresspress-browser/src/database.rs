@@ -323,8 +323,18 @@ impl DatabaseService for BrowserDatabaseService {
                 if !existing.contains(&col.name.to_lowercase()) {
                     let alter =
                         wafer_sql_utils::ddl::build_add_column(&table.name, col, Backend::Sqlite);
-                    // Best-effort: a duplicate column on re-run is benign.
-                    let _ = self.run_execute(&alter.sql, &[]).await;
+                    // `add_column_checked` (the shared `DbExec` default that
+                    // every other backend's lazy column-add path already
+                    // goes through — see `ensure_data_columns`) runs the
+                    // ALTER and, only on failure, re-queries the table's
+                    // actual columns: if `col` is now present, a concurrent
+                    // writer raced us to add the same column and the
+                    // failure is benign; otherwise the failure is real
+                    // (quota exceeded, malformed DDL, an OPFS write error
+                    // surfacing through `run_execute`, a flush error, …) and
+                    // propagates instead of being silently swallowed like
+                    // every `run_execute` error here used to be.
+                    DbExec::add_column_checked(self, &table.name, &col.name, &alter).await?;
                 }
             }
 
