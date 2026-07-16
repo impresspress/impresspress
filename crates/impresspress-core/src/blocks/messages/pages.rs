@@ -83,6 +83,7 @@ pub fn entry_card(record: &db::Record) -> Markup {
 
 pub async fn context_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let params = ListContextsParams {
+        owner_id: None, // admin SSR — explicit bypass, admins see all
         context_type: None,
         status: None,
         sender_id: None,
@@ -200,6 +201,7 @@ pub async fn context_detail_page(ctx: &dyn Context, msg: &Message) -> OutputStre
     // the chat_page template needs them for the thread-list pane.
     let siblings = if context.str_field("type") == "conversation" {
         let sibling_params = ListContextsParams {
+            owner_id: None, // admin SSR — explicit bypass, admins see all
             context_type: Some("conversation".to_string()),
             status: None,
             sender_id: None,

@@ -19,6 +19,7 @@ crate::impresspress_feature_block! {
                 BlockEndpoint::get("/b/static/app-{hash}.css").summary("Embedded CSS"),
                 BlockEndpoint::get("/b/static/htmx-{hash}.min.js").summary("Embedded htmx JS"),
                 BlockEndpoint::get("/b/static/marked-{hash}.min.js").summary("Embedded marked.js"),
+                BlockEndpoint::get("/b/static/purify-{hash}.js").summary("Embedded DOMPurify JS"),
                 BlockEndpoint::get("/b/static/llm-chat-{hash}.js").summary("Embedded LLM chat JS"),
                 BlockEndpoint::get("/b/static/files-browser-{hash}.js").summary("Embedded files-browser JS"),
                 BlockEndpoint::get("/b/static/itim-latin-{hash}.woff2").summary("Embedded Itim font (latin)"),
@@ -57,6 +58,12 @@ crate::impresspress_feature_block! {
                 ".min.js",
                 "application/javascript; charset=utf-8",
                 || Bytes::Owned(ui::assets::marked_js().as_bytes().to_vec()),
+            ),
+            (
+                "/b/static/purify-",
+                ".js",
+                "application/javascript; charset=utf-8",
+                || Bytes::Owned(ui::assets::purify_js().as_bytes().to_vec()),
             ),
             (
                 "/b/static/llm-chat-",
@@ -213,6 +220,33 @@ mod tests {
         assert!(
             body.contains("marked"),
             "body should be the vendored marked.js"
+        );
+    }
+
+    #[tokio::test]
+    async fn system_handle_serves_purify_js() {
+        let block = SystemBlock::new();
+        let url = assets::purify_js_url();
+        let mut msg = Message::new(format!("retrieve:{url}"));
+        msg.set_meta(wafer_run::META_REQ_ACTION, "retrieve");
+        msg.set_meta(wafer_run::META_REQ_RESOURCE, url);
+
+        let out = block.handle(&NopCtx, msg, InputStream::empty()).await;
+        let buffered = out.collect_buffered().await.expect("response");
+        let content_type = buffered
+            .meta
+            .iter()
+            .find(|m| m.key == META_RESP_CONTENT_TYPE)
+            .map(|m| m.value.as_str());
+        assert_eq!(
+            content_type,
+            Some("application/javascript; charset=utf-8"),
+            "wrong content type"
+        );
+        let body = std::str::from_utf8(&buffered.body).unwrap();
+        assert!(
+            body.contains("DOMPurify"),
+            "body should be the vendored DOMPurify build"
         );
     }
 }

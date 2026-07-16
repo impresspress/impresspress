@@ -60,7 +60,12 @@ fn render_page_body(
             })
         })
         .collect();
-    let messages_json_str = serde_json::to_string(&messages_json).unwrap_or_else(|_| "[]".into());
+    // Escape `<` so no `</script>` can terminate the application/json carrier
+    // element. serde_json does not escape `<`; the browser terminates a
+    // <script> element on literal `</script>` regardless of the type attribute.
+    let messages_json_str = serde_json::to_string(&messages_json)
+        .unwrap_or_else(|_| "[]".into())
+        .replace('<', "\\u003c");
 
     let thread_list = render_thread_list_pane(threads, thread_id);
     let messages_pane = render_messages_pane(entries, thread_id);
@@ -75,13 +80,18 @@ fn render_page_body(
 
         // Pulse animation for thinking indicator + blinking cursor.
         style { "@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}} @keyframes blink{0%,100%{opacity:1}50%{opacity:0}} .typing-cursor{display:inline-block;width:0.5em;height:1.1em;background:var(--text-primary,#333);vertical-align:text-bottom;margin-left:2px;animation:blink 0.8s step-end infinite}" }
+        // DOMPurify must load before marked.js/llm-chat.js so `window.DOMPurify`
+        // exists when renderMarkdown() sanitizes marked's output (P0 stored-XSS fix).
+        script src=(crate::ui::assets::purify_js_url()) {}
         // marked.js for markdown rendering — self-hosted (vendored), content-hashed.
         script src=(crate::ui::assets::marked_js_url()) {}
 
-        // Server-rendered initial state for the chat module. Carrier is
-        // type="application/json" so the browser does NOT parse the body as JS —
-        // any `</script>` or `<` in user-typed message content is inert. The
-        // JS module reads it via JSON.parse on init().
+        // Server-rendered initial state for the chat module. `messages_json_str`
+        // has every literal `<` replaced with the JSON escape sequence
+        // "backslash u 0 0 3 c" (see above) so a `</script>` in user-typed
+        // message content cannot terminate this element —
+        // `type="application/json"` does NOT prevent element termination on
+        // its own. The JS module reads it via JSON.parse on init().
         script type="application/json" id="llm-chat-bootstrap" {
             (maud::PreEscaped(messages_json_str))
         }
@@ -863,6 +873,42 @@ mod tests {
         assert!(!html.contains("function createNewThread"));
     }
 
+    /// DOMPurify must load before both marked.js and llm-chat.js — the P0
+    /// fix relies on `window.DOMPurify` existing by the time llm-chat.js's
+    /// `defer`red script runs `renderMarkdown()`. Order matters: a script
+    /// tag present but placed after llm-chat.js would not help since the
+    /// bug is about sanitizing marked's output, not about a race — but
+    /// pinning the order here guards against a future edit silently
+    /// reordering these tags and defeating the sanitizer at parse time.
+    #[test]
+    fn page_body_loads_purify_before_marked_and_llm_chat_js() {
+        let url = "/b/static/llm-chat-deadbeef.js";
+        let html = render_page_body(&[], &[], &[], "", None, url).into_string();
+
+        let purify_url = crate::ui::assets::purify_js_url();
+        let marked_url = crate::ui::assets::marked_js_url();
+        assert!(
+            html.contains(&format!(r#"src="{purify_url}""#)),
+            "missing external purify.js script tag (expected src={purify_url}): {html}"
+        );
+        assert!(
+            html.contains(&format!(r#"src="{marked_url}""#)),
+            "missing external marked.js script tag (expected src={marked_url}): {html}"
+        );
+
+        let purify_pos = html.find(purify_url).expect("purify script tag present");
+        let marked_pos = html.find(marked_url).expect("marked script tag present");
+        let llm_chat_pos = html.find(url).expect("llm-chat.js script tag present");
+        assert!(
+            purify_pos < marked_pos,
+            "purify.js must be loaded before marked.js: {html}"
+        );
+        assert!(
+            marked_pos < llm_chat_pos,
+            "marked.js must be loaded before llm-chat.js: {html}"
+        );
+    }
+
     /// Selector preservation contract — every ID the JS module depends on
     /// must appear in the rendered markup of the with-thread page. Single
     /// guard test; failure points at exactly which selector regressed.
@@ -903,59 +949,46 @@ mod tests {
         }
     }
 
-    /// XSS regression — a thread whose message content contains a
-    /// `</script>` sequence MUST NOT terminate the bootstrap script tag
-    /// prematurely. With the `type="application/json"` carrier, the body
-    /// is inert — the browser does not parse it as JS — so the literal
-    /// sequence appearing in textContent is safe. We also assert the dead
-    /// `_activeThreadId` / `_defaultModel` JS bootstrap fields are gone.
-    #[test]
-    fn render_page_body_carrier_escapes_user_content_safely() {
+    /// Build a `db::Record` with the given `content` field (role/created_at
+    /// filled with placeholder values), mirroring the fixture the carrier
+    /// tests need. Mirrors `make_thread`'s construction style above.
+    fn record_with_content(content: &str) -> db::Record {
         let mut data = std::collections::HashMap::new();
         data.insert("role".to_string(), serde_json::json!("user"));
-        data.insert(
-            "content".to_string(),
-            serde_json::json!("hello </script><script>alert(1)</script>"),
-        );
+        data.insert("content".to_string(), serde_json::json!(content));
         data.insert(
             "created_at".to_string(),
             serde_json::json!("2026-05-05T10:00:00Z"),
         );
-        let entry = db::Record {
+        db::Record {
             id: "e-1".to_string(),
             data,
-        };
+        }
+    }
 
-        let html = render_page_body(
-            &[],
-            &[entry],
-            &[],
-            "",
-            Some("t-1"),
-            "/b/static/llm-chat-test.js",
-        )
-        .into_string();
-
-        // Carrier present.
+    /// XSS regression — a thread whose message content contains a literal
+    /// `</script>` sequence must NOT appear verbatim in the rendered page.
+    /// serde_json does not escape `<`, and the browser terminates a
+    /// `<script>` element on the first literal `</script>` byte sequence
+    /// regardless of the `type="application/json"` attribute — so an
+    /// unescaped `<` would close the carrier early and let the rest of the
+    /// entry content run as live script.
+    #[test]
+    fn render_page_body_carrier_escapes_script_close() {
+        // An entry whose content contains a literal </script> must NOT appear
+        // verbatim in the rendered page — it would terminate the JSON carrier
+        // and inject live script. `type="application/json"` does NOT prevent
+        // element termination.
+        let entries = vec![record_with_content("</script><img src=x onerror=alert(1)>")];
+        let markup = render_page_body(&[], &entries, &[], "", None, "/x.js");
+        let html = markup.into_string();
         assert!(
-            html.contains(r#"<script type="application/json" id="llm-chat-bootstrap">"#),
-            "expected JSON carrier block: {html}"
-        );
-        // The dangerous content is INSIDE a non-JS-parsed block. We don't
-        // assert the absence of the literal bytes (they're allowed to appear
-        // in JSON text inside a type="application/json" block — they're inert).
-        // We assert that the JS bootstrap line that USED to inline values is gone.
-        assert!(
-            !html.contains("window._threadMessages = "),
-            "JS bootstrap line should be removed in favor of carrier: {html}"
+            !html.contains("</script><img"),
+            "raw </script> must not survive into the carrier: {html}"
         );
         assert!(
-            !html.contains("window._activeThreadId"),
-            "_activeThreadId was dead — should be removed entirely"
-        );
-        assert!(
-            !html.contains("window._defaultModel"),
-            "_defaultModel was dead — should be removed entirely"
+            html.contains("\\u003c/script"),
+            "the < of </script> must be JSON-escaped as \\u003c"
         );
     }
 

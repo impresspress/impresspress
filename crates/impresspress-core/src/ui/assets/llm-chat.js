@@ -16,7 +16,12 @@
   function renderMarkdown(text) {
     if (typeof marked !== 'undefined' && marked.parse) {
       try {
-        return marked.parse(text, { breaks: true });
+        var html = marked.parse(text, { breaks: true });
+        if (typeof DOMPurify !== 'undefined') {
+          return DOMPurify.sanitize(html);
+        }
+        // No sanitizer available → do not emit raw HTML.
+        return escHtml(text).replace(/\n/g, '<br>');
       } catch (e) {}
     }
     return escHtml(text).replace(/\n/g, '<br>');
@@ -80,7 +85,7 @@
 
     return '<div class="card"' + id + ' style="margin-bottom:0.75rem;' + bg + '">'
       + '<div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem">'
-      + '<span class="badge ' + badge + '" style="text-transform:capitalize">' + role + '</span>'
+      + '<span class="badge ' + badge + '" style="text-transform:capitalize">' + escHtml(role) + '</span>'
       + (date ? '<span class="text-muted" style="font-size:0.75rem">' + escHtml(date) + '</span>' : '')
       + modelBadge
       + '</div>'

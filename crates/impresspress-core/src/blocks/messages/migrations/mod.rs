@@ -4,19 +4,24 @@
 
 const SQL_001_SQLITE: &str = include_str!("001_messages_schema.sqlite.sql");
 const SQL_001_POSTGRES: &str = include_str!("001_messages_schema.postgres.sql");
+const SQL_002_SQLITE: &str = include_str!("002_owner_id.sqlite.sql");
+const SQL_002_POSTGRES: &str = include_str!("002_owner_id.postgres.sql");
 
 /// Ordered SQLite migration scripts for this block, as `(basename, content)`
 /// pairs. Feeds the runtime `lifecycle_init` apply path.
-pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[("001_messages_schema", SQL_001_SQLITE)];
+pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
+    ("001_messages_schema", SQL_001_SQLITE),
+    ("002_owner_id", SQL_002_SQLITE),
+];
 
 /// Ordered PostgreSQL migration scripts, matching [`SQLITE_MIGRATIONS`] one
 /// for one. Selected at runtime by `apply_migrations` when the deployment's
 /// `WAFER_RUN_SHARED__DATABASE__BACKEND` is `postgres`.
-pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[SQL_001_POSTGRES];
+pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[SQL_001_POSTGRES, SQL_002_POSTGRES];
 
 #[cfg(test)]
 mod tests {
-    use super::{SQL_001_POSTGRES, SQL_001_SQLITE};
+    use super::{SQL_001_POSTGRES, SQL_001_SQLITE, SQL_002_POSTGRES, SQL_002_SQLITE};
 
     /// The migration_helper statement splitter splits on bare `;` outside
     /// `--` line comments. Make sure every embedded statement parses into
@@ -30,6 +35,19 @@ mod tests {
     }
     fn count_create_index(sql: &str) -> usize {
         sql.match_indices("CREATE INDEX IF NOT EXISTS ").count()
+    }
+    // Match against the "ALTER TABLE " DDL prefix with an "ADD COLUMN" body,
+    // not a bare `contains("ADD COLUMN")` — the 002 header comment
+    // descriptively mentions "ALTER ADD COLUMN" (no "TABLE"), so a naive
+    // contains() check is trivially satisfied by prose and never actually
+    // looks at the DDL. This scans each real `ALTER TABLE ...;` statement.
+    fn count_alter_add_column(sql: &str) -> usize {
+        sql.match_indices("ALTER TABLE ")
+            .filter(|(idx, _)| {
+                let stmt_end = sql[*idx..].find(';').map(|i| idx + i).unwrap_or(sql.len());
+                sql[*idx..stmt_end].contains("ADD COLUMN")
+            })
+            .count()
     }
 
     #[test]
@@ -53,5 +71,25 @@ mod tests {
         assert_eq!(count_create_index(SQL_001_POSTGRES), 9);
         assert!(SQL_001_POSTGRES.contains("impresspress__messages__contexts"));
         assert!(SQL_001_POSTGRES.contains("impresspress__messages__entries"));
+    }
+
+    #[test]
+    fn owner_id_migration_adds_column_and_index_both_dialects() {
+        for sql in [SQL_002_SQLITE, SQL_002_POSTGRES] {
+            // Exactly 2 ALTER TABLE ... ADD COLUMN statements: contexts +
+            // entries. A dropped ALTER changes this count instead of being
+            // masked by the header comment's prose.
+            assert_eq!(count_alter_add_column(sql), 2);
+            // Backfill #1: contexts.owner_id from historical sender_id.
+            assert!(sql.contains("owner_id = sender_id"));
+            // Backfill #2: entries.owner_id from the parent context's
+            // owner_id, correlated on context_id. Deleting either backfill
+            // statement drops one of these substrings.
+            assert!(sql.contains("UPDATE impresspress__messages__entries"));
+            assert!(sql.contains("c.owner_id"));
+            assert!(sql.contains("context_id"));
+            assert!(sql.contains("idx_messages_contexts_owner_id"));
+            assert!(sql.contains("idx_messages_entries_owner_id"));
+        }
     }
 }
