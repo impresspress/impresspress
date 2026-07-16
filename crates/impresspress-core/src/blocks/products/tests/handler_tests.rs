@@ -886,3 +886,36 @@ async fn manage_products_uses_data_table_with_mobile_labels() {
     );
     assert!(html.contains("Widget"), "the seeded product should render");
 }
+
+// ============================================================
+// M1 (code review 2026-07-16): taxonomy endpoints stay Authenticated
+// ============================================================
+
+/// `/b/products/types` and `/b/products/group-templates` are undeclared in
+/// `ProductsBlock::info().endpoints`, so the central router's fail-closed
+/// default now resolves them to `Authenticated` rather than `Public`. Neither
+/// path has any anonymous consumer in this codebase (no catalog page/JS
+/// fetches them — both only ever backed an authenticated user's own
+/// product-management views), so this is the intended, reviewed outcome, not
+/// an accidental regression. Locks the decision in: declaring either
+/// `Public` later must be a deliberate, reviewed change.
+#[test]
+fn taxonomy_endpoints_are_not_declared_public() {
+    use wafer_run::Block;
+
+    let info = super::super::ProductsBlock::new().info();
+    assert_eq!(
+        crate::endpoint_match::endpoint_auth(&info.endpoints, "retrieve", "/b/products/types"),
+        None,
+        "/b/products/types must stay undeclared so it defaults to Authenticated"
+    );
+    assert_eq!(
+        crate::endpoint_match::endpoint_auth(
+            &info.endpoints,
+            "retrieve",
+            "/b/products/group-templates"
+        ),
+        None,
+        "/b/products/group-templates must stay undeclared so it defaults to Authenticated"
+    );
+}
