@@ -1,8 +1,9 @@
 use std::collections::HashMap;
 
+use wafer_block::wire::database::OnConflict;
 use wafer_block_crypto::primitives;
 use wafer_core::clients::{config, database as db, network};
-use wafer_run::{context::Context, InputStream, Message, OutputStream};
+use wafer_run::{context::Context, InputStream, Message, OutputStream, WaferError};
 
 use super::{repo, PRODUCTS_TABLE};
 use crate::{
@@ -12,6 +13,38 @@ use crate::{
     },
     util::hex_encode,
 };
+
+/// Processed Stripe webhook event ids (code review 2026-07-16: "Stripe
+/// webhooks lack event idempotency"). See `003_stripe_events.sqlite.sql` for
+/// the schema and full rationale.
+const STRIPE_EVENTS_TABLE: &str = "impresspress__products__stripe_events";
+
+/// Record `event_id` as processed via `INSERT ... ON CONFLICT (id) DO
+/// NOTHING` — a single atomic round trip, so two concurrent deliveries of
+/// the same event can't both observe "not yet seen" (unlike a separate
+/// existence check + insert). Returns `true` the first time an event id is
+/// seen (the caller should run side effects), `false` if a row already
+/// existed (the caller must skip — this is a retry/replay).
+async fn record_event_once(
+    ctx: &dyn Context,
+    event_id: &str,
+    event_type: &str,
+) -> Result<bool, WaferError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    let rows = db::upsert(
+        ctx,
+        STRIPE_EVENTS_TABLE,
+        vec![
+            ("id".to_string(), serde_json::json!(event_id)),
+            ("event_type".to_string(), serde_json::json!(event_type)),
+            ("created_at".to_string(), serde_json::json!(now)),
+        ],
+        vec!["id".to_string()],
+        OnConflict::SetColumns(vec![]),
+    )
+    .await?;
+    Ok(rows > 0)
+}
 
 pub async fn handle_checkout(ctx: &dyn Context, msg: &Message, input: InputStream) -> OutputStream {
     let Ok(stripe_key) = config::get(ctx, "IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY").await else {
@@ -252,6 +285,35 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
     };
 
     let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
+
+    // Idempotency: persist the top-level Stripe event id under a UNIQUE
+    // constraint BEFORE running any side effect. Stripe retries
+    // undelivered/non-2xx webhooks, and the signature timestamp window above
+    // itself accepts up to 5 minutes of replay — both redeliver the same
+    // `id`. Real Stripe events always carry one; a signed body without one
+    // (synthetic/malformed) can't be deduped, so it's processed as-is rather
+    // than rejected outright — the signature already establishes it came
+    // from a holder of the webhook secret.
+    let event_id = event.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    if !event_id.is_empty() {
+        match record_event_once(ctx, event_id, event_type).await {
+            Ok(true) => {} // first time seeing this event — fall through to processing
+            Ok(false) => {
+                tracing::info!(
+                    event_id = %event_id,
+                    event_type = %event_type,
+                    "duplicate Stripe webhook event — skipping side effects"
+                );
+                return ok_json(&serde_json::json!({"received": true, "duplicate": true}));
+            }
+            Err(e) => return err_internal("Failed to record webhook event", e),
+        }
+    } else {
+        tracing::warn!(
+            event_type = %event_type,
+            "Stripe webhook event missing top-level id — cannot dedupe replay/retry for this delivery"
+        );
+    }
 
     let data_object = event
         .get("data")
@@ -776,5 +838,112 @@ mod tests {
             url_path_encode("https://example.com"),
             "https%3A%2F%2Fexample.com"
         );
+    }
+
+    // --- Webhook event idempotency (code review 2026-07-16) ---
+
+    use crate::test_support::{output_json, TestContext};
+
+    /// Build a signed webhook request `(Message, InputStream)` for `body`,
+    /// using `secret` to compute the `Stripe-Signature` header the same way
+    /// `verify_stripe_signature` expects it.
+    fn signed_webhook_request(body: &serde_json::Value, secret: &str) -> (Message, InputStream) {
+        let payload = serde_json::to_vec(body).unwrap();
+        let timestamp = chrono::Utc::now().timestamp() as u64;
+        let signed_payload = build_signed_payload(timestamp, &payload);
+        let computed = primitives::hmac_sha256(secret.as_bytes(), &signed_payload);
+        let sig_header = format!("t={timestamp},v1={}", hex_encode(&computed));
+
+        let mut msg = Message::new("http.request");
+        msg.set_meta("req.action", "create");
+        msg.set_meta("req.resource", "/b/products/webhooks");
+        msg.set_meta("http.header.stripe-signature", sig_header);
+        (msg, InputStream::from_bytes(payload))
+    }
+
+    #[tokio::test]
+    async fn handle_webhook_is_idempotent_on_replayed_event_id() {
+        let mut ctx = TestContext::with_products().await;
+        let secret = "whsec_test_idempotency";
+        ctx.set_config("IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET", secret);
+
+        // `charge.refunded` with no matching purchase: the event-type match
+        // arm runs (purchase lookup misses, so no further side effect) — this
+        // isolates the assertion to the idempotency mechanism itself rather
+        // than a specific business side effect.
+        let body = serde_json::json!({
+            "id": "evt_replay_test_1",
+            "type": "charge.refunded",
+            "data": { "object": { "payment_intent": "pi_does_not_exist" } }
+        });
+
+        // First delivery: processed normally, no `duplicate` marker.
+        let (msg1, input1) = signed_webhook_request(&body, secret);
+        let json1 = output_json(handle_webhook(&ctx, &msg1, input1).await).await;
+        assert_eq!(json1["received"], true);
+        assert!(
+            json1.get("duplicate").is_none(),
+            "first delivery must not be marked duplicate: {json1:?}"
+        );
+
+        // Replay: identical event id — must ack 200 and skip processing.
+        let (msg2, input2) = signed_webhook_request(&body, secret);
+        let json2 = output_json(handle_webhook(&ctx, &msg2, input2).await).await;
+        assert_eq!(json2["received"], true);
+        assert_eq!(
+            json2["duplicate"], true,
+            "replayed event id must be acked as a duplicate no-op: {json2:?}"
+        );
+
+        // Exactly one row recorded for this event id — proves the UNIQUE
+        // constraint (not just app-level logic) is what's deduping.
+        let count = db::count_by_field(
+            &ctx,
+            "impresspress__products__stripe_events",
+            "id",
+            serde_json::json!("evt_replay_test_1"),
+        )
+        .await
+        .expect("count stripe_events rows");
+        assert_eq!(count, 1, "exactly one row should exist for the replayed event id");
+    }
+
+    #[tokio::test]
+    async fn handle_webhook_processes_distinct_event_ids_independently() {
+        let mut ctx = TestContext::with_products().await;
+        let secret = "whsec_test_idempotency_2";
+        ctx.set_config("IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET", secret);
+
+        for id in ["evt_distinct_1", "evt_distinct_2"] {
+            let body = serde_json::json!({
+                "id": id,
+                "type": "charge.refunded",
+                "data": { "object": { "payment_intent": "pi_does_not_exist" } }
+            });
+            let (msg, input) = signed_webhook_request(&body, secret);
+            let json = output_json(handle_webhook(&ctx, &msg, input).await).await;
+            assert_eq!(json["received"], true);
+            assert!(
+                json.get("duplicate").is_none(),
+                "a fresh, distinct event id must not be marked duplicate: {json:?}"
+            );
+        }
+    }
+
+    /// An event with no top-level `id` can't be deduped, but must still be
+    /// processed (not rejected) — this preserves existing behavior for
+    /// synthetic/malformed-but-signed payloads, since the HMAC signature
+    /// already establishes the caller holds the webhook secret.
+    #[tokio::test]
+    async fn handle_webhook_processes_event_with_no_id_without_erroring() {
+        let mut ctx = TestContext::with_products().await;
+        let secret = "whsec_test_idempotency_3";
+        ctx.set_config("IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET", secret);
+
+        let body = serde_json::json!({ "type": "charge.refunded", "data": {} });
+        let (msg, input) = signed_webhook_request(&body, secret);
+        let json = output_json(handle_webhook(&ctx, &msg, input).await).await;
+        assert_eq!(json["received"], true);
+        assert!(json.get("duplicate").is_none());
     }
 }
