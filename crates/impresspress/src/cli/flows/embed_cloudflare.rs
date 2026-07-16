@@ -14,7 +14,9 @@ pub async fn build(repo_root: &Path, release: bool) -> Result<()> {
 
     // Inspect [profile.release] before we kick off the long cargo build.
     // Warns only — doesn't block — but surfaces the most common cause of
-    // the Workers 400ms startup-CPU 1102 cliff.
+    // missing the Workers 1-second startup-CPU budget, which `wrangler
+    // deploy` enforces at deploy-validation time (error code 10021), not
+    // as a per-request runtime failure.
     if release {
         profile_check::check_release_profile(repo_root)?;
     }
@@ -215,6 +217,10 @@ pub async fn deploy(repo_root: &Path, release: bool) -> Result<()> {
         "-> uploaded version {} (preview {})",
         upload.version_id, upload.preview_url
     );
+    // Cloudflare's own reported size for the exact bundle it received —
+    // prefer this over the pre-upload `.wasm` byte heuristic in
+    // `profile_check` when deciding whether size is actually a problem.
+    profile_check::report_upload_size(upload.upload_size);
 
     // 2. Run migrations + seeds through the new version's own code, against
     //    the shared production D1 (additive migrations keep the still-live

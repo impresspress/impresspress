@@ -12,17 +12,21 @@ use std::{
 
 use anyhow::{bail, Context, Result};
 
-use super::assets::mime_for_path;
+use super::{assets::mime_for_path, profile_check::UploadSize};
 
 /// Output of `wrangler versions upload` (unpromoted deployment).
 pub struct VersionUpload {
     pub version_id: String,
     pub preview_url: String,
+    /// Cloudflare-reported upload size, when `wrangler` printed one. See
+    /// [`super::profile_check::report_upload_size`].
+    pub upload_size: Option<UploadSize>,
 }
 
 struct UploadAttempt {
     version_id: String,
     preview_url: Option<String>,
+    upload_size: Option<UploadSize>,
 }
 
 fn versions_upload_once(wrangler_toml: &Path) -> Result<UploadAttempt> {
@@ -41,6 +45,7 @@ fn versions_upload_once(wrangler_toml: &Path) -> Result<UploadAttempt> {
         );
     }
     // wrangler prints lines like:
+    //   Total Upload: 4210.12 KiB / gzip: 1234.56 KiB
     //   Worker Version ID: 8e3c...-....
     //   Version Preview URL: https://<hash>-<worker>.<subdomain>.workers.dev
     let version_id = parse_labeled_line(&stdout, "Version ID:")
@@ -48,6 +53,7 @@ fn versions_upload_once(wrangler_toml: &Path) -> Result<UploadAttempt> {
     Ok(UploadAttempt {
         version_id,
         preview_url: parse_labeled_line(&stdout, "Preview URL:"),
+        upload_size: super::profile_check::parse_upload_size(&stdout),
     })
 }
 
@@ -66,8 +72,8 @@ fn wrangler_triggers_deploy(wrangler_toml: &Path) -> Result<()> {
 }
 
 /// Upload a new worker version WITHOUT routing traffic to it. Captures
-/// stdout (unlike the inherit-stdio helpers) to parse the version id and
-/// preview URL.
+/// stdout (unlike the inherit-stdio helpers) to parse the version id,
+/// preview URL, and (if present) wrangler's own reported upload size.
 ///
 /// First-enable recovery: `preview_urls = true` in the toml is a
 /// worker-level setting; the first upload after enabling it prints no
@@ -80,6 +86,7 @@ pub fn wrangler_versions_upload(wrangler_toml: &Path) -> Result<VersionUpload> {
             return Ok(VersionUpload {
                 version_id: attempt.version_id,
                 preview_url,
+                upload_size: attempt.upload_size,
             })
         }
         None => {
@@ -102,6 +109,7 @@ pub fn wrangler_versions_upload(wrangler_toml: &Path) -> Result<VersionUpload> {
     Ok(VersionUpload {
         version_id: attempt.version_id,
         preview_url,
+        upload_size: attempt.upload_size,
     })
 }
 
