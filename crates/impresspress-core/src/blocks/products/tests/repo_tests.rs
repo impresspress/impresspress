@@ -185,6 +185,7 @@ async fn subscription_for_user_projects_curated_columns_without_leaking_ids() {
 
     let out = repo::subscriptions::subscription_for_user(&ctx, "user_1")
         .await
+        .expect("no repository error")
         .expect("subscription exists");
     let map = out
         .as_object()
@@ -225,5 +226,32 @@ async fn subscription_for_user_projects_curated_columns_without_leaking_ids() {
     assert!(
         !map.contains_key("stripe_customer_id"),
         "stripe_customer_id leaked into subscription_for_user response"
+    );
+}
+
+/// The legitimate "no subscription row" case must still map to `Ok(None)` —
+/// only genuine repository errors should surface as `Err`.
+#[tokio::test]
+async fn subscription_for_user_returns_ok_none_when_no_row() {
+    let ctx = ctx().await;
+    let result = repo::subscriptions::subscription_for_user(&ctx, "no_such_user").await;
+    assert!(
+        matches!(result, Ok(None)),
+        "no subscription row must be Ok(None), got {result:?}"
+    );
+}
+
+/// CODE_REVIEW_2026-07-16 "Error semantics fabricate successful defaults":
+/// a genuine repository failure must surface as `Err`, not be folded into
+/// the same `None` used for "user has no subscription" — the two were
+/// previously indistinguishable to the caller (`handle_subscription`
+/// reported `{"subscription": null}` for both).
+#[tokio::test]
+async fn subscription_for_user_repository_failure_surfaces_as_error() {
+    let ctx = ctx().await.break_reads();
+    let result = repo::subscriptions::subscription_for_user(&ctx, "user_1").await;
+    assert!(
+        result.is_err(),
+        "a genuine repository failure must surface as Err, not a fabricated None"
     );
 }

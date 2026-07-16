@@ -185,7 +185,7 @@ impl builder::BootHooks for BrowserBootHooks {
             )
             .into(),
         );
-        let features = config::load_block_settings(&self.db).await;
+        let features = config::load_block_settings(&self.db).await?;
 
         for (key, value) in &vars {
             self.config_svc.set(key, value);

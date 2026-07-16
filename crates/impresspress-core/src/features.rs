@@ -323,12 +323,27 @@ pub fn plan_seed_decisions(existing: &HashMap<String, ExistingRow>) -> Vec<SeedD
 /// state: the planner returns an empty `Vec`, so zero writes are issued and the
 /// only cost is the initial list (+ no re-read).
 ///
-/// Tolerant of a missing table (returns [`BlockSettings::default`] on list
-/// error) so a fresh DB — or a cold Cloudflare isolate whose first request
-/// races admin's Init — falls back to "all blocks enabled".
+/// # Error semantics
+///
+/// A missing `block_settings` table (fresh DB, or a cold Cloudflare isolate
+/// whose first request races admin's `Init`) is **not** an error condition
+/// here at all: [`DatabaseService::list`]'s shared `DbExec` implementation
+/// already guards on table existence and returns `Ok(RecordList::default())`
+/// for a table that doesn't exist yet (see `DbExec::list` in
+/// `wafer-core/src/interfaces/database/exec.rs`). That is the one and only
+/// place the "tolerant" cold-start case is handled.
+///
+/// Consequently, an `Err` reaching this function is **always** a genuine
+/// operational failure (backend outage, corruption, permissions) — never the
+/// missing-table case. Silently substituting [`BlockSettings::default`] here
+/// used to fabricate "every block enabled" out of a real error (CODE_REVIEW
+/// finding: "Feature settings fail open to all-blocks-enabled"). Instead this
+/// propagates the error so the caller can decide the right failure policy —
+/// every current caller treats it as fatal to the boot/build (fail closed:
+/// no runtime gets built/served with a fabricated all-enabled snapshot).
 pub async fn load_and_seed_block_settings(
     db: &std::sync::Arc<dyn wafer_core::interfaces::database::service::DatabaseService>,
-) -> BlockSettings {
+) -> Result<BlockSettings, wafer_core::interfaces::database::service::DatabaseError> {
     use wafer_block::db::ListOptions;
 
     let opts = ListOptions {
@@ -343,8 +358,15 @@ pub async fn load_and_seed_block_settings(
     {
         Ok(rl) => rl,
         Err(e) => {
-            tracing::warn!(error = %e, "load_and_seed_block_settings: list failed");
-            return BlockSettings::default();
+            // Not the missing-table case (that's `Ok(empty)`, handled inside
+            // `list` itself) — a genuine operational error. Do not fabricate
+            // all-enabled; propagate so the caller fails closed.
+            tracing::error!(
+                error = %e,
+                "load_and_seed_block_settings: list failed (operational error, not a \
+                 missing table); refusing to fabricate all-enabled defaults"
+            );
+            return Err(e);
         }
     };
 
@@ -438,7 +460,7 @@ pub async fn load_and_seed_block_settings(
         })
         .collect();
 
-    BlockSettings::from_blocks(blocks)
+    Ok(BlockSettings::from_blocks(blocks))
 }
 
 /// Apply one [`SeedDecision`] via [`DatabaseService`]. Insert builds a fresh
@@ -792,7 +814,9 @@ mod load_and_seed_tests {
     #[tokio::test]
     async fn seeds_all_defaults_on_empty_table() {
         let db = db_with_block_settings_table().await;
-        let settings = load_and_seed_block_settings(&db).await;
+        let settings = load_and_seed_block_settings(&db)
+            .await
+            .expect("load_and_seed_block_settings");
         for (name, default) in ENABLED_DEFAULTS {
             assert_eq!(
                 settings.is_block_enabled(name),
@@ -841,7 +865,9 @@ mod load_and_seed_tests {
         assert_eq!(before_enabled, stale_default);
         assert_eq!(before_hash, seed_hash_for(stale_default));
 
-        let settings = load_and_seed_block_settings(&db).await;
+        let settings = load_and_seed_block_settings(&db)
+            .await
+            .expect("load_and_seed_block_settings");
 
         // Post-condition: the gate fired — row updated to the current default.
         let (after_enabled, after_hash) = read_row(&db, block_name).await.unwrap();
@@ -877,7 +903,9 @@ mod load_and_seed_tests {
         .await
         .expect("insert user-edited row");
 
-        let settings = load_and_seed_block_settings(&db).await;
+        let settings = load_and_seed_block_settings(&db)
+            .await
+            .expect("load_and_seed_block_settings");
 
         let (after_enabled, after_hash) = read_row(&db, block_name).await.unwrap();
         assert_eq!(after_enabled, user_choice, "user choice must be preserved");
@@ -891,7 +919,9 @@ mod load_and_seed_tests {
     async fn no_writes_at_steady_state() {
         let db = db_with_block_settings_table().await;
         // First pass seeds everything.
-        load_and_seed_block_settings(&db).await;
+        load_and_seed_block_settings(&db)
+            .await
+            .expect("load_and_seed_block_settings");
         // Capture updated_at to detect any spurious write on the second pass.
         let before = db
             .query_raw(
@@ -901,7 +931,9 @@ mod load_and_seed_tests {
             .await
             .expect("snapshot before");
         // Second pass should be a no-op (empty plan).
-        load_and_seed_block_settings(&db).await;
+        load_and_seed_block_settings(&db)
+            .await
+            .expect("load_and_seed_block_settings");
         let after = db
             .query_raw(
                 &format!("SELECT block_name, updated_at FROM {BLOCK_SETTINGS_TABLE}"),
@@ -913,6 +945,159 @@ mod load_and_seed_tests {
             before.len(),
             after.len(),
             "steady-state pass must not insert rows",
+        );
+    }
+}
+
+/// Regression coverage for the fail-open finding: a genuine operational read
+/// error must propagate as `Err`, never fabricate `BlockSettings::default()`
+/// (which reads as "every block enabled").
+#[cfg(test)]
+mod operational_error_tests {
+    use std::sync::Arc;
+
+    use wafer_block::db::{Filter, ListOptions};
+    use wafer_core::interfaces::database::service::{
+        AggregateSpec, Column, DatabaseError, DatabaseService, Record, RecordList, Table,
+        UpsertSpec,
+    };
+
+    use super::*;
+
+    /// A [`DatabaseService`] whose `list` always fails with a simulated
+    /// operational error (backend outage / corruption — NOT a missing
+    /// table, which `DbExec::list` already handles by returning
+    /// `Ok(RecordList::default())` before any error can surface). Every
+    /// other method is `unreachable!`: `load_and_seed_block_settings` must
+    /// short-circuit at the first `list()` call and never reach them.
+    struct AlwaysErrorsOnList;
+
+    #[async_trait::async_trait]
+    impl DatabaseService for AlwaysErrorsOnList {
+        async fn get(&self, _collection: &str, _id: &str) -> Result<Record, DatabaseError> {
+            unreachable!("must not read a record after a list failure")
+        }
+
+        async fn list(
+            &self,
+            _collection: &str,
+            _opts: &ListOptions,
+        ) -> Result<RecordList, DatabaseError> {
+            Err(DatabaseError::Internal(
+                "simulated block_settings outage (not a missing-table condition)".into(),
+            ))
+        }
+
+        async fn create(
+            &self,
+            _collection: &str,
+            _data: HashMap<String, serde_json::Value>,
+        ) -> Result<Record, DatabaseError> {
+            unreachable!("must not write after a list failure")
+        }
+
+        async fn update(
+            &self,
+            _collection: &str,
+            _id: &str,
+            _data: HashMap<String, serde_json::Value>,
+        ) -> Result<Record, DatabaseError> {
+            unreachable!("must not write after a list failure")
+        }
+
+        async fn delete(&self, _collection: &str, _id: &str) -> Result<(), DatabaseError> {
+            unreachable!()
+        }
+
+        async fn count(
+            &self,
+            _collection: &str,
+            _filters: &[Filter],
+        ) -> Result<i64, DatabaseError> {
+            unreachable!()
+        }
+
+        async fn sum(
+            &self,
+            _collection: &str,
+            _field: &str,
+            _filters: &[Filter],
+        ) -> Result<f64, DatabaseError> {
+            unreachable!()
+        }
+
+        async fn query_raw(
+            &self,
+            _query: &str,
+            _args: &[serde_json::Value],
+        ) -> Result<Vec<Record>, DatabaseError> {
+            unreachable!()
+        }
+
+        async fn exec_raw(
+            &self,
+            _query: &str,
+            _args: &[serde_json::Value],
+        ) -> Result<i64, DatabaseError> {
+            unreachable!()
+        }
+
+        async fn upsert(&self, _collection: &str, _spec: UpsertSpec) -> Result<i64, DatabaseError> {
+            unreachable!()
+        }
+
+        async fn aggregate(
+            &self,
+            _collection: &str,
+            _spec: AggregateSpec,
+        ) -> Result<Vec<Record>, DatabaseError> {
+            unreachable!()
+        }
+
+        async fn ensure_schema_table(&self, _table: &Table) -> Result<(), DatabaseError> {
+            unreachable!()
+        }
+
+        async fn schema_table_exists(&self, _name: &str) -> Result<bool, DatabaseError> {
+            unreachable!()
+        }
+
+        async fn schema_drop_table(&self, _name: &str) -> Result<(), DatabaseError> {
+            unreachable!()
+        }
+
+        async fn schema_add_column(
+            &self,
+            _table: &str,
+            _column: &Column,
+        ) -> Result<(), DatabaseError> {
+            unreachable!()
+        }
+    }
+
+    /// The core regression: a genuine read error must NOT be treated as "all
+    /// enabled". Before this fix, `load_and_seed_block_settings` caught the
+    /// error and returned `BlockSettings::default()`, whose
+    /// `is_block_enabled` reports `true` for every block name — silently
+    /// enabling every feature (including ones normally gated off) on a real
+    /// outage. It must now propagate `Err` instead.
+    #[tokio::test]
+    async fn genuine_read_error_propagates_instead_of_fabricating_all_enabled() {
+        let db: Arc<dyn DatabaseService> = Arc::new(AlwaysErrorsOnList);
+        let result = load_and_seed_block_settings(&db).await;
+
+        assert!(
+            result.is_err(),
+            "an operational read error must surface as Err, not a fabricated BlockSettings"
+        );
+
+        // Spell out the danger the old behavior risked: `BlockSettings::default()`
+        // (an empty map) reports every block enabled, including ones that would
+        // never legitimately default to on.
+        let fabricated_default = BlockSettings::default();
+        assert!(
+            fabricated_default.is_block_enabled("some/never-configured-block"),
+            "sanity check: BlockSettings::default() is the all-enabled trap this fix avoids"
         );
     }
 }

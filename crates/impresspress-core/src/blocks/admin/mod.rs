@@ -24,10 +24,11 @@ pub const ADMIN_BLOCK_ID: &str = "impresspress/admin";
 pub const WRAP_GRANTS_TABLE: &str = "impresspress__admin__wrap_grants";
 
 use wafer_run::{
-    context::Context, BlockEndpoint, BlockInfo, InputStream, InstanceMode, Message, OutputStream,
+    context::Context, BlockEndpoint, BlockInfo, ErrorCode, InputStream, InstanceMode, Message,
+    OutputStream,
 };
 
-use crate::http::{err_not_found, ok_json};
+use crate::http::{err_bad_request, err_internal, err_not_found, ok_json};
 
 crate::impresspress_feature_block! {
     /// Admin panel: users, database, IAM, logs, settings (`impresspress/admin`).
@@ -304,7 +305,7 @@ async fn handle_create_wrap_grant(
     let description = form.get("description").cloned().unwrap_or_default();
 
     if grantee.is_empty() || resource.is_empty() {
-        return pages::permissions_page(ctx, &msg).await;
+        return err_bad_request("Grantee and resource are required");
     }
 
     let mut data = std::collections::HashMap::new();
@@ -313,7 +314,24 @@ async fn handle_create_wrap_grant(
     data.insert("write".into(), serde_json::json!(if write { 1 } else { 0 }));
     data.insert("resource_type".into(), serde_json::json!(resource_type));
     data.insert("description".into(), serde_json::json!(description));
-    let _ = db::create(ctx, WRAP_GRANTS_TABLE, data).await;
+
+    // Persist first; only render the (now-updated) page and write the audit
+    // event after a confirmed successful write. Previously `let _ =
+    // db::create(..)` discarded the result, so a failed insert still
+    // re-rendered the permissions page as if the grant had been added.
+    let record = match db::create(ctx, WRAP_GRANTS_TABLE, data).await {
+        Ok(record) => record,
+        Err(e) => return err_internal("Database error", e),
+    };
+
+    logs::audit_log(
+        ctx,
+        msg.user_id(),
+        "wrap_grant.create",
+        &format!("wrap_grants/{}", record.id),
+        msg.remote_addr(),
+    )
+    .await;
 
     msg.set_meta("req.query.subtab", "database");
     pages::permissions_page(ctx, &msg).await
@@ -324,7 +342,25 @@ async fn handle_delete_wrap_grant(
     mut msg: Message,
     grant_id: &str,
 ) -> OutputStream {
-    let _ = db::delete(ctx, WRAP_GRANTS_TABLE, grant_id).await;
+    // Persist first; only render the page and write the audit event after a
+    // confirmed successful delete. Previously `let _ = db::delete(..)`
+    // discarded the result, so deleting an already-gone (or unwritable)
+    // grant still re-rendered the page as a success.
+    match db::delete(ctx, WRAP_GRANTS_TABLE, grant_id).await {
+        Ok(()) => {}
+        Err(e) if e.code == ErrorCode::NotFound => return err_not_found("Grant not found"),
+        Err(e) => return err_internal("Database error", e),
+    }
+
+    logs::audit_log(
+        ctx,
+        msg.user_id(),
+        "wrap_grant.delete",
+        &format!("wrap_grants/{grant_id}"),
+        msg.remote_addr(),
+    )
+    .await;
+
     msg.set_meta("req.query.subtab", "database");
     pages::permissions_page(ctx, &msg).await
 }
@@ -355,6 +391,128 @@ mod tests {
             .unwrap_or("");
         assert_eq!(status, "308");
         assert_eq!(location, "/b/admin/settings/email");
+    }
+}
+
+/// Regression coverage for the swallowed-failure finding: WRAP grant
+/// create/delete must check the persistence result instead of discarding it
+/// (`let _ = db::create(..)` / `let _ = db::delete(..)`), and must only
+/// write the audit-log row after a confirmed successful write.
+#[cfg(test)]
+mod wrap_grant_mutation_tests {
+    use wafer_core::clients::database as db;
+    use wafer_run::InputStream;
+
+    use super::*;
+    use crate::test_support::{admin_msg, output_is_error, TestContext};
+
+    /// Count audit-log rows whose `action` matches.
+    async fn audit_count(ctx: &dyn Context, action: &str) -> usize {
+        db::list_all(
+            ctx,
+            AUDIT_LOGS_TABLE,
+            vec![wafer_block::db::Filter {
+                field: "action".to_string(),
+                operator: wafer_block::db::FilterOp::Equal,
+                value: serde_json::Value::String(action.to_string()),
+            }],
+        )
+        .await
+        .map(|rows| rows.len())
+        .unwrap_or(0)
+    }
+
+    #[tokio::test]
+    async fn create_wrap_grant_success_persists_and_audits() {
+        let ctx = TestContext::with_admin().await;
+        let msg = admin_msg("create", "/admin/grants/rules");
+        let form = "grantee=impresspress%2Ffiles&resource=impresspress__foo__bar&write=on";
+        let input = InputStream::from_bytes(form.as_bytes().to_vec());
+
+        let out = handle_create_wrap_grant(&ctx, msg, input).await;
+        let _ = out
+            .collect_buffered()
+            .await
+            .expect("a valid grant create must succeed, not error");
+
+        let rows = db::list_all(&ctx, WRAP_GRANTS_TABLE, vec![])
+            .await
+            .expect("list wrap grants");
+        assert_eq!(rows.len(), 1, "the grant must have been persisted");
+        assert_eq!(
+            rows[0].data.get("grantee").and_then(|v| v.as_str()),
+            Some("impresspress/files")
+        );
+        assert_eq!(audit_count(&ctx, "wrap_grant.create").await, 1);
+    }
+
+    /// The empty-field guard must reject before ever calling `db::create`, so
+    /// it writes no row and no audit event (a real, if minor, instance of the
+    /// same "failure must not look like success" contract — the previous
+    /// code silently re-rendered the page as if nothing was wrong).
+    #[tokio::test]
+    async fn create_wrap_grant_rejects_empty_fields_without_persisting() {
+        let ctx = TestContext::with_admin().await;
+        let msg = admin_msg("create", "/admin/grants/rules");
+        let input = InputStream::from_bytes(b"grantee=&resource=".to_vec());
+
+        let out = handle_create_wrap_grant(&ctx, msg, input).await;
+        assert!(
+            output_is_error(out, "InvalidArgument").await,
+            "empty grantee/resource must be rejected as a bad request"
+        );
+
+        let rows = db::list_all(&ctx, WRAP_GRANTS_TABLE, vec![])
+            .await
+            .expect("list wrap grants");
+        assert!(rows.is_empty(), "no grant row must be persisted");
+        assert_eq!(audit_count(&ctx, "wrap_grant.create").await, 0);
+    }
+
+    /// The core regression: deleting a grant that was never persisted (or is
+    /// already gone) must return an error — not silently re-render the
+    /// permissions page as if the delete had succeeded — and must not write
+    /// a success audit row. Previously `let _ = db::delete(..)` discarded
+    /// this `NotFound`.
+    #[tokio::test]
+    async fn delete_wrap_grant_missing_row_errors_without_audit() {
+        let ctx = TestContext::with_admin().await;
+        let msg = admin_msg("delete", "/admin/grants/rules/does-not-exist");
+
+        let out = handle_delete_wrap_grant(&ctx, msg, "does-not-exist").await;
+        assert!(
+            output_is_error(out, "NotFound").await,
+            "deleting a nonexistent grant must surface NotFound, not a fabricated success"
+        );
+        assert_eq!(audit_count(&ctx, "wrap_grant.delete").await, 0);
+    }
+
+    #[tokio::test]
+    async fn delete_wrap_grant_success_removes_row_and_audits() {
+        let ctx = TestContext::with_admin().await;
+
+        let mut data = std::collections::HashMap::new();
+        data.insert("grantee".into(), serde_json::json!("impresspress/files"));
+        data.insert("resource".into(), serde_json::json!("some_table"));
+        data.insert("write".into(), serde_json::json!(0));
+        data.insert("resource_type".into(), serde_json::json!(""));
+        data.insert("description".into(), serde_json::json!(""));
+        let record = db::create(&ctx, WRAP_GRANTS_TABLE, data)
+            .await
+            .expect("seed grant row");
+
+        let msg = admin_msg("delete", &format!("/admin/grants/rules/{}", record.id));
+        let out = handle_delete_wrap_grant(&ctx, msg, &record.id).await;
+        let _ = out
+            .collect_buffered()
+            .await
+            .expect("delete of an existing grant must succeed");
+
+        let rows = db::list_all(&ctx, WRAP_GRANTS_TABLE, vec![])
+            .await
+            .expect("list wrap grants");
+        assert!(rows.is_empty(), "the grant row must have been removed");
+        assert_eq!(audit_count(&ctx, "wrap_grant.delete").await, 1);
     }
 }
 

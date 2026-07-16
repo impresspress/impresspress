@@ -240,8 +240,11 @@ pub(crate) async fn active_plan_exists(ctx: &dyn Context, user_id: &str, plan: &
 }
 
 /// Fetch a user's subscription row with addon columns coalesced to 0 for the
-/// admin subscription-status endpoint. Errors / no-row collapse to `None`
-/// (preserves the original `handle_subscription` behaviour).
+/// admin subscription-status endpoint. `Ok(None)` means "no subscription
+/// row" (the legitimate, explicit not-found case). A real repository
+/// failure returns `Err` instead of being folded into the same `None` the
+/// caller uses for "user has no subscription" — those are different facts
+/// and previously reported identically as `{"subscription": null}`.
 ///
 /// This is not a grouped aggregate — it's a single-row lookup by `user_id`
 /// with 4 addon columns defaulted from NULL/absent to 0, so it's built on
@@ -253,7 +256,7 @@ pub(crate) async fn active_plan_exists(ctx: &dyn Context, user_id: &str, plan: &
 pub(crate) async fn subscription_for_user(
     ctx: &dyn Context,
     user_id: &str,
-) -> Option<serde_json::Value> {
+) -> Result<Option<serde_json::Value>, WaferError> {
     let record = match db::get_by_field(
         ctx,
         SUBSCRIPTIONS_TABLE,
@@ -263,8 +266,8 @@ pub(crate) async fn subscription_for_user(
     .await
     {
         Ok(record) => record,
-        Err(e) if e.code == ErrorCode::NotFound => return None,
-        Err(_) => return None,
+        Err(e) if e.code == ErrorCode::NotFound => return Ok(None),
+        Err(e) => return Err(e),
     };
 
     let mut out = serde_json::Map::new();
@@ -290,5 +293,5 @@ pub(crate) async fn subscription_for_user(
         let v = record.data.get(col).and_then(|v| v.as_i64()).unwrap_or(0);
         out.insert(col.to_string(), serde_json::json!(v));
     }
-    Some(serde_json::Value::Object(out))
+    Ok(Some(serde_json::Value::Object(out)))
 }

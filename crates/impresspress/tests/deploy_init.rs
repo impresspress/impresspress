@@ -77,7 +77,9 @@ async fn build_runtime(
         .cloned()
         .expect("JWT secret auto-seeded");
 
-    let features = impresspress_core::features::load_and_seed_block_settings(&database).await;
+    let features = impresspress_core::features::load_and_seed_block_settings(&database)
+        .await
+        .expect("load block settings");
 
     let config_service = wafer_core::service_blocks::config::EnvConfigService::new();
     for (key, value) in &vars {

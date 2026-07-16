@@ -550,7 +550,13 @@ where
     //    on `variables.block`. block_settings still needs an eager load
     //    because the ImpresspressRouter consumes the enablement map up front
     //    when wiring routes (it can't defer to a per-block init event).
-    let block_settings = impresspress_core::features::load_and_seed_block_settings(&db).await;
+    // A read error here is a genuine operational failure (D1 outage,
+    // corruption) — never the missing-table cold-start case, which
+    // `DatabaseService::list` already tolerates internally by returning an
+    // empty result. Propagate rather than fabricate "every block enabled":
+    // the runtime build fails, so no requests are served with a fabricated
+    // all-enabled snapshot.
+    let block_settings = impresspress_core::features::load_and_seed_block_settings(&db).await?;
 
     // 3. Build the ConfigService map. After dropping the D1 env_vars
     //    pre-load, this map only carries:

@@ -17,10 +17,27 @@ use crate::{
 // ---------------------------------------------------------------------------
 
 pub async fn overview(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let products_count = db::count(ctx, PRODUCTS_TABLE, &[]).await.unwrap_or(0);
-    let groups_count = db::count(ctx, GROUPS_TABLE, &[]).await.unwrap_or(0);
-    let purchases_count = repo::purchases::count_all(ctx).await.unwrap_or(0);
-    let pricing_count = db::count(ctx, PRICING_TABLE, &[]).await.unwrap_or(0);
+    // A repository failure on any of these must surface as an error, not be
+    // fabricated into a "0" stat: besides misreporting the catalog size, a
+    // false `products_count == 0` also trips `render_overview_empty_state`'s
+    // "Add your first product" CTA during a real outage — actively
+    // misleading, not just cosmetically wrong.
+    let products_count = match db::count(ctx, PRODUCTS_TABLE, &[]).await {
+        Ok(n) => n,
+        Err(e) => return crate::http::err_internal("Database error", e),
+    };
+    let groups_count = match db::count(ctx, GROUPS_TABLE, &[]).await {
+        Ok(n) => n,
+        Err(e) => return crate::http::err_internal("Database error", e),
+    };
+    let purchases_count = match repo::purchases::count_all(ctx).await {
+        Ok(n) => n,
+        Err(e) => return crate::http::err_internal("Database error", e),
+    };
+    let pricing_count = match db::count(ctx, PRICING_TABLE, &[]).await {
+        Ok(n) => n,
+        Err(e) => return crate::http::err_internal("Database error", e),
+    };
     let user_products_enabled = super::handlers::user_products_enabled(ctx).await;
 
     let content = html! {
