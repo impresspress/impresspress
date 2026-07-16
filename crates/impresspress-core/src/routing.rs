@@ -176,7 +176,20 @@ pub struct ExtraRoute {
 pub const ROUTES: &[Route] = &[
     // System & static assets
     Route::new("/health", RouteAccess::Public, "impresspress/system"),
-    Route::new(STATIC_PREFIX, RouteAccess::Public, "impresspress/system"),
+    // Static assets are content-hashed, immutable, and session-less by
+    // design (CSS/JS/fonts/logo for the logged-out login/signup pages).
+    // `SystemBlock::info().endpoints` declares them with MID-SEGMENT hash
+    // placeholders (e.g. `/b/static/app-{hash}.css`) — `{name}` only binds a
+    // WHOLE path segment in `endpoint_match::match_template`, so a real
+    // request like `/b/static/app-abc123.css` never matches any declared
+    // endpoint. That makes `declared_access` fall back to its fail-closed
+    // `Authenticated` default, which combined via `RouteAccess::max` would
+    // 403 every anonymous asset request (code review 2026-07-16, C1: "the
+    // logged-out login/signup pages load with no CSS/JS/fonts/logo").
+    // `router_declared_public` is the fix: it makes this route's own
+    // `Public` access final, so the fail-closed default is never consulted.
+    // Covers the whole `/b/static/*` prefix (this is a prefix route).
+    Route::router_declared_public(STATIC_PREFIX, "impresspress/system"),
     // Inspector — runtime debugging UI (admin only). Feature-gated as
     // `impresspress/inspector` but dispatches to the `wafer-run/inspector` block.
     Route::proxy(
@@ -943,6 +956,51 @@ mod tests {
             .await
             .expect("a logged-in caller must reach dispatch on an undeclared path (Authenticated, not a hard deny)");
         assert_eq!(buf.body, b"DISPATCHED");
+    }
+
+    #[tokio::test]
+    async fn anonymous_static_asset_request_is_not_denied() {
+        use crate::test_support::{anon_msg, TestContext};
+
+        let mut ctx = TestContext::new().await;
+        ctx.register_block("impresspress/system", std::sync::Arc::new(DispatchProbeBlock));
+
+        // No `BlockInfo` passed at all — proves the fix doesn't depend on
+        // `declared_access` matching. `SystemBlock::info().endpoints` uses
+        // MID-SEGMENT hash placeholders (`/b/static/app-{hash}.css`) that
+        // `match_template` can't bind to a real path anyway (see C1); the
+        // `router_declared_public` route must keep this reachable regardless.
+        let out = route_to_block(
+            &ctx,
+            anon_msg("retrieve", "/b/static/app-abc123.css"),
+            InputStream::empty(),
+            &AllEnabled,
+            &[],
+            &[],
+        )
+        .await;
+        let buf = out.collect_buffered().await.expect(
+            "an anonymous caller must reach dispatch for a static asset — \
+             the logged-out login/signup pages depend on this for CSS/JS/fonts/logo",
+        );
+        assert_eq!(buf.body, b"DISPATCHED");
+    }
+
+    #[test]
+    fn static_prefix_route_is_router_declared_public() {
+        // Direct check on the ROUTES entry itself (companion to the dispatch
+        // test above): the static prefix must use the `router_final` escape
+        // hatch, not a plain `Route::new(_, Public, _)`, or the fail-closed
+        // `declared_access` default would still win via `RouteAccess::max`.
+        let static_route = ROUTES
+            .iter()
+            .find(|r| r.prefix == STATIC_PREFIX)
+            .expect("static prefix route not declared");
+        assert_eq!(static_route.access, RouteAccess::Public);
+        assert!(
+            static_route.router_final,
+            "/b/static/ must be router_final so the Authenticated default can't override it"
+        );
     }
 
     #[tokio::test]
