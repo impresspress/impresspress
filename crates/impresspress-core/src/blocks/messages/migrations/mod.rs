@@ -21,7 +21,7 @@ pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[SQL_001_POSTGRES, SQL_002_POST
 
 #[cfg(test)]
 mod tests {
-    use super::{SQL_001_POSTGRES, SQL_001_SQLITE, SQL_002_SQLITE, SQL_002_POSTGRES};
+    use super::{SQL_001_POSTGRES, SQL_001_SQLITE, SQL_002_POSTGRES, SQL_002_SQLITE};
 
     /// The migration_helper statement splitter splits on bare `;` outside
     /// `--` line comments. Make sure every embedded statement parses into

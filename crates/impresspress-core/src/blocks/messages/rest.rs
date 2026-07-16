@@ -360,7 +360,11 @@ mod tests {
 
     // --- Context request helpers ---
 
-    async fn create_as(ctx: &TestContext, user_id: &str, body: serde_json::Value) -> serde_json::Value {
+    async fn create_as(
+        ctx: &TestContext,
+        user_id: &str,
+        body: serde_json::Value,
+    ) -> serde_json::Value {
         let (msg, input) = request("create", "/b/messages/api/contexts", user_id, body);
         crate::test_support::output_json(dispatch(ctx, msg, input).await).await
     }
@@ -526,7 +530,13 @@ mod tests {
         let ctx_id = created["id"].as_str().expect("id").to_string();
 
         // User B cannot add an entry to A's context, even knowing its id.
-        let out = add_entry_as(&ctx, "user-b", &ctx_id, serde_json::json!({"content": "sneaky"})).await;
+        let out = add_entry_as(
+            &ctx,
+            "user-b",
+            &ctx_id,
+            serde_json::json!({"content": "sneaky"}),
+        )
+        .await;
         assert_eq!(status_of(out).await, 404);
 
         // Nor list A's entries.

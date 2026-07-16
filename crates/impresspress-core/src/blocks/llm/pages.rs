@@ -979,9 +979,7 @@ mod tests {
         // verbatim in the rendered page — it would terminate the JSON carrier
         // and inject live script. `type="application/json"` does NOT prevent
         // element termination.
-        let entries = vec![record_with_content(
-            "</script><img src=x onerror=alert(1)>",
-        )];
+        let entries = vec![record_with_content("</script><img src=x onerror=alert(1)>")];
         let markup = render_page_body(&[], &entries, &[], "", None, "/x.js");
         let html = markup.into_string();
         assert!(
