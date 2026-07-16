@@ -41,7 +41,16 @@ jobs:
           prefix-key: wasm
 
       - name: Install wasm-pack
-        run: curl https://rustwasm.github.io/wasm-pack/installer/init.sh -sSf | sh
+        uses: jetli/wasm-pack-action@v0.4.0
+        with:
+          # Pin explicitly. With no version the action resolves "latest" via
+          # the GitHub API and falls back to its ancient hardcoded default
+          # (v0.9.1) whenever that lookup flakes/rate-limits — and v0.9.1
+          # cannot parse workspace-inherited manifest fields like
+          # `license.workspace = true`, failing with "invalid type: map,
+          # expected a string for key `package.license`". Matches gizza-ai's
+          # pin (PR #75).
+          version: 'v0.15.0'
 
       - name: Build WASM
         run: cd crates/impresspress-web && wasm-pack build --target web --release --out-dir pkg
