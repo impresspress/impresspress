@@ -211,16 +211,72 @@ describe("StorageService", () => {
     expect(result.uploaded).toBe(true);
   });
 
-  it("search calls the real /search?q= route", async () => {
-    fetchMock.mockResolvedValueOnce(fakeJsonResponse({ data: [] }));
-    await client().storage.search("report");
+  it("search decodes the real RecordList shape ({records, total_count}), not {data, total}", async () => {
+    fetchMock.mockResolvedValueOnce(
+      fakeJsonResponse({
+        records: [
+          {
+            id: "r1",
+            data: {
+              bucket: "my-bucket",
+              key: "report.pdf",
+              size: 42,
+              content_type: "application/pdf",
+              status: "complete",
+              uploaded_by: "u1",
+              uploaded_at: "2026-01-01T00:00:00Z",
+            },
+          },
+        ],
+        total_count: 1,
+        page: 1,
+        page_size: 20,
+      }),
+    );
+    const result = await client().storage.search("report");
     expect(fetchMock.mock.calls[0][0]).toBe("http://api.test/b/storage/api/search?q=report");
+    expect(result.total).toBe(1);
+    expect(result.items).toEqual([
+      {
+        id: "r1",
+        bucket: "my-bucket",
+        key: "report.pdf",
+        size: 42,
+        content_type: "application/pdf",
+        status: "complete",
+        uploaded_by: "u1",
+        uploaded_at: "2026-01-01T00:00:00Z",
+      },
+    ]);
   });
 
-  it("getRecentFiles calls /recent with no query parameters (the server ignores any)", async () => {
-    fetchMock.mockResolvedValueOnce(fakeJsonResponse({ data: [] }));
-    await client().storage.getRecentFiles();
+  it("getRecentFiles calls /recent with no query parameters and decodes {records, total_count}", async () => {
+    fetchMock.mockResolvedValueOnce(
+      fakeJsonResponse({
+        records: [
+          {
+            id: "r2",
+            data: {
+              bucket: "b",
+              key: "a.txt",
+              size: 1,
+              content_type: "text/plain",
+              status: "complete",
+              uploaded_by: "u1",
+              uploaded_at: "2026-01-02T00:00:00Z",
+            },
+          },
+        ],
+        total_count: 1,
+        page: 1,
+        page_size: 20,
+      }),
+    );
+    const result = await client().storage.getRecentFiles();
     expect(fetchMock.mock.calls[0][0]).toBe("http://api.test/b/storage/api/recent");
+    expect(result.total).toBe(1);
+    expect(result.items[0].key).toBe("a.txt");
+    expect(result.items[0].id).toBe("r2");
   });
 });
 
@@ -252,6 +308,43 @@ describe("CloudStorageExtension", () => {
       expires_in_hours: 24,
       max_access_count: undefined,
     });
+  });
+
+  it("listShares() decodes the real RecordList shape ({records, total_count}), not {data, total}", async () => {
+    fetchMock.mockResolvedValueOnce(
+      fakeJsonResponse({
+        records: [
+          {
+            id: "s1",
+            data: {
+              token: "tok",
+              bucket: "my-bucket",
+              key: "f.txt",
+              created_by: "u1",
+              created_at: "2026-01-01T00:00:00Z",
+              access_count: 0,
+            },
+          },
+        ],
+        total_count: 1,
+        page: 1,
+        page_size: 100,
+      }),
+    );
+    const result = await client().cloudStorage.listShares();
+    expect(fetchMock.mock.calls[0][0]).toBe("http://api.test/b/cloudstorage/shares");
+    expect(result.total).toBe(1);
+    expect(result.items).toEqual([
+      {
+        id: "s1",
+        token: "tok",
+        bucket: "my-bucket",
+        key: "f.txt",
+        created_by: "u1",
+        created_at: "2026-01-01T00:00:00Z",
+        access_count: 0,
+      },
+    ]);
   });
 
   it("getQuota() returns the real {quota, usage} shape from /b/cloudstorage/quota", async () => {

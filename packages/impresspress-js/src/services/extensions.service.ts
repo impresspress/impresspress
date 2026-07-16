@@ -48,6 +48,28 @@ export class ExtensionsService extends BaseService {
 }
 
 /**
+ * One row of the `impresspress__files__cloud_shares` table (see
+ * `crates/impresspress-core/src/blocks/files/repo/shares.rs`), flattened
+ * from the wire `Record { id, data }` shape (`id` + the row's columns).
+ */
+export interface ShareRecord {
+  id: string;
+  token: string;
+  bucket: string;
+  key: string;
+  created_by: string;
+  created_at: string;
+  access_count: number;
+  expires_at?: string;
+  max_access_count?: number;
+}
+
+export interface ListSharesResult {
+  items: ShareRecord[];
+  total: number;
+}
+
+/**
  * Aligned to the real `impresspress/files` cloud-storage surface in
  * `crates/impresspress-core/src/blocks/files/cloud.rs`: per-object share
  * links and the caller's own quota/usage. There is no user-facing
@@ -75,9 +97,25 @@ export class CloudStorageExtension extends ExtensionsService {
     });
   }
 
-  /** List the current user's shares. `GET /b/cloudstorage/shares`. */
-  async listShares(): Promise<{ data: unknown[]; total?: number }> {
-    return this.call("cloudstorage", "shares");
+  /**
+   * List the current user's shares. `GET /b/cloudstorage/shares`.
+   *
+   * The handler serializes wafer-core's `RecordList` directly
+   * (`ok_json(&result)` over `repo::shares::list_for_user`) — `{ records,
+   * total_count, page, page_size }`, NOT a `{ data, total }` envelope. See
+   * `wafer-block/src/wire/database.rs`.
+   */
+  async listShares(): Promise<ListSharesResult> {
+    const result = await this.call<{
+      records: Array<{ id: string; data: Omit<ShareRecord, "id"> }>;
+      total_count: number;
+      page: number;
+      page_size: number;
+    }>("cloudstorage", "shares");
+    return {
+      items: result.records.map((r) => ({ id: r.id, ...r.data })),
+      total: result.total_count,
+    };
   }
 
   /** Delete a share. `DELETE /b/cloudstorage/shares/{id}`. */

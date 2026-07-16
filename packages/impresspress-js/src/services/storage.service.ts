@@ -49,6 +49,50 @@ export interface UploadFileOptions {
   contentType?: string;
 }
 
+/**
+ * One row of the `impresspress__files__objects` metadata table (see
+ * `crates/impresspress-core/src/blocks/files/repo/objects.rs`), flattened
+ * from the wire `Record { id, data }` shape (`id` + the row's columns).
+ */
+export interface FileMetadataRecord {
+  id: string;
+  bucket: string;
+  key: string;
+  size: number;
+  content_type: string;
+  status: string;
+  uploaded_by: string;
+  uploaded_at: string;
+}
+
+export interface SearchResult {
+  items: FileMetadataRecord[];
+  total: number;
+}
+
+/**
+ * Wire shape of wafer-core's `RecordList` (see
+ * `wafer-block/src/wire/database.rs`): `{ records, total_count, page,
+ * page_size }`. `/b/storage/api/search` and `/b/storage/api/recent` both
+ * serialize a `RecordList` directly (`ok_json(&result)`), NOT a `{ data,
+ * total }` envelope.
+ */
+interface RecordListWire<T> {
+  records: Array<{ id: string; data: T }>;
+  total_count: number;
+  page: number;
+  page_size: number;
+}
+
+function flattenRecordList(
+  result: RecordListWire<Omit<FileMetadataRecord, "id">>,
+): SearchResult {
+  return {
+    items: result.records.map((r) => ({ id: r.id, ...r.data })),
+    total: result.total_count,
+  };
+}
+
 export class StorageService extends BaseService {
   /** List bucket names owned by the current user (or every bucket, for an admin). */
   async listBuckets(): Promise<string[]> {
@@ -151,23 +195,29 @@ export class StorageService extends BaseService {
   async search(
     query: string,
     options?: { page?: number; page_size?: number },
-  ): Promise<{ data: StorageObjectInfo[]; total?: number }> {
+  ): Promise<SearchResult> {
     const params = { q: query, ...options };
-    return this.request({
+    const result = await this.request<
+      RecordListWire<Omit<FileMetadataRecord, "id">>
+    >({
       method: "GET",
       url: `/b/storage/api/search?${this.buildQueryString(params)}`,
     });
+    return flattenRecordList(result);
   }
 
   /**
    * The 20 most recently viewed objects for the current user.
    * `GET /b/storage/api/recent` — takes no query parameters server-side.
    */
-  async getRecentFiles(): Promise<{ data: StorageObjectInfo[]; total?: number }> {
-    return this.request({
+  async getRecentFiles(): Promise<SearchResult> {
+    const result = await this.request<
+      RecordListWire<Omit<FileMetadataRecord, "id">>
+    >({
       method: "GET",
       url: "/b/storage/api/recent",
     });
+    return flattenRecordList(result);
   }
 }
 
