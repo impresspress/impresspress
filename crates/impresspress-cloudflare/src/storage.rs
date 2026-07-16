@@ -118,12 +118,64 @@ impl StorageService for R2StorageService {
         } else {
             100
         };
+        let offset = opts.offset.max(0) as u64;
 
-        let listed = self
-            .bucket
-            .list()
-            .prefix(&full_prefix)
-            .limit(limit)
+        // R2's list API has no numeric offset — only an opaque cursor (see
+        // `delete_folder` above for the same cursor/`truncated()` shape).
+        // Until `wafer_core::interfaces::storage::service::{ListOptions,
+        // ObjectList}` grow a cursor/next-cursor pair (so a caller can pass
+        // R2's own opaque cursor straight through instead of a numeric
+        // offset — the actual fix this finding recommends, and a
+        // wafer-core wire-type change out of scope for this crate), the
+        // only *correct* way to honor a nonzero offset here is to walk
+        // cursors up to it. Hop in R2's own max page size (1000) rather
+        // than the caller's usually-much-smaller page size, so satisfying
+        // a given offset costs the fewest possible extra R2 round trips
+        // this interface allows — this still isn't free (a deep offset
+        // still costs `offset / 1000` extra list calls on every request),
+        // which is exactly the gap the wafer-core cursor field would close.
+        const R2_LIST_MAX_PAGE: u32 = 1000;
+        let mut cursor: Option<String> = None;
+        let mut skipped: u64 = 0;
+        while skipped < offset {
+            let hop = (offset - skipped).min(u64::from(R2_LIST_MAX_PAGE)) as u32;
+            let mut builder = self.bucket.list().prefix(&full_prefix).limit(hop);
+            if let Some(c) = cursor.take() {
+                builder = builder.cursor(c);
+            }
+            let page = builder
+                .execute()
+                .await
+                .map_err(|e| StorageError::Internal(e.to_string()))?;
+
+            let got = page.objects().len() as u64;
+            skipped += got;
+
+            if !page.truncated() || got == 0 {
+                // Ran out of objects before reaching `offset` — the
+                // requested page is past the end of the keyspace. Return
+                // an empty page with an exact total (we've now walked the
+                // whole prefix) rather than wrapping back to page 1.
+                return Ok(ObjectList {
+                    objects: Vec::new(),
+                    total_count: skipped as i64,
+                });
+            }
+            cursor = page.cursor();
+            if cursor.is_none() {
+                // `truncated() == true` is documented to always come with
+                // a cursor (see `delete_folder`'s identical guard below).
+                return Err(StorageError::Internal(
+                    "R2 reported truncated results with no cursor".into(),
+                ));
+            }
+        }
+
+        let mut builder = self.bucket.list().prefix(&full_prefix).limit(limit);
+        if let Some(c) = cursor {
+            builder = builder.cursor(c);
+        }
+        let listed = builder
             .execute()
             .await
             .map_err(|e| StorageError::Internal(e.to_string()))?;
@@ -150,10 +202,25 @@ impl StorageService for R2StorageService {
             })
             .collect();
 
-        let count = objects.len() as i64;
+        // R2 may return fewer objects than requested even while more exist
+        // (`truncated() == true`) — reporting `objects.len()` as the total
+        // (the prior behavior) silently under-counts and breaks
+        // has-more-pages checks beyond page 1. Per
+        // `ObjectList::total_count`'s documented contract, backends where
+        // an exact total would require walking the whole keyspace may
+        // return a lower bound that's always strictly greater than
+        // `offset + limit` when more objects exist, which keeps
+        // `total_count > offset + limit` a correct has-more-pages check
+        // without an extra R2 call.
+        let total_count = if listed.truncated() {
+            offset as i64 + limit as i64 + 1
+        } else {
+            offset as i64 + objects.len() as i64
+        };
+
         Ok(ObjectList {
             objects,
-            total_count: count,
+            total_count,
         })
     }
 
