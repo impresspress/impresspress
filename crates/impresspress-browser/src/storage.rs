@@ -18,13 +18,18 @@ unsafe impl Sync for BrowserStorageService {}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/// Convert a *resolved* JsValue to a String. Bridge storage calls resolve
-/// either `undefined` (mutating calls with no payload) or a plain/JSON
-/// string. Anything else would mean bridge.js resolved instead of rejected
-/// with something unexpected — surface its message rather than silently
-/// losing it (shares `bridge::describe`'s message extraction with the
-/// rejection path in `await_bridge` below, so both use the same
+/// Convert a *resolved* JsValue to a String. The mutating bridge storage
+/// calls that still route through `await_bridge` (`put`/`delete`/
+/// `create_folder`/`delete_folder`) always resolve `undefined` — they carry
+/// no payload. Anything else (including a bare string) would mean bridge.js
+/// resolved with something unexpected — surface its message rather than
+/// silently losing it (shares `bridge::describe`'s message extraction with
+/// the rejection path in `await_bridge` below, so both use the same
 /// Error/DOMException `.message` lookup).
+///
+/// `get`/`list`/`list_folders` resolve structured JS objects/arrays instead
+/// and decode them directly with `serde_wasm_bindgen`, bypassing this
+/// string-shaped helper entirely — see their own methods below.
 fn jsvalue_to_string(val: wasm_bindgen::JsValue) -> Result<String, StorageError> {
     if val.is_null() || val.is_undefined() {
         return Ok(String::new());
@@ -66,10 +71,12 @@ async fn await_bridge(
     }
 }
 
-// ─── JSON shapes returned by the bridge ──────────────────────────────────────
+// ─── Structured shapes decoded from the bridge (serde_wasm_bindgen, not JSON) ─
 
 #[derive(Deserialize)]
 struct GetResponse {
+    /// Deserializes straight from the JS object's real `Uint8Array` field —
+    /// no `Array<number>`/JSON round trip.
     data: Vec<u8>,
     meta: GetMeta,
 }
@@ -78,6 +85,16 @@ struct GetResponse {
 struct GetMeta {
     content_type: String,
     size: i64,
+}
+
+/// `storageList`'s resolved shape: the requested page of keys plus the
+/// TRUE total of matching entries (before slicing to the page) — see
+/// `bridge::storage_list`'s doc comment for why a real cursor isn't
+/// implemented here.
+#[derive(Deserialize)]
+struct ListResponse {
+    keys: Vec<String>,
+    total: i64,
 }
 
 // ─── StorageService impl ──────────────────────────────────────────────────────
@@ -98,15 +115,18 @@ impl StorageService for BrowserStorageService {
     }
 
     async fn get(&self, folder: &str, key: &str) -> Result<(Vec<u8>, ObjectInfo), StorageError> {
-        // `await_bridge` already maps a missing folder/key to
-        // `StorageError::NotFound` via the OPFS `NotFoundError` DOMException
-        // rejection (see its doc comment) — bridge.js's `storageGet` never
-        // resolves an empty string on success, it always resolves a JSON
-        // payload, so there is no separate empty-string case to guard here.
-        let json = await_bridge(bridge::storage_get(folder, key)).await?;
+        // `storageGet` resolves a plain JS object `{ data: Uint8Array, meta }`
+        // (see `bridge::storage_get`'s doc comment) — not a string, so this
+        // bypasses `await_bridge`/`jsvalue_to_string` and maps the rejection
+        // directly, then decodes the resolved object with
+        // `serde_wasm_bindgen` in one step (no JSON round trip either
+        // direction).
+        let val = bridge::storage_get(folder, key)
+            .await
+            .map_err(map_rejection)?;
 
-        let resp: GetResponse = serde_json::from_str(&json)
-            .map_err(|e| StorageError::Internal(format!("parse error: {e}")))?;
+        let resp: GetResponse = serde_wasm_bindgen::from_value(val)
+            .map_err(|e| StorageError::Internal(format!("decode storage get response: {e}")))?;
 
         let info = ObjectInfo {
             key: key.to_string(),
@@ -128,17 +148,22 @@ impl StorageService for BrowserStorageService {
         let limit = if opts.limit > 0 { opts.limit as u32 } else { 0 };
         let offset = opts.offset as u32;
 
-        let json = await_bridge(bridge::storage_list(folder, &opts.prefix, limit, offset)).await?;
+        // `storageList` resolves `{ keys: string[], total: number }` — not a
+        // string — with `total` the full matching-entry count (not the page
+        // length; see `bridge::storage_list`'s doc comment).
+        let val = bridge::storage_list(folder, &opts.prefix, limit, offset)
+            .await
+            .map_err(map_rejection)?;
 
-        // Bridge returns a JSON array of key strings.
-        // ObjectInfo fields beyond `key` are not available from the list call;
-        // we use placeholder values (size=0, empty content_type, current time).
-        let keys: Vec<String> = serde_json::from_str(&json)
-            .map_err(|e| StorageError::Internal(format!("parse error: {e}")))?;
+        let resp: ListResponse = serde_wasm_bindgen::from_value(val)
+            .map_err(|e| StorageError::Internal(format!("decode storage list response: {e}")))?;
 
+        // ObjectInfo fields beyond `key` are not available from the list
+        // call; we use placeholder values (size=0, empty content_type,
+        // current time).
         let now = Utc::now();
-        let total_count = keys.len() as i64;
-        let objects = keys
+        let objects = resp
+            .keys
             .into_iter()
             .map(|k| ObjectInfo {
                 key: k,
@@ -150,7 +175,7 @@ impl StorageService for BrowserStorageService {
 
         Ok(ObjectList {
             objects,
-            total_count,
+            total_count: resp.total,
         })
     }
 
@@ -168,12 +193,16 @@ impl StorageService for BrowserStorageService {
     }
 
     async fn list_folders(&self) -> Result<Vec<FolderInfo>, StorageError> {
-        let json = await_bridge(bridge::storage_list_folders()).await?;
+        // `storageListFolders` resolves a plain JS array of strings — not a
+        // JSON string.
+        let val = bridge::storage_list_folders()
+            .await
+            .map_err(map_rejection)?;
 
-        // Bridge returns a JSON array of folder name strings.
         // FolderInfo fields beyond `name` are not available; use defaults.
-        let names: Vec<String> = serde_json::from_str(&json)
-            .map_err(|e| StorageError::Internal(format!("parse error: {e}")))?;
+        let names: Vec<String> = serde_wasm_bindgen::from_value(val).map_err(|e| {
+            StorageError::Internal(format!("decode storage list-folders response: {e}"))
+        })?;
 
         let now = Utc::now();
         let folders = names
@@ -210,7 +239,7 @@ mod tests {
     use wasm_bindgen::JsValue;
     use wasm_bindgen_test::wasm_bindgen_test;
 
-    use super::{jsvalue_to_string, map_rejection};
+    use super::{jsvalue_to_string, map_rejection, GetResponse, ListResponse};
 
     /// Build a JS object shaped like a rejected `DOMException`/`Error`:
     /// `{ name, message }`. This is exactly what OPFS's
@@ -274,5 +303,122 @@ mod tests {
             jsvalue_to_string(JsValue::from_str("hello")).unwrap(),
             "hello"
         );
+    }
+
+    // ── GetResponse decode (the structured `storageGet` shape) ──────────────
+    //
+    // `bridge::storage_get` used to resolve a JSON string that `get()`
+    // re-parsed with `serde_json::from_str`; it now resolves the plain JS
+    // object below, decoded in one step with `serde_wasm_bindgen`. These
+    // tests exercise exactly the decode step `get()` performs, using the
+    // same `Uint8Array`-in-a-plain-object shape `storageGet` in bridge.js
+    // actually resolves.
+
+    fn make_get_response_object(data: &[u8], content_type: &str, size: i64) -> JsValue {
+        use js_sys::Uint8Array;
+
+        let meta = Object::new();
+        Reflect::set(
+            &meta,
+            &JsValue::from_str("content_type"),
+            &JsValue::from_str(content_type),
+        )
+        .unwrap();
+        Reflect::set(
+            &meta,
+            &JsValue::from_str("size"),
+            &JsValue::from_f64(size as f64),
+        )
+        .unwrap();
+
+        let obj = Object::new();
+        Reflect::set(
+            &obj,
+            &JsValue::from_str("data"),
+            &Uint8Array::from(data).into(),
+        )
+        .unwrap();
+        Reflect::set(&obj, &JsValue::from_str("meta"), &meta).unwrap();
+        obj.into()
+    }
+
+    #[wasm_bindgen_test]
+    fn decodes_get_response_with_real_uint8array_in_one_step() {
+        let bytes = b"hello world";
+        let js_val = make_get_response_object(bytes, "text/plain", bytes.len() as i64);
+
+        let decoded: GetResponse =
+            serde_wasm_bindgen::from_value(js_val).expect("decode storage get response");
+
+        assert_eq!(decoded.data, bytes.to_vec());
+        assert_eq!(decoded.meta.content_type, "text/plain");
+        assert_eq!(decoded.meta.size, bytes.len() as i64);
+    }
+
+    #[wasm_bindgen_test]
+    fn decodes_get_response_with_empty_data() {
+        let js_val = make_get_response_object(&[], "application/octet-stream", 0);
+
+        let decoded: GetResponse =
+            serde_wasm_bindgen::from_value(js_val).expect("decode storage get response");
+
+        assert!(decoded.data.is_empty());
+        assert_eq!(decoded.meta.size, 0);
+    }
+
+    // ── ListResponse decode (the structured `storageList` shape) ────────────
+    //
+    // Regression guard for the exact bug this task fixes: `storageList` used
+    // to resolve a JSON string containing only the page, and the caller
+    // reported the page length as the total. `ListResponse` carries a real
+    // `total` distinct from `keys.len()` whenever the store has more
+    // matching entries than fit on the requested page.
+
+    fn make_list_response_object(keys: &[&str], total: i64) -> JsValue {
+        use js_sys::Array;
+
+        let js_keys = Array::new();
+        for k in keys {
+            js_keys.push(&JsValue::from_str(k));
+        }
+
+        let obj = Object::new();
+        Reflect::set(&obj, &JsValue::from_str("keys"), &js_keys).unwrap();
+        Reflect::set(
+            &obj,
+            &JsValue::from_str("total"),
+            &JsValue::from_f64(total as f64),
+        )
+        .unwrap();
+        obj.into()
+    }
+
+    #[wasm_bindgen_test]
+    fn decodes_list_response_with_total_larger_than_page() {
+        // A page of 2 keys out of 50 total matches — the bug this task
+        // fixes reported `total: 2` (the page length) instead of `50`.
+        let js_val = make_list_response_object(&["a", "b"], 50);
+
+        let decoded: ListResponse =
+            serde_wasm_bindgen::from_value(js_val).expect("decode storage list response");
+
+        assert_eq!(decoded.keys, vec!["a".to_string(), "b".to_string()]);
+        assert_eq!(decoded.total, 50);
+        assert_ne!(
+            decoded.total as usize,
+            decoded.keys.len(),
+            "total must reflect the full matching-entry count, not the page length"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    fn decodes_list_response_empty_folder() {
+        let js_val = make_list_response_object(&[], 0);
+
+        let decoded: ListResponse =
+            serde_wasm_bindgen::from_value(js_val).expect("decode storage list response");
+
+        assert!(decoded.keys.is_empty());
+        assert_eq!(decoded.total, 0);
     }
 }

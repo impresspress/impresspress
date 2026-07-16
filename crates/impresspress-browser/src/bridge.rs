@@ -11,16 +11,20 @@ extern "C" {
     pub async fn dbInit() -> Result<JsValue, JsValue>;
 
     /// Execute SQL that modifies data (INSERT/UPDATE/DELETE/DDL).
-    /// `params_json` is a JSON array of parameters.
-    /// Returns rows-modified count as a string. Throws on SQL error.
+    /// `params` is a structured JS array of bind values — build via
+    /// `db_codec::params_to_js`/`empty_params`, not a JSON string. Returns
+    /// the rows-modified count. Throws on SQL error. Does NOT flush to
+    /// OPFS — see `BrowserDatabaseService::with_flush` in `database.rs` for
+    /// the coalesced-flush durability contract.
     #[wasm_bindgen(catch, js_name = dbExecRaw)]
-    pub fn db_exec_raw(sql: &str, params_json: &str) -> Result<String, JsValue>;
+    pub fn db_exec_raw(sql: &str, params: JsValue) -> Result<f64, JsValue>;
 
-    /// Execute a SELECT SQL query.
-    /// `params_json` is a JSON array of parameters.
-    /// Returns JSON array of row objects as a string. Throws on SQL error.
+    /// Execute a SELECT SQL query. `params` as above.
+    /// Returns a JS array of plain row objects — NOT a JSON string. Decode
+    /// with `db_codec::parse_rows`/`rows_from_js`
+    /// (`serde_wasm_bindgen::from_value`).
     #[wasm_bindgen(catch, js_name = dbQueryRaw)]
-    pub fn db_query_raw(sql: &str, params_json: &str) -> Result<String, JsValue>;
+    pub fn db_query_raw(sql: &str, params: JsValue) -> Result<JsValue, JsValue>;
 
     /// Export the sql.js DB to OPFS at `impresspress.db`. Rejects on an OPFS
     /// write failure (e.g. `QuotaExceededError`).
@@ -39,9 +43,12 @@ extern "C" {
     ) -> Result<JsValue, JsValue>;
 
     /// Read file + metadata from OPFS.
-    /// Returns JSON string: `{ data: number[], meta: { content_type, size } }`.
-    /// Rejects with a `NotFoundError` `DOMException` if the folder or key
-    /// doesn't exist.
+    /// Returns a plain JS object `{ data: Uint8Array, meta: { content_type,
+    /// size } }` — NOT a JSON string. Decode directly with
+    /// `serde_wasm_bindgen::from_value` (`data` deserializes straight into a
+    /// `Vec<u8>` from the real `Uint8Array`, matching `network.rs`'s
+    /// `FetchResponse.body` pattern). Rejects with a `NotFoundError`
+    /// `DOMException` if the folder or key doesn't exist.
     #[wasm_bindgen(catch, js_name = storageGet)]
     pub async fn storage_get(folder: &str, key: &str) -> Result<JsValue, JsValue>;
 
@@ -51,8 +58,10 @@ extern "C" {
     pub async fn storage_delete(folder: &str, key: &str) -> Result<JsValue, JsValue>;
 
     /// List files in a folder matching a prefix, with pagination.
-    /// Returns JSON array of key strings. Rejects with a `NotFoundError`
-    /// `DOMException` if the folder doesn't exist.
+    /// Returns a plain JS object `{ keys: string[], total: number }` — NOT a
+    /// JSON string. `total` is the full matching-entry count, not the page
+    /// length. Decode with `serde_wasm_bindgen::from_value`. Rejects with a
+    /// `NotFoundError` `DOMException` if the folder doesn't exist.
     #[wasm_bindgen(catch, js_name = storageList)]
     pub async fn storage_list(
         folder: &str,
@@ -71,7 +80,8 @@ extern "C" {
     pub async fn storage_delete_folder(name: &str) -> Result<JsValue, JsValue>;
 
     /// List top-level storage directories.
-    /// Returns JSON array of folder name strings.
+    /// Returns a plain JS array of folder name strings — NOT a JSON string.
+    /// Decode with `serde_wasm_bindgen::from_value`.
     #[wasm_bindgen(catch, js_name = storageListFolders)]
     pub async fn storage_list_folders() -> Result<JsValue, JsValue>;
 

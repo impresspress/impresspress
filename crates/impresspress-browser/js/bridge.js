@@ -58,41 +58,58 @@ export async function dbInit() {
 /**
  * Execute SQL that modifies data (INSERT/UPDATE/DELETE/DDL).
  * @param {string} sql
- * @param {string} paramsJson - JSON array of parameters
- * @returns {string} rows-modified count as string
+ * @param {unknown[]} params - bind values, positional (sql.js accepts the
+ *   array directly — no JSON encode/decode round trip on either side; see
+ *   `db_codec::params_to_js`/`empty_params` on the Rust side).
+ * @returns {number} rows-modified count. Does NOT flush to OPFS — see
+ *   `dbFlush`'s doc comment for the durability contract.
  */
-export function dbExecRaw(sql, paramsJson) {
-    const params = JSON.parse(paramsJson);
+export function dbExecRaw(sql, params) {
     _db.run(sql, params);
-    const rowsModified = _db.getRowsModified();
-    return String(rowsModified);
+    return _db.getRowsModified();
 }
 
 /**
  * Execute a SELECT SQL query.
  * @param {string} sql
- * @param {string} paramsJson - JSON array of parameters
- * @returns {string} JSON array of row objects
+ * @param {unknown[]} params - bind values, positional (see `dbExecRaw`)
+ * @returns {Record<string, unknown>[]} row objects — a plain JS array, NOT a
+ *   JSON string. Decoded on the Rust side with `serde_wasm_bindgen`
+ *   (`db_codec::parse_rows`/`rows_from_js`) rather than
+ *   `JSON.stringify` + `serde_json::from_str`.
  */
-export function dbQueryRaw(sql, paramsJson) {
-    const params = JSON.parse(paramsJson);
+export function dbQueryRaw(sql, params) {
     const results = _db.exec(sql, params);
     if (!results || results.length === 0) {
-        return '[]';
+        return [];
     }
     const { columns, values } = results[0];
-    const rows = values.map((row) => {
+    return values.map((row) => {
         const obj = {};
         columns.forEach((col, i) => {
             obj[col] = row[i];
         });
         return obj;
     });
-    return JSON.stringify(rows);
 }
 
 /**
- * Export the sql.js DB to a Uint8Array and write it to OPFS at `impresspress.db`.
+ * Export the sql.js DB to a Uint8Array and write it to OPFS at
+ * `impresspress.db`.
+ *
+ * Durability contract: the Rust side (`BrowserDatabaseService::with_flush`
+ * in `database.rs`) calls this exactly ONCE per logical `DatabaseService`
+ * mutation (`create`/`update`/`delete`/`upsert`/`exec_raw`/schema changes),
+ * not once per SQL statement — a logical mutation that issues several
+ * statements (e.g. a lazy column-add ALTER before the INSERT) is one flush,
+ * not N. The flush happens even when the logical operation's own result is
+ * an error, since an earlier statement inside it may already have mutated
+ * the in-memory sql.js DB. There is no background/debounced/timer-based
+ * flush — every `DatabaseService` call that returns has already attempted
+ * exactly one flush, so the only crash-loss window is "mid-flush" (the tab
+ * or Service Worker is killed while `dbFlush` itself is exporting/writing),
+ * which is an inherent OPFS/browser-crash risk independent of this
+ * batching, not a window this change introduces.
  */
 export async function dbFlush() {
     if (!_db) return;
@@ -146,7 +163,11 @@ export async function storagePut(folder, key, data, contentType) {
  * Read file + metadata from OPFS.
  * @param {string} folder
  * @param {string} key
- * @returns {string} JSON string: { data: number[], meta: { content_type, size } }
+ * @returns {{data: Uint8Array, meta: {content_type: string, size: number}}}
+ *   A plain JS object — NOT a JSON string. `storage.rs` decodes it directly
+ *   with `serde_wasm_bindgen::from_value`; `data` deserializes straight into
+ *   a Rust `Vec<u8>` from the real `Uint8Array` here, with no
+ *   Uint8Array→Array<number>→JSON round trip in either direction.
  */
 export async function storageGet(folder, key) {
     const storageRoot = await getStorageRoot();
@@ -156,10 +177,10 @@ export async function storageGet(folder, key) {
     const fileHandle = await folderHandle.getFileHandle(key);
     const file = await fileHandle.getFile();
     const buffer = await file.arrayBuffer();
-    const dataArray = Array.from(new Uint8Array(buffer));
+    const data = new Uint8Array(buffer);
 
     // Read metadata
-    let meta = { content_type: 'application/octet-stream', size: dataArray.length };
+    let meta = { content_type: 'application/octet-stream', size: data.length };
     try {
         const metaHandle = await folderHandle.getFileHandle(`${key}.__meta__`);
         const metaFile = await metaHandle.getFile();
@@ -169,7 +190,7 @@ export async function storageGet(folder, key) {
         // No metadata file — use defaults
     }
 
-    return JSON.stringify({ data: dataArray, meta });
+    return { data, meta };
 }
 
 /**
@@ -189,12 +210,24 @@ export async function storageDelete(folder, key) {
 }
 
 /**
- * List files in a folder.
+ * List files in a folder matching `prefix`, paginated by `limit`/`offset`.
  * @param {string} folder
  * @param {string} prefix
  * @param {number} limit
  * @param {number} offset
- * @returns {string} JSON array of key strings
+ * @returns {{keys: string[], total: number}} A plain JS object — NOT a JSON
+ *   string. `total` is the full count of matching entries BEFORE slicing to
+ *   the requested page (previously this returned only the page, and the
+ *   caller reported the page length as the total).
+ *
+ *   OPFS's directory iterator (`FileSystemDirectoryHandle.entries()`) has no
+ *   native pagination, count, or cursor/skip-ahead API — it's
+ *   iterate-everything-or-nothing, and there is no separate persisted index
+ *   of keys to consult instead. A true cursor (resuming a listing without
+ *   re-scanning the directory) would require maintaining that index
+ *   ourselves, which is a bigger change out of scope here; this instead
+ *   returns an HONEST total by counting matches, during the one full
+ *   enumeration this already required, before applying offset/limit.
  */
 export async function storageList(folder, prefix, limit, offset) {
     const storageRoot = await getStorageRoot();
@@ -210,8 +243,9 @@ export async function storageList(folder, prefix, limit, offset) {
     }
 
     keys.sort();
+    const total = keys.length;
     const page = keys.slice(offset, limit > 0 ? offset + limit : undefined);
-    return JSON.stringify(page);
+    return { keys: page, total };
 }
 
 /**
@@ -234,7 +268,8 @@ export async function storageDeleteFolder(name) {
 
 /**
  * List top-level storage directories.
- * @returns {string} JSON array of folder name strings
+ * @returns {string[]} A plain JS array of folder name strings — NOT a JSON
+ *   string.
  */
 export async function storageListFolders() {
     const storageRoot = await getStorageRoot();
@@ -245,7 +280,7 @@ export async function storageListFolders() {
         }
     }
     folders.sort();
-    return JSON.stringify(folders);
+    return folders;
 }
 
 // ─── Asset loader bridge (SW → main thread) ─────────────────────────────────
