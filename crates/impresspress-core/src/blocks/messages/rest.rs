@@ -226,6 +226,9 @@ pub async fn add_entry(ctx: &dyn Context, msg: &Message, input: InputStream) -> 
         Ok(b) => b,
         Err(e) => return err_bad_request(&format!("Invalid body: {e}")),
     };
+    if matches!(body.role.as_str(), "assistant" | "system") {
+        return err_bad_request("role 'assistant' and 'system' are reserved for internal use");
+    }
     match service::add_entry(
         ctx,
         msg.user_id(), // owner derived server-side, never from body
@@ -564,5 +567,18 @@ mod tests {
             status_of(get_entry_as(&ctx, "user-a", &entry_id).await).await,
             200
         );
+    }
+
+    #[tokio::test]
+    async fn authenticated_api_rejects_reserved_roles() {
+        let ctx = messages_ctx().await;
+
+        let created = create_as(&ctx, "user-a", serde_json::json!({"type": "conversation"})).await;
+        let cid = created["id"].as_str().expect("id").to_string();
+
+        for role in ["assistant", "system"] {
+            let out = add_entry_as(&ctx, "user-a", &cid, serde_json::json!({"role": role, "content": "x"})).await;
+            assert_eq!(status_of(out).await, 400, "role {role} must be rejected");
+        }
     }
 }
