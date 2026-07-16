@@ -1,7 +1,8 @@
 use std::fs;
 
-use impresspress::cli::helpers::cloudflare::wrangler::{
-    generate, CloudflareConfig, D1Config, R2Config,
+use impresspress::cli::helpers::cloudflare::{
+    build::WORKER_BUILD_VERSION,
+    wrangler::{generate, CloudflareConfig, D1Config, R2Config},
 };
 use tempfile::tempdir;
 
@@ -50,6 +51,33 @@ fn generate_writes_wrangler_toml_with_required_fields() {
         !body.contains("migrations_dir"),
         "deploy toml must not declare a wrangler migrations ledger — \
          schema funnels through /_deploy/init"
+    );
+}
+
+#[test]
+fn generate_pins_worker_build_and_skips_reinstall_when_present() {
+    let tmp = tempdir().unwrap();
+    let repo_root = tmp.path();
+    let out = repo_root.join("target/impresspress-cloudflare");
+    fs::create_dir_all(&out).unwrap();
+
+    let path = generate(&sample_cfg(), repo_root, &out).unwrap();
+    let body = fs::read_to_string(&path).unwrap();
+
+    let expected_pin = format!(r#"--version "={WORKER_BUILD_VERSION}""#);
+    assert!(
+        body.contains(&expected_pin),
+        "build command must pin the exact worker-build version, not a \
+         floating semver range:\n{body}"
+    );
+    assert!(
+        body.contains(&format!(r#"= "{WORKER_BUILD_VERSION}""#)),
+        "build command must check the installed version before deciding \
+         whether to reinstall:\n{body}"
+    );
+    assert!(
+        body.contains("worker-build --release --no-default-features"),
+        "build command must still run worker-build after the check:\n{body}"
     );
 }
 

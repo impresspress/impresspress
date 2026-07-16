@@ -8,6 +8,8 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
 
+use super::build::WORKER_BUILD_VERSION;
+
 #[derive(Debug, Clone)]
 pub struct CloudflareConfig {
     pub account_id: String,
@@ -73,20 +75,28 @@ fn base_toml(cfg: &CloudflareConfig) -> toml::Value {
     root.insert("preview_urls".into(), Value::Boolean(true));
 
     let mut build = toml::map::Map::new();
-    // Pin to ^0.7 — worker-build 0.8.x rejects consumers using
-    // `worker < 0.8` (hard version check) and changed its output layout
-    // from `build/worker/shim.mjs` (which `main` points to) to
-    // `build/index.js`. Until we upgrade the `worker` crate, lock the
-    // toolchain to 0.7.x for both the local build and the wrangler-driven
-    // rebuild during deploy.
+    // Pinned to an exact version (`WORKER_BUILD_VERSION`, shared with the
+    // local `impresspress build --target cloudflare` path in
+    // `build::ensure_worker_build_installed`) — worker-build 0.8.x rejects
+    // consumers using `worker < 0.8` (hard version check) and changed its
+    // output layout from `build/worker/shim.mjs` (which `main` points to)
+    // to `build/index.js`. Until we upgrade the `worker` crate, lock the
+    // toolchain to this exact version for both the local build and the
+    // wrangler-driven rebuild during deploy.
+    //
+    // The `command -v ... && [ ... ] ||` guard skips `cargo install`
+    // outright when the pinned version is already on `PATH` (e.g. a build
+    // environment that persists `~/.cargo/bin` across runs), instead of
+    // reinstalling unconditionally on every build.
     build.insert(
         "command".into(),
-        Value::String(
-            "cargo install worker-build --version ^0.7 --quiet && \
+        Value::String(format!(
+            "((command -v worker-build >/dev/null 2>&1 && \
+             [ \"$(worker-build --version)\" = \"{WORKER_BUILD_VERSION}\" ]) || \
+             cargo install worker-build --version \"={WORKER_BUILD_VERSION}\" --quiet) && \
              worker-build --release --no-default-features \
              --features target-cloudflare"
-                .into(),
-        ),
+        )),
     );
     root.insert("build".into(), Value::Table(build));
 
