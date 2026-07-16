@@ -14,22 +14,50 @@ use crate::{
     util::hex_encode,
 };
 
-/// Processed Stripe webhook event ids (code review 2026-07-16: "Stripe
-/// webhooks lack event idempotency"). See `003_stripe_events.sqlite.sql` for
-/// the schema and full rationale.
+/// Recorded Stripe webhook event ids (code review 2026-07-16: "Stripe
+/// webhooks lack event idempotency"; I1 follow-up 2026-07-17: "recording
+/// event before side effects drops the event on transient failure"). See
+/// `003_stripe_events.sqlite.sql` for the schema and full rationale.
 const STRIPE_EVENTS_TABLE: &str = "impresspress__products__stripe_events";
 
-/// Record `event_id` as processed via `INSERT ... ON CONFLICT (id) DO
-/// NOTHING` — a single atomic round trip, so two concurrent deliveries of
-/// the same event can't both observe "not yet seen" (unlike a separate
-/// existence check + insert). Returns `true` the first time an event id is
-/// seen (the caller should run side effects), `false` if a row already
-/// existed (the caller must skip — this is a retry/replay).
-async fn record_event_once(
+/// `status` column values on [`STRIPE_EVENTS_TABLE`].
+const EVENT_STATUS_PENDING: &str = "pending";
+const EVENT_STATUS_PROCESSED: &str = "processed";
+
+/// Outcome of recording a Stripe event id before running its side effects.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum EventRecordState {
+    /// First time seeing this event id — a row was just inserted with
+    /// `status = "pending"`. The caller should run side effects.
+    New,
+    /// A row already existed with `status = "pending"` — a PRIOR delivery
+    /// recorded the event but its side effects never completed (process
+    /// crash, transient DB error, …) before this one arrived. The caller
+    /// should RE-run side effects rather than drop them.
+    PendingRetry,
+    /// A row already existed with `status = "processed"` — the side effects
+    /// already completed. A true duplicate; the caller must skip.
+    AlreadyProcessed,
+}
+
+/// Record `event_id` before running its side effects via `INSERT ... ON
+/// CONFLICT (id) DO NOTHING` (`status = "pending"`) — a single atomic round
+/// trip, so two concurrent first-sight deliveries of the same event can't
+/// both observe "not yet seen" (unlike a separate existence check + insert).
+///
+/// A conflict means a row already exists; its `status` then distinguishes a
+/// true duplicate (`"processed"` — side effects already succeeded, skip)
+/// from a retry of an attempt that died mid-way (`"pending"` — the row was
+/// recorded but [`mark_event_processed`] was never reached, so the caller
+/// must re-process). This is what keeps a transient side-effect failure from
+/// permanently dropping the event: recording happens up front for the
+/// atomic-insert dedup guarantee, but only [`mark_event_processed`] (called
+/// after side effects SUCCEED) makes the dedup final.
+async fn record_event(
     ctx: &dyn Context,
     event_id: &str,
     event_type: &str,
-) -> Result<bool, WaferError> {
+) -> Result<EventRecordState, WaferError> {
     let now = chrono::Utc::now().to_rfc3339();
     let rows = db::upsert(
         ctx,
@@ -37,13 +65,44 @@ async fn record_event_once(
         vec![
             ("id".to_string(), serde_json::json!(event_id)),
             ("event_type".to_string(), serde_json::json!(event_type)),
+            ("status".to_string(), serde_json::json!(EVENT_STATUS_PENDING)),
             ("created_at".to_string(), serde_json::json!(now)),
         ],
         vec!["id".to_string()],
         OnConflict::SetColumns(vec![]),
     )
     .await?;
-    Ok(rows > 0)
+    if rows > 0 {
+        return Ok(EventRecordState::New);
+    }
+
+    // Conflict: a row for this event id already exists. Read its status to
+    // tell a true duplicate apart from a prior attempt that died mid-way.
+    let existing = db::get(ctx, STRIPE_EVENTS_TABLE, event_id).await?;
+    let status = existing
+        .data
+        .get("status")
+        .and_then(|v| v.as_str())
+        .unwrap_or(EVENT_STATUS_PENDING);
+    if status == EVENT_STATUS_PROCESSED {
+        Ok(EventRecordState::AlreadyProcessed)
+    } else {
+        Ok(EventRecordState::PendingRetry)
+    }
+}
+
+/// Flip a recorded event's `status` to `"processed"` — called only after its
+/// side effects have SUCCEEDED. A transient failure between [`record_event`]
+/// and this call leaves the row `"pending"`, so Stripe's next retry of the
+/// same event id re-processes it instead of silently no-oping.
+async fn mark_event_processed(ctx: &dyn Context, event_id: &str) -> Result<(), WaferError> {
+    let mut data: HashMap<String, serde_json::Value> = HashMap::new();
+    data.insert(
+        "status".to_string(),
+        serde_json::json!(EVENT_STATUS_PROCESSED),
+    );
+    db::update(ctx, STRIPE_EVENTS_TABLE, event_id, data).await?;
+    Ok(())
 }
 
 pub async fn handle_checkout(ctx: &dyn Context, msg: &Message, input: InputStream) -> OutputStream {
@@ -287,18 +346,35 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
     let event_type = event.get("type").and_then(|v| v.as_str()).unwrap_or("");
 
     // Idempotency: persist the top-level Stripe event id under a UNIQUE
-    // constraint BEFORE running any side effect. Stripe retries
-    // undelivered/non-2xx webhooks, and the signature timestamp window above
-    // itself accepts up to 5 minutes of replay — both redeliver the same
-    // `id`. Real Stripe events always carry one; a signed body without one
-    // (synthetic/malformed) can't be deduped, so it's processed as-is rather
-    // than rejected outright — the signature already establishes it came
-    // from a holder of the webhook secret.
+    // constraint BEFORE running any side effect, as `status = "pending"`.
+    // Stripe retries undelivered/non-2xx webhooks, and the signature
+    // timestamp window above itself accepts up to 5 minutes of replay —
+    // both redeliver the same `id`. Real Stripe events always carry one; a
+    // signed body without one (synthetic/malformed) can't be deduped, so
+    // it's processed as-is rather than rejected outright — the signature
+    // already establishes it came from a holder of the webhook secret.
+    //
+    // `should_mark_processed` gates the post-processing `mark_event_processed`
+    // call below: only set when this delivery actually owns running side
+    // effects for `event_id` (a fresh event, or a retry of a previously
+    // `pending` one) — never for a true duplicate (which returns early) or a
+    // that-lacks-an-id delivery (which can't be deduped in either direction).
     let event_id = event.get("id").and_then(|v| v.as_str()).unwrap_or("");
+    let mut should_mark_processed = false;
     if !event_id.is_empty() {
-        match record_event_once(ctx, event_id, event_type).await {
-            Ok(true) => {} // first time seeing this event — fall through to processing
-            Ok(false) => {
+        match record_event(ctx, event_id, event_type).await {
+            Ok(EventRecordState::New) => {
+                should_mark_processed = true;
+            }
+            Ok(EventRecordState::PendingRetry) => {
+                tracing::info!(
+                    event_id = %event_id,
+                    event_type = %event_type,
+                    "re-processing Stripe webhook event left pending by a prior failed attempt"
+                );
+                should_mark_processed = true;
+            }
+            Ok(EventRecordState::AlreadyProcessed) => {
                 tracing::info!(
                     event_id = %event_id,
                     event_type = %event_type,
@@ -507,6 +583,25 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
 
         _ => {
             // Ignore unhandled event types
+        }
+    }
+
+    // Side effects above either completed (including the soft-fail branches
+    // that only log a warning) or this function already returned early via
+    // `err_internal` on a hard failure — reaching here means it's safe to
+    // seal the dedup: flip the row to `processed` so a future redelivery of
+    // this exact `event_id` is skipped as a true duplicate rather than
+    // re-run. If this update itself fails, log loudly rather than fail the
+    // webhook outright — the row stays `pending` and a future retry simply
+    // re-runs side effects, which are already safe to repeat (the atomic
+    // status-transition guards in `repo::purchases` / `repo::subscriptions`).
+    if should_mark_processed {
+        if let Err(e) = mark_event_processed(ctx, event_id).await {
+            tracing::error!(
+                event_id = %event_id,
+                error = %e,
+                "failed to mark Stripe webhook event processed"
+            );
         }
     }
 
@@ -945,5 +1040,99 @@ mod tests {
         let json = output_json(handle_webhook(&ctx, &msg, input).await).await;
         assert_eq!(json["received"], true);
         assert!(json.get("duplicate").is_none());
+    }
+
+    // --- Pending/processed status (I1 follow-up 2026-07-17: "recording
+    // event before side effects drops the event on transient failure") ---
+
+    /// Seed a row directly in `impresspress__products__stripe_events`,
+    /// simulating a delivery recorded by [`record_event`] at some earlier
+    /// point (either a prior attempt that died mid-way, or one that already
+    /// completed) — without going through `handle_webhook` itself.
+    async fn seed_stripe_event_row(ctx: &crate::test_support::TestContext, event_id: &str, status: &str) {
+        let mut row = HashMap::new();
+        row.insert("id".to_string(), serde_json::json!(event_id));
+        row.insert("event_type".to_string(), serde_json::json!("charge.refunded"));
+        row.insert("status".to_string(), serde_json::json!(status));
+        row.insert(
+            "created_at".to_string(),
+            serde_json::json!(chrono::Utc::now().to_rfc3339()),
+        );
+        db::create(ctx, STRIPE_EVENTS_TABLE, row)
+            .await
+            .expect("seed stripe_events row");
+    }
+
+    /// A `pending` row (a prior attempt that recorded the event but died
+    /// before its side effects completed — process crash, transient DB
+    /// error, …) must be RE-processed on the next delivery of the same
+    /// event id, not silently skipped as a duplicate. Once that delivery
+    /// completes, the row must flip to `processed` so a THIRD delivery is
+    /// then correctly skipped.
+    #[tokio::test]
+    async fn handle_webhook_reprocesses_a_previously_pending_event() {
+        let mut ctx = TestContext::with_products().await;
+        let secret = "whsec_test_pending_retry";
+        ctx.set_config("IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET", secret);
+
+        seed_stripe_event_row(&ctx, "evt_pending_retry", EVENT_STATUS_PENDING).await;
+
+        let body = serde_json::json!({
+            "id": "evt_pending_retry",
+            "type": "charge.refunded",
+            "data": { "object": { "payment_intent": "pi_does_not_exist" } }
+        });
+
+        // Delivery must re-process (not skip) a still-pending event.
+        let (msg, input) = signed_webhook_request(&body, secret);
+        let json = output_json(handle_webhook(&ctx, &msg, input).await).await;
+        assert_eq!(json["received"], true);
+        assert!(
+            json.get("duplicate").is_none(),
+            "a previously-pending event must be RE-processed, not skipped as a duplicate: {json:?}"
+        );
+
+        // The row must now be sealed as processed.
+        let row = db::get(&ctx, STRIPE_EVENTS_TABLE, "evt_pending_retry")
+            .await
+            .expect("row exists after processing");
+        assert_eq!(
+            row.data.get("status").and_then(|v| v.as_str()),
+            Some(EVENT_STATUS_PROCESSED),
+            "row must be sealed processed once side effects succeed"
+        );
+
+        // A THIRD delivery of the same event id is now a true duplicate.
+        let (msg2, input2) = signed_webhook_request(&body, secret);
+        let json2 = output_json(handle_webhook(&ctx, &msg2, input2).await).await;
+        assert_eq!(json2["received"], true);
+        assert_eq!(
+            json2["duplicate"], true,
+            "a processed event must be skipped on a later redelivery: {json2:?}"
+        );
+    }
+
+    /// A `processed` row is a true duplicate and must be skipped outright —
+    /// the counterpart to the `pending` re-process case above.
+    #[tokio::test]
+    async fn handle_webhook_skips_an_already_processed_event() {
+        let mut ctx = TestContext::with_products().await;
+        let secret = "whsec_test_already_processed";
+        ctx.set_config("IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET", secret);
+
+        seed_stripe_event_row(&ctx, "evt_already_processed", EVENT_STATUS_PROCESSED).await;
+
+        let body = serde_json::json!({
+            "id": "evt_already_processed",
+            "type": "charge.refunded",
+            "data": { "object": { "payment_intent": "pi_does_not_exist" } }
+        });
+        let (msg, input) = signed_webhook_request(&body, secret);
+        let json = output_json(handle_webhook(&ctx, &msg, input).await).await;
+        assert_eq!(json["received"], true);
+        assert_eq!(
+            json["duplicate"], true,
+            "an already-processed event must be skipped, not re-run: {json:?}"
+        );
     }
 }
