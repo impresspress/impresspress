@@ -8,8 +8,9 @@
   "scripts": {
     "build": "tsup src/index.ts --format cjs,esm --dts --clean",
     "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
-    "test": "ts-node --project tsconfig.test.json test/test-all.ts",
-    "test:watch": "nodemon --exec ts-node test/test-all.ts",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:pack-install": "bash scripts/smoke-pack-install.sh",
     "lint": "eslint 'src/**/*.ts'",
     "format": "prettier --write src"
   },
@@ -21,14 +22,11 @@
     "@typescript-eslint/eslint-plugin": "^6.0.0",
     "@typescript-eslint/parser": "^6.0.0",
     "eslint": "^8.0.0",
-    "nodemon": "^3.0.0",
+    "jsdom": "^25.0.0",
     "prettier": "^3.0.0",
-    "ts-node": "^10.9.0",
     "tsup": "^8.0.0",
-    "typescript": "^5.0.0"
-  },
-  "dependencies": {
-    "wafer-client-js": "file:../../../wafer-run/packages/wafer-client-js"
+    "typescript": "^5.0.0",
+    "vitest": "^2.0.0"
   },
   "files": [
     "dist",

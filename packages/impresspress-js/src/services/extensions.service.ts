@@ -15,9 +15,7 @@ export interface Extension {
 }
 
 export class ExtensionsService extends BaseService {
-  /**
-   * List all available extensions (registered blocks)
-   */
+  /** List all available extensions (registered blocks). `GET /b/admin/api/extensions`. */
   async list(): Promise<Extension[]> {
     return this.request<Extension[]>({
       method: "GET",
@@ -26,7 +24,10 @@ export class ExtensionsService extends BaseService {
   }
 
   /**
-   * Call a custom extension endpoint
+   * Call an arbitrary block endpoint at `/b/{extension}/{endpoint}`. This is
+   * a raw passthrough — there is no generic extension lifecycle API
+   * (enable/disable/configure/health) server-side, only each block's own
+   * declared HTTP routes, which this method reaches directly.
    */
   async call<T = any>(
     extension: string,
@@ -37,9 +38,7 @@ export class ExtensionsService extends BaseService {
       params?: Record<string, any>;
     },
   ): Promise<T> {
-    const queryString = options?.params
-      ? this.buildQueryString(options.params)
-      : "";
+    const queryString = options?.params ? this.buildQueryString(options.params) : "";
     return this.request<T>({
       method: options?.method || "GET",
       url: `/b/${extension}/${endpoint}${queryString ? `?${queryString}` : ""}`,
@@ -48,117 +47,80 @@ export class ExtensionsService extends BaseService {
   }
 }
 
-// CloudStorage extension specific methods
+/**
+ * Aligned to the real `impresspress/files` cloud-storage surface in
+ * `crates/impresspress-core/src/blocks/files/cloud.rs`: per-object share
+ * links and the caller's own quota/usage. There is no user-facing
+ * access-log or access-stats endpoint (`/admin/b/cloudstorage/access-logs`
+ * is admin-only and reached through the admin block's delegated HTTP
+ * surface, not this one; `access-stats` does not exist at all) — both were
+ * removed rather than pointed at a route that would 404 or silently expose
+ * the wrong auth boundary.
+ */
 export class CloudStorageExtension extends ExtensionsService {
-  /**
-   * Share a file or folder
-   */
+  /** Create a share link for an object. `POST /b/cloudstorage/shares`. */
   async share(
-    objectId: string,
-    options: {
-      email?: string;
-      userId?: string;
-      permissions?: "view" | "edit" | "admin";
-      expiresAt?: string;
-      isPublic?: boolean;
-    },
-  ): Promise<{ share_id: string; share_token?: string; url?: string }> {
+    bucket: string,
+    key: string,
+    options?: { expiresInHours?: number; maxAccessCount?: number },
+  ): Promise<{ id: string; token: string; direct_url: string }> {
     return this.call("cloudstorage", "shares", {
       method: "POST",
       data: {
-        object_id: objectId,
-        ...options,
+        bucket,
+        key,
+        expires_in_hours: options?.expiresInHours,
+        max_access_count: options?.maxAccessCount,
       },
     });
   }
 
-  /**
-   * List shares for current user
-   */
-  async listShares(): Promise<
-    Array<{
-      id: string;
-      object_id: string;
-      shared_with_email?: string;
-      shared_with_user_id?: string;
-      permission_level: string;
-      is_public: boolean;
-      expires_at?: string;
-      share_token?: string;
-    }>
-  > {
+  /** List the current user's shares. `GET /b/cloudstorage/shares`. */
+  async listShares(): Promise<{ data: unknown[]; total?: number }> {
     return this.call("cloudstorage", "shares");
   }
 
-  /**
-   * Delete a share
-   */
+  /** Delete a share. `DELETE /b/cloudstorage/shares/{id}`. */
   async deleteShare(shareId: string): Promise<void> {
-    await this.call("cloudstorage", `shares/${shareId}`, {
+    await this.call("cloudstorage", `shares/${encodeURIComponent(shareId)}`, {
       method: "DELETE",
     });
   }
 
-  /**
-   * Get storage quota information
-   */
+  /** Get the current user's storage quota and usage. `GET /b/cloudstorage/quota`. */
   async getQuota(): Promise<{
-    max_storage_bytes: number;
-    max_bandwidth_bytes: number;
-    storage_used: number;
-    bandwidth_used: number;
-    reset_bandwidth_at?: string;
+    quota: {
+      max_storage_bytes: number;
+      max_file_size_bytes: number;
+      max_files_per_bucket: number;
+      reset_period_days: number;
+    };
+    usage: Record<string, unknown>;
   }> {
     return this.call("cloudstorage", "quota");
   }
-
-  /**
-   * Get access logs
-   */
-  async getAccessLogs(objectId?: string): Promise<
-    Array<{
-      id: string;
-      object_id: string;
-      user_id?: string;
-      action: string;
-      ip_address?: string;
-      user_agent?: string;
-      created_at: string;
-    }>
-  > {
-    return this.call("cloudstorage", "access-logs", {
-      params: objectId ? { object_id: objectId } : undefined,
-    });
-  }
-
-  /**
-   * Get access statistics
-   */
-  async getAccessStats(): Promise<{
-    total_views: number;
-    total_downloads: number;
-    unique_visitors: number;
-    top_files: Array<{ object_id: string; count: number }>;
-    daily_stats: Array<{ date: string; views: number; downloads: number }>;
-  }> {
-    return this.call("cloudstorage", "api/access-stats");
-  }
 }
 
-// Products extension specific methods
+/**
+ * Aligned to the real `impresspress/products` HTTP surface in
+ * `crates/impresspress-core/src/blocks/products/mod.rs`. There is no public
+ * (non-admin) product/group creation or price-calculation route — the
+ * catalog is the only public listing surface, and mutations go through the
+ * `Admin`-gated `/b/products/api/admin/*` routes (the server enforces the
+ * auth tier; this SDK does not).
+ */
 export class ProductsExtension extends ExtensionsService {
-  /**
-   * List products
-   */
-  async listProducts(groupId?: string): Promise<any[]> {
-    return this.call("products", "products", {
-      params: groupId ? { group_id: groupId } : undefined,
-    });
+  /** Browse the public product catalog. `GET /b/products/catalog`. */
+  async listProducts(options?: { page?: number; page_size?: number }): Promise<{
+    records: unknown[];
+    total_count: number;
+    page: number;
+    page_size: number;
+  }> {
+    return this.call("products", "catalog", { params: options });
   }
 
-  /**
-   * Create a product
-   */
+  /** Create a product (admin). `POST /b/products/api/admin/products`. */
   async createProduct(data: {
     group_id: string;
     name: string;
@@ -166,44 +128,24 @@ export class ProductsExtension extends ExtensionsService {
     custom_fields?: Record<string, any>;
     pricing_formula?: string;
   }): Promise<any> {
-    return this.call("products", "products", {
+    return this.call("products", "api/admin/products", {
       method: "POST",
       data,
     });
   }
 
-  /**
-   * Calculate price for a product
-   */
-  async calculatePrice(
-    productId: string,
-    variables: Record<string, any>,
-  ): Promise<{
-    price: number;
-    breakdown: Array<{ component: string; value: number }>;
-  }> {
-    return this.call("products", `products/${productId}/calculate`, {
-      method: "POST",
-      data: { variables },
-    });
-  }
-
-  /**
-   * List groups
-   */
+  /** List product groups (admin). `GET /b/products/api/admin/groups`. */
   async listGroups(): Promise<any[]> {
-    return this.call("products", "api/groups");
+    return this.call("products", "api/admin/groups");
   }
 
-  /**
-   * Create a group
-   */
+  /** Create a product group (admin). `POST /b/products/api/admin/groups`. */
   async createGroup(data: {
     name: string;
     template_id: string;
     custom_fields?: Record<string, any>;
   }): Promise<any> {
-    return this.call("products", "api/groups", {
+    return this.call("products", "api/admin/groups", {
       method: "POST",
       data,
     });

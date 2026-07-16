@@ -1,409 +1,181 @@
 import { BaseService } from "./base.service";
-import {
-  StorageObject,
-  Bucket,
-  StorageObjectMetadata,
-} from "../types";
+
+/**
+ * Aligned to the REAL dispatch table in
+ * `crates/impresspress-core/src/blocks/files/storage.rs` (`const ROUTES`),
+ * which is the single source of truth for the on-the-wire
+ * `/b/storage/api/...` surface. That table only supports:
+ *
+ *   GET    /b/storage/api/buckets
+ *   POST   /b/storage/api/buckets
+ *   DELETE /b/storage/api/buckets/{name}
+ *   GET    /b/storage/api/buckets/{name}/objects
+ *   POST   /b/storage/api/buckets/{name}/objects
+ *   GET    /b/storage/api/buckets/{name}/objects/{key...}
+ *   DELETE /b/storage/api/buckets/{name}/objects/{key...}
+ *   GET    /b/storage/api/search?q=
+ *   GET    /b/storage/api/recent
+ *
+ * There is no folder/rename/move/metadata-update/quota/stats/trash surface
+ * under `/b/storage/api` — objects are addressed by `key` (which may
+ * contain `/`), not by an opaque id, and there is no `id` field on the
+ * bucket or object wire shapes at all. Per-object sharing and quota DO
+ * exist, but under `/b/cloudstorage/*` — see `CloudStorageExtension` in
+ * `extensions.service.ts`.
+ */
+
+export interface StorageObjectInfo {
+  key: string;
+  size: number;
+  content_type: string;
+  last_modified: string;
+}
+
+export interface ListObjectsResult {
+  objects: StorageObjectInfo[];
+  total_count: number;
+}
 
 export interface ListOptions {
-  parent_folder_id?: string;
-  search?: string;
-  type?: "file" | "folder" | "all";
-  sort?: "name" | "size" | "date" | "type";
-  order?: "asc" | "desc";
+  /** Key prefix filter. */
+  prefix?: string;
   page?: number;
-  limit?: number;
+  page_size?: number;
 }
 
 export interface UploadFileOptions {
-  path?: string;
-  parent_folder_id?: string;
-  metadata?: Record<string, any>;
-  onProgress?: (progress: number) => void;
-}
-
-export interface MoveOptions {
-  parent_folder_id?: string;
-  overwrite?: boolean;
-}
-
-export interface ShareOptions {
-  expires_in?: number;
-  password?: string;
-  permissions?: string[];
-  max_downloads?: number;
+  /** Object key. Required unless `file` is a `File` (its `.name` is used as a fallback). */
+  key?: string;
+  contentType?: string;
 }
 
 export class StorageService extends BaseService {
-  /**
-   * List files and folders in a bucket
-   * @param bucketName - The name of the bucket
-   * @param options - List options
-   */
-  async listObjects(
-    bucketName: string,
-    options?: ListOptions,
-  ): Promise<StorageObject[]> {
+  /** List bucket names owned by the current user (or every bucket, for an admin). */
+  async listBuckets(): Promise<string[]> {
+    const res = await this.request<{ buckets: string[] }>({
+      method: "GET",
+      url: "/b/storage/api/buckets",
+    });
+    return res.buckets;
+  }
+
+  /** Create a new bucket. */
+  async createBucket(
+    name: string,
+    isPublic = false,
+  ): Promise<{ name: string; created: boolean }> {
+    return this.request({
+      method: "POST",
+      url: "/b/storage/api/buckets",
+      data: { name, public: isPublic },
+    });
+  }
+
+  /** Delete a bucket and its objects. */
+  async deleteBucket(name: string): Promise<void> {
+    await this.request<{ deleted: boolean }>({
+      method: "DELETE",
+      url: `/b/storage/api/buckets/${encodeURIComponent(name)}`,
+    });
+  }
+
+  /** List objects in a bucket. */
+  async listObjects(bucketName: string, options?: ListOptions): Promise<ListObjectsResult> {
     const queryString = options ? this.buildQueryString(options) : "";
-    const response = await this.request<StorageObject[]>({
+    return this.request<ListObjectsResult>({
       method: "GET",
-      url: `/b/storage/api/buckets/${bucketName}/objects${queryString ? `?${queryString}` : ""}`,
-    });
-    return Array.isArray(response) ? response : [];
-  }
-
-  /**
-   * Get a specific object by ID
-   * @param bucketName - The name of the bucket
-   * @param objectId - The ID of the object
-   */
-  async getObject(
-    bucketName: string,
-    objectId: string,
-  ): Promise<StorageObject> {
-    return this.request<StorageObject>({
-      method: "GET",
-      url: `/b/storage/api/buckets/${bucketName}/objects/${objectId}`,
+      url: `/b/storage/api/buckets/${encodeURIComponent(bucketName)}/objects${queryString ? `?${queryString}` : ""}`,
     });
   }
 
+  /** Download an object's raw bytes. */
+  async downloadFile(bucketName: string, key: string): Promise<Blob> {
+    return this.requestBlob(
+      `/b/storage/api/buckets/${encodeURIComponent(bucketName)}/objects/${encodeObjectKey(key)}`,
+    );
+  }
+
+  /** Direct URL for downloading an object (e.g. for `<img src>` / `<a href>`). */
+  getDownloadUrl(bucketName: string, key: string): string {
+    return `${this.config.url}/b/storage/api/buckets/${encodeURIComponent(bucketName)}/objects/${encodeObjectKey(key)}`;
+  }
+
   /**
-   * Upload a file to storage
-   * @param bucketName - The name of the bucket
-   * @param file - The file to upload
-   * @param options - Upload options
+   * Upload a file to a bucket. `options.key` is required unless `file` is a
+   * `File` (browser), whose `.name` is used as a fallback — mirrors the
+   * server's multipart handling in `handle_upload_object`.
    */
   async uploadFile(
     bucketName: string,
     file: File | Buffer | Blob,
     options?: UploadFileOptions,
-  ): Promise<StorageObject> {
+  ): Promise<{ bucket: string; key: string; uploaded: boolean }> {
     const formData = new FormData();
 
-    // Handle different file types
     if (typeof globalThis.window !== "undefined" && file instanceof File) {
       formData.append("file", file);
     } else if (file instanceof Blob) {
-      formData.append("file", file, "file");
+      formData.append("file", file, options?.key ?? "file");
     } else if (typeof Buffer !== "undefined" && Buffer.isBuffer(file)) {
-      formData.append("file", new Blob([new Uint8Array(file)]), "file");
+      formData.append("file", new Blob([new Uint8Array(file)]), options?.key ?? "file");
     } else {
       throw new Error("Invalid file type");
     }
 
-    if (options?.path) {
-      formData.append("path", options.path);
-    }
-    if (options?.parent_folder_id) {
-      formData.append("parent_folder_id", options.parent_folder_id);
-    }
-    if (options?.metadata) {
-      formData.append("metadata", JSON.stringify(options.metadata));
-    }
-
-    return this.requestFormData<StorageObject>(
-      `/b/storage/api/buckets/${bucketName}/upload`,
+    const keyQuery = options?.key ? `?key=${encodeURIComponent(options.key)}` : "";
+    return this.requestFormData(
+      `/b/storage/api/buckets/${encodeURIComponent(bucketName)}/objects${keyQuery}`,
       formData,
     );
   }
 
-  /**
-   * Create a folder
-   * @param bucketName - The name of the bucket
-   * @param name - The name of the folder
-   * @param path - Optional path
-   * @param parentId - Optional parent folder ID
-   */
-  async createFolder(
-    bucketName: string,
-    name: string,
-    path?: string,
-    parentId?: string,
-  ): Promise<StorageObject> {
-    const data: any = { name };
-    if (path) data.path = path;
-    if (parentId) data.parent_folder_id = parentId;
-
-    return this.request<StorageObject>({
-      method: "POST",
-      url: `/b/storage/api/buckets/${bucketName}/folders`,
-      data,
-    });
-  }
-
-  /**
-   * Download a file from storage
-   * @param bucketName - The name of the bucket
-   * @param objectId - The ID of the object to download
-   */
-  async downloadFile(bucketName: string, objectId: string): Promise<Blob> {
-    return this.requestBlob(
-      `/b/storage/api/buckets/${bucketName}/objects/${objectId}/download`,
-    );
-  }
-
-  /**
-   * Get download URL for a file
-   * @param bucketName - The name of the bucket
-   * @param objectId - The ID of the object
-   */
-  getDownloadUrl(bucketName: string, objectId: string): string {
-    return `${this.config.url}/b/storage/api/buckets/${bucketName}/objects/${objectId}/download`;
-  }
-
-  /**
-   * Rename an object (file or folder)
-   * @param bucketName - The name of the bucket
-   * @param objectId - The ID of the object
-   * @param newName - The new name
-   */
-  async renameObject(
-    bucketName: string,
-    objectId: string,
-    newName: string,
-  ): Promise<StorageObject> {
-    return this.request<StorageObject>({
-      method: "PATCH",
-      url: `/b/storage/api/buckets/${bucketName}/objects/${objectId}/rename`,
-      data: { name: newName },
-    });
-  }
-
-  /**
-   * Update object metadata
-   * @param bucketName - The name of the bucket
-   * @param objectId - The ID of the object
-   * @param metadata - The metadata to update
-   */
-  async updateMetadata(
-    bucketName: string,
-    objectId: string,
-    metadata: StorageObjectMetadata | Record<string, any>,
-  ): Promise<StorageObject> {
-    return this.request<StorageObject>({
-      method: "PATCH",
-      url: `/b/storage/api/buckets/${bucketName}/objects/${objectId}/metadata`,
-      data: { metadata: JSON.stringify(metadata) },
-    });
-  }
-
-  /**
-   * Move an object to a different parent folder
-   * @param bucketName - The name of the bucket
-   * @param objectId - The ID of the object
-   * @param options - Move options
-   */
-  async moveObject(
-    bucketName: string,
-    objectId: string,
-    options: MoveOptions,
-  ): Promise<StorageObject> {
-    return this.request<StorageObject>({
-      method: "PATCH",
-      url: `/b/storage/api/buckets/${bucketName}/objects/${objectId}/move`,
-      data: options,
-    });
-  }
-
-  /**
-   * Share an object
-   * @param bucketName - The name of the bucket
-   * @param objectId - The ID of the object
-   * @param options - Share options
-   */
-  async shareObject(
-    bucketName: string,
-    objectId: string,
-    options?: ShareOptions,
-  ): Promise<{ url: string; expires_at?: Date }> {
-    return this.request({
-      method: "POST",
-      url: `/b/storage/api/buckets/${bucketName}/objects/${objectId}/share`,
-      data: options || {},
-    });
-  }
-
-  /**
-   * Delete an object (file or folder)
-   * @param bucketName - The name of the bucket
-   * @param objectId - The ID of the object
-   */
-  async deleteObject(bucketName: string, objectId: string): Promise<void> {
-    await this.request<void>({
+  /** Delete an object. */
+  async deleteObject(bucketName: string, key: string): Promise<void> {
+    await this.request<{ deleted: boolean }>({
       method: "DELETE",
-      url: `/b/storage/api/buckets/${bucketName}/objects/${objectId}`,
+      url: `/b/storage/api/buckets/${encodeURIComponent(bucketName)}/objects/${encodeObjectKey(key)}`,
     });
   }
 
-  /**
-   * Delete multiple objects
-   * @param bucketName - The name of the bucket
-   * @param objectIds - Array of object IDs
-   */
-  async deleteObjects(bucketName: string, objectIds: string[]): Promise<void> {
-    // Delete one by one for now
-    for (const id of objectIds) {
-      await this.deleteObject(bucketName, id);
+  /** Delete multiple objects (sequential — there is no bulk-delete route). */
+  async deleteObjects(bucketName: string, keys: string[]): Promise<void> {
+    for (const key of keys) {
+      await this.deleteObject(bucketName, key);
     }
   }
 
   /**
-   * Get storage quota information
-   */
-  async getQuota(): Promise<{
-    used: number;
-    total: number;
-    percentage: number;
-  }> {
-    try {
-      return await this.request({
-        method: "GET",
-        url: "/b/storage/api/quota",
-      });
-    } catch (error) {
-      // Return default quota on error
-      return { used: 0, total: 5 * 1024 * 1024 * 1024, percentage: 0 };
-    }
-  }
-
-  /**
-   * Get storage statistics
-   */
-  async getStats(): Promise<{
-    totalSize: number;
-    fileCount: number;
-    folderCount: number;
-    sharedCount: number;
-    trashedCount: number;
-  }> {
-    try {
-      return await this.request({
-        method: "GET",
-        url: "/b/storage/api/stats",
-      });
-    } catch (error) {
-      // Return default stats on error
-      return {
-        totalSize: 0,
-        fileCount: 0,
-        folderCount: 0,
-        sharedCount: 0,
-        trashedCount: 0,
-      };
-    }
-  }
-
-  /**
-   * Search for files and folders
-   * @param query - Search query
-   * @param options - Search options
+   * Search the current user's completed uploads by key substring.
+   * `GET /b/storage/api/search?q=`
    */
   async search(
     query: string,
-    options?: { type?: "file" | "folder" | "all" },
-  ): Promise<StorageObject[]> {
-    const params = new URLSearchParams({ q: query });
-    if (options?.type && options.type !== "all") {
-      params.append("type", options.type);
-    }
-
-    const response = await this.request<StorageObject[]>({
+    options?: { page?: number; page_size?: number },
+  ): Promise<{ data: StorageObjectInfo[]; total?: number }> {
+    const params = { q: query, ...options };
+    return this.request({
       method: "GET",
-      url: `/b/storage/api/search?${params.toString()}`,
+      url: `/b/storage/api/search?${this.buildQueryString(params)}`,
     });
-    return Array.isArray(response) ? response : [];
   }
 
   /**
-   * Get recent files
-   * @param limit - Number of files to return
+   * The 20 most recently viewed objects for the current user.
+   * `GET /b/storage/api/recent` — takes no query parameters server-side.
    */
-  async getRecentFiles(limit: number = 10): Promise<StorageObject[]> {
-    const response = await this.request<StorageObject[]>({
+  async getRecentFiles(): Promise<{ data: StorageObjectInfo[]; total?: number }> {
+    return this.request({
       method: "GET",
-      url: `/b/storage/api/recent?limit=${limit}`,
+      url: "/b/storage/api/recent",
     });
-    return Array.isArray(response) ? response : [];
   }
+}
 
-  /**
-   * Get shared files
-   */
-  async getSharedFiles(): Promise<StorageObject[]> {
-    const response = await this.request<StorageObject[]>({
-      method: "GET",
-      url: "/b/storage/api/shared",
-    });
-    return Array.isArray(response) ? response : [];
-  }
-
-  /**
-   * Get trashed files
-   */
-  async getTrashedFiles(): Promise<StorageObject[]> {
-    const response = await this.request<StorageObject[]>({
-      method: "GET",
-      url: "/b/storage/api/trash",
-    });
-    return Array.isArray(response) ? response : [];
-  }
-
-  /**
-   * Restore file from trash
-   * @param itemId - The ID of the item to restore
-   */
-  async restoreFromTrash(itemId: string): Promise<void> {
-    await this.request({
-      method: "POST",
-      url: `/b/storage/api/trash/${itemId}/restore`,
-      data: {},
-    });
-  }
-
-  /**
-   * Empty trash
-   */
-  async emptyTrash(): Promise<void> {
-    await this.request({
-      method: "DELETE",
-      url: "/b/storage/api/trash",
-    });
-  }
-
-  /**
-   * Create a new bucket
-   * @param name - The name of the bucket
-   * @param isPublic - Whether the bucket should be public
-   */
-  async createBucket(name: string, isPublic: boolean = false): Promise<Bucket> {
-    return this.request<Bucket>({
-      method: "POST",
-      url: "/b/storage/api/buckets",
-      data: {
-        name,
-        public: isPublic,
-      },
-    });
-  }
-
-  /**
-   * Delete a bucket
-   * @param name - The name of the bucket
-   */
-  async deleteBucket(name: string): Promise<void> {
-    await this.request<void>({
-      method: "DELETE",
-      url: `/b/storage/api/buckets/${name}`,
-    });
-  }
-
-  /**
-   * List all buckets
-   */
-  async listBuckets(): Promise<Bucket[]> {
-    return this.request<Bucket[]>({
-      method: "GET",
-      url: "/b/storage/api/buckets",
-    });
-  }
+/**
+ * Encode an object key for use as a path segment. Keys may contain `/`
+ * (the server binds them via a `{key...}` rest param, not a single
+ * segment) — encode each segment individually so the slashes survive.
+ */
+function encodeObjectKey(key: string): string {
+  return key.split("/").map(encodeURIComponent).join("/");
 }

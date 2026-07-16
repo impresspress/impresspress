@@ -1,4 +1,10 @@
-// Test file to verify type compatibility between manual and generated types
+import { describe, it, expect } from "vitest";
+// Verifies type compatibility between the hand-written model aliases
+// (`models.ts`) and the generated DB-schema types (`types/generated/database`)
+// they wrap — a compile error here means the alias/generated pair has
+// drifted. Field names are camelCase, matching the generated types exactly
+// (there is no snake_case/camelCase translation layer — see the workspace's
+// "no magic code / implicit mapping" rule).
 import {
   User,
   StorageObject,
@@ -6,81 +12,77 @@ import {
   IAMRole,
   AuthUser,
   StorageStorageObject,
-  StorageStorageBucket
-} from '../src/types';
+  StorageStorageBucket,
+} from "../src/types";
 
-// Test that User type is compatible with AuthUser
-const authUser: AuthUser = {
-  id: '123',
-  email: 'test@example.com',
-  username: 'testuser',
-  confirmed: true,
-  first_name: 'Test',
-  last_name: 'User',
-  display_name: 'Test User',
-  phone: '1234567890',
-  location: 'Test Location',
-  metadata: '{}',
-  created_at: new Date(),
-  updated_at: new Date()
-};
+describe("type compatibility between manual and generated types", () => {
+  it("User is an alias of the generated AuthUser", () => {
+    const authUser: AuthUser = {
+      id: "123",
+      email: "test@example.com",
+      username: "testuser",
+      confirmed: true,
+      firstName: "Test",
+      lastName: "User",
+      displayName: "Test User",
+      phone: "1234567890",
+      location: "Test Location",
+      metadata: "{}",
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    const user: User = authUser;
 
-// User extends AuthUser with roles
-const user: User = {
-  ...authUser,
-  roles: ['admin', 'user']
-};
+    expect(user.id).toBe(authUser.id);
+    expect(user.displayName).toBe("Test User");
+  });
 
-// Test that StorageObject is correctly aliased
-const storageObject: StorageObject = {
-  id: '456',
-  bucket_name: 'test-bucket',
-  object_name: 'test.txt',
-  parent_folder_id: null,
-  size: 1024,
-  content_type: 'text/plain',
-  checksum: 'abc123',
-  metadata: '{"test": true}',
-  created_at: new Date(),
-  updated_at: new Date(),
-  last_viewed: null,
-  user_id: '123',
-  app_id: null
-};
+  it("StorageObject is aliased to the generated StorageStorageObject", () => {
+    const storageObject: StorageObject = {
+      id: "456",
+      bucketName: "test-bucket",
+      objectName: "test.txt",
+      parentFolderId: null,
+      size: 1024,
+      contentType: "text/plain",
+      checksum: "abc123",
+      metadata: '{"test": true}',
+      createdAt: new Date(),
+      updatedAt: new Date(),
+      lastViewed: null,
+      userId: "123",
+      appId: null,
+    };
+    const direct: StorageStorageObject = storageObject;
+    expect(direct.bucketName).toBe("test-bucket");
+  });
 
-// Test that Bucket is correctly aliased
-const bucket: Bucket = {
-  id: '789',
-  name: 'test-bucket',
-  public: false,
-  created_at: new Date(),
-  updated_at: new Date()
-};
+  it("Bucket is aliased to the generated StorageStorageBucket", () => {
+    const bucket: Bucket = {
+      id: "789",
+      name: "test-bucket",
+      public: false,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    const direct: StorageStorageBucket = bucket;
+    expect(direct.name).toBe("test-bucket");
+  });
 
-// Test that IAMRole is correctly aliased
-const role: IAMRole = {
-  id: '321',
-  name: 'admin',
-  display_name: 'Administrator',
-  description: 'Full system access',
-  type: 'system',
-  metadata: {
-    allowed_ips: ['192.168.1.1'],
-    disabled_features: []
-  },
-  created_at: new Date(),
-  updated_at: new Date()
-};
-
-// Verify that the generated types can be used directly
-const directStorageObject: StorageStorageObject = storageObject;
-const directBucket: StorageStorageBucket = bucket;
-const directAuthUser: AuthUser = authUser;
-
-console.log('Type compatibility test passed! ✅');
-console.log('- User type extends AuthUser with roles field');
-console.log('- StorageObject is aliased to StorageStorageObject');
-console.log('- Bucket is aliased to StorageStorageBucket');
-console.log('- IAMRole is properly imported from generated types');
-
-export {};
+  it("IAMRole is imported from generated types with its full shape", () => {
+    const role: IAMRole = {
+      id: "321",
+      name: "admin",
+      displayName: "Administrator",
+      description: "Full system access",
+      type: "system",
+      metadata: {
+        allowedIps: ["192.168.1.1"],
+        disabledFeatures: [],
+      },
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    };
+    expect(role.name).toBe("admin");
+  });
+});
