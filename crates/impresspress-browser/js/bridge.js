@@ -210,12 +210,24 @@ export async function storageDelete(folder, key) {
 }
 
 /**
- * List files in a folder.
+ * List files in a folder matching `prefix`, paginated by `limit`/`offset`.
  * @param {string} folder
  * @param {string} prefix
  * @param {number} limit
  * @param {number} offset
- * @returns {string} JSON array of key strings
+ * @returns {{keys: string[], total: number}} A plain JS object — NOT a JSON
+ *   string. `total` is the full count of matching entries BEFORE slicing to
+ *   the requested page (previously this returned only the page, and the
+ *   caller reported the page length as the total).
+ *
+ *   OPFS's directory iterator (`FileSystemDirectoryHandle.entries()`) has no
+ *   native pagination, count, or cursor/skip-ahead API — it's
+ *   iterate-everything-or-nothing, and there is no separate persisted index
+ *   of keys to consult instead. A true cursor (resuming a listing without
+ *   re-scanning the directory) would require maintaining that index
+ *   ourselves, which is a bigger change out of scope here; this instead
+ *   returns an HONEST total by counting matches, during the one full
+ *   enumeration this already required, before applying offset/limit.
  */
 export async function storageList(folder, prefix, limit, offset) {
     const storageRoot = await getStorageRoot();
@@ -231,8 +243,9 @@ export async function storageList(folder, prefix, limit, offset) {
     }
 
     keys.sort();
+    const total = keys.length;
     const page = keys.slice(offset, limit > 0 ? offset + limit : undefined);
-    return JSON.stringify(page);
+    return { keys: page, total };
 }
 
 /**
@@ -255,7 +268,8 @@ export async function storageDeleteFolder(name) {
 
 /**
  * List top-level storage directories.
- * @returns {string} JSON array of folder name strings
+ * @returns {string[]} A plain JS array of folder name strings — NOT a JSON
+ *   string.
  */
 export async function storageListFolders() {
     const storageRoot = await getStorageRoot();
@@ -266,7 +280,7 @@ export async function storageListFolders() {
         }
     }
     folders.sort();
-    return JSON.stringify(folders);
+    return folders;
 }
 
 // ─── Asset loader bridge (SW → main thread) ─────────────────────────────────

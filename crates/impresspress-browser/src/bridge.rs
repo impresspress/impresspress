@@ -58,8 +58,10 @@ extern "C" {
     pub async fn storage_delete(folder: &str, key: &str) -> Result<JsValue, JsValue>;
 
     /// List files in a folder matching a prefix, with pagination.
-    /// Returns JSON array of key strings. Rejects with a `NotFoundError`
-    /// `DOMException` if the folder doesn't exist.
+    /// Returns a plain JS object `{ keys: string[], total: number }` — NOT a
+    /// JSON string. `total` is the full matching-entry count, not the page
+    /// length. Decode with `serde_wasm_bindgen::from_value`. Rejects with a
+    /// `NotFoundError` `DOMException` if the folder doesn't exist.
     #[wasm_bindgen(catch, js_name = storageList)]
     pub async fn storage_list(
         folder: &str,
@@ -78,7 +80,8 @@ extern "C" {
     pub async fn storage_delete_folder(name: &str) -> Result<JsValue, JsValue>;
 
     /// List top-level storage directories.
-    /// Returns JSON array of folder name strings.
+    /// Returns a plain JS array of folder name strings — NOT a JSON string.
+    /// Decode with `serde_wasm_bindgen::from_value`.
     #[wasm_bindgen(catch, js_name = storageListFolders)]
     pub async fn storage_list_folders() -> Result<JsValue, JsValue>;
 
