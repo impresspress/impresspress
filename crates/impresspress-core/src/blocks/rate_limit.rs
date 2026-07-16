@@ -791,4 +791,62 @@ mod tests {
         let outcome = decide_rate_limit(&Ok(1), Ok(vec![]), "k", 5, 60);
         assert_eq!(outcome, BackendCheckOutcome::Allowed(5));
     }
+
+    #[test]
+    fn rate_limit_counts_when_upsert_succeeds() {
+        // Regression for the adapter fail-open bug this PR fixes: before the
+        // D1 / KV-cached-D1 / browser `DatabaseService::upsert` forwarders
+        // existed (added alongside this test), every wasm rate-limit check's
+        // `upsert_result` was `Err("... not implemented by this database
+        // backend")`, so `decide_rate_limit` always took the `FailedOpen`
+        // branch below — the limiter silently allowed every request at full
+        // quota, on every backend, forever. Method *presence* is now
+        // compile-enforced (`upsert`/`aggregate` are required `DatabaseService`
+        // trait methods; the adapters would not build without the forwarders),
+        // so a real deployment's `upsert_result` is `Ok(_)`. This test locks in
+        // that once `upsert` actually succeeds, the decision is a real
+        // count-based `Allowed`/`Limited` — never the fail-open branch.
+
+        // Under the limit: counts, allows-by-remaining (not fail-open).
+        let under = decide_rate_limit(&Ok(1), Ok(vec![count_row(2)]), "k", 5, 60);
+        assert!(!matches!(under, BackendCheckOutcome::FailedOpen { .. }));
+        assert_eq!(under, BackendCheckOutcome::Allowed(3));
+
+        // Over the limit: counts, denies (not fail-open).
+        let over = decide_rate_limit(&Ok(1), Ok(vec![count_row(6)]), "k", 5, 60);
+        assert!(!matches!(over, BackendCheckOutcome::FailedOpen { .. }));
+        assert_eq!(over, BackendCheckOutcome::Limited(60));
+    }
 }
+
+// ---------------------------------------------------------------------------
+// Cross-adapter backend conformance (scope note)
+// ---------------------------------------------------------------------------
+//
+// The originally proposed Task 3 also called for a cross-adapter conformance
+// suite exercising `D1DatabaseService` / `KvCachedD1DatabaseService` (in
+// `impresspress-cloudflare`) and `BrowserDatabaseService` (in
+// `impresspress-browser`) directly, e.g. over a mock KV / sqlite `inner`.
+// That harness is not buildable: `impresspress-cloudflare` depends
+// unconditionally on the `worker` and `wasm-bindgen` crates (not
+// `target_arch`-gated in `Cargo.toml`), and `cargo check -p
+// impresspress-cloudflare` fails to even *compile* on a native host target
+// (`D1Database`/`R2`/`JsFuture` types are `!Send`, tripping the `async_trait`
+// `Send` bound the non-wasm32 cfg arm requires). `kv_cached_db.rs` documents
+// this directly: "this crate is wasm32-only and excluded from `cargo test
+// --workspace`". `impresspress-browser` is the same shape (wasm-bindgen web
+// bindings). Standing up a wasm-bindgen-test runner or a mock Worker KV was
+// explicitly out of scope for this task.
+//
+// Method *presence* conformance for all three adapters is instead enforced by
+// the compiler: PR 2a made `upsert`/`aggregate` required (non-defaulted)
+// `DatabaseService` trait methods, so `D1DatabaseService`,
+// `KvCachedD1DatabaseService`, and `BrowserDatabaseService` would not compile
+// at all without the forwarders Task 2 added — the workspace build is the
+// presence conformance check, re-run on every `cargo check`/`cargo test`.
+// The SQL *correctness* of the shared `DbExec::upsert`/`aggregate`/
+// `update_where_count` defaults those forwarders call into is covered by
+// wafer-run's own test suite. What remained testable on a native host was the
+// decision logic in `decide_rate_limit` above, which `rate_limit_counts_when_
+// upsert_succeeds` now covers for the success path (mirroring the existing
+// `rate_limit_decision_is_explicit_when_upsert_fails` for the failure path).

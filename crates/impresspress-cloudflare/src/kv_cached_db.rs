@@ -54,7 +54,7 @@ use std::{collections::HashMap, sync::Arc};
 use impresspress_core::cache_key;
 use wafer_block::db::{Filter, ListOptions};
 use wafer_core::interfaces::database::service::{
-    Column, DatabaseError, DatabaseService, Record, RecordList, Table,
+    AggregateSpec, Column, DatabaseError, DatabaseService, Record, RecordList, Table, UpsertSpec,
 };
 
 /// KV TTL applied to every cache PUT (24 h). Also the TTL the per-isolate
@@ -182,6 +182,14 @@ impl DatabaseService for KvCachedD1DatabaseService {
         self.inner.sum(collection, field, filters).await
     }
 
+    async fn aggregate(
+        &self,
+        collection: &str,
+        spec: AggregateSpec,
+    ) -> Result<Vec<Record>, DatabaseError> {
+        self.inner.aggregate(collection, spec).await
+    }
+
     async fn query_raw(
         &self,
         query: &str,
@@ -255,6 +263,33 @@ impl DatabaseService for KvCachedD1DatabaseService {
             )));
         }
         self.inner.update_where(collection, filters, data).await
+    }
+
+    async fn update_where_count(
+        &self,
+        collection: &str,
+        filters: &[Filter],
+        data: HashMap<String, serde_json::Value>,
+    ) -> Result<i64, DatabaseError> {
+        if cache_key::classify_table(collection).is_some() {
+            return Err(DatabaseError::Internal(format!(
+                "bulk update_where_count not supported on cached table `{collection}` \
+                 (would require KV mass-invalidation)"
+            )));
+        }
+        self.inner
+            .update_where_count(collection, filters, data)
+            .await
+    }
+
+    async fn upsert(&self, collection: &str, spec: UpsertSpec) -> Result<i64, DatabaseError> {
+        if cache_key::classify_table(collection).is_some() {
+            return Err(DatabaseError::Internal(format!(
+                "upsert not supported on cached table `{collection}` \
+                 (would require KV invalidation)"
+            )));
+        }
+        self.inner.upsert(collection, spec).await
     }
 
     async fn list(

@@ -20,7 +20,10 @@
 use wafer_block::db::{Filter, ListOptions};
 use wafer_core::interfaces::database::{
     exec::DbExec,
-    service::{Column, DatabaseError, DatabaseService, Record, RecordList, Table},
+    service::{
+        AggregateSpec, Column, DatabaseError, DatabaseService, Record, RecordList, Table,
+        UpsertSpec,
+    },
 };
 use wafer_sql_utils::{introspect, Backend};
 use wasm_bindgen::JsValue;
@@ -254,6 +257,27 @@ impl DatabaseService for D1DatabaseService {
         filters: &[Filter],
     ) -> Result<i64, DatabaseError> {
         DbExec::increment_field_where(self, collection, col, delta, filters).await
+    }
+
+    async fn upsert(&self, collection: &str, spec: UpsertSpec) -> Result<i64, DatabaseError> {
+        DbExec::upsert(self, collection, spec).await
+    }
+
+    async fn aggregate(
+        &self,
+        collection: &str,
+        spec: AggregateSpec,
+    ) -> Result<Vec<Record>, DatabaseError> {
+        DbExec::aggregate(self, collection, spec).await
+    }
+
+    async fn update_where_count(
+        &self,
+        collection: &str,
+        filters: &[Filter],
+        data: std::collections::HashMap<String, serde_json::Value>,
+    ) -> Result<i64, DatabaseError> {
+        DbExec::update_where_count(self, collection, filters, data).await
     }
 
     // --- Schema management: D1 schema is owned by Wrangler migrations ---
