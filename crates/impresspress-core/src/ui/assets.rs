@@ -181,6 +181,29 @@ pub fn marked_js_url() -> &'static str {
     })
 }
 
+const PURIFY_JS: &str = include_str!("assets/purify.min.js");
+
+/// DOMPurify (HTML sanitizer), vendored from DOMPurify 3.2.4 — self-hosted
+/// instead of a CDN `<script>` so there's no external runtime fetch
+/// (CSP-friendly, no third-party availability/supply-chain dependency at
+/// page load). Loaded before `marked.js`/`llm-chat.js` so `renderMarkdown`
+/// can sanitize the parsed markdown before it reaches `innerHTML`
+/// (P0 stored-XSS fix).
+pub fn purify_js() -> &'static str {
+    PURIFY_JS
+}
+
+/// DOMPurify JS URL with content hash, e.g. `/b/static/purify-a1b2c3d4.js`
+pub fn purify_js_url() -> &'static str {
+    static URL: OnceLock<String> = OnceLock::new();
+    URL.get_or_init(|| {
+        format!(
+            "{STATIC_PREFIX}purify-{}.js",
+            short_hash(purify_js().as_bytes())
+        )
+    })
+}
+
 const LLM_CHAT_JS: &str = include_str!("assets/llm-chat.js");
 
 /// Embedded vanilla-JS bundle for the LLM chat surface — markdown, message
@@ -523,6 +546,35 @@ mod tests {
                 "missing global re-export for {sym}"
             );
         }
+    }
+
+    #[test]
+    fn purify_js_url_has_content_hash() {
+        let url = super::purify_js_url();
+        assert!(url.starts_with("/b/static/purify-"));
+        assert!(url.ends_with(".js"));
+        let hash = url
+            .trim_start_matches("/b/static/purify-")
+            .trim_end_matches(".js");
+        assert_eq!(hash.len(), 8, "expected 8-char short hash, got: {hash}");
+        assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
+    }
+
+    #[test]
+    fn purify_js_is_dompurify_umd_build() {
+        let js = super::purify_js();
+        assert!(
+            js.contains("DOMPurify"),
+            "vendored asset should be DOMPurify"
+        );
+        // UMD build: `(e=...globalThis...||self).DOMPurify=t()` — assigns
+        // onto the global object (`window` in a browser) when there's no
+        // CommonJS/AMD module system, which is the load path llm-chat.js
+        // relies on for the bare `DOMPurify` global.
+        assert!(
+            js.contains(").DOMPurify=t()"),
+            "expected UMD build to assign a global .DOMPurify"
+        );
     }
 
     #[test]

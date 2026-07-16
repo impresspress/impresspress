@@ -16,7 +16,12 @@
   function renderMarkdown(text) {
     if (typeof marked !== 'undefined' && marked.parse) {
       try {
-        return marked.parse(text, { breaks: true });
+        var html = marked.parse(text, { breaks: true });
+        if (typeof DOMPurify !== 'undefined') {
+          return DOMPurify.sanitize(html);
+        }
+        // No sanitizer available → do not emit raw HTML.
+        return escHtml(text).replace(/\n/g, '<br>');
       } catch (e) {}
     }
     return escHtml(text).replace(/\n/g, '<br>');

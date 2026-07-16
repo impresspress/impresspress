@@ -80,6 +80,9 @@ fn render_page_body(
 
         // Pulse animation for thinking indicator + blinking cursor.
         style { "@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}} @keyframes blink{0%,100%{opacity:1}50%{opacity:0}} .typing-cursor{display:inline-block;width:0.5em;height:1.1em;background:var(--text-primary,#333);vertical-align:text-bottom;margin-left:2px;animation:blink 0.8s step-end infinite}" }
+        // DOMPurify must load before marked.js/llm-chat.js so `window.DOMPurify`
+        // exists when renderMarkdown() sanitizes marked's output (P0 stored-XSS fix).
+        script src=(crate::ui::assets::purify_js_url()) {}
         // marked.js for markdown rendering — self-hosted (vendored), content-hashed.
         script src=(crate::ui::assets::marked_js_url()) {}
 
@@ -868,6 +871,42 @@ mod tests {
         assert!(!html.contains("function handleChatSubmit"));
         assert!(!html.contains("function selectThread"));
         assert!(!html.contains("function createNewThread"));
+    }
+
+    /// DOMPurify must load before both marked.js and llm-chat.js — the P0
+    /// fix relies on `window.DOMPurify` existing by the time llm-chat.js's
+    /// `defer`red script runs `renderMarkdown()`. Order matters: a script
+    /// tag present but placed after llm-chat.js would not help since the
+    /// bug is about sanitizing marked's output, not about a race — but
+    /// pinning the order here guards against a future edit silently
+    /// reordering these tags and defeating the sanitizer at parse time.
+    #[test]
+    fn page_body_loads_purify_before_marked_and_llm_chat_js() {
+        let url = "/b/static/llm-chat-deadbeef.js";
+        let html = render_page_body(&[], &[], &[], "", None, url).into_string();
+
+        let purify_url = crate::ui::assets::purify_js_url();
+        let marked_url = crate::ui::assets::marked_js_url();
+        assert!(
+            html.contains(&format!(r#"src="{purify_url}""#)),
+            "missing external purify.js script tag (expected src={purify_url}): {html}"
+        );
+        assert!(
+            html.contains(&format!(r#"src="{marked_url}""#)),
+            "missing external marked.js script tag (expected src={marked_url}): {html}"
+        );
+
+        let purify_pos = html.find(purify_url).expect("purify script tag present");
+        let marked_pos = html.find(marked_url).expect("marked script tag present");
+        let llm_chat_pos = html.find(url).expect("llm-chat.js script tag present");
+        assert!(
+            purify_pos < marked_pos,
+            "purify.js must be loaded before marked.js: {html}"
+        );
+        assert!(
+            marked_pos < llm_chat_pos,
+            "marked.js must be loaded before llm-chat.js: {html}"
+        );
     }
 
     /// Selector preservation contract — every ID the JS module depends on
