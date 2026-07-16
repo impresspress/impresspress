@@ -43,21 +43,26 @@ fn lockfile_loads_remote_block() {
     .expect("write wafer.toml");
 
     // -----------------------------------------------------------------------
-    // 2. Write the synthetic wafer.lock.
-    //    sha256 is a required field in LockfilePackage; the loader
-    //    validates source prefix but does not verify the hash at runtime.
+    // 2. Write the synthetic wafer.lock (schema v2).
+    //    sha256 (tarball) is required; wasm_sha256 is the digest of the
+    //    extracted artifact the loader verifies at runtime before compiling
+    //    it (SEC-05), so it must match the cached echo.wasm bytes.
     // -----------------------------------------------------------------------
+    let wasm_sha256 = wafer_block::lockfile::sha256_hex(ECHO_WASM);
     let lockfile = tmp.path().join("wafer.lock");
     fs::write(
         &lockfile,
-        r#"version = 1
+        format!(
+            r#"version = 2
 
 [[package]]
 name = "example/echo"
 version = "0.1.0"
 sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+wasm_sha256 = "{wasm_sha256}"
 source = "registry+https://example.test/registry"
-"#,
+"#
+        ),
     )
     .expect("write lockfile");
 
