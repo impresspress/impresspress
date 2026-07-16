@@ -85,7 +85,7 @@
 
     return '<div class="card"' + id + ' style="margin-bottom:0.75rem;' + bg + '">'
       + '<div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem">'
-      + '<span class="badge ' + badge + '" style="text-transform:capitalize">' + role + '</span>'
+      + '<span class="badge ' + badge + '" style="text-transform:capitalize">' + escHtml(role) + '</span>'
       + (date ? '<span class="text-muted" style="font-size:0.75rem">' + escHtml(date) + '</span>' : '')
       + modelBadge
       + '</div>'
