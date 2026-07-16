@@ -40,10 +40,29 @@ pub(crate) fn coerce_param(v: &serde_json::Value) -> serde_json::Value {
 /// `bridge::db_query_raw` bind positionally — no JSON-string round trip.
 /// Each value is `coerce_param`'d first so arrays/objects still bind as JSON
 /// text.
+///
+/// Uses an explicit `Serializer` with `serialize_missing_as_null(true)`
+/// rather than the bare `serde_wasm_bindgen::to_value` free function: the
+/// default serializer maps `serde_json::Value::Null` (any nullable column,
+/// e.g. bootstrap's `deleted_at`) to JS `undefined` (`Value::Null`'s
+/// `Serialize` impl calls `serializer.serialize_unit()`, and
+/// `Serializer::new()`'s `serialize_missing_as_null` defaults to `false`,
+/// so `serialize_unit` returns `JsValue::UNDEFINED`). sql.js's parameter
+/// binder switches on `typeof value` and only recognizes
+/// `"string"|"number"|"bigint"|"boolean"`, plus an explicit `null === value`
+/// check under `"object"` — `"undefined"` matches none of those and throws
+/// `Wrong API use : tried to bind a value of an unknown type (undefined).`,
+/// which was silently killing the browser admin-bootstrap insert (and any
+/// other write with a null column) at the DB bridge. Setting
+/// `serialize_missing_as_null(true)` makes `serialize_unit` return
+/// `JsValue::NULL` instead, matching the old JSON.stringify/JSON.parse round
+/// trip's behavior (JSON has no `undefined`, so `null` always decoded back
+/// to a real JS `null`) and what sql.js accepts.
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn params_to_js(params: &[serde_json::Value]) -> Result<JsValue, String> {
     let coerced: Vec<serde_json::Value> = params.iter().map(coerce_param).collect();
-    serde_wasm_bindgen::to_value(&coerced).map_err(|e| format!("encode params: {e}"))
+    let serializer = serde_wasm_bindgen::Serializer::new().serialize_missing_as_null(true);
+    serde::Serialize::serialize(&coerced, &serializer).map_err(|e| format!("encode params: {e}"))
 }
 
 /// The empty bind-params array for a `db_exec_raw`/`db_query_raw` call that
