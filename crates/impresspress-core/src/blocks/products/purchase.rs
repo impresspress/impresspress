@@ -348,7 +348,20 @@ pub async fn handle_refund(ctx: &dyn Context, msg: &Message, input: InputStream)
         reason: Option<String>,
     }
     let raw = input.collect_to_bytes().await;
-    let body: RefundReq = serde_json::from_slice(&raw).unwrap_or_default();
+    // An absent body is a legitimate "no reason given" (every caller today
+    // sends `{}` for that, but a genuinely empty body is treated the same
+    // way defensively). A NON-empty body that fails to parse is malformed
+    // input and must be rejected — it must not silently become "no reason",
+    // which would hide a client bug (or a truncated/garbled request) behind
+    // a refund whose reason was silently dropped.
+    let body: RefundReq = if raw.is_empty() {
+        RefundReq::default()
+    } else {
+        match serde_json::from_slice(&raw) {
+            Ok(b) => b,
+            Err(e) => return err_bad_request(&format!("Invalid request body: {e}")),
+        }
+    };
 
     // Verify purchase exists
     if let Err(e) = repo::purchases::get(ctx, &id).await {
@@ -362,9 +375,14 @@ pub async fn handle_refund(ctx: &dyn Context, msg: &Message, input: InputStream)
     let refunded_by = msg.user_id().to_string();
     let reason_val = body.reason.unwrap_or_default();
 
-    let rows = repo::purchases::refund_atomic(ctx, &id, &refunded_by, &reason_val)
-        .await
-        .unwrap_or(0);
+    // A repository failure (outage/corruption) must surface as an error, not
+    // be folded into the same `rows == 0` branch as the legitimate "purchase
+    // isn't in `completed` status" business outcome — those are different
+    // conditions and previously reported the same misleading 400.
+    let rows = match repo::purchases::refund_atomic(ctx, &id, &refunded_by, &reason_val).await {
+        Ok(n) => n,
+        Err(e) => return err_internal("Database error", e),
+    };
 
     if rows == 0 {
         return err_bad_request(

@@ -269,6 +269,24 @@ async fn admin_stats() {
     assert!((body["total_revenue"].as_f64().unwrap() - 2999.0).abs() < 0.01);
 }
 
+/// CODE_REVIEW_2026-07-16 "Error semantics fabricate successful defaults":
+/// a genuine repository failure on any of the 5 independent stat
+/// counts/sums must surface as an error, not be reported as "0 products /
+/// $0 revenue" — an admin reading zeroed stats during a real outage would
+/// mistake a broken dashboard for real (empty) business data.
+/// `unwrap_or(0)` / `unwrap_or(0.0)` used to do exactly that.
+#[tokio::test]
+async fn admin_stats_repository_failure_surfaces_as_internal_error() {
+    let ctx = ctx().await.break_reads();
+
+    let (msg, input) = admin_get_msg("/admin/b/products/stats");
+    let out = dispatch_admin(&ctx, msg, input).await;
+    assert!(
+        output_is_error(out, ErrorCode::Internal).await,
+        "a genuine repository failure must surface as Internal, not a fabricated all-zero stats body"
+    );
+}
+
 // ============================================================
 // User Product CRUD — ownership isolation
 // ============================================================
@@ -829,6 +847,23 @@ async fn overview_hides_empty_state_once_products_exist() {
     assert!(
         !html.contains("Add your first product"),
         "CTA should be gone once the catalog has products: {html}"
+    );
+}
+
+/// CODE_REVIEW_2026-07-16 "Error semantics fabricate successful defaults": a
+/// genuine repository failure on the Overview page's stat counts must
+/// surface as an error, not silently render the page with fabricated "0"
+/// stats — which would ALSO wrongly trigger the "Add your first product"
+/// empty-state CTA during a real outage on a catalog that isn't actually
+/// empty.
+#[tokio::test]
+async fn overview_repository_failure_surfaces_as_internal_error() {
+    let ctx = ctx().await.break_reads();
+    let (msg, _input) = admin_get_msg("/b/products/");
+    let out = super::super::pages::overview(&ctx, &msg).await;
+    assert!(
+        output_is_error(out, ErrorCode::Internal).await,
+        "a genuine repository failure must surface as Internal, not a fabricated empty overview page"
     );
 }
 

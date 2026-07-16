@@ -958,7 +958,13 @@ async fn handle_subscription(ctx: &dyn Context, msg: &Message) -> OutputStream {
     if user_id.is_empty() {
         return err_unauthorized("Not authenticated");
     }
-    let sub = super::repo::subscriptions::subscription_for_user(ctx, &user_id).await;
+    // A real repository failure must surface as an error, not be reported to
+    // the caller as `{"subscription": null}` — indistinguishable from "you
+    // have no subscription" and potentially misread as a cancellation.
+    let sub = match super::repo::subscriptions::subscription_for_user(ctx, &user_id).await {
+        Ok(sub) => sub,
+        Err(e) => return err_internal("Database error", e),
+    };
     ok_json(&serde_json::json!({"subscription": sub}))
 }
 
@@ -983,11 +989,37 @@ async fn handle_stats(ctx: &dyn Context, _msg: &Message) -> OutputStream {
         db::count(ctx, GROUPS_TABLE, &[]),
     );
 
+    // A repository failure on any of these must surface as an error, not be
+    // fabricated into a "0" stat — an admin reading "0 products / $0 revenue"
+    // during a genuine outage would read that as real business data rather
+    // than a broken dashboard. `unwrap_or(0)` used to do exactly that for
+    // every one of the 5 counts/sums independently.
+    let total_products = match total_products {
+        Ok(n) => n,
+        Err(e) => return err_internal("Database error", e),
+    };
+    let active_products = match active_products {
+        Ok(n) => n,
+        Err(e) => return err_internal("Database error", e),
+    };
+    let total_purchases = match total_purchases {
+        Ok(n) => n,
+        Err(e) => return err_internal("Database error", e),
+    };
+    let total_revenue = match total_revenue {
+        Ok(n) => n,
+        Err(e) => return err_internal("Database error", e),
+    };
+    let total_groups = match total_groups {
+        Ok(n) => n,
+        Err(e) => return err_internal("Database error", e),
+    };
+
     ok_json(&serde_json::json!({
-        "total_products": total_products.unwrap_or(0),
-        "active_products": active_products.unwrap_or(0),
-        "total_purchases": total_purchases.unwrap_or(0),
-        "total_revenue": total_revenue.unwrap_or(0.0),
-        "total_groups": total_groups.unwrap_or(0)
+        "total_products": total_products,
+        "active_products": active_products,
+        "total_purchases": total_purchases,
+        "total_revenue": total_revenue,
+        "total_groups": total_groups
     }))
 }

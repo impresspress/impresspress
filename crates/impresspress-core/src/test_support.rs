@@ -311,6 +311,180 @@ impl TestContext {
         ));
         self
     }
+
+    /// Replace the database backing this context with one whose read
+    /// operations (`get`/`list`/`count`/`sum`/`query_raw`/`aggregate`) always
+    /// fail with a simulated operational error, while schema checks and
+    /// mutating operations still delegate to the real in-memory SQLite data.
+    ///
+    /// The mirror image of [`Self::break_writes`]: used to test that a
+    /// read/repository function surfaces — rather than swallows — a genuine
+    /// read failure instead of collapsing it into the same "not found" /
+    /// zero-valued result it uses for a legitimate absence.
+    pub fn break_reads(mut self) -> Self {
+        let broken: Arc<dyn wafer_core::interfaces::database::service::DatabaseService> =
+            Arc::new(FailingReadsDb {
+                inner: self.db_service.clone(),
+            });
+        self.db_service = broken.clone();
+        self.database_block = Arc::new(wafer_core::service_blocks::database::DatabaseBlock::new(
+            broken,
+        ));
+        self
+    }
+}
+
+/// `DatabaseService` decorator used by [`TestContext::break_reads`]. Every
+/// read method fails with [`DatabaseError::Internal`]; every mutating/schema
+/// method delegates to `inner` unchanged.
+struct FailingReadsDb {
+    inner: Arc<dyn wafer_core::interfaces::database::service::DatabaseService>,
+}
+
+#[async_trait::async_trait]
+impl wafer_core::interfaces::database::service::DatabaseService for FailingReadsDb {
+    async fn get(
+        &self,
+        _collection: &str,
+        _id: &str,
+    ) -> Result<
+        wafer_core::interfaces::database::service::Record,
+        wafer_core::interfaces::database::service::DatabaseError,
+    > {
+        Err(simulated_read_failure())
+    }
+
+    async fn list(
+        &self,
+        _collection: &str,
+        _opts: &wafer_block::db::ListOptions,
+    ) -> Result<
+        wafer_core::interfaces::database::service::RecordList,
+        wafer_core::interfaces::database::service::DatabaseError,
+    > {
+        Err(simulated_read_failure())
+    }
+
+    async fn create(
+        &self,
+        collection: &str,
+        data: HashMap<String, serde_json::Value>,
+    ) -> Result<
+        wafer_core::interfaces::database::service::Record,
+        wafer_core::interfaces::database::service::DatabaseError,
+    > {
+        self.inner.create(collection, data).await
+    }
+
+    async fn update(
+        &self,
+        collection: &str,
+        id: &str,
+        data: HashMap<String, serde_json::Value>,
+    ) -> Result<
+        wafer_core::interfaces::database::service::Record,
+        wafer_core::interfaces::database::service::DatabaseError,
+    > {
+        self.inner.update(collection, id, data).await
+    }
+
+    async fn delete(
+        &self,
+        collection: &str,
+        id: &str,
+    ) -> Result<(), wafer_core::interfaces::database::service::DatabaseError> {
+        self.inner.delete(collection, id).await
+    }
+
+    async fn count(
+        &self,
+        _collection: &str,
+        _filters: &[wafer_block::db::Filter],
+    ) -> Result<i64, wafer_core::interfaces::database::service::DatabaseError> {
+        Err(simulated_read_failure())
+    }
+
+    async fn sum(
+        &self,
+        _collection: &str,
+        _field: &str,
+        _filters: &[wafer_block::db::Filter],
+    ) -> Result<f64, wafer_core::interfaces::database::service::DatabaseError> {
+        Err(simulated_read_failure())
+    }
+
+    async fn query_raw(
+        &self,
+        _query: &str,
+        _args: &[serde_json::Value],
+    ) -> Result<
+        Vec<wafer_core::interfaces::database::service::Record>,
+        wafer_core::interfaces::database::service::DatabaseError,
+    > {
+        Err(simulated_read_failure())
+    }
+
+    async fn exec_raw(
+        &self,
+        query: &str,
+        args: &[serde_json::Value],
+    ) -> Result<i64, wafer_core::interfaces::database::service::DatabaseError> {
+        self.inner.exec_raw(query, args).await
+    }
+
+    async fn upsert(
+        &self,
+        collection: &str,
+        spec: wafer_core::interfaces::database::service::UpsertSpec,
+    ) -> Result<i64, wafer_core::interfaces::database::service::DatabaseError> {
+        self.inner.upsert(collection, spec).await
+    }
+
+    async fn aggregate(
+        &self,
+        _collection: &str,
+        _spec: wafer_core::interfaces::database::service::AggregateSpec,
+    ) -> Result<
+        Vec<wafer_core::interfaces::database::service::Record>,
+        wafer_core::interfaces::database::service::DatabaseError,
+    > {
+        Err(simulated_read_failure())
+    }
+
+    async fn ensure_schema_table(
+        &self,
+        table: &wafer_core::interfaces::database::service::Table,
+    ) -> Result<(), wafer_core::interfaces::database::service::DatabaseError> {
+        self.inner.ensure_schema_table(table).await
+    }
+
+    async fn schema_table_exists(
+        &self,
+        name: &str,
+    ) -> Result<bool, wafer_core::interfaces::database::service::DatabaseError> {
+        self.inner.schema_table_exists(name).await
+    }
+
+    async fn schema_drop_table(
+        &self,
+        name: &str,
+    ) -> Result<(), wafer_core::interfaces::database::service::DatabaseError> {
+        self.inner.schema_drop_table(name).await
+    }
+
+    async fn schema_add_column(
+        &self,
+        table: &str,
+        column: &wafer_core::interfaces::database::service::Column,
+    ) -> Result<(), wafer_core::interfaces::database::service::DatabaseError> {
+        self.inner.schema_add_column(table, column).await
+    }
+}
+
+fn simulated_read_failure() -> wafer_core::interfaces::database::service::DatabaseError {
+    wafer_core::interfaces::database::service::DatabaseError::Internal(
+        "simulated operational read failure (TestContext::break_reads)".into(),
+    )
 }
 
 /// `DatabaseService` decorator used by [`TestContext::break_writes`]. Every

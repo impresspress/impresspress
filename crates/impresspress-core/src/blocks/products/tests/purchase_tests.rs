@@ -480,6 +480,83 @@ async fn refund_without_reason() {
     assert_eq!(body["data"]["status"], "refunded");
 }
 
+/// CODE_REVIEW_2026-07-16 "Error semantics fabricate successful defaults":
+/// malformed refund JSON must be rejected, not silently treated as "no
+/// reason given" (`unwrap_or_default()` used to swallow the parse error).
+/// The purchase must be left untouched — no fabricated refund out of a
+/// broken request body.
+#[tokio::test]
+async fn refund_rejects_malformed_json_body() {
+    let ctx = ctx().await;
+
+    let mut pd = HashMap::new();
+    pd.insert("user_id".to_string(), serde_json::json!("user_1"));
+    pd.insert("status".to_string(), serde_json::json!("completed"));
+    seed(
+        &ctx,
+        "impresspress__products__purchases",
+        "pur_malformed",
+        pd,
+    )
+    .await;
+
+    let mut msg = wafer_run::Message::new("http.request");
+    msg.set_meta("req.action", "create");
+    msg.set_meta(
+        "req.resource",
+        "/admin/b/products/purchases/pur_malformed/refund",
+    );
+    msg.set_meta("auth.user_id", "admin_1");
+    msg.set_meta("auth.user_roles", "admin");
+    let input = wafer_run::InputStream::from_bytes(b"{not valid json".to_vec());
+
+    let out = purchase::handle_refund(&ctx, &msg, input).await;
+    assert!(
+        output_is_error(out, ErrorCode::InvalidArgument).await,
+        "malformed refund body must be rejected as a bad request"
+    );
+
+    let record = super::super::repo::purchases::get(&ctx, "pur_malformed")
+        .await
+        .expect("purchase still exists");
+    assert_eq!(
+        record.data.get("status").and_then(|v| v.as_str()),
+        Some("completed"),
+        "a malformed body must not fabricate a refund"
+    );
+}
+
+/// A genuine repository failure while applying the refund must surface as an
+/// internal-server error, not be folded into the same `rows == 0` branch as
+/// the legitimate "purchase isn't in `completed` status" business outcome —
+/// `unwrap_or(0)` used to conflate the two, reporting a real outage as the
+/// same 400 "can only refund completed purchases" message.
+#[tokio::test]
+async fn refund_repository_failure_surfaces_as_internal_error() {
+    let ctx = ctx().await;
+
+    let mut pd = HashMap::new();
+    pd.insert("user_id".to_string(), serde_json::json!("user_1"));
+    pd.insert("status".to_string(), serde_json::json!("completed"));
+    seed(&ctx, "impresspress__products__purchases", "pur_outage", pd).await;
+
+    let ctx = ctx.break_writes();
+
+    let (mut msg, input) = create_msg(
+        "/admin/b/products/purchases/pur_outage/refund",
+        "admin_1",
+        serde_json::json!({"reason": "Customer requested"}),
+    );
+    msg.set_meta("auth.user_roles", "admin");
+
+    let out = purchase::handle_refund(&ctx, &msg, input).await;
+    assert!(
+        output_is_error(out, ErrorCode::Internal).await,
+        "a genuine repository failure must surface as Internal, not the \
+         business-rule 400 used for an already-settled purchase"
+    );
+}
+
 // ============================================================
 // Purchase via user handler routing
 // ============================================================
