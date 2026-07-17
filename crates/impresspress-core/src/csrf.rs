@@ -114,7 +114,7 @@ pub fn enforce_origin_policy(msg: &Message, cookie_authenticated: bool) -> Optio
         return if is_safe {
             None
         } else {
-            Some(crate::ui::forbidden_response(msg))
+            Some(crate::ui::csrf_blocked_response(msg))
         };
     }
 
@@ -135,11 +135,11 @@ pub fn enforce_origin_policy(msg: &Message, cookie_authenticated: bool) -> Optio
         return if allowed {
             None
         } else {
-            Some(crate::ui::forbidden_response(msg))
+            Some(crate::ui::csrf_blocked_response(msg))
         };
     }
 
-    Some(crate::ui::forbidden_response(msg))
+    Some(crate::ui::csrf_blocked_response(msg))
 }
 
 /// Extract the `host[:port]` authority from an absolute URL string (an
