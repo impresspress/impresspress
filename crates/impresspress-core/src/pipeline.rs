@@ -75,10 +75,12 @@ pub fn drain_queued_request_logs() -> Vec<QueuedRequestLog> {
 /// Steps:
 /// 1. Strip `/api` prefix (CF convention — native doesn't use it)
 /// 2. Validate JWT and set auth meta
-/// 2a. CSRF: enforce the Fetch-Metadata/Origin policy for cookie-authenticated
-///     unsafe-method requests (see `crate::csrf`)
-/// 3. Route to the appropriate impresspress block
-/// 4. Log the request to `request_logs` (async, best-effort)
+/// 3. CSRF: enforce the Fetch-Metadata/Origin policy for cookie-authenticated
+///    unsafe-method requests (see `crate::csrf`)
+/// 4. Route to the appropriate impresspress block
+/// 5. Log the request to `request_logs` (async, best-effort) — a streamed
+///    download with a definite status is audited too; only open-ended streams
+///    (SSE) skip the row
 ///
 /// # Errors
 ///
@@ -187,16 +189,46 @@ pub async fn handle_request(
         None => routing::route_to_block(ctx, msg, input, features, block_infos, extra_routes).await,
     };
 
-    // 3a. If the block declares a streaming Content-Type up front (SSE, raw
-    //     byte stream), don't drain the response into memory just to grab a
-    //     status code for the audit log. The whole point of those formats is
-    //     bytes flowing while the producer is still working — buffering
-    //     defeats that. Skip request_logs for these responses; the trade is
-    //     intentional and acceptable for v1 (callers reach for SSE for
-    //     long-lived progress / chat streams which aren't the audit-worthy
-    //     short request/responses that request_logs is built for).
+    // 3a. A response that declares streaming intent up front (its headers in a
+    //     leading-meta frame) is forwarded without draining the body. Two
+    //     sub-cases, split by whether it carries the `resp.stream` marker:
+    //
+    //     - A DEFINITE streamed response — a file download / share access —
+    //       carries the marker and a known status in that header frame, so it
+    //       STILL gets its `request_logs` row (status resolved from the leading
+    //       meta, duration = time-to-headers) before the body streams. These
+    //       are short, audit-worthy request/responses; the audit row must not
+    //       be lost just because the body streams — and on platforms whose
+    //       adapter buffers the body anyway (the native axum listener), losing
+    //       it would be pure regression with no offsetting streaming benefit.
+    //
+    //     - A genuinely OPEN-ENDED stream — SSE / chat: a streaming
+    //       content-type with no marker, no definite status or completion —
+    //       skips the row. Buffering it just to grab a status would defeat
+    //       streaming, and these long-lived progress feeds aren't the short
+    //       request/responses request_logs is built for.
     let (leading_meta, next_event) = crate::streaming::drain_leading_meta(&mut stream).await;
     if crate::streaming::wants_streaming(&leading_meta) {
+        if crate::streaming::has_stream_marker(&leading_meta) {
+            let status_code = i64::from(http_codec::resolve_status(&leading_meta, 200));
+            let status_label = if status_code >= 400 { "ERROR" } else { "OK" };
+            let duration_ms = i64::try_from(crate::util::now_millis().saturating_sub(start_ms))
+                .unwrap_or(i64::MAX);
+            write_request_log(
+                ctx,
+                RequestLogRow {
+                    method: &method,
+                    path: &path,
+                    status_label,
+                    status_code,
+                    error_message: "",
+                    duration_ms,
+                    client_ip: &client_ip,
+                    user_id: &user_id,
+                },
+            )
+            .await;
+        }
         return crate::streaming::rebuild_streaming(leading_meta, next_event, stream);
     }
 
@@ -252,38 +284,79 @@ pub async fn handle_request(
     // clamps the unlikely case of an absurdly large delta to `i64::MAX`.
     let duration_ms =
         i64::try_from(crate::util::now_millis().saturating_sub(start_ms)).unwrap_or(i64::MAX);
-
-    // Skip logging static asset requests to reduce noise (one request_logs
-    // write per CSS/JS/font/logo fetch otherwise). The prefix is the shared
-    // `routing::STATIC_PREFIX` const so it can't drift from the routing
-    // table and the `ui::assets` URL builders again.
-    if !path.starts_with(routing::STATIC_PREFIX) && path != "/health" {
-        let mut data = std::collections::HashMap::new();
-        data.insert("method".to_string(), serde_json::json!(method));
-        data.insert("path".to_string(), serde_json::json!(path));
-        data.insert("status".to_string(), serde_json::json!(status_label));
-        data.insert("status_code".to_string(), serde_json::json!(status_code));
-        data.insert("duration_ms".to_string(), serde_json::json!(duration_ms));
-        data.insert(
-            "error_message".to_string(),
-            serde_json::json!(error_message),
-        );
-        data.insert("client_ip".to_string(), serde_json::json!(client_ip));
-        data.insert("user_id".to_string(), serde_json::json!(user_id));
-        crate::util::stamp_created(&mut data);
-
-        match request_log_mode() {
-            RequestLogMode::Inline => {
-                // Best-effort: don't fail the request if logging fails
-                let _ = db::create(ctx, crate::blocks::admin::REQUEST_LOGS_TABLE, data).await;
-            }
-            RequestLogMode::Queued => {
-                enqueue_request_log(crate::blocks::admin::REQUEST_LOGS_TABLE, data);
-            }
-        }
-    }
+    write_request_log(
+        ctx,
+        RequestLogRow {
+            method: &method,
+            path: &path,
+            status_label,
+            status_code,
+            error_message: &error_message,
+            duration_ms,
+            client_ip: &client_ip,
+            user_id: &user_id,
+        },
+    )
+    .await;
 
     reply
+}
+
+/// Fields of one `request_logs` audit row. Bundled into a struct so
+/// [`write_request_log`] stays a two-argument call (the row shape is shared by
+/// the buffered response tail and the streamed-download branch).
+struct RequestLogRow<'a> {
+    method: &'a str,
+    path: &'a str,
+    status_label: &'a str,
+    status_code: i64,
+    error_message: &'a str,
+    duration_ms: i64,
+    client_ip: &'a str,
+    user_id: &'a str,
+}
+
+/// Write one `request_logs` audit row (best-effort; never fails the request).
+/// Static-asset and health-check paths are skipped to keep the table
+/// signal-heavy — the prefix is the shared `routing::STATIC_PREFIX` const so it
+/// can't drift from the routing table and the `ui::assets` URL builders.
+///
+/// Shared by the buffered response tail and the streamed-download branch so a
+/// download produces the same row on every platform, whether the adapter
+/// streams or buffers its body.
+async fn write_request_log(ctx: &dyn Context, row: RequestLogRow<'_>) {
+    if row.path.starts_with(routing::STATIC_PREFIX) || row.path == "/health" {
+        return;
+    }
+    let mut data = std::collections::HashMap::new();
+    data.insert("method".to_string(), serde_json::json!(row.method));
+    data.insert("path".to_string(), serde_json::json!(row.path));
+    data.insert("status".to_string(), serde_json::json!(row.status_label));
+    data.insert(
+        "status_code".to_string(),
+        serde_json::json!(row.status_code),
+    );
+    data.insert(
+        "duration_ms".to_string(),
+        serde_json::json!(row.duration_ms),
+    );
+    data.insert(
+        "error_message".to_string(),
+        serde_json::json!(row.error_message),
+    );
+    data.insert("client_ip".to_string(), serde_json::json!(row.client_ip));
+    data.insert("user_id".to_string(), serde_json::json!(row.user_id));
+    crate::util::stamp_created(&mut data);
+
+    match request_log_mode() {
+        RequestLogMode::Inline => {
+            // Best-effort: don't fail the request if logging fails.
+            let _ = db::create(ctx, crate::blocks::admin::REQUEST_LOGS_TABLE, data).await;
+        }
+        RequestLogMode::Queued => {
+            enqueue_request_log(crate::blocks::admin::REQUEST_LOGS_TABLE, data);
+        }
+    }
 }
 
 /// Rebuild an `OutputStream` from an already-collected buffered response.
@@ -661,6 +734,163 @@ mod csrf_wiring_tests {
             .await
             .expect("Bearer-authenticated cross-site POST must not be blocked");
         assert_eq!(buf.body, b"DISPATCHED");
+    }
+}
+
+/// The download audit-row fix: a *marked* streamed response (file download /
+/// share access) still writes its `request_logs` row from the leading-meta
+/// status, while a genuinely open-ended stream (SSE — a streaming content-type
+/// with no marker) skips it. Drives `handle_request` end-to-end through a stub
+/// block reached via `extra_routes`, then queries `request_logs`.
+#[cfg(test)]
+mod streaming_audit_tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use wafer_run::{
+        Block as RunBlock, BlockCategory, LifecycleEvent, MetaEntry, WaferError,
+        META_RESP_CONTENT_TYPE,
+    };
+
+    use super::*;
+    use crate::{
+        features::AllEnabled,
+        routing::{ExtraRoute, RouteAccess},
+        streaming::{META_RESP_STREAM, STREAM_MARKER_VALUE},
+        test_support::{anon_msg, TestContext},
+    };
+
+    /// A DEFINITE streamed download: leading meta with the `resp.stream` marker
+    /// + a real content-type, then a body chunk.
+    struct MarkedDownloadBlock;
+    #[async_trait]
+    impl RunBlock for MarkedDownloadBlock {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new("test/dl", "0.0.1", "echo@v1", "marked download probe")
+                .category(BlockCategory::Service)
+        }
+        async fn handle(
+            &self,
+            _ctx: &dyn Context,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            OutputStream::from_producer(|sink, _cancel| async move {
+                let _ = sink
+                    .send_meta(MetaEntry {
+                        key: META_RESP_STREAM.into(),
+                        value: STREAM_MARKER_VALUE.into(),
+                    })
+                    .await;
+                let _ = sink
+                    .send_meta(MetaEntry {
+                        key: META_RESP_CONTENT_TYPE.into(),
+                        value: "image/png".into(),
+                    })
+                    .await;
+                let _ = sink.send_chunk(b"PNGDATA".to_vec()).await;
+                let _ = sink.complete(vec![]).await;
+            })
+        }
+        async fn lifecycle(
+            &self,
+            _ctx: &dyn Context,
+            _e: LifecycleEvent,
+        ) -> Result<(), WaferError> {
+            Ok(())
+        }
+    }
+
+    /// An OPEN-ENDED SSE stream: streaming content-type, NO marker.
+    struct SseStreamBlock;
+    #[async_trait]
+    impl RunBlock for SseStreamBlock {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new("test/sse", "0.0.1", "echo@v1", "sse probe")
+                .category(BlockCategory::Service)
+        }
+        async fn handle(
+            &self,
+            _ctx: &dyn Context,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            OutputStream::from_producer(|sink, _cancel| async move {
+                let _ = sink
+                    .send_meta(MetaEntry {
+                        key: META_RESP_CONTENT_TYPE.into(),
+                        value: "text/event-stream".into(),
+                    })
+                    .await;
+                let _ = sink.send_chunk(b"data: hi\n\n".to_vec()).await;
+                let _ = sink.complete(vec![]).await;
+            })
+        }
+        async fn lifecycle(
+            &self,
+            _ctx: &dyn Context,
+            _e: LifecycleEvent,
+        ) -> Result<(), WaferError> {
+            Ok(())
+        }
+    }
+
+    fn route(prefix: &str, block: &str) -> Vec<ExtraRoute> {
+        vec![ExtraRoute {
+            prefix: prefix.to_string(),
+            access: RouteAccess::Public,
+            block_name: block.to_string(),
+        }]
+    }
+
+    async fn drive(ctx: &TestContext, path: &str, routes: &[ExtraRoute]) {
+        // Inline mode so the audit write lands in the DB synchronously (not the
+        // CF wait-until queue), making the row queryable in-test.
+        set_request_log_mode(RequestLogMode::Inline);
+        let out = handle_request(
+            ctx,
+            anon_msg("retrieve", path),
+            InputStream::empty(),
+            None,
+            "test-secret",
+            false,
+            &AllEnabled,
+            &[],
+            routes,
+        )
+        .await;
+        // Consume the streamed response so the producer runs to completion.
+        let _ = out.collect_buffered().await;
+    }
+
+    async fn request_log_count(ctx: &TestContext) -> i64 {
+        db::count(ctx, crate::blocks::admin::REQUEST_LOGS_TABLE, &[])
+            .await
+            .expect("count request_logs")
+    }
+
+    #[tokio::test]
+    async fn streamed_download_with_marker_still_writes_request_log() {
+        let mut ctx = TestContext::with_admin().await;
+        ctx.register_block("test/dl", Arc::new(MarkedDownloadBlock));
+        drive(&ctx, "/x/dl", &route("/x/dl", "test/dl")).await;
+        assert_eq!(
+            request_log_count(&ctx).await,
+            1,
+            "a marked streamed download must still produce a request_logs row"
+        );
+    }
+
+    #[tokio::test]
+    async fn open_ended_sse_stream_skips_request_log() {
+        let mut ctx = TestContext::with_admin().await;
+        ctx.register_block("test/sse", Arc::new(SseStreamBlock));
+        drive(&ctx, "/x/sse", &route("/x/sse", "test/sse")).await;
+        assert_eq!(
+            request_log_count(&ctx).await,
+            0,
+            "an open-ended SSE stream must skip the request_logs row"
+        );
     }
 }
 

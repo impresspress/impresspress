@@ -6,6 +6,14 @@ use wafer_core::interfaces::network::service::{
     NetworkError, NetworkService, Request, Response, ResponseHead,
 };
 
+/// Response-body cap for the streaming fetch path, in bytes. Mirrors the
+/// native `wafer-block-network` SEC-020 default
+/// (`HttpNetworkService::DEFAULT_MAX_RESPONSE_BYTES`, 50 MiB) so a hostile or
+/// runaway upstream cannot stream unbounded into the isolate. A fixed constant
+/// rather than a config read: the unit-shaped `WorkerFetchService` has no
+/// config plumbing, and this is a security floor, not an operator knob.
+pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 50 * 1024 * 1024;
+
 /// NetworkService using CF Worker's fetch API.
 pub struct WorkerFetchService;
 
@@ -120,6 +128,13 @@ impl NetworkService for WorkerFetchService {
     /// already streamed; a dropped consumer aborts the blocked read via the
     /// paired cancellation token. A response with no body (e.g. `HEAD`, 204)
     /// yields an empty (`Complete`-only) body stream.
+    ///
+    /// SEC-020 response cap ([`DEFAULT_MAX_RESPONSE_BYTES`]) is enforced on this
+    /// new streaming capability the same way the native backend does: an
+    /// over-large advertised `Content-Length` is rejected before any bytes
+    /// stream, and the running byte total is checked per chunk (the only guard
+    /// for chunked / unknown-length responses), surfacing an `Error` terminal
+    /// on overflow after the partial bytes already forwarded.
     async fn do_request_streaming(
         &self,
         req: &Request,
@@ -130,6 +145,20 @@ impl NetworkService for WorkerFetchService {
             status_code: resp.status_code(),
             headers: collect_headers(&resp),
         };
+
+        // Reject up front when the advertised length already exceeds the cap,
+        // before streaming any bytes. `Headers::get` is case-insensitive.
+        // Read before `resp.stream()` takes its mutable borrow.
+        let cap = DEFAULT_MAX_RESPONSE_BYTES;
+        if let Ok(Some(len)) = resp.headers().get("content-length") {
+            if let Ok(advertised) = len.parse::<usize>() {
+                if advertised > cap {
+                    return Err(NetworkError::RequestError(format!(
+                        "response body {advertised} bytes exceeds cap of {cap} bytes"
+                    )));
+                }
+            }
+        }
 
         // `Response::stream` errors only when the response carries no body
         // (`ResponseBody::Empty`); map that to an empty body stream rather than
@@ -142,6 +171,7 @@ impl NetworkService for WorkerFetchService {
                 // `.next()` it regardless of the stream's own `Unpin`-ness.
                 let mut byte_stream = Box::pin(byte_stream);
                 OutputStream::from_producer(move |sink, cancel| async move {
+                    let mut received: usize = 0;
                     loop {
                         let Some(next) = cancel.run_until_cancelled(byte_stream.next()).await
                         else {
@@ -150,6 +180,21 @@ impl NetworkService for WorkerFetchService {
                         match next {
                             None => break,
                             Some(Ok(chunk)) => {
+                                // Running-total cap (SEC-020): bounds chunked /
+                                // unknown-length responses the advertised-length
+                                // guard above can't. Over-cap → Error terminal
+                                // after the partial bytes already sent (never a
+                                // silent truncation reported as Complete).
+                                received = received.saturating_add(chunk.len());
+                                if received > cap {
+                                    let _ = sink
+                                        .error(WaferError::new(
+                                            ErrorCode::Unavailable,
+                                            format!("response body exceeds cap of {cap} bytes"),
+                                        ))
+                                        .await;
+                                    return;
+                                }
                                 if sink.send_chunk(chunk).await.is_err() {
                                     return;
                                 }

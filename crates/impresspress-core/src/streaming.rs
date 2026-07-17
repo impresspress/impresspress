@@ -57,8 +57,13 @@ pub const STREAM_MARKER_VALUE: &str = "1";
 /// Maximum body size the buffered response path assembles in the isolate
 /// before reporting [`CappedCollect::OverLimit`] (which the adapter maps to
 /// HTTP 413 Payload Too Large). Responses larger than this are expected to
-/// take the streaming path, which never buffers. 100 MiB matches the
-/// storage/network streaming service caps upstream.
+/// take the streaming path, which never buffers. 100 MiB is a generous ceiling
+/// for a *buffered* (non-streaming) HTTP response — SSR pages and JSON API
+/// bodies are orders of magnitude smaller — chosen to catch a runaway buffered
+/// body before the Worker runtime rejects an oversized `Response`. It is
+/// independent of the outbound-fetch response cap
+/// (`network_service::DEFAULT_MAX_RESPONSE_BYTES`), which bounds a *streamed*
+/// upstream body on a different axis.
 pub const MAX_BUFFERED_RESPONSE_BYTES: usize = 100 * 1024 * 1024;
 
 /// True for content-types that should stream body chunks to the client as
@@ -79,6 +84,21 @@ pub fn leading_content_type(meta: &[MetaEntry]) -> Option<&str> {
     })
 }
 
+/// True when the response carries the explicit [`META_RESP_STREAM`] opt-in
+/// marker.
+///
+/// The marker distinguishes a **definite, audit-worthy** streamed response — a
+/// file download / share access whose final status is already known from its
+/// leading-meta header frame (no body drain needed) — from a genuinely
+/// **open-ended** stream (SSE / chat) that declares only a streaming
+/// content-type and has no definite status or completion. The pipeline uses
+/// this split to keep auditing short downloads (they still get a `request_logs`
+/// row) while skipping open-ended streams (buffering them just to read a status
+/// would defeat streaming).
+pub fn has_stream_marker(leading_meta: &[MetaEntry]) -> bool {
+    MetaGet::get(leading_meta, META_RESP_STREAM) == Some(STREAM_MARKER_VALUE)
+}
+
 /// The single streaming decision, consulted identically by the pipeline and
 /// every adapter: a response streams iff it declared streaming intent up front
 /// via leading meta — either the explicit [`META_RESP_STREAM`] marker or a
@@ -86,10 +106,8 @@ pub fn leading_content_type(meta: &[MetaEntry]) -> Option<&str> {
 /// all their meta in the trailing `Complete`, so they carry no leading meta
 /// and never match here.
 pub fn wants_streaming(leading_meta: &[MetaEntry]) -> bool {
-    if MetaGet::get(leading_meta, META_RESP_STREAM) == Some(STREAM_MARKER_VALUE) {
-        return true;
-    }
-    leading_content_type(leading_meta).is_some_and(is_streaming_content_type)
+    has_stream_marker(leading_meta)
+        || leading_content_type(leading_meta).is_some_and(is_streaming_content_type)
 }
 
 /// Pull `Meta` events off the front of an `OutputStream`, stopping at the first
