@@ -356,6 +356,27 @@ pub fn forbidden_response(msg: &wafer_run::Message) -> wafer_run::OutputStream {
     }
 }
 
+/// A credentialed, state-changing request that failed the CSRF origin policy
+/// (see [`crate::csrf::enforce_origin_policy`]). Kept distinct from
+/// [`forbidden_response`] so the message names the actual cause — a request
+/// that couldn't be verified as same-origin — instead of the misleading
+/// "admin access required" (which belongs to genuine admin-role denials).
+pub fn csrf_blocked_response(msg: &wafer_run::Message) -> wafer_run::OutputStream {
+    let accept = msg.get_meta("http.header.accept");
+    if accept.contains("text/html") && !accept.contains("application/json") {
+        status_response(
+            403,
+            "Request Blocked",
+            "403",
+            "Request blocked",
+            "This request couldn't be verified as coming from this site. Reload the page and try again.",
+            ("Go to homepage", "/"),
+        )
+    } else {
+        crate::http::err_forbidden("cross-origin request blocked")
+    }
+}
+
 /// Anonymous (or stale-session — identical by the time enforcement runs)
 /// browser request on a protected route: send the user to login with a return
 /// path so they land back where they started after signing in. API callers
