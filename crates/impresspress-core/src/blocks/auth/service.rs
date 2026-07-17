@@ -173,6 +173,14 @@ pub fn auth_grants() -> Vec<wafer_block::types::ResourceGrant> {
         // contains() fail-closed path treats every JWT as blocklisted,
         // 403-ing every signed-in admin request.
         wafer_run::ResourceGrant::read("impresspress/router", "wafer_run__auth__jwt_blocklist"),
+        // P2c: same pipeline-preprocessing shape as the blocklist grant
+        // above — `crate::crypto::extract_auth_meta` also calls
+        // `blocks::auth::current_auth_version()` (-> `repo::users::auth_version()`
+        // -> `db::get(ctx, USERS_TABLE, ...)`) in the router's context on
+        // every request bearing an access JWT. Without this grant WRAP
+        // denies the users-table read and the fail-closed lookup-error
+        // branch rejects every token, 403-ing every signed-in request.
+        wafer_run::ResourceGrant::read("impresspress/router", "wafer_run__auth__users"),
         // Admin block reads auth tables for the admin dashboards. The
         // wildcard mirrors the legacy AuthBlock grant — admin/pages/users
         // reads users, sessions, AND api_keys (the API-key tab) so the

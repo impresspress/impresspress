@@ -4,12 +4,22 @@ use std::collections::HashMap;
 
 use serde_json::{json, Value};
 use uuid::Uuid;
+use wafer_block::db::{Filter, FilterOp};
 use wafer_core::clients::database as db;
 use wafer_run::context::Context;
 
 use super::{map_bool, map_opt_str, map_str, now_iso, RepoError};
 
 pub const TABLE: &str = "wafer_run__auth__users";
+
+/// Column, JWT-claim, and cache-key name for the per-user auth-version
+/// counter (P2c: CODE_REVIEW_2026-07-16, "Access JWTs outlive account and
+/// role changes"). Kept as a single constant so the users-table column
+/// (migration `009_auth_version`), the access-JWT claim
+/// (`blocks::auth::helpers::generate_tokens`), and the verify-side cache key
+/// (`blocks::auth::current_auth_version`) can't drift onto different
+/// literals.
+pub const AUTH_VERSION_FIELD: &str = "auth_version";
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct UserRow {
@@ -307,6 +317,122 @@ pub async fn update_profile(
         .await
         .map_err(|e| RepoError::Db(format!("update profile for {user_id}: {e}")))?;
     row_from_map(&rec.data)
+}
+
+/// Read `user_id`'s current [`AUTH_VERSION_FIELD`] (P2c).
+///
+/// Returns `Ok(0)` when the user row is missing — mirrors
+/// [`is_email_verified`]'s doc-claim collapse. The verify-side check
+/// (`crate::crypto::extract_auth_meta`, via `blocks::auth::current_auth_version`)
+/// doesn't otherwise require the row to exist for a JWT to authenticate, so a
+/// missing row must not be indistinguishable from a real DB failure here.
+pub async fn auth_version(ctx: &dyn Context, user_id: &str) -> Result<i64, RepoError> {
+    use wafer_block::ErrorCode;
+
+    use crate::util::RecordExt;
+
+    match db::get(ctx, TABLE, user_id).await {
+        Ok(r) => Ok(r.i64_field(AUTH_VERSION_FIELD)),
+        Err(e) if e.code == ErrorCode::NotFound => Ok(0),
+        Err(e) => Err(RepoError::Db(format!(
+            "get auth_version for {user_id}: {e}"
+        ))),
+    }
+}
+
+/// Atomically increment `user_id`'s [`AUTH_VERSION_FIELD`] by 1 (P2c).
+///
+/// Issues a single `UPDATE ... SET auth_version = auth_version + 1 WHERE id
+/// = ?` via `db::increment_field_where` — a read-modify-write here could lose
+/// a concurrent bump (e.g. an admin disabling a user at the same moment the
+/// user changes their own password).
+///
+/// Callers should go through `blocks::auth::bump_auth_version`, which wraps
+/// this with the verify-side cache invalidation so the two can't drift out
+/// of sync; this function is the DB half only.
+pub async fn bump_auth_version(ctx: &dyn Context, user_id: &str) -> Result<(), RepoError> {
+    let filters = vec![Filter {
+        field: "id".to_string(),
+        operator: FilterOp::Equal,
+        value: json!(user_id),
+    }];
+    db::increment_field_where(ctx, TABLE, AUTH_VERSION_FIELD, 1, &filters)
+        .await
+        .map_err(|e| RepoError::Db(format!("bump_auth_version for {user_id}: {e}")))?;
+    Ok(())
+}
+
+#[cfg(test)]
+mod auth_version_tests {
+    use super::*;
+    use crate::test_support::TestContext;
+
+    async fn seed(ctx: &TestContext) -> String {
+        insert(
+            ctx,
+            NewUser {
+                email: "av@example.com".into(),
+                display_name: "AV".into(),
+                avatar_url: None,
+                role: "user".into(),
+            },
+        )
+        .await
+        .unwrap()
+        .id
+    }
+
+    #[tokio::test]
+    async fn fresh_user_starts_at_version_zero() {
+        let ctx = TestContext::with_auth().await;
+        let id = seed(&ctx).await;
+        assert_eq!(auth_version(&ctx, &id).await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn missing_user_reads_as_version_zero() {
+        let ctx = TestContext::with_auth().await;
+        assert_eq!(auth_version(&ctx, "does-not-exist").await.unwrap(), 0);
+    }
+
+    #[tokio::test]
+    async fn bump_increments_atomically_and_is_readable() {
+        let ctx = TestContext::with_auth().await;
+        let id = seed(&ctx).await;
+
+        bump_auth_version(&ctx, &id).await.unwrap();
+        assert_eq!(auth_version(&ctx, &id).await.unwrap(), 1);
+
+        bump_auth_version(&ctx, &id).await.unwrap();
+        bump_auth_version(&ctx, &id).await.unwrap();
+        assert_eq!(
+            auth_version(&ctx, &id).await.unwrap(),
+            3,
+            "three sequential bumps must land as +1 each, not overwrite"
+        );
+    }
+
+    #[tokio::test]
+    async fn bump_does_not_affect_other_users() {
+        let ctx = TestContext::with_auth().await;
+        let a = seed(&ctx).await;
+        let b = insert(
+            &ctx,
+            NewUser {
+                email: "other@example.com".into(),
+                display_name: "Other".into(),
+                avatar_url: None,
+                role: "user".into(),
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+
+        bump_auth_version(&ctx, &a).await.unwrap();
+        assert_eq!(auth_version(&ctx, &a).await.unwrap(), 1);
+        assert_eq!(auth_version(&ctx, &b).await.unwrap(), 0);
+    }
 }
 
 #[cfg(test)]

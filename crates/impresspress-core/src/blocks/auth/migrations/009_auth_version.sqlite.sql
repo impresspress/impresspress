@@ -1,0 +1,15 @@
+-- Per-user auth_version counter (P2c: CODE_REVIEW_2026-07-16, "Access JWTs
+-- outlive account and role changes"). A monotonic integer bumped by
+-- `crate::blocks::auth::bump_auth_version` on every security-relevant user
+-- mutation — password change, disable/enable, soft-delete, and role change
+-- (see `auth_ui::api::change_password`, `admin::ops`, `admin::iam`).
+--
+-- Every access JWT embeds the minting user's auth_version at issuance
+-- (`blocks::auth::helpers::generate_tokens`); the request-auth verify path
+-- (`crate::crypto::extract_auth_meta`) rejects a token whose embedded value
+-- is behind the stored current value, so an already-issued JWT is
+-- invalidated on the next request instead of only at its natural expiry.
+--
+-- SQLite has no `ADD COLUMN IF NOT EXISTS`; re-runs raise "duplicate column
+-- name", which `migration_helper` tolerates as an idempotent no-op.
+ALTER TABLE wafer_run__auth__users ADD COLUMN auth_version INTEGER NOT NULL DEFAULT 0;

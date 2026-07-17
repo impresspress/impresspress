@@ -6,6 +6,7 @@ use wafer_run::{context::Context, ErrorCode, InputStream, Message, OutputStream}
 
 use super::logs::audit_log;
 use crate::{
+    blocks::auth::bump_auth_version,
     http::{err_bad_request, err_conflict, err_forbidden, err_internal, err_not_found, ok_json},
     util::{json_map, RecordExt},
 };
@@ -285,6 +286,19 @@ async fn handle_assign_role(ctx: &dyn Context, msg: &Message, input: InputStream
     }));
     match db::create(ctx, USER_ROLES_TABLE, data).await {
         Ok(record) => {
+            // P2c: a role grant is a security-relevant change — bump the
+            // affected user's auth_version so any already-issued access JWT
+            // (minted with the old role set) is invalidated instead of
+            // keeping its stale `roles` claim until natural expiry. The row
+            // has already landed, so a failed bump must not read as success.
+            if let Err(e) = bump_auth_version(ctx, &body.user_id).await {
+                tracing::error!(
+                    user_id = %body.user_id,
+                    error = %e,
+                    "role assigned but auth_version bump failed"
+                );
+                return err_internal("Role assigned but session invalidation failed", e);
+            }
             // Audit-log like every other admin mutation (this JSON path used to
             // write zero audit rows).
             audit_log(
@@ -307,14 +321,17 @@ async fn handle_remove_role(ctx: &dyn Context, msg: &Message, path: &str) -> Out
         return err_bad_request("Missing user-role ID");
     }
 
-    // Prevent admins from removing their own admin role (self-lockout)
-    match db::get(ctx, USER_ROLES_TABLE, id).await {
+    // Prevent admins from removing their own admin role (self-lockout).
+    // Also captures the affected user id so a successful removal can bump
+    // their auth_version (P2c) below.
+    let role_user = match db::get(ctx, USER_ROLES_TABLE, id).await {
         Ok(record) => {
-            let role_user = record.str_field("user_id");
-            let role_name = record.str_field("role");
+            let role_user = record.str_field("user_id").to_string();
+            let role_name = record.str_field("role").to_string();
             if role_user == msg.user_id() && role_name == "admin" {
                 return err_bad_request("Cannot remove your own admin role");
             }
+            role_user
         }
         Err(e) if e.code == ErrorCode::NotFound => {
             return err_not_found("User-role assignment not found");
@@ -322,10 +339,22 @@ async fn handle_remove_role(ctx: &dyn Context, msg: &Message, path: &str) -> Out
         Err(e) => {
             return err_internal("Database error", e);
         }
-    }
+    };
 
     match db::delete(ctx, USER_ROLES_TABLE, id).await {
         Ok(()) => {
+            // P2c: role removal (demotion) is exactly the change this
+            // mechanism exists for — bump so a JWT minted with the removed
+            // role stops authenticating as that role immediately rather
+            // than at its natural expiry.
+            if let Err(e) = bump_auth_version(ctx, &role_user).await {
+                tracing::error!(
+                    user_id = %role_user,
+                    error = %e,
+                    "role removed but auth_version bump failed"
+                );
+                return err_internal("Role removed but session invalidation failed", e);
+            }
             audit_log(
                 ctx,
                 msg.user_id(),
@@ -373,7 +402,7 @@ mod tests {
     use wafer_run::{BlockInfo, WaferError};
 
     use super::*;
-    use crate::test_support::{output_is_error, output_json, TestContext};
+    use crate::test_support::{admin_msg, output_is_error, output_json, TestContext};
 
     /// Wraps a `TestContext` and turns every `db::get` call
     /// (`ServiceOp::DATABASE_GET`, wire kind `"database.get"`) into a
@@ -544,5 +573,101 @@ mod tests {
         .await;
         let json = output_json(out).await;
         assert_eq!(json["data"]["name"], "renamed-editor");
+    }
+
+    /// P2c: assigning a role is a security-relevant grant — it must bump the
+    /// target user's auth_version so an already-issued access JWT (minted
+    /// with the old, smaller role set) is invalidated instead of keeping its
+    /// stale `roles` claim until natural expiry.
+    #[tokio::test]
+    async fn assign_role_bumps_the_targets_auth_version() {
+        use crate::blocks::auth::repo::users;
+
+        let ctx = TestContext::with_auth().await;
+        let uid = users::insert(
+            &ctx,
+            users::NewUser {
+                email: "grantee@example.com".into(),
+                display_name: "Grantee".into(),
+                avatar_url: None,
+                role: "user".into(),
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+        assert_eq!(users::auth_version(&ctx, &uid).await.unwrap(), 0);
+
+        let msg = admin_msg("create", "/admin/iam/user-roles");
+        let out = handle_assign_role(
+            &ctx,
+            &msg,
+            body_input(serde_json::json!({"user_id": uid, "role": "editor"})),
+        )
+        .await;
+        assert!(
+            !output_is_error(out, "Internal").await,
+            "assign must succeed"
+        );
+
+        assert_eq!(
+            users::auth_version(&ctx, &uid).await.unwrap(),
+            1,
+            "assigning a role must bump the target user's auth_version"
+        );
+    }
+
+    /// P2c: removing a role (demotion) is exactly the change auth_version
+    /// exists to invalidate — an already-issued JWT minted with the removed
+    /// role must stop working immediately, not at its natural expiry.
+    #[tokio::test]
+    async fn remove_role_bumps_the_targets_auth_version() {
+        use crate::blocks::auth::repo::users;
+
+        let ctx = TestContext::with_auth().await;
+        let uid = users::insert(
+            &ctx,
+            users::NewUser {
+                email: "demotee@example.com".into(),
+                display_name: "Demotee".into(),
+                avatar_url: None,
+                role: "user".into(),
+            },
+        )
+        .await
+        .unwrap()
+        .id;
+
+        let msg = admin_msg("create", "/admin/iam/user-roles");
+        let assigned = output_json(
+            handle_assign_role(
+                &ctx,
+                &msg,
+                body_input(serde_json::json!({"user_id": uid, "role": "editor"})),
+            )
+            .await,
+        )
+        .await;
+        let role_row_id = assigned["id"]
+            .as_str()
+            .expect("assign response carries the user_roles row id")
+            .to_string();
+        // The assign above already bumped once; capture that baseline so the
+        // removal's OWN bump is what this test proves.
+        let before_remove = users::auth_version(&ctx, &uid).await.unwrap();
+
+        let remove_path = format!("/admin/iam/user-roles/{role_row_id}");
+        let remove_msg = admin_msg("delete", &remove_path);
+        let out = handle_remove_role(&ctx, &remove_msg, &remove_path).await;
+        assert!(
+            !output_is_error(out, "Internal").await,
+            "remove must succeed"
+        );
+
+        assert_eq!(
+            users::auth_version(&ctx, &uid).await.unwrap(),
+            before_remove + 1,
+            "removing a role must bump the target user's auth_version"
+        );
     }
 }
