@@ -48,7 +48,7 @@ jobs:
           prefix-key: wasm
 
       - name: Install wasm-pack
-        uses: jetli/wasm-pack-action@v0.4.0
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
         with:
           # Pin explicitly. With no version the action resolves "latest" via
           # the GitHub API and falls back to its ancient hardcoded default
@@ -193,6 +193,57 @@ jobs:
       - name: Check impresspress-browser + minimal-browser (wasm32)
         run: cargo check -p impresspress-browser -p minimal-browser --target wasm32-unknown-unknown
 
+  # impresspress-browser's `#[wasm_bindgen_test]`s (storage.rs, bridge.rs,
+  # network.rs — the wasm32-only-gated modules) previously only got
+  # `cargo check --target wasm32-unknown-unknown`'d by the `cloudflare` job
+  # above — compiled, never executed. They're pure JsValue-shape unit tests
+  # (build/decode plain JS objects via js-sys — no OPFS, no real fetch, no
+  # DOM) so they run headlessly under Node via `wasm-pack test --node`; no
+  # browser install needed. Independent of the impresspress-web wasm build
+  # (build.rs's include_bytes! prereq only matters for the `impresspress`
+  # crate), so this job doesn't need `build-wasm`'s artifact.
+  browser-wasm-test:
+    name: Browser WASM tests (impresspress-browser)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      # Gate like the `sdk` job below: skip the (slower, wasm-target) build
+      # entirely on PRs that don't touch impresspress-browser.
+      - name: Check for impresspress-browser changes
+        id: browser-changes
+        run: |
+          CHANGED=$(git diff --name-only ${{ github.event.pull_request.base.sha }}..HEAD -- crates/impresspress-browser/)
+          if [ -z "$CHANGED" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Rust
+        if: steps.browser-changes.outputs.skip != 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Rust cache
+        if: steps.browser-changes.outputs.skip != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: browser-wasm-test
+
+      - name: Install wasm-pack
+        if: steps.browser-changes.outputs.skip != 'true'
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
+        with:
+          version: 'v0.15.0'
+
+      - name: Run impresspress-browser wasm tests (Node)
+        if: steps.browser-changes.outputs.skip != 'true'
+        run: wasm-pack test --node crates/impresspress-browser
+
   # E2E is split into a single build stage plus two independent test stages so
   # the browser-WASM smoke tests (port 8080) and the native-server visual
   # baselines (port 8093) run in parallel instead of end-to-end in one job.
@@ -217,7 +268,7 @@ jobs:
           prefix-key: e2e
 
       - name: Install wasm-pack
-        uses: jetli/wasm-pack-action@v0.4.0
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
         with:
           # Pin explicitly. With no version the action resolves "latest" via
           # the GitHub API and falls back to its ancient hardcoded default
@@ -421,6 +472,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # Ignore entries in .cargo/audit.toml carry `expiry=YYYY-MM-DD`
+      # markers so temporary exceptions get re-triaged instead of living
+      # there forever. Fails the job if any marker's date has passed.
+      - name: Check for expired cargo-audit exceptions
+        run: bash scripts/check-audit-expiry.sh
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable

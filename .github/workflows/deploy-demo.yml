@@ -23,7 +23,7 @@ jobs:
           targets: wasm32-unknown-unknown
 
       - name: Install wasm-pack
-        uses: jetli/wasm-pack-action@v0.4.0
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
         with:
           # Pin explicitly — unpinned "latest" falls back to v0.9.1 on a GitHub
           # API flake, and v0.9.1 can't parse `license.workspace = true`.

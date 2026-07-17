@@ -41,7 +41,7 @@ jobs:
           prefix-key: wasm
 
       - name: Install wasm-pack
-        uses: jetli/wasm-pack-action@v0.4.0
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
         with:
           # Pin explicitly. With no version the action resolves "latest" via
           # the GitHub API and falls back to its ancient hardcoded default
@@ -171,6 +171,12 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      # Ignore entries in .cargo/audit.toml carry `expiry=YYYY-MM-DD`
+      # markers so temporary exceptions get re-triaged instead of living
+      # there forever. Fails the job if any marker's date has passed.
+      - name: Check for expired cargo-audit exceptions
+        run: bash scripts/check-audit-expiry.sh
 
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
