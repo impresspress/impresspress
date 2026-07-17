@@ -48,7 +48,7 @@ jobs:
           prefix-key: wasm
 
       - name: Install wasm-pack
-        uses: jetli/wasm-pack-action@v0.4.0
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
         with:
           # Pin explicitly. With no version the action resolves "latest" via
           # the GitHub API and falls back to its ancient hardcoded default
@@ -268,7 +268,7 @@ jobs:
           prefix-key: e2e
 
       - name: Install wasm-pack
-        uses: jetli/wasm-pack-action@v0.4.0
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
         with:
           # Pin explicitly. With no version the action resolves "latest" via
           # the GitHub API and falls back to its ancient hardcoded default
