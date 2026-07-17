@@ -6,9 +6,7 @@ use wafer_run::{context::Context, ErrorCode, Message, OutputStream};
 use super::repo;
 use crate::{
     blocks::rate_limit::{check_rate_limit, RateLimit, RateLimitOutcome, UserRateLimiter},
-    http::{
-        err_bad_request, err_forbidden, err_internal, err_internal_no_cause, err_not_found,
-    },
+    http::{err_bad_request, err_forbidden, err_internal, err_internal_no_cause, err_not_found},
     util::{json_map, RecordExt},
 };
 

@@ -96,7 +96,9 @@ pub fn wants_streaming(leading_meta: &[MetaEntry]) -> bool {
 /// non-`Meta` event. Returns the accumulated meta and the next event (if any),
 /// letting a caller peek the response's declared headers before deciding
 /// whether to stream the body or buffer it.
-pub async fn drain_leading_meta(stream: &mut OutputStream) -> (Vec<MetaEntry>, Option<StreamEvent>) {
+pub async fn drain_leading_meta(
+    stream: &mut OutputStream,
+) -> (Vec<MetaEntry>, Option<StreamEvent>) {
     let mut meta = Vec::new();
     while let Some(ev) = stream.next().await {
         match ev {
@@ -329,7 +331,10 @@ pub fn download_leading_meta(content_type: &str, extra_headers: &[(&str, &str)])
 /// an `Error` terminal after whatever bytes already streamed (no silent
 /// truncation reported as a clean `Complete`). A dropped consumer aborts the
 /// upstream read promptly via the paired cancellation token.
-pub fn stream_download(stream: NativeStorageGetStream, leading_meta: Vec<MetaEntry>) -> OutputStream {
+pub fn stream_download(
+    stream: NativeStorageGetStream,
+    leading_meta: Vec<MetaEntry>,
+) -> OutputStream {
     OutputStream::from_producer(move |sink, cancel| async move {
         for entry in leading_meta {
             if sink.send_meta(entry).await.is_err() {
@@ -340,9 +345,8 @@ pub fn stream_download(stream: NativeStorageGetStream, leading_meta: Vec<MetaEnt
         loop {
             // Race the upstream read against cancellation so a dropped consumer
             // aborts a blocked read promptly rather than after the next chunk.
-            let next = match cancel.run_until_cancelled(stream.next()).await {
-                None => return,
-                Some(n) => n,
+            let Some(next) = cancel.run_until_cancelled(stream.next()).await else {
+                return;
             };
             match next {
                 None => break,
@@ -403,7 +407,9 @@ mod tests {
     fn streaming_content_types_match_sse_and_octet_only() {
         assert!(is_streaming_content_type("text/event-stream"));
         assert!(is_streaming_content_type("application/octet-stream"));
-        assert!(is_streaming_content_type("TEXT/EVENT-STREAM; charset=utf-8"));
+        assert!(is_streaming_content_type(
+            "TEXT/EVENT-STREAM; charset=utf-8"
+        ));
         assert!(!is_streaming_content_type("image/png"));
         assert!(!is_streaming_content_type("application/json"));
     }
@@ -430,7 +436,10 @@ mod tests {
         // Buffered responses carry no leading meta at all.
         assert!(!wants_streaming(&[]));
         // A non-streaming content-type alone (as leading meta) does not stream.
-        assert!(!wants_streaming(&[meta(META_RESP_CONTENT_TYPE, "application/json")]));
+        assert!(!wants_streaming(&[meta(
+            META_RESP_CONTENT_TYPE,
+            "application/json"
+        )]));
         // The marker with the wrong value does not opt in.
         assert!(!wants_streaming(&[meta(META_RESP_STREAM, "0")]));
     }
@@ -444,7 +453,10 @@ mod tests {
                 ("Cache-Control", "private, max-age=3600"),
             ],
         );
-        assert_eq!(MetaGet::get(&m, META_RESP_STREAM), Some(STREAM_MARKER_VALUE));
+        assert_eq!(
+            MetaGet::get(&m, META_RESP_STREAM),
+            Some(STREAM_MARKER_VALUE)
+        );
         assert_eq!(MetaGet::get(&m, META_RESP_CONTENT_TYPE), Some("image/png"));
         assert_eq!(
             MetaGet::get(&m, "resp.header.Content-Disposition"),
@@ -478,13 +490,12 @@ mod tests {
 
     #[tokio::test]
     async fn collect_capped_within_limit_returns_buffered_terminal() {
-        let stream = OutputStream::respond_with_meta(
-            b"hello".to_vec(),
-            vec![meta(META_RESP_STATUS, "200")],
-        );
+        let stream =
+            OutputStream::respond_with_meta(b"hello".to_vec(), vec![meta(META_RESP_STATUS, "200")]);
         let mut stream = stream;
         let (leading, next) = drain_leading_meta(&mut stream).await;
-        match collect_capped_with_prelude(stream, leading, next, MAX_BUFFERED_RESPONSE_BYTES).await {
+        match collect_capped_with_prelude(stream, leading, next, MAX_BUFFERED_RESPONSE_BYTES).await
+        {
             CappedCollect::Terminal(Ok(buf)) => {
                 assert_eq!(buf.body, b"hello");
                 assert_eq!(MetaGet::get(&buf.meta, META_RESP_STATUS), Some("200"));
@@ -523,11 +534,10 @@ mod tests {
 
         // Error terminal maps via the codec's ErrorCode→status table.
         let err = WaferError::new(ErrorCode::PermissionDenied, "nope");
-        let parts =
-            http_codec::collect_http_response(terminal_to_stream(Err(TerminalNotResponse::Error(
-                err,
-            ))))
-            .await;
+        let parts = http_codec::collect_http_response(terminal_to_stream(Err(
+            TerminalNotResponse::Error(err),
+        )))
+        .await;
         assert_eq!(parts.status, 403);
 
         // Drop → 204.
@@ -549,7 +559,10 @@ mod tests {
             .map(|r| r.expect("no error terminal"))
             .collect()
             .await;
-        assert_eq!(collected, vec![b"one".to_vec(), b"two".to_vec(), b"three".to_vec()]);
+        assert_eq!(
+            collected,
+            vec![b"one".to_vec(), b"two".to_vec(), b"three".to_vec()]
+        );
     }
 
     #[tokio::test]
@@ -563,7 +576,10 @@ mod tests {
         let items: Vec<Result<Vec<u8>, WaferError>> =
             download_body_stream(b"head".to_vec(), rest).collect().await;
         assert!(items[0].as_ref().is_ok());
-        assert!(items.last().unwrap().is_err(), "error terminal must surface");
+        assert!(
+            items.last().unwrap().is_err(),
+            "error terminal must surface"
+        );
     }
 
     #[tokio::test]
@@ -573,16 +589,15 @@ mod tests {
             sink.complete(vec![]).await.ok();
         });
         let leading = vec![meta(META_RESP_CONTENT_TYPE, "text/event-stream")];
-        let rebuilt = rebuild_streaming(
-            leading,
-            Some(StreamEvent::Chunk(b"first".to_vec())),
-            rest,
-        );
+        let rebuilt = rebuild_streaming(leading, Some(StreamEvent::Chunk(b"first".to_vec())), rest);
         // Draining the rebuilt stream must yield the leading meta first, then
         // the peeked chunk, then the rest — the streaming contract.
         let mut rebuilt = rebuilt;
         let (m, next) = drain_leading_meta(&mut rebuilt).await;
-        assert_eq!(MetaGet::get(&m, META_RESP_CONTENT_TYPE), Some("text/event-stream"));
+        assert_eq!(
+            MetaGet::get(&m, META_RESP_CONTENT_TYPE),
+            Some("text/event-stream")
+        );
         assert!(matches!(next, Some(StreamEvent::Chunk(ref b)) if b == b"first"));
     }
 

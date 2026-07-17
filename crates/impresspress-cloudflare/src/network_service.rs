@@ -1,6 +1,10 @@
 use std::collections::HashMap;
 
-use wafer_core::interfaces::network::service::{NetworkError, NetworkService, Request, Response};
+use futures::StreamExt;
+use wafer_block::{common::ErrorCode, OutputStream, WaferError};
+use wafer_core::interfaces::network::service::{
+    NetworkError, NetworkService, Request, Response, ResponseHead,
+};
 
 /// NetworkService using CF Worker's fetch API.
 pub struct WorkerFetchService;
@@ -11,10 +15,25 @@ pub struct WorkerFetchService;
 unsafe impl Send for WorkerFetchService {}
 unsafe impl Sync for WorkerFetchService {}
 
-#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
-#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
-impl NetworkService for WorkerFetchService {
-    async fn do_request(&self, req: &Request) -> Result<Response, NetworkError> {
+impl WorkerFetchService {
+    /// Shared request setup + dispatch for both the buffered [`do_request`] and
+    /// the streaming [`do_request_streaming`] paths: method parse, request
+    /// init, header/body build, and the `fetch` call. Keeping it in one place
+    /// means the two entry points can never drift on how a request is built or
+    /// on any gate applied before dispatch — mirroring how the native
+    /// `wafer-run/network` backend shares one `send_request`.
+    ///
+    /// SSRF / allowlist enforcement is intentionally NOT duplicated here: on
+    /// Cloudflare the Workers runtime sandboxes outbound subrequests (it cannot
+    /// reach the internal metadata service or private ranges the way a native
+    /// process can), which is exactly why the buffered `do_request` never
+    /// carried an explicit `is_blocked_url` gate either. Both paths therefore
+    /// apply the identical (platform-provided) gate; the streaming path adds no
+    /// new capability that would bypass a check the buffered path enforces.
+    ///
+    /// [`do_request`]: NetworkService::do_request
+    /// [`do_request_streaming`]: NetworkService::do_request_streaming
+    async fn send(&self, req: &Request) -> Result<worker::Response, NetworkError> {
         let method = match req.method.to_uppercase().as_str() {
             "GET" => worker::Method::Get,
             "POST" => worker::Method::Post,
@@ -50,25 +69,108 @@ impl NetworkService for WorkerFetchService {
                 .map_err(|e| NetworkError::RequestError(format!("set header {k}: {e}")))?;
         }
 
-        let mut resp = worker::Fetch::Request(worker_req)
+        worker::Fetch::Request(worker_req)
             .send()
             .await
-            .map_err(|e| NetworkError::RequestError(format!("fetch error: {e}")))?;
+            .map_err(|e| NetworkError::RequestError(format!("fetch error: {e}")))
+    }
+}
+
+/// Flatten a Worker response's headers into the wire-facing
+/// `name → [values]` map (one entry per header name, all values preserved).
+/// Shared by both the buffered and streaming paths so their head shapes match.
+fn collect_headers(resp: &worker::Response) -> HashMap<String, Vec<String>> {
+    let mut resp_headers: HashMap<String, Vec<String>> = HashMap::new();
+    for (k, v) in resp.headers() {
+        resp_headers.entry(k).or_default().push(v);
+    }
+    resp_headers
+}
+
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
+impl NetworkService for WorkerFetchService {
+    async fn do_request(&self, req: &Request) -> Result<Response, NetworkError> {
+        let mut resp = self.send(req).await?;
 
         let status_code = resp.status_code();
         let resp_body = resp
             .bytes()
             .await
             .map_err(|e| NetworkError::RequestError(format!("read body: {e}")))?;
-        let mut resp_headers: HashMap<String, Vec<String>> = HashMap::new();
-        for (k, v) in resp.headers() {
-            resp_headers.entry(k).or_default().push(v);
-        }
+        let resp_headers = collect_headers(&resp);
 
         Ok(Response {
             status_code,
             headers: resp_headers,
             body: resp_body,
         })
+    }
+
+    /// Streams the upstream `fetch` response body through the Worker's native
+    /// `ReadableStream` (`Response::stream` → `worker::ByteStream`) into an
+    /// [`OutputStream`], instead of buffering the whole body into a `Vec` like
+    /// [`do_request`](Self::do_request). The [`ResponseHead`] (status +
+    /// headers) is resolved eagerly from the response head; body chunks flow
+    /// verbatim as they arrive.
+    ///
+    /// Goes through the same [`send`](Self::send) path as the buffered request,
+    /// so the SSRF/allowlist posture is identical (see `send`'s doc). A
+    /// body-read failure surfaces as an `Error` terminal after whatever bytes
+    /// already streamed; a dropped consumer aborts the blocked read via the
+    /// paired cancellation token. A response with no body (e.g. `HEAD`, 204)
+    /// yields an empty (`Complete`-only) body stream.
+    async fn do_request_streaming(
+        &self,
+        req: &Request,
+    ) -> Result<(ResponseHead, OutputStream), NetworkError> {
+        let mut resp = self.send(req).await?;
+
+        let head = ResponseHead {
+            status_code: resp.status_code(),
+            headers: collect_headers(&resp),
+        };
+
+        // `Response::stream` errors only when the response carries no body
+        // (`ResponseBody::Empty`); map that to an empty body stream rather than
+        // failing the whole request — parity with the buffered path, where
+        // `bytes()` returns an empty `Vec` for a bodyless response.
+        let body_stream = match resp.stream() {
+            Ok(byte_stream) => {
+                // `ByteStream` owns a `'static` handle to the JS ReadableStream,
+                // so it outlives `resp`. Box-pin so the producer loop can
+                // `.next()` it regardless of the stream's own `Unpin`-ness.
+                let mut byte_stream = Box::pin(byte_stream);
+                OutputStream::from_producer(move |sink, cancel| async move {
+                    loop {
+                        let Some(next) = cancel.run_until_cancelled(byte_stream.next()).await
+                        else {
+                            return;
+                        };
+                        match next {
+                            None => break,
+                            Some(Ok(chunk)) => {
+                                if sink.send_chunk(chunk).await.is_err() {
+                                    return;
+                                }
+                            }
+                            Some(Err(e)) => {
+                                let _ = sink
+                                    .error(WaferError::new(
+                                        ErrorCode::Unavailable,
+                                        format!("reading response body: {e}"),
+                                    ))
+                                    .await;
+                                return;
+                            }
+                        }
+                    }
+                    let _ = sink.complete(vec![]).await;
+                })
+            }
+            Err(_) => OutputStream::respond_with_meta(vec![], vec![]),
+        };
+
+        Ok((head, body_stream))
     }
 }

@@ -205,7 +205,8 @@ pub async fn handle_request(
         i64,
         String,
         OutputStream,
-    ) = match crate::streaming::collect_buffered_with_prelude(stream, leading_meta, next_event).await
+    ) = match crate::streaming::collect_buffered_with_prelude(stream, leading_meta, next_event)
+        .await
     {
         Ok(buf) => {
             let code = i64::from(http_codec::resolve_status(&buf.meta, 200));

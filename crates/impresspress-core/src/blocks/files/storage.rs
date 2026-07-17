@@ -912,7 +912,10 @@ mod integration_tests {
             })
             .flatten()
             .collect();
-        assert_eq!(body, b"PNGDATA", "the object body must be streamed verbatim");
+        assert_eq!(
+            body, b"PNGDATA",
+            "the object body must be streamed verbatim"
+        );
     }
 
     /// Build a browser-shaped `multipart/form-data` envelope around

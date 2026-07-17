@@ -3,6 +3,8 @@
 //! Implements the shared `StorageService` trait from wafer-core so R2Block
 //! can reuse the shared message handler.
 
+use futures::StreamExt;
+use wafer_block::{common::ErrorCode, OutputStream, WaferError};
 use wafer_core::interfaces::storage::service::{
     FolderInfo, ListOptions, ObjectInfo, ObjectList, StorageError, StorageService,
 };
@@ -95,6 +97,88 @@ impl StorageService for R2StorageService {
         };
 
         Ok((bytes, info))
+    }
+
+    /// Stream the R2 object body straight through the Worker's native
+    /// `ReadableStream` (`ObjectBody::stream` → `worker::ByteStream`) into an
+    /// [`OutputStream`], instead of buffering the whole object into a `Vec`
+    /// like the default `get_streaming` (which forwards to the buffered
+    /// [`get`](Self::get)). `ObjectInfo` — including the authoritative
+    /// `obj.size()` from the object head, not a post-read byte count — is
+    /// resolved eagerly and returned as the header; body chunks flow verbatim
+    /// as R2 delivers them. A body-read failure is surfaced as an `Error`
+    /// terminal after whatever bytes already streamed (never a silent
+    /// truncation reported as a clean `Complete`); a dropped consumer aborts
+    /// the blocked R2 read promptly via the paired cancellation token.
+    async fn get_streaming(
+        &self,
+        folder: &str,
+        key: &str,
+    ) -> Result<(OutputStream, ObjectInfo), StorageError> {
+        let r2_key = self.prefixed_key(folder, key);
+        let obj = self
+            .bucket
+            .get(&r2_key)
+            .execute()
+            .await
+            .map_err(|e| StorageError::Internal(e.to_string()))?
+            .ok_or(StorageError::NotFound)?;
+
+        let info = ObjectInfo {
+            key: key.to_string(),
+            // Authoritative size from the object head (the default `get` path
+            // reports `bytes.len()` only because it has already buffered).
+            size: obj.size() as i64,
+            content_type: obj
+                .http_metadata()
+                .content_type
+                .unwrap_or_else(|| "application/octet-stream".to_string()),
+            last_modified: r2_date_to_chrono(obj.uploaded()),
+        };
+
+        let body = obj
+            .body()
+            .ok_or_else(|| StorageError::Internal("no body".into()))?;
+        // `ByteStream` owns a `'static` handle to the JS ReadableStream, so it
+        // outlives `obj` (dropped at the end of this function). Box-pin it so
+        // the producer loop can `.next()` it regardless of the stream's own
+        // `Unpin`-ness.
+        let mut byte_stream = Box::pin(
+            body.stream()
+                .map_err(|e| StorageError::Internal(e.to_string()))?,
+        );
+
+        let stream = OutputStream::from_producer(move |sink, cancel| async move {
+            loop {
+                // Race the R2 read against cancellation so a dropped consumer
+                // aborts a blocked read promptly rather than after the next
+                // chunk resolves.
+                let Some(next) = cancel.run_until_cancelled(byte_stream.next()).await else {
+                    return;
+                };
+                match next {
+                    None => break,
+                    Some(Ok(chunk)) => {
+                        if sink.send_chunk(chunk).await.is_err() {
+                            // Consumer dropped the stream — stop reading.
+                            return;
+                        }
+                    }
+                    Some(Err(e)) => {
+                        let _ = sink
+                            .error(WaferError::new(
+                                ErrorCode::Internal,
+                                format!("R2 read body {r2_key}: {e}"),
+                            ))
+                            .await;
+                        return;
+                    }
+                }
+            }
+            let _ = sink.complete(vec![]).await;
+        });
+
+        Ok((stream, info))
     }
 
     async fn delete(&self, folder: &str, key: &str) -> Result<(), StorageError> {
