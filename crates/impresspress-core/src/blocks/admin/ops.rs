@@ -43,7 +43,7 @@ pub(super) use crate::util::validate_url_value;
 /// call sites in this module tree keep working.
 pub(super) use crate::util::{is_sensitive_key, MASKED_VALUE};
 use crate::{
-    blocks::auth::USERS_TABLE,
+    blocks::auth::{bump_auth_version, USERS_TABLE},
     http::{err_bad_request, err_forbidden, err_internal, err_not_found},
     util::RecordExt,
 };
@@ -121,6 +121,22 @@ pub(super) async fn set_user_disabled(
         Err(e) => return Err(err_internal("Database error", e)),
     };
 
+    // P2c: a disable/enable is a lifecycle change existing access JWTs must
+    // not survive — bump auth_version so they stop authenticating on the
+    // next request (see `crate::crypto::extract_auth_meta`). The mutation
+    // has already landed, so a failed bump must not be reported as success.
+    if let Err(e) = bump_auth_version(ctx, user_id).await {
+        tracing::error!(
+            user_id = %user_id,
+            error = %e,
+            "user disabled/enabled but auth_version bump failed"
+        );
+        return Err(err_internal(
+            "User updated but session invalidation failed",
+            e,
+        ));
+    }
+
     let action = if disabled {
         "user.disable"
     } else {
@@ -154,6 +170,20 @@ pub(super) async fn delete_user(
         Err(e) => return Err(err_internal("Database error", e)),
     }
 
+    // P2c: same reasoning as `set_user_disabled` — a soft-delete must
+    // invalidate already-issued access JWTs, not just refresh tokens.
+    if let Err(e) = bump_auth_version(ctx, user_id).await {
+        tracing::error!(
+            user_id = %user_id,
+            error = %e,
+            "user deleted but auth_version bump failed"
+        );
+        return Err(err_internal(
+            "User deleted but session invalidation failed",
+            e,
+        ));
+    }
+
     audit_log(
         ctx,
         &admin_id,
@@ -185,6 +215,11 @@ pub(super) async fn update_user_fields(
         }
     }
 
+    // Whether this patch touches the `disabled` lifecycle field — captured
+    // before `data` is consumed by the whitelist loop below, so the P2c bump
+    // after the write knows whether it's needed.
+    let touches_disabled = body.contains_key("disabled");
+
     let mut data = HashMap::new();
     for key in &["name", "disabled", "avatar_url"] {
         if let Some(val) = body.get(*key) {
@@ -201,6 +236,25 @@ pub(super) async fn update_user_fields(
         Err(e) if e.code == ErrorCode::NotFound => return Err(err_not_found("User not found")),
         Err(e) => return Err(err_internal("Database error", e)),
     };
+
+    // P2c: this whitelist can also flip `disabled` (the SSR path uses
+    // `set_user_disabled` directly, but this JSON path is reachable too) —
+    // bump auth_version the same way whenever it does, so a PATCH that
+    // disables a user can't bypass JWT invalidation just because it went
+    // through the generic field-update endpoint instead.
+    if touches_disabled {
+        if let Err(e) = bump_auth_version(ctx, user_id).await {
+            tracing::error!(
+                user_id = %user_id,
+                error = %e,
+                "user updated but auth_version bump failed"
+            );
+            return Err(err_internal(
+                "User updated but session invalidation failed",
+                e,
+            ));
+        }
+    }
 
     audit_log(
         ctx,
@@ -757,5 +811,73 @@ mod tests {
 
         expect_ok(set_user_disabled(&ctx, &msg, "u2", true).await);
         assert_eq!(audit_count(&ctx, "user.disable").await, 1);
+    }
+
+    /// P2c: disable, soft-delete, and a `disabled`-touching field update must
+    /// each bump the target user's auth_version so already-issued access JWTs
+    /// stop authenticating (`crate::crypto::extract_auth_meta`'s check). A
+    /// field update that does NOT touch `disabled` must NOT bump — a plain
+    /// name/avatar edit isn't a security-relevant lifecycle change.
+    #[tokio::test]
+    async fn user_lifecycle_mutations_bump_auth_version() {
+        use crate::blocks::auth::repo::users;
+
+        let ctx = admin_ctx().await;
+        crate::blocks::auth::migrations::apply(&ctx)
+            .await
+            .expect("apply auth migrations");
+        let msg = admin_msg("update", "/admin/users/admin_1");
+
+        let seed = |id: &str, email: &str| {
+            let mut data = HashMap::new();
+            data.insert("id".to_string(), serde_json::json!(id));
+            data.insert("email".to_string(), serde_json::json!(email));
+            data.insert("display_name".to_string(), serde_json::json!(id));
+            crate::util::stamp_created(&mut data);
+            data
+        };
+
+        db::create(&ctx, USERS_TABLE, seed("disable-me", "d@example.com"))
+            .await
+            .expect("seed user");
+        assert_eq!(users::auth_version(&ctx, "disable-me").await.unwrap(), 0);
+        expect_ok(set_user_disabled(&ctx, &msg, "disable-me", true).await);
+        assert_eq!(
+            users::auth_version(&ctx, "disable-me").await.unwrap(),
+            1,
+            "disable must bump auth_version"
+        );
+
+        db::create(&ctx, USERS_TABLE, seed("delete-me", "del@example.com"))
+            .await
+            .expect("seed user");
+        assert_eq!(users::auth_version(&ctx, "delete-me").await.unwrap(), 0);
+        expect_ok(delete_user(&ctx, &msg, "delete-me").await);
+        assert_eq!(
+            users::auth_version(&ctx, "delete-me").await.unwrap(),
+            1,
+            "soft-delete must bump auth_version"
+        );
+
+        db::create(&ctx, USERS_TABLE, seed("patch-me", "p@example.com"))
+            .await
+            .expect("seed user");
+        let mut body: HashMap<String, serde_json::Value> = HashMap::new();
+        body.insert("name".to_string(), serde_json::json!("New Name"));
+        expect_ok(update_user_fields(&ctx, &msg, "patch-me", &body).await);
+        assert_eq!(
+            users::auth_version(&ctx, "patch-me").await.unwrap(),
+            0,
+            "a field update that doesn't touch `disabled` must not bump auth_version"
+        );
+
+        let mut disable_body: HashMap<String, serde_json::Value> = HashMap::new();
+        disable_body.insert("disabled".to_string(), serde_json::json!(true));
+        expect_ok(update_user_fields(&ctx, &msg, "patch-me", &disable_body).await);
+        assert_eq!(
+            users::auth_version(&ctx, "patch-me").await.unwrap(),
+            1,
+            "a field update that DOES touch `disabled` must bump auth_version"
+        );
     }
 }

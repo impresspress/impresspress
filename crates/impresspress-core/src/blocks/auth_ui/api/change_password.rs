@@ -6,6 +6,7 @@ use wafer_run::{context::Context, InputStream, Message, OutputStream};
 use crate::{
     blocks::{
         auth::{
+            bump_auth_version,
             repo::{local_credentials, tokens},
             USERS_TABLE,
         },
@@ -87,7 +88,24 @@ pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> Out
             // partial-failure signal: log it and surface a non-success
             // response rather than swallowing it with `.ok()`.
             match tokens::revoke_all_for_user(ctx, user_id).await {
-                Ok(()) => ok_json(&serde_json::json!({"message": "Password changed successfully"})),
+                Ok(()) => {
+                    // P2c: invalidate already-issued access JWTs too — refresh
+                    // revocation alone doesn't touch a still-live access token,
+                    // which would otherwise keep authenticating with the old
+                    // password's blessing until its natural expiry. Same
+                    // fail-closed treatment as the revocation above: the
+                    // credential has already changed, so a failed bump must
+                    // not be reported as success.
+                    if let Err(e) = bump_auth_version(ctx, user_id).await {
+                        tracing::error!(
+                            user_id = %user_id,
+                            error = %e,
+                            "password changed but auth_version bump failed"
+                        );
+                        return err_internal("Password changed but session invalidation failed", e);
+                    }
+                    ok_json(&serde_json::json!({"message": "Password changed successfully"}))
+                }
                 Err(e) => {
                     tracing::error!(
                         user_id = %user_id,
@@ -190,5 +208,32 @@ mod tests {
         let buf = collect_or_panic(out).await;
         let json: serde_json::Value = serde_json::from_slice(&buf.body).unwrap();
         assert_eq!(json["message"], "Password changed successfully");
+    }
+
+    /// P2c: a successful password change must bump the user's auth_version
+    /// so already-issued access JWTs stop authenticating (see
+    /// `crate::crypto::extract_auth_meta`'s `auth_version` check).
+    #[tokio::test]
+    async fn successful_password_change_bumps_auth_version() {
+        use crate::blocks::auth::repo::users;
+
+        let ctx = ctx_with_crypto().await;
+        let user_id = signup_user(&ctx, "carol@example.com", "original-horse-battery1").await;
+        assert_eq!(users::auth_version(&ctx, &user_id).await.unwrap(), 0);
+
+        let msg = auth_msg("update", "/b/auth/api/change-password", &user_id);
+        let out = handle(
+            &ctx,
+            &msg,
+            body("original-horse-battery1", "new-horse-battery-2026"),
+        )
+        .await;
+        let _ = collect_or_panic(out).await;
+
+        assert_eq!(
+            users::auth_version(&ctx, &user_id).await.unwrap(),
+            1,
+            "password change must bump auth_version"
+        );
     }
 }
