@@ -15,6 +15,16 @@ export default defineConfig({
   },
   use: {
     baseURL: `http://127.0.0.1:${PORT}`,
+    // Present as a same-origin browser request. impresspress' CSRF defense
+    // rejects credentialed (cookie-carrying) state-changing requests that
+    // don't prove same-origin via Sec-Fetch metadata — a real browser form
+    // POST always sends these, but Playwright's API request context does not
+    // by default, so signup->login in one context would otherwise 403.
+    extraHTTPHeaders: {
+      'Origin': `http://127.0.0.1:${PORT}`,
+      'Sec-Fetch-Site': 'same-origin',
+      'Sec-Fetch-Mode': 'cors',
+    },
     trace: 'on-first-retry',
     screenshot: 'only-on-failure',
     video: 'retain-on-failure',
