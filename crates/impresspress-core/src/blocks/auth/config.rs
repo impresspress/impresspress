@@ -63,6 +63,21 @@ pub const PASSWORD_MIN_LENGTH_DEFAULT: u32 = 8;
 /// is stolen or a user logs out before the natural expiry.
 pub const ACCESS_TOKEN_LIFETIME_SECS_DEFAULT: u64 = 1800;
 
+/// Hard upper bound on [`ACCESS_TOKEN_LIFETIME_SECS_KEY`], enforced by
+/// [`super::helpers::access_token_lifetime_secs`] regardless of what an
+/// admin configures (P2c: CODE_REVIEW_2026-07-16, "Access JWTs outlive
+/// account and role changes"). `auth_version` (see `super::current_auth_version`)
+/// is the primary fix for stale-JWT exposure — it invalidates an
+/// already-issued token on the next request after a bump, bounded only by
+/// the short verify-side cache TTL — but it's still one mechanism, checked
+/// on one code path. This cap is the belt-and-suspenders backstop: even if
+/// `auth_version` were ever bypassed or buggy for some request path, an
+/// admin cannot configure a token that stays valid indefinitely by raw
+/// expiry alone. 24h matches the pre-SEC-042 default, so existing "long
+/// session" deployments aren't silently clamped tighter than they were
+/// before that hardening landed.
+pub const ACCESS_TOKEN_LIFETIME_SECS_MAX: u64 = 86_400;
+
 /// Config vars contributed by the Plan A2 auth block additions.
 ///
 /// Appended to the existing legacy `config_keys` list; do not duplicate or
@@ -106,7 +121,7 @@ pub fn auth_config_vars() -> Vec<ConfigVar> {
         .name("Password Minimum Length"),
         ConfigVar::new(
             ACCESS_TOKEN_LIFETIME_SECS_KEY,
-            "Lifetime of an issued JWT access token in seconds. Shorter values reduce the SEC-042 exposure window when a JWT leaks; longer values reduce refresh churn. Logout invalidates the in-flight JWT regardless via the blocklist.",
+            "Lifetime of an issued JWT access token in seconds. Shorter values reduce the SEC-042 exposure window when a JWT leaks; longer values reduce refresh churn. Logout invalidates the in-flight JWT regardless via the blocklist, and password/disable/role changes invalidate it via auth_version. Hard-capped at 86400 (24h) regardless of this value.",
             &ACCESS_TOKEN_LIFETIME_SECS_DEFAULT.to_string(),
         )
         .name("Access Token Lifetime (seconds)"),

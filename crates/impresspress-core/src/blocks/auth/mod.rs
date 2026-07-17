@@ -474,14 +474,20 @@ pub(crate) mod helpers {
 
     /// Resolve the configured access-token lifetime (SEC-042). Reads
     /// `WAFER_RUN__AUTH__ACCESS_TOKEN_LIFETIME_SECS`; falls back to the
-    /// declared default (30 min) if unset or unparseable.
+    /// declared default (30 min) if unset or unparseable, and is always
+    /// clamped to [`config::ACCESS_TOKEN_LIFETIME_SECS_MAX`] (P2c) — an admin
+    /// cannot configure this past the hard cap.
     pub(crate) async fn access_token_lifetime_secs(ctx: &dyn wafer_run::context::Context) -> u64 {
-        use super::config::{ACCESS_TOKEN_LIFETIME_SECS_DEFAULT, ACCESS_TOKEN_LIFETIME_SECS_KEY};
+        use super::config::{
+            ACCESS_TOKEN_LIFETIME_SECS_DEFAULT, ACCESS_TOKEN_LIFETIME_SECS_KEY,
+            ACCESS_TOKEN_LIFETIME_SECS_MAX,
+        };
         let raw = config_client::get_default(ctx, ACCESS_TOKEN_LIFETIME_SECS_KEY, "").await;
         raw.parse::<u64>()
             .ok()
             .filter(|n| *n > 0)
             .unwrap_or(ACCESS_TOKEN_LIFETIME_SECS_DEFAULT)
+            .min(ACCESS_TOKEN_LIFETIME_SECS_MAX)
     }
 
     /// Returns (access_token, refresh_token, family).
@@ -772,6 +778,44 @@ pub(crate) mod helpers {
             access_lifetime,
             cookie,
         })
+    }
+
+    #[cfg(test)]
+    mod access_token_lifetime_tests {
+        use super::*;
+        use crate::test_support::TestContext;
+
+        #[tokio::test]
+        async fn unset_falls_back_to_default() {
+            let ctx = TestContext::new().await;
+            assert_eq!(
+                access_token_lifetime_secs(&ctx).await,
+                config::ACCESS_TOKEN_LIFETIME_SECS_DEFAULT
+            );
+        }
+
+        #[tokio::test]
+        async fn honors_a_value_under_the_cap() {
+            let mut ctx = TestContext::new().await;
+            ctx.set_config("WAFER_RUN__AUTH__ACCESS_TOKEN_LIFETIME_SECS", "60");
+            assert_eq!(access_token_lifetime_secs(&ctx).await, 60);
+        }
+
+        #[tokio::test]
+        async fn clamps_a_value_over_the_cap() {
+            // P2c: an admin configuring an absurdly long-lived access token
+            // must not be able to defeat the belt-and-suspenders backstop —
+            // the resolved lifetime never exceeds the hard cap.
+            let mut ctx = TestContext::new().await;
+            ctx.set_config(
+                "WAFER_RUN__AUTH__ACCESS_TOKEN_LIFETIME_SECS",
+                &(config::ACCESS_TOKEN_LIFETIME_SECS_MAX * 10).to_string(),
+            );
+            assert_eq!(
+                access_token_lifetime_secs(&ctx).await,
+                config::ACCESS_TOKEN_LIFETIME_SECS_MAX
+            );
+        }
     }
 
     #[cfg(test)]
