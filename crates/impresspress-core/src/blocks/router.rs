@@ -88,15 +88,21 @@ impl Block for ImpresspressRouterBlock {
 
     async fn handle(&self, ctx: &dyn Context, msg: Message, input: InputStream) -> OutputStream {
         // Resolve auth token from Authorization header or auth_token cookie.
+        // `cookie_authenticated` records WHICH source resolved it — this is
+        // the one place in the pipeline that knows the difference, so it's
+        // forwarded to `handle_request` for the CSRF origin policy
+        // (`crate::csrf::enforce_origin_policy`): a credential that came from
+        // the cookie fallback is exactly the case a cross-site page can ride
+        // ambiently; a real `Authorization: Bearer` header is not.
         let auth_header = msg.header("authorization");
-        let auth_value = if !auth_header.is_empty() {
-            Some(auth_header.to_string())
+        let (auth_value, cookie_authenticated) = if !auth_header.is_empty() {
+            (Some(auth_header.to_string()), false)
         } else {
             let cookie_token = msg.cookie("auth_token");
             if !cookie_token.is_empty() {
-                Some(format!("Bearer {cookie_token}"))
+                (Some(format!("Bearer {cookie_token}")), true)
             } else {
-                None
+                (None, false)
             }
         };
 
@@ -115,6 +121,7 @@ impl Block for ImpresspressRouterBlock {
             input,
             auth_value.as_deref(),
             &jwt_secret,
+            cookie_authenticated,
             self.features.as_ref(),
             &self.block_infos,
             &self.extra_routes,
