@@ -28,8 +28,9 @@
 //!   [`SchemaCache`], so a warm backend memoizes those introspection facts and
 //!   issues zero introspection round-trips in steady state. The shared defaults
 //!   own invalidation (lazy `ALTER TABLE`, `exec_raw`/DDL) — D1's own
-//!   schema-management methods are no-ops (schema is migration-owned) and
-//!   mutate nothing, so they need none.
+//!   schema-*mutation* methods never run on the live path (schema is
+//!   migration-owned; a runtime mutation attempt is an explicit error, see the
+//!   `DatabaseService` impl) and so touch no cache.
 //! - [`strict_schema`](DbExec::strict_schema) reads a flag applied once at
 //!   lifecycle `Init` via [`set_strict_schema`](DatabaseService::set_strict_schema)
 //!   (the shared `wafer-run/database` handler reads
@@ -429,22 +430,44 @@ impl DatabaseService for D1DatabaseService {
         DbExec::update_where_count(self, collection, filters, data).await
     }
 
-    // --- Schema management: D1 schema is owned by Wrangler migrations ---
+    // --- Schema management: D1 schema is migration-owned ---
+    //
+    // D1's schema is established *exclusively* by each block's `migrations/*.sql`,
+    // applied at lifecycle `Init` through `db::ddl` (the host DDL op → `run_execute`)
+    // and gated by the migration-bless / `IMPRESSPRESS_RUN_MIGRATIONS` workflow.
+    // The runtime `DatabaseService` schema-*mutation* methods below are therefore
+    // never part of the live D1 path:
+    //
+    // - `ensure_schema_table` runs only from `handler::handle_lifecycle`, and only
+    //   when the `wafer-run/database` block is registered *with* a non-empty table
+    //   set. Impresspress always registers it via `service_blocks::database::register_with`
+    //   (empty `tables`), so `handle_lifecycle` takes its `tables.is_empty()` branch
+    //   and never calls this.
+    // - `schema_add_column` / `schema_drop_table` have no production caller at all.
+    //   The shared `DbExec` lazy column-add issues its `ALTER TABLE ADD COLUMN` via
+    //   `run_execute` (see `DbExec::add_column_checked`), not this method, and it is
+    //   disabled outright under STRICT_SCHEMA (which live CF deploys set).
+    //
+    // Returning `Ok(())` here would *claim* a mutation happened when nothing did — a
+    // silent success that only surfaces later as a confusing "no such table" / "no
+    // such column" from the next query. Instead each returns an explicit error so a
+    // mistaken runtime schema mutation on D1 fails loudly and names the fix (edit the
+    // block's migration files). `schema_table_exists` is a read and stays live.
 
-    async fn ensure_schema_table(&self, _table: &Table) -> Result<(), DatabaseError> {
-        Ok(())
+    async fn ensure_schema_table(&self, table: &Table) -> Result<(), DatabaseError> {
+        Err(schema_mutation_unsupported("ensure_schema_table", &table.name))
     }
 
     async fn schema_table_exists(&self, name: &str) -> Result<bool, DatabaseError> {
         DbExec::schema_table_exists(self, name).await
     }
 
-    async fn schema_drop_table(&self, _name: &str) -> Result<(), DatabaseError> {
-        Ok(())
+    async fn schema_drop_table(&self, name: &str) -> Result<(), DatabaseError> {
+        Err(schema_mutation_unsupported("schema_drop_table", name))
     }
 
-    async fn schema_add_column(&self, _table: &str, _column: &Column) -> Result<(), DatabaseError> {
-        Ok(())
+    async fn schema_add_column(&self, table: &str, _column: &Column) -> Result<(), DatabaseError> {
+        Err(schema_mutation_unsupported("schema_add_column", table))
     }
 
     fn set_strict_schema(&self, enabled: bool) {
@@ -480,6 +503,22 @@ fn json_value_to_js(val: &serde_json::Value) -> JsValue {
 /// Convert any Display error into a DatabaseError::Internal.
 fn db_err(e: impl std::fmt::Display) -> DatabaseError {
     DatabaseError::Internal(e.to_string())
+}
+
+/// The explicit "runtime schema mutation unsupported on D1" error shared by the
+/// three schema-*mutation* methods (`ensure_schema_table`, `schema_drop_table`,
+/// `schema_add_column`). D1's schema is migration-owned (see those methods'
+/// doc comment): a runtime mutation attempt is a genuine misuse, so it fails
+/// loudly rather than returning a silent `Ok(())` that hides the no-op. `method`
+/// is the trait method name and `target` the table it was asked to mutate — both
+/// surfaced so the misuse is diagnosable from the error line alone.
+fn schema_mutation_unsupported(method: &str, target: &str) -> DatabaseError {
+    DatabaseError::Internal(format!(
+        "runtime schema mutation unsupported on Cloudflare D1: `{method}` on \
+         `{target}` — D1 schema is migration-owned. Declare the table/column in \
+         the block's `migrations/*.sql` (applied at Init via `db::ddl`) instead \
+         of mutating the schema at runtime."
+    ))
 }
 
 /// Whether a D1 error message indicates the target table doesn't exist.
