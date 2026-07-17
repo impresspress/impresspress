@@ -455,7 +455,10 @@ impl DatabaseService for D1DatabaseService {
     // block's migration files). `schema_table_exists` is a read and stays live.
 
     async fn ensure_schema_table(&self, table: &Table) -> Result<(), DatabaseError> {
-        Err(schema_mutation_unsupported("ensure_schema_table", &table.name))
+        Err(schema_mutation_unsupported(
+            "ensure_schema_table",
+            &table.name,
+        ))
     }
 
     async fn schema_table_exists(&self, name: &str) -> Result<bool, DatabaseError> {
