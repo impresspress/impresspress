@@ -58,6 +58,8 @@ pub async fn profile_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
                 }
             }
             form action="/b/userportal/update-profile" method="post" {
+                (crate::csrf::hidden_field(ctx, msg))
+
                 div .form-group {
                     label .form-label for="display-name" { "Display name" }
                     input .form-input #display-name type="text" name="name"

@@ -12,7 +12,7 @@
 //! submits a plain HTML form — no JS).
 
 use wafer_core::clients::config;
-use wafer_run::{context::Context, InputStream, OutputStream};
+use wafer_run::{context::Context, InputStream, Message, OutputStream};
 
 use crate::{
     blocks::{
@@ -26,14 +26,30 @@ use crate::{
         errors::error_response,
     },
     http::{
-        err_bad_request, err_internal, err_internal_no_cause, err_unauthorized, ResponseBuilder,
+        err_bad_request, err_forbidden, err_internal, err_internal_no_cause, err_unauthorized,
+        ResponseBuilder,
     },
     util::parse_form_body,
 };
 
-pub async fn handle(ctx: &dyn Context, input: InputStream) -> OutputStream {
+pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> OutputStream {
     let raw = input.collect_to_bytes().await;
     let form = parse_form_body(&raw);
+
+    // CSRF defense-in-depth: this is a plain (no-JS) `<form>` POST, so the
+    // Fetch-Metadata/Origin layer (`crate::csrf::enforce_origin_policy`) is
+    // the only thing that would otherwise gate it — that layer only applies
+    // to COOKIE-authenticated requests, and this endpoint runs before any
+    // session exists. Validate the token the GET page embedded via
+    // `crate::csrf::hidden_field` instead.
+    let submitted_csrf = form
+        .get(crate::csrf::FIELD_NAME)
+        .map(String::as_str)
+        .unwrap_or("");
+    if !crate::csrf::verify(ctx, msg, submitted_csrf) {
+        return err_forbidden("invalid or missing csrf token");
+    }
+
     let token = match form.get("token") {
         Some(t) if !t.is_empty() => t.clone(),
         _ => return err_bad_request("missing token"),
@@ -147,9 +163,26 @@ mod tests {
         ctx
     }
 
+    /// The `Message` the real GET page (`pages::bootstrap::handle_get`)
+    /// would build for this POST's matching request — anonymous, no session
+    /// yet (that's the whole point of bootstrap redemption). Used both to
+    /// call `handle()` (which reads `msg.user_id()` via `crate::csrf::verify`)
+    /// and to compute the matching token via [`csrf_field`].
+    fn bootstrap_msg() -> Message {
+        crate::test_support::anon_msg("create", "/b/auth/api/bootstrap")
+    }
+
+    /// The `csrf_token=...` form fragment the GET page would have embedded
+    /// via `crate::csrf::hidden_field` for `msg`, computed the same way the
+    /// handler validates it.
+    fn csrf_field(ctx: &TestContext, msg: &Message) -> String {
+        format!("csrf_token={}", crate::csrf::token(ctx, msg))
+    }
+
     #[tokio::test]
     async fn redeems_valid_token_creates_admin_and_consumes_row() {
         let ctx = ctx_with_crypto().await;
+        let msg = bootstrap_msg();
 
         // Seed a bootstrap token row (sha256 of "test-token-xyz").
         let raw = "test-token-xyz";
@@ -162,9 +195,12 @@ mod tests {
             .unwrap();
 
         // POST the form.
-        let form = format!("token={raw}&email=admin@example.com&password=test1234");
+        let form = format!(
+            "token={raw}&email=admin@example.com&password=test1234&{}",
+            csrf_field(&ctx, &msg)
+        );
         let input = InputStream::from_bytes(form.into_bytes());
-        let _ = handle(&ctx, input).await;
+        let _ = handle(&ctx, &msg, input).await;
 
         // Admin user got created.
         let user = users::find_by_email(&ctx, "admin@example.com")
@@ -178,6 +214,56 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn missing_csrf_token_is_rejected() {
+        let ctx = ctx_with_crypto().await;
+        let msg = bootstrap_msg();
+
+        let raw = "no-csrf-token";
+        let hash = hash_token(raw);
+        let expires = (chrono::Utc::now() + chrono::Duration::hours(24))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        bootstrap_tokens::insert(&ctx, hash.clone(), &expires)
+            .await
+            .unwrap();
+
+        // No `csrf_token` field at all.
+        let form = format!("token={raw}&email=admin@example.com&password=test1234");
+        let out = handle(&ctx, &msg, InputStream::from_bytes(form.into_bytes())).await;
+        assert!(
+            crate::test_support::output_is_error(out, "PermissionDenied").await,
+            "a form POST with no csrf_token must be rejected"
+        );
+        // The token row must NOT have been consumed — rejection happens
+        // before the bootstrap-token lookup.
+        assert!(bootstrap_tokens::is_valid(&ctx, &hash).await.unwrap());
+    }
+
+    #[tokio::test]
+    async fn wrong_csrf_token_is_rejected() {
+        let ctx = ctx_with_crypto().await;
+        let msg = bootstrap_msg();
+
+        let raw = "wrong-csrf-token";
+        let hash = hash_token(raw);
+        let expires = (chrono::Utc::now() + chrono::Duration::hours(24))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        bootstrap_tokens::insert(&ctx, hash.clone(), &expires)
+            .await
+            .unwrap();
+
+        let form =
+            format!("token={raw}&email=admin@example.com&password=test1234&csrf_token=bogus");
+        let out = handle(&ctx, &msg, InputStream::from_bytes(form.into_bytes())).await;
+        assert!(
+            crate::test_support::output_is_error(out, "PermissionDenied").await,
+            "a form POST with a wrong csrf_token must be rejected"
+        );
+        assert!(bootstrap_tokens::is_valid(&ctx, &hash).await.unwrap());
+    }
+
+    #[tokio::test]
     async fn second_redemption_of_same_token_fails_and_does_not_double_create() {
         // Reproduces the single-use race directly (not just the repo-level
         // primitive): the same raw token, redeemed a second time, must be
@@ -185,6 +271,7 @@ mod tests {
         // `take_valid_by_hash`'s atomic consume is actually wired into the
         // handler in the "consume before create" order.
         let ctx = ctx_with_crypto().await;
+        let msg = bootstrap_msg();
 
         let raw = "single-use-token";
         let hash = hash_token(raw);
@@ -195,9 +282,17 @@ mod tests {
             .await
             .unwrap();
 
-        let form = format!("token={raw}&email=admin@example.com&password=test1234");
+        let form = format!(
+            "token={raw}&email=admin@example.com&password=test1234&{}",
+            csrf_field(&ctx, &msg)
+        );
 
-        let first = handle(&ctx, InputStream::from_bytes(form.clone().into_bytes())).await;
+        let first = handle(
+            &ctx,
+            &msg,
+            InputStream::from_bytes(form.clone().into_bytes()),
+        )
+        .await;
         assert_eq!(
             crate::test_support::output_status(first).await,
             302,
@@ -205,7 +300,7 @@ mod tests {
         );
 
         // Same raw token again — the row is already gone.
-        let second = handle(&ctx, InputStream::from_bytes(form.into_bytes())).await;
+        let second = handle(&ctx, &msg, InputStream::from_bytes(form.into_bytes())).await;
         assert!(
             crate::test_support::output_is_error(second, "Unauthenticated").await,
             "a second redemption of an already-consumed token must be rejected"
@@ -235,6 +330,7 @@ mod tests {
         // can let both requests observe the token as valid before either
         // deletes it, minting two admin accounts from one single-use token.
         let ctx = ctx_with_crypto().await;
+        let msg = bootstrap_msg();
 
         let raw = "concurrent-token";
         let hash = hash_token(raw);
@@ -245,12 +341,13 @@ mod tests {
             .await
             .unwrap();
 
-        let form_a = format!("token={raw}&email=admin-a@example.com&password=test1234");
-        let form_b = format!("token={raw}&email=admin-b@example.com&password=test1234");
+        let csrf = csrf_field(&ctx, &msg);
+        let form_a = format!("token={raw}&email=admin-a@example.com&password=test1234&{csrf}");
+        let form_b = format!("token={raw}&email=admin-b@example.com&password=test1234&{csrf}");
 
         let (out_a, out_b) = tokio::join!(
-            handle(&ctx, InputStream::from_bytes(form_a.into_bytes())),
-            handle(&ctx, InputStream::from_bytes(form_b.into_bytes())),
+            handle(&ctx, &msg, InputStream::from_bytes(form_a.into_bytes())),
+            handle(&ctx, &msg, InputStream::from_bytes(form_b.into_bytes())),
         );
         // One of the two concurrent redemptions is expected to come back as
         // an error terminal (the loser observes the token already
@@ -299,9 +396,13 @@ mod tests {
     #[tokio::test]
     async fn rejects_invalid_token() {
         let ctx = ctx_with_crypto().await;
-        let form = "token=wrong&email=admin@example.com&password=test1234";
-        let input = InputStream::from_bytes(form.as_bytes().to_vec());
-        let _ = handle(&ctx, input).await;
+        let msg = bootstrap_msg();
+        let form = format!(
+            "token=wrong&email=admin@example.com&password=test1234&{}",
+            csrf_field(&ctx, &msg)
+        );
+        let input = InputStream::from_bytes(form.into_bytes());
+        let _ = handle(&ctx, &msg, input).await;
         // No admin user was created.
         assert!(users::find_by_email(&ctx, "admin@example.com")
             .await
@@ -312,6 +413,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_short_password() {
         let ctx = ctx_with_crypto().await;
+        let msg = bootstrap_msg();
         // Even with a valid token row, the handler must reject password <8 chars.
         let raw = "another-token";
         let hash = hash_token(raw);
@@ -322,9 +424,12 @@ mod tests {
             .await
             .unwrap();
 
-        let form = format!("token={raw}&email=admin@example.com&password=short");
+        let form = format!(
+            "token={raw}&email=admin@example.com&password=short&{}",
+            csrf_field(&ctx, &msg)
+        );
         let input = InputStream::from_bytes(form.into_bytes());
-        let _ = handle(&ctx, input).await;
+        let _ = handle(&ctx, &msg, input).await;
 
         // No admin user, token row still valid (not consumed on rejection).
         assert!(users::find_by_email(&ctx, "admin@example.com")
@@ -337,6 +442,7 @@ mod tests {
     #[tokio::test]
     async fn rejects_common_password() {
         let ctx = ctx_with_crypto().await;
+        let msg = bootstrap_msg();
         // "admin123" is 8 chars — the old `password.len() < 8` check let it
         // through. It must now be rejected via the shared blocklist
         // (`validate_new_password`) routed through in Task 5.
@@ -349,9 +455,12 @@ mod tests {
             .await
             .unwrap();
 
-        let form = format!("token={raw}&email=admin@example.com&password=admin123");
+        let form = format!(
+            "token={raw}&email=admin@example.com&password=admin123&{}",
+            csrf_field(&ctx, &msg)
+        );
         let input = InputStream::from_bytes(form.into_bytes());
-        let _ = handle(&ctx, input).await;
+        let _ = handle(&ctx, &msg, input).await;
 
         // No admin user, token row still valid (not consumed on rejection).
         assert!(users::find_by_email(&ctx, "admin@example.com")
@@ -365,6 +474,7 @@ mod tests {
     async fn redeems_valid_token_redirects_to_a_real_route() {
         use wafer_run::{MetaGet, META_RESP_STATUS};
         let ctx = ctx_with_crypto().await;
+        let msg = bootstrap_msg();
         let raw = "redirect-token";
         let hash = hash_token(raw);
         let expires = (chrono::Utc::now() + chrono::Duration::hours(24))
@@ -374,8 +484,11 @@ mod tests {
             .await
             .unwrap();
 
-        let form = format!("token={raw}&email=admin@example.com&password=test1234");
-        let buf = handle(&ctx, InputStream::from_bytes(form.into_bytes()))
+        let form = format!(
+            "token={raw}&email=admin@example.com&password=test1234&{}",
+            csrf_field(&ctx, &msg)
+        );
+        let buf = handle(&ctx, &msg, InputStream::from_bytes(form.into_bytes()))
             .await
             .collect_buffered()
             .await

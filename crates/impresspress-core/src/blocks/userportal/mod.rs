@@ -250,6 +250,21 @@ async fn handle_update_profile(
 
     let raw = input.collect_to_bytes().await;
     let body = parse_form_body(&raw);
+
+    // CSRF defense-in-depth: this is a plain (no-JS) `<form>` POST (see
+    // `pages::profile::profile_page`, which embeds the matching token via
+    // `crate::csrf::hidden_field`). The Fetch-Metadata/Origin layer
+    // (`crate::csrf::enforce_origin_policy`) already covers this request
+    // since it's cookie-authenticated and unsafe-method; this is the
+    // additional per-form check.
+    let submitted_csrf = body
+        .get(crate::csrf::FIELD_NAME)
+        .map(String::as_str)
+        .unwrap_or("");
+    if !crate::csrf::verify(ctx, msg, submitted_csrf) {
+        return err_forbidden("invalid or missing csrf token");
+    }
+
     let name = body.get("name").map(|s| s.as_str()).unwrap_or("");
 
     let mut data = std::collections::HashMap::new();
@@ -266,6 +281,97 @@ async fn handle_update_profile(
     // Plain form POST → 303 See Other so the browser follows up with a GET
     // and the back/forward stack stays clean.
     crate::http::redirect(303, "/b/userportal/profile")
+}
+
+#[cfg(test)]
+mod update_profile_csrf_tests {
+    use super::*;
+    use crate::test_support::{auth_msg, output_status, TestContext};
+
+    async fn seed_user(ctx: &TestContext, user_id: &str) {
+        let mut data = std::collections::HashMap::new();
+        data.insert("id".to_string(), serde_json::json!(user_id));
+        data.insert("email".to_string(), serde_json::json!("u@example.com"));
+        data.insert("display_name".to_string(), serde_json::json!("Old Name"));
+        data.insert("name".to_string(), serde_json::json!("Old Name"));
+        data.insert("role".to_string(), serde_json::json!("user"));
+        data.insert("email_verified".to_string(), serde_json::json!(true));
+        crate::util::stamp_created(&mut data);
+        db::create(ctx, crate::blocks::auth::USERS_TABLE, data)
+            .await
+            .expect("seed user row");
+    }
+
+    #[tokio::test]
+    async fn valid_csrf_token_is_accepted() {
+        let ctx = TestContext::with_userportal().await;
+        seed_user(&ctx, "user-1").await;
+        let msg = auth_msg("create", "/b/userportal/update-profile", "user-1");
+
+        let form = format!(
+            "name=New+Name&csrf_token={}",
+            crate::csrf::token(&ctx, &msg)
+        );
+        let out =
+            handle_update_profile(&ctx, &msg, InputStream::from_bytes(form.into_bytes())).await;
+        assert_eq!(output_status(out).await, 303, "valid token must succeed");
+
+        let updated = db::get(&ctx, crate::blocks::auth::USERS_TABLE, "user-1")
+            .await
+            .unwrap();
+        assert_eq!(updated.str_field("name"), "New Name");
+    }
+
+    #[tokio::test]
+    async fn missing_csrf_token_is_rejected() {
+        let ctx = TestContext::with_userportal().await;
+        seed_user(&ctx, "user-1").await;
+        let msg = auth_msg("create", "/b/userportal/update-profile", "user-1");
+
+        let form = "name=New+Name".to_string();
+        let out =
+            handle_update_profile(&ctx, &msg, InputStream::from_bytes(form.into_bytes())).await;
+        assert!(
+            crate::test_support::output_is_error(out, "PermissionDenied").await,
+            "a form POST with no csrf_token must be rejected"
+        );
+
+        // Row must be unchanged — rejection happens before the update.
+        let unchanged = db::get(&ctx, crate::blocks::auth::USERS_TABLE, "user-1")
+            .await
+            .unwrap();
+        assert_eq!(unchanged.str_field("name"), "Old Name");
+    }
+
+    #[tokio::test]
+    async fn wrong_csrf_token_is_rejected() {
+        let ctx = TestContext::with_userportal().await;
+        seed_user(&ctx, "user-1").await;
+        let msg = auth_msg("create", "/b/userportal/update-profile", "user-1");
+
+        let form = "name=New+Name&csrf_token=not-the-right-value".to_string();
+        let out =
+            handle_update_profile(&ctx, &msg, InputStream::from_bytes(form.into_bytes())).await;
+        assert!(crate::test_support::output_is_error(out, "PermissionDenied").await);
+    }
+
+    #[tokio::test]
+    async fn another_users_token_is_rejected() {
+        // The token is per-identity — user B's valid token must not authorize
+        // a mutation submitted as user A.
+        let ctx = TestContext::with_userportal().await;
+        seed_user(&ctx, "user-1").await;
+        let msg_a = auth_msg("create", "/b/userportal/update-profile", "user-1");
+        let msg_b = auth_msg("create", "/b/userportal/update-profile", "user-2");
+
+        let form = format!(
+            "name=New+Name&csrf_token={}",
+            crate::csrf::token(&ctx, &msg_b)
+        );
+        let out =
+            handle_update_profile(&ctx, &msg_a, InputStream::from_bytes(form.into_bytes())).await;
+        assert!(crate::test_support::output_is_error(out, "PermissionDenied").await);
+    }
 }
 
 // ---------------------------------------------------------------------------

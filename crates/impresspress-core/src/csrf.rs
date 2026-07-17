@@ -8,19 +8,59 @@
 //! browser or a same-site (but attacker-influenced) subdomain can trigger, so
 //! it is not a complete CSRF defense on its own.
 //!
-//! [`enforce_origin_policy`] — Fetch-Metadata (`Sec-Fetch-Site`) / `Origin` /
-//! `Referer` validation for cookie-authenticated unsafe-method requests. This
-//! is the BROAD net: called exactly once, from `pipeline::handle_request`,
-//! before any block dispatch, so it covers every mutation uniformly. A
-//! request authenticated by a real `Authorization: Bearer` header (not the
-//! cookie) is exempt — a cross-site page has no ambient credential to attach
-//! a bearer token with, so it cannot forge that request in the first place.
+//! Two independent layers, both centralized here so no handler re-implements
+//! either:
 //!
-//! A stateless per-form synchronizer token (defense-in-depth for the handful
-//! of plain SSR `<form>` POSTs in this app) is layered on top of this module
-//! in a follow-up change.
+//! 1. [`enforce_origin_policy`] — Fetch-Metadata (`Sec-Fetch-Site`) / `Origin`
+//!    / `Referer` validation for cookie-authenticated unsafe-method requests.
+//!    This is the BROAD net: called exactly once, from
+//!    `pipeline::handle_request`, before any block dispatch, so it covers
+//!    every mutation uniformly. A request authenticated by a real
+//!    `Authorization: Bearer` header (not the cookie) is exempt — a
+//!    cross-site page has no ambient credential to attach a bearer token
+//!    with, so it cannot forge that request in the first place.
+//!
+//! 2. [`token`] / [`hidden_field`] / [`verify`] — a stateless synchronizer
+//!    token for the plain (non-JS, non-`htmx`) SSR `<form>` POSTs in this
+//!    app (bootstrap-admin redemption, profile update). Defense-in-depth on
+//!    top of layer 1: even a same-origin/allowed-origin POST must also carry
+//!    the correct per-identity token, which a same-site-but-compromised
+//!    origin (e.g. a sibling subdomain sharing the cookie's `Domain`) still
+//!    could not produce or read.
+//!
+//! `htmx`- and `fetch`-driven forms elsewhere in the app (admin variables,
+//! users, database explorer, portal buttons, chat composer, settings forms,
+//! …) are not retrofitted with the token: they are real browser-issued
+//! requests like any other, so layer 1 already covers them, and they already
+//! require the `Admin`/`Authenticated` route tier centrally enforced by
+//! `routing::route_to_block`. Layer 2 targets the handful of forms that
+//! submit as a plain, unmediated browser POST.
 
-use wafer_run::{Message, OutputStream};
+use maud::{html, Markup};
+use wafer_block_crypto::primitives;
+use wafer_run::{context::Context, Message, OutputStream};
+
+/// KDF context label for the CSRF signing key (see [`primitives::derive_block_key`]).
+/// Keeps the CSRF key cryptographically independent from the JWT verify key
+/// derived (elsewhere) from the same master secret, even though both trace
+/// back to `WAFER_RUN__AUTH__JWT_SECRET`.
+const CSRF_KEY_LABEL: &str = "impresspress/csrf";
+
+/// Subject used to key the token when no session is established yet (e.g.
+/// the bootstrap-admin form, rendered and submitted with no `auth_token`
+/// cookie at all). A constant subject is fine here — the anonymous case does
+/// not need per-visitor uniqueness to defeat CSRF, only unguessability, and
+/// an attacker's cross-site page can neither compute this HMAC (no master
+/// secret) nor read it off our page (Same-Origin Policy).
+const ANONYMOUS_SUBJECT: &str = "anonymous";
+
+/// `<form>` field name every CSRF-protected plain-HTML form submits the
+/// token under.
+pub const FIELD_NAME: &str = "csrf_token";
+
+// ---------------------------------------------------------------------------
+// Layer 1: Fetch-Metadata / Origin / Referer policy
+// ---------------------------------------------------------------------------
 
 /// HTTP methods a CSRF attack can drive (state-changing). Matches the
 /// `wafer_block::http_codec::action_for_http_method` wire contract:
@@ -119,13 +159,64 @@ fn normalize_authority(host_header: &str) -> Option<String> {
 }
 
 // ---------------------------------------------------------------------------
+// Layer 2: stateless synchronizer token for plain SSR `<form>` POSTs
+// ---------------------------------------------------------------------------
+
+/// Compute the expected CSRF token for the current request's identity.
+///
+/// Stateless: an HMAC over the caller's identity (the authenticated
+/// `user_id`, or [`ANONYMOUS_SUBJECT`] pre-login) keyed by a
+/// `WAFER_RUN__AUTH__JWT_SECRET`-derived key. No server-side storage, so it
+/// survives restarts and multi-isolate deployments; rotating the master
+/// secret invalidates every outstanding token exactly like it invalidates
+/// every JWT.
+pub fn token(ctx: &dyn Context, msg: &Message) -> String {
+    let secret = ctx
+        .config_get(crate::blocks::auth::JWT_SECRET_KEY)
+        .unwrap_or("");
+    let key = primitives::derive_block_key(secret.as_bytes(), CSRF_KEY_LABEL);
+    let subject = subject_for(msg);
+    let mac = primitives::hmac_sha256(key.as_bytes(), subject.as_bytes());
+    crate::util::hex_encode(&mac)
+}
+
+fn subject_for(msg: &Message) -> &str {
+    let uid = msg.user_id();
+    if uid.is_empty() {
+        ANONYMOUS_SUBJECT
+    } else {
+        uid
+    }
+}
+
+/// Hidden `<input>` carrying the current [`token`] value. Embed inside any
+/// plain SSR `<form>` this module protects; the corresponding POST handler
+/// validates it with [`verify`].
+pub fn hidden_field(ctx: &dyn Context, msg: &Message) -> Markup {
+    let value = token(ctx, msg);
+    html! { input type="hidden" name=(FIELD_NAME) value=(value); }
+}
+
+/// Validate a submitted token against the expected value for this request's
+/// identity. Constant-time compare — a timing side-channel would let an
+/// attacker recover the expected token byte-by-byte, defeating the whole
+/// point of the check.
+pub fn verify(ctx: &dyn Context, msg: &Message, submitted: &str) -> bool {
+    if submitted.is_empty() {
+        return false;
+    }
+    let expected = token(ctx, msg);
+    primitives::constant_time_eq(expected.as_bytes(), submitted.as_bytes())
+}
+
+// ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{anon_msg, auth_msg};
+    use crate::test_support::{anon_msg, auth_msg, TestContext};
 
     fn cookie_msg(action: &str, path: &str, user_id: &str) -> Message {
         let mut msg = if user_id.is_empty() {
@@ -245,5 +336,55 @@ mod tests {
         let mut msg = cookie_msg("create", "/b/admin/users", "user-1");
         msg.set_meta("http.header.origin", "http://impresspress.example.com");
         assert!(enforce_origin_policy(&msg, true).is_none());
+    }
+
+    // -- token / hidden_field / verify ---------------------------------------
+
+    #[tokio::test]
+    async fn token_roundtrips_for_authenticated_user() {
+        let mut ctx = TestContext::new().await;
+        ctx.set_config(crate::blocks::auth::JWT_SECRET_KEY, "test-master-secret");
+        let msg = auth_msg("create", "/b/userportal/update-profile", "user-1");
+
+        let tok = token(&ctx, &msg);
+        assert!(!tok.is_empty());
+        assert!(verify(&ctx, &msg, &tok));
+    }
+
+    #[tokio::test]
+    async fn token_differs_per_user() {
+        let mut ctx = TestContext::new().await;
+        ctx.set_config(crate::blocks::auth::JWT_SECRET_KEY, "test-master-secret");
+        let msg_a = auth_msg("create", "/x", "user-a");
+        let msg_b = auth_msg("create", "/x", "user-b");
+        assert_ne!(token(&ctx, &msg_a), token(&ctx, &msg_b));
+    }
+
+    #[tokio::test]
+    async fn anonymous_subject_produces_a_stable_token() {
+        let mut ctx = TestContext::new().await;
+        ctx.set_config(crate::blocks::auth::JWT_SECRET_KEY, "test-master-secret");
+        let msg1 = anon_msg("create", "/b/auth/api/bootstrap");
+        let msg2 = anon_msg("create", "/b/auth/api/bootstrap");
+        assert_eq!(token(&ctx, &msg1), token(&ctx, &msg2));
+    }
+
+    #[tokio::test]
+    async fn verify_rejects_empty_or_wrong_token() {
+        let mut ctx = TestContext::new().await;
+        ctx.set_config(crate::blocks::auth::JWT_SECRET_KEY, "test-master-secret");
+        let msg = auth_msg("create", "/b/userportal/update-profile", "user-1");
+        assert!(!verify(&ctx, &msg, ""));
+        assert!(!verify(&ctx, &msg, "not-the-right-token"));
+    }
+
+    #[tokio::test]
+    async fn hidden_field_embeds_the_current_token() {
+        let mut ctx = TestContext::new().await;
+        ctx.set_config(crate::blocks::auth::JWT_SECRET_KEY, "test-master-secret");
+        let msg = auth_msg("retrieve", "/b/userportal/profile", "user-1");
+        let rendered = hidden_field(&ctx, &msg).into_string();
+        assert!(rendered.contains(&format!(r#"name="{FIELD_NAME}""#)));
+        assert!(rendered.contains(&token(&ctx, &msg)));
     }
 }
