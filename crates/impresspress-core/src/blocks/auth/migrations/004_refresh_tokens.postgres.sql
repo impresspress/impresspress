@@ -9,6 +9,7 @@ CREATE TABLE IF NOT EXISTS wafer_run__auth__tokens (
     generation   BIGINT NOT NULL DEFAULT 0,
     revoked      BOOLEAN NOT NULL DEFAULT FALSE,
     created_at   TEXT NOT NULL,
+    updated_at   TEXT NOT NULL,
     expires_at   TEXT
 );
 CREATE UNIQUE INDEX IF NOT EXISTS wafer_run__auth__tokens_token_hash_uniq

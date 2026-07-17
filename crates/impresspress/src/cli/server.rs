@@ -114,6 +114,21 @@ pub async fn run(repo_root: &Path, run_migrations: bool) -> anyhow::Result<()> {
         .await
         .map_err(|e| anyhow!("load block settings: {e}"))?;
 
+    // STRICT_SCHEMA (`WAFER_RUN__DATABASE__STRICT_SCHEMA`): a deploy-time
+    // operational flag, read straight from the process env — exactly like the
+    // Cloudflare target reads it from a worker var. It is deliberately NOT
+    // routed through the declared-key DB-seeded `vars` path: `all_block_infos()`
+    // enumerates only impresspress feature blocks, so the wafer-core
+    // `wafer-run/database` service block's config var is not a "declared key"
+    // and `filter_to_declared_keys` would drop it — and it's an operator deploy
+    // decision, not an admin-editable runtime toggle to persist in the
+    // variables table. The `wafer-run/database` block reads it via
+    // `ctx.config_get` at Init and calls `set_strict_schema`. Threaded into
+    // both config surfaces below (async config service + sync snapshot), which
+    // must carry identical data.
+    let strict_schema =
+        std::env::var(wafer_core::interfaces::database::handler::STRICT_SCHEMA_CONFIG_KEY).ok();
+
     // 7. Build WAFER runtime via ImpresspressBuilder
     let config_service = wafer_core::service_blocks::config::EnvConfigService::new();
     for (key, value) in &vars {
@@ -128,6 +143,12 @@ pub async fn run(repo_root: &Path, run_migrations: bool) -> anyhow::Result<()> {
     );
     if run_migrations {
         config_service.set(impresspress_core::migration_helper::RUN_MIGRATIONS_KEY, "1");
+    }
+    if let Some(v) = &strict_schema {
+        config_service.set(
+            wafer_core::interfaces::database::handler::STRICT_SCHEMA_CONFIG_KEY,
+            v,
+        );
     }
 
     // Build the parallel snapshot map fed to `Wafer::set_config_snapshot`.
@@ -146,6 +167,12 @@ pub async fn run(repo_root: &Path, run_migrations: bool) -> anyhow::Result<()> {
         snapshot.insert(
             impresspress_core::migration_helper::RUN_MIGRATIONS_KEY.to_string(),
             "1".to_string(),
+        );
+    }
+    if let Some(v) = strict_schema {
+        snapshot.insert(
+            wafer_core::interfaces::database::handler::STRICT_SCHEMA_CONFIG_KEY.to_string(),
+            v,
         );
     }
 

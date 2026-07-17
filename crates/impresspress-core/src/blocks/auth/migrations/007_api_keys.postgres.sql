@@ -7,6 +7,7 @@ CREATE TABLE IF NOT EXISTS wafer_run__auth__api_keys (
     key_hash       TEXT NOT NULL UNIQUE,
     key_prefix     TEXT NOT NULL,
     created_at     TEXT NOT NULL,
+    updated_at     TEXT,
     expires_at     TEXT,
     revoked_at     TEXT
 );

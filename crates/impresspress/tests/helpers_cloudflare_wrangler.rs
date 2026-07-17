@@ -53,6 +53,11 @@ fn generate_writes_wrangler_toml_with_required_fields() {
         "deploy toml must not declare a wrangler migrations ledger — \
          schema funnels through /_deploy/init"
     );
+    assert!(
+        body.contains(r#"WAFER_RUN__DATABASE__STRICT_SCHEMA = "true""#),
+        "deploy toml must enable STRICT_SCHEMA so the D1 adapter trusts its \
+         migrated schema and skips per-op introspection round-trips:\n{body}"
+    );
 }
 
 #[test]

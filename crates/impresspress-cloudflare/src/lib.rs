@@ -627,6 +627,23 @@ where
             overlay.insert((*key).to_string(), v);
         }
     }
+    // STRICT_SCHEMA (`WAFER_RUN__DATABASE__STRICT_SCHEMA`): thread the worker
+    // var (wrangler.toml `[vars]`) into the config map so the shared
+    // `wafer-run/database` block's Init lifecycle resolves it via
+    // `ctx.config_get` — the sync snapshot surface — and calls
+    // `set_strict_schema` on the DB service before it serves any query. Native
+    // env-filters *every* declared config key into its snapshot; CF's snapshot
+    // is deliberately minimal (secrets + block settings), so this one
+    // operational knob is threaded explicitly rather than living in the D1
+    // `variables` table (it's a deploy-time decision, not an admin-editable
+    // runtime toggle). Absent var ⇒ key absent ⇒ default `false`.
+    if let Ok(strict) = env.var(wafer_core::interfaces::database::handler::STRICT_SCHEMA_CONFIG_KEY)
+    {
+        cfg_svc_map.insert(
+            wafer_core::interfaces::database::handler::STRICT_SCHEMA_CONFIG_KEY.to_string(),
+            strict.to_string(),
+        );
+    }
     cfg_svc_map.insert(
         impresspress_core::features::BLOCK_SETTINGS_CONFIG_KEY.to_string(),
         block_settings.to_config_json(),

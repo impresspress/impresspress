@@ -6,21 +6,18 @@
 //!
 //! ## Schema convention
 //!
-//! This module uses the **live TEXT-everything convention** — rows are
-//! materialised through `db::create` (which calls `ensure_table` on first
-//! insert) rather than the BLOB-keyed Plan A2 migration schema. The migration
-//! file `001_auth_schema.sqlite.sql` still defines a stricter schema for tests
-//! that opt into `with_auth()`, but production startup never applies migrations
-//! (the auth block's `Init` lifecycle only seeds the admin user, not the
-//! schema). Storing `token_hash` as a hex string in a TEXT column keeps the
-//! repo working in both cases:
-//!
-//! - In production, `ensure_table` materialises a TEXT-everything table on
-//!   first insert (mirroring how `users`, `user_roles`, and `tokens` already
-//!   work).
-//! - In tests using `with_auth()`, the migration's BLOB-keyed table already
-//!   exists; SQLite's loose typing accepts the hex string in the BLOB column,
-//!   and `ensure_table` adds the auto `id` column via `ALTER TABLE`.
+//! Rows are written through `db::create`, which synthesizes a TEXT `id` and
+//! stamps `created_at`/`updated_at`, on top of the `token_hash` primary key.
+//! `token_hash` is stored as a hex string in the (BLOB-affinity) key column;
+//! lookups are by `token_hash`, and the synthesized `id` identifies a row for
+//! update/delete. The migration file `001_auth_schema.{sqlite,postgres}.sql`
+//! declares every column `db::create` writes (the `id` + both timestamps in
+//! addition to the original key/`user_id`/`last_used_at`/`expires_at` set), so
+//! the repo works identically whether the runtime trusts its migrated schema
+//! (STRICT_SCHEMA) or lazily materialises missing columns in development.
+//! Those three columns used to be materialised only by lazy column-add;
+//! enabling STRICT_SCHEMA surfaced the drift, now fixed at the migration
+//! layer.
 
 use std::collections::HashMap;
 

@@ -336,6 +336,16 @@ impl DatabaseService for KvCachedD1DatabaseService {
         self.inner.schema_add_column(table, column).await
     }
 
+    fn set_strict_schema(&self, enabled: bool) {
+        // MUST forward — the trait default is a no-op, which would swallow the
+        // STRICT_SCHEMA flag here and leave the wrapped D1 adapter on the
+        // always-introspect path (its `schema_cache`/`strict_schema` overrides
+        // never seeing the flag). The `wafer-run/database` block applies this
+        // to whatever `DatabaseService` it holds — on CF that is this wrapper,
+        // so the flag reaches D1 only through this delegation.
+        self.inner.set_strict_schema(enabled);
+    }
+
     // Bulk-write ops on cached tables hard-error to avoid silent stale-cache footguns.
     async fn delete_where(
         &self,
