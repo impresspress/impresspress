@@ -10,14 +10,16 @@
 //! stamps `created_at`/`updated_at`, on top of the `token_hash` primary key.
 //! `token_hash` is stored as a hex string in the (BLOB-affinity) key column;
 //! lookups are by `token_hash`, and the synthesized `id` identifies a row for
-//! update/delete. The migration file `001_auth_schema.{sqlite,postgres}.sql`
-//! declares every column `db::create` writes (the `id` + both timestamps in
-//! addition to the original key/`user_id`/`last_used_at`/`expires_at` set), so
-//! the repo works identically whether the runtime trusts its migrated schema
-//! (STRICT_SCHEMA) or lazily materialises missing columns in development.
-//! Those three columns used to be materialised only by lazy column-add;
-//! enabling STRICT_SCHEMA surfaced the drift, now fixed at the migration
-//! layer.
+//! update/delete. `001_auth_schema.{sqlite,postgres}.sql` creates the base
+//! table (`token_hash`/`user_id`/`created_at`/`last_used_at`/`expires_at`); the
+//! `id` and `updated_at` columns `db::create` also writes are declared by the
+//! additive `010_strict_schema_columns` ALTER migration (kept separate so
+//! existing databases pick them up — `CREATE TABLE IF NOT EXISTS` is a no-op
+//! once the table exists). Together they give the repo an authoritative schema
+//! whether the runtime trusts it (STRICT_SCHEMA) or lazily materialises missing
+//! columns in development. Those two columns used to be materialised only by
+//! lazy column-add; enabling STRICT_SCHEMA surfaced the drift, now fixed at the
+//! migration layer.
 
 use std::collections::HashMap;
 
