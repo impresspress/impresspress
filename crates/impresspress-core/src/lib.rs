@@ -21,6 +21,7 @@ pub mod features;
 pub mod flows;
 pub mod http;
 pub mod kv;
+pub mod log_level;
 pub mod messages_schema;
 pub mod migration_helper;
 pub mod multipart;

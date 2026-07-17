@@ -171,8 +171,19 @@ pub fn make_fetch_network_service() -> Arc<dyn NetworkService> {
 }
 
 /// Construct a [`LoggerService`] that writes to `worker::console_log`.
-pub fn make_console_logger() -> Arc<dyn LoggerService> {
-    Arc::new(logger_service::ConsoleLoggerService)
+///
+/// The minimum emitted level is read at construction from the
+/// `IMPRESSPRESS_CF_LOG_LEVEL` worker var (set via `wrangler.toml [vars]` or
+/// the dashboard) — a runtime knob, unlike the previous `option_env!`
+/// compile-time read, so an operator can raise/lower verbosity per
+/// deployment without rebuilding. Falls back to the compile-time default
+/// (Debug in dev builds, Info in release) when the var is unset or
+/// unparseable. Resolved once per logger construction, which happens at
+/// most once per per-isolate runtime build
+/// (`runtime_cache::get_or_build`) — never on the request hot path.
+pub fn make_console_logger(env: &worker::Env) -> Arc<dyn LoggerService> {
+    let level = env.var(CF_LOG_LEVEL_KEY).ok().map(|v| v.to_string());
+    Arc::new(logger_service::ConsoleLoggerService::new(level.as_deref()))
 }
 
 /// Construct a [`ConfigService`] from a pre-loaded key/value map.
@@ -603,7 +614,7 @@ where
         .unwrap_or_default();
     let crypto = make_jwt_crypto_service(jwt_secret);
     let network = make_fetch_network_service();
-    let logger = make_console_logger();
+    let logger = make_console_logger(env);
     // Clone the map for the snapshot below before `make_config_service`
     // consumes it — the snapshot and the async ConfigService must carry
     // identical data (see comment at the `set_config_snapshot` call site).
@@ -709,6 +720,13 @@ const PROTECTED_ENV_KEYS: &[&str] = &[impresspress_core::blocks::auth::JWT_SECRE
 /// preview-host lockdown in [`run`]. Set to `"1"` to serve the full app on a
 /// `workers.dev` host (e.g. consumers with no custom domain).
 const ALLOW_WORKERS_DEV_KEY: &str = "IMPRESSPRESS_ALLOW_WORKERS_DEV";
+
+/// Worker var (`env.var`) that sets the Cloudflare console logger's minimum
+/// emitted level at runtime (`debug`/`info`/`warn`/`error`, case-insensitive
+/// — see [`impresspress_core::log_level::LogLevel::parse`]). Unset or
+/// unparseable falls back to the compile-time default. See
+/// [`make_console_logger`].
+const CF_LOG_LEVEL_KEY: &str = "IMPRESSPRESS_CF_LOG_LEVEL";
 
 /// True when the request's host is a `*.workers.dev` host (ASCII
 /// case-insensitive). Drives the preview-host lockdown in [`run`]. Two
