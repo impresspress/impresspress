@@ -473,6 +473,12 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      # Ignore entries in .cargo/audit.toml carry `expiry=YYYY-MM-DD`
+      # markers so temporary exceptions get re-triaged instead of living
+      # there forever. Fails the job if any marker's date has passed.
+      - name: Check for expired cargo-audit exceptions
+        run: bash scripts/check-audit-expiry.sh
+
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
 
