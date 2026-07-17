@@ -19,7 +19,7 @@ use std::{
     sync::Arc,
 };
 
-use impresspress_core::cache_key::CONFIG_VERSION_KEY;
+use impresspress_core::{cache_key::CONFIG_VERSION_KEY, metrics::CacheOutcome};
 
 /// Floor of the isolate-local warm-hit probe window (ms) — see
 /// [`next_probe_deadline_ms`].
@@ -56,6 +56,13 @@ pub(crate) struct ReadyRuntime {
 
 thread_local! {
     static RUNTIME: RefCell<Option<Rc<ReadyRuntime>>> = const { RefCell::new(None) };
+    /// Per-isolate cumulative count of runtime builds (cold + rebuild).
+    /// Surfaced via `Server-Timing` (`CacheOutcome::build_ordinal`) as a
+    /// zero-plumbing proxy for "D1 statements per logical request" — see
+    /// `impresspress_core::metrics`'s module doc. A plain `Cell<u32>`
+    /// increment; costs nothing on the far more common hit/probed-fresh
+    /// paths, which never touch it.
+    static BUILD_COUNT: Cell<u32> = const { Cell::new(0) };
     /// Set by `KvCachedD1DatabaseService::bump_config_version` /
     /// `force_bump_config_version` (kv_cached_db.rs) immediately after a
     /// LOCAL write to a config-version-bumping table (variables /
@@ -128,7 +135,10 @@ async fn current_version(kv: &Arc<dyn impresspress_core::kv::KvBackend>) -> Stri
 }
 
 /// Return the per-isolate cached runtime, rebuilding it if the KV
-/// config-version stamp has moved (or if nothing is cached yet).
+/// config-version stamp has moved (or if nothing is cached yet), alongside
+/// the [`CacheOutcome`] this call resolved to — a free byproduct of the
+/// branches below, consumed by `lib.rs::run` to build the `Server-Timing`
+/// response header.
 ///
 /// The `register_blocks` / `register_post_build` hooks are `FnOnce` and are
 /// consumed only on the build path; on a cache hit they are dropped unused.
@@ -136,7 +146,7 @@ pub(crate) async fn get_or_build<F, G>(
     env: &worker::Env,
     register_blocks: F,
     register_post_build: G,
-) -> Result<Rc<ReadyRuntime>, Box<dyn std::error::Error>>
+) -> Result<(Rc<ReadyRuntime>, CacheOutcome), Box<dyn std::error::Error>>
 where
     F: FnOnce(
         crate::ImpresspressBuilder,
@@ -165,14 +175,14 @@ where
     // config just changed, which is exactly when cross-PoP KV lag or a
     // failed row-invalidate would bake stale rows under the new stamp).
     // Cold builds keep the cache (cold-start latency is its remaining value).
-    let (probed_version, read_through) = if let Some(rt) = cached() {
+    let (probed_version, read_through, is_cold) = if let Some(rt) = cached() {
         let dirty = take_dirty();
 
         // Fast path: no local write since the runtime was built, and the
         // jittered probe window hasn't elapsed yet — skip the KV read
         // entirely. This is the case for nearly every warm request.
         if !dirty && now < rt.probe_deadline_ms.get() {
-            return Ok(rt);
+            return Ok((rt, CacheOutcome::Hit));
         }
 
         let version = current_version(&rt.kv).await;
@@ -186,10 +196,10 @@ where
         // exists to close.
         if !dirty && rt.version == version {
             rt.probe_deadline_ms.set(next_probe_deadline_ms(now));
-            return Ok(rt);
+            return Ok((rt, CacheOutcome::ProbedFresh));
         }
         tracing::info!(old = %rt.version, new = %version, dirty, "config version moved or local write pending; rebuilding runtime");
-        (version, true)
+        (version, true, false)
     } else {
         // Cold isolate: nothing cached to probe through. Construct a
         // standalone KV backend (cold path only — the hit/mismatch branch
@@ -200,7 +210,7 @@ where
         // the whole point is to probe before the build starts. Either way
         // this is exactly one KV `get` for the version stamp.
         let kv = crate::make_kv_backend(env, crate::runner::KV_BINDING)?;
-        (current_version(&kv).await, false)
+        (current_version(&kv).await, false, true)
     };
 
     let mut built = crate::build_runtime(
@@ -221,6 +231,12 @@ where
     built.wafer.seal().await.map_err(|e| format!("seal: {e}"))?;
     impresspress_core::builder::post_start(&built.wafer, &built.storage_block);
 
+    let build_ordinal = BUILD_COUNT.with(|c| {
+        let n = c.get() + 1;
+        c.set(n);
+        n
+    });
+
     let rt = Rc::new(ReadyRuntime {
         wafer: built.wafer,
         batch_db: built.batch_db,
@@ -229,5 +245,10 @@ where
         probe_deadline_ms: Cell::new(next_probe_deadline_ms(now)),
     });
     store(rt.clone());
-    Ok(rt)
+    let outcome = if is_cold {
+        CacheOutcome::ColdBuilt { build_ordinal }
+    } else {
+        CacheOutcome::Rebuilt { build_ordinal }
+    };
+    Ok((rt, outcome))
 }

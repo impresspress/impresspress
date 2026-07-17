@@ -305,8 +305,18 @@ where
                 for (table, rows) in by_table {
                     let n = rows.len();
                     if let Err(e) = batch_db.create_many(table, rows).await {
+                        // Structured metric line (not a Server-Timing header:
+                        // this closure runs in `ctx.wait_until`, after the
+                        // response has already been sent). See
+                        // `impresspress_core::metrics`'s module doc.
+                        let rows_str = n.to_string();
+                        let err_str = e.to_string();
                         worker::console_log!(
-                            "audit-log batch persistence failed ({n} rows into {table}): {e}"
+                            "{}",
+                            impresspress_core::metrics::metric_line(
+                                "audit_log_persist_failed",
+                                &[("table", table), ("rows", &rows_str), ("error", &err_str)],
+                            )
                         );
                     }
                 }
@@ -327,7 +337,15 @@ where
                     .put(impresspress_core::cache_key::CONFIG_VERSION_KEY, &stamp)
                     .await
                 {
-                    worker::console_log!("delayed config-version retry failed: {e}");
+                    // `e` here is already a `String` (KvBackend::put's error
+                    // type) — no `.to_string()` clone needed.
+                    worker::console_log!(
+                        "{}",
+                        impresspress_core::metrics::metric_line(
+                            "config_version_retry_failed",
+                            &[("error", &e)],
+                        )
+                    );
                 }
             });
         }
@@ -707,8 +725,26 @@ where
     // Reuse the per-isolate runtime; rebuild only when the KV config-version
     // stamp has moved. No boot funnel here — migrations/seeds run at deploy
     // time via `/_deploy/init`, not on the request path.
-    let rt = runtime_cache::get_or_build(&env, register_blocks, register_post_build).await?;
-    dispatch(&rt.wafer, req).await
+    let (rt, cache_outcome) =
+        runtime_cache::get_or_build(&env, register_blocks, register_post_build).await?;
+    let mut response = dispatch(&rt.wafer, req).await?;
+
+    // Cheap observability signal (2026-07-16 audit follow-up): one header
+    // assembly from a value already computed by `get_or_build`, no extra
+    // allocation beyond the header string itself, and a failure to set it
+    // never fails the request.
+    let server_timing = impresspress_core::metrics::server_timing_header(cache_outcome);
+    if let Err(e) = response.headers_mut().set("Server-Timing", &server_timing) {
+        worker::console_log!(
+            "{}",
+            impresspress_core::metrics::metric_line(
+                "server_timing_header_failed",
+                &[("error", &e.to_string())],
+            )
+        );
+    }
+
+    Ok(response)
 }
 
 /// Worker `Env` bindings that override D1 variables (set via
