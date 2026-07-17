@@ -39,6 +39,17 @@ impl LogLevel {
             _ => None,
         }
     }
+
+    /// True when a log call at `self` should be suppressed given a
+    /// configured `min_level` — i.e. `self` is strictly below the
+    /// threshold. Single source of truth for the suppression predicate:
+    /// `ConsoleLoggerService`'s `debug`/`info`/`warn`/`error` guards call
+    /// this directly (see `impresspress-cloudflare/src/logger_service.rs`),
+    /// so a test against this function is a real parity check against
+    /// production behavior, not a re-derivation of `Ord`.
+    pub fn is_suppressed(self, min_level: Self) -> bool {
+        self < min_level
+    }
 }
 
 #[cfg(test)]
@@ -70,13 +81,36 @@ mod tests {
     }
 
     #[test]
-    fn threshold_semantics_match_console_logger_service() {
-        // ConsoleLoggerService suppresses a call at `level` when
-        // `level < min_level` (see logger_service.rs's per-method guards).
+    fn is_suppressed_matches_console_logger_service_thresholds() {
+        // ConsoleLoggerService calls `LogLevel::X.is_suppressed(self.min_level)`
+        // directly for each of debug/info/warn/error (see logger_service.rs's
+        // per-method guards) — this exercises the exact same predicate, so
+        // it's a real parity check rather than a re-derivation of `Ord`.
         let min_level = LogLevel::Info;
-        assert!(LogLevel::Debug < min_level, "debug suppressed at min=info");
-        assert!(!(LogLevel::Info < min_level), "info emitted at min=info");
-        assert!(!(LogLevel::Warn < min_level), "warn emitted at min=info");
-        assert!(!(LogLevel::Error < min_level), "error emitted at min=info");
+        assert!(
+            LogLevel::Debug.is_suppressed(min_level),
+            "debug suppressed at min=info"
+        );
+        assert!(
+            !LogLevel::Info.is_suppressed(min_level),
+            "info emitted at min=info"
+        );
+        assert!(
+            !LogLevel::Warn.is_suppressed(min_level),
+            "warn emitted at min=info"
+        );
+        assert!(
+            !LogLevel::Error.is_suppressed(min_level),
+            "error emitted at min=info"
+        );
+    }
+
+    #[test]
+    fn is_suppressed_at_debug_min_emits_everything() {
+        let min_level = LogLevel::Debug;
+        assert!(!LogLevel::Debug.is_suppressed(min_level));
+        assert!(!LogLevel::Info.is_suppressed(min_level));
+        assert!(!LogLevel::Warn.is_suppressed(min_level));
+        assert!(!LogLevel::Error.is_suppressed(min_level));
     }
 }

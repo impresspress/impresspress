@@ -15,12 +15,15 @@
 //! `impresspress-cloudflare::runtime_cache::get_or_build` computes
 //! [`CacheOutcome`] for free from branches it already takes (no extra
 //! probe, no extra allocation on the request hot path).
-//! `impresspress-cloudflare::lib::run` turns it into a `Server-Timing`
-//! response header via [`server_timing_header`], and formats
-//! off-response-path background failures (audit-log batch persist,
-//! delayed config-version retry — both run inside `ctx.wait_until`
-//! closures *after* the response has already been sent, so they can never
-//! reach a response header) via [`metric_line`].
+//! `impresspress-cloudflare::lib::run_inner` turns it into a `Server-Timing`
+//! response header via [`server_timing_header`] — gated to the Cloudflare
+//! console logger's Debug (dev) level, since an unconditional header would
+//! disclose per-request cache/rebuild state, including the isolate build
+//! counter (a signal for when a config bump landed), to every anonymous
+//! production client — and formats off-response-path background failures
+//! (audit-log batch persist, delayed config-version retry — both run inside
+//! `ctx.wait_until` closures *after* the response has already been sent, so
+//! they can never reach a response header) via [`metric_line`].
 //!
 //! FOLLOW-UP (flagged, not implemented here): per-request D1 primitive
 //! statement count and rows read/written need a counter threaded through
@@ -80,14 +83,19 @@ impl CacheOutcome {
 }
 
 /// Build the `Server-Timing` response-header value for one dispatched
-/// request. Format: `<metric>;desc="<value>"` / `<metric>;dur=<n>` per the
+/// request. Format: `<metric>;desc="<value>"` per the
 /// [Server-Timing spec](https://developer.mozilla.org/en-US/docs/Web/HTTP/Headers/Server-Timing).
 ///
-/// The common warm-hit case (`build_ordinal() == None`) stays a single
-/// short entry; `rtbuild` only appears when this request paid for a build.
+/// `dur` is defined by the spec as a *duration in milliseconds* — DevTools
+/// and RUM tooling render it as a timing bar — so the per-isolate
+/// build-ordinal counter (an integer count, not a time) must never be
+/// passed as `dur`; that would render e.g. a 3rd rebuild as "3ms", which is
+/// actively misleading. When this request paid for a build, the ordinal is
+/// folded into the `desc` text instead (`"rebuilt (build 3)"`); a
+/// Server-Timing entry is valid with just name+desc and no `dur`.
 pub fn server_timing_header(outcome: CacheOutcome) -> String {
     match outcome.build_ordinal() {
-        Some(n) => format!("cache;desc=\"{}\", rtbuild;dur={n}", outcome.as_str()),
+        Some(n) => format!("cache;desc=\"{} (build {n})\"", outcome.as_str()),
         None => format!("cache;desc=\"{}\"", outcome.as_str()),
     }
 }
@@ -126,14 +134,17 @@ mod tests {
     }
 
     #[test]
-    fn header_with_build_includes_ordinal() {
-        assert_eq!(
-            server_timing_header(CacheOutcome::Rebuilt { build_ordinal: 3 }),
-            r#"cache;desc="rebuilt", rtbuild;dur=3"#
-        );
+    fn header_with_build_folds_ordinal_into_desc_not_dur() {
+        // `dur` is milliseconds per the Server-Timing spec — the build
+        // ordinal is a count, not a duration, so it must never land there
+        // (DevTools/RUM would render e.g. "rtbuild;dur=3" as a 3ms bar).
+        let with_build = server_timing_header(CacheOutcome::Rebuilt { build_ordinal: 3 });
+        assert_eq!(with_build, r#"cache;desc="rebuilt (build 3)""#);
+        assert!(!with_build.contains("dur="));
+
         assert_eq!(
             server_timing_header(CacheOutcome::ColdBuilt { build_ordinal: 1 }),
-            r#"cache;desc="cold-built", rtbuild;dur=1"#
+            r#"cache;desc="cold-built (build 1)""#
         );
     }
 

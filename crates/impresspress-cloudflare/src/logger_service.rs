@@ -42,35 +42,48 @@ impl ConsoleLoggerService {
     /// most once per config-version change (`runtime_cache::get_or_build`),
     /// so this never runs per-request.
     pub fn new(level: Option<&str>) -> Self {
-        let min_level = level.and_then(LogLevel::parse).unwrap_or(DEFAULT_LEVEL);
-        Self { min_level }
+        Self {
+            min_level: resolve_level(level),
+        }
     }
+}
+
+/// Resolve a raw level string (the `IMPRESSPRESS_CF_LOG_LEVEL` worker var's
+/// value) to a [`LogLevel`], falling back to [`DEFAULT_LEVEL`] when `raw` is
+/// `None` or unparseable.
+///
+/// `pub(crate)` (not folded into `ConsoleLoggerService::new`) so
+/// `lib.rs::run_inner` can resolve the exact same level to gate the
+/// `Server-Timing` header without downcasting the type-erased
+/// `Arc<dyn LoggerService>` the runtime holds.
+pub(crate) fn resolve_level(raw: Option<&str>) -> LogLevel {
+    raw.and_then(LogLevel::parse).unwrap_or(DEFAULT_LEVEL)
 }
 
 impl LoggerService for ConsoleLoggerService {
     fn debug(&self, msg: &str, fields: &[Field]) {
-        if LogLevel::Debug < self.min_level {
+        if LogLevel::Debug.is_suppressed(self.min_level) {
             return;
         }
         worker::console_debug!("[debug] {}{}", msg, Rendered(fields));
     }
 
     fn info(&self, msg: &str, fields: &[Field]) {
-        if LogLevel::Info < self.min_level {
+        if LogLevel::Info.is_suppressed(self.min_level) {
             return;
         }
         worker::console_log!("[info] {}{}", msg, Rendered(fields));
     }
 
     fn warn(&self, msg: &str, fields: &[Field]) {
-        if LogLevel::Warn < self.min_level {
+        if LogLevel::Warn.is_suppressed(self.min_level) {
             return;
         }
         worker::console_warn!("[warn] {}{}", msg, Rendered(fields));
     }
 
     fn error(&self, msg: &str, fields: &[Field]) {
-        if LogLevel::Error < self.min_level {
+        if LogLevel::Error.is_suppressed(self.min_level) {
             return;
         }
         worker::console_error!("[error] {}{}", msg, Rendered(fields));

@@ -182,8 +182,30 @@ pub fn make_fetch_network_service() -> Arc<dyn NetworkService> {
 /// most once per per-isolate runtime build
 /// (`runtime_cache::get_or_build`) — never on the request hot path.
 pub fn make_console_logger(env: &worker::Env) -> Arc<dyn LoggerService> {
-    let level = env.var(CF_LOG_LEVEL_KEY).ok().map(|v| v.to_string());
-    Arc::new(logger_service::ConsoleLoggerService::new(level.as_deref()))
+    Arc::new(logger_service::ConsoleLoggerService::new(
+        cf_log_level_var(env).as_deref(),
+    ))
+}
+
+/// Raw `IMPRESSPRESS_CF_LOG_LEVEL` worker var value, if set. Shared by
+/// [`make_console_logger`] (logger construction) and [`resolved_log_level`]
+/// (Server-Timing gating in `run_inner`) so both resolve from the same read
+/// instead of two independent env lookups that could disagree.
+fn cf_log_level_var(env: &worker::Env) -> Option<String> {
+    env.var(CF_LOG_LEVEL_KEY).ok().map(|v| v.to_string())
+}
+
+/// Resolve the Cloudflare console logger's minimum level without needing to
+/// downcast the type-erased `Arc<dyn LoggerService>` the runtime holds.
+///
+/// Used by `run_inner` to gate the `Server-Timing` response header: only
+/// attached when this resolves to `Debug` (dev). An unconditional header
+/// would disclose per-request cache/rebuild state — including the isolate
+/// build counter, a signal for when a config bump landed — to every
+/// anonymous client, which is a production fingerprinting concern, not a
+/// dev debugging aid.
+fn resolved_log_level(env: &worker::Env) -> impresspress_core::log_level::LogLevel {
+    logger_service::resolve_level(cf_log_level_var(env).as_deref())
 }
 
 /// Construct a [`ConfigService`] from a pre-loaded key/value map.
@@ -730,18 +752,22 @@ where
     let mut response = dispatch(&rt.wafer, req).await?;
 
     // Cheap observability signal (2026-07-16 audit follow-up): one header
-    // assembly from a value already computed by `get_or_build`, no extra
-    // allocation beyond the header string itself, and a failure to set it
-    // never fails the request.
-    let server_timing = impresspress_core::metrics::server_timing_header(cache_outcome);
-    if let Err(e) = response.headers_mut().set("Server-Timing", &server_timing) {
-        worker::console_log!(
-            "{}",
-            impresspress_core::metrics::metric_line(
-                "server_timing_header_failed",
-                &[("error", &e.to_string())],
-            )
-        );
+    // assembly from a value already computed by `get_or_build`. Gated to
+    // Debug (dev) level — see `resolved_log_level`'s doc — so an
+    // unconditional header doesn't disclose per-request cache/rebuild state
+    // to anonymous clients on production deployments (which default to
+    // Info). A failure to set it never fails the request.
+    if resolved_log_level(&env) == impresspress_core::log_level::LogLevel::Debug {
+        let server_timing = impresspress_core::metrics::server_timing_header(cache_outcome);
+        if let Err(e) = response.headers_mut().set("Server-Timing", &server_timing) {
+            worker::console_log!(
+                "{}",
+                impresspress_core::metrics::metric_line(
+                    "server_timing_header_failed",
+                    &[("error", &e.to_string())],
+                )
+            );
+        }
     }
 
     Ok(response)
