@@ -113,7 +113,38 @@ pub async fn extract_auth_meta(
         return;
     }
 
-    if let Some(sub) = claims.get("sub").and_then(|v| v.as_str()) {
+    // [P2c] Reject a token whose embedded `auth_version` is behind the
+    // user's current stored value — a password change, disable,
+    // soft-delete, or role change (all of which call
+    // `crate::blocks::auth::bump_auth_version`) invalidates every
+    // already-issued access JWT this way instead of waiting out the
+    // token's natural expiry. A missing claim defaults to `0`, matching the
+    // `auth_version` column's default, so tokens minted before this claim
+    // existed keep authenticating until the first bump. Reads through
+    // `current_auth_version`'s short-lived cache rather than the users
+    // table directly, so this doesn't cost a DB read on every request.
+    // Fails closed: a lookup error rejects the token rather than risk
+    // accepting a stale/compromised credential.
+    let sub = claims.get("sub").and_then(|v| v.as_str());
+    if let Some(uid) = sub {
+        let claim_version = claims
+            .get(crate::blocks::auth::repo::users::AUTH_VERSION_FIELD)
+            .and_then(|v| v.as_i64())
+            .unwrap_or(0);
+        match crate::blocks::auth::current_auth_version(ctx, uid).await {
+            Ok(current) if claim_version < current => return,
+            Ok(_) => {}
+            Err(e) => {
+                tracing::warn!(
+                    user_id = %uid,
+                    "extract_auth_meta: auth_version lookup failed, rejecting token: {e}"
+                );
+                return;
+            }
+        }
+    }
+
+    if let Some(sub) = sub {
         msg.set_meta(META_AUTH_USER_ID, sub);
     }
     if let Some(email) = claims.get("email").and_then(|v| v.as_str()) {
@@ -397,5 +428,118 @@ mod tests {
         let mut m2 = Message::new("http.request");
         extract_auth_meta(&ctx, &format!("Bearer {live}"), secret, "", &mut m2).await;
         assert_eq!(m2.get_meta(wafer_run::META_AUTH_USER_ID), "user-a");
+    }
+
+    // -- auth_version (P2c: "Access JWTs outlive account and role changes") --
+
+    /// Same as [`sign_access_jwt`] but with an explicit `auth_version` claim,
+    /// so tests can mint a token "as of" a specific version.
+    fn sign_access_jwt_with_version(
+        secret: &str,
+        sub: &str,
+        auth_version: i64,
+        ttl_secs: u64,
+    ) -> String {
+        let mut claims = HashMap::new();
+        claims.insert("sub".to_string(), serde_json::json!(sub));
+        claims.insert("type".to_string(), serde_json::json!("access"));
+        claims.insert(
+            crate::blocks::auth::repo::users::AUTH_VERSION_FIELD.to_string(),
+            serde_json::json!(auth_version),
+        );
+        let derived = primitives::derive_block_key(
+            secret.as_bytes(),
+            crate::blocks::auth_ui::AUTH_UI_BLOCK_ID,
+        );
+        primitives::jwt_sign(claims, Duration::from_secs(ttl_secs), derived.as_bytes())
+            .expect("test jwt_sign")
+    }
+
+    async fn seed_user(ctx: &crate::test_support::TestContext) -> String {
+        crate::blocks::auth::repo::users::insert(
+            ctx,
+            crate::blocks::auth::repo::users::NewUser {
+                email: "verify@example.com".into(),
+                display_name: "Verify".into(),
+                avatar_url: None,
+                role: "user".into(),
+            },
+        )
+        .await
+        .unwrap()
+        .id
+    }
+
+    #[tokio::test]
+    async fn extract_auth_meta_rejects_token_minted_before_a_bump() {
+        use wafer_run::Message;
+        let ctx = crate::test_support::TestContext::with_auth().await;
+        let uid = seed_user(&ctx).await;
+        let secret = "test-secret";
+
+        // Minted "before" any bump — embeds the user's then-current
+        // auth_version (0).
+        let token = sign_access_jwt_with_version(secret, &uid, 0, 3600);
+
+        let mut before = Message::new("http.request");
+        extract_auth_meta(&ctx, &format!("Bearer {token}"), secret, "", &mut before).await;
+        assert_eq!(
+            before.get_meta(wafer_run::META_AUTH_USER_ID),
+            uid,
+            "an unbumped token must authenticate"
+        );
+
+        // Password change / disable / soft-delete / role change all funnel
+        // through this single call.
+        crate::blocks::auth::bump_auth_version(&ctx, &uid)
+            .await
+            .expect("bump auth_version");
+
+        let mut after = Message::new("http.request");
+        extract_auth_meta(&ctx, &format!("Bearer {token}"), secret, "", &mut after).await;
+        assert_eq!(
+            after.get_meta(wafer_run::META_AUTH_USER_ID),
+            "",
+            "the SAME token minted before the bump must be rejected after it"
+        );
+    }
+
+    #[tokio::test]
+    async fn extract_auth_meta_accepts_a_token_minted_at_the_current_auth_version() {
+        use wafer_run::Message;
+        let ctx = crate::test_support::TestContext::with_auth().await;
+        let uid = seed_user(&ctx).await;
+        let secret = "test-secret";
+
+        crate::blocks::auth::bump_auth_version(&ctx, &uid)
+            .await
+            .expect("bump auth_version");
+
+        // Minted AFTER the bump, embedding the now-current version (1).
+        let token = sign_access_jwt_with_version(secret, &uid, 1, 3600);
+
+        let mut msg = Message::new("http.request");
+        extract_auth_meta(&ctx, &format!("Bearer {token}"), secret, "", &mut msg).await;
+        assert_eq!(
+            msg.get_meta(wafer_run::META_AUTH_USER_ID),
+            uid,
+            "a token minted at the current auth_version must authenticate"
+        );
+    }
+
+    #[tokio::test]
+    async fn extract_auth_meta_treats_a_missing_auth_version_claim_as_zero() {
+        // A token minted before this feature shipped carries no
+        // `auth_version` claim at all. It must still authenticate against a
+        // freshly migrated user, whose `auth_version` column defaults to 0.
+        use wafer_run::Message;
+        let ctx = crate::test_support::TestContext::with_auth().await;
+        let uid = seed_user(&ctx).await;
+        let secret = "test-secret";
+
+        let token = sign_access_jwt(secret, &uid, None, 3600);
+        let mut msg = Message::new("http.request");
+        extract_auth_meta(&ctx, &format!("Bearer {token}"), secret, "", &mut msg).await;
+        assert_eq!(msg.get_meta(wafer_run::META_AUTH_USER_ID), uid);
     }
 }

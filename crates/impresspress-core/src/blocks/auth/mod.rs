@@ -63,6 +63,233 @@ pub(crate) const DUMMY_HASH: &str = "$argon2id$v=19$m=19456,t=2,p=1$AAAAAAAAAAAA
 
 use crate::blocks::admin::USER_ROLES_TABLE;
 
+// ---------------------------------------------------------------------------
+// auth_version — invalidates already-issued access JWTs on account/role
+// changes (P2c: CODE_REVIEW_2026-07-16, "Access JWTs outlive account and role
+// changes").
+// ---------------------------------------------------------------------------
+//
+// Every access JWT embeds the minting user's `auth_version`
+// (`repo::users::AUTH_VERSION_FIELD`) at issuance — see
+// [`helpers::generate_tokens`]. `crate::crypto::extract_auth_meta` (the
+// request-auth verify path) rejects a token whose embedded version is behind
+// the user's current stored value, so a password change, disable,
+// soft-delete, or role change takes effect on the very next request instead
+// of waiting out the token's natural expiry.
+//
+// Reading `auth_version` on every authenticated request would cost a DB read
+// per request, so verification goes through the short-lived
+// process/isolate-local cache below ([`current_auth_version`]) instead of
+// `repo::users::auth_version` directly. [`bump_auth_version`] is the single
+// call site every security-relevant mutation uses — it increments the
+// column AND drops the cache entry in the same call, so a bump can never
+// forget to invalidate. The cache TTL (not the invalidate call) is what
+// bounds worst-case staleness: invalidation is same-isolate/process only and
+// therefore best-effort across a fleet of warm Cloudflare isolates, but the
+// TTL below is short enough that this doesn't matter in practice.
+
+/// How long a cached `auth_version` read is trusted before the next verify
+/// re-reads `repo::users`. An internal cache-freshness knob — not
+/// config-driven, unlike the access-token lifetime cap in
+/// [`config::ACCESS_TOKEN_LIFETIME_SECS_MAX`] — bounding how long a bumped
+/// version can still look "current" to a warm isolate that hasn't seen the
+/// bump's (best-effort) invalidation.
+const AUTH_VERSION_CACHE_TTL_MS: i64 = 5_000;
+
+/// Cap on the cache's entry count before a full clear, mirroring
+/// `rate_limit::UserRateLimiter`'s eviction policy — bounds memory in a
+/// long-lived native process / warm CF isolate.
+const AUTH_VERSION_CACHE_MAX_ENTRIES: usize = 50_000;
+
+struct AuthVersionCacheEntry {
+    version: i64,
+    cached_at_ms: i64,
+}
+
+static AUTH_VERSION_CACHE: std::sync::OnceLock<
+    std::sync::Mutex<HashMap<String, AuthVersionCacheEntry>>,
+> = std::sync::OnceLock::new();
+
+fn auth_version_cache() -> &'static std::sync::Mutex<HashMap<String, AuthVersionCacheEntry>> {
+    AUTH_VERSION_CACHE.get_or_init(|| std::sync::Mutex::new(HashMap::new()))
+}
+
+/// Resolve `user_id`'s current `auth_version`, serving a cache hit fresher
+/// than [`AUTH_VERSION_CACHE_TTL_MS`] or reading through to
+/// `repo::users::auth_version` and repopulating the cache. `now_ms` is
+/// injectable so tests can simulate TTL expiry deterministically (no real
+/// sleep); [`current_auth_version`] is the one production caller and always
+/// passes the real clock.
+async fn current_auth_version_at(
+    ctx: &dyn wafer_run::context::Context,
+    user_id: &str,
+    now_ms: i64,
+) -> Result<i64, repo::RepoError> {
+    if let Some(v) = {
+        let guard = auth_version_cache()
+            .lock()
+            .unwrap_or_else(|e| e.into_inner());
+        guard
+            .get(user_id)
+            .filter(|e| now_ms - e.cached_at_ms < AUTH_VERSION_CACHE_TTL_MS)
+            .map(|e| e.version)
+    } {
+        return Ok(v);
+    }
+
+    let version = repo::users::auth_version(ctx, user_id).await?;
+
+    let mut guard = auth_version_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner());
+    if guard.len() >= AUTH_VERSION_CACHE_MAX_ENTRIES {
+        guard.clear();
+    }
+    guard.insert(
+        user_id.to_string(),
+        AuthVersionCacheEntry {
+            version,
+            cached_at_ms: now_ms,
+        },
+    );
+    Ok(version)
+}
+
+/// Resolve `user_id`'s current `auth_version` through the short-lived cache,
+/// using the real wall clock. Called by `crate::crypto::extract_auth_meta` on
+/// every request that presents an access JWT. See the module docs above.
+pub(crate) async fn current_auth_version(
+    ctx: &dyn wafer_run::context::Context,
+    user_id: &str,
+) -> Result<i64, repo::RepoError> {
+    current_auth_version_at(ctx, user_id, crate::util::now_millis() as i64).await
+}
+
+/// Drop `user_id`'s cached `auth_version` entry, if any.
+fn invalidate_auth_version_cache(user_id: &str) {
+    auth_version_cache()
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .remove(user_id);
+}
+
+/// Bump `user_id`'s `auth_version` and invalidate its cache entry in one
+/// call, so a mutation can never bump the column and forget to invalidate
+/// the cache (or vice versa).
+///
+/// The single call site for every security-relevant mutation: password
+/// change (`auth_ui::api::change_password`), disable/soft-delete
+/// (`admin::ops::{set_user_disabled,delete_user,update_user_fields}`), and
+/// role change (`admin::iam::{handle_assign_role,handle_remove_role}`).
+pub(crate) async fn bump_auth_version(
+    ctx: &dyn wafer_run::context::Context,
+    user_id: &str,
+) -> Result<(), repo::RepoError> {
+    repo::users::bump_auth_version(ctx, user_id).await?;
+    invalidate_auth_version_cache(user_id);
+    Ok(())
+}
+
+#[cfg(test)]
+mod auth_version_cache_tests {
+    use super::*;
+    use crate::test_support::TestContext;
+
+    async fn seed(ctx: &TestContext) -> String {
+        repo::users::insert(
+            ctx,
+            repo::users::NewUser {
+                email: "cache@example.com".into(),
+                display_name: "Cache".into(),
+                avatar_url: None,
+                role: "user".into(),
+            },
+        )
+        .await
+        .unwrap()
+        .id
+    }
+
+    #[tokio::test]
+    async fn fresh_read_matches_the_stored_column() {
+        let ctx = TestContext::with_auth().await;
+        let uid = seed(&ctx).await;
+        assert_eq!(current_auth_version(&ctx, &uid).await.unwrap(), 0);
+
+        repo::users::bump_auth_version(&ctx, &uid).await.unwrap();
+        // Cache was never populated with a stale value for this uid before
+        // the bump, so an uncached read must see the new column value.
+        invalidate_auth_version_cache(&uid);
+        assert_eq!(current_auth_version(&ctx, &uid).await.unwrap(), 1);
+    }
+
+    #[tokio::test]
+    async fn cache_hit_serves_stale_value_within_ttl() {
+        let ctx = TestContext::with_auth().await;
+        let uid = seed(&ctx).await;
+
+        // Populate the cache at version 0.
+        assert_eq!(current_auth_version_at(&ctx, &uid, 1_000).await.unwrap(), 0);
+
+        // Bump the column directly (bypassing the wrapper, so the cache is
+        // NOT invalidated) — simulates a bump landing on another
+        // isolate/process that this cache hasn't heard about yet.
+        repo::users::bump_auth_version(&ctx, &uid).await.unwrap();
+
+        // Still within the TTL window from the first read: the cache must
+        // serve the stale (pre-bump) value, not re-read the DB.
+        assert_eq!(
+            current_auth_version_at(&ctx, &uid, 1_000 + AUTH_VERSION_CACHE_TTL_MS - 1)
+                .await
+                .unwrap(),
+            0,
+            "a fresh cache entry must be served as-is within its TTL"
+        );
+    }
+
+    #[tokio::test]
+    async fn expired_cache_entry_is_not_served_past_ttl() {
+        let ctx = TestContext::with_auth().await;
+        let uid = seed(&ctx).await;
+
+        // Populate the cache at version 0, timestamped at now=1_000.
+        assert_eq!(current_auth_version_at(&ctx, &uid, 1_000).await.unwrap(), 0);
+
+        // Bump without invalidating (see previous test).
+        repo::users::bump_auth_version(&ctx, &uid).await.unwrap();
+
+        // Once the TTL has elapsed, the stale cache entry must NOT be served
+        // — the read must fall through to the DB and see the bumped value.
+        let past_ttl = 1_000 + AUTH_VERSION_CACHE_TTL_MS + 1;
+        assert_eq!(
+            current_auth_version_at(&ctx, &uid, past_ttl).await.unwrap(),
+            1,
+            "a cache entry older than its TTL must not be served — must re-read the DB"
+        );
+    }
+
+    #[tokio::test]
+    async fn bump_auth_version_wrapper_invalidates_immediately() {
+        let ctx = TestContext::with_auth().await;
+        let uid = seed(&ctx).await;
+
+        // Populate the cache at version 0.
+        assert_eq!(current_auth_version(&ctx, &uid).await.unwrap(), 0);
+
+        // The wrapper bumps AND invalidates in one call.
+        bump_auth_version(&ctx, &uid).await.unwrap();
+
+        // A read immediately after (well within what would otherwise be the
+        // TTL window) must see the new value — proving invalidation, not
+        // TTL expiry, made this visible.
+        assert_eq!(
+            current_auth_version(&ctx, &uid).await.unwrap(),
+            1,
+            "bump_auth_version must invalidate the cache so the bump is visible immediately"
+        );
+    }
+}
+
 // --- Shared helpers used by auth_ui::api::* and auth_ui::oauth::* ---
 
 /// Token / cookie / role / role-mint helpers shared by the auth_ui HTTP
@@ -275,6 +502,11 @@ pub(crate) mod helpers {
     /// Access tokens carry a random `jti` so logout can blocklist the
     /// in-flight JWT (SEC-042) without affecting other live sessions for
     /// the same user.
+    ///
+    /// Access tokens also carry the user's current `auth_version` (P2c) —
+    /// see the module-level docs above `current_auth_version` — so a later
+    /// password-change/disable/role-change bump invalidates this token on
+    /// verify instead of only at its natural expiry.
     pub(crate) async fn generate_tokens(
         ctx: &dyn wafer_run::context::Context,
         user_id: &str,
@@ -305,6 +537,21 @@ pub(crate) mod helpers {
         // same HMAC key.
         let issuer = expected_issuer(ctx).await;
 
+        // [P2c] Embed the user's *current* auth_version so a subsequent
+        // password-change/disable/role-change bump (`bump_auth_version`)
+        // invalidates this token on verify (`crate::crypto::extract_auth_meta`)
+        // instead of only at its natural expiry. Always read fresh here
+        // (never from `current_auth_version`'s verify-side cache) so a
+        // freshly minted token reflects the true value, not a stale cache
+        // hit — a lookup failure fails the mint closed rather than risk
+        // embedding a version the caller can't vouch for.
+        let auth_version = repo::users::auth_version(ctx, user_id).await.map_err(|e| {
+            wafer_run::OutputStream::error(wafer_run::WaferError::new(
+                wafer_run::ErrorCode::Internal,
+                format!("auth_version lookup failed for {user_id}: {e}"),
+            ))
+        })?;
+
         let mut access_claims = HashMap::new();
         access_claims.insert(
             "user_id".to_string(),
@@ -329,6 +576,10 @@ pub(crate) mod helpers {
         );
         access_claims.insert("jti".to_string(), serde_json::Value::String(jti));
         access_claims.insert("iss".to_string(), serde_json::Value::String(issuer.clone()));
+        access_claims.insert(
+            repo::users::AUTH_VERSION_FIELD.to_string(),
+            serde_json::json!(auth_version),
+        );
 
         let access_token = crypto::sign(
             ctx,
@@ -521,6 +772,81 @@ pub(crate) mod helpers {
             access_lifetime,
             cookie,
         })
+    }
+
+    #[cfg(test)]
+    mod generate_tokens_auth_version_tests {
+        use wafer_block_crypto::service::Argon2JwtCryptoService;
+
+        use super::*;
+        use crate::test_support::TestContext;
+
+        /// A `TestContext` with auth migrations applied and a real crypto
+        /// block registered, so `generate_tokens`'s `crypto::sign` /
+        /// `crypto::random_bytes` calls (and `crypto::verify` in these tests)
+        /// have somewhere to dispatch to.
+        async fn ctx_with_crypto() -> TestContext {
+            let mut ctx = TestContext::with_auth().await;
+            let svc = std::sync::Arc::new(
+                Argon2JwtCryptoService::new(
+                    "test-jwt-secret-padded-to-min-32-bytes-aaaa".to_string(),
+                )
+                .expect("test secret is long enough"),
+            );
+            let crypto_block: std::sync::Arc<dyn wafer_run::Block> =
+                std::sync::Arc::new(wafer_core::service_blocks::crypto::CryptoBlock::new(svc));
+            ctx.register_block("wafer-run/crypto", crypto_block);
+            ctx
+        }
+
+        async fn seed_user(ctx: &TestContext) -> String {
+            repo::users::insert(
+                ctx,
+                repo::users::NewUser {
+                    email: "mint@example.com".into(),
+                    display_name: "Mint".into(),
+                    avatar_url: None,
+                    role: "user".into(),
+                },
+            )
+            .await
+            .unwrap()
+            .id
+        }
+
+        #[tokio::test]
+        async fn minted_access_token_embeds_the_users_current_auth_version() {
+            let ctx = ctx_with_crypto().await;
+            let uid = seed_user(&ctx).await;
+
+            // Bump twice before minting — the token must embed 2, not 0.
+            bump_auth_version(&ctx, &uid).await.unwrap();
+            bump_auth_version(&ctx, &uid).await.unwrap();
+
+            let Ok((access_token, _refresh_token, _family)) = generate_tokens(
+                &ctx,
+                &uid,
+                "mint@example.com",
+                &["user".to_string()],
+                "password",
+                None,
+            )
+            .await
+            else {
+                panic!("mint tokens failed")
+            };
+
+            let claims = crypto::verify(&ctx, &access_token)
+                .await
+                .expect("verify minted token");
+            assert_eq!(
+                claims
+                    .get(repo::users::AUTH_VERSION_FIELD)
+                    .and_then(|v| v.as_i64()),
+                Some(2),
+                "minted access token must embed the user's current auth_version at mint time"
+            );
+        }
     }
 }
 
