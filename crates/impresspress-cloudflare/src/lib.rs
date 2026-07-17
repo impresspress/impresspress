@@ -171,8 +171,41 @@ pub fn make_fetch_network_service() -> Arc<dyn NetworkService> {
 }
 
 /// Construct a [`LoggerService`] that writes to `worker::console_log`.
-pub fn make_console_logger() -> Arc<dyn LoggerService> {
-    Arc::new(logger_service::ConsoleLoggerService)
+///
+/// The minimum emitted level is read at construction from the
+/// `IMPRESSPRESS_CF_LOG_LEVEL` worker var (set via `wrangler.toml [vars]` or
+/// the dashboard) — a runtime knob, unlike the previous `option_env!`
+/// compile-time read, so an operator can raise/lower verbosity per
+/// deployment without rebuilding. Falls back to the compile-time default
+/// (Debug in dev builds, Info in release) when the var is unset or
+/// unparseable. Resolved once per logger construction, which happens at
+/// most once per per-isolate runtime build
+/// (`runtime_cache::get_or_build`) — never on the request hot path.
+pub fn make_console_logger(env: &worker::Env) -> Arc<dyn LoggerService> {
+    Arc::new(logger_service::ConsoleLoggerService::new(
+        cf_log_level_var(env).as_deref(),
+    ))
+}
+
+/// Raw `IMPRESSPRESS_CF_LOG_LEVEL` worker var value, if set. Shared by
+/// [`make_console_logger`] (logger construction) and [`resolved_log_level`]
+/// (Server-Timing gating in `run_inner`) so both resolve from the same read
+/// instead of two independent env lookups that could disagree.
+fn cf_log_level_var(env: &worker::Env) -> Option<String> {
+    env.var(CF_LOG_LEVEL_KEY).ok().map(|v| v.to_string())
+}
+
+/// Resolve the Cloudflare console logger's minimum level without needing to
+/// downcast the type-erased `Arc<dyn LoggerService>` the runtime holds.
+///
+/// Used by `run_inner` to gate the `Server-Timing` response header: only
+/// attached when this resolves to `Debug` (dev). An unconditional header
+/// would disclose per-request cache/rebuild state — including the isolate
+/// build counter, a signal for when a config bump landed — to every
+/// anonymous client, which is a production fingerprinting concern, not a
+/// dev debugging aid.
+fn resolved_log_level(env: &worker::Env) -> impresspress_core::log_level::LogLevel {
+    logger_service::resolve_level(cf_log_level_var(env).as_deref())
 }
 
 /// Construct a [`ConfigService`] from a pre-loaded key/value map.
@@ -294,8 +327,18 @@ where
                 for (table, rows) in by_table {
                     let n = rows.len();
                     if let Err(e) = batch_db.create_many(table, rows).await {
+                        // Structured metric line (not a Server-Timing header:
+                        // this closure runs in `ctx.wait_until`, after the
+                        // response has already been sent). See
+                        // `impresspress_core::metrics`'s module doc.
+                        let rows_str = n.to_string();
+                        let err_str = e.to_string();
                         worker::console_log!(
-                            "audit-log batch persistence failed ({n} rows into {table}): {e}"
+                            "{}",
+                            impresspress_core::metrics::metric_line(
+                                "audit_log_persist_failed",
+                                &[("table", table), ("rows", &rows_str), ("error", &err_str)],
+                            )
                         );
                     }
                 }
@@ -316,7 +359,15 @@ where
                     .put(impresspress_core::cache_key::CONFIG_VERSION_KEY, &stamp)
                     .await
                 {
-                    worker::console_log!("delayed config-version retry failed: {e}");
+                    // `e` here is already a `String` (KvBackend::put's error
+                    // type) — no `.to_string()` clone needed.
+                    worker::console_log!(
+                        "{}",
+                        impresspress_core::metrics::metric_line(
+                            "config_version_retry_failed",
+                            &[("error", &e)],
+                        )
+                    );
                 }
             });
         }
@@ -603,7 +654,7 @@ where
         .unwrap_or_default();
     let crypto = make_jwt_crypto_service(jwt_secret);
     let network = make_fetch_network_service();
-    let logger = make_console_logger();
+    let logger = make_console_logger(env);
     // Clone the map for the snapshot below before `make_config_service`
     // consumes it — the snapshot and the async ConfigService must carry
     // identical data (see comment at the `set_config_snapshot` call site).
@@ -696,8 +747,30 @@ where
     // Reuse the per-isolate runtime; rebuild only when the KV config-version
     // stamp has moved. No boot funnel here — migrations/seeds run at deploy
     // time via `/_deploy/init`, not on the request path.
-    let rt = runtime_cache::get_or_build(&env, register_blocks, register_post_build).await?;
-    dispatch(&rt.wafer, req).await
+    let (rt, cache_outcome) =
+        runtime_cache::get_or_build(&env, register_blocks, register_post_build).await?;
+    let mut response = dispatch(&rt.wafer, req).await?;
+
+    // Cheap observability signal (2026-07-16 audit follow-up): one header
+    // assembly from a value already computed by `get_or_build`. Gated to
+    // Debug (dev) level — see `resolved_log_level`'s doc — so an
+    // unconditional header doesn't disclose per-request cache/rebuild state
+    // to anonymous clients on production deployments (which default to
+    // Info). A failure to set it never fails the request.
+    if resolved_log_level(&env) == impresspress_core::log_level::LogLevel::Debug {
+        let server_timing = impresspress_core::metrics::server_timing_header(cache_outcome);
+        if let Err(e) = response.headers_mut().set("Server-Timing", &server_timing) {
+            worker::console_log!(
+                "{}",
+                impresspress_core::metrics::metric_line(
+                    "server_timing_header_failed",
+                    &[("error", &e.to_string())],
+                )
+            );
+        }
+    }
+
+    Ok(response)
 }
 
 /// Worker `Env` bindings that override D1 variables (set via
@@ -709,6 +782,13 @@ const PROTECTED_ENV_KEYS: &[&str] = &[impresspress_core::blocks::auth::JWT_SECRE
 /// preview-host lockdown in [`run`]. Set to `"1"` to serve the full app on a
 /// `workers.dev` host (e.g. consumers with no custom domain).
 const ALLOW_WORKERS_DEV_KEY: &str = "IMPRESSPRESS_ALLOW_WORKERS_DEV";
+
+/// Worker var (`env.var`) that sets the Cloudflare console logger's minimum
+/// emitted level at runtime (`debug`/`info`/`warn`/`error`, case-insensitive
+/// — see [`impresspress_core::log_level::LogLevel::parse`]). Unset or
+/// unparseable falls back to the compile-time default. See
+/// [`make_console_logger`].
+const CF_LOG_LEVEL_KEY: &str = "IMPRESSPRESS_CF_LOG_LEVEL";
 
 /// True when the request's host is a `*.workers.dev` host (ASCII
 /// case-insensitive). Drives the preview-host lockdown in [`run`]. Two
