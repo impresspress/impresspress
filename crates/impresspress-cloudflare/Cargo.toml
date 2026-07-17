@@ -90,6 +90,9 @@ chrono = { workspace = true }
 
 # Async
 async-trait = { workspace = true }
+# Stream combinators for pumping R2/fetch `ByteStream`s and the response
+# `OutputStream` into Worker `ReadableStream`s (StreamExt/TryStreamExt).
+futures = "0.3"
 
 # Observability
 tracing = { workspace = true }

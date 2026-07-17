@@ -4,7 +4,7 @@ use wafer_run::{context::Context, ErrorCode, HttpMethod, InputStream, Message, O
 use super::repo;
 use crate::{
     endpoint_match::{self, EndpointRoute},
-    http::{err_bad_request, err_forbidden, err_internal, err_not_found, ok_json, ResponseBuilder},
+    http::{err_bad_request, err_forbidden, err_internal, err_not_found, ok_json},
 };
 
 /// In-block dispatch targets for the user storage API.
@@ -384,10 +384,31 @@ async fn handle_get_object(ctx: &dyn Context, msg: &Message) -> OutputStream {
         tracing::warn!("Failed to track storage object view: {e}");
     }
 
-    match store::get(ctx, bucket, key).await {
-        Ok((data, info)) => ResponseBuilder::new().body(data, &info.content_type),
+    // Stream the object body straight from storage (R2 `get_streaming` on CF)
+    // rather than buffering the whole object into the isolate: `get_stream`
+    // returns the `ObjectInfo` header eagerly, then the body flows chunk by
+    // chunk. The leading meta carries the streaming opt-in marker + the real
+    // content-type so the pipeline and platform adapter take the streaming
+    // response path (see `crate::streaming`).
+    match store::get_stream(ctx, bucket, key).await {
+        Ok(stream) => {
+            let content_type = resolved_content_type(stream.info());
+            let leading = crate::streaming::download_leading_meta(&content_type, &[]);
+            crate::streaming::stream_download(stream, leading)
+        }
         Err(e) if e.code == ErrorCode::NotFound => err_not_found("Object not found"),
         Err(e) => err_internal("Storage error", e),
+    }
+}
+
+/// The object's stored content-type, falling back to `application/octet-stream`
+/// when the backend reports none (parity with the buffered `get` path, which
+/// R2/S3 default the same way).
+fn resolved_content_type(info: &store::ObjectInfo) -> String {
+    if info.content_type.is_empty() {
+        "application/octet-stream".to_string()
+    } else {
+        info.content_type.clone()
     }
 }
 
@@ -828,6 +849,73 @@ mod integration_tests {
             Arc::new(StorageBlock::new(Arc::new(MemStorage::default()))),
         );
         ctx
+    }
+
+    /// A download served via `handle_get_object` must take the STREAMING
+    /// response shape: the `resp.stream` opt-in marker and the object's real
+    /// content-type are emitted as **leading `Meta`** events (before the first
+    /// body `Chunk`), and the body bytes are forwarded verbatim. This is what
+    /// makes the pipeline + platform adapter stream the object instead of
+    /// buffering it whole in the isolate. (`MemStorage` uses the default
+    /// `get_streaming`, so this exercises the handler's framing end-to-end
+    /// through the real `wafer-run/storage` wire protocol.)
+    #[tokio::test]
+    async fn get_object_streams_body_with_leading_meta_marker() {
+        use futures::StreamExt;
+        use wafer_block::stream::StreamEvent;
+        use wafer_run::{MetaEntry, MetaGet, META_RESP_CONTENT_TYPE};
+
+        let ctx = ctx_with_storage().await;
+        seed_bucket(&ctx, "assets", "alice").await;
+        store::put(&ctx, "assets", "pic.png", b"PNGDATA", "image/png")
+            .await
+            .expect("seed object");
+
+        let mut msg = auth_msg(
+            "retrieve",
+            "/b/storage/api/buckets/assets/objects/pic.png",
+            "alice",
+        );
+        msg.set_meta("req.param.name", "assets");
+        msg.set_meta("req.param.key", "pic.png");
+
+        let events: Vec<StreamEvent> = handle_get_object(&ctx, &msg).await.collect().await;
+
+        // Leading meta must PRECEDE the first body chunk (the streaming shape).
+        let first_chunk = events
+            .iter()
+            .position(|e| matches!(e, StreamEvent::Chunk(_)))
+            .expect("a body chunk must be streamed");
+        let leading: Vec<MetaEntry> = events[..first_chunk]
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::Meta(m) => Some(m.clone()),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(
+            MetaGet::get(&leading, crate::streaming::META_RESP_STREAM),
+            Some(crate::streaming::STREAM_MARKER_VALUE),
+            "download must emit the streaming opt-in marker as leading meta"
+        );
+        assert_eq!(
+            MetaGet::get(&leading, META_RESP_CONTENT_TYPE),
+            Some("image/png"),
+            "download must emit the object's real content-type as leading meta"
+        );
+
+        let body: Vec<u8> = events
+            .iter()
+            .filter_map(|e| match e {
+                StreamEvent::Chunk(b) => Some(b.clone()),
+                _ => None,
+            })
+            .flatten()
+            .collect();
+        assert_eq!(
+            body, b"PNGDATA",
+            "the object body must be streamed verbatim"
+        );
     }
 
     /// Build a browser-shaped `multipart/form-data` envelope around

@@ -6,10 +6,7 @@ use wafer_run::{context::Context, ErrorCode, Message, OutputStream};
 use super::repo;
 use crate::{
     blocks::rate_limit::{check_rate_limit, RateLimit, RateLimitOutcome, UserRateLimiter},
-    http::{
-        err_bad_request, err_forbidden, err_internal, err_internal_no_cause, err_not_found,
-        ResponseBuilder,
-    },
+    http::{err_bad_request, err_forbidden, err_internal, err_internal_no_cause, err_not_found},
     util::{json_map, RecordExt},
 };
 
@@ -129,18 +126,32 @@ pub async fn handle_direct_access(
         tracing::warn!("Failed to log share access: {e}");
     }
 
-    // Serve the file
-    match store::get(ctx, bucket, key).await {
-        Ok((data, info)) => ResponseBuilder::new()
-            .set_header(
-                "Content-Disposition",
-                &format!(
-                    "inline; filename=\"{}\"",
-                    key.replace(['"', '\n', '\r'], "")
-                ),
-            )
-            .set_header("Cache-Control", "private, max-age=3600")
-            .body(data, &info.content_type),
+    // Serve the file — stream the body straight from storage (R2
+    // `get_streaming` on CF) rather than buffering the whole object in the
+    // isolate. `get_stream` resolves the `ObjectInfo` header eagerly; the
+    // leading meta carries the streaming opt-in marker + content-type +
+    // download headers so the pipeline and platform adapter take the streaming
+    // response path (see `crate::streaming`).
+    match store::get_stream(ctx, bucket, key).await {
+        Ok(stream) => {
+            let content_type = if stream.info().content_type.is_empty() {
+                "application/octet-stream".to_string()
+            } else {
+                stream.info().content_type.clone()
+            };
+            let disposition = format!(
+                "inline; filename=\"{}\"",
+                key.replace(['"', '\n', '\r'], "")
+            );
+            let leading = crate::streaming::download_leading_meta(
+                &content_type,
+                &[
+                    ("Content-Disposition", disposition.as_str()),
+                    ("Cache-Control", "private, max-age=3600"),
+                ],
+            );
+            crate::streaming::stream_download(stream, leading)
+        }
         Err(e) if e.code == ErrorCode::NotFound => err_not_found("File not found"),
         Err(e) => err_internal("Storage error", e),
     }
