@@ -4,9 +4,9 @@
 //! `blocks::router::ImpresspressRouterBlock::handle`) relies on
 //! `SameSite=Lax` alone unless this module is wired in. `SameSite=Lax` still
 //! attaches the cookie to a cross-site *top-level* navigation using a "safe"
-//! method, and to any request made via an unsafe method that a permissive
-//! browser or a same-site (but attacker-influenced) subdomain can trigger, so
-//! it is not a complete CSRF defense on its own.
+//! method, and — because the cookie is host-only rather than scoped to a
+//! specific subdomain — to any same-site cross-subdomain request using an
+//! unsafe method, so it is not a complete CSRF defense on its own.
 //!
 //! Two independent layers, both centralized here so no handler re-implements
 //! either:
@@ -23,10 +23,9 @@
 //! 2. [`token`] / [`hidden_field`] / [`verify`] — a stateless synchronizer
 //!    token for the plain (non-JS, non-`htmx`) SSR `<form>` POSTs in this
 //!    app (bootstrap-admin redemption, profile update). Defense-in-depth on
-//!    top of layer 1: even a same-origin/allowed-origin POST must also carry
-//!    the correct per-identity token, which a same-site-but-compromised
-//!    origin (e.g. a sibling subdomain sharing the cookie's `Domain`) still
-//!    could not produce or read.
+//!    top of layer 1: even an allowed-origin POST must also carry the
+//!    correct per-identity token, which nothing outside this same origin
+//!    could produce or read.
 //!
 //! `htmx`- and `fetch`-driven forms elsewhere in the app (admin variables,
 //! users, database explorer, portal buttons, chat composer, settings forms,
@@ -94,16 +93,23 @@ pub fn enforce_origin_policy(msg: &Message, cookie_authenticated: bool) -> Optio
 
     // Primary signal: Fetch Metadata. Sent by every modern browser for
     // essentially all requests (fetch/XHR, `<form>` submission, `htmx`),
-    // including same-origin ones. Only these three values indicate the
-    // request originated from our own site (or from no web page at all —
-    // "none" covers a typed URL / bookmark / browser extension); anything
-    // else, including "cross-site" and any value this policy doesn't
-    // recognize, is rejected.
+    // including same-origin ones. Only these two values indicate the request
+    // originated from our own origin (or from no web page at all — "none"
+    // covers a typed URL / bookmark / browser extension); everything else,
+    // including "same-site" and "cross-site" and any value this policy
+    // doesn't recognize, is rejected. `same-site` is deliberately NOT
+    // allowed: the `auth_token` cookie is host-only (no explicit `Domain`
+    // attribute), but `SameSite=Lax` still attaches it to a same-site
+    // cross-subdomain request, so a `same-site` classification does not
+    // imply the request came from this app — it could come from any sibling
+    // subdomain under the registrable domain. impresspress serves everything
+    // same-origin, so there is no legitimate same-site-but-cross-subdomain
+    // flow to accommodate.
     let sec_fetch_site = msg.header("sec-fetch-site");
     if !sec_fetch_site.is_empty() {
         let is_safe = matches!(
             sec_fetch_site.to_ascii_lowercase().as_str(),
-            "same-origin" | "same-site" | "none"
+            "same-origin" | "none"
         );
         return if is_safe {
             None
@@ -274,8 +280,8 @@ mod tests {
     }
 
     #[test]
-    fn same_site_and_none_are_allowed() {
-        for value in ["same-site", "none", "SAME-ORIGIN"] {
+    fn none_and_same_origin_are_allowed() {
+        for value in ["none", "SAME-ORIGIN"] {
             let mut msg = cookie_msg("update", "/b/admin/users/1", "user-1");
             msg.set_meta("http.header.sec-fetch-site", value);
             assert!(
@@ -283,6 +289,21 @@ mod tests {
                 "{value} should be allowed"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn same_site_cookie_authenticated_post_is_rejected() {
+        // A sibling subdomain under the same registrable domain classifies
+        // as `same-site`, not `same-origin`. The host-only `auth_token`
+        // cookie still attaches to it under `SameSite=Lax`, so an attacker
+        // controlling any sibling subdomain could otherwise forge this
+        // mutation. impresspress has no legitimate same-site-but-cross-
+        // subdomain POST flow, so this must be rejected just like
+        // `cross-site`.
+        let mut msg = cookie_msg("update", "/b/admin/users/1", "user-1");
+        msg.set_meta("http.header.sec-fetch-site", "same-site");
+        let out = enforce_origin_policy(&msg, true).expect("must reject");
+        assert!(crate::test_support::output_is_error(out, "PermissionDenied").await);
     }
 
     #[tokio::test]
