@@ -5,10 +5,20 @@ const ADMIN_PASSWORD = 'admin123';
 
 /**
  * Log in via the JSON API (POST /b/auth/api/login) and wait for the service
- * worker to activate.  The login endpoint sets an auth cookie that subsequent
- * page.request calls automatically carry, so no manual token handling is needed.
+ * worker to activate. `page.request` is a Node-side HTTP client — it carries
+ * whatever cookies the page's context holds, but (unlike a real page
+ * `fetch`/`htmx` request) it never sets `Sec-Fetch-Site`/`Origin`/`Referer`.
+ * The central CSRF origin policy (`impresspress_core::csrf`) requires one of
+ * those for any cookie-authenticated mutation, so relying on the login
+ * cookie here would 403 every subsequent call. Instead, pull the
+ * `access_token` out of the login response and send it as a real
+ * `Authorization: Bearer` header on every mutation below — bearer-authenticated
+ * requests resolve `cookie_authenticated = false` and are exempt from the
+ * policy (a cross-site page has no ambient credential to attach a bearer
+ * token with, so it isn't CSRF-able in the first place). Same pattern as
+ * `examples/tests/saas.spec.ts`.
  */
-async function loginAndWaitForSW(page: Page) {
+async function loginAndWaitForSW(page: Page): Promise<string> {
   // Navigate first so the SW can register and control the page.
   await page.goto('/');
   await page.waitForFunction(
@@ -22,6 +32,8 @@ async function loginAndWaitForSW(page: Page) {
     data: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD },
   });
   expect(res.status()).toBe(200);
+  const body = await res.json();
+  return body.access_token as string;
 }
 
 // ─── helpers ──────────────────────────────────────────────────────────────────
@@ -37,10 +49,12 @@ const align = (i: number): number[] => {
 // ─── tests ────────────────────────────────────────────────────────────────────
 
 test('create + upsert + query (vector mode) over a small index', async ({ page }) => {
-  await loginAndWaitForSW(page);
+  const token = await loginAndWaitForSW(page);
+  const headers = { Authorization: `Bearer ${token}` };
 
   // 1. Create a 384-d cosine index without keyword search.
   const create = await page.request.post('/b/vector/api/indexes', {
+    headers,
     data: {
       config: {
         name: 'smoke',
@@ -57,6 +71,7 @@ test('create + upsert + query (vector mode) over a small index', async ({ page }
   //    doc-A is the standard basis vector e_0; the query vector is also e_0,
   //    so doc-A wins on cosine similarity (score ≈ 1.0), doc-B loses.
   const upsert = await page.request.post('/b/vector/api/upsert', {
+    headers,
     data: {
       index: 'smoke',
       entries: [
@@ -69,6 +84,7 @@ test('create + upsert + query (vector mode) over a small index', async ({ page }
 
   // 3. Query with a vector identical to doc-A's; expect it to be top result.
   const query = await page.request.post('/b/vector/api/query', {
+    headers,
     data: {
       index: 'smoke',
       vector: align(0),
@@ -83,15 +99,17 @@ test('create + upsert + query (vector mode) over a small index', async ({ page }
   expect(body.matches[1].id).toBe('doc-B');
 
   // 4. Cleanup.
-  const del = await page.request.delete('/b/vector/api/indexes/smoke');
+  const del = await page.request.delete('/b/vector/api/indexes/smoke', { headers });
   expect(del.status()).toBe(200);
 });
 
 test('hybrid search returns FTS + vector matches via RRF', async ({ page }) => {
-  await loginAndWaitForSW(page);
+  const token = await loginAndWaitForSW(page);
+  const headers = { Authorization: `Bearer ${token}` };
 
   // 1. Create an index with keyword_search enabled.
   const create = await page.request.post('/b/vector/api/indexes', {
+    headers,
     data: {
       config: {
         name: 'hybrid',
@@ -107,6 +125,7 @@ test('hybrid search returns FTS + vector matches via RRF', async ({ page }) => {
   // 2. Upsert three entries: doc-A is both the nearest vector and a keyword
   //    hit; doc-B is only a keyword hit; doc-C is neither.
   const upsert = await page.request.post('/b/vector/api/upsert', {
+    headers,
     data: {
       index: 'hybrid',
       entries: [
@@ -122,6 +141,7 @@ test('hybrid search returns FTS + vector matches via RRF', async ({ page }) => {
   //    RRF should rank doc-A first (wins both legs), doc-B second (keyword
   //    hit), doc-C last (no overlap).
   const query = await page.request.post('/b/vector/api/query', {
+    headers,
     data: {
       index: 'hybrid',
       vector: align(0),
@@ -137,5 +157,5 @@ test('hybrid search returns FTS + vector matches via RRF', async ({ page }) => {
   expect(body.matches[body.matches.length - 1].id).toBe('doc-C');
 
   // 4. Cleanup.
-  await page.request.delete('/b/vector/api/indexes/hybrid');
+  await page.request.delete('/b/vector/api/indexes/hybrid', { headers });
 });
