@@ -212,6 +212,32 @@ pub fn auth_grants() -> Vec<wafer_block::types::ResourceGrant> {
             "wafer_run__auth__rate_limits",
         ),
         wafer_run::ResourceGrant::read_write("impresspress/files", "wafer_run__auth__rate_limits"),
+        // auth-ui's login / signup / refresh handlers read the auth-policy
+        // config vars declared by `auth::config` (owned by this block). These
+        // are CONFIG resources (uppercase `WAFER_RUN__AUTH__*`), a different
+        // namespace from the lowercase `wafer_run__auth__*` DATABASE grant
+        // above — so the DB wildcard does not cover them. Without these
+        // config-typed grants WRAP denies the reads and auth-ui silently
+        // falls back to defaults, so an operator's REQUIRE_VERIFICATION /
+        // ALLOWED_EMAIL_DOMAINS / ACCESS_TOKEN_LIFETIME_SECS settings are
+        // ignored. `allows_config_key` is an exact-match check, so each key is
+        // granted explicitly (no wildcard). Literals kept in sync with
+        // `auth::config`'s `*_KEY` consts for the WRAP-grant audit script.
+        wafer_run::ResourceGrant::read(
+            "impresspress/auth-ui",
+            "WAFER_RUN__AUTH__REQUIRE_VERIFICATION",
+        )
+        .typed(wafer_run::ResourceType::Config),
+        wafer_run::ResourceGrant::read(
+            "impresspress/auth-ui",
+            "WAFER_RUN__AUTH__ALLOWED_EMAIL_DOMAINS",
+        )
+        .typed(wafer_run::ResourceType::Config),
+        wafer_run::ResourceGrant::read(
+            "impresspress/auth-ui",
+            "WAFER_RUN__AUTH__ACCESS_TOKEN_LIFETIME_SECS",
+        )
+        .typed(wafer_run::ResourceType::Config),
     ]
 }
 
