@@ -81,6 +81,8 @@ pub fn drain_queued_request_logs() -> Vec<QueuedRequestLog> {
 /// Steps:
 /// 1. Strip `/api` prefix (CF convention — native doesn't use it)
 /// 2. Validate JWT and set auth meta
+/// 2a. CSRF: enforce the Fetch-Metadata/Origin policy for cookie-authenticated
+///     unsafe-method requests (see `crate::csrf`)
 /// 3. Route to the appropriate impresspress block
 /// 4. Log the request to `request_logs` (async, best-effort)
 ///
@@ -100,6 +102,7 @@ pub async fn handle_request(
     input: InputStream,
     auth_header: Option<&str>,
     jwt_secret: &str,
+    cookie_authenticated: bool,
     features: &dyn FeatureConfig,
     block_infos: &[BlockInfo],
     extra_routes: &[ExtraRoute],
@@ -176,9 +179,19 @@ pub async fn handle_request(
     let user_id = msg.user_id().to_string();
     let start_ms = crate::util::now_millis();
 
+    // 2a. CSRF: cookie-authenticated unsafe-method requests must pass the
+    // Fetch-Metadata/Origin/Referer policy before any block sees them. Bearer
+    // -authenticated callers (`cookie_authenticated == false`) are exempt — see
+    // `crate::csrf` module docs. One central check for every mutation. Routed
+    // through the same `stream` variable (rather than an early `return`) so a
+    // rejection flows through the normal status-resolution + audit-log tail
+    // below exactly like a dispatched response would.
+    //
     // 3. Route to block.
-    let mut stream =
-        routing::route_to_block(ctx, msg, input, features, block_infos, extra_routes).await;
+    let mut stream = match crate::csrf::enforce_origin_policy(&msg, cookie_authenticated) {
+        Some(denied) => denied,
+        None => routing::route_to_block(ctx, msg, input, features, block_infos, extra_routes).await,
+    };
 
     // 3a. If the block declares a streaming Content-Type up front (SSE, raw
     //     byte stream), don't drain the response into memory just to grab a
@@ -480,6 +493,7 @@ mod discovery_tests {
             InputStream::from_bytes(Vec::new()),
             None,
             "test-jwt-secret",
+            false,
             &AllEnabled,
             &real_block_infos(),
             &[],
@@ -668,6 +682,145 @@ mod discovery_tests {
             detail["parameters"][0]["name"], "id",
             "product detail must declare the {{id}} path param: {detail}"
         );
+    }
+}
+
+/// End-to-end proof that `handle_request` actually wires
+/// `crate::csrf::enforce_origin_policy` in — not just that the policy
+/// function itself is correct (covered exhaustively in `crate::csrf`'s own
+/// tests). Uses `extra_routes` to reach a dispatch-probe block the same way
+/// `routing::tests::extra_routes_honor_the_feature_gate` does, since the
+/// built-in `ROUTES` table has no test-only entry.
+#[cfg(test)]
+mod csrf_wiring_tests {
+    use async_trait::async_trait;
+    use wafer_run::{Block as RunBlock, BlockCategory, LifecycleEvent, WaferError};
+
+    use super::*;
+    use crate::{
+        features::AllEnabled,
+        routing::{ExtraRoute, RouteAccess},
+        test_support::{auth_msg, TestContext},
+    };
+
+    struct DispatchProbeBlock;
+    #[async_trait]
+    impl RunBlock for DispatchProbeBlock {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new("test/csrf-probe", "0.0.1", "echo@v1", "csrf wiring probe")
+                .category(BlockCategory::Service)
+        }
+        async fn handle(
+            &self,
+            _ctx: &dyn Context,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            ResponseBuilder::new()
+                .status(200)
+                .body(b"DISPATCHED".to_vec(), "text/plain")
+        }
+        async fn lifecycle(
+            &self,
+            _ctx: &dyn Context,
+            _e: LifecycleEvent,
+        ) -> Result<(), WaferError> {
+            Ok(())
+        }
+    }
+
+    async fn ctx_with_probe() -> TestContext {
+        let mut ctx = TestContext::new().await;
+        ctx.register_block("test/csrf-probe", std::sync::Arc::new(DispatchProbeBlock));
+        ctx
+    }
+
+    fn extra_route() -> Vec<ExtraRoute> {
+        vec![ExtraRoute {
+            prefix: "/x/csrf-probe".to_string(),
+            access: RouteAccess::Public,
+            block_name: "test/csrf-probe".to_string(),
+        }]
+    }
+
+    #[tokio::test]
+    async fn cookie_authenticated_cross_site_post_is_rejected_before_dispatch() {
+        let ctx = ctx_with_probe().await;
+        let mut msg = auth_msg("create", "/x/csrf-probe", "user-1");
+        msg.set_meta("http.header.sec-fetch-site", "cross-site");
+
+        let out = handle_request(
+            &ctx,
+            msg,
+            InputStream::empty(),
+            None, // no Authorization header — this credential came from the cookie
+            "test-secret",
+            true, // cookie_authenticated
+            &AllEnabled,
+            &[],
+            &extra_route(),
+        )
+        .await;
+
+        assert!(
+            crate::test_support::output_is_error(out, "PermissionDenied").await,
+            "cross-site cookie-authenticated POST must be rejected before block dispatch"
+        );
+    }
+
+    #[tokio::test]
+    async fn cookie_authenticated_same_origin_post_is_dispatched() {
+        let ctx = ctx_with_probe().await;
+        let mut msg = auth_msg("create", "/x/csrf-probe", "user-1");
+        msg.set_meta("http.header.sec-fetch-site", "same-origin");
+
+        let out = handle_request(
+            &ctx,
+            msg,
+            InputStream::empty(),
+            None,
+            "test-secret",
+            true,
+            &AllEnabled,
+            &[],
+            &extra_route(),
+        )
+        .await;
+
+        let buf = out
+            .collect_buffered()
+            .await
+            .expect("same-origin cookie-authenticated POST must reach dispatch");
+        assert_eq!(buf.body, b"DISPATCHED");
+    }
+
+    #[tokio::test]
+    async fn bearer_authenticated_cross_site_post_is_not_blocked() {
+        // cookie_authenticated=false: this credential came from a real
+        // `Authorization: Bearer` header, not the cookie fallback — never
+        // CSRF-able, so the cross-site Sec-Fetch-Site value is irrelevant.
+        let ctx = ctx_with_probe().await;
+        let mut msg = auth_msg("create", "/x/csrf-probe", "user-1");
+        msg.set_meta("http.header.sec-fetch-site", "cross-site");
+
+        let out = handle_request(
+            &ctx,
+            msg,
+            InputStream::empty(),
+            None,
+            "test-secret",
+            false, // cookie_authenticated
+            &AllEnabled,
+            &[],
+            &extra_route(),
+        )
+        .await;
+
+        let buf = out
+            .collect_buffered()
+            .await
+            .expect("Bearer-authenticated cross-site POST must not be blocked");
+        assert_eq!(buf.body, b"DISPATCHED");
     }
 }
 

@@ -58,12 +58,22 @@ export default async function globalSetup(config: FullConfig): Promise<void> {
     );
   }
 
+  const { access_token: accessToken } = (await res.json()) as { access_token: string };
+
   // Phase 5d Item C — seed a deterministic `photos` bucket with one file at
   // root and one in a `nested/` prefix so the storage-objects baselines have
   // something to render. Seeding is best-effort: any failure logs a warning
   // and continues so a transient API hiccup doesn't tank the whole suite —
   // the affected baselines will then visibly diff against the empty state.
-  await seedStoragePhotos(requestContext);
+  //
+  // `requestContext` is a Node-side HTTP client: it carries the login cookie
+  // but never sets Sec-Fetch-Site/Origin/Referer, so the central CSRF origin
+  // policy (`impresspress_core::csrf::enforce_origin_policy`) would (correctly)
+  // 403 every cookie-authenticated mutation made through it. Bearer-authenticated
+  // requests are exempt (not CSRF-able — a cross-site page has no ambient
+  // credential to attach a bearer token with), so seed via the `access_token`
+  // from the login response instead. Same pattern as `vector.spec.ts`.
+  await seedStoragePhotos(requestContext, accessToken);
 
   await requestContext.storageState({ path: ADMIN_STATE_PATH });
   await requestContext.dispose();
@@ -109,8 +119,9 @@ const TRANSPARENT_PNG_1X1 = Buffer.from([
  * Upload API: `POST /b/storage/api/buckets/{bucket}/objects?key=<key>` with
  * the raw object body. `Content-Type` header drives the stored content-type.
  */
-async function seedStoragePhotos(req: APIRequestContext): Promise<void> {
+async function seedStoragePhotos(req: APIRequestContext, accessToken: string): Promise<void> {
   const BUCKET = 'photos';
+  const authHeader = { Authorization: `Bearer ${accessToken}` };
 
   // 1. Create the bucket. The handler returns 200 on success and 500 if the
   //    bucket already exists at the filesystem layer; we treat anything <500
@@ -119,7 +130,7 @@ async function seedStoragePhotos(req: APIRequestContext): Promise<void> {
   try {
     const bucketRes = await req.post('/b/storage/api/buckets', {
       data: { name: BUCKET, public: false },
-      headers: { 'Content-Type': 'application/json' },
+      headers: { 'Content-Type': 'application/json', ...authHeader },
     });
     if (bucketRes.status() >= 500) {
       const body = await bucketRes.text().catch(() => '<unreadable>');
@@ -141,7 +152,7 @@ async function seedStoragePhotos(req: APIRequestContext): Promise<void> {
       const url = `/b/storage/api/buckets/${encodeURIComponent(BUCKET)}/objects?key=${encodeURIComponent(key)}`;
       const res = await req.post(url, {
         data: TRANSPARENT_PNG_1X1,
-        headers: { 'Content-Type': 'image/png' },
+        headers: { 'Content-Type': 'image/png', ...authHeader },
       });
       if (res.status() >= 400) {
         const body = await res.text().catch(() => '<unreadable>');

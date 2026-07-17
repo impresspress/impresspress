@@ -442,7 +442,7 @@ crate::impresspress_feature_block! {
                 api::sync_user::handle(ctx, &msg, input).await
             }
             // Bootstrap admin token redemption (NEW — filled in Task 6)
-            ("create", "/auth/api/bootstrap") => api::bootstrap::handle(ctx, input).await,
+            ("create", "/auth/api/bootstrap") => api::bootstrap::handle(ctx, &msg, input).await,
             _ => err_not_found("not found"),
         }
     },

@@ -48,6 +48,8 @@ pub async fn handle_get(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     }
 
                     form method="post" action="/b/auth/api/bootstrap" .login-form {
+                        (crate::csrf::hidden_field(ctx, msg))
+
                         div .form-group {
                             label .form-label for="token" { "Bootstrap Token" }
                             input
