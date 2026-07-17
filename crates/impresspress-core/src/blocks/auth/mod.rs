@@ -521,18 +521,22 @@ pub(crate) mod helpers {
         auth_method: &str,
         family: Option<&str>,
     ) -> std::result::Result<(String, String, String), wafer_run::OutputStream> {
-        let family = match family {
-            Some(f) => f.to_string(),
-            None => match crypto::random_bytes(ctx, 16).await {
-                Ok(bytes) => hex_encode(&bytes),
+        // SEC-042: per-token random id so logout can revoke a single JWT
+        // without touching other live sessions for the same user. When
+        // minting a brand-new family (`family` is `None`), draw the family
+        // id and jti from a single 32-byte host call and split it into two
+        // 16-byte halves (first half -> family, second half -> jti) instead
+        // of two sequential 16-byte round-trips — each `crypto::random_bytes`
+        // call is a host round-trip on Cloudflare.
+        let (family, jti) = match family {
+            Some(f) => match crypto::random_bytes(ctx, 16).await {
+                Ok(bytes) => (f.to_string(), hex_encode(&bytes)),
                 Err(e) => return Err(wafer_run::OutputStream::error(e)),
             },
-        };
-        // SEC-042: per-token random id so logout can revoke a single JWT
-        // without touching other live sessions for the same user.
-        let jti = match crypto::random_bytes(ctx, 16).await {
-            Ok(bytes) => hex_encode(&bytes),
-            Err(e) => return Err(wafer_run::OutputStream::error(e)),
+            None => match crypto::random_bytes(ctx, 32).await {
+                Ok(bytes) => (hex_encode(&bytes[..16]), hex_encode(&bytes[16..])),
+                Err(e) => return Err(wafer_run::OutputStream::error(e)),
+            },
         };
 
         let access_lifetime_secs = access_token_lifetime_secs(ctx).await;
