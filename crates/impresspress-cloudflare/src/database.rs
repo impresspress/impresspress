@@ -16,10 +16,35 @@
 //! demand (always `TEXT` on SQLite), matching the native sqlite/postgres
 //! backends. Reads against a missing table return empty/NotFound via the
 //! `dbx_table_exists` guard the defaults run first.
+//!
+//! ## Schema cache + STRICT_SCHEMA (wafer-run #313)
+//!
+//! Each logical op the shared executor runs is fronted by schema introspection
+//! — a table-exists check plus, on the lazy-column paths, a column-list query.
+//! On D1 each is a *network* round-trip that dwarfs the data query. This
+//! adapter therefore opts into the two `DbExec` accessors #313 added:
+//!
+//! - [`schema_cache`](DbExec::schema_cache) returns a per-isolate
+//!   [`SchemaCache`], so a warm backend memoizes those introspection facts and
+//!   issues zero introspection round-trips in steady state. The shared defaults
+//!   own invalidation (lazy `ALTER TABLE`, `exec_raw`/DDL) — D1's own
+//!   schema-management methods are no-ops (schema is migration-owned) and
+//!   mutate nothing, so they need none.
+//! - [`strict_schema`](DbExec::strict_schema) reads a flag applied once at
+//!   lifecycle `Init` via [`set_strict_schema`](DatabaseService::set_strict_schema)
+//!   (the shared `wafer-run/database` handler reads
+//!   `WAFER_RUN__DATABASE__STRICT_SCHEMA` from `ctx.config_get`). When set the
+//!   executor trusts the migrated schema and skips introspection *entirely* —
+//!   no table-exists probe, no lazy column-add — removing it from the hot path.
+//!   Production CF deploys enable it (wrangler `[vars]`); a write/query
+//!   referencing an unmigrated column then fails loudly, as intended.
+
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use wafer_block::db::{Filter, ListOptions};
 use wafer_core::interfaces::database::{
     exec::DbExec,
+    schema_cache::SchemaCache,
     service::{
         AggregateSpec, Column, DatabaseError, DatabaseService, Record, RecordList, Table,
         UpsertSpec,
@@ -32,11 +57,26 @@ use worker::*;
 /// Async database service wrapping Cloudflare D1.
 pub struct D1DatabaseService {
     db: D1Database,
+    /// Memoized table-exists / column-list facts (see [`SchemaCache`]).
+    /// Consulted by the shared executor before introspection and invalidated
+    /// by it on every schema mutation. Unused while `strict_schema` is set
+    /// (strict mode skips introspection outright).
+    schema_cache: SchemaCache,
+    /// STRICT_SCHEMA flag; applied once at lifecycle `Init` via
+    /// [`DatabaseService::set_strict_schema`]. When set, the shared executor
+    /// skips schema introspection entirely. `AtomicBool` (not `Cell`) so the
+    /// struct keeps the `Sync` bound `Arc<dyn DatabaseService>` needs; on
+    /// wasm32's single thread the ordering is immaterial.
+    strict_schema: AtomicBool,
 }
 
 impl D1DatabaseService {
     pub fn new(db: D1Database) -> Self {
-        Self { db }
+        Self {
+            db,
+            schema_cache: SchemaCache::new(),
+            strict_schema: AtomicBool::new(false),
+        }
     }
 
     /// Bind `params` (the JSON form produced by `sea_values_to_json`) to a
@@ -152,7 +192,10 @@ impl D1DatabaseService {
 // SAFETY: `D1DatabaseService` holds a `D1Database` handle scoped to a single
 // Worker isolate. wasm32-unknown-unknown has no threads, so the
 // `Send`/`Sync` bounds required by `Arc<dyn DatabaseService>` are satisfied
-// trivially — no cross-thread aliasing or data races can occur.
+// trivially — no cross-thread aliasing or data races can occur. The added
+// `schema_cache` (`parking_lot::RwLock`) and `strict_schema` (`AtomicBool`)
+// fields are themselves `Send + Sync`; the `unsafe impl` remains required
+// only because of the `!Send` `D1Database` handle.
 unsafe impl Send for D1DatabaseService {}
 unsafe impl Sync for D1DatabaseService {}
 
@@ -164,6 +207,14 @@ unsafe impl Sync for D1DatabaseService {}
 #[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl DbExec for D1DatabaseService {
     const BACKEND: Backend = Backend::Sqlite;
+
+    fn schema_cache(&self) -> Option<&SchemaCache> {
+        Some(&self.schema_cache)
+    }
+
+    fn strict_schema(&self) -> bool {
+        self.strict_schema.load(Ordering::Relaxed)
+    }
 
     async fn run_fetch(
         &self,
@@ -394,6 +445,10 @@ impl DatabaseService for D1DatabaseService {
 
     async fn schema_add_column(&self, _table: &str, _column: &Column) -> Result<(), DatabaseError> {
         Ok(())
+    }
+
+    fn set_strict_schema(&self, enabled: bool) {
+        self.strict_schema.store(enabled, Ordering::Relaxed);
     }
 }
 
