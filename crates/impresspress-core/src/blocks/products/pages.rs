@@ -66,7 +66,7 @@ pub async fn overview(ctx: &dyn Context, msg: &Message) -> OutputStream {
 ///
 ///   - `WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS` off: a live 403 on
 ///     `/b/products/api/products` (the user-owned-product route,
-///     `handlers::UserRoute::requires_user_products`) was previously the
+///     `handlers::dispatch::UserRoute::requires_user_products`) was previously the
 ///     only signal a new admin got that self-serve selling is disabled —
 ///     name the var and link to Settings, where it's the first toggle in
 ///     the Features section. The admin JSON create route
