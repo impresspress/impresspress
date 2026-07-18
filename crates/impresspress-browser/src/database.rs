@@ -406,12 +406,19 @@ pub fn make_database_service() -> std::sync::Arc<dyn DatabaseService> {
 // `wasm32-unknown-unknown` target — that `BrowserDatabaseService` satisfies the
 // exact `DatabaseService` surface `run_conformance` drives, and that the suite
 // entry point exists under the enabled `conformance` feature. It is compiled by
-// the existing `wasm-pack test --node crates/impresspress-browser` CI job (which
-// builds every `#[cfg(all(test, target_arch = "wasm32"))]` item) and by
-// `cargo check -p impresspress-browser --target wasm32-unknown-unknown`. If the
-// trait surface drifts (a new required op, or a changed signature) or the suite
-// entry is removed/renamed/re-gated, this stops compiling — surfacing the drift
-// at the consumer rather than only inside wafer-run. The assertion is never
+// an unconditional wasm32 CI step —
+// `cargo check --tests -p impresspress-browser --target wasm32-unknown-unknown`,
+// in both `ci.yml` and `ci-main.yml`. The `--tests` flag is required: this
+// `#[cfg(all(test, target_arch = "wasm32"))]` module needs the wasm32 dev-dep
+// `conformance` feature, which a plain `cargo check` (no `--tests`) does not
+// activate — so the plain check does NOT compile it. The dedicated
+// `wasm-pack test --node crates/impresspress-browser` job also builds it, but is
+// path-filtered to browser-crate changes, so the unconditional step above is
+// what catches a wafer-run pin bump (root-only diff) that drifts the trait
+// surface. If the trait surface drifts (a new required op, or a changed
+// signature) or the suite entry is removed/renamed/re-gated, this stops
+// compiling — surfacing the drift at the consumer rather than only inside
+// wafer-run. The assertion is never
 // executed and constructs no trait object, so it pulls in no sql.js/OPFS bridge
 // call: it stays green under Node, where that bridge does not exist.
 //
