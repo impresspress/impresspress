@@ -404,6 +404,83 @@ pub fn download_body_stream(
     head.chain(tail)
 }
 
+/// Splits a streamed upload body into fixed-size parts for a chunked /
+/// multipart object-storage upload (e.g. Cloudflare R2 multipart).
+///
+/// Object stores that can't accept an unbounded [`InputStream`] directly —
+/// R2's `put` rejects a `ReadableStream` of unknown length — instead take the
+/// body as a sequence of uniform parts (S3-style multipart). This accumulator
+/// buffers arriving byte chunks and hands back **exactly `part_size`-byte**
+/// parts as soon as enough bytes are available, then yields whatever remains
+/// (0..`part_size` bytes) as the final part via [`finish`](Self::finish). That
+/// invariant matches the object-store rule that every part except the last be
+/// the same size (and above the store's minimum), so the caller can upload
+/// each [`take_part`](Self::take_part) result as a non-final part and the
+/// [`finish`](Self::finish) tail as the last part.
+///
+/// Peak memory is bounded by one part plus one arriving chunk — never the whole
+/// object — which is exactly what streaming the upload is meant to buy over
+/// buffering the body whole. The byte order of the concatenated parts followed
+/// by the tail is identical to the concatenation of every pushed chunk (no
+/// bytes reordered, dropped, or duplicated); this is what the unit tests pin.
+///
+/// This is pure, allocation-only logic with no platform or async dependency,
+/// so it is host-unit-tested here and reused verbatim by the wasm-only
+/// Cloudflare R2 adapter, which cannot itself be unit-tested off-Worker.
+#[derive(Debug)]
+pub struct UploadPartBuffer {
+    part_size: usize,
+    buf: Vec<u8>,
+}
+
+impl UploadPartBuffer {
+    /// Create an accumulator that emits `part_size`-byte parts.
+    ///
+    /// # Panics
+    /// Panics if `part_size` is zero — a zero-size part can never fill, so the
+    /// accumulator would buffer the entire object and defeat its own purpose.
+    pub fn new(part_size: usize) -> Self {
+        assert!(part_size > 0, "part_size must be non-zero");
+        Self {
+            part_size,
+            buf: Vec::new(),
+        }
+    }
+
+    /// Append a body chunk. Bytes are held until they can be drained as
+    /// full parts via [`take_part`](Self::take_part).
+    pub fn push(&mut self, chunk: &[u8]) {
+        self.buf.extend_from_slice(chunk);
+    }
+
+    /// If at least one full part is buffered, drain and return exactly
+    /// `part_size` bytes; otherwise return `None`. Call in a loop after each
+    /// [`push`](Self::push) to flush every full part that a chunk completed.
+    pub fn take_part(&mut self) -> Option<Vec<u8>> {
+        if self.buf.len() >= self.part_size {
+            Some(self.buf.drain(..self.part_size).collect())
+        } else {
+            None
+        }
+    }
+
+    /// Bytes currently buffered but not yet drained as a full part. Always
+    /// strictly less than `part_size` once [`take_part`](Self::take_part) has
+    /// been drained to `None`.
+    pub fn buffered_len(&self) -> usize {
+        self.buf.len()
+    }
+
+    /// Consume the accumulator, returning the trailing bytes that never filled
+    /// a whole part — the final part of the upload. May be empty when the total
+    /// body length is an exact multiple of `part_size` (the caller then
+    /// completes the upload with the parts already drained, adding no empty
+    /// final part).
+    pub fn finish(self) -> Vec<u8> {
+        self.buf
+    }
+}
+
 #[cfg(test)]
 mod tests {
     // `super::*` re-exports the module's own `use` imports (OutputStream,
@@ -628,5 +705,113 @@ mod tests {
         let parts = http_codec::collect_http_response(out).await;
         assert_eq!(parts.status, 200);
         assert!(parts.body.is_empty());
+    }
+
+    // --- UploadPartBuffer ---
+
+    /// Drive `chunks` through the accumulator exactly as the R2 adapter does —
+    /// push each chunk, drain every full part it completed, then `finish` for
+    /// the tail — and return `(full_parts, tail)`.
+    fn split(part_size: usize, chunks: &[&[u8]]) -> (Vec<Vec<u8>>, Vec<u8>) {
+        let mut acc = UploadPartBuffer::new(part_size);
+        let mut parts = Vec::new();
+        for chunk in chunks {
+            acc.push(chunk);
+            while let Some(part) = acc.take_part() {
+                parts.push(part);
+            }
+        }
+        (parts, acc.finish())
+    }
+
+    /// Every non-final part is exactly `part_size`; the tail is strictly
+    /// smaller; and parts-then-tail concatenate back to the input verbatim.
+    fn assert_split_invariants(part_size: usize, chunks: &[&[u8]]) {
+        let (parts, tail) = split(part_size, chunks);
+        for part in &parts {
+            assert_eq!(part.len(), part_size, "non-final parts must be uniform");
+        }
+        assert!(tail.len() < part_size, "tail must be a partial part");
+        let mut rebuilt = Vec::new();
+        for part in &parts {
+            rebuilt.extend_from_slice(part);
+        }
+        rebuilt.extend_from_slice(&tail);
+        let original: Vec<u8> = chunks.concat();
+        assert_eq!(
+            rebuilt, original,
+            "no byte reordered, dropped, or duplicated"
+        );
+    }
+
+    #[test]
+    fn part_buffer_empty_stream_yields_no_parts_and_empty_tail() {
+        let (parts, tail) = split(4, &[]);
+        assert!(parts.is_empty());
+        assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn part_buffer_small_body_stays_in_tail() {
+        // Under one part → buffered put path (no parts emitted).
+        let (parts, tail) = split(4, &[b"ab", b"c"]);
+        assert!(parts.is_empty());
+        assert_eq!(tail, b"abc");
+    }
+
+    #[test]
+    fn part_buffer_exact_part_emits_one_and_empties_tail() {
+        let (parts, tail) = split(4, &[b"abcd"]);
+        assert_eq!(parts, vec![b"abcd".to_vec()]);
+        assert!(tail.is_empty(), "exact multiple leaves no final part");
+    }
+
+    #[test]
+    fn part_buffer_single_oversized_chunk_splits_into_uniform_parts() {
+        // 2.5 parts in a single push → two full parts + a half-part tail.
+        let (parts, tail) = split(4, &[b"aabbccdde"]);
+        assert_eq!(parts, vec![b"aabb".to_vec(), b"ccdd".to_vec()]);
+        assert_eq!(tail, b"e");
+    }
+
+    #[test]
+    fn part_buffer_many_small_chunks_span_boundaries() {
+        // Chunks that don't align to part boundaries still repack uniformly.
+        let chunks: &[&[u8]] = &[b"a", b"bc", b"def", b"gh", b"ijkl", b"m"];
+        assert_split_invariants(4, chunks);
+        let (parts, tail) = split(4, chunks);
+        assert_eq!(
+            parts,
+            vec![b"abcd".to_vec(), b"efgh".to_vec(), b"ijkl".to_vec()]
+        );
+        assert_eq!(tail, b"m");
+    }
+
+    #[test]
+    fn part_buffer_exact_multiple_across_chunks_has_empty_tail() {
+        let chunks: &[&[u8]] = &[b"abc", b"def", b"ghi", b"jkl"];
+        assert_split_invariants(4, chunks);
+        let (parts, tail) = split(4, chunks);
+        assert_eq!(parts.len(), 3, "12 bytes / 4 = 3 full parts");
+        assert!(tail.is_empty());
+    }
+
+    #[test]
+    fn part_buffer_take_part_drains_one_full_part_at_a_time() {
+        // A chunk worth three parts must be drained part-by-part, not at once.
+        let mut acc = UploadPartBuffer::new(2);
+        acc.push(b"aabbcc");
+        assert_eq!(acc.take_part(), Some(b"aa".to_vec()));
+        assert_eq!(acc.buffered_len(), 4);
+        assert_eq!(acc.take_part(), Some(b"bb".to_vec()));
+        assert_eq!(acc.take_part(), Some(b"cc".to_vec()));
+        assert_eq!(acc.take_part(), None);
+        assert!(acc.finish().is_empty());
+    }
+
+    #[test]
+    #[should_panic(expected = "part_size must be non-zero")]
+    fn part_buffer_zero_part_size_panics() {
+        UploadPartBuffer::new(0);
     }
 }
