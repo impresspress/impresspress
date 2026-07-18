@@ -44,7 +44,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use wafer_block::db::{Filter, ListOptions};
 use wafer_core::interfaces::database::{
-    exec::DbExec,
+    exec::{BatchOp, BatchResult, DbExec},
     schema_cache::SchemaCache,
     service::{
         AggregateSpec, Column, DatabaseError, DatabaseService, Record, RecordList, Table,
@@ -294,6 +294,121 @@ impl DbExec for D1DatabaseService {
     async fn dbx_table_exists(&self, table: &str) -> Result<bool, DatabaseError> {
         let (sql, params) = introspect::build_table_exists(table, Backend::Sqlite);
         Ok(self.run_scalar_i64(&sql, &params).await? > 0)
+    }
+
+    /// Collapse `ops` into ONE native D1 `db.batch()` round-trip.
+    ///
+    /// The shared `DbExec` default issues each op through its own single-
+    /// statement primitive — on D1 that is N separate network round-trips.
+    /// This override prepares every op's `(sql, params)` uniformly (the same
+    /// `prepare_bind` the primitives use, so binding is byte-identical) and
+    /// submits them as a single `db.batch()`, exactly like [`create_many`].
+    /// D1 returns one [`D1Result`] per statement **in submission order**
+    /// (worker-rs `D1Database::batch` documents this), so each result is
+    /// decoded positionally into the [`BatchResult`] variant its op names,
+    /// reusing the very helpers the single-statement primitives use:
+    ///
+    /// - [`BatchOp::Rows`] → `results()` → [`json_to_record`] per row (as
+    ///   [`run_fetch`](DbExec::run_fetch)).
+    /// - [`BatchOp::FetchOne`] → first of `results()` → `json_to_record`,
+    ///   empty ⇒ [`DatabaseError::NotFound`] (as
+    ///   [`run_fetch_one`](DbExec::run_fetch_one)).
+    /// - [`BatchOp::Execute`] → `meta().changes` (as
+    ///   [`run_execute`](DbExec::run_execute)).
+    /// - [`BatchOp::ScalarI64`] → first of `results()` → [`scalar_i64`] (as
+    ///   [`run_scalar_i64`](DbExec::run_scalar_i64)).
+    /// - [`BatchOp::ScalarF64`] → first of `results()` → [`scalar_f64`] (as
+    ///   [`run_scalar_f64`](DbExec::run_scalar_f64)).
+    ///
+    /// Note `results()` yields the same first row object `first()` returns, so
+    /// the scalar/fetch-one decode matches the primitives byte-for-byte.
+    ///
+    /// **Transactional vs. sequential (all-or-nothing).** D1 `batch()` runs
+    /// the statements sequentially inside one implicit transaction: it stops
+    /// at the first failing statement and rolls the whole batch back, and the
+    /// `batch()` promise rejects — so a failure surfaces here as the outer
+    /// `Err` (the whole call fails; results below are only reached when every
+    /// statement succeeded). This preserves the sequential default's
+    /// first-error identity (the first failing statement's error, later ops
+    /// not observed) but is **stricter**: the sequential default leaves an
+    /// *earlier* successful statement's side effects committed, whereas the
+    /// batch rolls them back. For the read-only `list` count+select batch that
+    /// is purely a consistency win (both statements see one snapshot); for
+    /// `update`'s UPDATE+re-fetch it means a failing re-fetch would also
+    /// undo the UPDATE — a failure that cannot occur on the happy path (a
+    /// well-formed by-id SELECT against the just-updated table), and rolling
+    /// back rather than half-applying is the safe direction regardless.
+    async fn run_batch(&self, ops: &[BatchOp<'_>]) -> Result<Vec<BatchResult>, DatabaseError> {
+        // An empty batch is a no-op; `db.batch(vec![])` has nothing to submit.
+        // Matches the sequential default (which pushes nothing).
+        if ops.is_empty() {
+            return Ok(Vec::new());
+        }
+
+        // Prepare + bind every statement, then submit as ONE round-trip.
+        let mut statements = Vec::with_capacity(ops.len());
+        for op in ops {
+            let (sql, params) = op.sql_params();
+            statements.push(self.prepare_bind(sql, params)?);
+        }
+        let results = self.db.batch(statements).await.map_err(db_err)?;
+
+        // D1 returns exactly one result per submitted statement, in order. A
+        // length mismatch would break positional decoding — surface it rather
+        // than silently mis-aligning results with ops.
+        if results.len() != ops.len() {
+            return Err(DatabaseError::Internal(format!(
+                "D1 batch returned {} results for {} statements",
+                results.len(),
+                ops.len()
+            )));
+        }
+
+        let mut out = Vec::with_capacity(ops.len());
+        for (op, result) in ops.iter().zip(results.iter()) {
+            // A transactional batch rejects (the `Err` above) on any statement
+            // failure, so a non-success result here is unexpected; guard it
+            // like `create_many` and surface D1's own error text rather than
+            // decode a failed statement.
+            if !result.success() {
+                return Err(DatabaseError::Internal(format!(
+                    "D1 batch statement failed: {}",
+                    result
+                        .error()
+                        .unwrap_or_else(|| "unknown error".to_string())
+                )));
+            }
+            let decoded = match op {
+                BatchOp::Rows { .. } => {
+                    let rows: Vec<serde_json::Value> = result.results().map_err(db_err)?;
+                    BatchResult::Rows(rows.into_iter().map(json_to_record).collect())
+                }
+                BatchOp::FetchOne { .. } => {
+                    let rows: Vec<serde_json::Value> = result.results().map_err(db_err)?;
+                    let row = rows.into_iter().next().ok_or(DatabaseError::NotFound)?;
+                    BatchResult::FetchOne(json_to_record(row))
+                }
+                BatchOp::Execute { .. } => {
+                    // Same source as `run_execute`: D1Result meta's `changes`.
+                    let changes = result
+                        .meta()
+                        .map_err(db_err)?
+                        .and_then(|m| m.changes)
+                        .unwrap_or(0);
+                    BatchResult::Execute(changes as i64)
+                }
+                BatchOp::ScalarI64 { .. } => {
+                    let rows: Vec<serde_json::Value> = result.results().map_err(db_err)?;
+                    BatchResult::ScalarI64(scalar_i64(rows.into_iter().next()))
+                }
+                BatchOp::ScalarF64 { .. } => {
+                    let rows: Vec<serde_json::Value> = result.results().map_err(db_err)?;
+                    BatchResult::ScalarF64(scalar_f64(rows.into_iter().next()))
+                }
+            };
+            out.push(decoded);
+        }
+        Ok(out)
     }
 }
 
