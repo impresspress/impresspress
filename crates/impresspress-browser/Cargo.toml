@@ -50,6 +50,12 @@ uuid = { version = "1", features = ["v4", "js"] }
 
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"
+# Enable the shared, backend-agnostic `DatabaseService` conformance suite
+# (`wafer_core::interfaces::database::conformance::run_conformance`) for the
+# `database.rs` conformance-wiring test module. Same crate as the normal
+# `wafer-core` dependency above; this dev-only entry just turns on the
+# `conformance` feature for this crate's wasm32 test build (off in production).
+wafer-core = { workspace = true, features = ["conformance"] }
 
 [lints]
 workspace = true

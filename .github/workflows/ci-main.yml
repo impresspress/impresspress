@@ -159,6 +159,13 @@ jobs:
       - name: Check impresspress-cloudflare (wasm32)
         run: cargo check --locked -p impresspress-cloudflare --target wasm32-unknown-unknown
 
+      # Compile-time DatabaseService conformance assertions (wafer-run #319
+      # shared suite) for the D1 + KV-cached adapters. Off-by-default feature so
+      # the ~1.3k-line suite never enters the production Worker wasm; this step
+      # enforces that both adapters still satisfy the suite's trait surface.
+      - name: Check impresspress-cloudflare conformance wiring (wasm32)
+        run: cargo check --locked -p impresspress-cloudflare --features conformance-check --target wasm32-unknown-unknown
+
       # Browser-target crates are also wasm-only consumers of wafer-run, and
       # nothing else in CI builds them for wasm32 — a set_asset_loader
       # signature break sat silently red on main for 5 days before the

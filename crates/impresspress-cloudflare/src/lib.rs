@@ -10,6 +10,12 @@
 
 pub mod config_service;
 pub mod config_source;
+// Compile-time `DatabaseService` conformance assertions for the D1 and
+// KV-cached adapters (wafer-run #319 shared suite). Gated behind the
+// off-by-default `conformance-check` feature so the suite never enters the
+// production Worker wasm; CI checks it explicitly. See the module doc.
+#[cfg(feature = "conformance-check")]
+mod conformance;
 pub mod convert;
 pub mod crypto_service;
 pub mod database;
