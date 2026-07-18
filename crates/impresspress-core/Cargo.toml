@@ -123,10 +123,14 @@ wafer-core = { workspace = true }
 # wafer-block — wire types + codec used directly by feature blocks that
 # encode/decode service payloads (e.g. llm chunks, vector queries).
 wafer-block = { workspace = true }
-# SQL utilities (query builders, value conversion)
+# SQL utilities (query builders, value conversion). sea-query is reached
+# transitively through this crate — impresspress-core builds no queries with the
+# raw sea-query API itself, so it declares no direct sea-query dependency. A
+# former direct `sea-query = "0.32"` (default features on) was dead code that,
+# via cargo feature unification, silently re-enabled sea-query's `backend-mysql`
+# + `derive`/`sea-query-derive` for the whole graph — defeating wafer-sql-utils'
+# `default-features = false` trim (wafer-run #317). Removed.
 wafer-sql-utils = { workspace = true }
-# SQL query builder (used via wafer-sql-utils, re-exported for complex conditions)
-sea-query = "0.32"
 # Native ONNX embeddings (optional — gated behind `native-embedding`).
 wafer-block-fastembed = { workspace = true, optional = true }
 # SQLite vector service (optional — gated behind `native-embedding`).
