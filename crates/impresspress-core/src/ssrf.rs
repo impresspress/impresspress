@@ -35,6 +35,12 @@
 /// server is routinely reached by name (`metadata.google.internal`), so it is
 /// listed here explicitly.
 ///
+/// The bare short-name `metadata` is listed alongside the FQDN: on GCP the
+/// metadata server is commonly addressed as `http://metadata/…`, which the
+/// instance's DNS search domain expands to `metadata.google.internal`. A URL
+/// host of `metadata` therefore reaches the same endpoint but would not match
+/// the FQDN entry, so it is denied explicitly.
+///
 /// Kept as a small, documented security constant (not app/domain config, so
 /// not a CLAUDE.md "hardcoded domain value" — it is the SSRF analogue of the
 /// `localhost` string the shared classifier itself hardcodes). The natural
@@ -42,7 +48,7 @@
 /// path and registry downloads share it; that is flagged as a producer
 /// follow-up rather than landed here, to keep this consumer change buildable
 /// against the current pin.
-const CLOUD_METADATA_HOSTS: &[&str] = &["metadata.google.internal"];
+const CLOUD_METADATA_HOSTS: &[&str] = &["metadata.google.internal", "metadata"];
 
 /// True when `host` is a well-known cloud instance-metadata DNS hostname.
 ///
@@ -109,6 +115,21 @@ mod tests {
         assert!(is_cloud_metadata_host("metadata.google.internal"));
         assert!(is_cloud_metadata_host("METADATA.GOOGLE.INTERNAL."));
         assert!(!is_cloud_metadata_host("metadata.google.internal.evil.com"));
+    }
+
+    #[test]
+    fn blocks_bare_metadata_short_name() {
+        // `http://metadata/` — GCP's metadata server reached via the DNS
+        // search-domain short-name, which expands to metadata.google.internal
+        // on-instance. The bare host `metadata` would not match the FQDN entry,
+        // so it is denied explicitly.
+        assert!(is_ssrf_blocked_url("http://metadata/"));
+        assert!(is_ssrf_blocked_url("http://metadata/computeMetadata/v1/"));
+        assert!(is_ssrf_blocked_url("https://Metadata./x")); // case + trailing dot
+        assert!(is_cloud_metadata_host("metadata"));
+        assert!(is_cloud_metadata_host("METADATA."));
+        // A longer host that merely starts with "metadata" is not the endpoint.
+        assert!(!is_cloud_metadata_host("metadata.example.com"));
     }
 
     #[test]
