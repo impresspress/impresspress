@@ -4,11 +4,19 @@
 //! can reuse the shared message handler.
 
 use futures::StreamExt;
-use wafer_block::{common::ErrorCode, OutputStream, WaferError};
+use impresspress_core::streaming::UploadPartBuffer;
+use wafer_block::{common::ErrorCode, InputStream, OutputStream, WaferError};
 use wafer_core::interfaces::storage::service::{
     FolderInfo, ListOptions, ObjectInfo, ObjectList, StorageError, StorageService,
 };
 use worker::*;
+
+/// R2 multipart part size for streaming uploads. Every part except the last
+/// must be identical in size and at least 5 MiB (R2's minimum); 8 MiB keeps
+/// clear of that floor while bounding peak isolate memory to a single buffered
+/// part. At R2's 10 000-part cap this still permits objects up to ~78 GiB —
+/// far beyond any body a Worker upload could plausibly carry.
+const PART_SIZE: usize = 8 * 1024 * 1024;
 
 /// Async storage service wrapping Cloudflare R2.
 /// Each project has its own R2 bucket — no tenant prefix needed.
@@ -34,6 +42,54 @@ impl R2StorageService {
 
     fn folder_prefix(&self, folder: &str) -> String {
         format!("{folder}/")
+    }
+
+    /// Start an R2 multipart upload for `r2_key`, recording `content_type` so
+    /// the completed object carries the same MIME type the buffered
+    /// [`put`](StorageService::put) path sets. Used by
+    /// [`put_streaming`](StorageService::put_streaming) once a body outgrows a
+    /// single [`PART_SIZE`] part.
+    async fn begin_multipart(
+        &self,
+        r2_key: &str,
+        content_type: &str,
+    ) -> Result<MultipartUpload, StorageError> {
+        self.bucket
+            .create_multipart_upload(r2_key)
+            .http_metadata(HttpMetadata {
+                content_type: Some(content_type.to_string()),
+                ..Default::default()
+            })
+            .execute()
+            .await
+            .map_err(|e| StorageError::Internal(e.to_string()))
+    }
+
+    /// Map one R2 list page into [`ObjectInfo`]s, stripping the folder prefix
+    /// from each key (R2 stores and returns fully `folder/`-prefixed keys).
+    /// Shared by both the cursor and offset branches of
+    /// [`list`](StorageService::list) so their per-object shaping cannot drift.
+    fn page_objects(&self, folder: &str, listed: &Objects) -> Vec<ObjectInfo> {
+        let folder_prefix_len = self.folder_prefix(folder).len();
+        listed
+            .objects()
+            .iter()
+            .map(|obj| {
+                let full_key = obj.key();
+                let key = if full_key.len() > folder_prefix_len {
+                    full_key[folder_prefix_len..].to_string()
+                } else {
+                    full_key
+                };
+
+                ObjectInfo {
+                    key,
+                    size: obj.size() as i64,
+                    content_type: "application/octet-stream".to_string(),
+                    last_modified: r2_date_to_chrono(obj.uploaded()),
+                }
+            })
+            .collect()
     }
 }
 
@@ -65,6 +121,108 @@ impl StorageService for R2StorageService {
             .execute()
             .await
             .map_err(|e| StorageError::Internal(e.to_string()))?;
+        Ok(())
+    }
+
+    /// Stream an [`InputStream`] body into R2 without buffering the whole
+    /// object, overriding the default `put_streaming` (which collapses the
+    /// stream to one `Vec` and forwards to [`put`](Self::put) — exactly the
+    /// full buffering the streaming request path exists to avoid).
+    ///
+    /// R2's `put` cannot take an unbounded `ReadableStream`: it rejects a
+    /// stream of unknown length ("Provided readable stream must have a known
+    /// length (request/response body or readable half of FixedLengthStream)"),
+    /// and the streaming-upload path carries no content length to build a
+    /// `FixedLengthStream` from. So a body that outgrows a single part is sent
+    /// via R2 **multipart** — [`UploadPartBuffer`] repacks the arriving chunks
+    /// into uniform [`PART_SIZE`] parts (R2 requires every part but the last be
+    /// the same size and ≥ 5 MiB) and each part is `upload_part`ed as it fills,
+    /// so peak isolate memory is one part, never the whole object.
+    ///
+    /// A body that never fills a part takes the buffered [`put`](Self::put)
+    /// path instead: its length is known (the accumulated `Vec`) and it skips
+    /// all multipart round trips. Content-type is preserved on both paths. Any
+    /// R2 error after the multipart upload begins aborts it, so a failed upload
+    /// never leaks an incomplete multipart upload into the bucket.
+    ///
+    /// Caveat (shared with the default and the local-storage override):
+    /// [`InputStream`] has no failure terminal, so a producer that aborts
+    /// mid-body is indistinguishable from a clean end — a truncated-then-ended
+    /// stream is committed as if complete. Distinguishing the two needs an
+    /// error terminal on `InputStream` (tracked as a wafer-block follow-up).
+    async fn put_streaming(
+        &self,
+        folder: &str,
+        key: &str,
+        mut data: InputStream,
+        content_type: &str,
+    ) -> Result<(), StorageError> {
+        let r2_key = self.prefixed_key(folder, key);
+        let mut acc = UploadPartBuffer::new(PART_SIZE);
+        let mut upload: Option<MultipartUpload> = None;
+        let mut parts: Vec<UploadedPart> = Vec::new();
+        // R2 part numbers are 1-based (and cap at 10 000, well within u16).
+        let mut next_part: u16 = 1;
+
+        // Pump the body into uniform full-size parts, promoting to a multipart
+        // upload the first time a part fills. `?` short-circuits on any R2
+        // error; the abort cleanup below then runs on the started upload.
+        let pump = async {
+            while let Some(chunk) = data.next().await {
+                acc.push(&chunk);
+                while let Some(part_bytes) = acc.take_part() {
+                    if upload.is_none() {
+                        upload = Some(self.begin_multipart(&r2_key, content_type).await?);
+                    }
+                    let uploaded = upload
+                        .as_ref()
+                        .expect("multipart upload promoted above")
+                        .upload_part(next_part, part_bytes)
+                        .await
+                        .map_err(|e| {
+                            StorageError::Internal(format!("R2 upload_part {r2_key}: {e}"))
+                        })?;
+                    parts.push(uploaded);
+                    next_part += 1;
+                }
+            }
+            Ok::<(), StorageError>(())
+        }
+        .await;
+
+        if let Err(e) = pump {
+            if let Some(mp) = upload {
+                // Best-effort cleanup; keep the original error, not an abort error.
+                let _ = mp.abort().await;
+            }
+            return Err(e);
+        }
+
+        let tail = acc.finish();
+
+        // Body fit inside a single part — one buffered write of a known length,
+        // no multipart round trips.
+        let Some(mp) = upload else {
+            return self.put(folder, key, &tail, content_type).await;
+        };
+
+        // Flush the trailing partial part (empty only when the total length was
+        // an exact multiple of PART_SIZE), then commit the upload.
+        if !tail.is_empty() {
+            match mp.upload_part(next_part, tail).await {
+                Ok(uploaded) => parts.push(uploaded),
+                Err(e) => {
+                    let _ = mp.abort().await;
+                    return Err(StorageError::Internal(format!(
+                        "R2 upload_part {r2_key}: {e}"
+                    )));
+                }
+            }
+        }
+
+        mp.complete(parts)
+            .await
+            .map_err(|e| StorageError::Internal(format!("R2 complete multipart {r2_key}: {e}")))?;
         Ok(())
     }
 
@@ -202,22 +360,69 @@ impl StorageService for R2StorageService {
         } else {
             100
         };
-        let offset = opts.offset.max(0) as u64;
 
-        // R2's list API has no numeric offset — only an opaque cursor (see
-        // `delete_folder` above for the same cursor/`truncated()` shape).
-        // Until `wafer_core::interfaces::storage::service::{ListOptions,
-        // ObjectList}` grow a cursor/next-cursor pair (so a caller can pass
-        // R2's own opaque cursor straight through instead of a numeric
-        // offset — the actual fix this finding recommends, and a
-        // wafer-core wire-type change out of scope for this crate), the
-        // only *correct* way to honor a nonzero offset here is to walk
-        // cursors up to it. Hop in R2's own max page size (1000) rather
-        // than the caller's usually-much-smaller page size, so satisfying
-        // a given offset costs the fewest possible extra R2 round trips
-        // this interface allows — this still isn't free (a deep offset
-        // still costs `offset / 1000` extra list calls on every request),
-        // which is exactly the gap the wafer-core cursor field would close.
+        // Cursor mode: thread R2's own native continuation cursor straight
+        // through and skip the offset walk entirely. `opts.offset` is ignored
+        // here — the wafer-core contract makes cursor take precedence over
+        // offset — so a deep page costs a single R2 list call with no prefix
+        // re-walk (the whole point of the cursor field vs. the offset path
+        // below).
+        if let Some(token) = &opts.cursor {
+            let mut builder = self.bucket.list().prefix(&full_prefix).limit(limit);
+            // An empty token means "before the first object" → the first page,
+            // which R2 returns when no cursor is set. A non-empty token is R2's
+            // own opaque cursor from a prior page's `next_cursor`, fed back
+            // verbatim.
+            if !token.is_empty() {
+                builder = builder.cursor(token.clone());
+            }
+            let listed = builder
+                .execute()
+                .await
+                .map_err(|e| StorageError::Internal(e.to_string()))?;
+
+            let objects = self.page_objects(folder, &listed);
+            // R2 only hands back a cursor while the listing is truncated;
+            // surface it as `next_cursor` so the caller pages on, or `None`
+            // once the final page is reached (no more objects).
+            let next_cursor = if listed.truncated() {
+                match listed.cursor() {
+                    Some(c) => Some(c),
+                    None => {
+                        // `truncated() == true` is documented to always carry a
+                        // cursor (same invariant the offset/`delete_folder`
+                        // guards rely on). Fail loudly rather than silently
+                        // dropping the continuation and stalling pagination.
+                        return Err(StorageError::Internal(
+                            "R2 reported truncated results with no cursor".into(),
+                        ));
+                    }
+                }
+            } else {
+                None
+            };
+
+            // In cursor mode `total_count` is only the current page's count (a
+            // lower bound that doesn't walk the rest of the keyspace); the
+            // wafer-core contract says cursor-paging callers signal has-more
+            // via `next_cursor`, not `total_count`.
+            return Ok(ObjectList {
+                total_count: objects.len() as i64,
+                objects,
+                next_cursor,
+            });
+        }
+
+        // Offset mode (cursor is `None`): R2's list API has no numeric offset —
+        // only an opaque cursor (see `delete_folder` above for the same
+        // cursor/`truncated()` shape) — so the only correct way to honor a
+        // nonzero offset is to walk cursors up to it. Hop in R2's own max page
+        // size (1000) rather than the caller's usually-much-smaller page size,
+        // so satisfying a given offset costs the fewest possible extra R2 round
+        // trips this path allows — still not free (a deep offset costs
+        // `offset / 1000` extra list calls per request), which is exactly why a
+        // caller should prefer cursor mode above for deep pagination.
+        let offset = opts.offset.max(0) as u64;
         const R2_LIST_MAX_PAGE: u32 = 1000;
         let mut cursor: Option<String> = None;
         let mut skipped: u64 = 0;
@@ -267,27 +472,7 @@ impl StorageService for R2StorageService {
             .await
             .map_err(|e| StorageError::Internal(e.to_string()))?;
 
-        let folder_prefix_len = self.folder_prefix(folder).len();
-
-        let objects: Vec<ObjectInfo> = listed
-            .objects()
-            .iter()
-            .map(|obj| {
-                let full_key = obj.key();
-                let key = if full_key.len() > folder_prefix_len {
-                    full_key[folder_prefix_len..].to_string()
-                } else {
-                    full_key
-                };
-
-                ObjectInfo {
-                    key,
-                    size: obj.size() as i64,
-                    content_type: "application/octet-stream".to_string(),
-                    last_modified: r2_date_to_chrono(obj.uploaded()),
-                }
-            })
-            .collect();
+        let objects = self.page_objects(folder, &listed);
 
         // R2 may return fewer objects than requested even while more exist
         // (`truncated() == true`) — reporting `objects.len()` as the total
@@ -305,11 +490,11 @@ impl StorageService for R2StorageService {
             offset as i64 + objects.len() as i64
         };
 
-        // TODO(cursor-pagination): R2 hands back a native continuation cursor
-        // (`listed.cursor()`); thread it through `next_cursor` in a follow-up
-        // (CF-R2-cursor consumer PR) so deep pages skip the offset re-walk
-        // above. Offset-only for now — `None` keeps the existing behavior
-        // unchanged (has-more is signaled via `total_count`).
+        // Offset mode deliberately returns no `next_cursor`: has-more is
+        // signaled via `total_count` here, and a caller mixing a fed-back
+        // cursor with a numeric offset would be ambiguous. Deep pagination that
+        // wants R2's native cursor uses cursor mode (the `opts.cursor` branch
+        // above) instead.
         Ok(ObjectList {
             objects,
             total_count,
