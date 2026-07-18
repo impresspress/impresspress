@@ -6,6 +6,9 @@ use wafer_core::interfaces::storage::service::{
 };
 
 use crate::bridge;
+// Pure, host-testable opaque list-cursor codec (envelope shared with the
+// local-storage backend); see `storage_cursor` for the format contract.
+use crate::storage_cursor as cursor;
 
 pub struct BrowserStorageService;
 
@@ -88,9 +91,10 @@ struct GetMeta {
 }
 
 /// `storageList`'s resolved shape: the requested page of keys plus the
-/// TRUE total of matching entries (before slicing to the page) — see
-/// `bridge::storage_list`'s doc comment for why a real cursor isn't
-/// implemented here.
+/// TRUE total of matching entries (before slicing to the page). `total`
+/// drives both the offset-mode has-more check and cursor-mode continuation
+/// (`start + page.len() < total`); see [`BrowserStorageService::list`] and
+/// the [`cursor`] module.
 #[derive(Deserialize)]
 struct ListResponse {
     keys: Vec<String>,
@@ -145,18 +149,41 @@ impl StorageService for BrowserStorageService {
     }
 
     async fn list(&self, folder: &str, opts: &ListOptions) -> Result<ObjectList, StorageError> {
+        // Cursor pagination takes precedence over offset (wafer-run #318,
+        // `ListOptions::cursor`): when a cursor is present we decode it to the
+        // resume offset and IGNORE `opts.offset`; otherwise we page by offset
+        // exactly as before. An empty cursor (`Some("")`) means "before the
+        // first object" and resolves to offset 0 — this begins a cursor walk.
+        let cursor_mode = opts.cursor.is_some();
+        let start: u64 = match &opts.cursor {
+            Some(token) => cursor::decode(token)?,
+            None => opts.offset.max(0) as u64,
+        };
+
         let limit = if opts.limit > 0 { opts.limit as u32 } else { 0 };
-        let offset = opts.offset as u32;
 
         // `storageList` resolves `{ keys: string[], total: number }` — not a
         // string — with `total` the full matching-entry count (not the page
-        // length; see `bridge::storage_list`'s doc comment).
-        let val = bridge::storage_list(folder, &opts.prefix, limit, offset)
+        // length; see `bridge::storage_list`'s doc comment). The JS bridge
+        // sorts keys before slicing, matching the local-storage backend, so
+        // offset/cursor paging is stable across calls.
+        let val = bridge::storage_list(folder, &opts.prefix, limit, cursor::clamp_offset(start))
             .await
             .map_err(map_rejection)?;
 
         let resp: ListResponse = serde_wasm_bindgen::from_value(val)
             .map_err(|e| StorageError::Internal(format!("decode storage list response: {e}")))?;
+
+        // Decide the continuation token BEFORE consuming `resp.keys`. In cursor
+        // mode we emit `next_cursor` only when more objects follow this page;
+        // offset callers always get `None` (they use `total_count` for
+        // has-more), matching the local-storage backend's rule.
+        let next_cursor = cursor::next_page_cursor(
+            cursor_mode,
+            start,
+            resp.keys.len() as u64,
+            resp.total.max(0) as u64,
+        );
 
         // ObjectInfo fields beyond `key` are not available from the list
         // call; we use placeholder values (size=0, empty content_type,
@@ -173,14 +200,10 @@ impl StorageService for BrowserStorageService {
             })
             .collect();
 
-        // TODO(cursor-pagination): OPFS listing is offset-only today; thread a
-        // real continuation token through `next_cursor` in a follow-up
-        // (CF-R2-cursor consumer PR). `None` keeps the existing offset-based
-        // behavior unchanged — has-more is still signaled via `total_count`.
         Ok(ObjectList {
             objects,
             total_count: resp.total,
-            next_cursor: None,
+            next_cursor,
         })
     }
 
