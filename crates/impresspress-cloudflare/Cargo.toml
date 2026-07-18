@@ -46,6 +46,13 @@ block-messages = ["impresspress-core/block-messages"]
 block-products = ["impresspress-core/block-products"]
 block-userportal = ["impresspress-core/block-userportal"]
 
+# Test-only: compile the shared wafer-run #319 `DatabaseService` conformance
+# suite and the `src/conformance.rs` compile-time assertions that wire the D1
+# and KV-cached adapters into it. Off by default so the ~1.3k-line suite never
+# enters the production Worker wasm; CI enables it in a dedicated
+# `cargo check --features conformance-check` step. Not a runtime block toggle.
+conformance-check = ["wafer-core/conformance"]
+
 [dependencies]
 # WAFER runtime
 wafer-run = { workspace = true }

@@ -386,3 +386,79 @@ impl DatabaseService for BrowserDatabaseService {
 pub fn make_database_service() -> std::sync::Arc<dyn DatabaseService> {
     std::sync::Arc::new(BrowserDatabaseService)
 }
+
+// ─── Shared DatabaseService conformance wiring ────────────────────────────────
+//
+// wafer-run #319 ships a backend-agnostic conformance suite
+// (`wafer_core::interfaces::database::conformance::run_conformance`) that drives
+// every `DatabaseService` op against a live service and asserts the concrete
+// observable behavior (CRUD round-trips, the full `FilterOp` surface, sorted /
+// paginated / projected / OR-grouped `list`, atomic `increment_field_where`,
+// insert-then-update and windowed-counter `upsert`, grouped aggregates, raw
+// SQL, schema management). It is the anti-drift mechanism: a `DatabaseService`
+// impl that silently no-ops or fails-open on any single op fails an assertion
+// instead of passing silently. Native SQLite and (gated) PostgreSQL already run
+// it inside wafer-run; this module wires the browser adapter in.
+//
+// ── Coverage achieved here: COMPILE-TIME conformance (no live run) ──
+//
+// `_browser_adapter_is_conformable` typechecks — for the real, shipping
+// `wasm32-unknown-unknown` target — that `BrowserDatabaseService` satisfies the
+// exact `DatabaseService` surface `run_conformance` drives, and that the suite
+// entry point exists under the enabled `conformance` feature. It is compiled by
+// an unconditional wasm32 CI step —
+// `cargo check --tests -p impresspress-browser --target wasm32-unknown-unknown`,
+// in both `ci.yml` and `ci-main.yml`. The `--tests` flag is required: this
+// `#[cfg(all(test, target_arch = "wasm32"))]` module needs the wasm32 dev-dep
+// `conformance` feature, which a plain `cargo check` (no `--tests`) does not
+// activate — so the plain check does NOT compile it. The dedicated
+// `wasm-pack test --node crates/impresspress-browser` job also builds it, but is
+// path-filtered to browser-crate changes, so the unconditional step above is
+// what catches a wafer-run pin bump (root-only diff) that drifts the trait
+// surface. If the trait surface drifts (a new required op, or a changed
+// signature) or the suite entry is removed/renamed/re-gated, this stops
+// compiling — surfacing the drift at the consumer rather than only inside
+// wafer-run. The assertion is never
+// executed and constructs no trait object, so it pulls in no sql.js/OPFS bridge
+// call: it stays green under Node, where that bridge does not exist.
+//
+// ── Gap: a live behavioral run is not feasible in the current CI ──
+//
+// A real `run_conformance(&BrowserDatabaseService).await` needs the JS bridge
+// this adapter is hardwired to (`crate::bridge` → `/js/bridge.js`) to be
+// functional, which requires BOTH:
+//   1. sql.js loaded — `bridge.js` STATICALLY imports the vendored ESM wrapper
+//      `/vendor/sql-wasm-esm.js` (dynamic `import()` is forbidden in Service
+//      Workers, so it cannot be lazified) plus `/vendor/sql-wasm.wasm`; and
+//   2. OPFS — `dbInit` reads and `dbFlush` (invoked by every mutating
+//      `DatabaseService` method via `with_flush`) writes the DB through
+//      `navigator.storage.getDirectory()`.
+// The CI job runs under Node (`wasm-pack test --node`), which has neither a
+// server serving `/vendor/*` nor OPFS, so a live run is infeasible without new
+// test infrastructure. Smallest change that would close the gap: a Node/headless
+// test double for the `bridge` DB fns — sql.js instantiated in-memory (the
+// vendored `sql-wasm.wasm` already lives at
+// `crates/impresspress-bundle/assets/vendor/`) with `dbFlush` shimmed to a
+// resolved no-op — then this module can call
+// `run_conformance(&BrowserDatabaseService).await` under a
+// `#[wasm_bindgen_test]` for a full behavioral run. The adapter itself needs no
+// change; only the JS half is swapped for a memory-backed one in the test.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod conformance {
+    use wafer_core::interfaces::database::{
+        conformance::run_conformance, service::DatabaseService,
+    };
+
+    use super::BrowserDatabaseService;
+
+    /// Compile-time proof (never executed) that the browser adapter is a valid
+    /// argument to the shared conformance suite. Typechecking the call — with
+    /// the `&BrowserDatabaseService` → `&dyn DatabaseService` coercion
+    /// `run_conformance` requires — is what enforces the trait-surface
+    /// conformance; awaiting it here would need the sql.js/OPFS bridge, which
+    /// the module doc explains is unavailable under `wasm-pack test --node`.
+    #[allow(dead_code)]
+    async fn _browser_adapter_is_conformable(svc: &BrowserDatabaseService) {
+        run_conformance(svc as &dyn DatabaseService).await;
+    }
+}
