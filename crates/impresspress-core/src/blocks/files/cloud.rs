@@ -302,6 +302,7 @@ mod tests {
             Ok(storage_service::ObjectList {
                 objects: vec![],
                 total_count: 0,
+                next_cursor: None,
             })
         }
 

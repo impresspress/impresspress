@@ -240,9 +240,12 @@ impl StorageService for R2StorageService {
                 // requested page is past the end of the keyspace. Return
                 // an empty page with an exact total (we've now walked the
                 // whole prefix) rather than wrapping back to page 1.
+                // Terminal page (whole prefix walked) — no more objects, so
+                // `next_cursor` is genuinely `None`.
                 return Ok(ObjectList {
                     objects: Vec::new(),
                     total_count: skipped as i64,
+                    next_cursor: None,
                 });
             }
             cursor = page.cursor();
@@ -302,9 +305,15 @@ impl StorageService for R2StorageService {
             offset as i64 + objects.len() as i64
         };
 
+        // TODO(cursor-pagination): R2 hands back a native continuation cursor
+        // (`listed.cursor()`); thread it through `next_cursor` in a follow-up
+        // (CF-R2-cursor consumer PR) so deep pages skip the offset re-walk
+        // above. Offset-only for now — `None` keeps the existing behavior
+        // unchanged (has-more is signaled via `total_count`).
         Ok(ObjectList {
             objects,
             total_count,
+            next_cursor: None,
         })
     }
 
