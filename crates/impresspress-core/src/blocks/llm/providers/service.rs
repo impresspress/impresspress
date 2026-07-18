@@ -57,6 +57,61 @@ struct Inner {
     cached_models: HashMap<String, Vec<ModelInfo>>,
 }
 
+/// Redirect-hop budget, matching reqwest's built-in `Policy::limited(10)` (the
+/// default we replace). reqwest counts the initial request URL in
+/// `Attempt::previous()`, so — exactly like its `Limit` arm — the bound trips
+/// when `previous().len()` *exceeds* this, i.e. after 10 redirects have been
+/// followed.
+const MAX_REDIRECTS: usize = 10;
+
+/// Outcome of evaluating one redirect hop.
+#[derive(Debug, PartialEq, Eq)]
+enum RedirectDecision {
+    /// Target is a safe public address within the hop budget — follow it.
+    Follow,
+    /// Target textually names an internal/SSRF address — refuse the request.
+    BlockSsrf,
+    /// Hop budget exhausted — refuse (preserves reqwest's old `limited(10)`).
+    TooManyRedirects,
+}
+
+/// Pure decision for a single redirect hop, split out of the reqwest redirect
+/// closure so it is unit-testable: `reqwest::redirect::Attempt` has no public
+/// constructor, so the closure itself can't be exercised directly.
+///
+/// `previous_len` is `Attempt::previous().len()` — the redirect chain so far,
+/// *including* the initial request URL (reqwest's own counting convention).
+/// SSRF is checked first so an internal target is reported as such even when it
+/// also happens to be over the hop limit.
+fn redirect_decision(target_url: &str, previous_len: usize) -> RedirectDecision {
+    if crate::ssrf::is_ssrf_blocked_url(target_url) {
+        RedirectDecision::BlockSsrf
+    } else if previous_len > MAX_REDIRECTS {
+        RedirectDecision::TooManyRedirects
+    } else {
+        RedirectDecision::Follow
+    }
+}
+
+/// A reqwest redirect policy that revalidates every hop against impresspress's
+/// own [`crate::ssrf::is_ssrf_blocked_url`], refusing redirects onto internal
+/// addresses while preserving the default 10-hop bound. Replaces reqwest's
+/// default `limited(10)` policy, which follows `3xx` targets with no per-hop
+/// SSRF check. Only redirect (`3xx`) targets pass through here — the initial
+/// request URL is never a redirect attempt, so the deliberate `http://localhost`
+/// affordance on the first request is unaffected.
+fn ssrf_revalidating_redirect_policy() -> reqwest::redirect::Policy {
+    reqwest::redirect::Policy::custom(|attempt| {
+        match redirect_decision(attempt.url().as_str(), attempt.previous().len()) {
+            RedirectDecision::Follow => attempt.follow(),
+            RedirectDecision::BlockSsrf => {
+                attempt.error("SSRF: redirect to internal address blocked")
+            }
+            RedirectDecision::TooManyRedirects => attempt.error("too many redirects"),
+        }
+    })
+}
+
 // SSRF posture for the provider client (native, `llm` feature).
 //
 // Provider endpoints are admin-configured and trusted, and the project
@@ -72,9 +127,21 @@ struct Inner {
 // policy blocks internal-infra targets (RFC1918 / link-local / CGNAT /
 // multicast / reserved IPs, the IPv6-embedded-v4 forms, and cloud-metadata
 // IPs + hostnames) while keeping the deliberate `http://localhost` affordance.
-// Its one gap versus the resolver — a public hostname that DNS-rebinds to a
-// private IP at connect time — is a weak vector for a fixed, admin-set
-// endpoint (there is no attacker-controlled per-request URL here).
+//
+// The initial URL is only half the story: reqwest's default redirect policy
+// would follow a `3xx` from a trusted-but-compromised (or simply
+// misconfigured) endpoint straight to an internal address the initial-URL gate
+// never inspects. So the client installs a custom redirect policy
+// (`ssrf_revalidating_redirect_policy`) that re-runs
+// `crate::ssrf::is_ssrf_blocked_url` on every redirect target and refuses
+// internal ones, preserving reqwest's old 10-hop bound. It fires ONLY on 3xx
+// targets, so the `http://localhost` affordance on the *initial* request is
+// untouched. With initial-URL and per-hop revalidation both in place,
+// redirect-to-internal is closed; the sole residual versus the native
+// `SsrfFilteringResolver` is DNS rebinding — a public hostname that resolves
+// to a private IP at connect time — a weak vector for a fixed, admin-set
+// endpoint (there is no attacker-controlled per-request URL here), and one a
+// reqwest client cannot close without a resolve-before-connect hook.
 impl ProviderLlmService {
     /// Construct a service with a default `reqwest` client. Returns
     /// `LlmError::BackendError` if the underlying TLS stack fails to
@@ -82,6 +149,7 @@ impl ProviderLlmService {
     /// back to a degraded mode rather than aborting the whole process.
     pub fn try_new() -> Result<Self, LlmError> {
         let http = reqwest::Client::builder()
+            .redirect(ssrf_revalidating_redirect_policy())
             .build()
             .map_err(|e| LlmError::BackendError(format!("reqwest client build: {e}")))?;
         Ok(Self {
@@ -545,5 +613,67 @@ mod tests {
         svc.configure(vec![local_cfg()]);
         assert!(svc.claims_backend("local"));
         assert!(!svc.claims_backend("openai-main"));
+    }
+
+    // --- M1: redirect-hop revalidation (see `redirect_decision`) -----------
+    //
+    // `reqwest::redirect::Attempt` has no public constructor, so the redirect
+    // closure is exercised through its extracted pure decision seam.
+
+    #[test]
+    fn redirect_to_internal_targets_is_blocked() {
+        // Cloud-metadata IP + short-name, loopback, and RFC1918 — every form
+        // the initial-URL gate blocks must also be blocked on a redirect hop.
+        for target in [
+            "http://169.254.169.254/latest/meta-data/",
+            "http://metadata/computeMetadata/v1/",
+            "http://localhost/admin",
+            "http://127.0.0.1/",
+            "http://10.0.0.1/",
+            "http://192.168.1.1/",
+            "http://[::1]/",
+        ] {
+            assert_eq!(
+                redirect_decision(target, 1),
+                RedirectDecision::BlockSsrf,
+                "redirect to {target} must be refused",
+            );
+        }
+    }
+
+    #[test]
+    fn redirect_to_public_host_is_followed() {
+        assert_eq!(
+            redirect_decision("https://api.openai.com/v1/models", 1),
+            RedirectDecision::Follow,
+        );
+        assert_eq!(
+            redirect_decision("https://example.com/next", 3),
+            RedirectDecision::Follow,
+        );
+    }
+
+    #[test]
+    fn redirect_hop_budget_matches_limited_10() {
+        // reqwest's `limited(10)` trips when `previous().len() > 10` (the first
+        // entry is the initial URL). So a public target at exactly 10 is still
+        // followed; at 11 it is refused.
+        assert_eq!(
+            redirect_decision("https://example.com/", MAX_REDIRECTS),
+            RedirectDecision::Follow,
+        );
+        assert_eq!(
+            redirect_decision("https://example.com/", MAX_REDIRECTS + 1),
+            RedirectDecision::TooManyRedirects,
+        );
+    }
+
+    #[test]
+    fn internal_target_over_hop_limit_reports_ssrf() {
+        // SSRF is the more actionable signal, so it wins over the hop bound.
+        assert_eq!(
+            redirect_decision("http://169.254.169.254/", MAX_REDIRECTS + 5),
+            RedirectDecision::BlockSsrf,
+        );
     }
 }

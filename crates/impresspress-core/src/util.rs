@@ -255,12 +255,17 @@ pub fn url_path_encode(s: &str) -> String {
 /// [`crate::ssrf::is_cloud_metadata_host`].
 ///
 /// It intentionally does NOT resolve arbitrary hostnames or revalidate
-/// redirect destinations — a hostname that resolves to a private/internal
-/// address at connect time (DNS rebinding), or a redirect Location that points
-/// at one, both bypass this check. Those require a resolve-before-connect +
-/// redirect-revalidation guard at the network/fetch layer (the actual
-/// outbound HTTP call site), not at config-write time, since the resolved
-/// address can differ from what it resolved to when this value was saved.
+/// redirect destinations: a hostname that resolves to a private/internal
+/// address at connect time (DNS rebinding), or a `3xx` redirect `Location`
+/// pointing at one, both bypass this *literal* write-time check. Those belong
+/// at the outbound fetch layer (the actual HTTP call site), not at
+/// config-write time, since the resolved address — and any redirect target —
+/// can differ from what was seen when the value was saved. The native LLM
+/// provider client does exactly the redirect half: it installs a redirect
+/// policy that re-runs [`crate::ssrf::is_ssrf_blocked_url`] on every hop (see
+/// [`crate::blocks::llm::providers`]), so on that path redirect-to-internal is
+/// closed and DNS rebinding is the sole residual. A resolve-before-connect
+/// guard (DNS rebinding) still belongs to the network layer.
 ///
 /// Parses with [`url::Url`] rather than hand-rolled string splitting: `Url`
 /// canonicalizes the scheme/host and `Url::host()` strips userinfo and port
