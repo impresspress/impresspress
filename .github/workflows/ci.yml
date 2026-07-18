@@ -110,7 +110,7 @@ jobs:
           path: crates/impresspress-web/pkg
 
       - name: Run clippy
-        run: cargo clippy --workspace --exclude impresspress-web --exclude impresspress-cloudflare
+        run: cargo clippy --locked --workspace --exclude impresspress-web --exclude impresspress-cloudflare
 
   test:
     name: Tests
@@ -150,7 +150,7 @@ jobs:
       # the harness is the right root-cause fix rather than bolting a
       # separate job on here.
       - name: Run tests
-        run: cargo test --workspace --exclude impresspress-web --exclude impresspress-cloudflare
+        run: cargo test --locked --workspace --exclude impresspress-web --exclude impresspress-cloudflare
 
   cloudflare:
     name: Cloudflare wasm32 check
@@ -184,14 +184,14 @@ jobs:
       # wrap `!Send` JsFutures that violate wafer-core's Send-bound traits
       # on host. Verify the crate compiles for wasm32 here.
       - name: Check impresspress-cloudflare (wasm32)
-        run: cargo check -p impresspress-cloudflare --target wasm32-unknown-unknown
+        run: cargo check --locked -p impresspress-cloudflare --target wasm32-unknown-unknown
 
       # Browser-target crates are also wasm-only consumers of wafer-run, and
       # nothing else in CI builds them for wasm32 — a set_asset_loader
       # signature break sat silently red on main for 5 days before the
       # impresspress #253 review caught it.
       - name: Check impresspress-browser + minimal-browser (wasm32)
-        run: cargo check -p impresspress-browser -p minimal-browser --target wasm32-unknown-unknown
+        run: cargo check --locked -p impresspress-browser -p minimal-browser --target wasm32-unknown-unknown
 
   # impresspress-browser's `#[wasm_bindgen_test]`s (storage.rs, bridge.rs,
   # network.rs — the wasm32-only-gated modules) previously only got
