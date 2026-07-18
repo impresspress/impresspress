@@ -173,9 +173,14 @@ impl StorageService for BrowserStorageService {
             })
             .collect();
 
+        // TODO(cursor-pagination): OPFS listing is offset-only today; thread a
+        // real continuation token through `next_cursor` in a follow-up
+        // (CF-R2-cursor consumer PR). `None` keeps the existing offset-based
+        // behavior unchanged — has-more is still signaled via `total_count`.
         Ok(ObjectList {
             objects,
             total_count: resp.total,
+            next_cursor: None,
         })
     }
 

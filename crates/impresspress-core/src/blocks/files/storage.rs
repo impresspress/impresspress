@@ -356,6 +356,8 @@ async fn handle_list_objects(ctx: &dyn Context, msg: &Message) -> OutputStream {
         prefix,
         limit: page_size as i64,
         offset: offset as i64,
+        // Offset-only paging; `None` preserves the existing behavior.
+        cursor: None,
     };
 
     match store::list(ctx, bucket, &opts).await {
@@ -824,6 +826,7 @@ mod integration_tests {
             Ok(ObjectList {
                 objects: vec![],
                 total_count: 0,
+                next_cursor: None,
             })
         }
 
