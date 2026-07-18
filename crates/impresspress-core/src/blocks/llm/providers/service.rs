@@ -57,6 +57,24 @@ struct Inner {
     cached_models: HashMap<String, Vec<ModelInfo>>,
 }
 
+// SSRF posture for the provider client (native, `llm` feature).
+//
+// Provider endpoints are admin-configured and trusted, and the project
+// deliberately supports self-hosted local models (an Ollama-style
+// `http://localhost:11434/v1`, exercised by `local_cfg` in the tests below).
+// So this client is intentionally NOT wrapped in the generic-network
+// `wafer-net-security` `SsrfFilteringResolver`: that resolver drops any
+// resolved IP that is loopback/private, which would resolve `localhost` →
+// `127.0.0.1` → blocked and regress that supported configuration. Instead,
+// provider-endpoint SSRF is enforced with `crate::util::validate_url_value` —
+// the same validator the config `_URL` write surfaces use — at provider
+// *write* time (`routes::providers`) and re-checked here at *call* time. That
+// policy blocks internal-infra targets (RFC1918 / link-local / CGNAT /
+// multicast / reserved IPs, the IPv6-embedded-v4 forms, and cloud-metadata
+// IPs + hostnames) while keeping the deliberate `http://localhost` affordance.
+// Its one gap versus the resolver — a public hostname that DNS-rebinds to a
+// private IP at connect time — is a weak vector for a fixed, admin-set
+// endpoint (there is no attacker-controlled per-request URL here).
 impl ProviderLlmService {
     /// Construct a service with a default `reqwest` client. Returns
     /// `LlmError::BackendError` if the underlying TLS stack fails to
@@ -79,7 +97,9 @@ impl ProviderLlmService {
     /// throwaway-instance call sites still compile. On the rare TLS-init
     /// failure we degrade to a client with no extra options (which itself
     /// cannot fail to build); the next chat call surfaces the underlying
-    /// reqwest error as `LlmError::Network`.
+    /// reqwest error as `LlmError::Network`. The per-request
+    /// [`crate::util::validate_url_value`] gate at each call site applies
+    /// regardless of which client backs the service.
     pub fn new() -> Self {
         Self::try_new().unwrap_or_else(|_| Self {
             inner: Arc::new(RwLock::new(Inner {
@@ -176,6 +196,14 @@ impl ProviderAdmin for ProviderLlmService {
         }
 
         let url = format!("{}/models", endpoint.trim_end_matches('/'));
+        // SSRF: refuse an endpoint pointing at internal infra (same policy as
+        // provider write-time validation; also catches endpoints stored before
+        // that validation existed). Allows `http://localhost` for self-hosted.
+        if let Err(e) = crate::util::validate_url_value(&url) {
+            return Err(LlmError::InvalidRequest(format!(
+                "provider endpoint blocked (SSRF): {e}"
+            )));
+        }
         let mut req = self.http.get(&url);
         if let Some(key) = api_key {
             req = req.bearer_auth(key);
@@ -240,6 +268,16 @@ impl LlmService for ProviderLlmService {
             Ok(v) => v,
             Err(e) => return Box::pin(futures::stream::once(async move { Err(e) })),
         };
+        // SSRF: refuse an endpoint pointing at internal infra, surfaced
+        // synchronously before the request is spawned. Same policy as
+        // provider write-time validation; allows `http://localhost`.
+        if let Err(e) = crate::util::validate_url_value(&url) {
+            return Box::pin(futures::stream::once(async move {
+                Err(LlmError::InvalidRequest(format!(
+                    "provider endpoint blocked (SSRF): {e}"
+                )))
+            }));
+        }
         let protocol = cfg.protocol;
 
         let (tx, rx) = mpsc::channel::<Result<ChatChunk, LlmError>>(16);

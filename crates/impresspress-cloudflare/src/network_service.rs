@@ -31,17 +31,34 @@ impl WorkerFetchService {
     /// on any gate applied before dispatch — mirroring how the native
     /// `wafer-run/network` backend shares one `send_request`.
     ///
-    /// SSRF / allowlist enforcement is intentionally NOT duplicated here: on
-    /// Cloudflare the Workers runtime sandboxes outbound subrequests (it cannot
-    /// reach the internal metadata service or private ranges the way a native
-    /// process can), which is exactly why the buffered `do_request` never
-    /// carried an explicit `is_blocked_url` gate either. Both paths therefore
-    /// apply the identical (platform-provided) gate; the streaming path adds no
-    /// new capability that would bypass a check the buffered path enforces.
+    /// SSRF precheck (defense-in-depth, SEC-019 consumer follow-up): before
+    /// dispatching the subrequest, the request URL is run through the shared
+    /// [`is_ssrf_blocked_url`](impresspress_core::ssrf::is_ssrf_blocked_url)
+    /// gate, so a request whose URL *literally* names an internal target —
+    /// private/loopback/link-local/CGNAT IP literal, `localhost`, an
+    /// IPv6-embedded-v4 form, or a well-known cloud-metadata hostname — is
+    /// refused here rather than relying solely on Cloudflare's runtime
+    /// sandbox. Applied in this shared helper so the buffered `do_request` and
+    /// the streaming `do_request_streaming` can never drift on the gate.
+    ///
+    /// Honest boundary: a Worker cannot resolve DNS before `fetch`, so this
+    /// precheck is necessarily URL/host-literal-based. It does NOT defend
+    /// against DNS rebinding — a public-looking hostname that resolves to a
+    /// private IP at connect time still reaches `fetch`; that residual case is
+    /// Cloudflare's own subrequest-SSRF layer to catch (the native path closes
+    /// it with a resolve-before-connect resolver, which the Workers `fetch`
+    /// API gives no hook for).
     ///
     /// [`do_request`]: NetworkService::do_request
     /// [`do_request_streaming`]: NetworkService::do_request_streaming
     async fn send(&self, req: &Request) -> Result<worker::Response, NetworkError> {
+        if impresspress_core::ssrf::is_ssrf_blocked_url(&req.url) {
+            return Err(NetworkError::RequestError(format!(
+                "SSRF: refusing request to internal/blocked address: {}",
+                req.url
+            )));
+        }
+
         let method = match req.method.to_uppercase().as_str() {
             "GET" => worker::Method::Get,
             "POST" => worker::Method::Post,

@@ -176,6 +176,12 @@ pub(in crate::blocks::llm) async fn create_provider(
     else {
         return err_bad_request("`endpoint` is required");
     };
+    // SSRF: an admin must not be able to point a provider at internal infra.
+    // Same gate the config `_URL` write surfaces use; the outbound client
+    // re-checks at call time (resolve-before-connect), this fails fast on save.
+    if let Err(e) = crate::util::validate_url_value(&endpoint) {
+        return err_bad_request(&format!("invalid `endpoint`: {e}"));
+    }
 
     let mut cfg = ProviderConfig::new(name, protocol, endpoint);
     if let Some(k) = body.key_var.filter(|s| !s.is_empty()) {
@@ -248,6 +254,11 @@ pub(in crate::blocks::llm) async fn update_provider(
         }
     }
     if let Some(e) = body.endpoint.filter(|s| !s.is_empty()) {
+        // SSRF: re-validate on edit (see create_provider) so an update can't
+        // smuggle in an internal endpoint that create rejected.
+        if let Err(err) = crate::util::validate_url_value(&e) {
+            return err_bad_request(&format!("invalid `endpoint`: {err}"));
+        }
         cfg.endpoint = e;
     }
     if let Some(k) = body.key_var {
@@ -421,6 +432,39 @@ mod tests {
                 assert!(e.message.contains("protocol"), "got: {}", e.message);
             }
             other => panic!("expected InvalidArgument, got {other:?}"),
+        }
+    }
+
+    /// SSRF: an admin must not be able to point a provider endpoint at
+    /// internal infrastructure. The rejection happens before any DB write, so
+    /// `PanicCtx` (which panics if the store is touched) staying quiet also
+    /// proves the check fails fast, ahead of `db::create`.
+    #[tokio::test]
+    async fn create_provider_rejects_internal_endpoint() {
+        for endpoint in [
+            "https://169.254.169.254/latest/meta-data/", // cloud metadata (link-local)
+            "http://10.0.0.1/v1",                        // RFC1918 private
+            "https://100.64.0.1/v1",                     // CGNAT
+            "https://metadata.google.internal/v1",       // metadata hostname
+        ] {
+            let block = stub_block();
+            let ctx = PanicCtx;
+            let msg = admin_msg("create", "/b/llm/api/providers");
+            let body = format!(r#"{{"name":"x","protocol":"open_ai","endpoint":"{endpoint}"}}"#);
+            let input = InputStream::from_bytes(body.into_bytes());
+
+            let out = create_provider(&block, &ctx, &msg, input).await;
+            match out.collect_buffered().await {
+                Err(TerminalNotResponse::Error(e)) => {
+                    assert_eq!(e.code, ErrorCode::InvalidArgument, "endpoint {endpoint}");
+                    assert!(
+                        e.message.contains("endpoint"),
+                        "endpoint {endpoint}: got: {}",
+                        e.message
+                    );
+                }
+                other => panic!("expected InvalidArgument for {endpoint}, got {other:?}"),
+            }
         }
     }
 

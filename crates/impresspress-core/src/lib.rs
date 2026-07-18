@@ -28,6 +28,7 @@ pub mod migration_helper;
 pub mod multipart;
 pub mod pipeline;
 pub mod routing;
+pub mod ssrf;
 pub mod streaming;
 pub mod ui;
 pub mod util;
