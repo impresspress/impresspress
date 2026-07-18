@@ -220,9 +220,23 @@ impl StorageService for R2StorageService {
             }
         }
 
-        mp.complete(parts)
-            .await
-            .map_err(|e| StorageError::Internal(format!("R2 complete multipart {r2_key}: {e}")))?;
+        // `complete` consumes `mp`, so capture the upload id first: if the
+        // commit fails we resume a fresh handle to abort the now-orphaned
+        // upload (R2 bills for an incomplete upload's parts until it is aborted
+        // or a lifecycle rule expires it). Best-effort — the resume/abort must
+        // not mask the original completion error.
+        let upload_id = mp.upload_id().await;
+        if let Err(e) = mp.complete(parts).await {
+            if let Ok(resumed) = self
+                .bucket
+                .resume_multipart_upload(r2_key.as_str(), upload_id)
+            {
+                let _ = resumed.abort().await;
+            }
+            return Err(StorageError::Internal(format!(
+                "R2 complete multipart {r2_key}: {e}"
+            )));
+        }
         Ok(())
     }
 
