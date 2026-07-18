@@ -243,11 +243,21 @@ pub fn url_path_encode(s: &str) -> String {
 /// including the IPv6 unique-local (`fc00::/7`) and link-local (`fe80::/10`)
 /// ranges alongside their IPv4 counterparts.
 ///
-/// This validator only covers literal IP addresses and the IPv4-mapped IPv6
-/// form. It intentionally does NOT resolve hostnames or revalidate redirect
-/// destinations — a hostname that resolves to a private/internal address at
-/// connect time (DNS rebinding), or a redirect Location that points at one,
-/// both bypass this check. Those require a resolve-before-connect +
+/// Literal IP classification is delegated to the shared `wafer-net-security`
+/// predicates ([`wafer_core::security::is_blocked_ipv4`] /
+/// [`is_blocked_ipv6`](wafer_core::security::is_blocked_ipv6)) so this write
+/// gate stays in lock-step with the outbound fetch layer instead of
+/// hand-rolling its own (narrower) range list. That covers, beyond the RFC
+/// 1918 private ranges, the CGNAT (`100.64.0.0/10`), link-local, benchmarking,
+/// multicast, reserved and broadcast ranges, and every IPv6-embedded-v4 form
+/// (IPv4-mapped, NAT64, 6to4, IPv4-compatible). Known cloud-metadata *DNS
+/// hostnames* (`metadata.google.internal`) are rejected too, via
+/// [`crate::ssrf::is_cloud_metadata_host`].
+///
+/// It intentionally does NOT resolve arbitrary hostnames or revalidate
+/// redirect destinations — a hostname that resolves to a private/internal
+/// address at connect time (DNS rebinding), or a redirect Location that points
+/// at one, both bypass this check. Those require a resolve-before-connect +
 /// redirect-revalidation guard at the network/fetch layer (the actual
 /// outbound HTTP call site), not at config-write time, since the resolved
 /// address can differ from what it resolved to when this value was saved.
@@ -301,40 +311,30 @@ pub(crate) fn validate_url_value(value: &str) -> Result<(), String> {
 
     // Check for private/internal IPs using the parsed host, which is
     // guaranteed to have userinfo and port stripped and IPv6 brackets
-    // removed — unlike the old string-split extraction.
+    // removed — unlike the old string-split extraction. The range list is the
+    // shared `wafer-net-security` classifier (same one the outbound fetch
+    // layer enforces), so this write gate cannot silently allow a range the
+    // fetch layer blocks (CGNAT, multicast, NAT64/6to4 embeddings, …).
     match parsed.host() {
         Some(url::Host::Ipv4(v4)) => {
-            let is_blocked = v4.is_private()       // 10.x, 172.16-31.x, 192.168.x
-                || v4.is_loopback()                // 127.x
-                || v4.is_link_local()              // 169.254.x
-                || v4.octets()[0] == 0; // 0.0.0.0/8
-            if is_blocked {
+            if wafer_core::security::is_blocked_ipv4(v4) {
                 return Err("URL must not point to private/internal IP addresses".to_string());
             }
         }
         Some(url::Host::Ipv6(v6)) => {
-            if v6.is_loopback() {
-                return Err("URL must not point to loopback address".to_string());
-            }
-            // Unique-local (`fc00::/7`, almost always seen as `fd00::/8`) is
-            // the IPv6 analogue of the v4 private ranges blocked above.
-            if v6.is_unique_local() {
+            if wafer_core::security::is_blocked_ipv6(v6) {
                 return Err("URL must not point to private/internal IP addresses".to_string());
             }
-            // Link-local (`fe80::/10`) is the IPv6 analogue of the v4
-            // `169.254.x` block above — also how instance-metadata endpoints
-            // are reached on some cloud providers.
-            if v6.is_unicast_link_local() {
-                return Err("URL must not point to link-local addresses".to_string());
-            }
-            // Block IPv4-mapped IPv6 addresses (::ffff:10.x.x.x etc.)
-            if let Some(v4) = v6.to_ipv4_mapped() {
-                if v4.is_private() || v4.is_loopback() || v4.is_link_local() {
-                    return Err("URL must not point to private/internal IP addresses".to_string());
-                }
+        }
+        // A hostname is not resolved here (see the doc's DNS-rebinding note),
+        // but a *literal* well-known cloud-metadata hostname is still a
+        // config-write mistake worth rejecting up front.
+        Some(url::Host::Domain(h)) => {
+            if crate::ssrf::is_cloud_metadata_host(h) {
+                return Err("URL must not point to a cloud metadata endpoint".to_string());
             }
         }
-        Some(url::Host::Domain(_)) | None => {}
+        None => {}
     }
     Ok(())
 }
@@ -834,6 +834,36 @@ mod tests {
     #[test]
     fn allows_real_ipv6_address() {
         assert!(validate_url_value("https://[2606:4700:4700::1111]/x").is_ok());
+    }
+
+    /// Ranges the previous hand-rolled predicate missed but the shared
+    /// `wafer-net-security` classifier (now delegated to) blocks: CGNAT, the
+    /// AWS/GCP metadata IP literals, and the IPv6-embedded-v4 forms
+    /// (IPv4-mapped, NAT64, 6to4).
+    #[test]
+    fn rejects_ranges_closed_by_shared_classifier() {
+        // Carrier-grade NAT (100.64.0.0/10) — routable internal cloud infra.
+        assert!(validate_url_value("https://100.64.0.1/x").is_err());
+        // Cloud metadata service (link-local v4).
+        assert!(validate_url_value("https://169.254.169.254/latest/meta-data/").is_err());
+        // IPv4-mapped IPv6 private/loopback.
+        assert!(validate_url_value("https://[::ffff:10.0.0.1]/x").is_err());
+        // NAT64 embedding of the metadata service (64:ff9b::169.254.169.254).
+        assert!(validate_url_value("https://[64:ff9b::a9fe:a9fe]/x").is_err());
+        // 6to4 embedding of 127.0.0.1.
+        assert!(validate_url_value("https://[2002:7f00:1::]/x").is_err());
+        // A NAT64 route to a genuinely public v4 stays allowed.
+        assert!(validate_url_value("https://[64:ff9b::5db8:d822]/x").is_ok());
+    }
+
+    /// A literal cloud-metadata DNS hostname is rejected at config-write time
+    /// even though hostnames are otherwise not resolved here.
+    #[test]
+    fn rejects_cloud_metadata_hostname() {
+        assert!(validate_url_value("https://metadata.google.internal/x").is_err());
+        assert!(validate_url_value("https://metadata.google.internal./x").is_err());
+        // A normal hostname that merely contains the string is still allowed.
+        assert!(validate_url_value("https://metadata.google.internal.example.com/x").is_ok());
     }
 
     #[test]
