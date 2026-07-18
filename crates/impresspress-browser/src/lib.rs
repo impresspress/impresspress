@@ -27,6 +27,13 @@ pub mod vector;
 #[cfg(any(target_arch = "wasm32", test))]
 mod db_codec;
 
+// Pure opaque list-cursor codec for the OPFS `storage` bridge edge — split out
+// of the wasm32-only `storage` module (same rationale as `db_codec`) so it
+// unit-tests on the host. Compiled on wasm32 (real use) or under `test` (host
+// unit tests), never on plain native builds where it'd be dead.
+#[cfg(any(target_arch = "wasm32", test))]
+mod storage_cursor;
+
 // wasm32-only — use wasm-bindgen, web-sys, js-sys.
 #[cfg(target_arch = "wasm32")]
 pub mod asset_loader;
