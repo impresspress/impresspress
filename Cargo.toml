@@ -77,11 +77,33 @@ wasm-bindgen = "0.2"
 js-sys = "0.3"
 maud = "0.26"
 [profile.release]
+# Size-first wasm profile (CF Worker + browser both ship from `release`).
 opt-level = "z"
 lto = true
 codegen-units = 1
 strip = true
 panic = "abort"
+# Two further wasm optimizations were benchmark-gated here and REJECTED by
+# measurement (raw `cargo build --target wasm32-unknown-unknown --release`
+# .wasm bytes; see the perf/wasm-opt-simd PR for full numbers):
+#
+#   * Per-package `[profile.release.package.<crypto>] opt-level = 3` (sha2,
+#     hmac, pbkdf2, argon2, blake2, hkdf) to speed the login/JWT hot path.
+#     Result: BYTE-FOR-BYTE IDENTICAL wasm (same sha256) for both targets.
+#     `lto = true` (fat LTO) re-optimizes the merged module at the top-level
+#     `-Oz`, discarding each crate's pre-LTO opt-level — the override is a
+#     no-op here. Making O3 crypto codegen actually survive would require a
+#     global LTO-mode change (e.g. `lto = "thin"`), a whole-bundle tradeoff
+#     that needs its own size+perf benchmark, not a "one crate" tweak.
+#
+#   * `-C target-feature=+simd128` for the wasm32 builds. Result: negligible
+#     (browser -122 B, CF -154 B, ~0.02%). The CF Worker has no SIMD-eligible
+#     code (crypto uses portable soft backends; `-Oz` disables autovectoriz-
+#     ation), so it gains nothing. Only the browser's `vector/score.rs` f32x4
+#     dot-product benefits, and only during vector search — a niche win that
+#     doesn't justify raising the browser floor to Safari 16.4 or threading
+#     RUSTFLAGS through every CI/deploy job (`.cargo/config.toml` is already
+#     owned by the gitignored local wafer-run `[patch]` workflow).
 
 [workspace.lints.clippy]
 redundant_clone = "warn"
