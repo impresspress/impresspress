@@ -66,6 +66,21 @@ impl RateLimit {
         max_requests: 60,
         window: Duration::from_secs(60),
     };
+    /// Anonymous configured-price previews: 120 requests per minute per IP.
+    pub const PRODUCTS_PREVIEW: Self = Self {
+        max_requests: 120,
+        window: Duration::from_secs(60),
+    };
+    /// Anonymous Stripe Checkout creation: 30 requests per minute per IP.
+    pub const PRODUCTS_CHECKOUT: Self = Self {
+        max_requests: 30,
+        window: Duration::from_secs(60),
+    };
+    /// Guest receipt status polling: 120 requests per minute per IP.
+    pub const PRODUCTS_RECEIPT: Self = Self {
+        max_requests: 120,
+        window: Duration::from_secs(60),
+    };
 
     /// Read config override for this rate limit category.
     ///
@@ -618,6 +633,9 @@ mod tests {
         assert_eq!(RateLimit::API_READ.max_requests, 300);
         assert_eq!(RateLimit::API_WRITE.max_requests, 120);
         assert_eq!(RateLimit::UPLOAD.max_requests, 60);
+        assert_eq!(RateLimit::PRODUCTS_PREVIEW.max_requests, 120);
+        assert_eq!(RateLimit::PRODUCTS_CHECKOUT.max_requests, 30);
+        assert_eq!(RateLimit::PRODUCTS_RECEIPT.max_requests, 120);
     }
 
     #[tokio::test]

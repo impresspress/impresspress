@@ -1,0 +1,32 @@
+{
+  "slug": "digital-download",
+  "title": "Field Notes Press",
+  "developer": {
+    "template": "Simple one-time product with a lookup-priced license",
+    "ownership": "Platform-owned catalog",
+    "fulfillment": "Download entitlement created only after confirmed payment",
+    "stripe_features": ["Hosted Checkout", "Immutable Price", "Webhook entitlement", "Guest receipt"],
+    "journey": ["Create the product from the simple one-time template.", "Add a public license selector and lookup amount row.", "Publish, sync, and embed the custom element in this static page."]
+  },
+  "operator": { "journey": ["Watch completed orders and failed payment state.", "Revoke or reissue the download entitlement without changing the order snapshot.", "Refund provider-first from the order detail page."] },
+  "seed": {
+    "template_id": "simple_product",
+    "product": { "name": "The Independent Field Guide", "slug": "field-guide", "currency": "USD", "fulfillment_kind": "download", "status": "active" },
+    "offer_definition": {
+      "name": "Digital license", "mode": "payment", "currency": "USD", "pricing_model": "components", "usage_type": "licensed", "billing_scheme": "per_unit", "tax_behavior": "exclusive",
+      "variables": [{ "key": "license", "kind": "select", "label": "License", "help_text": "Personal covers one reader; Studio covers a team.", "required": true, "default_value": "Personal", "allowed_values": ["Personal", "Studio"], "sort_order": 0 }],
+      "components": [{ "key": "guide", "label": "Field Guide license", "required": true, "sort_order": 0, "amount": { "type": "lookup", "input": "license", "prices": { "Personal": 2900, "Studio": 7900 } } }],
+      "checkout": { "automatic_tax": false, "collect_billing_address": false, "collect_shipping_address": false, "require_terms_consent": true }
+    }
+  },
+  "product": {
+    "schema_version": 1, "id": "field-guide", "name": "The Independent Field Guide", "slug": "field-guide", "description": "PDF and ePub · immediate entitlement after confirmed payment", "image_url": "", "tags": ["digital", "publishing"], "fulfillment_kind": "download",
+    "offers": [{ "id": "field-guide-license", "version": 1, "name": "Choose a license", "mode": "payment", "currency": "USD", "pricing_model": "components", "recurring_interval": null, "interval_count": 1,
+      "variables": [{ "key": "license", "kind": "select", "label": "License", "help_text": "Personal covers one reader; Studio covers a team.", "required": true, "default_value": "Personal", "allowed_values": ["Personal", "Studio"], "sort_order": 0 }],
+      "checkout": { "allow_promotion_codes": false, "automatic_tax": false, "collect_billing_address": false, "collect_shipping_address": false, "require_terms_consent": true, "trial_days": 0 }, "payment_links": [] }]
+  },
+  "scenario": {
+    "offer_id": "field-guide-license", "quantity": 1, "inputs": { "license": "Studio" }, "presentation": "hosted", "expected_total_label": "USD 79.00",
+    "quote": { "schema_version": 1, "offer_id": "field-guide-license", "offer_version": 1, "quantity": 1, "inputs": { "license": "Studio" }, "components": [{ "component_id": "guide", "key": "guide", "label": "Studio license", "included": true, "required": true, "unit_amount_minor": 7900, "quantity": 1, "total_amount_minor": 7900, "reason": "license selected" }], "amounts": { "currency": "USD", "subtotal_minor": 7900, "discount_minor": 0, "tax_minor": 0, "shipping_minor": 0, "platform_fee_minor": 0, "total_minor": 7900 } }
+  }
+}

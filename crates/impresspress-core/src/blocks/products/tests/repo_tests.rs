@@ -29,7 +29,7 @@ async fn cancel_and_reset_addons_zeroes_addons_and_cancels() {
     )
     .await;
 
-    let rows = repo::subscriptions::cancel_and_reset_addons(&ctx, "sub_stripe_1")
+    let rows = repo::subscriptions::cancel_and_reset_addons(&ctx, "sub_stripe_1", 1)
         .await
         .expect("cancel ok");
     assert_eq!(rows, 1, "exactly one subscription row updated");

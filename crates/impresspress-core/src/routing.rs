@@ -233,12 +233,10 @@ pub const ROUTES: &[Route] = &[
         "impresspress/files",
     ),
     // Stripe webhook — verified by HMAC signature (`stripe.rs::handle_webhook`),
-    // not by `msg.user_id()`; not declared as a `BlockEndpoint` in
-    // `impresspress/products` (routing.rs cannot add that declaration to the
-    // block's own file). Must precede the general `/b/products` entry below.
-    // See `Route::router_declared_public`'s doc comment for why a plain
-    // `Route::new(_, Public, _)` entry would NOT be enough once undeclared
-    // paths default to `Authenticated`.
+    // not by `msg.user_id()`. It is also declared Public in the products
+    // block for discovery, while this router-final carve-out keeps delivery
+    // reachable during boot or tests where BlockInfo metadata is unavailable.
+    // Must precede the general `/b/products` entry below.
     Route::router_declared_public("/b/products/webhooks", "impresspress/products"),
     Route::new("/b/products", RouteAccess::Public, "impresspress/products"),
     // Legalpages — public reads + admin writes/UI.

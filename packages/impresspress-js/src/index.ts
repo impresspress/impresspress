@@ -6,11 +6,7 @@ export { ImpresspressClient, createImpresspressClient } from './client';
 export { AuthService } from './services/auth.service';
 export { StorageService } from './services/storage.service';
 export { IAMService } from './services/iam.service';
-export {
-  ExtensionsService,
-  CloudStorageExtension,
-  ProductsExtension,
-} from './services/extensions.service';
+export * from './services/extensions.service';
 
 // Export types
 export * from './types';
@@ -46,10 +42,6 @@ export type {
   ListOptions,
   UploadFileOptions,
 } from './services/storage.service';
-
-export type {
-  Extension,
-} from './services/extensions.service';
 
 // Default export
 import { ImpresspressClient as Client } from './client';

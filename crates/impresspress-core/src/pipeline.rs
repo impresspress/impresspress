@@ -564,12 +564,9 @@ mod discovery_tests {
             "number",
             "catalog response schema must match the real products row shape: {catalog}"
         );
-        // The product object schema must cover every column the migration
-        // declares (see `001_products_schema.sqlite.sql`), not just a subset
-        // — `SELECT *` means all 22 columns land in the real response.
-        // `created_by`/`deleted_at` were previously missing entirely; pin
-        // them (plus the other four FK/requires columns) so the gap can't
-        // silently reopen.
+        // The product object schema must cover the original row plus every
+        // commerce-v2 column — `SELECT *` means all of them land in real
+        // catalog and builder responses.
         let product_props = &catalog["responses"]["200"]["content"]["application/json"]["schema"]
             ["properties"]["records"]["items"]["properties"]["data"]["properties"];
         for field in [
@@ -578,6 +575,15 @@ mod discovery_tests {
             "pricing_template_id",
             "requires",
             "created_by",
+            "owner_kind",
+            "owner_id",
+            "seller_account_id",
+            "approval_status",
+            "fulfillment_kind",
+            "stripe_product_id",
+            "current_version",
+            "submitted_at",
+            "published_at",
             "deleted_at",
         ] {
             assert!(
@@ -595,6 +601,285 @@ mod discovery_tests {
             detail["parameters"][0]["name"], "id",
             "product detail must declare the {{id}} path param: {detail}"
         );
+
+        let groups = &paths["/b/products/groups"];
+        assert!(
+            !groups["get"].is_null() && !groups["post"].is_null(),
+            "owned group list/create must appear in /openapi.json: {groups}"
+        );
+        assert_eq!(
+            groups["post"]["requestBody"]["content"]["application/json"]["schema"]["required"],
+            serde_json::json!(["name"]),
+            "group creation must document its required name: {groups}"
+        );
+        let group_products = &paths["/b/products/groups/{id}/products"]["get"];
+        assert_eq!(
+            group_products["parameters"][0]["name"], "id",
+            "owned group product listing must document its group id: {group_products}"
+        );
+
+        let calculate = &paths["/b/products/calculate-price"]["post"];
+        assert_eq!(
+            calculate["requestBody"]["content"]["application/json"]["schema"]["required"],
+            serde_json::json!(["product_id"]),
+            "legacy price calculation must document its request body: {calculate}"
+        );
+        assert_eq!(
+            calculate["responses"]["200"]["content"]["application/json"]["schema"]["properties"]
+                ["total"]["type"],
+            "number",
+            "legacy price calculation must document its response: {calculate}"
+        );
+
+        let webhook = &paths["/b/products/webhooks"]["post"];
+        assert_eq!(
+            webhook["requestBody"]["content"]["application/json"]["schema"]["required"],
+            serde_json::json!(["type", "data"]),
+            "the signed Stripe webhook payload must appear in discovery: {webhook}"
+        );
+        assert_eq!(
+            webhook["responses"]["200"]["content"]["application/json"]["schema"]["properties"]
+                ["received"]["type"],
+            "boolean",
+            "the Stripe webhook acknowledgement must be documented: {webhook}"
+        );
+
+        let checkout = &paths["/b/products/checkout"]["post"];
+        let checkout_inputs = checkout["requestBody"]["content"]["application/json"]["schema"]
+            ["oneOf"]
+            .as_array()
+            .expect("checkout must document typed-offer and legacy-purchase bodies");
+        assert_eq!(
+            checkout_inputs.len(),
+            2,
+            "checkout input variants: {checkout}"
+        );
+        assert_eq!(
+            checkout_inputs[0]["required"],
+            serde_json::json!(["offer_id"])
+        );
+        assert_eq!(
+            checkout_inputs[1]["required"],
+            serde_json::json!(["purchase_id"])
+        );
+        assert_eq!(
+            checkout["responses"]["200"]["content"]["application/json"]["schema"]["oneOf"]
+                .as_array()
+                .map(Vec::len),
+            Some(2),
+            "checkout must document both response families: {checkout}"
+        );
+
+        let guest_status = &paths["/b/products/orders/{id}/status"]["get"];
+        let guest_props = &guest_status["responses"]["200"]["content"]["application/json"]
+            ["schema"]["properties"];
+        assert_eq!(
+            guest_props["amounts"]["properties"]["total_minor"]["type"],
+            "integer"
+        );
+        assert!(
+            guest_props["buyer_email"].is_null()
+                && guest_props["stripe_payment_intent_id"].is_null(),
+            "guest order discovery must not expose buyer/provider identifiers: {guest_props}"
+        );
+
+        let subscription = &paths["/b/products/subscription"]["get"];
+        let subscription_props = &subscription["responses"]["200"]["content"]["application/json"]
+            ["schema"]["properties"]["subscription"]["properties"];
+        assert!(
+            subscription_props["stripe_customer_id"].is_null()
+                && subscription_props["user_id"].is_null(),
+            "subscription discovery must mirror the curated secret-free projection: {subscription_props}"
+        );
+
+        let portal = &paths["/b/products/billing-portal"]["post"];
+        assert_eq!(
+            portal["requestBody"]["content"]["application/json"]["schema"]["required"],
+            serde_json::json!(["return_url"])
+        );
+        assert_eq!(
+            portal["responses"]["200"]["content"]["application/json"]["schema"]["properties"]
+                ["url"]["format"],
+            "uri"
+        );
+
+        for (path, method) in [
+            ("/b/products/api/seller/account", "get"),
+            ("/b/products/api/seller/stats", "get"),
+            ("/b/products/api/seller/orders", "get"),
+            ("/b/products/api/seller/orders/{id}", "get"),
+            ("/b/products/api/seller/orders/{id}/refund", "post"),
+            ("/b/products/api/seller/onboarding", "post"),
+            ("/b/products/api/seller/dashboard", "post"),
+        ] {
+            assert!(
+                !paths[path][method].is_null(),
+                "seller endpoint {method} {path} must appear in discovery"
+            );
+        }
+        let seller_stats = &paths["/b/products/api/seller/stats"]["get"]["responses"]["200"]
+            ["content"]["application/json"]["schema"]["properties"];
+        let analytics_props = &seller_stats["currency_analytics"]["items"]["properties"];
+        assert_eq!(analytics_props["open_dispute_count"]["type"], "integer");
+        assert_eq!(
+            analytics_props["open_disputed_volume_minor"]["type"],
+            "integer"
+        );
+        assert_eq!(analytics_props["lost_dispute_count"]["type"], "integer");
+        assert_eq!(
+            analytics_props["lost_disputed_volume_minor"]["type"],
+            "integer"
+        );
+        let failure_props = &seller_stats["recent_failures"]["items"]["properties"];
+        assert_eq!(failure_props["total_minor"]["type"], "integer");
+        assert!(
+            failure_props["buyer_email"].is_null(),
+            "seller failure summaries must remain ownership-safe: {failure_props}"
+        );
+        let onboarding = &paths["/b/products/api/seller/onboarding"]["post"];
+        assert_eq!(
+            onboarding["requestBody"]["content"]["application/json"]["schema"]["required"],
+            serde_json::json!(["return_url", "refresh_url"])
+        );
+        let seller_refund = &paths["/b/products/api/seller/orders/{id}/refund"]["post"];
+        assert_eq!(
+            seller_refund["requestBody"]["content"]["application/json"]["schema"]["properties"]
+                ["amount_minor"]["minimum"],
+            1
+        );
+
+        for (path, method) in [
+            ("/b/products/api/admin/purchases", "get"),
+            ("/b/products/api/admin/purchases/{id}", "get"),
+            ("/b/products/api/admin/purchases/{id}/refund", "post"),
+            ("/b/products/api/admin/stats", "get"),
+            ("/b/products/api/admin/stripe/status", "get"),
+            ("/b/products/api/admin/webhook-events", "get"),
+            ("/b/products/api/admin/webhook-events/{id}/replay", "post"),
+            ("/b/products/api/admin/sellers", "get"),
+            ("/b/products/api/admin/sellers/{id}", "get"),
+            ("/b/products/api/admin/sellers/{id}/suspend", "post"),
+            ("/b/products/api/admin/sellers/{id}/reactivate", "post"),
+            ("/b/products/api/admin/products/{id}/approve", "post"),
+            ("/b/products/api/admin/products/{id}/reject", "post"),
+        ] {
+            assert!(
+                !paths[path][method].is_null(),
+                "administrator endpoint {method} {path} must appear in discovery"
+            );
+        }
+        let stripe_status = &paths["/b/products/api/admin/stripe/status"]["get"]["responses"]
+            ["200"]["content"]["application/json"]["schema"]["properties"];
+        assert!(
+            stripe_status["secret_key"].is_null()
+                && stripe_status["webhook_secret"].is_null()
+                && stripe_status["publishable_key"].is_null(),
+            "Stripe health discovery must never expose credential values: {stripe_status}"
+        );
+        let order_dispute = &paths["/b/products/api/admin/purchases/{id}"]["get"]["responses"]
+            ["200"]["content"]["application/json"]["schema"]["properties"]["disputes"]["items"]
+            ["properties"]["data"]["properties"];
+        assert_eq!(order_dispute["amount_minor"]["type"], "integer");
+        assert!(
+            order_dispute["status"]["enum"]
+                .as_array()
+                .is_some_and(|values| values.iter().any(|value| value == "needs_response")),
+            "order detail must document the durable dispute projection: {order_dispute}"
+        );
+        let order_payment = &paths["/b/products/api/admin/purchases/{id}"]["get"]["responses"]
+            ["200"]["content"]["application/json"]["schema"]["properties"]["purchase"]
+            ["properties"]["data"]["properties"];
+        assert_eq!(
+            order_payment["payment_intent_event_created"]["type"],
+            "integer"
+        );
+        assert!(
+            order_payment["provider_payment_status"]["enum"]
+                .as_array()
+                .is_some_and(|values| values.iter().any(|value| value == "payment_failed")),
+            "order detail must document the PaymentIntent operational projection: {order_payment}"
+        );
+        let webhook_events = &paths["/b/products/api/admin/webhook-events"]["get"]["responses"]
+            ["200"]["content"]["application/json"]["schema"]["properties"]["records"]["items"]
+            ["properties"];
+        assert!(
+            webhook_events["payload"].is_null() && webhook_events["processing_owner"].is_null(),
+            "webhook recovery discovery must remain payload/token safe: {webhook_events}"
+        );
+        assert_eq!(
+            paths["/b/products/api/admin/purchases/{id}/refund"]["patch"]["deprecated"], true,
+            "the legacy PATCH refund alias should direct clients to POST"
+        );
+
+        for prefix in ["/b/products/api/admin/products", "/b/products/api/products"] {
+            let collection = &paths[prefix];
+            assert_eq!(
+                collection["post"]["requestBody"]["content"]["application/json"]["schema"]
+                    ["required"],
+                serde_json::json!(["name"]),
+                "product creation must document its required name: {collection}"
+            );
+            assert_eq!(
+                collection["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+                    ["properties"]["records"]["items"]["properties"]["data"]["properties"]
+                    ["approval_status"]["type"],
+                "string",
+                "builder product lists must use the commerce-v2 row contract: {collection}"
+            );
+
+            let duplicate = &paths[&format!("{prefix}/{{id}}/duplicate")]["post"];
+            assert_eq!(
+                duplicate["responses"]["200"]["content"]["application/json"]["schema"]
+                    ["required"],
+                serde_json::json!(["product", "offers"]),
+                "whole-product duplication returns both the new product and cloned offers: {duplicate}"
+            );
+
+            let offers = &paths[&format!("{prefix}/{{product_id}}/offers")];
+            assert_eq!(
+                offers["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+                    ["required"],
+                serde_json::json!(["offers"]),
+                "offer lists use their real envelope: {offers}"
+            );
+            assert!(
+                offers["post"]["requestBody"]["content"]["application/json"]["schema"]["required"]
+                    .as_array()
+                    .is_some_and(|required| required.iter().any(|field| field == "components")),
+                "offer creation must document the component definition: {offers}"
+            );
+
+            let presets = &paths[&format!("{prefix}/{{product_id}}/offers/{{offer_id}}/presets")];
+            assert_eq!(
+                presets["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+                    ["required"],
+                serde_json::json!(["presets"]),
+                "preset lists use their real envelope: {presets}"
+            );
+            let links =
+                &paths[&format!("{prefix}/{{product_id}}/offers/{{offer_id}}/payment-links")];
+            assert_eq!(
+                links["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+                    ["required"],
+                serde_json::json!(["payment_links"]),
+                "Payment Link lists use their real envelope: {links}"
+            );
+        }
+
+        for path in [
+            "/b/products/api/admin/groups",
+            "/b/products/api/admin/types",
+            "/b/products/api/admin/pricing",
+            "/b/products/api/admin/variables",
+        ] {
+            assert_eq!(
+                paths[path]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
+                    ["required"],
+                serde_json::json!(["records", "total_count"]),
+                "legacy admin builder list must document RecordList: {}",
+                paths[path]["get"]
+            );
+        }
     }
 }
 
