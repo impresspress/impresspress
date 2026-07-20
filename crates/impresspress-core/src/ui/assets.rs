@@ -370,6 +370,23 @@ pub fn palette_js() -> &'static str {
     if (t.dataset.action === 'palette-close') { e.preventDefault(); close(); }
   });
 
+  // The shortcut hint defaults to the Mac glyph; swap to Ctrl elsewhere so
+  // the advertised key matches what the keydown handler above accepts.
+  if (!/Mac|iPhone|iPad|iPod/.test(navigator.platform || '')) {
+    document.querySelectorAll('.topbar__palette-cmd').forEach((n) => { n.textContent = 'Ctrl'; });
+    document.querySelectorAll('.shell__palette-icon').forEach((n) => { n.textContent = 'Ctrl K'; });
+  }
+
+  // Linked table rows (`.data-table__row--linked`) style as clickable; make
+  // the whole row actually navigate via its row-href anchor, unless the
+  // click landed on an interactive element of its own.
+  document.addEventListener('click', (e) => {
+    const row = e.target.closest('.data-table__row--linked');
+    if (!row || e.target.closest('a, button, input, select, label, textarea')) return;
+    const anchor = row.querySelector('.data-table__row-href a');
+    if (anchor) anchor.click();
+  });
+
   // Item click → navigate
   list.addEventListener('click', (e) => {
     const item = e.target.closest('.palette__item');

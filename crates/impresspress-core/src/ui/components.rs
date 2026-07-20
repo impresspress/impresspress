@@ -170,7 +170,9 @@ pub fn badge(variant: BadgeVariant, label: &str) -> Markup {
 
 /// Render a colored status badge, deriving the color from the status string.
 pub fn status_badge(status: &str) -> Markup {
-    badge(BadgeVariant::from_status(status), status)
+    // The variant is derived from the machine value; the label is humanized
+    // so snake_case enums (`partially_refunded`) never leak underscores.
+    badge(BadgeVariant::from_status(status), &status.replace('_', " "))
 }
 
 // ---------------------------------------------------------------------------
@@ -485,6 +487,18 @@ mod tests {
         let unknown = status_badge("public").into_string();
         assert!(unknown.contains("badge-info"), "default variant: {unknown}");
         assert!(unknown.contains(">public</span>"), "label text: {unknown}");
+    }
+
+    #[test]
+    fn status_badge_humanizes_snake_case_labels() {
+        // Machine enum values must never leak underscores into the UI:
+        // `partially_refunded` renders as "partially refunded".
+        let partial = status_badge("partially_refunded").into_string();
+        assert!(
+            partial.contains(">partially refunded</span>"),
+            "humanized label: {partial}"
+        );
+        assert!(!partial.contains("partially_refunded"), "raw enum: {partial}");
     }
 
     #[test]

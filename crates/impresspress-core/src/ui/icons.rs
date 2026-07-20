@@ -95,6 +95,10 @@ pub fn x() -> Markup {
     icon(r#"<path d="M18 6 6 18"/><path d="m6 6 12 12"/>"#)
 }
 
+pub fn check() -> Markup {
+    icon(r#"<path d="M20 6 9 17l-5-5"/>"#)
+}
+
 pub fn chevron_left() -> Markup {
     icon(r#"<path d="m15 18-6-6 6-6"/>"#)
 }

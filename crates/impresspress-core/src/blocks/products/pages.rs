@@ -121,7 +121,8 @@ use crate::{
 };
 
 const PRODUCTS_UI_CSS: &str = r#"
-.products-tabs{min-width:0;max-width:100%;margin:-.25rem 0 1.75rem;overflow-x:auto;scrollbar-width:thin}
+.products-tabs{min-width:0;max-width:100%;margin:-.25rem 0 1.75rem;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none}
+.products-tabs::-webkit-scrollbar{display:none}
 .products-tabs>nav{min-width:max-content}
 .products-tabs+header,.products-tabs+.page-header{margin-top:0}
 .products-guide{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1rem;margin:1.25rem 0}
@@ -142,6 +143,9 @@ body:has(.products-tabs) .filter-bar{margin:1rem 0;padding:.75rem;border:1px sol
 .product-wizard-progress{margin:0 0 1.25rem}
 .product-wizard-progress ol{display:grid;grid-template-columns:repeat(5,minmax(0,1fr));gap:.55rem;list-style:none;padding:0;margin:0}
 .product-wizard-progress li{min-height:2.25rem;border-radius:999px}
+.wizard-step-check{display:inline-flex;margin-right:.3rem}
+.wizard-step-check svg{width:.75rem;height:.75rem}
+.wizard-step-check[hidden]{display:none}
 .product-wizard-actions{position:sticky;bottom:0;z-index:2;display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-top:1rem;padding:.75rem 0;border-top:1px solid var(--border-color);background:var(--surface-1)}
 .product-wizard-actions__buttons{display:flex;gap:.75rem;margin-left:auto}
 .product-wizard-actions [hidden]{display:none!important}
@@ -791,6 +795,9 @@ pub async fn product_wizard(ctx: &dyn Context, msg: &Message, admin: bool) -> Ou
             ol {
                 @for (number, label) in [(1, "Type"), (2, "Details"), (3, "Pricing"), (4, "Checkout"), (5, "Review")] {
                     li data-wizard-indicator=(number) .badge .(if number == 1 { "badge-primary" } else { "badge-secondary" }) style="justify-content:center" {
+                        // Completed steps get a check icon (revealed by the
+                        // wizard JS) so state is not conveyed by color alone.
+                        span .wizard-step-check aria-hidden="true" hidden { (icons::check()) }
                         (number) ". " (label)
                     }
                 }
@@ -828,7 +835,11 @@ pub async fn product_wizard(ctx: &dyn Context, msg: &Message, admin: bool) -> Ou
             section .card data-wizard-step="2" hidden {
                 header .card__head { h3 .card__title { "Product details" } }
                 div .card__body {
-                    div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:1rem" {
+                    // Column gap only: each .form-group already carries the
+                    // vertical rhythm (margin-bottom), so a row gap on top of
+                    // it would make in-grid spacing larger than the gap to
+                    // the fields that follow the grid.
+                    div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(240px,1fr));gap:0 1rem" {
                         div .form-group {
                             label .form-label .required for="wizard-name" { "Name" }
                             input #wizard-name .form-input type="text" maxlength="160" required placeholder="e.g. Team plan";
@@ -1083,6 +1094,8 @@ function productWizardShowStep(step,scrollToStep){
   document.querySelectorAll('[data-wizard-indicator]').forEach(function(el){
     var current=Number(el.dataset.wizardIndicator);
     el.className='badge '+(current===productWizardStep?'badge-primary':current<productWizardStep?'badge-success':'badge-secondary');
+    var check=el.querySelector('.wizard-step-check');
+    if(check)check.hidden=current>=productWizardStep;
   });
   wizardById('wizard-previous').hidden=productWizardStep===1;
   wizardById('wizard-next').hidden=productWizardStep===5;
@@ -2157,7 +2170,7 @@ pub async fn purchases(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     hx-get={"/b/products/admin/purchases?status=" (*s)}
                     hx-target="#content"
                     hx-push-url="true"
-                { (*s) }
+                { (s.replace('_', " ")) }
             }
         }
 
@@ -2942,7 +2955,7 @@ pub async fn seller_orders(ctx: &dyn Context, msg: &Message) -> OutputStream {
         div .filter-bar {
             @for status in &["all", "pending", "completed", "partially_refunded", "refunded", "failed"] {
                 a .btn .(if (status_filter.is_empty() && *status == "all") || status_filter == *status { "btn--primary" } else { "btn--secondary" }) .btn--sm
-                    href={"/b/products/selling/orders?status=" (*status)} { (*status) }
+                    href={"/b/products/selling/orders?status=" (*status)} { (status.replace('_', " ")) }
             }
         }
         @match &result {
