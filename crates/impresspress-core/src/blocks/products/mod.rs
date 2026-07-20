@@ -59,8 +59,11 @@ const PUBLIC_RATE_LIMIT_ROUTES: &[RouteLimit] = &[
 /// this directly on its in-memory ConfigService after loading persisted
 /// variables, so an admin database value cannot accidentally turn a public
 /// browser runtime into a trusted secret holder. Native and Cloudflare leave
-/// it unset and retain the server default.
-pub const RUNTIME_KIND_CONFIG_KEY: &str = "WAFER_RUN_SHARED__RUNTIME__KIND";
+/// it unset and retain the server default. Double-underscore brackets mark
+/// the key as internal (same convention as `BLOCK_SETTINGS_CONFIG_KEY`) — it
+/// is never set via env var or the variables table, so it must not claim the
+/// admin-writable `WAFER_RUN_SHARED__` prefix.
+pub const RUNTIME_KIND_CONFIG_KEY: &str = "__IMPRESSPRESS_RUNTIME_KIND__";
 
 pub(crate) async fn stripe_secret_operations_allowed(
     ctx: &dyn wafer_run::context::Context,

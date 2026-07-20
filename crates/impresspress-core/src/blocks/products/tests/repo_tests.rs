@@ -255,3 +255,83 @@ async fn subscription_for_user_repository_failure_surfaces_as_error() {
         "a genuine repository failure must surface as Err, not a fabricated None"
     );
 }
+
+/// Offer state transitions are compare-and-swap writes: a write conditioned
+/// on a status the row no longer holds must not land. This is the guard that
+/// keeps a stale draft edit from wiping `stripe_price_id` on an offer that a
+/// concurrent request published between the read and the write.
+#[tokio::test]
+async fn stale_offer_write_cannot_land_after_status_transition() {
+    let ctx = ctx().await;
+
+    let mut od = HashMap::new();
+    od.insert("product_id".to_string(), serde_json::json!("prod_cas"));
+    od.insert("name".to_string(), serde_json::json!("Live offer"));
+    od.insert("status".to_string(), serde_json::json!("active"));
+    od.insert(
+        "stripe_price_id".to_string(),
+        serde_json::json!("price_live"),
+    );
+    od.insert(
+        "created_at".to_string(),
+        serde_json::json!("2026-01-01T00:00:00Z"),
+    );
+    od.insert(
+        "updated_at".to_string(),
+        serde_json::json!("2026-01-01T00:00:00Z"),
+    );
+    seed(&ctx, "impresspress__products__offers", "offer_cas", od).await;
+
+    let landed = repo::offers::update_if_status(
+        &ctx,
+        "offer_cas",
+        "draft",
+        HashMap::from([("stripe_price_id".to_string(), serde_json::json!(""))]),
+    )
+    .await
+    .unwrap();
+    assert!(!landed, "stale write must be rejected");
+    let record = db::get(&ctx, "impresspress__products__offers", "offer_cas")
+        .await
+        .unwrap();
+    assert_eq!(record.data["stripe_price_id"], "price_live");
+    assert_eq!(record.data["status"], "active");
+
+    // The same write lands when the row still holds the expected status.
+    let mut dd = HashMap::new();
+    dd.insert("product_id".to_string(), serde_json::json!("prod_cas"));
+    dd.insert("name".to_string(), serde_json::json!("Draft offer"));
+    dd.insert("status".to_string(), serde_json::json!("draft"));
+    dd.insert(
+        "stripe_price_id".to_string(),
+        serde_json::json!("price_stale"),
+    );
+    dd.insert(
+        "created_at".to_string(),
+        serde_json::json!("2026-01-01T00:00:00Z"),
+    );
+    dd.insert(
+        "updated_at".to_string(),
+        serde_json::json!("2026-01-01T00:00:00Z"),
+    );
+    seed(
+        &ctx,
+        "impresspress__products__offers",
+        "offer_cas_draft",
+        dd,
+    )
+    .await;
+    let landed = repo::offers::update_if_status(
+        &ctx,
+        "offer_cas_draft",
+        "draft",
+        HashMap::from([("stripe_price_id".to_string(), serde_json::json!(""))]),
+    )
+    .await
+    .unwrap();
+    assert!(landed);
+    let record = db::get(&ctx, "impresspress__products__offers", "offer_cas_draft")
+        .await
+        .unwrap();
+    assert_eq!(record.data["stripe_price_id"], "");
+}

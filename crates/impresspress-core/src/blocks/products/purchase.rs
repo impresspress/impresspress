@@ -348,27 +348,110 @@ async fn refund_purchase(
     let refunded_by = msg.user_id().to_string();
 
     if !is_stripe {
-        if !matches!(
-            purchase.str_field("status"),
-            "completed" | "partially_refunded"
-        ) {
-            return err_bad_request("Purchase is not in a refundable state");
-        }
-        let remaining = total - refunded_total;
-        let amount = body.amount_minor.unwrap_or(remaining);
-        if amount <= 0 || amount > remaining {
-            return err_bad_request("Refund amount exceeds the remaining refundable amount");
-        }
+        // Manual refunds go through the same refund ledger as Stripe refunds:
+        // the ledger row pins the absolute refunded-total target at claim
+        // time, so a retried delivery (same idempotency key) returns the
+        // recorded outcome instead of deducting a second time.
+        let existing = match repo::refunds::get_by_idempotency_key(ctx, &idempotency_key).await {
+            Ok(existing) => existing,
+            Err(error) => return err_internal("Could not inspect refund ledger", error),
+        };
+        let claim = if let Some(existing) = existing {
+            if existing.str_field("purchase_id") != id {
+                return err_bad_request("Refund idempotency key belongs to another purchase");
+            }
+            if body
+                .amount_minor
+                .is_some_and(|amount| amount != existing.i64_field("amount_minor"))
+                || (body.amount_minor.is_none()
+                    && existing.i64_field("target_refunded_total_minor") != total)
+                || (!note.is_empty() && note != existing.str_field("note"))
+            {
+                return err_bad_request(
+                    "Refund idempotency key was already used for a different request",
+                );
+            }
+            if existing.str_field("status") == "succeeded" {
+                let current = match repo::purchases::get(ctx, &id).await {
+                    Ok(current) => current,
+                    Err(error) => return err_internal("Could not load refunded purchase", error),
+                };
+                return ok_json(&manual_refund_result(
+                    &current,
+                    existing.i64_field("amount_minor"),
+                ));
+            }
+            repo::refunds::RefundClaim {
+                purchase_id: id.clone(),
+                payment_intent_id: String::new(),
+                stripe_account_id: String::new(),
+                idempotency_key: idempotency_key.clone(),
+                amount_minor: existing.i64_field("amount_minor"),
+                target_refunded_total_minor: existing.i64_field("target_refunded_total_minor"),
+                currency: existing.str_field("currency").to_string(),
+                provider_reason: String::new(),
+                note: existing.str_field("note").to_string(),
+                refunded_by: existing.str_field("refunded_by").to_string(),
+                livemode: existing.bool_field("livemode"),
+            }
+        } else {
+            if !matches!(
+                purchase.str_field("status"),
+                "completed" | "partially_refunded"
+            ) {
+                return err_bad_request("Purchase is not in a refundable state");
+            }
+            let remaining = total - refunded_total;
+            let amount = body.amount_minor.unwrap_or(remaining);
+            if amount <= 0 || amount > remaining {
+                return err_bad_request("Refund amount exceeds the remaining refundable amount");
+            }
+            repo::refunds::RefundClaim {
+                purchase_id: id.clone(),
+                payment_intent_id: String::new(),
+                stripe_account_id: String::new(),
+                idempotency_key: idempotency_key.clone(),
+                amount_minor: amount,
+                target_refunded_total_minor: refunded_total + amount,
+                currency: purchase.str_field("currency").to_ascii_uppercase(),
+                provider_reason: String::new(),
+                note: note.clone(),
+                refunded_by: refunded_by.clone(),
+                livemode: purchase.bool_field("livemode"),
+            }
+        };
+        let refund = match repo::refunds::claim(ctx, &claim).await {
+            Ok(refund) => refund,
+            Err(error)
+                if matches!(
+                    error.code,
+                    ErrorCode::InvalidArgument | ErrorCode::FailedPrecondition
+                ) =>
+            {
+                return err_bad_request(&error.message)
+            }
+            Err(error) => return err_internal("Could not claim refund operation", error),
+        };
+        // Apply against the claimed absolute target so a retry of an
+        // interrupted operation converges instead of deducting again.
         return match repo::purchases::reconcile_refund_total(
             ctx,
             &id,
-            refunded_total + amount,
+            refund.i64_field("target_refunded_total_minor"),
             &refunded_by,
             &note,
         )
         .await
         {
-            Ok(updated) => ok_json(&manual_refund_result(&updated, amount)),
+            Ok(updated) => {
+                if let Err(error) = repo::refunds::mark_succeeded(ctx, &refund.id).await {
+                    return err_internal("Could not record manual refund outcome", error);
+                }
+                ok_json(&manual_refund_result(
+                    &updated,
+                    refund.i64_field("amount_minor"),
+                ))
+            }
             Err(error) if error.code == ErrorCode::FailedPrecondition => {
                 err_bad_request(&error.message)
             }

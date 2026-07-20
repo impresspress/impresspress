@@ -43,3 +43,24 @@ fn commerce_policy_defaults_are_safe() {
     assert!(origins.optional);
     assert!(origins.default.is_empty());
 }
+
+#[tokio::test]
+async fn runtime_kind_is_adapter_injected_not_shared_config() {
+    use super::harness::ctx_with;
+
+    // The runtime marker is an internal synthetic key (adapter-injected,
+    // never env/DB): a value persisted under the legacy shared name must not
+    // affect Stripe secret-operation gating, and the key itself must follow
+    // the double-underscore internal convention rather than claiming the
+    // admin-writable WAFER_RUN_SHARED__ prefix.
+    assert!(
+        !crate::blocks::products::RUNTIME_KIND_CONFIG_KEY.starts_with("WAFER_RUN_SHARED__"),
+        "runtime kind must not use the admin-writable shared prefix"
+    );
+
+    let legacy = ctx_with(&[("WAFER_RUN_SHARED__RUNTIME__KIND", "browser")]).await;
+    assert!(crate::blocks::products::stripe_secret_operations_allowed(&legacy).await);
+
+    let browser = ctx_with(&[(crate::blocks::products::RUNTIME_KIND_CONFIG_KEY, "browser")]).await;
+    assert!(!crate::blocks::products::stripe_secret_operations_allowed(&browser).await);
+}

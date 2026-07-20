@@ -11,7 +11,7 @@ CREATE TABLE IF NOT EXISTS impresspress__products__disputes (
     currency              TEXT NOT NULL,
     reason                TEXT NOT NULL DEFAULT '',
     evidence_due_by       TEXT,
-    livemode              BOOLEAN NOT NULL DEFAULT FALSE,
+    livemode              INTEGER NOT NULL DEFAULT 0,
     event_created         BIGINT NOT NULL DEFAULT 0,
     closed_at             TEXT,
     created_at            TEXT NOT NULL,

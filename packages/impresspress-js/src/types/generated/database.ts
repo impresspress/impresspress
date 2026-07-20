@@ -1,6 +1,6 @@
-// Auto-generated from Go models - DO NOT EDIT MANUALLY
-// Generated at: 2025-12-16T13:13:17+13:00
-// Run 'go run scripts/generate-types.go' to regenerate
+// Hand-maintained database row types (the solobase-era Go generator no
+// longer exists). Keep in sync with the Rust schema sources: each block's
+// migrations/*.sql and, for products, contracts.rs.
 
 // ============================================
 // Package: auth

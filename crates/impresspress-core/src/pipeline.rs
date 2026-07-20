@@ -560,8 +560,8 @@ mod discovery_tests {
         );
         assert_eq!(
             catalog["responses"]["200"]["content"]["application/json"]["schema"]["properties"]
-                ["records"]["items"]["properties"]["data"]["properties"]["base_price"]["type"],
-            "number",
+                ["records"]["items"]["properties"]["data"]["properties"]["stock"]["type"],
+            "integer",
             "catalog response schema must match the real products row shape: {catalog}"
         );
         // The product object schema must cover the original row plus every
@@ -572,7 +572,6 @@ mod discovery_tests {
         for field in [
             "group_template_id",
             "product_template_id",
-            "pricing_template_id",
             "requires",
             "created_by",
             "owner_kind",
@@ -618,17 +617,17 @@ mod discovery_tests {
             "owned group product listing must document its group id: {group_products}"
         );
 
-        let calculate = &paths["/b/products/calculate-price"]["post"];
+        let preview = &paths["/b/products/pricing/preview"]["post"];
         assert_eq!(
-            calculate["requestBody"]["content"]["application/json"]["schema"]["required"],
-            serde_json::json!(["product_id"]),
-            "legacy price calculation must document its request body: {calculate}"
+            preview["requestBody"]["content"]["application/json"]["schema"]["required"],
+            serde_json::json!(["offer_id"]),
+            "offer pricing preview must document its request body: {preview}"
         );
-        assert_eq!(
-            calculate["responses"]["200"]["content"]["application/json"]["schema"]["properties"]
-                ["total"]["type"],
-            "number",
-            "legacy price calculation must document its response: {calculate}"
+        assert!(
+            !preview["responses"]["200"]["content"]["application/json"]["schema"]["properties"]
+                ["amounts"]
+                .is_null(),
+            "offer pricing preview must document its integer-minor-unit amounts: {preview}"
         );
 
         let webhook = &paths["/b/products/webhooks"]["post"];
@@ -645,29 +644,17 @@ mod discovery_tests {
         );
 
         let checkout = &paths["/b/products/checkout"]["post"];
-        let checkout_inputs = checkout["requestBody"]["content"]["application/json"]["schema"]
-            ["oneOf"]
-            .as_array()
-            .expect("checkout must document typed-offer and legacy-purchase bodies");
         assert_eq!(
-            checkout_inputs.len(),
-            2,
-            "checkout input variants: {checkout}"
+            checkout["requestBody"]["content"]["application/json"]["schema"]["required"],
+            serde_json::json!(["offer_id"]),
+            "checkout must document its typed-offer body: {checkout}"
         );
-        assert_eq!(
-            checkout_inputs[0]["required"],
-            serde_json::json!(["offer_id"])
-        );
-        assert_eq!(
-            checkout_inputs[1]["required"],
-            serde_json::json!(["purchase_id"])
-        );
-        assert_eq!(
-            checkout["responses"]["200"]["content"]["application/json"]["schema"]["oneOf"]
-                .as_array()
-                .map(Vec::len),
-            Some(2),
-            "checkout must document both response families: {checkout}"
+        let checkout_response =
+            &checkout["responses"]["200"]["content"]["application/json"]["schema"];
+        assert!(
+            checkout_response["properties"]["receipt_token"]["writeOnly"] == true
+                && !checkout_response["properties"]["amounts"].is_null(),
+            "checkout must document the receipt token and minor-unit amounts: {checkout}"
         );
 
         let guest_status = &paths["/b/products/orders/{id}/status"]["get"];
@@ -806,9 +793,10 @@ mod discovery_tests {
             webhook_events["payload"].is_null() && webhook_events["processing_owner"].is_null(),
             "webhook recovery discovery must remain payload/token safe: {webhook_events}"
         );
-        assert_eq!(
-            paths["/b/products/api/admin/purchases/{id}/refund"]["patch"]["deprecated"], true,
-            "the legacy PATCH refund alias should direct clients to POST"
+        assert!(
+            !paths["/b/products/api/admin/purchases/{id}/refund"]["post"].is_null()
+                && paths["/b/products/api/admin/purchases/{id}/refund"]["patch"].is_null(),
+            "admin refunds are POST-only; the legacy PATCH alias was removed"
         );
 
         for prefix in ["/b/products/api/admin/products", "/b/products/api/products"] {
@@ -869,15 +857,24 @@ mod discovery_tests {
         for path in [
             "/b/products/api/admin/groups",
             "/b/products/api/admin/types",
-            "/b/products/api/admin/pricing",
-            "/b/products/api/admin/variables",
         ] {
             assert_eq!(
                 paths[path]["get"]["responses"]["200"]["content"]["application/json"]["schema"]
                     ["required"],
                 serde_json::json!(["records", "total_count"]),
-                "legacy admin builder list must document RecordList: {}",
+                "admin builder list must document RecordList: {}",
                 paths[path]["get"]
+            );
+        }
+        // The legacy pricing-template/formula-variable builders were removed
+        // with the typed-offer redesign and must stay out of discovery.
+        for path in [
+            "/b/products/api/admin/pricing",
+            "/b/products/api/admin/variables",
+        ] {
+            assert!(
+                paths[path].is_null(),
+                "removed legacy builder path must not be documented: {path}"
             );
         }
     }

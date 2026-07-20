@@ -85,24 +85,38 @@ pub(crate) async fn validate_product_record(
     ctx: &dyn Context,
     product: &db::Record,
 ) -> Result<(), OutputStream> {
-    validate_product_fields(
-        ctx,
-        &HashMap::from([
-            (
-                "product_template_id".to_string(),
-                serde_json::json!(product.str_field("product_template_id")),
-            ),
-            (
-                "currency".to_string(),
-                serde_json::json!(product.str_field("currency")),
-            ),
-            (
-                "category".to_string(),
-                serde_json::json!(product.str_field("category")),
-            ),
-        ]),
-    )
-    .await
+    validate_product_record_with_patch(ctx, product, &HashMap::new()).await
+}
+
+/// Validate the restricted seller fields as they will exist after `patch` is
+/// applied to `product`. Activation-in-the-same-request must check this
+/// merged view — checking the stale pre-update record would wrongly reject a
+/// request that fixes a non-compliant field and activates in one call.
+pub(crate) async fn validate_product_record_with_patch(
+    ctx: &dyn Context,
+    product: &db::Record,
+    patch: &HashMap<String, serde_json::Value>,
+) -> Result<(), OutputStream> {
+    let mut merged = HashMap::from([
+        (
+            "product_template_id".to_string(),
+            serde_json::json!(product.str_field("product_template_id")),
+        ),
+        (
+            "currency".to_string(),
+            serde_json::json!(product.str_field("currency")),
+        ),
+        (
+            "category".to_string(),
+            serde_json::json!(product.str_field("category")),
+        ),
+    ]);
+    for key in ["product_template_id", "currency", "category"] {
+        if let Some(value) = patch.get(key) {
+            merged.insert(key.to_string(), value.clone());
+        }
+    }
+    validate_product_fields(ctx, &merged).await
 }
 
 pub(crate) async fn validate_currency(

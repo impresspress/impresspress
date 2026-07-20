@@ -418,6 +418,9 @@ impl UserRoute {
 
     /// Mutations that a platform suspension must stop while leaving the
     /// seller's read-only catalog and order/refund history available.
+    /// Issuing a refund moves real money, so it is gated too — a buyer who
+    /// needs to be made whole during a suspension goes through the admin
+    /// refund route.
     fn requires_unsuspended_seller(self) -> bool {
         matches!(
             self,
@@ -440,6 +443,7 @@ impl UserRoute {
                 | UserRoute::UpdateGroup
                 | UserRoute::DeleteGroup
                 | UserRoute::SellerOnboarding
+                | UserRoute::SellerRefund
         )
     }
 }

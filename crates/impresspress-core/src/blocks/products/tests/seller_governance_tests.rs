@@ -268,6 +268,48 @@ async fn suspension_archives_catalog_blocks_mutations_and_reactivation_stays_dra
 }
 
 #[tokio::test]
+async fn suspended_seller_cannot_issue_refunds() {
+    let test_ctx = ctx_with(&[("WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS", "true")]).await;
+    seed_seller(&test_ctx, "seller_refund_gate", "maker_refund_gate", true).await;
+
+    let mut pd = HashMap::new();
+    pd.insert("user_id".to_string(), json!("buyer_1"));
+    pd.insert("seller_account_id".to_string(), json!("seller_refund_gate"));
+    pd.insert("status".to_string(), json!("completed"));
+    pd.insert("total_cents".to_string(), json!(4000));
+    seed(
+        &test_ctx,
+        "impresspress__products__purchases",
+        "pur_seller_gate",
+        pd,
+    )
+    .await;
+
+    let (msg, input) = admin_create_msg(
+        "/admin/b/products/sellers/seller_refund_gate/suspend",
+        json!({}),
+    );
+    let suspended = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    assert_eq!(suspended["status"], "suspended");
+
+    // A platform suspension stops money-moving mutations: issuing a refund
+    // is one, and must be rejected like every other gated seller mutation
+    // (admins can still refund the buyer via the admin refund route).
+    let (msg, input) = create_msg(
+        "/b/products/seller/orders/pur_seller_gate/refund",
+        "maker_refund_gate",
+        json!({}),
+    );
+    assert!(
+        output_is_error(
+            dispatch_user(&test_ctx, msg, input).await,
+            ErrorCode::PermissionDenied,
+        )
+        .await
+    );
+}
+
+#[tokio::test]
 async fn admin_seller_api_and_pages_expose_owned_products_and_safe_capability_state() {
     let test_ctx = ctx_with(&[("WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS", "true")]).await;
     seed_seller(&test_ctx, "seller_visible", "maker_visible", true).await;
@@ -335,6 +377,56 @@ fn seller_governance_routes_are_all_admin_only() {
             "{action} {path} must require an administrator"
         );
     }
+}
+
+#[tokio::test]
+async fn activation_validates_merged_values_not_stale_record() {
+    // A product created before the platform tightened its currency policy
+    // holds a now-disallowed currency. Fixing the field and activating in the
+    // same PATCH must validate the merged view, not the stale record.
+    let test_ctx = ctx_with(&[
+        ("WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS", "true"),
+        ("IMPRESSPRESS__PRODUCTS__SELLER_ALLOWED_CURRENCIES", "nzd"),
+    ])
+    .await;
+
+    let mut pd = HashMap::new();
+    pd.insert("created_by".to_string(), json!("legacy_seller"));
+    pd.insert("name".to_string(), json!("Legacy priced product"));
+    pd.insert("product_template_id".to_string(), json!("simple_product"));
+    pd.insert("currency".to_string(), json!("USD"));
+    pd.insert("status".to_string(), json!("draft"));
+    seed(&test_ctx, PRODUCTS_TABLE, "prod_legacy_ccy", pd).await;
+
+    let (msg, input) = update_msg(
+        "/b/products/products/prod_legacy_ccy",
+        "legacy_seller",
+        json!({"currency": "NZD", "status": "active"}),
+    );
+    let body = output_to_json(dispatch_user(&test_ctx, msg, input).await).await;
+    assert_eq!(body["data"]["currency"], "NZD");
+    assert_eq!(body["data"]["status"], "active");
+
+    // Activating while leaving the stale value untouched must still fail.
+    let mut pd = HashMap::new();
+    pd.insert("created_by".to_string(), json!("legacy_seller"));
+    pd.insert("name".to_string(), json!("Still stale"));
+    pd.insert("product_template_id".to_string(), json!("simple_product"));
+    pd.insert("currency".to_string(), json!("USD"));
+    pd.insert("status".to_string(), json!("draft"));
+    seed(&test_ctx, PRODUCTS_TABLE, "prod_stale_ccy", pd).await;
+
+    let (msg, input) = update_msg(
+        "/b/products/products/prod_stale_ccy",
+        "legacy_seller",
+        json!({"status": "active"}),
+    );
+    let error = terminal_error(dispatch_user(&test_ctx, msg, input).await).await;
+    assert!(
+        error.message.contains("currency is not allowed"),
+        "{}",
+        error.message
+    );
 }
 
 #[tokio::test]

@@ -13,16 +13,16 @@
 //! `impresspress__admin__block_settings` once applied.
 
 const SQL_001_SQLITE: &str = include_str!("001_products_schema.sqlite.sql");
-#[cfg(feature = "postgres")]
+#[cfg(any(feature = "postgres", test))]
 const SQL_001_POSTGRES: &str = include_str!("001_products_schema.postgres.sql");
 const SQL_002_SQLITE: &str = include_str!("002_default_templates.sqlite.sql");
-#[cfg(feature = "postgres")]
+#[cfg(any(feature = "postgres", test))]
 const SQL_002_POSTGRES: &str = include_str!("002_default_templates.postgres.sql");
 const SQL_003_SQLITE: &str = include_str!("003_stripe_events.sqlite.sql");
-#[cfg(feature = "postgres")]
+#[cfg(any(feature = "postgres", test))]
 const SQL_003_POSTGRES: &str = include_str!("003_stripe_events.postgres.sql");
 const SQL_004_SQLITE: &str = include_str!("004_strict_schema_columns.sqlite.sql");
-#[cfg(feature = "postgres")]
+#[cfg(any(feature = "postgres", test))]
 const SQL_004_POSTGRES: &str = include_str!("004_strict_schema_columns.postgres.sql");
 const SQL_005_SQLITE: &str = include_str!("005_commerce_v2.sqlite.sql");
 #[cfg(any(feature = "postgres", test))]
@@ -134,12 +134,14 @@ mod strict_upgrade_tests {
     use wafer_core::interfaces::database::service::DatabaseService;
 
     use super::{
-        SQLITE_MIGRATIONS, SQL_004_SQLITE, SQL_005_POSTGRES, SQL_005_SQLITE, SQL_006_POSTGRES,
-        SQL_006_SQLITE, SQL_007_POSTGRES, SQL_007_SQLITE, SQL_008_POSTGRES, SQL_008_SQLITE,
-        SQL_009_POSTGRES, SQL_009_SQLITE, SQL_010_POSTGRES, SQL_010_SQLITE, SQL_011_POSTGRES,
-        SQL_011_SQLITE, SQL_012_POSTGRES, SQL_012_SQLITE, SQL_013_POSTGRES, SQL_013_SQLITE,
-        SQL_014_POSTGRES, SQL_014_SQLITE, SQL_015_POSTGRES, SQL_015_SQLITE, SQL_016_POSTGRES,
-        SQL_016_SQLITE, SQL_017_POSTGRES, SQL_017_SQLITE, SQL_018_POSTGRES, SQL_018_SQLITE,
+        SQLITE_MIGRATIONS, SQL_001_POSTGRES, SQL_001_SQLITE, SQL_002_POSTGRES, SQL_002_SQLITE,
+        SQL_003_POSTGRES, SQL_003_SQLITE, SQL_004_POSTGRES, SQL_004_SQLITE, SQL_005_POSTGRES,
+        SQL_005_SQLITE, SQL_006_POSTGRES, SQL_006_SQLITE, SQL_007_POSTGRES, SQL_007_SQLITE,
+        SQL_008_POSTGRES, SQL_008_SQLITE, SQL_009_POSTGRES, SQL_009_SQLITE, SQL_010_POSTGRES,
+        SQL_010_SQLITE, SQL_011_POSTGRES, SQL_011_SQLITE, SQL_012_POSTGRES, SQL_012_SQLITE,
+        SQL_013_POSTGRES, SQL_013_SQLITE, SQL_014_POSTGRES, SQL_014_SQLITE, SQL_015_POSTGRES,
+        SQL_015_SQLITE, SQL_016_POSTGRES, SQL_016_SQLITE, SQL_017_POSTGRES, SQL_017_SQLITE,
+        SQL_018_POSTGRES, SQL_018_SQLITE,
     };
     use crate::migration_helper::apply_ddl_via_service;
 
@@ -520,5 +522,60 @@ mod strict_upgrade_tests {
     fn order_shipping_migration_matches_sqlite_and_postgres() {
         assert!(SQL_013_SQLITE.contains("shipping_cents INTEGER NOT NULL"));
         assert!(SQL_013_POSTGRES.contains("shipping_cents BIGINT NOT NULL"));
+    }
+
+    /// "INTEGER (not BOOLEAN) is used for boolean-like columns to match the
+    /// JSON-value round-trips used by block code" (001/005 header comment).
+    /// A BOOLEAN column on one backend would round-trip `true`/`false` while
+    /// every other table and the other backend round-trip `0`/`1`.
+    #[test]
+    fn boolean_like_columns_use_integer_on_every_backend() {
+        for (name, sql) in [
+            ("001 sqlite", SQL_001_SQLITE),
+            ("001 postgres", SQL_001_POSTGRES),
+            ("002 sqlite", SQL_002_SQLITE),
+            ("002 postgres", SQL_002_POSTGRES),
+            ("003 sqlite", SQL_003_SQLITE),
+            ("003 postgres", SQL_003_POSTGRES),
+            ("004 sqlite", SQL_004_SQLITE),
+            ("004 postgres", SQL_004_POSTGRES),
+            ("005 sqlite", SQL_005_SQLITE),
+            ("005 postgres", SQL_005_POSTGRES),
+            ("006 sqlite", SQL_006_SQLITE),
+            ("006 postgres", SQL_006_POSTGRES),
+            ("007 sqlite", SQL_007_SQLITE),
+            ("007 postgres", SQL_007_POSTGRES),
+            ("008 sqlite", SQL_008_SQLITE),
+            ("008 postgres", SQL_008_POSTGRES),
+            ("009 sqlite", SQL_009_SQLITE),
+            ("009 postgres", SQL_009_POSTGRES),
+            ("010 sqlite", SQL_010_SQLITE),
+            ("010 postgres", SQL_010_POSTGRES),
+            ("011 sqlite", SQL_011_SQLITE),
+            ("011 postgres", SQL_011_POSTGRES),
+            ("012 sqlite", SQL_012_SQLITE),
+            ("012 postgres", SQL_012_POSTGRES),
+            ("013 sqlite", SQL_013_SQLITE),
+            ("013 postgres", SQL_013_POSTGRES),
+            ("014 sqlite", SQL_014_SQLITE),
+            ("014 postgres", SQL_014_POSTGRES),
+            ("015 sqlite", SQL_015_SQLITE),
+            ("015 postgres", SQL_015_POSTGRES),
+            ("016 sqlite", SQL_016_SQLITE),
+            ("016 postgres", SQL_016_POSTGRES),
+            ("017 sqlite", SQL_017_SQLITE),
+            ("017 postgres", SQL_017_POSTGRES),
+            ("018 sqlite", SQL_018_SQLITE),
+            ("018 postgres", SQL_018_POSTGRES),
+        ] {
+            let declares_boolean = sql.lines().any(|line| {
+                let line = line.trim();
+                !line.starts_with("--") && line.to_ascii_uppercase().contains("BOOLEAN")
+            });
+            assert!(
+                !declares_boolean,
+                "products migration {name} declares a BOOLEAN column; use INTEGER"
+            );
+        }
     }
 }

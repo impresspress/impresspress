@@ -150,6 +150,99 @@ async fn refund_completed_purchase() {
 }
 
 #[tokio::test]
+async fn manual_partial_refund_retry_is_idempotent() {
+    let ctx = ctx().await;
+
+    let mut pd = HashMap::new();
+    pd.insert("user_id".to_string(), serde_json::json!("user_1"));
+    pd.insert("status".to_string(), serde_json::json!("completed"));
+    pd.insert("total_cents".to_string(), serde_json::json!(5000));
+    seed(
+        &ctx,
+        "impresspress__products__purchases",
+        "pur_manual_retry",
+        pd,
+    )
+    .await;
+
+    let request = serde_json::json!({
+        "amount_minor": 2000,
+        "idempotency_key": "manual_retry_1",
+    });
+    let (mut msg, input) = create_msg(
+        "/admin/b/products/purchases/pur_manual_retry/refund",
+        "admin_1",
+        request.clone(),
+    );
+    msg.set_meta("auth.user_roles", "admin");
+    let body = output_to_json(purchase::handle_refund(&ctx, &msg, input).await).await;
+    assert_eq!(body["status"], "succeeded");
+    assert_eq!(body["amount_minor"], 2000);
+    assert_eq!(body["refunded_total_minor"], 2000);
+
+    // A retried delivery of the same request (same idempotency key, e.g.
+    // after a timeout) must return the recorded outcome, not deduct again.
+    let (mut msg, input) = create_msg(
+        "/admin/b/products/purchases/pur_manual_retry/refund",
+        "admin_1",
+        request,
+    );
+    msg.set_meta("auth.user_roles", "admin");
+    let body = output_to_json(purchase::handle_refund(&ctx, &msg, input).await).await;
+    assert_eq!(body["status"], "succeeded");
+    assert_eq!(body["amount_minor"], 2000);
+    assert_eq!(body["refunded_total_minor"], 2000);
+
+    let purchase = super::super::repo::purchases::get(&ctx, "pur_manual_retry")
+        .await
+        .unwrap();
+    assert_eq!(
+        purchase.data["refunded_total_cents"],
+        serde_json::json!(2000)
+    );
+    assert_eq!(
+        purchase.data["status"],
+        serde_json::json!("partially_refunded")
+    );
+}
+
+#[tokio::test]
+async fn manual_refund_key_reuse_with_different_amount_fails() {
+    let ctx = ctx().await;
+
+    let mut pd = HashMap::new();
+    pd.insert("user_id".to_string(), serde_json::json!("user_1"));
+    pd.insert("status".to_string(), serde_json::json!("completed"));
+    pd.insert("total_cents".to_string(), serde_json::json!(5000));
+    seed(
+        &ctx,
+        "impresspress__products__purchases",
+        "pur_manual_reuse",
+        pd,
+    )
+    .await;
+
+    let (mut msg, input) = create_msg(
+        "/admin/b/products/purchases/pur_manual_reuse/refund",
+        "admin_1",
+        serde_json::json!({"amount_minor": 2000, "idempotency_key": "manual_reuse_1"}),
+    );
+    msg.set_meta("auth.user_roles", "admin");
+    let body = output_to_json(purchase::handle_refund(&ctx, &msg, input).await).await;
+    assert_eq!(body["status"], "succeeded");
+
+    // The same key with a different amount is a client bug, not a retry.
+    let (mut msg, input) = create_msg(
+        "/admin/b/products/purchases/pur_manual_reuse/refund",
+        "admin_1",
+        serde_json::json!({"amount_minor": 1000, "idempotency_key": "manual_reuse_1"}),
+    );
+    msg.set_meta("auth.user_roles", "admin");
+    let out = purchase::handle_refund(&ctx, &msg, input).await;
+    assert!(output_is_error(out, ErrorCode::InvalidArgument).await);
+}
+
+#[tokio::test]
 async fn refund_non_completed_fails() {
     let ctx = ctx().await;
 

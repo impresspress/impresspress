@@ -505,7 +505,9 @@ pub(super) async fn handle_user_update_product(
             return err_bad_request("Seller product status must be draft, active, or archived");
         }
         if status == "active" {
-            if let Err(response) = seller_policy::validate_product_record(ctx, &current).await {
+            if let Err(response) =
+                seller_policy::validate_product_record_with_patch(ctx, &current, &data).await
+            {
                 return response;
             }
             let approval = field_as_string(&current, "approval_status");

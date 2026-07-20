@@ -541,6 +541,45 @@ pub(crate) async fn create(
     get_managed(ctx, &offer_id).await
 }
 
+/// Compare-and-swap write: apply `data` only if the offer row still holds
+/// `expected_status`. Returns whether the write landed. Every offer state
+/// transition writes through this guard — a plain `db::update` would let a
+/// write that raced a concurrent transition land on the wrong state (e.g. a
+/// stale draft edit wiping `stripe_price_id` on a just-published offer).
+pub(crate) async fn update_if_status(
+    ctx: &dyn Context,
+    offer_id: &str,
+    expected_status: &str,
+    data: HashMap<String, Value>,
+) -> Result<bool, WaferError> {
+    let rows = db::update_by_filters_count(
+        ctx,
+        TABLE,
+        vec![
+            Filter {
+                field: "id".to_string(),
+                operator: FilterOp::Equal,
+                value: serde_json::json!(offer_id),
+            },
+            Filter {
+                field: "status".to_string(),
+                operator: FilterOp::Equal,
+                value: serde_json::json!(expected_status),
+            },
+        ],
+        data,
+    )
+    .await?;
+    Ok(rows == 1)
+}
+
+fn concurrent_transition() -> WaferError {
+    WaferError::new(
+        ErrorCode::FailedPrecondition,
+        "the offer was modified concurrently; reload it and retry",
+    )
+}
+
 pub(crate) async fn update_draft(
     ctx: &dyn Context,
     product_id: &str,
@@ -563,11 +602,19 @@ pub(crate) async fn update_draft(
         .ok_or_else(|| invalid("offer version is too large"))?;
     let offer = build_offer(offer_id, product_id, version, definition)?;
 
-    variables::replace_for_offer(ctx, offer_id, &definition.variables).await?;
-    offer_components::replace_for_offer(ctx, offer_id, &definition.components).await?;
+    // Write the offer row first, guarded on the status still being draft: if
+    // a concurrent publish landed since the read above, nothing (including
+    // the variable/component replacement below) may touch the live offer.
     let mut data = definition_data(&offer)?;
     stamp_updated(&mut data);
-    db::update(ctx, TABLE, offer_id, data).await?;
+    if !update_if_status(ctx, offer_id, "draft", data).await? {
+        return Err(WaferError::new(
+            ErrorCode::FailedPrecondition,
+            "active or archived offers are immutable; duplicate the offer to edit it",
+        ));
+    }
+    variables::replace_for_offer(ctx, offer_id, &definition.variables).await?;
+    offer_components::replace_for_offer(ctx, offer_id, &definition.components).await?;
     get_managed(ctx, offer_id).await
 }
 
@@ -590,7 +637,15 @@ pub(crate) async fn publish(
     offer_pricing::validate_offer(&managed.offer).map_err(|error| invalid(error.to_string()))?;
     let mut data = HashMap::from([("status".to_string(), Value::String("active".to_string()))]);
     stamp_updated(&mut data);
-    db::update(ctx, TABLE, offer_id, data).await?;
+    if !update_if_status(ctx, offer_id, "draft", data).await? {
+        // A concurrent transition won the race. Re-read: a concurrent
+        // publish converges to the same outcome; anything else is an error.
+        let managed = get_managed(ctx, offer_id).await?;
+        if managed.status == OfferStatus::Active {
+            return Ok(managed);
+        }
+        return Err(concurrent_transition());
+    }
     get_managed(ctx, offer_id).await
 }
 
@@ -605,7 +660,20 @@ pub(crate) async fn archive(
     }
     let mut data = HashMap::from([("status".to_string(), Value::String("archived".to_string()))]);
     stamp_updated(&mut data);
-    db::update(ctx, TABLE, offer_id, data).await?;
+    let expected = match managed.status {
+        OfferStatus::Draft => "draft",
+        OfferStatus::Active => "active",
+        OfferStatus::Archived => unreachable!("archived returns above"),
+    };
+    if !update_if_status(ctx, offer_id, expected, data).await? {
+        // A concurrent transition won the race. A concurrent archive
+        // converges to the same outcome; anything else is an error.
+        let managed = get_managed(ctx, offer_id).await?;
+        if managed.status == OfferStatus::Archived {
+            return Ok(managed);
+        }
+        return Err(concurrent_transition());
+    }
     get_managed(ctx, offer_id).await
 }
 

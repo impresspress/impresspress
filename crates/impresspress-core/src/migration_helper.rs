@@ -583,15 +583,16 @@ mod tests {
     #[test]
     fn products_sql_splits_into_expected_chunks() {
         // Counts the executable statements in the products block SQL files.
-        // 10 CREATE TABLE + 9 CREATE INDEX = 19 statements per backend.
+        // 9 CREATE TABLE + 9 CREATE INDEX = 18 statements per backend (the
+        // 2026-07 pre-production reset removed `pricing_templates`).
         let sql_sqlite = include_str!("blocks/products/migrations/001_products_schema.sqlite.sql");
         let sqlite_count = split_statements(sql_sqlite)
             .into_iter()
             .filter(|s| has_executable_content(s))
             .count();
         assert_eq!(
-            sqlite_count, 19,
-            "products sqlite migration: expected 19 statements, got {sqlite_count}"
+            sqlite_count, 18,
+            "products sqlite migration: expected 18 statements, got {sqlite_count}"
         );
 
         let sql_postgres =
@@ -601,8 +602,8 @@ mod tests {
             .filter(|s| has_executable_content(s))
             .count();
         assert_eq!(
-            postgres_count, 19,
-            "products postgres migration: expected 19 statements, got {postgres_count}"
+            postgres_count, 18,
+            "products postgres migration: expected 18 statements, got {postgres_count}"
         );
 
         // 002 seeds the two default templates (one INSERT each) per backend.
