@@ -118,6 +118,22 @@ jobs:
             kill "$(cat /tmp/impresspress-pid)" 2>/dev/null || true
           fi
 
+      # The products browser-lifecycle specs snapshot into the same
+      # .playwright-mcp/ tree but run fully mocked — no native server needed.
+      - name: Regen products browser-lifecycle snapshots
+        working-directory: crates/impresspress-web
+        run: npx playwright test --config=tests/playwright.config.ts tests/e2e/products-*.spec.ts --update-snapshots
+
+      - name: Install examples-suite dependencies
+        working-directory: examples
+        run: |
+          npm ci
+          npx playwright install chromium --with-deps
+
+      - name: Regen products static-example snapshots
+        working-directory: examples
+        run: npm run test:products:update
+
       - name: Commit and push regenerated baselines
         # `${{ inputs.branch }}` is routed through env vars (not interpolated
         # into the script body) to avoid GitHub Actions script-injection.
@@ -129,12 +145,12 @@ jobs:
           # Use `git status --porcelain` instead of `git diff` so this also
           # picks up untracked baselines — i.e. ones that were deleted in
           # the PR's prior commit and recreated by --update-snapshots.
-          if [ -z "$(git status --porcelain '.playwright-mcp/')" ]; then
+          if [ -z "$(git status --porcelain '.playwright-mcp/' 'examples/tests/')" ]; then
             echo "::notice::No baseline drift — nothing to commit."
             exit 0
           fi
           echo "Baseline diff detected:"
-          git status --porcelain '.playwright-mcp/'
-          git add .playwright-mcp/
+          git status --porcelain '.playwright-mcp/' 'examples/tests/'
+          git add .playwright-mcp/ examples/tests/
           git commit -m "test(ui): regen visual baselines from CI render (auto-committed by regen-visual-baselines.yml against ${TARGET_BRANCH})"
           git push origin "HEAD:${TARGET_BRANCH}"
