@@ -97,6 +97,20 @@ impl StripeClient {
         if response.status_code >= 400 {
             let decoded: Value = serde_json::from_slice(&response.body).unwrap_or_default();
             let code = provider_error_code(&decoded);
+            // 429 and 5xx are ambiguous: Stripe may have applied the mutation
+            // before failing, so they classify like a transport failure
+            // (`Internal`) — callers keep their durable claim and retry with
+            // the same idempotency key. Only the remaining 4xx responses are
+            // deterministic rejections that terminally fail an operation.
+            if response.status_code == 429 || response.status_code >= 500 {
+                return Err(WaferError::new(
+                    ErrorCode::Internal,
+                    format!(
+                        "Stripe request could not be completed (HTTP {}, code {code})",
+                        response.status_code
+                    ),
+                ));
+            }
             return Err(WaferError::new(
                 ErrorCode::FailedPrecondition,
                 format!(

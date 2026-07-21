@@ -525,6 +525,11 @@ pub(crate) async fn create(
         "stripe_product_id".to_string(),
         Value::String(String::new()),
     );
+    // Born fenced: the offer already lists for its product, but its child
+    // rows are only written below. `publish` refuses drafts with
+    // `draft_updating` raised, so a crash between here and the settle write
+    // can never leave a publishable half-created offer.
+    data.insert("draft_updating".to_string(), Value::Bool(true));
     stamp_created(&mut data);
     db::create(ctx, TABLE, data).await?;
 
@@ -537,6 +542,11 @@ pub(crate) async fn create(
     {
         cleanup_new(ctx, &offer_id).await;
         return Err(error);
+    }
+    let mut settle = HashMap::from([("draft_updating".to_string(), Value::Bool(false))]);
+    stamp_updated(&mut settle);
+    if !update_if_current(ctx, &offer_id, "draft", Some(0), settle).await? {
+        return Err(concurrent_transition());
     }
     get_managed(ctx, &offer_id).await
 }
@@ -552,24 +562,42 @@ pub(crate) async fn update_if_status(
     expected_status: &str,
     data: HashMap<String, Value>,
 ) -> Result<bool, WaferError> {
-    let rows = db::update_by_filters_count(
-        ctx,
-        TABLE,
-        vec![
-            Filter {
-                field: "id".to_string(),
-                operator: FilterOp::Equal,
-                value: serde_json::json!(offer_id),
-            },
-            Filter {
-                field: "status".to_string(),
-                operator: FilterOp::Equal,
-                value: serde_json::json!(expected_status),
-            },
-        ],
-        data,
-    )
-    .await?;
+    update_if_current(ctx, offer_id, expected_status, None, data).await
+}
+
+/// [`update_if_status`] additionally fenced on `draft_revision` when
+/// `expected_draft_revision` is given. The revision fence is what extends the
+/// single-row CAS to the offer's child tables: `update_draft` advances the
+/// revision before replacing variables/components, so a `publish` that CASes
+/// on the revision it read and validated can never land over a child set it
+/// did not see.
+pub(crate) async fn update_if_current(
+    ctx: &dyn Context,
+    offer_id: &str,
+    expected_status: &str,
+    expected_draft_revision: Option<i64>,
+    data: HashMap<String, Value>,
+) -> Result<bool, WaferError> {
+    let mut filters = vec![
+        Filter {
+            field: "id".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!(offer_id),
+        },
+        Filter {
+            field: "status".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!(expected_status),
+        },
+    ];
+    if let Some(draft_revision) = expected_draft_revision {
+        filters.push(Filter {
+            field: "draft_revision".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!(draft_revision),
+        });
+    }
+    let rows = db::update_by_filters_count(ctx, TABLE, filters, data).await?;
     Ok(rows == 1)
 }
 
@@ -601,20 +629,43 @@ pub(crate) async fn update_draft(
         .checked_add(1)
         .ok_or_else(|| invalid("offer version is too large"))?;
     let offer = build_offer(offer_id, product_id, version, definition)?;
+    let draft_revision = record.i64_field("draft_revision");
+    let next_revision = draft_revision
+        .checked_add(1)
+        .ok_or_else(|| invalid("offer draft revision is too large"))?;
 
-    // Write the offer row first, guarded on the status still being draft: if
-    // a concurrent publish landed since the read above, nothing (including
-    // the variable/component replacement below) may touch the live offer.
+    // Write the offer row first, guarded on the status still being draft and
+    // on the draft revision read above: if a concurrent publish or draft
+    // update landed since that read, nothing (including the
+    // variable/component replacement below) may touch the offer. The same
+    // write advances the revision and raises `draft_updating`, opening the
+    // fence that keeps `publish` off the offer until the child rows are
+    // consistent again.
     let mut data = definition_data(&offer)?;
+    data.insert("draft_revision".to_string(), Value::from(next_revision));
+    data.insert("draft_updating".to_string(), Value::Bool(true));
     stamp_updated(&mut data);
-    if !update_if_status(ctx, offer_id, "draft", data).await? {
-        return Err(WaferError::new(
-            ErrorCode::FailedPrecondition,
-            "active or archived offers are immutable; duplicate the offer to edit it",
-        ));
+    if !update_if_current(ctx, offer_id, "draft", Some(draft_revision), data).await? {
+        let current = db::get(ctx, TABLE, offer_id).await?;
+        if current.str_field("status") != "draft" {
+            return Err(WaferError::new(
+                ErrorCode::FailedPrecondition,
+                "active or archived offers are immutable; duplicate the offer to edit it",
+            ));
+        }
+        return Err(concurrent_transition());
     }
     variables::replace_for_offer(ctx, offer_id, &definition.variables).await?;
     offer_components::replace_for_offer(ctx, offer_id, &definition.components).await?;
+
+    // Settle the fence only after every child row is consistent. If this
+    // update crashed above, the offer stays a draft with `draft_updating`
+    // raised: publish keeps failing cleanly until a retried update completes.
+    let mut settle = HashMap::from([("draft_updating".to_string(), Value::Bool(false))]);
+    stamp_updated(&mut settle);
+    if !update_if_current(ctx, offer_id, "draft", Some(next_revision), settle).await? {
+        return Err(concurrent_transition());
+    }
     get_managed(ctx, offer_id).await
 }
 
@@ -623,7 +674,13 @@ pub(crate) async fn publish(
     product_id: &str,
     offer_id: &str,
 ) -> Result<ManagedOffer, WaferError> {
-    let managed = get_for_product(ctx, product_id, offer_id).await?;
+    let record = db::get(ctx, TABLE, offer_id).await?;
+    if record.str_field("product_id") != product_id {
+        return Err(WaferError::new(ErrorCode::NotFound, "offer not found"));
+    }
+    let draft_revision = record.i64_field("draft_revision");
+    let draft_updating = record.bool_field("draft_updating");
+    let managed = hydrate_managed(ctx, record).await?;
     match managed.status {
         OfferStatus::Active => return Ok(managed),
         OfferStatus::Archived => {
@@ -634,10 +691,20 @@ pub(crate) async fn publish(
         }
         OfferStatus::Draft => {}
     }
+    if draft_updating {
+        // A draft update is replacing this offer's variables/components (or
+        // crashed while doing so): the child set read above may be
+        // half-replaced and must never become the published version.
+        return Err(concurrent_transition());
+    }
     offer_pricing::validate_offer(&managed.offer).map_err(|error| invalid(error.to_string()))?;
     let mut data = HashMap::from([("status".to_string(), Value::String("active".to_string()))]);
     stamp_updated(&mut data);
-    if !update_if_status(ctx, offer_id, "draft", data).await? {
+    // CAS draft->active fenced on the exact draft revision that was read and
+    // validated: any draft update that started since (which always advances
+    // the revision before touching child rows) makes this write miss, so a
+    // publish can only ever pin the consistent child set it validated.
+    if !update_if_current(ctx, offer_id, "draft", Some(draft_revision), data).await? {
         // A concurrent transition won the race. Re-read: a concurrent
         // publish converges to the same outcome; anything else is an error.
         let managed = get_managed(ctx, offer_id).await?;

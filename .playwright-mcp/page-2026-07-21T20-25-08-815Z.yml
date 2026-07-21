@@ -1,0 +1,21 @@
+- generic [active] [ref=f5e1]:
+  - heading "Embedded checkout — same-origin live test" [level=1] [ref=f5e225]
+  - generic [ref=f5e229]:
+    - heading "Field Guide (Test Download)" [level=2] [ref=f5e230]
+    - generic [ref=f5e231]:
+      - generic [ref=f5e232]:
+        - generic [ref=f5e233]:
+          - text: Quantity
+          - spinbutton "Quantity" [ref=f5e234]: "1"
+        - generic [ref=f5e235]:
+          - text: Email
+          - textbox "Email" [ref=f5e236]: embedded-buyer@example.com
+      - generic [ref=f5e237]:
+        - generic [ref=f5e247]:
+          - generic [ref=f5e248]: Field Guide (Test Download)
+          - generic [ref=f5e249]: NZD 25.00
+        - generic [ref=f5e242]:
+          - generic [ref=f5e243]: Total
+          - generic [ref=f5e244]: NZD 25.00
+      - button "Open secure checkout" [ref=f5e245] [cursor=pointer]
+      - status [ref=f5e246]

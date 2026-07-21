@@ -4,19 +4,22 @@ use serde_json::json;
 use wafer_core::clients::database as db;
 use wafer_run::{AuthLevel, Block, ErrorCode};
 
-use super::harness::{create_msg, ctx, dispatch_user, output_is_error, output_to_json, seed};
-
-use super::super::{
-    contracts::{
-        AmountRule, BillingScheme, CheckoutPolicy, ComponentRecurrence, Condition, Offer,
-        OfferComponent, OfferMode, PackageRounding, PricingModel, PricingPreviewRequest,
-        PricingTier, QuantityRule, RecurringInterval, ShippingDeliveryEstimate,
-        ShippingEstimateUnit, ShippingOption, TaxBehavior, UsageType, VariableDefinition,
-        VariableKind, VariableVisibility,
+use super::{
+    super::{
+        contracts::{
+            AmountRule, BillingScheme, CheckoutPolicy, ComponentRecurrence, Condition, Offer,
+            OfferComponent, OfferMode, PackageRounding, PricingModel, PricingPreviewRequest,
+            PricingTier, QuantityRule, RecurringInterval, ShippingDeliveryEstimate,
+            ShippingEstimateUnit, ShippingOption, TaxBehavior, UsageType, VariableDefinition,
+            VariableKind, VariableVisibility,
+        },
+        offer_pricing::{
+            evaluate_condition, evaluate_offer, validate_inputs, validate_offer, InputScope,
+        },
+        repo::{offer_components, offers, variables},
+        ProductsBlock, PRODUCTS_TABLE,
     },
-    offer_pricing::{evaluate_condition, evaluate_offer, validate_inputs, validate_offer},
-    repo::{offer_components, offers, variables},
-    ProductsBlock, PRODUCTS_TABLE,
+    harness::{create_msg, ctx, dispatch_user, output_is_error, output_to_json, seed},
 };
 
 fn variable(key: &str, kind: VariableKind) -> VariableDefinition {
@@ -131,7 +134,7 @@ fn configurable_rows_resolve_in_minor_units_with_explanations() {
             ("rush".to_string(), json!(false)),
         ]),
     };
-    let preview = evaluate_offer(&offer, &request).unwrap();
+    let preview = evaluate_offer(&offer, &request, InputScope::Public).unwrap();
     assert_eq!(preview.amounts.total_minor, 3200);
     assert_eq!(preview.amounts.currency, "NZD");
     let rush = preview
@@ -159,7 +162,7 @@ fn offer_total_policy_is_exact_inclusive_and_strictly_validated() {
         ]),
     };
     assert_eq!(
-        evaluate_offer(&offer, &request)
+        evaluate_offer(&offer, &request, InputScope::Public)
             .unwrap()
             .amounts
             .total_minor,
@@ -169,14 +172,18 @@ fn offer_total_policy_is_exact_inclusive_and_strictly_validated() {
     offer.checkout.minimum_total_minor = Some(3201);
     offer.checkout.maximum_total_minor = None;
     assert_eq!(
-        evaluate_offer(&offer, &request).unwrap_err().code,
+        evaluate_offer(&offer, &request, InputScope::Public)
+            .unwrap_err()
+            .code,
         "total_below_minimum"
     );
 
     offer.checkout.minimum_total_minor = None;
     offer.checkout.maximum_total_minor = Some(3199);
     assert_eq!(
-        evaluate_offer(&offer, &request).unwrap_err().code,
+        evaluate_offer(&offer, &request, InputScope::Public)
+            .unwrap_err()
+            .code,
         "total_above_maximum"
     );
 
@@ -222,7 +229,7 @@ fn typed_input_validation_covers_all_supported_kinds() {
         ("multi".to_string(), json!(["x", "y"])),
         ("text".to_string(), json!("hello")),
     ]);
-    let validated = validate_inputs(&definitions, &inputs).unwrap();
+    let validated = validate_inputs(&definitions, &inputs, InputScope::Public).unwrap();
     assert_eq!(validated.normalized()["number"], json!("1.25"));
     assert_eq!(validated.normalized()["multi"], json!(["x", "y"]));
     assert_eq!(validated.normalized()["date"], json!("2026-07-20"));
@@ -240,23 +247,25 @@ fn booking_dates_are_validated_bounded_and_orderable() {
     let definitions = vec![arrival];
 
     let valid = BTreeMap::from([("arrival".to_string(), json!("2026-07-20"))]);
-    assert!(validate_inputs(&definitions, &valid).is_ok());
+    assert!(validate_inputs(&definitions, &valid, InputScope::Public).is_ok());
 
     let invalid = BTreeMap::from([("arrival".to_string(), json!("20/07/2026"))]);
     assert_eq!(
-        validate_inputs(&definitions, &invalid).unwrap_err().code,
-        "invalid_input"
-    );
-
-    let out_of_range = BTreeMap::from([("arrival".to_string(), json!("2026-08-01"))]);
-    assert_eq!(
-        validate_inputs(&definitions, &out_of_range)
+        validate_inputs(&definitions, &invalid, InputScope::Public)
             .unwrap_err()
             .code,
         "invalid_input"
     );
 
-    let inputs = validate_inputs(&definitions, &valid).unwrap();
+    let out_of_range = BTreeMap::from([("arrival".to_string(), json!("2026-08-01"))]);
+    assert_eq!(
+        validate_inputs(&definitions, &out_of_range, InputScope::Public)
+            .unwrap_err()
+            .code,
+        "invalid_input"
+    );
+
+    let inputs = validate_inputs(&definitions, &valid, InputScope::Public).unwrap();
     assert!(evaluate_condition(
         &Condition::GreaterThanOrEqual {
             input: "arrival".to_string(),
@@ -276,21 +285,114 @@ fn inputs_reject_unknown_missing_bounds_and_duplicates() {
         ("rush".to_string(), json!(false)),
     ]);
     assert_eq!(
-        validate_inputs(&offer.variables, &inputs).unwrap_err().code,
+        validate_inputs(&offer.variables, &inputs, InputScope::Public)
+            .unwrap_err()
+            .code,
         "invalid_input"
     );
     inputs.insert("pages".to_string(), json!(2));
     inputs.insert("unknown".to_string(), json!(true));
     assert_eq!(
-        validate_inputs(&offer.variables, &inputs).unwrap_err().code,
+        validate_inputs(&offer.variables, &inputs, InputScope::Public)
+            .unwrap_err()
+            .code,
         "unknown_input"
     );
     inputs.remove("unknown");
     inputs.remove("rush");
     assert_eq!(
-        validate_inputs(&offer.variables, &inputs).unwrap_err().code,
+        validate_inputs(&offer.variables, &inputs, InputScope::Public)
+            .unwrap_err()
+            .code,
         "missing_input"
     );
+}
+
+fn comp_toggle_offer() -> Offer {
+    let mut offer = configurable_offer();
+    let mut comp = variable("comp", VariableKind::Boolean);
+    comp.required = false;
+    comp.default_value = Some(json!(false));
+    comp.visibility = VariableVisibility::Hidden;
+    let mut discount_tier = variable("discount_tier", VariableKind::Select);
+    discount_tier.required = false;
+    discount_tier.default_value = Some(json!("none"));
+    discount_tier.allowed_values = vec!["none".to_string(), "half".to_string()];
+    discount_tier.visibility = VariableVisibility::AdminOnly;
+    offer.variables = vec![comp, discount_tier];
+    offer.components = vec![
+        component(
+            "base",
+            AmountRule::Fixed {
+                unit_amount_minor: 10_000,
+            },
+            Condition::Equals {
+                input: "comp".to_string(),
+                value: json!(false),
+            },
+        ),
+        component(
+            "comped_base",
+            AmountRule::Fixed {
+                unit_amount_minor: 100,
+            },
+            Condition::Equals {
+                input: "comp".to_string(),
+                value: json!(true),
+            },
+        ),
+    ];
+    offer
+}
+
+#[test]
+fn public_scope_rejects_hidden_and_admin_only_inputs_and_prices_their_defaults() {
+    let offer = comp_toggle_offer();
+    let request = PricingPreviewRequest {
+        offer_id: offer.id.clone(),
+        quantity: 1,
+        inputs: BTreeMap::new(),
+    };
+    assert_eq!(
+        evaluate_offer(&offer, &request, InputScope::Public)
+            .unwrap()
+            .amounts
+            .total_minor,
+        10_000
+    );
+
+    let comped = PricingPreviewRequest {
+        inputs: BTreeMap::from([("comp".to_string(), json!(true))]),
+        ..request.clone()
+    };
+    let error = evaluate_offer(&offer, &comped, InputScope::Public).unwrap_err();
+    assert_eq!(error.code, "restricted_input");
+    assert_eq!(error.field.as_deref(), Some("comp"));
+
+    let discounted = PricingPreviewRequest {
+        inputs: BTreeMap::from([("discount_tier".to_string(), json!("half"))]),
+        ..request
+    };
+    let error = evaluate_offer(&offer, &discounted, InputScope::Public).unwrap_err();
+    assert_eq!(error.code, "restricted_input");
+    assert_eq!(error.field.as_deref(), Some("discount_tier"));
+}
+
+#[test]
+fn management_scope_may_supply_hidden_and_admin_only_inputs() {
+    let offer = comp_toggle_offer();
+    let request = PricingPreviewRequest {
+        offer_id: offer.id.clone(),
+        quantity: 1,
+        inputs: BTreeMap::from([
+            ("comp".to_string(), json!(true)),
+            ("discount_tier".to_string(), json!("half")),
+        ]),
+    };
+    let preview = evaluate_offer(&offer, &request, InputScope::Management).unwrap();
+    assert_eq!(preview.amounts.total_minor, 100);
+    assert_eq!(preview.inputs["comp"], json!(true));
+    assert_eq!(preview.inputs["discount_tier"], json!("half"));
 }
 
 #[test]
@@ -315,7 +417,10 @@ fn decimal_variable_pricing_is_exact_and_enforces_steps() {
         inputs: BTreeMap::from([("weight".to_string(), json!("0.3"))]),
     };
     assert_eq!(
-        evaluate_offer(&offer, &valid).unwrap().amounts.total_minor,
+        evaluate_offer(&offer, &valid, InputScope::Public)
+            .unwrap()
+            .amounts
+            .total_minor,
         3
     );
     let invalid = PricingPreviewRequest {
@@ -323,9 +428,88 @@ fn decimal_variable_pricing_is_exact_and_enforces_steps() {
         ..valid
     };
     assert_eq!(
-        evaluate_offer(&offer, &invalid).unwrap_err().code,
+        evaluate_offer(&offer, &invalid, InputScope::Public)
+            .unwrap_err()
+            .code,
         "invalid_input"
     );
+}
+
+fn flat_plus_per_unit_offer() -> Offer {
+    let mut offer = configurable_offer();
+    offer.variables = vec![variable("hours", VariableKind::Number)];
+    offer.components = vec![component(
+        "labour",
+        AmountRule::FlatPlusPerUnit {
+            base_amount_minor: 10_000,
+            input: "hours".to_string(),
+            unit_amount_minor: 2000,
+        },
+        Condition::Always,
+    )];
+    offer
+}
+
+#[test]
+fn flat_plus_per_unit_charges_the_base_plus_the_per_unit_contribution() {
+    let offer = flat_plus_per_unit_offer();
+    let request = PricingPreviewRequest {
+        offer_id: offer.id.clone(),
+        quantity: 1,
+        inputs: BTreeMap::from([("hours".to_string(), json!(3))]),
+    };
+    let preview = evaluate_offer(&offer, &request, InputScope::Public).unwrap();
+    assert_eq!(preview.amounts.total_minor, 16_000);
+    let labour = preview
+        .components
+        .iter()
+        .find(|component| component.key == "labour")
+        .unwrap();
+    assert!(labour.included);
+    assert_eq!(labour.unit_amount_minor, 16_000);
+    assert_eq!(labour.total_amount_minor, 16_000);
+}
+
+#[test]
+fn negative_per_unit_inputs_never_reduce_the_price() {
+    // FlatPlusPerUnit: -3 × 2000 must not offset the 10000 base down to 4000.
+    let mut offer = flat_plus_per_unit_offer();
+    let request = PricingPreviewRequest {
+        offer_id: offer.id.clone(),
+        quantity: 1,
+        inputs: BTreeMap::from([("hours".to_string(), json!(-3))]),
+    };
+    let error = evaluate_offer(&offer, &request, InputScope::Public).unwrap_err();
+    assert_eq!(error.code, "invalid_input");
+    assert_eq!(error.field.as_deref(), Some("hours"));
+    assert!(error.message.contains("must not be negative"));
+
+    // PerUnit rejects the negative contribution the same way.
+    offer.components[0].amount = AmountRule::PerUnit {
+        input: "hours".to_string(),
+        unit_amount_minor: 2000,
+    };
+    let error = evaluate_offer(&offer, &request, InputScope::Public).unwrap_err();
+    assert_eq!(error.code, "invalid_input");
+    assert_eq!(error.field.as_deref(), Some("hours"));
+    assert!(error.message.contains("must not be negative"));
+}
+
+#[test]
+fn bounds_comparison_overflow_is_rejected_not_treated_as_in_range() {
+    let mut weight = variable("weight", VariableKind::Number);
+    weight.minimum = Some("0.5".to_string());
+    weight.maximum = Some("10.5".to_string());
+    let definitions = vec![weight];
+    // 38 digits parse as a valid decimal but overflow the i128 comparison
+    // against a fractional bound; that must fail closed instead of being
+    // treated as within bounds.
+    let huge = "9".repeat(38);
+    let inputs = BTreeMap::from([("weight".to_string(), json!(huge))]);
+    let error = validate_inputs(&definitions, &inputs, InputScope::Public).unwrap_err();
+    assert_eq!(error.code, "invalid_input");
+    assert_eq!(error.field.as_deref(), Some("weight"));
+    assert!(error.message.contains("too large"));
 }
 
 #[test]
@@ -361,14 +545,14 @@ fn graduated_volume_and_package_pricing_are_exact_at_boundaries() {
         quantity: 1,
         inputs: BTreeMap::from([("units".to_string(), json!(7))]),
     };
-    let graduated = evaluate_offer(&offer, &request).unwrap();
+    let graduated = evaluate_offer(&offer, &request, InputScope::Public).unwrap();
     assert_eq!(graduated.amounts.total_minor, 910);
 
     offer.components[0].amount = AmountRule::Volume {
         input: "units".to_string(),
         tiers,
     };
-    let volume = evaluate_offer(&offer, &request).unwrap();
+    let volume = evaluate_offer(&offer, &request, InputScope::Public).unwrap();
     assert_eq!(volume.amounts.total_minor, 610);
 
     offer.billing_scheme = BillingScheme::PerUnit;
@@ -382,7 +566,7 @@ fn graduated_volume_and_package_pricing_are_exact_at_boundaries() {
         inputs: BTreeMap::from([("units".to_string(), json!(11))]),
         ..request
     };
-    let packages = evaluate_offer(&offer, &package_request).unwrap();
+    let packages = evaluate_offer(&offer, &package_request, InputScope::Public).unwrap();
     assert_eq!(packages.amounts.total_minor, 750);
 
     offer.components[0].amount = AmountRule::Package {
@@ -391,7 +575,7 @@ fn graduated_volume_and_package_pricing_are_exact_at_boundaries() {
         package_amount_minor: 250,
         rounding: PackageRounding::Exact,
     };
-    let error = evaluate_offer(&offer, &package_request).unwrap_err();
+    let error = evaluate_offer(&offer, &package_request, InputScope::Public).unwrap_err();
     assert_eq!(error.code, "invalid_input");
     assert!(error.message.contains("exact multiple"));
 }
@@ -453,6 +637,7 @@ fn advanced_amount_rules_reject_bad_tiers_types_and_overflow() {
             quantity: 1,
             inputs: BTreeMap::from([("units".to_string(), json!(2))]),
         },
+        InputScope::Public,
     )
     .unwrap_err();
     assert_eq!(error.code, "amount_overflow");
@@ -652,6 +837,74 @@ async fn public_preview_loads_server_owned_offer_rows() {
 }
 
 #[tokio::test]
+async fn public_preview_rejects_hidden_and_admin_only_inputs() {
+    let ctx = ctx().await;
+    seed_persisted_preview_offer(&ctx, "active").await;
+    seed(
+        &ctx,
+        variables::TABLE,
+        "variable_comp",
+        HashMap::from([
+            ("name".to_string(), json!("comp")),
+            ("var_type".to_string(), json!("boolean")),
+            ("offer_id".to_string(), json!("offer_preview")),
+            ("label".to_string(), json!("Comp this order")),
+            ("required".to_string(), json!(0)),
+            ("default_value".to_string(), json!("false")),
+            ("visibility".to_string(), json!("hidden")),
+        ]),
+    )
+    .await;
+    seed(
+        &ctx,
+        variables::TABLE,
+        "variable_discount_tier",
+        HashMap::from([
+            ("name".to_string(), json!("discount_tier")),
+            ("var_type".to_string(), json!("select")),
+            ("offer_id".to_string(), json!("offer_preview")),
+            ("label".to_string(), json!("Discount tier")),
+            ("required".to_string(), json!(0)),
+            ("default_value".to_string(), json!("\"none\"")),
+            ("allowed_values".to_string(), json!(r#"["none","half"]"#)),
+            ("visibility".to_string(), json!("admin_only")),
+        ]),
+    )
+    .await;
+
+    for restricted in [json!({"comp": true}), json!({"discount_tier": "half"})] {
+        let mut inputs = json!({"pages": 4});
+        inputs
+            .as_object_mut()
+            .unwrap()
+            .extend(restricted.as_object().unwrap().clone());
+        let (msg, input) = create_msg(
+            "/b/products/pricing/preview",
+            "",
+            json!({"offer_id": "offer_preview", "quantity": 1, "inputs": inputs}),
+        );
+        assert!(
+            output_is_error(
+                dispatch_user(&ctx, msg, input).await,
+                ErrorCode::InvalidArgument
+            )
+            .await
+        );
+    }
+
+    // Without the restricted inputs the defaults price normally.
+    let (msg, input) = create_msg(
+        "/b/products/pricing/preview",
+        "",
+        json!({"offer_id": "offer_preview", "quantity": 1, "inputs": {"pages": 4}}),
+    );
+    let body = output_to_json(dispatch_user(&ctx, msg, input).await).await;
+    assert_eq!(body["amounts"]["total_minor"], 100);
+    assert_eq!(body["inputs"]["comp"], json!(false));
+    assert_eq!(body["inputs"]["discount_tier"], json!("none"));
+}
+
+#[tokio::test]
 async fn public_preview_hides_offers_for_non_active_products() {
     let ctx = ctx().await;
     seed_persisted_preview_offer(&ctx, "draft").await;
@@ -702,7 +955,7 @@ fn nested_conditions_are_deterministic() {
             ("rush".to_string(), json!(false)),
         ]),
     };
-    let preview = evaluate_offer(&offer, &request).unwrap();
+    let preview = evaluate_offer(&offer, &request, InputScope::Public).unwrap();
     assert!(
         preview
             .components

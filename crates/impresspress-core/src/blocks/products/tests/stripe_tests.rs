@@ -5,8 +5,10 @@ use std::{
 
 use async_trait::async_trait;
 use wafer_block_crypto::primitives;
-use wafer_core::clients::database as db;
-use wafer_core::interfaces::network::service::{NetworkError, NetworkService, Request, Response};
+use wafer_core::{
+    clients::database as db,
+    interfaces::network::service::{NetworkError, NetworkService, Request, Response},
+};
 use wafer_run::{Block, ErrorCode, InputStream, Message};
 
 use super::harness::*;
@@ -351,6 +353,57 @@ async fn typed_checkout_webhook_reconciles_exact_provider_and_amount_state() {
     assert_eq!(order.data["provider_payment_intent_id"], "pi_reconciled");
     assert_eq!(order.data["stripe_customer_id"], "cus_reconciled");
     assert_eq!(order.data["reconciliation_status"], "reconciled");
+}
+
+/// If the local `provider_session_id` write failed after the Stripe session
+/// was created, the order has an EMPTY session id and the completion event
+/// would previously dead-letter with no recovery for a paid buyer. The signed
+/// event's `client_reference_id` (set to the local purchase id at creation)
+/// plus every other cross-check lets the order adopt the session id; a
+/// DIFFERENT non-empty stored session id must still hard-fail.
+#[tokio::test]
+async fn typed_checkout_completion_adopts_session_after_lost_session_id_write() {
+    let ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET",
+        WEBHOOK_SECRET,
+    )])
+    .await;
+
+    // The session-id write after session creation never landed locally.
+    seed_typed_checkout_order(&ctx, "order_adopt", "").await;
+    let event = typed_checkout_completed_event("order_adopt", "cs_adopted");
+    let (msg, input) = webhook_msg(&event, WEBHOOK_SECRET);
+    let body = output_to_json(stripe::handle_webhook(&ctx, &msg, input).await).await;
+    assert_eq!(body["received"], true);
+    let order = db::get(&ctx, "impresspress__products__purchases", "order_adopt")
+        .await
+        .unwrap();
+    assert_eq!(order.data["status"], "completed");
+    assert_eq!(order.data["provider_session_id"], "cs_adopted");
+    assert_eq!(order.data["reconciliation_status"], "reconciled");
+    assert_eq!(order.data["provider_payment_intent_id"], "pi_reconciled");
+
+    // Adoption is only for the EMPTY case: a different stored session id is
+    // a conflict and must fail closed without touching the order.
+    seed_typed_checkout_order(&ctx, "order_adopt_conflict", "cs_original").await;
+    let conflict = typed_checkout_completed_event("order_adopt_conflict", "cs_hijack");
+    let (msg, input) = webhook_msg(&conflict, WEBHOOK_SECRET);
+    assert!(
+        output_is_error(
+            stripe::handle_webhook(&ctx, &msg, input).await,
+            ErrorCode::Internal,
+        )
+        .await
+    );
+    let order = db::get(
+        &ctx,
+        "impresspress__products__purchases",
+        "order_adopt_conflict",
+    )
+    .await
+    .unwrap();
+    assert_eq!(order.data["status"], "checkout_started");
+    assert_eq!(order.data["provider_session_id"], "cs_original");
 }
 
 #[tokio::test]
@@ -913,6 +966,183 @@ async fn webhook_subscription_checkout_records_provider_identity_and_items() {
     assert_eq!(items[0].data["component_id"], "component_base");
 }
 
+/// A crash between the completion write and the subscription-item snapshot
+/// used to be unrecoverable: the redelivery saw "already completed" and
+/// skipped the snapshot forever. The snapshot is an idempotent upsert, so a
+/// redelivery of the completion event must backfill it.
+#[tokio::test]
+async fn checkout_redelivery_backfills_missing_subscription_item_snapshot() {
+    let ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET",
+        WEBHOOK_SECRET,
+    )])
+    .await;
+    seed(
+        &ctx,
+        repo::purchases::PURCHASES_TABLE,
+        "purchase_snapshot_backfill",
+        HashMap::from([
+            ("user_id".to_string(), serde_json::json!("buyer_1")),
+            ("buyer_user_id".to_string(), serde_json::json!("buyer_1")),
+            ("status".to_string(), serde_json::json!("checkout_started")),
+            ("total_cents".to_string(), serde_json::json!(2500)),
+            ("subtotal_cents".to_string(), serde_json::json!(2500)),
+            ("currency".to_string(), serde_json::json!("NZD")),
+            ("stripe_account_id".to_string(), serde_json::json!("")),
+            ("livemode".to_string(), serde_json::json!(true)),
+            (
+                "provider_session_id".to_string(),
+                serde_json::json!("cs_snapshot_backfill"),
+            ),
+            (
+                "metadata".to_string(),
+                serde_json::json!(serde_json::json!({
+                    "schema_version": 1,
+                    "offer_id": "offer_pro_monthly",
+                    "offer_version": 3,
+                    "offer_mode": "subscription",
+                    "allowed_shipping_amounts_minor": [0]
+                })
+                .to_string()),
+            ),
+            (
+                "reconciliation_status".to_string(),
+                serde_json::json!("awaiting_payment"),
+            ),
+        ]),
+    )
+    .await;
+    seed(
+        &ctx,
+        "impresspress__products__line_items",
+        "line_snapshot_backfill",
+        HashMap::from([
+            (
+                "purchase_id".to_string(),
+                serde_json::json!("purchase_snapshot_backfill"),
+            ),
+            ("product_id".to_string(), serde_json::json!("product_pro")),
+            ("product_name".to_string(), serde_json::json!("Pro plan")),
+            (
+                "offer_id".to_string(),
+                serde_json::json!("offer_pro_monthly"),
+            ),
+            (
+                "component_id".to_string(),
+                serde_json::json!("component_base"),
+            ),
+            ("quantity".to_string(), serde_json::json!(1)),
+            ("unit_amount_minor".to_string(), serde_json::json!(2500)),
+            ("total_minor".to_string(), serde_json::json!(2500)),
+            ("offer_version".to_string(), serde_json::json!(3)),
+        ]),
+    )
+    .await;
+    let event = serde_json::json!({
+        "id": "evt_snapshot_backfill",
+        "type": "checkout.session.completed",
+        "livemode": true,
+        "data": {
+            "object": {
+                "id": "cs_snapshot_backfill",
+                "client_reference_id": "purchase_snapshot_backfill",
+                "metadata": {
+                    "purchase_id": "purchase_snapshot_backfill",
+                    "offer_id": "offer_pro_monthly",
+                    "offer_version": "3"
+                },
+                "mode": "subscription",
+                "payment_status": "paid",
+                "currency": "nzd",
+                "amount_subtotal": 2500,
+                "amount_total": 2500,
+                "total_details": {
+                    "amount_discount": 0,
+                    "amount_tax": 0,
+                    "amount_shipping": 0
+                },
+                "payment_intent": null,
+                "customer": "cus_buyer_1",
+                "subscription": "sub_backfill",
+                "livemode": true
+            }
+        }
+    });
+
+    // First delivery: the completion write lands, then the subscription-item
+    // snapshot hits a transient outage. The delivery must fail retryably.
+    let failing = crate::test_support::FailingDbOpContext::new(
+        ctx.clone(),
+        vec![("database.upsert", repo::subscription_items::TABLE)],
+    );
+    let (msg, input) = webhook_msg(&event, WEBHOOK_SECRET);
+    assert!(
+        output_is_error(
+            stripe::handle_webhook(&failing, &msg, input).await,
+            ErrorCode::Internal,
+        )
+        .await
+    );
+    let order = repo::purchases::get(&ctx, "purchase_snapshot_backfill")
+        .await
+        .unwrap();
+    assert_eq!(order.data["status"], "completed");
+    assert_eq!(
+        db::list_all(&ctx, repo::subscription_items::TABLE, vec![])
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
+    let event_row = db::get(
+        &ctx,
+        "impresspress__products__stripe_events",
+        "evt_snapshot_backfill",
+    )
+    .await
+    .unwrap();
+    assert_eq!(event_row.data["status"], "failed");
+    assert!(!event_row.str_field("next_retry_at").is_empty());
+
+    // Stripe redelivers after the backoff window; the order is already
+    // completed (rows == 0) but the missing snapshot must be backfilled.
+    db::update(
+        &ctx,
+        "impresspress__products__stripe_events",
+        "evt_snapshot_backfill",
+        HashMap::from([(
+            "next_retry_at".to_string(),
+            serde_json::json!("2000-01-01T00:00:00Z"),
+        )]),
+    )
+    .await
+    .unwrap();
+    let (msg, input) = webhook_msg(&event, WEBHOOK_SECRET);
+    let body = output_to_json(stripe::handle_webhook(&ctx, &msg, input).await).await;
+    assert_eq!(body["received"], true);
+    let items = db::list_all(
+        &ctx,
+        repo::subscription_items::TABLE,
+        vec![wafer_block::db::Filter {
+            field: "subscription_id".to_string(),
+            operator: wafer_block::db::FilterOp::Equal,
+            value: serde_json::json!("sub_backfill"),
+        }],
+    )
+    .await
+    .unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].data["purchase_id"], "purchase_snapshot_backfill");
+    let event_row = db::get(
+        &ctx,
+        "impresspress__products__stripe_events",
+        "evt_snapshot_backfill",
+    )
+    .await
+    .unwrap();
+    assert_eq!(event_row.data["status"], "processed");
+}
+
 #[tokio::test]
 async fn commerce_subscription_webhooks_keep_authoritative_lifecycle_state() {
     let ctx = ctx_with(&[(
@@ -1036,6 +1266,82 @@ async fn commerce_subscription_webhooks_keep_authoritative_lifecycle_state() {
         purchase.data["subscription_cancel_at_period_end"].as_bool() == Some(false)
             || purchase.data["subscription_cancel_at_period_end"].as_i64() == Some(0)
     );
+}
+
+/// API versions from 2025-03 (incl. the pinned Clover default) drop
+/// `current_period_end` from the subscription top level (it moves onto the
+/// items) and express a Billing-Portal "cancel at period end" as a concrete
+/// `cancel_at` timestamp while the legacy boolean stays false. The sync must
+/// read both newer shapes or every Clover deployment reports "no period end"
+/// and never flags scheduled cancellations.
+#[tokio::test]
+async fn commerce_subscription_sync_reads_clover_item_periods_and_cancel_at() {
+    let ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET",
+        WEBHOOK_SECRET,
+    )])
+    .await;
+    seed(
+        &ctx,
+        repo::purchases::PURCHASES_TABLE,
+        "purchase_subscription_clover",
+        HashMap::from([
+            ("user_id".to_string(), serde_json::json!("buyer_clover")),
+            (
+                "buyer_user_id".to_string(),
+                serde_json::json!("buyer_clover"),
+            ),
+            ("status".to_string(), serde_json::json!("completed")),
+            ("total_cents".to_string(), serde_json::json!(900)),
+            ("currency".to_string(), serde_json::json!("NZD")),
+            (
+                "stripe_subscription_id".to_string(),
+                serde_json::json!("sub_commerce_clover"),
+            ),
+            ("stripe_account_id".to_string(), serde_json::json!("")),
+            ("livemode".to_string(), serde_json::json!(false)),
+            (
+                "subscription_status".to_string(),
+                serde_json::json!("active"),
+            ),
+        ]),
+    )
+    .await;
+    let item_period_end = 2_100_000_000_i64;
+    let updated = serde_json::json!({
+        "id": "evt_commerce_subscription_clover",
+        "type": "customer.subscription.updated",
+        "livemode": false,
+        "data": {"object": {
+            "id": "sub_commerce_clover",
+            "status": "active",
+            "cancel_at_period_end": false,
+            "cancel_at": item_period_end,
+            "canceled_at": 2_000_000_500_i64,
+            "items": {"data": [
+                {"current_period_end": item_period_end - 600},
+                {"current_period_end": item_period_end}
+            ]}
+        }}
+    });
+    let (msg, input) = webhook_msg(&updated, WEBHOOK_SECRET);
+    let body = output_to_json(stripe::handle_webhook(&ctx, &msg, input).await).await;
+    assert_eq!(body["received"], true);
+
+    let purchase = repo::purchases::get(&ctx, "purchase_subscription_clover")
+        .await
+        .unwrap();
+    assert_eq!(
+        purchase.data["subscription_current_period_end"],
+        chrono::DateTime::<chrono::Utc>::from_timestamp(item_period_end, 0)
+            .unwrap()
+            .to_rfc3339()
+    );
+    assert!(
+        purchase.data["subscription_cancel_at_period_end"].as_bool() == Some(true)
+            || purchase.data["subscription_cancel_at_period_end"].as_i64() == Some(1)
+    );
+    assert_eq!(purchase.data["subscription_status"], "active");
 }
 
 #[tokio::test]
@@ -1210,6 +1516,441 @@ async fn commerce_invoice_events_recover_past_due_without_resurrecting_or_reorde
     .unwrap();
     assert_eq!(platform.data["status"], "cancelled");
     assert_eq!(platform.data["stripe_event_created"], 400);
+}
+
+/// Immediate cancellation makes Stripe emit `customer.subscription.updated`
+/// (still "active") and `customer.subscription.deleted` with the same
+/// `created` second. Whichever order they are delivered in, the deletion is
+/// authoritative: an equal-second update may never move either projection
+/// away from the terminal status.
+#[tokio::test]
+async fn same_second_subscription_update_cannot_resurrect_deleted_subscription() {
+    let ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET",
+        WEBHOOK_SECRET,
+    )])
+    .await;
+    seed(
+        &ctx,
+        repo::purchases::PURCHASES_TABLE,
+        "purchase_same_second",
+        HashMap::from([
+            (
+                "user_id".to_string(),
+                serde_json::json!("buyer_same_second"),
+            ),
+            ("status".to_string(), serde_json::json!("completed")),
+            ("total_cents".to_string(), serde_json::json!(2500)),
+            ("currency".to_string(), serde_json::json!("NZD")),
+            (
+                "stripe_subscription_id".to_string(),
+                serde_json::json!("sub_same_second"),
+            ),
+            (
+                "stripe_account_id".to_string(),
+                serde_json::json!("acct_same_second"),
+            ),
+            ("livemode".to_string(), serde_json::json!(true)),
+            (
+                "subscription_status".to_string(),
+                serde_json::json!("active"),
+            ),
+            (
+                "subscription_event_created".to_string(),
+                serde_json::json!(100),
+            ),
+        ]),
+    )
+    .await;
+    seed(
+        &ctx,
+        repo::subscriptions::SUBSCRIPTIONS_TABLE,
+        "sub_platform_same_second",
+        HashMap::from([
+            (
+                "user_id".to_string(),
+                serde_json::json!("platform_same_second"),
+            ),
+            (
+                "stripe_customer_id".to_string(),
+                serde_json::json!("cus_same_second"),
+            ),
+            (
+                "stripe_subscription_id".to_string(),
+                serde_json::json!("sub_same_second"),
+            ),
+            ("plan".to_string(), serde_json::json!("pro")),
+            ("status".to_string(), serde_json::json!("active")),
+            ("stripe_event_created".to_string(), serde_json::json!(100)),
+        ]),
+    )
+    .await;
+
+    let deleted = serde_json::json!({
+        "id": "evt_same_second_deleted",
+        "type": "customer.subscription.deleted",
+        "created": 200,
+        "account": "acct_same_second",
+        "livemode": true,
+        "data": {"object": {
+            "id": "sub_same_second",
+            "canceled_at": 200
+        }}
+    });
+    let (msg, input) = webhook_msg(&deleted, WEBHOOK_SECRET);
+    assert_eq!(
+        output_to_json(stripe::handle_webhook(&ctx, &msg, input).await).await["received"],
+        true
+    );
+
+    // The lingering same-second snapshot still says "active".
+    let updated = serde_json::json!({
+        "id": "evt_same_second_updated",
+        "type": "customer.subscription.updated",
+        "created": 200,
+        "account": "acct_same_second",
+        "livemode": true,
+        "data": {"object": {
+            "id": "sub_same_second",
+            "status": "active",
+            "cancel_at_period_end": false
+        }}
+    });
+    let (msg, input) = webhook_msg(&updated, WEBHOOK_SECRET);
+    assert_eq!(
+        output_to_json(stripe::handle_webhook(&ctx, &msg, input).await).await["received"],
+        true
+    );
+
+    let purchase = repo::purchases::get(&ctx, "purchase_same_second")
+        .await
+        .unwrap();
+    assert_eq!(purchase.data["subscription_status"], "canceled");
+    assert_eq!(purchase.data["subscription_event_created"], 200);
+    let platform = db::get(
+        &ctx,
+        repo::subscriptions::SUBSCRIPTIONS_TABLE,
+        "sub_platform_same_second",
+    )
+    .await
+    .unwrap();
+    assert_eq!(platform.data["status"], "cancelled");
+    assert_eq!(platform.data["stripe_event_created"], 200);
+}
+
+/// A commerce order only gains its `stripe_subscription_id` when
+/// `checkout.session.completed` reconciles, so a subscription event delivered
+/// ahead of the (retried) completion matches nothing yet. It must fail as
+/// retryable — not be sealed as processed — and apply once the redelivery
+/// finds the linked order.
+#[tokio::test]
+async fn prelink_subscription_event_retries_until_checkout_completion_links_it() {
+    let ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET",
+        WEBHOOK_SECRET,
+    )])
+    .await;
+    seed(
+        &ctx,
+        repo::purchases::PURCHASES_TABLE,
+        "purchase_prelink",
+        HashMap::from([
+            ("user_id".to_string(), serde_json::json!("buyer_prelink")),
+            (
+                "buyer_user_id".to_string(),
+                serde_json::json!("buyer_prelink"),
+            ),
+            ("status".to_string(), serde_json::json!("checkout_started")),
+            ("total_cents".to_string(), serde_json::json!(2500)),
+            ("subtotal_cents".to_string(), serde_json::json!(2500)),
+            ("currency".to_string(), serde_json::json!("NZD")),
+            ("stripe_account_id".to_string(), serde_json::json!("")),
+            ("livemode".to_string(), serde_json::json!(true)),
+            (
+                "provider_session_id".to_string(),
+                serde_json::json!("cs_prelink"),
+            ),
+            (
+                "metadata".to_string(),
+                serde_json::json!(serde_json::json!({
+                    "schema_version": 1,
+                    "offer_id": "offer_pro_monthly",
+                    "offer_version": 3,
+                    "offer_mode": "subscription",
+                    "allowed_shipping_amounts_minor": [0]
+                })
+                .to_string()),
+            ),
+            (
+                "reconciliation_status".to_string(),
+                serde_json::json!("awaiting_payment"),
+            ),
+        ]),
+    )
+    .await;
+    seed(
+        &ctx,
+        "impresspress__products__line_items",
+        "line_prelink",
+        HashMap::from([
+            (
+                "purchase_id".to_string(),
+                serde_json::json!("purchase_prelink"),
+            ),
+            ("product_id".to_string(), serde_json::json!("product_pro")),
+            ("product_name".to_string(), serde_json::json!("Pro plan")),
+            (
+                "offer_id".to_string(),
+                serde_json::json!("offer_pro_monthly"),
+            ),
+            (
+                "component_id".to_string(),
+                serde_json::json!("component_base"),
+            ),
+            ("quantity".to_string(), serde_json::json!(1)),
+            ("unit_amount_minor".to_string(), serde_json::json!(2500)),
+            ("total_minor".to_string(), serde_json::json!(2500)),
+            ("offer_version".to_string(), serde_json::json!(3)),
+        ]),
+    )
+    .await;
+
+    // The subscription event races ahead of its checkout completion: nothing
+    // references sub_prelink yet, so sealing it would lose the state change.
+    let updated = serde_json::json!({
+        "id": "evt_prelink_updated",
+        "type": "customer.subscription.updated",
+        "created": 200,
+        "livemode": true,
+        "data": {"object": {
+            "id": "sub_prelink",
+            "status": "past_due",
+            "cancel_at_period_end": false
+        }}
+    });
+    let (msg, input) = webhook_msg(&updated, WEBHOOK_SECRET);
+    assert!(
+        output_is_error(
+            stripe::handle_webhook(&ctx, &msg, input).await,
+            ErrorCode::Internal,
+        )
+        .await,
+        "a subscription event matching no local subscription must be retried, not sealed"
+    );
+    let event_row = db::get(
+        &ctx,
+        "impresspress__products__stripe_events",
+        "evt_prelink_updated",
+    )
+    .await
+    .unwrap();
+    assert_eq!(event_row.data["status"], "failed");
+    assert!(!event_row.str_field("next_retry_at").is_empty());
+    assert!(event_row.str_field("last_error").contains("sub_prelink"));
+    assert!(event_row.str_field("last_error").contains("out-of-order"));
+    let purchase = repo::purchases::get(&ctx, "purchase_prelink")
+        .await
+        .unwrap();
+    assert_eq!(purchase.data["status"], "checkout_started");
+
+    // The retried checkout completion finally links the subscription.
+    let completed = serde_json::json!({
+        "id": "evt_prelink_completed",
+        "type": "checkout.session.completed",
+        "created": 100,
+        "livemode": true,
+        "data": {"object": {
+            "id": "cs_prelink",
+            "client_reference_id": "purchase_prelink",
+            "metadata": {
+                "purchase_id": "purchase_prelink",
+                "offer_id": "offer_pro_monthly",
+                "offer_version": "3"
+            },
+            "mode": "subscription",
+            "payment_status": "paid",
+            "currency": "nzd",
+            "amount_subtotal": 2500,
+            "amount_total": 2500,
+            "total_details": {
+                "amount_discount": 0,
+                "amount_tax": 0,
+                "amount_shipping": 0
+            },
+            "payment_intent": null,
+            "customer": "cus_prelink",
+            "subscription": "sub_prelink",
+            "livemode": true
+        }}
+    });
+    let (msg, input) = webhook_msg(&completed, WEBHOOK_SECRET);
+    assert_eq!(
+        output_to_json(stripe::handle_webhook(&ctx, &msg, input).await).await["received"],
+        true
+    );
+    let purchase = repo::purchases::get(&ctx, "purchase_prelink")
+        .await
+        .unwrap();
+    assert_eq!(purchase.data["status"], "completed");
+    assert_eq!(purchase.data["stripe_subscription_id"], "sub_prelink");
+    assert_eq!(purchase.data["subscription_status"], "active");
+
+    // Stripe redelivers the failed event after its backoff window; rewind the
+    // retry gate the way the scheduler would observe it after the delay.
+    db::update(
+        &ctx,
+        "impresspress__products__stripe_events",
+        "evt_prelink_updated",
+        HashMap::from([(
+            "next_retry_at".to_string(),
+            serde_json::json!("2000-01-01T00:00:00Z"),
+        )]),
+    )
+    .await
+    .unwrap();
+    let (msg, input) = webhook_msg(&updated, WEBHOOK_SECRET);
+    assert_eq!(
+        output_to_json(stripe::handle_webhook(&ctx, &msg, input).await).await["received"],
+        true
+    );
+    let purchase = repo::purchases::get(&ctx, "purchase_prelink")
+        .await
+        .unwrap();
+    assert_eq!(purchase.data["subscription_status"], "past_due");
+    assert_eq!(purchase.data["subscription_event_created"], 200);
+    let event_row = db::get(
+        &ctx,
+        "impresspress__products__stripe_events",
+        "evt_prelink_updated",
+    )
+    .await
+    .unwrap();
+    assert_eq!(event_row.data["status"], "processed");
+}
+
+/// A failed payment on a leftover open invoice after
+/// `customer.subscription.deleted` must not move either projection back to
+/// `past_due` — that would resurrect access with a fresh grace window.
+#[tokio::test]
+async fn invoice_payment_failed_after_deletion_does_not_regress_terminal_state() {
+    let ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET",
+        WEBHOOK_SECRET,
+    )])
+    .await;
+    seed(
+        &ctx,
+        repo::purchases::PURCHASES_TABLE,
+        "purchase_failed_after_cancel",
+        HashMap::from([
+            (
+                "user_id".to_string(),
+                serde_json::json!("buyer_failed_after_cancel"),
+            ),
+            ("status".to_string(), serde_json::json!("completed")),
+            ("total_cents".to_string(), serde_json::json!(2500)),
+            ("currency".to_string(), serde_json::json!("NZD")),
+            (
+                "stripe_subscription_id".to_string(),
+                serde_json::json!("sub_failed_after_cancel"),
+            ),
+            (
+                "stripe_account_id".to_string(),
+                serde_json::json!("acct_failed_seller"),
+            ),
+            ("livemode".to_string(), serde_json::json!(true)),
+            (
+                "subscription_status".to_string(),
+                serde_json::json!("active"),
+            ),
+            (
+                "subscription_event_created".to_string(),
+                serde_json::json!(100),
+            ),
+        ]),
+    )
+    .await;
+    seed(
+        &ctx,
+        repo::subscriptions::SUBSCRIPTIONS_TABLE,
+        "sub_platform_failed_after_cancel",
+        HashMap::from([
+            (
+                "user_id".to_string(),
+                serde_json::json!("platform_failed_after_cancel"),
+            ),
+            (
+                "stripe_customer_id".to_string(),
+                serde_json::json!("cus_failed_after_cancel"),
+            ),
+            (
+                "stripe_subscription_id".to_string(),
+                serde_json::json!("sub_failed_after_cancel"),
+            ),
+            ("plan".to_string(), serde_json::json!("pro")),
+            ("status".to_string(), serde_json::json!("active")),
+            ("stripe_event_created".to_string(), serde_json::json!(100)),
+        ]),
+    )
+    .await;
+
+    let deleted = serde_json::json!({
+        "id": "evt_failed_after_cancel_deleted",
+        "type": "customer.subscription.deleted",
+        "created": 300,
+        "account": "acct_failed_seller",
+        "livemode": true,
+        "data": {"object": {
+            "id": "sub_failed_after_cancel",
+            "canceled_at": 300
+        }}
+    });
+    let (msg, input) = webhook_msg(&deleted, WEBHOOK_SECRET);
+    assert_eq!(
+        output_to_json(stripe::handle_webhook(&ctx, &msg, input).await).await["received"],
+        true
+    );
+
+    // The final open invoice fails with a strictly newer timestamp.
+    let payment_failed = serde_json::json!({
+        "id": "evt_failed_after_cancel_invoice",
+        "type": "invoice.payment_failed",
+        "created": 400,
+        "account": "acct_failed_seller",
+        "livemode": true,
+        "data": {"object": {
+            "parent": {"subscription_details": {
+                "subscription": "sub_failed_after_cancel"
+            }}
+        }}
+    });
+    let (msg, input) = webhook_msg(&payment_failed, WEBHOOK_SECRET);
+    assert_eq!(
+        output_to_json(stripe::handle_webhook(&ctx, &msg, input).await).await["received"],
+        true
+    );
+
+    let purchase = repo::purchases::get(&ctx, "purchase_failed_after_cancel")
+        .await
+        .unwrap();
+    assert_eq!(purchase.data["subscription_status"], "canceled");
+    assert_eq!(purchase.data["subscription_event_created"], 300);
+    let platform = db::get(
+        &ctx,
+        repo::subscriptions::SUBSCRIPTIONS_TABLE,
+        "sub_platform_failed_after_cancel",
+    )
+    .await
+    .unwrap();
+    assert_eq!(platform.data["status"], "cancelled");
+    assert_eq!(platform.data["stripe_event_created"], 300);
+    assert!(
+        platform.data["grace_period_end"]
+            .as_str()
+            .unwrap_or("")
+            .is_empty(),
+        "a refused past-due write must not grant a fresh grace window"
+    );
 }
 
 #[tokio::test]
@@ -1680,6 +2421,104 @@ async fn webhook_charge_refunded_unknown_intent_is_noop() {
     let out = stripe::handle_webhook(&ctx, &msg, input).await;
     let body = output_to_json(out).await;
     assert_eq!(body["received"], true);
+}
+
+/// Only a definitive NotFound may treat `charge.refunded` as a foreign
+/// charge. A transient purchase-lookup outage must fail the delivery
+/// retryably — sealing the event would permanently drop a dashboard-initiated
+/// refund locally.
+#[tokio::test]
+async fn webhook_charge_refunded_lookup_outage_is_retried_not_sealed() {
+    let ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET",
+        WEBHOOK_SECRET,
+    )])
+    .await;
+    seed(
+        &ctx,
+        repo::purchases::PURCHASES_TABLE,
+        "purchase_refund_outage",
+        HashMap::from([
+            ("user_id".to_string(), serde_json::json!("buyer_outage")),
+            ("status".to_string(), serde_json::json!("completed")),
+            ("provider".to_string(), serde_json::json!("stripe")),
+            ("total_cents".to_string(), serde_json::json!(5000)),
+            (
+                "provider_payment_intent_id".to_string(),
+                serde_json::json!("pi_refund_outage"),
+            ),
+        ]),
+    )
+    .await;
+    let event = serde_json::json!({
+        "id": "evt_refund_outage",
+        "type": "charge.refunded",
+        "livemode": false,
+        "data": {"object": {
+            "payment_intent": "pi_refund_outage",
+            "amount": 5000,
+            "amount_refunded": 5000,
+            "refunded": true,
+            "livemode": false
+        }}
+    });
+
+    // The purchase lookup hits a simulated database outage: the event must
+    // fail with a scheduled retry, not be sealed as processed.
+    let failing = crate::test_support::FailingDbOpContext::new(
+        ctx.clone(),
+        vec![("database.list", repo::purchases::PURCHASES_TABLE)],
+    );
+    let (msg, input) = webhook_msg(&event, WEBHOOK_SECRET);
+    assert!(
+        output_is_error(
+            stripe::handle_webhook(&failing, &msg, input).await,
+            ErrorCode::Internal,
+        )
+        .await
+    );
+    let event_row = db::get(
+        &ctx,
+        "impresspress__products__stripe_events",
+        "evt_refund_outage",
+    )
+    .await
+    .unwrap();
+    assert_eq!(event_row.data["status"], "failed");
+    assert!(!event_row.str_field("next_retry_at").is_empty());
+    let purchase = repo::purchases::get(&ctx, "purchase_refund_outage")
+        .await
+        .unwrap();
+    assert_eq!(purchase.data["status"], "completed");
+
+    // Stripe redelivers after the backoff window and the refund lands.
+    db::update(
+        &ctx,
+        "impresspress__products__stripe_events",
+        "evt_refund_outage",
+        HashMap::from([(
+            "next_retry_at".to_string(),
+            serde_json::json!("2000-01-01T00:00:00Z"),
+        )]),
+    )
+    .await
+    .unwrap();
+    let (msg, input) = webhook_msg(&event, WEBHOOK_SECRET);
+    let body = output_to_json(stripe::handle_webhook(&ctx, &msg, input).await).await;
+    assert_eq!(body["received"], true);
+    let purchase = repo::purchases::get(&ctx, "purchase_refund_outage")
+        .await
+        .unwrap();
+    assert_eq!(purchase.data["status"], "refunded");
+    assert_eq!(purchase.data["refunded_total_cents"], 5000);
+    let event_row = db::get(
+        &ctx,
+        "impresspress__products__stripe_events",
+        "evt_refund_outage",
+    )
+    .await
+    .unwrap();
+    assert_eq!(event_row.data["status"], "processed");
 }
 
 #[tokio::test]
@@ -2979,6 +3818,7 @@ async fn synced_offer_archive_is_provider_first_retryable_and_idempotent() {
             quantity: 1,
             inputs: serde_json::from_value(serde_json::json!({"pages": 2})).unwrap(),
         },
+        offer_pricing::InputScope::Management,
     )
     .unwrap();
     let pending_link = repo::payment_links::create_pending(
@@ -3537,6 +4377,169 @@ async fn typed_checkout_can_use_validated_named_preset_without_runtime_inputs() 
     );
 }
 
+/// Seed an active platform offer whose price hinges on a hidden `comp`
+/// toggle and an admin-only `discount_tier`, alongside the public `pages`
+/// input.
+async fn seed_active_offer_with_restricted_variables(
+    ctx: &crate::test_support::TestContext,
+    product_id: &str,
+) -> String {
+    seed(
+        ctx,
+        PRODUCTS_TABLE,
+        product_id,
+        HashMap::from([
+            ("name".to_string(), serde_json::json!("Configurable print")),
+            ("slug".to_string(), serde_json::json!(product_id)),
+            ("status".to_string(), serde_json::json!("active")),
+            ("approval_status".to_string(), serde_json::json!("approved")),
+            ("owner_kind".to_string(), serde_json::json!("platform")),
+            ("owner_id".to_string(), serde_json::json!("")),
+            ("created_by".to_string(), serde_json::json!("")),
+        ]),
+    )
+    .await;
+    let definition: OfferDefinitionRequest = serde_json::from_value(serde_json::json!({
+        "name": "Print configuration",
+        "mode": "payment",
+        "currency": "nzd",
+        "pricing_model": "components",
+        "usage_type": "licensed",
+        "billing_scheme": "per_unit",
+        "tax_behavior": "exclusive",
+        "variables": [
+            {
+                "key": "pages",
+                "kind": "integer",
+                "label": "Pages",
+                "required": true,
+                "minimum": "1",
+                "maximum": "20",
+                "step": "1"
+            },
+            {
+                "key": "comp",
+                "kind": "boolean",
+                "label": "Comp this order",
+                "default_value": false,
+                "visibility": "hidden"
+            },
+            {
+                "key": "discount_tier",
+                "kind": "select",
+                "label": "Discount tier",
+                "default_value": "none",
+                "allowed_values": ["none", "half"],
+                "visibility": "admin_only"
+            }
+        ],
+        "components": [
+            {
+                "key": "setup",
+                "label": "Setup",
+                "required": true,
+                "amount": {"type": "fixed", "unit_amount_minor": 1000},
+                "condition": {"op": "equals", "input": "comp", "value": false}
+            },
+            {
+                "key": "comped_setup",
+                "label": "Comped setup",
+                "required": true,
+                "amount": {"type": "fixed", "unit_amount_minor": 100},
+                "condition": {"op": "equals", "input": "comp", "value": true}
+            },
+            {
+                "key": "pages",
+                "label": "Printed pages",
+                "required": true,
+                "amount": {
+                    "type": "per_unit",
+                    "input": "pages",
+                    "unit_amount_minor": 25
+                }
+            }
+        ]
+    }))
+    .unwrap();
+    let offer = repo::offers::create(ctx, product_id, "admin_1", &definition)
+        .await
+        .expect("create offer");
+    repo::offers::publish(ctx, product_id, &offer.offer.id)
+        .await
+        .expect("publish offer");
+    offer.offer.id
+}
+
+#[tokio::test]
+async fn public_checkout_rejects_restricted_inputs_while_presets_may_pin_them() {
+    let mut ctx = ctx_with(&[
+        ("IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "sk_test_x"),
+        ("WAFER_RUN_SHARED__FRONTEND_URL", "https://shop.example"),
+    ])
+    .await;
+    register_stripe_network(
+        &mut ctx,
+        serde_json::json!({
+            "id": "cs_test_restricted",
+            "url": "https://checkout.stripe.com/c/pay/cs_test_restricted"
+        }),
+    );
+    let offer_id =
+        seed_active_offer_with_restricted_variables(&ctx, "product_restricted_inputs").await;
+
+    // An anonymous buyer must not be able to set the hidden comp toggle or
+    // the admin-only discount tier on the direct checkout path.
+    for restricted in [
+        serde_json::json!({"pages": 2, "comp": true}),
+        serde_json::json!({"pages": 2, "discount_tier": "half"}),
+    ] {
+        let (msg, input) = create_msg(
+            "/b/products/checkout",
+            "",
+            serde_json::json!({"offer_id": offer_id, "inputs": restricted}),
+        );
+        assert!(
+            output_is_error(
+                stripe::handle_checkout(&ctx, &msg, input).await,
+                ErrorCode::InvalidArgument
+            )
+            .await
+        );
+    }
+
+    // Customer-visible inputs still check out at the undiscounted total.
+    let (msg, input) = create_msg(
+        "/b/products/checkout",
+        "",
+        serde_json::json!({"offer_id": offer_id, "inputs": {"pages": 2}}),
+    );
+    let checkout = output_to_json(stripe::handle_checkout(&ctx, &msg, input).await).await;
+    assert_eq!(checkout["amounts"]["total_minor"], 1050);
+
+    // A management-authored preset may deliberately pin the hidden toggle,
+    // and checking out through that preset keeps working.
+    let preset = repo::checkout_presets::create(
+        &ctx,
+        &offer_id,
+        "admin_1",
+        &serde_json::from_value(serde_json::json!({
+            "name": "Comped two pages",
+            "slug": "comped-two-pages",
+            "inputs": {"pages": 2, "comp": true}
+        }))
+        .unwrap(),
+    )
+    .await
+    .expect("management preset may pin hidden variables");
+    let (msg, input) = create_msg(
+        "/b/products/checkout",
+        "",
+        serde_json::json!({"offer_id": offer_id, "preset_id": preset.id}),
+    );
+    let comped = output_to_json(stripe::handle_checkout(&ctx, &msg, input).await).await;
+    assert_eq!(comped["amounts"]["total_minor"], 150);
+}
+
 #[tokio::test]
 async fn checkout_and_payment_links_enforce_offer_total_policy_before_stripe() {
     let ctx = ctx_with(&[
@@ -3602,6 +4605,268 @@ async fn checkout_and_payment_links_enforce_offer_total_policy_before_stripe() {
     .unwrap_err();
     assert_eq!(error.code, ErrorCode::InvalidArgument);
     assert!(error.message.contains("below the offer minimum"));
+}
+
+/// A Payment Link delivery creates the local order, attaches the session id,
+/// and then completes it. A crash between attach and completion used to make
+/// the redelivery a false duplicate (any order for the session short-circuited
+/// as Ok), sealing the event with a paid order stranded in `pending`. The
+/// redelivery must resume the completion path, and a crash between completion
+/// and the subscription-item snapshot must backfill the snapshot.
+#[tokio::test]
+async fn payment_link_redelivery_resumes_partial_order_and_backfills_snapshot() {
+    let ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET",
+        WEBHOOK_SECRET,
+    )])
+    .await;
+    let product_id = "product_payment_link_resume";
+    seed(
+        &ctx,
+        PRODUCTS_TABLE,
+        product_id,
+        HashMap::from([
+            ("name".to_string(), serde_json::json!("Care plan")),
+            ("slug".to_string(), serde_json::json!(product_id)),
+            ("status".to_string(), serde_json::json!("active")),
+            ("approval_status".to_string(), serde_json::json!("approved")),
+            ("owner_kind".to_string(), serde_json::json!("platform")),
+        ]),
+    )
+    .await;
+    let definition: OfferDefinitionRequest = serde_json::from_value(serde_json::json!({
+        "name": "Monthly subscription",
+        "mode": "subscription",
+        "currency": "nzd",
+        "pricing_model": "fixed",
+        "recurring_interval": "month",
+        "interval_count": 1,
+        "usage_type": "licensed",
+        "billing_scheme": "per_unit",
+        "tax_behavior": "exclusive",
+        "components": [{
+            "key": "plan",
+            "label": "Care plan",
+            "required": true,
+            "amount": {"type": "fixed", "unit_amount_minor": 4900}
+        }]
+    }))
+    .unwrap();
+    let offer = repo::offers::create(&ctx, product_id, "admin_1", &definition)
+        .await
+        .unwrap();
+    let offer_id = offer.offer.id;
+    repo::offers::publish(&ctx, product_id, &offer_id)
+        .await
+        .unwrap();
+    let managed = repo::offers::get_managed(&ctx, &offer_id).await.unwrap();
+    let preview = offer_pricing::evaluate_offer(
+        &managed.offer,
+        &PricingPreviewRequest {
+            offer_id: offer_id.clone(),
+            quantity: 1,
+            inputs: Default::default(),
+        },
+        offer_pricing::InputScope::Management,
+    )
+    .unwrap();
+    let pending_link = repo::payment_links::create_pending(
+        &ctx,
+        &offer_id,
+        "",
+        "",
+        "",
+        false,
+        "resume-link-config",
+        &preview,
+        0,
+    )
+    .await
+    .unwrap();
+    let link_id = pending_link.managed.id;
+    repo::payment_links::mark_synced(
+        &ctx,
+        &link_id,
+        "plink_resume",
+        "https://buy.stripe.com/resume",
+    )
+    .await
+    .unwrap();
+
+    let event = serde_json::json!({
+        "id": "evt_payment_link_resume",
+        "type": "checkout.session.completed",
+        "livemode": false,
+        "data": {
+            "object": {
+                "id": "cs_payment_link_resume",
+                "payment_link": "plink_resume",
+                "mode": "subscription",
+                "payment_status": "paid",
+                "metadata": {
+                    "impresspress_payment_link_id": link_id,
+                    "offer_id": offer_id,
+                    "offer_version": "1"
+                },
+                "currency": "nzd",
+                "amount_subtotal": 4900,
+                "amount_total": 4900,
+                "total_details": {
+                    "amount_discount": 0,
+                    "amount_tax": 0,
+                    "amount_shipping": 0
+                },
+                "customer_details": {"email": "guest@example.com"},
+                "customer": "cus_resume",
+                "payment_intent": null,
+                "subscription": "sub_resume",
+                "livemode": false
+            }
+        }
+    });
+
+    // First delivery: the order and its line items are created and the
+    // session id is attached, then the completion write hits a simulated
+    // outage. The delivery must fail retryably with the order left pending.
+    let failing = crate::test_support::FailingDbOpContext::new(
+        ctx.clone(),
+        vec![(
+            "database.update_where_count",
+            repo::purchases::PURCHASES_TABLE,
+        )],
+    );
+    let (msg, input) = webhook_msg(&event, WEBHOOK_SECRET);
+    assert!(
+        output_is_error(
+            stripe::handle_webhook(&failing, &msg, input).await,
+            ErrorCode::Internal,
+        )
+        .await
+    );
+    let order = repo::purchases::find_by_session(&ctx, "cs_payment_link_resume")
+        .await
+        .unwrap()
+        .expect("order created by the failed delivery");
+    assert_eq!(order.data["status"], "pending");
+    assert_eq!(
+        db::list_all(&ctx, repo::subscription_items::TABLE, vec![])
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
+    let event_row = db::get(
+        &ctx,
+        "impresspress__products__stripe_events",
+        "evt_payment_link_resume",
+    )
+    .await
+    .unwrap();
+    assert_eq!(event_row.data["status"], "failed");
+    assert!(!event_row.str_field("next_retry_at").is_empty());
+
+    // Second delivery: the redelivery must resume the completion path for
+    // the existing pending order — this time the subscription-item snapshot
+    // hits an outage after the completion write lands.
+    db::update(
+        &ctx,
+        "impresspress__products__stripe_events",
+        "evt_payment_link_resume",
+        HashMap::from([(
+            "next_retry_at".to_string(),
+            serde_json::json!("2000-01-01T00:00:00Z"),
+        )]),
+    )
+    .await
+    .unwrap();
+    let failing = crate::test_support::FailingDbOpContext::new(
+        ctx.clone(),
+        vec![("database.upsert", repo::subscription_items::TABLE)],
+    );
+    let (msg, input) = webhook_msg(&event, WEBHOOK_SECRET);
+    assert!(
+        output_is_error(
+            stripe::handle_webhook(&failing, &msg, input).await,
+            ErrorCode::Internal,
+        )
+        .await
+    );
+    let order = repo::purchases::find_by_session(&ctx, "cs_payment_link_resume")
+        .await
+        .unwrap()
+        .expect("resumed order");
+    assert_eq!(order.data["status"], "completed");
+    assert_eq!(order.data["stripe_subscription_id"], "sub_resume");
+    assert_eq!(
+        db::list_all(&ctx, repo::subscription_items::TABLE, vec![])
+            .await
+            .unwrap()
+            .len(),
+        0
+    );
+
+    // Third delivery: the order is terminal, so the redelivery is a
+    // duplicate — but it must still backfill the missing idempotent
+    // subscription-item snapshot before sealing the event.
+    db::update(
+        &ctx,
+        "impresspress__products__stripe_events",
+        "evt_payment_link_resume",
+        HashMap::from([(
+            "next_retry_at".to_string(),
+            serde_json::json!("2000-01-01T00:00:00Z"),
+        )]),
+    )
+    .await
+    .unwrap();
+    let (msg, input) = webhook_msg(&event, WEBHOOK_SECRET);
+    let body = output_to_json(stripe::handle_webhook(&ctx, &msg, input).await).await;
+    assert_eq!(body["received"], true);
+    let order = repo::purchases::find_by_session(&ctx, "cs_payment_link_resume")
+        .await
+        .unwrap()
+        .expect("completed order");
+    assert_eq!(order.data["status"], "completed");
+    assert_eq!(order.data["reconciliation_status"], "reconciled");
+    assert_eq!(order.data["buyer_email"], "guest@example.com");
+    assert_eq!(order.data["subtotal_cents"], 4900);
+    assert_eq!(order.data["total_cents"], 4900);
+    // Exactly one order and one immutable line snapshot exist across all
+    // three deliveries.
+    assert_eq!(
+        db::count(&ctx, repo::purchases::PURCHASES_TABLE, &[])
+            .await
+            .unwrap(),
+        1
+    );
+    assert_eq!(
+        repo::purchases::list_line_items(&ctx, &order.id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+    let items = db::list_all(
+        &ctx,
+        repo::subscription_items::TABLE,
+        vec![wafer_block::db::Filter {
+            field: "subscription_id".to_string(),
+            operator: wafer_block::db::FilterOp::Equal,
+            value: serde_json::json!("sub_resume"),
+        }],
+    )
+    .await
+    .unwrap();
+    assert_eq!(items.len(), 1);
+    assert_eq!(items[0].data["purchase_id"], order.id);
+    let event_row = db::get(
+        &ctx,
+        "impresspress__products__stripe_events",
+        "evt_payment_link_resume",
+    )
+    .await
+    .unwrap();
+    assert_eq!(event_row.data["status"], "processed");
 }
 
 #[tokio::test]

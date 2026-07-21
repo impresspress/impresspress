@@ -1,0 +1,108 @@
+- generic [ref=f99e1]:
+  - main [ref=f99e187]:
+    - generic [ref=f99e188]:
+      - generic [ref=f99e189]: Impresspress Sandbox
+      - generic [ref=f99e199]:
+        - text: Impresspress Sandbox partners with Stripe for secure financial services.
+        - button "Return to Impresspress Sandbox" [ref=f99e201] [cursor=pointer]
+    - iframe [active] [ref=f99e214]:
+      - generic [ref=f121e1]:
+        - generic [ref=f121e253]:
+          - log
+          - log
+        - generic [ref=f121e257]:
+          - button "37.5% Business details" [ref=f121e260] [cursor=pointer]:
+            - progressbar "37.5%" [ref=f121e261]
+            - generic [ref=f121e265]: Business details
+          - generic [ref=f121e268]: You're using a test account with test data.
+          - generic [ref=f121e280]:
+            - generic [ref=f121e283]:
+              - generic [ref=f121e284]:
+                - heading "Business details" [level=1] [ref=f121e285]
+                - generic [ref=f121e286]: Provide some details about how you earn or collect money with Impresspress Sandbox.
+              - generic [ref=f121e288]:
+                - generic [ref=f121e290]:
+                  - generic [ref=f121e291]:
+                    - generic [ref=f121e292]: Industry
+                    - generic [ref=f121e294]: Selecting your industry helps satisfy risk and compliance obligations. Select the option that best matches the goods or service your customers will buy.
+                  - button "Please select your industry…" [active] [ref=f121e300] [cursor=pointer]
+                - generic [ref=f121e305]:
+                  - generic [ref=f121e306]: Your website
+                  - generic [ref=f121e310]:
+                    - textbox "Your website" [ref=f121e316]:
+                      - /placeholder: www.example.com
+                    - generic [ref=f121e319]:
+                      - generic [ref=f121e322]:
+                        - text: Share a website that shows the products or services you sell or promote. Placeholder or under-construction sites aren't supported.
+                        - link "Learn more about the businesses we support" [ref=f121e323] [cursor=pointer]:
+                          - /url: https://support.stripe.com/questions/business-website-for-account-activation-faq
+                      - button "Don’t have a website? Add product description instead." [ref=f121e324] [cursor=pointer]
+            - button "Continue" [ref=f121e328] [cursor=pointer]
+    - generic [ref=f99e216]:
+      - generic:
+        - generic:
+          - generic [ref=f99e217]:
+            - generic:
+              - generic:
+                - generic [ref=f99e218]: Powered by
+                - img "Stripe" [ref=f99e220]
+                - button "Information" [ref=f99e228] [cursor=pointer]
+          - list [ref=f99e234]:
+            - listitem [ref=f99e235]:
+              - link "Terms" [ref=f99e236] [cursor=pointer]:
+                - /url: https://stripe.com/US/connect-account/legal
+            - listitem [ref=f99e240]:
+              - link "Privacy" [ref=f99e241] [cursor=pointer]:
+                - /url: https://stripe.com/US/privacy
+          - generic [ref=f99e248]:
+            - button [ref=f99e249] [cursor=pointer]:
+              - generic [ref=f99e250]: English (NZ)
+            - combobox [ref=f99e256] [cursor=pointer]:
+              - option "Auto-detect"
+              - option "Bahasa Indonesia"
+              - option "čeština"
+              - option "Dansk"
+              - option "Deutsch"
+              - option "Eesti"
+              - option "English (Australia)"
+              - option "English (Canada)"
+              - option "English (India)"
+              - option "English (Ireland)"
+              - option "English (New Zealand)" [selected]
+              - option "English (Singapore)"
+              - option "English (United Kingdom)"
+              - option "English (United States)"
+              - option "Español (América Latina)"
+              - option "Español (España)"
+              - option "Français (Canada)"
+              - option "Français (France)"
+              - option "Hrvatski"
+              - option "Italiano"
+              - option "Latviešu"
+              - option "Lietuvių"
+              - option "Magyar"
+              - option "Malti"
+              - option "Melayu"
+              - option "Nederlands (Nederland)"
+              - option "Norsk bokmål"
+              - option "Polski"
+              - option "Português (Brasil)"
+              - option "Português (Portugal)"
+              - option "Română"
+              - option "Slovenčina"
+              - option "Slovenščina"
+              - option "Suomi"
+              - option "Svenska"
+              - option "Tiếng Việt"
+              - option "Türkçe"
+              - option "Wikang Filipino"
+              - option "Ελληνικά"
+              - option "български"
+              - option "ไทย"
+              - option "한국어"
+              - option "中文(简体)"
+              - option "日本語"
+              - option "繁體中文(台灣)"
+              - option "繁體中文(香港)"
+  - generic:
+    - iframe

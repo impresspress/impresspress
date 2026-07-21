@@ -1078,6 +1078,175 @@ async fn stripe_rejection_and_mode_mismatch_never_mark_purchase_refunded() {
     assert_eq!(purchase.data["status"], "completed");
 }
 
+/// HTTP 429 and 5xx from POST /v1/refunds are ambiguous: Stripe may have
+/// created the refund before failing, so the ledger claim must stay pending
+/// and the provider operation queued for a retry with the SAME idempotency
+/// key. Marking the ledger failed here would desynchronize it from real money
+/// movement — the later refund webhook would find no active row.
+#[tokio::test]
+async fn ambiguous_stripe_refund_failure_stays_retryable_with_the_same_key() {
+    for status in [500_u16, 429] {
+        let mut ctx = ctx_with(&[(
+            "IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY",
+            "sk_test_refunds",
+        )])
+        .await;
+        seed_stripe_refund_order(
+            &ctx,
+            "purchase_ambiguous_refund",
+            "completed",
+            5000,
+            0,
+            "",
+            false,
+        )
+        .await;
+        let requests = register_sequence_with_status(
+            &mut ctx,
+            vec![
+                (
+                    status,
+                    serde_json::json!({"error": {"code": "lock_timeout"}}),
+                ),
+                (
+                    200,
+                    serde_json::json!({
+                        "id": "re_ambiguous",
+                        "status": "succeeded",
+                        "amount": 1000,
+                        "payment_intent": "pi_purchase_ambiguous_refund",
+                        "livemode": false
+                    }),
+                ),
+            ],
+        );
+        let (msg, input) = admin_refund_msg(
+            "purchase_ambiguous_refund",
+            serde_json::json!({"amount_minor": 1000, "idempotency_key": "ambiguous"}),
+        );
+        assert!(
+            output_is_error(dispatch_admin(&ctx, msg, input).await, ErrorCode::Internal).await,
+            "HTTP {status} must surface as a retryable internal error"
+        );
+
+        let ledger = repo::refunds::list_for_purchase(&ctx, "purchase_ambiguous_refund")
+            .await
+            .unwrap();
+        assert_eq!(ledger.len(), 1);
+        assert_eq!(
+            ledger[0].data["status"], "pending",
+            "HTTP {status} must keep the ledger claim pending, not failed"
+        );
+        let purchase = repo::purchases::get(&ctx, "purchase_ambiguous_refund")
+            .await
+            .unwrap();
+        assert_eq!(purchase.data["status"], "completed");
+        assert_eq!(purchase.data["refunded_total_cents"], 0);
+        let operation = wafer_core::clients::database::get_by_field(
+            &ctx,
+            repo::provider_operations::TABLE,
+            "aggregate_type",
+            serde_json::json!("refund"),
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            operation.data["status"], "pending",
+            "HTTP {status} must keep the provider operation queued, not dead-lettered"
+        );
+
+        let (mut reconcile, input) = admin_create_msg(
+            "/admin/b/products/provider-operations/reconcile",
+            serde_json::json!({}),
+        );
+        reconcile.set_meta("req.query.limit", "1");
+        let result = output_to_json(dispatch_admin(&ctx, reconcile, input).await).await;
+        assert_eq!(result["claimed"], 1);
+        assert_eq!(result["succeeded"], 1);
+
+        let requests = requests.lock().unwrap();
+        assert_eq!(requests.len(), 2);
+        assert_eq!(requests[1].method, "POST");
+        assert_eq!(requests[1].url, "https://api.stripe.com/v1/refunds");
+        assert_eq!(
+            requests[0].headers["Idempotency-Key"],
+            "impresspress_refund_purchase_ambiguous_refund_ambiguous"
+        );
+        assert_eq!(
+            requests[1].headers["Idempotency-Key"], requests[0].headers["Idempotency-Key"],
+            "the retry must reuse the original idempotency key"
+        );
+        let purchase = repo::purchases::get(&ctx, "purchase_ambiguous_refund")
+            .await
+            .unwrap();
+        assert_eq!(purchase.data["status"], "partially_refunded");
+        assert_eq!(purchase.data["refunded_total_cents"], 1000);
+    }
+}
+
+/// 402 (like every non-429 4xx) means Stripe deterministically rejected the
+/// request: no refund exists, so the ledger row fails terminally and the
+/// provider operation dead-letters instead of retrying a refused request.
+#[tokio::test]
+async fn card_level_stripe_rejection_fails_the_refund_deterministically() {
+    let mut ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY",
+        "sk_test_refunds",
+    )])
+    .await;
+    seed_stripe_refund_order(
+        &ctx,
+        "purchase_declined_refund",
+        "completed",
+        5000,
+        0,
+        "",
+        false,
+    )
+    .await;
+    let requests = register_sequence_with_status(
+        &mut ctx,
+        vec![(
+            402,
+            serde_json::json!({"error": {"code": "expired_or_canceled_card"}}),
+        )],
+    );
+    let (msg, input) = admin_refund_msg(
+        "purchase_declined_refund",
+        serde_json::json!({"idempotency_key": "declined"}),
+    );
+    assert!(
+        output_is_error(
+            dispatch_admin(&ctx, msg, input).await,
+            ErrorCode::InvalidArgument
+        )
+        .await
+    );
+    let ledger = repo::refunds::list_for_purchase(&ctx, "purchase_declined_refund")
+        .await
+        .unwrap();
+    assert_eq!(ledger[0].data["status"], "failed");
+    assert!(ledger[0].data["last_error"]
+        .as_str()
+        .unwrap()
+        .contains("expired_or_canceled_card"));
+    let operation = wafer_core::clients::database::get_by_field(
+        &ctx,
+        repo::provider_operations::TABLE,
+        "aggregate_type",
+        serde_json::json!("refund"),
+    )
+    .await
+    .unwrap();
+    assert_eq!(operation.data["status"], "dead_letter");
+    let purchase = repo::purchases::get(&ctx, "purchase_declined_refund")
+        .await
+        .unwrap();
+    assert_eq!(purchase.data["status"], "completed");
+    assert_eq!(purchase.data["refunded_total_cents"], 0);
+    assert_eq!(requests.lock().unwrap().len(), 1);
+}
+
 #[tokio::test]
 async fn refund_validation_rejects_over_refund_and_unknown_fields_before_stripe() {
     let mut ctx = ctx_with(&[(

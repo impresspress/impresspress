@@ -694,9 +694,20 @@ pub(crate) async fn reconcile_checkout_session(
             format!("Checkout Session reconciliation failed: {message}"),
         )
     };
-    if purchase.str_field("provider_session_id").is_empty()
-        || purchase.str_field("provider_session_id") != completion.session_id
-    {
+    if completion.session_id.is_empty() {
+        return Err(invalid("session id does not match the order"));
+    }
+    // An EMPTY stored session id means the local write after creating the
+    // provider session failed (the Stripe session exists and its metadata and
+    // client_reference_id point at this order, but the id never landed
+    // locally). The completed event arrives through signature verification
+    // and every other identity/mode/currency/amount/offer cross-check below
+    // still applies, so the order may ADOPT the session id — written only via
+    // the guarded CAS at the end (from empty, alongside the status guard). A
+    // DIFFERENT non-empty stored id remains a hard conflict.
+    let stored_session_id = purchase.str_field("provider_session_id").to_string();
+    let adopt_session = stored_session_id.is_empty();
+    if !adopt_session && stored_session_id != completion.session_id {
         return Err(invalid("session id does not match the order"));
     }
     if completion.client_reference_id != purchase_id {
@@ -859,6 +870,12 @@ pub(crate) async fn reconcile_checkout_session(
             serde_json::json!(&now),
         );
     }
+    if adopt_session {
+        data.insert(
+            "provider_session_id".to_string(),
+            serde_json::json!(&completion.session_id),
+        );
+    }
     db::update_by_filters_count(
         ctx,
         PURCHASES_TABLE,
@@ -876,7 +893,10 @@ pub(crate) async fn reconcile_checkout_session(
             Filter {
                 field: "provider_session_id".to_string(),
                 operator: FilterOp::Equal,
-                value: serde_json::json!(&completion.session_id),
+                // Adoption only ever writes onto an order that still has no
+                // session id; a concurrent writer landing another id first
+                // makes this CAS a no-op instead of an overwrite.
+                value: serde_json::json!(&stored_session_id),
             },
         ],
         data,
@@ -1164,10 +1184,21 @@ pub(crate) async fn sync_payment_intent(
     Ok(Some(get(ctx, &purchase.id).await?))
 }
 
-/// Reconcile a subscription sold through a commerce order. Platform-plan
-/// subscriptions have no matching commerce purchase and return `Ok(None)`.
-/// A matching order must have the same connected-account and mode
-/// context as the event, otherwise the webhook fails closed.
+/// Reconcile a subscription sold through a commerce order. Subscriptions that
+/// belong to no commerce purchase (platform-plan subscriptions, or a delivery
+/// racing ahead of its own Checkout completion) return `Ok(None)`; the
+/// webhook decides whether that means "not ours" or "retry later". A matching
+/// order must have the same connected-account and mode context as the event,
+/// otherwise the webhook fails closed.
+///
+/// Stripe deliveries can arrive out of order — including different events in
+/// the same `created` second (immediate cancellation emits
+/// `customer.subscription.updated` and `customer.subscription.deleted`
+/// together). Writes apply the shared transition rules
+/// ([`super::subscription_transition_allowed`]) against the current
+/// projection and compare-and-swap on the exact (timestamp, status) pair that
+/// was read, so two workers racing with old/new events cannot let the older
+/// or less-terminal projection win after both read the same previous row.
 #[allow(clippy::too_many_arguments)]
 pub(crate) async fn sync_commerce_subscription(
     ctx: &dyn Context,
@@ -1187,7 +1218,7 @@ pub(crate) async fn sync_commerce_subscription(
             "subscription id, status, and a valid event timestamp are required",
         ));
     }
-    let purchase = match db::get_by_field(
+    let mut purchase = match db::get_by_field(
         ctx,
         PURCHASES_TABLE,
         "stripe_subscription_id",
@@ -1211,61 +1242,86 @@ pub(crate) async fn sync_commerce_subscription(
             "subscription event mode does not match the commerce order",
         ));
     }
-    let now = chrono::Utc::now().to_rfc3339();
-    let mut data = HashMap::from([
-        ("subscription_status".to_string(), serde_json::json!(status)),
-        (
-            "subscription_last_synced_at".to_string(),
-            serde_json::json!(&now),
-        ),
-        ("updated_at".to_string(), serde_json::json!(&now)),
-        (
-            "subscription_event_created".to_string(),
-            serde_json::json!(event_created),
-        ),
-    ]);
-    if let Some(value) = cancel_at_period_end {
-        data.insert(
-            "subscription_cancel_at_period_end".to_string(),
-            serde_json::json!(value),
-        );
+    let purchase_id = purchase.id.clone();
+    for _ in 0..3 {
+        let current_created = purchase.i64_field("subscription_event_created");
+        let current_status = purchase.str_field("subscription_status").to_string();
+        if !super::subscription_transition_allowed(
+            &current_status,
+            current_created,
+            status,
+            event_created,
+        ) {
+            return Ok(Some(purchase));
+        }
+        if let Some(expected) = expected_current_status {
+            if current_status != expected {
+                return Ok(Some(purchase));
+            }
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut data = HashMap::from([
+            ("subscription_status".to_string(), serde_json::json!(status)),
+            (
+                "subscription_last_synced_at".to_string(),
+                serde_json::json!(&now),
+            ),
+            ("updated_at".to_string(), serde_json::json!(&now)),
+            (
+                "subscription_event_created".to_string(),
+                serde_json::json!(event_created),
+            ),
+        ]);
+        if let Some(value) = cancel_at_period_end {
+            data.insert(
+                "subscription_cancel_at_period_end".to_string(),
+                serde_json::json!(value),
+            );
+        }
+        if let Some(value) = current_period_end {
+            data.insert(
+                "subscription_current_period_end".to_string(),
+                serde_json::json!(value),
+            );
+        }
+        if let Some(value) = canceled_at {
+            data.insert(
+                "subscription_canceled_at".to_string(),
+                serde_json::json!(value),
+            );
+        }
+        let rows = db::update_by_filters_count(
+            ctx,
+            PURCHASES_TABLE,
+            vec![
+                Filter {
+                    field: "id".to_string(),
+                    operator: FilterOp::Equal,
+                    value: serde_json::json!(&purchase_id),
+                },
+                Filter {
+                    field: "subscription_event_created".to_string(),
+                    operator: FilterOp::Equal,
+                    value: serde_json::json!(current_created),
+                },
+                Filter {
+                    field: "subscription_status".to_string(),
+                    operator: FilterOp::Equal,
+                    value: serde_json::json!(&current_status),
+                },
+            ],
+            data,
+        )
+        .await?;
+        if rows == 1 {
+            return Ok(Some(get(ctx, &purchase_id).await?));
+        }
+        purchase = get(ctx, &purchase_id).await?;
     }
-    if let Some(value) = current_period_end {
-        data.insert(
-            "subscription_current_period_end".to_string(),
-            serde_json::json!(value),
-        );
-    }
-    if let Some(value) = canceled_at {
-        data.insert(
-            "subscription_canceled_at".to_string(),
-            serde_json::json!(value),
-        );
-    }
-    // Stripe deliveries can arrive out of order. The timestamp predicate is
-    // part of the write so two workers racing with old/new events cannot let
-    // the older projection win after both read the same previous row.
-    let mut filters = vec![
-        Filter {
-            field: "id".to_string(),
-            operator: FilterOp::Equal,
-            value: serde_json::json!(&purchase.id),
-        },
-        Filter {
-            field: "subscription_event_created".to_string(),
-            operator: FilterOp::LessEqual,
-            value: serde_json::json!(event_created),
-        },
-    ];
-    if let Some(expected) = expected_current_status {
-        filters.push(Filter {
-            field: "subscription_status".to_string(),
-            operator: FilterOp::Equal,
-            value: serde_json::json!(expected),
-        });
-    }
-    db::update_by_filters_count(ctx, PURCHASES_TABLE, filters, data).await?;
-    Ok(Some(get(ctx, &purchase.id).await?))
+    Err(WaferError::new(
+        wafer_run::ErrorCode::FailedPrecondition,
+        "commerce subscription state changed concurrently; retry the event",
+    ))
 }
 
 /// Atomic checkout claim: `pending` -> `checkout_started`. Returns rows

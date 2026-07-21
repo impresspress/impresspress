@@ -1,0 +1,6 @@
+- generic [active] [ref=f26e1]:
+  - heading "Field Guide — live embedded checkout test" [level=1] [ref=f26e2]
+  - paragraph [ref=f26e3]: This static page is served from a different origin (port 4178) than the Impresspress API (port 8093).
+  - generic [ref=f26e6]:
+    - heading "Field Guide (Test Download)" [level=2] [ref=f26e7]
+    - iframe [ref=f26e25]:

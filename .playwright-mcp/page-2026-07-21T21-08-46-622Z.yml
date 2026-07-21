@@ -1,0 +1,22 @@
+- generic [active] [ref=f26e1]:
+  - heading "Field Guide — live embedded checkout test" [level=1] [ref=f26e2]
+  - paragraph [ref=f26e3]: This static page is served from a different origin (port 4178) than the Impresspress API (port 8093).
+  - generic [ref=f26e6]:
+    - heading "Field Guide (Test Download)" [level=2] [ref=f26e7]
+    - generic [ref=f26e8]:
+      - generic [ref=f26e9]:
+        - generic [ref=f26e10]:
+          - text: Quantity
+          - spinbutton "Quantity" [ref=f26e11]: "1"
+        - generic [ref=f26e12]:
+          - text: Email
+          - textbox "Email" [ref=f26e13]
+      - generic [ref=f26e16]:
+        - generic [ref=f26e18]:
+          - generic [ref=f26e19]: Field Guide (Test Download)
+          - generic [ref=f26e20]: NZD 25.00
+        - generic [ref=f26e21]:
+          - generic [ref=f26e22]: Total
+          - generic [ref=f26e23]: NZD 25.00
+      - button "Open secure checkout" [ref=f26e14] [cursor=pointer]
+      - status [ref=f26e15]

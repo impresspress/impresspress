@@ -4,7 +4,6 @@ use wafer_core::clients::database::{self as db, Record};
 use wafer_run::{context::Context, ErrorCode, InputStream, Message, OutputStream, WaferError};
 
 use super::seller_policy;
-
 use crate::{
     blocks::products::{
         contracts::{OfferDefinitionRequest, PricingPreviewRequest},
@@ -135,7 +134,11 @@ pub(super) async fn handle_preview(
         Ok(offer) => offer,
         Err(error) => return domain_error(error),
     };
-    match offer_pricing::evaluate_offer(&managed.offer, &request) {
+    match offer_pricing::evaluate_offer(
+        &managed.offer,
+        &request,
+        offer_pricing::InputScope::Management,
+    ) {
         Ok(preview) => ok_json(&preview),
         Err(error) => err_bad_request(&format!("{}: {}", error.code, error)),
     }

@@ -19,6 +19,35 @@ use wafer_run::{ConfigVar, InputType};
 /// `WAFER_RUN_SHARED__*` entry.
 pub const DEPLOY_TOKEN_KEY: &str = "IMPRESSPRESS_DEPLOY_TOKEN";
 
+/// Shared config key: cross-origin origins allowed to call the API.
+///
+/// Fed to the `wafer-run/cors` middleware block's `allowed_origins` at boot
+/// (see `flows::register_site_main`). Empty by default: the CORS block fails
+/// closed and denies all cross-origin requests until an operator lists the
+/// static-storefront/SPA origins that embed the products widget. Comma-
+/// separated (e.g. `https://shop.example,https://www.shop.example`) or `*`.
+pub const CORS_ALLOWED_ORIGINS_KEY: &str = "WAFER_RUN_SHARED__CORS_ALLOWED_ORIGINS";
+
+/// Shared config key: extra Content-Security-Policy directives, merged over
+/// the security-headers block's hard baseline (which can only be *widened*,
+/// never weakened — see `wafer-block-security-headers::merge_csp`).
+///
+/// Defaults to [`DEFAULT_CSP_DIRECTIVES`] so embedded Stripe Checkout works
+/// out of the box on first-party pages. Operators extend this to allow
+/// additional embeds; the baseline `default-src`/`script-src` guarantees
+/// survive regardless of what is set here.
+pub const CSP_DIRECTIVES_KEY: &str = "WAFER_RUN_SHARED__CSP_DIRECTIVES";
+
+/// Default value for [`CSP_DIRECTIVES_KEY`] — the Stripe origins that
+/// embedded Checkout and Stripe.js require, per
+/// `docs/products-stripe-commerce.md`. Additive only: these widen
+/// `script-src`/`frame-src`/`connect-src` to the named Stripe hosts. Hosted
+/// Checkout and Payment Links are top-level navigations and need no CSP
+/// allowance; only embedded Stripe.js does.
+pub const DEFAULT_CSP_DIRECTIVES: &str = "script-src https://js.stripe.com; \
+     frame-src https://js.stripe.com https://hooks.stripe.com https://checkout.stripe.com; \
+     connect-src https://api.stripe.com https://r.stripe.com";
+
 /// Shared config variables readable by all blocks, writable only by admin.
 ///
 /// These are NOT owned by any block — they're platform-level settings.
@@ -140,6 +169,25 @@ pub fn shared_config_vars() -> Vec<ConfigVar> {
         )
         .name("Embedded Scripts")
         .input_type(InputType::Text),
+        ConfigVar::new(
+            CORS_ALLOWED_ORIGINS_KEY,
+            "Origins permitted to make cross-origin API requests (comma-\
+             separated, or `*`). Required for a static/cross-origin site to \
+             embed the products storefront widget. Empty denies all cross-\
+             origin requests (fail closed).",
+            "",
+        )
+        .name("CORS Allowed Origins")
+        .input_type(InputType::Text),
+        ConfigVar::new(
+            CSP_DIRECTIVES_KEY,
+            "Extra Content-Security-Policy directives, merged over a hard \
+             baseline that can only be widened. Defaults to the Stripe origins \
+             embedded Checkout requires; extend to allow additional embeds.",
+            DEFAULT_CSP_DIRECTIVES,
+        )
+        .name("CSP Directives")
+        .input_type(InputType::Text),
     ];
     // Auth-scoped shared vars (wafer-run/auth reads these; admin writes them).
     // Declared here rather than in the auth block's BlockInfo::config_keys because
@@ -249,7 +297,9 @@ pub fn key_block_prefix(key: &str) -> String {
 
 #[cfg(test)]
 mod shared_vars_tests {
-    use super::shared_config_vars;
+    use super::{
+        shared_config_vars, CORS_ALLOWED_ORIGINS_KEY, CSP_DIRECTIVES_KEY, DEFAULT_CSP_DIRECTIVES,
+    };
 
     /// Every shared var must be declared exactly once. A duplicate key means
     /// two competing defaults for the same setting — which one the seeder
@@ -266,6 +316,37 @@ mod shared_vars_tests {
                 seen.insert(v.key.clone()),
                 "duplicate shared config var declaration: {}",
                 v.key
+            );
+        }
+    }
+
+    /// The CORS and CSP middleware keys must be declared shared vars, and the
+    /// CSP default must carry the Stripe origins embedded Checkout needs — the
+    /// builder injects these into the wafer-run/cors and security-headers steps
+    /// (`flows::register_site_main`), which have no other config channel. If a
+    /// rename or a trimmed default slips through, cross-origin embeds break and
+    /// embedded Stripe.js is CSP-blocked, exactly the regression these keys fix.
+    #[test]
+    fn cors_and_csp_middleware_vars_are_declared_with_stripe_defaults() {
+        let vars = shared_config_vars();
+        let keys: std::collections::HashSet<&str> = vars.iter().map(|v| v.key.as_str()).collect();
+        assert!(
+            keys.contains(CORS_ALLOWED_ORIGINS_KEY),
+            "CORS allow-origins var must be a declared shared var"
+        );
+        let csp = vars
+            .iter()
+            .find(|v| v.key == CSP_DIRECTIVES_KEY)
+            .expect("CSP directives var must be a declared shared var");
+        assert_eq!(csp.default, DEFAULT_CSP_DIRECTIVES);
+        for host in [
+            "https://js.stripe.com",
+            "https://checkout.stripe.com",
+            "https://api.stripe.com",
+        ] {
+            assert!(
+                DEFAULT_CSP_DIRECTIVES.contains(host),
+                "default CSP must allow {host} for embedded Checkout"
             );
         }
     }

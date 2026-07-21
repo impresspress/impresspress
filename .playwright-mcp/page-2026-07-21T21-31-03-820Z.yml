@@ -1,0 +1,148 @@
+- generic [ref=f99e1]:
+  - main [ref=f99e187]:
+    - generic [ref=f99e188]:
+      - generic [ref=f99e189]: Impresspress Sandbox
+      - generic [ref=f99e199]:
+        - text: Impresspress Sandbox partners with Stripe for secure financial services.
+        - button "Return to Impresspress Sandbox" [ref=f99e201] [cursor=pointer]
+    - iframe [ref=f99e214]:
+      - generic [ref=f121e1]:
+        - generic [ref=f121e253]:
+          - log
+          - log
+        - generic [ref=f121e257]:
+          - button [ref=f121e329] [cursor=pointer]:
+            - progressbar [ref=f121e330]
+            - generic [ref=f121e265]: Business details
+          - generic [ref=f121e268]: You're using a test account with test data.
+          - generic [ref=f121e280]:
+            - generic [ref=f121e283]:
+              - generic [ref=f121e284]:
+                - heading [level=1] [ref=f121e331]: Business details
+                - generic [ref=f121e286]: Provide some details about how you earn or collect money with Impresspress Sandbox.
+              - generic [ref=f121e288]:
+                - generic [ref=f121e290]:
+                  - generic [ref=f121e291]:
+                    - generic [ref=f121e292]: Industry
+                    - generic [ref=f121e294]: Selecting your industry helps satisfy risk and compliance obligations. Select the option that best matches the goods or service your customers will buy.
+                  - button [expanded] [ref=f121e332] [cursor=pointer]:
+                    - generic [ref=f121e301]: Please select your industry…
+                - generic [ref=f121e305]:
+                  - generic [ref=f121e306]: Your website
+                  - generic [ref=f121e310]:
+                    - textbox [ref=f121e335]:
+                      - /placeholder: www.example.com
+                    - generic [ref=f121e319]:
+                      - generic [ref=f121e322]:
+                        - text: Share a website that shows the products or services you sell or promote. Placeholder or under-construction sites aren't supported.
+                        - link [ref=f121e336] [cursor=pointer]:
+                          - /url: https://support.stripe.com/questions/business-website-for-account-activation-faq
+                          - text: Learn more about the businesses we support
+                      - button [ref=f121e337] [cursor=pointer]: Don’t have a website? Add product description instead.
+            - button [ref=f121e338] [cursor=pointer]: Continue
+    - generic [ref=f99e216]:
+      - generic:
+        - generic:
+          - generic [ref=f99e217]:
+            - generic:
+              - generic:
+                - generic [ref=f99e218]: Powered by
+                - img "Stripe" [ref=f99e220]
+                - button "Information" [ref=f99e228] [cursor=pointer]
+          - list [ref=f99e234]:
+            - listitem [ref=f99e235]:
+              - link "Terms" [ref=f99e236] [cursor=pointer]:
+                - /url: https://stripe.com/US/connect-account/legal
+            - listitem [ref=f99e240]:
+              - link "Privacy" [ref=f99e241] [cursor=pointer]:
+                - /url: https://stripe.com/US/privacy
+          - generic [ref=f99e248]:
+            - button [ref=f99e249] [cursor=pointer]:
+              - generic [ref=f99e250]: English (NZ)
+            - combobox [ref=f99e256] [cursor=pointer]:
+              - option "Auto-detect"
+              - option "Bahasa Indonesia"
+              - option "čeština"
+              - option "Dansk"
+              - option "Deutsch"
+              - option "Eesti"
+              - option "English (Australia)"
+              - option "English (Canada)"
+              - option "English (India)"
+              - option "English (Ireland)"
+              - option "English (New Zealand)" [selected]
+              - option "English (Singapore)"
+              - option "English (United Kingdom)"
+              - option "English (United States)"
+              - option "Español (América Latina)"
+              - option "Español (España)"
+              - option "Français (Canada)"
+              - option "Français (France)"
+              - option "Hrvatski"
+              - option "Italiano"
+              - option "Latviešu"
+              - option "Lietuvių"
+              - option "Magyar"
+              - option "Malti"
+              - option "Melayu"
+              - option "Nederlands (Nederland)"
+              - option "Norsk bokmål"
+              - option "Polski"
+              - option "Português (Brasil)"
+              - option "Português (Portugal)"
+              - option "Română"
+              - option "Slovenčina"
+              - option "Slovenščina"
+              - option "Suomi"
+              - option "Svenska"
+              - option "Tiếng Việt"
+              - option "Türkçe"
+              - option "Wikang Filipino"
+              - option "Ελληνικά"
+              - option "български"
+              - option "ไทย"
+              - option "한국어"
+              - option "中文(简体)"
+              - option "日本語"
+              - option "繁體中文(台灣)"
+              - option "繁體中文(香港)"
+  - generic:
+    - iframe
+  - iframe [active] [ref=f99e257]:
+    - generic [ref=f124e3]:
+      - group [ref=f124e4]:
+        - combobox "Search…" [expanded] [active] [ref=f124e11]
+      - listbox "Suggestions" [ref=f124e12]:
+        - button "Most popular" [expanded] [ref=f124e13] [cursor=pointer]
+        - group "Most popular" [ref=f124e16]:
+          - option "Software" [ref=f124e17] [cursor=pointer]
+          - option "Clothing and accessories" [ref=f124e18] [cursor=pointer]
+          - option "Consulting services" [ref=f124e19] [cursor=pointer]
+        - button "Retail" [ref=f124e20] [cursor=pointer]
+        - group "Retail"
+        - button "Digital products" [ref=f124e23] [cursor=pointer]
+        - group "Digital products"
+        - button "Food and drink" [ref=f124e26] [cursor=pointer]
+        - group "Food and drink"
+        - button "Professional services" [ref=f124e29] [cursor=pointer]
+        - group "Professional services"
+        - button "Membership organisations" [ref=f124e32] [cursor=pointer]
+        - group "Membership organisations"
+        - button "Personal services" [ref=f124e35] [cursor=pointer]
+        - group "Personal services"
+        - button "Transportation" [ref=f124e38] [cursor=pointer]
+        - group "Transportation"
+        - button "Travel and lodging" [ref=f124e41] [cursor=pointer]
+        - group "Travel and lodging"
+        - button "Medical services" [ref=f124e44] [cursor=pointer]
+        - group "Medical services"
+        - button "Education" [ref=f124e47] [cursor=pointer]
+        - group "Education"
+        - button "Entertainment and recreation" [ref=f124e50] [cursor=pointer]
+        - group "Entertainment and recreation"
+        - button "Building services" [ref=f124e53] [cursor=pointer]
+        - group "Building services"
+        - button "Financial services" [ref=f124e56] [cursor=pointer]
+        - group "Financial services"
+        - button "Regulated and age-restricted products" [ref=f124e59] [cursor=pointer]
+        - group "Regulated and age-restricted products"

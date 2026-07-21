@@ -1000,27 +1000,30 @@ async fn handle_offer_checkout(
         (String::new(), String::new(), 0)
     };
 
-    let checkout_inputs = match request.preset_id.as_deref() {
+    let (checkout_inputs, input_scope) = match request.preset_id.as_deref() {
         Some(preset_id) => {
             if !request.inputs.is_empty() {
                 return err_bad_request("preset checkout cannot also provide runtime inputs");
             }
             match repo::checkout_presets::get_active(ctx, &offer.id, preset_id).await {
-                Ok(preset) => preset.inputs,
+                // Preset values were validated under the management scope when
+                // the preset was saved, so they may pin hidden or admin-only
+                // variables the buyer could never supply directly.
+                Ok(preset) => (preset.inputs, offer_pricing::InputScope::Management),
                 Err(error) if error.code == wafer_run::ErrorCode::NotFound => {
                     return err_not_found("Checkout preset not found");
                 }
                 Err(error) => return err_internal("Could not load checkout preset", error),
             }
         }
-        None => request.inputs.clone(),
+        None => (request.inputs.clone(), offer_pricing::InputScope::Public),
     };
     let pricing_request = PricingPreviewRequest {
         offer_id: request.offer_id.clone(),
         quantity: request.quantity,
         inputs: checkout_inputs,
     };
-    let mut preview = match offer_pricing::evaluate_offer(&offer, &pricing_request) {
+    let mut preview = match offer_pricing::evaluate_offer(&offer, &pricing_request, input_scope) {
         Ok(preview) => preview,
         Err(error) => return err_bad_request(&format!("{}: {}", error.code, error)),
     };
@@ -2245,6 +2248,9 @@ pub(crate) async fn create_payment_link(
             quantity: 1,
             inputs,
         },
+        // Payment Links are created on owner/admin routes from preset values
+        // that were validated under the management scope at save time.
+        offer_pricing::InputScope::Management,
     )
     .map_err(|error| {
         WaferError::new(
@@ -2484,11 +2490,31 @@ async fn reconcile_payment_link_session(
             "Payment Link Checkout Session is missing its id",
         ));
     }
-    if repo::purchases::find_by_session(ctx, session_id)
-        .await?
-        .is_some()
-    {
-        return Ok(());
+    // A redelivery may find an order a prior delivery already created for
+    // this session. Only a terminal order makes the redelivery a duplicate:
+    // an order still in its pre-completion state means the prior delivery
+    // crashed between order creation and completion, and returning Ok here
+    // would seal the event with a paid order stranded in `pending` forever.
+    // Such an order resumes the completion path below instead (every
+    // identity/amount cross-check still runs; only creation is skipped).
+    let mut resumed_order = None;
+    if let Some(existing) = repo::purchases::find_by_session(ctx, session_id).await? {
+        if matches!(existing.str_field("status"), "pending" | "checkout_started") {
+            resumed_order = Some(existing);
+        } else {
+            // The order already completed. Backfill the idempotent
+            // subscription-item snapshot in case the prior delivery crashed
+            // between the completion write and the snapshot.
+            let subscription = session
+                .get("subscription")
+                .and_then(|value| value.as_str())
+                .unwrap_or("");
+            if !subscription.is_empty() && existing.str_field("status") == "completed" {
+                repo::subscription_items::snapshot_from_purchase(ctx, &existing.id, subscription)
+                    .await?;
+            }
+            return Ok(());
+        }
     }
     let offer_id = session
         .pointer("/metadata/offer_id")
@@ -2699,35 +2725,43 @@ async fn reconcile_payment_link_session(
         .or_else(|| session.get("customer_email"))
         .and_then(|value| value.as_str())
         .unwrap_or("");
-    let order = repo::purchases::create_checkout_order(
-        ctx,
-        repo::purchases::CheckoutOrderSnapshot {
-            buyer_user_id: String::new(),
-            buyer_email: buyer_email.to_string(),
-            seller_account_id: stored.seller_account_id,
-            stripe_account_id: stored.stripe_account_id,
-            presentation: CheckoutPresentation::PaymentLink,
-            mode: offer.mode,
-            offer_id: offer.id.clone(),
-            offer_version: offer.version,
-            livemode: stored.livemode,
-            receipt_token_hash: String::new(),
-            receipt_token_expires_at: None,
-            allowed_shipping_amounts_minor: allowed_shipping_amounts(&offer),
-            amounts: pricing.amounts,
-            items,
-        },
-    )
-    .await?;
-    repo::purchases::update(
-        ctx,
-        &order.id,
-        HashMap::from([(
-            "provider_session_id".to_string(),
-            serde_json::json!(session_id),
-        )]),
-    )
-    .await?;
+    let order = match resumed_order {
+        // The order and its line items already exist from the failed prior
+        // delivery; only the completion transition and snapshot remain.
+        Some(order) => order,
+        None => {
+            let order = repo::purchases::create_checkout_order(
+                ctx,
+                repo::purchases::CheckoutOrderSnapshot {
+                    buyer_user_id: String::new(),
+                    buyer_email: buyer_email.to_string(),
+                    seller_account_id: stored.seller_account_id,
+                    stripe_account_id: stored.stripe_account_id,
+                    presentation: CheckoutPresentation::PaymentLink,
+                    mode: offer.mode,
+                    offer_id: offer.id.clone(),
+                    offer_version: offer.version,
+                    livemode: stored.livemode,
+                    receipt_token_hash: String::new(),
+                    receipt_token_expires_at: None,
+                    allowed_shipping_amounts_minor: allowed_shipping_amounts(&offer),
+                    amounts: pricing.amounts,
+                    items,
+                },
+            )
+            .await?;
+            repo::purchases::update(
+                ctx,
+                &order.id,
+                HashMap::from([(
+                    "provider_session_id".to_string(),
+                    serde_json::json!(session_id),
+                )]),
+            )
+            .await?;
+            order
+        }
+    };
     let payment_intent = session
         .get("payment_intent")
         .and_then(|value| value.as_str())
@@ -2776,6 +2810,44 @@ async fn reconcile_payment_link_session(
     Ok(())
 }
 
+/// Billing-period end for a subscription event. Stripe API versions from
+/// 2025-03 onward (including the pinned Clover version) removed
+/// `current_period_end` from the subscription top level and report it per
+/// item instead; prefer the top-level field when an older-shaped payload
+/// carries it, otherwise take the latest item period end.
+fn subscription_period_end(data_object: &serde_json::Value) -> Option<String> {
+    if let Some(value) = stripe_timestamp(data_object.get("current_period_end")) {
+        return Some(value);
+    }
+    data_object
+        .pointer("/items/data")?
+        .as_array()?
+        .iter()
+        .filter_map(|item| {
+            item.get("current_period_end")
+                .and_then(serde_json::Value::as_i64)
+        })
+        .max()
+        .and_then(|seconds| {
+            chrono::DateTime::<chrono::Utc>::from_timestamp(seconds, 0)
+                .map(|value| value.to_rfc3339())
+        })
+}
+
+/// Whether the subscription has a scheduled (end-of-period) cancellation.
+/// Newer API versions express the Billing Portal's "cancel at period end" as
+/// a concrete `cancel_at` timestamp while leaving the legacy
+/// `cancel_at_period_end` boolean false; either representation counts.
+fn subscription_cancels_at_period_end(data_object: &serde_json::Value) -> bool {
+    data_object
+        .get("cancel_at_period_end")
+        .and_then(serde_json::Value::as_bool)
+        .unwrap_or(false)
+        || data_object
+            .get("cancel_at")
+            .is_some_and(|value| !value.is_null())
+}
+
 fn stripe_timestamp(value: Option<&serde_json::Value>) -> Option<String> {
     match value {
         Some(serde_json::Value::String(value)) if !value.is_empty() => Some(value.clone()),
@@ -2805,6 +2877,22 @@ fn invoice_subscription_id(invoice: &serde_json::Value) -> String {
     } else {
         direct
     }
+}
+
+/// A subscription/invoice event that matches neither a commerce purchase nor
+/// the platform subscription table is indistinguishable from a delivery that
+/// raced ahead of its own `checkout.session.completed` (a commerce order only
+/// gains its `stripe_subscription_id` at completion). Sealing it as processed
+/// would silently drop the state change, so the webhook fails it as retryable
+/// instead: the lease/backoff machinery retries until the completion links
+/// the subscription, and a genuinely foreign subscription dead-letters after
+/// the bounded attempts (replayable from the admin queue).
+fn unmatched_subscription_message(stripe_subscription_id: &str) -> String {
+    format!(
+        "Stripe subscription {stripe_subscription_id} matches no commerce order or platform \
+         subscription; it may be an out-of-order delivery ahead of its checkout completion — \
+         retrying until the completion links it"
+    )
 }
 
 fn checkout_session_completion(
@@ -3104,18 +3192,37 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                         "Purchase {} not updated — already completed or refunded",
                         purchase_id
                     );
-                } else if !stripe_subscription_id.is_empty() {
-                    if let Err(error) = repo::subscription_items::snapshot_from_purchase(
-                        ctx,
-                        purchase_id,
-                        &stripe_subscription_id,
-                    )
-                    .await
-                    {
-                        fail_webhook!(
-                            err_internal("Failed to snapshot subscription items", error),
-                            "subscription item snapshot failed"
-                        );
+                }
+                if !stripe_subscription_id.is_empty() {
+                    // The snapshot is an idempotent upsert and must not be
+                    // tied to the completion transition: a crash between the
+                    // completion write and the snapshot means the redelivery
+                    // sees rows == 0, and skipping it then would strand the
+                    // subscription without its item snapshot forever.
+                    let snapshot_due = rows == 1
+                        || match repo::purchases::get(ctx, purchase_id).await {
+                            Ok(purchase) => purchase.str_field("status") == "completed",
+                            Err(error) => fail_webhook!(
+                                err_internal(
+                                    "Failed to load purchase for subscription snapshot",
+                                    error
+                                ),
+                                "subscription snapshot purchase lookup failed"
+                            ),
+                        };
+                    if snapshot_due {
+                        if let Err(error) = repo::subscription_items::snapshot_from_purchase(
+                            ctx,
+                            purchase_id,
+                            &stripe_subscription_id,
+                        )
+                        .await
+                        {
+                            fail_webhook!(
+                                err_internal("Failed to snapshot subscription items", error),
+                                "subscription item snapshot failed"
+                            );
+                        }
                     }
                 }
             } else if let Some(local_link_id) = data_object
@@ -3325,32 +3432,43 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                 .pointer("/items/data/0/price/lookup_key")
                 .or_else(|| data_object.pointer("/items/data/0/price/metadata/plan"))
                 .and_then(|v| v.as_str());
+            let mut commerce_matched = false;
             if !stripe_sub_id.is_empty() && !status.is_empty() {
-                let current_period_end = stripe_timestamp(data_object.get("current_period_end"));
+                let current_period_end = subscription_period_end(&data_object);
                 let canceled_at = stripe_timestamp(data_object.get("canceled_at"));
-                if let Err(error) = repo::purchases::sync_commerce_subscription(
+                match repo::purchases::sync_commerce_subscription(
                     ctx,
                     stripe_sub_id,
                     event_account,
                     event_livemode,
                     status,
                     current_period_end.as_deref(),
-                    Some(
-                        data_object
-                            .get("cancel_at_period_end")
-                            .and_then(|value| value.as_bool())
-                            .unwrap_or(false),
-                    ),
+                    Some(subscription_cancels_at_period_end(&data_object)),
                     canceled_at.as_deref(),
                     None,
                     event_created,
                 )
                 .await
                 {
-                    fail_webhook!(
+                    Ok(Some(_)) => commerce_matched = true,
+                    Ok(None) => {}
+                    Err(error) => fail_webhook!(
                         err_internal("Failed to synchronize commerce subscription", error),
                         "commerce subscription synchronization failed"
-                    );
+                    ),
+                }
+            }
+            if !commerce_matched && !stripe_sub_id.is_empty() {
+                match repo::subscriptions::platform_subscription_exists(ctx, stripe_sub_id).await {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        let message = unmatched_subscription_message(stripe_sub_id);
+                        fail_webhook!(err_internal_no_cause(&message), &message);
+                    }
+                    Err(error) => fail_webhook!(
+                        err_internal("Failed to resolve Stripe subscription ownership", error),
+                        "subscription ownership lookup failed"
+                    ),
                 }
             }
             if let Err(error) = repo::subscriptions::update_status_plan(
@@ -3395,7 +3513,7 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
         "invoice.paid" | "invoice.payment_succeeded" => {
             let stripe_sub_id = invoice_subscription_id(&data_object);
             if !stripe_sub_id.is_empty() {
-                if let Err(error) = repo::purchases::sync_commerce_subscription(
+                let commerce_matched = match repo::purchases::sync_commerce_subscription(
                     ctx,
                     &stripe_sub_id,
                     event_account,
@@ -3409,10 +3527,26 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                 )
                 .await
                 {
-                    fail_webhook!(
+                    Ok(purchase) => purchase.is_some(),
+                    Err(error) => fail_webhook!(
                         err_internal("Failed to recover commerce subscription", error),
                         "commerce subscription recovery write failed"
-                    );
+                    ),
+                };
+                if !commerce_matched {
+                    match repo::subscriptions::platform_subscription_exists(ctx, &stripe_sub_id)
+                        .await
+                    {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            let message = unmatched_subscription_message(&stripe_sub_id);
+                            fail_webhook!(err_internal_no_cause(&message), &message);
+                        }
+                        Err(error) => fail_webhook!(
+                            err_internal("Failed to resolve Stripe subscription ownership", error),
+                            "subscription ownership lookup failed"
+                        ),
+                    }
                 }
                 if let Err(error) = repo::subscriptions::recover_from_paid_invoice(
                     ctx,
@@ -3432,7 +3566,10 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
         "invoice.payment_failed" => {
             let stripe_sub_id = invoice_subscription_id(&data_object);
             if !stripe_sub_id.is_empty() {
-                if let Err(error) = repo::purchases::sync_commerce_subscription(
+                // The past-due write is derived from the invoice, not an
+                // authoritative subscription snapshot; the repo layer refuses
+                // to move a terminal (canceled) projection back to past_due.
+                let commerce_matched = match repo::purchases::sync_commerce_subscription(
                     ctx,
                     &stripe_sub_id,
                     event_account,
@@ -3446,10 +3583,26 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                 )
                 .await
                 {
-                    fail_webhook!(
+                    Ok(purchase) => purchase.is_some(),
+                    Err(error) => fail_webhook!(
                         err_internal("Failed to mark commerce subscription past due", error),
                         "commerce subscription past-due write failed"
-                    );
+                    ),
+                };
+                if !commerce_matched {
+                    match repo::subscriptions::platform_subscription_exists(ctx, &stripe_sub_id)
+                        .await
+                    {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            let message = unmatched_subscription_message(&stripe_sub_id);
+                            fail_webhook!(err_internal_no_cause(&message), &message);
+                        }
+                        Err(error) => fail_webhook!(
+                            err_internal("Failed to resolve Stripe subscription ownership", error),
+                            "subscription ownership lookup failed"
+                        ),
+                    }
                 }
                 // Billing-critical: surface DB failures so Stripe retries.
                 if let Err(e) =
@@ -3474,7 +3627,7 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
 
             if !stripe_sub_id.is_empty() {
                 let canceled_at = stripe_timestamp(data_object.get("canceled_at"));
-                if let Err(error) = repo::purchases::sync_commerce_subscription(
+                let commerce_matched = match repo::purchases::sync_commerce_subscription(
                     ctx,
                     stripe_sub_id,
                     event_account,
@@ -3488,10 +3641,26 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                 )
                 .await
                 {
-                    fail_webhook!(
+                    Ok(purchase) => purchase.is_some(),
+                    Err(error) => fail_webhook!(
                         err_internal("Failed to cancel commerce subscription", error),
                         "commerce subscription cancellation failed"
-                    );
+                    ),
+                };
+                if !commerce_matched {
+                    match repo::subscriptions::platform_subscription_exists(ctx, stripe_sub_id)
+                        .await
+                    {
+                        Ok(true) => {}
+                        Ok(false) => {
+                            let message = unmatched_subscription_message(stripe_sub_id);
+                            fail_webhook!(err_internal_no_cause(&message), &message);
+                        }
+                        Err(error) => fail_webhook!(
+                            err_internal("Failed to resolve Stripe subscription ownership", error),
+                            "subscription ownership lookup failed"
+                        ),
+                    }
                 }
             }
 
@@ -3817,9 +3986,27 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                 .to_string();
 
             if !payment_intent.is_empty() {
-                if let Ok(purchase) =
-                    repo::purchases::find_by_payment_intent(ctx, &payment_intent).await
-                {
+                // A refunded charge for a foreign PaymentIntent is a benign
+                // no-op, but only a definitive NotFound proves that. Any
+                // other lookup error must fail the delivery as retryable —
+                // sealing the event on a transient outage would permanently
+                // drop a dashboard-initiated refund locally.
+                let purchase =
+                    match repo::purchases::find_by_payment_intent(ctx, &payment_intent).await {
+                        Ok(purchase) => Some(purchase),
+                        Err(error) if error.code == wafer_run::ErrorCode::NotFound => {
+                            tracing::info!(
+                                payment_intent_id = %payment_intent,
+                                "Stripe refunded charge does not belong to a local commerce order"
+                            );
+                            None
+                        }
+                        Err(error) => fail_webhook!(
+                            err_internal("Failed to load refunded purchase", error),
+                            "refunded purchase lookup failed"
+                        ),
+                    };
+                if let Some(purchase) = purchase {
                     let purchase_account = purchase.str_field("stripe_account_id");
                     if (!event_account.is_empty() && event_account != purchase_account)
                         || (event_account.is_empty() && !purchase_account.is_empty())
@@ -4355,6 +4542,7 @@ mod tests {
                 quantity: 1,
                 inputs: Default::default(),
             },
+            offer_pricing::InputScope::Public,
         )
         .unwrap();
         let request: CheckoutRequest = serde_json::from_value(serde_json::json!({
@@ -4438,6 +4626,7 @@ mod tests {
                 quantity: 1,
                 inputs: Default::default(),
             },
+            offer_pricing::InputScope::Public,
         )
         .unwrap();
         let request: CheckoutRequest = serde_json::from_value(serde_json::json!({

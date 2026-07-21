@@ -16,8 +16,10 @@ mod tests;
 pub(crate) use handlers::{
     GROUPS_TABLE, GROUP_TEMPLATES_TABLE, PRODUCTS_TABLE, PRODUCT_TEMPLATES_TABLE, TYPES_TABLE,
 };
-pub(crate) use repo::purchases::{LINE_ITEMS_TABLE, PURCHASES_TABLE};
-pub(crate) use repo::variables::TABLE as VARIABLES_TABLE;
+pub(crate) use repo::{
+    purchases::{LINE_ITEMS_TABLE, PURCHASES_TABLE},
+    variables::TABLE as VARIABLES_TABLE,
+};
 use wafer_core::clients::config;
 use wafer_run::{BlockEndpoint, BlockInfo, ConfigVar, InputType, InstanceMode};
 

@@ -83,6 +83,9 @@ async fn validated_data(
             quantity: 1,
             inputs: request.inputs.clone(),
         },
+        // Presets are authored on owner/admin routes and may deliberately pin
+        // hidden or admin-only variables for a curated checkout link.
+        offer_pricing::InputScope::Management,
     )
     .map_err(|error| invalid(format!("invalid preset inputs: {error}")))?;
     let canonical = serde_json::to_string(&serde_json::json!({

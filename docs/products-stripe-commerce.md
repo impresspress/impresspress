@@ -126,7 +126,7 @@ Replace the placeholder with the Impresspress API origin and a public active pro
 ></impresspress-product>
 ```
 
-Set `presentation="embedded"` for embedded Checkout or `presentation="payment_link"` to open a reusable link. For a cross-origin static site, configure the API/deployment CORS policy for that site; `IMPRESSPRESS__PRODUCTS__CHECKOUT_ALLOWED_ORIGINS` separately controls redirect URL origins and is not a CORS switch.
+Set `presentation="embedded"` for embedded Checkout or `presentation="payment_link"` to open a reusable link. For a cross-origin static site, list its origin in `WAFER_RUN_SHARED__CORS_ALLOWED_ORIGINS` (comma-separated, or `*`) so the browser is allowed to read the storefront projection and create Checkout; it is empty by default and fails closed. `IMPRESSPRESS__PRODUCTS__CHECKOUT_ALLOWED_ORIGINS` is a separate control over redirect URL origins and is not a CORS switch.
 
 The custom element loads only the safe storefront projection, renders public variables, debounces authoritative previews, shows itemized totals, creates Checkout, and dispatches:
 
@@ -149,16 +149,15 @@ npm --prefix examples run test:products
 
 ### Content Security Policy
 
-For hosted Checkout/Payment Links, allow navigation to Stripe. Embedded Checkout dynamically loads `https://js.stripe.com/clover/stripe.js`; start with a policy that includes:
+Impresspress-served pages already ship a Content-Security-Policy that permits embedded Stripe.js: the `WAFER_RUN_SHARED__CSP_DIRECTIVES` shared config var defaults to the Stripe origins below and is merged over the security-headers block's restrictive baseline (it can only widen the policy, never weaken it). Hosted Checkout and Payment Links are top-level navigations and need no CSP allowance; only embedded Checkout, which dynamically loads `https://js.stripe.com/clover/stripe.js`, does. The default value is:
 
 ```text
-script-src 'self' https://js.stripe.com;
+script-src https://js.stripe.com;
 frame-src https://js.stripe.com https://hooks.stripe.com https://checkout.stripe.com;
-connect-src 'self' https://YOUR-IMPRESSPRESS-DOMAIN https://api.stripe.com https://r.stripe.com;
-img-src 'self' data: https:;
+connect-src https://api.stripe.com https://r.stripe.com;
 ```
 
-Deploy CSP in report-only mode first and narrow/extend it based on the Stripe payment methods you enable. Impresspress currently uses hosted Express Dashboard login links rather than Connect.js embedded components. If Connect embedded components are introduced, also allow Stripe's documented Connect.js script/frame/connect origins; do not add them pre-emptively to a tighter current policy.
+A **cross-origin** page that embeds the widget is served by *your* site, not Impresspress, so it must carry an equivalent CSP of its own (the `WAFER_RUN_SHARED__CSP_DIRECTIVES` default only governs Impresspress-served pages). Extend the var — never below the baseline — to allow additional embeds, and narrow/extend based on the Stripe payment methods you enable. Impresspress currently uses hosted Express Dashboard login links rather than Connect.js embedded components. If Connect embedded components are introduced, also allow Stripe's documented Connect.js script/frame/connect origins; do not add them pre-emptively to a tighter current policy.
 
 Stripe references: [Checkout security guidance](https://docs.stripe.com/security/guide), [Stripe.js](https://docs.stripe.com/js), and [Connect embedded components](https://docs.stripe.com/connect/get-started-connect-embedded-components).
 

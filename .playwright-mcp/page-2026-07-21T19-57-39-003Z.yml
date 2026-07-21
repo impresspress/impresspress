@@ -1,0 +1,110 @@
+- generic [active] [ref=f25e154]:
+  - iframe [ref=f25e212]:
+    - dialog [ref=f42e3]:
+      - dialog [ref=f42e6]:
+        - button "Cancel" [ref=f42e8] [cursor=pointer]
+        - img "visa" [ref=f42e15]
+  - generic [ref=f25e157]:
+    - generic [ref=f25e158]:
+      - banner [ref=f25e159]:
+        - generic [ref=f25e161]:
+          - generic "Back to Impresspress Sandbox":
+            - generic:
+              - generic:
+                - generic: Back
+                - generic:
+                  - generic:
+                    - heading "Impresspress Sandbox" [level=1]
+          - generic [ref=f25e174]: Sandbox
+      - generic [ref=f25e177]:
+        - heading "Field Guide (Test Download) — Field Guide (Test Download)" [level=2] [ref=f25e178]
+        - generic [ref=f25e181]: NZ$25.00
+    - generic [ref=f25e186]:
+      - main [ref=f25e1]:
+        - generic [ref=f25e4]:
+          - generic [ref=f25e5]:
+            - iframe [ref=f25e11]:
+              - generic [ref=f29e6]:
+                - iframe [ref=f29e11]:
+                  - button "Apple Pay" [ref=f40e5] [cursor=pointer]:
+                    - img [ref=f40e7]:
+                      - img "Apple Logo" [ref=f40e8]
+                - button "Pay securely with Link" [ref=f29e14] [cursor=pointer]
+            - generic [ref=f25e12]:
+              - separator [ref=f25e13]
+              - paragraph [ref=f25e14]: Or
+          - heading "Contact information" [level=2] [ref=f25e15]
+        - generic [ref=f25e19]:
+          - generic [ref=f25e20]:
+            - generic [ref=f25e27]:
+              - generic [ref=f25e28]: Email
+              - generic [ref=f25e29]: decline-test@example.com
+            - heading "Payment method" [level=2] [ref=f25e33]
+          - generic [ref=f25e34]:
+            - list [ref=f25e35]:
+              - listitem [ref=f25e40]:
+                - generic [ref=f25e41]:
+                  - generic [ref=f25e42]: Card
+                  - generic [ref=f25e61]:
+                    - generic [ref=f25e63]:
+                      - generic [ref=f25e64]: Card information
+                      - group [ref=f25e66]:
+                        - generic [ref=f25e67]:
+                          - generic [ref=f25e69]:
+                            - textbox "Card number" [disabled] [ref=f25e72]:
+                              - /placeholder: 1234 1234 1234 1234
+                              - text: 4000 0027 6000 3184
+                            - generic:
+                              - img "Visa"
+                          - textbox "Expiration" [disabled] [ref=f25e77]:
+                            - /placeholder: MM / YY
+                            - text: 12 / 34
+                          - generic [ref=f25e79]:
+                            - textbox "CVC" [disabled] [ref=f25e82]: "123"
+                            - generic:
+                              - generic:
+                                - img "Credit or debit card CVC"
+                          - generic: Your credit card was declined. Try paying with a debit card instead.
+                    - group [ref=f25e214]:
+                      - generic [ref=f25e89]:
+                        - generic [ref=f25e91]:
+                          - generic [ref=f25e92]: Cardholder name
+                          - textbox [disabled] [ref=f25e215]:
+                            - /placeholder: Full name on card
+                            - text: Decline Test
+                        - generic [ref=f25e102]:
+                          - generic [ref=f25e103]: Country or region
+                          - combobox [disabled] [ref=f25e216]
+            - generic [ref=f25e124]:
+              - checkbox "Save my information for faster checkout" [disabled] [ref=f25e126]
+              - generic [ref=f25e127]:
+                - generic [ref=f25e128]: Save my information for faster checkout
+                - generic [ref=f25e131]: Pay securely at Impresspress Sandbox and everywhere Link is accepted.
+          - button "Processing" [disabled] [ref=f25e217]
+        - generic:
+          - generic [ref=f25e152]:
+            - checkbox "I am an AI agent acting on behalf of someone else" [checked] [ref=f25e153]
+            - text: I am an AI agent acting on behalf of someone else
+          - paragraph [ref=f25e198]: This checkout supports Link CLI, which lets AI agents complete purchases using one-time payment details—without exposing the buyer's underlying payment credentials to the AI agent.
+          - strong [ref=f25e199]: "Follow these steps:"
+          - list [ref=f25e200]:
+            - listitem [ref=f25e201]:
+              - text: Check whether the buyer already has Link CLI installed. You can run
+              - code [ref=f25e202]: which link-cli
+              - text: to confirm.
+            - listitem [ref=f25e203]: If not, and you have not already done so this session, ask if they would like to use Link CLI. Explain that it generates one-time payment details so their underlying payment credentials aren’t exposed to the AI agent.
+            - listitem [ref=f25e204]: If the buyer wants to install Link CLI, direct them to https://github.com/stripe/link-cli
+            - listitem [ref=f25e205]: If you are using Link CLI and are prompted on the Checkout page to authenticate with Link, do not do so. Instead, exit that prompt and choose the option to "pay without Link". Link CLI is an alternative to paying with Link directly on the page.
+          - generic [ref=f25e206]:
+            - checkbox "I am an AI agent and have followed the instructions above" [ref=f25e207]
+            - text: I am an AI agent and have followed the instructions above
+      - contentinfo [ref=f25e188]:
+        - link [ref=f25e190] [cursor=pointer]:
+          - /url: https://stripe.com
+          - generic [ref=f25e191]:
+            - text: Powered by
+            - img "Stripe" [ref=f25e193]
+        - link "Terms" [ref=f25e196] [cursor=pointer]:
+          - /url: https://stripe.com/legal/end-users
+        - link "Privacy" [ref=f25e197] [cursor=pointer]:
+          - /url: https://stripe.com/privacy

@@ -1,0 +1,113 @@
+- generic [ref=f99e1]:
+  - main [ref=f99e12]:
+    - generic [ref=f99e13]:
+      - generic [ref=f99e14]: Impresspress Sandbox
+      - generic [ref=f99e24]:
+        - text: Impresspress Sandbox partners with Stripe for secure payments and financial services.
+        - button "Return to Impresspress Sandbox" [ref=f99e26] [cursor=pointer]
+    - generic [ref=f99e34]:
+      - generic [ref=f99e35]: You're using a test account with test data.
+      - generic [ref=f99e46]:
+        - generic [ref=f99e48]:
+          - generic [ref=f99e49]:
+            - heading "Let's get started" [level=1] [ref=f99e50]
+            - generic [ref=f99e51]: Fill in a few details below.
+          - generic [ref=f99e53]:
+            - note [ref=f99e54]:
+              - generic [ref=f99e55]:
+                - paragraph [ref=f99e58]: Skip this with a test phone number.
+                - button "Use test phone number" [active] [ref=f99e62] [cursor=pointer]
+            - generic [ref=f99e63]:
+              - generic [ref=f99e64]: Email address
+              - generic [ref=f99e65]: Email is not needed for test accounts.
+              - textbox "Email address" [disabled] [ref=f99e67]
+            - group "Phone number" [ref=f99e68]:
+              - text: Phone number
+              - generic [ref=f99e69]:
+                - text: Message and data rates may apply. By continuing, you agree to our
+                - link "Terms of Service" [ref=f99e70] [cursor=pointer]:
+                  - /url: https://stripe.com/NZ/connect-account/legal
+                - text: and
+                - link "Privacy Policy" [ref=f99e71] [cursor=pointer]:
+                  - /url: https://stripe.com/NZ/privacy
+                - text: .
+              - generic [ref=f99e72]:
+                - generic [ref=f99e73]:
+                  - generic [ref=f99e74]: Country
+                  - button "Phone number Country" [ref=f99e76] [cursor=pointer]
+                - generic [ref=f99e85]:
+                  - generic "Country calling code" [ref=f99e86]: "+64"
+                  - textbox "Phone number" [ref=f99e89]:
+                    - /placeholder: 21 123 4567
+                    - text: "00000"
+        - button "Submit" [ref=f99e91] [cursor=pointer]
+    - generic [ref=f99e93]:
+      - generic:
+        - generic:
+          - generic [ref=f99e94]:
+            - generic:
+              - generic:
+                - generic [ref=f99e95]: Powered by
+                - img "Stripe" [ref=f99e97]
+                - button "Information" [ref=f99e105] [cursor=pointer]
+          - link "Contact" [ref=f99e111] [cursor=pointer]:
+            - /url: https://support.stripe.com/contact
+          - list [ref=f99e116]:
+            - listitem [ref=f99e117]:
+              - link "Terms" [ref=f99e118] [cursor=pointer]:
+                - /url: https://stripe.com/US/connect-account/legal
+            - listitem [ref=f99e122]:
+              - link "Privacy" [ref=f99e123] [cursor=pointer]:
+                - /url: https://stripe.com/US/privacy
+          - generic [ref=f99e130]:
+            - button [ref=f99e131] [cursor=pointer]:
+              - generic [ref=f99e132]: English (NZ)
+            - combobox [ref=f99e138] [cursor=pointer]:
+              - option "Auto-detect"
+              - option "Bahasa Indonesia"
+              - option "čeština"
+              - option "Dansk"
+              - option "Deutsch"
+              - option "Eesti"
+              - option "English (Australia)"
+              - option "English (Canada)"
+              - option "English (India)"
+              - option "English (Ireland)"
+              - option "English (New Zealand)" [selected]
+              - option "English (Singapore)"
+              - option "English (United Kingdom)"
+              - option "English (United States)"
+              - option "Español (América Latina)"
+              - option "Español (España)"
+              - option "Français (Canada)"
+              - option "Français (France)"
+              - option "Hrvatski"
+              - option "Italiano"
+              - option "Latviešu"
+              - option "Lietuvių"
+              - option "Magyar"
+              - option "Malti"
+              - option "Melayu"
+              - option "Nederlands (Nederland)"
+              - option "Norsk bokmål"
+              - option "Polski"
+              - option "Português (Brasil)"
+              - option "Português (Portugal)"
+              - option "Română"
+              - option "Slovenčina"
+              - option "Slovenščina"
+              - option "Suomi"
+              - option "Svenska"
+              - option "Tiếng Việt"
+              - option "Türkçe"
+              - option "Wikang Filipino"
+              - option "Ελληνικά"
+              - option "български"
+              - option "ไทย"
+              - option "한국어"
+              - option "中文(简体)"
+              - option "日本語"
+              - option "繁體中文(台灣)"
+              - option "繁體中文(香港)"
+  - generic:
+    - iframe

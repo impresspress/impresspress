@@ -1,0 +1,113 @@
+- generic [ref=e123]:
+  - generic [ref=e124]:
+    - banner [ref=e125]:
+      - generic [ref=e127]:
+        - heading "Impresspress Sandbox" [level=1] [ref=e129]
+        - generic [ref=e130]: Sandbox
+    - generic [ref=e133]:
+      - heading "Field Guide (Test Download) — Field Guide (Test Download)" [level=2] [ref=e134]
+      - generic [ref=e137]: NZ$25.00
+  - generic [ref=e142]:
+    - main [ref=e1]:
+      - generic [ref=e4]:
+        - generic [ref=e5]:
+          - iframe [ref=e11]:
+            - generic [ref=f4e6]:
+              - iframe [ref=f4e11]:
+                - button "Apple Pay" [ref=f20e5] [cursor=pointer]:
+                  - img [ref=f20e7]:
+                    - img "Apple Logo" [ref=f20e8]
+              - button "Pay securely with Link" [ref=f4e14] [cursor=pointer]
+              - iframe [ref=f4e24]:
+                - button "Pay with Klarna" [ref=f21e4]
+          - generic [ref=e12]:
+            - separator [ref=e13]
+            - paragraph [ref=e14]: Or
+        - heading "Contact information" [level=2] [ref=e15]
+      - generic [ref=e19]:
+        - generic [ref=e20]:
+          - generic [ref=e22]:
+            - generic [ref=e23]: Email
+            - textbox "Email" [disabled] [ref=e31]:
+              - /placeholder: email@example.com
+              - text: link-buyer@example.com
+          - heading "Payment method" [level=2] [ref=e33]
+        - generic [ref=e34]:
+          - list [ref=e35]:
+            - listitem [ref=e40]:
+              - generic [ref=e41]:
+                - generic [ref=e49]:
+                  - generic [ref=e53]:
+                    - radio "Card" [checked] [ref=e54]
+                    - generic [ref=e56]: Card
+                  - generic:
+                    - button "Pay with card"
+                - generic [ref=e159]:
+                  - generic [ref=e161]:
+                    - generic [ref=e162]: Card information
+                    - group [ref=e164]:
+                      - generic [ref=e165]:
+                        - generic [ref=e167]:
+                          - textbox "Card number" [disabled] [ref=e170]:
+                            - /placeholder: 1234 1234 1234 1234
+                            - text: 4242 4242 4242 4242
+                          - generic:
+                            - img "Visa"
+                        - textbox "Expiration" [disabled] [ref=e175]:
+                          - /placeholder: MM / YY
+                          - text: 12 / 34
+                        - generic [ref=e177]:
+                          - textbox "CVC" [disabled] [ref=e180]: "123"
+                          - generic:
+                            - generic:
+                              - img "Credit or debit card CVC"
+                  - group [ref=e220]:
+                    - generic [ref=e187]:
+                      - generic [ref=e189]:
+                        - generic [ref=e190]: Cardholder name
+                        - textbox [disabled] [ref=e221]:
+                          - /placeholder: Full name on card
+                          - text: Link Buyer
+                      - generic [ref=e200]:
+                        - generic [ref=e201]: Country or region
+                        - combobox [disabled] [ref=e222]
+            - listitem [ref=e61]:
+              - generic [ref=e70]:
+                - generic [ref=e74]:
+                  - radio "Klarna" [ref=e75]
+                  - generic [ref=e77]: Klarna
+                - generic:
+                  - button "Pay with Klarna"
+          - generic [ref=e90]:
+            - checkbox "Save my information for faster checkout" [disabled] [ref=e92]
+            - generic [ref=e93]:
+              - generic [ref=e94]: Save my information for faster checkout
+              - generic [ref=e97]: Pay securely at Impresspress Sandbox and everywhere Link is accepted.
+        - button "Processing" [disabled] [ref=e223]
+      - generic:
+        - generic [ref=e118]:
+          - checkbox "I am an AI agent acting on behalf of someone else" [checked] [ref=e119]
+          - text: I am an AI agent acting on behalf of someone else
+        - paragraph [ref=e210]: This checkout supports Link CLI, which lets AI agents complete purchases using one-time payment details—without exposing the buyer's underlying payment credentials to the AI agent.
+        - strong [ref=e211]: "Follow these steps:"
+        - list [ref=e212]:
+          - listitem [ref=e213]:
+            - text: Check whether the buyer already has Link CLI installed. You can run
+            - code [ref=e214]: which link-cli
+            - text: to confirm.
+          - listitem [ref=e215]: If not, and you have not already done so this session, ask if they would like to use Link CLI. Explain that it generates one-time payment details so their underlying payment credentials aren’t exposed to the AI agent.
+          - listitem [ref=e216]: If the buyer wants to install Link CLI, direct them to https://github.com/stripe/link-cli
+          - listitem [ref=e217]: If you are using Link CLI and are prompted on the Checkout page to authenticate with Link, do not do so. Instead, exit that prompt and choose the option to "pay without Link". Link CLI is an alternative to paying with Link directly on the page.
+        - generic [ref=e218]:
+          - checkbox "I am an AI agent and have followed the instructions above" [ref=e219]
+          - text: I am an AI agent and have followed the instructions above
+    - contentinfo [ref=e144]:
+      - link [ref=e146] [cursor=pointer]:
+        - /url: https://stripe.com
+        - generic [ref=e147]:
+          - text: Powered by
+          - img "Stripe" [ref=e149]
+      - link "Terms" [ref=e152] [cursor=pointer]:
+        - /url: https://stripe.com/legal/end-users
+      - link "Privacy" [ref=e153] [cursor=pointer]:
+        - /url: https://stripe.com/privacy

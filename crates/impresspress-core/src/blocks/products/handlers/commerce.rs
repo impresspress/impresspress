@@ -263,7 +263,7 @@ pub(crate) async fn handle_preview(ctx: &dyn Context, input: InputStream) -> Out
         Err(error) if error.code == ErrorCode::NotFound => return err_not_found("Offer not found"),
         Err(error) => return err_internal("Could not load offer", error),
     };
-    match offer_pricing::evaluate_offer(&offer, &request) {
+    match offer_pricing::evaluate_offer(&offer, &request, offer_pricing::InputScope::Public) {
         Ok(preview) => ok_json(&preview),
         Err(error) => err_bad_request(&format!("{}: {}", error.code, error)),
     }

@@ -1,0 +1,169 @@
+- generic [ref=f47e2]:
+  - link "Skip to content" [ref=f47e3] [cursor=pointer]:
+    - /url: "#content"
+  - navigation "Primary" [ref=f47e4]:
+    - img "Impresspress" [ref=f47e6]
+    - generic [ref=f47e7]:
+      - generic [ref=f47e8]:
+        - generic [ref=f47e9]:
+          - generic [ref=f47e10]: Account
+          - list [ref=f47e11]:
+            - listitem [ref=f47e12]:
+              - link "Profile" [ref=f47e13] [cursor=pointer]:
+                - /url: /b/userportal/profile
+            - listitem [ref=f47e19]:
+              - link "Organizations" [ref=f47e20] [cursor=pointer]:
+                - /url: /b/auth/orgs
+            - listitem [ref=f47e28]:
+              - link "Sessions" [ref=f47e29] [cursor=pointer]:
+                - /url: /b/userportal/sessions
+            - listitem [ref=f47e34]:
+              - link "Security" [ref=f47e35] [cursor=pointer]:
+                - /url: /b/userportal/security
+        - generic [ref=f47e41]:
+          - generic [ref=f47e42]: Apps
+          - list [ref=f47e43]:
+            - listitem [ref=f47e44]:
+              - link "Products" [ref=f47e45] [cursor=pointer]:
+                - /url: /b/products/
+            - listitem [ref=f47e52]:
+              - link "Files" [ref=f47e53] [cursor=pointer]:
+                - /url: /b/storage/
+            - listitem [ref=f47e58]:
+              - link "Shares" [ref=f47e59] [cursor=pointer]:
+                - /url: /b/cloudstorage/
+            - listitem [ref=f47e65]:
+              - link "Legal" [ref=f47e66] [cursor=pointer]:
+                - /url: /b/legalpages/admin/privacy
+      - button "Toggle sidebar" [ref=f47e72] [cursor=pointer]
+    - button "A admin@example.com Admin" [ref=f47e77] [cursor=pointer]:
+      - generic [ref=f47e78]: A
+      - generic [ref=f47e79]:
+        - generic [ref=f47e80]: admin@example.com
+        - generic [ref=f47e81]: Admin
+  - generic [ref=f47e82]:
+    - banner [ref=f47e83]:
+      - heading "Products" [level=1] [ref=f47e84]
+      - button "Open command palette" [ref=f47e86] [cursor=pointer]:
+        - generic [ref=f47e87]: Quick jump
+        - generic [ref=f47e88]:
+          - generic [ref=f47e89]: Ctrl
+          - generic [ref=f47e90]: K
+    - generic [ref=f47e91]:
+      - generic [ref=f47e93]:
+        - link "Commerce" [ref=f47e94] [cursor=pointer]:
+          - /url: /b/products/
+        - link "Purchases" [ref=f47e100] [cursor=pointer]:
+          - /url: /b/products/my-purchases
+        - link "Selling" [ref=f47e105] [cursor=pointer]:
+          - /url: /b/products/selling
+      - link "← Back to my purchases" [ref=f47e110] [cursor=pointer]:
+        - /url: /b/products/my-purchases
+      - generic [ref=f47e111]:
+        - generic [ref=f47e112]:
+          - heading "Order 833bef52-d176-4bba-9730-1e63299a5bb8" [level=1] [ref=f47e113]
+          - paragraph [ref=f47e114]: Created 2026-07-21T10:39:22.531134482+00:00
+        - generic [ref=f47e115]:
+          - generic [ref=f47e116]: completed
+          - generic [ref=f47e117]: test
+      - generic [ref=f47e118]:
+        - generic [ref=f47e121]:
+          - generic [ref=f47e122]: Subtotal
+          - generic [ref=f47e123]: 9.00 NZD
+        - generic [ref=f47e131]:
+          - generic [ref=f47e132]: Discount
+          - generic [ref=f47e133]: 0.00 NZD
+        - generic [ref=f47e139]:
+          - generic [ref=f47e140]: Tax
+          - generic [ref=f47e141]: 0.00 NZD
+        - generic [ref=f47e148]:
+          - generic [ref=f47e149]: Shipping
+          - generic [ref=f47e150]: 0.00 NZD
+        - generic [ref=f47e158]:
+          - generic [ref=f47e159]: Total
+          - generic [ref=f47e160]: 9.00 NZD
+        - generic [ref=f47e166]:
+          - generic [ref=f47e167]: Refunded
+          - generic [ref=f47e168]: 0.00 NZD
+        - generic [ref=f47e175]:
+          - generic [ref=f47e176]: Platform fee
+          - generic [ref=f47e177]: 0.00 NZD
+      - generic [ref=f47e180]:
+        - heading "Timeline" [level=2] [ref=f47e182]
+        - generic [ref=f47e183]:
+          - generic [ref=f47e184]:
+            - paragraph [ref=f47e185]: Order created
+            - strong [ref=f47e186]: 2026-07-21T10:39:22.531134482+00:00
+          - generic [ref=f47e187]:
+            - paragraph [ref=f47e188]: Payment recorded
+            - strong [ref=f47e189]: 2026-07-21T10:39:49.869307254+00:00
+          - generic [ref=f47e190]:
+            - paragraph [ref=f47e191]: Approved
+            - strong [ref=f47e192]: 2026-07-21T10:39:49.869307254+00:00
+          - generic [ref=f47e193]:
+            - paragraph [ref=f47e194]: Subscription synced
+            - strong [ref=f47e195]: 2026-07-21T10:39:49.869307254+00:00
+      - generic [ref=f47e196]:
+        - heading "Items" [level=2] [ref=f47e198]
+        - table [ref=f47e201]:
+          - rowgroup [ref=f47e202]:
+            - row [ref=f47e203]:
+              - columnheader "Item" [ref=f47e204]
+              - columnheader "Quantity" [ref=f47e205]
+              - columnheader "Unit" [ref=f47e206]
+              - columnheader "Total" [ref=f47e207]
+              - columnheader "Configuration" [ref=f47e208]
+          - rowgroup [ref=f47e209]:
+            - row [ref=f47e210]:
+              - cell [ref=f47e211]:
+                - generic [ref=f47e212]:
+                  - strong [ref=f47e213]: Monthly Club (Test Subscription) — Monthly Club (Test Subscription)
+                  - text: 019f8442-21c3-7ed1-ab46-44e8c18a272b
+              - cell "1" [ref=f47e214]
+              - cell "9.00 NZD" [ref=f47e215]
+              - cell [ref=f47e216]:
+                - strong [ref=f47e217]: 9.00 NZD
+              - cell "—" [ref=f47e218]
+      - generic [ref=f47e219]:
+        - generic [ref=f47e220]:
+          - heading "Buyer and checkout" [level=2] [ref=f47e222]
+          - generic [ref=f47e223]:
+            - paragraph [ref=f47e224]:
+              - strong [ref=f47e225]: "Buyer:"
+              - text: 019f843d-61e7-7612-8d18-f3697e28ab86
+            - paragraph [ref=f47e226]:
+              - strong [ref=f47e227]: "Presentation:"
+              - text: hosted
+            - paragraph [ref=f47e228]:
+              - strong [ref=f47e229]: "Provider:"
+              - text: stripe
+            - paragraph [ref=f47e230]:
+              - strong [ref=f47e231]: "Seller account:"
+              - text: Platform
+        - generic [ref=f47e232]:
+          - heading "Provider reconciliation" [level=2] [ref=f47e234]
+          - generic [ref=f47e235]:
+            - paragraph [ref=f47e236]:
+              - strong [ref=f47e237]: "State:"
+              - generic [ref=f47e238]: reconciled
+            - paragraph [ref=f47e239]:
+              - strong [ref=f47e240]: "Checkout Session:"
+              - code [ref=f47e241]: cs_test_a1oXxzGGT7K14wpiJvG23TYTRjeUhzKKtDxAgRB9eTiBbq2gWD6Nu5JmwH
+            - paragraph [ref=f47e242]:
+              - strong [ref=f47e243]: "Customer:"
+              - code [ref=f47e244]: cus_UvRzup1QRhFauy
+      - generic [ref=f47e245]:
+        - generic [ref=f47e246]:
+          - generic [ref=f47e247]:
+            - heading "Subscription" [level=2] [ref=f47e248]
+            - paragraph [ref=f47e249]:
+              - code [ref=f47e250]: sub_1Tvb5T5cUeypfV8EFSeso5ho
+          - generic [ref=f47e251]: active
+        - generic [ref=f47e252]:
+          - paragraph [ref=f47e253]:
+            - strong [ref=f47e254]: "Current period ends:"
+            - text: Not reported yet
+          - paragraph [ref=f47e255]:
+            - strong [ref=f47e256]: "Cancels at period end:"
+            - text: "No"
+          - button "Manage subscription and billing" [ref=f47e257] [cursor=pointer]

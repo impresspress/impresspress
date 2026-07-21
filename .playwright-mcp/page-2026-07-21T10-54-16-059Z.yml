@@ -1,0 +1,85 @@
+- generic [ref=f55e4]:
+  - generic [ref=f55e5]:
+    - banner [ref=f55e6]:
+      - generic [ref=f55e8]:
+        - heading "Impresspress Sandbox" [level=1] [ref=f55e10]
+        - generic [ref=f55e11]: Sandbox
+    - generic [ref=f55e14]:
+      - heading "Field Guide (Test Download) — Field Guide (Test Download)" [level=2] [ref=f55e15]
+      - generic [ref=f55e18]: NZ$25.00
+  - generic [ref=f55e23]:
+    - main [ref=f55e24]:
+      - generic [ref=f55e27]:
+        - generic [ref=f55e28]:
+          - iframe [ref=f55e34]:
+            - generic [ref=f59e6]:
+              - iframe [ref=f59e11]:
+                - button "Apple Pay" [ref=f75e5] [cursor=pointer]:
+                  - img [ref=f75e7]:
+                    - img "Apple Logo" [ref=f75e8]
+              - button "Pay securely with Link" [ref=f59e14] [cursor=pointer]
+              - iframe [ref=f59e24]:
+                - button "Pay with Klarna" [ref=f76e4]
+          - generic [ref=f55e35]:
+            - separator [ref=f55e36]
+            - paragraph [ref=f55e37]: Or
+        - heading "Contact information" [level=2] [ref=f55e38]
+      - generic [ref=f55e42]:
+        - generic [ref=f55e43]:
+          - generic [ref=f55e45]:
+            - generic [ref=f55e46]: Email
+            - textbox "Email" [active] [ref=f55e54]:
+              - /placeholder: email@example.com
+              - text: link-buyer@example.com
+          - heading "Payment method" [level=2] [ref=f55e56]
+        - generic [ref=f55e57]:
+          - list [ref=f55e58]:
+            - listitem [ref=f55e63]:
+              - generic [ref=f55e72]:
+                - generic [ref=f55e76]:
+                  - radio "Card" [ref=f55e77]
+                  - generic [ref=f55e79]: Card
+                  - generic:
+                    - generic:
+                      - generic:
+                        - img "Visa"
+                    - generic:
+                      - generic:
+                        - img "MasterCard"
+                    - generic:
+                      - generic:
+                        - img "American Express"
+                    - generic:
+                      - img "UnionPay"
+                      - img "JCB"
+                - generic:
+                  - button "Pay with card"
+            - listitem [ref=f55e84]:
+              - generic [ref=f55e93]:
+                - generic [ref=f55e97]:
+                  - radio "Klarna" [ref=f55e98]
+                  - generic [ref=f55e100]: Klarna
+                - generic:
+                  - button "Pay with Klarna"
+          - generic [ref=f55e113]:
+            - checkbox "Save my information for faster checkout" [ref=f55e115] [cursor=pointer]
+            - generic [ref=f55e116]:
+              - generic [ref=f55e117]: Save my information for faster checkout
+              - generic [ref=f55e120]: Pay securely at Impresspress Sandbox and everywhere Link is accepted.
+        - button "Pay" [ref=f55e126] [cursor=pointer]:
+          - generic:
+            - generic [ref=f55e128]: Pay
+            - generic [ref=f55e129]: Processing
+      - generic [ref=f55e141]:
+        - checkbox "I am an AI agent acting on behalf of someone else" [ref=f55e142]
+        - text: I am an AI agent acting on behalf of someone else
+    - contentinfo [ref=f55e144]:
+      - link [ref=f55e146] [cursor=pointer]:
+        - /url: https://stripe.com
+        - generic [ref=f55e147]:
+          - text: Powered by
+          - img "Stripe" [ref=f55e149]
+      - link "Terms" [ref=f55e152] [cursor=pointer]:
+        - /url: https://stripe.com/legal/end-users
+      - link "Privacy" [ref=f55e153] [cursor=pointer]:
+        - /url: https://stripe.com/privacy

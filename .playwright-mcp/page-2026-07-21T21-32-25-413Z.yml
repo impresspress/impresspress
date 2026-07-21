@@ -1,0 +1,119 @@
+- generic [ref=f99e1]:
+  - main [ref=f99e187]:
+    - generic [ref=f99e188]:
+      - generic [ref=f99e189]: Impresspress Sandbox
+      - generic [ref=f99e199]:
+        - text: Impresspress Sandbox partners with Stripe for secure financial services.
+        - button "Return to Impresspress Sandbox" [ref=f99e201] [cursor=pointer]
+    - iframe [active] [ref=f99e214]:
+      - generic [ref=f121e1]:
+        - generic [ref=f121e253]:
+          - log
+          - log
+        - generic [ref=f121e365]:
+          - button "62.5% Bank details" [ref=f121e368] [cursor=pointer]:
+            - progressbar "62.5%" [ref=f121e369]
+            - generic [ref=f121e373]: Bank details
+          - generic [ref=f121e376]: You're using a test account with test data.
+          - generic [ref=f121e392]:
+            - generic [ref=f121e393]:
+              - heading "Add an account for payouts" [level=1] [ref=f121e394]
+              - generic [ref=f121e395]: We'll send earnings you receive to this account.
+            - generic [ref=f121e398]:
+              - generic [ref=f121e404]:
+                - generic [ref=f121e405]: You're using a test account.
+                - button "Use test account" [ref=f121e410] [cursor=pointer]
+              - generic [ref=f121e422]:
+                - generic [ref=f121e425]:
+                  - generic [ref=f121e426]: "110000000"
+                  - generic [ref=f121e427]: ROUTING
+                - generic [ref=f121e434]: "000123456789"
+                - generic [ref=f121e438]: "1234"
+              - generic [ref=f121e440]:
+                - generic [ref=f121e441]: Routing number
+                - textbox "Routing number" [active] [ref=f121e450]:
+                  - /placeholder: "110000000"
+              - generic [ref=f121e451]:
+                - generic [ref=f121e452]: Account number
+                - generic [ref=f121e455]:
+                  - textbox "Account number" [ref=f121e461]:
+                    - /placeholder: "000123456789"
+                  - generic [ref=f121e462]: Your bank account must be a checking account.
+              - generic [ref=f121e464]:
+                - generic [ref=f121e465]: Confirm account number
+                - textbox "Confirm account number" [ref=f121e474]:
+                  - /placeholder: "000123456789"
+              - generic [ref=f121e476]:
+                - text: By adding your bank account to your Stripe account and clicking below, you authorise Stripe to debit your bank as described in these
+                - link "terms" [ref=f121e477] [cursor=pointer]:
+                  - /url: https://stripe.com/en-us/legal/bank-debit-authorizations
+                - text: .
+              - button "Continue" [disabled] [ref=f121e482]
+    - generic [ref=f99e216]:
+      - generic:
+        - generic:
+          - generic [ref=f99e217]:
+            - generic:
+              - generic:
+                - generic [ref=f99e218]: Powered by
+                - img "Stripe" [ref=f99e220]
+                - button "Information" [ref=f99e228] [cursor=pointer]
+          - list [ref=f99e234]:
+            - listitem [ref=f99e235]:
+              - link "Terms" [ref=f99e236] [cursor=pointer]:
+                - /url: https://stripe.com/US/connect-account/legal
+            - listitem [ref=f99e240]:
+              - link "Privacy" [ref=f99e241] [cursor=pointer]:
+                - /url: https://stripe.com/US/privacy
+          - generic [ref=f99e248]:
+            - button [ref=f99e249] [cursor=pointer]:
+              - generic [ref=f99e250]: English (NZ)
+            - combobox [ref=f99e256] [cursor=pointer]:
+              - option "Auto-detect"
+              - option "Bahasa Indonesia"
+              - option "čeština"
+              - option "Dansk"
+              - option "Deutsch"
+              - option "Eesti"
+              - option "English (Australia)"
+              - option "English (Canada)"
+              - option "English (India)"
+              - option "English (Ireland)"
+              - option "English (New Zealand)" [selected]
+              - option "English (Singapore)"
+              - option "English (United Kingdom)"
+              - option "English (United States)"
+              - option "Español (América Latina)"
+              - option "Español (España)"
+              - option "Français (Canada)"
+              - option "Français (France)"
+              - option "Hrvatski"
+              - option "Italiano"
+              - option "Latviešu"
+              - option "Lietuvių"
+              - option "Magyar"
+              - option "Malti"
+              - option "Melayu"
+              - option "Nederlands (Nederland)"
+              - option "Norsk bokmål"
+              - option "Polski"
+              - option "Português (Brasil)"
+              - option "Português (Portugal)"
+              - option "Română"
+              - option "Slovenčina"
+              - option "Slovenščina"
+              - option "Suomi"
+              - option "Svenska"
+              - option "Tiếng Việt"
+              - option "Türkçe"
+              - option "Wikang Filipino"
+              - option "Ελληνικά"
+              - option "български"
+              - option "ไทย"
+              - option "한국어"
+              - option "中文(简体)"
+              - option "日本語"
+              - option "繁體中文(台灣)"
+              - option "繁體中文(香港)"
+  - generic:
+    - iframe

@@ -1,0 +1,25 @@
+- generic [ref=f96e2]:
+  - complementary [ref=f96e3]:
+    - heading "Impresspress" [level=1] [ref=f96e4]
+    - paragraph [ref=f96e5]: Create your account.
+  - main [ref=f96e6]:
+    - generic [ref=f96e7]:
+      - generic [ref=f96e8]:
+        - img "Impresspress" [ref=f96e9]
+        - paragraph [ref=f96e10]: Create your Impresspress account
+      - generic [ref=f96e11]:
+        - generic [ref=f96e12]:
+          - generic [ref=f96e13]: Email
+          - textbox "Email" [ref=f96e14]:
+            - /placeholder: you@example.com
+        - generic [ref=f96e15]:
+          - generic [ref=f96e16]: Password
+          - generic [ref=f96e17]:
+            - textbox "Password" [ref=f96e18]:
+              - /placeholder: Min 8 characters
+            - button "Toggle password visibility" [ref=f96e19] [cursor=pointer]
+        - button "Create Account" [ref=f96e25] [cursor=pointer]
+      - generic [ref=f96e26]:
+        - text: Already have an account?
+        - link "Sign in" [ref=f96e27] [cursor=pointer]:
+          - /url: /b/auth/login

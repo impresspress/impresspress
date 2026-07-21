@@ -1,0 +1,123 @@
+- generic [ref=f6e2]:
+  - link "Skip to content" [ref=f6e3] [cursor=pointer]:
+    - /url: "#content"
+  - navigation "Primary" [ref=f6e4]:
+    - img "Impresspress" [ref=f6e6]
+    - generic [ref=f6e7]:
+      - generic [ref=f6e8]:
+        - generic [ref=f6e9]:
+          - generic [ref=f6e10]: Workspace
+          - list [ref=f6e11]:
+            - listitem [ref=f6e12]:
+              - link "Dashboard" [ref=f6e13] [cursor=pointer]:
+                - /url: /b/admin/
+            - listitem [ref=f6e21]:
+              - link "Users" [ref=f6e22] [cursor=pointer]:
+                - /url: /b/admin/users
+        - generic [ref=f6e30]:
+          - generic [ref=f6e31]: Data
+          - list [ref=f6e32]:
+            - listitem [ref=f6e33]:
+              - link "Storage" [ref=f6e34] [cursor=pointer]:
+                - /url: /b/storage/admin/
+            - listitem [ref=f6e39]:
+              - link "Database" [ref=f6e40] [cursor=pointer]:
+                - /url: /b/admin/database
+            - listitem [ref=f6e46]:
+              - link "Vector indexes" [ref=f6e47] [cursor=pointer]:
+                - /url: /b/vector/
+        - generic [ref=f6e55]:
+          - generic [ref=f6e56]: Communication
+          - list [ref=f6e57]:
+            - listitem [ref=f6e58]:
+              - link "Messages" [ref=f6e59] [cursor=pointer]:
+                - /url: /b/messages/
+            - listitem [ref=f6e65]:
+              - link "LLM" [ref=f6e66] [cursor=pointer]:
+                - /url: /b/llm/
+        - generic [ref=f6e72]:
+          - generic [ref=f6e73]: Commerce
+          - list [ref=f6e74]:
+            - listitem [ref=f6e75]:
+              - link "Products" [ref=f6e76] [cursor=pointer]:
+                - /url: /b/products/admin/
+        - generic [ref=f6e83]:
+          - generic [ref=f6e84]: System
+          - list [ref=f6e85]:
+            - listitem [ref=f6e86]:
+              - link "Blocks" [ref=f6e87] [cursor=pointer]:
+                - /url: /b/admin/blocks
+            - listitem [ref=f6e94]:
+              - link "Logs" [ref=f6e95] [cursor=pointer]:
+                - /url: /b/admin/logs
+            - listitem [ref=f6e101]:
+              - link "Settings" [ref=f6e102] [cursor=pointer]:
+                - /url: /b/admin/settings/email
+      - button "Toggle sidebar" [ref=f6e108] [cursor=pointer]
+    - button "A admin@example.com Admin" [ref=f6e113] [cursor=pointer]:
+      - generic [ref=f6e114]: A
+      - generic [ref=f6e115]:
+        - generic [ref=f6e116]: admin@example.com
+        - generic [ref=f6e117]: Admin
+  - generic [ref=f6e118]:
+    - banner [ref=f6e119]:
+      - heading "Products" [level=1] [ref=f6e120]
+      - button "Open command palette" [ref=f6e122] [cursor=pointer]:
+        - generic [ref=f6e123]: Quick jump
+        - generic [ref=f6e124]:
+          - generic [ref=f6e125]: Ctrl
+          - generic [ref=f6e126]: K
+    - generic [ref=f6e127]:
+      - generic [ref=f6e129]:
+        - link "Overview" [ref=f6e130] [cursor=pointer]:
+          - /url: /b/products/admin/
+        - link "Products" [ref=f6e136] [cursor=pointer]:
+          - /url: /b/products/admin/manage
+        - link "Groups" [ref=f6e141] [cursor=pointer]:
+          - /url: /b/products/admin/groups
+        - link "Orders" [ref=f6e144] [cursor=pointer]:
+          - /url: /b/products/admin/purchases
+        - link "Sellers" [ref=f6e149] [cursor=pointer]:
+          - /url: /b/products/admin/sellers
+        - link "Stripe" [ref=f6e154] [cursor=pointer]:
+          - /url: /b/products/admin/stripe
+        - link "Settings" [ref=f6e157] [cursor=pointer]:
+          - /url: /b/products/admin/settings
+      - generic [ref=f6e161]:
+        - generic [ref=f6e162]:
+          - heading "Create product" [level=2] [ref=f6e163]
+          - paragraph [ref=f6e164]: Build a clear checkout for a simple item, subscription, booking, or configurable service
+        - link "Cancel" [ref=f6e166] [cursor=pointer]:
+          - /url: /b/products/admin/manage
+      - navigation "Product setup progress" [ref=f6e167]:
+        - list [ref=f6e168]:
+          - listitem [ref=f6e169]: 1. Type
+          - listitem [ref=f6e170]: 2. Details
+          - listitem [ref=f6e171]: 3. Pricing
+          - listitem [ref=f6e172]: 4. Checkout
+          - listitem [ref=f6e173]: 5. Review
+      - generic [ref=f6e174]:
+        - generic [ref=f6e175]:
+          - generic [ref=f6e177]:
+            - heading "Choose a starting template" [level=3] [ref=f6e178]
+            - paragraph [ref=f6e179]: Every template remains fully editable before it is saved.
+          - group "Product template" [ref=f6e181]:
+            - generic [ref=f6e183]:
+              - generic [ref=f6e184] [cursor=pointer]:
+                - radio "Simple product One price paid once. Good for a standard physical or digital item." [checked] [ref=f6e185]
+                - strong [ref=f6e186]: Simple product
+                - generic [ref=f6e187]: One price paid once. Good for a standard physical or digital item.
+              - generic [ref=f6e188] [cursor=pointer]:
+                - radio "Simple subscription One recurring price with an interval and optional trial." [ref=f6e189]
+                - strong [ref=f6e190]: Simple subscription
+                - generic [ref=f6e191]: One recurring price with an interval and optional trial.
+              - generic [ref=f6e192] [cursor=pointer]:
+                - radio "Configurable product Bookings, customer choices, quantities, and conditional add-ons." [ref=f6e193]
+                - strong [ref=f6e194]: Configurable product
+                - generic [ref=f6e195]: Bookings, customer choices, quantities, and conditional add-ons.
+              - generic [ref=f6e196] [cursor=pointer]:
+                - radio "Configurable subscription Recurring plans driven by quantities, dates, choices, and conditions." [ref=f6e197]
+                - strong [ref=f6e198]: Configurable subscription
+                - generic [ref=f6e199]: Recurring plans driven by quantities, dates, choices, and conditions.
+        - text: "* * *"
+        - button "Continue" [ref=f6e202] [cursor=pointer]

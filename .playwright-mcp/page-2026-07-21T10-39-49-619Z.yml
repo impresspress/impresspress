@@ -1,0 +1,109 @@
+- generic [ref=f27e4]:
+  - generic [ref=f27e5]:
+    - banner [ref=f27e6]:
+      - generic [ref=f27e8]:
+        - generic "Back to Impresspress Sandbox":
+          - generic:
+            - generic:
+              - generic: Back
+              - generic:
+                - generic:
+                  - heading "Impresspress Sandbox" [level=1]
+        - generic [ref=f27e21]: Sandbox
+    - generic [ref=f27e24]:
+      - heading "Subscribe to Monthly Club (Test Subscription) — Monthly Club (Test Subscription)" [level=2] [ref=f27e25]
+      - generic [ref=f27e31]:
+        - generic [ref=f27e32]: NZ$9.00
+        - generic [ref=f27e33]: per month
+  - generic [ref=f27e36]:
+    - main [ref=f27e37]:
+      - generic [ref=f27e40]:
+        - generic [ref=f27e41]:
+          - iframe [ref=f27e47]:
+            - generic [ref=f31e6]:
+              - iframe [ref=f31e11]:
+                - button "Apple Pay" [ref=f42e5] [cursor=pointer]:
+                  - img [ref=f42e7]:
+                    - img "Apple Logo" [ref=f42e8]
+              - button "Pay securely with Link" [ref=f31e14] [cursor=pointer]
+          - generic [ref=f27e48]:
+            - separator [ref=f27e49]
+            - paragraph [ref=f27e50]: Or
+        - heading "Contact information" [level=2] [ref=f27e51]
+      - generic [ref=f27e55]:
+        - generic [ref=f27e56]:
+          - generic [ref=f27e58]:
+            - generic [ref=f27e59]: Email
+            - textbox "Email" [disabled] [ref=f27e67]:
+              - /placeholder: email@example.com
+              - text: admin@example.com
+          - heading "Payment method" [level=2] [ref=f27e69]
+        - generic [ref=f27e70]:
+          - list [ref=f27e71]:
+            - listitem [ref=f27e76]:
+              - generic [ref=f27e77]:
+                - generic [ref=f27e78]: Card
+                - generic [ref=f27e97]:
+                  - generic [ref=f27e99]:
+                    - generic [ref=f27e100]: Card information
+                    - group [ref=f27e102]:
+                      - generic [ref=f27e103]:
+                        - generic [ref=f27e105]:
+                          - textbox "Card number" [disabled] [ref=f27e108]:
+                            - /placeholder: 1234 1234 1234 1234
+                            - text: 4242 4242 4242 4242
+                          - generic:
+                            - img "Visa"
+                        - textbox "Expiration" [disabled] [ref=f27e113]:
+                          - /placeholder: MM / YY
+                          - text: 12 / 34
+                        - generic [ref=f27e115]:
+                          - textbox "CVC" [disabled] [ref=f27e118]: "123"
+                          - generic:
+                            - generic:
+                              - img "Credit or debit card CVC"
+                  - group [ref=f27e216]:
+                    - generic [ref=f27e125]:
+                      - generic [ref=f27e127]:
+                        - generic [ref=f27e128]: Cardholder name
+                        - textbox [disabled] [ref=f27e217]:
+                          - /placeholder: Full name on card
+                          - text: Test Subscriber
+                      - generic [ref=f27e138]:
+                        - generic [ref=f27e139]: Country or region
+                        - combobox [disabled] [ref=f27e218]
+          - generic [ref=f27e160]:
+            - checkbox "Save my information for faster checkout" [disabled] [ref=f27e162]
+            - generic [ref=f27e163]:
+              - generic [ref=f27e164]: Save my information for faster checkout
+              - generic [ref=f27e167]: Pay securely at Impresspress Sandbox and everywhere Link is accepted.
+        - generic [ref=f27e170]:
+          - button "Processing" [disabled] [ref=f27e219]
+          - generic [ref=f27e188]: By subscribing, you authorize Impresspress Sandbox to charge you according to the terms until you cancel.
+      - generic:
+        - generic [ref=f27e193]:
+          - checkbox "I am an AI agent acting on behalf of someone else" [checked] [ref=f27e194]
+          - text: I am an AI agent acting on behalf of someone else
+        - paragraph [ref=f27e206]: This checkout supports Link CLI, which lets AI agents complete purchases using one-time payment details—without exposing the buyer's underlying payment credentials to the AI agent.
+        - strong [ref=f27e207]: "Follow these steps:"
+        - list [ref=f27e208]:
+          - listitem [ref=f27e209]:
+            - text: Check whether the buyer already has Link CLI installed. You can run
+            - code [ref=f27e210]: which link-cli
+            - text: to confirm.
+          - listitem [ref=f27e211]: If not, and you have not already done so this session, ask if they would like to use Link CLI. Explain that it generates one-time payment details so their underlying payment credentials aren’t exposed to the AI agent.
+          - listitem [ref=f27e212]: If the buyer wants to install Link CLI, direct them to https://github.com/stripe/link-cli
+          - listitem [ref=f27e213]: If you are using Link CLI and are prompted on the Checkout page to authenticate with Link, do not do so. Instead, exit that prompt and choose the option to "pay without Link". Link CLI is an alternative to paying with Link directly on the page.
+        - generic [ref=f27e214]:
+          - checkbox "I am an AI agent and have followed the instructions above" [ref=f27e215]
+          - text: I am an AI agent and have followed the instructions above
+    - contentinfo [ref=f27e196]:
+      - link [ref=f27e198] [cursor=pointer]:
+        - /url: https://stripe.com
+        - generic [ref=f27e199]:
+          - text: Powered by
+          - img "Stripe" [ref=f27e201]
+      - link "Terms" [ref=f27e204] [cursor=pointer]:
+        - /url: https://stripe.com/legal/end-users
+      - link "Privacy" [ref=f27e205] [cursor=pointer]:
+        - /url: https://stripe.com/privacy

@@ -65,6 +65,16 @@ impl ImpresspressBuilder {
             .get(crate::blocks::auth::JWT_SECRET_KEY)
             .unwrap_or_default();
 
+        // Read the middleware config for the site-main flow now, before
+        // `config` is moved into the config service block below. Used at step
+        // 12 to configure the wafer-run/cors and security-headers steps.
+        let cors_allowed_origins =
+            config.get_default(crate::config_vars::CORS_ALLOWED_ORIGINS_KEY, "");
+        let csp_directives = config.get_default(
+            crate::config_vars::CSP_DIRECTIVES_KEY,
+            crate::config_vars::DEFAULT_CSP_DIRECTIVES,
+        );
+
         // 3. Create runtime
         let config_source = self
             .config_source
@@ -374,8 +384,9 @@ impl ImpresspressBuilder {
             }
         }
 
-        // 12. Register site-main flow
-        crate::flows::register_site_main(&mut wafer)?;
+        // 12. Register site-main flow, configuring its wafer-run/cors and
+        // security-headers steps from the shared config read at step 2.
+        crate::flows::register_site_main(&mut wafer, &cors_allowed_origins, &csp_directives)?;
 
         Ok((wafer, storage_block))
     }

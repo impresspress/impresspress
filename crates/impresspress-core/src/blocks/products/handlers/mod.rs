@@ -37,9 +37,9 @@ mod subscription;
 mod types;
 
 pub(in crate::blocks::products) use dispatch::user_products_enabled;
+pub use dispatch::{handle_admin, handle_user};
 #[cfg(test)]
 pub(in crate::blocks::products) use dispatch::{ADMIN_ROUTES, USER_ROUTES};
-pub use dispatch::{handle_admin, handle_user};
 pub(in crate::blocks::products) use product::name_like_filter;
 use wafer_core::clients::database as db;
 use wafer_run::context::Context;

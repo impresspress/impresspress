@@ -16,7 +16,8 @@ use super::{
     contracts::{
         AmountRule, BillingScheme, Condition, MoneyBreakdown, Offer, OfferMode, PackageRounding,
         PricingPreview, PricingPreviewRequest, PricingTier, QuantityRule, RecurringInterval,
-        ResolvedComponent, VariableDefinition, VariableKind, COMMERCE_SCHEMA_VERSION,
+        ResolvedComponent, VariableDefinition, VariableKind, VariableVisibility,
+        COMMERCE_SCHEMA_VERSION,
     },
     money::normalize_currency,
 };
@@ -339,11 +340,21 @@ fn validate_bounds(definition: &VariableDefinition, value: Decimal) -> Result<()
         .map(Decimal::parse)
         .transpose()
         .map_err(bad_definition)?;
-    if minimum.is_some_and(|minimum| value.compare(minimum).ok() == Some(Ordering::Less)) {
-        return Err(invalid_input(definition, "is below the minimum"));
+    if let Some(minimum) = minimum {
+        let comparison = value
+            .compare(minimum)
+            .map_err(|message| invalid_input(definition, message))?;
+        if comparison == Ordering::Less {
+            return Err(invalid_input(definition, "is below the minimum"));
+        }
     }
-    if maximum.is_some_and(|maximum| value.compare(maximum).ok() == Some(Ordering::Greater)) {
-        return Err(invalid_input(definition, "is above the maximum"));
+    if let Some(maximum) = maximum {
+        let comparison = value
+            .compare(maximum)
+            .map_err(|message| invalid_input(definition, message))?;
+        if comparison == Ordering::Greater {
+            return Err(invalid_input(definition, "is above the maximum"));
+        }
     }
     if let Some(step) = definition.step.as_deref() {
         let step = Decimal::parse(step).map_err(bad_definition)?;
@@ -544,9 +555,24 @@ fn parse_input(
     }
 }
 
+/// Who supplied the raw pricing inputs being validated.
+///
+/// Public callers (the storefront pricing preview and direct checkout) may
+/// only supply customer-visible variables; on those paths a hidden or
+/// admin-only variable always evaluates from its configured default.
+/// Management callers (owner and admin previews, preset validation, and
+/// checkout via a preset whose values were validated at save time) may
+/// supply any variable.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum InputScope {
+    Public,
+    Management,
+}
+
 pub fn validate_inputs(
     definitions: &[VariableDefinition],
     raw: &BTreeMap<String, Value>,
+    scope: InputScope,
 ) -> Result<ValidatedInputs, PricingError> {
     let mut by_key = BTreeMap::new();
     for definition in definitions {
@@ -582,11 +608,18 @@ pub fn validate_inputs(
         }
     }
     for key in raw.keys() {
-        if !by_key.contains_key(key.as_str()) {
+        let Some(definition) = by_key.get(key.as_str()) else {
             return Err(PricingError::new(
                 "unknown_input",
                 Some(key),
                 "input is not defined by the offer",
+            ));
+        };
+        if scope == InputScope::Public && definition.visibility != VariableVisibility::Public {
+            return Err(PricingError::new(
+                "restricted_input",
+                Some(key),
+                "input is not customer-editable",
             ));
         }
     }
@@ -822,27 +855,47 @@ fn tiered_amount(
     })
 }
 
+/// Resolve `input × unit_amount_minor`, rejecting a negative contribution so
+/// a negative numeric input can never reduce a component's price — including
+/// when a later step (like a flat base) would pull the sum back above zero.
+fn per_unit_amount(
+    inputs: &ValidatedInputs,
+    key: &str,
+    unit_amount_minor: i64,
+) -> Result<i64, PricingError> {
+    let amount = decimal_input(inputs, key)?
+        .multiply_minor(unit_amount_minor)
+        .map_err(|message| PricingError::new("invalid_input", Some(key), message))?;
+    if amount < 0 {
+        return Err(PricingError::new(
+            "invalid_input",
+            Some(key),
+            "per-unit amounts must not be negative",
+        ));
+    }
+    Ok(amount)
+}
+
 fn resolve_amount(rule: &AmountRule, inputs: &ValidatedInputs) -> Result<i64, PricingError> {
     let amount = match rule {
         AmountRule::Fixed { unit_amount_minor } => *unit_amount_minor,
         AmountRule::PerUnit {
             input: key,
             unit_amount_minor,
-        } => decimal_input(inputs, key)?
-            .multiply_minor(*unit_amount_minor)
-            .map_err(|message| PricingError::new("invalid_input", Some(key), message))?,
+        } => per_unit_amount(inputs, key, *unit_amount_minor)?,
         AmountRule::FlatPlusPerUnit {
             base_amount_minor,
             input: key,
             unit_amount_minor,
-        } => decimal_input(inputs, key)?
-            .multiply_minor(*unit_amount_minor)
-            .and_then(|value| {
-                value
-                    .checked_add(*base_amount_minor)
-                    .ok_or_else(|| "calculated amount is too large".to_string())
-            })
-            .map_err(|message| PricingError::new("invalid_input", Some(key), message))?,
+        } => per_unit_amount(inputs, key, *unit_amount_minor)?
+            .checked_add(*base_amount_minor)
+            .ok_or_else(|| {
+                PricingError::new(
+                    "amount_overflow",
+                    Some(key),
+                    "calculated amount is too large",
+                )
+            })?,
         AmountRule::Lookup { input: key, prices } => {
             let selected = input(inputs, key)?.scalar().ok_or_else(|| {
                 PricingError::new(
@@ -1313,6 +1366,7 @@ pub fn validate_offer(offer: &Offer) -> Result<(), PricingError> {
 pub fn evaluate_offer(
     offer: &Offer,
     request: &PricingPreviewRequest,
+    scope: InputScope,
 ) -> Result<PricingPreview, PricingError> {
     validate_offer(offer)?;
     if request.offer_id != offer.id {
@@ -1329,7 +1383,7 @@ pub fn evaluate_offer(
             format!("quantity must be between 1 and {MAX_ORDER_QUANTITY}"),
         ));
     }
-    let inputs = validate_inputs(&offer.variables, &request.inputs)?;
+    let inputs = validate_inputs(&offer.variables, &request.inputs, scope)?;
     let mut ordered: Vec<_> = offer.components.iter().collect();
     ordered.sort_by(|left, right| {
         left.sort_order

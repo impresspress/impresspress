@@ -1,0 +1,174 @@
+- generic [ref=f133e2]:
+  - link "Skip to content" [ref=f133e3] [cursor=pointer]:
+    - /url: "#content"
+  - navigation "Primary" [ref=f133e4]:
+    - img "Impresspress" [ref=f133e6]
+    - generic [ref=f133e7]:
+      - generic [ref=f133e8]:
+        - generic [ref=f133e9]:
+          - generic [ref=f133e10]: Workspace
+          - list [ref=f133e11]:
+            - listitem [ref=f133e12]:
+              - link "Dashboard" [ref=f133e13] [cursor=pointer]:
+                - /url: /b/admin/
+            - listitem [ref=f133e21]:
+              - link "Users" [ref=f133e22] [cursor=pointer]:
+                - /url: /b/admin/users
+        - generic [ref=f133e30]:
+          - generic [ref=f133e31]: Data
+          - list [ref=f133e32]:
+            - listitem [ref=f133e33]:
+              - link "Storage" [ref=f133e34] [cursor=pointer]:
+                - /url: /b/storage/admin/
+            - listitem [ref=f133e39]:
+              - link "Database" [ref=f133e40] [cursor=pointer]:
+                - /url: /b/admin/database
+            - listitem [ref=f133e46]:
+              - link "Vector indexes" [ref=f133e47] [cursor=pointer]:
+                - /url: /b/vector/
+        - generic [ref=f133e55]:
+          - generic [ref=f133e56]: Communication
+          - list [ref=f133e57]:
+            - listitem [ref=f133e58]:
+              - link "Messages" [ref=f133e59] [cursor=pointer]:
+                - /url: /b/messages/
+            - listitem [ref=f133e65]:
+              - link "LLM" [ref=f133e66] [cursor=pointer]:
+                - /url: /b/llm/
+        - generic [ref=f133e72]:
+          - generic [ref=f133e73]: Commerce
+          - list [ref=f133e74]:
+            - listitem [ref=f133e75]:
+              - link "Products" [ref=f133e76] [cursor=pointer]:
+                - /url: /b/products/admin/
+        - generic [ref=f133e83]:
+          - generic [ref=f133e84]: System
+          - list [ref=f133e85]:
+            - listitem [ref=f133e86]:
+              - link "Blocks" [ref=f133e87] [cursor=pointer]:
+                - /url: /b/admin/blocks
+            - listitem [ref=f133e94]:
+              - link "Logs" [ref=f133e95] [cursor=pointer]:
+                - /url: /b/admin/logs
+            - listitem [ref=f133e101]:
+              - link "Settings" [ref=f133e102] [cursor=pointer]:
+                - /url: /b/admin/settings/email
+      - button "Toggle sidebar" [ref=f133e108] [cursor=pointer]
+    - button "A admin@example.com Admin" [ref=f133e113] [cursor=pointer]:
+      - generic [ref=f133e114]: A
+      - generic [ref=f133e115]:
+        - generic [ref=f133e116]: admin@example.com
+        - generic [ref=f133e117]: Admin
+  - generic [ref=f133e118]:
+    - banner [ref=f133e119]:
+      - heading "Products" [level=1] [ref=f133e120]
+      - button "Open command palette" [ref=f133e122] [cursor=pointer]:
+        - generic [ref=f133e123]: Quick jump
+        - generic [ref=f133e124]:
+          - generic [ref=f133e125]: Ctrl
+          - generic [ref=f133e126]: K
+    - generic [ref=f133e127]:
+      - generic [ref=f133e129]:
+        - link "Overview" [ref=f133e130] [cursor=pointer]:
+          - /url: /b/products/admin/
+        - link "Products" [ref=f133e136] [cursor=pointer]:
+          - /url: /b/products/admin/manage
+        - link "Groups" [ref=f133e141] [cursor=pointer]:
+          - /url: /b/products/admin/groups
+        - link "Orders" [ref=f133e144] [cursor=pointer]:
+          - /url: /b/products/admin/purchases
+        - link "Sellers" [ref=f133e149] [cursor=pointer]:
+          - /url: /b/products/admin/sellers
+        - link "Stripe" [ref=f133e154] [cursor=pointer]:
+          - /url: /b/products/admin/stripe
+        - link "Settings" [ref=f133e157] [cursor=pointer]:
+          - /url: /b/products/admin/settings
+      - generic [ref=f133e161]:
+        - generic [ref=f133e162]:
+          - heading "Seller Field Kit" [level=2] [ref=f133e163]
+          - paragraph [ref=f133e164]: Manage product details, immutable pricing versions, and Stripe checkout links
+        - link "Back to products" [ref=f133e166] [cursor=pointer]:
+          - /url: /b/products/admin/manage
+      - generic [ref=f133e167]:
+        - generic [ref=f133e168]:
+          - generic [ref=f133e170]:
+            - heading "Product details" [level=3] [ref=f133e171]
+            - generic [ref=f133e172]: pending review
+            - generic [ref=f133e173]: "Approval: pending"
+          - generic [ref=f133e174]:
+            - button "Approve listing" [ref=f133e175] [cursor=pointer]
+            - button "Return to seller" [ref=f133e176] [cursor=pointer]
+            - button "Duplicate product" [ref=f133e177] [cursor=pointer]
+            - button "Archive product" [ref=f133e178] [cursor=pointer]
+        - generic [ref=f133e180]:
+          - generic [ref=f133e181]:
+            - generic [ref=f133e182]:
+              - generic [ref=f133e183]: Name *
+              - textbox "Name *" [ref=f133e184]: Seller Field Kit
+            - generic [ref=f133e185]:
+              - generic [ref=f133e186]: URL slug
+              - textbox "URL slug" [ref=f133e187]: seller-field-kit
+            - generic [ref=f133e188]:
+              - generic [ref=f133e189]: Image URL
+              - textbox "Image URL" [ref=f133e190]
+            - generic [ref=f133e191]:
+              - generic [ref=f133e192]: Fulfillment
+              - combobox "Fulfillment" [ref=f133e193] [cursor=pointer]:
+                - option "None" [selected]
+                - option "Manual"
+                - option "Digital download"
+                - option "Access entitlement"
+                - option "Webhook"
+          - generic [ref=f133e194]:
+            - generic [ref=f133e195]: Description
+            - textbox "Description" [ref=f133e196]
+          - button "Save product details" [ref=f133e197] [cursor=pointer]
+      - text: "* *"
+      - generic [ref=f133e198]:
+        - heading "Pricing offers" [level=2] [ref=f133e199]
+        - paragraph [ref=f133e200]: Published offers are immutable so existing orders and links retain their exact terms.
+        - generic [ref=f133e201]:
+          - generic [ref=f133e202]:
+            - generic [ref=f133e203]:
+              - generic [ref=f133e204]:
+                - heading "Seller Field Kit" [level=3] [ref=f133e205]
+                - generic [ref=f133e206]: active
+                - generic [ref=f133e207]: v1
+              - paragraph [ref=f133e208]: "payment · fixed · NZD · Stripe sync: not_synced"
+            - generic [ref=f133e209]:
+              - button "Sync to Stripe" [ref=f133e210] [cursor=pointer]
+              - button "Duplicate to draft" [ref=f133e211] [cursor=pointer]
+              - button "Archive" [ref=f133e212] [cursor=pointer]
+          - generic [ref=f133e213]:
+            - generic [ref=f133e214]:
+              - generic [ref=f133e215]:
+                - generic [ref=f133e216]:
+                  - heading "Test pricing scenarios" [level=4] [ref=f133e217]
+                  - paragraph [ref=f133e218]: Try representative customer inputs. The itemized result comes from the same server evaluator used by checkout.
+                - button "Calculate preview" [ref=f133e219] [cursor=pointer]
+              - generic [ref=f133e221]:
+                - generic [ref=f133e222]: Checkout quantity
+                - spinbutton "Checkout quantity" [ref=f133e223]: "1"
+            - generic [ref=f133e224]:
+              - generic [ref=f133e225]:
+                - heading "Customer fields" [level=4] [ref=f133e226]
+                - paragraph [ref=f133e227]: No customer fields
+              - generic [ref=f133e228]:
+                - heading "Itemized price rows" [level=4] [ref=f133e229]
+                - list [ref=f133e230]:
+                  - listitem [ref=f133e231]:
+                    - strong [ref=f133e232]: Seller Field Kit
+                    - text: ": 4000 minor units"
+              - generic [ref=f133e233]:
+                - heading "Checkout" [level=4] [ref=f133e234]
+                - paragraph [ref=f133e235]: 1 row(s), 0 input(s)
+            - generic [ref=f133e236]:
+              - heading "Shareable Stripe Payment Links" [level=4] [ref=f133e237]
+              - paragraph [ref=f133e238]: Links keep this exact immutable offer version. Configurable values are saved in a named preset first.
+              - generic [ref=f133e239]:
+                - generic [ref=f133e240]: After-completion URL (optional)
+                - textbox "https://example.com/thank-you" [ref=f133e241]
+              - button "+ Create or reuse Payment Link" [ref=f133e243] [cursor=pointer]
+              - generic [ref=f133e244]: No Payment Links yet.
+            - group [ref=f133e245]:
+              - generic "Hosted, embedded, and static-site integration" [ref=f133e246] [cursor=pointer]

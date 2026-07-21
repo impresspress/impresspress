@@ -1,0 +1,123 @@
+- generic [ref=f4e2]:
+  - link "Skip to content" [ref=f4e3] [cursor=pointer]:
+    - /url: "#content"
+  - navigation "Primary" [ref=f4e4]:
+    - img "Impresspress" [ref=f4e6]
+    - generic [ref=f4e7]:
+      - generic [ref=f4e8]:
+        - generic [ref=f4e9]:
+          - generic [ref=f4e10]: Workspace
+          - list [ref=f4e11]:
+            - listitem [ref=f4e12]:
+              - link "Dashboard" [ref=f4e13] [cursor=pointer]:
+                - /url: /b/admin/
+            - listitem [ref=f4e21]:
+              - link "Users" [ref=f4e22] [cursor=pointer]:
+                - /url: /b/admin/users
+        - generic [ref=f4e30]:
+          - generic [ref=f4e31]: Data
+          - list [ref=f4e32]:
+            - listitem [ref=f4e33]:
+              - link "Storage" [ref=f4e34] [cursor=pointer]:
+                - /url: /b/storage/admin/
+            - listitem [ref=f4e39]:
+              - link "Database" [ref=f4e40] [cursor=pointer]:
+                - /url: /b/admin/database
+            - listitem [ref=f4e46]:
+              - link "Vector indexes" [ref=f4e47] [cursor=pointer]:
+                - /url: /b/vector/
+        - generic [ref=f4e55]:
+          - generic [ref=f4e56]: Communication
+          - list [ref=f4e57]:
+            - listitem [ref=f4e58]:
+              - link "Messages" [ref=f4e59] [cursor=pointer]:
+                - /url: /b/messages/
+            - listitem [ref=f4e65]:
+              - link "LLM" [ref=f4e66] [cursor=pointer]:
+                - /url: /b/llm/
+        - generic [ref=f4e72]:
+          - generic [ref=f4e73]: Commerce
+          - list [ref=f4e74]:
+            - listitem [ref=f4e75]:
+              - link "Products" [ref=f4e76] [cursor=pointer]:
+                - /url: /b/products/admin/
+        - generic [ref=f4e83]:
+          - generic [ref=f4e84]: System
+          - list [ref=f4e85]:
+            - listitem [ref=f4e86]:
+              - link "Blocks" [ref=f4e87] [cursor=pointer]:
+                - /url: /b/admin/blocks
+            - listitem [ref=f4e94]:
+              - link "Logs" [ref=f4e95] [cursor=pointer]:
+                - /url: /b/admin/logs
+            - listitem [ref=f4e101]:
+              - link "Settings" [ref=f4e102] [cursor=pointer]:
+                - /url: /b/admin/settings/email
+      - button "Toggle sidebar" [ref=f4e108] [cursor=pointer]
+    - button "A admin@example.com Admin" [ref=f4e113] [cursor=pointer]:
+      - generic [ref=f4e114]: A
+      - generic [ref=f4e115]:
+        - generic [ref=f4e116]: admin@example.com
+        - generic [ref=f4e117]: Admin
+  - generic [ref=f4e118]:
+    - banner [ref=f4e119]:
+      - heading "Products" [level=1] [ref=f4e120]
+      - button "Open command palette" [ref=f4e122] [cursor=pointer]:
+        - generic [ref=f4e123]: Quick jump
+        - generic [ref=f4e124]:
+          - generic [ref=f4e125]: Ctrl
+          - generic [ref=f4e126]: K
+    - generic [ref=f4e127]:
+      - generic [ref=f4e129]:
+        - link "Overview" [ref=f4e130] [cursor=pointer]:
+          - /url: /b/products/admin/
+        - link "Products" [ref=f4e136] [cursor=pointer]:
+          - /url: /b/products/admin/manage
+        - link "Groups" [ref=f4e141] [cursor=pointer]:
+          - /url: /b/products/admin/groups
+        - link "Orders" [ref=f4e144] [cursor=pointer]:
+          - /url: /b/products/admin/purchases
+        - link "Sellers" [ref=f4e149] [cursor=pointer]:
+          - /url: /b/products/admin/sellers
+        - link "Stripe" [ref=f4e154] [cursor=pointer]:
+          - /url: /b/products/admin/stripe
+        - link "Settings" [ref=f4e157] [cursor=pointer]:
+          - /url: /b/products/admin/settings
+      - generic [ref=f4e161]:
+        - generic [ref=f4e162]:
+          - heading "Products" [level=2] [ref=f4e163]
+          - paragraph [ref=f4e164]: Manage your product catalog
+        - link "+ New Product" [ref=f4e166] [cursor=pointer]:
+          - /url: /b/products/admin/new
+      - searchbox "Search products..." [ref=f4e173]
+      - generic [ref=f4e174]:
+        - table [ref=f4e176]:
+          - rowgroup [ref=f4e177]:
+            - row [ref=f4e178]:
+              - columnheader "Name" [ref=f4e179]
+              - columnheader "Status" [ref=f4e180]
+              - columnheader "Owner" [ref=f4e181]
+              - columnheader "Approval" [ref=f4e182]
+              - columnheader "Currency" [ref=f4e183]
+              - columnheader "Group" [ref=f4e184]
+              - columnheader "Created" [ref=f4e185]
+          - rowgroup [ref=f4e186]:
+            - row [ref=f4e187]:
+              - cell "Field Guide (Test Download)" [ref=f4e188]
+              - cell "active" [ref=f4e189]
+              - cell "Platform" [ref=f4e191]
+              - cell "approved" [ref=f4e192]
+              - cell "NZD" [ref=f4e194]
+              - cell "—" [ref=f4e195]
+              - cell "2026-07-21" [ref=f4e196]
+              - cell [ref=f4e197]:
+                - link "Open" [ref=f4e198] [cursor=pointer]:
+                  - /url: /b/products/admin/products/da8e9b45-6546-4cf7-88b0-b5dbc301d866
+                  - text: ›
+        - navigation "Pagination" [ref=f4e199]:
+          - generic [ref=f4e200]: 1 total
+          - link "‹ Prev" [disabled]:
+            - /url: /b/products/admin/manage?page=1
+          - generic [ref=f4e201]: 1 / 1
+          - link "Next ›" [disabled]:
+            - /url: /b/products/admin/manage?page=1

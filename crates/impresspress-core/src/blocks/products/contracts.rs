@@ -1,8 +1,9 @@
 //! Stable, provider-neutral JSON contracts for the commerce APIs.
 
+use std::collections::BTreeMap;
+
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use std::collections::BTreeMap;
 
 pub const COMMERCE_SCHEMA_VERSION: u32 = 1;
 

@@ -40,6 +40,9 @@ pub struct SettingsSection<'a> {
     /// One-line explanation rendered under the heading; empty renders
     /// nothing.
     pub description: &'a str,
+    /// Whether this optional section starts behind a native disclosure
+    /// control. Existing pages remain expanded unless they opt in.
+    pub collapsible: bool,
 }
 
 impl<'a> SettingsSection<'a> {
@@ -50,12 +53,20 @@ impl<'a> SettingsSection<'a> {
             icon,
             vars,
             description: "",
+            collapsible: false,
         }
     }
 
     /// Set the one-line explanation rendered under the section heading.
     pub fn description(mut self, description: &'a str) -> Self {
         self.description = description;
+
+        self
+    }
+
+    /// Make optional or advanced settings secondary to the page essentials.
+    pub fn collapsible(mut self) -> Self {
+        self.collapsible = true;
         self
     }
 }
@@ -221,7 +232,7 @@ function submitSettings(e) {{
     .then(function(r) {{ return r.json(); }})
     .then(function(d) {{ document.body.dispatchEvent(new CustomEvent('showToast', {{ detail: {{ message: d.message || 'Saved', type: d.error ? 'error' : 'success' }} }})); }})
     .catch(function(err) {{ document.body.dispatchEvent(new CustomEvent('showToast', {{ detail: {{ message: 'Error: ' + err.message, type: 'error' }} }})); }})
-    .finally(function() {{ btn.disabled = false; btn.textContent = 'Save Settings'; }});
+    .finally(function() {{ btn.disabled = false; btn.textContent = 'Save settings'; }});
     return false;
 }}
 "#
@@ -247,18 +258,32 @@ pub async fn render_sections(ctx: &dyn Context, sections: &[SettingsSection<'_>]
     let empty = String::new();
     html! {
         @for (i, section) in sections.iter().enumerate() {
-            h3 style=(format!(
-                "font-size:1rem;font-weight:600;margin:{} 0 {};padding-bottom:0.5rem;border-bottom:1px solid var(--border-color)",
-                if i == 0 { "0" } else { "1.5rem" },
-                if section.description.is_empty() { "1rem" } else { "0.5rem" }
-            )) {
-                (section.icon) " " (section.title)
-            }
-            @if !section.description.is_empty() {
-                p .text-muted style="font-size:0.85rem;margin:0 0 1rem" { (section.description) }
-            }
-            @for var in section.vars {
-                (render_field(var, values.get(&var.key).unwrap_or(&empty)))
+            @if section.collapsible {
+                details style="margin-top:1rem;border:1px solid var(--border-color);border-radius:12px" {
+                    summary style="padding:.9rem 1rem;cursor:pointer;font-weight:600" { (section.icon) " " (section.title) }
+                    div style="padding:0 1rem 1rem" {
+                        @if !section.description.is_empty() {
+                            p .text-muted style="font-size:0.85rem;margin:0 0 1rem" { (section.description) }
+                        }
+                        @for var in section.vars {
+                            (render_field(var, values.get(&var.key).unwrap_or(&empty)))
+                        }
+                    }
+                }
+            } @else {
+                h3 style=(format!(
+                    "font-size:1rem;font-weight:600;margin:{} 0 {};padding-bottom:0.5rem;border-bottom:1px solid var(--border-color)",
+                    if i == 0 { "0" } else { "1.5rem" },
+                    if section.description.is_empty() { "1rem" } else { "0.5rem" }
+                )) {
+                    (section.icon) " " (section.title)
+                }
+                @if !section.description.is_empty() {
+                    p .text-muted style="font-size:0.85rem;margin:0 0 1rem" { (section.description) }
+                }
+                @for var in section.vars {
+                    (render_field(var, values.get(&var.key).unwrap_or(&empty)))
+                }
             }
         }
     }
@@ -283,7 +308,7 @@ pub async fn settings_form(
         form #settings-form onsubmit="return submitSettings(event)" {
             (fields)
             (extra)
-            button .btn .btn-primary type="submit" style="margin-top:1rem" { "Save Settings" }
+            button .btn .btn--primary type="submit" style="margin-top:1rem" { "Save settings" }
         }
         script { (PreEscaped(submit_js(post_url))) }
     }

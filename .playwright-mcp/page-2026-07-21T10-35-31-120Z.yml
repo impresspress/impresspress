@@ -1,0 +1,113 @@
+- generic [ref=f3e2]:
+  - link "Skip to content" [ref=f3e3] [cursor=pointer]:
+    - /url: "#content"
+  - navigation "Primary" [ref=f3e4]:
+    - img "Impresspress" [ref=f3e6]
+    - generic [ref=f3e7]:
+      - generic [ref=f3e8]:
+        - generic [ref=f3e9]:
+          - generic [ref=f3e10]: Workspace
+          - list [ref=f3e11]:
+            - listitem [ref=f3e12]:
+              - link "Dashboard" [ref=f3e13] [cursor=pointer]:
+                - /url: /b/admin/
+            - listitem [ref=f3e21]:
+              - link "Users" [ref=f3e22] [cursor=pointer]:
+                - /url: /b/admin/users
+        - generic [ref=f3e30]:
+          - generic [ref=f3e31]: Data
+          - list [ref=f3e32]:
+            - listitem [ref=f3e33]:
+              - link "Storage" [ref=f3e34] [cursor=pointer]:
+                - /url: /b/storage/admin/
+            - listitem [ref=f3e39]:
+              - link "Database" [ref=f3e40] [cursor=pointer]:
+                - /url: /b/admin/database
+            - listitem [ref=f3e46]:
+              - link "Vector indexes" [ref=f3e47] [cursor=pointer]:
+                - /url: /b/vector/
+        - generic [ref=f3e55]:
+          - generic [ref=f3e56]: Communication
+          - list [ref=f3e57]:
+            - listitem [ref=f3e58]:
+              - link "Messages" [ref=f3e59] [cursor=pointer]:
+                - /url: /b/messages/
+            - listitem [ref=f3e65]:
+              - link "LLM" [ref=f3e66] [cursor=pointer]:
+                - /url: /b/llm/
+        - generic [ref=f3e72]:
+          - generic [ref=f3e73]: Commerce
+          - list [ref=f3e74]:
+            - listitem [ref=f3e75]:
+              - link "Products" [ref=f3e76] [cursor=pointer]:
+                - /url: /b/products/admin/
+        - generic [ref=f3e83]:
+          - generic [ref=f3e84]: System
+          - list [ref=f3e85]:
+            - listitem [ref=f3e86]:
+              - link "Blocks" [ref=f3e87] [cursor=pointer]:
+                - /url: /b/admin/blocks
+            - listitem [ref=f3e94]:
+              - link "Logs" [ref=f3e95] [cursor=pointer]:
+                - /url: /b/admin/logs
+            - listitem [ref=f3e101]:
+              - link "Settings" [ref=f3e102] [cursor=pointer]:
+                - /url: /b/admin/settings/email
+      - button "Toggle sidebar" [ref=f3e108] [cursor=pointer]
+    - button "A admin@example.com Admin" [ref=f3e113] [cursor=pointer]:
+      - generic [ref=f3e114]: A
+      - generic [ref=f3e115]:
+        - generic [ref=f3e116]: admin@example.com
+        - generic [ref=f3e117]: Admin
+  - generic [ref=f3e118]:
+    - banner [ref=f3e119]:
+      - heading "Products" [level=1] [ref=f3e120]
+      - button "Open command palette" [ref=f3e122] [cursor=pointer]:
+        - generic [ref=f3e123]: Quick jump
+        - generic [ref=f3e124]:
+          - generic [ref=f3e125]: Ctrl
+          - generic [ref=f3e126]: K
+    - generic [ref=f3e127]:
+      - generic [ref=f3e129]:
+        - link "Overview" [ref=f3e130] [cursor=pointer]:
+          - /url: /b/products/admin/
+        - link "Products" [ref=f3e136] [cursor=pointer]:
+          - /url: /b/products/admin/manage
+        - link "Groups" [ref=f3e141] [cursor=pointer]:
+          - /url: /b/products/admin/groups
+        - link "Orders" [ref=f3e144] [cursor=pointer]:
+          - /url: /b/products/admin/purchases
+        - link "Sellers" [ref=f3e149] [cursor=pointer]:
+          - /url: /b/products/admin/sellers
+        - link "Stripe" [ref=f3e154] [cursor=pointer]:
+          - /url: /b/products/admin/stripe
+        - link "Settings" [ref=f3e157] [cursor=pointer]:
+          - /url: /b/products/admin/settings
+      - generic [ref=f3e161]:
+        - generic [ref=f3e162]:
+          - heading "Create product" [level=2] [ref=f3e163]
+          - paragraph [ref=f3e164]: Build a clear checkout for a simple item, subscription, booking, or configurable service
+        - link "Cancel" [ref=f3e166] [cursor=pointer]:
+          - /url: /b/products/admin/manage
+      - navigation "Product setup progress" [ref=f3e167]:
+        - list [ref=f3e168]:
+          - listitem [ref=f3e169]: 1. Type
+          - listitem [ref=f3e170]: 2. Details
+          - listitem [ref=f3e171]: 3. Pricing
+          - listitem [ref=f3e172]: 4. Checkout
+          - listitem [ref=f3e173]: 5. Review
+      - generic [ref=f3e174]:
+        - text: "* * *"
+        - generic [ref=f3e294]:
+          - heading "Review" [level=3] [ref=f3e296]
+          - generic [ref=f3e298]:
+            - heading "Field Guide (Test Download)" [level=4] [ref=f3e299]
+            - paragraph [ref=f3e300]: One-time payment · NZD · Fixed price
+            - list [ref=f3e301]:
+              - listitem [ref=f3e302]: "Field Guide (Test Download): 25.00 NZD"
+            - paragraph [ref=f3e303]: 0 customer input(s), 1 price row(s)
+        - generic [ref=f3e200]:
+          - button "Back" [ref=f3e231] [cursor=pointer]
+          - generic [ref=f3e201]:
+            - button "Save draft" [ref=f3e304] [cursor=pointer]
+            - button "Create and publish" [ref=f3e305] [cursor=pointer]

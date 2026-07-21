@@ -66,6 +66,9 @@ const SQL_017_POSTGRES: &str = include_str!("017_refund_connect_event_order.post
 const SQL_018_SQLITE: &str = include_str!("018_provider_operation_leases.sqlite.sql");
 #[cfg(any(feature = "postgres", test))]
 const SQL_018_POSTGRES: &str = include_str!("018_provider_operation_leases.postgres.sql");
+const SQL_019_SQLITE: &str = include_str!("019_offer_draft_revision.sqlite.sql");
+#[cfg(any(feature = "postgres", test))]
+const SQL_019_POSTGRES: &str = include_str!("019_offer_draft_revision.postgres.sql");
 
 /// Ordered SQLite migration scripts for this block, as `(basename, content)`
 /// pairs. Feeds the runtime `lifecycle_init` apply path.
@@ -89,6 +92,7 @@ pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
     ("016_payment_intent_state", SQL_016_SQLITE),
     ("017_refund_connect_event_order", SQL_017_SQLITE),
     ("018_provider_operation_leases", SQL_018_SQLITE),
+    ("019_offer_draft_revision", SQL_019_SQLITE),
 ];
 
 /// Ordered PostgreSQL migration scripts, matching [`SQLITE_MIGRATIONS`]. Empty
@@ -114,6 +118,7 @@ pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[
     SQL_016_POSTGRES,
     SQL_017_POSTGRES,
     SQL_018_POSTGRES,
+    SQL_019_POSTGRES,
 ];
 #[cfg(not(feature = "postgres"))]
 pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[];
@@ -141,7 +146,7 @@ mod strict_upgrade_tests {
         SQL_010_SQLITE, SQL_011_POSTGRES, SQL_011_SQLITE, SQL_012_POSTGRES, SQL_012_SQLITE,
         SQL_013_POSTGRES, SQL_013_SQLITE, SQL_014_POSTGRES, SQL_014_SQLITE, SQL_015_POSTGRES,
         SQL_015_SQLITE, SQL_016_POSTGRES, SQL_016_SQLITE, SQL_017_POSTGRES, SQL_017_SQLITE,
-        SQL_018_POSTGRES, SQL_018_SQLITE,
+        SQL_018_POSTGRES, SQL_018_SQLITE, SQL_019_POSTGRES, SQL_019_SQLITE,
     };
     use crate::migration_helper::apply_ddl_via_service;
 
@@ -397,6 +402,27 @@ mod strict_upgrade_tests {
     }
 
     #[test]
+    fn offer_draft_revision_migration_matches_sqlite_and_postgres() {
+        for fragment in [
+            "impresspress__products__offers",
+            "draft_revision",
+            "draft_updating",
+            "NOT NULL DEFAULT 0",
+        ] {
+            assert!(
+                SQL_019_SQLITE.contains(fragment),
+                "SQLite offer draft-revision migration is missing {fragment}"
+            );
+            assert!(
+                SQL_019_POSTGRES.contains(fragment),
+                "PostgreSQL offer draft-revision migration is missing {fragment}"
+            );
+        }
+        assert_eq!(SQL_019_SQLITE.matches("ADD COLUMN").count(), 2);
+        assert_eq!(SQL_019_POSTGRES.matches("ADD COLUMN").count(), 2);
+    }
+
+    #[test]
     fn commerce_subscription_state_migration_matches_sqlite_and_postgres() {
         for fragment in [
             "subscription_status TEXT NOT NULL",
@@ -567,6 +593,8 @@ mod strict_upgrade_tests {
             ("017 postgres", SQL_017_POSTGRES),
             ("018 sqlite", SQL_018_SQLITE),
             ("018 postgres", SQL_018_POSTGRES),
+            ("019 sqlite", SQL_019_SQLITE),
+            ("019 postgres", SQL_019_POSTGRES),
         ] {
             let declares_boolean = sql.lines().any(|line| {
                 let line = line.trim();

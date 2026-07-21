@@ -1,0 +1,244 @@
+- generic [ref=f99e1]:
+  - main [ref=f99e187]:
+    - generic [ref=f99e188]:
+      - generic [ref=f99e189]: Impresspress Sandbox
+      - generic [ref=f99e199]:
+        - text: Impresspress Sandbox partners with Stripe for secure financial services.
+        - button "Return to Impresspress Sandbox" [ref=f99e201] [cursor=pointer]
+    - iframe [active] [ref=f99e214]:
+      - generic [ref=f121e1]:
+        - generic [ref=f121e253]:
+          - log [ref=f121e254]:
+            - generic [ref=f121e255]: "1990"
+          - log
+        - generic [ref=f121e67]:
+          - button "12.5% Personal details" [ref=f121e70] [cursor=pointer]:
+            - progressbar "12.5%" [ref=f121e71]
+            - generic [ref=f121e75]: Personal details
+          - generic [ref=f121e78]: You're using a test account with test data.
+          - generic [ref=f121e97]:
+            - generic [ref=f121e100]:
+              - generic [ref=f121e101]:
+                - heading "Verify your personal details" [level=1] [ref=f121e102]
+                - generic [ref=f121e105]:
+                  - text: This information is collected to verify your identity, keep your account safe, and help meet legal and regulatory requirements. For more information, review Stripe's
+                  - link "Privacy Policy" [ref=f121e106] [cursor=pointer]:
+                    - /url: https://stripe.com/privacy
+                  - text: .
+              - generic [ref=f121e108]:
+                - generic [ref=f121e109]:
+                  - generic [ref=f121e110]:
+                    - generic [ref=f121e111]: Your legal name
+                    - generic [ref=f121e113]: Enter your name the same way it appears in government records (like your passport or tax records).
+                  - generic [ref=f121e115]:
+                    - textbox "Legal first name" [ref=f121e119]: Jane
+                    - textbox "Legal last name" [ref=f121e123]: Seller
+                - generic [ref=f121e125]:
+                  - generic [ref=f121e126]: Email address
+                  - textbox "Email address" [ref=f121e133]:
+                    - /placeholder: you@example.com
+                    - text: seller@example.com
+                - generic [ref=f121e134]:
+                  - generic [ref=f121e135]: Date of birth
+                  - group [ref=f121e141]:
+                    - generic [ref=f121e144]:
+                      - generic [ref=f121e145]:
+                        - generic [ref=f121e146]: Day
+                        - spinbutton "Date Day" [ref=f121e148]: "01"
+                      - generic [ref=f121e149]: /
+                      - generic [ref=f121e150]:
+                        - generic [ref=f121e151]: Month
+                        - spinbutton "Date Month" [ref=f121e153]: "01"
+                      - generic [ref=f121e154]: /
+                      - generic [ref=f121e155]:
+                        - generic [ref=f121e156]: Year
+                        - spinbutton "Date Year" [ref=f121e158]: "1990"
+                - generic [ref=f121e160]:
+                  - generic [ref=f121e164]:
+                    - text: Home address
+                    - button "More information about home address" [ref=f121e165] [cursor=pointer]
+                  - group [ref=f121e175]:
+                    - generic [ref=f121e177]:
+                      - text: Home address
+                      - button "More information about home address" [ref=f121e178] [cursor=pointer]
+                    - generic [ref=f121e183]:
+                      - generic [ref=f121e184]:
+                        - generic [ref=f121e185]: Country
+                        - generic [ref=f121e187]:
+                          - combobox "Home address More information about home address Country" [disabled]:
+                            - option "United States" [selected]
+                      - group [ref=f121e188]:
+                        - generic [ref=f121e191]:
+                          - generic [ref=f121e192]: Address Field 1
+                          - combobox "Address Field 1" [active] [ref=f121e194]
+                      - generic [ref=f121e195]:
+                        - generic [ref=f121e196]: Address Field 2
+                        - textbox "Home address More information about home address Address Field 2" [ref=f121e198]:
+                          - /placeholder: Address Field 2
+                      - generic [ref=f121e199]:
+                        - generic [ref=f121e200]: City
+                        - textbox "Home address More information about home address City" [ref=f121e202]:
+                          - /placeholder: City
+                          - text: South San Francisco
+                      - generic [ref=f121e203]:
+                        - generic [ref=f121e204]: State
+                        - combobox "Home address More information about home address State" [ref=f121e207] [cursor=pointer]:
+                          - option "Alabama"
+                          - option "Alaska"
+                          - option "American Samoa"
+                          - option "Arizona"
+                          - option "Arkansas"
+                          - option "Armed Forces (AA)"
+                          - option "Armed Forces (AE)"
+                          - option "Armed Forces (AP)"
+                          - option "California" [selected]
+                          - option "Colorado"
+                          - option "Connecticut"
+                          - option "Delaware"
+                          - option "District of Columbia"
+                          - option "Florida"
+                          - option "Georgia"
+                          - option "Guam"
+                          - option "Hawaii"
+                          - option "Idaho"
+                          - option "Illinois"
+                          - option "Indiana"
+                          - option "Iowa"
+                          - option "Kansas"
+                          - option "Kentucky"
+                          - option "Louisiana"
+                          - option "Maine"
+                          - option "Marshall Islands"
+                          - option "Maryland"
+                          - option "Massachusetts"
+                          - option "Michigan"
+                          - option "Micronesia"
+                          - option "Minnesota"
+                          - option "Mississippi"
+                          - option "Missouri"
+                          - option "Montana"
+                          - option "Nebraska"
+                          - option "Nevada"
+                          - option "New Hampshire"
+                          - option "New Jersey"
+                          - option "New Mexico"
+                          - option "New York"
+                          - option "North Carolina"
+                          - option "North Dakota"
+                          - option "Northern Mariana Islands"
+                          - option "Ohio"
+                          - option "Oklahoma"
+                          - option "Oregon"
+                          - option "Palau"
+                          - option "Pennsylvania"
+                          - option "Puerto Rico"
+                          - option "Rhode Island"
+                          - option "South Carolina"
+                          - option "South Dakota"
+                          - option "Tennessee"
+                          - option "Texas"
+                          - option "Utah"
+                          - option "Vermont"
+                          - option "Virgin Islands"
+                          - option "Virginia"
+                          - option "Washington"
+                          - option "West Virginia"
+                          - option "Wisconsin"
+                          - option "Wyoming"
+                      - generic [ref=f121e208]:
+                        - generic [ref=f121e209]: Postal code
+                        - textbox "Home address More information about home address Postal code" [ref=f121e211]:
+                          - /placeholder: Postal code
+                          - text: "94080"
+                - generic [ref=f121e213]:
+                  - generic [ref=f121e214]:
+                    - generic [ref=f121e215]: Phone number
+                    - generic [ref=f121e217]: Your phone number is required to be in the country of your account.
+                  - group [ref=f121e222]:
+                    - generic [ref=f121e224]: Your phone number is required to be in the country of your account.
+                    - generic [ref=f121e226]:
+                      - generic "Country calling code" [ref=f121e227]: "+1"
+                      - textbox "Phone number" [ref=f121e230]:
+                        - /placeholder: 201 555 0123
+                        - text: "0000000000"
+                - generic [ref=f121e231]:
+                  - generic [ref=f121e232]:
+                    - generic [ref=f121e233]: Last 4 digits of Social Security number
+                    - generic [ref=f121e235]: We are required to collect this information to satisfy regulatory obligations.
+                  - group [ref=f121e239]:
+                    - generic [ref=f121e244]:
+                      - generic [ref=f121e245]: Last 4 digits of Social Security number
+                      - textbox "Last 4 digits of Social Security number" [ref=f121e247]:
+                        - /placeholder: "8888"
+                        - text: "0000"
+            - button "Continue" [ref=f121e252] [cursor=pointer]
+        - generic:
+          - iframe
+    - generic [ref=f99e216]:
+      - generic:
+        - generic:
+          - generic [ref=f99e217]:
+            - generic:
+              - generic:
+                - generic [ref=f99e218]: Powered by
+                - img "Stripe" [ref=f99e220]
+                - button "Information" [ref=f99e228] [cursor=pointer]
+          - list [ref=f99e234]:
+            - listitem [ref=f99e235]:
+              - link "Terms" [ref=f99e236] [cursor=pointer]:
+                - /url: https://stripe.com/US/connect-account/legal
+            - listitem [ref=f99e240]:
+              - link "Privacy" [ref=f99e241] [cursor=pointer]:
+                - /url: https://stripe.com/US/privacy
+          - generic [ref=f99e248]:
+            - button [ref=f99e249] [cursor=pointer]:
+              - generic [ref=f99e250]: English (NZ)
+            - combobox [ref=f99e256] [cursor=pointer]:
+              - option "Auto-detect"
+              - option "Bahasa Indonesia"
+              - option "čeština"
+              - option "Dansk"
+              - option "Deutsch"
+              - option "Eesti"
+              - option "English (Australia)"
+              - option "English (Canada)"
+              - option "English (India)"
+              - option "English (Ireland)"
+              - option "English (New Zealand)" [selected]
+              - option "English (Singapore)"
+              - option "English (United Kingdom)"
+              - option "English (United States)"
+              - option "Español (América Latina)"
+              - option "Español (España)"
+              - option "Français (Canada)"
+              - option "Français (France)"
+              - option "Hrvatski"
+              - option "Italiano"
+              - option "Latviešu"
+              - option "Lietuvių"
+              - option "Magyar"
+              - option "Malti"
+              - option "Melayu"
+              - option "Nederlands (Nederland)"
+              - option "Norsk bokmål"
+              - option "Polski"
+              - option "Português (Brasil)"
+              - option "Português (Portugal)"
+              - option "Română"
+              - option "Slovenčina"
+              - option "Slovenščina"
+              - option "Suomi"
+              - option "Svenska"
+              - option "Tiếng Việt"
+              - option "Türkçe"
+              - option "Wikang Filipino"
+              - option "Ελληνικά"
+              - option "български"
+              - option "ไทย"
+              - option "한국어"
+              - option "中文(简体)"
+              - option "日本語"
+              - option "繁體中文(台灣)"
+              - option "繁體中文(香港)"
+  - generic:
+    - iframe

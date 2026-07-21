@@ -1,0 +1,160 @@
+- generic [ref=f99e1]:
+  - main [ref=f99e187]:
+    - generic [ref=f99e188]:
+      - generic [ref=f99e189]: Impresspress Sandbox
+      - generic [ref=f99e199]:
+        - text: Impresspress Sandbox partners with Stripe for secure financial services.
+        - button "Return to Impresspress Sandbox" [ref=f99e201] [cursor=pointer]
+    - iframe [active] [ref=f99e214]:
+      - generic [active] [ref=f121e1]:
+        - generic [ref=f121e253]:
+          - log
+          - log
+        - generic [ref=f121e489]:
+          - generic [ref=f121e490]: You're using a test account with test data.
+          - generic [ref=f121e499]:
+            - heading "Review and submit" [level=1] [ref=f121e501]
+            - generic [ref=f121e502]:
+              - generic [ref=f121e503]:
+                - heading "Business type" [level=2] [ref=f121e508]
+                - generic [ref=f121e513]:
+                  - generic [ref=f121e516]:
+                    - generic [ref=f121e517]: Individual or sole proprietorship
+                    - button "Edit" [ref=f121e523] [cursor=pointer]
+                  - generic [ref=f121e525]:
+                    - generic [ref=f121e526]: Location
+                    - generic [ref=f121e527]: United States
+              - generic [ref=f121e529]:
+                - heading "Professional details" [level=2] [ref=f121e534]
+                - generic [ref=f121e541]:
+                  - generic [ref=f121e544]:
+                    - generic [ref=f121e545]: Business information
+                    - button "Edit" [ref=f121e551] [cursor=pointer]
+                  - generic [ref=f121e553]:
+                    - generic [ref=f121e554]: Other information provided
+                    - generic [ref=f121e555]: Product description, Industry
+              - generic [ref=f121e557]:
+                - heading "Public details" [level=2] [ref=f121e562]
+                - generic [ref=f121e567]:
+                  - generic [ref=f121e570]:
+                    - generic [ref=f121e571]: Statement descriptor
+                    - button "Edit" [ref=f121e577] [cursor=pointer]
+                  - text: JANE SELLER
+              - generic [ref=f121e579]:
+                - heading "Personal details" [level=2] [ref=f121e584]
+                - generic [ref=f121e589]:
+                  - generic [ref=f121e590]:
+                    - generic [ref=f121e593]:
+                      - generic [ref=f121e594]: Jane Seller
+                      - button "Jane Seller" [ref=f121e600] [cursor=pointer]: Edit
+                    - generic [ref=f121e601]:
+                      - generic [ref=f121e602]:
+                        - generic [ref=f121e603]: Email address
+                        - generic [ref=f121e604]: seller@example.com
+                      - generic [ref=f121e606]:
+                        - generic [ref=f121e607]: Date of birth
+                        - generic [ref=f121e608]: Born on 1 January 1990
+                      - generic [ref=f121e610]:
+                        - generic [ref=f121e611]: Address
+                        - paragraph [ref=f121e614]:
+                          - generic [ref=f121e615]: address_full_match
+                          - generic [ref=f121e616]: South San Francisco, CA 94080 US
+                      - generic [ref=f121e617]:
+                        - generic [ref=f121e618]: Other information provided
+                        - generic [ref=f121e619]: Last 4 SSN, Phone
+                  - region
+              - generic [ref=f121e621]:
+                - heading "Payout details" [level=2] [ref=f121e626]
+                - generic [ref=f121e634]:
+                  - generic [ref=f121e641]:
+                    - generic [ref=f121e642]:
+                      - generic [ref=f121e643]: STRIPE TEST BANK
+                      - generic [ref=f121e644]: USD
+                      - generic [ref=f121e645]: Instant-eligible
+                    - generic [ref=f121e647]:
+                      - generic [ref=f121e648]: "110000000"
+                      - generic [ref=f121e654]: ••••6789
+                  - button "Edit" [ref=f121e656] [cursor=pointer]
+            - generic [ref=f121e657]:
+              - generic [ref=f121e661]:
+                - generic [ref=f121e662]:
+                  - text: By clicking
+                  - strong [ref=f121e663]: Agree and submit
+                  - text: ", you certify that the information you have provided is complete and correct, and you agree to the following:"
+                - list [ref=f121e664]:
+                  - listitem [ref=f121e665]:
+                    - link "Connected Account Agreement" [ref=f121e666] [cursor=pointer]:
+                      - /url: https://stripe.com/US/legal/connect-account
+                  - listitem [ref=f121e667]:
+                    - link "Acquirer Disclosure" [ref=f121e668] [cursor=pointer]:
+                      - /url: https://stripe.com/legal/acquirer-disclosure
+                - text: You also agree to receiving autodialed text messages.
+              - button "Agree and submit" [ref=f121e672] [cursor=pointer]
+    - generic [ref=f99e216]:
+      - generic:
+        - generic:
+          - generic [ref=f99e217]:
+            - generic:
+              - generic:
+                - generic [ref=f99e218]: Powered by
+                - img "Stripe" [ref=f99e220]
+                - button "Information" [ref=f99e228] [cursor=pointer]
+          - list [ref=f99e234]:
+            - listitem [ref=f99e235]:
+              - link "Terms" [ref=f99e236] [cursor=pointer]:
+                - /url: https://stripe.com/US/connect-account/legal
+            - listitem [ref=f99e240]:
+              - link "Privacy" [ref=f99e241] [cursor=pointer]:
+                - /url: https://stripe.com/US/privacy
+          - generic [ref=f99e248]:
+            - button [ref=f99e249] [cursor=pointer]:
+              - generic [ref=f99e250]: English (NZ)
+            - combobox [ref=f99e256] [cursor=pointer]:
+              - option "Auto-detect"
+              - option "Bahasa Indonesia"
+              - option "čeština"
+              - option "Dansk"
+              - option "Deutsch"
+              - option "Eesti"
+              - option "English (Australia)"
+              - option "English (Canada)"
+              - option "English (India)"
+              - option "English (Ireland)"
+              - option "English (New Zealand)" [selected]
+              - option "English (Singapore)"
+              - option "English (United Kingdom)"
+              - option "English (United States)"
+              - option "Español (América Latina)"
+              - option "Español (España)"
+              - option "Français (Canada)"
+              - option "Français (France)"
+              - option "Hrvatski"
+              - option "Italiano"
+              - option "Latviešu"
+              - option "Lietuvių"
+              - option "Magyar"
+              - option "Malti"
+              - option "Melayu"
+              - option "Nederlands (Nederland)"
+              - option "Norsk bokmål"
+              - option "Polski"
+              - option "Português (Brasil)"
+              - option "Português (Portugal)"
+              - option "Română"
+              - option "Slovenčina"
+              - option "Slovenščina"
+              - option "Suomi"
+              - option "Svenska"
+              - option "Tiếng Việt"
+              - option "Türkçe"
+              - option "Wikang Filipino"
+              - option "Ελληνικά"
+              - option "български"
+              - option "ไทย"
+              - option "한국어"
+              - option "中文(简体)"
+              - option "日本語"
+              - option "繁體中文(台灣)"
+              - option "繁體中文(香港)"
+  - generic:
+    - iframe

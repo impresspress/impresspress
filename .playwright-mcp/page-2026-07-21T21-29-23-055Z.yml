@@ -1,0 +1,102 @@
+- generic [ref=f99e1]:
+  - main [ref=f99e12]:
+    - generic [ref=f99e13]:
+      - generic [ref=f99e14]: Impresspress Sandbox
+      - generic [ref=f99e24]:
+        - text: Impresspress Sandbox partners with Stripe for secure payments and financial services.
+        - button "Return to Impresspress Sandbox" [ref=f99e26] [cursor=pointer]
+    - generic [ref=f99e34]:
+      - generic [ref=f99e35]: You're using a test account with test data.
+      - generic [ref=f99e139]:
+        - generic [ref=f99e141]:
+          - generic [ref=f99e142]:
+            - heading "We sent a text to your phone" [level=1] [ref=f99e143]
+            - generic [ref=f99e144]: Enter the verification code we sent to your number ending in 0000.
+          - generic [ref=f99e146]:
+            - note [ref=f99e147]:
+              - generic [ref=f99e148]:
+                - paragraph [ref=f99e151]: Use the code 000000 to successfully continue.
+                - button "Use test code" [active] [ref=f99e155] [cursor=pointer]
+            - generic [ref=f99e156]:
+              - generic "Verification code" [ref=f99e160]:
+                - generic [ref=f99e161]:
+                  - generic [ref=f99e162] [cursor=pointer]: "0"
+                  - generic [ref=f99e163] [cursor=pointer]: "0"
+                  - generic [ref=f99e164] [cursor=pointer]: "0"
+                - generic [ref=f99e166]:
+                  - generic [ref=f99e167] [cursor=pointer]: "0"
+                  - generic [ref=f99e168] [cursor=pointer]: "0"
+                  - generic [ref=f99e169] [cursor=pointer]: "0"
+                - textbox "Verification code" [ref=f99e171]: "000000"
+              - button "Resend code" [ref=f99e172] [cursor=pointer]
+        - button "Use a different phone number" [ref=f99e177] [cursor=pointer]
+    - generic [ref=f99e93]:
+      - generic:
+        - generic:
+          - generic [ref=f99e94]:
+            - generic:
+              - generic:
+                - generic [ref=f99e95]: Powered by
+                - img "Stripe" [ref=f99e97]
+                - button "Information" [ref=f99e105] [cursor=pointer]
+          - link "Contact" [ref=f99e111] [cursor=pointer]:
+            - /url: https://support.stripe.com/contact
+          - list [ref=f99e116]:
+            - listitem [ref=f99e117]:
+              - link "Terms" [ref=f99e118] [cursor=pointer]:
+                - /url: https://stripe.com/US/connect-account/legal
+            - listitem [ref=f99e122]:
+              - link "Privacy" [ref=f99e123] [cursor=pointer]:
+                - /url: https://stripe.com/US/privacy
+          - generic [ref=f99e130]:
+            - button [ref=f99e131] [cursor=pointer]:
+              - generic [ref=f99e132]: English (NZ)
+            - combobox [ref=f99e138] [cursor=pointer]:
+              - option "Auto-detect"
+              - option "Bahasa Indonesia"
+              - option "čeština"
+              - option "Dansk"
+              - option "Deutsch"
+              - option "Eesti"
+              - option "English (Australia)"
+              - option "English (Canada)"
+              - option "English (India)"
+              - option "English (Ireland)"
+              - option "English (New Zealand)" [selected]
+              - option "English (Singapore)"
+              - option "English (United Kingdom)"
+              - option "English (United States)"
+              - option "Español (América Latina)"
+              - option "Español (España)"
+              - option "Français (Canada)"
+              - option "Français (France)"
+              - option "Hrvatski"
+              - option "Italiano"
+              - option "Latviešu"
+              - option "Lietuvių"
+              - option "Magyar"
+              - option "Malti"
+              - option "Melayu"
+              - option "Nederlands (Nederland)"
+              - option "Norsk bokmål"
+              - option "Polski"
+              - option "Português (Brasil)"
+              - option "Português (Portugal)"
+              - option "Română"
+              - option "Slovenčina"
+              - option "Slovenščina"
+              - option "Suomi"
+              - option "Svenska"
+              - option "Tiếng Việt"
+              - option "Türkçe"
+              - option "Wikang Filipino"
+              - option "Ελληνικά"
+              - option "български"
+              - option "ไทย"
+              - option "한국어"
+              - option "中文(简体)"
+              - option "日本語"
+              - option "繁體中文(台灣)"
+              - option "繁體中文(香港)"
+  - generic:
+    - iframe

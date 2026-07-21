@@ -1,0 +1,20 @@
+- main [ref=f129e3]:
+  - heading "Account" [level=1] [ref=f129e5]
+  - list [ref=f129e7]:
+    - listitem [ref=f129e8]:
+      - link "Profile" [ref=f129e9] [cursor=pointer]:
+        - /url: /b/userportal/profile
+        - generic [ref=f129e15]: ›
+    - listitem [ref=f129e16]:
+      - link "Security" [ref=f129e17] [cursor=pointer]:
+        - /url: /b/userportal/security
+        - generic [ref=f129e23]: ›
+    - listitem [ref=f129e24]:
+      - link "Sessions" [ref=f129e25] [cursor=pointer]:
+        - /url: /b/userportal/sessions
+        - generic [ref=f129e30]: ›
+    - listitem [ref=f129e31]:
+      - link "Organizations" [ref=f129e32] [cursor=pointer]:
+        - /url: /b/auth/orgs
+        - generic [ref=f129e40]: ›
+  - button "Sign Out" [ref=f129e43] [cursor=pointer]

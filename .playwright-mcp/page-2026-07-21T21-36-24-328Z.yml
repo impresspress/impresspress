@@ -1,0 +1,450 @@
+- generic [ref=f131e2]:
+  - link "Skip to content" [ref=f131e3] [cursor=pointer]:
+    - /url: "#content"
+  - navigation "Primary" [ref=f131e4]:
+    - img "Impresspress" [ref=f131e6]
+    - generic [ref=f131e7]:
+      - generic [ref=f131e8]:
+        - generic [ref=f131e9]:
+          - generic [ref=f131e10]: Workspace
+          - list [ref=f131e11]:
+            - listitem [ref=f131e12]:
+              - link "Dashboard" [ref=f131e13] [cursor=pointer]:
+                - /url: /b/admin/
+            - listitem [ref=f131e21]:
+              - link "Users" [ref=f131e22] [cursor=pointer]:
+                - /url: /b/admin/users
+        - generic [ref=f131e30]:
+          - generic [ref=f131e31]: Data
+          - list [ref=f131e32]:
+            - listitem [ref=f131e33]:
+              - link "Storage" [ref=f131e34] [cursor=pointer]:
+                - /url: /b/storage/admin/
+            - listitem [ref=f131e39]:
+              - link "Database" [ref=f131e40] [cursor=pointer]:
+                - /url: /b/admin/database
+            - listitem [ref=f131e46]:
+              - link "Vector indexes" [ref=f131e47] [cursor=pointer]:
+                - /url: /b/vector/
+        - generic [ref=f131e55]:
+          - generic [ref=f131e56]: Communication
+          - list [ref=f131e57]:
+            - listitem [ref=f131e58]:
+              - link "Messages" [ref=f131e59] [cursor=pointer]:
+                - /url: /b/messages/
+            - listitem [ref=f131e65]:
+              - link "LLM" [ref=f131e66] [cursor=pointer]:
+                - /url: /b/llm/
+        - generic [ref=f131e72]:
+          - generic [ref=f131e73]: Commerce
+          - list [ref=f131e74]:
+            - listitem [ref=f131e75]:
+              - link "Products" [ref=f131e76] [cursor=pointer]:
+                - /url: /b/products/admin/
+        - generic [ref=f131e83]:
+          - generic [ref=f131e84]: System
+          - list [ref=f131e85]:
+            - listitem [ref=f131e86]:
+              - link "Blocks" [ref=f131e87] [cursor=pointer]:
+                - /url: /b/admin/blocks
+            - listitem [ref=f131e94]:
+              - link "Logs" [ref=f131e95] [cursor=pointer]:
+                - /url: /b/admin/logs
+            - listitem [ref=f131e101]:
+              - link "Settings" [ref=f131e102] [cursor=pointer]:
+                - /url: /b/admin/settings/email
+      - button "Toggle sidebar" [ref=f131e108] [cursor=pointer]
+    - button "A admin@example.com Admin" [ref=f131e113] [cursor=pointer]:
+      - generic [ref=f131e114]: A
+      - generic [ref=f131e115]:
+        - generic [ref=f131e116]: admin@example.com
+        - generic [ref=f131e117]: Admin
+  - generic [ref=f131e118]:
+    - banner [ref=f131e119]:
+      - heading "Dashboard" [level=1] [ref=f131e120]
+      - generic [ref=f131e121]: "|"
+      - generic [ref=f131e122]: System overview
+      - button "Open command palette" [ref=f131e124] [cursor=pointer]:
+        - generic [ref=f131e125]: Quick jump
+        - generic [ref=f131e126]:
+          - generic [ref=f131e127]: Ctrl
+          - generic [ref=f131e128]: K
+    - generic [ref=f131e130]:
+      - generic [ref=f131e132]:
+        - generic [ref=f131e133]:
+          - generic [ref=f131e134]:
+            - generic [ref=f131e135]:
+              - heading "New users" [level=3] [ref=f131e136]
+              - paragraph [ref=f131e137]: Last 30 days
+            - link "View" [ref=f131e138] [cursor=pointer]:
+              - /url: /b/admin/users
+          - generic [ref=f131e139]:
+            - table [ref=f131e140]:
+              - rowgroup [ref=f131e141]:
+                - row [ref=f131e142]:
+                  - cell "0" [ref=f131e143]
+                  - text: "2026-06-22: 0"
+                - row [ref=f131e144]:
+                  - cell "0" [ref=f131e145]
+                  - text: "2026-06-23: 0"
+                - row [ref=f131e146]:
+                  - cell "0" [ref=f131e147]
+                  - text: "2026-06-24: 0"
+                - row [ref=f131e148]:
+                  - cell "0" [ref=f131e149]
+                  - text: "2026-06-25: 0"
+                - row [ref=f131e150]:
+                  - cell "0" [ref=f131e151]
+                  - text: "2026-06-26: 0"
+                - row [ref=f131e152]:
+                  - cell "0" [ref=f131e153]
+                  - text: "2026-06-27: 0"
+                - row [ref=f131e154]:
+                  - cell "0" [ref=f131e155]
+                  - text: "2026-06-28: 0"
+                - row [ref=f131e156]:
+                  - cell "0" [ref=f131e157]
+                  - text: "2026-06-29: 0"
+                - row [ref=f131e158]:
+                  - cell "0" [ref=f131e159]
+                  - text: "2026-06-30: 0"
+                - row [ref=f131e160]:
+                  - cell "0" [ref=f131e161]
+                  - text: "2026-07-01: 0"
+                - row [ref=f131e162]:
+                  - cell "0" [ref=f131e163]
+                  - text: "2026-07-02: 0"
+                - row [ref=f131e164]:
+                  - cell "0" [ref=f131e165]
+                  - text: "2026-07-03: 0"
+                - row [ref=f131e166]:
+                  - cell "0" [ref=f131e167]
+                  - text: "2026-07-04: 0"
+                - row [ref=f131e168]:
+                  - cell "0" [ref=f131e169]
+                  - text: "2026-07-05: 0"
+                - row [ref=f131e170]:
+                  - cell "0" [ref=f131e171]
+                  - text: "2026-07-06: 0"
+                - row [ref=f131e172]:
+                  - cell "0" [ref=f131e173]
+                  - text: "2026-07-07: 0"
+                - row [ref=f131e174]:
+                  - cell "0" [ref=f131e175]
+                  - text: "2026-07-08: 0"
+                - row [ref=f131e176]:
+                  - cell "0" [ref=f131e177]
+                  - text: "2026-07-09: 0"
+                - row [ref=f131e178]:
+                  - cell "0" [ref=f131e179]
+                  - text: "2026-07-10: 0"
+                - row [ref=f131e180]:
+                  - cell "0" [ref=f131e181]
+                  - text: "2026-07-11: 0"
+                - row [ref=f131e182]:
+                  - cell "0" [ref=f131e183]
+                  - text: "2026-07-12: 0"
+                - row [ref=f131e184]:
+                  - cell "0" [ref=f131e185]
+                  - text: "2026-07-13: 0"
+                - row [ref=f131e186]:
+                  - cell "0" [ref=f131e187]
+                  - text: "2026-07-14: 0"
+                - row [ref=f131e188]:
+                  - cell "0" [ref=f131e189]
+                  - text: "2026-07-15: 0"
+                - row [ref=f131e190]:
+                  - cell "0" [ref=f131e191]
+                  - text: "2026-07-16: 0"
+                - row [ref=f131e192]:
+                  - cell "0" [ref=f131e193]
+                  - text: "2026-07-17: 0"
+                - row [ref=f131e194]:
+                  - cell "0" [ref=f131e195]
+                  - text: "2026-07-18: 0"
+                - row [ref=f131e196]:
+                  - cell "0" [ref=f131e197]
+                  - text: "2026-07-19: 0"
+                - row [ref=f131e198]:
+                  - cell "0" [ref=f131e199]
+                  - text: "2026-07-20: 0"
+                - row [ref=f131e200]:
+                  - cell "2" [ref=f131e201]
+                  - text: "2026-07-21: 2"
+            - generic [ref=f131e202]:
+              - generic [ref=f131e203]: Jun 22
+              - generic [ref=f131e204]: Jul 21
+        - generic [ref=f131e205]:
+          - generic [ref=f131e206]:
+            - generic [ref=f131e207]:
+              - heading "Requests" [level=3] [ref=f131e208]
+              - paragraph [ref=f131e209]: Last 30 days
+            - link "View" [ref=f131e210] [cursor=pointer]:
+              - /url: /b/admin/logs
+          - generic [ref=f131e211]:
+            - table [ref=f131e212]:
+              - rowgroup [ref=f131e213]:
+                - row [ref=f131e214]:
+                  - cell "0" [ref=f131e215]
+                  - text: "2026-06-22: 0"
+                - row [ref=f131e216]:
+                  - cell "0" [ref=f131e217]
+                  - text: "2026-06-23: 0"
+                - row [ref=f131e218]:
+                  - cell "0" [ref=f131e219]
+                  - text: "2026-06-24: 0"
+                - row [ref=f131e220]:
+                  - cell "0" [ref=f131e221]
+                  - text: "2026-06-25: 0"
+                - row [ref=f131e222]:
+                  - cell "0" [ref=f131e223]
+                  - text: "2026-06-26: 0"
+                - row [ref=f131e224]:
+                  - cell "0" [ref=f131e225]
+                  - text: "2026-06-27: 0"
+                - row [ref=f131e226]:
+                  - cell "0" [ref=f131e227]
+                  - text: "2026-06-28: 0"
+                - row [ref=f131e228]:
+                  - cell "0" [ref=f131e229]
+                  - text: "2026-06-29: 0"
+                - row [ref=f131e230]:
+                  - cell "0" [ref=f131e231]
+                  - text: "2026-06-30: 0"
+                - row [ref=f131e232]:
+                  - cell "0" [ref=f131e233]
+                  - text: "2026-07-01: 0"
+                - row [ref=f131e234]:
+                  - cell "0" [ref=f131e235]
+                  - text: "2026-07-02: 0"
+                - row [ref=f131e236]:
+                  - cell "0" [ref=f131e237]
+                  - text: "2026-07-03: 0"
+                - row [ref=f131e238]:
+                  - cell "0" [ref=f131e239]
+                  - text: "2026-07-04: 0"
+                - row [ref=f131e240]:
+                  - cell "0" [ref=f131e241]
+                  - text: "2026-07-05: 0"
+                - row [ref=f131e242]:
+                  - cell "0" [ref=f131e243]
+                  - text: "2026-07-06: 0"
+                - row [ref=f131e244]:
+                  - cell "0" [ref=f131e245]
+                  - text: "2026-07-07: 0"
+                - row [ref=f131e246]:
+                  - cell "0" [ref=f131e247]
+                  - text: "2026-07-08: 0"
+                - row [ref=f131e248]:
+                  - cell "0" [ref=f131e249]
+                  - text: "2026-07-09: 0"
+                - row [ref=f131e250]:
+                  - cell "0" [ref=f131e251]
+                  - text: "2026-07-10: 0"
+                - row [ref=f131e252]:
+                  - cell "0" [ref=f131e253]
+                  - text: "2026-07-11: 0"
+                - row [ref=f131e254]:
+                  - cell "0" [ref=f131e255]
+                  - text: "2026-07-12: 0"
+                - row [ref=f131e256]:
+                  - cell "0" [ref=f131e257]
+                  - text: "2026-07-13: 0"
+                - row [ref=f131e258]:
+                  - cell "0" [ref=f131e259]
+                  - text: "2026-07-14: 0"
+                - row [ref=f131e260]:
+                  - cell "0" [ref=f131e261]
+                  - text: "2026-07-15: 0"
+                - row [ref=f131e262]:
+                  - cell "0" [ref=f131e263]
+                  - text: "2026-07-16: 0"
+                - row [ref=f131e264]:
+                  - cell "0" [ref=f131e265]
+                  - text: "2026-07-17: 0"
+                - row [ref=f131e266]:
+                  - cell "0" [ref=f131e267]
+                  - text: "2026-07-18: 0"
+                - row [ref=f131e268]:
+                  - cell "0" [ref=f131e269]
+                  - text: "2026-07-19: 0"
+                - row [ref=f131e270]:
+                  - cell "0" [ref=f131e271]
+                  - text: "2026-07-20: 0"
+                - row [ref=f131e272]:
+                  - cell "126" [ref=f131e273]
+                  - text: "2026-07-21: 126"
+            - generic [ref=f131e274]:
+              - generic [ref=f131e275]: Jun 22
+              - generic [ref=f131e276]: Jul 21
+        - generic [ref=f131e277]:
+          - generic [ref=f131e278]:
+            - generic [ref=f131e279]:
+              - heading "Errors" [level=3] [ref=f131e280]
+              - paragraph [ref=f131e281]: Last 30 days
+            - link "View" [ref=f131e282] [cursor=pointer]:
+              - /url: /b/admin/logs?status=ERROR
+          - generic [ref=f131e283]:
+            - table [ref=f131e284]:
+              - rowgroup [ref=f131e285]:
+                - row [ref=f131e286]:
+                  - cell "0" [ref=f131e287]
+                  - text: "2026-06-22: 0"
+                - row [ref=f131e288]:
+                  - cell "0" [ref=f131e289]
+                  - text: "2026-06-23: 0"
+                - row [ref=f131e290]:
+                  - cell "0" [ref=f131e291]
+                  - text: "2026-06-24: 0"
+                - row [ref=f131e292]:
+                  - cell "0" [ref=f131e293]
+                  - text: "2026-06-25: 0"
+                - row [ref=f131e294]:
+                  - cell "0" [ref=f131e295]
+                  - text: "2026-06-26: 0"
+                - row [ref=f131e296]:
+                  - cell "0" [ref=f131e297]
+                  - text: "2026-06-27: 0"
+                - row [ref=f131e298]:
+                  - cell "0" [ref=f131e299]
+                  - text: "2026-06-28: 0"
+                - row [ref=f131e300]:
+                  - cell "0" [ref=f131e301]
+                  - text: "2026-06-29: 0"
+                - row [ref=f131e302]:
+                  - cell "0" [ref=f131e303]
+                  - text: "2026-06-30: 0"
+                - row [ref=f131e304]:
+                  - cell "0" [ref=f131e305]
+                  - text: "2026-07-01: 0"
+                - row [ref=f131e306]:
+                  - cell "0" [ref=f131e307]
+                  - text: "2026-07-02: 0"
+                - row [ref=f131e308]:
+                  - cell "0" [ref=f131e309]
+                  - text: "2026-07-03: 0"
+                - row [ref=f131e310]:
+                  - cell "0" [ref=f131e311]
+                  - text: "2026-07-04: 0"
+                - row [ref=f131e312]:
+                  - cell "0" [ref=f131e313]
+                  - text: "2026-07-05: 0"
+                - row [ref=f131e314]:
+                  - cell "0" [ref=f131e315]
+                  - text: "2026-07-06: 0"
+                - row [ref=f131e316]:
+                  - cell "0" [ref=f131e317]
+                  - text: "2026-07-07: 0"
+                - row [ref=f131e318]:
+                  - cell "0" [ref=f131e319]
+                  - text: "2026-07-08: 0"
+                - row [ref=f131e320]:
+                  - cell "0" [ref=f131e321]
+                  - text: "2026-07-09: 0"
+                - row [ref=f131e322]:
+                  - cell "0" [ref=f131e323]
+                  - text: "2026-07-10: 0"
+                - row [ref=f131e324]:
+                  - cell "0" [ref=f131e325]
+                  - text: "2026-07-11: 0"
+                - row [ref=f131e326]:
+                  - cell "0" [ref=f131e327]
+                  - text: "2026-07-12: 0"
+                - row [ref=f131e328]:
+                  - cell "0" [ref=f131e329]
+                  - text: "2026-07-13: 0"
+                - row [ref=f131e330]:
+                  - cell "0" [ref=f131e331]
+                  - text: "2026-07-14: 0"
+                - row [ref=f131e332]:
+                  - cell "0" [ref=f131e333]
+                  - text: "2026-07-15: 0"
+                - row [ref=f131e334]:
+                  - cell "0" [ref=f131e335]
+                  - text: "2026-07-16: 0"
+                - row [ref=f131e336]:
+                  - cell "0" [ref=f131e337]
+                  - text: "2026-07-17: 0"
+                - row [ref=f131e338]:
+                  - cell "0" [ref=f131e339]
+                  - text: "2026-07-18: 0"
+                - row [ref=f131e340]:
+                  - cell "0" [ref=f131e341]
+                  - text: "2026-07-19: 0"
+                - row [ref=f131e342]:
+                  - cell "0" [ref=f131e343]
+                  - text: "2026-07-20: 0"
+                - row [ref=f131e344]:
+                  - cell "6" [ref=f131e345]
+                  - text: "2026-07-21: 6"
+            - generic [ref=f131e346]:
+              - generic [ref=f131e347]: Jun 22
+              - generic [ref=f131e348]: Jul 21
+      - generic [ref=f131e349]:
+        - generic [ref=f131e350]:
+          - generic [ref=f131e351]: Total Users
+          - generic [ref=f131e352]: "2"
+        - generic [ref=f131e353]:
+          - generic [ref=f131e354]: New Today
+          - generic [ref=f131e355]: "2"
+        - generic [ref=f131e356]:
+          - generic [ref=f131e357]: Requests Today
+          - generic [ref=f131e358]: "126"
+        - generic [ref=f131e359]:
+          - generic [ref=f131e360]: Errors Today
+          - generic [ref=f131e361]: "6"
+        - generic [ref=f131e362]:
+          - generic [ref=f131e363]: Avg Response
+          - generic [ref=f131e364]: 101ms
+      - generic [ref=f131e365]:
+        - generic [ref=f131e367]:
+          - generic [ref=f131e368]:
+            - heading "Recent Users" [level=3] [ref=f131e369]
+            - link "View all" [ref=f131e370] [cursor=pointer]:
+              - /url: /b/admin/users
+          - table [ref=f131e373]:
+            - rowgroup [ref=f131e374]:
+              - row [ref=f131e375]:
+                - cell "seller@example.com" [ref=f131e376]
+                - cell "2026-07-21" [ref=f131e377]
+              - row [ref=f131e378]:
+                - cell "admin@example.com" [ref=f131e379]
+                - cell "2026-07-21" [ref=f131e380]
+        - generic [ref=f131e382]:
+          - generic [ref=f131e383]:
+            - heading "Recent Errors" [level=3] [ref=f131e384]
+            - link "View all" [ref=f131e385] [cursor=pointer]:
+              - /url: /b/admin/logs?status=ERROR
+          - table [ref=f131e388]:
+            - rowgroup [ref=f131e389]:
+              - row [ref=f131e390]:
+                - columnheader "Status" [ref=f131e391]
+                - columnheader "Method" [ref=f131e392]
+                - columnheader "Path" [ref=f131e393]
+                - columnheader "Time" [ref=f131e394]
+            - rowgroup [ref=f131e395]:
+              - row [ref=f131e396]:
+                - cell "500" [ref=f131e397]
+                - cell "RETRIEVE" [ref=f131e399]
+                - cell "/b/auth/logout" [ref=f131e400]
+                - cell "2026-07-21T21:35:56" [ref=f131e401]
+              - row [ref=f131e402]:
+                - cell "500" [ref=f131e403]
+                - cell "CREATE" [ref=f131e405]
+                - cell "/b/products/checkout" [ref=f131e406]
+                - cell "2026-07-21T21:35:50" [ref=f131e407]
+              - row [ref=f131e408]:
+                - cell "500" [ref=f131e409]
+                - cell "RETRIEVE" [ref=f131e411]
+                - cell "/b/products/storefront/38a08d07-50ca-4dc4-90a4-d7a31146051d" [ref=f131e412]
+                - cell "2026-07-21T21:35:12" [ref=f131e413]
+              - row [ref=f131e414]:
+                - cell "500" [ref=f131e415]
+                - cell "CREATE" [ref=f131e417]
+                - cell "/b/products/pricing/preview" [ref=f131e418]
+                - cell "2026-07-21T20:27:09" [ref=f131e419]
+              - row [ref=f131e420]:
+                - cell "500" [ref=f131e421]
+                - cell "CREATE" [ref=f131e423]
+                - cell "/b/products/pricing/preview" [ref=f131e424]
+                - cell "2026-07-21T20:27:09" [ref=f131e425]

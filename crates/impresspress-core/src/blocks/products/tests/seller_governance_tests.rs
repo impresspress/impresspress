@@ -4,10 +4,12 @@ use serde_json::{json, Value};
 use wafer_core::clients::database as db;
 use wafer_run::{AuthLevel, Block, ErrorCode, OutputStream};
 
-use super::super::{contracts::OfferStatus, repo, ProductsBlock, PRODUCTS_TABLE};
-use super::harness::{
-    admin_create_msg, admin_get_msg, create_msg, ctx_with, dispatch_admin, dispatch_user, get_msg,
-    output_is_error, output_to_html, output_to_json, seed, update_msg,
+use super::{
+    super::{contracts::OfferStatus, repo, ProductsBlock, PRODUCTS_TABLE},
+    harness::{
+        admin_create_msg, admin_get_msg, create_msg, ctx_with, dispatch_admin, dispatch_user,
+        get_msg, output_is_error, output_to_html, output_to_json, seed, update_msg,
+    },
 };
 
 fn fixed_offer() -> Value {

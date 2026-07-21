@@ -1,0 +1,53 @@
+- generic [active]:
+  - generic [ref=f48e308]:
+    - generic [ref=f48e311]:
+      - generic:
+        - generic:
+          - link "Impresspress Sandbox Sandbox" [ref=f48e198] [cursor=pointer]:
+            - /url: http://127.0.0.1:8093/b/products/my-purchases/833bef52-d176-4bba-9730-1e63299a5bb8
+            - generic:
+              - generic:
+                - generic [ref=f48e204]: Impresspress Sandbox
+                - generic [ref=f48e205]: Sandbox
+          - generic [ref=f48e210]:
+            - generic:
+              - generic:
+                - generic [ref=f48e211]: Impresspress Sandbox partners with Stripe for simplified billing.
+                - link "Return to Impresspress Sandbox" [ref=f48e215] [cursor=pointer]:
+                  - /url: http://127.0.0.1:8093/b/products/my-purchases/833bef52-d176-4bba-9730-1e63299a5bb8
+      - contentinfo [ref=f48e313]:
+        - link "Powered by Stripe" [ref=f48e314] [cursor=pointer]:
+          - /url: https://stripe.com
+          - generic [ref=f48e316]:
+            - generic:
+              - generic:
+                - generic [ref=f48e219]: Powered by
+                - img "Stripe" [ref=f48e222]
+        - generic [ref=f48e317]:
+          - link "Terms" [ref=f48e318] [cursor=pointer]:
+            - /url: https://stripe.com/terms
+          - link "Privacy" [ref=f48e319] [cursor=pointer]:
+            - /url: https://stripe.com/privacy
+    - generic [ref=f48e322]:
+      - generic [ref=f48e325]:
+        - button "Billing" [ref=f48e225] [cursor=pointer]
+        - generic [ref=f48e332]: Cancel
+      - generic:
+        - generic:
+          - generic [ref=f48e227]: Confirm cancellation
+          - generic [ref=f48e235]:
+            - generic:
+              - generic:
+                - generic [ref=f48e237]:
+                  - generic:
+                    - generic:
+                      - generic [ref=f48e238]: Monthly Club (Test Subscription) — Monthly Club (Test Subscription)
+                      - generic [ref=f48e243]: $9.00 per month
+                - generic [ref=f48e245]: If you cancel this subscription, it will still be available until the end of your billing period on August 21, 2026.
+            - generic [ref=f48e249]:
+              - generic:
+                - generic:
+                  - button "Cancel subscription" [ref=f48e251] [cursor=pointer]
+                  - button "Go back" [ref=f48e273] [cursor=pointer]
+  - generic:
+    - iframe

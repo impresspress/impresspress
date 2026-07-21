@@ -2310,9 +2310,10 @@ fn dispatch_tables_are_backed_by_declared_endpoints() {
     let info = super::super::ProductsBlock::new().info();
 
     for route in super::super::handlers::ADMIN_ROUTES {
-        let declared_path = route
-            .template
-            .replacen("/admin/b/products", "/b/products/api/admin", 1);
+        let declared_path =
+            route
+                .template
+                .replacen("/admin/b/products", "/b/products/api/admin", 1);
         assert!(
             info.endpoints.iter().any(|endpoint| {
                 endpoint.method == route.method

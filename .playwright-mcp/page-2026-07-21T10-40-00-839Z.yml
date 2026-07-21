@@ -1,0 +1,105 @@
+- generic [ref=f44e2]:
+  - link "Skip to content" [ref=f44e3] [cursor=pointer]:
+    - /url: "#content"
+  - navigation "Primary" [ref=f44e4]:
+    - img "Impresspress" [ref=f44e6]
+    - generic [ref=f44e7]:
+      - generic [ref=f44e8]:
+        - generic [ref=f44e9]:
+          - generic [ref=f44e10]: Account
+          - list [ref=f44e11]:
+            - listitem [ref=f44e12]:
+              - link "Profile" [ref=f44e13] [cursor=pointer]:
+                - /url: /b/userportal/profile
+            - listitem [ref=f44e19]:
+              - link "Organizations" [ref=f44e20] [cursor=pointer]:
+                - /url: /b/auth/orgs
+            - listitem [ref=f44e28]:
+              - link "Sessions" [ref=f44e29] [cursor=pointer]:
+                - /url: /b/userportal/sessions
+            - listitem [ref=f44e34]:
+              - link "Security" [ref=f44e35] [cursor=pointer]:
+                - /url: /b/userportal/security
+        - generic [ref=f44e41]:
+          - generic [ref=f44e42]: Apps
+          - list [ref=f44e43]:
+            - listitem [ref=f44e44]:
+              - link "Products" [ref=f44e45] [cursor=pointer]:
+                - /url: /b/products/
+            - listitem [ref=f44e52]:
+              - link "Files" [ref=f44e53] [cursor=pointer]:
+                - /url: /b/storage/
+            - listitem [ref=f44e58]:
+              - link "Shares" [ref=f44e59] [cursor=pointer]:
+                - /url: /b/cloudstorage/
+            - listitem [ref=f44e65]:
+              - link "Legal" [ref=f44e66] [cursor=pointer]:
+                - /url: /b/legalpages/admin/privacy
+      - button "Toggle sidebar" [ref=f44e72] [cursor=pointer]
+    - button "A admin@example.com Admin" [ref=f44e77] [cursor=pointer]:
+      - generic [ref=f44e78]: A
+      - generic [ref=f44e79]:
+        - generic [ref=f44e80]: admin@example.com
+        - generic [ref=f44e81]: Admin
+  - generic [ref=f44e82]:
+    - banner [ref=f44e83]:
+      - heading "My Purchases" [level=1] [ref=f44e84]
+      - button "Open command palette" [ref=f44e86] [cursor=pointer]:
+        - generic [ref=f44e87]: Quick jump
+        - generic [ref=f44e88]:
+          - generic [ref=f44e89]: Ctrl
+          - generic [ref=f44e90]: K
+    - generic [ref=f44e91]:
+      - generic [ref=f44e93]:
+        - link "Commerce" [ref=f44e94] [cursor=pointer]:
+          - /url: /b/products/
+        - link "Purchases" [ref=f44e100] [cursor=pointer]:
+          - /url: /b/products/my-purchases
+        - link "Selling" [ref=f44e105] [cursor=pointer]:
+          - /url: /b/products/selling
+      - generic [ref=f44e111]:
+        - heading "My Purchases" [level=2] [ref=f44e112]
+        - paragraph [ref=f44e113]: Receipts, payment status, and subscription details
+      - generic [ref=f44e114]:
+        - table [ref=f44e116]:
+          - rowgroup [ref=f44e117]:
+            - row [ref=f44e118]:
+              - columnheader "Status" [ref=f44e119]
+              - columnheader "Total" [ref=f44e120]
+              - columnheader "Provider" [ref=f44e121]
+              - columnheader "Date" [ref=f44e122]
+          - rowgroup [ref=f44e123]:
+            - row [ref=f44e124]:
+              - cell "completed" [ref=f44e125]
+              - cell "9.00 NZD" [ref=f44e127]
+              - cell "stripe" [ref=f44e128]
+              - cell "2026-07-21" [ref=f44e129]
+              - cell [ref=f44e130]:
+                - link "Open" [ref=f44e131] [cursor=pointer]:
+                  - /url: /b/products/my-purchases/833bef52-d176-4bba-9730-1e63299a5bb8
+                  - text: ›
+            - row [ref=f44e132]:
+              - cell "partially refunded" [ref=f44e133]
+              - cell "25.00 NZD" [ref=f44e135]
+              - cell "stripe" [ref=f44e136]
+              - cell "2026-07-21" [ref=f44e137]
+              - cell [ref=f44e138]:
+                - link "Open" [ref=f44e139] [cursor=pointer]:
+                  - /url: /b/products/my-purchases/d46b5317-d584-49ad-bd1e-276c2a5720b0
+                  - text: ›
+            - row [ref=f44e140]:
+              - cell "checkout started" [ref=f44e141]
+              - cell "25.00 NZD" [ref=f44e143]
+              - cell "stripe" [ref=f44e144]
+              - cell "2026-07-21" [ref=f44e145]
+              - cell [ref=f44e146]:
+                - link "Open" [ref=f44e147] [cursor=pointer]:
+                  - /url: /b/products/my-purchases/b9808456-b3b4-4f2e-816e-881ddd5629e4
+                  - text: ›
+        - navigation "Pagination" [ref=f44e148]:
+          - generic [ref=f44e149]: 3 total
+          - link "‹ Prev" [disabled]:
+            - /url: /b/products/my-purchases?page=1
+          - generic [ref=f44e150]: 1 / 1
+          - link "Next ›" [disabled]:
+            - /url: /b/products/my-purchases?page=1

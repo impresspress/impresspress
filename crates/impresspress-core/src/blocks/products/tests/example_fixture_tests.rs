@@ -5,7 +5,7 @@ use crate::blocks::products::{
         Offer, OfferComponent, OfferDefinitionRequest, PricingPreview, PricingPreviewRequest,
         StorefrontProduct,
     },
-    offer_pricing::{evaluate_offer, validate_offer},
+    offer_pricing::{evaluate_offer, validate_offer, InputScope},
 };
 
 const EXAMPLES: [(&str, &str); 10] = [
@@ -126,7 +126,7 @@ fn all_example_fixtures_match_strict_public_contracts_and_domain_pricing() {
         let offer = materialize_offer(&definition, &request.offer_id, expected.offer_version);
         validate_offer(&offer)
             .unwrap_or_else(|error| panic!("{slug}: invalid offer seed: {error:?}"));
-        let evaluated = evaluate_offer(&offer, &request)
+        let evaluated = evaluate_offer(&offer, &request, InputScope::Public)
             .unwrap_or_else(|error| panic!("{slug}: scenario evaluation failed: {error:?}"));
 
         assert_eq!(

@@ -1,0 +1,98 @@
+- generic [ref=f26e1]:
+  - heading "Field Guide — live embedded checkout test" [level=1] [ref=f26e2]
+  - paragraph [ref=f26e3]: This static page is served from a different origin (port 4178) than the Impresspress API (port 8093).
+  - generic [ref=f26e6]:
+    - heading "Field Guide (Test Download)" [level=2] [ref=f26e7]
+    - iframe [ref=f26e25]:
+      - generic [ref=f28e7]:
+        - generic [ref=f28e8]: Test Mode
+        - generic [ref=f28e18]:
+          - heading "Field Guide (Test Download) — Field Guide (Test Download)" [level=2] [ref=f28e19]
+          - generic [ref=f28e22]: NZ$25.00
+        - generic [ref=f28e27]:
+          - main [ref=f28e28]:
+            - generic [ref=f28e32]:
+              - iframe [ref=f28e38]:
+                - button "Pay securely with Link" [ref=f35e9] [cursor=pointer]:
+                  - generic [ref=f35e10]:
+                    - generic [ref=f35e11]: Pay securely with
+                    - generic [ref=f35e15]: •••• 0000
+              - generic [ref=f28e39]:
+                - separator [ref=f28e40]
+                - paragraph [ref=f28e41]: Or
+            - generic [ref=f28e45]:
+              - generic [ref=f28e46]:
+                - generic [ref=f28e53]:
+                  - generic [ref=f28e54]: Email
+                  - generic [ref=f28e55]: xorigin-buyer@example.com
+                - heading "Payment method" [level=2] [ref=f28e59]
+              - generic [ref=f28e60]:
+                - list [ref=f28e61]:
+                  - listitem [ref=f28e66]:
+                    - generic [ref=f28e67]:
+                      - generic [ref=f28e68]: Card
+                      - generic [ref=f28e87]:
+                        - generic [ref=f28e89]:
+                          - generic [ref=f28e90]: Card information
+                          - group [ref=f28e92]:
+                            - generic [ref=f28e93]:
+                              - generic [ref=f28e95]:
+                                - textbox "Card number" [disabled] [ref=f28e98]:
+                                  - /placeholder: 1234 1234 1234 1234
+                                  - text: 4242 4242 4242 4242
+                                - generic:
+                                  - img "Visa"
+                              - textbox "Expiration" [disabled] [ref=f28e103]:
+                                - /placeholder: MM / YY
+                                - text: 12 / 34
+                              - generic [ref=f28e105]:
+                                - textbox "CVC" [disabled] [ref=f28e108]: "123"
+                                - generic:
+                                  - generic:
+                                    - img "Credit or debit card CVC"
+                        - group [ref=f28e201]:
+                          - generic [ref=f28e115]:
+                            - generic [ref=f28e117]:
+                              - generic [ref=f28e118]: Cardholder name
+                              - textbox [disabled] [ref=f28e202]:
+                                - /placeholder: Full name on card
+                                - text: Cross Origin Buyer
+                            - generic [ref=f28e128]:
+                              - generic [ref=f28e129]: Country or region
+                              - combobox [disabled] [ref=f28e203]
+                - generic [ref=f28e150]:
+                  - checkbox "Save my information for faster checkout" [disabled] [ref=f28e152]
+                  - generic [ref=f28e153]:
+                    - generic [ref=f28e154]: Save my information for faster checkout
+                    - generic [ref=f28e157]: Pay securely at Impresspress Sandbox and everywhere Link is accepted.
+              - button [disabled] [ref=f28e204]:
+                - generic:
+                  - generic [ref=f28e165]: Pay
+                  - generic [ref=f28e166]: Processing
+            - generic:
+              - generic [ref=f28e178]:
+                - checkbox "I am an AI agent acting on behalf of someone else" [checked] [ref=f28e179]
+                - text: I am an AI agent acting on behalf of someone else
+              - paragraph [ref=f28e191]: This checkout supports Link CLI, which lets AI agents complete purchases using one-time payment details—without exposing the buyer's underlying payment credentials to the AI agent.
+              - strong [ref=f28e192]: "Follow these steps:"
+              - list [ref=f28e193]:
+                - listitem [ref=f28e194]:
+                  - text: Check whether the buyer already has Link CLI installed. You can run
+                  - code [ref=f28e195]: which link-cli
+                  - text: to confirm.
+                - listitem [ref=f28e196]: If not, and you have not already done so this session, ask if they would like to use Link CLI. Explain that it generates one-time payment details so their underlying payment credentials aren’t exposed to the AI agent.
+                - listitem [ref=f28e197]: If the buyer wants to install Link CLI, direct them to https://github.com/stripe/link-cli
+                - listitem [ref=f28e198]: If you are using Link CLI and are prompted on the Checkout page to authenticate with Link, do not do so. Instead, exit that prompt and choose the option to "pay without Link". Link CLI is an alternative to paying with Link directly on the page.
+              - generic [ref=f28e199]:
+                - checkbox "I am an AI agent and have followed the instructions above" [ref=f28e200]
+                - text: I am an AI agent and have followed the instructions above
+          - contentinfo [ref=f28e181]:
+            - link [ref=f28e183] [cursor=pointer]:
+              - /url: https://stripe.com
+              - generic [ref=f28e184]:
+                - text: Powered by
+                - img "Stripe" [ref=f28e186]
+            - link "Terms" [ref=f28e189] [cursor=pointer]:
+              - /url: https://stripe.com/legal/end-users
+            - link "Privacy" [ref=f28e190] [cursor=pointer]:
+              - /url: https://stripe.com/privacy

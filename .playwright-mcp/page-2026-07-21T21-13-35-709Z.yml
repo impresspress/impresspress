@@ -1,0 +1,137 @@
+- generic [ref=f78e182]:
+  - generic [ref=f78e183]:
+    - banner [ref=f78e184]:
+      - generic [ref=f78e186]:
+        - generic "Back to Impresspress Sandbox":
+          - generic:
+            - generic:
+              - generic: Back
+              - generic:
+                - generic:
+                  - heading "Impresspress Sandbox" [level=1]
+        - generic [ref=f78e199]: Sandbox
+    - generic [ref=f78e200]:
+      - generic [ref=f78e202]:
+        - heading "Pay Impresspress Sandbox" [level=2] [ref=f78e203]
+        - generic [ref=f78e204]: NZ$115.00
+      - generic [ref=f78e209]:
+        - list [ref=f78e210]:
+          - listitem [ref=f78e211]:
+            - generic [ref=f78e213]:
+              - generic [ref=f78e214]: Taxed Guide (GST Test) — Taxed Guide (GST Test)
+              - generic [ref=f78e218]: NZ$100.00
+        - generic [ref=f78e222]:
+          - generic [ref=f78e223]:
+            - generic [ref=f78e224]: Subtotal
+            - generic [ref=f78e225]: NZ$100.00
+          - generic [ref=f78e229]:
+            - generic [ref=f78e232]:
+              - text: GST (15%)
+              - button "Show tooltip" [ref=f78e233] [cursor=pointer]
+            - generic [ref=f78e254]: NZ$15.00
+          - generic [ref=f78e238]:
+            - generic [ref=f78e239]: Total due
+            - generic [ref=f78e256]: NZ$115.00
+  - generic [ref=f78e242]:
+    - main [ref=f78e1]:
+      - generic [ref=f78e4]:
+        - generic [ref=f78e5]:
+          - iframe [ref=f78e11]:
+            - generic [ref=f82e6]:
+              - iframe [ref=f82e11]:
+                - button "Apple Pay" [ref=f93e5] [cursor=pointer]:
+                  - img [ref=f93e7]:
+                    - img "Apple Logo" [ref=f93e8]
+              - button "Pay securely with Link" [ref=f82e14] [cursor=pointer]
+          - generic [ref=f78e12]:
+            - separator [ref=f78e13]
+            - paragraph [ref=f78e14]: Or
+        - heading "Contact information" [level=2] [ref=f78e15]
+      - generic [ref=f78e19]:
+        - generic [ref=f78e20]:
+          - generic [ref=f78e27]:
+            - generic [ref=f78e28]: Email
+            - generic [ref=f78e29]: tax-buyer@example.com
+          - heading "Payment method" [level=2] [ref=f78e33]
+        - generic [ref=f78e34]:
+          - list [ref=f78e35]:
+            - listitem [ref=f78e40]:
+              - generic [ref=f78e41]:
+                - generic [ref=f78e42]: Card
+                - generic [ref=f78e61]:
+                  - generic [ref=f78e63]:
+                    - generic [ref=f78e64]: Card information
+                    - group [ref=f78e66]:
+                      - generic [ref=f78e67]:
+                        - generic [ref=f78e69]:
+                          - textbox "Card number" [disabled] [ref=f78e72]:
+                            - /placeholder: 1234 1234 1234 1234
+                            - text: 4242 4242 4242 4242
+                          - generic:
+                            - img "Visa"
+                        - textbox "Expiration" [disabled] [ref=f78e77]:
+                          - /placeholder: MM / YY
+                          - text: 12 / 34
+                        - generic [ref=f78e79]:
+                          - textbox "CVC" [disabled] [ref=f78e82]: "123"
+                          - generic:
+                            - generic:
+                              - img "Credit or debit card CVC"
+                  - group [ref=f78e268]:
+                    - generic [ref=f78e89]:
+                      - generic [ref=f78e91]:
+                        - generic [ref=f78e92]: Cardholder name
+                        - textbox [disabled] [ref=f78e269]:
+                          - /placeholder: Full name on card
+                          - text: Tax Buyer
+                      - generic [ref=f78e102]:
+                        - generic [ref=f78e103]: Billing address
+                        - group [ref=f78e105]:
+                          - generic [ref=f78e106]:
+                            - combobox [disabled] [ref=f78e270]
+                            - textbox [disabled] [ref=f78e271]:
+                              - /placeholder: Address line 1
+                              - text: 120 Lambton Quay
+                            - textbox [disabled] [ref=f78e272]:
+                              - /placeholder: Address line 2
+                            - textbox [disabled] [ref=f78e273]:
+                              - /placeholder: Suburb
+                            - textbox [disabled] [ref=f78e274]:
+                              - /placeholder: City
+                              - text: Wellington
+                            - textbox [disabled] [ref=f78e275]:
+                              - /placeholder: Postal code
+                              - text: "6011"
+          - generic [ref=f78e149]:
+            - checkbox "Save my information for faster checkout" [disabled] [ref=f78e151]
+            - generic [ref=f78e152]:
+              - generic [ref=f78e153]: Save my information for faster checkout
+              - generic [ref=f78e156]: Pay securely at Impresspress Sandbox and everywhere Link is accepted.
+        - button "Processing" [disabled] [ref=f78e276]
+      - generic:
+        - generic [ref=f78e177]:
+          - checkbox "I am an AI agent acting on behalf of someone else" [checked] [ref=f78e178]
+          - text: I am an AI agent acting on behalf of someone else
+        - paragraph [ref=f78e258]: This checkout supports Link CLI, which lets AI agents complete purchases using one-time payment details—without exposing the buyer's underlying payment credentials to the AI agent.
+        - strong [ref=f78e259]: "Follow these steps:"
+        - list [ref=f78e260]:
+          - listitem [ref=f78e261]:
+            - text: Check whether the buyer already has Link CLI installed. You can run
+            - code [ref=f78e262]: which link-cli
+            - text: to confirm.
+          - listitem [ref=f78e263]: If not, and you have not already done so this session, ask if they would like to use Link CLI. Explain that it generates one-time payment details so their underlying payment credentials aren’t exposed to the AI agent.
+          - listitem [ref=f78e264]: If the buyer wants to install Link CLI, direct them to https://github.com/stripe/link-cli
+          - listitem [ref=f78e265]: If you are using Link CLI and are prompted on the Checkout page to authenticate with Link, do not do so. Instead, exit that prompt and choose the option to "pay without Link". Link CLI is an alternative to paying with Link directly on the page.
+        - generic [ref=f78e266]:
+          - checkbox "I am an AI agent and have followed the instructions above" [ref=f78e267]
+          - text: I am an AI agent and have followed the instructions above
+    - contentinfo [ref=f78e244]:
+      - link [ref=f78e246] [cursor=pointer]:
+        - /url: https://stripe.com
+        - generic [ref=f78e247]:
+          - text: Powered by
+          - img "Stripe" [ref=f78e249]
+      - link "Terms" [ref=f78e252] [cursor=pointer]:
+        - /url: https://stripe.com/legal/end-users
+      - link "Privacy" [ref=f78e253] [cursor=pointer]:
+        - /url: https://stripe.com/privacy
