@@ -121,9 +121,15 @@ use crate::{
 };
 
 const PRODUCTS_UI_CSS: &str = r#"
-.products-tabs{min-width:0;max-width:100%;margin:0 0 1.25rem;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none}
+.products-tabs{min-width:0;max-width:100%;margin:0 0 1.25rem;overflow-x:auto;overflow-y:hidden;scrollbar-width:none;-ms-overflow-style:none}
 .products-tabs::-webkit-scrollbar{display:none}
 .products-tabs>nav{min-width:max-content}
+/* The strip above is the single horizontal scroller: the inner .tabs
+   component must not become a second, nested one (its own mobile rule sets
+   overflow-x:auto), and fractional-zoom rounding must never turn the strip
+   into a vertical scroller that silently clips icon tops behind the hidden
+   scrollbars. */
+.products-tabs .tabs{overflow-x:visible}
 .products-tabs+header,.products-tabs+.page-header{margin-top:0}
 .products-guide{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1rem;margin:1.25rem 0}
 .products-guide__item{position:relative;padding:1.2rem 1.25rem;border:1px solid color-mix(in srgb,var(--border-color) 82%,transparent);border-radius:14px;background:linear-gradient(145deg,color-mix(in srgb,var(--surface-1) 96%,var(--primary-color) 4%),var(--surface-1));box-shadow:0 8px 26px rgba(15,23,42,.05)}
