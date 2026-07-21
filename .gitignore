@@ -45,6 +45,10 @@ Thumbs.db
 # Build output
 build/
 .bin/
+# Local demo work
+/demo/
+/examples/products/clawfood/
+/examples/tests/products-examples.spec.ts-snapshots/clawfood-*.png
 
 # Git worktrees
 .worktrees/

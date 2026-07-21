@@ -2,6 +2,12 @@
 
 These ten standalone static sites exercise the real `<impresspress-product>` web component against deterministic API and Stripe responses. They never create a live charge.
 
+## Built with Codex and GPT-5.6
+
+We used Codex and GPT-5.6 to design and build the products feature through an extensive [14-phase implementation plan](../../docs/2026-07-19-products-stripe-implementation-plan.md). We began by auditing the existing products block and agreeing on the architecture and safety constraints, then worked in small, verified slices across the commerce schema, pricing engine, Stripe and Connect integrations, admin and seller experiences, buyer storefront, SDK, and documentation.
+
+Each phase paired implementation with focused tests and a running verification log, allowing the plan to evolve without losing unfinished work or weakening its original safeguards. The final workflow was exercised through Rust and SDK suites, end-to-end Chromium journeys, responsive visual checks, and ten distinct example storefronts covering the supported product and payment experiences.
+
 ## Run the suite
 
 From `examples/`:
