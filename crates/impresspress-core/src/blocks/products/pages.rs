@@ -121,7 +121,7 @@ use crate::{
 };
 
 const PRODUCTS_UI_CSS: &str = r#"
-.products-tabs{min-width:0;max-width:100%;margin:-.25rem 0 1.75rem;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none}
+.products-tabs{min-width:0;max-width:100%;margin:0 0 1.25rem;overflow-x:auto;scrollbar-width:none;-ms-overflow-style:none}
 .products-tabs::-webkit-scrollbar{display:none}
 .products-tabs>nav{min-width:max-content}
 .products-tabs+header,.products-tabs+.page-header{margin-top:0}
@@ -135,6 +135,8 @@ const PRODUCTS_UI_CSS: &str = r#"
 .products-callout__copy strong{display:block;margin-bottom:.2rem}
 .products-callout__copy p{margin:0}
 body:has(.products-tabs) .shell__main,body:has(.products-tabs) .shell__body{min-width:0}
+body:has(.products-tabs) .shell__body{padding:1.1rem 1.4rem}
+@media(max-width:760px){body:has(.products-tabs) .shell__body{padding:.85rem .9rem}}
 body:has(.products-tabs) .page-header{padding-bottom:.35rem}
 body:has(.products-tabs) .stats-grid{gap:1rem;margin-top:1rem}
 body:has(.products-tabs) .stat-card{border-radius:14px;box-shadow:0 8px 24px rgba(15,23,42,.045)}
@@ -145,10 +147,8 @@ body:has(.products-tabs) .filter-bar{margin:1rem 0;padding:.75rem;border:1px sol
 .product-wizard-progress li{min-height:2.25rem;border-radius:999px}
 .wizard-step-check{display:inline-flex;margin-right:.3rem}
 .wizard-step-check svg{width:.75rem;height:.75rem}
-.wizard-step-check[hidden]{display:none}
 .product-wizard-actions{position:sticky;bottom:0;z-index:2;display:flex;justify-content:space-between;gap:1rem;flex-wrap:wrap;margin-top:1rem;padding:.75rem 0;border-top:1px solid var(--border-color);background:var(--surface-1)}
 .product-wizard-actions__buttons{display:flex;gap:.75rem;margin-left:auto}
-.product-wizard-actions [hidden]{display:none!important}
 .product-template-grid{display:grid;grid-template-columns:repeat(2,minmax(0,1fr));gap:1rem}
 .product-template-card{display:grid;grid-template-columns:auto 1fr;gap:.35rem .75rem;align-items:start;padding:1rem;border:1px solid var(--border-color);border-radius:14px;cursor:pointer;transition:border-color .15s ease,box-shadow .15s ease,transform .15s ease}
 .product-template-card:hover{border-color:var(--primary-color);box-shadow:0 8px 22px rgba(15,23,42,.08);transform:translateY(-1px)}
@@ -3504,11 +3504,13 @@ async fn settings_vars(ctx: &dyn Context) -> SettingsVars {
             "WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS",
         )],
         stripe,
-        commerce: vec![
+        checkout: vec![
             config_vars::var_in(&own, "IMPRESSPRESS__PRODUCTS__DEFAULT_CURRENCY"),
             config_vars::var_in(&own, "IMPRESSPRESS__PRODUCTS__PLATFORM_COUNTRY"),
             config_vars::var_in(&own, "IMPRESSPRESS__PRODUCTS__AUTOMATIC_TAX"),
             config_vars::var_in(&own, "IMPRESSPRESS__PRODUCTS__CHECKOUT_ALLOWED_ORIGINS"),
+        ],
+        sellers: vec![
             config_vars::var_in(&own, "IMPRESSPRESS__PRODUCTS__SELLER_APPLICATION_FEE_BPS"),
             config_vars::var_in(&own, "IMPRESSPRESS__PRODUCTS__SELLER_MODERATION_REQUIRED"),
             config_vars::var_in(&own, "IMPRESSPRESS__PRODUCTS__SELLER_ALLOWED_TEMPLATES"),
@@ -3523,7 +3525,8 @@ async fn settings_vars(ctx: &dyn Context) -> SettingsVars {
 struct SettingsVars {
     features: Vec<wafer_run::ConfigVar>,
     stripe: Vec<wafer_run::ConfigVar>,
-    commerce: Vec<wafer_run::ConfigVar>,
+    checkout: Vec<wafer_run::ConfigVar>,
+    sellers: Vec<wafer_run::ConfigVar>,
     webhooks: Vec<wafer_run::ConfigVar>,
 }
 
@@ -3532,7 +3535,8 @@ impl SettingsVars {
     fn all(&self) -> Vec<wafer_run::ConfigVar> {
         let mut v = self.features.clone();
         v.extend(self.stripe.iter().cloned());
-        v.extend(self.commerce.iter().cloned());
+        v.extend(self.checkout.iter().cloned());
+        v.extend(self.sellers.iter().cloned());
         v.extend(self.webhooks.iter().cloned());
         v
     }
@@ -3542,10 +3546,18 @@ pub async fn settings(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let trusted_server = super::stripe_secret_operations_allowed(ctx).await;
     let vars = settings_vars(ctx).await;
     let sections = [
-        SettingsSection::new("Features", icons::settings(), &vars.features),
-        SettingsSection::new("Stripe", icons::dollar_sign(), &vars.stripe),
-        SettingsSection::new("Commerce", icons::shopping_cart(), &vars.commerce),
-        SettingsSection::new("Webhooks", icons::globe(), &vars.webhooks),
+        SettingsSection::new("Features", icons::settings(), &vars.features)
+            .description("Platform-wide switches shared with other blocks."),
+        SettingsSection::new("Stripe credentials", icons::dollar_sign(), &vars.stripe)
+            .description(
+                "API keys and webhook signing. Connection status and the go-live checklist live in the Stripe tab.",
+            ),
+        SettingsSection::new("Checkout defaults", icons::shopping_cart(), &vars.checkout)
+            .description("Applied to new products and offers; each offer can override them."),
+        SettingsSection::new("Marketplace sellers", icons::users(), &vars.sellers)
+            .description("Fees, moderation, and limits for user-owned products."),
+        SettingsSection::new("Outbound webhooks", icons::globe(), &vars.webhooks)
+            .description("Signed billing-event notifications sent to your own endpoint."),
     ];
     let content = html! {
         (admin_tabs("settings"))

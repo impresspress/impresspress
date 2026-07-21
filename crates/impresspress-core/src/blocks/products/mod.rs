@@ -74,6 +74,87 @@ pub(crate) async fn stripe_secret_operations_allowed(
 /// The products block's own declared config vars. Single source of truth for
 /// both `BlockInfo::config_keys` and the admin settings page (which renders
 /// these via `ui::settings_form` rather than a parallel tuple table).
+/// Stripe presentment currencies offered for the platform default. Values
+/// are ISO 4217; the storefront still accepts any valid currency configured
+/// per product — this list only drives the admin default select.
+const CURRENCY_OPTIONS: &[(&str, &str)] = &[
+    ("USD", "USD — US Dollar"),
+    ("EUR", "EUR — Euro"),
+    ("GBP", "GBP — British Pound"),
+    ("AUD", "AUD — Australian Dollar"),
+    ("CAD", "CAD — Canadian Dollar"),
+    ("NZD", "NZD — New Zealand Dollar"),
+    ("JPY", "JPY — Japanese Yen"),
+    ("CHF", "CHF — Swiss Franc"),
+    ("SEK", "SEK — Swedish Krona"),
+    ("NOK", "NOK — Norwegian Krone"),
+    ("DKK", "DKK — Danish Krone"),
+    ("SGD", "SGD — Singapore Dollar"),
+    ("HKD", "HKD — Hong Kong Dollar"),
+    ("INR", "INR — Indian Rupee"),
+    ("BRL", "BRL — Brazilian Real"),
+    ("MXN", "MXN — Mexican Peso"),
+    ("PLN", "PLN — Polish Zloty"),
+    ("CZK", "CZK — Czech Koruna"),
+    ("AED", "AED — UAE Dirham"),
+    ("ZAR", "ZAR — South African Rand"),
+];
+
+/// Countries where Stripe supports platform accounts (ISO 3166-1 alpha-2).
+/// The leading empty value renders as "Not set" so the optional var can be
+/// cleared from the select widget.
+const COUNTRY_OPTIONS: &[(&str, &str)] = &[
+    ("", "Not set"),
+    ("AU", "Australia"),
+    ("AT", "Austria"),
+    ("BE", "Belgium"),
+    ("BG", "Bulgaria"),
+    ("BR", "Brazil"),
+    ("CA", "Canada"),
+    ("HR", "Croatia"),
+    ("CY", "Cyprus"),
+    ("CZ", "Czechia"),
+    ("DK", "Denmark"),
+    ("EE", "Estonia"),
+    ("FI", "Finland"),
+    ("FR", "France"),
+    ("DE", "Germany"),
+    ("GI", "Gibraltar"),
+    ("GR", "Greece"),
+    ("HK", "Hong Kong"),
+    ("HU", "Hungary"),
+    ("IN", "India"),
+    ("ID", "Indonesia"),
+    ("IE", "Ireland"),
+    ("IT", "Italy"),
+    ("JP", "Japan"),
+    ("LV", "Latvia"),
+    ("LI", "Liechtenstein"),
+    ("LT", "Lithuania"),
+    ("LU", "Luxembourg"),
+    ("MY", "Malaysia"),
+    ("MT", "Malta"),
+    ("MX", "Mexico"),
+    ("NL", "Netherlands"),
+    ("NZ", "New Zealand"),
+    ("NG", "Nigeria"),
+    ("NO", "Norway"),
+    ("PL", "Poland"),
+    ("PT", "Portugal"),
+    ("RO", "Romania"),
+    ("SG", "Singapore"),
+    ("SK", "Slovakia"),
+    ("SI", "Slovenia"),
+    ("ZA", "South Africa"),
+    ("ES", "Spain"),
+    ("SE", "Sweden"),
+    ("CH", "Switzerland"),
+    ("TH", "Thailand"),
+    ("AE", "United Arab Emirates"),
+    ("GB", "United Kingdom"),
+    ("US", "United States"),
+];
+
 pub(crate) fn config_vars() -> Vec<ConfigVar> {
     vec![
         ConfigVar::new(
@@ -116,18 +197,20 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
         .input_type(InputType::Text),
         ConfigVar::new(
             "IMPRESSPRESS__PRODUCTS__DEFAULT_CURRENCY",
-            "Default three-letter ISO currency code for new products (for example USD or NZD)",
+            "Currency preselected for new products and offers",
             "USD",
         )
         .name("Default Currency")
-        .input_type(InputType::Text),
+        .input_type(InputType::Select)
+        .options(CURRENCY_OPTIONS),
         ConfigVar::new(
             "IMPRESSPRESS__PRODUCTS__PLATFORM_COUNTRY",
-            "Two-letter country code for the platform Stripe account and seller onboarding defaults",
+            "Country of the platform Stripe account; also the seller onboarding default",
             "",
         )
         .name("Platform Country")
-        .input_type(InputType::Text)
+        .input_type(InputType::Select)
+        .options(COUNTRY_OPTIONS)
         .optional(),
         ConfigVar::new(
             "IMPRESSPRESS__PRODUCTS__AUTOMATIC_TAX",
@@ -150,7 +233,7 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
             "0",
         )
         .name("Seller Application Fee (bps)")
-        .input_type(InputType::Text),
+        .input_type(InputType::Number),
         ConfigVar::new(
             "IMPRESSPRESS__PRODUCTS__SELLER_MODERATION_REQUIRED",
             "Require admin approval before a user-owned product can be published",
@@ -188,7 +271,7 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
             "0",
         )
         .name("Seller Product Limit")
-        .input_type(InputType::Text),
+        .input_type(InputType::Number),
         ConfigVar::new(
             "IMPRESSPRESS__PRODUCTS__WEBHOOK_URL",
             "Webhook URL for billing events",

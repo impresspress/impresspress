@@ -2,6 +2,12 @@
 
 /* ===== Reset ===== */
 *, *::before, *::after { margin: 0; padding: 0; box-sizing: border-box; }
+/* The `hidden` attribute must always win: any component rule that sets its
+ * own `display` (e.g. an alert styled `display:block`) would otherwise
+ * override the UA's `[hidden] { display: none }` and render an empty,
+ * styled-but-blank element (the bug behind phantom colored bars above
+ * empty admin tables). */
+[hidden] { display: none !important; }
 html, body {
 	height: 100%;
 	font-family: 'Itim', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;

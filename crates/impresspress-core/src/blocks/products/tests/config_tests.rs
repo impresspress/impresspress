@@ -64,3 +64,31 @@ async fn runtime_kind_is_adapter_injected_not_shared_config() {
     let browser = ctx_with(&[(crate::blocks::products::RUNTIME_KIND_CONFIG_KEY, "browser")]).await;
     assert!(!crate::blocks::products::stripe_secret_operations_allowed(&browser).await);
 }
+
+#[test]
+fn enumerable_and_numeric_vars_use_typed_widgets() {
+    // Currency and country are enumerable — free-text invites typos that
+    // only surface at checkout; they render as selects with declared
+    // options. Fee and product limits are numeric.
+    let currency = var("IMPRESSPRESS__PRODUCTS__DEFAULT_CURRENCY");
+    assert_eq!(currency.input_type, InputType::Select);
+    assert!(currency.options.iter().any(|o| o.value == "USD"));
+    assert!(currency.options.iter().any(|o| o.value == "NZD"));
+
+    let country = var("IMPRESSPRESS__PRODUCTS__PLATFORM_COUNTRY");
+    assert_eq!(country.input_type, InputType::Select);
+    assert!(country.options.iter().any(|o| o.value == "US"));
+    assert!(country.options.iter().any(|o| o.value == "NZ"));
+    // Optional var: an explicit "not set" choice must exist so admins can
+    // clear it from the select widget.
+    assert!(country.options.iter().any(|o| o.value.is_empty()));
+
+    assert_eq!(
+        var("IMPRESSPRESS__PRODUCTS__SELLER_APPLICATION_FEE_BPS").input_type,
+        InputType::Number
+    );
+    assert_eq!(
+        var("IMPRESSPRESS__PRODUCTS__SELLER_MAX_PRODUCTS").input_type,
+        InputType::Number
+    );
+}

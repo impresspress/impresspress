@@ -498,7 +498,10 @@ mod tests {
             partial.contains(">partially refunded</span>"),
             "humanized label: {partial}"
         );
-        assert!(!partial.contains("partially_refunded"), "raw enum: {partial}");
+        assert!(
+            !partial.contains("partially_refunded"),
+            "raw enum: {partial}"
+        );
     }
 
     #[test]
