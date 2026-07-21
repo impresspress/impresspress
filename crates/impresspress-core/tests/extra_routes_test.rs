@@ -607,7 +607,7 @@ async fn products_admin_api_rejects_non_admin() {
         BlockEndpoint::get("/b/products/admin/").auth(AuthLevel::Admin),
         BlockEndpoint::get("/b/products/api/admin/groups").auth(AuthLevel::Admin),
         BlockEndpoint::delete("/b/products/api/admin/products/{id}").auth(AuthLevel::Admin),
-        BlockEndpoint::patch("/b/products/api/admin/purchases/{id}/refund").auth(AuthLevel::Admin),
+        BlockEndpoint::post("/b/products/api/admin/purchases/{id}/refund").auth(AuthLevel::Admin),
         BlockEndpoint::get("/b/products/catalog").auth(AuthLevel::Public),
     ])];
 
@@ -615,7 +615,7 @@ async fn products_admin_api_rejects_non_admin() {
         ("retrieve", "/b/products/admin/"),
         ("retrieve", "/b/products/api/admin/groups"),
         ("delete", "/b/products/api/admin/products/p-1"),
-        ("update", "/b/products/api/admin/purchases/o-9/refund"),
+        ("create", "/b/products/api/admin/purchases/o-9/refund"),
     ];
     for (action, path) in cases {
         let mut msg = make_msg_with_user(path, "user-1");

@@ -82,7 +82,7 @@ pub(crate) enum AdminRoute {
 /// The `purchases/{id}/refund` template precedes the generic
 /// `purchases/{id}` so the refund route wins (the old `ends_with("/refund")`
 /// guard).
-const ADMIN_ROUTES: &[EndpointRoute<AdminRoute>] = &[
+pub(in crate::blocks::products) const ADMIN_ROUTES: &[EndpointRoute<AdminRoute>] = &[
     EndpointRoute::new(
         HttpMethod::Get,
         "/admin/b/products/products",
@@ -247,11 +247,6 @@ const ADMIN_ROUTES: &[EndpointRoute<AdminRoute>] = &[
         HttpMethod::Get,
         "/admin/b/products/purchases",
         AdminRoute::ListPurchases,
-    ),
-    EndpointRoute::new(
-        HttpMethod::Patch,
-        "/admin/b/products/purchases/{id}/refund",
-        AdminRoute::RefundPurchase,
     ),
     EndpointRoute::new(
         HttpMethod::Post,
@@ -453,7 +448,7 @@ impl UserRoute {
 /// "products in a group" route wins (the old `ends_with("/products")` guard);
 /// `catalog` precedes `catalog/{id}`, and `purchases` precedes
 /// `purchases/{id}`.
-const USER_ROUTES: &[EndpointRoute<UserRoute>] = &[
+pub(in crate::blocks::products) const USER_ROUTES: &[EndpointRoute<UserRoute>] = &[
     // Own products
     EndpointRoute::new(
         HttpMethod::Get,

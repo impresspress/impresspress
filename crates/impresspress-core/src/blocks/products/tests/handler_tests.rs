@@ -2294,3 +2294,53 @@ fn every_products_json_endpoint_has_discovery_schema() {
         missing.join("\n")
     );
 }
+
+#[test]
+fn dispatch_tables_are_backed_by_declared_endpoints() {
+    // Central auth enforcement matches the on-the-wire path against the
+    // endpoints DECLARED in `BlockInfo`; an undeclared path falls back to
+    // `Authenticated`, not `Admin`. The dispatch tables are matched AFTER
+    // that gate, so a dispatch entry without a matching declaration is a
+    // reachable route with the wrong tier (PR #59 shipped exactly this: a
+    // stale PATCH refund alias only in the dispatch table, refundable by any
+    // logged-in user). Drive both tables against the real `BlockInfo` so the
+    // two surfaces cannot drift again.
+    use wafer_run::{AuthLevel, Block};
+
+    let info = super::super::ProductsBlock::new().info();
+
+    for route in super::super::handlers::ADMIN_ROUTES {
+        let declared_path = route
+            .template
+            .replacen("/admin/b/products", "/b/products/api/admin", 1);
+        assert!(
+            info.endpoints.iter().any(|endpoint| {
+                endpoint.method == route.method
+                    && endpoint.path == declared_path
+                    && endpoint.auth == AuthLevel::Admin
+            }),
+            "admin dispatch route {:?} {} has no declared Admin endpoint {}",
+            route.method,
+            route.template,
+            declared_path,
+        );
+    }
+
+    for route in super::super::handlers::USER_ROUTES {
+        // User dispatch paths are reached both from `/b/products/api/...`
+        // (normalized) and directly (`catalog`, `checkout`, ...). Either
+        // declaration form keeps the central gate authoritative.
+        let api_path = route.template.replacen("/b/products", "/b/products/api", 1);
+        assert!(
+            info.endpoints.iter().any(|endpoint| {
+                endpoint.method == route.method
+                    && (endpoint.path == api_path || endpoint.path == route.template)
+            }),
+            "user dispatch route {:?} {} declared neither as {} nor as {}",
+            route.method,
+            route.template,
+            api_path,
+            route.template,
+        );
+    }
+}
