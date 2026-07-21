@@ -223,7 +223,7 @@ fn admin_tabs(active: &str) -> Markup {
             active: active == "stripe",
             href: "/b/products/admin/stripe",
             label: "Stripe",
-            icon: Some(icons::link()),
+            icon: Some(icons::credit_card()),
         },
         components::Tab {
             active: active == "settings",

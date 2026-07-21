@@ -229,7 +229,14 @@ pub fn database() -> Markup {
 }
 
 pub fn link() -> Markup {
+    // Official Lucide `link` path — the previous hand-rolled glyph (two
+    // tight C-shapes plus a diagonal) rasterized into a muddy blob at 18px,
+    // especially under fractional browser zoom.
     icon(
-        r#"<path d="m10 13-4.35 4.35a2 2 0 0 0 0 2.83l.6.6a2 2 0 0 0 2.83 0L13 16.66m6-6-4.35-4.35a2 2 0 0 0-2.83 0l-.6.6a2 2 0 0 0 0 2.83L16.66 13"/><line x1="9" x2="15" y1="15" y2="9"/>"#,
+        r#"<path d="M10 13a5 5 0 0 0 7.54.54l3-3a5 5 0 0 0-7.07-7.07l-1.72 1.71"/><path d="M14 11a5 5 0 0 0-7.54-.54l-3 3a5 5 0 1 0 7.07 7.07l1.71-1.71"/>"#,
     )
+}
+
+pub fn credit_card() -> Markup {
+    icon(r#"<rect width="20" height="14" x="2" y="5" rx="2"/><path d="M2 10h20"/>"#)
 }
