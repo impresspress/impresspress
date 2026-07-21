@@ -1,0 +1,111 @@
+- generic [ref=f99e1]:
+  - main [ref=f99e187]:
+    - generic [ref=f99e188]:
+      - generic [ref=f99e189]: Impresspress Sandbox
+      - generic [ref=f99e199]:
+        - text: Impresspress Sandbox partners with Stripe for secure financial services.
+        - button "Return to Impresspress Sandbox" [ref=f99e201] [cursor=pointer]
+    - iframe [active] [ref=f99e214]:
+      - generic [ref=f121e1]:
+        - generic [ref=f121e253]:
+          - log
+          - log
+        - generic [ref=f121e257]:
+          - button "37.5% Business details" [ref=f121e339] [cursor=pointer]:
+            - progressbar "37.5%" [ref=f121e340]
+            - generic [ref=f121e265]: Business details
+          - generic [ref=f121e268]: You're using a test account with test data.
+          - generic [ref=f121e280]:
+            - generic [ref=f121e283]:
+              - generic [ref=f121e284]:
+                - heading "Business details" [level=1] [ref=f121e341]
+                - generic [ref=f121e286]: Provide some details about how you earn or collect money with Impresspress Sandbox.
+              - generic [ref=f121e288]:
+                - generic [ref=f121e290]:
+                  - generic [ref=f121e291]:
+                    - generic [ref=f121e292]: Industry
+                    - generic [ref=f121e294]: Selecting your industry helps satisfy risk and compliance obligations. Select the option that best matches the goods or service your customers will buy.
+                  - button "Software" [ref=f121e342] [cursor=pointer]
+                - generic [ref=f121e349]:
+                  - generic [ref=f121e350]: Product description
+                  - generic [ref=f121e353]:
+                    - generic [ref=f121e354]:
+                      - generic [ref=f121e355]: business_profile[product_description]
+                      - textbox "business_profile[product_description]" [active] [ref=f121e357]:
+                        - /placeholder: "Example: I sell new and gently used children's clothing, toys and accessories for ages 0–10. I sell these items through my website and on Instagram."
+                    - generic [ref=f121e360]:
+                      - text: Tell us which products or services you provide and when you charge customers.
+                      - button "Have a website?" [ref=f121e361] [cursor=pointer]
+                      - generic [ref=f121e362]:
+                        - text: By sharing a product description instead of a URL, you confirm that you don't use a website, app, social media page, or online profile to promote or sell products or services.
+                        - link "Learn more about website requirements" [ref=f121e363] [cursor=pointer]:
+                          - /url: https://support.stripe.com/questions/can-i-get-started-on-stripe-without-a-business-website
+            - button "Continue" [ref=f121e348] [cursor=pointer]
+    - generic [ref=f99e216]:
+      - generic:
+        - generic:
+          - generic [ref=f99e217]:
+            - generic:
+              - generic:
+                - generic [ref=f99e218]: Powered by
+                - img "Stripe" [ref=f99e220]
+                - button "Information" [ref=f99e228] [cursor=pointer]
+          - list [ref=f99e234]:
+            - listitem [ref=f99e235]:
+              - link "Terms" [ref=f99e236] [cursor=pointer]:
+                - /url: https://stripe.com/US/connect-account/legal
+            - listitem [ref=f99e240]:
+              - link "Privacy" [ref=f99e241] [cursor=pointer]:
+                - /url: https://stripe.com/US/privacy
+          - generic [ref=f99e248]:
+            - button [ref=f99e249] [cursor=pointer]:
+              - generic [ref=f99e250]: English (NZ)
+            - combobox [ref=f99e256] [cursor=pointer]:
+              - option "Auto-detect"
+              - option "Bahasa Indonesia"
+              - option "čeština"
+              - option "Dansk"
+              - option "Deutsch"
+              - option "Eesti"
+              - option "English (Australia)"
+              - option "English (Canada)"
+              - option "English (India)"
+              - option "English (Ireland)"
+              - option "English (New Zealand)" [selected]
+              - option "English (Singapore)"
+              - option "English (United Kingdom)"
+              - option "English (United States)"
+              - option "Español (América Latina)"
+              - option "Español (España)"
+              - option "Français (Canada)"
+              - option "Français (France)"
+              - option "Hrvatski"
+              - option "Italiano"
+              - option "Latviešu"
+              - option "Lietuvių"
+              - option "Magyar"
+              - option "Malti"
+              - option "Melayu"
+              - option "Nederlands (Nederland)"
+              - option "Norsk bokmål"
+              - option "Polski"
+              - option "Português (Brasil)"
+              - option "Português (Portugal)"
+              - option "Română"
+              - option "Slovenčina"
+              - option "Slovenščina"
+              - option "Suomi"
+              - option "Svenska"
+              - option "Tiếng Việt"
+              - option "Türkçe"
+              - option "Wikang Filipino"
+              - option "Ελληνικά"
+              - option "български"
+              - option "ไทย"
+              - option "한국어"
+              - option "中文(简体)"
+              - option "日本語"
+              - option "繁體中文(台灣)"
+              - option "繁體中文(香港)"
+  - generic:
+    - iframe

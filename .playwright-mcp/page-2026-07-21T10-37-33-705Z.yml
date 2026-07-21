@@ -1,0 +1,193 @@
+- generic [ref=f23e2]:
+  - link "Skip to content" [ref=f23e3] [cursor=pointer]:
+    - /url: "#content"
+  - navigation "Primary" [ref=f23e4]:
+    - img "Impresspress" [ref=f23e6]
+    - generic [ref=f23e7]:
+      - generic [ref=f23e8]:
+        - generic [ref=f23e9]:
+          - generic [ref=f23e10]: Workspace
+          - list [ref=f23e11]:
+            - listitem [ref=f23e12]:
+              - link "Dashboard" [ref=f23e13] [cursor=pointer]:
+                - /url: /b/admin/
+            - listitem [ref=f23e21]:
+              - link "Users" [ref=f23e22] [cursor=pointer]:
+                - /url: /b/admin/users
+        - generic [ref=f23e30]:
+          - generic [ref=f23e31]: Data
+          - list [ref=f23e32]:
+            - listitem [ref=f23e33]:
+              - link "Storage" [ref=f23e34] [cursor=pointer]:
+                - /url: /b/storage/admin/
+            - listitem [ref=f23e39]:
+              - link "Database" [ref=f23e40] [cursor=pointer]:
+                - /url: /b/admin/database
+            - listitem [ref=f23e46]:
+              - link "Vector indexes" [ref=f23e47] [cursor=pointer]:
+                - /url: /b/vector/
+        - generic [ref=f23e55]:
+          - generic [ref=f23e56]: Communication
+          - list [ref=f23e57]:
+            - listitem [ref=f23e58]:
+              - link "Messages" [ref=f23e59] [cursor=pointer]:
+                - /url: /b/messages/
+            - listitem [ref=f23e65]:
+              - link "LLM" [ref=f23e66] [cursor=pointer]:
+                - /url: /b/llm/
+        - generic [ref=f23e72]:
+          - generic [ref=f23e73]: Commerce
+          - list [ref=f23e74]:
+            - listitem [ref=f23e75]:
+              - link "Products" [ref=f23e76] [cursor=pointer]:
+                - /url: /b/products/admin/
+        - generic [ref=f23e83]:
+          - generic [ref=f23e84]: System
+          - list [ref=f23e85]:
+            - listitem [ref=f23e86]:
+              - link "Blocks" [ref=f23e87] [cursor=pointer]:
+                - /url: /b/admin/blocks
+            - listitem [ref=f23e94]:
+              - link "Logs" [ref=f23e95] [cursor=pointer]:
+                - /url: /b/admin/logs
+            - listitem [ref=f23e101]:
+              - link "Settings" [ref=f23e102] [cursor=pointer]:
+                - /url: /b/admin/settings/email
+      - button "Toggle sidebar" [ref=f23e108] [cursor=pointer]
+    - button "A admin@example.com Admin" [ref=f23e113] [cursor=pointer]:
+      - generic [ref=f23e114]: A
+      - generic [ref=f23e115]:
+        - generic [ref=f23e116]: admin@example.com
+        - generic [ref=f23e117]: Admin
+  - generic [ref=f23e118]:
+    - banner [ref=f23e119]:
+      - heading "Products" [level=1] [ref=f23e120]
+      - button "Open command palette" [ref=f23e122] [cursor=pointer]:
+        - generic [ref=f23e123]: Quick jump
+        - generic [ref=f23e124]:
+          - generic [ref=f23e125]: Ctrl
+          - generic [ref=f23e126]: K
+    - generic [ref=f23e127]:
+      - generic [ref=f23e129]:
+        - link "Overview" [ref=f23e130] [cursor=pointer]:
+          - /url: /b/products/admin/
+        - link "Products" [ref=f23e136] [cursor=pointer]:
+          - /url: /b/products/admin/manage
+        - link "Groups" [ref=f23e141] [cursor=pointer]:
+          - /url: /b/products/admin/groups
+        - link "Orders" [ref=f23e144] [cursor=pointer]:
+          - /url: /b/products/admin/purchases
+        - link "Sellers" [ref=f23e149] [cursor=pointer]:
+          - /url: /b/products/admin/sellers
+        - link "Stripe" [ref=f23e154] [cursor=pointer]:
+          - /url: /b/products/admin/stripe
+        - link "Settings" [ref=f23e157] [cursor=pointer]:
+          - /url: /b/products/admin/settings
+      - link "← Back to all orders" [ref=f23e161] [cursor=pointer]:
+        - /url: /b/products/admin/purchases
+      - generic [ref=f23e162]:
+        - generic [ref=f23e163]:
+          - heading "Order d46b5317-d584-49ad-bd1e-276c2a5720b0" [level=1] [ref=f23e164]
+          - paragraph [ref=f23e165]: Created 2026-07-21T10:36:05.354035641+00:00
+        - generic [ref=f23e166]:
+          - generic [ref=f23e167]: completed
+          - generic [ref=f23e168]: test
+      - generic [ref=f23e169]:
+        - generic [ref=f23e172]:
+          - generic [ref=f23e173]: Subtotal
+          - generic [ref=f23e174]: 25.00 NZD
+        - generic [ref=f23e182]:
+          - generic [ref=f23e183]: Discount
+          - generic [ref=f23e184]: 0.00 NZD
+        - generic [ref=f23e190]:
+          - generic [ref=f23e191]: Tax
+          - generic [ref=f23e192]: 0.00 NZD
+        - generic [ref=f23e199]:
+          - generic [ref=f23e200]: Shipping
+          - generic [ref=f23e201]: 0.00 NZD
+        - generic [ref=f23e209]:
+          - generic [ref=f23e210]: Total
+          - generic [ref=f23e211]: 25.00 NZD
+        - generic [ref=f23e217]:
+          - generic [ref=f23e218]: Refunded
+          - generic [ref=f23e219]: 0.00 NZD
+        - generic [ref=f23e226]:
+          - generic [ref=f23e227]: Platform fee
+          - generic [ref=f23e228]: 0.00 NZD
+      - generic [ref=f23e231]:
+        - heading "Timeline" [level=2] [ref=f23e233]
+        - generic [ref=f23e234]:
+          - generic [ref=f23e235]:
+            - paragraph [ref=f23e236]: Order created
+            - strong [ref=f23e237]: 2026-07-21T10:36:05.354035641+00:00
+          - generic [ref=f23e238]:
+            - paragraph [ref=f23e239]: Payment recorded
+            - strong [ref=f23e240]: 2026-07-21T10:36:48.349422436+00:00
+          - generic [ref=f23e241]:
+            - paragraph [ref=f23e242]: Approved
+            - strong [ref=f23e243]: 2026-07-21T10:36:48.349422436+00:00
+      - generic [ref=f23e244]:
+        - heading "Items" [level=2] [ref=f23e246]
+        - table [ref=f23e249]:
+          - rowgroup [ref=f23e250]:
+            - row [ref=f23e251]:
+              - columnheader "Item" [ref=f23e252]
+              - columnheader "Quantity" [ref=f23e253]
+              - columnheader "Unit" [ref=f23e254]
+              - columnheader "Total" [ref=f23e255]
+              - columnheader "Configuration" [ref=f23e256]
+          - rowgroup [ref=f23e257]:
+            - row [ref=f23e258]:
+              - cell [ref=f23e259]:
+                - generic [ref=f23e260]:
+                  - strong [ref=f23e261]: Field Guide (Test Download) — Field Guide (Test Download)
+                  - text: 019f843e-cc5a-73a0-90e3-7d46328633c7
+              - cell "1" [ref=f23e262]
+              - cell "25.00 NZD" [ref=f23e263]
+              - cell [ref=f23e264]:
+                - strong [ref=f23e265]: 25.00 NZD
+              - cell "—" [ref=f23e266]
+      - generic [ref=f23e267]:
+        - generic [ref=f23e268]:
+          - heading "Buyer and checkout" [level=2] [ref=f23e270]
+          - generic [ref=f23e271]:
+            - paragraph [ref=f23e272]:
+              - strong [ref=f23e273]: "Buyer:"
+              - text: buyer-test@example.com
+            - paragraph [ref=f23e274]:
+              - strong [ref=f23e275]: "Presentation:"
+              - text: hosted
+            - paragraph [ref=f23e276]:
+              - strong [ref=f23e277]: "Provider:"
+              - text: stripe
+            - paragraph [ref=f23e278]:
+              - strong [ref=f23e279]: "Seller account:"
+              - text: Platform
+        - generic [ref=f23e280]:
+          - heading "Provider reconciliation" [level=2] [ref=f23e282]
+          - generic [ref=f23e283]:
+            - paragraph [ref=f23e284]:
+              - strong [ref=f23e285]: "State:"
+              - generic [ref=f23e286]: reconciled
+            - paragraph [ref=f23e287]:
+              - strong [ref=f23e288]: "Payment state:"
+              - generic [ref=f23e289]: succeeded
+            - paragraph [ref=f23e290]:
+              - strong [ref=f23e291]: "Checkout Session:"
+              - code [ref=f23e292]: cs_test_a1d43fDBZ7DXi3QguvCZrVSNuGmrVBj3jttkpyzzGuJDdbT16RVKOmSDis
+            - paragraph [ref=f23e293]:
+              - strong [ref=f23e294]: "PaymentIntent:"
+              - code [ref=f23e295]: pi_3Tvb2Y5cUeypfV8E1wCMEiH3
+      - generic [ref=f23e296]:
+        - heading "Create refund" [level=2] [ref=f23e298]
+        - generic [ref=f23e299]:
+          - paragraph [ref=f23e300]: Leave the amount blank to refund the complete remaining balance. Stripe refunds and proportional Connect fee/transfer reversals are requested before local success is recorded.
+          - generic [ref=f23e301]:
+            - generic [ref=f23e302]:
+              - generic [ref=f23e303]: Amount (NZD)
+              - textbox "Amount (NZD)" [ref=f23e304]:
+                - /placeholder: Full remaining amount
+            - generic [ref=f23e305]:
+              - generic [ref=f23e306]: Private note
+              - textbox "Private note" [ref=f23e307]
+          - button "Create refund" [ref=f23e308] [cursor=pointer]

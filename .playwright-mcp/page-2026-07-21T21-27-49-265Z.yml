@@ -1,0 +1,105 @@
+- generic [ref=f98e2]:
+  - link "Skip to content" [ref=f98e3] [cursor=pointer]:
+    - /url: "#content"
+  - navigation "Primary" [ref=f98e4]:
+    - img "Impresspress" [ref=f98e6]
+    - generic [ref=f98e7]:
+      - generic [ref=f98e8]:
+        - generic [ref=f98e9]:
+          - generic [ref=f98e10]: Account
+          - list [ref=f98e11]:
+            - listitem [ref=f98e12]:
+              - link "Profile" [ref=f98e13] [cursor=pointer]:
+                - /url: /b/userportal/profile
+            - listitem [ref=f98e19]:
+              - link "Organizations" [ref=f98e20] [cursor=pointer]:
+                - /url: /b/auth/orgs
+            - listitem [ref=f98e28]:
+              - link "Sessions" [ref=f98e29] [cursor=pointer]:
+                - /url: /b/userportal/sessions
+            - listitem [ref=f98e34]:
+              - link "Security" [ref=f98e35] [cursor=pointer]:
+                - /url: /b/userportal/security
+        - generic [ref=f98e41]:
+          - generic [ref=f98e42]: Apps
+          - list [ref=f98e43]:
+            - listitem [ref=f98e44]:
+              - link "Products" [ref=f98e45] [cursor=pointer]:
+                - /url: /b/products/
+            - listitem [ref=f98e52]:
+              - link "Files" [ref=f98e53] [cursor=pointer]:
+                - /url: /b/storage/
+            - listitem [ref=f98e58]:
+              - link "Shares" [ref=f98e59] [cursor=pointer]:
+                - /url: /b/cloudstorage/
+            - listitem [ref=f98e65]:
+              - link "Legal" [ref=f98e66] [cursor=pointer]:
+                - /url: /b/legalpages/admin/privacy
+      - button "Toggle sidebar" [ref=f98e72] [cursor=pointer]
+    - button "S seller@example.com User" [ref=f98e77] [cursor=pointer]:
+      - generic [ref=f98e78]: S
+      - generic [ref=f98e79]:
+        - generic [ref=f98e80]: seller@example.com
+        - generic [ref=f98e81]: User
+  - generic [ref=f98e82]:
+    - banner [ref=f98e83]:
+      - heading "Products" [level=1] [ref=f98e84]
+      - button "Open command palette" [ref=f98e86] [cursor=pointer]:
+        - generic [ref=f98e87]: Quick jump
+        - generic [ref=f98e88]:
+          - generic [ref=f98e89]: Ctrl
+          - generic [ref=f98e90]: K
+    - generic [ref=f98e91]:
+      - generic [ref=f98e93]:
+        - link "Commerce" [ref=f98e94] [cursor=pointer]:
+          - /url: /b/products/
+        - link "Purchases" [ref=f98e100] [cursor=pointer]:
+          - /url: /b/products/my-purchases
+        - link "Selling" [ref=f98e105] [cursor=pointer]:
+          - /url: /b/products/selling
+      - navigation "Seller workspace" [ref=f98e110]:
+        - link "Dashboard" [ref=f98e111] [cursor=pointer]:
+          - /url: /b/products/selling
+        - link "Products and links" [ref=f98e112] [cursor=pointer]:
+          - /url: /b/products/my-products
+        - link "Orders and subscriptions" [ref=f98e113] [cursor=pointer]:
+          - /url: /b/products/selling/orders
+      - generic [ref=f98e115]:
+        - heading "Seller dashboard" [level=2] [ref=f98e116]
+        - paragraph [ref=f98e117]: Sales, subscriptions, Stripe readiness, and actions
+      - generic [ref=f98e118]:
+        - generic [ref=f98e119]:
+          - generic [ref=f98e120]:
+            - heading "Stripe seller account" [level=3] [ref=f98e121]
+            - paragraph [ref=f98e122]: Stripe hosts identity verification, payouts, and the Express dashboard.
+          - generic [ref=f98e123]: Not connected
+        - generic [ref=f98e124]:
+          - generic [ref=f98e125]:
+            - generic [ref=f98e126]:
+              - paragraph [ref=f98e127]: Charges
+              - strong [ref=f98e128]: Unavailable
+            - generic [ref=f98e129]:
+              - paragraph [ref=f98e130]: Payouts
+              - strong [ref=f98e131]: Unavailable
+            - generic [ref=f98e132]:
+              - paragraph [ref=f98e133]: Platform fee
+              - strong [ref=f98e134]: 10.00%
+            - generic [ref=f98e135]:
+              - paragraph [ref=f98e136]: Mode
+              - strong [ref=f98e137]: Test
+          - generic [ref=f98e138]:
+            - button "Connect Stripe to sell" [ref=f98e139] [cursor=pointer]
+            - link "Manage products" [ref=f98e140] [cursor=pointer]:
+              - /url: /b/products/my-products
+      - generic [ref=f98e141]:
+        - heading "Your sales by currency" [level=2] [ref=f98e142]
+        - paragraph [ref=f98e143]: Money is reported separately for each currency. Gross values include orders that were later refunded; after-refund sales subtract customer refunds. Proceeds shown here subtract recorded platform fees but are before Stripe fees, disputes, reserves, and payout adjustments; Stripe remains authoritative for available balance and payouts.
+        - generic [ref=f98e144]:
+          - heading "No sales data yet" [level=3] [ref=f98e147]
+          - paragraph [ref=f98e148]: Completed orders and subscription activity will appear here.
+      - generic [ref=f98e149]:
+        - heading "Recent payment failures" [level=2] [ref=f98e150]
+        - paragraph [ref=f98e151]: Failed seller orders that may need customer follow-up. Stripe Dashboard provides provider-level payment details.
+        - generic [ref=f98e152]:
+          - heading "No recent failures" [level=3] [ref=f98e156]
+          - paragraph [ref=f98e157]: No failed seller orders need attention.

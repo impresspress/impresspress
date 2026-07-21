@@ -1,0 +1,123 @@
+- generic [ref=f5e2]:
+  - link "Skip to content" [ref=f5e3] [cursor=pointer]:
+    - /url: "#content"
+  - navigation "Primary" [ref=f5e4]:
+    - img "Impresspress" [ref=f5e6]
+    - generic [ref=f5e7]:
+      - generic [ref=f5e8]:
+        - generic [ref=f5e9]:
+          - generic [ref=f5e10]: Workspace
+          - list [ref=f5e11]:
+            - listitem [ref=f5e12]:
+              - link "Dashboard" [ref=f5e13] [cursor=pointer]:
+                - /url: /b/admin/
+            - listitem [ref=f5e21]:
+              - link "Users" [ref=f5e22] [cursor=pointer]:
+                - /url: /b/admin/users
+        - generic [ref=f5e30]:
+          - generic [ref=f5e31]: Data
+          - list [ref=f5e32]:
+            - listitem [ref=f5e33]:
+              - link "Storage" [ref=f5e34] [cursor=pointer]:
+                - /url: /b/storage/admin/
+            - listitem [ref=f5e39]:
+              - link "Database" [ref=f5e40] [cursor=pointer]:
+                - /url: /b/admin/database
+            - listitem [ref=f5e46]:
+              - link "Vector indexes" [ref=f5e47] [cursor=pointer]:
+                - /url: /b/vector/
+        - generic [ref=f5e55]:
+          - generic [ref=f5e56]: Communication
+          - list [ref=f5e57]:
+            - listitem [ref=f5e58]:
+              - link "Messages" [ref=f5e59] [cursor=pointer]:
+                - /url: /b/messages/
+            - listitem [ref=f5e65]:
+              - link "LLM" [ref=f5e66] [cursor=pointer]:
+                - /url: /b/llm/
+        - generic [ref=f5e72]:
+          - generic [ref=f5e73]: Commerce
+          - list [ref=f5e74]:
+            - listitem [ref=f5e75]:
+              - link "Products" [ref=f5e76] [cursor=pointer]:
+                - /url: /b/products/admin/
+        - generic [ref=f5e83]:
+          - generic [ref=f5e84]: System
+          - list [ref=f5e85]:
+            - listitem [ref=f5e86]:
+              - link "Blocks" [ref=f5e87] [cursor=pointer]:
+                - /url: /b/admin/blocks
+            - listitem [ref=f5e94]:
+              - link "Logs" [ref=f5e95] [cursor=pointer]:
+                - /url: /b/admin/logs
+            - listitem [ref=f5e101]:
+              - link "Settings" [ref=f5e102] [cursor=pointer]:
+                - /url: /b/admin/settings/email
+      - button "Toggle sidebar" [ref=f5e108] [cursor=pointer]
+    - button "A admin@example.com Admin" [ref=f5e113] [cursor=pointer]:
+      - generic [ref=f5e114]: A
+      - generic [ref=f5e115]:
+        - generic [ref=f5e116]: admin@example.com
+        - generic [ref=f5e117]: Admin
+  - generic [ref=f5e118]:
+    - banner [ref=f5e119]:
+      - heading "Products" [level=1] [ref=f5e120]
+      - button "Open command palette" [ref=f5e122] [cursor=pointer]:
+        - generic [ref=f5e123]: Quick jump
+        - generic [ref=f5e124]:
+          - generic [ref=f5e125]: Ctrl
+          - generic [ref=f5e126]: K
+    - generic [ref=f5e127]:
+      - generic [ref=f5e129]:
+        - link "Overview" [ref=f5e130] [cursor=pointer]:
+          - /url: /b/products/admin/
+        - link "Products" [ref=f5e136] [cursor=pointer]:
+          - /url: /b/products/admin/manage
+        - link "Groups" [ref=f5e141] [cursor=pointer]:
+          - /url: /b/products/admin/groups
+        - link "Orders" [ref=f5e144] [cursor=pointer]:
+          - /url: /b/products/admin/purchases
+        - link "Sellers" [ref=f5e149] [cursor=pointer]:
+          - /url: /b/products/admin/sellers
+        - link "Stripe" [ref=f5e154] [cursor=pointer]:
+          - /url: /b/products/admin/stripe
+        - link "Settings" [ref=f5e157] [cursor=pointer]:
+          - /url: /b/products/admin/settings
+      - generic [ref=f5e161]:
+        - generic [ref=f5e162]:
+          - heading "Products" [level=2] [ref=f5e163]
+          - paragraph [ref=f5e164]: Create offers, take payments, and manage every order from one place
+        - link "+ Create product" [ref=f5e166] [cursor=pointer]:
+          - /url: /b/products/admin/new
+      - generic [ref=f5e167]:
+        - generic [ref=f5e170]:
+          - generic [ref=f5e171]: Products
+          - generic [ref=f5e172]: "1"
+        - generic [ref=f5e180]:
+          - generic [ref=f5e181]: Groups
+          - generic [ref=f5e182]: "0"
+        - generic [ref=f5e188]:
+          - generic [ref=f5e189]: Offers
+          - generic [ref=f5e190]: "1"
+        - generic [ref=f5e196]:
+          - generic [ref=f5e197]: Orders
+          - generic [ref=f5e198]: "0"
+      - region "Commerce setup" [ref=f5e204]:
+        - article [ref=f5e205]:
+          - generic [ref=f5e206]: "1"
+          - heading "Create a product" [level=3] [ref=f5e207]
+          - paragraph [ref=f5e208]: Choose a simple price or a configurable product for bookings, quantities, and choices.
+        - article [ref=f5e209]:
+          - generic [ref=f5e210]: "2"
+          - heading "Publish an offer" [level=3] [ref=f5e211]
+          - paragraph [ref=f5e212]: Review the customer fields and itemized price rows, then publish the version you want to sell.
+        - article [ref=f5e213]:
+          - generic [ref=f5e214]: "3"
+          - heading "Share checkout" [level=3] [ref=f5e215]
+          - paragraph [ref=f5e216]: Use the storefront widget, embedded checkout, or a hosted payment link.
+      - generic [ref=f5e217]:
+        - heading "Sales and subscriptions" [level=2] [ref=f5e218]
+        - paragraph [ref=f5e219]: Money is reported separately for each currency. Gross values include orders that were later refunded; after-refund sales subtract customer refunds.
+        - generic [ref=f5e220]:
+          - heading "No sales data yet" [level=3] [ref=f5e223]
+          - paragraph [ref=f5e224]: Completed orders and subscription activity will appear here.

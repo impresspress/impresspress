@@ -607,7 +607,7 @@ async fn products_admin_api_rejects_non_admin() {
         BlockEndpoint::get("/b/products/admin/").auth(AuthLevel::Admin),
         BlockEndpoint::get("/b/products/api/admin/groups").auth(AuthLevel::Admin),
         BlockEndpoint::delete("/b/products/api/admin/products/{id}").auth(AuthLevel::Admin),
-        BlockEndpoint::patch("/b/products/api/admin/purchases/{id}/refund").auth(AuthLevel::Admin),
+        BlockEndpoint::post("/b/products/api/admin/purchases/{id}/refund").auth(AuthLevel::Admin),
         BlockEndpoint::get("/b/products/catalog").auth(AuthLevel::Public),
     ])];
 
@@ -615,7 +615,7 @@ async fn products_admin_api_rejects_non_admin() {
         ("retrieve", "/b/products/admin/"),
         ("retrieve", "/b/products/api/admin/groups"),
         ("delete", "/b/products/api/admin/products/p-1"),
-        ("update", "/b/products/api/admin/purchases/o-9/refund"),
+        ("create", "/b/products/api/admin/purchases/o-9/refund"),
     ];
     for (action, path) in cases {
         let mut msg = make_msg_with_user(path, "user-1");
@@ -710,6 +710,66 @@ fn real_block_info(name: &str) -> BlockInfo {
         .into_iter()
         .find(|i| i.name == name)
         .unwrap_or_else(|| panic!("block {name} not in all_block_infos()"))
+}
+
+#[cfg(feature = "block-products")]
+#[tokio::test]
+async fn products_owned_group_taxonomy_and_pricing_routes_enforce_real_declarations() {
+    let infos = vec![real_block_info("impresspress/products")];
+    let cases = [
+        ("retrieve", "/b/products/groups"),
+        ("create", "/b/products/groups"),
+        ("retrieve", "/b/products/groups/group-1"),
+        ("update", "/b/products/groups/group-1"),
+        ("delete", "/b/products/groups/group-1"),
+        ("retrieve", "/b/products/groups/group-1/products"),
+        ("retrieve", "/b/products/types"),
+        ("retrieve", "/b/products/group-templates"),
+        ("create", "/b/products/calculate-price"),
+    ];
+
+    for (action, path) in cases {
+        let anonymous_ctx = RecordingContext::new();
+        let mut anonymous = make_msg(path);
+        anonymous.set_meta("req.action", action);
+        let denied = routing::route_to_block(
+            &anonymous_ctx,
+            anonymous,
+            InputStream::empty(),
+            &AllEnabled,
+            &infos,
+            &[],
+        )
+        .await;
+        assert_eq!(
+            response_status(denied).await,
+            403,
+            "anonymous {action} {path} must be rejected before dispatch"
+        );
+        assert!(anonymous_ctx.calls().is_empty());
+
+        let authenticated_ctx = RecordingContext::new();
+        let mut authenticated = make_msg_with_user(path, "seller-1");
+        authenticated.set_meta("req.action", action);
+        let allowed = routing::route_to_block(
+            &authenticated_ctx,
+            authenticated,
+            InputStream::empty(),
+            &AllEnabled,
+            &infos,
+            &[],
+        )
+        .await;
+        assert_eq!(
+            response_status(allowed).await,
+            200,
+            "authenticated {action} {path} must dispatch"
+        );
+        assert_eq!(
+            authenticated_ctx.calls(),
+            vec!["impresspress/products".to_string()]
+        );
+    }
 }
 
 /// Assert that every variant of an admin overview path is gated `Admin`

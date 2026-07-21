@@ -37,12 +37,37 @@ pub struct SettingsSection<'a> {
     pub icon: Markup,
     /// The config variables rendered in this section, in order.
     pub vars: &'a [ConfigVar],
+    /// One-line explanation rendered under the heading; empty renders
+    /// nothing.
+    pub description: &'a str,
+    /// Whether this optional section starts behind a native disclosure
+    /// control. Existing pages remain expanded unless they opt in.
+    pub collapsible: bool,
 }
 
 impl<'a> SettingsSection<'a> {
     /// Construct a section from a title, icon, and its variables.
     pub fn new(title: &'a str, icon: Markup, vars: &'a [ConfigVar]) -> Self {
-        Self { title, icon, vars }
+        Self {
+            title,
+            icon,
+            vars,
+            description: "",
+            collapsible: false,
+        }
+    }
+
+    /// Set the one-line explanation rendered under the section heading.
+    pub fn description(mut self, description: &'a str) -> Self {
+        self.description = description;
+
+        self
+    }
+
+    /// Make optional or advanced settings secondary to the page essentials.
+    pub fn collapsible(mut self) -> Self {
+        self.collapsible = true;
+        self
     }
 }
 
@@ -144,7 +169,35 @@ fn render_field(var: &ConfigVar, value: &str) -> Markup {
                 }
             }
         },
-        InputType::Url | InputType::Text => html! {
+        // A Select without declared options degrades to the plain text
+        // widget below rather than rendering an empty, unusable dropdown.
+        InputType::Select if !var.options.is_empty() => html! {
+            div .form-group style="margin-bottom:1.25rem" {
+                label .form-label for=(var.key) { (label) }
+                select .form-select #(var.key) name=(var.key) {
+                    @for option in &var.options {
+                        option value=(option.value)
+                            selected[option.value == value
+                                || (value.is_empty() && option.value == var.default)]
+                        { (option.label) }
+                    }
+                }
+                @if !var.description.is_empty() {
+                    p .text-muted style="font-size:0.8rem;margin-top:0.25rem" { (var.description) }
+                }
+            }
+        },
+        InputType::Number => html! {
+            div .form-group style="margin-bottom:1.25rem" {
+                label .form-label for=(var.key) { (label) }
+                input .form-input #(var.key) name=(var.key) type="number" value=(value)
+                    placeholder=(var.default);
+                @if !var.description.is_empty() {
+                    p .text-muted style="font-size:0.8rem;margin-top:0.25rem" { (var.description) }
+                }
+            }
+        },
+        InputType::Url | InputType::Text | InputType::Select => html! {
             div .form-group style="margin-bottom:1.25rem" {
                 label .form-label for=(var.key) { (label) }
                 input .form-input #(var.key) name=(var.key) type="text" value=(value)
@@ -179,7 +232,7 @@ function submitSettings(e) {{
     .then(function(r) {{ return r.json(); }})
     .then(function(d) {{ document.body.dispatchEvent(new CustomEvent('showToast', {{ detail: {{ message: d.message || 'Saved', type: d.error ? 'error' : 'success' }} }})); }})
     .catch(function(err) {{ document.body.dispatchEvent(new CustomEvent('showToast', {{ detail: {{ message: 'Error: ' + err.message, type: 'error' }} }})); }})
-    .finally(function() {{ btn.disabled = false; btn.textContent = 'Save Settings'; }});
+    .finally(function() {{ btn.disabled = false; btn.textContent = 'Save settings'; }});
     return false;
 }}
 "#
@@ -205,14 +258,32 @@ pub async fn render_sections(ctx: &dyn Context, sections: &[SettingsSection<'_>]
     let empty = String::new();
     html! {
         @for (i, section) in sections.iter().enumerate() {
-            h3 style=(format!(
-                "font-size:1rem;font-weight:600;margin:{} 0 1rem;padding-bottom:0.5rem;border-bottom:1px solid var(--border-color)",
-                if i == 0 { "0" } else { "1.5rem" }
-            )) {
-                (section.icon) " " (section.title)
-            }
-            @for var in section.vars {
-                (render_field(var, values.get(&var.key).unwrap_or(&empty)))
+            @if section.collapsible {
+                details style="margin-top:1rem;border:1px solid var(--border-color);border-radius:12px" {
+                    summary style="padding:.9rem 1rem;cursor:pointer;font-weight:600" { (section.icon) " " (section.title) }
+                    div style="padding:0 1rem 1rem" {
+                        @if !section.description.is_empty() {
+                            p .text-muted style="font-size:0.85rem;margin:0 0 1rem" { (section.description) }
+                        }
+                        @for var in section.vars {
+                            (render_field(var, values.get(&var.key).unwrap_or(&empty)))
+                        }
+                    }
+                }
+            } @else {
+                h3 style=(format!(
+                    "font-size:1rem;font-weight:600;margin:{} 0 {};padding-bottom:0.5rem;border-bottom:1px solid var(--border-color)",
+                    if i == 0 { "0" } else { "1.5rem" },
+                    if section.description.is_empty() { "1rem" } else { "0.5rem" }
+                )) {
+                    (section.icon) " " (section.title)
+                }
+                @if !section.description.is_empty() {
+                    p .text-muted style="font-size:0.85rem;margin:0 0 1rem" { (section.description) }
+                }
+                @for var in section.vars {
+                    (render_field(var, values.get(&var.key).unwrap_or(&empty)))
+                }
             }
         }
     }
@@ -237,7 +308,7 @@ pub async fn settings_form(
         form #settings-form onsubmit="return submitSettings(event)" {
             (fields)
             (extra)
-            button .btn .btn-primary type="submit" style="margin-top:1rem" { "Save Settings" }
+            button .btn .btn--primary type="submit" style="margin-top:1rem" { "Save settings" }
         }
         script { (PreEscaped(submit_js(post_url))) }
     }
@@ -308,6 +379,50 @@ mod tests {
         ConfigVar::new(key, "desc text", "def")
             .name(name)
             .input_type(input_type)
+    }
+
+    #[tokio::test]
+    async fn section_description_renders_under_the_heading() {
+        let ctx = crate::test_support::TestContext::new().await;
+        let vars = [var("X__A", "A", InputType::Text)];
+        let sections = [
+            SettingsSection::new("Checkout", super::super::icons::settings(), &vars)
+                .description("Defaults applied to new offers."),
+        ];
+        let s = render_sections(&ctx, &sections).await.into_string();
+        assert!(s.contains("Defaults applied to new offers."), "{s}");
+    }
+
+    #[test]
+    fn select_field_renders_options_with_current_value_selected() {
+        let v = var("X__CCY", "Default Currency", InputType::Select)
+            .options(&[("USD", "USD — US Dollar"), ("NZD", "NZD — NZ Dollar")]);
+        let s = render_field(&v, "NZD").into_string();
+        assert!(s.contains("<select"), "renders a select: {s}");
+        assert!(s.contains(r#"name="X__CCY""#));
+        assert!(s.contains(r#"value="USD""#));
+        assert!(
+            s.contains(r#"value="NZD" selected"#),
+            "current value is preselected: {s}"
+        );
+        assert!(s.contains("NZD — NZ Dollar"));
+    }
+
+    #[test]
+    fn select_without_options_falls_back_to_text_input() {
+        let v = var("X__MODE", "Mode", InputType::Select);
+        let s = render_field(&v, "live").into_string();
+        assert!(!s.contains("<select"), "no options, no select: {s}");
+        assert!(s.contains(r#"type="text""#));
+        assert!(s.contains(r#"value="live""#));
+    }
+
+    #[test]
+    fn number_field_renders_number_input() {
+        let v = var("X__FEE", "Fee (bps)", InputType::Number);
+        let s = render_field(&v, "250").into_string();
+        assert!(s.contains(r#"type="number""#), "number widget: {s}");
+        assert!(s.contains(r#"value="250""#));
     }
 
     #[test]

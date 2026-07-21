@@ -1,0 +1,27 @@
+{
+  "slug": "boutique-store", "title": "Marrow & Loom",
+  "developer": { "template": "Configurable one-time physical product", "ownership": "Platform-owned boutique", "fulfillment": "Manual tracked shipping from immutable size/cloth snapshot", "stripe_features": ["Hosted Checkout", "Automatic Tax", "Shipping rate", "Conditional rows"], "journey": ["Create size, cloth, and monogram variables.", "Attach conditional cloth and embroidery rows.", "Configure allowed shipping countries/rates and publish the offer."] },
+  "operator": { "journey": ["Review stock before publication and archive unavailable variants.", "Fulfill from the order's exact size, cloth, monogram, and shipping snapshot.", "Use Stripe-hosted tax and refund records during support."] },
+  "seed": {
+    "template_id": "configurable_product",
+    "product": { "name": "Archive Jacket", "slug": "archive-jacket", "currency": "NZD", "fulfillment_kind": "manual", "stock": 24, "status": "active" },
+    "offer_definition": {
+      "name": "Made-to-order jacket", "mode": "payment", "currency": "NZD", "pricing_model": "components", "usage_type": "licensed", "billing_scheme": "per_unit", "tax_behavior": "exclusive",
+      "variables": [
+        { "key": "size", "kind": "select", "label": "Size", "required": true, "default_value": "M", "allowed_values": ["XS", "S", "M", "L"], "sort_order": 0 },
+        { "key": "cloth", "kind": "select", "label": "Cloth", "required": true, "default_value": "Cotton", "allowed_values": ["Cotton", "Wool"], "sort_order": 1 },
+        { "key": "monogram", "kind": "boolean", "label": "Add a monogram", "required": false, "default_value": false, "sort_order": 2 }
+      ],
+      "components": [
+        { "key": "jacket", "label": "Archive Jacket", "required": true, "sort_order": 0, "amount": { "type": "fixed", "unit_amount_minor": 44900 } },
+        { "key": "wool", "label": "Wool cloth", "required": false, "sort_order": 1, "amount": { "type": "fixed", "unit_amount_minor": 4500 }, "condition": { "op": "equals", "input": "cloth", "value": "Wool" } },
+        { "key": "monogram", "label": "Hand monogram", "required": false, "sort_order": 2, "amount": { "type": "fixed", "unit_amount_minor": 2500 }, "condition": { "op": "equals", "input": "monogram", "value": true } }
+      ],
+      "checkout": { "automatic_tax": true, "collect_billing_address": true, "collect_shipping_address": true, "allowed_shipping_countries": ["NZ", "AU"], "shipping_options": [{ "display_name": "Tracked delivery", "amount_minor": 1200, "tax_behavior": "exclusive", "delivery_estimate": { "minimum": 2, "maximum": 5, "unit": "business_day" } }] }
+    }
+  },
+  "product": { "schema_version": 1, "id": "archive-jacket", "name": "Archive Jacket", "slug": "archive-jacket", "description": "Small-run jacket · tracked shipping", "image_url": "", "tags": ["physical", "apparel"], "fulfillment_kind": "manual", "offers": [{ "id": "archive-jacket-offer", "version": 2, "name": "Configure jacket", "mode": "payment", "currency": "NZD", "pricing_model": "components", "recurring_interval": null, "interval_count": 1,
+    "variables": [{ "key": "size", "kind": "select", "label": "Size", "required": true, "default_value": "M", "allowed_values": ["XS", "S", "M", "L"], "sort_order": 0 }, { "key": "cloth", "kind": "select", "label": "Cloth", "required": true, "default_value": "Cotton", "allowed_values": ["Cotton", "Wool"], "sort_order": 1 }, { "key": "monogram", "kind": "boolean", "label": "Add a monogram", "required": false, "default_value": false, "sort_order": 2 }],
+    "checkout": { "allow_promotion_codes": false, "automatic_tax": true, "collect_billing_address": true, "collect_shipping_address": true, "require_terms_consent": true, "trial_days": 0 }, "payment_links": [] }] },
+  "scenario": { "offer_id": "archive-jacket-offer", "quantity": 1, "inputs": { "size": "M", "cloth": "Wool", "monogram": true }, "presentation": "hosted", "expected_total_label": "NZD 519.00", "quote": { "schema_version": 1, "offer_id": "archive-jacket-offer", "offer_version": 2, "quantity": 1, "inputs": { "size": "M", "cloth": "Wool", "monogram": true }, "components": [{ "component_id": "jacket", "key": "jacket", "label": "Archive Jacket", "included": true, "required": true, "unit_amount_minor": 44900, "quantity": 1, "total_amount_minor": 44900, "reason": "required" }, { "component_id": "wool", "key": "wool", "label": "Wool cloth", "included": true, "required": false, "unit_amount_minor": 4500, "quantity": 1, "total_amount_minor": 4500, "reason": "cloth selected" }, { "component_id": "monogram", "key": "monogram", "label": "Hand monogram", "included": true, "required": false, "unit_amount_minor": 2500, "quantity": 1, "total_amount_minor": 2500, "reason": "monogram selected" }], "amounts": { "currency": "NZD", "subtotal_minor": 51900, "discount_minor": 0, "tax_minor": 0, "shipping_minor": 0, "platform_fee_minor": 0, "total_minor": 51900 } } }
+}

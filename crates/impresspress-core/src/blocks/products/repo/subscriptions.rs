@@ -2,110 +2,385 @@
 
 use std::collections::HashMap;
 
-use wafer_block::{
-    db::{Filter, FilterOp, ListOptions},
-    wire::database::OnConflict,
-};
+use wafer_block::db::{Filter, FilterOp, ListOptions};
 use wafer_core::clients::database as db;
 use wafer_run::{context::Context, ErrorCode, WaferError};
+
+use crate::util::RecordExt;
 
 /// Platform-billing subscription table — one row per user.
 pub(crate) const SUBSCRIPTIONS_TABLE: &str = "impresspress__products__subscriptions";
 
-/// Insert-or-update the platform subscription for a user. The row id is the
-/// deterministic `sub_{user_id}` so two webhooks racing for the same user hit
-/// the same primary key and the `user_id`-conflict clause merges them rather
-/// than inserting duplicates. Returns rows affected.
+fn platform_update_data(
+    stripe_customer_id: &str,
+    stripe_subscription_id: &str,
+    plan: &str,
+    event_created: i64,
+    now: &str,
+) -> HashMap<String, serde_json::Value> {
+    HashMap::from([
+        (
+            "stripe_customer_id".to_string(),
+            serde_json::json!(stripe_customer_id),
+        ),
+        (
+            "stripe_subscription_id".to_string(),
+            serde_json::json!(stripe_subscription_id),
+        ),
+        ("plan".to_string(), serde_json::json!(plan)),
+        ("status".to_string(), serde_json::json!("active")),
+        ("grace_period_end".to_string(), serde_json::Value::Null),
+        (
+            "stripe_event_created".to_string(),
+            serde_json::json!(event_created),
+        ),
+        ("updated_at".to_string(), serde_json::json!(now)),
+    ])
+}
+
+async fn update_platform_if_current(
+    ctx: &dyn Context,
+    user_id: &str,
+    stripe_customer_id: &str,
+    stripe_subscription_id: &str,
+    plan: &str,
+    event_created: i64,
+) -> Result<i64, WaferError> {
+    let now = chrono::Utc::now().to_rfc3339();
+    db::update_by_filters_count(
+        ctx,
+        SUBSCRIPTIONS_TABLE,
+        vec![
+            Filter {
+                field: "user_id".to_string(),
+                operator: FilterOp::Equal,
+                value: serde_json::json!(user_id),
+            },
+            Filter {
+                field: "stripe_event_created".to_string(),
+                operator: FilterOp::LessEqual,
+                value: serde_json::json!(event_created),
+            },
+        ],
+        platform_update_data(
+            stripe_customer_id,
+            stripe_subscription_id,
+            plan,
+            event_created,
+            &now,
+        ),
+    )
+    .await
+}
+
+/// Insert or timestamp-conditionally update the platform subscription for a
+/// user. The deterministic row id and unique `user_id` index serialize races;
+/// a loser retries through the same atomic timestamp predicate. Late Checkout
+/// deliveries therefore cannot overwrite a newer invoice/subscription event.
+/// Returns rows affected.
 pub(crate) async fn upsert_platform(
     ctx: &dyn Context,
     user_id: &str,
     stripe_customer_id: &str,
     stripe_subscription_id: &str,
     plan: &str,
+    event_created: i64,
 ) -> Result<i64, WaferError> {
-    let now = chrono::Utc::now().to_rfc3339();
-    let sub_id = format!("sub_{user_id}");
-    db::upsert(
+    match db::get_by_field(
         ctx,
         SUBSCRIPTIONS_TABLE,
-        vec![
-            ("id".to_string(), serde_json::json!(sub_id)),
-            ("user_id".to_string(), serde_json::json!(user_id)),
-            (
-                "stripe_customer_id".to_string(),
-                serde_json::json!(stripe_customer_id),
-            ),
-            (
-                "stripe_subscription_id".to_string(),
-                serde_json::json!(stripe_subscription_id),
-            ),
-            ("plan".to_string(), serde_json::json!(plan)),
-            ("status".to_string(), serde_json::json!("active")),
-            ("created_at".to_string(), serde_json::json!(&now)),
-            ("updated_at".to_string(), serde_json::json!(&now)),
-        ],
-        vec!["user_id".to_string()],
-        OnConflict::SetColumns(vec![
-            "stripe_customer_id".to_string(),
-            "stripe_subscription_id".to_string(),
-            "plan".to_string(),
-            "status".to_string(),
-            "updated_at".to_string(),
-        ]),
+        "user_id",
+        serde_json::json!(user_id),
     )
     .await
+    {
+        Ok(_) => {
+            return update_platform_if_current(
+                ctx,
+                user_id,
+                stripe_customer_id,
+                stripe_subscription_id,
+                plan,
+                event_created,
+            )
+            .await;
+        }
+        Err(error) if error.code == ErrorCode::NotFound => {}
+        Err(error) => return Err(error),
+    }
+
+    let now = chrono::Utc::now().to_rfc3339();
+    let sub_id = format!("sub_{user_id}");
+    let mut data = platform_update_data(
+        stripe_customer_id,
+        stripe_subscription_id,
+        plan,
+        event_created,
+        &now,
+    );
+    data.insert("id".to_string(), serde_json::json!(sub_id));
+    data.insert("user_id".to_string(), serde_json::json!(user_id));
+    data.insert("created_at".to_string(), serde_json::json!(&now));
+    match db::create(ctx, SUBSCRIPTIONS_TABLE, data).await {
+        Ok(_) => Ok(1),
+        Err(create_error) => {
+            // Another worker may have inserted the deterministic/unique row
+            // after our lookup. Only treat that race as recoverable when the
+            // row now exists; otherwise preserve the original database error.
+            match db::get_by_field(
+                ctx,
+                SUBSCRIPTIONS_TABLE,
+                "user_id",
+                serde_json::json!(user_id),
+            )
+            .await
+            {
+                Ok(_) => {
+                    update_platform_if_current(
+                        ctx,
+                        user_id,
+                        stripe_customer_id,
+                        stripe_subscription_id,
+                        plan,
+                        event_created,
+                    )
+                    .await
+                }
+                Err(error) if error.code == ErrorCode::NotFound => Err(create_error),
+                Err(error) => Err(error),
+            }
+        }
+    }
+}
+
+/// Fetch the platform subscription row referencing a Stripe subscription id,
+/// or `None` when no row references it.
+async fn get_by_stripe_sub(
+    ctx: &dyn Context,
+    stripe_subscription_id: &str,
+) -> Result<Option<db::Record>, WaferError> {
+    let rows = db::list(
+        ctx,
+        SUBSCRIPTIONS_TABLE,
+        &ListOptions {
+            filters: vec![Filter {
+                field: "stripe_subscription_id".into(),
+                operator: FilterOp::Equal,
+                value: serde_json::json!(stripe_subscription_id),
+            }],
+            limit: 1,
+            skip_count: true,
+            ..Default::default()
+        },
+    )
+    .await?;
+    Ok(rows.records.into_iter().next())
+}
+
+/// Whether any platform-billing subscription row references this Stripe
+/// subscription id. Unlike [`find_user_by_stripe_sub`], database failures
+/// surface as `Err` instead of collapsing into "not found", because the
+/// webhook uses this answer to decide between sealing an event as processed
+/// and scheduling a retry.
+pub(crate) async fn platform_subscription_exists(
+    ctx: &dyn Context,
+    stripe_subscription_id: &str,
+) -> Result<bool, WaferError> {
+    Ok(get_by_stripe_sub(ctx, stripe_subscription_id)
+        .await?
+        .is_some())
 }
 
 /// Sync status (and optionally plan) from a `customer.subscription.updated`
-/// event, matched by Stripe subscription id. Returns rows affected.
+/// event, matched by Stripe subscription id. Applies the shared transition
+/// rules ([`super::subscription_transition_allowed`]): strictly older events
+/// never apply, nothing leaves a terminal status, and an equal-second
+/// delivery may only move toward a more-terminal status (immediate
+/// cancellation emits `updated` and `deleted` with the same `created` second
+/// — the deletion stays authoritative regardless of delivery order). Writes
+/// compare-and-swap on the exact (timestamp, status) pair that was read.
+/// Returns rows affected (0 = no matching row, or the event was refused).
 pub(crate) async fn update_status_plan(
     ctx: &dyn Context,
     stripe_subscription_id: &str,
     status: &str,
     plan: Option<&str>,
+    event_created: i64,
 ) -> Result<i64, WaferError> {
-    let now = chrono::Utc::now().to_rfc3339();
-    let mut data: HashMap<String, serde_json::Value> = HashMap::new();
-    data.insert("status".into(), serde_json::json!(status));
-    data.insert("updated_at".into(), serde_json::json!(&now));
-    if let Some(plan) = plan {
-        data.insert("plan".into(), serde_json::json!(plan));
+    let Some(mut current) = get_by_stripe_sub(ctx, stripe_subscription_id).await? else {
+        return Ok(0);
+    };
+    for _ in 0..3 {
+        let current_created = current.i64_field("stripe_event_created");
+        let current_status = current.str_field("status").to_string();
+        if !super::subscription_transition_allowed(
+            &current_status,
+            current_created,
+            status,
+            event_created,
+        ) {
+            return Ok(0);
+        }
+        let now = chrono::Utc::now().to_rfc3339();
+        let mut data: HashMap<String, serde_json::Value> = HashMap::new();
+        data.insert("status".into(), serde_json::json!(status));
+        data.insert("updated_at".into(), serde_json::json!(&now));
+        data.insert(
+            "stripe_event_created".into(),
+            serde_json::json!(event_created),
+        );
+        if let Some(plan) = plan {
+            data.insert("plan".into(), serde_json::json!(plan));
+        }
+        let rows = db::update_by_filters_count(
+            ctx,
+            SUBSCRIPTIONS_TABLE,
+            vec![
+                Filter {
+                    field: "stripe_subscription_id".into(),
+                    operator: FilterOp::Equal,
+                    value: serde_json::json!(stripe_subscription_id),
+                },
+                Filter {
+                    field: "stripe_event_created".into(),
+                    operator: FilterOp::Equal,
+                    value: serde_json::json!(current_created),
+                },
+                Filter {
+                    field: "status".into(),
+                    operator: FilterOp::Equal,
+                    value: serde_json::json!(&current_status),
+                },
+            ],
+            data,
+        )
+        .await?;
+        if rows == 1 {
+            return Ok(1);
+        }
+        current = match get_by_stripe_sub(ctx, stripe_subscription_id).await? {
+            Some(record) => record,
+            None => return Ok(0),
+        };
     }
-    db::update_by_filters_count(
-        ctx,
-        SUBSCRIPTIONS_TABLE,
-        vec![Filter {
-            field: "stripe_subscription_id".into(),
-            operator: FilterOp::Equal,
-            value: serde_json::json!(stripe_subscription_id),
-        }],
-        data,
-    )
-    .await
+    Err(WaferError::new(
+        ErrorCode::FailedPrecondition,
+        "platform subscription state changed concurrently; retry the event",
+    ))
 }
 
 /// Mark a subscription past-due with a 7-day grace window
-/// (`invoice.payment_failed`). Returns rows affected.
+/// (`invoice.payment_failed`). A failed payment on a leftover open invoice
+/// after `customer.subscription.deleted` must not move a terminal row back to
+/// `past_due` and grant a fresh grace window, so the write requires an
+/// equal-or-newer event timestamp AND a non-terminal current status
+/// (mirroring [`recover_from_paid_invoice`]'s status guard). Returns rows
+/// affected (0 = no matching row, or the event was refused).
 pub(crate) async fn mark_past_due(
     ctx: &dyn Context,
     stripe_subscription_id: &str,
+    event_created: i64,
 ) -> Result<i64, WaferError> {
-    let now = chrono::Utc::now();
-    let grace_end = (now + chrono::Duration::days(7)).to_rfc3339();
-    let now = now.to_rfc3339();
-    let mut data: HashMap<String, serde_json::Value> = HashMap::new();
-    data.insert("status".into(), serde_json::json!("past_due"));
-    data.insert("grace_period_end".into(), serde_json::json!(&grace_end));
-    data.insert("updated_at".into(), serde_json::json!(&now));
+    let Some(mut current) = get_by_stripe_sub(ctx, stripe_subscription_id).await? else {
+        return Ok(0);
+    };
+    for _ in 0..3 {
+        let current_created = current.i64_field("stripe_event_created");
+        let current_status = current.str_field("status").to_string();
+        if !super::subscription_transition_allowed(
+            &current_status,
+            current_created,
+            "past_due",
+            event_created,
+        ) {
+            return Ok(0);
+        }
+        let now = chrono::Utc::now();
+        let grace_end = (now + chrono::Duration::days(7)).to_rfc3339();
+        let now = now.to_rfc3339();
+        let mut data: HashMap<String, serde_json::Value> = HashMap::new();
+        data.insert("status".into(), serde_json::json!("past_due"));
+        data.insert("grace_period_end".into(), serde_json::json!(&grace_end));
+        data.insert("updated_at".into(), serde_json::json!(&now));
+        data.insert(
+            "stripe_event_created".into(),
+            serde_json::json!(event_created),
+        );
+        let rows = db::update_by_filters_count(
+            ctx,
+            SUBSCRIPTIONS_TABLE,
+            vec![
+                Filter {
+                    field: "stripe_subscription_id".into(),
+                    operator: FilterOp::Equal,
+                    value: serde_json::json!(stripe_subscription_id),
+                },
+                Filter {
+                    field: "stripe_event_created".into(),
+                    operator: FilterOp::Equal,
+                    value: serde_json::json!(current_created),
+                },
+                Filter {
+                    field: "status".into(),
+                    operator: FilterOp::Equal,
+                    value: serde_json::json!(&current_status),
+                },
+            ],
+            data,
+        )
+        .await?;
+        if rows == 1 {
+            return Ok(1);
+        }
+        current = match get_by_stripe_sub(ctx, stripe_subscription_id).await? {
+            Some(record) => record,
+            None => return Ok(0),
+        };
+    }
+    Err(WaferError::new(
+        ErrorCode::FailedPrecondition,
+        "platform subscription state changed concurrently; retry the event",
+    ))
+}
+
+/// Restore a subscription only when a newer successful invoice follows a
+/// local `past_due` state. A paid final invoice must not resurrect an already
+/// canceled subscription.
+pub(crate) async fn recover_from_paid_invoice(
+    ctx: &dyn Context,
+    stripe_subscription_id: &str,
+    event_created: i64,
+) -> Result<i64, WaferError> {
+    let now = chrono::Utc::now().to_rfc3339();
     db::update_by_filters_count(
         ctx,
         SUBSCRIPTIONS_TABLE,
-        vec![Filter {
-            field: "stripe_subscription_id".into(),
-            operator: FilterOp::Equal,
-            value: serde_json::json!(stripe_subscription_id),
-        }],
-        data,
+        vec![
+            Filter {
+                field: "stripe_subscription_id".into(),
+                operator: FilterOp::Equal,
+                value: serde_json::json!(stripe_subscription_id),
+            },
+            Filter {
+                field: "status".into(),
+                operator: FilterOp::Equal,
+                value: serde_json::json!("past_due"),
+            },
+            Filter {
+                field: "stripe_event_created".into(),
+                operator: FilterOp::LessEqual,
+                value: serde_json::json!(event_created),
+            },
+        ],
+        HashMap::from([
+            ("status".into(), serde_json::json!("active")),
+            ("grace_period_end".into(), serde_json::Value::Null),
+            (
+                "stripe_event_created".into(),
+                serde_json::json!(event_created),
+            ),
+            ("updated_at".into(), serde_json::json!(now)),
+        ]),
     )
     .await
 }
@@ -115,6 +390,7 @@ pub(crate) async fn mark_past_due(
 pub(crate) async fn cancel_and_reset_addons(
     ctx: &dyn Context,
     stripe_subscription_id: &str,
+    event_created: i64,
 ) -> Result<i64, WaferError> {
     let now = chrono::Utc::now().to_rfc3339();
     let mut data: HashMap<String, serde_json::Value> = HashMap::new();
@@ -124,14 +400,25 @@ pub(crate) async fn cancel_and_reset_addons(
     data.insert("addon_r2_bytes".into(), serde_json::json!(0));
     data.insert("addon_d1_bytes".into(), serde_json::json!(0));
     data.insert("updated_at".into(), serde_json::json!(&now));
+    data.insert(
+        "stripe_event_created".into(),
+        serde_json::json!(event_created),
+    );
     db::update_by_filters_count(
         ctx,
         SUBSCRIPTIONS_TABLE,
-        vec![Filter {
-            field: "stripe_subscription_id".into(),
-            operator: FilterOp::Equal,
-            value: serde_json::json!(stripe_subscription_id),
-        }],
+        vec![
+            Filter {
+                field: "stripe_subscription_id".into(),
+                operator: FilterOp::Equal,
+                value: serde_json::json!(stripe_subscription_id),
+            },
+            Filter {
+                field: "stripe_event_created".into(),
+                operator: FilterOp::LessEqual,
+                value: serde_json::json!(event_created),
+            },
+        ],
         data,
     )
     .await

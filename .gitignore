@@ -15,6 +15,7 @@ crates/impresspress/data/
 *.db-wal
 test-results/
 playwright-report/
+playwright-report-products/
 # Playwright globalSetup writes a real session token here (see
 # crates/impresspress-web/tests/e2e/fixtures/global-setup.ts). Never commit.
 crates/impresspress-web/tests/.auth/
@@ -44,6 +45,10 @@ Thumbs.db
 # Build output
 build/
 .bin/
+# Local demo work
+/demo/
+/examples/products/clawfood/
+/examples/tests/products-examples.spec.ts-snapshots/clawfood-*.png
 
 # Git worktrees
 .worktrees/

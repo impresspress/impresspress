@@ -1,23 +1,19 @@
 //! Admin- and user-facing HTTP handlers for the impresspress/products block.
 //!
-//! Dispatches under `/admin/b/products/...` (admin CRUD on products, groups,
-//! types, pricing templates, purchases, stats) and `/b/products/...` (catalog,
-//! user-owned products/groups when `WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS` is
-//! enabled, calculate-price, purchases, checkout, subscription status).
-//! Stripe webhook + checkout-session flows live in the sibling `stripe` module.
+//! Dispatches product, typed-offer, seller, order, storefront, and Stripe
+//! operations for admin and user-facing routes.
 //!
 //! Split by domain responsibility:
 //! - [`dispatch`] — the `AdminRoute`/`UserRoute` tables and the
 //!   `handle_admin`/`handle_user` entry points that match a normalized
-//!   sub-path and fan out to the domain modules below (or to the sibling
-//!   `variables`/`purchase`/`pricing`/`stripe` modules).
+//!   sub-path and fan out to the domain modules below or the order and Stripe
+//!   modules.
 //! - [`product`] — product CRUD, both admin (`/admin/b/products/products`)
 //!   and user-owned (`/b/products/products`, gated on
 //!   `WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS`).
 //! - [`group`] — group CRUD (admin + user-owned), the "products in a
 //!   group" listing, and the read-only group-templates listing.
 //! - [`types`] — product-type taxonomy CRUD.
-//! - [`pricing_template`] — pricing template CRUD (admin-only).
 //! - [`catalog`] — the public product catalog (`/b/products/catalog`).
 //! - [`subscription`] — the authenticated subscription-status endpoint.
 //! - [`stats`] — the admin dashboard counts/revenue endpoint.
@@ -27,16 +23,23 @@
 //! the same paths unchanged.
 
 mod catalog;
+mod commerce;
 mod dispatch;
 mod group;
-mod pricing_template;
+mod offers;
+mod payment_links;
 mod product;
+mod provider;
+pub(in crate::blocks::products) mod seller_policy;
+mod sellers;
 mod stats;
 mod subscription;
 mod types;
 
 pub(in crate::blocks::products) use dispatch::user_products_enabled;
 pub use dispatch::{handle_admin, handle_user};
+#[cfg(test)]
+pub(in crate::blocks::products) use dispatch::{ADMIN_ROUTES, USER_ROUTES};
 pub(in crate::blocks::products) use product::name_like_filter;
 use wafer_core::clients::database as db;
 use wafer_run::context::Context;

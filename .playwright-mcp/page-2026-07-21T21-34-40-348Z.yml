@@ -1,0 +1,97 @@
+- generic [ref=f126e2]:
+  - link "Skip to content" [ref=f126e3] [cursor=pointer]:
+    - /url: "#content"
+  - navigation "Primary" [ref=f126e4]:
+    - img "Impresspress" [ref=f126e6]
+    - generic [ref=f126e7]:
+      - generic [ref=f126e8]:
+        - generic [ref=f126e9]:
+          - generic [ref=f126e10]: Account
+          - list [ref=f126e11]:
+            - listitem [ref=f126e12]:
+              - link "Profile" [ref=f126e13] [cursor=pointer]:
+                - /url: /b/userportal/profile
+            - listitem [ref=f126e19]:
+              - link "Organizations" [ref=f126e20] [cursor=pointer]:
+                - /url: /b/auth/orgs
+            - listitem [ref=f126e28]:
+              - link "Sessions" [ref=f126e29] [cursor=pointer]:
+                - /url: /b/userportal/sessions
+            - listitem [ref=f126e34]:
+              - link "Security" [ref=f126e35] [cursor=pointer]:
+                - /url: /b/userportal/security
+        - generic [ref=f126e41]:
+          - generic [ref=f126e42]: Apps
+          - list [ref=f126e43]:
+            - listitem [ref=f126e44]:
+              - link "Products" [ref=f126e45] [cursor=pointer]:
+                - /url: /b/products/
+            - listitem [ref=f126e52]:
+              - link "Files" [ref=f126e53] [cursor=pointer]:
+                - /url: /b/storage/
+            - listitem [ref=f126e58]:
+              - link "Shares" [ref=f126e59] [cursor=pointer]:
+                - /url: /b/cloudstorage/
+            - listitem [ref=f126e65]:
+              - link "Legal" [ref=f126e66] [cursor=pointer]:
+                - /url: /b/legalpages/admin/privacy
+      - button "Toggle sidebar" [ref=f126e72] [cursor=pointer]
+    - button "S seller@example.com User" [ref=f126e77] [cursor=pointer]:
+      - generic [ref=f126e78]: S
+      - generic [ref=f126e79]:
+        - generic [ref=f126e80]: seller@example.com
+        - generic [ref=f126e81]: User
+  - generic [ref=f126e82]:
+    - banner [ref=f126e83]:
+      - heading "Products" [level=1] [ref=f126e84]
+      - button "Open command palette" [ref=f126e86] [cursor=pointer]:
+        - generic [ref=f126e87]: Quick jump
+        - generic [ref=f126e88]:
+          - generic [ref=f126e89]: Ctrl
+          - generic [ref=f126e90]: K
+    - generic [ref=f126e91]:
+      - generic [ref=f126e93]:
+        - link "Commerce" [ref=f126e94] [cursor=pointer]:
+          - /url: /b/products/
+        - link "Purchases" [ref=f126e100] [cursor=pointer]:
+          - /url: /b/products/my-purchases
+        - link "Selling" [ref=f126e105] [cursor=pointer]:
+          - /url: /b/products/selling
+      - generic [ref=f126e110]:
+        - generic [ref=f126e111]:
+          - heading "Create product" [level=2] [ref=f126e112]
+          - paragraph [ref=f126e113]: Build a clear checkout for a simple item, subscription, booking, or configurable service
+        - link "Cancel" [ref=f126e115] [cursor=pointer]:
+          - /url: /b/products/my-products
+      - navigation "Product setup progress" [ref=f126e116]:
+        - list [ref=f126e117]:
+          - listitem [ref=f126e118]: 1. Type
+          - listitem [ref=f126e119]: 2. Details
+          - listitem [ref=f126e120]: 3. Pricing
+          - listitem [ref=f126e121]: 4. Checkout
+          - listitem [ref=f126e122]: 5. Review
+      - generic [ref=f126e123]:
+        - generic [ref=f126e124]:
+          - generic [ref=f126e126]:
+            - heading "Choose a starting template" [level=3] [ref=f126e127]
+            - paragraph [ref=f126e128]: Every template remains fully editable before it is saved.
+          - group "Product template" [ref=f126e130]:
+            - generic [ref=f126e132]:
+              - generic [ref=f126e133] [cursor=pointer]:
+                - radio "Simple product One price paid once. Good for a standard physical or digital item." [checked] [ref=f126e134]
+                - strong [ref=f126e135]: Simple product
+                - generic [ref=f126e136]: One price paid once. Good for a standard physical or digital item.
+              - generic [ref=f126e137] [cursor=pointer]:
+                - radio "Simple subscription One recurring price with an interval and optional trial." [ref=f126e138]
+                - strong [ref=f126e139]: Simple subscription
+                - generic [ref=f126e140]: One recurring price with an interval and optional trial.
+              - generic [ref=f126e141] [cursor=pointer]:
+                - radio "Configurable product Bookings, customer choices, quantities, and conditional add-ons." [ref=f126e142]
+                - strong [ref=f126e143]: Configurable product
+                - generic [ref=f126e144]: Bookings, customer choices, quantities, and conditional add-ons.
+              - generic [ref=f126e145] [cursor=pointer]:
+                - radio "Configurable subscription Recurring plans driven by quantities, dates, choices, and conditions." [ref=f126e146]
+                - strong [ref=f126e147]: Configurable subscription
+                - generic [ref=f126e148]: Recurring plans driven by quantities, dates, choices, and conditions.
+        - text: "* * *"
+        - button "Continue" [ref=f126e151] [cursor=pointer]

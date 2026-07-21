@@ -1,0 +1,147 @@
+- generic [ref=f95e2]:
+  - link "Skip to content" [ref=f95e3] [cursor=pointer]:
+    - /url: "#content"
+  - navigation "Primary" [ref=f95e4]:
+    - img "Impresspress" [ref=f95e6]
+    - generic [ref=f95e7]:
+      - generic [ref=f95e8]:
+        - generic [ref=f95e9]:
+          - generic [ref=f95e10]: Workspace
+          - list [ref=f95e11]:
+            - listitem [ref=f95e12]:
+              - link "Dashboard" [ref=f95e13] [cursor=pointer]:
+                - /url: /b/admin/
+            - listitem [ref=f95e21]:
+              - link "Users" [ref=f95e22] [cursor=pointer]:
+                - /url: /b/admin/users
+        - generic [ref=f95e30]:
+          - generic [ref=f95e31]: Data
+          - list [ref=f95e32]:
+            - listitem [ref=f95e33]:
+              - link "Storage" [ref=f95e34] [cursor=pointer]:
+                - /url: /b/storage/admin/
+            - listitem [ref=f95e39]:
+              - link "Database" [ref=f95e40] [cursor=pointer]:
+                - /url: /b/admin/database
+            - listitem [ref=f95e46]:
+              - link "Vector indexes" [ref=f95e47] [cursor=pointer]:
+                - /url: /b/vector/
+        - generic [ref=f95e55]:
+          - generic [ref=f95e56]: Communication
+          - list [ref=f95e57]:
+            - listitem [ref=f95e58]:
+              - link "Messages" [ref=f95e59] [cursor=pointer]:
+                - /url: /b/messages/
+            - listitem [ref=f95e65]:
+              - link "LLM" [ref=f95e66] [cursor=pointer]:
+                - /url: /b/llm/
+        - generic [ref=f95e72]:
+          - generic [ref=f95e73]: Commerce
+          - list [ref=f95e74]:
+            - listitem [ref=f95e75]:
+              - link "Products" [ref=f95e76] [cursor=pointer]:
+                - /url: /b/products/admin/
+        - generic [ref=f95e83]:
+          - generic [ref=f95e84]: System
+          - list [ref=f95e85]:
+            - listitem [ref=f95e86]:
+              - link "Blocks" [ref=f95e87] [cursor=pointer]:
+                - /url: /b/admin/blocks
+            - listitem [ref=f95e94]:
+              - link "Logs" [ref=f95e95] [cursor=pointer]:
+                - /url: /b/admin/logs
+            - listitem [ref=f95e101]:
+              - link "Settings" [ref=f95e102] [cursor=pointer]:
+                - /url: /b/admin/settings/email
+      - button "Toggle sidebar" [ref=f95e108] [cursor=pointer]
+    - button "A admin@example.com Admin" [ref=f95e113] [cursor=pointer]:
+      - generic [ref=f95e114]: A
+      - generic [ref=f95e115]:
+        - generic [ref=f95e116]: admin@example.com
+        - generic [ref=f95e117]: Admin
+  - generic [ref=f95e118]:
+    - banner [ref=f95e119]:
+      - heading "Products" [level=1] [ref=f95e120]
+      - button "Open command palette" [ref=f95e122] [cursor=pointer]:
+        - generic [ref=f95e123]: Quick jump
+        - generic [ref=f95e124]:
+          - generic [ref=f95e125]: Ctrl
+          - generic [ref=f95e126]: K
+    - generic [ref=f95e127]:
+      - generic [ref=f95e129]:
+        - link "Overview" [ref=f95e130] [cursor=pointer]:
+          - /url: /b/products/admin/
+        - link "Products" [ref=f95e136] [cursor=pointer]:
+          - /url: /b/products/admin/manage
+        - link "Groups" [ref=f95e141] [cursor=pointer]:
+          - /url: /b/products/admin/groups
+        - link "Orders" [ref=f95e144] [cursor=pointer]:
+          - /url: /b/products/admin/purchases
+        - link "Sellers" [ref=f95e149] [cursor=pointer]:
+          - /url: /b/products/admin/sellers
+        - link "Stripe" [ref=f95e154] [cursor=pointer]:
+          - /url: /b/products/admin/stripe
+        - link "Settings" [ref=f95e157] [cursor=pointer]:
+          - /url: /b/products/admin/settings
+      - generic [ref=f95e161]:
+        - generic [ref=f95e162]:
+          - heading "Products" [level=2] [ref=f95e163]
+          - paragraph [ref=f95e164]: Manage your product catalog
+        - link "+ New Product" [ref=f95e166] [cursor=pointer]:
+          - /url: /b/products/admin/new
+      - searchbox "Search products..." [ref=f95e173]
+      - generic [ref=f95e174]:
+        - table [ref=f95e176]:
+          - rowgroup [ref=f95e177]:
+            - row [ref=f95e178]:
+              - columnheader "Name" [ref=f95e179]
+              - columnheader "Status" [ref=f95e180]
+              - columnheader "Owner" [ref=f95e181]
+              - columnheader "Approval" [ref=f95e182]
+              - columnheader "Currency" [ref=f95e183]
+              - columnheader "Group" [ref=f95e184]
+              - columnheader "Created" [ref=f95e185]
+          - rowgroup [ref=f95e186]:
+            - row [ref=f95e187]:
+              - cell "Taxed Guide (GST Test)" [ref=f95e188]
+              - cell "active" [ref=f95e189]
+              - cell "Platform" [ref=f95e191]
+              - cell "approved" [ref=f95e192]
+              - cell "NZD" [ref=f95e194]
+              - cell "—" [ref=f95e195]
+              - cell "2026-07-21" [ref=f95e196]
+              - cell [ref=f95e197]:
+                - link "Open" [ref=f95e198] [cursor=pointer]:
+                  - /url: /b/products/admin/products/81af2da1-b70d-4d20-9c2f-ca4314e7d8d2
+                  - text: ›
+            - row [ref=f95e199]:
+              - cell "Team Seats (Test Configurable)" [ref=f95e200]
+              - cell "active" [ref=f95e201]
+              - cell "Platform" [ref=f95e203]
+              - cell "approved" [ref=f95e204]
+              - cell "NZD" [ref=f95e206]
+              - cell "—" [ref=f95e207]
+              - cell "2026-07-21" [ref=f95e208]
+              - cell [ref=f95e209]:
+                - link "Open" [ref=f95e210] [cursor=pointer]:
+                  - /url: /b/products/admin/products/ec4809f3-5709-43a0-96f6-7e86c339451d
+                  - text: ›
+            - row [ref=f95e211]:
+              - cell "Field Guide (Test Download)" [ref=f95e212]
+              - cell "active" [ref=f95e213]
+              - cell "Platform" [ref=f95e215]
+              - cell "approved" [ref=f95e216]
+              - cell "NZD" [ref=f95e218]
+              - cell "—" [ref=f95e219]
+              - cell "2026-07-21" [ref=f95e220]
+              - cell [ref=f95e221]:
+                - link "Open" [ref=f95e222] [cursor=pointer]:
+                  - /url: /b/products/admin/products/2a6e050e-bc8c-4b8c-9295-83c94095a0f7
+                  - text: ›
+        - navigation "Pagination" [ref=f95e223]:
+          - generic [ref=f95e224]: 3 total
+          - link "‹ Prev" [disabled]:
+            - /url: /b/products/admin/manage?page=1
+          - generic [ref=f95e225]: 1 / 1
+          - link "Next ›" [disabled]:
+            - /url: /b/products/admin/manage?page=1

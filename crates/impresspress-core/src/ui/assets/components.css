@@ -575,7 +575,19 @@ dialog.modal .modal-error[hidden] { display: none; }
 .data-table tbody td { padding: 0.55rem 0.75rem; font-size: var(--text-sm); border-bottom: 1px dashed var(--border-light); color: var(--text-primary); }
 .data-table tbody tr:last-child td { border-bottom: none; }
 .data-table__row--linked:hover { background: var(--bg-hover); cursor: pointer; }
-.data-table__row-href { width: 1.5rem; text-align: right; color: var(--text-muted); }
+.data-table__row-href { width: 3rem; text-align: right; color: var(--text-muted); }
+/* The chevron is the row's accessible link; give it a real touch target
+   (~44px) — the rest of the row is made clickable by the delegated handler
+   in assets.rs, which routes clicks to this anchor. */
+.data-table__row-href a {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    min-width: 2.75rem;
+    min-height: 2.75rem;
+    margin: -0.75rem -0.5rem;
+    border-radius: 8px;
+}
 .data-table__empty { padding: var(--spacing-xl); }
 
 /* ===== Empty state ===== */

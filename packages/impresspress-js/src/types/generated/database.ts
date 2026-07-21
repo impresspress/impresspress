@@ -1,6 +1,6 @@
-// Auto-generated from Go models - DO NOT EDIT MANUALLY
-// Generated at: 2025-12-16T13:13:17+13:00
-// Run 'go run scripts/generate-types.go' to regenerate
+// Hand-maintained database row types (the solobase-era Go generator no
+// longer exists). Keep in sync with the Rust schema sources: each block's
+// migrations/*.sql and, for products, contracts.rs.
 
 // ============================================
 // Package: auth
@@ -416,101 +416,54 @@ export interface ProductGroup {
 }
 
 export interface ProductGroupTemplate {
-  id: number;
+  id: string;
   name: string;
   displayName: string;
-  description: string;
-  icon: string;
-  // Filter field definitions
-  filterFieldsSchema: any[];
-  // active, pending, deleted
-  status: string;
-  createdAt: string | Date;
-  updatedAt: string | Date;
-}
-
-export interface ProductPricingTemplate {
-  id: number;
-  name: string;
-  displayName: string;
-  description: string;
-  priceFormula: string;
-  conditionFormula: string;
-  variables: Record<string, any>;
-  category: string;
-  // active, pending, deleted
-  status: string;
   createdAt: string | Date;
   updatedAt: string | Date;
 }
 
 export interface ProductProduct {
-  id: number;
-  groupId: number;
-  group: any;
-  productTemplateId: number;
-  productTemplate: any;
+  id: string;
   name: string;
   description: string;
-  basePrice: number;
+  slug: string;
   currency: string;
-  filterNumeric1?: number | null;
-  filterNumeric2?: number | null;
-  filterNumeric3?: number | null;
-  filterNumeric4?: number | null;
-  filterNumeric5?: number | null;
-  filterText1?: string | null;
-  filterText2?: string | null;
-  filterText3?: string | null;
-  filterText4?: string | null;
-  filterText5?: string | null;
-  filterBoolean1?: boolean | null;
-  filterBoolean2?: boolean | null;
-  filterBoolean3?: boolean | null;
-  filterBoolean4?: boolean | null;
-  filterBoolean5?: boolean | null;
-  filterEnum1?: string | null;
-  filterEnum2?: string | null;
-  filterEnum3?: string | null;
-  filterEnum4?: string | null;
-  filterEnum5?: string | null;
-  // Store as GeoJSON or lat,lng
-  filterLocation1?: string | null;
-  filterLocation2?: string | null;
-  filterLocation3?: string | null;
-  filterLocation4?: string | null;
-  filterLocation5?: string | null;
-  // Additional non-indexed fields
-  customFields: Record<string, any>;
-  // Product-specific variable values
-  variables: Record<string, any>;
-  pricingFormula: string;
-  active: boolean;
+  status: string;
+  category: string;
+  tags: string;
+  metadata: string;
+  imageUrl: string;
+  stock: number;
+  groupId: string;
+  typeId: string;
+  groupTemplateId: string;
+  productTemplateId: string;
+  requires: string;
+  createdBy: string;
+  ownerKind: string;
+  ownerId: string;
+  sellerAccountId: string;
+  approvalStatus: string;
+  fulfillmentKind: string;
+  stripeProductId: string;
+  currentVersion: number;
+  submittedAt?: string | Date | null;
+  publishedAt?: string | Date | null;
+  deletedAt?: string | Date | null;
   createdAt: string | Date;
   updatedAt: string | Date;
 }
 
 export interface ProductProductTemplate {
-  id: number;
+  id: string;
   name: string;
   displayName: string;
-  description: string;
-  category: string;
-  icon: string;
-  // Filter field definitions (indexed, mapped to filter columns)
-  filterFieldsSchema: any[];
-  // Custom field definitions (non-indexed, stored in CustomFields JSON)
-  customFieldsSchema: any[];
-  // IDs of pricing templates to use
-  pricingTemplates: number[];
-  // instant, approval
-  billingMode: string;
-  // one-time, recurring
-  billingType: string;
-  billingRecurringInterval?: string | null;
-  billingRecurringIntervalCount?: number | null;
-  // active, pending, deleted
-  status: string;
+  kind: string;
+  schemaVersion: number;
+  schemaJson: string;
+  configJson: string;
+  isSystem: boolean;
   createdAt: string | Date;
   updatedAt: string | Date;
 }

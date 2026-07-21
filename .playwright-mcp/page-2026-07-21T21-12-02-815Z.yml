@@ -1,0 +1,26 @@
+- generic [ref=f75e2]:
+  - complementary [ref=f75e3]:
+    - heading "Impresspress" [level=1] [ref=f75e4]
+    - paragraph [ref=f75e5]: Sign in to continue.
+  - main [ref=f75e6]:
+    - generic [ref=f75e7]:
+      - generic [ref=f75e8]:
+        - img "Impresspress" [ref=f75e9]
+        - paragraph [ref=f75e10]: Sign in to Impresspress
+      - generic [ref=f75e11]:
+        - generic [ref=f75e12]:
+          - generic [ref=f75e13]: Email
+          - textbox "Email" [ref=f75e14]:
+            - /placeholder: you@example.com
+        - generic [ref=f75e15]:
+          - generic [ref=f75e16]: Password
+          - generic [ref=f75e17]:
+            - textbox "Password" [ref=f75e18]:
+              - /placeholder: Enter your password
+            - button "Toggle password visibility" [ref=f75e19] [cursor=pointer]
+        - button "Forgot password?" [ref=f75e26] [cursor=pointer]
+        - button "Sign In" [ref=f75e27] [cursor=pointer]
+      - generic [ref=f75e28]:
+        - text: Don't have an account?
+        - link "Sign up" [ref=f75e29] [cursor=pointer]:
+          - /url: /b/auth/signup?redirect=/b/products/admin/new

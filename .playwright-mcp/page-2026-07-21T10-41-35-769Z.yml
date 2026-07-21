@@ -1,0 +1,234 @@
+- generic [ref=f46e2]:
+  - link "Skip to content" [ref=f46e3] [cursor=pointer]:
+    - /url: "#content"
+  - navigation "Primary" [ref=f46e4]:
+    - img "Impresspress" [ref=f46e6]
+    - generic [ref=f46e7]:
+      - generic [ref=f46e8]:
+        - generic [ref=f46e9]:
+          - generic [ref=f46e10]: Workspace
+          - list [ref=f46e11]:
+            - listitem [ref=f46e12]:
+              - link "Dashboard" [ref=f46e13] [cursor=pointer]:
+                - /url: /b/admin/
+            - listitem [ref=f46e21]:
+              - link "Users" [ref=f46e22] [cursor=pointer]:
+                - /url: /b/admin/users
+        - generic [ref=f46e30]:
+          - generic [ref=f46e31]: Data
+          - list [ref=f46e32]:
+            - listitem [ref=f46e33]:
+              - link "Storage" [ref=f46e34] [cursor=pointer]:
+                - /url: /b/storage/admin/
+            - listitem [ref=f46e39]:
+              - link "Database" [ref=f46e40] [cursor=pointer]:
+                - /url: /b/admin/database
+            - listitem [ref=f46e46]:
+              - link "Vector indexes" [ref=f46e47] [cursor=pointer]:
+                - /url: /b/vector/
+        - generic [ref=f46e55]:
+          - generic [ref=f46e56]: Communication
+          - list [ref=f46e57]:
+            - listitem [ref=f46e58]:
+              - link "Messages" [ref=f46e59] [cursor=pointer]:
+                - /url: /b/messages/
+            - listitem [ref=f46e65]:
+              - link "LLM" [ref=f46e66] [cursor=pointer]:
+                - /url: /b/llm/
+        - generic [ref=f46e72]:
+          - generic [ref=f46e73]: Commerce
+          - list [ref=f46e74]:
+            - listitem [ref=f46e75]:
+              - link "Products" [ref=f46e76] [cursor=pointer]:
+                - /url: /b/products/admin/
+        - generic [ref=f46e83]:
+          - generic [ref=f46e84]: System
+          - list [ref=f46e85]:
+            - listitem [ref=f46e86]:
+              - link "Blocks" [ref=f46e87] [cursor=pointer]:
+                - /url: /b/admin/blocks
+            - listitem [ref=f46e94]:
+              - link "Logs" [ref=f46e95] [cursor=pointer]:
+                - /url: /b/admin/logs
+            - listitem [ref=f46e101]:
+              - link "Settings" [ref=f46e102] [cursor=pointer]:
+                - /url: /b/admin/settings/email
+      - button "Toggle sidebar" [ref=f46e108] [cursor=pointer]
+    - button "A admin@example.com Admin" [ref=f46e113] [cursor=pointer]:
+      - generic [ref=f46e114]: A
+      - generic [ref=f46e115]:
+        - generic [ref=f46e116]: admin@example.com
+        - generic [ref=f46e117]: Admin
+  - generic [ref=f46e118]:
+    - banner [ref=f46e119]:
+      - heading "Products" [level=1] [ref=f46e120]
+      - button "Open command palette" [ref=f46e122] [cursor=pointer]:
+        - generic [ref=f46e123]: Quick jump
+        - generic [ref=f46e124]:
+          - generic [ref=f46e125]: Ctrl
+          - generic [ref=f46e126]: K
+    - generic [ref=f46e127]:
+      - generic [ref=f46e129]:
+        - link "Overview" [ref=f46e130] [cursor=pointer]:
+          - /url: /b/products/admin/
+        - link "Products" [ref=f46e136] [cursor=pointer]:
+          - /url: /b/products/admin/manage
+        - link "Groups" [ref=f46e141] [cursor=pointer]:
+          - /url: /b/products/admin/groups
+        - link "Orders" [ref=f46e144] [cursor=pointer]:
+          - /url: /b/products/admin/purchases
+        - link "Sellers" [ref=f46e149] [cursor=pointer]:
+          - /url: /b/products/admin/sellers
+        - link "Stripe" [ref=f46e154] [cursor=pointer]:
+          - /url: /b/products/admin/stripe
+        - link "Settings" [ref=f46e157] [cursor=pointer]:
+          - /url: /b/products/admin/settings
+      - generic [ref=f46e162]:
+        - heading "Stripe setup" [level=2] [ref=f46e163]
+        - paragraph [ref=f46e164]: Connect payments, webhooks, Checkout, Billing Portal, and seller payouts
+      - generic [ref=f46e166]:
+        - strong [ref=f46e167]: Test mode is active
+        - paragraph [ref=f46e168]: Checkout is safe to exercise, but no real funds will move. Replace both keys with matching live-mode keys only after the checklist below is complete.
+      - generic [ref=f46e169]:
+        - generic [ref=f46e170]:
+          - generic [ref=f46e171]:
+            - heading "Connection" [level=3] [ref=f46e172]
+            - paragraph [ref=f46e173]: Stripe is reachable. Payments use test data and do not move real money.
+          - generic [ref=f46e174]: Connected — test mode
+        - generic [ref=f46e175]:
+          - paragraph
+          - generic [ref=f46e176]:
+            - generic [ref=f46e177]:
+              - paragraph [ref=f46e178]: Account
+              - strong [ref=f46e179]: acct_1Tvavm5cUeypfV8E
+            - generic [ref=f46e180]:
+              - paragraph [ref=f46e181]: Country / currency
+              - strong [ref=f46e182]: NZ / NZD
+            - generic [ref=f46e183]:
+              - paragraph [ref=f46e184]: API version
+              - strong [ref=f46e185]: 2026-02-25.clover
+            - generic [ref=f46e186]:
+              - paragraph [ref=f46e187]: Payments / payouts
+              - strong [ref=f46e188]: Unavailable / Unavailable
+          - generic [ref=f46e189]:
+            - button "Test connection" [ref=f46e190] [cursor=pointer]
+            - link "Configure Stripe" [ref=f46e191] [cursor=pointer]:
+              - /url: /b/products/admin/settings
+      - generic [ref=f46e192]:
+        - generic [ref=f46e193]:
+          - heading "Go-live checklist" [level=3] [ref=f46e195]
+          - list [ref=f46e197]:
+            - listitem [ref=f46e198]:
+              - generic [ref=f46e199]: Ready
+              - generic [ref=f46e200]:
+                - strong [ref=f46e201]: Secret key
+                - paragraph [ref=f46e202]: Stored server-side and never rendered back into this page.
+            - listitem [ref=f46e203]:
+              - generic [ref=f46e204]: Ready
+              - generic [ref=f46e205]:
+                - strong [ref=f46e206]: Publishable key
+                - paragraph [ref=f46e207]: Required by embedded Checkout and browser storefronts.
+            - listitem [ref=f46e208]:
+              - generic [ref=f46e209]: Ready
+              - generic [ref=f46e210]:
+                - strong [ref=f46e211]: Webhook signing secret
+                - paragraph [ref=f46e212]: Required to verify Stripe event signatures and reject forged events.
+            - listitem [ref=f46e213]:
+              - generic [ref=f46e214]: Action needed
+              - generic [ref=f46e215]:
+                - strong [ref=f46e216]: Stripe account verification
+                - paragraph [ref=f46e217]: Stripe must confirm the account details before live processing.
+            - listitem [ref=f46e218]:
+              - generic [ref=f46e219]: Action needed
+              - generic [ref=f46e220]:
+                - strong [ref=f46e221]: Charges enabled
+                - paragraph [ref=f46e222]: The platform account must be allowed to accept payments.
+        - generic [ref=f46e223]:
+          - heading "Webhook destination" [level=3] [ref=f46e225]
+          - generic [ref=f46e226]:
+            - paragraph [ref=f46e227]: "Register this HTTPS route as a Stripe webhook destination:"
+            - code [ref=f46e228]: /b/products/webhooks
+            - paragraph [ref=f46e229]: "Subscribe to the events ImpressPress currently reconciles:"
+            - list [ref=f46e230]:
+              - listitem [ref=f46e231]:
+                - code [ref=f46e232]: account.updated
+              - listitem [ref=f46e233]:
+                - code [ref=f46e234]: checkout.session.completed
+              - listitem [ref=f46e235]:
+                - code [ref=f46e236]: checkout.session.async_payment_succeeded
+              - listitem [ref=f46e237]:
+                - code [ref=f46e238]: checkout.session.async_payment_failed
+              - listitem [ref=f46e239]:
+                - code [ref=f46e240]: payment_intent.succeeded
+                - text: ","
+                - code [ref=f46e241]: payment_intent.payment_failed
+                - text: ","
+                - code [ref=f46e242]: payment_intent.processing
+                - text: ","
+                - code [ref=f46e243]: payment_intent.requires_action
+                - text: ","
+                - code [ref=f46e244]: payment_intent.canceled
+              - listitem [ref=f46e245]:
+                - code [ref=f46e246]: customer.subscription.updated
+              - listitem [ref=f46e247]:
+                - code [ref=f46e248]: customer.subscription.deleted
+              - listitem [ref=f46e249]:
+                - code [ref=f46e250]: invoice.paid
+                - text: ","
+                - code [ref=f46e251]: invoice.payment_succeeded
+              - listitem [ref=f46e252]:
+                - code [ref=f46e253]: invoice.payment_failed
+              - listitem [ref=f46e254]:
+                - code [ref=f46e255]: charge.dispute.created
+                - text: ","
+                - code [ref=f46e256]: charge.dispute.updated
+                - text: ","
+                - code [ref=f46e257]: charge.dispute.closed
+              - listitem [ref=f46e258]:
+                - code [ref=f46e259]: refund.created
+                - text: ","
+                - code [ref=f46e260]: refund.updated
+                - text: ","
+                - code [ref=f46e261]: refund.failed
+              - listitem [ref=f46e262]:
+                - code [ref=f46e263]: charge.refunded
+            - paragraph [ref=f46e264]: Use the signing secret Stripe assigns to this destination in Products Settings. Keep test and live destinations separate.
+      - generic [ref=f46e265]:
+        - generic [ref=f46e266]:
+          - generic [ref=f46e267]:
+            - heading "Webhook delivery health" [level=3] [ref=f46e268]
+            - paragraph [ref=f46e269]: Inspect processing state and safely replay failed deliveries. Signed payloads and worker lease tokens are never displayed.
+          - generic [ref=f46e270]:
+            - generic [ref=f46e271]:
+              - text: Status
+              - combobox "Status" [ref=f46e272]:
+                - option "Needs manual review" [selected]
+                - option "Waiting to retry"
+                - option "Processing"
+                - option "Processed"
+                - option "All events"
+            - button "Refresh" [ref=f46e273] [cursor=pointer]
+        - generic [ref=f46e274]:
+          - paragraph [ref=f46e275]: 0 events match this filter.
+          - paragraph [ref=f46e277]: No matching webhook events.
+      - generic [ref=f46e278]:
+        - generic [ref=f46e279]:
+          - generic [ref=f46e280]:
+            - heading "Provider reconciliation" [level=3] [ref=f46e281]
+            - paragraph [ref=f46e282]: Recover incomplete Stripe mutations with atomic worker leases and their original idempotency keys. This endpoint can also be invoked by an authenticated scheduler.
+          - generic [ref=f46e283]:
+            - generic [ref=f46e284]:
+              - text: Status
+              - combobox "Status" [ref=f46e285]:
+                - option "Needs manual review" [selected]
+                - option "Waiting to retry"
+                - option "Pending"
+                - option "Processing"
+                - option "Succeeded"
+                - option "All operations"
+            - button "Reconcile due operations" [ref=f46e286] [cursor=pointer]
+            - button "Refresh" [ref=f46e287] [cursor=pointer]
+        - generic [ref=f46e288]:
+          - paragraph [ref=f46e289]: 0 operations match this filter.
+          - status
+          - paragraph [ref=f46e291]: No matching provider operations.

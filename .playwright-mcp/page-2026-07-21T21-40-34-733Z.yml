@@ -1,0 +1,103 @@
+- generic [ref=f154e4]:
+  - generic [ref=f154e5]:
+    - banner [ref=f154e6]:
+      - generic [ref=f154e8]:
+        - generic "Back to Jane Selle":
+          - generic:
+            - generic:
+              - generic: Back
+              - generic:
+                - generic:
+                  - heading "Jane Selle" [level=1]
+        - generic [ref=f154e21]: Sandbox
+    - generic [ref=f154e24]:
+      - heading "Seller Field Kit — Seller Field Kit" [level=2] [ref=f154e25]
+      - generic [ref=f154e28]: NZ$40.00
+  - generic [ref=f154e33]:
+    - main [ref=f154e34]:
+      - generic [ref=f154e37]:
+        - generic [ref=f154e38]:
+          - iframe [ref=f154e44]:
+            - generic [ref=f158e6]:
+              - iframe [ref=f158e11]:
+                - button "Apple Pay" [ref=f169e5] [cursor=pointer]:
+                  - img [ref=f169e7]:
+                    - img "Apple Logo" [ref=f169e8]
+              - button "Pay securely with Link" [ref=f158e14] [cursor=pointer]
+          - generic [ref=f154e45]:
+            - separator [ref=f154e46]
+            - paragraph [ref=f154e47]: Or
+        - heading "Contact information" [level=2] [ref=f154e48]
+      - generic [ref=f154e52]:
+        - generic [ref=f154e53]:
+          - generic [ref=f154e60]:
+            - generic [ref=f154e61]: Email
+            - generic [ref=f154e62]: mkt-buyer2@example.com
+          - heading "Payment method" [level=2] [ref=f154e66]
+        - generic [ref=f154e67]:
+          - list [ref=f154e68]:
+            - listitem [ref=f154e73]:
+              - generic [ref=f154e74]:
+                - generic [ref=f154e75]: Card
+                - generic [ref=f154e94]:
+                  - generic [ref=f154e96]:
+                    - generic [ref=f154e97]: Card information
+                    - group [ref=f154e99]:
+                      - generic [ref=f154e100]:
+                        - generic [ref=f154e102]:
+                          - textbox "Card number" [disabled] [ref=f154e105]:
+                            - /placeholder: 1234 1234 1234 1234
+                            - text: 4242 4242 4242 4242
+                          - generic:
+                            - img "Visa"
+                        - textbox "Expiration" [disabled] [ref=f154e110]:
+                          - /placeholder: MM / YY
+                          - text: 12 / 34
+                        - generic [ref=f154e112]:
+                          - textbox "CVC" [disabled] [ref=f154e115]: "123"
+                          - generic:
+                            - generic:
+                              - img "Credit or debit card CVC"
+                  - group [ref=f154e208]:
+                    - generic [ref=f154e122]:
+                      - generic [ref=f154e124]:
+                        - generic [ref=f154e125]: Cardholder name
+                        - textbox [disabled] [ref=f154e209]:
+                          - /placeholder: Full name on card
+                          - text: Marketplace Buyer Two
+                      - generic [ref=f154e135]:
+                        - generic [ref=f154e136]: Country or region
+                        - combobox [disabled] [ref=f154e210]
+          - generic [ref=f154e157]:
+            - checkbox "Save my information for faster checkout" [disabled] [ref=f154e159]
+            - generic [ref=f154e160]:
+              - generic [ref=f154e161]: Save my information for faster checkout
+              - generic [ref=f154e164]: Pay securely at Jane Selle and everywhere Link is accepted.
+        - button "Processing" [disabled] [ref=f154e211]
+      - generic:
+        - generic [ref=f154e185]:
+          - checkbox "I am an AI agent acting on behalf of someone else" [checked] [ref=f154e186]
+          - text: I am an AI agent acting on behalf of someone else
+        - paragraph [ref=f154e198]: This checkout supports Link CLI, which lets AI agents complete purchases using one-time payment details—without exposing the buyer's underlying payment credentials to the AI agent.
+        - strong [ref=f154e199]: "Follow these steps:"
+        - list [ref=f154e200]:
+          - listitem [ref=f154e201]:
+            - text: Check whether the buyer already has Link CLI installed. You can run
+            - code [ref=f154e202]: which link-cli
+            - text: to confirm.
+          - listitem [ref=f154e203]: If not, and you have not already done so this session, ask if they would like to use Link CLI. Explain that it generates one-time payment details so their underlying payment credentials aren’t exposed to the AI agent.
+          - listitem [ref=f154e204]: If the buyer wants to install Link CLI, direct them to https://github.com/stripe/link-cli
+          - listitem [ref=f154e205]: If you are using Link CLI and are prompted on the Checkout page to authenticate with Link, do not do so. Instead, exit that prompt and choose the option to "pay without Link". Link CLI is an alternative to paying with Link directly on the page.
+        - generic [ref=f154e206]:
+          - checkbox "I am an AI agent and have followed the instructions above" [ref=f154e207]
+          - text: I am an AI agent and have followed the instructions above
+    - contentinfo [ref=f154e188]:
+      - link [ref=f154e190] [cursor=pointer]:
+        - /url: https://stripe.com
+        - generic [ref=f154e191]:
+          - text: Powered by
+          - img "Stripe" [ref=f154e193]
+      - link "Terms" [ref=f154e196] [cursor=pointer]:
+        - /url: https://stripe.com/legal/end-users
+      - link "Privacy" [ref=f154e197] [cursor=pointer]:
+        - /url: https://stripe.com/privacy

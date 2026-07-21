@@ -29,7 +29,7 @@ async fn cancel_and_reset_addons_zeroes_addons_and_cancels() {
     )
     .await;
 
-    let rows = repo::subscriptions::cancel_and_reset_addons(&ctx, "sub_stripe_1")
+    let rows = repo::subscriptions::cancel_and_reset_addons(&ctx, "sub_stripe_1", 1)
         .await
         .expect("cancel ok");
     assert_eq!(rows, 1, "exactly one subscription row updated");
@@ -57,6 +57,115 @@ async fn cancel_and_reset_addons_zeroes_addons_and_cancels() {
         rec.data.get("addon_d1_bytes").and_then(|v| v.as_i64()),
         Some(0)
     );
+}
+
+/// Same-second deliveries may only move toward a more-terminal status, and
+/// nothing — not even a strictly newer event — moves a terminal row back to a
+/// live or past-due status. Immediate cancellation emits `updated` (active)
+/// and `deleted` with the same `created` second, and a leftover open invoice
+/// can still fail after deletion; neither may resurrect the subscription.
+#[tokio::test]
+async fn update_status_plan_and_mark_past_due_respect_terminal_status_ranking() {
+    let ctx = ctx().await;
+    let mut sd = HashMap::new();
+    sd.insert("user_id".to_string(), serde_json::json!("user_rank"));
+    sd.insert(
+        "stripe_subscription_id".to_string(),
+        serde_json::json!("sub_stripe_rank"),
+    );
+    sd.insert("plan".to_string(), serde_json::json!("pro"));
+    sd.insert("status".to_string(), serde_json::json!("active"));
+    sd.insert("stripe_event_created".to_string(), serde_json::json!(100));
+    seed(
+        &ctx,
+        "impresspress__products__subscriptions",
+        "sub_db_rank",
+        sd,
+    )
+    .await;
+
+    // The cancellation lands first...
+    let rows =
+        repo::subscriptions::update_status_plan(&ctx, "sub_stripe_rank", "canceled", None, 200)
+            .await
+            .expect("cancel ok");
+    assert_eq!(rows, 1);
+
+    // ...and the same-second "active" snapshot must not resurrect it.
+    let rows =
+        repo::subscriptions::update_status_plan(&ctx, "sub_stripe_rank", "active", None, 200)
+            .await
+            .expect("refused write ok");
+    assert_eq!(rows, 0);
+
+    // A strictly newer non-terminal update cannot leave the terminal state
+    // either: a canceled Stripe subscription id never becomes live again.
+    let rows =
+        repo::subscriptions::update_status_plan(&ctx, "sub_stripe_rank", "active", None, 300)
+            .await
+            .expect("refused write ok");
+    assert_eq!(rows, 0);
+
+    // Neither can a failed payment on a leftover open invoice.
+    let rows = repo::subscriptions::mark_past_due(&ctx, "sub_stripe_rank", 400)
+        .await
+        .expect("refused write ok");
+    assert_eq!(rows, 0);
+
+    let rec = db::get(&ctx, "impresspress__products__subscriptions", "sub_db_rank")
+        .await
+        .expect("row exists");
+    assert_eq!(
+        rec.data.get("status").and_then(|v| v.as_str()),
+        Some("canceled")
+    );
+    assert_eq!(
+        rec.data
+            .get("stripe_event_created")
+            .and_then(|v| v.as_i64()),
+        Some(200)
+    );
+    assert!(rec
+        .data
+        .get("grace_period_end")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .is_empty());
+
+    // A live subscription still becomes past-due with a grace window.
+    let mut sd = HashMap::new();
+    sd.insert("user_id".to_string(), serde_json::json!("user_live"));
+    sd.insert(
+        "stripe_subscription_id".to_string(),
+        serde_json::json!("sub_stripe_live"),
+    );
+    sd.insert("plan".to_string(), serde_json::json!("pro"));
+    sd.insert("status".to_string(), serde_json::json!("active"));
+    sd.insert("stripe_event_created".to_string(), serde_json::json!(100));
+    seed(
+        &ctx,
+        "impresspress__products__subscriptions",
+        "sub_db_live",
+        sd,
+    )
+    .await;
+    let rows = repo::subscriptions::mark_past_due(&ctx, "sub_stripe_live", 150)
+        .await
+        .expect("past-due ok");
+    assert_eq!(rows, 1);
+    let rec = db::get(&ctx, "impresspress__products__subscriptions", "sub_db_live")
+        .await
+        .expect("row exists");
+    assert_eq!(
+        rec.data.get("status").and_then(|v| v.as_str()),
+        Some("past_due")
+    );
+    assert!(!rec
+        .data
+        .get("grace_period_end")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .is_empty());
 }
 
 /// `complete_atomic` transitions a pending purchase to completed and records
@@ -254,4 +363,84 @@ async fn subscription_for_user_repository_failure_surfaces_as_error() {
         result.is_err(),
         "a genuine repository failure must surface as Err, not a fabricated None"
     );
+}
+
+/// Offer state transitions are compare-and-swap writes: a write conditioned
+/// on a status the row no longer holds must not land. This is the guard that
+/// keeps a stale draft edit from wiping `stripe_price_id` on an offer that a
+/// concurrent request published between the read and the write.
+#[tokio::test]
+async fn stale_offer_write_cannot_land_after_status_transition() {
+    let ctx = ctx().await;
+
+    let mut od = HashMap::new();
+    od.insert("product_id".to_string(), serde_json::json!("prod_cas"));
+    od.insert("name".to_string(), serde_json::json!("Live offer"));
+    od.insert("status".to_string(), serde_json::json!("active"));
+    od.insert(
+        "stripe_price_id".to_string(),
+        serde_json::json!("price_live"),
+    );
+    od.insert(
+        "created_at".to_string(),
+        serde_json::json!("2026-01-01T00:00:00Z"),
+    );
+    od.insert(
+        "updated_at".to_string(),
+        serde_json::json!("2026-01-01T00:00:00Z"),
+    );
+    seed(&ctx, "impresspress__products__offers", "offer_cas", od).await;
+
+    let landed = repo::offers::update_if_status(
+        &ctx,
+        "offer_cas",
+        "draft",
+        HashMap::from([("stripe_price_id".to_string(), serde_json::json!(""))]),
+    )
+    .await
+    .unwrap();
+    assert!(!landed, "stale write must be rejected");
+    let record = db::get(&ctx, "impresspress__products__offers", "offer_cas")
+        .await
+        .unwrap();
+    assert_eq!(record.data["stripe_price_id"], "price_live");
+    assert_eq!(record.data["status"], "active");
+
+    // The same write lands when the row still holds the expected status.
+    let mut dd = HashMap::new();
+    dd.insert("product_id".to_string(), serde_json::json!("prod_cas"));
+    dd.insert("name".to_string(), serde_json::json!("Draft offer"));
+    dd.insert("status".to_string(), serde_json::json!("draft"));
+    dd.insert(
+        "stripe_price_id".to_string(),
+        serde_json::json!("price_stale"),
+    );
+    dd.insert(
+        "created_at".to_string(),
+        serde_json::json!("2026-01-01T00:00:00Z"),
+    );
+    dd.insert(
+        "updated_at".to_string(),
+        serde_json::json!("2026-01-01T00:00:00Z"),
+    );
+    seed(
+        &ctx,
+        "impresspress__products__offers",
+        "offer_cas_draft",
+        dd,
+    )
+    .await;
+    let landed = repo::offers::update_if_status(
+        &ctx,
+        "offer_cas_draft",
+        "draft",
+        HashMap::from([("stripe_price_id".to_string(), serde_json::json!(""))]),
+    )
+    .await
+    .unwrap();
+    assert!(landed);
+    let record = db::get(&ctx, "impresspress__products__offers", "offer_cas_draft")
+        .await
+        .unwrap();
+    assert_eq!(record.data["stripe_price_id"], "");
 }

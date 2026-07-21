@@ -1,0 +1,14 @@
+<!doctype html>
+<html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>OrbitOps — SaaS plans</title><link rel="stylesheet" href="../shared/site.css"></head>
+<body class="theme-dark" style="--accent:#8b7cff;--accent-2:#4de4c1;--display:Inter,ui-sans-serif,system-ui,sans-serif">
+  <header class="shell site-nav"><a class="brand" href="#"><span class="brand-mark">O</span>OrbitOps</a><nav class="nav-links"><a href="#platform">Platform</a><a href="#buy">Pricing</a><a href="#developer">API</a></nav></header>
+  <main class="shell"><section class="hero" data-testid="example-hero"><p class="eyebrow">Release operations for calm teams</p><h1>Choose your launch velocity.</h1><p class="hero-copy">Monthly or annual billing, per-seat pricing, an optional onboarding sprint, and a Stripe Billing Portal when plans change.</p><div class="hero-actions"><a class="button" href="#buy">Price your team</a><a class="button secondary" href="#platform">Explore OrbitOps</a></div><div class="proof"><div><strong>14 days</strong><span>Trial policy</span></div><div><strong>Per seat</strong><span>Licensed quantity</span></div><div><strong>Portal</strong><span>Self-serve billing</span></div></div></section>
+    <section id="buy" class="commerce-layout"><div><p class="eyebrow">Transparent plans</p><h2 class="section-heading">Scale without pricing archaeology.</h2><p class="section-copy">Switch monthly or annual, set team size, and include onboarding. Recurring and one-time rows are shown separately.</p><div class="widget-frame"><impresspress-product product-id="orbitops-plans" presentation="hosted" credentials="omit"></impresspress-product></div></div><aside><div class="side-card"><h3>Team journey</h3><ol class="journey"><li>Choose monthly or annual billing.</li><li>Set licensed seats and onboarding.</li><li>Manage the resulting subscription in Stripe Billing Portal.</li></ol></div><div class="side-card"><h3>Revenue operations</h3><ol class="journey" data-operator-journey></ol></div></aside></section>
+    <section id="developer" class="developer"><div class="developer-grid"><div class="developer-card"><p class="eyebrow">Implementation</p><h3 data-template></h3><p><strong>Ownership:</strong> <span data-ownership></span><br><strong>Fulfillment:</strong> <span data-fulfillment></span></p><div class="badge-row" data-stripe-features></div><ol class="journey" data-developer-journey></ol></div><pre>&lt;impresspress-product
+  product-id="orbitops-plans"
+  presentation="hosted"&gt;
+&lt;/impresspress-product&gt;
+
+// Later: POST /b/products/billing-portal</pre></div></section>
+  </main><footer><div class="shell">OrbitOps demo · Versioned recurring offers and lifecycle-safe webhooks.</div></footer><p data-example-error role="alert"></p><script src="http://127.0.0.1:4179/b/products/storefront.js" defer></script><script src="../shared/site.js" defer></script>
+</body></html>

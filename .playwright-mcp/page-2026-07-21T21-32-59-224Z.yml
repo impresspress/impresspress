@@ -1,0 +1,123 @@
+- generic [ref=f125e2]:
+  - link "Skip to content" [ref=f125e3] [cursor=pointer]:
+    - /url: "#content"
+  - navigation "Primary" [ref=f125e4]:
+    - img "Impresspress" [ref=f125e6]
+    - generic [ref=f125e7]:
+      - generic [ref=f125e8]:
+        - generic [ref=f125e9]:
+          - generic [ref=f125e10]: Account
+          - list [ref=f125e11]:
+            - listitem [ref=f125e12]:
+              - link "Profile" [ref=f125e13] [cursor=pointer]:
+                - /url: /b/userportal/profile
+            - listitem [ref=f125e19]:
+              - link "Organizations" [ref=f125e20] [cursor=pointer]:
+                - /url: /b/auth/orgs
+            - listitem [ref=f125e28]:
+              - link "Sessions" [ref=f125e29] [cursor=pointer]:
+                - /url: /b/userportal/sessions
+            - listitem [ref=f125e34]:
+              - link "Security" [ref=f125e35] [cursor=pointer]:
+                - /url: /b/userportal/security
+        - generic [ref=f125e41]:
+          - generic [ref=f125e42]: Apps
+          - list [ref=f125e43]:
+            - listitem [ref=f125e44]:
+              - link "Products" [ref=f125e45] [cursor=pointer]:
+                - /url: /b/products/
+            - listitem [ref=f125e52]:
+              - link "Files" [ref=f125e53] [cursor=pointer]:
+                - /url: /b/storage/
+            - listitem [ref=f125e58]:
+              - link "Shares" [ref=f125e59] [cursor=pointer]:
+                - /url: /b/cloudstorage/
+            - listitem [ref=f125e65]:
+              - link "Legal" [ref=f125e66] [cursor=pointer]:
+                - /url: /b/legalpages/admin/privacy
+      - button "Toggle sidebar" [ref=f125e72] [cursor=pointer]
+    - button "S seller@example.com User" [ref=f125e77] [cursor=pointer]:
+      - generic [ref=f125e78]: S
+      - generic [ref=f125e79]:
+        - generic [ref=f125e80]: seller@example.com
+        - generic [ref=f125e81]: User
+  - generic [ref=f125e82]:
+    - banner [ref=f125e83]:
+      - heading "Products" [level=1] [ref=f125e84]
+      - button "Open command palette" [ref=f125e86] [cursor=pointer]:
+        - generic [ref=f125e87]: Quick jump
+        - generic [ref=f125e88]:
+          - generic [ref=f125e89]: Ctrl
+          - generic [ref=f125e90]: K
+    - generic [ref=f125e91]:
+      - generic [ref=f125e93]:
+        - link "Commerce" [ref=f125e94] [cursor=pointer]:
+          - /url: /b/products/
+        - link "Purchases" [ref=f125e100] [cursor=pointer]:
+          - /url: /b/products/my-purchases
+        - link "Selling" [ref=f125e105] [cursor=pointer]:
+          - /url: /b/products/selling
+      - navigation "Seller workspace" [ref=f125e110]:
+        - link "Dashboard" [ref=f125e111] [cursor=pointer]:
+          - /url: /b/products/selling
+        - link "Products and links" [ref=f125e112] [cursor=pointer]:
+          - /url: /b/products/my-products
+        - link "Orders and subscriptions" [ref=f125e113] [cursor=pointer]:
+          - /url: /b/products/selling/orders
+      - generic [ref=f125e115]:
+        - heading "Seller dashboard" [level=2] [ref=f125e116]
+        - paragraph [ref=f125e117]: Sales, subscriptions, Stripe readiness, and actions
+      - generic [ref=f125e118]:
+        - generic [ref=f125e119]:
+          - generic [ref=f125e120]:
+            - heading "Stripe seller account" [level=3] [ref=f125e121]
+            - paragraph [ref=f125e122]: Stripe hosts identity verification, payouts, and the Express dashboard.
+          - generic [ref=f125e123]: Setup incomplete
+        - generic [ref=f125e124]:
+          - generic [ref=f125e125]:
+            - generic [ref=f125e126]:
+              - paragraph [ref=f125e127]: Charges
+              - strong [ref=f125e128]: Unavailable
+            - generic [ref=f125e129]:
+              - paragraph [ref=f125e130]: Payouts
+              - strong [ref=f125e131]: Unavailable
+            - generic [ref=f125e132]:
+              - paragraph [ref=f125e133]: Platform fee
+              - strong [ref=f125e134]: 10.00%
+            - generic [ref=f125e135]:
+              - paragraph [ref=f125e136]: Mode
+              - strong [ref=f125e137]: Test
+          - generic [ref=f125e138]:
+            - strong [ref=f125e139]: Information Stripe still needs
+            - list [ref=f125e140]:
+              - listitem [ref=f125e141]: business profile › mcc
+              - listitem [ref=f125e142]: business profile › url
+              - listitem [ref=f125e143]: business type
+              - listitem [ref=f125e144]: external account
+              - listitem [ref=f125e145]: representative › dob › day
+              - listitem [ref=f125e146]: representative › dob › month
+              - listitem [ref=f125e147]: representative › dob › year
+              - listitem [ref=f125e148]: representative › email
+              - listitem [ref=f125e149]: representative › first name
+              - listitem [ref=f125e150]: representative › last name
+              - listitem [ref=f125e151]: settings › payments › statement descriptor
+              - listitem [ref=f125e152]: tos acceptance › date
+              - listitem [ref=f125e153]: tos acceptance › ip
+          - paragraph [ref=f125e154]: "Stripe restriction: requirements › past due"
+          - generic [ref=f125e155]:
+            - button "Continue Stripe setup" [ref=f125e156] [cursor=pointer]
+            - button "Open Stripe dashboard" [ref=f125e157] [cursor=pointer]
+            - link "Manage products" [ref=f125e158] [cursor=pointer]:
+              - /url: /b/products/my-products
+      - generic [ref=f125e159]:
+        - heading "Your sales by currency" [level=2] [ref=f125e160]
+        - paragraph [ref=f125e161]: Money is reported separately for each currency. Gross values include orders that were later refunded; after-refund sales subtract customer refunds. Proceeds shown here subtract recorded platform fees but are before Stripe fees, disputes, reserves, and payout adjustments; Stripe remains authoritative for available balance and payouts.
+        - generic [ref=f125e162]:
+          - heading "No sales data yet" [level=3] [ref=f125e165]
+          - paragraph [ref=f125e166]: Completed orders and subscription activity will appear here.
+      - generic [ref=f125e167]:
+        - heading "Recent payment failures" [level=2] [ref=f125e168]
+        - paragraph [ref=f125e169]: Failed seller orders that may need customer follow-up. Stripe Dashboard provides provider-level payment details.
+        - generic [ref=f125e170]:
+          - heading "No recent failures" [level=3] [ref=f125e174]
+          - paragraph [ref=f125e175]: No failed seller orders need attention.

@@ -1,0 +1,100 @@
+- generic [active]:
+  - generic [ref=f48e341]:
+    - generic [ref=f48e344]:
+      - generic:
+        - generic:
+          - link "Impresspress Sandbox Sandbox" [ref=f48e346] [cursor=pointer]:
+            - /url: http://127.0.0.1:8093/b/products/my-purchases/833bef52-d176-4bba-9730-1e63299a5bb8
+            - generic:
+              - generic:
+                - generic [ref=f48e352]: Impresspress Sandbox
+                - generic [ref=f48e353]: Sandbox
+          - generic [ref=f48e358]:
+            - generic:
+              - generic:
+                - generic [ref=f48e359]: Impresspress Sandbox partners with Stripe for simplified billing.
+                - link "Return to Impresspress Sandbox" [ref=f48e363] [cursor=pointer]:
+                  - /url: http://127.0.0.1:8093/b/products/my-purchases/833bef52-d176-4bba-9730-1e63299a5bb8
+      - contentinfo [ref=f48e368]:
+        - link "Powered by Stripe" [ref=f48e369] [cursor=pointer]:
+          - /url: https://stripe.com
+          - generic [ref=f48e371]:
+            - generic:
+              - generic:
+                - generic [ref=f48e372]: Powered by
+                - img "Stripe" [ref=f48e375]
+        - generic [ref=f48e377]:
+          - link "Terms" [ref=f48e378] [cursor=pointer]:
+            - /url: https://stripe.com/terms
+          - link "Privacy" [ref=f48e379] [cursor=pointer]:
+            - /url: https://stripe.com/privacy
+    - generic [ref=f48e384]:
+      - generic:
+        - generic:
+          - generic [ref=f48e387]:
+            - generic [ref=f48e388]: Current subscription
+            - generic [ref=f48e393]:
+              - generic:
+                - generic:
+                  - generic [ref=f48e395]:
+                    - generic:
+                      - generic:
+                        - generic [ref=f48e396]:
+                          - generic:
+                            - generic:
+                              - generic [ref=f48e397]: Cancels Aug 21
+                              - generic [ref=f48e403]:
+                                - generic:
+                                  - generic:
+                                    - generic [ref=f48e404]: Monthly Club (Test Subscription) — Monthly Club (Test Subscription)
+                                    - generic [ref=f48e409]: $9.00 per month
+                        - generic [ref=f48e411]: Your service will end on August 21, 2026.
+                        - generic [ref=f48e422]:
+                          - generic:
+                            - generic:
+                              - generic [ref=f48e431]: Visa •••• 4242
+                              - button [ref=f48e434] [cursor=pointer]
+                  - link "Don't cancel subscription" [ref=f48e442] [cursor=pointer]:
+                    - /url: /p/session/test_YWNjdF8xVHZhdm01Y1VleXBmVjhFLF9VdlMxM0pmclRZNEpGUjdGNGdMNlk5a05MNXdkQ1FB0100RxnmNE08/subscriptions/sub_1Tvb5T5cUeypfV8EFSeso5ho/reactivate
+          - generic [ref=f48e448]:
+            - generic [ref=f48e449]: Payment method
+            - generic [ref=f48e452]:
+              - generic:
+                - generic:
+                  - generic [ref=f48e456]:
+                    - generic [ref=f48e468]:
+                      - generic:
+                        - generic:
+                          - generic [ref=f48e469]: Visa •••• 4242
+                          - generic [ref=f48e470]: Expires 12/2034
+                    - button "More options" [ref=f48e477] [cursor=pointer]
+                  - link "Add payment method" [ref=f48e487] [cursor=pointer]:
+                    - /url: /p/session/test_YWNjdF8xVHZhdm01Y1VleXBmVjhFLF9VdlMxM0pmclRZNEpGUjdGNGdMNlk5a05MNXdkQ1FB0100RxnmNE08/payment-methods
+          - generic [ref=f48e493]:
+            - generic [ref=f48e494]: Billing information
+            - generic:
+              - generic:
+                - generic [ref=f48e498]:
+                  - generic [ref=f48e499]: Name
+                  - generic [ref=f48e501]: Test Subscriber
+                - generic [ref=f48e503]:
+                  - generic [ref=f48e504]: Email
+                  - generic [ref=f48e506]: admin@example.com
+                - generic [ref=f48e508]:
+                  - generic [ref=f48e509]: Billing address
+                  - generic [ref=f48e511]: NZ
+                - link "Update information" [ref=f48e518] [cursor=pointer]:
+                  - /url: /p/session/test_YWNjdF8xVHZhdm01Y1VleXBmVjhFLF9VdlMxM0pmclRZNEpGUjdGNGdMNlk5a05MNXdkQ1FB0100RxnmNE08/customer/update
+          - generic [ref=f48e524]:
+            - generic [ref=f48e525]:
+              - generic [ref=f48e526]: Invoice history
+              - button [ref=f48e531] [cursor=pointer]
+            - link "Jul 21, 2026 NZ$9.00 Paid Monthly Club (Test Subscription) — Monthly Club (Test Subscription)" [ref=f48e536] [cursor=pointer]:
+              - /url: https://invoice.stripe.com/i/acct_1Tvavm5cUeypfV8E/test_YWNjdF8xVHZhdm01Y1VleXBmVjhFLF9VdlJ6YjlJWk9obU1vOU5OQ3RtQTJ1WXV2QkhQaTl4LDE3NTE3MTM1OA0200X8GFGb2Q?s=il&locale=en-US
+              - generic [ref=f48e537]:
+                - generic [ref=f48e538]: Jul 21, 2026
+                - generic [ref=f48e539]: NZ$9.00
+                - generic [ref=f48e541]: Paid
+                - paragraph [ref=f48e543]: Monthly Club (Test Subscription) — Monthly Club (Test Subscription)
+  - generic:
+    - iframe

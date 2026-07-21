@@ -21,11 +21,11 @@ pub(super) async fn handle_stats(ctx: &dyn Context, _msg: &Message) -> OutputStr
     // serializing 5 round-trips on the request path. `futures::join!`
     // (not `tokio::join!`) because tokio is an optional dep in
     // impresspress-core's Cargo.toml — futures 0.3 is unconditional.
-    let (total_products, active_products, total_purchases, total_revenue, total_groups) = futures::join!(
+    let (total_products, active_products, total_purchases, analytics, total_groups) = futures::join!(
         db::count(ctx, PRODUCTS_TABLE, &[]),
         db::count(ctx, PRODUCTS_TABLE, &active_filter),
         repo::purchases::count_all(ctx),
-        repo::purchases::sum_completed_cents(ctx),
+        repo::purchases::commerce_analytics(ctx, None),
         db::count(ctx, GROUPS_TABLE, &[]),
     );
 
@@ -46,8 +46,8 @@ pub(super) async fn handle_stats(ctx: &dyn Context, _msg: &Message) -> OutputStr
         Ok(n) => n,
         Err(e) => return err_internal("Database error", e),
     };
-    let total_revenue = match total_revenue {
-        Ok(n) => n,
+    let analytics = match analytics {
+        Ok(analytics) => analytics,
         Err(e) => return err_internal("Database error", e),
     };
     let total_groups = match total_groups {
@@ -59,7 +59,33 @@ pub(super) async fn handle_stats(ctx: &dyn Context, _msg: &Message) -> OutputStr
         "total_products": total_products,
         "active_products": active_products,
         "total_purchases": total_purchases,
-        "total_revenue": total_revenue,
+        "currency_analytics": analytics,
         "total_groups": total_groups
     }))
+}
+
+pub(super) async fn handle_seller_stats(ctx: &dyn Context, msg: &Message) -> OutputStream {
+    let account = match repo::seller_accounts::get_for_user(ctx, msg.user_id()).await {
+        Ok(Some(account)) => account,
+        Ok(None) => {
+            return ok_json(&serde_json::json!({
+                "seller_account_id": "",
+                "currency_analytics": [],
+                "recent_failures": []
+            }))
+        }
+        Err(error) => return err_internal("Database error", error),
+    };
+    let (analytics, failures) = futures::join!(
+        repo::purchases::commerce_analytics(ctx, Some(&account.id)),
+        repo::purchases::recent_seller_failures(ctx, &account.id, 5),
+    );
+    match (analytics, failures) {
+        (Ok(analytics), Ok(failures)) => ok_json(&serde_json::json!({
+            "seller_account_id": account.id,
+            "currency_analytics": analytics,
+            "recent_failures": failures
+        })),
+        (Err(error), _) | (_, Err(error)) => err_internal("Database error", error),
+    }
 }

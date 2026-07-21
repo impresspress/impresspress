@@ -370,6 +370,23 @@ pub fn palette_js() -> &'static str {
     if (t.dataset.action === 'palette-close') { e.preventDefault(); close(); }
   });
 
+  // The shortcut hint defaults to the Mac glyph; swap to Ctrl elsewhere so
+  // the advertised key matches what the keydown handler above accepts.
+  if (!/Mac|iPhone|iPad|iPod/.test(navigator.platform || '')) {
+    document.querySelectorAll('.topbar__palette-cmd').forEach((n) => { n.textContent = 'Ctrl'; });
+    document.querySelectorAll('.shell__palette-icon').forEach((n) => { n.textContent = 'Ctrl K'; });
+  }
+
+  // Linked table rows (`.data-table__row--linked`) style as clickable; make
+  // the whole row actually navigate via its row-href anchor, unless the
+  // click landed on an interactive element of its own.
+  document.addEventListener('click', (e) => {
+    const row = e.target.closest('.data-table__row--linked');
+    if (!row || e.target.closest('a, button, input, select, label, textarea')) return;
+    const anchor = row.querySelector('.data-table__row-href a');
+    if (anchor) anchor.click();
+  });
+
   // Item click → navigate
   list.addEventListener('click', (e) => {
     const item = e.target.closest('.palette__item');
@@ -382,6 +399,35 @@ pub fn palette_js() -> &'static str {
   });
 
   input.addEventListener('input', (e) => apply(e.target.value));
+
+  // Keyboard scrolling for the app shell. The document never scrolls (the
+  // .shell grid is 100vh; .shell__body is the real scroller), so with no
+  // focused element PageDown/PageUp/Space/Home/End/arrows would silently do
+  // nothing. Registered after the palette handler above, so an open palette
+  // (which preventDefaults its own keys) wins. Only fires when the event
+  // target is the page itself — typing in fields and focused widgets keep
+  // their native behavior.
+  document.addEventListener('keydown', (e) => {
+    if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
+    if (e.target !== document.body && e.target !== document.documentElement) return;
+    const scroller = document.querySelector('.shell__body');
+    if (!scroller) return;
+    const pageStep = scroller.clientHeight * 0.9;
+    const lineStep = 40;
+    let dy;
+    switch (e.key) {
+      case 'PageDown': dy = pageStep; break;
+      case 'PageUp': dy = -pageStep; break;
+      case ' ': dy = e.shiftKey ? -pageStep : pageStep; break;
+      case 'ArrowDown': dy = lineStep; break;
+      case 'ArrowUp': dy = -lineStep; break;
+      case 'Home': scroller.scrollTo({ top: 0 }); e.preventDefault(); return;
+      case 'End': scroller.scrollTo({ top: scroller.scrollHeight }); e.preventDefault(); return;
+      default: return;
+    }
+    scroller.scrollBy({ top: dy });
+    e.preventDefault();
+  });
 })();
 "#
 }

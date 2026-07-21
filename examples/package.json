@@ -6,7 +6,9 @@
     "test": "./run-tests.sh",
     "test:dropship": "./run-tests.sh dropship",
     "test:saas": "./run-tests.sh saas",
-    "test:blog": "./run-tests.sh blog"
+    "test:blog": "./run-tests.sh blog",
+    "test:products": "playwright test --config=products.playwright.config.ts",
+    "test:products:update": "playwright test --config=products.playwright.config.ts --update-snapshots"
   },
   "devDependencies": {
     "@playwright/test": "^1.58.2"

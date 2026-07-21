@@ -1,0 +1,18 @@
+- generic [active] [ref=e1]:
+  - heading "Field Guide — live embedded checkout test" [level=1] [ref=e2]
+  - paragraph [ref=e3]: This static page is served from a different origin (port 4178) than the Impresspress API (port 8093).
+  - generic [ref=e6]:
+    - heading "Loading product…" [level=2] [ref=e7]
+    - generic [ref=e8]:
+      - generic [ref=e9]:
+        - generic [ref=e10]:
+          - text: Offer
+          - combobox "Offer" [ref=e11]
+        - generic [ref=e12]:
+          - text: Quantity
+          - spinbutton "Quantity" [ref=e13]: "1"
+        - generic [ref=e14]:
+          - text: Email
+          - textbox "Email" [ref=e15]
+      - button "Continue to checkout" [disabled] [ref=e16]
+      - status [ref=e17]: Failed to fetch

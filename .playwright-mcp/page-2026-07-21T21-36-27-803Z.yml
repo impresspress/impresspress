@@ -1,0 +1,134 @@
+- generic [ref=f132e2]:
+  - link "Skip to content" [ref=f132e3] [cursor=pointer]:
+    - /url: "#content"
+  - navigation "Primary" [ref=f132e4]:
+    - img "Impresspress" [ref=f132e6]
+    - generic [ref=f132e7]:
+      - generic [ref=f132e8]:
+        - generic [ref=f132e9]:
+          - generic [ref=f132e10]: Workspace
+          - list [ref=f132e11]:
+            - listitem [ref=f132e12]:
+              - link "Dashboard" [ref=f132e13] [cursor=pointer]:
+                - /url: /b/admin/
+            - listitem [ref=f132e21]:
+              - link "Users" [ref=f132e22] [cursor=pointer]:
+                - /url: /b/admin/users
+        - generic [ref=f132e30]:
+          - generic [ref=f132e31]: Data
+          - list [ref=f132e32]:
+            - listitem [ref=f132e33]:
+              - link "Storage" [ref=f132e34] [cursor=pointer]:
+                - /url: /b/storage/admin/
+            - listitem [ref=f132e39]:
+              - link "Database" [ref=f132e40] [cursor=pointer]:
+                - /url: /b/admin/database
+            - listitem [ref=f132e46]:
+              - link "Vector indexes" [ref=f132e47] [cursor=pointer]:
+                - /url: /b/vector/
+        - generic [ref=f132e55]:
+          - generic [ref=f132e56]: Communication
+          - list [ref=f132e57]:
+            - listitem [ref=f132e58]:
+              - link "Messages" [ref=f132e59] [cursor=pointer]:
+                - /url: /b/messages/
+            - listitem [ref=f132e65]:
+              - link "LLM" [ref=f132e66] [cursor=pointer]:
+                - /url: /b/llm/
+        - generic [ref=f132e72]:
+          - generic [ref=f132e73]: Commerce
+          - list [ref=f132e74]:
+            - listitem [ref=f132e75]:
+              - link "Products" [ref=f132e76] [cursor=pointer]:
+                - /url: /b/products/admin/
+        - generic [ref=f132e83]:
+          - generic [ref=f132e84]: System
+          - list [ref=f132e85]:
+            - listitem [ref=f132e86]:
+              - link "Blocks" [ref=f132e87] [cursor=pointer]:
+                - /url: /b/admin/blocks
+            - listitem [ref=f132e94]:
+              - link "Logs" [ref=f132e95] [cursor=pointer]:
+                - /url: /b/admin/logs
+            - listitem [ref=f132e101]:
+              - link "Settings" [ref=f132e102] [cursor=pointer]:
+                - /url: /b/admin/settings/email
+      - button "Toggle sidebar" [ref=f132e108] [cursor=pointer]
+    - button "A admin@example.com Admin" [ref=f132e113] [cursor=pointer]:
+      - generic [ref=f132e114]: A
+      - generic [ref=f132e115]:
+        - generic [ref=f132e116]: admin@example.com
+        - generic [ref=f132e117]: Admin
+  - generic [ref=f132e118]:
+    - banner [ref=f132e119]:
+      - heading "Products" [level=1] [ref=f132e120]
+      - button "Open command palette" [ref=f132e122] [cursor=pointer]:
+        - generic [ref=f132e123]: Quick jump
+        - generic [ref=f132e124]:
+          - generic [ref=f132e125]: Ctrl
+          - generic [ref=f132e126]: K
+    - generic [ref=f132e127]:
+      - generic [ref=f132e129]:
+        - link "Overview" [ref=f132e130] [cursor=pointer]:
+          - /url: /b/products/admin/
+        - link "Products" [ref=f132e136] [cursor=pointer]:
+          - /url: /b/products/admin/manage
+        - link "Groups" [ref=f132e141] [cursor=pointer]:
+          - /url: /b/products/admin/groups
+        - link "Orders" [ref=f132e144] [cursor=pointer]:
+          - /url: /b/products/admin/purchases
+        - link "Sellers" [ref=f132e149] [cursor=pointer]:
+          - /url: /b/products/admin/sellers
+        - link "Stripe" [ref=f132e154] [cursor=pointer]:
+          - /url: /b/products/admin/stripe
+        - link "Settings" [ref=f132e157] [cursor=pointer]:
+          - /url: /b/products/admin/settings
+      - generic [ref=f132e162]:
+        - heading "Sellers" [level=2] [ref=f132e163]
+        - paragraph [ref=f132e164]: Review seller listings and monitor Stripe Connect readiness
+      - generic [ref=f132e165]:
+        - heading "Moderation queue" [level=2] [ref=f132e166]
+        - paragraph [ref=f132e167]: 1 listing(s) are waiting for a decision.
+        - table [ref=f132e169]:
+          - rowgroup [ref=f132e170]:
+            - row [ref=f132e171]:
+              - columnheader "Product" [ref=f132e172]
+              - columnheader "Seller" [ref=f132e173]
+              - columnheader "Submitted" [ref=f132e174]
+              - columnheader "Status" [ref=f132e175]
+          - rowgroup [ref=f132e176]:
+            - row [ref=f132e177]:
+              - cell "Seller Field Kit" [ref=f132e178]
+              - cell "019f8693-d852-76e1-9672-569faa947857" [ref=f132e179]
+              - cell "2026-07-21" [ref=f132e180]
+              - cell "pending review" [ref=f132e181]
+              - cell [ref=f132e183]:
+                - link "Open" [ref=f132e184] [cursor=pointer]:
+                  - /url: /b/products/admin/products/38a08d07-50ca-4dc4-90a4-d7a31146051d
+                  - text: ›
+      - generic [ref=f132e185]:
+        - heading "Stripe Connect sellers" [level=2] [ref=f132e186]
+        - table [ref=f132e188]:
+          - rowgroup [ref=f132e189]:
+            - row [ref=f132e190]:
+              - columnheader "Seller" [ref=f132e191]
+              - columnheader "Status" [ref=f132e192]
+              - columnheader "Stripe account" [ref=f132e193]
+              - columnheader "Charges" [ref=f132e194]
+              - columnheader "Payouts" [ref=f132e195]
+              - columnheader "Products" [ref=f132e196]
+              - columnheader "Requirements" [ref=f132e197]
+          - rowgroup [ref=f132e198]:
+            - row [ref=f132e199]:
+              - cell "019f8693-d852-76e1-9672-569faa947857" [ref=f132e200]
+              - cell "active" [ref=f132e201]
+              - cell [ref=f132e203]:
+                - code [ref=f132e204]: acct_1TvlDE6zVBeNZelj
+              - cell "enabled" [ref=f132e205]
+              - cell "enabled" [ref=f132e207]
+              - cell "1" [ref=f132e209]
+              - cell "0" [ref=f132e210]
+              - cell [ref=f132e211]:
+                - link "Open" [ref=f132e212] [cursor=pointer]:
+                  - /url: /b/products/admin/sellers/seller_9fa15d1049a5038afb16454ec2999623
+                  - text: ›

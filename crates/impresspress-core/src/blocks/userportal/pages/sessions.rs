@@ -84,15 +84,19 @@ fn render_table(rows: &[sessions::SessionRow], current_hash: Option<&[u8]>) -> M
                 @for r in rows {
                     @let is_current = current_hash.is_some_and(|h| h == r.token_hash.as_slice());
                     tr .session-row {
+                        // Timestamps render as semantic <time> elements —
+                        // correct HTML for datetimes, and the visual-baseline
+                        // suite masks `time` so per-run session times don't
+                        // make the screenshots unreproducible.
                         td data-label="Started" {
-                            (r.created_at)
+                            time datetime=(r.created_at) { (r.created_at) }
                             @if is_current {
                                 " "
                                 (badge(BadgeVariant::Success, "Current session"))
                             }
                         }
-                        td data-label="Last used" { (r.last_used_at) }
-                        td data-label="Expires" { (r.expires_at) }
+                        td data-label="Last used" { time datetime=(r.last_used_at) { (r.last_used_at) } }
+                        td data-label="Expires" { time datetime=(r.expires_at) { (r.expires_at) } }
                         td data-label="" {
                             button .btn .btn-ghost .btn-sm
                                 hx-delete=(format!("/b/userportal/sessions/{}", hex_encode(&r.token_hash)))

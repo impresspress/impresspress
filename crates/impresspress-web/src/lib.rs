@@ -190,6 +190,15 @@ impl builder::BootHooks for BrowserBootHooks {
         for (key, value) in &vars {
             self.config_svc.set(key, value);
         }
+        // This adapter executes inside an end user's browser. Set the marker
+        // after persisted variables are published so a database/admin value
+        // cannot accidentally enable Stripe secret-key operations locally.
+        // Static pages may still use a remote trusted commerce API or
+        // pre-created Payment Links.
+        self.config_svc.set(
+            impresspress_core::blocks::products::RUNTIME_KIND_CONFIG_KEY,
+            "browser",
+        );
         self.config_svc.set(
             impresspress_core::features::BLOCK_SETTINGS_CONFIG_KEY,
             &features.to_config_json(),

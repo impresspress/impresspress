@@ -1,0 +1,123 @@
+- generic [ref=f76e2]:
+  - link "Skip to content" [ref=f76e3] [cursor=pointer]:
+    - /url: "#content"
+  - navigation "Primary" [ref=f76e4]:
+    - img "Impresspress" [ref=f76e6]
+    - generic [ref=f76e7]:
+      - generic [ref=f76e8]:
+        - generic [ref=f76e9]:
+          - generic [ref=f76e10]: Workspace
+          - list [ref=f76e11]:
+            - listitem [ref=f76e12]:
+              - link "Dashboard" [ref=f76e13] [cursor=pointer]:
+                - /url: /b/admin/
+            - listitem [ref=f76e21]:
+              - link "Users" [ref=f76e22] [cursor=pointer]:
+                - /url: /b/admin/users
+        - generic [ref=f76e30]:
+          - generic [ref=f76e31]: Data
+          - list [ref=f76e32]:
+            - listitem [ref=f76e33]:
+              - link "Storage" [ref=f76e34] [cursor=pointer]:
+                - /url: /b/storage/admin/
+            - listitem [ref=f76e39]:
+              - link "Database" [ref=f76e40] [cursor=pointer]:
+                - /url: /b/admin/database
+            - listitem [ref=f76e46]:
+              - link "Vector indexes" [ref=f76e47] [cursor=pointer]:
+                - /url: /b/vector/
+        - generic [ref=f76e55]:
+          - generic [ref=f76e56]: Communication
+          - list [ref=f76e57]:
+            - listitem [ref=f76e58]:
+              - link "Messages" [ref=f76e59] [cursor=pointer]:
+                - /url: /b/messages/
+            - listitem [ref=f76e65]:
+              - link "LLM" [ref=f76e66] [cursor=pointer]:
+                - /url: /b/llm/
+        - generic [ref=f76e72]:
+          - generic [ref=f76e73]: Commerce
+          - list [ref=f76e74]:
+            - listitem [ref=f76e75]:
+              - link "Products" [ref=f76e76] [cursor=pointer]:
+                - /url: /b/products/admin/
+        - generic [ref=f76e83]:
+          - generic [ref=f76e84]: System
+          - list [ref=f76e85]:
+            - listitem [ref=f76e86]:
+              - link "Blocks" [ref=f76e87] [cursor=pointer]:
+                - /url: /b/admin/blocks
+            - listitem [ref=f76e94]:
+              - link "Logs" [ref=f76e95] [cursor=pointer]:
+                - /url: /b/admin/logs
+            - listitem [ref=f76e101]:
+              - link "Settings" [ref=f76e102] [cursor=pointer]:
+                - /url: /b/admin/settings/email
+      - button "Toggle sidebar" [ref=f76e108] [cursor=pointer]
+    - button "A admin@example.com Admin" [ref=f76e113] [cursor=pointer]:
+      - generic [ref=f76e114]: A
+      - generic [ref=f76e115]:
+        - generic [ref=f76e116]: admin@example.com
+        - generic [ref=f76e117]: Admin
+  - generic [ref=f76e118]:
+    - banner [ref=f76e119]:
+      - heading "Products" [level=1] [ref=f76e120]
+      - button "Open command palette" [ref=f76e122] [cursor=pointer]:
+        - generic [ref=f76e123]: Quick jump
+        - generic [ref=f76e124]:
+          - generic [ref=f76e125]: Ctrl
+          - generic [ref=f76e126]: K
+    - generic [ref=f76e127]:
+      - generic [ref=f76e129]:
+        - link "Overview" [ref=f76e130] [cursor=pointer]:
+          - /url: /b/products/admin/
+        - link "Products" [ref=f76e136] [cursor=pointer]:
+          - /url: /b/products/admin/manage
+        - link "Groups" [ref=f76e141] [cursor=pointer]:
+          - /url: /b/products/admin/groups
+        - link "Orders" [ref=f76e144] [cursor=pointer]:
+          - /url: /b/products/admin/purchases
+        - link "Sellers" [ref=f76e149] [cursor=pointer]:
+          - /url: /b/products/admin/sellers
+        - link "Stripe" [ref=f76e154] [cursor=pointer]:
+          - /url: /b/products/admin/stripe
+        - link "Settings" [ref=f76e157] [cursor=pointer]:
+          - /url: /b/products/admin/settings
+      - generic [ref=f76e161]:
+        - generic [ref=f76e162]:
+          - heading "Create product" [level=2] [ref=f76e163]
+          - paragraph [ref=f76e164]: Build a clear checkout for a simple item, subscription, booking, or configurable service
+        - link "Cancel" [ref=f76e166] [cursor=pointer]:
+          - /url: /b/products/admin/manage
+      - navigation "Product setup progress" [ref=f76e167]:
+        - list [ref=f76e168]:
+          - listitem [ref=f76e169]: 1. Type
+          - listitem [ref=f76e170]: 2. Details
+          - listitem [ref=f76e171]: 3. Pricing
+          - listitem [ref=f76e172]: 4. Checkout
+          - listitem [ref=f76e173]: 5. Review
+      - generic [ref=f76e174]:
+        - generic [ref=f76e175]:
+          - generic [ref=f76e177]:
+            - heading "Choose a starting template" [level=3] [ref=f76e178]
+            - paragraph [ref=f76e179]: Every template remains fully editable before it is saved.
+          - group "Product template" [ref=f76e181]:
+            - generic [ref=f76e183]:
+              - generic [ref=f76e184] [cursor=pointer]:
+                - radio "Simple product One price paid once. Good for a standard physical or digital item." [checked] [ref=f76e185]
+                - strong [ref=f76e186]: Simple product
+                - generic [ref=f76e187]: One price paid once. Good for a standard physical or digital item.
+              - generic [ref=f76e188] [cursor=pointer]:
+                - radio "Simple subscription One recurring price with an interval and optional trial." [ref=f76e189]
+                - strong [ref=f76e190]: Simple subscription
+                - generic [ref=f76e191]: One recurring price with an interval and optional trial.
+              - generic [ref=f76e192] [cursor=pointer]:
+                - radio "Configurable product Bookings, customer choices, quantities, and conditional add-ons." [ref=f76e193]
+                - strong [ref=f76e194]: Configurable product
+                - generic [ref=f76e195]: Bookings, customer choices, quantities, and conditional add-ons.
+              - generic [ref=f76e196] [cursor=pointer]:
+                - radio "Configurable subscription Recurring plans driven by quantities, dates, choices, and conditions." [ref=f76e197]
+                - strong [ref=f76e198]: Configurable subscription
+                - generic [ref=f76e199]: Recurring plans driven by quantities, dates, choices, and conditions.
+        - text: "* * *"
+        - button "Continue" [ref=f76e202] [cursor=pointer]

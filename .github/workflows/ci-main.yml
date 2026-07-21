@@ -5,6 +5,7 @@ on:
     branches: [main]
     paths:
       - 'crates/**'
+      - 'examples/**'
       - 'packages/**'
       - 'Cargo.toml'
       - 'Cargo.lock'
@@ -183,6 +184,126 @@ jobs:
       # trait-surface drift this guards — would skip it.
       - name: Check impresspress-browser conformance wiring (wasm32)
         run: cargo check --locked --tests -p impresspress-browser --target wasm32-unknown-unknown
+
+  products-browser:
+    name: Products browser lifecycles
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: crates/impresspress-web/package-lock.json
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: products-playwright-${{ runner.os }}-${{ hashFiles('crates/impresspress-web/package-lock.json') }}
+
+      - name: Install browser-test dependencies and Chromium
+        working-directory: crates/impresspress-web
+        run: |
+          npm ci
+          npx playwright install chromium --with-deps
+
+      - name: Run Products admin, buyer, seller, Stripe, and lifecycle flows
+        working-directory: crates/impresspress-web
+        run: npx playwright test --config=tests/playwright.config.ts tests/e2e/products-*.spec.ts
+
+      - name: Upload Products browser report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-products
+          path: |
+            crates/impresspress-web/playwright-report/
+            crates/impresspress-web/test-results/
+          retention-days: 7
+
+  product-examples:
+    name: Products static examples (Playwright)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: examples/package-lock.json
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: product-examples-playwright-${{ runner.os }}-${{ hashFiles('examples/package-lock.json') }}
+
+      - name: Install example dependencies and Chromium
+        working-directory: examples
+        run: |
+          npm ci
+          npx playwright install chromium --with-deps
+
+      - name: Run ten-site commerce suite
+        working-directory: examples
+        env:
+          PRODUCT_EXAMPLES_PORT: 4178
+        run: npm run test:products
+
+      - name: Upload product-example report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-product-examples
+          path: |
+            examples/playwright-report-products/
+            examples/test-results/
+          retention-days: 7
+
+  products-postgres:
+    name: Products PostgreSQL migrations
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: impresspress_products_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d impresspress_products_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: impresspress_products_test
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Apply all Products PostgreSQL migrations in order
+        run: |
+          for migration in crates/impresspress-core/src/blocks/products/migrations/*.postgres.sql; do
+            echo "applying ${migration}"
+            psql --set ON_ERROR_STOP=1 --file "${migration}"
+          done
+
+      - name: Verify commerce schema and deterministic templates
+        run: |
+          test "$(psql --tuples-only --no-align --command "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name LIKE 'impresspress__products__%'")" -ge 20
+          test "$(psql --tuples-only --no-align --command "SELECT count(*) FROM impresspress__products__product_templates WHERE id IN ('simple_product','simple_subscription','configurable_product','configurable_subscription')")" -eq 4
+          test "$(psql --tuples-only --no-align --command "SELECT count(*) FROM information_schema.columns WHERE table_name = 'impresspress__products__purchases' AND column_name IN ('shipping_cents','subscription_event_created','provider_payment_status','payment_intent_event_created')")" -eq 4
+          test "$(psql --tuples-only --no-align --command "SELECT count(*) FROM information_schema.columns WHERE (table_name, column_name) IN (('impresspress__products__refunds','stripe_event_created'),('impresspress__products__seller_accounts','stripe_event_created'),('impresspress__products__provider_operations','processing_owner'))")" -eq 3
 
   audit:
     name: Security Audit

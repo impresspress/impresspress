@@ -1,242 +1,14 @@
-use std::collections::HashMap;
-
 use wafer_block::db::{Filter, FilterOp};
-use wafer_core::clients::database as db;
 use wafer_run::{context::Context, ErrorCode, InputStream, Message, OutputStream};
 
-use super::{repo, PRODUCTS_TABLE};
+use super::{
+    contracts::{RefundRequest, RefundResult, RefundResultStatus},
+    repo, stripe_provider,
+};
 use crate::{
-    http::{
-        err_bad_request, err_forbidden, err_internal, err_not_found, err_unauthorized, ok_json,
-    },
+    http::{err_bad_request, err_forbidden, err_internal, err_not_found, ok_json},
     util::RecordExt,
 };
-
-pub async fn handle_create(ctx: &dyn Context, msg: &Message, input: InputStream) -> OutputStream {
-    #[derive(serde::Deserialize)]
-    struct CreateReq {
-        items: Vec<PurchaseItem>,
-        currency: Option<String>,
-    }
-    #[derive(serde::Deserialize)]
-    struct PurchaseItem {
-        product_id: String,
-        quantity: i64,
-        #[serde(default)]
-        variables: HashMap<String, f64>,
-    }
-
-    let raw = input.collect_to_bytes().await;
-    let body: CreateReq = match serde_json::from_slice(&raw) {
-        Ok(b) => b,
-        Err(e) => return err_bad_request(&format!("Invalid body: {e}")),
-    };
-
-    if body.items.is_empty() {
-        return err_bad_request("No items in purchase");
-    }
-
-    let currency = body.currency.unwrap_or_else(|| "USD".to_string());
-    let now = chrono::Utc::now().to_rfc3339();
-    let user_id = msg.user_id().to_string();
-    if user_id.is_empty() {
-        return err_unauthorized("Authentication required to create a purchase");
-    }
-
-    // Calculate totals
-    let mut total_amount = 0.0;
-    let mut line_items_data = Vec::new();
-
-    for item in &body.items {
-        if item.quantity <= 0 {
-            return err_bad_request("Quantity must be positive");
-        }
-        let Ok(product) = db::get(ctx, PRODUCTS_TABLE, &item.product_id).await else {
-            return err_not_found(&format!("Product {} not found", item.product_id));
-        };
-
-        // Reject draft/deleted/inactive products
-        let product_status = product
-            .data
-            .get("status")
-            .and_then(|v| v.as_str())
-            .unwrap_or("active");
-        if product_status != "active" {
-            return err_bad_request(&format!(
-                "Product {} is not available for purchase (status: {})",
-                item.product_id, product_status
-            ));
-        }
-        if !product
-            .data
-            .get("deleted_at")
-            .and_then(|v| v.as_str())
-            .unwrap_or("")
-            .is_empty()
-        {
-            return err_not_found(&format!("Product {} not found", item.product_id));
-        }
-
-        let product_name = product
-            .data
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or("Unknown")
-            .to_string();
-
-        // Resolve unit price via the shared resolver: apply the product's
-        // pricing template when set, otherwise fall back to `base_price`. A
-        // missing template row falls back to `base_price` (so a stale reference
-        // can't block a sale); the returned price has already passed
-        // `validate_price`, which rejects price manipulation via variables and
-        // zero-priced freebies.
-        let unit_price = match super::pricing::resolve_unit_price(
-            ctx,
-            &product,
-            &item.variables,
-            super::pricing::MissingTemplate::FallBackToBase,
-        )
-        .await
-        {
-            Ok(resolved) => resolved.unit_price,
-            Err(e) => {
-                return err_bad_request(&format!(
-                    "Invalid price for product {}: {e}",
-                    item.product_id
-                ))
-            }
-        };
-
-        let line_total = unit_price * item.quantity as f64;
-        total_amount += line_total;
-
-        line_items_data.push((
-            item.product_id.clone(),
-            product_name,
-            item.quantity,
-            unit_price,
-            line_total,
-            &item.variables,
-        ));
-    }
-
-    // `as i64` saturates on overflow / NaN — both would silently produce a
-    // bogus i64. Validate first so a pathological formula result (NaN, ±inf,
-    // > i64::MAX cents ≈ $9.2e16) can't sneak through.
-    let total_cents_f = total_amount * 100.0;
-    if !total_cents_f.is_finite() {
-        return err_bad_request("Purchase total is not a finite number");
-    }
-    let rounded = total_cents_f.round();
-    if rounded < 1.0 || rounded > i64::MAX as f64 {
-        return err_bad_request("Purchase total is out of range");
-    }
-    let total_cents = rounded as i64;
-    if total_cents <= 0 {
-        return err_bad_request("Purchase total must be greater than zero");
-    }
-
-    // Create purchase
-    let mut purchase_data = HashMap::new();
-    purchase_data.insert(
-        "user_id".to_string(),
-        serde_json::Value::String(user_id.clone()),
-    );
-    purchase_data.insert(
-        "status".to_string(),
-        serde_json::Value::String("pending".to_string()),
-    );
-    purchase_data.insert("total_cents".to_string(), serde_json::json!(total_cents));
-    purchase_data.insert("amount_cents".to_string(), serde_json::json!(total_cents));
-    purchase_data.insert("currency".to_string(), serde_json::Value::String(currency));
-    purchase_data.insert(
-        "provider".to_string(),
-        serde_json::Value::String("manual".to_string()),
-    );
-    purchase_data.insert(
-        "created_at".to_string(),
-        serde_json::Value::String(now.clone()),
-    );
-    purchase_data.insert(
-        "updated_at".to_string(),
-        serde_json::Value::String(now.clone()),
-    );
-
-    let purchase = match repo::purchases::create(ctx, purchase_data).await {
-        Ok(p) => p,
-        Err(e) => return err_internal("Failed to create purchase", e),
-    };
-
-    // Create line items — roll back purchase on failure
-    for (product_id, product_name, qty, unit_price, line_total, variables) in &line_items_data {
-        let mut item_data = HashMap::new();
-        item_data.insert(
-            "purchase_id".to_string(),
-            serde_json::Value::String(purchase.id.clone()),
-        );
-        item_data.insert(
-            "product_id".to_string(),
-            serde_json::Value::String(product_id.clone()),
-        );
-        item_data.insert(
-            "product_name".to_string(),
-            serde_json::Value::String(product_name.clone()),
-        );
-        item_data.insert("quantity".to_string(), serde_json::json!(qty));
-        item_data.insert("unit_price".to_string(), serde_json::json!(unit_price));
-        item_data.insert("total_price".to_string(), serde_json::json!(line_total));
-        item_data.insert("variables".to_string(), serde_json::json!(variables));
-        item_data.insert(
-            "created_at".to_string(),
-            serde_json::Value::String(now.clone()),
-        );
-        if let Err(e) = repo::purchases::add_line_item(ctx, item_data).await {
-            rollback_purchase(ctx, &purchase.id).await;
-            return err_internal("Failed to create line item", e);
-        }
-    }
-
-    ok_json(&serde_json::json!({
-        "id": purchase.id,
-        "status": "pending",
-        "total_cents": total_cents,
-        "item_count": line_items_data.len()
-    }))
-}
-
-/// Roll back a partially-created purchase after a line-item insert fails.
-///
-/// Tries to delete the purchase header first; if the delete fails (transient
-/// DB error, foreign-key constraints from already-inserted siblings, etc.),
-/// falls through to marking the purchase `failed` so it can never proceed to
-/// checkout. A dangling `pending` purchase with partial line items is the
-/// worst case, so this best-effort path is intentionally infallible from the
-/// caller's perspective (failures are logged, not propagated).
-async fn rollback_purchase(ctx: &dyn Context, purchase_id: &str) {
-    if let Err(del_err) = repo::purchases::delete(ctx, purchase_id).await {
-        tracing::warn!(
-            error = %del_err,
-            purchase_id = %purchase_id,
-            "rollback delete failed; marking purchase as failed"
-        );
-        let mut fail_data = HashMap::new();
-        fail_data.insert(
-            "status".to_string(),
-            serde_json::Value::String("failed".to_string()),
-        );
-        fail_data.insert(
-            "updated_at".to_string(),
-            serde_json::Value::String(chrono::Utc::now().to_rfc3339()),
-        );
-        if let Err(mark_err) = repo::purchases::update(ctx, purchase_id, fail_data).await {
-            tracing::error!(
-                error = %mark_err,
-                purchase_id = %purchase_id,
-                "could not mark partial purchase as failed; manual cleanup required"
-            );
-        }
-    }
-}
 
 pub async fn handle_list_user(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let user_id = msg.user_id().to_string();
@@ -281,6 +53,56 @@ pub async fn handle_list_admin(ctx: &dyn Context, msg: &Message) -> OutputStream
     }
 }
 
+pub async fn handle_list_seller(ctx: &dyn Context, msg: &Message) -> OutputStream {
+    let account = match repo::seller_accounts::get_for_user(ctx, msg.user_id()).await {
+        Ok(Some(account)) => account,
+        Ok(None) => return err_forbidden("Complete seller setup before viewing seller orders"),
+        Err(error) => return err_internal("Database error", error),
+    };
+    let (page, page_size, _) = msg.pagination_params(20);
+    let mut filters = vec![Filter {
+        field: "seller_account_id".to_string(),
+        operator: FilterOp::Equal,
+        value: serde_json::json!(account.id),
+    }];
+    let status = msg.query("status").to_string();
+    if !status.is_empty() && status != "all" {
+        filters.push(Filter {
+            field: "status".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!(status),
+        });
+    }
+    match repo::purchases::list_paginated(ctx, filters, page as i64, page_size as i64).await {
+        Ok(result) => ok_json(&result),
+        Err(error) => err_internal("Database error", error),
+    }
+}
+
+async fn purchase_response(
+    ctx: &dyn Context,
+    purchase: wafer_core::clients::database::Record,
+) -> OutputStream {
+    let line_items = match repo::purchases::list_line_items(ctx, &purchase.id).await {
+        Ok(line_items) => line_items,
+        Err(error) => return err_internal("Could not load purchase line items", error),
+    };
+    let refunds = match repo::refunds::list_for_purchase(ctx, &purchase.id).await {
+        Ok(refunds) => refunds,
+        Err(error) => return err_internal("Could not load purchase refunds", error),
+    };
+    let disputes = match repo::disputes::list_for_purchase(ctx, &purchase.id).await {
+        Ok(disputes) => disputes,
+        Err(error) => return err_internal("Could not load purchase disputes", error),
+    };
+    ok_json(&serde_json::json!({
+        "purchase": purchase,
+        "line_items": line_items,
+        "refunds": refunds,
+        "disputes": disputes
+    }))
+}
+
 pub async fn handle_get(ctx: &dyn Context, msg: &Message) -> OutputStream {
     // Prefer the router-populated `{id}` path var (set by the endpoint
     // matcher), falling back to stripping the known prefixes for hand-built
@@ -307,27 +129,94 @@ pub async fn handle_get(ctx: &dyn Context, msg: &Message) -> OutputStream {
         Err(e) => return err_internal("Database error", e),
     };
 
-    // Verify access: user can only view their own, admin can view all
-    let purchase_user = purchase.str_field("user_id");
+    // Verify access: a buyer can only view their own order; admin can view all.
+    let purchase_user = if purchase.str_field("buyer_user_id").is_empty() {
+        purchase.str_field("user_id")
+    } else {
+        purchase.str_field("buyer_user_id")
+    };
     if purchase_user != msg.user_id() && !crate::util::is_admin(msg) {
         return err_forbidden("Access denied");
     }
 
-    // Get line items
-    let line_items = repo::purchases::list_line_items(ctx, id)
-        .await
-        .unwrap_or_default();
-
-    ok_json(&serde_json::json!({
-        "purchase": purchase,
-        "line_items": line_items
-    }))
+    purchase_response(ctx, purchase).await
 }
 
-pub async fn handle_refund(ctx: &dyn Context, msg: &Message, input: InputStream) -> OutputStream {
+pub async fn handle_get_seller(ctx: &dyn Context, msg: &Message) -> OutputStream {
+    let id = msg.var("id");
+    if id.is_empty() {
+        return err_bad_request("Missing purchase ID");
+    }
+    let account = match repo::seller_accounts::get_for_user(ctx, msg.user_id()).await {
+        Ok(Some(account)) => account,
+        Ok(None) => return err_forbidden("Complete seller setup before viewing seller orders"),
+        Err(error) => return err_internal("Database error", error),
+    };
+    let purchase = match repo::purchases::get(ctx, id).await {
+        Ok(purchase) => purchase,
+        Err(error) if error.code == ErrorCode::NotFound => {
+            return err_not_found("Purchase not found")
+        }
+        Err(error) => return err_internal("Database error", error),
+    };
+    if purchase.str_field("seller_account_id") != account.id {
+        return err_forbidden("Access denied");
+    }
+    purchase_response(ctx, purchase).await
+}
+
+fn refund_result(
+    purchase: &wafer_core::clients::database::Record,
+    refund: &wafer_core::clients::database::Record,
+) -> RefundResult {
+    RefundResult {
+        purchase_id: purchase.id.clone(),
+        refund_id: refund.id.clone(),
+        provider_refund_id: refund.str_field("provider_refund_id").to_string(),
+        status: match refund.str_field("status") {
+            "succeeded" => RefundResultStatus::Succeeded,
+            "failed" | "canceled" => RefundResultStatus::Failed,
+            _ => RefundResultStatus::Pending,
+        },
+        provider_status: refund.str_field("provider_status").to_string(),
+        amount_minor: refund.i64_field("amount_minor"),
+        refunded_total_minor: purchase.i64_field("refunded_total_cents"),
+        order_total_minor: purchase.i64_field("total_cents"),
+        currency: purchase.str_field("currency").to_ascii_uppercase(),
+        livemode: refund.bool_field("livemode"),
+    }
+}
+
+fn manual_refund_result(
+    purchase: &wafer_core::clients::database::Record,
+    amount_minor: i64,
+) -> RefundResult {
+    RefundResult {
+        purchase_id: purchase.id.clone(),
+        refund_id: String::new(),
+        provider_refund_id: String::new(),
+        status: RefundResultStatus::Succeeded,
+        provider_status: "manual".to_string(),
+        amount_minor,
+        refunded_total_minor: purchase.i64_field("refunded_total_cents"),
+        order_total_minor: purchase.i64_field("total_cents"),
+        currency: purchase.str_field("currency").to_ascii_uppercase(),
+        livemode: false,
+    }
+}
+
+fn valid_refund_operation_key(value: &str) -> bool {
+    !value.is_empty()
+        && value.len() <= 80
+        && value
+            .bytes()
+            .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
+}
+
+fn admin_refund_id(msg: &Message) -> String {
     // `/admin/b/products/purchases/{id}/refund` — prefer the matcher-bound
     // `{id}`, falling back to prefix/suffix stripping for hand-built tests.
-    let id = {
+    {
         let var = msg.var("id");
         if !var.is_empty() {
             var.to_string()
@@ -338,15 +227,50 @@ pub async fn handle_refund(ctx: &dyn Context, msg: &Message, input: InputStream)
                 .unwrap_or("")
                 .to_string()
         }
-    };
+    }
+}
+
+pub async fn handle_refund(ctx: &dyn Context, msg: &Message, input: InputStream) -> OutputStream {
+    let id = admin_refund_id(msg);
     if id.is_empty() {
         return err_bad_request("Missing purchase ID");
     }
+    refund_purchase(ctx, msg, input, id).await
+}
 
-    #[derive(serde::Deserialize, Default)]
-    struct RefundReq {
-        reason: Option<String>,
+pub async fn handle_seller_refund(
+    ctx: &dyn Context,
+    msg: &Message,
+    input: InputStream,
+) -> OutputStream {
+    let id = msg.var("id").to_string();
+    if id.is_empty() {
+        return err_bad_request("Missing purchase ID");
     }
+    let account = match repo::seller_accounts::get_for_user(ctx, msg.user_id()).await {
+        Ok(Some(account)) => account,
+        Ok(None) => return err_forbidden("Complete seller setup before refunding seller orders"),
+        Err(error) => return err_internal("Database error", error),
+    };
+    let purchase = match repo::purchases::get(ctx, &id).await {
+        Ok(purchase) => purchase,
+        Err(error) if error.code == ErrorCode::NotFound => {
+            return err_not_found("Purchase not found")
+        }
+        Err(error) => return err_internal("Database error", error),
+    };
+    if purchase.str_field("seller_account_id") != account.id {
+        return err_forbidden("Access denied");
+    }
+    refund_purchase(ctx, msg, input, id).await
+}
+
+async fn refund_purchase(
+    ctx: &dyn Context,
+    msg: &Message,
+    input: InputStream,
+    id: String,
+) -> OutputStream {
     let raw = input.collect_to_bytes().await;
     // An absent body is a legitimate "no reason given" (every caller today
     // sends `{}` for that, but a genuinely empty body is treated the same
@@ -354,8 +278,8 @@ pub async fn handle_refund(ctx: &dyn Context, msg: &Message, input: InputStream)
     // input and must be rejected — it must not silently become "no reason",
     // which would hide a client bug (or a truncated/garbled request) behind
     // a refund whose reason was silently dropped.
-    let body: RefundReq = if raw.is_empty() {
-        RefundReq::default()
+    let body: RefundRequest = if raw.is_empty() {
+        RefundRequest::default()
     } else {
         match serde_json::from_slice(&raw) {
             Ok(b) => b,
@@ -363,36 +287,440 @@ pub async fn handle_refund(ctx: &dyn Context, msg: &Message, input: InputStream)
         }
     };
 
-    // Verify purchase exists
-    if let Err(e) = repo::purchases::get(ctx, &id).await {
-        if e.code == ErrorCode::NotFound {
-            return err_not_found("Purchase not found");
+    let note = body.note.unwrap_or_default().trim().to_string();
+    if note.chars().count() > 500 {
+        return err_bad_request("Refund note must be 500 characters or fewer");
+    }
+    if body.amount_minor.is_some_and(|amount| amount <= 0) {
+        return err_bad_request("Refund amount_minor must be positive");
+    }
+    let client_key = match body.idempotency_key.as_deref() {
+        Some(value) if valid_refund_operation_key(value) => value.to_string(),
+        Some(_) => {
+            return err_bad_request(
+                "idempotency_key must be 1-80 letters, numbers, underscores, or hyphens",
+            )
         }
-        return err_internal("Database error", e);
+        None if body.amount_minor.is_none() => "full".to_string(),
+        None => format!("amount_{}", body.amount_minor.unwrap_or_default()),
+    };
+    let idempotency_key = format!("impresspress_refund_{id}_{client_key}");
+    if idempotency_key.len() > 255 {
+        return err_bad_request("Refund idempotency key is too long");
     }
 
-    // Atomic status transition: completed → refunded (prevents double-refund race)
-    let refunded_by = msg.user_id().to_string();
-    let reason_val = body.reason.unwrap_or_default();
-
-    // A repository failure (outage/corruption) must surface as an error, not
-    // be folded into the same `rows == 0` branch as the legitimate "purchase
-    // isn't in `completed` status" business outcome — those are different
-    // conditions and previously reported the same misleading 400.
-    let rows = match repo::purchases::refund_atomic(ctx, &id, &refunded_by, &reason_val).await {
-        Ok(n) => n,
-        Err(e) => return err_internal("Database error", e),
+    let purchase = match repo::purchases::get(ctx, &id).await {
+        Ok(purchase) => purchase,
+        Err(error) if error.code == ErrorCode::NotFound => {
+            return err_not_found("Purchase not found")
+        }
+        Err(error) => return err_internal("Database error", error),
     };
-
-    if rows == 0 {
-        return err_bad_request(
-            "Can only refund completed purchases (status may have changed concurrently)",
+    let has_payment_intent = !purchase.str_field("stripe_payment_intent_id").is_empty()
+        || !purchase.str_field("provider_payment_intent_id").is_empty();
+    if purchase.str_field("provider") != "stripe"
+        && !has_payment_intent
+        && !matches!(
+            purchase.str_field("status"),
+            "completed" | "partially_refunded"
+        )
+    {
+        return err_bad_request("Purchase is not in a refundable state");
+    }
+    let total = purchase.i64_field("total_cents");
+    let refunded_total = purchase.i64_field("refunded_total_cents");
+    if total <= 0 || refunded_total < 0 || refunded_total > total {
+        return err_internal(
+            "Purchase has invalid refund accounting",
+            wafer_run::WaferError::new(ErrorCode::Internal, "invalid purchase refund totals"),
         );
     }
 
-    // Fetch the updated record for the response
-    match repo::purchases::get(ctx, &id).await {
-        Ok(record) => ok_json(&record),
-        Err(e) => err_internal("Database error", e),
+    let payment_intent_id = {
+        let current = purchase.str_field("stripe_payment_intent_id");
+        if current.is_empty() {
+            purchase.str_field("provider_payment_intent_id").to_string()
+        } else {
+            current.to_string()
+        }
+    };
+    let is_stripe = purchase.str_field("provider") == "stripe" || !payment_intent_id.is_empty();
+    let refunded_by = msg.user_id().to_string();
+
+    if !is_stripe {
+        // Manual refunds go through the same refund ledger as Stripe refunds:
+        // the ledger row pins the absolute refunded-total target at claim
+        // time, so a retried delivery (same idempotency key) returns the
+        // recorded outcome instead of deducting a second time.
+        let existing = match repo::refunds::get_by_idempotency_key(ctx, &idempotency_key).await {
+            Ok(existing) => existing,
+            Err(error) => return err_internal("Could not inspect refund ledger", error),
+        };
+        let claim = if let Some(existing) = existing {
+            if existing.str_field("purchase_id") != id {
+                return err_bad_request("Refund idempotency key belongs to another purchase");
+            }
+            if body
+                .amount_minor
+                .is_some_and(|amount| amount != existing.i64_field("amount_minor"))
+                || (body.amount_minor.is_none()
+                    && existing.i64_field("target_refunded_total_minor") != total)
+                || (!note.is_empty() && note != existing.str_field("note"))
+            {
+                return err_bad_request(
+                    "Refund idempotency key was already used for a different request",
+                );
+            }
+            if existing.str_field("status") == "succeeded" {
+                let current = match repo::purchases::get(ctx, &id).await {
+                    Ok(current) => current,
+                    Err(error) => return err_internal("Could not load refunded purchase", error),
+                };
+                return ok_json(&manual_refund_result(
+                    &current,
+                    existing.i64_field("amount_minor"),
+                ));
+            }
+            repo::refunds::RefundClaim {
+                purchase_id: id.clone(),
+                payment_intent_id: String::new(),
+                stripe_account_id: String::new(),
+                idempotency_key: idempotency_key.clone(),
+                amount_minor: existing.i64_field("amount_minor"),
+                target_refunded_total_minor: existing.i64_field("target_refunded_total_minor"),
+                currency: existing.str_field("currency").to_string(),
+                provider_reason: String::new(),
+                note: existing.str_field("note").to_string(),
+                refunded_by: existing.str_field("refunded_by").to_string(),
+                livemode: existing.bool_field("livemode"),
+            }
+        } else {
+            if !matches!(
+                purchase.str_field("status"),
+                "completed" | "partially_refunded"
+            ) {
+                return err_bad_request("Purchase is not in a refundable state");
+            }
+            let remaining = total - refunded_total;
+            let amount = body.amount_minor.unwrap_or(remaining);
+            if amount <= 0 || amount > remaining {
+                return err_bad_request("Refund amount exceeds the remaining refundable amount");
+            }
+            repo::refunds::RefundClaim {
+                purchase_id: id.clone(),
+                payment_intent_id: String::new(),
+                stripe_account_id: String::new(),
+                idempotency_key: idempotency_key.clone(),
+                amount_minor: amount,
+                target_refunded_total_minor: refunded_total + amount,
+                currency: purchase.str_field("currency").to_ascii_uppercase(),
+                provider_reason: String::new(),
+                note: note.clone(),
+                refunded_by: refunded_by.clone(),
+                livemode: purchase.bool_field("livemode"),
+            }
+        };
+        let refund = match repo::refunds::claim(ctx, &claim).await {
+            Ok(refund) => refund,
+            Err(error)
+                if matches!(
+                    error.code,
+                    ErrorCode::InvalidArgument | ErrorCode::FailedPrecondition
+                ) =>
+            {
+                return err_bad_request(&error.message)
+            }
+            Err(error) => return err_internal("Could not claim refund operation", error),
+        };
+        // Apply against the claimed absolute target so a retry of an
+        // interrupted operation converges instead of deducting again.
+        return match repo::purchases::reconcile_refund_total(
+            ctx,
+            &id,
+            refund.i64_field("target_refunded_total_minor"),
+            &refunded_by,
+            &note,
+        )
+        .await
+        {
+            Ok(updated) => {
+                if let Err(error) = repo::refunds::mark_succeeded(ctx, &refund.id).await {
+                    return err_internal("Could not record manual refund outcome", error);
+                }
+                ok_json(&manual_refund_result(
+                    &updated,
+                    refund.i64_field("amount_minor"),
+                ))
+            }
+            Err(error) if error.code == ErrorCode::FailedPrecondition => {
+                err_bad_request(&error.message)
+            }
+            Err(error) => err_internal("Could not record manual refund", error),
+        };
     }
+    if payment_intent_id.is_empty() {
+        return err_bad_request("Stripe purchase does not have a PaymentIntent");
+    }
+
+    let existing = match repo::refunds::get_by_idempotency_key(ctx, &idempotency_key).await {
+        Ok(existing) => existing,
+        Err(error) => return err_internal("Could not inspect refund ledger", error),
+    };
+    let provider_reason = body
+        .provider_reason
+        .map(|reason| reason.as_str().to_string())
+        .unwrap_or_default();
+    let claim = if let Some(existing) = existing {
+        if existing.str_field("purchase_id") != id {
+            return err_bad_request("Refund idempotency key belongs to another purchase");
+        }
+        if body
+            .amount_minor
+            .is_some_and(|amount| amount != existing.i64_field("amount_minor"))
+            || (body.amount_minor.is_none()
+                && existing.i64_field("target_refunded_total_minor") != total)
+            || (!provider_reason.is_empty()
+                && provider_reason != existing.str_field("provider_reason"))
+            || (!note.is_empty() && note != existing.str_field("note"))
+        {
+            return err_bad_request(
+                "Refund idempotency key was already used for a different request",
+            );
+        }
+        repo::refunds::RefundClaim {
+            purchase_id: id.clone(),
+            payment_intent_id: existing.str_field("payment_intent_id").to_string(),
+            stripe_account_id: existing.str_field("stripe_account_id").to_string(),
+            idempotency_key: idempotency_key.clone(),
+            amount_minor: existing.i64_field("amount_minor"),
+            target_refunded_total_minor: existing.i64_field("target_refunded_total_minor"),
+            currency: existing.str_field("currency").to_string(),
+            provider_reason: existing.str_field("provider_reason").to_string(),
+            note: existing.str_field("note").to_string(),
+            refunded_by: existing.str_field("refunded_by").to_string(),
+            livemode: existing.bool_field("livemode"),
+        }
+    } else {
+        if !matches!(
+            purchase.str_field("status"),
+            "completed" | "partially_refunded"
+        ) {
+            return err_bad_request("Purchase is not in a refundable state");
+        }
+        let remaining = total - refunded_total;
+        let amount = body.amount_minor.unwrap_or(remaining);
+        if amount <= 0 || amount > remaining {
+            return err_bad_request("Refund amount exceeds the remaining refundable amount");
+        }
+        repo::refunds::RefundClaim {
+            purchase_id: id.clone(),
+            payment_intent_id: payment_intent_id.clone(),
+            stripe_account_id: purchase.str_field("stripe_account_id").to_string(),
+            idempotency_key: idempotency_key.clone(),
+            amount_minor: amount,
+            target_refunded_total_minor: refunded_total + amount,
+            currency: purchase.str_field("currency").to_ascii_uppercase(),
+            provider_reason,
+            note: note.clone(),
+            refunded_by: refunded_by.clone(),
+            livemode: purchase.bool_field("livemode"),
+        }
+    };
+    let mut refund = match repo::refunds::claim(ctx, &claim).await {
+        Ok(refund) => refund,
+        Err(error)
+            if matches!(
+                error.code,
+                ErrorCode::InvalidArgument | ErrorCode::FailedPrecondition
+            ) =>
+        {
+            return err_bad_request(&error.message)
+        }
+        Err(error) => return err_internal("Could not claim refund operation", error),
+    };
+    let provider_operation = match repo::provider_operations::ensure(
+        ctx,
+        repo::provider_operations::REFUND_RECONCILE,
+        "refund",
+        &refund.id,
+        refund.str_field("stripe_account_id"),
+        refund.str_field("idempotency_key"),
+        "{\"version\":1}",
+    )
+    .await
+    {
+        Ok(operation) => operation,
+        Err(error) => return err_internal("Could not enqueue refund reconciliation", error),
+    };
+
+    if refund.str_field("status") == "succeeded" {
+        if let Err(error) = repo::provider_operations::resolve_unleased(
+            ctx,
+            &provider_operation.id,
+            true,
+            refund.str_field("response_json"),
+            "",
+        )
+        .await
+        {
+            return err_internal("Could not complete refund reconciliation operation", error);
+        }
+        let current = match repo::purchases::get(ctx, &id).await {
+            Ok(current) => current,
+            Err(error) => return err_internal("Could not load refunded purchase", error),
+        };
+        return ok_json(&refund_result(&current, &refund));
+    }
+    if refund.str_field("status") == "provider_succeeded" {
+        let current = match repo::purchases::reconcile_refund_total(
+            ctx,
+            &id,
+            refund.i64_field("target_refunded_total_minor"),
+            refund.str_field("refunded_by"),
+            refund.str_field("note"),
+        )
+        .await
+        {
+            Ok(current) => current,
+            Err(error) => return err_internal("Could not reconcile successful refund", error),
+        };
+        refund = match repo::refunds::mark_succeeded(ctx, &refund.id).await {
+            Ok(refund) => refund,
+            Err(error) => return err_internal("Could not complete refund ledger", error),
+        };
+        if let Err(error) = repo::provider_operations::resolve_unleased(
+            ctx,
+            &provider_operation.id,
+            true,
+            refund.str_field("response_json"),
+            "",
+        )
+        .await
+        {
+            return err_internal("Could not complete refund reconciliation operation", error);
+        }
+        return ok_json(&refund_result(&current, &refund));
+    }
+    if refund.str_field("status") == "pending" && !refund.str_field("provider_refund_id").is_empty()
+    {
+        return ok_json(&refund_result(&purchase, &refund));
+    }
+
+    let params = stripe_provider::StripeRefundParams {
+        purchase_id: id.clone(),
+        payment_intent_id: refund.str_field("payment_intent_id").to_string(),
+        stripe_account_id: refund.str_field("stripe_account_id").to_string(),
+        idempotency_key: refund.str_field("idempotency_key").to_string(),
+        amount_minor: refund.i64_field("amount_minor"),
+        provider_reason: refund.str_field("provider_reason").to_string(),
+        refund_application_fee: !refund.str_field("stripe_account_id").is_empty()
+            && purchase.i64_field("platform_fee_cents") > 0,
+        expected_livemode: purchase.bool_field("livemode"),
+    };
+    let provider = match stripe_provider::create_refund(ctx, &params).await {
+        Ok(provider) => provider,
+        Err(error) => {
+            let ledger_update = if error.code == ErrorCode::Internal {
+                repo::refunds::mark_retryable_error(ctx, &refund.id, &error.message).await
+            } else {
+                repo::refunds::mark_failed(ctx, &refund.id, &error.message).await
+            };
+            if let Err(update_error) = ledger_update {
+                tracing::error!(
+                    error = %update_error,
+                    refund_id = %refund.id,
+                    "could not record Stripe refund failure"
+                );
+            }
+            if error.code != ErrorCode::Internal {
+                if let Err(update_error) = repo::provider_operations::resolve_unleased(
+                    ctx,
+                    &provider_operation.id,
+                    false,
+                    "{}",
+                    &error.message,
+                )
+                .await
+                {
+                    tracing::error!(
+                        error = %update_error,
+                        operation_id = %provider_operation.id,
+                        "could not terminally resolve rejected refund operation"
+                    );
+                }
+            }
+            return if matches!(
+                error.code,
+                ErrorCode::InvalidArgument | ErrorCode::FailedPrecondition
+            ) {
+                err_bad_request(&error.message)
+            } else {
+                err_internal("Stripe refund could not be completed", error)
+            };
+        }
+    };
+    let response_json = serde_json::json!({
+        "id": provider.id,
+        "status": provider.status,
+        "amount_minor": provider.amount_minor,
+        "livemode": provider.livemode,
+    })
+    .to_string();
+    refund = match repo::refunds::record_provider_response(
+        ctx,
+        &refund.id,
+        &provider.id,
+        &provider.status,
+        provider.livemode,
+        &response_json,
+    )
+    .await
+    {
+        Ok(refund) => refund,
+        Err(error) => return err_internal("Could not record Stripe refund response", error),
+    };
+    if provider.status != "succeeded" {
+        if matches!(provider.status.as_str(), "failed" | "canceled") {
+            if let Err(error) = repo::provider_operations::resolve_unleased(
+                ctx,
+                &provider_operation.id,
+                false,
+                &response_json,
+                "Stripe refund failed or was canceled",
+            )
+            .await
+            {
+                return err_internal("Could not resolve failed refund operation", error);
+            }
+        }
+        return ok_json(&refund_result(&purchase, &refund));
+    }
+    let updated = match repo::purchases::reconcile_refund_total(
+        ctx,
+        &id,
+        refund.i64_field("target_refunded_total_minor"),
+        refund.str_field("refunded_by"),
+        refund.str_field("note"),
+    )
+    .await
+    {
+        Ok(updated) => updated,
+        Err(error) => return err_internal("Could not reconcile successful Stripe refund", error),
+    };
+    refund = match repo::refunds::mark_succeeded(ctx, &refund.id).await {
+        Ok(refund) => refund,
+        Err(error) => return err_internal("Could not complete refund ledger", error),
+    };
+    if let Err(error) = repo::provider_operations::resolve_unleased(
+        ctx,
+        &provider_operation.id,
+        true,
+        &response_json,
+        "",
+    )
+    .await
+    {
+        return err_internal("Could not complete refund reconciliation operation", error);
+    }
+    ok_json(&refund_result(&updated, &refund))
 }

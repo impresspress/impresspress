@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Field Notes Press — Independent Field Guide</title>
+  <link rel="stylesheet" href="../shared/site.css">
+</head>
+<body class="theme-editorial" style="--accent:#2447d8;--accent-2:#ed6a5a;--paper:#f5f0e7;--display:'Iowan Old Style',Georgia,serif">
+  <header class="shell site-nav"><a class="brand" href="#"><span class="brand-mark">FN</span>Field Notes Press</a><nav class="nav-links"><a href="#preview">Preview</a><a href="#buy">Buy</a><a href="#developer">Build notes</a></nav></header>
+  <main class="shell">
+    <section class="hero" data-testid="example-hero">
+      <p class="eyebrow">Digital field manual · Edition 04</p>
+      <h1>Make a small publication feel indispensable.</h1>
+      <p class="hero-copy">A 126-page PDF and ePub playbook for independent editors, delivered immediately after Stripe confirms the order.</p>
+      <div class="hero-actions"><a class="button" href="#buy">Choose a license</a><a class="button secondary" href="#preview">Read 12 pages</a></div>
+      <div class="proof"><div><strong>PDF + ePub</strong><span>Two accessible formats</span></div><div><strong>3 devices</strong><span>Personal license default</span></div><div><strong>Instant</strong><span>Entitlement after webhook</span></div></div>
+    </section>
+    <section id="buy" class="commerce-layout">
+      <div><p class="eyebrow">Secure purchase</p><h2 class="section-heading">Your guide, your license.</h2><p class="section-copy">Choose personal or studio use. The server computes the exact entitlement price and Stripe hosts payment.</p><div class="widget-frame"><impresspress-product product-id="field-guide" presentation="hosted" credentials="omit"></impresspress-product></div></div>
+      <aside><div class="side-card"><h3>Reader journey</h3><ol class="journey"><li>Choose a license and quantity.</li><li>Review the itemized quote.</li><li>Pay on Stripe and receive a signed download entitlement.</li></ol></div><div class="side-card"><h3>Operator trail</h3><ol class="journey" data-operator-journey></ol></div></aside>
+    </section>
+    <section id="developer" class="developer"><div class="developer-grid"><div class="developer-card"><p class="eyebrow">Implementation</p><h3 data-template></h3><p><strong>Ownership:</strong> <span data-ownership></span><br><strong>Fulfillment:</strong> <span data-fulfillment></span></p><div class="badge-row" data-stripe-features></div><ol class="journey" data-developer-journey></ol></div><pre>&lt;script src="https://commerce.example/b/products/storefront.js" defer&gt;&lt;/script&gt;
+&lt;impresspress-product
+  api-base="https://commerce.example"
+  product-id="field-guide"
+  presentation="hosted"
+  credentials="omit"&gt;
+&lt;/impresspress-product&gt;</pre></div></section>
+  </main>
+  <footer><div class="shell">A static Impresspress commerce example · No framework or client-held secret.</div></footer>
+  <p data-example-error role="alert"></p><script src="http://127.0.0.1:4179/b/products/storefront.js" defer></script><script src="../shared/site.js" defer></script>
+</body></html>

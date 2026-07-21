@@ -2,8 +2,8 @@
 --
 -- Replaces the implicit `ensure_table` materialization (TEXT-only columns,
 -- no indexes) for tables owned by `impresspress/products`. CREATE TABLE
--- IF NOT EXISTS is a no-op against existing prod tables, but the CREATE
--- INDEX statements below add indexes the auto-create path was silently
+-- IF NOT EXISTS is idempotent for repeated initialization. The CREATE INDEX
+-- statements below add indexes the auto-create path was silently
 -- skipping (CollectionSchema indexes are advisory under ensure_table).
 --
 -- Also creates the `subscriptions` table which was previously missing
@@ -19,7 +19,6 @@ CREATE TABLE IF NOT EXISTS impresspress__products__products (
     name                  TEXT NOT NULL,
     description           TEXT NOT NULL DEFAULT '',
     slug                  TEXT NOT NULL DEFAULT '',
-    base_price            REAL NOT NULL DEFAULT 0,
     currency              TEXT NOT NULL DEFAULT 'USD',
     status                TEXT NOT NULL DEFAULT 'draft',
     category              TEXT NOT NULL DEFAULT '',
@@ -31,7 +30,6 @@ CREATE TABLE IF NOT EXISTS impresspress__products__products (
     type_id               TEXT NOT NULL DEFAULT '',
     group_template_id     TEXT NOT NULL DEFAULT '',
     product_template_id   TEXT NOT NULL DEFAULT '',
-    pricing_template_id   TEXT NOT NULL DEFAULT '',
     requires              TEXT NOT NULL DEFAULT '',
     created_by            TEXT NOT NULL DEFAULT '',
     deleted_at            TEXT,
@@ -50,7 +48,6 @@ CREATE TABLE IF NOT EXISTS impresspress__products__groups (
     id                  TEXT PRIMARY KEY,
     name                TEXT NOT NULL,
     description         TEXT NOT NULL DEFAULT '',
-    template_id         TEXT NOT NULL DEFAULT '',
     group_template_id   TEXT NOT NULL DEFAULT '',
     user_id             TEXT NOT NULL DEFAULT '',
     status              TEXT NOT NULL DEFAULT 'active',
@@ -67,16 +64,6 @@ CREATE TABLE IF NOT EXISTS impresspress__products__types (
     is_system   INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL,
     updated_at  TEXT NOT NULL
-);
-
--- Pricing templates -------------------------------------------------------
-CREATE TABLE IF NOT EXISTS impresspress__products__pricing_templates (
-    id              TEXT PRIMARY KEY,
-    name            TEXT NOT NULL,
-    price_formula   TEXT NOT NULL DEFAULT '',
-    template_data   TEXT NOT NULL DEFAULT '{}',
-    created_at      TEXT NOT NULL,
-    updated_at      TEXT NOT NULL
 );
 
 -- Purchases ---------------------------------------------------------------
@@ -116,9 +103,6 @@ CREATE TABLE IF NOT EXISTS impresspress__products__line_items (
     product_id    TEXT NOT NULL,
     product_name  TEXT NOT NULL DEFAULT '',
     quantity      INTEGER NOT NULL DEFAULT 1,
-    unit_price    REAL NOT NULL DEFAULT 0,
-    total_price   REAL NOT NULL DEFAULT 0,
-    variables     TEXT NOT NULL DEFAULT '{}',
     created_at    TEXT NOT NULL,
     updated_at    TEXT NOT NULL
 );
@@ -143,14 +127,12 @@ CREATE TABLE IF NOT EXISTS impresspress__products__product_templates (
     updated_at    TEXT NOT NULL
 );
 
--- Variables (pricing-formula inputs) --------------------------------------
+-- Typed offer inputs ------------------------------------------------------
 CREATE TABLE IF NOT EXISTS impresspress__products__variables (
     id             TEXT PRIMARY KEY,
     name           TEXT NOT NULL,
     var_type       TEXT NOT NULL DEFAULT 'number',
     default_value  TEXT,
-    scope          TEXT NOT NULL DEFAULT 'system',
-    product_id     TEXT NOT NULL DEFAULT '',
     created_at     TEXT NOT NULL,
     updated_at     TEXT NOT NULL
 );

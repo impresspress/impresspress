@@ -74,6 +74,15 @@ pub fn admin() -> Vec<NavGroup> {
             ],
         },
         NavGroup {
+            label: Some("Commerce".to_string()),
+            items: vec![block_item(
+                "Products",
+                "/b/products/admin/",
+                icons::shopping_cart,
+                "impresspress/products",
+            )],
+        },
+        NavGroup {
             label: Some("System".to_string()),
             items: vec![
                 item("Blocks", "/b/admin/blocks", icons::package),
@@ -147,13 +156,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn admin_has_four_labeled_groups_in_spec_order() {
+    fn admin_has_five_labeled_groups_in_spec_order() {
         let groups = admin();
         let labels: Vec<&str> = groups
             .iter()
             .map(|g| g.label.as_deref().unwrap_or(""))
             .collect();
-        assert_eq!(labels, vec!["Workspace", "Data", "Communication", "System"]);
+        assert_eq!(
+            labels,
+            vec!["Workspace", "Data", "Communication", "Commerce", "System"]
+        );
+    }
+
+    #[test]
+    fn admin_commerce_links_to_products_admin_when_registered() {
+        let groups = admin();
+        let commerce = groups
+            .iter()
+            .find(|g| g.label.as_deref() == Some("Commerce"))
+            .expect("Commerce group exists");
+        let products = commerce
+            .items
+            .iter()
+            .find(|i| i.label == "Products")
+            .expect("Products entry exists");
+        assert_eq!(products.href, "/b/products/admin/");
+        assert_eq!(products.block, Some("impresspress/products"));
     }
 
     #[test]
@@ -286,6 +314,7 @@ mod tests {
             "impresspress/vector",
             "impresspress/messages",
             "impresspress/llm",
+            "impresspress/products",
         ]
         .into();
         let before: usize = groups.iter().map(|g| g.items.len()).sum();
