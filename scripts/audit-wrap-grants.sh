@@ -67,6 +67,7 @@ fi
 # file-scope-aware fallback for `TABLE`).
 
 declare -A CONST_VALUE          # bare_name -> value (latest seen — global fallback only)
+declare -A CONST_AMBIGUOUS      # bare_name -> 1 when two files define the same bare name with DIFFERENT values; the global fallback must refuse these instead of returning whichever file grep happened to visit last
 declare -A FILE_CONST_VALUE     # "${file}::${bare_name}" -> value (per-file definitions)
 declare -A FILE_CONST_NAMES     # file -> space-separated list of locally-defined names
 declare -A FILE_USE_ALIAS       # "${file}::${alias}" -> source_name (from `use ... as alias`)
@@ -96,6 +97,9 @@ while IFS= read -r line; do
   if [[ "$rest" =~ $re_const ]]; then
     name="${BASH_REMATCH[1]}"
     value="${BASH_REMATCH[2]}"
+    if [ -n "${CONST_VALUE[$name]:-}" ] && [ "${CONST_VALUE[$name]}" != "$value" ]; then
+      CONST_AMBIGUOUS["$name"]=1
+    fi
     CONST_VALUE["$name"]="$value"
     FILE_CONST_VALUE["${file}::${name}"]="$value"
     FILE_CONST_NAMES["$file"]="${FILE_CONST_NAMES[$file]:-} $name"
@@ -548,6 +552,43 @@ resolve_token() {
       return
     fi
   fi
+  # 0c. Qualified module path whose final module segment is lowercase
+  #     (e.g. `repo::offers::TABLE`, `super::repo::purchases::TABLE`). Walk
+  #     the module path from this file to the defining .rs file and read the
+  #     const there. Rust callsites often name a module brought into scope by
+  #     a `use` of an ANCESTOR module (`repo::offers::TABLE` inside
+  #     `handlers/*.rs` where `repo/` sits at the block root), so when the
+  #     file-relative walk misses, retry from each ancestor directory up to
+  #     the blocks root. A path that reaches a real file which lacks the
+  #     const stays unresolved — never fall through to the bare-name maps,
+  #     which are ambiguous for `TABLE`.
+  if [[ "$tok" == *::* && "$tok" != Self::* && "$tok" != self::* ]]; then
+    local qmodule="${tok%::*}"
+    if [[ "$bare" =~ ^[A-Z][A-Z0-9_]*$ ]] && [[ "$qmodule" =~ (^|::)[a-z_]+$ ]]; then
+      local qfile
+      qfile="$(resolve_module_path "$file" "$qmodule")"
+      if [ -z "$qfile" ] && [[ "$qmodule" != crate::* && "$qmodule" != super::* ]]; then
+        local qdir qfs
+        qdir="$(dirname "$file")"
+        qfs="${qmodule//::/\/}"
+        while [[ "$qdir" == "$BLOCKS_DIR"* ]]; do
+          if [ -f "$qdir/$qfs.rs" ]; then qfile="$qdir/$qfs.rs"; break; fi
+          if [ -f "$qdir/$qfs/mod.rs" ]; then qfile="$qdir/$qfs/mod.rs"; break; fi
+          qdir="$(dirname "$qdir")"
+        done
+      fi
+      if [ -n "$qfile" ]; then
+        local qval
+        qval="$(lookup_const_in_file "$qfile" "$bare")"
+        if [ -n "$qval" ]; then
+          echo "$qval"
+          return
+        fi
+        echo "<unresolved:$tok>"
+        return
+      fi
+    fi
+  fi
   # 1. Per-file definition.
   if [ -n "${FILE_CONST_VALUE[${file}::${bare}]:-}" ]; then
     echo "${FILE_CONST_VALUE[${file}::${bare}]}"
@@ -607,8 +648,11 @@ resolve_token() {
   fi
   # 5. Global fallback — only safe if the bare name is unambiguous across
   #    the codebase. Used for grant declarations (top-level scope) where
-  #    file-aware lookup isn't a fit.
-  if [ -n "${CONST_VALUE[$bare]:-}" ]; then
+  #    file-aware lookup isn't a fit. Names defined with different values in
+  #    different files (`TABLE`) must stay unresolved here: returning
+  #    whichever definition grep visited last fabricates cross-block
+  #    references that fail the audit spuriously.
+  if [ -n "${CONST_VALUE[$bare]:-}" ] && [ -z "${CONST_AMBIGUOUS[$bare]:-}" ]; then
     echo "${CONST_VALUE[$bare]}"
     return
   fi
