@@ -450,8 +450,17 @@ pub async fn handle_request(
             )
         }
         Err(TerminalNotResponse::Error(err)) => {
+            // The error's OWN code decides the status. This was hardcoded 500,
+            // so a `NotFound` — which `error_code_to_http_status` maps to 404,
+            // and `PermissionDenied` to 403 — was served and logged as a server
+            // error. `resolve_error_status` is the mapping `wafer-block`
+            // already provides for exactly this; the pipeline simply never
+            // called it. A crawler reads 500 as "retry later" and 404 as "drop
+            // this URL", so the old behaviour also invited retries of URLs that
+            // will never exist. See `an_unmatched_endpoint_is_404_not_500`.
             let message = err.message.clone();
-            ("ERROR", 500, message, OutputStream::error(err))
+            let code = i64::from(http_codec::resolve_error_status(&err));
+            ("ERROR", code, message, OutputStream::error(err))
         }
         Err(TerminalNotResponse::Drop) => ("OK", 204, String::new(), OutputStream::drop_request()),
         Err(TerminalNotResponse::Continue(m)) => {
@@ -524,13 +533,118 @@ struct RequestLogRow<'a> {
 /// Shared by the buffered response tail and the streamed-download branch so a
 /// download produces the same row on every platform, whether the adapter
 /// streams or buffers its body.
+/// The stored `path` for a request that matched no route.
+///
+/// The path is attacker-supplied. Storing it verbatim lets anyone mint
+/// unbounded DISTINCT rows by walking `/aaa1`, `/aaa2`, … and puts their text
+/// into the admin UI. A 404 carries no routing information worth keeping, so
+/// every one collapses to this single label.
+pub const UNMATCHED_PATH_LABEL: &str = "<unmatched>";
+
+/// The most `request_logs` rows one isolate will write in one window.
+///
+/// The backstop. `RequestLogPolicy` reasons about WHICH requests deserve a
+/// row; this bounds HOW MANY regardless of that reasoning being right. Real
+/// 5xx traffic never approaches it; a flood hits it immediately.
+///
+/// Note the honest limit: this bounds an isolate, not the account. Cloudflare
+/// may run many isolates, so a determined flood still multiplies by that
+/// count — which is why it is the third layer and not the only one.
+pub const REQUEST_LOG_CEILING_PER_WINDOW: usize = 200;
+
+/// The ceiling's window. Long enough that a flood cannot simply wait it out at
+/// a useful rate, short enough that a genuine incident is not silenced all day.
+const REQUEST_LOG_WINDOW_MS: u64 = 3_600_000;
+
+/// What `request_logs` keeps. See [`crate::config_vars::REQUEST_LOG_CONFIG_KEY`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestLogPolicy {
+    /// Every request (minus static assets and `/health`). The default.
+    All,
+    /// Server errors only — 5xx.
+    ///
+    /// 4xx is deliberately excluded even though it looks diagnostic: it is
+    /// entirely attacker-mintable (any GET to a non-route is a 404) and
+    /// Cloudflare's edge analytics already counts it. 5xx is the only class
+    /// carrying an `error_message` no edge log can reconstruct.
+    Errors,
+    /// Nothing.
+    Off,
+}
+
+impl RequestLogPolicy {
+    /// Parse the config value. Anything unrecognised — including an empty
+    /// string — is [`RequestLogPolicy::All`], so a typo degrades to today's
+    /// behaviour rather than silently disabling the audit trail.
+    fn parse(raw: Option<&str>) -> Self {
+        match raw.map(str::trim).unwrap_or_default() {
+            "errors" => Self::Errors,
+            "off" => Self::Off,
+            _ => Self::All,
+        }
+    }
+
+    fn keeps(self, status_code: i64) -> bool {
+        match self {
+            Self::All => true,
+            Self::Errors => status_code >= 500,
+            Self::Off => false,
+        }
+    }
+}
+
+thread_local! {
+    /// `(window start ms, rows written in it)` for this isolate.
+    static REQUEST_LOG_BUDGET: Cell<(u64, usize)> = const { Cell::new((0, 0)) };
+}
+
+/// Claim one row against this isolate's ceiling; `false` means refuse to write.
+fn claim_request_log_budget(now_ms: u64) -> bool {
+    REQUEST_LOG_BUDGET.with(|budget| {
+        let (window_start, used) = budget.get();
+        let (window_start, used) = if now_ms.saturating_sub(window_start) >= REQUEST_LOG_WINDOW_MS {
+            (now_ms, 0)
+        } else {
+            (window_start, used)
+        };
+        if used >= REQUEST_LOG_CEILING_PER_WINDOW {
+            budget.set((window_start, used));
+            return false;
+        }
+        budget.set((window_start, used + 1));
+        true
+    })
+}
+
+/// Reset the isolate's ceiling. Tests only — a shared thread outlives a
+/// fixture, so without this a count would depend on test ordering.
+#[cfg(test)]
+pub(crate) fn reset_request_log_budget_for_test() {
+    REQUEST_LOG_BUDGET.with(|budget| budget.set((0, 0)));
+}
+
 async fn write_request_log(ctx: &dyn Context, row: RequestLogRow<'_>) {
     if row.path.starts_with(routing::STATIC_PREFIX) || row.path == "/health" {
         return;
     }
+    let policy =
+        RequestLogPolicy::parse(ctx.config_get(crate::config_vars::REQUEST_LOG_CONFIG_KEY));
+    if !policy.keeps(row.status_code) {
+        return;
+    }
+    if !claim_request_log_budget(crate::util::now_millis()) {
+        return;
+    }
+    // Collapse the attacker-controlled half of the key space before it is
+    // stored. See `UNMATCHED_PATH_LABEL`.
+    let path = if row.status_code == 404 {
+        UNMATCHED_PATH_LABEL
+    } else {
+        row.path
+    };
     let mut data = std::collections::HashMap::new();
     data.insert("method".to_string(), serde_json::json!(row.method));
-    data.insert("path".to_string(), serde_json::json!(row.path));
+    data.insert("path".to_string(), serde_json::json!(path));
     data.insert("status".to_string(), serde_json::json!(row.status_label));
     data.insert(
         "status_code".to_string(),
@@ -2417,5 +2531,248 @@ mod request_log_mode_tests {
         assert!(drain_queued_request_logs().is_empty(), "drain must clear");
 
         set_request_log_mode(RequestLogMode::Inline); // restore for other tests
+    }
+}
+
+#[cfg(test)]
+mod request_log_policy_tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use wafer_run::{
+        Block as RunBlock, BlockCategory, LifecycleEvent, MetaEntry, WaferError, META_RESP_STATUS,
+    };
+
+    use super::*;
+    use crate::{
+        config_vars::REQUEST_LOG_CONFIG_KEY,
+        features::AllEnabled,
+        routing::{ExtraRoute, RouteAccess},
+        test_support::{anon_msg, TestContext},
+    };
+
+    /// Answers 200. The traffic an attacker floods and Cloudflare already logs.
+    struct OkBlock;
+    #[async_trait]
+    impl RunBlock for OkBlock {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new("test/ok", "0.0.1", "echo@v1", "ok probe")
+                .category(BlockCategory::Service)
+        }
+        async fn handle(&self, _c: &dyn Context, _m: Message, _i: InputStream) -> OutputStream {
+            OutputStream::from_producer(|sink, _cancel| async move {
+                let _ = sink.send_chunk(b"ok".to_vec()).await;
+                let _ = sink.complete(vec![]).await;
+            })
+        }
+        async fn lifecycle(&self, _c: &dyn Context, _e: LifecycleEvent) -> Result<(), WaferError> {
+            Ok(())
+        }
+    }
+
+    /// Answers 500 — the only class whose `error_message` nothing else has.
+    struct BoomBlock;
+    #[async_trait]
+    impl RunBlock for BoomBlock {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new("test/boom", "0.0.1", "echo@v1", "error probe")
+                .category(BlockCategory::Service)
+        }
+        async fn handle(&self, _c: &dyn Context, _m: Message, _i: InputStream) -> OutputStream {
+            OutputStream::from_producer(|sink, _cancel| async move {
+                let _ = sink
+                    .send_meta(MetaEntry {
+                        key: META_RESP_STATUS.into(),
+                        value: "500".into(),
+                    })
+                    .await;
+                let _ = sink.send_chunk(b"boom".to_vec()).await;
+                let _ = sink.complete(vec![]).await;
+            })
+        }
+        async fn lifecycle(&self, _c: &dyn Context, _e: LifecycleEvent) -> Result<(), WaferError> {
+            Ok(())
+        }
+    }
+
+    fn route(prefix: &str, block: &str) -> Vec<ExtraRoute> {
+        vec![ExtraRoute::new(prefix, block, RouteAccess::Public)]
+    }
+
+    async fn ctx_with(policy: Option<&str>) -> TestContext {
+        let mut ctx = TestContext::with_admin().await;
+        if let Some(policy) = policy {
+            ctx.set_config(REQUEST_LOG_CONFIG_KEY, policy);
+        }
+        ctx.register_block("test/ok", Arc::new(OkBlock));
+        ctx.register_block("test/boom", Arc::new(BoomBlock));
+        ctx
+    }
+
+    async fn drive(ctx: &TestContext, path: &str, routes: &[ExtraRoute]) {
+        set_request_log_mode(RequestLogMode::Inline);
+        reset_request_log_budget_for_test();
+        let out = handle_request(
+            ctx,
+            anon_msg("retrieve", path),
+            InputStream::empty(),
+            None,
+            "test-secret",
+            false,
+            &AllEnabled,
+            &[],
+            routes,
+        )
+        .await;
+        let _ = out.collect_buffered().await;
+    }
+
+    async fn status_codes(ctx: &TestContext) -> Vec<i64> {
+        db::list_all(ctx, crate::blocks::admin::REQUEST_LOGS_TABLE, vec![])
+            .await
+            .expect("list request_logs")
+            .into_iter()
+            .map(|r| {
+                r.data
+                    .get("status_code")
+                    .and_then(serde_json::Value::as_i64)
+                    .unwrap_or_default()
+            })
+            .collect()
+    }
+
+    /// The stored `path` of every row, which is what the collapse test needs
+    /// and what a count test can also use.
+    async fn rows(ctx: &TestContext) -> Vec<String> {
+        db::list_all(ctx, crate::blocks::admin::REQUEST_LOGS_TABLE, vec![])
+            .await
+            .expect("list request_logs")
+            .into_iter()
+            .map(|r| {
+                r.data
+                    .get("path")
+                    .and_then(serde_json::Value::as_str)
+                    .unwrap_or_default()
+                    .to_string()
+            })
+            .collect()
+    }
+
+    /// The default must not change behaviour for anyone who does not set the
+    /// var: absent config means log everything, exactly as before.
+    #[tokio::test]
+    async fn the_default_policy_logs_every_request() {
+        let ctx = ctx_with(None).await;
+        drive(&ctx, "/x/ok", &route("/x/ok", "test/ok")).await;
+        assert_eq!(rows(&ctx).await.len(), 1, "absent config must mean `all`");
+    }
+
+    /// The whole point: a 200 is what a flood is made of, and Cloudflare's edge
+    /// already records it. Under `errors` it must cost zero D1 writes.
+    #[tokio::test]
+    async fn errors_policy_does_not_log_a_successful_request() {
+        let ctx = ctx_with(Some("errors")).await;
+        drive(&ctx, "/x/ok", &route("/x/ok", "test/ok")).await;
+        assert_eq!(
+            rows(&ctx).await.len(),
+            0,
+            "a 200 under `errors` must write nothing"
+        );
+    }
+
+    /// …but the 5xx must survive, because its `error_message` is the one field
+    /// no edge log can reconstruct.
+    #[tokio::test]
+    async fn errors_policy_still_logs_a_server_error() {
+        let ctx = ctx_with(Some("errors")).await;
+        drive(&ctx, "/x/boom", &route("/x/boom", "test/boom")).await;
+        assert_eq!(
+            rows(&ctx).await.len(),
+            1,
+            "a 5xx under `errors` must still be recorded"
+        );
+    }
+
+    /// A 404 is fully attacker-minted and the edge counts it for free.
+    #[tokio::test]
+    async fn errors_policy_does_not_log_a_client_error() {
+        let ctx = ctx_with(Some("errors")).await;
+        drive(&ctx, "/x/nope", &[]).await;
+        assert_eq!(
+            rows(&ctx).await.len(),
+            0,
+            "4xx is attacker-controlled volume; the edge already has it"
+        );
+    }
+
+    #[tokio::test]
+    async fn off_policy_logs_nothing_at_all() {
+        let ctx = ctx_with(Some("off")).await;
+        drive(&ctx, "/x/boom", &route("/x/boom", "test/boom")).await;
+        assert_eq!(rows(&ctx).await.len(), 0, "`off` must write nothing");
+    }
+
+    /// The path is attacker-supplied. Storing it verbatim lets anyone mint
+    /// unbounded DISTINCT rows — and puts their text in the admin UI. An
+    /// unmatched route must collapse to one fixed label.
+    #[tokio::test]
+    async fn an_unmatched_path_is_collapsed_not_stored_verbatim() {
+        let ctx = ctx_with(Some("all")).await;
+        drive(&ctx, "/x/../attacker-controlled-junk-9f2", &[]).await;
+        let rows = rows(&ctx).await;
+        assert_eq!(rows.len(), 1, "the request is still counted");
+        assert_eq!(
+            rows[0], UNMATCHED_PATH_LABEL,
+            "an unmatched path must be collapsed, not echoed into the table"
+        );
+    }
+
+    /// The backstop. Whatever the policy reasoning, one isolate cannot be made
+    /// to write without limit — this is what makes the worst case bounded.
+    #[tokio::test]
+    async fn a_flood_cannot_exceed_the_per_isolate_write_ceiling() {
+        let ctx = ctx_with(Some("all")).await;
+        set_request_log_mode(RequestLogMode::Inline);
+        reset_request_log_budget_for_test();
+        for _ in 0..(REQUEST_LOG_CEILING_PER_WINDOW + 25) {
+            let out = handle_request(
+                &ctx,
+                anon_msg("retrieve", "/x/ok"),
+                InputStream::empty(),
+                None,
+                "test-secret",
+                false,
+                &AllEnabled,
+                &[],
+                &route("/x/ok", "test/ok"),
+            )
+            .await;
+            let _ = out.collect_buffered().await;
+        }
+        assert_eq!(
+            rows(&ctx).await.len(),
+            REQUEST_LOG_CEILING_PER_WINDOW,
+            "the ceiling must hold no matter how many requests arrive"
+        );
+    }
+
+    /// An error's own code must decide the status.
+    ///
+    /// `pipeline` hardcoded 500 for every `TerminalNotResponse::Error`, so a
+    /// `NotFound` — which `http_codec::error_code_to_http_status` maps to 404 —
+    /// was served, and logged, as a server error. That is wrong on its own
+    /// terms (a crawler reads 500 as "retry later" and 404 as "drop it"), and
+    /// it defeats `RequestLogPolicy::Errors`: every attacker-minted junk URL
+    /// would count as a 5xx and be logged.
+    #[tokio::test]
+    async fn an_unmatched_endpoint_is_404_not_500() {
+        let ctx = ctx_with(Some("all")).await;
+        drive(&ctx, "/x/nope", &[]).await;
+        let codes = status_codes(&ctx).await;
+        assert_eq!(
+            codes,
+            vec![404],
+            "an unroutable endpoint is a client error, not a server error"
+        );
     }
 }

@@ -1206,6 +1206,17 @@ where
             strict.to_string(),
         );
     }
+    // Same reasoning as STRICT_SCHEMA above, and the same explicit thread-
+    // through for the same reason: CF's config snapshot is deliberately
+    // minimal, so an operational knob that is not a secret and not a block
+    // setting has to be carried by hand. Absent var ⇒ key absent ⇒ `all`,
+    // which is the behaviour every existing deployment already has.
+    if let Ok(request_log) = env.var(impresspress_core::config_vars::REQUEST_LOG_CONFIG_KEY) {
+        cfg_svc_map.insert(
+            impresspress_core::config_vars::REQUEST_LOG_CONFIG_KEY.to_string(),
+            request_log.to_string(),
+        );
+    }
     cfg_svc_map.insert(
         impresspress_core::features::BLOCK_SETTINGS_CONFIG_KEY.to_string(),
         block_settings.to_config_json(),

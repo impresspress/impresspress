@@ -50,6 +50,28 @@ pub const CORS_ALLOWED_ORIGINS_KEY: &str = "WAFER_RUN_SHARED__CORS_ALLOWED_ORIGI
 /// survive regardless of what is set here.
 pub const CSP_DIRECTIVES_KEY: &str = "WAFER_RUN_SHARED__CSP_DIRECTIVES";
 
+/// What `request_logs` keeps: `all` (default), `errors`, or `off`.
+///
+/// A deploy-time operational knob, not an admin-editable runtime toggle, so it
+/// is threaded explicitly the way `WAFER_RUN__DATABASE__STRICT_SCHEMA` is
+/// rather than travelling through the config bridge. Absent ⇒ `all`, which is
+/// the behaviour every existing deployment already has.
+///
+/// # Why this exists
+///
+/// A row per request on a public unauthenticated route is audit F-07 and is
+/// what guideline rule 9 forbids: anyone can mint rows by sending GETs. On
+/// Cloudflare D1 the cost is concrete — one insert is 3 rows written (the row,
+/// the `id` PRIMARY KEY autoindex, the `created_at` index), so 33,333 requests
+/// exhaust a free tier's entire 100,000 writes/day. Measured on one production
+/// site on 2026-09-04: 4,042 requests/hour, ~291,000 rows/day written, and
+/// request logs were 100% of all writes.
+///
+/// `errors` keeps the only field an edge log cannot reconstruct — the app's
+/// own `error_message` on a 5xx — and drops the rest, which Cloudflare's
+/// request analytics already records for free.
+pub const REQUEST_LOG_CONFIG_KEY: &str = "IMPRESSPRESS_REQUEST_LOG";
+
 /// Default value for [`CSP_DIRECTIVES_KEY`] — the Stripe origins that
 /// embedded Checkout and Stripe.js require, per
 /// `docs/products-stripe-commerce.md`. Additive only: these widen
