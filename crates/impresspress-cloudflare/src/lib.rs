@@ -64,7 +64,36 @@ fn make_d1_database_service_concrete(
     binding: &str,
 ) -> Result<Arc<database::D1DatabaseService>, worker::Error> {
     let db = env.d1(binding)?;
-    Ok(Arc::new(database::D1DatabaseService::new(db)))
+    let service = database::D1DatabaseService::new(db);
+    // Apply STRICT_SCHEMA at CONSTRUCTION, not only at block Init.
+    //
+    // `ScopedDatabaseService::current` pushes the flag onto the shared service
+    // before each call, so the request path is covered. Two callers are not:
+    // this constructor is used directly for the request-log drain
+    // (`ctx.wait_until`) and for the pre-Init window, and each gets a service
+    // whose `strict_schema` is still `false` and whose `SchemaCache` is brand
+    // new. `create_many` then calls `ensure_data_columns`, which introspects,
+    // and the cache can never be warm because the service does not outlive the
+    // request.
+    //
+    // Measured on a production site, 2026-09-04: 4,042 drain inserts an hour
+    // produced 4,042 of 5,478 `pragma_table_info` calls -- ~95,000 D1 rows read
+    // an hour, ~2.3M a day, to re-derive a schema the migrations own and the
+    // var already says to trust.
+    let strict = env
+        .var(wafer_core::interfaces::database::handler::STRICT_SCHEMA_CONFIG_KEY)
+        .map(|v| v.to_string())
+        .map(|v| {
+            // Mirrors wafer-core's private `config_flag_enabled`.
+            let v = v.trim();
+            v.eq_ignore_ascii_case("true") || v == "1"
+        })
+        .unwrap_or(false);
+    if strict {
+        use wafer_core::interfaces::database::service::DatabaseService as _;
+        service.set_strict_schema(true);
+    }
+    Ok(Arc::new(service))
 }
 
 /// Construct a [`DatabaseService`] backed by D1 with a Cloudflare KV cache
