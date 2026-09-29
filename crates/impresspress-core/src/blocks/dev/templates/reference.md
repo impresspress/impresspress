@@ -6,17 +6,23 @@ compiler in this sandbox is not the one on your laptop, and the rules below
 are what the sandbox refuses a block for.
 
 Scaffold one with `dev_create_block` rather than writing the files by hand —
-it writes the vendored support module for you, and that module is the whole
-SDK.
+it writes the one dependency the manifest may name, and the one macro call
+`lib.rs` needs, exactly as the compiler expects them.
 
 ## Layout
 
 ```
 blocks/<name>/
-  Cargo.toml            # no dependencies, ever
+  Cargo.toml            # one dependency: wafer_guest, by path
   src/lib.rs            # your block
-  src/wafer_guest.rs    # vendored support module — do not edit
 ```
+
+The SDK is the `wafer_guest` crate, and it is not part of your block: it lives
+at `../../wafer_guest` relative to the block, beside `blocks/` rather than
+inside it. You never write it — the compiler places it there, from
+`GET /b/dev/api/guest`, which also answers with its source if you want to read
+it. It is built once when the compiler starts, so compiling your block
+rebuilds only your own crate.
 
 `<name>` is 2–32 characters matching `^[a-z][a-z0-9-]{1,31}$`, with no
 doubled hyphen and no trailing hyphen. It is a directory, a crate name and
@@ -54,15 +60,23 @@ Naming anything outside those is refused when the block is staged, with a
 diagnostic (`cap-collection`, `cap-folder`, `cap-config`,
 `endpoint-outside-routes`) naming the entry.
 
-## `Cargo.toml`: no dependencies
+## `Cargo.toml`: one dependency, no registry
 
 The compiler runs in your browser and **has no registry access**. It can
-build `core` and `std` and nothing else, so the `[dependencies]` table is
-empty and stays empty. Adding a crate does not produce a slow build — it
-produces a build that cannot start.
+build `core`, `std` and crates it already has on disk, so the
+`[dependencies]` table holds exactly one entry and keeps it:
 
-Everything you would reach for a crate for is in `src/wafer_guest.rs`: JSON,
-the request/response types, schemas, and the database / storage / config
+```toml
+[dependencies]
+wafer_guest = { path = "../../wafer_guest" }
+```
+
+Leave that line as it is — the path is the same in the workspace, in the
+compiler and in an export, and nothing rewrites it. Adding any other crate
+does not produce a slow build — it produces a build that cannot start.
+
+Everything you would reach for a crate for is in `wafer_guest`: JSON, the
+request/response types, schemas, and the database / storage / config
 clients. No `serde`, no `serde_json`, no `uuid`, no `chrono`.
 
 There are no procedural macros either, so there is nothing to derive. A
@@ -78,8 +92,10 @@ diagnostic. (Hyphens become underscores in the file name, as cargo does it:
 
 ## The `block()` and `init()` functions
 
-`src/lib.rs` must define exactly two public functions. The vendored module's
-ABI exports call them; nothing else is required of you.
+`src/lib.rs` must define exactly two public functions and hand them to
+`wafer_guest::export!(block, init);`, which stamps the ABI exports the host
+calls into your crate and wires them to these two. Nothing else is required
+of you.
 
 ```rust
 pub fn block() -> Block;
@@ -418,7 +434,10 @@ The scaffolded `[profile.release]` (`opt-level = "z"`, `lto = false`,
 `codegen-units = 1`, `panic = "abort"`, `strip = true`) is what keeps a block
 well inside the 4 MiB limit while compiling quickly. LTO is off on purpose:
 it roughly doubles the compile time to save about 20 KB of artifact. Do not
-remove these settings.
+remove these settings. Cargo builds `wafer_guest` with your block's profile
+too, so a block whose profile differs from the scaffolded one makes the
+compiler rebuild the guest crate for it — about 30 seconds added to that
+compile.
 
 A block needing something on the "never granted" list is not a block: put
 that work in a page, which talks to other origins over HTTP like any web
@@ -464,7 +483,7 @@ The codes you are most likely to see:
 | `package-name` | `Cargo.toml`'s `[package] name` must be the block's directory name |
 | `nested-source` | A file in any subdirectory — the crate is `Cargo.toml` plus a flat `src/` |
 | `artifact-too-large` | Restore the `[profile.release]` size settings |
-| `wafer-guest-version` | The block was built against an older `wafer_guest.rs`: replace its `src/wafer_guest.rs` with `wafer_guest_module` from `GET /b/dev/api/reference`, then compile again |
+| `wafer-guest-version` | The compiler session was built against a different guest crate than this sandbox: reload the workspace page and compile again — the block's own files are not at fault |
 | `guest-load` / `guest-info` / `guest-init` / `guest-probe` | The module was loaded and something failed at that stage — the message is the host's |
 
 ## Template: `hello`

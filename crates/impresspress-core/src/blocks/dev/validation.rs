@@ -240,19 +240,21 @@ impl Diagnostic {
         )
     }
 
-    /// The refusal a block built against a stale guest crate produces.
+    /// The refusal a block built against a different guest crate version
+    /// produces.
     ///
     /// The `wafer_guest` crate IS the ABI: it renders the `BlockInfo` the
     /// validator reads, decodes the request frame and writes the response
-    /// frame. A block built against an older copy is therefore speaking a
-    /// contract this runtime no longer guarantees, and the failure that would
+    /// frame. A block built against another version is therefore speaking a
+    /// contract this runtime does not guarantee, and the failure that would
     /// surface — a trap, or a `BlockInfo` that does not parse — says nothing
     /// about the cause.
     ///
     /// The block's own files are not at fault: the crate comes from the
-    /// compiler session, which fetched it from `GET /b/dev/api/guest` when
-    /// the workspace page loaded. A stale version means that page predates
-    /// the bundle now serving, so the remedy is to reload it and recompile.
+    /// compiler session, which the page started from `GET /b/dev/api/guest`.
+    /// A mismatch means that session was started from a different bundle
+    /// than the one now serving — older or newer, the check is equality — so
+    /// the remedy is to reload the page and recompile.
     ///
     /// Refused before the artifact is stored or executed: the version is
     /// knowable without running anything, and the fix does not depend on
@@ -262,8 +264,8 @@ impl Diagnostic {
             WAFER_GUEST_VERSION_CODE,
             format!(
                 "the artifact was compiled against wafer_guest version {reported}; this \
-                 sandbox speaks version {current}. The compiler session was started from an \
-                 older bundle than the one now serving: reload the workspace page (a fresh \
+                 sandbox speaks version {current}. The compiler session was started from a \
+                 different bundle than the one now serving: reload the workspace page (a fresh \
                  session builds against the current crate) and compile again; the block's \
                  own files are unchanged."
             ),

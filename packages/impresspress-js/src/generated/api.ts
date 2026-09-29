@@ -2705,7 +2705,12 @@ export interface paths {
                              *     once at start-up so the crate above is compiled before any real block.
                              */
                             warmup: {
-                                /** @description Cargo's package name, which names the artifact and the VFS directory. */
+                                /**
+                                 * @description Cargo's package name, which names the artifact and the VFS directory:
+                                 *     the crate is built at `blocks/<crate_name>/`, with `blocks/` beside
+                                 *     `wafer_guest/`, which is the layout its `../../wafer_guest` dependency
+                                 *     needs.
+                                 */
                                 crate_name: string;
                                 /** @description Crate-relative paths: `Cargo.toml`, `src/lib.rs`. */
                                 files: {

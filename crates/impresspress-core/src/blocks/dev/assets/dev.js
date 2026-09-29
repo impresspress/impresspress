@@ -1021,7 +1021,16 @@ async function ensureCompiler(onProgress) {
   }
   if (!compiler) {
     if (!guestCrate) {
-      guestCrate = await json(await api.get('/b/dev/api/guest'));
+      // Named, because the caller is a compile: a bare transport or HTTP
+      // error would read as the build's own failure. `guestCrate` is only
+      // assigned on success, so the next compile fetches again.
+      try {
+        guestCrate = await json(await api.get('/b/dev/api/guest'));
+      } catch (error) {
+        throw new Error(
+          'fetching the guest crate: ' + (error && error.message ? error.message : String(error))
+        );
+      }
     }
     compiler = new BrowserRustCompiler(compilerManifest, { guest: guestCrate });
   }

@@ -286,7 +286,8 @@ async fn reference_returns_the_authoring_guide() {
         "agent_tool",
         "site__<name>__",
         "wasm32-wasip1",
-        "no dependencies",
+        "no registry access",
+        r#"wafer_guest = { path = "../../wafer_guest" }"#,
     ] {
         assert!(
             markdown.contains(needle),

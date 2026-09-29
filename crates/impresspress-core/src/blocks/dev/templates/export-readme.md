@@ -60,8 +60,14 @@ imports `seed/`, so it takes a few seconds; every load after that is instant.
         toolchain on your own machine, run
         `cargo build --release --target wasm32-wasip1` inside
         `seed/blocks/<name>/`; the SDK is the only dependency, so no crate
-        registry is needed. The rule for `seed/manifest.json` above still
-        holds for anything you put back under `seed/`.
+        registry is needed. The module lands at
+        `seed/blocks/<name>/target/wasm32-wasip1/release/<crate>.wasm`, where
+        `<crate>` is the block's name with hyphens spelled as underscores
+        (`my-shop` builds `my_shop.wasm`). Putting it back means copying it
+        over `seed/blocks/<name>.wasm` and updating that block's
+        `spec.artifact_sha256` in `seed/manifest.json` to the new file's SHA-256 —
+        the rule for `seed/manifest.json` above holds for anything you put
+        back under `seed/`, edited sources included.
 
     seed/data.json
         A snapshot of the data the sandbox held: products, offers and their

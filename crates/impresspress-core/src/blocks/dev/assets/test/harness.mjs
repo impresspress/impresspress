@@ -39,7 +39,7 @@ const tail = fs.readFileSync(path.join(here, '..', 'dev.js'), 'utf8');
  *   `base64` is how the real endpoint reports a file that is not text, which
  *   is the case `snapshotBlock` has to refuse.
  * @param {Function} [options.compiler]  what the tail's
- *   `new BrowserRustCompiler(manifest)` builds. In the shipped page this
+ *   `new BrowserRustCompiler(manifest, { guest })` builds. In the shipped page this
  *   binding comes from the module import `assets.rs` emits ahead of the IIFE
  *   (`DEV_JS_IMPORTS`); the harness reads the TAIL, which has no import, so it
  *   is supplied here instead.

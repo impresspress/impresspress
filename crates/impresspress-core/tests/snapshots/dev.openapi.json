@@ -2237,7 +2237,7 @@
                     "description": "The `hello` template scaffolded as `hello`: what the compiler builds\nonce at start-up so the crate above is compiled before any real block.",
                     "properties": {
                       "crate_name": {
-                        "description": "Cargo's package name, which names the artifact and the VFS directory.",
+                        "description": "Cargo's package name, which names the artifact and the VFS directory:\nthe crate is built at `blocks/<crate_name>/`, with `blocks/` beside\n`wafer_guest/`, which is the layout its `../../wafer_guest` dependency\nneeds.",
                         "type": "string"
                       },
                       "files": {

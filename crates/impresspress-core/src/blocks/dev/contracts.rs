@@ -544,7 +544,10 @@ pub struct GuestResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct WarmupCrate {
-    /// Cargo's package name, which names the artifact and the VFS directory.
+    /// Cargo's package name, which names the artifact and the VFS directory:
+    /// the crate is built at `blocks/<crate_name>/`, with `blocks/` beside
+    /// `wafer_guest/`, which is the layout its `../../wafer_guest` dependency
+    /// needs.
     pub crate_name: String,
     /// Crate-relative paths: `Cargo.toml`, `src/lib.rs`.
     pub files: std::collections::BTreeMap<String, String>,

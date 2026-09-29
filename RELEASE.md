@@ -684,6 +684,37 @@ header: it must identify the caller through `request.user_id` /
 `request.roles`, which the host fills in. Staging already refused a block that
 declared either header (`cap-headers`), so no accepted block was granted them.
 
+### Dev sandbox: blocks depend on the `wafer_guest` crate
+
+**What changes.** The guest SDK is a crate, `crates/wafer-guest`, instead of a
+module copied into every block. A scaffolded block is two files: `Cargo.toml`,
+whose one dependency is `wafer_guest = { path = "../../wafer_guest" }`, and
+`src/lib.rs`, which says `use wafer_guest::*;` and
+`wafer_guest::export!(block, init);`. The compiler builds the crate once when
+its session starts (about 30 seconds) and then rebuilds only the block, so a
+compile takes a few seconds instead of about 20. `GET /b/dev/api/guest` serves
+the crate; the reference no longer carries `wafer_guest_module`. An export
+archive now carries `seed/wafer_guest/` beside `seed/blocks/` whenever it has a
+block. The compiler dist moves to `807ace9e.2`.
+
+**Your blocks.** Nothing breaks. The guest ABI version is unchanged at 2, so a
+block already compiled keeps serving, and a seed archive that carries one
+still imports. A block scaffolded before this release — three files, with its
+own `src/wafer_guest.rs` and `mod wafer_guest;` — still compiles, just slower:
+it rebuilds its copy of the module on every compile.
+
+**What to do.** Nothing is required. To get the fast compile for an existing
+block, either scaffold it again and move your code across, or edit it in
+place: in `Cargo.toml`, add `wafer_guest = { path = "../../wafer_guest" }`
+under `[dependencies]` and set `lto = false` in `[profile.release]` (cargo
+builds the guest crate with the block's profile, so a block whose profile
+differs from the scaffolded one pays a guest rebuild of about 30 seconds); in
+`src/lib.rs`, replace `mod wafer_guest;` (with its `#[cfg]` line) and
+`use crate::wafer_guest::*;` with
+`use wafer_guest::*;` and `wafer_guest::export!(block, init);`; then delete
+`src/wafer_guest.rs` and compile again. Re-export any seed bundle afterwards
+if you want it to carry the new layout.
+
 ### Dev sandbox: blocks built before this release must be recompiled (guest ABI 2)
 
 **What changes.** The host refuses a list query with a page size of `0`, and the
