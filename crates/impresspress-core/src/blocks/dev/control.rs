@@ -109,7 +109,8 @@ pub struct DynamicBlockSpec {
     /// here, and compared field-by-field in the `PartialEq` impl below.
     #[schemars(with = "serde_json::Value")]
     pub capabilities: wafer_block::BlockCapabilities,
-    /// `wafer_guest.rs` ABI version the artifact was built against.
+    /// `WAFER_GUEST_VERSION` of the `wafer_guest` crate the artifact was
+    /// built against; `0` when the compiler did not report one.
     pub wafer_guest_version: u32,
 }
 

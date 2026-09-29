@@ -1,5 +1,5 @@
 //! Scaffolding a block and reading the authoring reference —
-//! `POST /b/dev/api/blocks` and `GET /b/dev/api/reference`.
+//! `POST /b/dev/api/blocks`, `GET /b/dev/api/reference` and `GET /b/dev/api/guest`.
 //!
 //! Gated on `block-dev` for the same reason the other `dev_*.rs` files are:
 //! the block does not exist in a default-feature build, so these tests must
@@ -300,6 +300,42 @@ async fn reference_returns_the_authoring_guide() {
 }
 
 // ---------------------------------------------------------------------------
+// GET /b/dev/api/guest
+// ---------------------------------------------------------------------------
+
+/// What the page hands the compiler at start-up: the guest crate and a block
+/// to build it with. Crate-relative paths, because that is what the worker
+/// writes and what the export archive lays down.
+#[tokio::test]
+async fn the_guest_endpoint_hands_out_the_crate_and_a_warmup_block() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    let body = output_json(
+        ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/guest"))
+            .await,
+    )
+    .await;
+    assert_eq!(body["version"], WAFER_GUEST_VERSION);
+    assert_eq!(
+        body["files"]["Cargo.toml"].as_str(),
+        Some(impresspress_core::blocks::dev::scaffold::GUEST_CARGO_TOML)
+    );
+    assert!(body["files"]["src/lib.rs"]
+        .as_str()
+        .expect("lib.rs")
+        .contains("pub const WAFER_GUEST_VERSION"));
+    assert_eq!(body["warmup"]["crate_name"], "hello");
+    let warmup = body["warmup"]["files"].as_object().expect("warmup files");
+    assert_eq!(
+        warmup.keys().collect::<Vec<_>>(),
+        vec!["Cargo.toml", "src/lib.rs"]
+    );
+    assert!(warmup["Cargo.toml"]
+        .as_str()
+        .expect("Cargo.toml")
+        .contains("path = \"../../wafer_guest\""));
+}
+
+// ---------------------------------------------------------------------------
 // The guest-module version gate
 // ---------------------------------------------------------------------------
 
@@ -327,6 +363,12 @@ async fn staging_with_a_stale_module_version_is_a_diagnostic() {
     .await;
     assert_eq!(body["success"], false);
     assert_eq!(body["diagnostics"][0]["code"], "wafer-guest-version");
+    let message = body["diagnostics"][0]["message"].as_str().expect("message");
+    assert!(message.contains("reload"), "names the remedy: {message}");
+    assert!(
+        !message.contains("wafer_guest_module"),
+        "no retired field: {message}"
+    );
     // Refused before the artifact was executed: nothing was inspected and
     // nothing was activated.
     assert_eq!(control.inspections(), 0);

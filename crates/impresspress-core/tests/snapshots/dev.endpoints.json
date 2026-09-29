@@ -5,6 +5,7 @@
   "GET /b/dev/api/files admin",
   "GET /b/dev/api/generations admin",
   "GET /b/dev/api/generations/{id} admin",
+  "GET /b/dev/api/guest admin",
   "GET /b/dev/api/reference admin",
   "GET /b/dev/api/status admin",
   "GET /b/dev/api/tools.json admin",

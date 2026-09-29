@@ -137,8 +137,8 @@ pub const TOO_MANY_BLOCKS: &str = "too-many-blocks";
 pub const BUILD_ROW_MISSING: &str = "build-row-missing";
 /// The artifact is over [`MAX_ARTIFACT_BYTES`].
 pub const ARTIFACT_TOO_LARGE: &str = "artifact-too-large";
-/// The artifact was compiled against a `wafer_guest.rs` that is not the one
-/// the sandbox scaffolds.
+/// The artifact was compiled against a `wafer_guest` crate version that is
+/// not the one the sandbox serves.
 pub const WAFER_GUEST_VERSION_CODE: &str = "wafer-guest-version";
 /// A staged build the previous process did not finish, retired on the next
 /// boot (`super::activation::converge_on_boot`).
@@ -240,27 +240,32 @@ impl Diagnostic {
         )
     }
 
-    /// The refusal a stale vendored guest module produces.
+    /// The refusal a block built against a stale guest crate produces.
     ///
-    /// The module IS the ABI: it renders the `BlockInfo` the validator reads,
-    /// decodes the request frame and writes the response frame. A block built
-    /// against an older copy is therefore speaking a contract this runtime no
-    /// longer guarantees, and the failure that would surface — a trap, or a
-    /// `BlockInfo` that does not parse — says nothing about the cause.
+    /// The `wafer_guest` crate IS the ABI: it renders the `BlockInfo` the
+    /// validator reads, decodes the request frame and writes the response
+    /// frame. A block built against an older copy is therefore speaking a
+    /// contract this runtime no longer guarantees, and the failure that would
+    /// surface — a trap, or a `BlockInfo` that does not parse — says nothing
+    /// about the cause.
+    ///
+    /// The block's own files are not at fault: the crate comes from the
+    /// compiler session, which fetched it from `GET /b/dev/api/guest` when
+    /// the workspace page loaded. A stale version means that page predates
+    /// the bundle now serving, so the remedy is to reload it and recompile.
     ///
     /// Refused before the artifact is stored or executed: the version is
-    /// knowable without running anything, and the fix (replace the module,
-    /// then recompile) does not depend on what the module would have
-    /// reported.
+    /// knowable without running anything, and the fix does not depend on
+    /// what the artifact would have reported.
     pub fn stale_guest_module(reported: u32, current: u32) -> Self {
         Self::error(
             WAFER_GUEST_VERSION_CODE,
             format!(
-                "the artifact was compiled against wafer_guest.rs version {reported}; this \
-                 sandbox writes and speaks version {current}. Replace the block's \
-                 src/wafer_guest.rs with the current module (`wafer_guest_module` in \
-                 GET /b/dev/api/reference) and compile again; the block's own files are \
-                 unchanged."
+                "the artifact was compiled against wafer_guest version {reported}; this \
+                 sandbox speaks version {current}. The compiler session was started from an \
+                 older bundle than the one now serving: reload the workspace page (a fresh \
+                 session builds against the current crate) and compile again; the block's \
+                 own files are unchanged."
             ),
         )
     }

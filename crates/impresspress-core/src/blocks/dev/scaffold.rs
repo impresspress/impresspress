@@ -1,5 +1,6 @@
-//! `POST /b/dev/api/blocks` and `GET /b/dev/api/reference` — starting a block,
-//! and the guide for writing one.
+//! `POST /b/dev/api/blocks`, `GET /b/dev/api/reference` and
+//! `GET /b/dev/api/guest` — starting a block, the guide for writing one, and
+//! the SDK crate it is compiled against.
 //!
 //! # Why a scaffolder and not a documented file list
 //!
@@ -28,7 +29,10 @@ use wafer_run::{context::Context, ErrorCode, InputStream, OutputStream};
 
 use super::{
     blobs,
-    contracts::{CreateBlockRequest, CreateBlockResponse, FileConflict, ReferenceResponse},
+    contracts::{
+        CreateBlockRequest, CreateBlockResponse, FileConflict, GuestResponse, ReferenceResponse,
+        WarmupCrate,
+    },
     files, no_store, no_store_db_error_internal, no_store_error,
     paths::{self, WorkspaceArea, BLOCK_NAME_RULE},
     validation, workspace, DevShared, WAFER_GUEST_VERSION,
@@ -329,6 +333,29 @@ pub async fn handle_reference(_ctx: &dyn Context) -> OutputStream {
     no_store().json(&ReferenceResponse {
         wafer_guest_version: WAFER_GUEST_VERSION,
         markdown: reference_markdown(),
+    })
+}
+
+/// `GET /b/dev/api/guest` — the guest crate and a warm-up block.
+pub async fn handle_guest(_ctx: &dyn Context) -> OutputStream {
+    let prefix = format!("{}hello/", workspace::BLOCKS_PREFIX);
+    let files = Template::Hello
+        .files("hello")
+        .into_iter()
+        .map(|(path, content)| {
+            let relative = path
+                .strip_prefix(&prefix)
+                .expect("Template::files writes under blocks/<name>/");
+            (relative.to_string(), content)
+        })
+        .collect();
+    no_store().json(&GuestResponse {
+        version: WAFER_GUEST_VERSION,
+        files: guest_files(),
+        warmup: WarmupCrate {
+            crate_name: "hello".to_string(),
+            files,
+        },
     })
 }
 
