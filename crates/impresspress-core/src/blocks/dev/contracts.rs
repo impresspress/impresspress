@@ -339,6 +339,9 @@ pub struct FileWriteResponse {
     /// under `site/` publishes; a write under `blocks/` does not — only a
     /// compile turns block source into a published block.
     pub generation: Option<GenerationSummary>,
+    /// One entry per phase the write's activation passed through, with how
+    /// long it took. The last is `active`. Empty when nothing was published.
+    pub progress: Vec<ProgressStep>,
 }
 
 /// Request of `POST /b/dev/api/files/delete`.

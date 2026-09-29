@@ -10,7 +10,7 @@ use impresspress_core::{
         activation::{self, ActivationError, ActivationIntent},
         artifacts, blobs,
         contracts::SiteManifest,
-        control::{DynamicBlockSpec, DynamicRoute, RouteAccessKind},
+        control::{DynamicBlockSpec, DynamicRoute, GenerationAnnouncement, RouteAccessKind},
         generation::{self, GenerationManifest},
         repo::{
             self,
@@ -94,6 +94,84 @@ async fn a_site_write_creates_and_activates_a_generation_without_rebuilding_the_
     assert_eq!(status["activation"], serde_json::Value::Null);
 }
 
+// ---------------------------------------------------------------------------
+// An activation is announced to the page (design §2.6)
+// ---------------------------------------------------------------------------
+
+/// The announcement an activation of generation `id` is expected to make.
+fn announced(
+    id: &serde_json::Value,
+    cause: GenerationCause,
+    paths: &[&str],
+) -> GenerationAnnouncement {
+    GenerationAnnouncement {
+        id: id.as_str().expect("generation id").to_string(),
+        cause,
+        changed_paths: paths.iter().map(|p| p.to_string()).collect(),
+    }
+}
+
+#[tokio::test]
+async fn a_site_write_announces_its_generation_with_the_paths_it_published() {
+    let control = FakeControl::new();
+    let ctx = TestContext::with_dev(control.clone()).await;
+
+    let first = write_file(&ctx, "site/index.html", "<h1>v1</h1>", None).await;
+    assert_eq!(
+        control.announcements(),
+        vec![announced(
+            &first["generation"]["id"],
+            GenerationCause::SiteWrite,
+            &["site/index.html"],
+        )]
+    );
+
+    // Only what this generation published: the unchanged `index.html` is not
+    // named again, which is what lets the page treat a stylesheet edit as
+    // CSS-only.
+    let second = write_file(&ctx, "site/style.css", "a{}", None).await;
+    assert_eq!(
+        control.announcements(),
+        vec![
+            announced(
+                &first["generation"]["id"],
+                GenerationCause::SiteWrite,
+                &["site/index.html"],
+            ),
+            announced(
+                &second["generation"]["id"],
+                GenerationCause::SiteWrite,
+                &["site/style.css"],
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_site_delete_announces_the_path_it_removed() {
+    let control = FakeControl::new();
+    let ctx = TestContext::with_dev(control.clone()).await;
+    let w = write_file(&ctx, "site/a.css", "a{}", None).await;
+
+    let d = output_json(
+        dev_post(
+            &ctx,
+            "/b/dev/api/files/delete",
+            json!({"path": "site/a.css", "expected_sha256": w["sha256"]}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(
+        control.announcements().last(),
+        Some(&announced(
+            &d["generation"]["id"],
+            GenerationCause::SiteDelete,
+            &["site/a.css"],
+        ))
+    );
+}
+
 #[tokio::test]
 async fn deleting_a_site_file_removes_it_from_the_served_folder() {
     let ctx = TestContext::with_dev(FakeControl::new()).await;
@@ -128,6 +206,8 @@ async fn block_source_writes_do_not_create_generations() {
 
     let w = write_file(&ctx, "blocks/hello/src/lib.rs", "// rust", None).await;
     assert_eq!(w["generation"], serde_json::Value::Null);
+    // Nothing activated, so no phase ran.
+    assert_eq!(w["progress"], json!([]));
 
     let l = output_json(dev_get(&ctx, "/b/dev/api/generations").await).await;
     assert!(
@@ -643,6 +723,11 @@ async fn a_failed_runtime_rebuild_leaves_the_previous_generation_active() {
     assert_eq!(l["generations"][0]["status"], "failed");
     assert_eq!(l["generations"][0]["cause"], "block_compile");
     assert_eq!(l["generations"][1]["status"], "active");
+    // A generation that never went live is never announced: only the site
+    // write before it reached the page.
+    let announcements = control.announcements();
+    assert_eq!(announcements.len(), 1, "{announcements:?}");
+    assert_eq!(announcements[0].id, before["active_generation"]["id"]);
 }
 
 #[tokio::test]

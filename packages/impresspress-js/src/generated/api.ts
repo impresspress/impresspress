@@ -2352,6 +2352,21 @@ export interface paths {
                             /** @description Workspace-relative path that was written. */
                             path: string;
                             /**
+                             * @description One entry per phase the write's activation passed through, with how
+                             *     long it took. The last is `active`. Empty when nothing was published.
+                             */
+                            progress: {
+                                /** @description Human-readable detail for the progress panel. */
+                                detail: string;
+                                /**
+                                 * Format: uint64
+                                 * @description Milliseconds spent in it.
+                                 */
+                                ms: number;
+                                /** @description The phase this step covers. */
+                                phase: "idle" | "validating" | "building_runtime" | "publishing" | "active" | "failed";
+                            }[];
+                            /**
                              * @description SHA-256 of the stored content, hex-encoded. Pass it as the next
                              *     write's `expected_sha256`.
                              */

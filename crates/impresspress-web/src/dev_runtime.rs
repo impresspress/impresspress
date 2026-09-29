@@ -53,7 +53,10 @@ use std::{
 use impresspress_core::blocks::dev::{
     activation::{self, ActivationIntent, Maintenance},
     artifacts,
-    control::{DynamicBlockSpec, RuntimeControl, ShellSource, ValidationFailure, ValidationStage},
+    control::{
+        DynamicBlockSpec, GenerationAnnouncement, RuntimeControl, ShellSource, ValidationFailure,
+        ValidationStage,
+    },
     repo::generations::GenerationCause,
     seed::{self, SeedManifest},
     DevShared, BLOCK_NAME,
@@ -554,6 +557,78 @@ impl RuntimeControl for BrowserRuntimeControl {
     fn runtime_generation(&self) -> u64 {
         self.generation.get()
     }
+
+    /// Post `{ type: 'dev-generation', id, cause, changed_paths }` to every
+    /// window this worker controls — the `/b/dev` page in every tab, and
+    /// whatever else is open on the origin, which ignores a type it does not
+    /// know.
+    ///
+    /// Spawned rather than awaited: `matchAll` is a promise, and the trait
+    /// method is fire-and-forget because the activation has already
+    /// committed (see [`RuntimeControl::announce_active`]). A failure is
+    /// logged and the activation stands.
+    fn announce_active(&self, generation: &GenerationAnnouncement) {
+        let id = generation.id.clone();
+        let message = match announcement_message(generation) {
+            Ok(message) => message,
+            Err(e) => {
+                web_sys::console::error_1(
+                    &describe_js(&e, &format!("announcing generation {id}")).into(),
+                );
+                return;
+            }
+        };
+        wasm_bindgen_futures::spawn_local(async move {
+            if let Err(e) = post_to_windows(&message).await {
+                web_sys::console::error_1(&format!("announcing generation {id}: {e}").into());
+            }
+        });
+    }
+}
+
+/// The message [`BrowserRuntimeControl::announce_active`] posts, built field
+/// by field so its shape is the one the page reads (`dev.js`'s
+/// `onGenerationActive`): `cause` in the API's own snake_case spelling.
+fn announcement_message(generation: &GenerationAnnouncement) -> Result<JsValue, JsValue> {
+    let message = js_sys::Object::new();
+    let changed_paths: js_sys::Array = generation
+        .changed_paths
+        .iter()
+        .map(|path| JsValue::from_str(path))
+        .collect();
+    for (key, value) in [
+        ("type", JsValue::from_str("dev-generation")),
+        ("id", JsValue::from_str(&generation.id)),
+        ("cause", JsValue::from_str(generation.cause.as_str())),
+        ("changed_paths", changed_paths.into()),
+    ] {
+        js_sys::Reflect::set(&message, &JsValue::from_str(key), &value)?;
+    }
+    Ok(message.into())
+}
+
+/// Post `message` to every window client of this service worker.
+///
+/// One client that refuses the message does not stop the others from
+/// getting it: each failure is logged on its own and the loop carries on.
+async fn post_to_windows(message: &JsValue) -> Result<(), String> {
+    let global: web_sys::ServiceWorkerGlobalScope = js_sys::global()
+        .dyn_into()
+        .map_err(|_| "activations can only be announced from a service worker".to_string())?;
+    let options = web_sys::ClientQueryOptions::new();
+    options.set_type(web_sys::ClientType::Window);
+    let clients = JsFuture::from(global.clients().match_all_with_options(&options))
+        .await
+        .map_err(|e| describe_js(&e, "listing the window clients"))?;
+    for client in js_sys::Array::from(&clients).iter() {
+        let client: web_sys::Client = client.unchecked_into();
+        if let Err(e) = client.post_message(message) {
+            web_sys::console::error_1(
+                &describe_js(&e, &format!("posting to client {}", client.url())).into(),
+            );
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------

@@ -118,6 +118,18 @@ async fn staging_a_valid_block_activates_a_generation_and_rebuilds_the_runtime()
     assert_eq!(rebuilds[0][0].routes.len(), 1);
     assert_eq!(rebuilds[0][0].routes[0].prefix, "/b/hello/");
 
+    // The page is told the generation went live (design §2.6). A compile
+    // publishes no site file, so it names none — the page reloads the
+    // preview for it rather than swapping stylesheets.
+    let announcements = control.announcements();
+    assert_eq!(announcements.len(), 1, "{announcements:?}");
+    assert_eq!(announcements[0].id, r["generation"]["id"]);
+    assert_eq!(announcements[0].cause, GenerationCause::BlockCompile);
+    assert!(
+        announcements[0].changed_paths.is_empty(),
+        "{announcements:?}"
+    );
+
     let status = dev_status(&ctx).await;
     assert_eq!(status["blocks"][0]["name"], "site/hello");
     assert_eq!(status["blocks"][0]["routes"][0]["prefix"], "/b/hello/");

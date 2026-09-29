@@ -119,6 +119,12 @@ export function instantiate({
   // real handler — `pagehide`'s `event.persisted` branch is a decision the
   // handler owns, and there is no other way to reach it.
   const windowListeners = [];
+  // `navigator.serviceWorker`, as far as the tail uses it: the target the
+  // worker's `postMessage`s arrive on. A real `EventTarget`, so a test
+  // delivers a push the way a browser does — `dispatchEvent(new
+  // MessageEvent('message', { data }))` — and the tail's own listener, with
+  // its own filtering, is what handles it.
+  const serviceWorker = new EventTarget();
   // Enough of an element for the tail to build a list out of: the tail's only
   // DOM verbs are `innerHTML = ''` to empty a container and `appendChild` to
   // refill it, so `children` plus an `innerHTML` setter that clears it is a
@@ -234,6 +240,7 @@ export function instantiate({
         windowListeners.push({ type, listener });
       }
     },
+    navigator: { serviceWorker },
     fetch(...args) {
       fetchCalls.push(args);
       // The tail makes two kinds of request on load and they cannot share one
@@ -332,12 +339,17 @@ export function instantiate({
     },
     // The tail's own name for the class `assets.rs` imports into the module.
     BrowserRustCompiler: compiler,
-    // The download half of `exportSite`. A counter rather than a real object
-    // URL: the page's only contract with it is "what `createObjectURL`
-    // returned is what `revokeObjectURL` is later given".
-    URL: {
-      createObjectURL: (blob) => `blob:fake/${blob.size}`,
-      revokeObjectURL: (url) => revoked.push(url)
+    // The real `URL` — the preview's stylesheet swap resolves `href`s with
+    // it — plus the download half of `exportSite`. A counter rather than a
+    // real object URL: the page's only contract with it is "what
+    // `createObjectURL` returned is what `revokeObjectURL` is later given".
+    URL: class extends URL {
+      static createObjectURL(blob) {
+        return `blob:fake/${blob.size}`;
+      }
+      static revokeObjectURL(url) {
+        revoked.push(url);
+      }
     },
     // Both timer functions are UNREF'd. Node keeps the process alive while a
     // timer is pending, and the tail schedules two long ones on purpose: the
@@ -395,7 +407,8 @@ return {
   updateExportButton,
   get exportInFlight() { return exportInFlight },
   get statusInFlight() { return statusInFlight },
-  get compilerManifest() { return compilerManifest }
+  get compilerManifest() { return compilerManifest },
+  refreshAfterChange
 };`
   );
   const handle = factory(...Object.values(sandbox));
@@ -412,5 +425,17 @@ return {
       fn();
     }
   };
-  return { handle, fetchCalls, fireWindow, fireInterval, elements, tools, downloads, revoked };
+  // Deliver one message from the service worker, as a browser would.
+  const push = (data) => serviceWorker.dispatchEvent(new MessageEvent('message', { data }));
+  return {
+    handle,
+    fetchCalls,
+    fireWindow,
+    fireInterval,
+    push,
+    elements,
+    tools,
+    downloads,
+    revoked
+  };
 }

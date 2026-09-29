@@ -29,6 +29,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::repo::generations::GenerationCause;
+
 /// Access tier a dynamically-registered block asks the router to apply to one
 /// of its route prefixes.
 ///
@@ -314,6 +316,37 @@ pub trait RuntimeControl: wafer_run::MaybeSend + wafer_run::MaybeSync {
     /// rebuild). The `/b/dev` page re-registers its agent tools whenever this
     /// changes.
     fn runtime_generation(&self) -> u64;
+
+    /// Tell every open page that `generation` is now live (design §2.6).
+    ///
+    /// Called once per activation, after it has committed — the generation
+    /// is active and journalled by then, whoever caused it. It is how a tab
+    /// learns of a generation another tab (or an agent driving one) made, and
+    /// how the page's own preview learns it may reload without first reading
+    /// the status back.
+    ///
+    /// Fire-and-forget, hence synchronous and infallible: the activation has
+    /// already happened, so a failure to deliver the news must not be
+    /// reported as a failure to activate. An implementation logs what it
+    /// could not deliver; a page that missed the message still sees the
+    /// generation on its next status read.
+    fn announce_active(&self, generation: &GenerationAnnouncement);
+}
+
+/// What [`RuntimeControl::announce_active`] tells the page about a
+/// generation that has just gone live.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GenerationAnnouncement {
+    /// The generation that is now active.
+    pub id: String,
+    /// What created it.
+    pub cause: GenerationCause,
+    /// Every workspace path (`site/…`) the activation wrote to or removed
+    /// from the published site, in the order the publisher touched them.
+    /// Empty when the site did not change — a compile, a block removal. The
+    /// page reads it to tell a CSS-only change (swap the stylesheets) from
+    /// any other (reload the preview).
+    pub changed_paths: Vec<String>,
 }
 
 /// The static shell the sandbox is running inside, as the export reads it.

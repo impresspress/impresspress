@@ -153,12 +153,12 @@ function drawLadder(phase, finished) {
 // The journal only describes an activation while it is in flight: the moment
 // the swap is recorded the row rests at `idle` (`repo/runtime_state.rs`), so
 // `/b/dev/api/status` stops mentioning the phases it passed through. A
-// compile that took forty seconds would therefore leave a BLANK ladder a
-// third of a second later, because `withProgress` runs a catch-up poll the
-// instant the call returns. The one account of those phases that survives is
-// the `progress` the staging response carries, so `renderProgress` records it
-// here against the generation it published, and `renderStatus` keeps showing
-// it for as long as that generation is the live one.
+// compile that took forty seconds would therefore leave a BLANK ladder at the
+// next status read. Two accounts of a finished activation survive it: the
+// `progress` a mutating response carries (`renderProgress`) and the service
+// worker's push that the generation went live (`onGenerationActive`). Either
+// records it here against the generation it published, and `renderStatus`
+// keeps showing it for as long as that generation is the live one.
 var completed = null;
 
 // Draw the ladder from an activation's own after-the-fact account of itself,
@@ -177,6 +177,15 @@ function renderProgress(generationId, progress) {
 
 function renderStatus(status) {
   var activation = status.activation;
+  // A status read the worker answered while an activation was still in
+  // flight can land AFTER the push that says the same activation went live:
+  // the two travel on different channels, and nothing orders them. Such an
+  // answer describes the past — drawing it would stand a half-finished
+  // ladder, and a "live generation" line naming the previous generation,
+  // over the generation this page already knows is serving.
+  if (activation && completed !== null && activation.generation_id === completed.generation) {
+    return;
+  }
   var phase = activation ? activation.phase : 'idle';
   var activeId = status.active_generation ? status.active_generation.id : null;
   // Nothing in flight, and the generation the last activation published is
@@ -203,6 +212,13 @@ function renderStatus(status) {
     log(activation.detail);
     lastDetail = activation.detail;
   }
+  noteLiveGeneration(activeId);
+}
+
+// Record which generation is serving, logging the change. Both the status and
+// the activation push report it, so the line is written once per change
+// whichever of them reports it first.
+function noteLiveGeneration(activeId) {
   if (activeId !== lastActiveGeneration) {
     log('live generation: ' + (activeId || 'none'));
     lastActiveGeneration = activeId;
@@ -237,8 +253,10 @@ var outstanding = 0;
 // nothing, since each response is a complete picture rather than a delta.
 var statusInFlight = false;
 
-// ~300 ms while a mutating call is outstanding (design §7.5). There is no
-// push channel: the block answers `no-store` precisely so this poll always
+// ~300 ms while a mutating call is outstanding (design §7.5), for the phases
+// an activation passes through while it runs. The service worker pushes only
+// the END of an activation (`onGenerationActive`); the phases in between are
+// read here, and the block answers `no-store` precisely so this poll always
 // sees the journal as it stands.
 function startPolling() {
   if (polling !== null) {
@@ -299,10 +317,13 @@ function refreshSiteTools() {
 }
 
 // Wrap a tool's `execute` so the panel is live for the duration of the call
-// and the page catches up with what the call changed. The catch-up is in a
-// `finally`: a refused write still moved the workspace's mtime nowhere, but
+// and the file tree catches up with what the call changed. The catch-up is in
+// a `finally`: a refused write still moved the workspace's mtime nowhere, but
 // a PARTIALLY applied one (a site write that published and then failed to
-// activate) leaves the page showing a workspace that no longer exists.
+// activate) leaves the page showing a workspace that no longer exists. The
+// preview is not this wrapper's business: it follows the service worker's
+// push (`onGenerationActive`), which also covers generations another tab or
+// agent made.
 function withProgress(execute) {
   return async function (args) {
     // Once the session is gone (`abort.signal.aborted`), the abort handler
@@ -338,10 +359,15 @@ function withProgress(execute) {
   };
 }
 
+// The file tree only. No status read and no preview reload: the service
+// worker pushes every generation the moment it commits
+// (`activation.rs::activate_staged` announces it before the reply is sent),
+// and `onGenerationActive` reloads the preview from that push whether it lands
+// before or after this call's reply. Awaiting a status read and reloading
+// here was the delay the push removes — and a second reload of the same
+// generation.
 async function refreshAfterChange() {
   try {
-    observe(await json(await api.get('/b/dev/api/status')));
-    reloadPreview();
     await loadFiles();
   } catch (error) {
     // Never let the catch-up replace the tool's own result: the agent asked
@@ -349,6 +375,86 @@ async function refreshAfterChange() {
     // page's problem, not the answer to that call.
     logError(error);
   }
+}
+
+// ---- the live preview -----------------------------------------------------
+
+// The generation the preview was last (re)loaded or restyled for, or `null`
+// before the first push. What makes a push idempotent: the page reacts once
+// per generation, however many times it is told.
+var shownGeneration = null;
+
+// One `{ type: 'dev-generation', id, cause, changed_paths }` push from the
+// service worker (`dev_runtime.rs::announce_active`): generation `id` is live.
+// Sent to every tab on the origin for every activation, whoever caused it —
+// so this is what keeps a preview current when another tab, or an agent
+// driving one, changes the site.
+//
+// `changed_paths` are workspace paths (`site/…`) the publish wrote or
+// removed. When every one is a stylesheet the page's markup and scripts are
+// unchanged, and swapping the stylesheets in place keeps the preview's
+// scroll position and state where a reload would throw both away.
+function onGenerationActive(message) {
+  if (message.id === shownGeneration) {
+    return;
+  }
+  shownGeneration = message.id;
+  noteLiveGeneration(message.id);
+  // The push is the end of that activation, so the ladder reads `active` —
+  // and keeps reading it, through `renderStatus`, while it stays live.
+  completed = { generation: message.id, phase: 'active' };
+  drawLadder(completed.phase, true);
+
+  var paths = message.changed_paths;
+  var cssOnly =
+    paths.length > 0 &&
+    paths.every(function (path) {
+      return /\.css$/.test(path);
+    });
+  if (!cssOnly || swapStylesheets(paths, message.id) === 0) {
+    reloadPreview();
+  }
+
+  // Only a generation that may have changed the BLOCK set can have rebuilt
+  // the runtime, and a rebuilt runtime brings a different deployment-wide
+  // tool set. `observe` is what notices the new `runtime_generation` and
+  // refreshes those registrations — so one status read, after the preview
+  // has already been told to reload rather than before it.
+  if (message.cause !== 'site_write' && message.cause !== 'site_delete' && !abort.signal.aborted) {
+    api.get('/b/dev/api/status').then(json).then(observe).catch(logError);
+  }
+}
+
+// Point every `<link rel="stylesheet">` in the preview whose file is one of
+// `paths` at the new generation's copy, and return how many were pointed.
+//
+// The `?g=` query is a cache key, not a parameter: the published folder
+// serves the same path with new bytes, and a link whose `href` did not change
+// would not be re-fetched. Zero means the preview references none of the
+// changed stylesheets directly (it `@import`s them, or is not a page at all),
+// and the caller reloads instead — a swap that restyled nothing would leave
+// the preview showing the previous generation.
+function swapStylesheets(paths, generationId) {
+  var frame = document.getElementById('dev-preview-frame');
+  var swapped = 0;
+  try {
+    var base = frame.contentWindow.location.href;
+    var links = frame.contentDocument.querySelectorAll('link[rel="stylesheet"]');
+    for (var i = 0; i < links.length; i += 1) {
+      var url = new URL(links[i].getAttribute('href'), base);
+      // The site is served from `/` (`page.rs`'s frame), so the workspace
+      // path of `/css/site.css` is `site/css/site.css`.
+      if (paths.indexOf('site' + decodeURIComponent(url.pathname)) !== -1) {
+        links[i].setAttribute('href', url.pathname + '?g=' + encodeURIComponent(generationId));
+        swapped += 1;
+      }
+    }
+  } catch (error) {
+    // A frame mid-navigation has no document to reach into; the reload the
+    // caller falls back to is the right answer for it anyway.
+    return 0;
+  }
+  return swapped;
 }
 
 function reloadPreview() {
@@ -361,6 +467,19 @@ function reloadPreview() {
   } catch (error) {
     frame.setAttribute('src', frame.getAttribute('src'));
   }
+}
+
+// A page opened without a controlling service worker (or a test harness with
+// no `navigator`) simply never hears a push; everything else on it works.
+if (typeof navigator !== 'undefined' && navigator.serviceWorker) {
+  navigator.serviceWorker.addEventListener('message', function (event) {
+    var data = event.data;
+    // Every window on the origin hears every message the worker posts
+    // (`sw.js`'s self-destruct notice among them); this page acts on its own.
+    if (data && data.type === 'dev-generation') {
+      onGenerationActive(data);
+    }
+  });
 }
 
 // ---- tools ----------------------------------------------------------------
@@ -693,6 +812,9 @@ var save = withProgress(async function () {
       written.path +
       (written.generation ? ' — generation ' + written.generation.id : ' (staged, not published)')
   );
+  if (written.generation) {
+    renderProgress(written.generation.id, written.progress);
+  }
 });
 
 var remove = withProgress(async function () {
