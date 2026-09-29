@@ -115,12 +115,13 @@ pub fn restore_wafer(previous: Rc<wafer_run::Wafer>) {
 /// the reply must not claim a durability it does not have. The change is not
 /// undone, though: it is already live in the in-memory database, every later
 /// read sees it, and the next export that succeeds persists it — possibly
-/// this request's own after-response flush. A caller that retries on the 500 therefore repeats a
-/// change that did happen (a retried `dev_write_file` creates another
-/// generation). The failure is reported only as this `tracing::error` in the
-/// console: the request's audit row was queued with the flow's own status,
-/// so under the browser's default `errors` policy no `request_logs` row
-/// records it at all, and under `all` the row carries that status, not 500.
+/// this request's own after-response flush. A caller that retries on the
+/// 500 therefore repeats a change that did happen (a retried
+/// `dev_write_file` creates another generation). The failure is reported
+/// only as this `tracing::error` in the console: the request's audit row was
+/// queued with the flow's own status, so under the browser's default
+/// `errors` policy no `request_logs` row records it at all, and under `all`
+/// the row carries that status, not 500.
 ///
 /// The request also runs inside its own
 /// [`AfterResponse`](impresspress_core::after_response::AfterResponse)

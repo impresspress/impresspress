@@ -183,17 +183,21 @@ pub(crate) async fn with_flush_mapped<T, E>(
             tracing::error!(error = %e, "could not check the sql.js connection before a write")
         }
     }
-    // Noted before `op` runs, so a write that is dropped half-way still
-    // leaves its scope owing the flush for the statements it did run.
+    // Both marks are made before `op` runs, so a write dropped half-way still
+    // counts for the statements it did run: its scope owes a flush
+    // (`note_mutation`), and the guard's drop — at `op`'s end, or wherever
+    // this future is dropped — raises the mutation epoch, so no export
+    // requested before then is taken to hold them.
     if crate::flush_scope::note_mutation() {
-        let result = op.await;
-        crate::flush_scope::mutation_done();
+        let result = {
+            let _ends = crate::flush_scope::MutationEnds::begin();
+            op.await
+        };
         return resolve_flush_outcome(result, settle_transaction().map_err(map_flush));
     }
     let op = async {
-        let result = op.await;
-        crate::flush_scope::mutation_done();
-        result
+        let _ends = crate::flush_scope::MutationEnds::begin();
+        op.await
     };
     with_flush_through(op, crate::flush_scope::flush_covering_now, map_flush).await
 }

@@ -22,8 +22,8 @@
 //! it, so its generation's rows are written inside the OTHER request's
 //! poll and mark that request's scope; the waiting write's own scope owes
 //! nothing, yet its reply reports the generation active. So the crate keeps
-//! a mutation epoch (bumped when each logical mutation completes, in or out
-//! of a scope) and an exported-through epoch (the epoch every written
+//! a mutation epoch (raised when each logical mutation ends — completed, or
+//! dropped half-way — in or out of a scope) and an exported-through epoch (the epoch every written
 //! export is known to hold), and a scope that ends while the first is ahead
 //! of the second flushes although it mutated nothing. It first looks for an
 //! export already under way that covers the epoch — one called at or after
@@ -32,7 +32,11 @@
 //! own. The cost: a request that mutated nothing (a status poll) but ends
 //! while another request's mutations are unexported pays for, or waits on,
 //! one export. A scope that mutated nothing and ends when everything is
-//! exported writes nothing.
+//! exported writes nothing. After a failed export the exported-through epoch
+//! stays behind, so while OPFS keeps failing every later request, read-only
+//! status polls included, attempts an export and answers 500, until one
+//! export succeeds; that follows from the rule and is intended — no reply
+//! vouches for a database that is not on disk.
 //!
 //! ## Interleaved requests
 //!
@@ -106,12 +110,25 @@ thread_local! {
     static NEXT_FLUSH_ID: Cell<u64> = const { Cell::new(0) };
 }
 
-/// Record that a logical mutation has completed — whatever it returned,
-/// since a failed one may have applied some of its statements. Called after
-/// the mutation's statements have run, never before: an export called
-/// between the two must not be credited with them.
-pub(crate) fn mutation_done() {
-    MUTATION_EPOCH.with(|epoch| epoch.set(epoch.get() + 1));
+/// Raises the mutation epoch when one logical mutation ends: dropped once
+/// the mutation's future has completed — whatever it returned, since a
+/// failed one may have applied some of its statements — or when that future
+/// is dropped half-way, after the statements it did run. Created before the
+/// mutation runs and raising the epoch only when dropped, so an export
+/// called while the mutation is under way is never credited with its
+/// statements.
+pub(crate) struct MutationEnds(());
+
+impl MutationEnds {
+    pub(crate) fn begin() -> Self {
+        Self(())
+    }
+}
+
+impl Drop for MutationEnds {
+    fn drop(&mut self) {
+        MUTATION_EPOCH.with(|epoch| epoch.set(epoch.get() + 1));
+    }
 }
 
 /// Record that the in-memory database was just loaded from OPFS
@@ -431,6 +448,64 @@ mod tests {
         b_flush.expect("B awaited A's flush");
         assert_eq!(seen_by_b, 1, "B returned only once A's export was written");
         assert_eq!(opfs_writes() - before, 1, "and added none of its own");
+    }
+
+    /// **A write dropped half-way still counts.** B mutates, wakes A and
+    /// ends, so B's export is in flight. A then starts a write, lets it run
+    /// one statement, drops it at its next await, and ends. That statement
+    /// may postdate B's export, so A must not settle for B's export: the
+    /// dropped write raises the mutation epoch, and A's end starts an export
+    /// of its own that holds the statement. Fails if the epoch is raised
+    /// only when a write's future completes (A reuses B's export: one
+    /// export in all).
+    #[wasm_bindgen_test]
+    async fn a_write_dropped_half_way_is_exported_at_its_scopes_end() {
+        let db = fresh().await;
+        let before = opfs_writes();
+        let (wake_a, a_woken) = futures::channel::oneshot::channel::<()>();
+
+        let a = run(async {
+            a_woken.await.expect("B wakes A");
+            let epoch = MUTATION_EPOCH.with(Cell::get);
+            let mut write = Box::pin(crate::database::with_flush_mapped(
+                async {
+                    db.query_raw(
+                        &format!("INSERT INTO {TABLE} (id, name) VALUES ('partial', 'p')"),
+                        &[],
+                    )
+                    .await
+                    .expect("the write's first statement");
+                    yield_now().await;
+                    Ok::<(), String>(())
+                },
+                |error| error,
+            ));
+            assert!(
+                futures::poll!(write.as_mut()).is_pending(),
+                "the write stops at its await, one statement in"
+            );
+            drop(write);
+            assert_eq!(
+                MUTATION_EPOCH.with(Cell::get),
+                epoch + 1,
+                "the dropped write raised the epoch"
+            );
+        });
+        let b = run(async {
+            mutate(&db, "b").await;
+            wake_a.send(()).expect("A is waiting");
+        });
+        let (((), a_flush), ((), b_flush)) = futures::join!(a, b);
+
+        a_flush.expect("A's flush");
+        b_flush.expect("B's flush");
+        assert_eq!(
+            opfs_writes() - before,
+            2,
+            "A exported on its own rather than reusing B's export"
+        );
+        crate::db_init().await.expect("reopen from OPFS");
+        assert_eq!(row_count(&db).await, 2, "the partial statement is on disk");
     }
 
     /// Two requests interleaved on one thread each flush once, at their own
