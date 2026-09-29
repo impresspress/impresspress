@@ -580,6 +580,10 @@ test('a two-file block reports the session\'s guest version', async () => {
 });
 
 test('a guest crate the API would not serve is an isError, and the next compile fetches it again', async () => {
+  // The workspace already has a block and the build has a compiler, so the
+  // page starts the toolchain on load (`warmCompiler`) and that start-up is
+  // the first fetch of the guest. It fails too, and — the warm-up being
+  // one-shot — the compile below is the next thing to ask.
   let guestHits = 0;
   let constructed = 0;
   class Stub {
@@ -595,14 +599,14 @@ test('a guest crate the API would not serve is an isError, and the next compile 
       return BUILT;
     }
   }
-  const { tools } = instantiate({
+  const { tools, elements } = instantiate({
     hasModelContext: true,
     compilerManifest: MANIFEST,
     workspace: HELLO,
     compiler: Stub,
     guest() {
       guestHits += 1;
-      return guestHits === 1
+      return guestHits <= 2
         ? { status: 500, body: { error: 'internal', message: 'boom' } }
         : {
             body: {
@@ -625,6 +629,11 @@ test('a guest crate the API would not serve is an isError, and the next compile 
     })
   });
   await settle();
+  assert.equal(guestHits, 1);
+  assert.match(
+    elements.get('dev-log').textContent,
+    /compiler: start-up failed \(fetching the guest crate: .*HTTP 500.*\); the first compile will retry/
+  );
 
   const first = await tools.get('dev_compile_block').execute({ name: 'hello' });
   // Not a verdict on the block: the session could not be started at all, and
@@ -637,7 +646,7 @@ test('a guest crate the API would not serve is an isError, and the next compile 
   const message = first.content[0].text.slice(prefix.length);
   assert.ok(message.startsWith('fetching the guest crate: '), message);
   assert.match(message, /HTTP 500/);
-  assert.equal(guestHits, 1);
+  assert.equal(guestHits, 2);
   // No session was built from a guest the page does not have.
   assert.equal(constructed, 0);
 
@@ -646,7 +655,7 @@ test('a guest crate the API would not serve is an isError, and the next compile 
   const second = await tools.get('dev_compile_block').execute({ name: 'hello' });
   assert.equal(second.isError, undefined);
   assert.equal(second.structuredContent.success, true);
-  assert.equal(guestHits, 2);
+  assert.equal(guestHits, 3);
   assert.equal(constructed, 1);
 });
 
