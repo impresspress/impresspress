@@ -272,9 +272,10 @@ async fn a_site_write_whose_new_blob_is_missing_is_refused() {
     );
 }
 
-/// A rollback trusts nothing: it republishes a generation whose blobs may have
-/// aged out of retention, so every blob it names is probed — including the
-/// ones the generation it replaces also names.
+/// A rollback trusts nothing: every blob the generation it republishes names
+/// is probed — including the ones the generation it replaces also names,
+/// which the collector could not have removed. Rollbacks are rare, so they
+/// deliberately skip the shortcut an everyday edit takes (defence in depth).
 #[tokio::test]
 async fn a_rollback_probes_every_blob_it_republishes() {
     let ctx = TestContext::with_dev(FakeControl::new()).await;
@@ -720,9 +721,15 @@ async fn rolling_back_to_a_generation_whose_content_is_gone_is_a_422() {
 /// Stage a generation the way a crashed activation would have left one: the
 /// row exists, its blobs are stored, and the journal points at it mid-publish.
 async fn insert_staged_generation(ctx: &TestContext, content: &str) -> String {
+    let site = site_of(ctx, content).await;
+    insert_staged_site(ctx, site).await
+}
+
+/// [`insert_staged_generation`] for a whole site manifest.
+async fn insert_staged_site(ctx: &TestContext, site: SiteManifest) -> String {
     let state = runtime_state::read(ctx).await.expect("read journal");
     let id = repo::new_id();
-    let mut manifest = GenerationManifest::staged(site_of(ctx, content).await, Vec::new());
+    let mut manifest = GenerationManifest::staged(site, Vec::new());
     manifest.identify(id.clone(), state.active_generation_id.clone());
 
     generations::insert(
@@ -777,6 +784,43 @@ async fn boot_converges_an_interrupted_activation() {
         served(&ctx, "index.html").await.as_deref(),
         Some(&b"v2"[..])
     );
+}
+
+/// Boot convergence trusts nothing, by the same policy as a rollback: every
+/// blob the generation it converges on names is probed — including the ones
+/// the active generation also names, which a crash cannot have removed.
+#[tokio::test]
+async fn boot_convergence_probes_every_blob_it_publishes() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    write_file(&ctx, "site/style.css", "h1{}", None).await;
+
+    // The interrupted generation adds a page and keeps the active stylesheet.
+    let mut site = site_of(&ctx, "v2").await;
+    site.files.push(FileEntry {
+        path: "style.css".to_string(),
+        sha256: sha_of("h1{}"),
+        size: 4,
+        content_type: "text/css; charset=utf-8".to_string(),
+    });
+    let staged = insert_staged_site(&ctx, site).await;
+
+    let before = ctx.storage_reads().len();
+    activation::converge_on_boot(&ctx, &ctx.dev_shared())
+        .await
+        .expect("converge");
+    let reads: Vec<String> = ctx.storage_reads()[before..].to_vec();
+
+    let state = runtime_state::read(&ctx).await.expect("read journal");
+    assert_eq!(state.active_generation_id.as_deref(), Some(staged.as_str()));
+    for content in ["v2", "h1{}"] {
+        assert!(
+            reads.contains(&format!(
+                "get_streaming impresspress/dev/blobs/{}",
+                sha_of(content)
+            )),
+            "{content:?} was not probed; all reads: {reads:#?}",
+        );
+    }
 }
 
 /// Convergence that cannot succeed must still leave a coherent instance: the

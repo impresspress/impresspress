@@ -686,9 +686,12 @@ async fn activate(
     // The blobs validation may take as present without probing. The active
     // generation was validated when it activated, and the collector never
     // deletes a blob a retained generation names, so everything its site
-    // names is still stored. A rollback republishes an older generation whose
-    // blobs may have aged out of retention, and a seed has no generation
-    // before it: both probe everything they name.
+    // names is still stored. Only the everyday edits take that shortcut. A
+    // rollback and a seed (like boot convergence, see `converge_on_boot`)
+    // are rare, so they deliberately trust nothing and probe every blob they
+    // name, the ones the active site shares included: defence in depth
+    // against a store that lost content behind the ledger's back, bought
+    // where it costs nothing that matters.
     let present_site = match cause {
         GenerationCause::SiteWrite
         | GenerationCause::SiteDelete
@@ -1183,9 +1186,13 @@ pub async fn converge_on_boot(
                 // half of the desired one — so republish that from the
                 // manifest authoritative for it, treating the abandoned
                 // manifest as what is currently out there.
-                // No site is vouched for: the process died mid-activation,
-                // so boot trusts nothing it has not probed.
-                // Inline: boot has no request to defer to (see `Maintenance`).
+                // No site is vouched for, by the same policy as a rollback
+                // or a seed (see `activate`): boot convergence is rare, so it
+                // deliberately probes every blob the generation names rather
+                // than trusting the active one's. The crash is not the
+                // reason; it does not invalidate the active generation's
+                // blobs. Inline: boot has no request to defer to (see
+                // `Maintenance`).
                 if activate_staged(
                     ctx,
                     shared,
