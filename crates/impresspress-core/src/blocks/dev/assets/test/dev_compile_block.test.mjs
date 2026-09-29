@@ -61,9 +61,11 @@ test('snapshotBlock reads the block crate-relative, and nothing about the guest 
   assert.equal(snapshot.files['src/lib.rs'], LIB_RS);
   assert.deepEqual(snapshot.diagnostics, []);
   // The block depends on the guest crate by path and carries no copy of it,
-  // so there is no version to read out of it: the one the page reports is
-  // the one the compiler session was built from (see the staging tests).
-  assert.equal('guestVersion' in snapshot, false);
+  // so it is not legacy and there is no version to read out of it: the one
+  // the page reports is the one the compiler session was built from (see the
+  // staging tests).
+  assert.equal(snapshot.legacy, false);
+  assert.equal(snapshot.legacyGuestVersion, null);
 });
 
 test('snapshotBlock refuses a binary file under blocks/ with a binary-source diagnostic', async () => {
@@ -518,6 +520,63 @@ test('the compiler is constructed with the guest the API hands out, and the stag
   // The version of the guest the session was BUILT from, as the compile
   // reported it — a `2` the harness's default guest (`1`) could not produce.
   assert.equal(seen.staged.wafer_guest_version, 2);
+});
+
+/**
+ * Compile `workspace` as `hello` with a session whose guest is version 2, and
+ * return the staging request the page sent.
+ */
+async function stagedFor(workspace) {
+  let staged = null;
+  const { handle } = instantiate({
+    compilerManifest: MANIFEST,
+    workspace,
+    compiler: fakeCompiler(() => ({ ...BUILT, guestVersion: 2 })),
+    status: { active_generation: null, runtime_generation: 0, blocks: [], activation: null },
+    stage(request) {
+      staged = request;
+      return {
+        build_id: 'bld_1',
+        success: true,
+        diagnostics: [],
+        generation: { id: 'gen_2', cause: 'block_compile', status: 'active' },
+        progress: []
+      };
+    }
+  });
+  await settle();
+  await handle.compileBlock('hello');
+  return staged;
+}
+
+test('a legacy block reports the version of the guest module it vendors, not the session\'s', async () => {
+  // An old three-file block: its own copy of the SDK, compiled as part of the
+  // block's crate. The session's guest crate (version 2) never enters that
+  // build, so staging must be told the version the artifact was actually made
+  // against — the gate that refuses a stale ABI is a claim about the artifact.
+  const staged = await stagedFor([
+    ...HELLO,
+    file(
+      'blocks/hello/src/wafer_guest.rs',
+      '/// The ABI.\npub const WAFER_GUEST_VERSION: u32 = 1;\n'
+    )
+  ]);
+  assert.equal(staged.wafer_guest_version, 1);
+});
+
+test('a legacy block whose vendored module states no version reports null, not the session\'s', async () => {
+  const staged = await stagedFor([
+    ...HELLO,
+    file('blocks/hello/src/wafer_guest.rs', 'pub const WAFER_GUEST_VERSION: usize = 1;\n')
+  ]);
+  // `null` is "unknown", which staging records as `0` — an honest absence
+  // rather than the session's version standing in for a module it did not build.
+  assert.equal(staged.wafer_guest_version, null);
+});
+
+test('a two-file block reports the session\'s guest version', async () => {
+  const staged = await stagedFor(HELLO);
+  assert.equal(staged.wafer_guest_version, 2);
 });
 
 test('a guest crate the API would not serve is an isError, and the next compile fetches it again', async () => {

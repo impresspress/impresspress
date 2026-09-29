@@ -701,7 +701,9 @@ block. The compiler dist moves to `807ace9e.2`.
 block already compiled keeps serving, and a seed archive that carries one
 still imports. A block scaffolded before this release — three files, with its
 own `src/wafer_guest.rs` and `mod wafer_guest;` — still compiles, just slower:
-it rebuilds its copy of the module on every compile.
+it rebuilds its copy of the module on every compile, and staging still checks
+it against the version its own vendored copy states, so a copy older than
+version 2 is refused with `wafer-guest-version` as before.
 
 **What to do.** Nothing is required. To get the fast compile for an existing
 block, either scaffold it again and move your code across, or edit it in
@@ -731,8 +733,8 @@ and so does importing a seed bundle that carries one.
 the current module — `GET /b/dev/api/reference` returns it as
 `wafer_guest_module`, and a newly scaffolded block has it (superseded by the
 entry above: the module is now a crate the sandbox serves, and a block depends
-on it by path) — then compile and stage again. The block's own files are unchanged. Re-export any seed bundle
-afterwards.
+on it by path) — then compile and stage again. The block's own files are
+unchanged. Re-export any seed bundle afterwards.
 
 ### Native: proxy and connection settings for the HTTP listener
 

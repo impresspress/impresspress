@@ -1163,6 +1163,12 @@ async function snapshotBlock(name) {
   }
   var files = {};
   var diagnostics = [];
+  // Whether this is a legacy block — one that carries its own vendored copy
+  // of the guest SDK as `src/wafer_guest.rs` rather than depending on the
+  // crate — and, if so, the `WAFER_GUEST_VERSION` that copy states. See the
+  // read below.
+  var legacy = false;
+  var legacyGuestVersion = null;
   // The source manifest, one `<crate-relative path>\0<sha256>\n` line per
   // file, sorted. NUL rather than a space because a path may contain
   // anything but that, so no two different snapshots can produce one string;
@@ -1251,11 +1257,27 @@ async function snapshotBlock(name) {
         });
       }
     }
+    // A legacy block compiles as a self-contained crate against its OWN
+    // vendored module, not against the session's guest crate, so the ABI it
+    // was built with is the one that copy states. The version staging checks
+    // is a claim about the artifact, not about the session: reporting the
+    // session's version here would record an old version-1 block as 2, pass
+    // the gate, and activate it with the v1 contract. So the version is read
+    // out of the copy that was compiled, and a copy edited past recognition
+    // reports `null`, which staging records as `0` — "unknown" — rather than
+    // a guess.
+    if (rel === 'src/wafer_guest.rs') {
+      legacy = true;
+      var found = /WAFER_GUEST_VERSION: u32 = (\d+)/.exec(file.content);
+      legacyGuestVersion = found ? Number(found[1]) : null;
+    }
   }
   manifest.sort();
   return {
     files: files,
     diagnostics: diagnostics,
+    legacy: legacy,
+    legacyGuestVersion: legacyGuestVersion,
     sourceSha: await sha256Hex(manifest.join(''))
   };
 }
@@ -1422,7 +1444,10 @@ async function runCompile(name) {
         source_manifest_sha256: snapshot.sourceSha,
         compiler_version: compilerVersion,
         diagnostics: diagnostics,
-        wafer_guest_version: built.guestVersion
+        // A legacy block reports the version of the module it vendors;
+        // every other block was built against the session's guest crate.
+        // `snapshotBlock` says why.
+        wafer_guest_version: snapshot.legacy ? snapshot.legacyGuestVersion : built.guestVersion
       })
     );
   })();

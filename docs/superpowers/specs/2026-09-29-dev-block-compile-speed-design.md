@@ -131,8 +131,10 @@ after `hello`).
 **The session.** `init` carries the guest crate's files and a warm-up crate
 (the scaffolded `hello` template). After the sysroot loads, the worker
 writes `/wafer_guest/**` and `/blocks/hello/**` and runs the warm-up build;
-`ready` is posted only when it has finished, and the ready message reports
-the guest's version. A `compile` that arrives during the warm-up queues
+`ready` is posted only when it has finished, and reports the toolchain's
+`rustcVersion`; the guest's version is the adapter's, which holds the guest
+it handed the worker and reports its version on every compile result. A
+`compile` that arrives during the warm-up queues
 behind it exactly as one arriving during the sysroot load does today. The
 warm-up is an ordinary compile of an ordinary block, not a special path.
 
@@ -145,15 +147,19 @@ artifacts and leaves the guest's build in `/target` alone (measured
 2026-09-30: an edit to a dependency-free crate is rebuilt, and hello costs
 ~0.4 s more). `touch` was tried first and does not work: a touched
 dependency-free crate still came back `Fresh`. The VFS's timestamps behave
-as counters, and what `touch` sets was not inspected. The root-cause fix is real file timestamps in Rubrc's VFS, upstream,
-for the next pin bump, and the worker comment says so.
+as counters, and what `touch` sets was not inspected. The root-cause fix is
+real file timestamps in Rubrc's VFS, upstream, for the next pin bump, and the
+worker comment says so.
 
 **Staging.** `POST /b/dev/api/builds/stage` keeps its `wafer_guest_version`
 field and its `wafer-guest-version` refusal. The page fills it from the
 guest it handed the worker at `init` (the API's `version`), not by parsing a
 Rust file out of the workspace. The refusal still catches the real case: a
 page holding a compiler session built from an older bundle than the service
-worker that is now validating its output.
+worker that is now validating its output. A legacy block, which compiles
+against its own vendored `src/wafer_guest.rs` rather than the session's
+guest, reports the version parsed from that vendored copy instead (`null`,
+recorded as unknown, when it states none).
 
 **Export.** The archive gains `seed/wafer_guest/Cargo.toml` and
 `seed/wafer_guest/src/lib.rs` whenever it contains a block, so
@@ -227,7 +233,7 @@ Three PRs, in order:
 * `dev_compile_block.test.mjs` (page side) for `init` carrying the guest and
   the version reaching the staging request.
 * The probe, run against a rebuilt dist, reports the `hello` build under 5 s
-  warm and the guest version in `ready`.
+  warm.
 * CI's `dev-compile` and `dev-scenario` e2e timing lines are the acceptance
   numbers: `compile_ms` under 10 s on a GitHub runner for the newsletter
   block.

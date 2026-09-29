@@ -206,8 +206,9 @@ pub mod abi {
     /// # Safety
     /// `ptr`/`len` must name `len` initialized bytes the host wrote into
     /// memory it obtained from `__wafer_alloc`, alive for the whole call. The
-    /// host guarantees that for the export [`export!`] stamps, and that
-    /// export is the only caller; block code must not call this itself.
+    /// host guarantees that for the export [`export!`](crate::export!)
+    /// stamps, and that export is the only caller; block code must not call
+    /// this itself.
     pub unsafe fn handle(block: &super::Block, ptr: i32, len: i32) -> i64 {
         // SAFETY: the caller upholds this function's contract (see above).
         let frame = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
@@ -229,8 +230,9 @@ pub mod abi {
     /// # Safety
     /// `ptr`/`len` must name `len` initialized bytes the host wrote into
     /// memory it obtained from `__wafer_alloc`, alive for the whole call. The
-    /// host guarantees that for the export [`export!`] stamps, and that
-    /// export is the only caller; block code must not call this itself.
+    /// host guarantees that for the export [`export!`](crate::export!)
+    /// stamps, and that export is the only caller; block code must not call
+    /// this itself.
     pub unsafe fn lifecycle(init: fn(&Ctx) -> Result<(), String>, ptr: i32, len: i32) -> i64 {
         // SAFETY: the caller upholds this function's contract (see above).
         let event = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };

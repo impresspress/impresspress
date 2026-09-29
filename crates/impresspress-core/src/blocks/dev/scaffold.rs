@@ -363,6 +363,37 @@ pub async fn handle_guest(_ctx: &dyn Context) -> OutputStream {
 mod tests {
     use super::*;
 
+    /// Every template's `Cargo.toml` is the same file but for its package
+    /// name — the profile above all.
+    ///
+    /// cargo builds a dependency under the ROOT package's profile, so the
+    /// `wafer_guest` build in `/target` is only reused by a block whose
+    /// `[profile.release]` matches the one it was built with. The session's
+    /// warm-up builds `hello`; a table-based block whose profile had drifted
+    /// from it would silently pay the ~30 s guest rebuild on every session,
+    /// and nothing but its compile time would say so.
+    #[test]
+    fn every_template_manifest_differs_from_hello_only_in_its_package_name() {
+        let hello: Vec<&str> = Template::Hello.cargo_toml().lines().collect();
+        let table: Vec<&str> = Template::Table.cargo_toml().lines().collect();
+        assert_eq!(
+            hello.len(),
+            table.len(),
+            "the two manifests differ in length"
+        );
+        let differing: Vec<(&str, &str)> = hello
+            .iter()
+            .zip(&table)
+            .filter(|(a, b)| a != b)
+            .map(|(a, b)| (*a, *b))
+            .collect();
+        assert_eq!(
+            differing,
+            vec![(r#"name = "hello""#, r#"name = "newsletter""#)],
+            "the templates may differ only in `[package] name`"
+        );
+    }
+
     /// The two files, in the order the manifest will list them.
     #[test]
     fn a_scaffolded_block_is_two_files_under_its_own_directory() {

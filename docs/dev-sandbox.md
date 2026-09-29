@@ -151,7 +151,8 @@ After that, each compile rebuilds only the block's own crate and takes a few
 seconds (measured: about 2 seconds for the `hello` template and about 6 for
 `table`). A block from before the SDK was a crate — three files, with its own
 `src/wafer_guest.rs` — still compiles, rebuilding its copy every time, in
-about 20 seconds. A failed compile returns diagnostics (file,
+about 20 seconds, and staging still checks it against the guest version its
+own vendored copy states. A failed compile returns diagnostics (file,
 line, column, message) without touching the live site; a successful one is
 validated, staged and activated automatically, the same as any other
 change.

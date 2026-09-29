@@ -1,19 +1,19 @@
 //! The guest SDK crate against the real `wafer_block` types.
 //!
-//! `crates/wafer-guest` writes three wire shapes by hand
-//! — `BlockInfo`, `GuestResult` and `Result<(), WaferError>` — and reads a
-//! fourth, the `__wafer_handle` call frame. Nothing in a wasm build checks
-//! that they agree with the types the host parses: a field renamed upstream
-//! would surface as a trap inside wasmi, or worse as a `BlockInfo` that
-//! parsed with a capability silently missing.
+//! `crates/wafer-guest` writes three wire shapes by hand — `BlockInfo`,
+//! `GuestResult` and `Result<(), WaferError>` — and reads a fourth, the
+//! `__wafer_handle` call frame. Nothing in a wasm build checks that they
+//! agree with the types the host parses: a field renamed upstream would
+//! surface as a trap inside wasmi, or worse as a `BlockInfo` that parsed with
+//! a capability silently missing.
 //!
 //! So the crate is compiled **natively** here, as an ordinary
 //! dev-dependency (its `extern` block is `#[cfg(target_arch = "wasm32")]`; a
 //! shim panics for every host call, and every export `export!` stamps is
 //! wasm32-only too), and what it renders is parsed with the producer's own
-//! types. That is a
-//! compile-time check of every field name and an assertion on every value —
-//! no runtime, no wasm, and it runs in the ordinary `block-dev` suite.
+//! types. That is a compile-time check of every field name and an assertion
+//! on every value — no runtime, no wasm, and it runs in the ordinary
+//! `block-dev` suite.
 //!
 //! The end-to-end half — a real wasm build driven by wasmi against real
 //! SQLite — is `wafer_guest_golden.rs`.

@@ -453,6 +453,36 @@ mod tests {
         assert!(found >= 4, "only {found} api URLs found in dev.js");
     }
 
+    /// The page can read the guest ABI version out of a legacy block's
+    /// vendored module, in the spelling that module actually uses.
+    ///
+    /// A legacy block carries its own copy of the SDK as `src/wafer_guest.rs`
+    /// and compiles against it rather than against the session's guest crate,
+    /// so `dev.js` parses `WAFER_GUEST_VERSION` out of that copy and reports
+    /// it with the staged build, and `blocks_api.rs` refuses anything that is
+    /// not the sandbox's own. Those copies were byte-copies of the crate's
+    /// `src/lib.rs`, so the spelling the regex must match is the one
+    /// `GUEST_LIB_RS` uses. Were the constant reformatted — a type annotation
+    /// dropped, the spacing changed — the regex would no longer describe the
+    /// files it is aimed at, and every legacy block would be staged as `null`
+    /// ("unknown") with the check silently off. This is the only place the
+    /// regex and the file it is aimed at are both in scope.
+    #[test]
+    fn the_page_can_read_the_version_out_of_a_vendored_guest_module() {
+        assert!(
+            assets::dev_js().contains(r"/WAFER_GUEST_VERSION: u32 = (\d+)/"),
+            "dev.js must read a legacy block's own guest version, not assume one"
+        );
+        let expected = format!(
+            "WAFER_GUEST_VERSION: u32 = {}",
+            super::super::WAFER_GUEST_VERSION
+        );
+        assert!(
+            super::super::scaffold::GUEST_LIB_RS.contains(&expected),
+            "the guest crate must state `{expected}` for dev.js's regex to find it"
+        );
+    }
+
     /// The prompt names tools, not endpoints the agent would have to guess
     /// at, and every tool it names is one `/b/dev/api/tools.json` publishes.
     #[test]
