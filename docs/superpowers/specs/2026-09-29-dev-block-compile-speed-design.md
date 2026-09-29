@@ -139,13 +139,14 @@ warm-up is an ordinary compile of an ordinary block, not a special path.
 **Freshness.** Rubrc's write-file event replaces a file's contents without
 moving its mtime, so cargo would call an edited block fresh. Today's answer
 is `cargo clean` before every build, which with a dependency would cost the
-29 s it just saved. The worker instead runs `touch` (a builtin of Rubrc's
-shell) over every path it just wrote, which is what makes cargo rebuild the
-block and leaves the guest's build alone (measured: the artifact changes
-with the source, and a compile with nothing changed still rebuilds). This is
-still a workaround for the VFS's mtime behaviour; the root-cause fix belongs
-upstream in Rubrc's VFS and goes into the next pin bump, and the worker
-comment says so.
+29 s it just saved. The worker instead runs `cargo clean -p <crate>` before
+each build, cargo's own way to rebuild one package: it removes the block's
+artifacts and leaves the guest's build in `/target` alone (measured
+2026-09-30: an edit to a dependency-free crate is rebuilt, and hello costs
+~0.4 s more). `touch` was tried first and does not work — the VFS's
+timestamps are counters, so a touched dependency-free crate still came back
+`Fresh`. The root-cause fix is real file timestamps in Rubrc's VFS, upstream,
+for the next pin bump, and the worker comment says so.
 
 **Staging.** `POST /b/dev/api/builds/stage` keeps its `wafer_guest_version`
 field and its `wafer-guest-version` refusal. The page fills it from the

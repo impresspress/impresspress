@@ -20,9 +20,10 @@
  * What the guest is, is a terminal: rubrc composes rustc, cargo, llvm and a
  * shell into one component, and the only way in is to type at session 0 and
  * read what comes back. So `compile` writes the crate's files through the
- * VFS's write-file event, `touch`es them, types a cargo line, waits for the
- * prompt to come back, and asks the shell to `download` the artifact — which
- * is delivered back through the same host bridge as chunks.
+ * VFS's write-file event, cleans that one package out of `/target`, types a
+ * cargo line, waits for the prompt to come back, and asks the shell to
+ * `download` the artifact — which is delivered back through the same host
+ * bridge as chunks.
  *
  * The VFS is laid out like an export archive: a block lives at
  * `/blocks/<crate>/`, the guest SDK it depends on by path at `/wafer_guest/`,
@@ -180,7 +181,7 @@ const writeFile = (path: string, content: string) => {
 };
 
 /**
- * Write a crate under `root` and return the absolute paths written.
+ * Write a crate under `root`.
  *
  * Nothing is deleted first, so a file an earlier compile wrote under
  * `/blocks/<crate>/src/` and this one no longer has stays on disk. That is
@@ -188,14 +189,10 @@ const writeFile = (path: string, content: string) => {
  * `mod`, and every file the block still has is rewritten here — a leftover
  * is a file nothing names.
  */
-const writeCrate = (root: string, files: Record<string, string>): string[] => {
-  const written: string[] = [];
+const writeCrate = (root: string, files: Record<string, string>) => {
   for (const [path, content] of Object.entries(files)) {
-    const absolute = `${root}/${path.replace(/^\/+/, "")}`;
-    writeFile(absolute, content);
-    written.push(absolute);
+    writeFile(`${root}/${path.replace(/^\/+/, "")}`, content);
   }
-  return written;
 };
 
 /**
@@ -216,24 +213,37 @@ const runCommand = async (line: string, timeoutMs: number, what: string): Promis
   return body.slice(0, body.lastIndexOf("\n") + 1);
 };
 
+/** The flags every cargo invocation on a block shares. */
+const blockFlags = (crateName: string, target: string, release: boolean) =>
+  `${release ? " --release" : ""} --manifest-path /blocks/${crateName}/Cargo.toml ` +
+  `--target-dir /target --target ${target}`;
+
 /**
- * Make cargo see the files just written.
+ * Force the block's own package to be rebuilt, and nothing else.
  *
- * The VFS's write-file event replaces a file's contents without moving its
- * mtime, so cargo — which compares source mtimes against the fingerprint of
- * the last build — would call an edited crate fresh and hand back the
- * previous artifact. `touch` moves the mtime, which is the one thing cargo
- * needs, and touches nothing else: a dependency that was not rewritten
- * (`/wafer_guest`) keeps its build. This is a workaround for the VFS, not a
- * property of cargo; the root-cause fix is upstream in rubrc's write-file
- * handler and belongs to the next pin bump.
+ * Cargo decides freshness by comparing source mtimes with the last build's,
+ * and in rubrc's VFS those cannot be trusted: the write-file event does not
+ * move a file's mtime, and the VFS's timestamps are nanosecond-scale
+ * counters rather than times. A crate with no dependencies came back
+ * `Fresh` — the previous module, for code that had just been edited — and
+ * `touch` did not change that (tried 2026-09-30). A block that depends on
+ * `wafer_guest` happens to rebuild every time only because those counters
+ * make cargo think the guest was rebuilt, which is nothing to rely on.
+ * `cargo clean -p <crate>` is cargo's own way to rebuild one package: it
+ * removes that package's artifacts and leaves `/wafer_guest`'s build in
+ * `/target` alone, so the guest is still compiled once per session. The
+ * upstream fix is real file timestamps in rubrc's VFS; with those, this
+ * could go.
  */
-const touchAll = async (paths: string[], what: string): Promise<string> =>
-  runCommand(`touch ${paths.join(" ")}`, COMPILE_TIMEOUT_MS, `touch for ${what}`);
+const cleanBlock = async (crateName: string, target: string, release: boolean) =>
+  runCommand(
+    `cargo clean -p ${crateName}${blockFlags(crateName, target, release)}`,
+    COMPILE_TIMEOUT_MS,
+    `cargo clean -p ${crateName}`,
+  );
 
 const buildCommand = (crateName: string, target: string, release: boolean) =>
-  `cargo build${release ? " --release" : ""} --manifest-path /blocks/${crateName}/Cargo.toml ` +
-  `--target-dir /target --target ${target} --message-format=json`;
+  `cargo build${blockFlags(crateName, target, release)} --message-format=json`;
 
 /** Where cargo leaves a block's module, and what `download` reads. */
 const artifactPath = (crateName: string, target: string, release: boolean) =>
@@ -251,10 +261,12 @@ const artifactPath = (crateName: string, target: string, release: boolean) =>
  * way the previous module would be downloaded and answered
  * as this compile's — a green build of code nobody wrote. With it removed,
  * a build that fails for ANY reason leaves nothing at `artifactPath`, and
- * `download` finding nothing is answered `success: false`. Like the mtime,
- * this works around rubrc (cargo's `build-finished` does not reflect a
- * rustc failure); the root-cause fix is upstream and belongs to the next pin
- * bump. `-f` because the first build of a block has nothing to remove.
+ * `download` finding nothing is answered `success: false`. `cleanBlock`
+ * does not cover this: a manifest cargo cannot resolve fails the clean as
+ * well as the build, and the module stays. This works around rubrc (cargo's
+ * `build-finished` does not reflect a rustc failure); the root-cause fix is
+ * upstream and belongs to the next pin bump. `-f` because the first build
+ * of a block has nothing to remove.
  */
 const removeArtifact = async (crateName: string, target: string, release: boolean) =>
   runCommand(
@@ -615,11 +627,9 @@ const init = async (message: Extract<PageMessage, { type: "init" }>) => {
 
   if (message.guest) {
     postProgress(id, "initializing", { detail: "writing the guest crate" });
-    const written = [
-      ...writeCrate("/wafer_guest", message.guest.files),
-      ...writeCrate(`/blocks/${message.guest.warmup.crateName}`, message.guest.warmup.files),
-    ];
-    await touchAll(written, "the warm-up");
+    writeCrate("/wafer_guest", message.guest.files);
+    writeCrate(`/blocks/${message.guest.warmup.crateName}`, message.guest.warmup.files);
+    await cleanBlock(message.guest.warmup.crateName, SYSROOT_TRIPLE, true);
     await removeArtifact(message.guest.warmup.crateName, SYSROOT_TRIPLE, true);
     postProgress(id, "initializing", { detail: "building wafer_guest once for this session" });
     const output = await runCommand(
@@ -658,12 +668,12 @@ const compile = async (message: Extract<PageMessage, { type: "compile" }>) => {
   inFlight = message.id;
   currentId = message.id;
   stderrText = "";
-  /** Shell output that is not the build's own: `touch`, `rm`, `download`. */
+  /** Shell output that is not the build's own: `cargo clean -p`, `rm`, `download`. */
   let shellLog = "";
   const builtPath = artifactPath(message.crateName, message.target, message.release);
 
-  const written = writeCrate(`/blocks/${message.crateName}`, message.files);
-  shellLog += await touchAll(written, message.crateName);
+  writeCrate(`/blocks/${message.crateName}`, message.files);
+  shellLog += await cleanBlock(message.crateName, message.target, message.release);
   shellLog += await removeArtifact(message.crateName, message.target, message.release);
   const output = await runCommand(
     buildCommand(message.crateName, message.target, message.release),
@@ -722,9 +732,9 @@ const compile = async (message: Extract<PageMessage, { type: "compile" }>) => {
   // so the split is by content. `stderr` is what a human would have seen from
   // the build — rustc's own rendering of each diagnostic, then cargo's status
   // output, then anything the guest wrote to fd 2 outside the shell's stream.
-  // `stdout` is the rest of the session: `touch`, `rm` and `download`. Cargo's
-  // `--message-format=json` protocol lines appear in neither; they are what
-  // `diagnostics` is made of.
+  // `stdout` is the rest of the session: `cargo clean -p`, `rm` and
+  // `download`. Cargo's `--message-format=json` protocol lines appear in
+  // neither; they are what `diagnostics` is made of.
   const humanBuildOutput = [...rendered, plain.join("\n").trim()]
     .filter((part) => part.length > 0)
     .join("\n");

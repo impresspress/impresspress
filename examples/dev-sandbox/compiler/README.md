@@ -269,8 +269,8 @@ page → { type: 'cancel', id }
   transcript. `stderr` is the build as a human would have seen it: rustc's own
   `rendered` text for each diagnostic, then cargo's status output, then
   anything written to fd 2 outside the shell's stream. `stdout` is the rest of
-  the session — `touch`, `rm` and the `download` that reads the artifact out of the
-  VFS. Cargo's `--message-format=json` protocol lines appear in
+  the session — `cargo clean -p <crate>`, `rm` and the `download` that reads
+  the artifact out of the VFS. Cargo's `--message-format=json` protocol lines appear in
   neither: they are what `diagnostics` is made of, so `stdout` is not a wall
   of JSON.
 
@@ -283,9 +283,10 @@ archive — a block at `/blocks/<crate>/`, the guest SDK it depends on by path
 
 1. each file written under `/blocks/<crate>/` through the VFS's write-file
    event (`input_string` with session `0xEEEEEEEE`, a JSON `{path, content}`),
-2. `touch` over every file just written, because that write does not move the
-   file's mtime and cargo would otherwise call an edited crate fresh and hand
-   back the previous artifact (see "What was confirmed"),
+2. `cargo clean -p <crate>` (same `--release`, `--manifest-path`,
+   `--target-dir` and `--target`), which removes that one package's
+   artifacts so cargo rebuilds it, and leaves `/wafer_guest`'s build alone —
+   because cargo's mtime comparison cannot be trusted in this VFS (below),
 3. `rm -f /target/wasm32-wasip1/release/<crate>.wasm` — the path step 5
    reads — so that a build that fails leaves nothing there (below),
 4. `cargo build --release --manifest-path /blocks/<crate>/Cargo.toml
@@ -296,17 +297,35 @@ archive — a block at `/blocks/<crate>/`, the guest SDK it depends on by path
    file back out through the host bridge as chunks.
 
 **The warm-up.** `init` with a `guest` writes `/wafer_guest/**` and the
-warm-up block, `touch`es them, removes the warm-up's module, runs the same
-`cargo build` over the warm-up, and checks with `download` that the module
-is there before it posts `ready`. That compiles `wafer_guest` into `/target`,
+warm-up block, runs the same `cargo clean -p` and `rm` over the warm-up,
+runs the same `cargo build`, and checks with `download` that the module is
+there before it posts `ready`. That compiles `wafer_guest` into `/target`,
 and every build in the session shares that one `--target-dir`, so a later
-`compile` recompiles only the block: `wafer_guest` was not rewritten, its
-mtimes did not move, and cargo keeps its build. That is the whole speed-up —
+`compile` recompiles only the block: `cargo clean -p` names only the block's
+package, and cargo keeps the guest's build (its `Fresh wafer_guest` line).
+That is the whole speed-up —
 the guest is most of what a block compiles, and it is compiled once per
 worker instead of once per compile. Nothing is deleted between compiles; a
 file an earlier compile left in `/blocks/<crate>/src/` is harmless, because
 rustc only compiles what `lib.rs` reaches through `mod`, and every file the
 block still has is rewritten.
+
+**Cargo's freshness check is not trusted.** The VFS's write-file event does
+not move a file's mtime, and the VFS's timestamps are nanosecond-scale
+counters rather than times, so cargo's mtime comparison cannot be trusted:
+a crate with no dependencies, edited, came back `Fresh` with the previous
+module. A block that depends on `wafer_guest` rebuilds every time today only
+because the counters make cargo think the guest was rebuilt ("the dependency
+`wafer_guest` was rebuilt (… 325ns after last build at 0.000000001s)"),
+which is an accident, not a mechanism. `cargo clean -p <crate>` is cargo's
+own way to rebuild one package while keeping its dependencies, and it costs
+~0.4 s a compile. **`touch` was tried on 2026-09-30 and does not work**: a
+touched dependency-free crate still came back `Fresh` — whatever `touch`
+sets in this VFS, cargo does not see it as newer than its last build. Do not
+retry it. The probe's
+dependency-free crate (`probe_fresh`: build answering 1, edit `src/lib.rs`
+to answer 2, call it) is the regression test: with the clean taken out it
+answered 1.
 
 **Cargo's verdict is not trusted, and the previous module is removed.** On
 this toolchain, cargo's `build-finished` success does not reflect a rustc
@@ -325,15 +344,16 @@ code nobody wrote. Two things stop that:
   the warm-up, with `init` failing). The probe's missing-path-dependency
   compile and its no-diagnostic broken guest are the regression tests: with
   the `rm` taken out, the first came back `success: true` with the previous
-  `hello.wasm`.
+  `hello.wasm` — with `cargo clean -p` in place too, since a manifest cargo
+  cannot resolve fails the clean as well as the build.
 * **An error diagnostic fails the build**, whatever `build-finished` says,
   so the answer carries rustc's diagnostics rather than only "artifact
   missing". The probe's syntax-error build is the test.
 
-Both are workarounds for rubrc, like `touch` for the mtime: the
-root-cause fixes (the write-file event should move the mtime; cargo's
-`build-finished` success should reflect rustc's failure) are upstream and
-are candidates for the next pin bump.
+These, and `cargo clean -p`, are workarounds for rubrc: the root-cause
+fixes (real file timestamps in the VFS, moved by the write-file event;
+cargo's `build-finished` success reflecting rustc's failure) are upstream
+and are candidates for the next pin bump.
 
 The other structural surprise is the worker pair. The WASI *farm* services
 calls for every thread of the guest and those threads block on `Atomics.wait`
@@ -427,10 +447,11 @@ Two things this run also settled, neither of them predicted:
   event replaces a file's contents without moving its mtime, so the second
   compile of an edited crate came back `"fresh": true` with the *first*
   build's artifact — a green build of code nobody wrote. The worker then
-  emptied `/target` before every build; since 2026-09-30 it `touch`es every
-  file it writes instead, which moves the mtime and keeps the guest's build
-  (see "How a compile actually happens"). The root-cause fix is upstream, in
-  rubrc's write-file handler, and belongs to the next pin bump.
+  emptied `/target` before every build; since 2026-09-30 it runs
+  `cargo clean -p <crate>` instead, which rebuilds the block and keeps the
+  guest's build (`touch` was tried and does not work; see "How a compile
+  actually happens"). The root-cause fix is real file timestamps in rubrc's
+  VFS, upstream, and belongs to the next pin bump.
 * **Vite rewrites `new URL(`./x/${v}`, import.meta.url)` into a build-time
   glob lookup.** Ours resolved to `undefined` because `sysroot/` does not
   exist until the build vendors it. `worker-entry.ts` reads `import.meta.url`
@@ -443,30 +464,40 @@ Two things this run also settled, neither of them predicted:
 `807ace9e`, packaging revision 2, `"build": "full"`), chromium headless, the
 same 24-core linux box. The probe `init`s with the guest from
 `crates/wafer-guest` and the `hello` template as the warm-up — what
-`GET /b/dev/api/guest` hands the page — and every step below passed.
+`GET /b/dev/api/guest` hands the page — and every step passed. The numbers
+are from the final run of the committed worker (`cargo clean -p` before each
+build); earlier runs that day, before the clean, were ~0.4 s faster per
+compile.
 
 | | |
 | --- | --- |
-| `ready`, including the warm-up build | **34 868 ms** (~7-8 s toolchain, ~27 s building `wafer_guest` through `hello`) |
-| `ready` again, component in IndexedDB | 32 441 ms |
-| `compile` of `hello` after the warm-up | **1 785 ms**, artifact 115 327 bytes, whole wafer ABI |
-| `compile` of `newsletter` (the `table` template, its scaffolded profile) | **5 472 ms**, artifact 133 784 bytes, whole wafer ABI |
-| `compile` of a self-contained `hello` (the SDK as a module, no dependencies) | 19 862 ms, artifact 111 133 bytes, whole wafer ABI |
-| `compile` of `hello` with a syntax error | 647 ms, `success: false`, no artifact, `src/lib.rs:46:18` |
-| `compile` of `hello` with a truncated `Cargo.toml` (`[package` …) | 35 ms, `success: false`, no artifact, `blocks/hello/Cargo.toml:1:9 unclosed table` |
-| `compile` of `hello` with a path dependency that is not there | 323 ms, `success: false`, no artifact, `artifact-missing` plus cargo's "failed to get `wafer_guest` as a dependency" in `stderr` |
-| `init` with a guest whose `src/lib.rs` is `fn { broken` | `error` in 8 058 ms: "the guest crate does not build on this toolchain: /wafer_guest/src/lib.rs:1: this file contains an unclosed delimiter" |
+| `ready`, including the warm-up build | **35 394 ms** (~8 s toolchain, ~27 s building `wafer_guest` through `hello`) |
+| `ready` again, component in IndexedDB | 32 905 ms |
+| `compile` of `hello` after the warm-up | **2 289 ms**, artifact 115 327 bytes, whole wafer ABI |
+| `compile` of `hello` with its greeting edited | 2 275 ms, 115 295 bytes, contents differ from the first |
+| `compile` of `newsletter` (the `table` template, its scaffolded profile) | **5 728 ms**, artifact 133 784 bytes, whole wafer ABI |
+| `compile` of a self-contained `hello` (the SDK as a module, no dependencies) | 20 408 ms, artifact 111 133 bytes, whole wafer ABI |
+| `compile` of `probe_fresh` (no dependencies), then again with only `src/lib.rs` edited | 1 664 ms / 1 636 ms; answers 1, then 2 |
+| `compile` of `hello` with a syntax error | 988 ms, `success: false`, no artifact, `src/lib.rs:46:18` |
+| `compile` of `hello` with a truncated `Cargo.toml` (`[package` …) | 39 ms, `success: false`, no artifact, `blocks/hello/Cargo.toml:1:9 unclosed table` |
+| `compile` of `hello` with a path dependency that is not there | 733 ms, `success: false`, no artifact, `artifact-missing` plus cargo's "failed to get `wafer_guest` as a dependency" in `stderr` |
+| `init` with a guest whose `src/lib.rs` is `fn { broken` | `error` in 8 297 ms: "the guest crate does not build on this toolchain: /wafer_guest/src/lib.rs:1: this file contains an unclosed delimiter" |
 | `init` with a guest whose `Cargo.toml` names a missing path dependency | `error`: "the guest crate does not build on this toolchain: the warm-up left no /target/wasm32-wasip1/release/hello.wasm …; cargo said: … failed to get `no_such_crate` …" |
 | total download to first `ready` | 75.1 MB (13 files), largest `vfs.core-*.wasm.br.part-001` at 25 165 824 bytes |
 
 1. **A block compile no longer rebuilds the guest.** `hello` went from ~20 s
    (the self-contained row, which is what every compile cost before) to
-   1.8 s, and `newsletter` builds in 5.5 s. The probe fails if `hello` takes
+   2.3 s, and `newsletter` builds in 5.7 s. The probe fails if `hello` takes
    15 s or more, so a regression to rebuilding the guest cannot pass as
    merely slow. Confirmed.
-2. **`touch` is enough for cargo to see an edit.** The error build rewrites
-   the `lib.rs` of a crate built moments earlier, with only `touch` between
-   them; cargo recompiled it and rustc reported the missing `;`. Confirmed.
+2. **An edit is always rebuilt.** A dependency-free crate edited in
+   `src/lib.rs` alone answers the new value — and with `cargo clean -p`
+   taken out for one run it answered the old one (`probe_value() = 1`,
+   cargo `Fresh`), as it also did with `touch` in its place. For `hello`, an
+   edited greeting gives a different module and a syntax error right after
+   reaches rustc; those pass without the clean too, because a block that
+   depends on `wafer_guest` is marked dirty every time on this pin, so they
+   are asserted as the real case but are not the proof. Confirmed.
 3. **A block from before this change still builds.** The self-contained
    `hello` — `Cargo.toml` with an empty `[dependencies]`, the guest crate's
    `lib.rs` as `src/wafer_guest.rs`, the five exports written out — is what a
@@ -509,7 +540,7 @@ Everything above was measured. These were not, and should not be assumed:
 * **No page reload was measured.** The "warm" figure is a second worker in the
   same page, which is the same IndexedDB but not the same code path a returning
   visitor takes.
-* **Seven compiles per worker, not more.** Nothing here says what a worker does
+* **Eleven compiles per worker, not more.** Nothing here says what a worker does
   after twenty, or how the VFS's memory behaves over a long session.
 * **The Cloudflare edge is untested.** Everything ran against
   `scripts/serve-probe.mjs`, which sets the same two headers the deployment
@@ -524,9 +555,14 @@ Everything above was measured. These were not, and should not be assumed:
   seen is rustc's rendered error followed by cargo's `Finished`; where in
   rubrc's process layer rustc's status is lost was not established. It is an
   upstream defect — cargo's `build-finished` success does not reflect a
-  rustc failure — and, with the write-file mtime, a candidate for the next
-  pin bump. An internal compiler error and a linker failure were not tried;
-  the `rm` before every build is what covers them.
+  rustc failure — and a candidate for the next pin bump.
+  An internal compiler error and a linker failure were not tried; the `rm`
+  before every build is what covers them.
+* **Why `touch` does not reach cargo was not traced.** The VFS's timestamps
+  are counters (cargo prints them as nanoseconds since the epoch) and the
+  write-file event does not move them; what `touch` sets was not inspected.
+  The upstream fix is real file timestamps in rubrc's VFS, a candidate for
+  the next pin bump, after which `cargo clean -p` could go.
 * **`--fast` has not been run.** It selects rubrc's own `no-opt` recipe and
   marks the manifest so the verifier refuses it, but the composition has not
   been exercised that way here.
