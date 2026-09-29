@@ -683,12 +683,26 @@ async fn activate(
     .map_err(storage_error)?;
     drop(composing);
 
+    // The blobs validation may take as present without probing. The active
+    // generation was validated when it activated, and the collector never
+    // deletes a blob a retained generation names, so everything its site
+    // names is still stored. A rollback republishes an older generation whose
+    // blobs may have aged out of retention, and a seed has no generation
+    // before it: both probe everything they name.
+    let present_site = match cause {
+        GenerationCause::SiteWrite
+        | GenerationCause::SiteDelete
+        | GenerationCause::BlockCompile
+        | GenerationCause::BlockRemove => previous.as_ref().map(|(_, active)| &active.site),
+        GenerationCause::Rollback | GenerationCause::Seed => None,
+    };
     let outcome = activate_staged(
         ctx,
         shared,
         &row,
         &manifest,
         previous.as_ref(),
+        present_site,
         &state,
         maintenance,
     )
@@ -765,12 +779,16 @@ async fn adopt_site(
 /// Split from [`activate`] because boot recovery converges on a row that
 /// already exists: re-staging it would mint a second id for one desired state
 /// and break the append-only history's parent chain.
+///
+/// `present_site` is a site manifest whose blobs are known to be stored;
+/// validation does not probe them again (see [`missing_content`]).
 async fn activate_staged(
     ctx: &dyn Context,
     shared: &Arc<super::DevShared>,
     row: &GenerationRow,
     manifest: &GenerationManifest,
     previous: Option<&(GenerationRow, GenerationManifest)>,
+    present_site: Option<&SiteManifest>,
     state: &RuntimeState,
     maintenance: Maintenance,
 ) -> Result<ActivationOutcome, ActivationError> {
@@ -779,9 +797,11 @@ async fn activate_staged(
     let mut progress = Progress::start();
 
     // --- Validate ---------------------------------------------------------
+    // Every blob the manifest names except those `present_site` vouches for,
+    // and every artifact.
     journal(ctx, state, Some(id), ActivationPhase::Validating).await?;
     set_status(ctx, id, GenerationStatus::Validating, None, None).await?;
-    let missing = missing_content(ctx, manifest).await?;
+    let missing = missing_content(ctx, manifest, present_site).await?;
     if !missing.is_empty() {
         let error = ActivationError::Validation(missing);
         abandon(ctx, id, state, &error.to_string()).await?;
@@ -1054,8 +1074,7 @@ async fn load_previous(
 /// pass over the site to learn something the key already states.
 ///
 /// Presence is asked as cheaply as each store allows, because this runs on
-/// every activation — every site-file save included — over the WHOLE manifest,
-/// not just what changed:
+/// every activation — every site-file save included:
 ///
 /// * **Artifacts** are answered by the builds ledger
 ///   ([`repo::builds::artifact_index`]) with no storage call at all. Every
@@ -1071,16 +1090,34 @@ async fn load_previous(
 ///   reads every artifact it loads, but one that keeps the block set — a site
 ///   write — commits naming it, as the generation before it already did.
 /// * **Blobs** have no ledger, so each is probed with [`blobs::exists`], which
-///   opens the object and declines its body rather than reading it.
+///   opens the object and declines its body rather than reading it — except
+///   a blob `present_site` names, which the caller vouches is stored. For an
+///   ordinary edit that is the active generation's site: it was validated
+///   when it activated, and the collector never deletes a blob a retained
+///   generation names, so a site write probes only the blob it adds (one
+///   storage open per save rather than one per site file). A rollback, a seed
+///   and boot convergence pass `None` and probe every blob.
 ///
 /// The `Err` is a storage failure — the store could not answer — which is a
 /// different thing from the store answering that content is gone.
 async fn missing_content(
     ctx: &dyn Context,
     manifest: &GenerationManifest,
+    present_site: Option<&SiteManifest>,
 ) -> Result<Vec<String>, ActivationError> {
+    let present: BTreeSet<&str> = present_site
+        .map(|site| {
+            site.files
+                .iter()
+                .map(|entry| entry.sha256.as_str())
+                .collect()
+        })
+        .unwrap_or_default();
     let mut missing = Vec::new();
     for sha in generation::site_blob_shas(manifest) {
+        if present.contains(sha) {
+            continue;
+        }
         if !blobs::exists(ctx, sha).await.map_err(storage_error)? {
             missing.push(format!("no blob is stored for site content {sha}"));
         }
@@ -1146,6 +1183,8 @@ pub async fn converge_on_boot(
                 // half of the desired one — so republish that from the
                 // manifest authoritative for it, treating the abandoned
                 // manifest as what is currently out there.
+                // No site is vouched for: the process died mid-activation,
+                // so boot trusts nothing it has not probed.
                 // Inline: boot has no request to defer to (see `Maintenance`).
                 if activate_staged(
                     ctx,
@@ -1153,6 +1192,7 @@ pub async fn converge_on_boot(
                     &row,
                     &manifest,
                     previous.as_ref(),
+                    None,
                     &state,
                     Maintenance::Inline,
                 )
