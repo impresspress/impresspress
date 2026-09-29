@@ -32,15 +32,28 @@ name: CI shared
 # `build-wasm` is not here; it is `build-wasm.yml`, which both callers run
 # before calling this file. See that file for why it is separate. Every job
 # below that needs the wasm downloads the `impresspress-web-pkg` artifact it
-# publishes, and is ordered after it by the caller's `needs:`.
+# publishes, and is ordered after it by the caller's `needs:`. The callers call
+# this file whatever `build-wasm` concluded (short of a cancelled run) and pass
+# that conclusion in as `build-wasm-result`: the jobs that download the
+# artifact run only on `success`, every other job runs regardless, and `ci-ok`
+# fails unless it is `success`.
+#
+# `ci-ok`, the last job, is the one check branch protection requires. It needs
+# every other job in this file and fails if any of them failed or was
+# cancelled, or if `build-wasm` did not succeed. A skipped job does not fail
+# it: the only jobs that skip are the ones downstream of a job that already
+# failed, or of a `build-wasm` that did not succeed, and either of those is
+# already red. `scripts/check-ci-ok-needs.sh`, run inside `ci-ok`, fails when a
+# job in this file is missing from its `needs:`, so a new job cannot run
+# outside the required check.
 #
 # Editing this file changes BOTH gates at once. Two consequences:
 #   * A comment that describes "this workflow" has to be true on a pull request
 #     and on a merge. Language like "at PR time" or "path-filtered" was true
 #     of only one of the two copies four separate times while they were being
 #     equalised, and none of it fails a build.
-#   * A change to this file runs no workflow unless it is in the callers'
-#     `paths:` filters. It is in both. Do not remove it from either.
+#   * `ci.yml` has no `paths:` filter, so every pull request runs this file.
+#     `ci-main.yml` does, and this file is in it. Do not remove it from there.
 
 on:
   workflow_call:
@@ -54,6 +67,13 @@ on:
           side.
         required: true
         type: boolean
+      build-wasm-result:
+        description: >-
+          The caller's `needs.build-wasm.result`. The jobs that download the
+          `impresspress-web-pkg` artifact run only when it is `success`, and
+          `ci-ok` fails when it is anything else.
+        required: true
+        type: string
 
 # Read-only token. No job below writes to the repository; the two that use
 # `github.token` only read a public release asset from another repository. The
@@ -69,7 +89,10 @@ jobs:
   check:
     name: Format & Lint
     # Ordered after `build-wasm.yml` by the caller, so the `impresspress-web-pkg`
-    # artifact this job downloads is already published.
+    # artifact this job downloads is already published — when it succeeded.
+    # When it did not there is no artifact, and `ci-ok` is red on the
+    # `build-wasm` result itself.
+    if: inputs.build-wasm-result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -212,7 +235,10 @@ jobs:
   test:
     name: Tests
     # Ordered after `build-wasm.yml` by the caller, so the `impresspress-web-pkg`
-    # artifact this job downloads is already published.
+    # artifact this job downloads is already published — when it succeeded.
+    # When it did not there is no artifact, and `ci-ok` is red on the
+    # `build-wasm` result itself.
+    if: inputs.build-wasm-result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -361,7 +387,10 @@ jobs:
   cloudflare:
     name: Cloudflare wasm32 check
     # Ordered after `build-wasm.yml` by the caller, so the `impresspress-web-pkg`
-    # artifact this job downloads is already published.
+    # artifact this job downloads is already published — when it succeeded.
+    # When it did not there is no artifact, and `ci-ok` is red on the
+    # `build-wasm` result itself.
+    if: inputs.build-wasm-result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -704,7 +733,10 @@ jobs:
   e2e-build:
     name: E2E build (CLI + web assets)
     # Ordered after `build-wasm.yml` by the caller, so the `impresspress-web-pkg`
-    # artifact this job downloads is already published.
+    # artifact this job downloads is already published — when it succeeded.
+    # When it did not there is no artifact, and `ci-ok` is red on the
+    # `build-wasm` result itself.
+    if: inputs.build-wasm-result == 'success'
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -844,7 +876,10 @@ jobs:
   e2e-dev-sandbox:
     name: E2E dev sandbox (browser WASM + wasmi guest)
     # Ordered after `build-wasm.yml` by the caller, so the `impresspress-web-pkg`
-    # artifact this job downloads is already published.
+    # artifact this job downloads is already published — when it succeeded.
+    # When it did not there is no artifact, and `ci-ok` is red on the
+    # `build-wasm` result itself.
+    if: inputs.build-wasm-result == 'success'
     runs-on: ubuntu-latest
     # The e2e itself is a few minutes. The ceiling is for the case where
     # neither the release asset nor the cache is there and this job composes
@@ -1816,3 +1851,46 @@ jobs:
         if: steps.sdk-changes.outputs.skip != 'true'
         working-directory: packages/impresspress-js
         run: npm run test:pack-install
+
+  # The one job branch protection requires, reported as `ci / ci-ok`. See this
+  # file's header for what it passes and fails on.
+  ci-ok:
+    name: ci-ok
+    # always(): a failed dependency must turn this job red, not skip it — a
+    # skipped required check reads as passing.
+    if: always()
+    # Every other job id in this file. `scripts/check-ci-ok-needs.sh`, the
+    # first step below, fails when this list and the file's jobs disagree.
+    needs:
+      - check
+      - test
+      - test-postgres
+      - cloudflare
+      - cloudflare-wasm-test
+      - browser-wasm-test
+      - e2e-build
+      - e2e-smoke
+      - e2e-dev-sandbox
+      - e2e-dev-compile
+      - e2e-visual
+      - products-browser
+      - product-examples
+      - postgres-migrations
+      - audit
+      - sdk
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Every job in this workflow is in ci-ok's needs
+        run: bash scripts/check-ci-ok-needs.sh
+
+      - name: build-wasm succeeded and no job failed or was cancelled
+        env:
+          NEEDS: ${{ toJSON(needs) }}
+          BUILD_WASM_RESULT: ${{ inputs.build-wasm-result }}
+        run: |
+          echo "build-wasm: ${BUILD_WASM_RESULT}"
+          echo "$NEEDS" | jq -r 'to_entries[] | "\(.key): \(.value.result)"'
+          test "$BUILD_WASM_RESULT" = success
+          echo "$NEEDS" | jq -e 'length > 0 and all(.[]; .result == "success" or .result == "skipped")' > /dev/null

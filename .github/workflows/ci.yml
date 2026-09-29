@@ -4,33 +4,15 @@ name: CI
 # `ci-main.yml` calls with the same arguments but `pull-request: false` — so
 # the two gates cannot drift apart by construction. See that file's header.
 
+# No `paths:` filter: every pull request runs the full job set, so `ci / ci-ok`
+# (the summary job at the end of `ci-shared.yml`) reports on every pull request
+# and can be a required status check. A filtered workflow never starts on a
+# pull request outside its paths, which leaves a required check waiting
+# forever. Three narrow jobs skip their work on a pull request that does not
+# touch their inputs; see `ci-shared.yml`.
 on:
   pull_request:
     branches: [main]
-    paths:
-      - 'crates/**'
-      - 'examples/**'
-      - 'packages/**'
-      - 'Cargo.toml'
-      - 'Cargo.lock'
-      - 'scripts/**'
-      - '.github/workflows/ci.yml'
-      # The workflows this one calls, directly or through `ci-shared.yml`.
-      # Without these entries a change to the shared body — which is every job
-      # this gate runs — would start no workflow at all and merge ungated.
-      - '.github/workflows/ci-shared.yml'
-      - '.github/workflows/build-wasm.yml'
-      - '.github/workflows/audit.yml'
-      # `ci-main.yml` is in THIS filter because it is not in its own trigger's
-      # reach on a pull request: a pull request that touches only the merge
-      # workflow would otherwise start no workflow at all and merge with no
-      # gate — the exact shape of any future fix to that file. Nothing here
-      # runs `ci-main.yml`; listing it just means the pull-request gate runs
-      # and the change is reviewed against a green build.
-      - '.github/workflows/ci-main.yml'
-      # The dev-sandbox e2e stages this proof guest into a live browser
-      # runtime, so a change to it must run CI.
-      - 'experiments/browser-service-worker-blocks/guest/**'
 
 concurrency:
   group: ci-${{ github.ref }}
@@ -45,35 +27,22 @@ jobs:
   build-wasm:
     uses: ./.github/workflows/build-wasm.yml
 
-  # `needs: build-wasm` is the edge that the six jobs inside `ci-shared.yml`
-  # which download the `impresspress-web-pkg` artifact each used to carry. A job
-  # cannot depend on a job inside a called workflow, only on the call, so the
-  # edge moves up here, onto the whole call. That has two consequences, and the
-  # second one is not about timing:
+  # `needs: build-wasm` orders the six jobs inside `ci-shared.yml` that
+  # download the `impresspress-web-pkg` artifact after it. A job cannot depend
+  # on a job inside a called workflow, only on the call, so the edge is on the
+  # whole call, and every job in `ci-shared.yml` waits for `build-wasm`.
   #
-  #   * It delays the EIGHT jobs that never needed the wasm and had no `needs:`
-  #     at all — audit, sdk, the three products lanes, test-postgres, and both
-  #     wasm test lanes (cloudflare-wasm-test, browser-wasm-test, neither of
-  #     which downloads the artifact) — by `build-wasm`'s ~4 minutes. All eight
-  #     run for under 3.5 minutes and none is on the critical path (build-wasm
-  #     -> e2e-dev-sandbox -> e2e-dev-compile, ~26 minutes), so the run's wall
-  #     clock and its runner minutes are both unchanged.
-  #   * It changes what gets REPORTED when the wasm build fails. Those eight
-  #     used to run and report their own verdict whatever `build-wasm` did.
-  #     Now a failed `build-wasm` skips this call, and all sixteen jobs in
-  #     `ci-shared.yml` report nothing — sixteen of this gate's seventeen,
-  #     sixteen of `ci-main.yml`'s twenty-three. A dependency bump that both
-  #     breaks the wasm build and introduces a security advisory used to
-  #     surface two red jobs; now it surfaces one, and the advisory stays
-  #     invisible until the build is fixed and CI re-runs. Same for a
-  #     client-library or migration regression. This is not a false green
-  #     today: `build-wasm` is genuinely red when it fails, and this fork has
-  #     no required status checks. But a SKIPPED required check reports as
-  #     passing, so if required checks are ever configured on the prefixed job
-  #     names, sixteen of the twenty-three would report green on a build
-  #     failure. Configure `build-wasm` as required alongside them.
+  # `!cancelled()` rather than the implicit `success()`: the call runs whatever
+  # `build-wasm` concluded, and `build-wasm-result` carries that conclusion in.
+  # The jobs that download the artifact skip unless it is `success` (directly,
+  # or through their own `needs:`), the jobs that do not need it still run and
+  # report, and `ci / ci-ok` fails on anything but `success`. With `success()` a failed `build-wasm` would
+  # skip the whole call, `ci / ci-ok` would never report, and a required
+  # check that never reports shows as waiting, not as failed.
   ci:
     needs: build-wasm
+    if: ${{ !cancelled() }}
     uses: ./.github/workflows/ci-shared.yml
     with:
       pull-request: true
+      build-wasm-result: ${{ needs.build-wasm.result }}
