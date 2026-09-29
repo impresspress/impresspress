@@ -1614,7 +1614,7 @@ export interface paths {
         put?: never;
         /**
          * Scaffold a new block from a template
-         * @description Writes blocks/<name>/{Cargo.toml, src/lib.rs, src/wafer_guest.rs}. The support module is written verbatim — it is the guest ABI and must not be hand-written or edited. Writing source activates nothing; compile the block to make it serve.
+         * @description Writes blocks/<name>/{Cargo.toml, src/lib.rs}, instantiated from the template. The manifest depends on the guest SDK crate by path (`../../wafer_guest`), which the sandbox provides; the block never contains the SDK. Writing source activates nothing; compile the block to make it serve.
          */
         post: {
             parameters: {
@@ -2696,14 +2696,9 @@ export interface paths {
                              */
                             markdown: string;
                             /**
-                             * @description The current `src/wafer_guest.rs`, verbatim: what a block built against
-                             *     an older copy writes over its own before compiling again.
-                             */
-                            wafer_guest_module: string;
-                            /**
                              * Format: uint32
-                             * @description The `WAFER_GUEST_VERSION` of the support module this reference
-                             *     documents and `POST /b/dev/api/blocks` writes.
+                             * @description The `WAFER_GUEST_VERSION` of the guest SDK crate this reference
+                             *     documents and every scaffolded block depends on.
                              */
                             wafer_guest_version: number;
                         };

@@ -1,14 +1,15 @@
 //! The two templates, compiled for real and run for real.
 //!
-//! `wafer_guest_parity.rs` proves the JSON the guest module *renders* is the
+//! `wafer_guest_parity.rs` proves the JSON the guest SDK *renders* is the
 //! JSON the host's types parse. That is a check of shapes, and it can be true
 //! of a module that never compiles to wasm, never negotiates the JSON host
 //! codec, and never reaches a database. This file closes the rest of the
 //! loop:
 //!
-//! 1. copy a template out of the tree (dereferencing the `wafer_guest.rs`
-//!    symlink) and build it with **plain `cargo`** for `wasm32-wasip1`,
-//!    `--offline`, which is what proves the crate has no dependencies — the
+//! 1. lay the template out as an export archive and the compiler's VFS do —
+//!    `blocks/<name>/` beside the guest SDK crate at `wafer_guest/` — and
+//!    build it with **plain `cargo`** for `wasm32-wasip1`, `--offline`,
+//!    which is what proves the block needs nothing but that crate — the
 //!    browser toolchain the sandbox actually uses has no registry at all;
 //! 2. load it the way the sandbox loads a staged block — read its
 //!    `BlockInfo` under deny-all, run the static rules over that, then
@@ -53,14 +54,6 @@ use wafer_block::{
 };
 use wafer_block_sqlite::service::SQLiteDatabaseService;
 use wafer_run::{wasm::WasmiBlock, ResourceLimits, Wafer};
-
-/// The canonical guest support module, compiled for the host, so a test can
-/// render a `BlockInfo` exactly as a sandbox block does.
-///
-/// It carries its own `#![expect(dead_code)]` — this file uses only part of
-/// the API — so this declaration must not add a second one.
-#[path = "../src/blocks/dev/templates/wafer_guest.rs"]
-mod wafer_guest;
 
 // ---------------------------------------------------------------------------
 // Building a template
@@ -121,17 +114,12 @@ fn buildable() -> bool {
     }
 }
 
-/// Copy `from` to `to`, following symlinks.
-///
-/// Following them is the point: `src/wafer_guest.rs` in each template is a
-/// symlink to the canonical module, and the copy has to be a real file so the
-/// build is of the same bytes `dev_create_block` writes.
+/// Copy the directory tree at `from` to `to`.
 fn copy_dir_all(from: &Path, to: &Path) -> std::io::Result<()> {
     std::fs::create_dir_all(to)?;
     for entry in std::fs::read_dir(from)? {
         let entry = entry?;
         let target = to.join(entry.file_name());
-        // `metadata` follows symlinks, so a symlinked file reports as a file.
         if entry.metadata()?.is_dir() {
             copy_dir_all(&entry.path(), &target)?;
         } else {
@@ -157,18 +145,32 @@ fn package_name(manifest: &str) -> String {
         .to_string()
 }
 
+/// Lay the guest crate down beside the blocks, exactly as an export archive
+/// and the compiler's VFS do (`seed/wafer_guest/`, `/wafer_guest/`), so the
+/// template's `path = "../../wafer_guest"` resolves.
+fn write_guest_crate(root: &Path) {
+    for (path, content) in impresspress_core::blocks::dev::scaffold::guest_files() {
+        let target = root.join("wafer_guest").join(path);
+        std::fs::create_dir_all(target.parent().expect("a parent")).expect("create the directory");
+        std::fs::write(&target, content).expect("write the guest crate");
+    }
+}
+
 /// Build `templates/{name}` for `wasm32-wasip1` and return the module.
 fn build_template(name: &str) -> Vec<u8> {
     let source = Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("src/blocks/dev/templates")
         .join(name);
     let out = tempfile::tempdir().expect("tempdir");
-    copy_dir_all(&source, out.path()).expect("copy the template");
-    build_crate(name, out.path())
+    write_guest_crate(out.path());
+    let block_dir = out.path().join("blocks").join(name);
+    copy_dir_all(&source, &block_dir).expect("copy the template");
+    build_crate(name, out.path(), &block_dir)
 }
 
-/// Scaffold `template` as block `name` — the three files `dev_create_block`
-/// writes, from [`Template::files`] itself — and build it.
+/// Scaffold `template` as block `name` — the two files `dev_create_block`
+/// writes, from [`Template::files`] itself — and build it beside the guest
+/// crate.
 ///
 /// The one edit is the one an author makes before a second block from the
 /// same template can run beside the first: agent tool names are unique
@@ -185,30 +187,30 @@ fn build_scaffolded_with(
     edit: impl Fn(String) -> String,
 ) -> Vec<u8> {
     let out = tempfile::tempdir().expect("tempdir");
-    let block_dir = format!("blocks/{name}/");
+    write_guest_crate(out.path());
     let tool = format!("\"subscribe_{}\"", name.replace('-', "_"));
     for (path, content) in template.files(name) {
         let content = edit(content.replace("\"subscribe_newsletter\"", &tool));
-        let relative = path
-            .strip_prefix(&block_dir)
-            .unwrap_or_else(|| panic!("{path} is outside {block_dir}"));
-        let target = out.path().join(relative);
+        // `path` is workspace-relative (`blocks/<name>/…`), which is the
+        // layout the build root mirrors.
+        let target = out.path().join(&path);
         std::fs::create_dir_all(target.parent().expect("a parent")).expect("create the directory");
         std::fs::write(&target, content).expect("write the scaffolded file");
     }
-    build_crate(name, out.path())
+    build_crate(name, out.path(), &out.path().join("blocks").join(name))
 }
 
-/// Build the crate at `dir` for `wasm32-wasip1` and return the module.
-fn build_crate(name: &str, dir: &Path) -> Vec<u8> {
+/// Build the block crate at `dir` (laid out under `root`, beside the guest
+/// crate) for `wasm32-wasip1` and return the module.
+fn build_crate(name: &str, root: &Path, dir: &Path) -> Vec<u8> {
     let package =
         package_name(&std::fs::read_to_string(dir.join("Cargo.toml")).expect("read Cargo.toml"));
     // `--offline` is the assertion, not an optimization: a template with a
-    // single dependency would fail here rather than quietly working on a
+    // registry dependency would fail here rather than quietly working on a
     // machine with a warm registry cache. `--target-dir` is explicit so an
     // ambient `CARGO_TARGET_DIR` cannot move the artifact out from under the
     // read below.
-    let target_dir = dir.join("target");
+    let target_dir = root.join("target");
     let status = Command::new("cargo")
         .args([
             "build",
@@ -224,7 +226,7 @@ fn build_crate(name: &str, dir: &Path) -> Vec<u8> {
         .expect("run cargo");
     assert!(
         status.success(),
-        "the {name} template must build with plain cargo and no dependencies"
+        "the {name} template must build with plain cargo and no registry dependencies"
     );
 
     let artifact = target_dir
@@ -669,6 +671,31 @@ async fn a_list_without_a_limit_returns_every_row() {
         emails,
         vec!["one@example.com".to_string(), "two@example.com".to_string()]
     );
+
+    // An author who changes the block's `[profile.release]` still gets a
+    // module: cargo rebuilds the guest crate under the block's profile, and
+    // what comes out still fits the limit and still loads and serves.
+    assert!(
+        Template::Table
+            .files("fast")
+            .iter()
+            .any(|(_, content)| content.contains("opt-level = \"z\"")),
+        "the table template's profile optimises for size"
+    );
+    let wasm = build_scaffolded_with(Template::Table, "fast", |content| {
+        content.replace("opt-level = \"z\"", "opt-level = 3")
+    });
+    let (block, _spec) = load_as_the_sandbox_does("fast", &wasm);
+    let mut wafer = golden_wafer();
+    wafer
+        .register_block("site/fast", Arc::new(block))
+        .expect("register site/fast");
+    let wafer = wafer.start().await.expect("start the runtime");
+    assert_eq!(subscribe(&wafer, "fast", "three@example.com").await, 200);
+    assert_eq!(
+        subscriber_emails(&wafer, "fast").await,
+        vec!["three@example.com".to_string()]
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -769,16 +796,20 @@ pub extern "C" fn __wafer_lifecycle(_ptr: i32, _len: i32) -> i64 {{
 }}
 "####
     );
-    let dir = tempfile::tempdir().expect("tempdir");
-    std::fs::create_dir_all(dir.path().join("src")).expect("create src");
-    std::fs::write(dir.path().join("src/lib.rs"), source).expect("write the guest");
+    // Laid out as a block beside the guest crate, because the hello manifest
+    // it borrows depends on it (by path; this source never calls it).
+    let root = tempfile::tempdir().expect("tempdir");
+    write_guest_crate(root.path());
+    let dir = root.path().join("blocks/hostile");
+    std::fs::create_dir_all(dir.join("src")).expect("create src");
+    std::fs::write(dir.join("src/lib.rs"), source).expect("write the guest");
     let manifest = std::fs::read_to_string(
         Path::new(env!("CARGO_MANIFEST_DIR")).join("src/blocks/dev/templates/hello/Cargo.toml"),
     )
     .expect("read the hello manifest")
     .replace("name = \"hello\"", "name = \"hostile\"");
-    std::fs::write(dir.path().join("Cargo.toml"), manifest).expect("write the manifest");
-    build_crate("hostile", dir.path())
+    std::fs::write(dir.join("Cargo.toml"), manifest).expect("write the manifest");
+    build_crate("hostile", root.path(), &dir)
 }
 
 /// The hostile guest, admitted as the sandbox admits it, in a started runtime.

@@ -2704,6 +2704,7 @@ dependencies = [
  "wafer-net-security",
  "wafer-run",
  "wafer-sql-utils",
+ "wafer_guest",
  "walkdir",
  "wiremock",
  "zip",
@@ -6188,6 +6189,10 @@ dependencies = [
  "wafer-block",
  "wafer-schema",
 ]
+
+[[package]]
+name = "wafer_guest"
+version = "0.1.0"
 
 [[package]]
 name = "walkdir"

@@ -286,6 +286,10 @@ rusqlite = { workspace = true }
 # regular optional dep) is off.
 wafer-block-sqlite = { workspace = true }
 wafer-block-http-listener = { workspace = true }
+# The guest SDK, compiled for the host: the parity test renders `BlockInfo`
+# JSON with it and parses the result with the real `wafer_block` types, and
+# the golden test builds the templates beside it.
+wafer_guest = { path = "../wafer-guest" }
 async-trait = { workspace = true }
 # The `tests/` crates are separate compilation units, so they cannot reach the
 # lib's own `base64ct`. Same crate, same standard alphabet + padding as the

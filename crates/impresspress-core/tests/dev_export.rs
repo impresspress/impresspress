@@ -319,7 +319,6 @@ async fn export_zip_contains_shell_seed_sources_and_data_with_dev_off() {
         "seed/site/index.html",
         "seed/blocks/hello.wasm",
         "seed/blocks/hello/src/lib.rs",
-        "seed/blocks/hello/src/wafer_guest.rs",
         "seed/data.json",
     ] {
         assert!(

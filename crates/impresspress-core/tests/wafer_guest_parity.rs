@@ -1,15 +1,17 @@
-//! The vendored guest module against the real `wafer_block` types.
+//! The guest SDK crate against the real `wafer_block` types.
 //!
-//! `src/blocks/dev/templates/wafer_guest.rs` writes three wire shapes by hand
+//! `crates/wafer-guest` writes three wire shapes by hand
 //! — `BlockInfo`, `GuestResult` and `Result<(), WaferError>` — and reads a
 //! fourth, the `__wafer_handle` call frame. Nothing in a wasm build checks
 //! that they agree with the types the host parses: a field renamed upstream
 //! would surface as a trap inside wasmi, or worse as a `BlockInfo` that
 //! parsed with a capability silently missing.
 //!
-//! So the module is compiled **natively** here (its `extern` block is
-//! `#[cfg(target_arch = "wasm32")]`; a shim panics for every host call) and
-//! what it renders is parsed with the producer's own types. That is a
+//! So the crate is compiled **natively** here, as an ordinary
+//! dev-dependency (its `extern` block is `#[cfg(target_arch = "wasm32")]`; a
+//! shim panics for every host call, and every export `export!` stamps is
+//! wasm32-only too), and what it renders is parsed with the producer's own
+//! types. That is a
 //! compile-time check of every field name and an assertion on every value —
 //! no runtime, no wasm, and it runs in the ordinary `block-dev` suite.
 //!
@@ -17,25 +19,16 @@
 //! SQLite — is `wafer_guest_golden.rs`.
 #![cfg(feature = "block-dev")]
 
-/// The canonical support module, compiled for the host.
-///
-/// It carries its own `#![expect(dead_code)]` — a template uses only part of
-/// the API — so this declaration must not add a second one.
-#[path = "../src/blocks/dev/templates/wafer_guest.rs"]
-mod wafer_guest;
-
 /// The `hello` template's `src/lib.rs`.
 ///
-/// Its own `mod wafer_guest;` is `#[cfg(target_arch = "wasm32")]`-gated and
-/// its `use crate::wafer_guest::*;` is not — which resolves to the module
-/// above when the file is compiled as part of this test crate, and to the
-/// template's own symlinked copy when it is compiled as a block crate's root.
-/// One line, two contexts, no cfg on the import.
+/// Its `use wafer_guest::*;` names the crate in both contexts — here, where
+/// the file is a module of this test crate, and in a block crate, where it is
+/// the root — and its `wafer_guest::export!` expands to nothing on the host.
 #[path = "../src/blocks/dev/templates/hello/src/lib.rs"]
 #[expect(
     dead_code,
-    reason = "a template exports a whole guest ABI; this test reads only the \
-              part it compares"
+    reason = "`init` is reached only through the wasm32-only exports \
+              `export!` stamps; this test never runs it"
 )]
 mod hello_template;
 
@@ -43,8 +36,8 @@ mod hello_template;
 #[path = "../src/blocks/dev/templates/table/src/lib.rs"]
 #[expect(
     dead_code,
-    reason = "a template exports a whole guest ABI; this test reads only the \
-              part it compares"
+    reason = "`init` is reached only through the wasm32-only exports \
+              `export!` stamps; this test never runs it"
 )]
 mod table_template;
 
@@ -199,7 +192,7 @@ fn json_codec_round_trips_wire_shapes() {
     );
     // A 4-byte UTF-8 sequence survives the copy path verbatim. (The
     // `\uD83D\uDE80` *escape* form is pinned by the codec's own tests, in
-    // `wafer_guest.rs`.)
+    // the `wafer_guest` crate.)
     assert_eq!(
         Json::parse(r#""🚀""#).expect("astral character").as_str(),
         Some("🚀")
@@ -354,35 +347,25 @@ fn the_lifecycle_result_shape_is_the_hosts_own_result_type() {
 }
 
 // ---------------------------------------------------------------------------
-// The vendored copies
+// The version
 // ---------------------------------------------------------------------------
 
-/// Both templates carry the canonical module, and the module carries the
-/// version the block publishes.
-///
-/// The templates' `src/wafer_guest.rs` are symlinks, so this is an assertion
-/// about the checkout as well as about the bytes: a clone made without
-/// symlink support would leave three files that could drift.
+/// The number the sandbox checks staged builds against is the number the
+/// crate declares, and the source the API hands out is the crate's own.
 #[test]
-fn templates_carry_the_canonical_module_byte_for_byte() {
-    let canonical = include_str!("../src/blocks/dev/templates/wafer_guest.rs");
-    assert_eq!(
-        include_str!("../src/blocks/dev/templates/hello/src/wafer_guest.rs"),
-        canonical
-    );
-    assert_eq!(
-        include_str!("../src/blocks/dev/templates/table/src/wafer_guest.rs"),
-        canonical
-    );
-    // The version the module declares and the version the block reports are
-    // one number; a scaffolded block's `wafer-guest-version` check compares
-    // exactly these two.
-    assert!(canonical.contains(&format!(
-        "pub const WAFER_GUEST_VERSION: u32 = {};",
-        impresspress_core::blocks::dev::WAFER_GUEST_VERSION
-    )));
+fn the_sandbox_and_the_crate_agree_on_the_guest_version() {
     assert_eq!(
         wafer_guest::WAFER_GUEST_VERSION,
         impresspress_core::blocks::dev::WAFER_GUEST_VERSION
+    );
+    let lib = impresspress_core::blocks::dev::scaffold::GUEST_LIB_RS;
+    assert!(lib.contains(&format!(
+        "pub const WAFER_GUEST_VERSION: u32 = {};",
+        wafer_guest::WAFER_GUEST_VERSION
+    )));
+    assert!(
+        impresspress_core::blocks::dev::scaffold::GUEST_CARGO_TOML
+            .contains("name = \"wafer_guest\""),
+        "the crate the API hands out must be the one the templates depend on"
     );
 }

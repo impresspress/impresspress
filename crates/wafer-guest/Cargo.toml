@@ -1,0 +1,21 @@
+# The dev sandbox's guest SDK: the whole standard library of a sandbox block.
+#
+# Every block scaffolded by `dev_create_block` depends on this crate by path
+# (`wafer_guest = { path = "../../wafer_guest" }`), the compiler worker builds
+# it once per session, and an export archive carries it beside the blocks.
+# It is written verbatim into places that have no Cargo workspace (the
+# browser toolchain's VFS, an exported site), so nothing here may inherit
+# from `[workspace.package]`, and it must keep building on the pinned
+# in-browser toolchain (rustc 1.83, edition 2021, no registry access).
+[package]
+name = "wafer_guest"
+version = "0.1.0"
+edition = "2021"
+license = "MIT OR Apache-2.0"
+description = "Guest SDK for ImpressPress dev-sandbox blocks (std-only, no dependencies)"
+publish = false
+
+[lib]
+crate-type = ["rlib"]
+
+[dependencies]

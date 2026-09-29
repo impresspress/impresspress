@@ -1,8 +1,9 @@
-# A sandbox block: one crate, no dependencies.
+# A sandbox block: one crate, one dependency.
 #
-# The browser toolchain that compiles this has no registry access, so
-# `[dependencies]` stays empty — everything a block needs is in
-# `src/wafer_guest.rs`, which the scaffolder wrote beside this file.
+# The browser toolchain that compiles this has no registry access, so the
+# only dependency a block can have is the guest SDK beside it, by path — the
+# same path in the workspace, in the compiler's VFS and in an export archive.
+# Nothing else goes in this table.
 
 [package]
 name = "newsletter"
@@ -15,21 +16,21 @@ edition = "2021"
 crate-type = ["cdylib"]
 
 [dependencies]
+wafer_guest = { path = "../../wafer_guest" }
 
-# The sandbox accepts an artifact of at most 4 MiB. Each setting below is
-# chosen for that limit or for compile time in the browser:
+# The sandbox accepts an artifact of at most 4 MiB, and these settings keep a
+# block well under it. What each one is for:
 #
-# - `opt-level = "z"` optimises for size, which is what keeps a block well
-#   under the limit.
-# - `lto = false` is deliberate: link-time optimisation roughly doubles the
-#   compile to save about 20 KB of artifact. Do not turn it on. With one
-#   codegen unit, `false` and `"off"` build the same thing.
-# - `codegen-units = 1` gives a smaller artifact and is also the faster
-#   compile here; more units build slower in the browser toolchain.
-# - `panic = "abort"` drops the unwinding machinery. It also means a panic in
+# * `opt-level = "z"` optimises for size.
+# * `lto = false` is deliberate: link-time optimisation doubled the in-browser
+#   compile for about 22 KB of artifact, so a block trades those bytes for
+#   half the wait.
+# * `codegen-units = 1` because parallel codegen is a loss inside the
+#   in-browser compiler (16 units built two and a half times slower).
+# * `panic = "abort"` drops the unwinding machinery. It also means a panic in
 #   a handler traps the instance instead of unwinding — return an error
 #   response rather than panicking on anything a caller can cause.
-# - `strip = true` drops symbols and debug info from the artifact.
+# * `strip = true` drops the symbol names and debug info from the module.
 [profile.release]
 opt-level = "z"
 lto = false

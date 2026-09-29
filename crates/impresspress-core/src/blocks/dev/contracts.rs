@@ -513,16 +513,13 @@ pub struct CreateBlockResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReferenceResponse {
-    /// The `WAFER_GUEST_VERSION` of the support module this reference
-    /// documents and `POST /b/dev/api/blocks` writes.
+    /// The `WAFER_GUEST_VERSION` of the guest SDK crate this reference
+    /// documents and every scaffolded block depends on.
     pub wafer_guest_version: u32,
     /// The authoring guide, as Markdown: the API, the host services, the
     /// namespace rules, the limits, the diagnostic codes, and both templates
     /// in full.
     pub markdown: String,
-    /// The current `src/wafer_guest.rs`, verbatim: what a block built against
-    /// an older copy writes over its own before compiling again.
-    pub wafer_guest_module: String,
 }
 
 /// One entry of the export bundle: where it lands in the zip, and how big it

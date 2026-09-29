@@ -36,10 +36,10 @@ async fn read_file(ctx: &TestContext, path: &str) -> String {
 // POST /b/dev/api/blocks
 // ---------------------------------------------------------------------------
 
-/// The endpoint writes three files: the crate manifest, the instantiated
-/// template, and the vendored support module verbatim.
+/// The endpoint writes two files, the crate manifest and the instantiated
+/// template, and the manifest depends on the guest SDK crate by path.
 #[tokio::test]
-async fn create_block_writes_the_template_and_the_module() {
+async fn create_block_writes_the_template_as_two_files() {
     let ctx = TestContext::with_dev(FakeControl::new()).await;
     let created = output_json(
         dev_post(
@@ -62,8 +62,7 @@ async fn create_block_writes_the_template_and_the_module() {
         paths,
         vec![
             "blocks/newsletter/Cargo.toml",
-            "blocks/newsletter/src/lib.rs",
-            "blocks/newsletter/src/wafer_guest.rs",
+            "blocks/newsletter/src/lib.rs"
         ]
     );
 
@@ -73,17 +72,18 @@ async fn create_block_writes_the_template_and_the_module() {
         "the template is instantiated with the block name"
     );
     assert!(lib.contains("site__newsletter__subscribers"));
-    assert!(read_file(&ctx, "blocks/newsletter/Cargo.toml")
-        .await
-        .contains(r#"name = "newsletter""#));
-    // The support module is the canonical bytes, not a rendering of them.
-    assert_eq!(
-        read_file(&ctx, "blocks/newsletter/src/wafer_guest.rs").await,
-        Template::WAFER_GUEST
+    // The SDK is not written into the block: the block names it and hands
+    // its entry points to it.
+    assert!(lib.contains("wafer_guest::export!(block, init);"), "{lib}");
+    let cargo = read_file(&ctx, "blocks/newsletter/Cargo.toml").await;
+    assert!(cargo.contains(r#"name = "newsletter""#), "{cargo}");
+    assert!(
+        cargo.contains(r#"wafer_guest = { path = "../../wafer_guest" }"#),
+        "{cargo}"
     );
 
     // A second create over the same directory is a conflict, whichever
-    // template it names — overwriting two of three files would leave a crate
+    // template it names — overwriting the files there would leave a crate
     // that is neither what the author wrote nor what the template is.
     let again = dev_post(
         &ctx,
@@ -178,7 +178,7 @@ async fn an_unknown_template_is_refused() {
 
 /// A create that runs out of quota part-way stores nothing at all.
 ///
-/// The endpoint writes three files, and the quota is a running total: a
+/// The endpoint writes two files, and the quota is a running total: a
 /// workspace with room for the first and not the second used to store the
 /// first blob and then return without saving, so the bytes it had just put in
 /// the store were never charged for. `check_quotas` bounds on `blob_bytes`
@@ -278,12 +278,6 @@ async fn reference_returns_the_authoring_guide() {
     )
     .await;
     assert_eq!(body["wafer_guest_version"], WAFER_GUEST_VERSION);
-    // The module a block built against an older copy writes over its own:
-    // the stale-module diagnostic points here.
-    assert_eq!(
-        body["wafer_guest_module"].as_str(),
-        Some(Template::WAFER_GUEST)
-    );
 
     let markdown = body["markdown"].as_str().expect("markdown");
     for needle in [
@@ -309,7 +303,7 @@ async fn reference_returns_the_authoring_guide() {
 // The guest-module version gate
 // ---------------------------------------------------------------------------
 
-/// A block compiled against an older `wafer_guest.rs` is refused with a coded
+/// A block compiled against an older guest SDK is refused with a coded
 /// diagnostic, before the module is loaded.
 #[tokio::test]
 async fn staging_with_a_stale_module_version_is_a_diagnostic() {

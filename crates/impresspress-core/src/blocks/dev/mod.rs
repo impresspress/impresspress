@@ -83,9 +83,10 @@ pub const BLOCK_NAME: &str = "impresspress/dev";
 /// in this module — is what keeps the sandbox admin-only.
 pub const ROUTE_PREFIX: &str = "/b/dev";
 
-/// `wafer_guest.rs` ABI version the block scaffolder currently writes.
-/// Published in the status response so the page can tell whether a block it
-/// compiled earlier was built against a stale guest shim.
+/// ABI version of the guest SDK crate (`crates/wafer-guest`) that scaffolded
+/// blocks depend on. Must equal `wafer_guest::WAFER_GUEST_VERSION`, which the
+/// parity test asserts. Published in the status response so the page can
+/// tell whether a block it compiled earlier was built against an older SDK.
 pub const WAFER_GUEST_VERSION: u32 = 2;
 
 /// In-block dispatch targets, one per declared HTTP endpoint.
@@ -235,10 +236,11 @@ pub const ROUTES: &[EndpointRoute<Route>] = &[
     EndpointRoute::admin(HttpMethod::Post, "/b/dev/api/blocks", Route::ApiBlockCreate)
         .summary("Scaffold a new block from a template")
         .description(
-            "Writes blocks/<name>/{Cargo.toml, src/lib.rs, src/wafer_guest.rs}. The \
-             support module is written verbatim — it is the guest ABI and must not be \
-             hand-written or edited. Writing source activates nothing; compile the \
-             block to make it serve.",
+            "Writes blocks/<name>/{Cargo.toml, src/lib.rs}, instantiated from the \
+             template. The manifest depends on the guest SDK crate by path \
+             (`../../wafer_guest`), which the sandbox provides; the block never \
+             contains the SDK. Writing source activates nothing; compile the block to \
+             make it serve.",
         )
         .input(request_schema_of::<contracts::CreateBlockRequest>)
         .output(response_schema_of::<contracts::CreateBlockResponse>),

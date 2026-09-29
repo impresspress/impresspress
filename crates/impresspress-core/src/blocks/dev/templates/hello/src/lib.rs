@@ -8,17 +8,13 @@
 //! capabilities it implies are the only authority the compiled block gets.
 //! This one claims nothing, so it can reach nothing.
 
-// `wafer_guest.rs` sits beside this file. It is vendored, not a dependency —
-// the browser toolchain has no registry access, so `Cargo.toml`'s
-// `[dependencies]` table is empty and the whole SDK is that one module.
-//
-// The `cfg` gate lets the sandbox's own parity test compile this file for the
-// host; a host `cargo check` fails on the unconditional `use` below. A block
-// is built for wasm32-wasip1, where the module is there.
-#[cfg(target_arch = "wasm32")]
-mod wafer_guest;
+// The guest SDK. It is a crate beside the block (`../../wafer_guest`), not a
+// file inside it: the compiler builds it once per session and every block
+// links against that build. `export!` stamps the five entry points the host
+// calls into this crate, wired to `block()` and `init()` below.
+use wafer_guest::*;
 
-use crate::wafer_guest::*;
+wafer_guest::export!(block, init);
 
 /// What this block is, and what it serves.
 pub fn block() -> Block {

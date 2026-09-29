@@ -781,8 +781,8 @@ async fn a_seeded_build_row_records_the_block_info_the_guest_reported() {
     assert_eq!(control.inspections(), 1);
 }
 
-/// The staging path refuses a module built against a different
-/// `wafer_guest.rs` before it executes it (`blocks_api::handle_stage`), and a
+/// The staging path refuses a module built against a different guest SDK
+/// version before it executes it (`blocks_api::handle_stage`), and a
 /// seed is the other way a module reaches this runtime. The failure the gate
 /// prevents is a trap inside wasmi during the boot activation — the one boot
 /// that can least explain itself — and §10.1 makes exports deliberately

@@ -17,13 +17,13 @@
 //! is what lets `db::ensure_table` create the table. Raw SQL and raw DDL are
 //! never granted.
 
-// The `cfg` gate lets the sandbox's own parity test compile this file for the
-// host; a host `cargo check` fails on the unconditional `use` below. A block
-// is built for wasm32-wasip1, where the module is there.
-#[cfg(target_arch = "wasm32")]
-mod wafer_guest;
+// The guest SDK. It is a crate beside the block (`../../wafer_guest`), not a
+// file inside it: the compiler builds it once per session and every block
+// links against that build. `export!` stamps the five entry points the host
+// calls into this crate, wired to `block()` and `init()` below.
+use wafer_guest::*;
 
-use crate::wafer_guest::*;
+wafer_guest::export!(block, init);
 
 /// The one table this block owns.
 ///
