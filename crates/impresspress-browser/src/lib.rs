@@ -91,5 +91,7 @@ pub async fn db_init() -> Result<(), wasm_bindgen::JsValue> {
     // Whatever the schema cache knew described the database this replaced.
     database::forget_schema();
     opened?;
+    // The database in memory is now the one on disk.
+    flush_scope::loaded_from_disk();
     Ok(())
 }

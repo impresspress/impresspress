@@ -10,9 +10,29 @@
 //! [`note_mutation`] whether a scope is current and, if so, records that a
 //! flush is owed instead of exporting; [`run`] exports once when the scoped
 //! future has finished — BEFORE it hands the future's output back, so a
-//! reply built from that output still means the change is durable. A scope
-//! in which nothing mutated exports nothing. Outside every scope nothing
-//! changes: each logical mutation flushes itself.
+//! reply built from that output still means the change is durable. Outside
+//! every scope nothing changes: each logical mutation flushes itself.
+//!
+//! ## The epoch rule
+//!
+//! A scope does not return until every mutation completed before its end —
+//! its own or another scope's — is in an export that has been written. A
+//! mutation is not always made by the request it belongs to: a write that
+//! arrives while another write's activation is running is coalesced into
+//! it, so its generation's rows are written inside the OTHER request's
+//! poll and mark that request's scope; the waiting write's own scope owes
+//! nothing, yet its reply reports the generation active. So the crate keeps
+//! a mutation epoch (bumped when each logical mutation completes, in or out
+//! of a scope) and an exported-through epoch (the epoch every written
+//! export is known to hold), and a scope that ends while the first is ahead
+//! of the second flushes although it mutated nothing. It first looks for an
+//! export already under way that covers the epoch — one called at or after
+//! it; `bridge.js` serializes exports, so an export holds every mutation
+//! completed before its call — and awaits that one instead of adding its
+//! own. The cost: a request that mutated nothing (a status poll) but ends
+//! while another request's mutations are unexported pays for, or waits on,
+//! one export. A scope that mutated nothing and ends when everything is
+//! exported writes nothing.
 //!
 //! ## Interleaved requests
 //!
@@ -23,9 +43,14 @@
 //! whichever request happened to be current. The owed flag is therefore made
 //! current on every poll of the scoped future and the previous one restored
 //! when that poll returns (the shape of
-//! `impresspress_core::after_response::Scoped`), so a mutation always marks
-//! the flag of the request whose code made it, and each request flushes once,
-//! at its own end, if it mutated.
+//! `impresspress_core::after_response::Scoped`), so a mutation marks the
+//! flag of the request whose code made it, and a request that mutated
+//! flushes at its own end. Its export holds whatever else was in memory at
+//! the time, other requests' mutations included; keeping the flag per
+//! request is what lets a request that owes nothing, with nothing
+//! unexported, skip the export — a preference, not a rule, since the epoch
+//! rule above makes such a request export (or wait) whenever another
+//! request's mutations are still unexported.
 //!
 //! The restore is a drop guard, so it also runs when the inner poll unwinds:
 //! a panic in one request's future cannot leave its flag current for the
@@ -46,6 +71,8 @@ use std::{
     task::{Context, Poll},
 };
 
+use futures::future::{FutureExt, LocalBoxFuture, Shared};
+
 thread_local! {
     /// The owed-flush flag of the scope whose future is being polled right
     /// now, if any.
@@ -54,6 +81,96 @@ thread_local! {
 
 fn current() -> Option<Rc<Cell<bool>>> {
     CURRENT.with(|slot| slot.borrow().clone())
+}
+
+/// One export, shareable between every scope that waits on it. The output
+/// is [`crate::database::flush_through_bridge`]'s.
+type SharedFlush = Shared<LocalBoxFuture<'static, Result<(), String>>>;
+
+/// The most recently started export, while it is still running: the
+/// mutation epoch when it was called, its identity, and the export itself.
+struct InFlight {
+    covers: u64,
+    id: u64,
+    flush: SharedFlush,
+}
+
+thread_local! {
+    /// How many logical mutations have completed on the one sql.js database.
+    static MUTATION_EPOCH: Cell<u64> = const { Cell::new(0) };
+    /// The mutation epoch every written export is known to hold.
+    static EXPORTED_THROUGH: Cell<u64> = const { Cell::new(0) };
+    /// See [`InFlight`].
+    static IN_FLIGHT: RefCell<Option<InFlight>> = const { RefCell::new(None) };
+    /// The id the next export started by [`flush_covering_now`] takes.
+    static NEXT_FLUSH_ID: Cell<u64> = const { Cell::new(0) };
+}
+
+/// Record that a logical mutation has completed — whatever it returned,
+/// since a failed one may have applied some of its statements. Called after
+/// the mutation's statements have run, never before: an export called
+/// between the two must not be credited with them.
+pub(crate) fn mutation_done() {
+    MUTATION_EPOCH.with(|epoch| epoch.set(epoch.get() + 1));
+}
+
+/// Record that the in-memory database was just loaded from OPFS
+/// (`db_init`): it now matches what is written, whatever was unexported
+/// before.
+pub(crate) fn loaded_from_disk() {
+    let epoch = MUTATION_EPOCH.with(Cell::get);
+    EXPORTED_THROUGH.with(|through| through.set(epoch));
+}
+
+/// An export that will hold every mutation completed so far: the one in
+/// flight when it was called after the last of them, or else a new one.
+///
+/// `bridge.js` runs exports one at a time, each after every earlier call
+/// has finished, so an export's snapshot is taken no earlier than its call
+/// and holds every mutation that had completed by then. The epoch is
+/// therefore captured at the call — a lower bound for what the export will
+/// hold, which can only cost a later scope an export, never let one return
+/// early. When it is written, the exported-through epoch moves up to it.
+pub(crate) fn flush_covering_now() -> SharedFlush {
+    let epoch = MUTATION_EPOCH.with(Cell::get);
+    let running = IN_FLIGHT.with(|slot| {
+        slot.borrow()
+            .as_ref()
+            .filter(|in_flight| in_flight.covers >= epoch)
+            .map(|in_flight| in_flight.flush.clone())
+    });
+    if let Some(flush) = running {
+        return flush;
+    }
+    let id = NEXT_FLUSH_ID.with(|next| next.replace(next.get() + 1));
+    let flush = async move {
+        let result = crate::database::flush_through_bridge().await;
+        if result.is_ok() {
+            EXPORTED_THROUGH.with(|through| through.set(through.get().max(epoch)));
+        }
+        IN_FLIGHT.with(|slot| {
+            let mut slot = slot.borrow_mut();
+            if slot.as_ref().is_some_and(|in_flight| in_flight.id == id) {
+                *slot = None;
+            }
+        });
+        result
+    }
+    .boxed_local()
+    .shared();
+    IN_FLIGHT.with(|slot| {
+        *slot.borrow_mut() = Some(InFlight {
+            covers: epoch,
+            id,
+            flush: flush.clone(),
+        })
+    });
+    flush
+}
+
+/// Whether a mutation has completed that no written export is known to hold.
+fn unexported_mutations() -> bool {
+    MUTATION_EPOCH.with(Cell::get) > EXPORTED_THROUGH.with(Cell::get)
 }
 
 /// Record that the scope being polled owes a flush: `true` when one is
@@ -99,7 +216,9 @@ impl<F: Future> Future for Scoped<F> {
 }
 
 /// Run `future` as one flush scope, then flush the database once if anything
-/// inside it mutated; returns the future's output and that flush's result.
+/// inside it mutated, or if any mutation completed so far is not yet
+/// exported (the epoch rule in the module doc); returns the future's output
+/// and that flush's result.
 ///
 /// The flush result is the request's durability verdict: an `Err` means a
 /// mutation the output may report as done is in memory only, and the caller
@@ -117,8 +236,8 @@ pub async fn run<F: Future>(future: F) -> (F::Output, Result<(), String>) {
     if outer.is_some() {
         return (output, Ok(()));
     }
-    let flush = if owed.get() {
-        crate::database::flush_through_bridge().await
+    let flush = if owed.get() || unexported_mutations() {
+        flush_covering_now().await
     } else {
         Ok(())
     };
@@ -244,6 +363,74 @@ mod tests {
 
         crate::db_init().await.expect("reopen from OPFS");
         assert_eq!(row_count(&db).await, 2);
+    }
+
+    /// **A coalesced waiter.** Scope A mutates and wakes scope B, which
+    /// mutated nothing, then stays open until B has returned — the shape of
+    /// a write whose activation, driven from another write's poll, marks the
+    /// other write's scope while its own owes nothing. B must not return
+    /// (and so its request must not reply "durable") until an export holding
+    /// A's row has been written. Fails if a scope that owes nothing returns
+    /// without looking at mutations other scopes made.
+    #[wasm_bindgen_test]
+    async fn a_scope_that_wakes_after_another_scopes_mutation_flushes_before_returning() {
+        let db = fresh().await;
+        let before = opfs_writes();
+        let (wake_b, b_woken) = futures::channel::oneshot::channel::<()>();
+        let (b_returned, wait_for_b) = futures::channel::oneshot::channel::<()>();
+
+        let a = run(async {
+            mutate(&db, "a").await;
+            wake_b.send(()).expect("B is waiting");
+            wait_for_b.await.expect("B returns");
+        });
+        let b = async {
+            let ((), flush) = run(async {
+                b_woken.await.expect("A wakes B");
+            })
+            .await;
+            flush.expect("B's flush");
+            let exported = opfs_writes() - before;
+            crate::db_init().await.expect("reopen from OPFS");
+            let durable = row_count(&db).await;
+            b_returned.send(()).expect("A is waiting");
+            (exported, durable)
+        };
+        let (((), a_flush), (exported, durable)) = futures::join!(a, b);
+
+        a_flush.expect("A's flush");
+        assert_eq!(exported, 1, "B returned only after an export");
+        assert_eq!(durable, 1, "and that export holds A's row");
+    }
+
+    /// The cheap half of the same rule: a scope that ends while another
+    /// scope's export is in flight, and whose unexported mutations that
+    /// export already covers, awaits it rather than adding one. A mutates,
+    /// wakes B and ends (its export starts); B, which mutated nothing, ends
+    /// in the same pass and returns once A's export is written. One export.
+    #[wasm_bindgen_test]
+    async fn a_scope_ending_during_a_covering_export_awaits_it() {
+        let db = fresh().await;
+        let before = opfs_writes();
+        let (wake_b, b_woken) = futures::channel::oneshot::channel::<()>();
+
+        let a = run(async {
+            mutate(&db, "a").await;
+            wake_b.send(()).expect("B is waiting");
+        });
+        let b = async {
+            let ((), flush) = run(async {
+                b_woken.await.expect("A wakes B");
+            })
+            .await;
+            (flush, opfs_writes() - before)
+        };
+        let (((), a_flush), (b_flush, seen_by_b)) = futures::join!(a, b);
+
+        a_flush.expect("A's flush");
+        b_flush.expect("B awaited A's flush");
+        assert_eq!(seen_by_b, 1, "B returned only once A's export was written");
+        assert_eq!(opfs_writes() - before, 1, "and added none of its own");
     }
 
     /// Two requests interleaved on one thread each flush once, at their own

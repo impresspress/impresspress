@@ -105,14 +105,17 @@ pub fn restore_wafer(previous: Rc<wafer_run::Wafer>) {
 /// ## Durability and the work after the reply
 ///
 /// The request runs as one [`flush_scope`](crate::flush_scope): its
-/// mutations share one database export, and that export has been written
-/// before this function returns — so a response that reports a change done
-/// means the change is durable. When that export fails the response is a
-/// 500, whatever the flow answered, because the reply must not claim a
-/// durability it does not have. The change is not undone, though: it is
-/// already live in the in-memory database, every later read sees it, and the
-/// next export that succeeds persists it — possibly this request's own
-/// after-response flush. A caller that retries on the 500 therefore repeats a
+/// mutations share one database export, and by the epoch rule
+/// (`flush_scope`'s module doc) this function does not return until every
+/// mutation completed before the request's end, whichever request made it,
+/// is in an export that has been written — so a response that reports a
+/// change done means the change is durable, even when the change was
+/// written from another request's poll (a coalesced activation). When that
+/// export fails the response is a 500, whatever the flow answered, because
+/// the reply must not claim a durability it does not have. The change is not
+/// undone, though: it is already live in the in-memory database, every later
+/// read sees it, and the next export that succeeds persists it — possibly
+/// this request's own after-response flush. A caller that retries on the 500 therefore repeats a
 /// change that did happen (a retried `dev_write_file` creates another
 /// generation). The failure is reported only as this `tracing::error` in the
 /// console: the request's audit row was queued with the flow's own status,

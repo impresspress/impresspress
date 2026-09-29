@@ -187,9 +187,15 @@ pub(crate) async fn with_flush_mapped<T, E>(
     // leaves its scope owing the flush for the statements it did run.
     if crate::flush_scope::note_mutation() {
         let result = op.await;
+        crate::flush_scope::mutation_done();
         return resolve_flush_outcome(result, settle_transaction().map_err(map_flush));
     }
-    with_flush_through(op, flush_through_bridge, map_flush).await
+    let op = async {
+        let result = op.await;
+        crate::flush_scope::mutation_done();
+        result
+    };
+    with_flush_through(op, crate::flush_scope::flush_covering_now, map_flush).await
 }
 
 /// The one flush this crate performs: end whatever transaction the operation
@@ -201,7 +207,8 @@ pub(crate) async fn with_flush_mapped<T, E>(
 /// that was still open is an error even when the flush succeeds: its
 /// statements were rolled back, so the operation must not be reported done.
 ///
-/// Also the one a [`crate::flush_scope`] runs at its end.
+/// Reached only through [`crate::flush_scope::flush_covering_now`], which
+/// records what each export holds so a scope can tell whether it must flush.
 pub(crate) async fn flush_through_bridge() -> Result<(), String> {
     let settled = settle_transaction();
     let flushed = bridge::dbFlush()

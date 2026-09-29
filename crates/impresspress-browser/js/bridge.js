@@ -119,17 +119,21 @@ export function dbQueryRaw(sql, params) {
  * (e.g. a lazy column-add ALTER before the INSERT) is one flush, not N.
  * Inside a flush scope (one request), a mutation calls nothing: it records
  * that the scope owes a flush, and the scope calls this exactly ONCE when
- * its work is done, before the request's reply is returned; a scope that
- * mutated nothing does not call it. Either way the flush happens even when
- * a logical operation's own result is an error, since an earlier statement
- * inside it may already have mutated the in-memory sql.js DB. There is no
+ * its work is done, before the request's reply is returned. A scope that
+ * mutated nothing calls it too, or awaits a running call, when another
+ * scope's mutations are not yet exported (the epoch rule in
+ * `src/flush_scope.rs`), and otherwise does not call it. Either way the
+ * flush happens even when a logical operation's own result is an error,
+ * since an earlier statement inside it may already have mutated the
+ * in-memory sql.js DB. There is no
  * background/debounced/timer-based flush — a `DatabaseService` call made
  * outside a scope has attempted its flush by the time it returns, and a
  * scope has attempted its one flush by the time it hands its output back,
  * so the only crash-loss windows are "mid-flush" (the tab or Service
  * Worker is killed while `dbFlush` itself is exporting/writing) and, inside
- * a scope, between a mutation and the scope's end — before any reply that
- * could report the mutation done has been sent.
+ * a scope, between a mutation and the end of every scope that could report
+ * it done: by the epoch rule no scope ends, and so no reply is sent, while a
+ * mutation completed before its end is unexported, whichever scope made it.
  *
  * sql.js's `export()` closes the connection and opens a new one, which rolls
  * back a transaction still open on it. The Rust side ends any such

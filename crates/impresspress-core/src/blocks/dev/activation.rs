@@ -208,10 +208,13 @@ fn storage_error(e: WaferError) -> ActivationError {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Maintenance {
     /// After the current request's reply, through [`crate::deferred`]. For
-    /// every activation a request asks for: the generation is live and
-    /// durable before the reply, and two directory walks and a manifest parse
-    /// per retained generation are not something the caller needs to wait
-    /// for.
+    /// every activation a request asks for: the generation is live before
+    /// the reply, and durable before it on every platform that makes a reply
+    /// wait for the request's writes — in the browser, by the flush scope's
+    /// epoch rule, even for a waiter whose generation was written from
+    /// another request's poll — and two directory walks and a manifest
+    /// parse per retained generation are not something the caller needs to
+    /// wait for.
     Deferred,
     /// Before the activation returns. For the host's boot (seed import and
     /// [`converge_on_boot`]), which runs outside any request: in the browser

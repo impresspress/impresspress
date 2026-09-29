@@ -288,8 +288,10 @@ async function handleFetch(event) {
         // this worker alive until it has run — the browser may stop an idle
         // worker as soon as the response is delivered. Registered while the
         // `respondWith` promise is still pending, which is when `waitUntil`
-        // may still be called. The request's own changes were written before
-        // `handle_request` resolved; only this work is at stake.
+        // may still be called. `handle_request` resolves only once every
+        // database change completed before the request ended, whichever
+        // request made it, is written (the epoch rule in impresspress-browser's
+        // `flush_scope.rs`); only this work is at stake.
         const { response, after } = await handle_request(request);
         event.waitUntil(after);
         return response;
