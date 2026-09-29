@@ -235,6 +235,62 @@ const buildCommand = (crateName: string, target: string, release: boolean) =>
   `cargo build${release ? " --release" : ""} --manifest-path /blocks/${crateName}/Cargo.toml ` +
   `--target-dir /target --target ${target} --message-format=json`;
 
+/** Where cargo leaves a block's module, and what `download` reads. */
+const artifactPath = (crateName: string, target: string, release: boolean) =>
+  `/target/${target}/${release ? "release" : "debug"}/${crateName.replace(/-/g, "_")}.wasm`;
+
+/**
+ * Remove the block's previous module before building it again.
+ *
+ * `/target` is kept for the whole session, so the last build's module is
+ * still there when the next build starts — and this toolchain's cargo does
+ * not report every failure: `build-finished` says `success: true` after
+ * rustc has failed (rustc's status never reaches cargo), and a build that
+ * dies before cargo emits any JSON can leave no diagnostic at all (a path
+ * dependency that is not there prints neither JSON nor a `-->` span). Either
+ * way the previous module would be downloaded and answered
+ * as this compile's — a green build of code nobody wrote. With it removed,
+ * a build that fails for ANY reason leaves nothing at `artifactPath`, and
+ * `download` finding nothing is answered `success: false`. Like the mtime,
+ * this works around rubrc (cargo's `build-finished` does not reflect a
+ * rustc failure); the root-cause fix is upstream and belongs to the next pin
+ * bump. `-f` because the first build of a block has nothing to remove.
+ */
+const removeArtifact = async (crateName: string, target: string, release: boolean) =>
+  runCommand(
+    `rm -f ${artifactPath(crateName, target, release)}`,
+    COMPILE_TIMEOUT_MS,
+    `rm for ${crateName}`,
+  );
+
+/**
+ * `download` a file out of the VFS and hand back its bytes, if it exists.
+ *
+ * `download` prints "File not found" and streams nothing when the path is
+ * wrong, so the name the bridge reported is checked rather than assumed:
+ * chunks left over from an earlier request must never be served as this
+ * request's artifact.
+ */
+const readArtifact = async (path: string): Promise<{ bytes?: ArrayBuffer; output: string }> => {
+  downloadChunks = [];
+  downloadName = "";
+  const output = await runCommand(`download ${path}`, COMPILE_TIMEOUT_MS, "download");
+  let bytes: ArrayBuffer | undefined;
+  if (downloadChunks.length > 0 && downloadName === path) {
+    const total = downloadChunks.reduce((n, c) => n + c.byteLength, 0);
+    const joined = new Uint8Array(total);
+    let at = 0;
+    for (const chunk of downloadChunks) {
+      joined.set(chunk, at);
+      at += chunk.byteLength;
+    }
+    bytes = joined.buffer;
+  }
+  downloadChunks = [];
+  downloadName = "";
+  return { bytes, output };
+};
+
 // ------------------------------------------------------------ the WASI farm
 
 /** A file descriptor that collects what the guest writes into a string. */
@@ -564,18 +620,30 @@ const init = async (message: Extract<PageMessage, { type: "init" }>) => {
       ...writeCrate(`/blocks/${message.guest.warmup.crateName}`, message.guest.warmup.files),
     ];
     await touchAll(written, "the warm-up");
+    await removeArtifact(message.guest.warmup.crateName, SYSROOT_TRIPLE, true);
     postProgress(id, "initializing", { detail: "building wafer_guest once for this session" });
     const output = await runCommand(
       buildCommand(message.guest.warmup.crateName, SYSROOT_TRIPLE, true),
       COMPILE_TIMEOUT_MS,
       "the warm-up build",
     );
-    const { diagnostics, buildFinished } = parseBuild(output);
+    const { diagnostics, buildFinished, plain } = parseBuild(output);
     const firstError = diagnostics.find((d) => d.severity === "error");
     if (buildFinished === false || firstError) {
       throw new Error(
         `the guest crate does not build on this toolchain` +
           (firstError ? `: ${firstError.file}:${firstError.line}: ${firstError.message}` : ""),
+      );
+    }
+    // No error was reported, which on this toolchain does not mean the build
+    // worked (see `removeArtifact`): the warm-up's module has to be there.
+    const warmupPath = artifactPath(message.guest.warmup.crateName, SYSROOT_TRIPLE, true);
+    const { bytes, output: downloadOutput } = await readArtifact(warmupPath);
+    if (!bytes) {
+      throw new Error(
+        `the guest crate does not build on this toolchain: the warm-up left no ${warmupPath} ` +
+          `(\`download\` said: ${downloadOutput.trim() || "nothing"}); cargo said: ` +
+          (plain.join("\n").trim() || "nothing"),
       );
     }
   }
@@ -590,13 +658,13 @@ const compile = async (message: Extract<PageMessage, { type: "compile" }>) => {
   inFlight = message.id;
   currentId = message.id;
   stderrText = "";
-  downloadChunks = [];
-  downloadName = "";
-  /** Shell output that is not the build's own: `touch`, `download`. */
+  /** Shell output that is not the build's own: `touch`, `rm`, `download`. */
   let shellLog = "";
+  const builtPath = artifactPath(message.crateName, message.target, message.release);
 
   const written = writeCrate(`/blocks/${message.crateName}`, message.files);
   shellLog += await touchAll(written, message.crateName);
+  shellLog += await removeArtifact(message.crateName, message.target, message.release);
   const output = await runCommand(
     buildCommand(message.crateName, message.target, message.release),
     COMPILE_TIMEOUT_MS,
@@ -605,46 +673,29 @@ const compile = async (message: Extract<PageMessage, { type: "compile" }>) => {
   const { diagnostics, rendered, plain, buildFinished } = parseBuild(output);
   const errored = diagnostics.some((d) => d.severity === "error");
   // An error diagnostic fails the build whatever cargo concludes, because
-  // cargo's verdict is not reliable here. A syntax error in the block comes
-  // back from this toolchain with rustc's error rendered and then cargo's
-  // `Finished` and `"build-finished", "success": true` — rustc's failure does
-  // not reach cargo as a non-zero status — and with `/target` kept across
-  // compiles cargo then uplifts the PREVIOUS build's artifact, so trusting
-  // `build-finished` would ship code nobody wrote. Cleaning `/target` before
-  // every build used to hide this (there was no previous artifact to find).
-  // Like the mtime, the root-cause fix is upstream in rubrc and belongs to
-  // the next pin bump.
+  // cargo's verdict is not reliable here: a syntax error in the block comes
+  // back with rustc's error rendered and then cargo's `Finished` and
+  // `"build-finished", "success": true` (see `removeArtifact`). Removing the
+  // previous module already keeps such a build from being answered with it;
+  // this check is what makes the answer carry rustc's diagnostics rather
+  // than only "artifact missing".
   const built = buildFinished !== false && !errored;
 
   let artifact: ArrayBuffer | undefined;
   if (built) {
-    const crateFile = `${message.crateName.replace(/-/g, "_")}.wasm`;
-    const artifactPath =
-      `/target/${message.target}/${message.release ? "release" : "debug"}/${crateFile}`;
-    postProgress(message.id, "compiling", { detail: `reading ${artifactPath}` });
-    const downloadOutput = await runCommand(
-      `download ${artifactPath}`,
-      COMPILE_TIMEOUT_MS,
-      "download",
-    );
+    postProgress(message.id, "compiling", { detail: `reading ${builtPath}` });
+    const { bytes, output: downloadOutput } = await readArtifact(builtPath);
     shellLog += downloadOutput;
-    // `download` prints "File not found" and streams nothing when the path is
-    // wrong, so the name the bridge reported is checked rather than assumed:
-    // chunks left over from an earlier request must never be served as this
-    // request's artifact.
-    if (downloadChunks.length > 0 && downloadName === artifactPath) {
-      const total = downloadChunks.reduce((n, c) => n + c.byteLength, 0);
-      const bytes = new Uint8Array(total);
-      let at = 0;
-      for (const chunk of downloadChunks) {
-        bytes.set(chunk, at);
-        at += chunk.byteLength;
-      }
-      artifact = bytes.buffer;
+    if (bytes) {
+      artifact = bytes;
     } else {
-      // cargo said it finished and there is nothing at the path we derived
-      // from `crateName` — most plausibly a `Cargo.toml` whose `[package]
-      // name` was changed, since that is what cargo names the file after.
+      // Nothing reported an error and there is nothing at the path derived
+      // from `crateName`: either the build failed without a diagnostic this
+      // worker can parse (a malformed `Cargo.toml`, an internal compiler
+      // error — `stderr` has cargo's own words; `removeArtifact` is why the
+      // previous module is not here to be mistaken for this one), or a
+      // `Cargo.toml` whose `[package] name` was changed, since that is what
+      // cargo names the file after.
       // Without this the request goes back as `success: false` with an EMPTY
       // diagnostics list: the one answer that tells an agent nothing at all,
       // and the exact shape `compile-timeout` exists to avoid. It is a
@@ -657,22 +708,21 @@ const compile = async (message: Extract<PageMessage, { type: "compile" }>) => {
         severity: "error",
         code: "artifact-missing",
         message:
-          `the build finished but ${artifactPath} could not be read out of the VFS ` +
+          `the build produced no ${builtPath} ` +
           `(\`download\` said: ${downloadOutput.trim() || "nothing"}). ` +
-          "`[package] name` in Cargo.toml must be the block's name — cargo names " +
-          "the artifact after the package.",
+          "Either the build failed without a diagnostic (see stderr for cargo's " +
+          "output), or `[package] name` in Cargo.toml is not the block's name — " +
+          "cargo names the artifact after the package.",
       });
     }
   }
-  downloadChunks = [];
-  downloadName = "";
 
   // How the two text fields are filled, and why they are not fd 1 and fd 2:
   // the guest's streams reach us already merged into one terminal transcript,
   // so the split is by content. `stderr` is what a human would have seen from
   // the build — rustc's own rendering of each diagnostic, then cargo's status
   // output, then anything the guest wrote to fd 2 outside the shell's stream.
-  // `stdout` is the rest of the session: `touch` and `download`. Cargo's
+  // `stdout` is the rest of the session: `touch`, `rm` and `download`. Cargo's
   // `--message-format=json` protocol lines appear in neither; they are what
   // `diagnostics` is made of.
   const humanBuildOutput = [...rendered, plain.join("\n").trim()]

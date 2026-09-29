@@ -224,6 +224,50 @@
     );
     show();
 
+    // Two builds that fail before rustc runs, each right after a good build
+    // of the same crate, so `hello.wasm` is still in `/target` — and this
+    // toolchain's cargo does not report every failure, so these are the
+    // cases where the previous module could be answered as this compile's.
+    // Neither may be.
+    const failsWithoutRustc = async (key, label, cargoToml) => {
+      const started = performance.now();
+      const answer = await channel.send({
+        type: "compile",
+        id: `compile-${key}`,
+        crateName: hello.crateName,
+        files: { ...hello.files, "Cargo.toml": cargoToml },
+        target: "wasm32-wasip1",
+        release: true,
+      });
+      results.measurements[key] = {
+        compile_ms: Math.round(performance.now() - started),
+        success: answer.success,
+        artifact_bytes: answer.artifact?.byteLength ?? null,
+        diagnostics: answer.diagnostics,
+        stdout_tail: (answer.stdout ?? "").slice(-2000),
+        stderr_tail: (answer.stderr ?? "").slice(-2000),
+      };
+      step(
+        answer.success === false && answer.artifact === undefined,
+        `${label}: success=${answer.success}, artifact=${answer.artifact?.byteLength ?? "none"}, ` +
+          `first diagnostic=${JSON.stringify((answer.diagnostics ?? [])[0] ?? null)}`,
+      );
+      show();
+    };
+
+    // Truncated: cargo prints a `-->` span, which the worker parses into an
+    // error diagnostic.
+    await failsWithoutRustc("malformed_manifest", "malformed Cargo.toml", '[package\nname = "hello"\n');
+
+    // A path dependency that is not there: cargo fails with no JSON and no
+    // `-->` span, so no diagnostic is parsed and nothing but the missing
+    // module says the build failed. This is the step that fails if the
+    // worker stops removing the previous module before a build.
+    const missingDependency = hello.files["Cargo.toml"].replace("../../wafer_guest", "../../no_such_crate");
+    if (missingDependency === hello.files["Cargo.toml"]) throw new Error("hello's Cargo.toml no longer names ../../wafer_guest");
+    await compileBlock(channel, "hello_again", hello, "hello (again, to leave hello.wasm in /target)");
+    await failsWithoutRustc("missing_dependency", "Cargo.toml with a missing path dependency", missingDependency);
+
     // The scaffolded `table` template (package `newsletter`), with its real
     // profile: the heaviest template a user starts from.
     await compileBlock(channel, "newsletter", await fetchJson("./template/table.json"), "newsletter (table template)");
@@ -268,6 +312,7 @@ fn probe_deliberate_error() -> i32 {
     results.measurements.error_compile_ms = Math.round(performance.now() - errorStarted);
     results.measurements.error_compile = {
       success: bad.success,
+      artifact_bytes: bad.artifact?.byteLength ?? null,
       diagnostics: bad.diagnostics,
       stdout_tail: (bad.stdout ?? "").slice(-2000),
       // rustc's own rendering of the failure: this is what `stderr` is for,
@@ -276,8 +321,8 @@ fn probe_deliberate_error() -> i32 {
     };
     const diagnostic = (bad.diagnostics ?? []).find((d) => d.severity === "error");
     step(
-      !bad.success && !!diagnostic && diagnostic.file.includes("lib.rs") && diagnostic.line > 0,
-      `error build: success=${bad.success}, first diagnostic=${JSON.stringify(diagnostic ?? null)}`,
+      !bad.success && bad.artifact === undefined && !!diagnostic && diagnostic.file.includes("lib.rs") && diagnostic.line > 0,
+      `error build: success=${bad.success}, artifact=${bad.artifact?.byteLength ?? "none"}, first diagnostic=${JSON.stringify(diagnostic ?? null)}`,
     );
     show();
     worker.terminate();
@@ -300,6 +345,30 @@ fn probe_deliberate_error() -> i32 {
       `init with a broken guest: ${brokenGuest.type} ${brokenGuest.message ?? ""}`,
     );
     brokenGuestWorker.terminate();
+    show();
+
+    // The same, for a guest that fails with no diagnostic at all (a path
+    // dependency that is not there): no error is reported, so only the
+    // missing warm-up module can say the build failed.
+    const guestCargo = initGuest.files["Cargo.toml"];
+    const guestCargoMissingDependency = guestCargo.replace(
+      "[dependencies]",
+      '[dependencies]\nno_such_crate = { path = "../no_such_crate" }',
+    );
+    if (guestCargoMissingDependency === guestCargo) throw new Error("the guest's Cargo.toml has no [dependencies] table");
+    const silentGuestWorker = new Worker(`./${manifest.version}/worker.js`, { type: "module" });
+    const silentGuestChannel = talk(silentGuestWorker);
+    const silentGuest = await silentGuestChannel.send({
+      type: "init",
+      id: "init-silent-broken-guest",
+      guest: { ...initGuest, files: { ...initGuest.files, "Cargo.toml": guestCargoMissingDependency } },
+    });
+    results.measurements.silent_broken_guest = silentGuest;
+    step(
+      silentGuest.type === "error" && /guest crate does not build/.test(silentGuest.message ?? ""),
+      `init with a guest that fails without a diagnostic: ${silentGuest.type} ${(silentGuest.message ?? "").slice(0, 300)}`,
+    );
+    silentGuestWorker.terminate();
     show();
 
     // Another worker in the same page: the component is in IndexedDB now, so

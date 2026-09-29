@@ -269,7 +269,7 @@ page → { type: 'cancel', id }
   transcript. `stderr` is the build as a human would have seen it: rustc's own
   `rendered` text for each diagnostic, then cargo's status output, then
   anything written to fd 2 outside the shell's stream. `stdout` is the rest of
-  the session — `touch` and the `download` that reads the artifact out of the
+  the session — `touch`, `rm` and the `download` that reads the artifact out of the
   VFS. Cargo's `--message-format=json` protocol lines appear in
   neither: they are what `diagnostics` is made of, so `stdout` is not a wall
   of JSON.
@@ -286,16 +286,19 @@ archive — a block at `/blocks/<crate>/`, the guest SDK it depends on by path
 2. `touch` over every file just written, because that write does not move the
    file's mtime and cargo would otherwise call an edited crate fresh and hand
    back the previous artifact (see "What was confirmed"),
-3. `cargo build --release --manifest-path /blocks/<crate>/Cargo.toml
+3. `rm -f /target/wasm32-wasip1/release/<crate>.wasm` — the path step 5
+   reads — so that a build that fails leaves nothing there (below),
+4. `cargo build --release --manifest-path /blocks/<crate>/Cargo.toml
    --target-dir /target --target wasm32-wasip1 --message-format=json` typed
    into session 0 one code point at a time, and a wait for the shell's
    `<cwd> $ ` prompt to come back — the only completion signal there is,
-4. `download /target/wasm32-wasip1/release/<crate>.wasm`, which streams the
+5. `download /target/wasm32-wasip1/release/<crate>.wasm`, which streams the
    file back out through the host bridge as chunks.
 
 **The warm-up.** `init` with a `guest` writes `/wafer_guest/**` and the
-warm-up block, `touch`es them, and runs the same `cargo build` over the
-warm-up before it posts `ready`. That compiles `wafer_guest` into `/target`,
+warm-up block, `touch`es them, removes the warm-up's module, runs the same
+`cargo build` over the warm-up, and checks with `download` that the module
+is there before it posts `ready`. That compiles `wafer_guest` into `/target`,
 and every build in the session shares that one `--target-dir`, so a later
 `compile` recompiles only the block: `wafer_guest` was not rewritten, its
 mtimes did not move, and cargo keeps its build. That is the whole speed-up —
@@ -305,13 +308,32 @@ file an earlier compile left in `/blocks/<crate>/src/` is harmless, because
 rustc only compiles what `lib.rs` reaches through `mod`, and every file the
 block still has is rewritten.
 
-**An error diagnostic fails the build, whatever cargo says.** A syntax error
-comes back from this toolchain with rustc's error rendered and then cargo's
-`Finished` and `"build-finished", "success": true` — rustc's failure does not
-reach cargo — and with `/target` kept across compiles cargo then uplifts the
-previous build's artifact. The worker therefore reports success only when
-`build-finished` is not `false` AND no diagnostic is an error. The probe's
-error build is the regression test for it.
+**Cargo's verdict is not trusted, and the previous module is removed.** On
+this toolchain, cargo's `build-finished` success does not reflect a rustc
+failure: a syntax error comes back with rustc's error rendered and then
+cargo's `Finished` and `"build-finished", "success": true`. A build can also
+fail before cargo emits any JSON and without a `-->` span the worker could
+parse (a path dependency that is not there), which leaves no diagnostic at
+all. With `/target` kept across compiles, either one would have `download`
+hand back the PREVIOUS build's module as this compile's — a green build of
+code nobody wrote. Two things stop that:
+
+* **`rm -f` before every build** (the warm-up and each `compile`), so a
+  build that fails for any reason leaves nothing at the path `download`
+  reads, and "File not found" is answered `success: false` with an
+  `artifact-missing` diagnostic and cargo's own output in `stderr` (and, for
+  the warm-up, with `init` failing). The probe's missing-path-dependency
+  compile and its no-diagnostic broken guest are the regression tests: with
+  the `rm` taken out, the first came back `success: true` with the previous
+  `hello.wasm`.
+* **An error diagnostic fails the build**, whatever `build-finished` says,
+  so the answer carries rustc's diagnostics rather than only "artifact
+  missing". The probe's syntax-error build is the test.
+
+Both are workarounds for rubrc, like `touch` for the mtime: the
+root-cause fixes (the write-file event should move the mtime; cargo's
+`build-finished` success should reflect rustc's failure) are upstream and
+are candidates for the next pin bump.
 
 The other structural surprise is the worker pair. The WASI *farm* services
 calls for every thread of the guest and those threads block on `Atomics.wait`
@@ -430,8 +452,11 @@ same 24-core linux box. The probe `init`s with the guest from
 | `compile` of `hello` after the warm-up | **1 785 ms**, artifact 115 327 bytes, whole wafer ABI |
 | `compile` of `newsletter` (the `table` template, its scaffolded profile) | **5 472 ms**, artifact 133 784 bytes, whole wafer ABI |
 | `compile` of a self-contained `hello` (the SDK as a module, no dependencies) | 19 862 ms, artifact 111 133 bytes, whole wafer ABI |
-| `compile` of `hello` with a syntax error | 647 ms, `success: false`, `src/lib.rs:46:18` |
+| `compile` of `hello` with a syntax error | 647 ms, `success: false`, no artifact, `src/lib.rs:46:18` |
+| `compile` of `hello` with a truncated `Cargo.toml` (`[package` …) | 35 ms, `success: false`, no artifact, `blocks/hello/Cargo.toml:1:9 unclosed table` |
+| `compile` of `hello` with a path dependency that is not there | 323 ms, `success: false`, no artifact, `artifact-missing` plus cargo's "failed to get `wafer_guest` as a dependency" in `stderr` |
 | `init` with a guest whose `src/lib.rs` is `fn { broken` | `error` in 8 058 ms: "the guest crate does not build on this toolchain: /wafer_guest/src/lib.rs:1: this file contains an unclosed delimiter" |
+| `init` with a guest whose `Cargo.toml` names a missing path dependency | `error`: "the guest crate does not build on this toolchain: the warm-up left no /target/wasm32-wasip1/release/hello.wasm …; cargo said: … failed to get `no_such_crate` …" |
 | total download to first `ready` | 75.1 MB (13 files), largest `vfs.core-*.wasm.br.part-001` at 25 165 824 bytes |
 
 1. **A block compile no longer rebuilds the guest.** `hello` went from ~20 s
@@ -450,11 +475,19 @@ same 24-core linux box. The probe `init`s with the guest from
 4. **A guest that does not build fails `init`**, with rustc's first error in
    the message, rather than posting `ready` and failing every compile after.
    Confirmed.
-5. **Cargo reports success for a syntax error** (see "How a compile actually
-   happens"). Found by this run's error build, which came back
-   `success: true` with an error diagnostic and the previous artifact until
-   the worker stopped trusting `build-finished` over an error diagnostic.
-   Confirmed, and guarded; not fixed at its root.
+5. **Cargo reports success for a syntax error, and a build can fail with no
+   diagnostic at all** (see "How a compile actually happens"). Found by this
+   run's error build, which came back `success: true` with an error
+   diagnostic and the previous artifact. The worker now removes the previous
+   module before every build and fails any build with an error diagnostic;
+   with the `rm` taken out for one run, the missing-path-dependency compile
+   came back `success: true` with the previous `hello.wasm` (115 327 bytes),
+   so that probe step is load-bearing. With the error-diagnostic check taken
+   out instead, the syntax-error build still failed (no module to download),
+   so the `rm` alone closes the stale-artifact hole and the check adds the
+   diagnostics. `rm -f` on a path that does not exist returns the prompt
+   cleanly (the warm-up's first `rm`). Confirmed, and guarded; not fixed at
+   its root.
 6. **The warm-up is the new cost of `ready`.** About 27 s of the 35 s is the
    warm-up build, paid once per worker. A cancelled compile spends the
    worker, so the fresh worker pays it again.
@@ -476,7 +509,7 @@ Everything above was measured. These were not, and should not be assumed:
 * **No page reload was measured.** The "warm" figure is a second worker in the
   same page, which is the same IndexedDB but not the same code path a returning
   visitor takes.
-* **Four compiles per worker, not more.** Nothing here says what a worker does
+* **Seven compiles per worker, not more.** Nothing here says what a worker does
   after twenty, or how the VFS's memory behaves over a long session.
 * **The Cloudflare edge is untested.** Everything ran against
   `scripts/serve-probe.mjs`, which sets the same two headers the deployment
@@ -489,9 +522,11 @@ Everything above was measured. These were not, and should not be assumed:
   `crates/wafer-guest` have to keep compiling on it, and a pin bump can move it.
 * **Why cargo reports a syntax error as success was not traced.** What was
   seen is rustc's rendered error followed by cargo's `Finished`; where in
-  rubrc's process layer rustc's status is lost was not established. Other
-  failures that emit no error diagnostic (an internal compiler error, say)
-  were not tried.
+  rubrc's process layer rustc's status is lost was not established. It is an
+  upstream defect — cargo's `build-finished` success does not reflect a
+  rustc failure — and, with the write-file mtime, a candidate for the next
+  pin bump. An internal compiler error and a linker failure were not tried;
+  the `rm` before every build is what covers them.
 * **`--fast` has not been run.** It selects rubrc's own `no-opt` recipe and
   marks the manifest so the verifier refuses it, but the composition has not
   been exercised that way here.

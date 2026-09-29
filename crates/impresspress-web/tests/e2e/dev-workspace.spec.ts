@@ -565,7 +565,9 @@ test('the workspace discovers the packaged compiler on a cross-origin-isolated d
   // packaging revision (`807ace9e.2`), and every compiler URL carries it, so a
   // page showing the wrong one is a page that would start the wrong worker.
   await expect(page.locator('#dev-compiler-version')).toHaveText(
-    new RegExp(`^Compiler v${manifest.version} · \\d+\\.\\d MiB$`),
+    new RegExp(
+      `^Compiler v${manifest.version.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')} · \\d+\\.\\d MiB$`,
+    ),
   );
   // Compile needs a toolchain AND a block, and this workspace is the seed —
   // `site/**` and nothing under `blocks/`. So the button is still disabled,

@@ -120,7 +120,7 @@ export type ResultMessage = {
   /** Transferred, not copied — the adapter owns the buffer after this. */
   artifact?: ArrayBuffer;
   /**
-   * The session's other output, ANSI stripped: `touch` and the `download`
+   * The session's other output, ANSI stripped: `touch`, `rm` and the `download`
    * that reads the artifact out of the VFS.
    *
    * The guest's streams reach the worker already merged into one terminal
