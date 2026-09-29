@@ -234,12 +234,15 @@ test('an agent scaffolds, compiles and uses a Rust block end to end', async ({ p
   expect(reference.wafer_guest_version).toBeGreaterThan(0);
 
   // --- 2. Scaffold ---------------------------------------------------------
+  //
+  // The first block in the workspace is what starts the toolchain
+  // (`warmCompiler` in `dev.js`), and it starts DURING this call: the listing
+  // refresh that finds the block is awaited inside the tool before it
+  // returns. So start-up is timed from before the call, not after it.
+  const warmStarted = Date.now();
   const created = structured<CreateBlock>(
     await execute(page, 'dev_create_block', { name: BLOCK, template: 'table' }),
   );
-  // The first block in the workspace is what starts the toolchain
-  // (`warmCompiler` in `dev.js`), so start-up is timed from here.
-  const warmStarted = Date.now();
   expect(created.files.map((f) => f.path)).toEqual([
     `blocks/${BLOCK}/Cargo.toml`,
     `blocks/${BLOCK}/src/lib.rs`,
@@ -252,8 +255,8 @@ test('an agent scaffolds, compiles and uses a Rust block end to end', async ({ p
   //
   // Only once the toolchain has said it is up, so `first_compile_ms` below is
   // a compile against a started toolchain — what a visitor who scaffolds and
-  // then edits for a few seconds actually waits for — and `ready_ms` is
-  // start-up on its own. The budget is the download plus the start on a slow
+  // then edits for a few seconds actually waits for — and `ready_ms` is not
+  // mixed into it. The budget is the download plus the start on a slow
   // runner.
   await expect(page.locator('#dev-log')).toContainText('compiler: ready', { timeout: 6 * 60 * 1000 });
   const readyMs = Date.now() - warmStarted;
@@ -289,9 +292,10 @@ test('an agent scaffolds, compiles and uses a Rust block end to end', async ({ p
   // The numbers CI greps into its job summary.
   //
   // `ready_ms` is toolchain start-up — download included on a cold cache —
-  // measured from the scaffold that started it to the page's
-  // `compiler: ready` log line (polled, so it can read late by the poll
-  // interval, never early). `compile_ms` is the worker's own figure for the
+  // measured from just before the scaffold call that starts it to the page's
+  // `compiler: ready` log line. It includes the part of the scaffold that runs
+  // before the warm-up begins, and the log line is polled, so it can read late
+  // by both, never early. `compile_ms` is the worker's own figure for the
   // build (cargo's clock plus the shell round trip); `artifact_bytes` is the
   // module the page staged. `first_compile_ms` is the whole first
   // `dev_compile_block` call against the already started toolchain.

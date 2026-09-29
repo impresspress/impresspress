@@ -148,6 +148,31 @@ test('the toolchain starts on load when the workspace already has a block', asyn
   assert.match(elements.get('dev-log').textContent, /compiler: ready \(807ace9e\)/);
 });
 
+test('the toolchain starts when the manifest arrives after the block listing', async () => {
+  // The other order of the load-time race: `loadFiles` has already reported a
+  // block, and only the manifest's arrival can start the toolchain.
+  const { Stub, calls } = countingCompiler();
+  let release;
+  const manifestGate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const { handle } = instantiate({
+    compilerManifest: MANIFEST,
+    manifestGate,
+    workspace: [HELLO()],
+    compiler: Stub
+  });
+  await settle();
+  // The listing has landed and the manifest has not.
+  assert.equal(handle.compilerManifest, null);
+  assert.equal(calls.initialize, 0);
+
+  release();
+  await settle();
+
+  assert.equal(calls.initialize, 1);
+});
+
 test('a workspace with no block never starts the toolchain', async () => {
   const { Stub, calls } = countingCompiler();
   instantiate({
