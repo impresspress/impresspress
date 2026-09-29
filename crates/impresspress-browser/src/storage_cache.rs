@@ -5,7 +5,14 @@
 //! OPFS `storage` directory — the page never opens it, and `loader.js`'s wipe
 //! runs only after the workers are unregistered — and every write the worker
 //! makes goes through `BrowserStorageService`, which reports each one here
-//! (`put`, `put_streaming`, `delete`, `delete_folder`). Unregistering does not
+//! (`put`, `put_streaming`, `delete`, `delete_folder`). "Only writer" holds
+//! per worker, not across a worker update: `skipWaiting` + `clients.claim`
+//! (`sw.js.tmpl`) let the old worker finish its in-flight fetches and
+//! after-response work while the new one already serves and caches reads, so a
+//! write by the old worker in that window can leave the new worker's cache
+//! stale, `workspace.json` included. The in-memory sql.js database has the same
+//! exposure; this cache rests on the same premise, with the same limit.
+//! Unregistering does not
 //! terminate a worker that is already running, so the wipe alone does not
 //! guarantee no worker (and no cache) outlives it: that rests on the recovery
 //! flow navigating the page away right after the wipe, which leaves the old
@@ -23,7 +30,7 @@
 //!
 //! **Bounds.** The cache's memory stays within about [`BUDGET_BYTES`], least
 //! recently used evicted first: each entry is charged its object bytes, the
-//! strings it holds (the path twice, the `ObjectInfo`'s key and content type)
+//! strings it holds (the path counted twice, the `ObjectInfo`'s key and content type)
 //! and [`ENTRY_OVERHEAD_BYTES`] for its fixed bookkeeping, so many tiny objects
 //! are bounded as surely as a few large ones. The charge is an estimate of the
 //! heap the entry holds, not an allocator measurement, so the bound is
@@ -44,6 +51,14 @@
 //! inserts its own bytes only if no other write overlapped it
 //! ([`ReadCache::insert_written`]); otherwise OPFS's final state is not known
 //! here and the key is left uncached.
+//!
+//! That relies on the storage service's write futures (`put`, `put_streaming`,
+//! `delete`, `delete_folder`) never being dropped mid-flight: nothing in the
+//! browser, dev or web code paths wraps them in a `select`, timeout or
+//! `Abortable` today. A dropped Rust future does not stop the JS promise, so
+//! the trailing epoch advance would be skipped and a read that overlapped the
+//! write could cache stale bytes for good. A future timeout wrapper must
+//! invalidate on drop.
 
 use std::{
     collections::{HashMap, VecDeque},
@@ -61,13 +76,15 @@ pub(crate) const MAX_ENTRY_BYTES: usize = 1024 * 1024;
 
 /// An entry's fixed memory beyond its bytes and strings: the map slot with its
 /// `ObjectInfo`, up to two recency records in `order` (see [`ReadCache::compact`]),
-/// the `Rc` header, and an allocator header for each of its five heap
-/// allocations. That is under 200 bytes on wasm32, rounded up.
+/// the `Rc` header, and an allocator header for each of its six heap
+/// allocations (the map key, the `ObjectInfo`'s key and content type, the
+/// bytes, and a dead plus a live recency record's path). That is under 200
+/// bytes on wasm32, rounded up.
 pub(crate) const ENTRY_OVERHEAD_BYTES: usize = 256;
 
-/// What an entry costs against the budget: its object bytes, its path (held
-/// twice, as the map key and in its recency record), its `ObjectInfo`'s
-/// strings and [`ENTRY_OVERHEAD_BYTES`].
+/// What an entry costs against the budget: its object bytes, its path (an
+/// entry holds it up to three times, as the map key and in a live and a dead
+/// recency record; the charge counts it twice), its `ObjectInfo`'s strings and [`ENTRY_OVERHEAD_BYTES`].
 fn charge(path: &str, data: &[u8], info: &ObjectInfo) -> usize {
     data.len() + 2 * path.len() + info.key.len() + info.content_type.len() + ENTRY_OVERHEAD_BYTES
 }
