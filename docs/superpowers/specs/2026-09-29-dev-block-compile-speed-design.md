@@ -15,6 +15,8 @@ variant of it, on a 24-core box over localhost, warm worker:
 | --- | --- | --- |
 | current profile (`opt-level = "z"`, `lto = true`, `codegen-units = 1`) | 36–38 s | 89 KB |
 | same, `lto = false` | 20–21 s | 111 KB |
+| `table` template (211 lines), current profile | 46 s | — |
+| `table` template, `lto = false` | 29 s | — |
 | `lto = "thin"` | 139 s | 108 KB |
 | 16 codegen units, no LTO | 51 s | 116 KB |
 | `opt-level = 0`, no LTO | 11 s | 215 KB |

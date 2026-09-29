@@ -22,7 +22,8 @@ crate-type = ["cdylib"]
 # - `opt-level = "z"` optimises for size, which is what keeps a block well
 #   under the limit.
 # - `lto = false` is deliberate: link-time optimisation roughly doubles the
-#   compile to save about 20 KB of artifact. Do not turn it on.
+#   compile to save about 20 KB of artifact. Do not turn it on. With one
+#   codegen unit, `false` and `"off"` build the same thing.
 # - `codegen-units = 1` gives a smaller artifact and is also the faster
 #   compile here; more units build slower in the browser toolchain.
 # - `panic = "abort"` drops the unwinding machinery. It also means a panic in
