@@ -41,8 +41,10 @@ import { execute, waitForTool, type ToolResult } from './fixtures/webmcp-helpers
  * `/b/hello/` never exists.
  *
  * So the artifact is real and the compiler is not. The test scaffolds the
- * block through `dev_create_block`, reads the three files back out of the
- * workspace through `dev_read_file`, builds THOSE BYTES on the host with
+ * block through `dev_create_block`, reads its two files back out of the
+ * workspace through `dev_read_file`, lays them beside the guest SDK crate
+ * `GET /b/dev/api/guest` serves (the one the real compiler session is started
+ * with), builds THOSE BYTES on the host with
  * `cargo build --release --target wasm32-wasip1`, and drops the module beside
  * the fake worker, which serves it as its own output. Everything the tool does
  * with that module — the base64, the source digest, the guest version, the
@@ -118,8 +120,12 @@ const GREETING_EDITED = 'Hello from site/hello — edited, recompiled, same tool
 /** The block's source file every edit below goes through. */
 const LIB_RS = `blocks/${BLOCK}/src/lib.rs`;
 
-/** The three files `dev_create_block` scaffolds, in the order it reports them. */
-const CRATE_FILES = [`blocks/${BLOCK}/Cargo.toml`, LIB_RS, `blocks/${BLOCK}/src/wafer_guest.rs`];
+/**
+ * The two files `dev_create_block` scaffolds, in the order it reports them.
+ * The SDK is not among them: `Cargo.toml` reaches it by path
+ * (`../../wafer_guest`), and the compiler session supplies that crate.
+ */
+const CRATE_FILES = [`blocks/${BLOCK}/Cargo.toml`, LIB_RS];
 
 test.beforeAll(() => {
   mkdirSync(TOOL_COMPILER_DIR, { recursive: true });
@@ -195,13 +201,28 @@ type Compile = {
  * actually makes. Which also makes it the way an edit reaches the artifact:
  * write the file through the tool, call this, compile.
  *
- * `--offline` because a sandbox block has an empty `[dependencies]` by
- * construction (the browser toolchain has no registry access, so the whole SDK
- * is the vendored `src/wafer_guest.rs`) — a build that needed the network here
- * would mean the template had grown a dependency it cannot have.
+ * The guest SDK comes from `GET /b/dev/api/guest` — the crate the real worker
+ * builds once per session — and goes where the block's
+ * `wafer_guest = { path = "../../wafer_guest" }` looks for it: the same
+ * `<root>/wafer_guest/` beside `<root>/blocks/<BLOCK>/` layout the worker
+ * writes, so a template whose path drifted from the served crate fails here.
+ *
+ * `--offline` because a sandbox block and its guest crate have no registry
+ * dependencies by construction (the browser toolchain has no registry access)
+ * — a build that needed the network here would mean the template or the SDK
+ * had grown a dependency it cannot have.
  */
 async function buildOnHost(page: Page, files: string[]) {
-  const crate = mkdtempSync(path.join(tmpdir(), 'dev-compile-'));
+  const root = mkdtempSync(path.join(tmpdir(), 'dev-compile-'));
+  const guest = await page.evaluate(() =>
+    fetch('/b/dev/api/guest').then((r) => r.json() as Promise<{ files: Record<string, string> }>),
+  );
+  for (const [rel, content] of Object.entries(guest.files)) {
+    const target = path.join(root, 'wafer_guest', rel);
+    mkdirSync(path.dirname(target), { recursive: true });
+    writeFileSync(target, content);
+  }
+  const crate = path.join(root, 'blocks', BLOCK);
   for (const entryPath of files) {
     const file = structured<FileRead>(await execute(page, 'dev_read_file', { path: entryPath }));
     expect(file.encoding).toBe('utf8');
@@ -209,15 +230,17 @@ async function buildOnHost(page: Page, files: string[]) {
     mkdirSync(path.dirname(target), { recursive: true });
     writeFileSync(target, file.content);
   }
-  execFileSync('cargo', ['build', '--release', '--target', 'wasm32-wasip1', '--offline'], {
-    cwd: crate,
-    stdio: 'inherit',
-  });
+  const targetDir = path.join(root, 'target');
+  execFileSync(
+    'cargo',
+    ['build', '--release', '--target', 'wasm32-wasip1', '--offline', '--target-dir', targetDir],
+    { cwd: crate, stdio: 'inherit' },
+  );
   copyFileSync(
-    path.join(crate, 'target', 'wasm32-wasip1', 'release', `${BLOCK}.wasm`),
+    path.join(targetDir, 'wasm32-wasip1', 'release', `${BLOCK}.wasm`),
     path.join(TOOL_COMPILER_DIR, `${BLOCK}.wasm`),
   );
-  rmSync(crate, { recursive: true, force: true });
+  rmSync(root, { recursive: true, force: true });
 }
 
 /**
