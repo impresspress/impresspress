@@ -66,8 +66,15 @@ wafer-block = { workspace = true }
 # route returns "block not found" — linkme `register_static_block!`
 # doesn't emit on wasm32, so the manual register helper is the only
 # registration site, and every entry in it is
-# `#[cfg(feature = "block-X")]`-gated. Keep in sync with
-# `impresspress-cloudflare/Cargo.toml`.
+# `#[cfg(feature = "block-X")]`-gated.
+#
+# This list is checked against `impresspress-core`'s block features and
+# `impresspress-cloudflare`'s passthroughs by
+# `impresspress-core/tests/manifest_block_parity.rs`, which is where any
+# difference between the three is written down with its reason. It replaces
+# the "keep in sync with impresspress-cloudflare/Cargo.toml" comment that used
+# to sit here — that one stayed accurate and its Cloudflare counterpart did
+# not, which is exactly the failure mode a comment cannot catch.
 #
 # (`block-llm`/`block-vector` were once excluded here because the old
 # LlmBlock pulled tokio/reqwest on wasm32; the LlmService trait refactor
@@ -105,6 +112,10 @@ impresspress-core = { path = "../impresspress-core", default-features = false, f
     # transformers-embed), so the page is fully functional in the demo. The old
     # exclusion predates the LlmService refactor that made this wasm32-clean.
     "block-vector",
+    # `block-signal`: WebRTC signalling rooms (`impresspress/signal`). Typed
+    # `db::*` client only — no native HTTP client, no crypto beyond what's
+    # already pulled in — so it is wasm32-clean with nothing extra to wire.
+    "block-signal",
 ] }
 
 # Config service (needed for EnvConfigService::new() and ConfigService::set())

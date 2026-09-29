@@ -53,7 +53,7 @@ async fn storefront_config_exposes_only_a_valid_matching_publishable_key() {
     ])
     .await;
     let (msg, input) = get_msg("/b/products/storefront/config", "");
-    let body = output_to_json(dispatch_user(&ctx, msg, input).await).await;
+    let body = output_to_json(dispatch(&ctx, msg, input).await).await;
     assert_eq!(body["embedded_checkout_available"], true);
     assert_eq!(body["stripe_publishable_key"], "pk_test_browser_safe");
     assert_eq!(body["stripe_mode"], "test");
@@ -74,7 +74,7 @@ async fn storefront_config_exposes_only_a_valid_matching_publishable_key() {
     ])
     .await;
     let (msg, input) = get_msg("/b/products/storefront/config", "");
-    let body = output_to_json(dispatch_user(&mismatch, msg, input).await).await;
+    let body = output_to_json(dispatch(&mismatch, msg, input).await).await;
     assert_eq!(body["embedded_checkout_available"], false);
 
     let invalid = ctx_with(&[(
@@ -83,7 +83,7 @@ async fn storefront_config_exposes_only_a_valid_matching_publishable_key() {
     )])
     .await;
     let (msg, input) = get_msg("/b/products/storefront/config", "");
-    let body = output_to_json(dispatch_user(&invalid, msg, input).await).await;
+    let body = output_to_json(dispatch(&invalid, msg, input).await).await;
     assert_eq!(body["embedded_checkout_available"], false);
     assert!(body.get("stripe_publishable_key").is_none());
     assert!(body.get("stripe_mode").is_none());
@@ -109,7 +109,7 @@ async fn browser_runtime_hides_secret_settings_and_rejects_stripe_secret_operati
     .await;
 
     let (msg, input) = get_msg("/b/products/storefront/config", "");
-    let config = output_to_json(dispatch_user(&ctx, msg, input).await).await;
+    let config = output_to_json(dispatch(&ctx, msg, input).await).await;
     assert_eq!(config["embedded_checkout_available"], false);
 
     let (msg, input) = create_msg(
@@ -148,7 +148,7 @@ async fn browser_runtime_hides_secret_settings_and_rejects_stripe_secret_operati
 async fn storefront_widget_is_javascript_and_uses_all_three_stripe_presentations() {
     let ctx = ctx().await;
     let (msg, input) = get_msg("/b/products/storefront.js", "");
-    let response = dispatch_user(&ctx, msg, input)
+    let response = dispatch(&ctx, msg, input)
         .await
         .collect_buffered()
         .await
@@ -224,7 +224,7 @@ async fn guest_order_status_requires_an_unexpired_receipt_and_returns_a_minimal_
 
     let (mut msg, input) = get_msg("/b/products/orders/order_guest_receipt/status", "");
     msg.set_meta("req.query.receipt_token", token);
-    let body = output_to_json(dispatch_user(&ctx, msg, input).await).await;
+    let body = output_to_json(dispatch(&ctx, msg, input).await).await;
     assert_eq!(body["order_id"], "order_guest_receipt");
     assert_eq!(body["status"], "completed");
     assert_eq!(body["amounts"]["currency"], "JPY");
@@ -244,7 +244,7 @@ async fn guest_order_status_requires_an_unexpired_receipt_and_returns_a_minimal_
     let (mut msg, input) = get_msg("/b/products/orders/order_guest_receipt/status", "");
     msg.set_meta("req.query.receipt_token", "wrong-token");
     assert!(
-        output_is_error(dispatch_user(&ctx, msg, input).await, ErrorCode::NotFound).await,
+        output_is_error(dispatch(&ctx, msg, input).await, ErrorCode::NotFound).await,
         "a wrong capability must not reveal whether the order exists"
     );
 
@@ -261,7 +261,73 @@ async fn guest_order_status_requires_an_unexpired_receipt_and_returns_a_minimal_
     .expect("expire receipt");
     let (mut msg, input) = get_msg("/b/products/orders/order_guest_receipt/status", "");
     msg.set_meta("req.query.receipt_token", token);
-    assert!(output_is_error(dispatch_user(&ctx, msg, input).await, ErrorCode::NotFound).await);
+    assert!(output_is_error(dispatch(&ctx, msg, input).await, ErrorCode::NotFound).await);
+}
+
+/// The guest view publishes the subscription state as the
+/// `SubscriptionStatus` vocabulary: a Stripe status passes through, the
+/// column default (a one-time order) leaves the field out, and a stored value
+/// outside the set is the data fault every other reader of the column
+/// reports, not text handed to the buyer.
+#[tokio::test]
+async fn guest_order_status_publishes_the_typed_subscription_state() {
+    let ctx = ctx().await;
+    let token = "guest-subscription-token";
+    for (order_id, stored) in [
+        ("order_sub_active", "active"),
+        ("order_one_time", ""),
+        ("order_sub_foreign", "cancelled"),
+    ] {
+        seed(
+            &ctx,
+            PURCHASES_TABLE,
+            order_id,
+            HashMap::from([
+                ("user_id".to_string(), serde_json::json!("")),
+                ("buyer_user_id".to_string(), serde_json::json!("")),
+                ("status".to_string(), serde_json::json!("completed")),
+                (
+                    "reconciliation_status".to_string(),
+                    serde_json::json!("reconciled"),
+                ),
+                ("currency".to_string(), serde_json::json!("USD")),
+                ("subscription_status".to_string(), serde_json::json!(stored)),
+                (
+                    "receipt_token_hash".to_string(),
+                    serde_json::json!(sha256_hex(token.as_bytes())),
+                ),
+                (
+                    "receipt_token_expires_at".to_string(),
+                    serde_json::json!(
+                        (chrono::Utc::now() + chrono::Duration::hours(1)).to_rfc3339()
+                    ),
+                ),
+            ]),
+        )
+        .await;
+    }
+    let status_of = |order_id: &str| {
+        let (mut msg, input) = get_msg(&format!("/b/products/orders/{order_id}/status"), "");
+        msg.set_meta("req.query.receipt_token", token);
+        (msg, input)
+    };
+
+    let (msg, input) = status_of("order_sub_active");
+    let body = output_to_json(dispatch(&ctx, msg, input).await).await;
+    assert_eq!(body["subscription_status"], "active");
+
+    let (msg, input) = status_of("order_one_time");
+    let body = output_to_json(dispatch(&ctx, msg, input).await).await;
+    assert!(
+        body.get("subscription_status").is_none(),
+        "a one-time order carries no subscription state: {body}"
+    );
+
+    let (msg, input) = status_of("order_sub_foreign");
+    assert!(
+        output_is_error(dispatch(&ctx, msg, input).await, ErrorCode::Internal).await,
+        "a stored status outside SubscriptionStatus must not reach the buyer"
+    );
 }
 
 #[tokio::test]
@@ -388,4 +454,31 @@ fn stripe_webhook_is_never_an_agent_tool() {
         "the Stripe webhook is a machine-to-machine transport endpoint \
          authenticated by HMAC — never an agent tool"
     );
+}
+
+/// The storefront config answers under the WRAP checks production runs.
+///
+/// Whether this runtime may hold Stripe secrets is the runtime-owned
+/// `RUNTIME_KIND_CONFIG_KEY`, which belongs to no block's namespace: a
+/// config-client read of it is refused for `impresspress/products`, so the
+/// endpoint must take it off the `config_get` snapshot the adapter publishes.
+/// Driven as the products block with its own declared allowlist and the
+/// deployment's grants.
+#[tokio::test]
+async fn the_storefront_config_answers_under_wrap() {
+    let ctx = ctx_with(&[
+        (
+            "IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY",
+            "sk_test_server_only",
+        ),
+        (
+            "IMPRESSPRESS__PRODUCTS__STRIPE_PUBLISHABLE_KEY",
+            "pk_test_browser_safe",
+        ),
+    ])
+    .await
+    .running_as("impresspress/products");
+    let (msg, input) = get_msg("/b/products/storefront/config", "");
+    let body = output_to_json(dispatch(&ctx, msg, input).await).await;
+    assert_eq!(body["embedded_checkout_available"], true, "{body}");
 }

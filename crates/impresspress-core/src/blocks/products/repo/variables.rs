@@ -10,6 +10,7 @@ use wafer_run::{context::Context, ErrorCode, WaferError};
 
 use crate::{
     blocks::products::contracts::VariableDefinition,
+    db_read::{self, Bound},
     util::{stamp_created, stamp_updated, RecordExt},
 };
 
@@ -121,7 +122,13 @@ pub(crate) async fn list_for_offer(
     ctx: &dyn Context,
     offer_id: &str,
 ) -> Result<Vec<Record>, WaferError> {
-    db::list_all(ctx, TABLE, vec![offer_filter(offer_id)]).await
+    db_read::list_bounded(
+        ctx,
+        TABLE,
+        vec![offer_filter(offer_id)],
+        Bound::OnePer("variable declared on one offer"),
+    )
+    .await
 }
 
 /// Replace one draft offer's complete variable definition while preserving

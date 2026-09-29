@@ -16,6 +16,16 @@ pub mod shell;
 pub mod sidebar;
 pub mod templates;
 
+/// Scanning helpers shared by this module's guards and `components::badge`'s.
+/// Private to `ui`, which is enough: every user is a descendant of `ui`.
+#[cfg(test)]
+mod test_support;
+
+use crate::config_vars::{
+    APP_NAME_KEY, AUTH_HEADLINE_KEY, AUTH_LOGO_URL_KEY, AUTH_TAGLINE_KEY, DEFAULT_APP_NAME,
+    EMBEDDED_SCRIPTS_KEY, FAVICON_URL_KEY, LOGO_ICON_URL_KEY, PRIMARY_COLOR_KEY,
+};
+
 /// Branding/site config loaded from environment variables.
 /// Passed through to layout and sidebar so every page renders consistently.
 pub struct SiteConfig {
@@ -44,28 +54,24 @@ pub struct SiteConfig {
 
 impl SiteConfig {
     /// Load site config from the WAFER config system (env vars / variables table).
-    pub async fn load(ctx: &dyn wafer_run::context::Context) -> Self {
+    ///
+    /// A failed read is returned: a page drawn with a default brand because
+    /// the config block refused the read would pass for an unbranded site.
+    pub async fn load(
+        ctx: &dyn wafer_run::context::Context,
+    ) -> Result<Self, wafer_run::WaferError> {
         use wafer_core::clients::config;
-        let scripts_raw = config::get_default(ctx, "WAFER_RUN_SHARED__EMBEDDED_SCRIPTS", "").await;
-        Self {
-            app_name: config::get_default(ctx, "WAFER_RUN_SHARED__APP_NAME", "Impresspress").await,
+        let scripts_raw = config::get_default(ctx, EMBEDDED_SCRIPTS_KEY, "").await?;
+        Ok(Self {
+            app_name: config::get_default(ctx, APP_NAME_KEY, DEFAULT_APP_NAME).await?,
             // Blank = no wordmark image: templates render the app name as
             // text next to the (pixel-art) icon. Set to white-label with a
             // wordmark of your own.
-            logo_url: config::get_default(ctx, crate::config_vars::LOGO_URL_KEY, "").await,
-            logo_icon_url: config::get_default(
-                ctx,
-                "WAFER_RUN_SHARED__LOGO_ICON_URL",
-                &assets::logo_icon_url(),
-            )
-            .await,
-            favicon_url: config::get_default(
-                ctx,
-                "WAFER_RUN_SHARED__FAVICON_URL",
-                &assets::favicon_url(),
-            )
-            .await,
-            primary_color: config::get_default(ctx, "WAFER_RUN_SHARED__PRIMARY_COLOR", "").await,
+            logo_url: config::get_default(ctx, crate::config_vars::LOGO_URL_KEY, "").await?,
+            logo_icon_url: config::get_default(ctx, LOGO_ICON_URL_KEY, &assets::logo_icon_url())
+                .await?,
+            favicon_url: config::get_default(ctx, FAVICON_URL_KEY, &assets::favicon_url()).await?,
+            primary_color: config::get_default(ctx, PRIMARY_COLOR_KEY, "").await?,
             embedded_scripts: scripts_raw
                 .split(',')
                 .map(str::trim)
@@ -74,17 +80,41 @@ impl SiteConfig {
                 .collect(),
             auth_headline: config::get_default(
                 ctx,
-                "WAFER_RUN_SHARED__AUTH_HEADLINE",
+                AUTH_HEADLINE_KEY,
                 crate::config_vars::DEFAULT_AUTH_HEADLINE,
             )
-            .await,
+            .await?,
             auth_tagline: config::get_default(
                 ctx,
-                "WAFER_RUN_SHARED__AUTH_TAGLINE",
+                AUTH_TAGLINE_KEY,
                 crate::config_vars::DEFAULT_AUTH_TAGLINE,
             )
-            .await,
+            .await?,
+        })
+    }
+
+    /// [`Self::load`] with the auth pages' one difference: they prefer
+    /// `WAFER_RUN_SHARED__AUTH_LOGO_URL` when it is set, so a deployment can
+    /// show a different wordmark on login/signup than in the app chrome, and
+    /// fall back to the ordinary logo when it is not.
+    ///
+    /// This replaces `blocks::auth_ui::pages::site_config`, a synchronous
+    /// near-copy of `load` that read the boot-time `ctx.config_get` snapshot.
+    /// That snapshot is frozen at startup, so every branding value an admin
+    /// saved was invisible to the login page until the process restarted —
+    /// and on Cloudflare it never arrived at all, because no D1 variables row
+    /// reaches that surface. One async loader means the auth pages cannot
+    /// drift from the rest of the site again.
+    pub async fn load_for_auth(
+        ctx: &dyn wafer_run::context::Context,
+    ) -> Result<Self, wafer_run::WaferError> {
+        use wafer_core::clients::config;
+        let mut config = Self::load(ctx).await?;
+        let auth_logo = config::get_default(ctx, AUTH_LOGO_URL_KEY, "").await?;
+        if !auth_logo.is_empty() {
+            config.logo_url = auth_logo;
         }
+        Ok(config)
     }
 }
 
@@ -150,6 +180,25 @@ pub struct NavItem {
     /// `ctx.registered_blocks()` so the nav never links to a route that
     /// would 404. `None` = always shown (backing block is unconditional).
     pub block: Option<&'static str>,
+    /// The path prefix of the pages this item stands for, when that is more
+    /// than its own `href` and the paths below it: the Settings item links to
+    /// `/b/admin/settings/email` but stands for every page under
+    /// `/b/admin/settings`. `None` = the item stands for its `href` alone
+    /// (plus the paths below it, for an `href` without a trailing slash).
+    /// [`sidebar::active_item`] reads it to pick the highlighted item.
+    pub section: Option<&'static str>,
+}
+
+impl NavItem {
+    /// Declare the path prefix this item stands for — see [`NavItem::section`].
+    /// Written without a trailing slash; it covers the prefix itself and every
+    /// path below it.
+    pub fn in_section(self, section: &'static str) -> Self {
+        NavItem {
+            section: Some(section),
+            ..self
+        }
+    }
 }
 
 pub use sidebar::NavGroup;
@@ -189,7 +238,7 @@ impl<'a> Page<'a> {
     /// Render the full page: `page()` wrapping `shell()` + the ⌘K palette
     /// modal (mounted only when `topbar.show_palette` is true).
     pub fn render(self) -> maud::Markup {
-        use maud::{html, PreEscaped};
+        use maud::html;
         let palette_markup = if self.topbar.show_palette {
             palette::palette(nav_groups::palette_entries_from_groups(self.nav))
         } else {
@@ -210,8 +259,6 @@ impl<'a> Page<'a> {
                     self.body,
                 ))
                 (palette_markup)
-                script { (PreEscaped(assets::palette_js())) }
-                script { (PreEscaped(assets::drawer_js())) }
             },
         )
     }
@@ -302,7 +349,12 @@ pub async fn shell_page(
     shell: Shell<'_>,
     body: maud::Markup,
 ) -> wafer_run::OutputStream {
-    html_response(shell_document(ctx, msg, shell, body).await)
+    match shell_document(ctx, msg, shell, body).await {
+        Ok(document) => html_response(document),
+        Err(e) => {
+            crate::blocks::crud::db_error_page(msg, e, "page chrome: site config read failed")
+        }
+    }
 }
 
 /// [`shell_page`]'s markup, before it becomes a response.
@@ -313,26 +365,43 @@ pub async fn shell_page(
 /// isolation, without which the in-browser compiler has no `SharedArrayBuffer`)
 /// and `Cache-Control: no-store`, and an `OutputStream`'s meta is fixed when
 /// the stream is built — so the headers have to be on the response as it is
-/// constructed, not bolted onto one that already exists.
+/// constructed, not bolted onto one that already exists. For the same
+/// reason a failed site-config read is returned for the caller to answer.
 pub async fn shell_document(
     ctx: &dyn wafer_run::context::Context,
     msg: &wafer_run::Message,
     shell: Shell<'_>,
     body: maud::Markup,
-) -> maud::Markup {
-    let config = SiteConfig::load(ctx).await;
+) -> Result<maud::Markup, wafer_run::WaferError> {
+    let config = SiteConfig::load(ctx).await?;
     let user = UserInfo::from_message(msg);
     let mut groups = shell.nav.groups();
-    // Hide nav items whose backing block isn't registered on this target
-    // (feature-gated blocks vary per deployment — see NavItem::block).
+    // Hide nav items whose backing block won't serve on this target: either
+    // it isn't registered (feature-gated blocks vary per deployment — see
+    // NavItem::block), or it is registered and disabled, which the router
+    // answers with "endpoint not found".
+    //
+    // Enablement is the gate decision the ROUTER published for this request
+    // (`routing::gate_from_request`), not the boot config snapshot and not a
+    // read of our own. The snapshot is frozen at `build()`, so once the admin
+    // toggle moves the router's live gate a snapshot-backed sidebar renders
+    // links the router has already begun 404ing; and a database read here
+    // would put one in the shared chrome path of every SSR page, which
+    // `llm::pages`' boundary test rightly forbids ("the page must issue no
+    // database call of its own").
+    //
+    // Reading the router's own answer makes agreement structural rather than
+    // argued: the sidebar cannot show a link this request's router would
+    // refuse, on any target.
     let registered: std::collections::HashSet<&str> = ctx
         .registered_blocks()
         .iter()
         .map(|b| b.name.as_str())
         .collect();
-    nav_groups::retain_registered(&mut groups, &registered);
+    let features = crate::routing::gate_from_request(ctx, msg);
+    nav_groups::retain_reachable(&mut groups, &registered, &features);
     let path = msg.path().to_string();
-    Page {
+    Ok(Page {
         config: &config,
         title: shell.title,
         nav: &groups,
@@ -346,7 +415,7 @@ pub async fn shell_document(
         },
         body,
     }
-    .document(msg)
+    .document(msg))
 }
 
 /// Minimal `SiteConfig` used by the status-page helpers. They render
@@ -354,7 +423,7 @@ pub async fn shell_document(
 /// branding + no embedded scripts is the right shape.
 fn minimal_config() -> SiteConfig {
     SiteConfig {
-        app_name: "Impresspress".to_string(),
+        app_name: DEFAULT_APP_NAME.to_string(),
         logo_url: String::new(),
         logo_icon_url: String::new(),
         favicon_url: assets::favicon_url(),
@@ -427,10 +496,13 @@ pub fn csrf_blocked_response(msg: &wafer_run::Message) -> wafer_run::OutputStrea
     }
 }
 
-/// Anonymous (or stale-session — identical by the time enforcement runs)
-/// browser request on a protected route: send the user to login with a return
-/// path so they land back where they started after signing in. API callers
-/// (non-HTML `Accept`) keep the JSON 403 contract instead of a redirect.
+/// A request with no identity on a protected route — anonymous, or carrying a
+/// credential that did not verify (identical by the time enforcement runs).
+/// A browser page is sent to login with a return path, so the user lands back
+/// where they started after signing in. An API caller (non-HTML `Accept`)
+/// gets the JSON `401` with its `WWW-Authenticate` challenge
+/// ([`crate::http::err_unauthenticated`]): the status every client reads as
+/// "sign in", which the `403` of [`forbidden_response`] is not.
 ///
 /// The return path is form-encoded via [`crate::util::urlencode`] into a
 /// `?redirect=` query param — the exact param name and encoding the login page
@@ -445,7 +517,7 @@ pub fn unauthenticated_response(msg: &wafer_run::Message) -> wafer_run::OutputSt
         );
         crate::http::redirect(302, &target)
     } else {
-        crate::http::err_forbidden("authentication required")
+        crate::http::err_unauthenticated("authentication required")
     }
 }
 
@@ -467,6 +539,17 @@ pub fn not_found_response(msg: &wafer_run::Message) -> wafer_run::OutputStream {
 }
 
 /// Return styled 500 for browser requests, JSON for API requests.
+///
+/// This is what a full page answers when a read it renders from fails: the
+/// page is never drawn from defaults, because an empty list or a blank form
+/// field reads as "you have none" / "your name is empty", and a form built
+/// that way writes the blank back on submit. An htmx swap uses
+/// [`swap_error_response`] instead, since htmx drops a 5xx body.
+///
+/// It takes no cause, so it cannot tell a WRAP denial from an outage. A read
+/// that failed with a service error goes through
+/// [`crate::blocks::crud::db_error_page`], which answers this only for an
+/// internal fault and [`refused_response`] for a denial or a quota.
 pub fn server_error_response(msg: &wafer_run::Message) -> wafer_run::OutputStream {
     let accept = msg.get_meta("http.header.accept");
     if accept.contains("text/html") && !accept.contains("application/json") {
@@ -483,27 +566,239 @@ pub fn server_error_response(msg: &wafer_run::Message) -> wafer_run::OutputStrea
     }
 }
 
+/// A refusal a page's read met, as [`crate::blocks::crud::db_error_page`]
+/// classified it: the 403 a WRAP denial becomes, the 429 a quota keeps, the
+/// database statement budget's refusal (which says reloading will not help)
+/// and the 409 a duplicate key is, as a styled page for a browser and as the
+/// refusal itself for an API caller.
+///
+/// It takes a [`crate::blocks::crud::Refusal`], which only
+/// [`crate::blocks::crud::classify_db_error`] builds, because the API branch
+/// sends the error to the client as it stands.
+pub fn refused_response(
+    msg: &wafer_run::Message,
+    refusal: crate::blocks::crud::Refusal,
+) -> wafer_run::OutputStream {
+    let error = refusal.into_error();
+    let accept = msg.get_meta("http.header.accept");
+    if !accept.contains("text/html") || accept.contains("application/json") {
+        return wafer_run::OutputStream::error(error);
+    }
+    let is_statement_budget = matches!(
+        error.detail_code(),
+        Some(
+            wafer_block::wire::database::STATEMENT_BUDGET_EXHAUSTED
+                | wafer_block::wire::database::STATEMENT_BUDGET_EXCEEDS_LIMIT
+        )
+    );
+    if is_statement_budget {
+        // Not "try again later": the same page asks for the same statements.
+        let (status, code) = if error.code == wafer_run::ErrorCode::ResourceExhausted {
+            (429, "429")
+        } else {
+            (400, "400")
+        };
+        return status_response(
+            status,
+            "Too much at once",
+            code,
+            "Too much at once",
+            "This page needs more database work than one request may do, so reloading it \
+             will not help. Please let the site administrator know.",
+            ("Go home", "/"),
+        );
+    }
+    match error.code {
+        wafer_run::ErrorCode::PermissionDenied => status_response(
+            403,
+            "Forbidden",
+            "403",
+            "Forbidden",
+            "You don't have access to this page.",
+            ("Go home", "/"),
+        ),
+        wafer_run::ErrorCode::ResourceExhausted => status_response(
+            429,
+            "Too many requests",
+            "429",
+            "Too many requests",
+            "This page is over its usage limit right now. Please try again later.",
+            ("Go home", "/"),
+        ),
+        wafer_run::ErrorCode::AlreadyExists => status_response(
+            409,
+            "Already exists",
+            "409",
+            "Already exists",
+            "This page tried to write an entry that already exists, so reloading it will not \
+             help. Please let the site administrator know.",
+            ("Go home", "/"),
+        ),
+        _ => wafer_run::OutputStream::error(error),
+    }
+}
+
+/// The htmx-swap half of [`server_error_response`]: the read behind a
+/// fragment failed, so the swap target is replaced by an error notice and an
+/// error toast fires.
+///
+/// The notice is a `div` carrying `target_id` as its own `id`, so the caller's
+/// control must swap a block-level target with `hx-swap="outerHTML"`: the
+/// target is then still there for the next request to swap into. An
+/// `innerHTML` swap would nest a second element with the same id, and a
+/// table-part target (`<tr>`, `<tbody>`) would get a `div` where the parser
+/// only allows rows — a `<tr>` target uses [`swap_error_row_response`].
+///
+/// The status is 200 because htmx 2's default `responseHandling` swaps only
+/// 2xx: a 5xx body would be dropped and the stale fragment left on screen,
+/// which is the stale state this exists to replace. `message` is shown in
+/// both places and should say what the operator can do (usually: reload the
+/// page).
+pub fn swap_error_response(target_id: &str, message: &str) -> wafer_run::OutputStream {
+    let markup = maud::html! {
+        div id=(target_id) {
+            div class="alert alert--error" role="alert" { (message) }
+        }
+    };
+    html_response_with_toast(markup, message, "error")
+}
+
+/// [`swap_error_response`] for a table row: the control swaps one `<tr>`
+/// (`hx-target="#<target_id>"`, `hx-swap="outerHTML"`), so the notice is a
+/// `<tr>` carrying `target_id`, with one cell spanning the table's `colspan`
+/// columns. A `div` there would be moved out of the table by the HTML parser,
+/// leaving the target gone and the notice outside the table.
+///
+/// Same status and toast as [`swap_error_response`], for the same reason.
+pub fn swap_error_row_response(
+    target_id: &str,
+    colspan: usize,
+    message: &str,
+) -> wafer_run::OutputStream {
+    let markup = maud::html! {
+        tr id=(target_id) {
+            td colspan=(colspan) {
+                div class="alert alert--error" role="alert" { (message) }
+            }
+        }
+    };
+    html_response_with_toast(markup, message, "error")
+}
+
+/// [`swap_error_response`] for a control that swaps its target's CONTENTS
+/// (`innerHTML`, htmx's default): the notice is the alert alone, with no id of
+/// its own, so the target stays the one element carrying its id.
+///
+/// Same status and toast as [`swap_error_response`], for the same reason.
+pub fn swap_notice_response(message: &str) -> wafer_run::OutputStream {
+    let markup = maud::html! {
+        div class="alert alert--error" role="alert" { (message) }
+    };
+    html_response_with_toast(markup, message, "error")
+}
+
+/// `value` as JSON that an HTTP header can carry: every character outside
+/// ASCII is written as a `\uXXXX` escape (a surrogate pair above the BMP).
+///
+/// `serde_json` escapes control characters but leaves the rest of Unicode as
+/// it is, and the HTTP codec answers a header value holding a non-ASCII
+/// character with a 500 rather than send it. Non-ASCII can only appear inside
+/// a JSON string, where the escape is equivalent, so htmx parses the same
+/// value.
+fn header_json(value: &serde_json::Value) -> String {
+    let json = value.to_string();
+    let mut out = String::with_capacity(json.len());
+    for c in json.chars() {
+        if c.is_ascii() {
+            out.push(c);
+        } else {
+            let mut units = [0u16; 2];
+            for unit in c.encode_utf16(&mut units) {
+                out.push_str(&format!("\\u{unit:04x}"));
+            }
+        }
+    }
+    out
+}
+
 /// Respond with HTML + an HX-Trigger header for toast notifications.
 ///
 /// The trigger payload lands in an HTTP response header and is parsed by
 /// htmx as JSON. Building it with `format!` would let a toast message
 /// containing `"` or `\` produce malformed JSON (and a possible header-
 /// injection vector via embedded `\r\n`). Route through `serde_json` so
-/// the message text is properly escaped.
+/// the message text is properly escaped, and through [`header_json`] so a
+/// message outside ASCII (an em dash, an accented name) stays sendable.
 pub fn html_response_with_toast(
     markup: maud::Markup,
     toast_message: &str,
     toast_type: &str,
 ) -> wafer_run::OutputStream {
-    let trigger = serde_json::json!({
+    let trigger = header_json(&serde_json::json!({
         "showToast": {
             "message": toast_message,
             "type": toast_type,
         }
-    })
-    .to_string();
+    }));
     crate::http::ResponseBuilder::new()
         .set_header("HX-Trigger", &trigger)
+        .body(
+            markup.into_string().into_bytes(),
+            "text/html; charset=utf-8",
+        )
+}
+
+/// Serialize a value for a `<script>` body that maud will not escape.
+///
+/// Inside a `<script>` element the HTML parser is looking for exactly one
+/// thing: the byte sequence `</script`. It does not care that the `<` is
+/// inside a JSON string, and `type="application/json"` does not change that.
+/// So a payload that ever carries operator- or user-supplied text — a product
+/// name, a seller's display name, a chat message — can close the element early
+/// and have everything after it parsed as markup.
+///
+/// Escaping every `<` as its JSON escape sequence (backslash, u, 0, 0, 3, c)
+/// closes that off completely: `<` can only appear inside a JSON *string*
+/// (the structural characters are `{}[]:,` and the literals are alphanumeric),
+/// the escape denotes the same character to any JSON or JavaScript parser, and
+/// the text `</script` can no longer be spelled in the output at all.
+///
+/// Every site that interpolates a serialized value into a script goes through
+/// this. None of the current payloads can carry `<` — they are ids, URLs and
+/// enum wire strings — so this is closing a hazard, not a live hole; the
+/// `blocks/llm/pages.rs` bootstrap carrier had already done it by hand
+/// (its payload IS user text) and now shares the helper.
+pub fn script_json(value: &serde_json::Value) -> String {
+    script_json_escape(&value.to_string())
+}
+
+/// [`script_json`] for a payload that is already serialized.
+pub fn script_json_escape(json: &str) -> String {
+    json.replace('<', "\\u003c")
+}
+
+/// An htmx fragment that is (or fills) a modal, plus the instruction to
+/// reveal that modal once it has been swapped in.
+///
+/// The four handlers that answer with modal contents used to append a
+/// `<script>` to the fragment that reached back out and cleared the overlay's
+/// `hidden` attribute — three byte-identical copies plus one built with
+/// `format!`, interpolating a record id into JavaScript source. The
+/// `HX-Trigger-After-Swap` channel says the same thing without a script: the
+/// modal section of `ui/assets/chrome.js` listens for `openModal`, the mirror
+/// of the `closeModal` event handlers already emit through `HX-Trigger`.
+///
+/// *After-swap* rather than plain `HX-Trigger` because the overlay is already
+/// in the page and opening it before its contents arrive shows an empty box.
+/// As in [`html_response_with_toast`], the payload goes through
+/// [`header_json`] so an id can neither malform the JSON nor inject a header.
+pub fn html_response_opening_modal(
+    markup: maud::Markup,
+    modal_id: &str,
+) -> wafer_run::OutputStream {
+    let trigger = header_json(&serde_json::json!({ "openModal": { "id": modal_id } }));
+    crate::http::ResponseBuilder::new()
+        .set_header("HX-Trigger-After-Swap", &trigger)
         .body(
             markup.into_string().into_bytes(),
             "text/html; charset=utf-8",
@@ -515,8 +810,14 @@ mod tests {
     use maud::{html, Markup};
     use wafer_run::Message;
 
-    use super::*;
-    use crate::ui::shell::{Crumb, Topbar};
+    use super::{
+        test_support::{collect_css_classes, mask_rust_comments, strip_css_comments},
+        *,
+    };
+    use crate::{
+        config_vars::{AUTH_HEADLINE_KEY, AUTH_TAGLINE_KEY},
+        ui::shell::{Crumb, Topbar},
+    };
 
     fn site_config() -> SiteConfig {
         SiteConfig {
@@ -531,12 +832,97 @@ mod tests {
         }
     }
 
+    /// A duplicate key a page's read met is the styled 409 page for a
+    /// browser, in the same shape as the 403 and 429 refusal pages, and the
+    /// sanitized 409 JSON for an API caller. Neither carries the driver's
+    /// text, which names the table and the column.
+    #[tokio::test]
+    async fn a_duplicate_on_a_page_is_the_styled_409() {
+        let driver = || {
+            wafer_run::WaferError::new(
+                wafer_run::ErrorCode::AlreadyExists,
+                "UNIQUE constraint failed: impresspress__admin__roles.name",
+            )
+        };
+        let request = |accept: &str| {
+            let mut msg = Message::new("http.request");
+            msg.set_meta("http.header.accept", accept);
+            msg
+        };
+
+        let page = wafer_block::http_codec::collect_http_response(
+            crate::blocks::crud::db_error_page(&request("text/html"), driver(), "test page"),
+        )
+        .await;
+        let html = String::from_utf8_lossy(&page.body);
+        assert_eq!(page.status, 409, "{html}");
+        let content_type = page
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("content-type"))
+            .map(|(_, value)| value.as_str())
+            .unwrap_or_default();
+        assert!(content_type.starts_with("text/html"), "{content_type}");
+        assert!(
+            html.contains("Already exists") && html.contains("Go home"),
+            "{html}"
+        );
+        // The tab names the same thing the heading does, as on the 403 and
+        // 429 pages.
+        assert!(html.contains("<title>Already exists — "), "{html}");
+        assert!(
+            !html.contains("impresspress__admin"),
+            "schema leaked: {html}"
+        );
+
+        let api = wafer_block::http_codec::collect_http_response(
+            crate::blocks::crud::db_error_page(&request("application/json"), driver(), "test page"),
+        )
+        .await;
+        let json: serde_json::Value = serde_json::from_slice(&api.body).unwrap_or_default();
+        assert_eq!(api.status, 409, "{json}");
+        assert_eq!(
+            json["message"],
+            serde_json::json!(crate::blocks::crud::DUPLICATE_KEY),
+            "{json}"
+        );
+    }
+
+    /// A toast travels in the `HX-Trigger` header, and the HTTP codec answers
+    /// a header value holding a character outside ASCII with a 500 instead of
+    /// sending it. The admin's bulk release toast carries an em dash, so the
+    /// action itself answered 500. The escaped JSON is sent, and parses back
+    /// to the same message.
+    #[tokio::test]
+    async fn a_toast_outside_ascii_is_sent_and_parses_back() {
+        let message = "Handed 2 keys back \u{2014} caf\u{e9} \u{1f600}";
+        let parts = wafer_block::http_codec::collect_http_response(html_response_with_toast(
+            maud::html! {},
+            message,
+            "success",
+        ))
+        .await;
+        assert_eq!(parts.status, 200, "the toast response must be sendable");
+        let trigger = parts
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("hx-trigger"))
+            .map(|(_, value)| value.clone())
+            .expect("an HX-Trigger header");
+        assert!(trigger.is_ascii(), "{trigger}");
+        let parsed: serde_json::Value = serde_json::from_str(&trigger).expect("valid JSON");
+        assert_eq!(parsed["showToast"]["message"], message);
+    }
+
     /// `SiteConfig::load` defaults the auth-panel headline/tagline to the
     /// requested marketing copy when no config var is set.
     #[tokio::test]
     async fn site_config_load_defaults_auth_headline_and_tagline() {
-        let ctx = crate::test_support::TestContext::new().await;
-        let config = SiteConfig::load(&ctx).await;
+        // Read as auth-ui, the block that renders the auth panel.
+        let ctx = crate::test_support::TestContext::new()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
+        let config = SiteConfig::load(&ctx).await.expect("site config");
         assert_eq!(
             config.auth_headline,
             crate::config_vars::DEFAULT_AUTH_HEADLINE
@@ -554,9 +940,10 @@ mod tests {
     #[tokio::test]
     async fn site_config_load_honors_auth_headline_and_tagline_overrides() {
         let mut ctx = crate::test_support::TestContext::new().await;
-        ctx.set_config("WAFER_RUN_SHARED__AUTH_HEADLINE", "Acme Cloud");
-        ctx.set_config("WAFER_RUN_SHARED__AUTH_TAGLINE", "Built for Acme.");
-        let config = SiteConfig::load(&ctx).await;
+        ctx.set_config(AUTH_HEADLINE_KEY, "Acme Cloud");
+        ctx.set_config(AUTH_TAGLINE_KEY, "Built for Acme.");
+        let ctx = ctx.running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
+        let config = SiteConfig::load(&ctx).await.expect("site config");
         assert_eq!(config.auth_headline, "Acme Cloud");
         assert_eq!(config.auth_tagline, "Built for Acme.");
     }
@@ -690,22 +1077,24 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn unauthenticated_response_json_accept_stays_403() {
-        // API caller (non-HTML Accept) keeps the JSON 403 contract — status
-        // stays 403 (not 401) so existing API clients/tests don't break.
-        use wafer_block::http_codec;
-        use wafer_run::streams::output::TerminalNotResponse;
+    async fn unauthenticated_response_answers_an_api_caller_401_with_a_challenge() {
+        // An API caller (non-HTML Accept) is told to sign in: 401 and the
+        // WWW-Authenticate challenge RFC 9110 requires on one, not the 403
+        // that means "signed in, but not allowed".
         let mut msg = Message::new("http.request");
         msg.set_meta("req.resource", "/b/chat/hello");
         msg.set_meta("http.header.accept", "application/json");
-        let status = match unauthenticated_response(&msg).collect_buffered().await {
-            Ok(buf) => i64::from(http_codec::resolve_status(&buf.meta, 200)),
-            Err(TerminalNotResponse::Error(err)) => {
-                i64::from(http_codec::resolve_error_status(&err))
-            }
-            Err(other) => panic!("unexpected terminal: {other:?}"),
-        };
-        assert_eq!(status, 403);
+        let parts =
+            wafer_block::http_codec::collect_http_response(unauthenticated_response(&msg)).await;
+        assert_eq!(parts.status, 401);
+        let challenge = parts
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("www-authenticate"))
+            .map(|(_, value)| value.as_str());
+        assert_eq!(challenge, Some(crate::http::WWW_AUTHENTICATE));
+        let body = String::from_utf8_lossy(&parts.body);
+        assert!(body.contains("authentication required"), "{body}");
     }
 
     #[tokio::test]
@@ -981,6 +1370,595 @@ mod tests {
         assert!(
             offenders.is_empty(),
             "static inline styles remain:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// Every first-party source tree the two handler gates below walk.
+    ///
+    /// The markup lives in `src/blocks` and `src/ui`, but a handler attribute
+    /// is a handler attribute wherever it is written, and a gate whose roots
+    /// stop short of a directory that can emit HTML is a gate with a hole in
+    /// it. So this is every first-party `src` tree in the workspace plus the
+    /// one first-party JavaScript directory that is not under a `src`. What is
+    /// deliberately outside: vendored and generated trees — `node_modules`,
+    /// `pkg`, anything under a `vendor/`, and `*.min.js` — which are not ours
+    /// to fix.
+    const HANDLER_SCAN_ROOTS: [&str; 8] = [
+        concat!(env!("CARGO_MANIFEST_DIR"), "/src"),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../impresspress/src"),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../impresspress-browser/src"),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../impresspress-browser/js"),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../impresspress-bundle/src"),
+        concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../impresspress-cloudflare/src"
+        ),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../impresspress-native/src"),
+        concat!(env!("CARGO_MANIFEST_DIR"), "/../impresspress-web/src"),
+    ];
+
+    /// Blank every comment in `src` to spaces, keeping the newlines.
+    ///
+    /// Prose about the rule is not a violation of the rule, and both gates
+    /// below scan the whole file rather than line by line — a handler split
+    /// across two lines is still a handler — so a comment has to be neutralised
+    /// in place rather than skipped. Blanking keeps every line number correct.
+    ///
+    /// A comment has to OPEN its line to be treated as one, for `/*` exactly as
+    /// for `//`. Mid-line, those two characters are far more likely to be part
+    /// of a string: `crates/impresspress-web/src/lib.rs` carries a
+    /// content-security-policy line reading `https://*.huggingface.co`, and
+    /// treating that `/*` as a comment opener blanked every remaining line of
+    /// the file — a hole big enough to hide a whole crate behind. A block
+    /// comment that opens a line and closes on the same one is blanked only up
+    /// to its `*/`, so a handler written after it is still seen.
+    fn blank_comments(src: &str) -> String {
+        fn blanked(s: &str) -> String {
+            " ".repeat(s.chars().count())
+        }
+        let mut out: Vec<String> = Vec::new();
+        let mut in_block = false;
+        for line in src.split('\n') {
+            let opens = !in_block && line.trim_start().starts_with("/*");
+            if in_block || opens {
+                match line.find("*/") {
+                    Some(i) => {
+                        in_block = false;
+                        let cut = i + 2;
+                        out.push(format!("{}{}", blanked(&line[..cut]), &line[cut..]));
+                    }
+                    None => {
+                        in_block = true;
+                        out.push(blanked(line));
+                    }
+                }
+            } else if line.trim_start().starts_with("//") {
+                out.push(blanked(line));
+            } else {
+                out.push(line.to_string());
+            }
+        }
+        out.join("\n")
+    }
+
+    /// Every `.rs`/`.js` file under [`HANDLER_SCAN_ROOTS`], as
+    /// `(display path, comment-blanked source)`.
+    fn handler_scan_sources() -> Vec<(String, String)> {
+        let mut out = Vec::new();
+        for root in HANDLER_SCAN_ROOTS {
+            assert!(
+                std::path::Path::new(root).is_dir(),
+                "{root} is not a directory — a root that quietly stops existing \
+                 is a gate that quietly stops running"
+            );
+            for entry in walkdir::WalkDir::new(root)
+                .into_iter()
+                .filter_map(Result::ok)
+            {
+                let path = entry.path().to_string_lossy().into_owned();
+                let ext = entry.path().extension().and_then(|x| x.to_str());
+                if !(ext == Some("rs") || ext == Some("js"))
+                    || path.ends_with(".min.js")
+                    || path.contains("/vendor/")
+                {
+                    continue;
+                }
+                let src = std::fs::read_to_string(entry.path()).unwrap();
+                out.push((path, blank_comments(&src)));
+            }
+        }
+        out
+    }
+
+    /// Every event-handler attribute in `src`, as `(line number, snippet)`.
+    ///
+    /// Shapes matched: maud's `on…="…"`, `on…='…'`, `on…=(expr)` and
+    /// `on…={…}`, and the same in a raw HTML string, with any whitespace —
+    /// newlines included — on either side of the `=`, and with the event name
+    /// in any case. Those are the four ways a violation has actually been
+    /// spelled in this tree plus the ones it could be spelled in next.
+    ///
+    /// Deliberately not matched:
+    ///
+    /// - `el.onload = () => …` — a property assignment on an element a script
+    ///   built itself. It is not an attribute, the value is a function rather
+    ///   than source text, and there is nothing for the escaping rule to bite
+    ///   on. The `.` is what tells the two apart.
+    /// - an identifier that merely begins with `on` (`once`, `online`), because
+    ///   the run of letters has to be followed by `=` and a value opener.
+    /// - htmx's `hx-on--…` / `hx-on:…`, whose event name is empty at that
+    ///   point. That channel is refused by
+    ///   [`pages_carry_no_htmx_eval_attributes`] instead of being silently
+    ///   ignored.
+    fn handler_attributes(src: &str) -> Vec<(usize, String)> {
+        let bytes = src.as_bytes();
+        let mut found = Vec::new();
+        for (i, _) in src.match_indices("on") {
+            if i > 0 {
+                let prev = bytes[i - 1] as char;
+                if prev.is_ascii_alphanumeric() || prev == '_' || prev == '.' {
+                    continue;
+                }
+            }
+            let rest = &src[i + 2..];
+            let name_len = rest.chars().take_while(char::is_ascii_alphabetic).count();
+            if name_len == 0 {
+                continue;
+            }
+            let Some(value) = rest[name_len..].trim_start().strip_prefix('=') else {
+                continue;
+            };
+            if !value.trim_start().starts_with(['"', '\'', '(', '{']) {
+                continue;
+            }
+            let snippet = src[i..]
+                .chars()
+                .take(48)
+                .map(|c| if c == '\n' { ' ' } else { c })
+                .collect();
+            found.push((src[..i].matches('\n').count() + 1, snippet));
+        }
+        found
+    }
+
+    /// The detector sees every shape a handler can be written in, and none of
+    /// the shapes that only look like one.
+    ///
+    /// Without this the gate's own coverage is unfalsifiable: it passes on a
+    /// clean tree whether it can see anything or not, and four of these cases
+    /// were false negatives it used to have — a single-quoted value, whitespace
+    /// after the `=`, a capitalised event name, and an attribute split across
+    /// lines.
+    #[test]
+    fn handler_attribute_detector_sees_every_shape() {
+        // Every fixture spells the handler prefix `{on}` and substitutes it,
+        // because a literal one written out here would be a real violation in
+        // a real scanned file — this one — and the gate below would fail on its
+        // own test data.
+        let fixture = |s: &str| blank_comments(&s.replace("{on}", "on"));
+
+        for spelling in [
+            r#"button {on}click="doThing()" { }"#,
+            r#"<button {on}click='doThing()'>"#,
+            r#"a {on}click = "doThing()""#,
+            r#"<button {on}Click="doThing()">"#,
+            "button\n    {on}mouseover=\"doThing()\"",
+            "button {on}click\n  =\"doThing()\"",
+            r#"select {on}change={"go('" (id) "')"}"#,
+            r#"button {on}click=(format!("go('{id}')"))"#,
+        ] {
+            assert!(
+                !handler_attributes(&fixture(spelling)).is_empty(),
+                "the gate must see `{spelling}`"
+            );
+        }
+        for innocent in [
+            "script.{on}load = () => resolve(window.Stripe);",
+            r#"el.textC{on}tent = "hello";"#,
+            r#"form hx-{on}--after-request="location.reload()""#,
+            r#"// {on}click="doThing()""#,
+            r#"/// {on}click="doThing()""#,
+            "/*\n * {on}click=\"doThing()\"\n */",
+        ] {
+            assert!(
+                handler_attributes(&fixture(innocent)).is_empty(),
+                "the gate must not flag `{innocent}`"
+            );
+        }
+
+        // The one accepted over-match, pinned so it is a decision rather than a
+        // surprise. An identifier that happens to start with `on` and is
+        // assigned a string or a parenthesised expression is indistinguishable
+        // from an attribute by shape alone — `let once = "first";` and
+        // `onclick = "doThing()"` differ only in what the letters spell. The
+        // gate errs toward flagging, because it is loud when it is wrong and
+        // silent when it is too narrow, and a security-hygiene door should fail
+        // the noisy way. Nothing in the workspace trips it today; if something
+        // does, rename the binding.
+        for over_match in [r#"let {on}ce = "first";"#, r#"{on}going = (a + b);"#] {
+            assert!(
+                !handler_attributes(&fixture(over_match)).is_empty(),
+                "this over-match is documented as accepted: `{over_match}`"
+            );
+        }
+    }
+
+    /// No page emits an event-handler attribute. Behaviour is declared with
+    /// `data-action` and read by a delegated listener — the rule and the shared
+    /// vocabulary are written out in `ui/assets/chrome.js`, and the reason it
+    /// exists is at `blocks/admin/pages/network.rs`: maud escapes an attribute
+    /// value as HTML, but an `onclick` value is not HTML, it is JavaScript
+    /// source, so nothing stands between interpolated text and script
+    /// execution. None of the 104 occurrences this replaced was a live sink —
+    /// every interpolating one was traced to a closed set — but there was no
+    /// door keeping the next one safe, and this is that door.
+    #[test]
+    fn pages_carry_no_event_handler_attributes() {
+        let mut offenders = Vec::new();
+        for (path, src) in handler_scan_sources() {
+            for (line, snippet) in handler_attributes(&src) {
+                offenders.push(format!("{path}:{line} ({snippet})"));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "event-handler attributes remain — declare a `data-action` verb and \
+             read it from a delegated listener instead:\n{}",
+            offenders.join("\n")
+        );
+    }
+
+    /// Every htmx attribute in `src` whose value htmx would compile with
+    /// `new Function`, or whose value this scan cannot rule out as one, as
+    /// `(line number, snippet)`.
+    ///
+    /// Four shapes, and they are every place htmx 2 evaluates attribute text:
+    ///
+    /// - `hx-on…` in any spelling (`hx-on:click`, `hx-on--after-request`,
+    ///   `hx-on::load`) — the handler body is compiled as a function;
+    /// - `hx-vars` — its whole value is evaluated, always;
+    /// - `hx-vals` / `hx-headers` whose value opens with `js:` or
+    ///   `javascript:` — the rest is evaluated;
+    /// - `hx-trigger` whose value holds a `[` — the bracketed filter is
+    ///   evaluated.
+    ///
+    /// The attribute name is matched with its `data-` twin (`data-hx-on…`),
+    /// which htmx reads identically. The first two are flagged whatever the
+    /// value. The last two turn on the value's text, which is only known as
+    /// far as it is literal — see [`htmx_value`] for how a value is read and
+    /// where a splice begins — so the rule for them is: flag unless the
+    /// literal text PROVES the value safe.
+    ///
+    /// - `hx-vals` / `hx-headers`: htmx trims the value and tests its prefix.
+    ///   Flagged when the literal text before the first splice, trimmed,
+    ///   starts with `js:`/`javascript:`, or when a splice follows a literal
+    ///   prefix that is still the start of one of them — the empty prefix
+    ///   included, so `hx-vals=(expr)` is flagged and
+    ///   `hx-vals={"{\"id\": " (id) "}"}` is not.
+    /// - `hx-trigger`: flagged when the literal text holds a `[` or the value
+    ///   has any splice at all, because a `[` can arrive anywhere in it.
+    fn htmx_eval_attributes(src: &str) -> Vec<(usize, String)> {
+        let mut found = Vec::new();
+        let mut flag = |i: usize| {
+            let snippet = src[i..]
+                .chars()
+                .take(48)
+                .map(|c| if c == '\n' { ' ' } else { c })
+                .collect();
+            found.push((src[..i].matches('\n').count() + 1, snippet));
+        };
+        for (i, _) in src.match_indices("hx-") {
+            let before = src[..i].strip_suffix("data-").unwrap_or(&src[..i]);
+            if before
+                .chars()
+                .next_back()
+                .is_some_and(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+            {
+                continue;
+            }
+            let rest = &src[i + 3..];
+            let name_len = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | ':'))
+                .count();
+            let name = &rest[..name_len];
+            let after = i + 3 + name_len;
+            let hit = match name {
+                "vars" => true,
+                "vals" | "headers" => htmx_value(&src[after..]).is_some_and(|v| {
+                    let known = v.literal.trim_start();
+                    ["js:", "javascript:"].iter().any(|eval| {
+                        known.starts_with(eval) || (v.spliced && eval.starts_with(known))
+                    })
+                }),
+                "trigger" => {
+                    htmx_value(&src[after..]).is_some_and(|v| v.spliced || v.literal.contains('['))
+                }
+                _ => name == "on" || name.starts_with("on-") || name.starts_with("on:"),
+            };
+            if hit {
+                flag(i);
+            }
+        }
+        found
+    }
+
+    /// An attribute value as far as its source text shows it.
+    #[derive(Debug)]
+    struct HtmxValue {
+        /// The value's literal text, unescaped, up to its first splice.
+        literal: String,
+        /// Whether a splice — text only known at run time — follows
+        /// `literal`. What comes after the first splice is not read: neither
+        /// rule in [`htmx_eval_attributes`] could clear a value on it.
+        spliced: bool,
+    }
+
+    /// The value of the attribute whose name `rest` follows, or `None` for a
+    /// bare attribute or one not followed by `=`.
+    ///
+    /// The value's opener decides how it is read:
+    ///
+    /// - `"…"` / `'…'`, and `\"…\"` / `\'…\'` inside a Rust string holding
+    ///   raw HTML — literal text, with a backslash escaping the next
+    ///   character, decoded. A Rust raw string (`r"…"`, `r#"…"#`, any
+    ///   number of `#`s) reads the same, with no escapes. A placeholder
+    ///   inside either is a splice: `${…}` in a JS
+    ///   template literal, and `{name}` / `{}` / `{:…}` in a Rust format
+    ///   string, where `{{` is one literal `{`. A JSON object never opens
+    ///   like a placeholder (`{"` or `{{`), and a
+    ///   literal that only looks like a placeholder is over-matched rather
+    ///   than guessed at.
+    /// - maud's `(expr)` and `[option]` — a splice from the first character.
+    /// - maud's `{…}` — its string literals are literal text and anything
+    ///   else (a `(expr)` splice, an `@if`) is a splice.
+    /// - anything else — an unquoted HTML value, literal up to whitespace,
+    ///   `>` or a quote.
+    fn htmx_value(rest: &str) -> Option<HtmxValue> {
+        let value = rest.trim_start().strip_prefix('=')?.trim_start();
+        let mut out = HtmxValue {
+            literal: String::new(),
+            spliced: false,
+        };
+        if let Some((body, close)) = raw_string_opener(value) {
+            htmx_quoted(&mut out, body, &close, true, false);
+            return Some(out);
+        }
+        match value.chars().next()? {
+            q @ ('"' | '\'') => {
+                htmx_quoted(&mut out, &value[1..], &q.to_string(), true, true);
+            }
+            '\\' if value[1..].starts_with(['"', '\'']) => {
+                let close = &value[..2];
+                htmx_quoted(&mut out, &value[2..], close, true, true);
+            }
+            '(' | '[' => out.spliced = true,
+            '{' => {
+                let mut body = &value[1..];
+                loop {
+                    body = body.trim_start();
+                    if let Some((s, close)) = raw_string_opener(body) {
+                        body = htmx_quoted(&mut out, s, &close, false, false);
+                        if out.spliced {
+                            break;
+                        }
+                    } else if let Some(s) = body.strip_prefix('"') {
+                        body = htmx_quoted(&mut out, s, "\"", false, true);
+                        if out.spliced {
+                            break;
+                        }
+                    } else if body.starts_with('}') || body.is_empty() {
+                        break;
+                    } else {
+                        out.spliced = true;
+                        break;
+                    }
+                }
+            }
+            _ => {
+                out.literal = value
+                    .chars()
+                    .take_while(|c| !c.is_whitespace() && !matches!(c, '>' | '"' | '\''))
+                    .collect();
+            }
+        }
+        Some(out)
+    }
+
+    /// When `src` opens a Rust raw string — `r"`, `r#"`, `r##"`, … — the
+    /// text after the opener and the closer that ends it (`"` and as many
+    /// `#`s).
+    fn raw_string_opener(src: &str) -> Option<(&str, String)> {
+        let rest = src.strip_prefix('r')?;
+        let hashes = rest.chars().take_while(|&c| c == '#').count();
+        let body = rest[hashes..].strip_prefix('"')?;
+        Some((body, format!("\"{}", "#".repeat(hashes))))
+    }
+
+    /// Read one quoted literal of an [`HtmxValue`] into `out`, from just
+    /// after its opener up to `close`, and return what follows the closer —
+    /// or `""` once a placeholder splice is met, when `placeholders` says the
+    /// literal is one that can hold them. With `escapes`, a backslash escape
+    /// is decoded to the character it stands for (`\t` is a tab, which htmx's
+    /// trim removes before it tests for `js:`); a raw string has none.
+    fn htmx_quoted<'a>(
+        out: &mut HtmxValue,
+        body: &'a str,
+        close: &str,
+        placeholders: bool,
+        escapes: bool,
+    ) -> &'a str {
+        let mut chars = body.char_indices().peekable();
+        while let Some((at, c)) = chars.next() {
+            if body[at..].starts_with(close) {
+                return &body[at + close.len()..];
+            }
+            if escapes && c == '\\' {
+                let Some((_, escaped)) = chars.next() else {
+                    break;
+                };
+                match escaped {
+                    'n' => out.literal.push('\n'),
+                    't' => out.literal.push('\t'),
+                    'r' => out.literal.push('\r'),
+                    '0' => out.literal.push('\0'),
+                    'x' | 'u' => {
+                        // `\x41` or `\u{41}`: the hex digits, braces aside.
+                        let mut hex = String::new();
+                        while let Some(&(_, h)) = chars.peek() {
+                            let braced = escaped == 'u' && matches!(h, '{' | '}');
+                            if !(h.is_ascii_hexdigit() || braced)
+                                || (escaped == 'x' && hex.len() == 2)
+                            {
+                                break;
+                            }
+                            chars.next();
+                            if h == '}' {
+                                break;
+                            }
+                            if h != '{' {
+                                hex.push(h);
+                            }
+                        }
+                        if let Some(ch) =
+                            u32::from_str_radix(&hex, 16).ok().and_then(char::from_u32)
+                        {
+                            out.literal.push(ch);
+                        }
+                    }
+                    // A line continuation: the newline and the indentation
+                    // after it are not part of the string.
+                    '\n' => {
+                        while chars.peek().is_some_and(|&(_, w)| w.is_whitespace()) {
+                            chars.next();
+                        }
+                    }
+                    other => out.literal.push(other),
+                }
+                continue;
+            }
+            let next = body[at + c.len_utf8()..].chars().next();
+            if placeholders && c == '{' && next == Some('{') {
+                // A format string's escaped brace: one literal `{`.
+                chars.next();
+                out.literal.push(c);
+                continue;
+            }
+            let placeholder = (c == '$' && next == Some('{'))
+                || (c == '{'
+                    && next.is_some_and(|n| {
+                        n.is_ascii_alphanumeric() || matches!(n, '_' | '}' | ':')
+                    }));
+            if placeholders && placeholder {
+                out.spliced = true;
+                return "";
+            }
+            out.literal.push(c);
+        }
+        ""
+    }
+
+    /// The detector sees every eval-shaped htmx attribute, and none of the
+    /// htmx attributes that only resemble one.
+    #[test]
+    fn htmx_eval_attribute_detector_sees_every_shape() {
+        // Spelled `{hx}` and substituted, because this file is scanned and a
+        // literal here would be a violation in its own test data.
+        let fixture = |s: &str| blank_comments(&s.replace("{hx}", "hx-"));
+
+        for spelling in [
+            r#"form {hx}on--after-request="location.reload()""#,
+            r#"<button {hx}on:click="go()">"#,
+            r#"div {hx}on::load="go()""#,
+            r#"div data-{hx}on:click="go()""#,
+            r#"div {hx}vars="a:1""#,
+            r#"div {hx}vals="js:{a: 1}""#,
+            r#"div {hx}vals='javascript:{a: 1}'"#,
+            r#"div {hx}headers={"js:" (expr)}"#,
+            r#"div {hx}trigger="click[ctrlKey]""#,
+            r#"div {hx}trigger = "every 2s [ready()]""#,
+            "div\n    {hx}on--after-request=(body)",
+            // Values built by an expression: what they hold is only known at
+            // run time, so the literal text has to prove them safe or they
+            // are flagged.
+            r#"div {hx}trigger=(trigger)"#,
+            r#"div {hx}trigger=[maybe_trigger]"#,
+            r#"div {hx}trigger={"every " (secs) "s"}"#,
+            r#"div {hx}vals=(format!("js:{{a: {n}}}"))"#,
+            r#"div {hx}vals=(vals)"#,
+            r#"div {hx}headers={(prefix) "{}"}"#,
+            r#"div {hx}vals={"  j" (rest)}"#,
+            r#"format!("<div {hx}vals='{vals}'>")"#,
+            r#"`<div {hx}trigger="${trigger}">`"#,
+            r#""<div {hx}vals=\"js:{a: 1}\">""#,
+            r#"<div {hx}trigger=click[ctrlKey]>"#,
+            r##"div {hx}trigger=r#"click[ctrlKey]"#"##,
+            r##"div {hx}vals=r#"js:{a:1}"#"##,
+            r###"div {hx}vals=r##"js:{"a": "#"}"##"###,
+            r#"div {hx}vals=r"javascript:{a:1}""#,
+            r##"div {hx}headers={r#"js:"# (expr)}"##,
+            r#"div {hx}vals="\tjs:{a:1}""#,
+            r#"div {hx}vals="\n  js:{a:1}""#,
+            r#"div {hx}vals="\u{20}js:{a:1}""#,
+            r#"div {hx}vals={"\x20" "js:{a:1}"}"#,
+        ] {
+            assert!(
+                !htmx_eval_attributes(&fixture(spelling)).is_empty(),
+                "the gate must see `{spelling}`"
+            );
+        }
+        for innocent in [
+            r#"form {hx}post="/b/x" {hx}swap="none""#,
+            r#"div {hx}vals='{"a": 1}'"#,
+            r#"div {hx}headers={"{\"a\": 1}"}"#,
+            r#"div {hx}trigger="load""#,
+            r#"input {hx}trigger="input changed delay:300ms""#,
+            r##"div {hx}target="#list" {hx}confirm="Sure?""##,
+            r#"div data-reload-on-success"#,
+            r#"// {hx}on--after-request="x()""#,
+            r#"/// {hx}vars="a:1""#,
+            // A splice after a literal prefix that already decides the value.
+            r#"div {hx}vals={"{\"id\": " (id) "}"}"#,
+            r#"format!("<div {hx}vals='{{\"id\": {id}}}'>")"#,
+            r#""<div {hx}trigger=\"load\">""#,
+            r#"<div {hx}trigger=load>"#,
+            r##"div {hx}vals=r#"{"a": 1}"#"##,
+            r##"div {hx}trigger=r#"load"#"##,
+            r#"div {hx}vals="\tjsx""#,
+        ] {
+            assert!(
+                htmx_eval_attributes(&fixture(innocent)).is_empty(),
+                "the gate must not flag `{innocent}`"
+            );
+        }
+    }
+
+    /// No page carries an htmx attribute that htmx would evaluate.
+    ///
+    /// Every page is served under a content-security policy with no
+    /// `'unsafe-eval'` (`wafer-run/security-headers` refuses to add one), and
+    /// `ui::layout::page` sets htmx's `allowEval` to false, so any such
+    /// attribute is dead on arrival: the control renders, and the behaviour
+    /// it declares never runs. What a control does after its request succeeds
+    /// is declared with the `data-*-on-success` attributes that
+    /// `ui/assets/chrome.js` section 5 applies; the Playwright spec
+    /// `crates/impresspress-web/tests/e2e/htmx-success-effects.spec.ts` proves
+    /// they run under the real header.
+    #[test]
+    fn pages_carry_no_htmx_eval_attributes() {
+        let mut offenders = Vec::new();
+        for (path, src) in handler_scan_sources() {
+            for (line, snippet) in htmx_eval_attributes(&src) {
+                offenders.push(format!("{path}:{line} ({snippet})"));
+            }
+        }
+        assert!(
+            offenders.is_empty(),
+            "htmx attributes that need eval remain — they never run under the \
+             served CSP. Declare the effect with a `data-*-on-success` \
+             attribute (ui/assets/chrome.js, section 5) or a delegated \
+             listener instead:\n{}",
             offenders.join("\n")
         );
     }
@@ -1457,6 +2435,40 @@ mod tests {
         out
     }
 
+    /// Utility classes handed to a component builder as a string literal --
+    /// `Badge::new(..).classes("text-11 mr-1")`. They land in the rendered
+    /// `class` attribute exactly like a maud shorthand does, so this guard has
+    /// to see them; without this pass, moving a pill onto `components::Badge`
+    /// would quietly drop its utility classes out of the scan.
+    ///
+    /// Scanned over the whole file rather than inside an `html!` body, because
+    /// a component can be built outside one -- `admin::pages::database`'s
+    /// `backend_badge` returns a `Badge` with no surrounding `html!` at all.
+    /// The caller passes the *comment-masked* source (see
+    /// `test_support::mask_rust_comments`), so this call spelled out in running
+    /// prose -- as it is three lines above -- is not read as a real class list;
+    /// masking string literals as the `html!`-scoped scans do is not an option
+    /// here, since the value being read is itself a string literal.
+    fn find_component_class_literals(src: &[char]) -> Vec<(usize, String)> {
+        let needle: Vec<char> = ".classes(\"".chars().collect();
+        let mut out = Vec::new();
+        let mut i = 0;
+        while i + needle.len() <= src.len() {
+            if src[i..i + needle.len()] == needle[..] {
+                let val_start = i + needle.len();
+                let mut j = val_start;
+                while j < src.len() && src[j] != '"' {
+                    j += 1;
+                }
+                out.push((i, src[val_start..j].iter().collect()));
+                i = j + 1;
+                continue;
+            }
+            i += 1;
+        }
+        out
+    }
+
     /// Maud's dynamic `class={ ... }` attribute -- a mix of literal string
     /// fragments and interpolated/conditional pieces, e.g.
     /// `class={ "block-card" @if !is_enabled { " block-card--disabled" } }`.
@@ -1511,6 +2523,21 @@ mod tests {
         let chars: Vec<char> = src.chars().collect();
         let test_spans = find_test_mod_spans(&chars);
         let in_test = |pos: usize| test_spans.iter().any(|&(s, e)| pos >= s && pos < e);
+
+        let comment_masked: Vec<char> = mask_rust_comments(src).chars().collect();
+        for (idx, value) in find_component_class_literals(&comment_masked) {
+            if in_test(idx) {
+                continue;
+            }
+            let line = 1 + chars[..idx].iter().filter(|&&c| c == '\n').count();
+            for tok in value.split_whitespace() {
+                if tok.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) {
+                    used.entry(tok.to_string()).or_insert_with(|| {
+                        (path.to_string(), line, format!(".classes(\"{value}\")"))
+                    });
+                }
+            }
+        }
 
         let needle: Vec<char> = "html!".chars().collect();
         let mut i = 0;
@@ -1569,74 +2596,6 @@ mod tests {
             }
 
             i = end;
-        }
-    }
-
-    /// Non-nested `/* ... */` stripper -- CSS comments never nest, so this
-    /// is exact, not a heuristic.
-    fn strip_css_comments_for_class_scan(s: &str) -> String {
-        let mut out = String::with_capacity(s.len());
-        let mut chars = s.chars().peekable();
-        while let Some(c) = chars.next() {
-            if c == '/' && chars.peek() == Some(&'*') {
-                chars.next();
-                while let Some(c2) = chars.next() {
-                    if c2 == '*' && chars.peek() == Some(&'/') {
-                        chars.next();
-                        break;
-                    }
-                }
-                continue;
-            }
-            out.push(c);
-        }
-        out
-    }
-
-    /// Every `.classname` token appearing in `text`. Used both for a CSS
-    /// selector (everything before a `{`) and it does not need to know the
-    /// selector's full grammar -- comma-separated lists, compound
-    /// selectors (`.foo.bar`), descendant combinators (`.foo .bar`),
-    /// pseudo-classes/elements, attribute selectors -- extracting every
-    /// `.ident` substring finds every class in all of them alike.
-    fn collect_class_tokens(text: &str, out: &mut std::collections::HashSet<String>) {
-        let chars: Vec<char> = text.chars().collect();
-        let mut i = 0;
-        while i < chars.len() {
-            if chars[i] == '.'
-                && matches!(chars.get(i + 1), Some(c) if c.is_ascii_alphabetic() || *c == '_')
-            {
-                let start = i + 1;
-                let mut j = start;
-                while j < chars.len()
-                    && (chars[j].is_ascii_alphanumeric() || chars[j] == '_' || chars[j] == '-')
-                {
-                    j += 1;
-                }
-                out.insert(chars[start..j].iter().collect());
-                i = j;
-                continue;
-            }
-            i += 1;
-        }
-    }
-
-    /// Every class any rule in a stylesheet defines -- selector text is
-    /// everything since the last `{`/`}`/`;` boundary, up to (not
-    /// including) the next `{`; this naturally covers rules nested inside
-    /// `@media`/`@supports` blocks too, since their inner rules' `{` are
-    /// found by the same scan.
-    fn collect_css_classes(css_no_comments: &str, out: &mut std::collections::HashSet<String>) {
-        let chars: Vec<char> = css_no_comments.chars().collect();
-        let mut last_boundary = 0usize;
-        for (i, &c) in chars.iter().enumerate() {
-            if c == '{' {
-                let selector: String = chars[last_boundary..i].iter().collect();
-                collect_class_tokens(&selector, out);
-                last_boundary = i + 1;
-            } else if c == '}' || c == ';' {
-                last_boundary = i + 1;
-            }
         }
     }
 
@@ -1753,7 +2712,7 @@ mod tests {
             .filter(|e| e.path().extension().is_some_and(|x| x == "css"))
         {
             let src = std::fs::read_to_string(entry.path()).unwrap();
-            collect_css_classes(&strip_css_comments_for_class_scan(&src), &mut defined);
+            collect_css_classes(&strip_css_comments(&src), &mut defined);
         }
 
         // Stylesheets a block owns and serves itself, kept PER BLOCK rather
@@ -1782,7 +2741,7 @@ mod tests {
             };
             let src = std::fs::read_to_string(entry.path()).unwrap();
             collect_css_classes(
-                &strip_css_comments_for_class_scan(&src),
+                &strip_css_comments(&src),
                 block_local.entry(owner).or_default(),
             );
         }
@@ -1893,6 +2852,86 @@ mod tests {
         assert!(
             stale.is_empty(),
             "exception list entries no longer both used and undefined -- remove them: {stale:?}"
+        );
+    }
+
+    /// The page header had two renderers. `templates::render_header` emitted
+    /// `header.page-header > div.page-header__text > h2.page-header__title`;
+    /// `components::page_header` emits `div.flex > div > h2.page-title`. The
+    /// first one is gone, and it went for free rather than by a cutover:
+    /// every one of its 15 production call sites passed
+    /// `PageHeader { title: "", subtitle: None, primary_action: None }`, which
+    /// `render_header` answered with empty markup, so the `.page-header*`
+    /// family reached no page in any deployment and its stylesheet rules
+    /// styled nothing.
+    ///
+    /// This guard keeps it deleted from both halves. A `.page-header` or
+    /// `.page-header__*` class appearing in maud markup means the second
+    /// renderer is back; the same name appearing in a stylesheet means a rule
+    /// is waiting for it. `pages_use_only_classes_defined_in_the_stylesheet`
+    /// above cannot see either case — it only asserts that markup is a subset
+    /// of the stylesheet, so a class in neither passes it, and a class in the
+    /// stylesheet alone passes it too.
+    ///
+    /// The stylesheet half reads the shared bundle *and* every stylesheet a
+    /// block owns and serves itself, for the reason that guard keeps them
+    /// apart: a block-local sheet is served with that block's pages, so a
+    /// `.page-header` rule in one is as live as a rule in `ui/styles/`. This
+    /// half deliberately merges the two rather than keeping them per block —
+    /// unlike the subset guard, it asks whether the rule exists anywhere at
+    /// all, not whether it reaches the page using it.
+    #[test]
+    fn the_first_generation_page_header_stays_deleted() {
+        fn is_gen1_header(class: &str) -> bool {
+            class == "page-header" || class.starts_with("page-header__")
+        }
+
+        let mut used: std::collections::BTreeMap<String, (String, usize, String)> =
+            Default::default();
+        for root in [
+            concat!(env!("CARGO_MANIFEST_DIR"), "/src/blocks"),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/src/ui"),
+        ] {
+            for entry in walkdir::WalkDir::new(root)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|e| e.path().extension().is_some_and(|x| x == "rs"))
+            {
+                let src = std::fs::read_to_string(entry.path()).unwrap();
+                collect_markup_classes(&src, &entry.path().display().to_string(), &mut used);
+            }
+        }
+        let in_markup: Vec<String> = used
+            .iter()
+            .filter(|(class, _)| is_gen1_header(class))
+            .map(|(class, (file, line, _))| format!("{file}:{line}: .{class}"))
+            .collect();
+        assert!(
+            in_markup.is_empty(),
+            "the first-generation page header is being rendered again; \
+             use components::page_header:\n{}",
+            in_markup.join("\n")
+        );
+
+        let mut defined: std::collections::HashSet<String> = std::collections::HashSet::new();
+        for styles_root in [
+            concat!(env!("CARGO_MANIFEST_DIR"), "/src/ui/styles"),
+            concat!(env!("CARGO_MANIFEST_DIR"), "/src/blocks"),
+        ] {
+            for entry in walkdir::WalkDir::new(styles_root)
+                .into_iter()
+                .filter_map(Result::ok)
+                .filter(|e| e.path().extension().is_some_and(|x| x == "css"))
+            {
+                let css = std::fs::read_to_string(entry.path()).unwrap();
+                collect_css_classes(&strip_css_comments(&css), &mut defined);
+            }
+        }
+        let mut in_styles: Vec<&String> = defined.iter().filter(|c| is_gen1_header(c)).collect();
+        in_styles.sort();
+        assert!(
+            in_styles.is_empty(),
+            "a stylesheet still carries first-generation page-header rules: {in_styles:?}"
         );
     }
 }

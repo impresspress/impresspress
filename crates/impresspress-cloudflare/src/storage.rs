@@ -145,11 +145,10 @@ impl StorageService for R2StorageService {
     /// R2 error after the multipart upload begins aborts it, so a failed upload
     /// never leaks an incomplete multipart upload into the bucket.
     ///
-    /// Caveat (shared with the default and the local-storage override):
-    /// [`InputStream`] has no failure terminal, so a producer that aborts
-    /// mid-body is indistinguishable from a clean end — a truncated-then-ended
-    /// stream is committed as if complete. Distinguishing the two needs an
-    /// error terminal on `InputStream` (tracked as a wafer-block follow-up).
+    /// A body that fails part-way (an `Err` item: the connection dropped, a
+    /// cap or deadline was hit) is [`StorageError::Body`] and takes the same
+    /// abort, so nothing is committed at the key — neither the parts already
+    /// uploaded nor, for a small body, a buffered `put` of the prefix.
     async fn put_streaming(
         &self,
         folder: &str,
@@ -169,6 +168,7 @@ impl StorageService for R2StorageService {
         // error; the abort cleanup below then runs on the started upload.
         let pump = async {
             while let Some(chunk) = data.next().await {
+                let chunk = chunk.map_err(StorageError::Body)?;
                 acc.push(&chunk);
                 while let Some(part_bytes) = acc.take_part() {
                     if upload.is_none() {
@@ -573,5 +573,109 @@ impl StorageService for R2StorageService {
     async fn list_folders(&self) -> Result<Vec<FolderInfo>, StorageError> {
         // R2 doesn't have a native folder concept
         Ok(Vec::new())
+    }
+}
+
+/// `put_streaming` against a scripted R2 bucket: a plain JS object carrying
+/// the methods `worker::Bucket` calls (`put`, `createMultipartUpload`, and the
+/// upload's `uploadPart` / `abort` / `complete`), each counting its calls.
+/// No `worker::Env` is needed, so these run under the `cloudflare-wasm-test`
+/// job with the rest of this crate's wasm tests.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod put_streaming_tests {
+    use wafer_block::{common::ErrorCode, InputStream, WaferError};
+    use wafer_core::interfaces::storage::service::{StorageError, StorageService};
+    use wasm_bindgen::{JsCast, JsValue};
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::{R2StorageService, PART_SIZE};
+
+    /// A bucket whose every call is counted in its `calls` property.
+    fn scripted_bucket() -> JsValue {
+        js_sys::Function::new_no_args(
+            r#"
+            const calls = { put: 0, create: 0, uploadPart: 0, abort: 0, complete: 0 };
+            const upload = {
+                uploadId: "upload-1",
+                key: "k",
+                uploadPart: (n) => { calls.uploadPart++; return Promise.resolve({ partNumber: n, etag: "etag-" + n }); },
+                abort: () => { calls.abort++; return Promise.resolve(); },
+                complete: () => { calls.complete++; return Promise.resolve({}); },
+            };
+            return {
+                calls,
+                put: () => { calls.put++; return Promise.resolve({}); },
+                createMultipartUpload: () => { calls.create++; return Promise.resolve(upload); },
+            };
+            "#,
+        )
+        .call0(&JsValue::NULL)
+        .expect("build the scripted bucket")
+    }
+
+    fn calls(bucket: &JsValue, name: &str) -> u32 {
+        let calls = js_sys::Reflect::get(bucket, &JsValue::from_str("calls")).expect("calls");
+        js_sys::Reflect::get(&calls, &JsValue::from_str(name))
+            .expect("a counter")
+            .as_f64()
+            .expect("a number") as u32
+    }
+
+    /// A body that yields `chunks` and then fails the way a dropped upload
+    /// does.
+    fn failing_body(chunks: Vec<Vec<u8>>) -> InputStream {
+        let items = chunks
+            .into_iter()
+            .map(Ok)
+            .chain(std::iter::once(Err(WaferError::new(
+                ErrorCode::DeadlineExceeded,
+                "request body read timed out",
+            ))));
+        InputStream::from_stream(futures::stream::iter(items))
+    }
+
+    /// A body smaller than a part that fails is not `put` as the prefix that
+    /// arrived: it is `StorageError::Body`, carrying the transport's error.
+    #[wasm_bindgen_test]
+    async fn a_small_body_that_fails_is_not_stored() {
+        let bucket = scripted_bucket();
+        let svc = R2StorageService::new(bucket.clone().unchecked_into());
+        let result = svc
+            .put_streaming(
+                "f",
+                "k",
+                failing_body(vec![b"prefix".to_vec()]),
+                "text/plain",
+            )
+            .await;
+        match result {
+            Err(StorageError::Body(e)) => assert_eq!(e.code, ErrorCode::DeadlineExceeded),
+            other => panic!("a failed body must be StorageError::Body, got {other:?}"),
+        }
+        assert_eq!(calls(&bucket, "put"), 0, "the prefix must not be stored");
+    }
+
+    /// A body that fails after a part was uploaded aborts the multipart
+    /// upload rather than completing it.
+    #[wasm_bindgen_test]
+    async fn a_multipart_body_that_fails_is_aborted() {
+        let bucket = scripted_bucket();
+        let svc = R2StorageService::new(bucket.clone().unchecked_into());
+        let result = svc
+            .put_streaming(
+                "f",
+                "k",
+                failing_body(vec![vec![0u8; PART_SIZE]]),
+                "text/plain",
+            )
+            .await;
+        assert!(
+            matches!(result, Err(StorageError::Body(_))),
+            "a failed body must be StorageError::Body, got {result:?}"
+        );
+        assert_eq!(calls(&bucket, "uploadPart"), 1, "the full part went up");
+        assert_eq!(calls(&bucket, "abort"), 1, "the upload must be aborted");
+        assert_eq!(calls(&bucket, "complete"), 0, "the upload must not commit");
+        assert_eq!(calls(&bucket, "put"), 0);
     }
 }

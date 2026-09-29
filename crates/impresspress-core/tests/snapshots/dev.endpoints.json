@@ -1,0 +1,21 @@
+[
+  "GET /b/dev admin",
+  "GET /b/dev/api/export admin",
+  "GET /b/dev/api/export/manifest admin",
+  "GET /b/dev/api/files admin",
+  "GET /b/dev/api/generations admin",
+  "GET /b/dev/api/generations/{id} admin",
+  "GET /b/dev/api/reference admin",
+  "GET /b/dev/api/status admin",
+  "GET /b/dev/api/tools.json admin",
+  "GET /b/dev/static/compiler-adapter.js admin",
+  "GET /b/dev/static/dev.css admin",
+  "GET /b/dev/static/dev.js admin",
+  "POST /b/dev/api/blocks admin",
+  "POST /b/dev/api/blocks/{name}/remove admin",
+  "POST /b/dev/api/builds/stage admin",
+  "POST /b/dev/api/files/delete admin",
+  "POST /b/dev/api/files/read admin",
+  "POST /b/dev/api/files/write admin",
+  "POST /b/dev/api/generations/{id}/rollback admin"
+]

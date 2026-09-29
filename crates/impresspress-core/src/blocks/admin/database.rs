@@ -1,11 +1,14 @@
 use wafer_core::clients::database as db;
-use wafer_run::{context::Context, InputStream, Message, OutputStream};
+use wafer_run::{context::Context, ErrorCode, InputStream, Message, OutputStream, WaferError};
 use wafer_sql_utils::{introspect, Backend};
 
-use crate::http::{err_bad_request, err_forbidden, err_internal, err_not_found, ok_json};
+use crate::{
+    blocks::crud,
+    http::{err_bad_request, err_forbidden, err_not_found, ok_json},
+};
 
 /// Lightweight per-table summary: name + row count. Shared by the JSON
-/// `GET /admin/database/tables` handler and the SSR database page's
+/// `GET /b/admin/api/database/tables` handler and the SSR database page's
 /// left-pane list so both run the same introspection routine.
 pub(in crate::blocks::admin) struct TableSummary {
     pub name: String,
@@ -13,7 +16,7 @@ pub(in crate::blocks::admin) struct TableSummary {
 }
 
 /// A single column's introspected metadata. Shared by the JSON
-/// `GET /admin/database/tables/{name}/columns` handler and the SSR
+/// `GET /b/admin/api/database/tables/{name}/columns` handler and the SSR
 /// schema panel.
 pub(in crate::blocks::admin) struct ColumnInfo {
     pub name: String,
@@ -24,23 +27,34 @@ pub(in crate::blocks::admin) struct ColumnInfo {
     pub default_value: Option<String>,
 }
 
-/// Run the backend table count for one table name, returning 0 on any
-/// failure (an invalid identifier is treated like a failed count query).
+/// Why [`introspect_columns`] has no schema to show.
+pub(in crate::blocks::admin) enum IntrospectError {
+    /// The name is not an identifier the backend can quote. It is user input
+    /// (URL path / `?table=`), so this is the caller's mistake.
+    InvalidName,
+    /// The backend reports no columns for the name: there is no such table.
+    NoSuchTable,
+    /// A read failed. Never shown as an empty schema or a zero count.
+    Read(WaferError),
+}
+
+/// Run the backend table count for one table name.
 ///
-/// The name always originates from the backend's own table listing, so a
-/// build error here means an identifier the backend can't quote.
-async fn table_row_count(ctx: &dyn Context, name: &str) -> i64 {
-    match introspect::build_table_row_count(name, crate::db_backend(ctx).await) {
-        Ok(count_sql) => db::query_raw(ctx, &count_sql, &[])
-            .await
-            .ok()
-            .and_then(|r| {
-                r.first()
-                    .and_then(|r| r.data.get("cnt").and_then(|v| v.as_i64()))
-            })
-            .unwrap_or(0),
-        Err(_) => 0,
-    }
+/// The name has already been through the backend's quoting (it comes from the
+/// backend's own table listing, or from a column read that found the table),
+/// so a build error here is a fault, not user input.
+async fn table_row_count(ctx: &dyn Context, name: &str) -> Result<i64, WaferError> {
+    let count_sql = introspect::build_table_row_count(name, crate::db_backend(ctx).await?)
+        .map_err(|e| WaferError::new(ErrorCode::Internal, format!("count {name}: {e}")))?;
+    let rows = db::query_raw(ctx, &count_sql, &[]).await?;
+    rows.first()
+        .and_then(|r| r.data.get("cnt").and_then(|v| v.as_i64()))
+        .ok_or_else(|| {
+            WaferError::new(
+                ErrorCode::Internal,
+                format!("count {name}: the backend returned no count"),
+            )
+        })
 }
 
 /// List every table with its row count, sorted by name.
@@ -50,11 +64,14 @@ async fn table_row_count(ctx: &dyn Context, name: &str) -> i64 {
 /// concurrent counts on a single backend connection (the SQLite case) can
 /// deadlock, and the row is read-once-per-page, so the dedupe (not the
 /// fan-out) is the win here.
+///
+/// A failed listing or count is an error: an empty list or a `0` count would
+/// read as an empty database.
 pub(in crate::blocks::admin) async fn introspect_table_summaries(
     ctx: &dyn Context,
-) -> Vec<TableSummary> {
-    let sql = introspect::build_list_tables(crate::db_backend(ctx).await);
-    let records = db::query_raw(ctx, &sql, &[]).await.unwrap_or_default();
+) -> Result<Vec<TableSummary>, WaferError> {
+    let sql = introspect::build_list_tables(crate::db_backend(ctx).await?);
+    let records = db::query_raw(ctx, &sql, &[]).await?;
     let mut out = Vec::with_capacity(records.len());
     for r in &records {
         let name = r
@@ -66,27 +83,32 @@ pub(in crate::blocks::admin) async fn introspect_table_summaries(
         if name.is_empty() {
             continue;
         }
-        let row_count = table_row_count(ctx, &name).await;
+        let row_count = table_row_count(ctx, &name).await?;
         out.push(TableSummary { name, row_count });
     }
     out.sort_by(|a, b| a.name.cmp(&b.name));
-    out
+    Ok(out)
 }
 
 /// Introspect one table's columns plus its row count. `table` is untrusted
-/// (URL path / selected name); an invalid identifier yields an empty column
-/// list and a 0 count rather than an error, matching both surfaces' prior
-/// behavior.
+/// (URL path / selected name).
 pub(in crate::blocks::admin) async fn introspect_columns(
     ctx: &dyn Context,
     table: &str,
-) -> (Vec<ColumnInfo>, i64) {
-    let columns = match introspect::build_table_info(table, crate::db_backend(ctx).await) {
-        Ok((info_sql, info_args)) => db::query_raw(ctx, &info_sql, &info_args)
-            .await
-            .unwrap_or_default(),
-        Err(_) => Vec::new(),
-    };
+) -> Result<(Vec<ColumnInfo>, i64), IntrospectError> {
+    let backend = crate::db_backend(ctx)
+        .await
+        .map_err(IntrospectError::Read)?;
+    let (info_sql, info_args) =
+        introspect::build_table_info(table, backend).map_err(|_| IntrospectError::InvalidName)?;
+    let columns = db::query_raw(ctx, &info_sql, &info_args)
+        .await
+        .map_err(IntrospectError::Read)?;
+    // Both backends answer the column read for an unknown table with no rows
+    // rather than an error; counting it would fail, so stop here.
+    if columns.is_empty() {
+        return Err(IntrospectError::NoSuchTable);
+    }
     let cols = columns
         .iter()
         .map(|c| ColumnInfo {
@@ -111,39 +133,22 @@ pub(in crate::blocks::admin) async fn introspect_columns(
                 .map(str::to_string),
         })
         .collect();
-    let row_count = table_row_count(ctx, table).await;
-    (cols, row_count)
+    let row_count = table_row_count(ctx, table)
+        .await
+        .map_err(IntrospectError::Read)?;
+    Ok((cols, row_count))
 }
 
-/// `path` is the normalized `/admin/database/...` sub-path, passed explicitly
-/// (no `req.resource` rewrite). `handle_columns` extracts the table name from it.
-pub async fn handle(
-    ctx: &dyn Context,
-    msg: &Message,
-    path: &str,
-    input: InputStream,
-) -> OutputStream {
-    let action = msg.action();
-
-    match (action, path) {
-        ("retrieve", "/admin/database/info") => handle_info(ctx).await,
-        ("retrieve", "/admin/database/tables") => handle_tables(ctx).await,
-        ("retrieve", _)
-            if path.starts_with("/admin/database/tables/") && path.ends_with("/columns") =>
-        {
-            handle_columns(ctx, path).await
-        }
-        ("create", "/admin/database/query") => handle_query(ctx, input).await,
-        _ => err_not_found("not found"),
-    }
-}
-
-async fn handle_info(ctx: &dyn Context) -> OutputStream {
-    let backend = crate::db_backend(ctx).await;
+/// `GET /b/admin/api/database/info`.
+pub(super) async fn handle_info(ctx: &dyn Context) -> OutputStream {
+    let backend = match crate::db_backend(ctx).await {
+        Ok(backend) => backend,
+        Err(e) => return crud::db_error_internal(e, "Could not read the database backend"),
+    };
     let sql = introspect::build_list_tables(backend);
     let tables = match db::query_raw(ctx, &sql, &[]).await {
         Ok(t) => t,
-        Err(e) => return err_internal("Database error", e),
+        Err(e) => return crud::db_error_internal(e, "Database error"),
     };
 
     let table_names: Vec<&str> = tables
@@ -167,9 +172,13 @@ fn backend_name(backend: Backend) -> &'static str {
     }
 }
 
-async fn handle_tables(ctx: &dyn Context) -> OutputStream {
-    let table_info: Vec<serde_json::Value> = introspect_table_summaries(ctx)
-        .await
+/// `GET /b/admin/api/database/tables`.
+pub(super) async fn handle_tables(ctx: &dyn Context) -> OutputStream {
+    let summaries = match introspect_table_summaries(ctx).await {
+        Ok(summaries) => summaries,
+        Err(e) => return crud::db_error_internal(e, "Could not list the tables"),
+    };
+    let table_info: Vec<serde_json::Value> = summaries
         .into_iter()
         .map(|t| {
             serde_json::json!({
@@ -181,24 +190,24 @@ async fn handle_tables(ctx: &dyn Context) -> OutputStream {
     ok_json(&serde_json::json!(table_info))
 }
 
-async fn handle_columns(ctx: &dyn Context, path: &str) -> OutputStream {
-    // Extract table name from /admin/database/tables/{name}/columns
-    let table_name = path
-        .strip_prefix("/admin/database/tables/")
-        .and_then(|s| s.strip_suffix("/columns"))
-        .unwrap_or("");
+/// `GET /b/admin/api/database/tables/{name}/columns`. `{name}` is read only
+/// as the route table bound it.
+pub(super) async fn handle_columns(ctx: &dyn Context, msg: &Message) -> OutputStream {
+    let table_name = match crud::path_var(msg, "name", "Missing table name") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
 
-    if table_name.is_empty() {
-        return err_bad_request("Missing table name");
-    }
-
-    // The table name is user input from the URL path; an invalid identifier
-    // is a bad request, not a server error.
-    if introspect::build_table_info(table_name, crate::db_backend(ctx).await).is_err() {
-        return err_bad_request("Invalid table name");
-    }
-
-    let (columns, _row_count) = introspect_columns(ctx, table_name).await;
+    let columns = match introspect_columns(ctx, table_name).await {
+        Ok((columns, _row_count)) => columns,
+        // The table name is user input from the URL path; an invalid
+        // identifier is a bad request, not a server error.
+        Err(IntrospectError::InvalidName) => return err_bad_request("Invalid table name"),
+        Err(IntrospectError::NoSuchTable) => return err_not_found("Table not found"),
+        Err(IntrospectError::Read(e)) => {
+            return crud::db_error_internal(e, "Could not read the table's columns")
+        }
+    };
     let col_info: Vec<serde_json::Value> = columns
         .iter()
         .map(|c| {
@@ -240,9 +249,17 @@ impl QueryValidationError {
 ///
 /// Accepts: SELECT / PRAGMA (whitelisted) / EXPLAIN / WITH.
 /// Rejects: multi-statement (`;`), any write keyword (whole-word match),
-/// and unsafe PRAGMAs.
+/// unsafe PRAGMAs, and any statement naming a
+/// [`crate::secret_tables::SECRET_TABLES`] table.
 ///
-/// Used by both the JSON API (`POST /admin/database/query`) and the
+/// The secret-table refusal is here, in the validator, rather than over the
+/// result set: `db::query_raw` returns records keyed by the column name the
+/// query chose, so a mask keyed on `(table, column)` is defeated by
+/// `SELECT value AS v`. Refusing before execution is the only rule the query
+/// text cannot be reshaped around — see the `secret_tables` module docs and
+/// `tests/admin/sql_explorer_secrets.rs`.
+///
+/// Used by both the JSON API (`POST /b/admin/api/database/query`) and the
 /// admin SSR page handler (`POST /b/admin/database/query`). Single
 /// source of truth — do not duplicate this logic.
 pub(in crate::blocks::admin) fn validate_readonly_query(
@@ -266,6 +283,23 @@ pub(in crate::blocks::admin) fn validate_readonly_query(
         return Err(QueryValidationError::Forbidden(
             "Multi-statement queries are not allowed".to_string(),
         ));
+    }
+
+    // A query that names a table holding authentication material is refused
+    // whatever verb it uses and whatever it would have done with the rows.
+    // Placed ahead of the keyword scan, the PRAGMA whitelist and the
+    // first-word check so the refusal never depends on any of them reading the
+    // statement the way the backend will: an `EXPLAIN`, a `PRAGMA`, or a shape
+    // none of them recognise is refused here just the same.
+    if crate::secret_tables::rejects_unicode_escape(trimmed) {
+        return Err(QueryValidationError::Forbidden(
+            "Unicode-escaped identifiers and string constants (U&\"…\" / U&'…') are not \
+             allowed: they can spell a table name this validator would not see"
+                .to_string(),
+        ));
+    }
+    if let Some(entry) = crate::secret_tables::secret_table_named_in(trimmed) {
+        return Err(QueryValidationError::Forbidden(entry.refusal()));
     }
 
     let query_upper = trimmed.to_uppercase();
@@ -354,14 +388,18 @@ pub(in crate::blocks::admin) fn validate_readonly_query(
     }
 }
 
-async fn handle_query(ctx: &dyn Context, input: InputStream) -> OutputStream {
+/// `POST /b/admin/api/database/query`.
+pub(super) async fn handle_query(ctx: &dyn Context, input: InputStream) -> OutputStream {
     #[derive(serde::Deserialize)]
     struct QueryReq {
         query: String,
         #[serde(default)]
         args: Vec<serde_json::Value>,
     }
-    let raw = input.collect_to_bytes().await;
+    let raw = match input.collect_to_bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => return OutputStream::error(e),
+    };
     let body: QueryReq = match serde_json::from_slice(&raw) {
         Ok(b) => b,
         Err(e) => return err_bad_request(&format!("Invalid body: {e}")),
@@ -389,6 +427,85 @@ async fn handle_query(ctx: &dyn Context, input: InputStream) -> OutputStream {
 #[cfg(test)]
 mod tests {
     use super::{validate_readonly_query, QueryValidationError};
+    use crate::{
+        blocks::admin::test_support::routed,
+        test_support::{admin_msg, output_http_status, output_json, TestContext},
+    };
+
+    async fn api(ctx: &TestContext, path: &str) -> wafer_run::OutputStream {
+        wafer_run::Block::handle(
+            &crate::blocks::admin::AdminBlock::new(),
+            ctx,
+            routed(admin_msg("retrieve", path)),
+            wafer_run::InputStream::empty(),
+        )
+        .await
+    }
+
+    /// A failed listing is a 500, not `[]` — an empty database.
+    #[tokio::test]
+    async fn a_failed_table_listing_is_a_500_not_an_empty_list() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID)
+            .break_reads();
+        let out = api(&ctx, "/b/admin/api/database/tables").await;
+        assert_eq!(output_http_status(out).await, 500);
+    }
+
+    /// A failed column read is a 500, not a table with no columns.
+    #[tokio::test]
+    async fn a_failed_column_read_is_a_500_not_no_columns() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID)
+            .break_reads();
+        let path = format!(
+            "/b/admin/api/database/tables/{}/columns",
+            crate::blocks::admin::ROLES_TABLE
+        );
+        let out = api(&ctx, &path).await;
+        assert_eq!(output_http_status(out).await, 500);
+    }
+
+    /// A name the backend has no table for is a 404, not an empty column list.
+    #[tokio::test]
+    async fn an_unknown_table_is_a_404() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        let out = api(&ctx, "/b/admin/api/database/tables/no_such_table/columns").await;
+        assert_eq!(output_http_status(out).await, 404);
+    }
+
+    /// Control: healthy reads answer the tables with counts and the columns.
+    #[tokio::test]
+    async fn healthy_reads_answer_tables_and_columns() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        let table = crate::blocks::admin::ROLES_TABLE;
+
+        let tables = output_json(api(&ctx, "/b/admin/api/database/tables").await).await;
+        let row = tables
+            .as_array()
+            .expect("an array")
+            .iter()
+            .find(|t| t["name"] == table)
+            .expect("the roles table is listed");
+        assert!(row["row_count"].is_i64(), "{row}");
+
+        let path = format!("/b/admin/api/database/tables/{table}/columns");
+        let columns = output_json(api(&ctx, &path).await).await;
+        assert!(
+            columns["columns"]
+                .as_array()
+                .expect("columns")
+                .iter()
+                .any(|c| c["name"] == "name"),
+            "{columns}"
+        );
+    }
 
     #[test]
     fn validate_accepts_select_pragma_explain_with() {
@@ -462,5 +579,29 @@ mod tests {
     fn validate_marks_unknown_first_word_as_bad_request() {
         let err = validate_readonly_query("EXEC users").unwrap_err();
         assert!(matches!(err, QueryValidationError::BadRequest(_)));
+    }
+
+    /// A secret table is `Forbidden` (403), not `BadRequest` — the query is
+    /// well-formed and the answer is "not here". The end-to-end coverage,
+    /// including the shapes a result-set mask would have missed, lives in
+    /// `tests/admin/sql_explorer_secrets.rs`.
+    #[test]
+    fn validate_refuses_every_secret_table_whatever_shape_names_it() {
+        for entry in crate::secret_tables::SECRET_TABLES {
+            let table = entry.table;
+            for query in [
+                format!("SELECT * FROM {table}"),
+                format!("SELECT x AS v FROM {table}"),
+                format!("WITH q AS (SELECT x FROM {table}) SELECT * FROM q"),
+                format!("PRAGMA table_info({table})"),
+            ] {
+                let err = validate_readonly_query(&query).unwrap_err();
+                assert!(
+                    matches!(err, QueryValidationError::Forbidden(_)),
+                    "{query}: {err:?}"
+                );
+                assert!(err.message().contains(table), "{query}: {err:?}");
+            }
+        }
     }
 }

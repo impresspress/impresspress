@@ -1,0 +1,79 @@
+name: Build wasm
+
+# The `impresspress-web` wasm, built once per run and published as the
+# `impresspress-web-pkg` artifact. The job comment below says why it is built
+# once; this comment says why it is a workflow of its own.
+#
+# It is a workflow rather than a job inside `ci-shared.yml` because
+# `ci-main.yml`'s merge-only `cross-compile` and `coverage` jobs depend on it
+# too, and a job cannot depend on a job that lives inside a called workflow —
+# only on the call. Keeping the builder callable lets those two start as soon
+# as the wasm exists instead of waiting for the whole shared suite.
+#
+# `release.yml` calls this workflow too, so the wasm a release binary embeds is
+# built by the same pinned wasm-pack, with the same flags, as every CI run's.
+# It used to carry a 35-line copy of the job below; folding that in was left
+# out of the reusable-workflow change because `release.yml` had never run and
+# so could not be proved by the same before/after job listing. It now has a
+# `workflow_dispatch` dry run, which is the proof.
+
+on:
+  workflow_call:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  # The impresspress crate's build.rs `include_bytes!`s the impresspress-web wasm, so
+  # every job that compiles the workspace (check/test/e2e-build) previously ran
+  # `wasm-pack build --release` itself — six redundant wasm-opt passes per run.
+  # Build it once here, publish `pkg/` as an artifact, and have downstream jobs
+  # download it instead of rebuilding.
+  build-wasm:
+    name: Build impresspress-web wasm
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: wasm
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
+        with:
+          # Pin explicitly. With no version the action resolves "latest" via
+          # the GitHub API and falls back to its ancient hardcoded default
+          # (v0.9.1) whenever that lookup flakes/rate-limits — and v0.9.1
+          # cannot parse workspace-inherited manifest fields like
+          # `license.workspace = true`, failing with "invalid type: map,
+          # expected a string for key `package.license`". Matches gizza-ai's
+          # pin (PR #75).
+          version: 'v0.15.0'
+
+      # `-- --locked` forwards to the `cargo build` wasm-pack runs. Every
+      # cargo invocation in these workflows that resolves against a committed
+      # lockfile now passes it; this one did not, so the wasm blob that
+      # `crates/impresspress/build.rs` bakes into the binary was the one place
+      # a release resolved dependencies afresh instead of using the set CI
+      # tested. All the deploy workflows carry the same flag now for the same
+      # reason. (The cargo-audit install in `audit.yml` is not in that set: it
+      # fetches a pinned release binary, not this repository's lockfile.)
+      - name: Build WASM
+        run: cd crates/impresspress-web && wasm-pack build --target web --release --out-dir pkg -- --locked
+
+      - name: Upload pkg/ artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: impresspress-web-pkg
+          path: crates/impresspress-web/pkg/
+          retention-days: 1

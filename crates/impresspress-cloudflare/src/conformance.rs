@@ -44,7 +44,12 @@
 //!   binding). Smallest change that would close the gap: a `wrangler dev` /
 //!   miniflare (workerd) test harness with a `[[d1_databases]]` binding — or
 //!   the `@cloudflare/vitest-pool-workers` runner — invoking
-//!   `run_conformance(&D1DatabaseService::new(env.d1("DB")?)).await`. The suite
+//!   `run_conformance(&D1DatabaseService::new(env.d1("DB")?, false, "DB",
+//!   D1QueryCount::new(), D1_QUERIES_PER_INVOCATION_DEFAULT)).await` — a
+//!   fresh count and the Workers Paid limit, since the suite is one
+//!   invocation's work (the suite's first act is `set_strict_schema(false)`
+//!   anyway — it exercises
+//!   the lazy-column paths strict mode skips). The suite
 //!   already drops-then-creates its own `conf_*` tables, so it is safe against
 //!   a persistent D1 instance.
 //!
@@ -74,14 +79,12 @@ use crate::{database::D1DatabaseService, kv_cached_db::KvCachedD1DatabaseService
 /// Compile-time proof (never executed) that the D1 adapter is a valid argument
 /// to the shared conformance suite. See the module doc for what this enforces
 /// and why a live run is infeasible without a workerd D1 binding.
-#[allow(dead_code)]
 async fn _d1_adapter_is_conformable(svc: &D1DatabaseService) {
     run_conformance(svc as &dyn DatabaseService).await;
 }
 
 /// Compile-time proof (never executed) that the KV-cached wrapper is a valid
 /// argument to the shared conformance suite. See the module doc.
-#[allow(dead_code)]
 async fn _kv_cached_adapter_is_conformable(svc: &KvCachedD1DatabaseService) {
     run_conformance(svc as &dyn DatabaseService).await;
 }

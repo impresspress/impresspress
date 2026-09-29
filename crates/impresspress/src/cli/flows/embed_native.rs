@@ -12,6 +12,10 @@ use crate::cli::{
 const RUNTIME_SITE_REL: &str = "data/storage/wafer-run/web/site";
 
 pub async fn build(repo_root: &Path, release: bool) -> Result<()> {
+    // A malformed `impresspress.toml` fails the build here, before any work;
+    // only an absent file means "no manifest_path override".
+    let cfg = config::find_and_load(repo_root)?;
+
     // 1. wafer build per block.
     blocks::build_all(repo_root).await?;
 
@@ -27,10 +31,11 @@ pub async fn build(repo_root: &Path, release: bool) -> Result<()> {
     if release {
         cargo.arg("--release");
     }
-    if let Ok((cfg, _)) = config::find_and_load(repo_root) {
-        if let Some(mp) = &cfg.impresspress.manifest_path {
-            cargo.arg("--manifest-path").arg(mp);
-        }
+    if let Some(mp) = cfg
+        .as_ref()
+        .and_then(|(c, _)| c.impresspress.manifest_path.as_ref())
+    {
+        cargo.arg("--manifest-path").arg(mp);
     }
     cargo.current_dir(repo_root);
     cmd::run("cargo build", cargo).await?;

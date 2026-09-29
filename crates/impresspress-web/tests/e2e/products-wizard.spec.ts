@@ -2,22 +2,23 @@ import { expect, test } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-const pagesPath = fileURLToPath(
-  new URL(
-    "../../../impresspress-core/src/blocks/products/pages.rs",
-    import.meta.url,
-  ),
+const bundlesUrl = new URL(
+  "../../../impresspress-core/src/blocks/products/assets/",
+  import.meta.url,
 );
-const adminOrigin = "https://admin.example";
 
-function productWizardScript() {
-  const source = readFileSync(pagesPath, "utf8");
-  const match = source.match(
-    /const PRODUCT_WIZARD_JS: &str = r#"\n([\s\S]*?)\n"#;/,
-  );
-  if (!match) throw new Error("Could not extract PRODUCT_WIZARD_JS from pages.rs");
-  return match[1];
+/**
+ * A products browser bundle, read from the very file the server serves at
+ * `/b/static/products-*.js`. These used to be Rust string constants dug out
+ * of `pages.rs` with a regular expression; they are real files now, so the
+ * spec reads the file — the same way `products-storefront.spec.ts` has always
+ * read `storefront.js`.
+ */
+function bundle(name: string) {
+  return readFileSync(fileURLToPath(new URL(name, bundlesUrl)), "utf8");
 }
+
+const adminOrigin = "https://admin.example";
 
 const wizardFixture = `<!doctype html>
 <html>
@@ -61,7 +62,7 @@ test.describe("products guided wizard", () => {
       });
     });
     await page.goto(`${adminOrigin}/b/products/admin/new`);
-    await page.addScriptTag({ content: productWizardScript() });
+    await page.addScriptTag({ content: bundle("products-wizard.js") });
 
     const settings = page.locator("#wizard-shipping-settings");
     await expect(settings).toBeHidden();
@@ -167,7 +168,7 @@ test.describe("products guided wizard", () => {
       });
     });
     await page.goto(`${adminOrigin}/b/products/admin/new`);
-    await page.addScriptTag({ content: productWizardScript() });
+    await page.addScriptTag({ content: bundle("products-wizard.js") });
 
     await page.evaluate(() => {
       (window as any).addWizardVariable({

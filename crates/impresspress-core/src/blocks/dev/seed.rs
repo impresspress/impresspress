@@ -70,7 +70,6 @@
 //! activation.
 
 use serde::{Deserialize, Serialize};
-use wafer_core::clients::database as db;
 use wafer_run::context::Context;
 
 use super::{
@@ -84,6 +83,8 @@ use super::{
     validation,
     workspace::{self, Workspace},
 };
+// audit-allow: the dev block grants itself this table — `dev::wrap_grants()` maps every `TABLE_ALLOWLIST` entry to `read_write(BLOCK_NAME, table)`, which the runtime honours from its flat grant list; the audit attributes grants to the declaring file's block and so cannot see it
+use crate::platform_state::variables::{self, VariablePatch};
 
 /// Seed-manifest schema version this build reads.
 ///
@@ -212,6 +213,30 @@ pub fn data_url(path: &str) -> String {
 /// spelled at both ends is a string that can be spelled two ways.
 pub const DATA_CONTENT_TYPE: &str = "application/json";
 
+/// Largest data snapshot a bundle may carry, in bytes.
+///
+/// One constant for both ends of the format: the importer refuses a larger
+/// `data.json` before fetching it, and `super::export` refuses to write one.
+/// A bound only the importer knew about would let an export succeed and hand
+/// over a bundle whose own importer then rejects it — on a cold boot, where
+/// the refusal leaves the imported instance's site empty.
+///
+/// Sized for a shop, not for an editable file: the snapshot carries every row
+/// of the exported tables — each account with its credentials and role, each
+/// product with its offers — so a limit on the scale of
+/// [`paths::MAX_FILE_BYTES`] would refuse an ordinary shop of a few hundred
+/// accounts.
+///
+/// What bounded it from above was write cost, not memory: in the browser
+/// every database call that returns has saved the WHOLE sql.js database to
+/// OPFS (`dbFlush` in `impresspress-browser`'s `bridge.js`), so a row-per-call
+/// import saved it once per row. [`data_snapshot::import`] writes the whole
+/// snapshot in one `db::batch`, so an import costs one whole-database save.
+/// The limit stays at 2 MiB until a batched import
+/// of a larger snapshot has been timed on a real browser cold boot; that
+/// measurement, not the write count, is what a higher value has to rest on.
+pub const MAX_DATA_BYTES: usize = 2 * 1024 * 1024;
+
 /// The short workspace name of a registered block (`site/hello` → `hello`).
 ///
 /// The workspace directory, the artifact URL and the route prefix are all
@@ -331,7 +356,7 @@ async fn import_bundle(
         // the same reason and at the same point: before the module is fetched,
         // stored or executed. A block built against a different
         // `wafer_guest.rs` speaks a contract this runtime no longer
-        // guarantees, and loading it turns a one-line "rescaffold and
+        // guarantees, and loading it turns a one-line "replace the module and
         // recompile" into a trap inside wasmi — on the one boot that can least
         // explain it. `validate_static` cannot produce this verdict
         // (`BlockInfo` carries no such field, spec amendment 8), so the
@@ -501,9 +526,16 @@ async fn import_bundle(
     // a bare `Option<String>` path could only ever be.
     if let Some(declared) = &manifest.data {
         let url = data_url(&declared.path);
-        let bytes = fetch_and_verify(fetch, &url, declared, DATA_CONTENT_TYPE).await?;
-        let snapshot: data_snapshot::DataSnapshot = serde_json::from_slice(&bytes)
-            .map_err(|e| format!("{url}: not a valid data snapshot: {e}"))?;
+        // The raw bytes live only as long as the parse: the rows are applied
+        // from the parsed snapshot, so holding up to `MAX_DATA_BYTES` of JSON
+        // beside them through every database write would be a second copy of
+        // the snapshot for nothing.
+        let snapshot: data_snapshot::DataSnapshot = {
+            let bytes =
+                fetch_and_verify(fetch, &url, declared, DATA_CONTENT_TYPE, MAX_DATA_BYTES).await?;
+            serde_json::from_slice(&bytes)
+                .map_err(|e| format!("{url}: not a valid data snapshot: {e}"))?
+        };
         data_snapshot::import(ctx, &snapshot)
             .await
             .map_err(|e| format!("{url}: {}", e.message))?;
@@ -528,17 +560,21 @@ async fn import_bundle(
 /// actually be served as, so a bundle claiming a different one was produced
 /// by an exporter that does not agree with this build about how files are
 /// served.
+///
+/// `max_bytes` is the limit for this kind of file — [`paths::MAX_FILE_BYTES`]
+/// for a workspace file, [`MAX_DATA_BYTES`] for the data snapshot — and the
+/// declared size is checked against it before anything is fetched.
 async fn fetch_and_verify(
     fetch: &dyn SeedFetch,
     url: &str,
     declared: &SeedFile,
     served_as: &str,
+    max_bytes: usize,
 ) -> Result<Vec<u8>, String> {
-    if declared.size > paths::MAX_FILE_BYTES as u64 {
+    if declared.size > max_bytes as u64 {
         return Err(format!(
-            "{url}: declares {} bytes; the per-file limit is {}",
+            "{url}: declares {} bytes; the limit for this file is {max_bytes}",
             declared.size,
-            paths::MAX_FILE_BYTES
         ));
     }
 
@@ -579,7 +615,7 @@ async fn fetch_verified(
     paths::validate_path(workspace_path)
         .map_err(|e| format!("the seed bundle names {workspace_path:?}: {e}"))?;
     let served = paths::content_type_for(workspace_path);
-    fetch_and_verify(fetch, url, declared, served).await
+    fetch_and_verify(fetch, url, declared, served, paths::MAX_FILE_BYTES).await
 }
 
 /// One block's refusal, with every diagnostic's message and code.
@@ -722,43 +758,23 @@ const SEED_ERROR_DESCRIPTION: &str =
 /// site that no later boot retries (the failed generation is in the ledger, so
 /// `is_fresh` is false from then on).
 pub async fn record_failure(ctx: &dyn Context, message: &str) {
-    let now = crate::util::now_rfc3339();
-    let row: Vec<(String, serde_json::Value)> = vec![
-        // `db::upsert` writes `data` verbatim — unlike `db::create` it
-        // synthesizes no `id` — and `id` is this table's `TEXT PRIMARY KEY`,
-        // so the row has to carry one or the INSERT writes a NULL key (or is
-        // refused outright on Postgres). Discarded on the conflict path: `id`
-        // is not in the update set, so a second refusal keeps the first row's.
-        ("id".to_string(), uuid::Uuid::new_v4().to_string().into()),
-        ("key".to_string(), SEED_ERROR_KEY.into()),
-        ("value".to_string(), message.into()),
-        ("name".to_string(), SEED_ERROR_NAME.into()),
-        ("description".to_string(), SEED_ERROR_DESCRIPTION.into()),
-        (
-            "block".to_string(),
-            crate::config_vars::key_block_prefix(SEED_ERROR_KEY).into(),
-        ),
-        // Not a secret: it is a diagnostic about this instance's own boot, and
-        // masking it would hide the one thing it exists to say.
-        ("sensitive".to_string(), 0.into()),
-        ("created_at".to_string(), now.clone().into()),
-        ("updated_at".to_string(), now.into()),
-    ];
-    // `key` is the table's `UNIQUE` column, so this is the atomic upsert and
-    // not the get-then-create race: a boot that fails twice updates one row.
-    // `created_at` is deliberately not in the update set — the row's age is
-    // when the first refusal happened.
-    let written = db::upsert(
+    // `key` is the table's `UNIQUE` column and `upsert_by_key` is the one
+    // write path every platform shares (the Cloudflare row cache refuses the
+    // atomic upsert on this table); a boot that fails twice updates one row.
+    // `created_at` is not in the patch — the row's age is when the first
+    // refusal happened.
+    let written = variables::upsert_by_key(
         ctx,
-        crate::admin_schema::VARIABLES_TABLE,
-        row,
-        vec!["key".to_string()],
-        wafer_block::wire::database::OnConflict::SetColumns(vec![
-            "value".to_string(),
-            "name".to_string(),
-            "description".to_string(),
-            "updated_at".to_string(),
-        ]),
+        SEED_ERROR_KEY,
+        VariablePatch {
+            value: Some(message.to_string()),
+            name: Some(SEED_ERROR_NAME.to_string()),
+            description: Some(SEED_ERROR_DESCRIPTION.to_string()),
+            // Not a secret: it is a diagnostic about this instance's own
+            // boot, and masking it would hide the one thing it exists to say.
+            sensitive: Some(false),
+            ..Default::default()
+        },
     )
     .await;
     if let Err(e) = written {
@@ -776,16 +792,7 @@ pub async fn record_failure(ctx: &dyn Context, message: &str) {
 /// carry an empty explanation of a failure that is over. Deleting a key with
 /// no row affects nothing, which is what makes this callable unconditionally.
 async fn clear_failure(ctx: &dyn Context) {
-    let cleared = db::delete_by_filters(
-        ctx,
-        crate::admin_schema::VARIABLES_TABLE,
-        vec![wafer_block::db::Filter {
-            field: "key".to_string(),
-            operator: wafer_block::db::FilterOp::Equal,
-            value: serde_json::Value::String(SEED_ERROR_KEY.to_string()),
-        }],
-    )
-    .await;
+    let cleared = variables::delete_by_key(ctx, SEED_ERROR_KEY).await;
     if let Err(e) = cleared {
         tracing::error!(
             error = %e.message,
@@ -802,23 +809,10 @@ async fn clear_failure(ctx: &dyn Context) {
 /// writes this runs, so a config read would answer with the previous boot's
 /// answer to a question about this one.
 pub async fn last_failure(ctx: &dyn Context) -> Result<Option<String>, wafer_run::WaferError> {
-    match db::get_by_field(
-        ctx,
-        crate::admin_schema::VARIABLES_TABLE,
-        "key",
-        serde_json::Value::String(SEED_ERROR_KEY.to_string()),
-    )
-    .await
-    {
-        Ok(record) => Ok(record
-            .data
-            .get("value")
-            .and_then(|value| value.as_str())
-            .filter(|message| !message.is_empty())
-            .map(str::to_string)),
-        Err(e) if e.code == wafer_run::ErrorCode::NotFound => Ok(None),
-        Err(e) => Err(e),
-    }
+    Ok(variables::get_by_key(ctx, SEED_ERROR_KEY)
+        .await?
+        .map(|row| row.value)
+        .filter(|message| !message.is_empty()))
 }
 
 /// Store one verified file's bytes and record it in the workspace under

@@ -8,26 +8,18 @@
 /* ===== Responsive ===== */
 /* Live mobile rules migrated from former (max-width: 767px) block — Phase 5c. */
 @media (max-width: 720px) {
-	.page-header { padding: var(--space-4); }
 	.card { padding: var(--space-4); margin-bottom: var(--space-4); }
 	.stats-grid { grid-template-columns: 1fr; gap: var(--space-4); }
 	.stat-card { padding: var(--space-4); }
 	.stat-value { font-size: 1.5rem; }
 	.btn { width: 100%; justify-content: center; }
 	.pagination { flex-direction: column; align-items: stretch; gap: var(--space-4); }
-	.pagination-info { margin-right: 0; text-align: center; }
-	.pagination-controls { justify-content: center; }
 	.tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; }
 	.tab { flex-shrink: 0; }
 }
 
 /* ===== Page templates — Phase 1 ===== */
 .page { display: flex; flex-direction: column; gap: var(--space-4); padding: var(--space-4); }
-.page-header { display: flex; align-items: flex-start; gap: var(--space-4); }
-.page-header__text { flex: 1; }
-.page-header__title { font-size: var(--text-xl); font-weight: 500; margin: 0; color: var(--text-primary); }
-.page-header__subtitle { font-size: var(--text-sm); color: var(--text-secondary); margin: var(--space-1) 0 0; }
-.page-header__action { margin-left: auto; }
 .page-filters { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 .page-body { min-height: 100px; }
 .page-pagination { padding-top: var(--space-2); }
@@ -68,7 +60,6 @@
 .form-section__title { font-size: var(--text-lg); font-weight: 500; margin: 0; }
 .form-section__desc { font-size: var(--text-sm); color: var(--text-secondary); margin: var(--space-1) 0 0; }
 .form-section__body { padding-top: var(--space-2); }
-.form-bar { padding: var(--space-4) var(--space-6); border-top: 1px solid var(--border-light); display: flex; justify-content: flex-end; gap: var(--space-2); position: sticky; bottom: 0; background: var(--surface-1); }
 
 /* ===== Dashboard page ===== */
 /* .stats-grid default + min-width:1024px rules live above the @media (max-width: 720px) block (cascade order).
@@ -124,20 +115,18 @@
 
 /* ===== Products admin =====
  * Migrated from `blocks/products/pages.rs`'s page-local `PRODUCTS_UI_CSS`
- * `<style>` block (task 12e). The `body:has(.products-tabs)` rules are
- * compound selectors so they always beat the plain `.page-header`/
- * `.stats-grid` rules above, regardless of file load order; `.products-
- * section*` are page-local classes with no conflicting utility, so
- * placement here (vs. component files) is purely by "page chrome" concern. */
+ * `<style>` block (task 12e). The `body:has(.products-tabs)` rule is a
+ * compound selector so it always beats the plain `.stats-grid` rule above,
+ * regardless of file load order; `.products-section*` are page-local classes
+ * with no conflicting utility, so placement here (vs. component files) is
+ * purely by "page chrome" concern. The companion `.page-header` overrides
+ * this block used to carry went with the first-generation page header, which
+ * rendered on no page. */
 .products-section { margin-top: var(--space-8); }
 .products-section__head { display: flex; align-items: end; justify-content: space-between; gap: var(--space-4); flex-wrap: wrap; margin-bottom: var(--space-3); }
 .products-section__head h2, .products-section__head h3, .products-section__head p { margin: 0; }
 .products-section__head p { margin-top: var(--space-1); }
-body:has(.products-tabs) .page-header { padding-bottom: var(--space-1); }
 body:has(.products-tabs) .stats-grid { gap: var(--space-4); margin-top: var(--space-4); }
-@media (max-width: 760px) {
-	body:has(.products-tabs) .page-header { align-items: flex-start; }
-}
 
 /* ===== Status page ===== */
 .status-page { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: var(--space-8); background: var(--surface-2); }

@@ -4,36 +4,39 @@
 //! `wafer_run__auth__bootstrap_tokens` (24h expiry) instead of creating an
 //! admin user directly — see [`crate::blocks::auth::bootstrap`]. This
 //! handler is the redemption side: holder posts the raw token + chosen
-//! email/password, we verify the token row, create the admin user via the
-//! same code path the env-var bootstrap uses, consume the token row, and
-//! mint a session cookie identical to the one [`super::login`] would issue.
+//! email/password, we check the token row, hash the password, consume the
+//! token row, create the admin user through the same write the env-var
+//! bootstrap uses, and mint a session cookie identical to the one
+//! [`super::login`] would issue.
 //!
 //! Request body is `application/x-www-form-urlencoded` (the GET page
 //! submits a plain HTML form — no JS).
 
-use wafer_core::clients::config;
 use wafer_run::{context::Context, InputStream, Message, OutputStream};
 
 use crate::{
     blocks::{
         auth::{
-            bootstrap,
-            helpers::issue_tokens_and_cookie,
+            bootstrap, hash_new_password,
+            helpers::{issue_tokens_and_cookie, RoleSource, Rotation, SessionLifetime, TokenGrant},
             repo::{bootstrap_tokens, users},
             service::hash_token,
         },
-        auth_ui::redirect::{default_post_login_redirect, is_safe_local_redirect},
+        auth_ui::redirect::{configured_admin_default, default_post_login_redirect},
+        crud,
         errors::error_response,
     },
     http::{
-        err_bad_request, err_forbidden, err_internal, err_internal_no_cause, err_unauthorized,
-        ResponseBuilder,
+        err_bad_request, err_forbidden, err_internal_no_cause, err_unauthorized, ResponseBuilder,
     },
     util::parse_form_body,
 };
 
 pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> OutputStream {
-    let raw = input.collect_to_bytes().await;
+    let raw = match input.collect_to_bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => return OutputStream::error(e),
+    };
     let form = parse_form_body(&raw);
 
     // CSRF defense-in-depth: this is a plain (no-JS) `<form>` POST, so the
@@ -55,46 +58,70 @@ pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> Out
         _ => return err_bad_request("missing token"),
     };
     let email = match form.get("email") {
-        Some(e) if !e.is_empty() => e.trim().to_lowercase(),
+        Some(e) if !e.is_empty() => users::normalize_email(e),
         _ => return err_bad_request("missing email"),
     };
     let password = match form.get("password") {
         Some(p) if !p.is_empty() => p.clone(),
         _ => return err_bad_request("missing password"),
     };
-    if let Err((code, msg)) = super::password_policy::validate_new_password(ctx, &password).await {
-        return error_response(code, &msg);
+    match super::password_policy::validate_new_password(ctx, &password).await {
+        Ok(Ok(())) => {}
+        Ok(Err((code, msg))) => return error_response(code, &msg),
+        Err(response) => return response,
     }
 
     let token_hash = hash_token(&token);
 
-    // 1. Atomically validate AND consume the token in a single
+    // 0. Resolve the session lifetime before the token is spent: a
+    //    misconfigured one refuses the redemption and leaves the single-use
+    //    token redeemable (see `SessionLifetime`).
+    let lifetime = match SessionLifetime::resolve_or_error(ctx).await {
+        Ok(lifetime) => lifetime,
+        Err(r) => return r,
+    };
+
+    // 1. Refuse an unknown or expired token before the password is hashed,
+    //    so a caller without one cannot spend the crypto service's work.
+    //    This read decides nothing on its own: step 3 is the atomic consume.
+    match bootstrap_tokens::is_valid(ctx, &token_hash).await {
+        Ok(true) => {}
+        Ok(false) => return err_unauthorized("invalid or expired bootstrap token"),
+        Err(e) => return crud::db_error_internal(e, "bootstrap_tokens lookup"),
+    }
+
+    // 2. Hash the password while the token is still unspent: a crypto
+    //    service that cannot be reached is a 503 the holder can retry with
+    //    the same token.
+    let password_hash = match hash_new_password(ctx, &password).await {
+        Ok(hash) => hash,
+        Err(response) => return response,
+    };
+
+    // 3. Atomically validate AND consume the token in a single
     //    `DELETE ... RETURNING` round trip (`take_valid_by_hash`), *before*
-    //    creating the admin account. This closes the redemption race the old
-    //    validate → create-admin → best-effort-delete sequence had: two
-    //    concurrent requests presenting the same raw token could both pass
-    //    the (separate) `is_valid` read and both create an admin user before
-    //    either got around to deleting the row. Because the read and the
-    //    delete are now the same SQL statement, the database serializes the
-    //    two attempts — only one caller can ever observe `true` here, so
-    //    only one can proceed past this point.
+    //    creating the admin account. Two concurrent requests presenting the
+    //    same raw token can both pass step 1, but the read and the delete
+    //    here are one SQL statement, so the database serializes the two
+    //    attempts — only one caller can ever observe `true` here, so only
+    //    one can proceed past this point.
     match bootstrap_tokens::take_valid_by_hash(ctx, &token_hash).await {
         Ok(true) => {}
         Ok(false) => return err_unauthorized("invalid or expired bootstrap token"),
-        Err(e) => return err_internal("bootstrap_tokens lookup", e),
+        Err(e) => return crud::db_error_internal(e, "bootstrap_tokens lookup"),
     }
 
-    // 2. Create the admin user via the same code path bootstrap-on-init uses.
-    //    Reusing this keeps the legacy companion columns (`name`, `disabled`,
+    // 4. Create the admin user through the same write bootstrap-on-init
+    //    uses, which keeps the legacy companion columns (`name`, `disabled`,
     //    `deleted_at`) and the local_credentials row consistent with the
-    //    env-var path. The token is already consumed (step 1), so a failure
+    //    env-var path. The token is already consumed (step 3), so a failure
     //    here just means the caller needs a fresh token from an operator —
     //    it can't reopen the single-use race.
-    if let Err(e) = bootstrap::bootstrap_with_email_password(ctx, &email, &password).await {
-        return err_internal("create admin", e);
+    if let Err(e) = bootstrap::create_admin(ctx, &email, &password_hash).await {
+        return crud::db_error_internal(e, "create admin");
     }
 
-    // 4. Look up the just-created user so we have its id for session minting.
+    // 5. Look up the just-created user so we have its id for session minting.
     let user = match users::find_by_email(ctx, &email).await {
         Ok(Some(u)) => u,
         Ok(None) => {
@@ -102,30 +129,41 @@ pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> Out
                 "bootstrap created admin but find_by_email returned no row",
             )
         }
-        Err(e) => return err_internal("users::find_by_email after bootstrap", e),
+        Err(e) => return crud::db_error_internal(e, "users::find_by_email after bootstrap"),
     };
 
-    // 5. Mint a session — same shared token-issuance tail as login/signup.
-    let roles = vec!["admin".to_string()];
-    let issued =
-        match issue_tokens_and_cookie(ctx, &user.id, &email, &roles, "password", None, 0).await {
-            Ok(i) => i,
-            Err(r) => return r,
-        };
+    // 6. Mint a session — same shared token-issuance tail as login/signup,
+    //    for the roles the account holds and the `auth_version` of the row
+    //    step 5 read (see `TokenGrant`).
+    let grant = match TokenGrant::resolve(ctx, &user, RoleSource::Stored).await {
+        Ok(grant) => grant,
+        Err(e) => return crud::db_error_internal(e, "Failed to resolve user roles"),
+    };
+    let issued = match issue_tokens_and_cookie(
+        ctx,
+        &lifetime,
+        &user.id,
+        &email,
+        &grant,
+        "password",
+        Rotation::NewFamily,
+    )
+    .await
+    {
+        Ok(i) => i,
+        Err(r) => return r,
+    };
 
-    // 6. Set the auth cookie + redirect to a real post-login destination. The
+    // 7. Set the auth cookie + redirect to a real post-login destination. The
     //    form is a plain HTML POST (no JS), so a 302 with Set-Cookie is the
     //    right completion signal. Honor WAFER_RUN_SHARED__POST_LOGIN_REDIRECT
     //    (validated) like login/oauth, defaulting to the admin home — the old
     //    `/b/auth/dashboard` target is not a registered route (404).
-    let post_login_raw =
-        config::get_default(ctx, "WAFER_RUN_SHARED__POST_LOGIN_REDIRECT", "/b/admin/").await;
-    let admin_default = if is_safe_local_redirect(&post_login_raw) {
-        post_login_raw
-    } else {
-        "/b/admin/".to_string()
+    let admin_default = match configured_admin_default(ctx).await {
+        Ok(admin_default) => admin_default,
+        Err(e) => return crud::db_error_internal(e, "Could not read the post-login redirect"),
     };
-    // Bootstrap redemption always creates the admin account (step 2 above),
+    // Bootstrap redemption always creates the admin account (step 4 above),
     // so `is_admin` is always `true` here — routed through the same
     // single-sourced rule as login/OAuth (`redirect::default_post_login_redirect`)
     // for consistency, not because the outcome differs.
@@ -139,7 +177,6 @@ pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> Out
 
 #[cfg(test)]
 mod tests {
-    use std::sync::Arc;
 
     use super::*;
     use crate::test_support::TestContext;
@@ -149,18 +186,7 @@ mod tests {
     /// minting goes through `crypto::sign`/`random_bytes`. Without this the
     /// handler trips on `block 'wafer-run/crypto' not registered`.
     async fn ctx_with_crypto() -> TestContext {
-        let mut ctx = TestContext::with_auth().await;
-        let svc = Arc::new(
-            wafer_block_crypto::service::Argon2JwtCryptoService::new(
-                // ≥ 32 bytes for HMAC-SHA256 minimum-length check.
-                "test-jwt-secret-padded-to-min-32-bytes-aaaa".to_string(),
-            )
-            .expect("test secret is long enough"),
-        );
-        let crypto_block: Arc<dyn wafer_run::Block> =
-            Arc::new(wafer_core::service_blocks::crypto::CryptoBlock::new(svc));
-        ctx.register_block("wafer-run/crypto", crypto_block);
-        ctx
+        TestContext::with_auth_and_crypto().await
     }
 
     /// The `Message` the real GET page (`pages::bootstrap::handle_get`)
@@ -308,10 +334,7 @@ mod tests {
 
         // Only one admin user exists — the second attempt never reached
         // `bootstrap_with_email_password`.
-        let count =
-            wafer_core::clients::database::count(&ctx, crate::blocks::auth::USERS_TABLE, &[])
-                .await
-                .unwrap();
+        let count = crate::blocks::auth::repo::users::count(&ctx).await.unwrap();
         assert_eq!(
             count, 1,
             "the second redemption must not create a second user"
@@ -383,10 +406,7 @@ mod tests {
              (got {outcome_a:?} and {outcome_b:?})"
         );
 
-        let count =
-            wafer_core::clients::database::count(&ctx, crate::blocks::auth::USERS_TABLE, &[])
-                .await
-                .unwrap();
+        let count = crate::blocks::auth::repo::users::count(&ctx).await.unwrap();
         assert_eq!(
             count, 1,
             "a single bootstrap token must create at most one admin account"
@@ -500,5 +520,74 @@ mod tests {
             MetaGet::get(&buf.meta, "resp.header.Location"),
             Some("/b/admin/")
         );
+    }
+
+    /// A password hasher that cannot be reached is a 503 the holder may
+    /// retry with the same token: the password is hashed before the
+    /// single-use token is spent, so no admin exists yet, the token is still
+    /// redeemable, and once the hasher answers the same token redeems.
+    #[tokio::test]
+    async fn an_unreachable_password_hasher_is_a_503_and_keeps_the_token() {
+        use crate::test_support::{output_http_status, HasherFault};
+
+        let (ctx, hasher) = TestContext::with_auth_and_faulty_hasher().await;
+        let msg = bootstrap_msg();
+        let raw = "outage-token";
+        let hash = hash_token(raw);
+        let expires = (chrono::Utc::now() + chrono::Duration::hours(24))
+            .format("%Y-%m-%dT%H:%M:%SZ")
+            .to_string();
+        bootstrap_tokens::insert(&ctx, hash.clone(), &expires)
+            .await
+            .unwrap();
+        let form = format!(
+            "token={raw}&email=admin@example.com&password=test1234&{}",
+            csrf_field(&ctx, &msg)
+        );
+        hasher.fail_hash(Some(HasherFault::Unreachable));
+
+        let out = handle(
+            &ctx,
+            &msg,
+            InputStream::from_bytes(form.clone().into_bytes()),
+        )
+        .await;
+
+        assert_eq!(output_http_status(out).await, 503);
+        assert!(users::find_by_email(&ctx, "admin@example.com")
+            .await
+            .unwrap()
+            .is_none());
+        assert!(
+            bootstrap_tokens::is_valid(&ctx, &hash).await.unwrap(),
+            "the token survives an outage"
+        );
+
+        hasher.fail_hash(None);
+        let out = handle(&ctx, &msg, InputStream::from_bytes(form.into_bytes())).await;
+        assert_eq!(output_http_status(out).await, 302, "the same token redeems");
+        assert!(users::find_by_email(&ctx, "admin@example.com")
+            .await
+            .unwrap()
+            .is_some());
+    }
+
+    /// An unknown token is refused before the password is hashed: with the
+    /// hasher down it is still the 401, not the hasher's 503.
+    #[tokio::test]
+    async fn an_invalid_token_is_refused_before_hashing() {
+        use crate::test_support::{output_http_status, HasherFault};
+
+        let (ctx, hasher) = TestContext::with_auth_and_faulty_hasher().await;
+        let msg = bootstrap_msg();
+        hasher.fail_hash(Some(HasherFault::Unreachable));
+        let form = format!(
+            "token=wrong&email=admin@example.com&password=test1234&{}",
+            csrf_field(&ctx, &msg)
+        );
+
+        let out = handle(&ctx, &msg, InputStream::from_bytes(form.into_bytes())).await;
+
+        assert_eq!(output_http_status(out).await, 401);
     }
 }

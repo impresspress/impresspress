@@ -47,10 +47,27 @@ const { objects } = await impresspress.storage.listObjects('my-bucket');
 
 ## Type Safety
 
-The SDK includes TypeScript types generated from the backend models, ensuring type safety across your application:
+Every exported type describes a shape a handler actually returns, and lives
+next to the service that speaks it. Nothing here models a database row: the
+SDK talks to HTTP endpoints, whose projections are narrower than the tables
+behind them.
+
+The exported types are hand-written, but they are *checked* against a
+generated one. `src/generated/api.ts` is produced by `npm run generate:types`
+from the committed per-block OpenAPI snapshots
+(`crates/impresspress-core/tests/snapshots/*.openapi.json`), which each block's
+`EndpointRoute` table generates in turn, and CI regenerates and diffs it.
+`test/generated-contract.test.ts` then asserts that what the server publishes
+is assignable to what these interfaces promise, so a reshaped response body is
+a compile error here rather than a runtime surprise for a consumer.
 
 ```typescript
-import { AuthUser, StorageObject, IAMRole } from '@impresspress/sdk';
+import type {
+  AuthSessionUser,   // GET /b/auth/api/me
+  StorageObjectInfo, // GET /b/storage/api/buckets/{name}/objects
+  Extension,         // GET /b/admin/api/extensions
+  IAMRole,           // GET /b/admin/api/iam/roles
+} from '@impresspress/sdk';
 ```
 
 ## Features
@@ -144,9 +161,29 @@ const blob = await impresspress.storage.downloadFile('images', 'photo.jpg');
 const url = impresspress.storage.getDownloadUrl('images', 'photo.jpg');
 await impresspress.storage.deleteObject('images', 'photo.jpg');
 
-// Search the current user's uploads / recently viewed objects
+// Search the current user's uploads (object-metadata rows)
 const results = await impresspress.storage.search('photo');
+// The current user's recent object views (audit rows: bucket, key, viewed_at)
 const recent = await impresspress.storage.getRecentFiles();
+```
+
+`uploadFile` and `downloadFile` run with **no timeout** by default. Every other
+call gets the client's 30 s default, but a transfer's duration is a function of
+file size and link speed, so a fixed ceiling would just be a cap on how large a
+file the SDK can move. Bound or cancel a transfer explicitly when you want to:
+
+```typescript
+// Give this one upload a 10-minute ceiling
+await impresspress.storage.uploadFile('images', bigFile, {
+  key: 'raw.tiff',
+  timeout: 10 * 60 * 1000,
+});
+
+// Or cancel it on demand — an unbounded transfer is still abortable
+const controller = new AbortController();
+const download = impresspress.storage.downloadFile('images', 'raw.tiff', {
+  signal: controller.signal,
+});
 ```
 
 ### CloudStorage (sharing + quota)
@@ -223,7 +260,7 @@ Config options:
 - `url`: The Impresspress server URL
 - `apiKey`: Optional API key for authentication
 - `headers`: Additional headers to include
-- `timeout`: Request timeout in milliseconds
+- `timeout`: Request timeout in milliseconds (JSON calls only — `uploadFile` and `downloadFile` opt out, see Transfer timeouts)
 
 ### Services
 
@@ -270,6 +307,28 @@ try {
 } catch (error) {
   if (error instanceof ImpresspressError) {
     console.error(error.code, error.message, error.status);
+  }
+}
+```
+
+When the server can say precisely what went wrong it also sends a `code`,
+surfaced as `error.detailCode` (`"invalid_credentials"`,
+`"rate_limit_exceeded"`, …). Branch on it rather than on `status`: two
+errors can share a status and differ in whether a retry can succeed. A 429
+with `rate_limit_exceeded` can be retried after its `Retry-After`; one with
+`database.statement_budget_exhausted` (or a 400 with
+`database.statement_budget_exceeds_limit`) means the request needs more
+database work than one request may do, and sent again unchanged it fails the
+same way — do not retry it automatically, send less per request:
+
+```typescript
+import { isStatementBudgetError } from '@impresspress/sdk';
+
+try {
+  await impresspress.auth.signUp({ email: 'new@example.com', password: 'correct-horse' });
+} catch (error) {
+  if (isStatementBudgetError(error)) {
+    // Retrying this request would fail the same way: surface it instead.
   }
 }
 ```

@@ -9,22 +9,18 @@
 use base64ct::{Base64, Encoding};
 use impresspress_core::{
     blocks::dev::{
-        blobs, paths, scaffold::Template, test_support::FakeControl, workspace, RuntimeControl,
-        WAFER_GUEST_VERSION,
+        blobs, paths,
+        scaffold::Template,
+        test_support::{dev_post, hello_info, FakeControl},
+        workspace, RuntimeControl, WAFER_GUEST_VERSION,
     },
     test_support::{admin_msg, output_http_status, output_json, TestContext},
 };
 use serde_json::json;
-use wafer_run::{AuthLevel, BlockEndpoint, BlockInfo, OutputStream};
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// `POST` a JSON body to a `/b/dev` route as an admin, through the router.
-async fn dev_post(ctx: &TestContext, path: &str, body: serde_json::Value) -> OutputStream {
-    ctx.dispatch_json(admin_msg("create", path), &body).await
-}
 
 /// Read one workspace file's content back through the files API.
 async fn read_file(ctx: &TestContext, path: &str) -> String {
@@ -34,15 +30,6 @@ async fn read_file(ctx: &TestContext, path: &str) -> String {
         .as_str()
         .unwrap_or_else(|| panic!("read {path} returned no content: {body}"))
         .to_string()
-}
-
-/// The `BlockInfo` a well-behaved `hello` guest reports.
-fn hello_info(name: &str) -> BlockInfo {
-    BlockInfo::new(name, "0.1.0", "http-handler@v1", "hello").endpoints(vec![BlockEndpoint::get(
-        "/b/hello/",
-    )
-    .auth(AuthLevel::Public)
-    .summary("hello")])
 }
 
 // ---------------------------------------------------------------------------
@@ -133,7 +120,10 @@ async fn a_hyphenated_name_reaches_every_place_the_name_is_load_bearing() {
     let lib = read_file(&ctx, "blocks/my-shop/src/lib.rs").await;
     assert!(lib.contains(r#"Block::new("site/my-shop""#), "{lib}");
     assert!(lib.contains("/b/my-shop/subscribe"), "{lib}");
-    assert!(lib.contains("site__my-shop__subscribers"), "{lib}");
+    // The collection is spelled the way the runtime spells the block's
+    // namespace, a hyphen as `_`: the one spelling validation accepts.
+    assert!(lib.contains("site__my_shop__subscribers"), "{lib}");
+    assert!(!lib.contains("site__my-shop__"), "{lib}");
     assert!(!lib.contains("site/newsletter"), "no stale block id: {lib}");
     assert!(
         !lib.contains("site__newsletter__"),
@@ -179,7 +169,7 @@ async fn an_unknown_template_is_refused() {
     assert_eq!(output_http_status(refused).await, 400);
     // Nothing was written.
     let listed = output_json(
-        ctx.dispatch(admin_msg("retrieve", "/b/dev/api/files"))
+        ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/files"))
             .await,
     )
     .await;
@@ -283,11 +273,17 @@ async fn scaffolding_activates_nothing() {
 async fn reference_returns_the_authoring_guide() {
     let ctx = TestContext::with_dev(FakeControl::new()).await;
     let body = output_json(
-        ctx.dispatch(admin_msg("retrieve", "/b/dev/api/reference"))
+        ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/reference"))
             .await,
     )
     .await;
     assert_eq!(body["wafer_guest_version"], WAFER_GUEST_VERSION);
+    // The module a block built against an older copy writes over its own:
+    // the stale-module diagnostic points here.
+    assert_eq!(
+        body["wafer_guest_module"].as_str(),
+        Some(Template::WAFER_GUEST)
+    );
 
     let markdown = body["markdown"].as_str().expect("markdown");
     for needle in [

@@ -51,7 +51,12 @@ pub async fn verify(
     if token.len() > MAX_TOKEN_BYTES || token.chars().any(char::is_control) {
         return Err(VerifyError::InvalidToken);
     }
-    let secret = config::get_default(ctx, TURNSTILE_SECRET_KEY, "").await;
+    let secret = config::get_default(ctx, TURNSTILE_SECRET_KEY, "")
+        .await
+        .map_err(|e| {
+            tracing::warn!(error = %e, "turnstile secret read failed");
+            VerifyError::Unavailable
+        })?;
     if secret.trim().is_empty() {
         return Err(VerifyError::Unavailable);
     }

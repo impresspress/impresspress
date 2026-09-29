@@ -21,12 +21,14 @@ use std::collections::HashMap;
 
 use maud::{html, Markup, PreEscaped};
 use wafer_core::clients::config;
-use wafer_run::{context::Context, InputStream, OutputStream};
+use wafer_run::{context::Context, InputStream, Message, OutputStream, WaferError};
 pub use wafer_run::{ConfigVar, InputType};
 
 use crate::{
+    blocks::admin::logs::audit_log,
+    config_vars::is_truthy,
     http::{err_bad_request, err_internal, ok_json},
-    util::{is_sensitive_key, validate_url_value, MASKED_VALUE},
+    util::{is_sensitive_key, validate_declared_config_value, MASKED_VALUE},
 };
 
 /// One titled group of settings within a form (e.g. "Stripe", "OAuth Providers").
@@ -71,22 +73,40 @@ impl<'a> SettingsSection<'a> {
     }
 }
 
-/// Load the current value for every var in `sections` via the config client.
+/// The value each of `vars` currently reads as — stored, else the boot map,
+/// else the var's declared default — or `Err` when the `variables` table could
+/// not be read.
+///
+/// Through [`crate::blocks::config::get_many`], never `config::get_default`:
+/// that one answers an unreadable table from the boot map and then the
+/// default, and `submit_js` posts every field, so a form rendered from it and
+/// saved writes those over every stored value on the page.
+///
+/// `get_many` also refuses the whole batch when WRAP denies the caller ONE of
+/// the keys, so a page that renders a var its block may not read is an error
+/// page rather than a field showing the default: the page has no value to
+/// show and its Save would have written the default over the stored one.
+async fn current_values<'v>(
+    ctx: &dyn Context,
+    vars: impl IntoIterator<Item = &'v ConfigVar>,
+) -> Result<HashMap<String, String>, WaferError> {
+    let vars: Vec<&ConfigVar> = vars.into_iter().collect();
+    let keys: Vec<&str> = vars.iter().map(|var| var.key.as_str()).collect();
+    let mut values = crate::blocks::config::get_many(ctx, &keys).await?;
+    for var in vars {
+        values
+            .entry(var.key.clone())
+            .or_insert_with(|| var.default.clone());
+    }
+    Ok(values)
+}
+
+/// Load the current value for every var in `sections`.
 async fn load_values(
     ctx: &dyn Context,
     sections: &[SettingsSection<'_>],
-) -> HashMap<String, String> {
-    let mut values = HashMap::new();
-    for section in sections {
-        for var in section.vars {
-            // `entry`-guard so a key declared in two sections is only fetched once.
-            if !values.contains_key(&var.key) {
-                let value = config::get_default(ctx, &var.key, &var.default).await;
-                values.insert(var.key.clone(), value);
-            }
-        }
-    }
-    values
+) -> Result<HashMap<String, String>, WaferError> {
+    current_values(ctx, sections.iter().flat_map(|section| section.vars)).await
 }
 
 /// Render one field, deriving the widget from the var's [`InputType`].
@@ -102,8 +122,10 @@ fn render_field(var: &ConfigVar, value: &str) -> Markup {
     // source of truth shared with the admin Variables page
     // (`blocks::admin::ops::is_sensitive_key`, re-exported from
     // `crate::util`): sensitive when the var declares `InputType::Password`
-    // *or* its key follows the `_SECRET`/`_KEY` suffix convention, so a var
-    // left on the default `Text` widget by mistake still gets redacted.
+    // *or* the key rule says so — the `_SECRET`/`_KEY` suffix convention, or
+    // the same key declared `Password`/`auto_generate` anywhere in the build —
+    // so a var left on the default `Text` widget by mistake still gets
+    // redacted.
     // `has_value` is captured from the real value (presence only, never its
     // content) so the placeholder can still distinguish "configured" from
     // "not configured" without ever exposing the secret itself.
@@ -114,7 +136,7 @@ fn render_field(var: &ConfigVar, value: &str) -> Markup {
         InputType::Toggle => html! {
             div .form-group {
                 label .form-checkbox {
-                    input type="checkbox" name=(var.key) checked[value == "true"];
+                    input type="checkbox" name=(var.key) checked[is_truthy(value)];
                     (label)
                 }
                 @if !var.description.is_empty() {
@@ -123,14 +145,26 @@ fn render_field(var: &ConfigVar, value: &str) -> Markup {
             }
         },
         InputType::Password => {
+            // Built from `MASKED_VALUE` rather than spelled out, so the
+            // placeholder and the mask every read path emits cannot drift into
+            // two different strings. The admin Variables edit modal renders the
+            // same pair.
+            let placeholder = if has_value {
+                format!("{MASKED_VALUE} (set)")
+            } else {
+                "Not configured".to_string()
+            };
             html! {
                 div .form-group {
                     label .form-label for=(var.key) { (label) }
                     div .value-reveal-wrapper {
                         input .form-input #(var.key) name=(var.key) type="password" value=(value)
-                            placeholder=(if has_value { "******** (set)" } else { "Not configured" });
+                            placeholder=(placeholder);
                         button type="button" .btn .btn--ghost .btn--icon .btn-icon-right
-                            onclick={"var i=document.getElementById('" (var.key) "');if(i.type==='password'){i.type='text';this.title='Hide';this.setAttribute('aria-label','Hide value')}else{i.type='password';this.title='Reveal';this.setAttribute('aria-label','Reveal value')}"}
+                            data-action="reveal-toggle"
+                            data-reveal-target=(var.key)
+                            data-reveal-show="Reveal"
+                            data-reveal-hide="Hide"
                             title="Reveal"
                             aria-label="Reveal value"
                         { (super::icons::eye()) }
@@ -148,7 +182,7 @@ fn render_field(var: &ConfigVar, value: &str) -> Markup {
                     input .form-input #(var.key) name=(var.key) type="text" value=(value)
                         placeholder=(var.default);
                     input .color-swatch-input type="color" value=(value)
-                        onchange={"document.getElementById('" (var.key) "').value=this.value"};
+                        data-action="mirror-value" data-mirror-target=(var.key);
                 }
                 @if !var.description.is_empty() {
                     p .form-hint { (var.description) }
@@ -210,10 +244,21 @@ fn render_field(var: &ConfigVar, value: &str) -> Markup {
 /// form as a JSON object to `post_url` and shows a toast with the result.
 /// `post_url` is interpolated via `serde_json` so it can't break out of the
 /// JS string literal.
+///
+/// The form binds this by being `#settings-form`, not by an `onsubmit`
+/// attribute — see the delegated-action rule in `ui/assets/chrome.js`. The
+/// listener is on `document`, so a form that arrives in an htmx swap is bound
+/// too, which an attribute-free direct `addEventListener` here would miss.
 fn submit_js(post_url: &str) -> String {
     let url = serde_json::to_string(post_url).unwrap_or_else(|_| "\"\"".to_string());
     format!(
         r#"
+if (!window.__settingsFormInit) {{
+    window.__settingsFormInit = true;
+    document.addEventListener('submit', function (e) {{
+        if (e.target && e.target.id === 'settings-form') submitSettings(e);
+    }});
+}}
 function submitSettings(e) {{
     e.preventDefault();
     var form = document.getElementById('settings-form');
@@ -249,10 +294,16 @@ function submitSettings(e) {{
 /// shell used to be such a host; it's form-less now — `ui::templates::
 /// tabbed_page` — precisely so every tab can render a complete
 /// [`settings_form`] instead.)
-pub async fn render_sections(ctx: &dyn Context, sections: &[SettingsSection<'_>]) -> Markup {
-    let values = load_values(ctx, sections).await;
+///
+/// `Err` when the current values could not be read: the caller answers with
+/// an error page, never with fields filled from defaults.
+pub async fn render_sections(
+    ctx: &dyn Context,
+    sections: &[SettingsSection<'_>],
+) -> Result<Markup, WaferError> {
+    let values = load_values(ctx, sections).await?;
     let empty = String::new();
-    html! {
+    Ok(html! {
         @for (i, section) in sections.iter().enumerate() {
             @if section.collapsible {
                 details .card .mt-4 {
@@ -280,13 +331,17 @@ pub async fn render_sections(ctx: &dyn Context, sections: &[SettingsSection<'_>]
                 }
             }
         }
-    }
+    })
 }
 
 /// Render the full ConfigVar-driven settings form: a `#settings-form` posting
 /// JSON to `post_url`, with one titled section per [`SettingsSection`], a
 /// "Save Settings" button, and the shared submit snippet. Current values are
-/// loaded from the config client internally.
+/// loaded from the config block internally; `Err` when they could not be read,
+/// and the caller answers an error page instead of a form (see
+/// [`render_sections`]) — [`crate::blocks::crud::db_error_page`], which keeps
+/// a WRAP denial's 403 where [`crate::ui::server_error_response`] would make
+/// it a 500.
 ///
 /// `extra` is appended after the last section and before the submit button —
 /// used by blocks that want an extra panel inside the form (e.g. legalpages'
@@ -296,16 +351,16 @@ pub async fn settings_form(
     post_url: &str,
     sections: &[SettingsSection<'_>],
     extra: Markup,
-) -> Markup {
-    let fields = render_sections(ctx, sections).await;
-    html! {
-        form #settings-form onsubmit="return submitSettings(event)" {
+) -> Result<Markup, WaferError> {
+    let fields = render_sections(ctx, sections).await?;
+    Ok(html! {
+        form #settings-form {
             (fields)
             (extra)
             button .btn .btn--primary .mt-4 type="submit" { "Save settings" }
         }
         script { (PreEscaped(submit_js(post_url))) }
-    }
+    })
 }
 
 /// Generic settings save handler: parse the JSON body, and for every key in
@@ -314,30 +369,147 @@ pub async fn settings_form(
 /// declared). Parse failure returns a real `400` (htmx clients branch on the
 /// status, not a 200-with-`error`-key body — the residual finding folded in
 /// from S1-I).
+///
+/// Writes one `settings.update` audit row naming `block_label` and the keys
+/// this save actually wrote — the same trail
+/// `ops::update_variable` writes for the identical
+/// keys edited on the admin Variables page, so which page an operator used
+/// stops deciding whether the change is recorded. `msg` carries the admin id
+/// and remote address the row is attributed to.
 pub async fn save_settings(
     ctx: &dyn Context,
+    msg: &Message,
     input: InputStream,
     allowed: &[ConfigVar],
     block_label: &str,
 ) -> OutputStream {
-    let raw = input.collect_to_bytes().await;
+    let raw = match input.collect_to_bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => return OutputStream::error(e),
+    };
     let body: HashMap<String, String> = match serde_json::from_slice(&raw) {
         Ok(b) => b,
         Err(e) => return err_bad_request(&format!("Invalid request: {e}")),
     };
-    // Validate every URL-typed value up front so one bad URL can't leave a
-    // half-applied save. `is_url()` (InputType::Url) is the declared rule, and
-    // `validate_url_value` is the same SSRF check the admin variables page runs —
-    // shared so the two write surfaces can't accept divergent inputs.
+    // Validate every refusable value up front so one bad field can't leave a
+    // half-applied save. `util::validate_declared_config_value` is the rule the
+    // admin variables page and `config::set` run (SSRF for a URL, the declared
+    // value rules), with `is_url()` (InputType::Url) also selecting the SSRF
+    // check — shared so the write surfaces can't accept divergent inputs.
+    //
+    // The mask refusal belongs to the SAME pre-pass and for the same reason: a
+    // refusal raised from inside the write loop below goes out after
+    // `config::set` has already run for every var ahead of it in the allowlist,
+    // which is precisely the half-applied save this pass exists to prevent. The
+    // mask is not something this form can post — a sensitive field renders
+    // blank, and a placeholder is not submitted — so a client that sends one
+    // round-tripped a read, and storing it would replace the secret with eight
+    // asterisks. See `util::is_masked_submission`.
+    //
+    // Checked for EVERY allowlisted var, not only the ones this module can see
+    // are sensitive, and the asymmetry is the point. The writer
+    // (`blocks::config::ConfigWrite::write`) decides on the STORED row's flag;
+    // this module only has the declared `ConfigVar`, and the two diverge for a
+    // declared var that is neither `Password`, `auto_generate`, `_SECRET` nor
+    // `_KEY` but whose row an operator flagged sensitive — reachable from the
+    // Variables edit modal and from `handle_create`'s absent-means-sensitive
+    // default. It cannot close that gap by looking: WRAP denies four of
+    // `save_settings`' five callers (legalpages, auth_ui, userportal, products;
+    // `admin::pages::email` is the exception, since it runs as the admin block
+    // itself) the admin `variables` table, which is the whole reason
+    // `blocks::config` reads it through the raw `DatabaseService` — and a
+    // shared helper has to work for the four. So it refuses what it cannot RULE
+    // OUT, never a subset of the writer's refusals, which is the only shape
+    // that guarantees no write has started when a refusal goes out.
+    //
+    // What keeps that from taking the page down with it: the refusal is for a
+    // mask that would REPLACE a value, so a submission equal to what is already
+    // stored is not refused at all. That case is not exotic — `render_field`
+    // blanks only the fields it can see are sensitive, so a plain-declared row
+    // whose value happens to be the mask is rendered back into its input and
+    // posted by `submit_js` like any other, and refusing it 400'd the whole
+    // form on every save with no way out (blank is a real write for a plain
+    // field: it CLEARS). Such a row has four writers, not one — the JSON API,
+    // the admin Variables edit modal (`ops::update_variable` deliberately does
+    // not drop a typed mask), env seeding through `insert_if_absent`, and
+    // `dev::data_snapshot::import`.
+    //
+    // "Already stored" is read through `current_values`, which is the exact
+    // call `load_values` makes for `render_field` — so the question asked here
+    // is the one the browser's answer was formed from. Reading it from
+    // anywhere else would reintroduce the drift this guard exists to close. It
+    // costs a read only when a mask is actually submitted, and a read that
+    // fails refuses the save before any write, as the page itself would have
+    // refused to render.
+    //
+    // `ConfigWrite::write` asks it the same way, against a non-empty row else
+    // the boot map, and that is load-bearing rather than tidy: it compared
+    // against the row alone once, so for a key with no row (or an empty one)
+    // whose BOOT value is the mask, this pre-pass allowed and the writer
+    // refused — mid-loop, page half saved. See
+    // `a_boot_map_value_equal_to_the_mask_is_not_a_half_applied_save`. The two
+    // sides ask one question; neither is left inferring the other's answer.
+    let masked: Vec<&ConfigVar> = allowed
+        .iter()
+        .filter(|var| {
+            body.get(&var.key)
+                .is_some_and(|value| value == MASKED_VALUE)
+        })
+        .collect();
+    let current = if masked.is_empty() {
+        HashMap::new()
+    } else {
+        match current_values(ctx, masked).await {
+            Ok(current) => current,
+            Err(e) => return err_internal("Could not read the current settings", e),
+        }
+    };
     for var in allowed {
-        if var.is_url() {
-            if let Some(value) = body.get(&var.key) {
-                if let Err(e) = validate_url_value(value) {
-                    return err_bad_request(&format!("{}: {e}", var.key));
-                }
-            }
+        let Some(value) = body.get(&var.key) else {
+            continue;
+        };
+        // The declared type's URL rule, plus everything `config::set`'s
+        // writer runs — checked here so a refusal cannot land mid-loop after
+        // earlier fields have already been written.
+        if let Err(e) = validate_declared_config_value(var, value) {
+            return err_bad_request(&format!("{}: {e}", var.key));
+        }
+        if value == MASKED_VALUE && current.get(&var.key) != Some(value) {
+            // The remedy differs by field, so the message does too — the same
+            // sentence cannot be true of both. A sensitive field renders blank
+            // and `save_settings` reads blank as "unchanged"; a plain field
+            // renders its value and blank CLEARS it, so telling that operator
+            // to blank the field would be telling them to destroy it.
+            //
+            // The plain branch names no other surface to go and do it on. It is
+            // chosen from the DECLARED var, and the case that makes this guard
+            // necessary at all is the declared-plain row an operator flagged —
+            // for which the admin Variables page reads the ROW's flag and
+            // refuses with the opposite explanation. Sending an operator there
+            // would be sending them to a dead end.
+            let remedy = if is_sensitive_key(&var.key, var.is_sensitive() as i64) {
+                "Type the real value to change it, or leave the field blank to keep the \
+                 stored one."
+            } else {
+                "Type the value you want stored — this form cannot store that literal \
+                 string."
+            };
+            // No claim about what is stored now: this same refusal covers a key
+            // with nothing stored at all, where the write would be a create.
+            return err_bad_request(&format!(
+                "{}: {MASKED_VALUE} is what a masked value reads back as, not a value. \
+                 {remedy}",
+                var.key
+            ));
         }
     }
+    // Which keys this save actually wrote, in allowlist order. Collected
+    // rather than assumed from the body: a sensitive field submitted blank
+    // means "not touched" and is skipped below, and a write can fail
+    // mid-loop. The audit row names what happened, so a half-applied save is
+    // recorded as the keys that landed rather than not at all.
+    let mut written: Vec<&str> = Vec::new();
+    let mut write_failure = None;
     for var in allowed {
         let Some(value) = body.get(&var.key) else {
             continue;
@@ -345,22 +517,59 @@ pub async fn save_settings(
         // SEC-060: `render_field` never echoes a sensitive var's real value
         // back into the DOM (it renders empty + a placeholder instead), so
         // when the admin re-submits the form without retyping the secret the
-        // browser posts back either an empty string or — if some client
-        // literally round-trips the placeholder — the `MASKED_VALUE` mask
-        // itself. Neither is a real value; treat both as "leave the stored
-        // secret alone" instead of overwriting it with blank/mask bytes.
-        // Only a genuinely retyped value reaches `config::set`. Uses the
-        // same single-sourced `is_sensitive_key` rule as the render path so
-        // the two can't disagree on which fields this guard applies to.
+        // browser posts back an empty string. That is the widget saying "I did
+        // not touch this" — the only thing a blank masked field can mean — so
+        // the stored secret is left alone and only a genuinely retyped value
+        // reaches `config::set`. Uses the same single-sourced
+        // `is_sensitive_key` rule as the render path so the two can't disagree
+        // on which fields this applies to.
+        // The mask is a different case with a different answer, and it was
+        // already refused by the pre-pass above — only an empty field reaches
+        // here as "unchanged".
         let is_sensitive = is_sensitive_key(&var.key, var.is_sensitive() as i64);
-        if is_sensitive && (value.is_empty() || value == MASKED_VALUE) {
+        if is_sensitive && value.is_empty() {
             continue;
         }
         // Surface the first write failure instead of reporting a false
         // "saved" — htmx clients branch on the status, not a 200 body.
+        //
+        // A REFUSAL is forwarded with its own code and message rather than
+        // flattened into `err_internal`. `ConfigWrite::write` answers
+        // `InvalidArgument` for the guards it enforces — "Cannot set {key} to
+        // an empty value" is the one that still reaches here, since clearing a
+        // declared-plain field whose ROW an operator flagged is a thing the
+        // rendered form can produce and the pre-pass above cannot predict
+        // (it would have to refuse every clear to catch it, and clearing a
+        // plain field is legitimate). Reported as a 500 "Failed to save X
+        // settings", that told the operator the server broke and named nothing
+        // they could act on; forwarded, it is a 400 naming the key and the
+        // reason. The write it refuses has not happened, but writes ahead of it
+        // in the allowlist have — the residual half-applied save this module
+        // cannot close without the stored flag it is not allowed to read.
         if let Err(e) = config::set(ctx, &var.key, value).await {
-            return err_internal(&format!("Failed to save {block_label} settings"), e);
+            write_failure = Some(if e.code == wafer_run::ErrorCode::InvalidArgument {
+                OutputStream::error(e)
+            } else {
+                err_internal(&format!("Failed to save {block_label} settings"), e)
+            });
+            break;
         }
+        written.push(&var.key);
+    }
+    if !written.is_empty() {
+        // Keys only, never values: a settings page writes secrets, and the
+        // audit log is readable by every admin.
+        audit_log(
+            ctx,
+            msg.user_id(),
+            "settings.update",
+            &format!("settings/{block_label} ({})", written.join(", ")),
+            msg.remote_addr(),
+        )
+        .await;
+    }
+    if let Some(failure) = write_failure {
+        return failure;
     }
     ok_json(&serde_json::json!({"message": "Settings saved"}))
 }
@@ -368,6 +577,10 @@ pub async fn save_settings(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        blocks::email::MAILGUN_API_KEY,
+        config_vars::{APP_NAME_KEY, LOGO_URL_KEY},
+    };
 
     fn var(key: &str, name: &str, input_type: InputType) -> ConfigVar {
         ConfigVar::new(key, "desc text", "def")
@@ -377,13 +590,18 @@ mod tests {
 
     #[tokio::test]
     async fn section_description_renders_under_the_heading() {
-        let ctx = crate::test_support::TestContext::new().await;
+        let ctx = crate::test_support::TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         let vars = [var("X__A", "A", InputType::Text)];
         let sections = [
             SettingsSection::new("Checkout", super::super::icons::settings(), &vars)
                 .description("Defaults applied to new offers."),
         ];
-        let s = render_sections(&ctx, &sections).await.into_string();
+        let s = render_sections(&ctx, &sections)
+            .await
+            .expect("the current values are readable")
+            .into_string();
         assert!(s.contains("Defaults applied to new offers."), "{s}");
     }
 
@@ -421,9 +639,9 @@ mod tests {
 
     #[test]
     fn text_field_renders_text_input_with_label_and_help() {
-        let v = var("WAFER_RUN_SHARED__APP_NAME", "App Name", InputType::Text);
+        let v = var(APP_NAME_KEY, "App Name", InputType::Text);
         let s = render_field(&v, "MyApp").into_string();
-        assert!(s.contains(r#"name="WAFER_RUN_SHARED__APP_NAME""#));
+        assert!(s.contains(&format!(r#"name="{APP_NAME_KEY}""#)));
         assert!(s.contains(r#"type="text""#));
         assert!(s.contains(r#"value="MyApp""#));
         assert!(s.contains(">App Name<"));
@@ -451,12 +669,13 @@ mod tests {
         // Eye toggle present, with an accessible name that the handler keeps
         // in sync with the shown/hidden state (2026-07-11 a11y review).
         assert!(set.contains(r#"aria-label="Reveal value""#));
-        assert!(set.contains(
-            "i.type='text';this.title='Hide';this.setAttribute('aria-label','Hide value')"
-        ));
-        assert!(set.contains(
-            "i.type='password';this.title='Reveal';this.setAttribute('aria-label','Reveal value')"
-        ));
+        // The two labels are operands now, not a hand-written `onclick`
+        // string: `reveal-toggle` in the modal section of
+        // `ui/assets/chrome.js` swaps `title` and `aria-label` from them.
+        assert!(set.contains(r#"data-action="reveal-toggle""#));
+        assert!(set.contains(r#"data-reveal-target="X__PW""#));
+        assert!(set.contains(r#"data-reveal-show="Reveal""#));
+        assert!(set.contains(r#"data-reveal-hide="Hide""#));
 
         let empty = render_field(&v, "").into_string();
         assert!(empty.contains("Not configured"));
@@ -487,7 +706,7 @@ mod tests {
         let s = render_field(&v, "#abcdef").into_string();
         assert!(s.contains(r#"type="color""#));
         assert!(s.contains("value=\"#abcdef\""));
-        assert!(s.contains("onchange="));
+        assert!(s.contains(r#"data-action="mirror-value" data-mirror-target="X__COLOR""#));
     }
 
     #[test]
@@ -542,21 +761,26 @@ mod tests {
         body: serde_json::Value,
     ) -> OutputStream {
         let input = InputStream::from_bytes(serde_json::to_vec(&body).unwrap());
-        save_settings(ctx, input, allowed, "test").await
+        save_settings(
+            ctx,
+            &crate::test_support::admin_msg("create", "/b/admin/settings"),
+            input,
+            allowed,
+            "test",
+        )
+        .await
     }
 
     #[tokio::test]
     async fn save_settings_rejects_ssrf_url_for_url_typed_var() {
-        let ctx = TestContext::new().await;
-        let allowed = [var(
-            "WAFER_RUN_SHARED__BRANDING__LOGO_URL",
-            "Logo",
-            InputType::Url,
-        )];
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        let allowed = [var(LOGO_URL_KEY, "Logo", InputType::Url)];
         let out = run_save(
             &ctx,
             &allowed,
-            serde_json::json!({"WAFER_RUN_SHARED__BRANDING__LOGO_URL": "https://10.0.0.1/logo.png"}),
+            serde_json::json!({LOGO_URL_KEY: "https://10.0.0.1/logo.png"}),
         )
         .await;
         assert!(
@@ -570,16 +794,14 @@ mod tests {
 
     #[tokio::test]
     async fn save_settings_surfaces_config_set_failure() {
-        // No `wafer-run/config` block registered → config::set fails. Before the
-        // fix the loop swallowed the error and reported success anyway.
-        let ctx = TestContext::new().await;
-        let allowed = [var("WAFER_RUN_SHARED__APP_NAME", "App", InputType::Text)];
-        let out = run_save(
-            &ctx,
-            &allowed,
-            serde_json::json!({"WAFER_RUN_SHARED__APP_NAME": "MyApp"}),
-        )
-        .await;
+        // Every config::set fails; a loop that swallowed the error would
+        // report success anyway.
+        let mut ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        ctx.refuse_config_writes();
+        let allowed = [var(APP_NAME_KEY, "App", InputType::Text)];
+        let out = run_save(&ctx, &allowed, serde_json::json!({APP_NAME_KEY: "MyApp"})).await;
         assert!(
             matches!(
                 out.collect_buffered().await,
@@ -593,22 +815,20 @@ mod tests {
 
     #[tokio::test]
     async fn render_sections_never_leaks_a_stored_secret_into_the_html() {
-        let mut ctx = TestContext::new().await;
-        ctx.set_config(
-            "IMPRESSPRESS__EMAIL__MAILGUN_API_KEY",
-            "key-abcdef0123456789",
-        );
-        let v = var(
-            "IMPRESSPRESS__EMAIL__MAILGUN_API_KEY",
-            "Mailgun API Key",
-            InputType::Password,
-        );
+        let mut ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        ctx.set_config(MAILGUN_API_KEY, "key-abcdef0123456789");
+        let v = var(MAILGUN_API_KEY, "Mailgun API Key", InputType::Password);
         let sections = [SettingsSection::new(
             "Email",
             html! {},
             std::slice::from_ref(&v),
         )];
-        let out = render_sections(&ctx, &sections).await.into_string();
+        let out = render_sections(&ctx, &sections)
+            .await
+            .expect("the current values are readable")
+            .into_string();
 
         assert!(
             !out.contains("key-abcdef0123456789"),
@@ -621,8 +841,10 @@ mod tests {
     // --- SEC-060: save_settings' unchanged-secret guard ---
 
     #[tokio::test]
-    async fn save_settings_leaves_a_sensitive_field_unchanged_on_empty_or_masked_submit() {
-        let mut ctx = TestContext::new().await;
+    async fn save_settings_leaves_a_sensitive_field_unchanged_on_empty_submit() {
+        let mut ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         // Registers a real `wafer-run/config` service block (TestContext::set_config)
         // and seeds the current stored secret.
         ctx.set_config("X__API_SECRET", "original-secret");
@@ -634,25 +856,11 @@ mod tests {
         let body = output_json(out).await;
         assert_eq!(body["message"], "Settings saved");
         assert_eq!(
-            config::get_default(&ctx, "X__API_SECRET", "").await,
+            config::get_default(&ctx, "X__API_SECRET", "")
+                .await
+                .expect("config read"),
             "original-secret",
             "an empty submit for a sensitive field must not clear/overwrite the stored secret"
-        );
-
-        // A literal round-trip of the mask placeholder must also be treated
-        // as "unchanged", not stored as the literal mask string.
-        let out = run_save(
-            &ctx,
-            &allowed,
-            serde_json::json!({"X__API_SECRET": MASKED_VALUE}),
-        )
-        .await;
-        let body = output_json(out).await;
-        assert_eq!(body["message"], "Settings saved");
-        assert_eq!(
-            config::get_default(&ctx, "X__API_SECRET", "").await,
-            "original-secret",
-            "submitting the mask placeholder must not overwrite the stored secret with it"
         );
 
         // A genuinely new value must still be written.
@@ -665,9 +873,565 @@ mod tests {
         let body = output_json(out).await;
         assert_eq!(body["message"], "Settings saved");
         assert_eq!(
-            config::get_default(&ctx, "X__API_SECRET", "").await,
+            config::get_default(&ctx, "X__API_SECRET", "")
+                .await
+                .expect("config read"),
             "brand-new-secret",
             "a genuinely retyped secret must be saved"
+        );
+    }
+
+    /// A literal round-trip of the mask is REFUSED, not silently dropped.
+    ///
+    /// It used to be folded in with the empty submit as "unchanged", which kept
+    /// the secret safe but answered `200 {"message": "Settings saved"}` to a
+    /// client whose write was discarded — and since the next read hands that
+    /// client the same mask back, nothing it could do would reveal the write
+    /// never happened. The two are different things and get different answers:
+    /// a blank field is the widget's only way to say "I did not touch this",
+    /// while the mask can only have come from a client round-tripping a read.
+    /// Same answer as the admin variable surfaces, whose
+    /// `ops::update_variable` refuses it identically — see
+    /// `util::is_masked_submission`.
+    #[tokio::test]
+    async fn save_settings_refuses_the_mask_rather_than_storing_or_dropping_it() {
+        let mut ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        ctx.set_config("X__API_SECRET", "original-secret");
+        let allowed = [var("X__API_SECRET", "API Secret", InputType::Password)];
+
+        let out = run_save(
+            &ctx,
+            &allowed,
+            serde_json::json!({"X__API_SECRET": MASKED_VALUE}),
+        )
+        .await;
+        assert_eq!(
+            crate::test_support::output_http_status(out).await,
+            400,
+            "a client that posts the mask must be told, not thanked"
+        );
+        assert_eq!(
+            config::get_default(&ctx, "X__API_SECRET", "")
+                .await
+                .expect("config read"),
+            "original-secret",
+            "and the stored secret must survive the refusal"
+        );
+    }
+
+    /// The refusal must not leave a half-applied save.
+    ///
+    /// URL validation is deliberately a PRE-PASS for exactly this reason —
+    /// "one bad URL can't leave a half-applied save" — and a mask refusal
+    /// raised from inside the write loop had the same defect it was hoisted to
+    /// avoid: the vars before it in the allowlist were already written when the
+    /// 400 went out, so the admin got an error for a form that had partly
+    /// saved.
+    #[tokio::test]
+    async fn a_refused_mask_writes_nothing_at_all() {
+        let mut ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        ctx.set_config(APP_NAME_KEY, "MyApp");
+        ctx.set_config("X__API_SECRET", "original-secret");
+        // App name first, so it would already be written by the time the mask
+        // is reached if the check lived in the write loop.
+        let allowed = [
+            var(APP_NAME_KEY, "App Name", InputType::Text),
+            var("X__API_SECRET", "API Secret", InputType::Password),
+        ];
+
+        let out = run_save(
+            &ctx,
+            &allowed,
+            serde_json::json!({
+                APP_NAME_KEY: "Renamed",
+                "X__API_SECRET": MASKED_VALUE,
+            }),
+        )
+        .await;
+        assert_eq!(crate::test_support::output_http_status(out).await, 400);
+        assert_eq!(
+            config::get_default(&ctx, APP_NAME_KEY, "")
+                .await
+                .expect("config read"),
+            "MyApp",
+            "a refused save must not have written the fields before the refusal"
+        );
+    }
+
+    /// A var the OPERATOR flagged must not half-apply the save either.
+    ///
+    /// The pre-pass reads sensitivity from the DECLARED `ConfigVar`; the writer
+    /// (`blocks::config::ConfigWrite::write`) reads it from the stored row. The
+    /// two diverge for a declared var that is neither `Password`,
+    /// `auto_generate`, `_SECRET` nor `_KEY` but whose row an operator flagged
+    /// `sensitive = 1` — reachable from the Variables edit modal, and from
+    /// `handle_create`'s absent-means-sensitive default. The pre-pass saw no
+    /// mask, the writer did, and the refusal landed mid-loop with every var
+    /// ahead of it already written: the half-applied save the pre-pass exists
+    /// to prevent, reported as a 500.
+    ///
+    /// This surface cannot ask the writer's question — WRAP denies
+    /// `ui::settings_form`'s callers the admin `variables` table, which is the
+    /// whole reason `blocks::config` reads it through the raw `DatabaseService`
+    /// — so the pre-pass refuses a mask it cannot RULE OUT instead. It is
+    /// strictly more cautious than the writer, never less.
+    #[tokio::test]
+    async fn an_operator_flagged_var_is_refused_before_anything_is_written() {
+        use crate::platform_state::variables::{self, NewVariable};
+
+        let mut ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        crate::blocks::admin::migrations::apply(&ctx.fixture())
+            .await
+            .expect("apply admin migrations");
+        ctx.boot_config_service().await;
+
+        variables::insert(
+            &ctx,
+            NewVariable {
+                key: APP_NAME_KEY.to_string(),
+                value: "MyApp".to_string(),
+                name: String::new(),
+                description: String::new(),
+                warning: String::new(),
+                sensitive: false,
+                updated_by: String::new(),
+                block: None,
+            },
+        )
+        .await
+        .expect("seed the app name");
+        // Declared plain, flagged by the operator. Neither suffix, no
+        // `Password` declaration — only the row says it is sensitive.
+        variables::insert(
+            &ctx,
+            NewVariable {
+                key: "X__PLAIN_NOTE".to_string(),
+                value: "operator-flagged-value".to_string(),
+                name: String::new(),
+                description: String::new(),
+                warning: String::new(),
+                sensitive: true,
+                updated_by: String::new(),
+                block: None,
+            },
+        )
+        .await
+        .expect("seed the flagged note");
+
+        let allowed = [
+            var(APP_NAME_KEY, "App Name", InputType::Text),
+            var("X__PLAIN_NOTE", "Note", InputType::Text),
+        ];
+        let out = run_save(
+            &ctx,
+            &allowed,
+            serde_json::json!({
+                APP_NAME_KEY: "Renamed",
+                "X__PLAIN_NOTE": MASKED_VALUE,
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            crate::test_support::output_http_status(out).await,
+            400,
+            "the refusal is a bad request that names the remedy, not a 500"
+        );
+        assert_eq!(
+            config::get_default(&ctx, APP_NAME_KEY, "")
+                .await
+                .expect("config read"),
+            "MyApp",
+            "and nothing ahead of it in the allowlist may have been written"
+        );
+        assert_eq!(
+            config::get_default(&ctx, "X__PLAIN_NOTE", "")
+                .await
+                .expect("config read"),
+            "operator-flagged-value",
+        );
+    }
+
+    // --- the save's audit row ---
+
+    /// A save that wrote nothing must not claim in the trail that it did.
+    /// A sensitive field submitted blank means "I did not touch this", so a
+    /// form of one such field is a no-op, not a `settings.update`.
+    #[tokio::test]
+    async fn a_save_that_wrote_nothing_writes_no_audit_row() {
+        let mut ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        ctx.set_config("X__API_SECRET", "original-secret");
+        let allowed = [var("X__API_SECRET", "API Secret", InputType::Password)];
+
+        let out = run_save(&ctx, &allowed, serde_json::json!({"X__API_SECRET": ""})).await;
+        assert_eq!(output_json(out).await["message"], "Settings saved");
+        assert_eq!(
+            crate::test_support::audit_count(&ctx, "settings.update").await,
+            0,
+        );
+    }
+
+    /// The residual half-applied save this module cannot close still has to
+    /// be readable afterwards: the writer refuses a var mid-loop, everything
+    /// ahead of it in the allowlist is already written, and the audit row
+    /// names exactly those keys rather than being skipped along with the
+    /// failure.
+    ///
+    /// Same fixture as `an_operator_flagged_var_is_refused_before_anything_
+    /// is_written`, submitting an EMPTY value instead of the mask: the
+    /// pre-pass only looks for the mask, so this one reaches the writer,
+    /// which refuses an empty value for a row the operator flagged.
+    #[tokio::test]
+    async fn a_half_applied_save_audits_the_keys_that_landed() {
+        use crate::platform_state::variables::{self, NewVariable};
+
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        variables::insert(
+            &ctx.fixture(),
+            NewVariable {
+                key: "X__PLAIN_NOTE".to_string(),
+                value: "operator-flagged-value".to_string(),
+                name: String::new(),
+                description: String::new(),
+                warning: String::new(),
+                sensitive: true,
+                updated_by: String::new(),
+                block: None,
+            },
+        )
+        .await
+        .expect("seed the flagged note");
+
+        let allowed = [
+            var(APP_NAME_KEY, "App Name", InputType::Text),
+            var("X__PLAIN_NOTE", "Note", InputType::Text),
+        ];
+        let out = run_save(
+            &ctx,
+            &allowed,
+            serde_json::json!({
+                APP_NAME_KEY: "Renamed",
+                "X__PLAIN_NOTE": "",
+            }),
+        )
+        .await;
+        assert_eq!(
+            crate::test_support::output_http_status(out).await,
+            400,
+            "precondition: the writer refuses the second var mid-loop"
+        );
+        assert_eq!(
+            config::get_default(&ctx, APP_NAME_KEY, "")
+                .await
+                .expect("config read"),
+            "Renamed",
+            "precondition: the first var was written before the refusal"
+        );
+
+        let rows = crate::test_support::audit_rows(&ctx, "settings.update").await;
+        assert_eq!(rows.len(), 1, "the writes that landed are recorded");
+        assert_eq!(
+            crate::util::RecordExt::str_field(&rows[0], "resource"),
+            "settings/test (WAFER_RUN_SHARED__APP_NAME)",
+            "and only the keys that landed are named"
+        );
+    }
+
+    /// The two surfaces must agree when the BOOT MAP is what answers the read.
+    ///
+    /// `config::get_default` prefers a non-empty row and falls back to the boot
+    /// map, so when the row is absent or empty the boot map is the value the
+    /// form rendered and the pre-pass compares against. The writer compared
+    /// against the row alone, which is `""` — so for a key whose boot value is
+    /// the mask the pre-pass ALLOWED and the writer REFUSED, mid-loop, with
+    /// everything ahead of it in the allowlist already written. The pre-pass
+    /// being the stricter of the two was the claim; the fallback runs the other
+    /// way.
+    ///
+    /// Reachable without a doctored fixture: an env-seeded
+    /// `BOOTSTRAP_ADMIN_PASSWORD` of eight asterisks, cleared on the Variables
+    /// page (the provisioning exemption permits it, leaving an empty row), then
+    /// typed again on the auth settings form — a form with five vars ahead of
+    /// it.
+    #[tokio::test]
+    async fn a_boot_map_value_equal_to_the_mask_is_not_a_half_applied_save() {
+        use crate::platform_state::variables::{self, NewVariable};
+
+        const BOOT_ONLY: &str = "X__THING_SECRET";
+
+        let mut ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        crate::blocks::admin::migrations::apply(&ctx.fixture())
+            .await
+            .expect("apply admin migrations");
+        // No row for `BOOT_ONLY`; the boot map answers it, and with the mask.
+        ctx.boot_config_service_with(&[(BOOT_ONLY, MASKED_VALUE)])
+            .await;
+        variables::insert(
+            &ctx,
+            NewVariable {
+                key: APP_NAME_KEY.to_string(),
+                value: "MyApp".to_string(),
+                name: String::new(),
+                description: String::new(),
+                warning: String::new(),
+                sensitive: false,
+                updated_by: String::new(),
+                block: None,
+            },
+        )
+        .await
+        .expect("seed the app name");
+
+        assert_eq!(
+            config::get_default(&ctx, BOOT_ONLY, "")
+                .await
+                .expect("config read"),
+            MASKED_VALUE,
+            "the fixture only means something if the boot map is what the form read"
+        );
+        assert!(
+            variables::get_by_key(&ctx, BOOT_ONLY)
+                .await
+                .expect("read back")
+                .is_none(),
+            "...and if no row is what the writer would have compared against"
+        );
+
+        let allowed = [
+            var(APP_NAME_KEY, "App Name", InputType::Text),
+            var(BOOT_ONLY, "Thing Secret", InputType::Password),
+        ];
+        let out = run_save(
+            &ctx,
+            &allowed,
+            serde_json::json!({
+                APP_NAME_KEY: "Renamed",
+                BOOT_ONLY: MASKED_VALUE,
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            crate::test_support::output_http_status(out).await,
+            200,
+            "submitting the value the form was shown must not be refused by the writer \
+             after the pre-pass allowed it"
+        );
+        assert_eq!(
+            config::get_default(&ctx, APP_NAME_KEY, "")
+                .await
+                .expect("config read"),
+            "Renamed",
+        );
+        assert_eq!(
+            config::get_default(&ctx, BOOT_ONLY, "")
+                .await
+                .expect("config read"),
+            MASKED_VALUE
+        );
+    }
+
+    /// A refusal raised by the WRITER is reported as the refusal it is.
+    ///
+    /// The empty-value case is the one that still reaches `config::set` — a
+    /// declared-plain field whose row an operator flagged, cleared on the form,
+    /// which the pre-pass cannot predict (it would have to refuse every clear,
+    /// and clearing a plain field is legitimate). `ConfigWrite::write` answers
+    /// `InvalidArgument`; `save_settings` flattened every failure into
+    /// `err_internal`, so the operator got a 500 that named nothing they could
+    /// act on for a request the server had understood perfectly.
+    ///
+    /// Nothing else covers this: the pre-pass tests never reach `config::set`,
+    /// and `save_settings_surfaces_config_set_failure` asserts only that SOME
+    /// error terminal comes back.
+    #[tokio::test]
+    async fn a_writer_refusal_is_forwarded_as_a_bad_request() {
+        use crate::platform_state::variables::{self, NewVariable};
+
+        let mut ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        crate::blocks::admin::migrations::apply(&ctx.fixture())
+            .await
+            .expect("apply admin migrations");
+        ctx.boot_config_service().await;
+
+        // Declared plain, flagged by the operator: only the row says it is
+        // sensitive, so the pre-pass lets the empty value through and the
+        // writer refuses it.
+        variables::insert(
+            &ctx,
+            NewVariable {
+                key: "X__PLAIN_NOTE".to_string(),
+                value: "operator-flagged-value".to_string(),
+                name: String::new(),
+                description: String::new(),
+                warning: String::new(),
+                sensitive: true,
+                updated_by: String::new(),
+                block: None,
+            },
+        )
+        .await
+        .expect("seed the flagged note");
+
+        let allowed = [var("X__PLAIN_NOTE", "Note", InputType::Text)];
+        let out = run_save(&ctx, &allowed, serde_json::json!({"X__PLAIN_NOTE": ""})).await;
+
+        let status = crate::test_support::output_http_status(out).await;
+        assert_eq!(
+            status, 400,
+            "a guard the writer enforces is a bad request, not a server fault"
+        );
+        assert_eq!(
+            config::get_default(&ctx, "X__PLAIN_NOTE", "")
+                .await
+                .expect("config read"),
+            "operator-flagged-value",
+        );
+    }
+
+    /// A plain field whose stored value ALREADY is the mask must not take the
+    /// whole page down with it.
+    ///
+    /// `render_field` blanks only the fields it can see are sensitive, so such
+    /// a row is rendered straight back into its input, and `submit_js` posts
+    /// every named field. A pre-pass that refused the mask outright therefore
+    /// 400'd the entire form on every save — every other setting on the page
+    /// with it — without the operator having typed anything, and with no way
+    /// out: the field cannot be left blank either, because for a plain field
+    /// blank is a real write that CLEARS it.
+    ///
+    /// The refusal exists to stop a mask REPLACING a value. A submission equal
+    /// to what is already stored replaces nothing, so there is nothing to
+    /// refuse.
+    #[tokio::test]
+    async fn a_plain_field_already_holding_the_mask_does_not_break_the_page() {
+        use crate::platform_state::variables::{self, NewVariable};
+
+        let mut ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        crate::blocks::admin::migrations::apply(&ctx.fixture())
+            .await
+            .expect("apply admin migrations");
+        ctx.boot_config_service().await;
+
+        for (key, value) in [(APP_NAME_KEY, "MyApp"), ("X__NOTE", MASKED_VALUE)] {
+            variables::insert(
+                &ctx,
+                NewVariable {
+                    key: key.to_string(),
+                    value: value.to_string(),
+                    name: String::new(),
+                    description: String::new(),
+                    warning: String::new(),
+                    sensitive: false,
+                    updated_by: String::new(),
+                    block: None,
+                },
+            )
+            .await
+            .expect("seed the row");
+        }
+
+        let allowed = [
+            var(APP_NAME_KEY, "App Name", InputType::Text),
+            var("X__NOTE", "Note", InputType::Text),
+        ];
+        // The page really does hand the mask back to the browser: this is what
+        // makes the save below the form's own unedited submission, not a
+        // hand-built request.
+        let sections = [SettingsSection::new("Settings", html! {}, &allowed)];
+        let rendered = render_sections(&ctx, &sections)
+            .await
+            .expect("the current values are readable")
+            .into_string();
+        assert!(
+            rendered.contains(MASKED_VALUE),
+            "a plain field's stored value is rendered into its input, mask or not: {rendered}"
+        );
+
+        let out = run_save(
+            &ctx,
+            &allowed,
+            serde_json::json!({
+                APP_NAME_KEY: "Renamed",
+                "X__NOTE": MASKED_VALUE,
+            }),
+        )
+        .await;
+
+        assert_eq!(
+            crate::test_support::output_http_status(out).await,
+            200,
+            "saving the page unedited must not be refused"
+        );
+        assert_eq!(
+            config::get_default(&ctx, APP_NAME_KEY, "")
+                .await
+                .expect("config read"),
+            "Renamed",
+            "and the edit the operator actually made must land"
+        );
+        assert_eq!(
+            config::get_default(&ctx, "X__NOTE", "")
+                .await
+                .expect("config read"),
+            MASKED_VALUE,
+            "the untouched row is unchanged",
+        );
+    }
+
+    /// THIS surface refuses a mask the operator INTRODUCES, even for a plain
+    /// field, and that is a deliberate difference from the JSON API.
+    ///
+    /// `blocks::admin::settings` judges the mask exactly — `"********"` is an
+    /// ordinary value for a row nothing masks, and it can see the row's flag to
+    /// tell. This module cannot: WRAP denies four of its five callers the admin
+    /// `variables` table, and a shared helper has to work for the four. A
+    /// pre-pass that guessed would miss an operator-flagged row and half-apply
+    /// the save (`an_operator_flagged_var_is_refused_before_anything_is_written`),
+    /// so it covers more than the writer does instead — only that can promise
+    /// no write has started.
+    ///
+    /// What it gives up is CHANGING a plain setting to eight asterisks through
+    /// a block settings form. Not saving a page that already holds them: a
+    /// submission equal to the stored value replaces nothing and is allowed —
+    /// see `a_plain_field_already_holding_the_mask_does_not_break_the_page`,
+    /// which is the whole page this would otherwise have made unsavable.
+    #[tokio::test]
+    async fn save_settings_refuses_the_mask_even_for_a_plain_field() {
+        let mut ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        ctx.set_config(APP_NAME_KEY, "MyApp");
+        let allowed = [var(APP_NAME_KEY, "App Name", InputType::Text)];
+
+        let out = run_save(
+            &ctx,
+            &allowed,
+            serde_json::json!({APP_NAME_KEY: MASKED_VALUE}),
+        )
+        .await;
+        assert_eq!(crate::test_support::output_http_status(out).await, 400);
+        assert_eq!(
+            config::get_default(&ctx, APP_NAME_KEY, "")
+                .await
+                .expect("config read"),
+            "MyApp",
         );
     }
 
@@ -675,26 +1439,91 @@ mod tests {
     async fn save_settings_still_clears_a_non_sensitive_field_on_empty_submit() {
         // Non-sensitive fields keep the pre-existing behavior: an empty
         // submit is a real write (clears the stored value), not "unchanged".
-        let mut ctx = TestContext::new().await;
-        ctx.set_config("WAFER_RUN_SHARED__APP_NAME", "MyApp");
-        let allowed = [var(
-            "WAFER_RUN_SHARED__APP_NAME",
-            "App Name",
-            InputType::Text,
-        )];
+        let mut ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        ctx.set_config(APP_NAME_KEY, "MyApp");
+        let allowed = [var(APP_NAME_KEY, "App Name", InputType::Text)];
 
-        let out = run_save(
-            &ctx,
-            &allowed,
-            serde_json::json!({"WAFER_RUN_SHARED__APP_NAME": ""}),
-        )
-        .await;
+        let out = run_save(&ctx, &allowed, serde_json::json!({APP_NAME_KEY: ""})).await;
         let body = output_json(out).await;
         assert_eq!(body["message"], "Settings saved");
         assert_eq!(
-            config::get_default(&ctx, "WAFER_RUN_SHARED__APP_NAME", "").await,
+            config::get_default(&ctx, APP_NAME_KEY, "")
+                .await
+                .expect("config read"),
             "",
             "a non-sensitive field's empty submit is a real write, unlike a sensitive field's"
+        );
+    }
+}
+
+/// CFG-01 reproduction for the second write surface. Separate module so the
+/// boot-seeded config fixture stays out of the tests above.
+#[cfg(test)]
+mod config_store_reproduction {
+    use super::*;
+    use crate::test_support::TestContext;
+
+    /// A setting saved through an admin settings form must survive a restart.
+    ///
+    /// `save_settings` is the write path behind five admin forms (products,
+    /// legalpages, userportal, email, auth-ui). It calls `config::set`, which
+    /// on native writes the `EnvConfigService`'s in-memory override map and
+    /// nothing else — the `variables` table, the only durable store, never
+    /// sees the value. The save therefore takes effect immediately and is
+    /// gone on the next boot, the exact mirror of the `update_variable`
+    /// defect: two write paths, neither syncing to the other.
+    ///
+    /// The restart is modelled by seeding a second config service from the
+    /// same database through the production loader, which is all a fresh
+    /// process does.
+    #[tokio::test]
+    async fn settings_form_save_survives_a_restart() {
+        const KEY: &str = crate::config_vars::PRIMARY_COLOR_KEY;
+
+        let mut ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        crate::blocks::admin::migrations::apply(&ctx.fixture())
+            .await
+            .expect("apply admin migrations");
+        ctx.boot_config_service().await;
+
+        let saved = crate::test_support::unique_config_value();
+        let allowed = [crate::config_vars::shared_var(KEY)];
+        let body =
+            serde_json::to_vec(&serde_json::json!({ KEY: saved })).expect("serialize request body");
+        let status = crate::test_support::output_status(
+            save_settings(
+                &ctx,
+                &crate::test_support::admin_msg("create", "/b/admin/settings"),
+                InputStream::from_bytes(body),
+                &allowed,
+                "branding",
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(status, 200, "the settings form reported the save succeeded");
+
+        // Live reads see it, which is why this looks like it works.
+        assert_eq!(
+            wafer_core::clients::config::get_default(&ctx, KEY, "unset")
+                .await
+                .expect("config read"),
+            saved
+        );
+
+        // Restart: a fresh process seeds its config service from the table.
+        ctx.boot_config_service().await;
+
+        assert_eq!(
+            wafer_core::clients::config::get_default(&ctx, KEY, "unset")
+                .await
+                .expect("config read"),
+            saved,
+            "a setting saved through an admin form must outlive the process that saved it"
         );
     }
 }

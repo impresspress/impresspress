@@ -47,9 +47,9 @@
 /* Profile Menu */
 .profile-menu {
 	/* Closed by default via the boolean `hidden` attribute (base.css:
-	   `[hidden] { display: none !important; }`) -- sidebar.rs's
-	   toggleProfileMenu()/outside-click handler flip `m.hidden` instead of
-	   writing an inline style. */
+	   `[hidden] { display: none !important; }`) -- sidebar.rs's delegated
+	   `profile-menu-toggle`/outside-click listener flips `m.hidden` instead
+	   of writing an inline style. */
 	position: absolute; bottom: 100%; left: 0.5rem; right: 0.5rem;
 	margin-bottom: var(--space-2); background: white;
 	border: 1px solid var(--border-color); border-radius: 0.75rem;
@@ -306,7 +306,12 @@
    padded/gapped treatment, on .shell__main below. */
 .shell { display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); height: 100vh; background: var(--surface-2); }
 @media (max-width: 720px) {
-	.shell { grid-template-columns: 1fr; }
+	/* One column, two rows: the mobile header, then the main column taking
+	   the rest of the viewport. Left to implicit `auto` rows, the grid split
+	   its spare height evenly between them whenever the page was shorter than
+	   the screen, so a short page (the one-bucket file list) opened with a
+	   ~225px blank band under the header. */
+	.shell { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
 }
 .shell__main { display: flex; flex-direction: column; min-height: 0; gap: var(--space-4); padding: var(--space-4); }
 .shell__body { flex: 1; background: var(--surface-1); border: 1px solid var(--border-color); border-radius: var(--radius-lg); overflow-y: auto; }
@@ -346,7 +351,7 @@ body:has(.products-tabs) .shell__body { padding: var(--space-4) var(--space-6); 
 	display: inline-flex; align-items: center; gap: var(--space-2);
 	background: var(--surface-3); border: 1px solid var(--border-color);
 	border-radius: var(--radius-md); padding: var(--space-1) var(--space-2); font-size: var(--text-xs);
-	color: var(--text-secondary); cursor: pointer; font-family: inherit;
+	color: var(--text-secondary); cursor: pointer;
 }
 .topbar__palette:hover { background: var(--bg-hover); }
 .topbar__palette kbd { background: var(--bg-secondary); padding: 1px var(--space-1); border-radius: 4px; font-size: 0.7rem; font-family: ui-monospace, Menlo, monospace; display: inline-flex; align-items: center; gap: var(--space-1); }
@@ -386,7 +391,6 @@ body:has(.products-tabs) .shell__body { padding: var(--space-4) var(--space-6); 
 		align-items: center;
 		justify-content: center;
 		color: var(--text-primary);
-		font-family: inherit;
 	}
 	.shell__mobile-title {
 		flex: 1;

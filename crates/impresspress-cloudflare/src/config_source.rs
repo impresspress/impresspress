@@ -1,21 +1,36 @@
 //! D1ConfigSource — Cloudflare target's [`ConfigSource`] impl.
 //!
 //! Reads block-declared env-var config keys from the admin block's
-//! `impresspress__admin__variables` D1 table. Filters by the new `block`
-//! column (added by migration 002) for an indexed per-block lookup — no
-//! full-table scan, no `LIKE prefix%` scan.
+//! `impresspress__admin__variables` D1 table.
+//!
+//! ONE unfiltered read of the whole table serves every block. The `snapshot`
+//! method lists the table with no filter, groups the rows by the `block`
+//! column IN MEMORY, and memoizes that grouping against the config-write
+//! generation it was read at; `fetch_block_variables` is then a map lookup,
+//! not a query. One grouping is deliberately NOT memoized — rows read but
+//! every one of them dropped, the pre-migration-002 shape — for the reason
+//! the `snapshot` method records.
+//!
+//! The `block` column (added by migration 002, which also indexed it) is NOT
+//! obsolete — it is still exactly what the grouping keys on, and a row
+//! without it belongs to no block's config. Only the QUERY STRATEGY changed:
+//! this source used to issue one filtered `WHERE block = ?` lookup per
+//! registered block (the column existed so that lookup could be an indexed
+//! equality rather than a `LIKE prefix%` match on `key`), and that was one
+//! KV-cached read per block on every cold hydration. Neither filtered shape
+//! is issued here now. The `snapshot` FIELD records the measurement
+//! behind that trade; the `snapshot` METHOD records why the unfiltered shape
+//! is deliberately not cacheable.
 //!
 //! Optionally layers an in-memory overlay (e.g. `worker::Env` secrets such
 //! as `WAFER_RUN__AUTH__JWT_SECRET`) on top of the D1 rows. Overlay values
 //! win over D1 — overlay represents CF env bindings that must override
 //! whatever an admin happens to have stored in the variables table.
-//!
-//! Spec: docs/superpowers/specs/2026-05-15-lazy-block-init-design.md §2, §6
 
 use std::{cell::Cell, collections::HashMap, rc::Rc, sync::Arc};
 
 use async_trait::async_trait;
-use impresspress_core::{blocks::admin::VARIABLES_TABLE, cache_key};
+use impresspress_core::{cache_key, platform_state::variables};
 use wafer_block::ConfigVar;
 use wafer_core::interfaces::database::service::DatabaseService;
 use wafer_run::{ConfigError, ConfigSource, EnvBlockConfig};
@@ -30,8 +45,8 @@ use wafer_run::{ConfigError, ConfigSource, EnvBlockConfig};
 /// it against. Silent truncation would show up as some blocks mysteriously
 /// falling back to their defaults, so it is worth a log line even though the
 /// production table holds a few dozen rows against a 10,000 budget.
-fn snapshot_may_be_truncated(returned: usize, limit: i64) -> bool {
-    i64::try_from(returned).is_ok_and(|returned| returned >= limit)
+fn snapshot_may_be_truncated(returned: usize, limit: Option<u32>) -> bool {
+    limit.is_some_and(|limit| returned >= limit as usize)
 }
 
 /// Every variables row, grouped by the `block` column. Rows whose `block`
@@ -58,8 +73,8 @@ pub struct D1ConfigSource {
     overlay: HashMap<String, String>,
     /// The whole variables table, fetched at most once per source.
     ///
-    /// `wafer-run` calls `load_for_block` once per registered block during
-    /// `strict_init_all_blocks`, and the previous per-block query made that
+    /// `wafer-run` calls `load_for_block` once per registered block while
+    /// `builder::boot` initializes them, and the previous per-block query made that
     /// one KV-cached read EACH — 22 on the production deployment, every cold
     /// hydration, and (measured 2026-09-01) all 22 returning zero rows,
     /// because only one block has block-scoped rows at all and its own
@@ -156,7 +171,7 @@ impl D1ConfigSource {
         let generation = impresspress_core::config_generation::config_write_generation();
         let rows = self
             .db
-            .list(VARIABLES_TABLE, &cache_key::full_table_list_opts())
+            .list(variables::TABLE, &cache_key::full_table_list_opts())
             .await
             .map_err(Box::new)?;
 
@@ -174,11 +189,12 @@ impl D1ConfigSource {
         let limit = cache_key::full_table_list_opts().limit;
         if snapshot_may_be_truncated(rows.records.len(), limit) {
             return Err(format!(
-                "variables snapshot returned {} rows, at or above the {limit}-row query limit: \
+                "variables snapshot returned {} rows, at or above the {}-row query limit: \
                  the table may be truncated, and resolving block config from a partial \
                  snapshot would silently leave blocks on their defaults. Raise the limit or \
                  paginate this read.",
-                rows.records.len()
+                rows.records.len(),
+                limit.unwrap_or_default(),
             )
             .into());
         }
@@ -186,22 +202,20 @@ impl D1ConfigSource {
         let returned_rows = rows.records.len();
         let mut grouped: BlockVariables = HashMap::new();
         for record in rows.records {
-            let Some(block) = record.data.get("block").and_then(|b| b.as_str()) else {
+            // Decoded through the row type that owns these column names, so
+            // this adapter cannot drift from `platform_state::variables`.
+            // A row the codec rejects (no `key`) is dropped rather than
+            // failing the snapshot, as it was before: one malformed row must
+            // not leave every block on its defaults.
+            let Ok(row) = variables::VariableRow::from_record(&record.id, &record.data) else {
                 continue;
             };
-            if block.is_empty() {
-                continue;
-            }
-            let (Some(key), Some(value)) = (
-                record.data.get("key").and_then(|k| k.as_str()),
-                record.data.get("value").and_then(|v| v.as_str()),
-            ) else {
+            // Shared (`WAFER_RUN_SHARED__*`) and ad hoc keys have no block
+            // and belong to no block's snapshot.
+            let Some(block) = row.block else {
                 continue;
             };
-            grouped
-                .entry(block.to_string())
-                .or_default()
-                .insert(key.to_string(), value.to_string());
+            grouped.entry(block).or_default().insert(row.key, row.value);
         }
 
         let snapshot = Rc::new(grouped);
@@ -214,7 +228,7 @@ impl D1ConfigSource {
         // that by re-reading on every call; caching the emptiness instead
         // would leave every block on defaults for the rest of the boot.
         //
-        // An genuinely empty TABLE is not this case and is safely cached:
+        // A genuinely empty TABLE is not this case and is safely cached:
         // seeding it goes through `create`, which does record a write.
         if snapshot.is_empty() && returned_rows > 0 {
             tracing::warn!(
@@ -441,7 +455,67 @@ mod tests {
         async fn exec_raw(&self, _q: &str, _a: &[serde_json::Value]) -> Result<i64, DatabaseError> {
             unreachable!()
         }
-        async fn upsert(&self, _c: &str, _s: UpsertSpec) -> Result<i64, DatabaseError> {
+        async fn create_many(
+            &self,
+            _collection: &str,
+            _rows: Vec<std::collections::HashMap<String, serde_json::Value>>,
+        ) -> Result<i64, wafer_core::interfaces::database::service::DatabaseError> {
+            unreachable!()
+        }
+
+        async fn take_where(
+            &self,
+            _collection: &str,
+            _filters: &[Filter],
+        ) -> Result<Vec<Record>, DatabaseError> {
+            unreachable!()
+        }
+
+        async fn update_where(
+            &self,
+            _collection: &str,
+            _filters: &[Filter],
+            _data: HashMap<String, serde_json::Value>,
+        ) -> Result<(), DatabaseError> {
+            unreachable!()
+        }
+
+        async fn batch(
+            &self,
+            _ops: Vec<wafer_core::interfaces::database::service::WriteOp>,
+        ) -> Result<
+            Vec<wafer_core::interfaces::database::service::WriteOutcome>,
+            wafer_core::interfaces::database::service::DatabaseError,
+        > {
+            unreachable!()
+        }
+
+        async fn insert_guarded(
+            &self,
+            _collection: &str,
+            _data: std::collections::HashMap<String, serde_json::Value>,
+            _guards: &[wafer_core::interfaces::database::service::CapGuard],
+        ) -> Result<
+            wafer_core::interfaces::database::service::GuardedInsert,
+            wafer_core::interfaces::database::service::DatabaseError,
+        > {
+            unreachable!()
+        }
+
+        async fn update_guarded(
+            &self,
+            _collection: &str,
+            _filters: &[wafer_block::db::Filter],
+            _data: std::collections::HashMap<String, serde_json::Value>,
+            _guards: &[wafer_core::interfaces::database::service::CapGuard],
+        ) -> Result<
+            wafer_core::interfaces::database::service::GuardedUpdate,
+            wafer_core::interfaces::database::service::DatabaseError,
+        > {
+            unreachable!()
+        }
+
+        async fn upsert(&self, _c: &str, _s: UpsertSpec) -> Result<Option<Record>, DatabaseError> {
             unreachable!()
         }
         async fn aggregate(
@@ -457,11 +531,21 @@ mod tests {
         async fn schema_table_exists(&self, _n: &str) -> Result<bool, DatabaseError> {
             unreachable!()
         }
+        async fn schema_columns(&self, _table: &str) -> Result<Vec<String>, DatabaseError> {
+            unreachable!()
+        }
         async fn schema_drop_table(&self, _n: &str) -> Result<(), DatabaseError> {
             unreachable!()
         }
         async fn schema_add_column(&self, _t: &str, _c: &Column) -> Result<(), DatabaseError> {
             unreachable!()
+        }
+
+        fn statement_budget(
+            &self,
+        ) -> Result<wafer_core::interfaces::database::service::StatementBudget, DatabaseError>
+        {
+            Ok(wafer_core::interfaces::database::service::StatementBudget::Unbounded)
         }
     }
 
@@ -610,14 +694,21 @@ mod tests {
     #[wasm_bindgen_test]
     fn a_full_page_is_detected_as_possible_truncation() {
         let limit = impresspress_core::cache_key::full_table_list_opts().limit;
-        assert!(snapshot_may_be_truncated(limit as usize, limit));
-        assert!(!snapshot_may_be_truncated(limit as usize - 1, limit));
+        let rows = limit.expect("the full-table read is bounded") as usize;
+        assert!(snapshot_may_be_truncated(rows, limit));
+        assert!(!snapshot_may_be_truncated(rows - 1, limit));
         assert!(!snapshot_may_be_truncated(0, limit));
+        assert!(
+            !snapshot_may_be_truncated(rows, None),
+            "an unbounded read is complete"
+        );
     }
 
     #[wasm_bindgen_test]
     async fn a_truncated_snapshot_fails_the_load_instead_of_serving_partial_config() {
-        let limit = impresspress_core::cache_key::full_table_list_opts().limit as usize;
+        let limit = impresspress_core::cache_key::full_table_list_opts()
+            .limit
+            .expect("the full-table read is bounded") as usize;
         let db = CountingDb::new(vec![("WAFER_RUN__AUTH", "K", "v")]);
         // Claim a full page came back, which is indistinguishable from a
         // truncated one.

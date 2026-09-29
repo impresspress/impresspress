@@ -3,11 +3,17 @@
 use wafer_run::{context::Context, Message, OutputStream};
 
 use crate::{
-    blocks::files::repo,
-    http::{err_bad_request, err_internal, ok_json},
+    blocks::{
+        crud,
+        files::{contracts::RecordListView, repo},
+    },
+    http::{err_bad_request, ok_json},
 };
 
-pub(super) async fn handle_search(ctx: &dyn Context, msg: &Message) -> OutputStream {
+pub(in crate::blocks::files) async fn handle_search(
+    ctx: &dyn Context,
+    msg: &Message,
+) -> OutputStream {
     let query = msg.query("q").to_string();
     if query.is_empty() {
         return err_bad_request("Missing search query");
@@ -18,20 +24,23 @@ pub(super) async fn handle_search(ctx: &dyn Context, msg: &Message) -> OutputStr
         ctx,
         msg.user_id(),
         &query,
-        page_size as i64,
+        page_size as u32,
         offset as i64,
     )
     .await
     {
-        Ok(result) => ok_json(&result),
-        Err(e) => err_internal("Search failed", e),
+        Ok(page) => ok_json(&RecordListView::from_page(page)),
+        Err(e) => crud::db_error_internal(e, "Search failed"),
     }
 }
 
-pub(super) async fn handle_recent(ctx: &dyn Context, msg: &Message) -> OutputStream {
+pub(in crate::blocks::files) async fn handle_recent(
+    ctx: &dyn Context,
+    msg: &Message,
+) -> OutputStream {
     match repo::views::list_recent_for_user(ctx, msg.user_id(), 20).await {
-        Ok(result) => ok_json(&result),
-        Err(e) => err_internal("Database error", e),
+        Ok(page) => ok_json(&RecordListView::from_page(page)),
+        Err(e) => crud::db_error_internal(e, "Database error"),
     }
 }
 

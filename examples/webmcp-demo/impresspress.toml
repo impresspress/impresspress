@@ -10,6 +10,13 @@ compatibility_date = "2026-05-01"
 # Deep-merged into the generated wrangler.toml: the `CONFIG_CACHE` KV binding
 # the D1 config cache needs, which the generator does not emit.
 wrangler_overrides_path = "wrangler.overrides.toml"
+# The auth retention sweep, opt-in and off by default (see `DEFAULT_CRONS`).
+# Step 2 of 2; step 1 is the `#[worker::event(scheduled)]` export in
+# `src/lib.rs`. Without that export this line would buy a daily failed
+# invocation and nothing else. `impresspress deploy` applies it with
+# `wrangler triggers deploy` after promotion — `wrangler versions upload`
+# cannot.
+crons = ["17 3 * * *"]
 
 [cloudflare.d1]
 # Binding is a code contract — the adapter reads `env.DB`.

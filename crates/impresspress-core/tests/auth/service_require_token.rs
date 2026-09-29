@@ -1,17 +1,20 @@
-//! `AuthServiceImpl::require_token(scope)` — rejects session cookies,
-//! enforces PAT scope membership.
+//! `AuthServiceImpl::require_token(scope)` — enforces PAT scope membership
+//! and refuses a credential that carries no scopes at all.
 
-use std::sync::Arc;
+use std::{sync::Arc, time::Duration};
 
-use impresspress_core::blocks::auth::{
-    migrations,
-    repo::{pats, sessions, users},
-    service::{hash_token, AuthServiceImpl, BlockState},
+use impresspress_core::{
+    blocks::auth::{
+        migrations,
+        repo::pats,
+        service::{hash_token, AuthServiceImpl, BlockState},
+    },
+    test_support::seed_user,
 };
 use wafer_core::interfaces::auth::service::{AuthError, AuthService, TokenScope};
 use wafer_run::{context::Context, Message};
 
-use crate::common::MigrationTestCtx;
+use crate::common::{auth_fixture, MintAccessToken};
 
 fn bearer(tok: &str) -> Message {
     let mut m = Message::new("auth.require_token");
@@ -19,28 +22,16 @@ fn bearer(tok: &str) -> Message {
     m
 }
 
-fn cookie(tok: &str) -> Message {
-    let mut m = Message::new("auth.require_token");
-    m.set_meta("http.header.cookie", format!("wafer_session={tok}"));
-    m
-}
-
 #[tokio::test]
-async fn require_token_enforces_scope_and_rejects_session_cookies() {
-    let ctx: Arc<dyn Context> = Arc::new(MigrationTestCtx::new().await);
+async fn require_token_enforces_scope_and_rejects_an_access_jwt() {
+    let raw_ctx = Arc::new(auth_fixture(impresspress_core::blocks::auth::AUTH_BLOCK_ID).await);
+    let ctx: Arc<dyn Context> = raw_ctx.clone();
     migrations::apply(ctx.as_ref()).await.expect("migrations");
 
-    let u = users::insert(
-        ctx.as_ref(),
-        users::NewUser {
-            email: "t@example.com".into(),
-            display_name: "T".into(),
-            avatar_url: None,
-            role: "user".into(),
-        },
-    )
-    .await
-    .expect("seed user");
+    let u = seed_user("t@example.com")
+        .display_name("T")
+        .insert(ctx.as_ref())
+        .await;
 
     // PAT with publish scope → Ok.
     let ok_raw = "wafer_pat_ok";
@@ -72,19 +63,6 @@ async fn require_token_enforces_scope_and_rejects_session_cookies() {
     .await
     .expect("seed noscope pat");
 
-    // Session cookie → Forbidden (scopes only apply to PATs).
-    let sess_raw = "sess-raw";
-    sessions::insert(
-        ctx.as_ref(),
-        sessions::NewSession {
-            token_hash: hash_token(sess_raw),
-            user_id: u.id.clone(),
-            expires_at: "9999-01-01T00:00:00Z".into(),
-        },
-    )
-    .await
-    .expect("seed session");
-
     let svc = AuthServiceImpl::new(BlockState::for_test(ctx.clone()));
 
     let got = svc
@@ -102,10 +80,16 @@ async fn require_token_enforces_scope_and_rejects_session_cookies() {
         "expected Forbidden, got {err:?}"
     );
 
+    // A session access JWT is a valid credential of the wrong kind: scopes
+    // live only on PATs, so this is Forbidden (the caller's credentials are
+    // valid but cannot carry a scope), not Unauthorized.
+    let access = raw_ctx
+        .mint_access_token(&u.id, &[], Duration::from_secs(3600))
+        .await;
     let err = svc
-        .require_token(&cookie(sess_raw), TokenScope::Publish)
+        .require_token(&bearer(&access), TokenScope::Publish)
         .await
-        .expect_err("session rejected");
+        .expect_err("an access jwt carries no scopes");
     assert!(
         matches!(err, AuthError::Forbidden),
         "expected Forbidden, got {err:?}"

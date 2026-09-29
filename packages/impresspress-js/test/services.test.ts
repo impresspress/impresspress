@@ -1,7 +1,8 @@
-import { describe, it, expect, vi, beforeEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { ImpresspressClient } from "../src/client";
 import { ImpresspressError } from "../src/error";
-import { fakeJsonResponse, fakeBlobResponse } from "./fixtures";
+import anonymousMe from "./anonymous-me.response.json";
+import { fakeJsonResponse, fakeBlobResponse, hangingFetch, recordedResponse } from "./fixtures";
 
 /**
  * These tests pin every SDK method to the REAL server route it now calls
@@ -48,6 +49,56 @@ describe("AuthService", () => {
     expect(c.auth.isAuthenticated()).toBe(true);
   });
 
+  it("signUp with verification off returns the signed-in branch and caches its tokens", async () => {
+    fetchMock.mockResolvedValueOnce(
+      fakeJsonResponse(
+        {
+          email_verified: true,
+          access_token: "a",
+          refresh_token: "r",
+          token_type: "Bearer",
+          expires_in: 1800,
+          default_redirect: "/b/userportal/",
+          user: { id: "u1", email: "a@b.com", roles: ["user"], name: "" },
+        },
+        201,
+      ),
+    );
+
+    const c = client();
+    const result = await c.auth.signUp({ email: "a@b.com", password: "pw" });
+
+    expect(fetchMock.mock.calls[0][0]).toBe("http://api.test/b/auth/api/signup");
+    if (!result.emailVerified) throw new Error("expected the signed-in branch");
+    expect(result.tokens.access_token).toBe("a");
+    expect(result.user.id).toBe("u1");
+    expect(result.default_redirect).toBe("/b/userportal/");
+    expect(c.auth.isAuthenticated()).toBe(true);
+  });
+
+  it("signUp awaiting verification returns the pending branch and signs nobody in", async () => {
+    fetchMock.mockResolvedValueOnce(
+      fakeJsonResponse(
+        {
+          email_verified: false,
+          message: "Account created. Please verify your email before signing in.",
+          user: { email: "a@b.com" },
+        },
+        201,
+      ),
+    );
+
+    const c = client();
+    const result = await c.auth.signUp({ email: "a@b.com", password: "pw" });
+
+    expect(result).toEqual({
+      emailVerified: false,
+      message: "Account created. Please verify your email before signing in.",
+      user: { email: "a@b.com" },
+    });
+    expect(c.auth.isAuthenticated()).toBe(false);
+  });
+
   it("getUser unwraps the {user} envelope GET /me actually returns", async () => {
     fetchMock.mockResolvedValueOnce(
       fakeJsonResponse({ user: { id: "u1", email: "a@b.com", roles: ["user"] } }),
@@ -72,10 +123,13 @@ describe("AuthService", () => {
     expect(user.name).toBe("New Name");
   });
 
-  it("getUser maps a 401 to null instead of throwing", async () => {
-    fetchMock.mockResolvedValueOnce(
-      fakeJsonResponse({ error: "Unauthorized", message: "Not authenticated" }, 401),
-    );
+  // The server's own answer to `GET /b/auth/api/me` with no session, byte for
+  // byte: `the_sdk_fixture_is_what_an_anonymous_me_answers`
+  // (crates/impresspress-core/tests/request_preamble.rs) fails when the
+  // server stops sending exactly this.
+  it("getUser returns null for the server's real anonymous /me answer", async () => {
+    expect(anonymousMe.status).toBe(401);
+    fetchMock.mockResolvedValueOnce(recordedResponse(anonymousMe));
     const user = await client().auth.getUser();
     expect(user).toBeNull();
   });
@@ -86,6 +140,43 @@ describe("AuthService", () => {
     );
     await expect(client().auth.getUser()).rejects.toBeInstanceOf(ImpresspressError);
   });
+
+  // The server answers a request whose credential it could not check (a
+  // failed blocklist or auth_version read) with 503, or with the 403 a WRAP
+  // refusal keeps. Neither means "signed out": getUser must propagate it and
+  // leave the session in place, so the next call after the outage succeeds.
+  for (const [status, error] of [
+    [503, "Unavailable"],
+    [403, "PermissionDenied"],
+  ] as const) {
+    it(`getUser propagates a ${status} and keeps the session`, async () => {
+      fetchMock.mockResolvedValueOnce(
+        fakeJsonResponse({
+          access_token: "a",
+          refresh_token: "r",
+          token_type: "Bearer",
+          expires_in: 1800,
+          user: { id: "u1", email: "a@b.com", roles: ["user"] },
+        }),
+      );
+      const c = client();
+      await c.auth.signIn({ email: "a@b.com", password: "pw" });
+
+      fetchMock.mockResolvedValueOnce(
+        fakeJsonResponse(
+          { error, message: "Authentication is temporarily unavailable" },
+          status,
+        ),
+      );
+      const err = await c.auth.getUser().then(
+        () => null,
+        (e: unknown) => e,
+      );
+      expect(err).toBeInstanceOf(ImpresspressError);
+      expect((err as ImpresspressError).status).toBe(status);
+      expect(c.auth.isAuthenticated()).toBe(true);
+    });
+  }
 
   it("resetPassword calls the real forgot-password route, not a phantom reset-password GET", async () => {
     fetchMock.mockResolvedValueOnce(fakeJsonResponse({ message: "ok" }));
@@ -125,15 +216,16 @@ describe("AuthService", () => {
     expect(JSON.parse(init.body)).toEqual({ email: "a@b.com" });
   });
 
-  it("signInWithOAuth passes provider as a query param and reads auth_url (not `url`)", async () => {
-    fetchMock.mockResolvedValueOnce(
-      fakeJsonResponse({ auth_url: "https://accounts.google.com/x", provider: "google" }),
-    );
+  it("signInWithOAuth returns the start URL to navigate to, without calling it", async () => {
     const res = await client().auth.signInWithOAuth("google");
-    expect(fetchMock.mock.calls[0][0]).toBe(
-      "http://api.test/b/auth/oauth/login?provider=google",
-    );
-    expect(res.auth_url).toContain("accounts.google.com");
+    expect(res).toEqual({
+      auth_url: "http://api.test/b/auth/oauth/login?provider=google",
+      provider: "google",
+    });
+    // Navigating is the point: the start endpoint sets the cookie that binds
+    // the flow to this browser, and a fetch from another origin cannot store
+    // it. A request here would mean that binding is lost in Safari.
+    expect(fetchMock).not.toHaveBeenCalled();
   });
 
   it("refreshSession requires refresh_token in the body (server rejects an empty one)", async () => {
@@ -252,7 +344,13 @@ describe("StorageService", () => {
     ]);
   });
 
-  it("getRecentFiles calls /recent with no query parameters and decodes {records, total_count}", async () => {
+  /**
+   * The body here is an object-VIEW audit row, which is what
+   * `handle_recent` actually pages (`repo::views::list_recent_for_user`) —
+   * not an object-metadata row. The fixture used to send metadata columns,
+   * which is the shape the route's schema wrongly claimed.
+   */
+  it("getRecentFiles calls /recent with no query parameters and decodes the view rows", async () => {
     fetchMock.mockResolvedValueOnce(
       fakeJsonResponse({
         records: [
@@ -261,11 +359,10 @@ describe("StorageService", () => {
             data: {
               bucket: "b",
               key: "a.txt",
-              size: 1,
-              content_type: "text/plain",
-              status: "complete",
-              uploaded_by: "u1",
-              uploaded_at: "2026-01-02T00:00:00Z",
+              user_id: "u1",
+              viewed_at: "2026-01-02T00:00:00Z",
+              created_at: "2026-01-02T00:00:00Z",
+              updated_at: "2026-01-02T00:00:00Z",
             },
           },
         ],
@@ -279,6 +376,137 @@ describe("StorageService", () => {
     expect(result.total).toBe(1);
     expect(result.items[0].key).toBe("a.txt");
     expect(result.items[0].id).toBe("r2");
+    expect(result.items[0].user_id).toBe("u1");
+    expect(result.items[0].viewed_at).toBe("2026-01-02T00:00:00Z");
+  });
+});
+
+/**
+ * Transfer timeouts. Folding the upload/download paths into `HttpClient`
+ * brought them under a client that applies a 30 s default — which would have
+ * capped every large upload and download, silently, at half a minute. The
+ * transfer paths therefore opt out of the timeout by default (`NO_TIMEOUT`)
+ * and take a per-call override instead. These tests are the guard.
+ */
+describe("transfer timeouts", () => {
+  beforeEach(() => {
+    vi.useFakeTimers();
+  });
+
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("uploadFile is not capped by the 30 s JSON default", async () => {
+    const { fetchFn, captured } = hangingFetch();
+    fetchMock.mockImplementation(fetchFn);
+    const controller = new AbortController();
+
+    const promise = client().storage.uploadFile("b", new Blob(["x"]), {
+      key: "big.bin",
+      signal: controller.signal,
+    });
+    const assertion = expect(promise).rejects.toMatchObject({ code: "aborted" });
+
+    // Ten minutes into a slow upload: nothing may have aborted it.
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(captured.signal?.aborted).toBe(false);
+
+    controller.abort();
+    await assertion;
+  });
+
+  it("uploadFile honours an explicit timeout when the caller wants one", async () => {
+    const { fetchFn } = hangingFetch();
+    fetchMock.mockImplementation(fetchFn);
+
+    const promise = client().storage.uploadFile("b", new Blob(["x"]), {
+      key: "f.txt",
+      timeout: 5_000,
+    });
+    const assertion = expect(promise).rejects.toMatchObject({ code: "timeout" });
+    await vi.advanceTimersByTimeAsync(5_000);
+    await assertion;
+  });
+
+  it("downloadFile is not capped by the 30 s JSON default", async () => {
+    const { fetchFn, captured } = hangingFetch();
+    fetchMock.mockImplementation(fetchFn);
+    const controller = new AbortController();
+
+    const promise = client().storage.downloadFile("b", "big.bin", { signal: controller.signal });
+    const assertion = expect(promise).rejects.toMatchObject({ code: "aborted" });
+
+    await vi.advanceTimersByTimeAsync(600_000);
+    expect(captured.signal?.aborted).toBe(false);
+
+    controller.abort();
+    await assertion;
+  });
+
+  it("downloadFile honours an explicit timeout when the caller wants one", async () => {
+    const { fetchFn } = hangingFetch();
+    fetchMock.mockImplementation(fetchFn);
+
+    const promise = client().storage.downloadFile("b", "f.txt", { timeout: 5_000 });
+    const assertion = expect(promise).rejects.toMatchObject({ code: "timeout" });
+    await vi.advanceTimersByTimeAsync(5_000);
+    await assertion;
+  });
+
+  it("a plain JSON call still gets the 30 s default", async () => {
+    const { fetchFn } = hangingFetch();
+    fetchMock.mockImplementation(fetchFn);
+
+    const promise = client().storage.listBuckets();
+    const assertion = expect(promise).rejects.toMatchObject({ code: "timeout" });
+    await vi.advanceTimersByTimeAsync(30_000);
+    await assertion;
+  });
+});
+
+/**
+ * Every failure the SDK raises itself carries a machine-readable `code`, so a
+ * caller can branch on it without matching on message text.
+ */
+describe("SDK-raised error codes", () => {
+  it("refreshSession without a token throws code no_refresh_token", async () => {
+    const error = await client()
+      .auth.refreshSession()
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ImpresspressError);
+    expect((error as ImpresspressError).code).toBe("no_refresh_token");
+  });
+
+  it("uploadFile with a non-file throws code invalid_file_type", async () => {
+    const error = await client()
+      .storage.uploadFile("b", "not a file" as unknown as Blob)
+      .then(() => null)
+      .catch((e: unknown) => e);
+    expect(error).toBeInstanceOf(ImpresspressError);
+    expect((error as ImpresspressError).code).toBe("invalid_file_type");
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * The six services share ONE `HttpClient`, so credentials set anywhere apply
+ * everywhere — there is no per-service copy to keep in sync.
+ */
+describe("shared HttpClient", () => {
+  it("an API key set on one service is sent by every other service", async () => {
+    const c = client();
+    c.auth.setApiKey("k-123");
+
+    fetchMock.mockResolvedValueOnce(fakeJsonResponse({ buckets: [] }));
+    await c.storage.listBuckets();
+    expect(fetchMock.mock.calls[0][1].headers["Authorization"]).toBe("Bearer k-123");
+
+    c.removeApiKey();
+    fetchMock.mockResolvedValueOnce(fakeJsonResponse({ buckets: [] }));
+    await c.storage.listBuckets();
+    expect(fetchMock.mock.calls[1][1].headers["Authorization"]).toBeUndefined();
   });
 });
 
@@ -325,6 +553,8 @@ describe("CloudStorageExtension", () => {
               created_by: "u1",
               created_at: "2026-01-01T00:00:00Z",
               access_count: 0,
+              expires_at: null,
+              max_access_count: null,
             },
           },
         ],
@@ -345,13 +575,18 @@ describe("CloudStorageExtension", () => {
         created_by: "u1",
         created_at: "2026-01-01T00:00:00Z",
         access_count: 0,
+        expires_at: null,
+        max_access_count: null,
       },
     ]);
   });
 
   it("getQuota() returns the real {quota, usage} shape from /b/cloudstorage/quota", async () => {
     fetchMock.mockResolvedValueOnce(
-      fakeJsonResponse({ quota: { max_storage_bytes: 1 }, usage: { storage_used: 0 } }),
+      fakeJsonResponse({
+        quota: { max_storage_bytes: 1 },
+        usage: { total_bytes: 0, file_count: 0 },
+      }),
     );
     const result = await client().cloudStorage.getQuota();
     expect(fetchMock.mock.calls[0][0]).toBe("http://api.test/b/cloudstorage/quota");

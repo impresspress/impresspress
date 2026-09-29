@@ -5,28 +5,17 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{Context, Result};
+// The release asset set's shape is shared with the runtime that reads it back
+// — see `impresspress_core::release_inventory`'s module doc. Only the
+// directory walk that turns staged files into entries is deploy-side, and it
+// is `release_manifest_from_staged_dir` below.
+pub use impresspress_core::release_inventory::{
+    ReleaseAssetEntry, ReleaseManifest, RELEASES_ROOT, RELEASE_MANIFEST_SCHEMA_VERSION,
+};
 use impresspress_core::{routing::STATIC_PREFIX, ui::assets as ui_assets};
-use serde::{Deserialize, Serialize};
 
 /// Source dirs (relative to repo_root) to mirror into out_dir/assets/.
 const ASSET_DIRS: &[&str] = &["dist", "content", "public"];
-
-/// Reserved R2 namespace for immutable, deploy-managed release objects.
-///
-/// The deployer writes release objects only in this namespace (plus
-/// per-Worker-version deployment records). It never lists, deletes, or rewrites
-/// mutable logical business/user keys already present in the bucket.
-pub const RELEASES_ROOT: &str = ".impresspress/releases/v1";
-
-pub const RELEASE_MANIFEST_SCHEMA_VERSION: u32 = 1;
-
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReleaseAssetEntry {
-    pub logical_key: String,
-    pub size: u64,
-    pub sha256: String,
-    pub content_type: String,
-}
 
 /// Where a deployed worker should fetch UI assets (CSS/JS/fonts/logos) from.
 ///
@@ -49,9 +38,12 @@ pub fn resolve_asset_base_url(has_r2: bool) -> String {
 ///
 /// `ASSETS` is unconditional (`build.rs` lists every asset file on disk
 /// regardless of Cargo features), but `ui_assets::bytes()` returns `None`
-/// for an entry gated behind a block feature the CLI wasn't built with
-/// (`marked.min.js`/`purify.min.js`/`llm-chat.js` need `block-llm`,
-/// `files-browser.js` needs `block-files`) — a supported combination, e.g.
+/// for a block-owned entry whose block the CLI wasn't built with — the block
+/// declares those bytes itself (`blocks::llm::assets` owns
+/// `marked.min.js`/`purify.min.js`/`llm-chat.js` and needs `block-llm`;
+/// `blocks::files::assets` owns `files-browser.js` and needs `block-files`),
+/// so a build without the block carries no bytes for them. A supported
+/// combination, e.g.
 /// `--no-default-features --features sqlite,embed-assets`. Such entries are
 /// skipped rather than treated as an error, with a warning naming exactly
 /// what was skipped so the omission is visible in the deploy log instead of
@@ -99,135 +91,48 @@ pub fn ui_asset_entries() -> Vec<ReleaseAssetEntry> {
     entries
 }
 
-/// Deterministic identity and inventory of the local release asset set.
+/// Walk a staged assets directory into a [`ReleaseManifest`].
 ///
-/// `asset_set_sha256` hashes the compact JSON encoding of `schema_version` and
-/// the sorted `files` array. It deliberately excludes timestamps, repository
-/// paths, and the derived immutable prefix, so equal bytes at equal logical
-/// keys produce the same identity on every machine.
-#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
-pub struct ReleaseManifest {
-    pub schema_version: u32,
-    pub asset_set_sha256: String,
-    pub immutable_prefix: String,
-    pub files: Vec<ReleaseAssetEntry>,
-}
-
-#[derive(Serialize)]
-struct ManifestIdentity<'a> {
-    schema_version: u32,
-    files: &'a [ReleaseAssetEntry],
-}
-
-impl ReleaseManifest {
-    pub fn from_staged_dir(assets_root: &Path) -> Result<Self> {
-        let mut paths = Vec::new();
-        collect_files(assets_root, &mut paths)?;
-        let mut keyed_paths = paths
-            .into_iter()
-            .map(|path| {
-                let key = logical_key(assets_root, &path)?;
-                if key == ".impresspress" || key.starts_with(".impresspress/") {
-                    anyhow::bail!(
-                        "release asset logical key {key:?} uses reserved .impresspress namespace"
-                    );
-                }
-                if key == "manifest.json" || key == "keys.json" {
-                    anyhow::bail!(
-                        "release asset logical key {key:?} collides with the release \
-                         metadata object of the same name; rename the file"
-                    );
-                }
-                Ok((key, path))
-            })
-            .collect::<Result<Vec<_>>>()?;
-        keyed_paths.sort_by(|(left, _), (right, _)| left.cmp(right));
-
-        let mut files = Vec::with_capacity(keyed_paths.len());
-        for (key, path) in keyed_paths {
-            let bytes = std::fs::read(&path)
-                .with_context(|| format!("read staged release asset {}", path.display()))?;
-            files.push(ReleaseAssetEntry {
-                logical_key: key,
-                size: bytes.len() as u64,
-                sha256: impresspress_core::util::sha256_hex(&bytes),
-                content_type: mime_for_path(&path).to_string(),
-            });
-        }
-
-        let canonical = serde_json::to_vec(&ManifestIdentity {
-            schema_version: RELEASE_MANIFEST_SCHEMA_VERSION,
-            files: &files,
+/// This is the only deploy-side half of the release manifest: turning files on
+/// disk into [`ReleaseAssetEntry`] values. Everything downstream of the
+/// entries — the asset-set digest, the immutable prefix, the key inventory,
+/// the prepared-plan identity — belongs to `ReleaseManifest` itself and is
+/// shared with the runtime that verifies it.
+pub fn release_manifest_from_staged_dir(assets_root: &Path) -> Result<ReleaseManifest> {
+    let mut paths = Vec::new();
+    collect_files(assets_root, &mut paths)?;
+    let keyed_paths = paths
+        .into_iter()
+        .map(|path| {
+            let key = logical_key(assets_root, &path)?;
+            if key == ".impresspress" || key.starts_with(".impresspress/") {
+                anyhow::bail!(
+                    "release asset logical key {key:?} uses reserved .impresspress namespace"
+                );
+            }
+            if key == "manifest.json" || key == "keys.json" {
+                anyhow::bail!(
+                    "release asset logical key {key:?} collides with the release \
+                     metadata object of the same name; rename the file"
+                );
+            }
+            Ok((key, path))
         })
-        .context("serialize release asset identity")?;
-        let asset_set_sha256 = impresspress_core::util::sha256_hex(&canonical);
-        let immutable_prefix = format!("{RELEASES_ROOT}/{asset_set_sha256}");
-        Ok(Self {
-            schema_version: RELEASE_MANIFEST_SCHEMA_VERSION,
-            asset_set_sha256,
-            immutable_prefix,
-            files,
-        })
+        .collect::<Result<Vec<_>>>()?;
+
+    let mut files = Vec::with_capacity(keyed_paths.len());
+    for (key, path) in keyed_paths {
+        let bytes = std::fs::read(&path)
+            .with_context(|| format!("read staged release asset {}", path.display()))?;
+        files.push(ReleaseAssetEntry {
+            logical_key: key,
+            size: bytes.len() as u64,
+            sha256: impresspress_core::util::sha256_hex(&bytes),
+            content_type: mime_for_path(&path).to_string(),
+        });
     }
 
-    pub fn manifest_key(&self) -> String {
-        format!("{}/manifest.json", self.immutable_prefix)
-    }
-
-    pub fn keys_key(&self) -> String {
-        format!("{}/keys.json", self.immutable_prefix)
-    }
-
-    pub fn immutable_key(&self, logical_key: &str) -> String {
-        format!("{}/{logical_key}", self.immutable_prefix)
-    }
-
-    pub fn to_pretty_json(&self) -> Result<Vec<u8>> {
-        let mut bytes = serde_json::to_vec_pretty(self).context("serialize release manifest")?;
-        bytes.push(b'\n');
-        Ok(bytes)
-    }
-
-    /// Compact, sorted exact-key representation bound into the Worker version.
-    /// The runtime uses exact membership to redirect release reads without
-    /// touching business/user keys.
-    pub fn logical_keys_json(&self) -> Result<String> {
-        let keys = self
-            .files
-            .iter()
-            .map(|entry| entry.logical_key.as_str())
-            .collect::<Vec<_>>();
-        serde_json::to_string(&keys).context("serialize release asset key set")
-    }
-
-    pub fn canonical_asset_set_sha256(&self) -> String {
-        format!("sha256:{}", self.asset_set_sha256)
-    }
-
-    pub fn manifest_sha256(&self) -> Result<String> {
-        Ok(format!(
-            "sha256:{}",
-            impresspress_core::util::sha256_hex(&self.to_pretty_json()?)
-        ))
-    }
-
-    pub fn logical_keys_sha256(&self) -> Result<String> {
-        Ok(format!(
-            "sha256:{}",
-            impresspress_core::util::sha256_hex(self.logical_keys_json()?.as_bytes())
-        ))
-    }
-
-    pub fn prepared_identity(&self) -> Result<impresspress_core::PreparedReleaseAssets> {
-        impresspress_core::PreparedReleaseAssets::present(
-            self.canonical_asset_set_sha256(),
-            self.immutable_prefix.clone(),
-            self.manifest_key(),
-            self.manifest_sha256()?,
-            self.logical_keys_sha256()?,
-        )
-        .context("construct prepared release-asset identity")
-    }
+    Ok(ReleaseManifest::from_entries(files)?)
 }
 
 #[derive(Debug, Default)]
@@ -447,8 +352,8 @@ mod tests {
         std::fs::write(staged.path().join("site/media/z.webp"), b"z-image").unwrap();
         std::fs::write(staged.path().join("site/media/a.jpg"), b"a-image").unwrap();
 
-        let first = ReleaseManifest::from_staged_dir(staged.path()).unwrap();
-        let second = ReleaseManifest::from_staged_dir(staged.path()).unwrap();
+        let first = release_manifest_from_staged_dir(staged.path()).unwrap();
+        let second = release_manifest_from_staged_dir(staged.path()).unwrap();
 
         assert_eq!(first, second);
         assert_eq!(
@@ -473,10 +378,10 @@ mod tests {
     fn release_identity_changes_for_bytes_or_logical_key() {
         let staged = tempfile::tempdir().unwrap();
         std::fs::write(staged.path().join("hero.webp"), b"v1").unwrap();
-        let v1 = ReleaseManifest::from_staged_dir(staged.path()).unwrap();
+        let v1 = release_manifest_from_staged_dir(staged.path()).unwrap();
 
         std::fs::write(staged.path().join("hero.webp"), b"v2").unwrap();
-        let changed_bytes = ReleaseManifest::from_staged_dir(staged.path()).unwrap();
+        let changed_bytes = release_manifest_from_staged_dir(staged.path()).unwrap();
         assert_ne!(v1.asset_set_sha256, changed_bytes.asset_set_sha256);
 
         std::fs::rename(
@@ -484,7 +389,7 @@ mod tests {
             staged.path().join("renamed.webp"),
         )
         .unwrap();
-        let changed_key = ReleaseManifest::from_staged_dir(staged.path()).unwrap();
+        let changed_key = release_manifest_from_staged_dir(staged.path()).unwrap();
         assert_ne!(changed_bytes.asset_set_sha256, changed_key.asset_set_sha256);
     }
 
@@ -492,7 +397,7 @@ mod tests {
     fn manifest_json_round_trips_with_identity() {
         let staged = tempfile::tempdir().unwrap();
         std::fs::write(staged.path().join("app.js"), b"console.log(1)").unwrap();
-        let manifest = ReleaseManifest::from_staged_dir(staged.path()).unwrap();
+        let manifest = release_manifest_from_staged_dir(staged.path()).unwrap();
 
         let encoded = manifest.to_pretty_json().unwrap();
         let decoded: ReleaseManifest = serde_json::from_slice(&encoded).unwrap();
@@ -518,7 +423,7 @@ mod tests {
         std::fs::create_dir_all(staged.path().join(".impresspress")).unwrap();
         std::fs::write(staged.path().join(".impresspress/user.json"), b"data").unwrap();
 
-        let err = ReleaseManifest::from_staged_dir(staged.path()).unwrap_err();
+        let err = release_manifest_from_staged_dir(staged.path()).unwrap_err();
         assert!(err.to_string().contains("reserved .impresspress namespace"));
     }
 
@@ -526,7 +431,7 @@ mod tests {
     fn keys_key_lives_beside_the_manifest() {
         let staged = tempfile::tempdir().unwrap();
         std::fs::write(staged.path().join("app.js"), b"app").unwrap();
-        let release = ReleaseManifest::from_staged_dir(staged.path()).unwrap();
+        let release = release_manifest_from_staged_dir(staged.path()).unwrap();
         assert_eq!(
             release.keys_key(),
             format!("{}/keys.json", release.immutable_prefix)
@@ -538,7 +443,7 @@ mod tests {
         for reserved in ["manifest.json", "keys.json"] {
             let staged = tempfile::tempdir().unwrap();
             std::fs::write(staged.path().join(reserved), b"x").unwrap();
-            let err = ReleaseManifest::from_staged_dir(staged.path()).unwrap_err();
+            let err = release_manifest_from_staged_dir(staged.path()).unwrap_err();
             assert!(
                 err.to_string().contains(reserved),
                 "expected {reserved} rejection, got: {err}"

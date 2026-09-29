@@ -1,13 +1,21 @@
-mod contracts;
+/// The block's wire types, including the two enums that define its `kind`
+/// and `role` columns. `pub` because `blocks::llm` converts [`EntryRole`]
+/// into `wafer_core::clients::llm::ChatRole` — the column is this block's,
+/// so the type that names its values is too (B20).
+///
+/// [`EntryRole`]: contracts::EntryRole
+pub mod contracts;
+#[cfg(test)]
+mod error_mapping_tests;
 pub(crate) mod migrations;
 pub mod pages;
 pub mod rest;
 pub mod service;
 
-use wafer_run::{BlockEndpoint, BlockInfo, HttpMethod, InstanceMode};
+use wafer_run::{BlockInfo, HttpMethod, InstanceMode};
 
 use crate::{
-    endpoint_match::{self, EndpointRoute},
+    endpoint_match::{self, request_schema_of, EndpointRoute},
     http::err_not_found,
 };
 
@@ -27,71 +35,200 @@ enum Route {
     DeleteEntry,
 }
 
-/// Method + path-template dispatch table. Templates mirror the declared
-/// `info().endpoints`; the matcher extracts `{id}` into `req.param.id`.
-/// More-specific templates (`.../{id}/entries`) precede generic ones
-/// (`.../{id}`) so ordering resolves them like the old `ends_with` guards.
+/// The block's HTTP surface: what `handle()` dispatches on and what
+/// `info().endpoints` is generated from. More-specific templates
+/// (`.../{id}/entries`) precede generic ones (`.../{id}`) so ordering
+/// resolves them like the old `ends_with` guards. The matcher binds `{id}`
+/// into `req.param.id` for the handlers' `msg.var` readers.
+///
+/// The two SSR pages (the chat/context inspector) are `Admin` and the JSON
+/// API is `Authenticated`. The central router enforces that from the
+/// declaration, so the block hand-checks no `is_admin`.
 const ROUTES: &[EndpointRoute<Route>] = &[
-    EndpointRoute::new(HttpMethod::Get, "/b/messages/", Route::ContextListPage),
-    EndpointRoute::new(
+    // UI pages
+    EndpointRoute::admin(HttpMethod::Get, "/b/messages/", Route::ContextListPage)
+        .summary("Context list page")
+        .tags(&["ui"]),
+    EndpointRoute::admin(
         HttpMethod::Get,
         "/b/messages/contexts/{id}",
         Route::ContextDetailPage,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Context detail page")
+    .tags(&["ui"]),
+    // Contexts
+    EndpointRoute::authenticated(
         HttpMethod::Get,
         "/b/messages/api/contexts",
         Route::ListContexts,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("List contexts")
+    .description("List contexts with optional filters by type, status, sender_id, parent_id")
+    .query_params(list_contexts_query_schema)
+    .output(context_list_schema)
+    .tags(&["contexts"]),
+    EndpointRoute::authenticated(
         HttpMethod::Post,
         "/b/messages/api/contexts",
         Route::CreateContext,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Create context")
+    .input(request_schema_of::<contracts::CreateContextRequest>)
+    .tags(&["contexts"]),
+    // Entries under a context (before the generic `.../{id}` rows)
+    EndpointRoute::authenticated(
         HttpMethod::Get,
         "/b/messages/api/contexts/{id}/entries",
         Route::ListEntries,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("List entries in context")
+    .path_params(context_id_path_schema)
+    .query_params(list_entries_query_schema)
+    .tags(&["entries"]),
+    EndpointRoute::authenticated(
         HttpMethod::Post,
         "/b/messages/api/contexts/{id}/entries",
         Route::AddEntry,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Add entry to context")
+    .path_params(context_id_path_schema)
+    .input(request_schema_of::<contracts::AddEntryRequest>)
+    .tags(&["entries"]),
+    EndpointRoute::authenticated(
         HttpMethod::Get,
         "/b/messages/api/contexts/{id}",
         Route::GetContext,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Get context")
+    .path_params(context_id_path_schema)
+    .tags(&["contexts"]),
+    EndpointRoute::authenticated(
         HttpMethod::Patch,
         "/b/messages/api/contexts/{id}",
         Route::UpdateContext,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Update context")
+    .input(request_schema_of::<contracts::UpdateContextRequest>)
+    .tags(&["contexts"]),
+    EndpointRoute::authenticated(
         HttpMethod::Delete,
         "/b/messages/api/contexts/{id}",
         Route::DeleteContext,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Delete context and its entries")
+    .tags(&["contexts"]),
+    // Entries by id
+    EndpointRoute::authenticated(
         HttpMethod::Get,
         "/b/messages/api/entries/{id}",
         Route::GetEntry,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Get entry")
+    .tags(&["entries"]),
+    EndpointRoute::authenticated(
         HttpMethod::Delete,
         "/b/messages/api/entries/{id}",
         Route::DeleteEntry,
-    ),
+    )
+    .summary("Delete entry")
+    .tags(&["entries"]),
 ];
+
+// The query and path schemas below stay hand-written: the filters come from
+// `msg.query(..)` by name (rest.rs) and `id` from `msg.var("id")` as the
+// table bound it, the same by-name shape as `files`'s bucket/key params and
+// `products`'s `id_path_schema`. Nothing here deserializes a *struct*, so a
+// type declared only to feed `request_schema_of::<T>` would have no runtime
+// user.
+//
+// The two closed-set filters are the exception, and [`enum_filter`] is why:
+// `rest::enum_query` deserializes `kind` and `role` into their enums, so the
+// published value list is that enum's own schema rather than a third copy of
+// the four spellings.
+
+/// One closed-set query parameter: the enum's derived schema, with this
+/// parameter's description attached.
+///
+/// Produces the same `{"description", "enum", "type"}` object a real enum
+/// field publishes anywhere else, so the schema says what `rest::enum_query`
+/// actually accepts — the descriptions used to carry the value list in prose
+/// and could drift from it silently.
+fn enum_filter<T: schemars::JsonSchema>(description: &str) -> serde_json::Value {
+    let mut schema = request_schema_of::<T>();
+    // The derive titles a *top-level* schema with its Rust type name; the
+    // same enum as a field of `AddEntryRequest` carries no title, and a
+    // query parameter is a field, not a document.
+    if let Some(object) = schema.as_object_mut() {
+        object.remove("title");
+    }
+    schema["description"] = serde_json::json!(description);
+    schema
+}
+
+/// Query parameters of `GET /b/messages/api/contexts`.
+fn list_contexts_query_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "type": {"type": "string", "description": "Filter by context type (conversation, task, notification)"},
+            "status": {"type": "string", "description": "Filter by status"},
+            "sender_id": {"type": "string", "description": "Filter by sender"},
+            "parent_id": {"type": "string", "description": "Filter by parent context"},
+            "page": {"type": "integer", "default": 1},
+            "page_size": {"type": "integer", "default": 20}
+        }
+    })
+}
+
+/// Response of `GET /b/messages/api/contexts`.
+///
+/// Hand-written, not derived: `service::list_contexts` returns
+/// `wafer_core::clients::database::RecordList`, a raw
+/// `{records: [{id, data: <column map>}], total_count}` envelope with no
+/// contract type behind `data` — same reasoning already recorded for
+/// `products`'s `record_list_schema`. Typing it means typing the row shape
+/// first (a behaviour change: an unlisted column would start being dropped
+/// from the response), which is out of scope for a schema migration.
+fn context_list_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "records": {"type": "array", "items": {"type": "object"}},
+            "total_count": {"type": "integer"}
+        }
+    })
+}
+
+/// Path parameters of `GET /b/messages/api/contexts/{id}`.
+fn context_id_path_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "required": ["id"],
+        "properties": {
+            "id": {"type": "string", "description": "Context ID"}
+        }
+    })
+}
+
+/// Query parameters of `GET /b/messages/api/contexts/{id}/entries`.
+fn list_entries_query_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "properties": {
+            "kind": enum_filter::<contracts::EntryKind>("Filter by entry kind"),
+            "role": enum_filter::<contracts::EntryRole>("Filter by sender role"),
+            "page": {"type": "integer", "default": 1},
+            "page_size": {"type": "integer", "default": 100}
+        }
+    })
+}
 
 crate::impresspress_feature_block! {
     /// Unified message and context system (`impresspress/messages`).
     pub struct MessagesBlock;
     name: "impresspress/messages",
     info: |_this| {
-        use wafer_block::types::ResourceGrant;
-        use wafer_run::{AuthLevel, CollectionSchema};
+        use wafer_run::CollectionSchema;
 
         BlockInfo::new(
             "impresspress/messages",
@@ -100,16 +237,20 @@ crate::impresspress_feature_block! {
             "Unified message and context system",
         )
         .instance_mode(InstanceMode::Singleton)
-        .requires(vec!["wafer-run/database".into()])
-        // The chat UI in `impresspress/llm` reads thread + entry rows directly
-        // via the typed `db::list` client (see `llm/pages.rs`). Without these
-        // grants the WRAP runtime denies the call and the chat sidebar
-        // renders empty in production. Surfaced by the static
-        // `scripts/audit-wrap-grants.sh` audit (PR #84).
-        .grants(vec![
-            ResourceGrant::read("impresspress/llm", service::CONTEXTS_TABLE),
-            ResourceGrant::read("impresspress/llm", service::ENTRIES_TABLE),
+        .requires(vec![
+            "wafer-run/database".into(),
+            // `migration_helper::db_backend` reads the database backend through
+            // the config client when the block's migrations run at Init.
+            "wafer-run/config".into(),
         ])
+        // No `grants(..)`. The two `ResourceGrant::read("impresspress/llm", ..)`
+        // entries that used to be here existed only because the chat UI read
+        // this block's tables directly with `db::list`. It reaches them
+        // through `ctx.call_block("impresspress/messages", ..)` now, and a
+        // call_block callee's own database access is authorized as itself
+        // (`RuntimeContext::dispatch_call` makes this block's `node_id` the
+        // `caller_id` of the database sub-context), so WRAP Rule 3 —
+        // "the caller owns the resource" — admits it with no grant at all.
         // Advisory table list — admin "Database tables" discovery + the WRAP
         // grant-UI read only `CollectionSchema::name`. The schema itself
         // (columns, indexes, FKs) lives solely in the block's hand-authored
@@ -126,118 +267,11 @@ crate::impresspress_feature_block! {
              containers (conversations, tasks, channels). Entries are the universal \
              primitive (messages, artifacts, notifications, status changes).",
         )
-        .endpoints(vec![
-            // UI pages — admin-only (the chat/context inspector SSR pages).
-            // Declared here so the central router enforces the admin tier
-            // before dispatch; the block no longer hand-checks `is_admin`.
-            BlockEndpoint::get("/b/messages/")
-                .summary("Context list page")
-                .auth(AuthLevel::Admin)
-                .tags(&["ui"]),
-            BlockEndpoint::get("/b/messages/contexts/{id}")
-                .summary("Context detail page")
-                .auth(AuthLevel::Admin)
-                .tags(&["ui"]),
-            // Contexts
-            //
-            // `query_params_schema` (this endpoint and ListEntries below) and
-            // `path_params_schema` (GetContext) stay hand-written: the
-            // filters come from `msg.query(..)` by name via `non_empty(..)`
-            // (rest.rs), and `id` comes from `path_param(msg, "id", ..)`
-            // (util.rs, with a prefix-strip fallback) — the same
-            // `msg.var(..)`-by-name shape as `files`'s bucket/key params and
-            // `products`'s `id_path_schema`. Nothing here deserializes a
-            // struct, so a type declared only to feed `.query_params::<T>()`
-            // / `.path_params::<T>()` would have no runtime user.
-            BlockEndpoint::get("/b/messages/api/contexts")
-                .summary("List contexts")
-                .description("List contexts with optional filters by type, status, sender_id, parent_id")
-                .auth(AuthLevel::Authenticated)
-                .query_params_schema(serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "type": {"type": "string", "description": "Filter by context type (conversation, task, notification)"},
-                        "status": {"type": "string", "description": "Filter by status"},
-                        "sender_id": {"type": "string", "description": "Filter by sender"},
-                        "parent_id": {"type": "string", "description": "Filter by parent context"},
-                        "page": {"type": "integer", "default": 1},
-                        "page_size": {"type": "integer", "default": 20}
-                    }
-                }))
-                // Hand-written, not derived: `service::list_contexts` returns
-                // `wafer_core::clients::database::RecordList`, a raw
-                // `{records: [{id, data: <column map>}], total_count}`
-                // envelope with no contract type behind `data` — same
-                // reasoning already recorded for `products`'s
-                // `record_list_schema`. Typing it means typing the row shape
-                // first (a behaviour change: an unlisted column would start
-                // being dropped from the response), which is out of scope
-                // for a schema migration.
-                .output_schema(serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "records": {"type": "array", "items": {"type": "object"}},
-                        "total_count": {"type": "integer"}
-                    }
-                }))
-                .tags(&["contexts"]),
-            BlockEndpoint::post("/b/messages/api/contexts")
-                .summary("Create context")
-                .auth(AuthLevel::Authenticated)
-                .input::<contracts::CreateContextRequest>()
-                .tags(&["contexts"]),
-            BlockEndpoint::get("/b/messages/api/contexts/{id}")
-                .summary("Get context")
-                .auth(AuthLevel::Authenticated)
-                .path_params_schema(serde_json::json!({
-                    "type": "object",
-                    "required": ["id"],
-                    "properties": {
-                        "id": {"type": "string", "description": "Context ID"}
-                    }
-                }))
-                .tags(&["contexts"]),
-            BlockEndpoint::patch("/b/messages/api/contexts/{id}")
-                .summary("Update context")
-                .auth(AuthLevel::Authenticated)
-                .input::<contracts::UpdateContextRequest>()
-                .tags(&["contexts"]),
-            BlockEndpoint::delete("/b/messages/api/contexts/{id}")
-                .summary("Delete context and its entries")
-                .auth(AuthLevel::Authenticated)
-                .tags(&["contexts"]),
-            // Entries
-            BlockEndpoint::get("/b/messages/api/contexts/{id}/entries")
-                .summary("List entries in context")
-                .auth(AuthLevel::Authenticated)
-                .query_params_schema(serde_json::json!({
-                    "type": "object",
-                    "properties": {
-                        "kind": {"type": "string", "description": "Filter by kind (message, artifact, notification, status)"},
-                        "role": {"type": "string", "description": "Filter by role (user, agent, system)"},
-                        "page": {"type": "integer", "default": 1},
-                        "page_size": {"type": "integer", "default": 100}
-                    }
-                }))
-                .tags(&["entries"]),
-            BlockEndpoint::post("/b/messages/api/contexts/{id}/entries")
-                .summary("Add entry to context")
-                .auth(AuthLevel::Authenticated)
-                .input::<contracts::AddEntryRequest>()
-                .tags(&["entries"]),
-            BlockEndpoint::get("/b/messages/api/entries/{id}")
-                .summary("Get entry")
-                .auth(AuthLevel::Authenticated)
-                .tags(&["entries"]),
-            BlockEndpoint::delete("/b/messages/api/entries/{id}")
-                .summary("Delete entry")
-                .auth(AuthLevel::Authenticated)
-                .tags(&["entries"]),
-        ])
+        .endpoints(endpoint_match::declare(ROUTES))
         .can_disable(true)
         .default_enabled(true)
     },
-    handle: |_this, ctx, msg, input| {
+    handle: |_this, ctx, mut msg, input| {
         // Auth is enforced centrally by `route_to_block` from the declared
         // endpoint `AuthLevel` (UI pages → Admin, API → Authenticated), so no
         // per-handler `user_id`/`is_admin` preamble is needed here. Dispatch
@@ -288,5 +322,83 @@ mod tests {
             !info.endpoints.iter().any(|e| e.path == "/a2a"),
             "/a2a must not be exposed — it dispatched unauthenticated; re-add behind auth first"
         );
+    }
+}
+
+#[cfg(test)]
+pub(crate) mod test_support {
+    use std::sync::Arc;
+
+    use wafer_run::Message;
+
+    use crate::test_support::TestContext;
+
+    /// A `TestContext` carrying this block's migrations **and** the block
+    /// itself, so `ctx.call_block("impresspress/messages", ..)` reaches the
+    /// real handlers.
+    ///
+    /// `blocks::llm` talks to this block only through `call_block`, so its
+    /// own tests need the callee registered; without it `messages_create`
+    /// silently returns `None` and a chat test proves nothing about the
+    /// entries it thinks it wrote. Migrations are applied the way
+    /// `TestContext::with_products` and friends apply theirs, after
+    /// `with_auth()` so the migration-tracking table exists first.
+    pub(crate) async fn ctx_with_messages() -> TestContext {
+        let mut ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::messages::MessagesBlock::BLOCK_NAME);
+        let sqlite: Vec<&str> = super::migrations::SQLITE_MIGRATIONS
+            .iter()
+            .map(|(_, sql)| *sql)
+            .collect();
+        crate::migration_helper::apply_migrations(
+            &ctx,
+            "impresspress/messages",
+            &sqlite,
+            super::migrations::POSTGRES_MIGRATIONS,
+        )
+        .await
+        .expect("apply messages migrations in test fixture");
+        ctx.register_block(
+            "impresspress/messages",
+            Arc::new(super::MessagesBlock::new()),
+        );
+        ctx
+    }
+
+    /// Run `msg` through the block's own route table so `{id}` is bound the
+    /// way it is on the wire, then hand the message to a handler directly.
+    /// Panics when no row matches: a test that sends an unroutable path
+    /// would otherwise exercise the handler's "missing id" branch by
+    /// accident.
+    pub(crate) fn routed(mut msg: Message) -> Message {
+        let route = crate::endpoint_match::dispatch(&mut msg, super::ROUTES);
+        assert!(
+            route.is_some(),
+            "no messages route matches {} {}",
+            msg.action(),
+            msg.path()
+        );
+        msg
+    }
+}
+
+#[cfg(test)]
+mod table_tests {
+    use wafer_run::Block as _;
+
+    use super::*;
+
+    /// `info().endpoints` is generated from `ROUTES`; nothing else declares
+    /// an endpoint for this block.
+    #[test]
+    fn info_endpoints_come_from_the_table() {
+        let declared = MessagesBlock::new().info().endpoints;
+        assert_eq!(declared.len(), ROUTES.len());
+        for (ep, row) in declared.iter().zip(ROUTES) {
+            assert_eq!(ep.method, row.method, "{}", row.template);
+            assert_eq!(ep.path, row.template);
+            assert_eq!(ep.auth, row.auth, "{}", row.template);
+        }
     }
 }

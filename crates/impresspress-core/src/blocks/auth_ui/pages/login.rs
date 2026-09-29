@@ -5,10 +5,11 @@ use wafer_run::{context::Context, Message, OutputStream};
 
 use super::{
     login_script, oauth_button_script, oauth_provider_configured, oauth_provider_icon,
-    oauth_provider_label, pw_field, pw_toggle_js, site_config,
+    oauth_provider_label, pw_field, site_config,
 };
 use crate::{
     blocks::auth_ui::redirect::is_safe_local_redirect,
+    config_vars::{ALLOW_SIGNUP_KEY, ENABLE_OAUTH_KEY},
     ui::{
         self,
         components::{alert, auth_panel, oauth_button, AlertVariant},
@@ -17,11 +18,18 @@ use crate::{
 };
 
 pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let config = site_config(ctx);
-    let allow_signup = ctx
-        .config_get("WAFER_RUN_SHARED__ALLOW_SIGNUP")
-        .unwrap_or("true")
-        == "true";
+    let config = match site_config(ctx).await {
+        Ok(site) => site,
+        Err(e) => {
+            return crate::blocks::crud::db_error_page(msg, e, "page: site config read failed")
+        }
+    };
+    let allow_signup = match crate::config_vars::get_bool(ctx, ALLOW_SIGNUP_KEY, true).await {
+        Ok(allowed) => allowed,
+        Err(e) => {
+            return crate::blocks::crud::db_error_page(msg, e, "Could not read the signup switch")
+        }
+    };
     let raw_redirect = msg.get_meta("req.query.redirect").to_string();
     // Validate redirect — only allow relative paths (prevent open redirect)
     let redirect = if is_safe_local_redirect(&raw_redirect) {
@@ -50,19 +58,30 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
     // full credential triple (CLIENT_ID + CLIENT_SECRET + REDIRECT_URL) is
     // present in env. Avoids rendering a "Continue with GitHub" button that
     // would 4xx as soon as it's clicked.
-    let oauth_enabled = ctx
-        .config_get("WAFER_RUN_SHARED__ENABLE_OAUTH")
-        .unwrap_or("false")
-        == "true";
-    let oauth_providers: Vec<&'static str> = if oauth_enabled {
-        ["github", "google", "microsoft"]
-            .iter()
-            .copied()
-            .filter(|p| oauth_provider_configured(ctx, p))
-            .collect()
-    } else {
-        Vec::new()
+    let oauth_enabled = match crate::config_vars::get_bool(ctx, ENABLE_OAUTH_KEY, false).await {
+        Ok(enabled) => enabled,
+        Err(e) => {
+            return crate::blocks::crud::db_error_page(msg, e, "Could not read the OAuth switch")
+        }
     };
+    // A loop rather than `.filter()`: the predicate reads config through the
+    // async client now, and an async predicate has no place in `Iterator`.
+    let mut oauth_providers: Vec<&'static str> = Vec::new();
+    if oauth_enabled {
+        for provider in ["github", "google", "microsoft"] {
+            match oauth_provider_configured(ctx, provider).await {
+                Ok(true) => oauth_providers.push(provider),
+                Ok(false) => {}
+                Err(e) => {
+                    return crate::blocks::crud::db_error_page(
+                        msg,
+                        e,
+                        "Could not read the OAuth provider config",
+                    )
+                }
+            }
+        }
+    }
 
     let markup = ui::layout::page(
         "Sign In",
@@ -92,7 +111,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
                         div .auth-divider { "or" }
                     }
 
-                    form #form .login-form onsubmit="return handleLogin(event)" {
+                    form #form .login-form {
                         input type="hidden" #redirect value=(redirect);
 
                         div .form-group {
@@ -106,7 +125,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
                         }
 
                         div .auth-actions {
-                            button type="button" class="btn btn--ghost btn--sm" onclick="handleForgot()" {
+                            button type="button" class="btn btn--ghost btn--sm" data-action="auth-forgot" {
                                 "Forgot password?"
                             }
                         }
@@ -122,7 +141,6 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     }
                 }
 
-                script { (PreEscaped(pw_toggle_js())) }
                 script { (PreEscaped(login_script())) }
                 @if !oauth_providers.is_empty() {
                     script { (PreEscaped(oauth_button_script())) }
@@ -139,7 +157,75 @@ mod tests {
     use wafer_run::Message;
 
     use super::handle;
-    use crate::test_support::{output_html, TestContext};
+    use crate::{
+        blocks::auth_ui::{
+            OAUTH_GITHUB_CLIENT_ID_KEY, OAUTH_GITHUB_CLIENT_SECRET_KEY, OAUTH_REDIRECT_URI_KEY,
+        },
+        config_vars::{ALLOW_SIGNUP_KEY, ENABLE_OAUTH_KEY},
+        test_support::{output_html, TestContext},
+    };
+
+    /// The page and the API must answer "is signup allowed?" the same way.
+    ///
+    /// `WAFER_RUN_SHARED__ALLOW_SIGNUP=1` opened the signup API
+    /// (`auth::helpers::signup_allowed` accepted `"true"` or `"1"`) while
+    /// this page compared against `"true"` alone and hid the link — so the
+    /// only route to a form that works was to already know the URL.
+    #[tokio::test]
+    async fn signup_link_and_signup_api_read_the_same_truth_table() {
+        for enabled in ["1", "true", "YES", " on "] {
+            let mut ctx = TestContext::new()
+                .await
+                .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
+            ctx.set_config(ALLOW_SIGNUP_KEY, enabled);
+            let html = output_html(handle(&ctx, &login_msg(&[])).await).await;
+            assert!(
+                crate::blocks::auth::helpers::signup_allowed(&ctx)
+                    .await
+                    .expect("config read"),
+                "the signup API must accept {enabled:?}"
+            );
+            assert!(
+                html.contains("/b/auth/signup"),
+                "the signup link must be rendered for {enabled:?}: {html}"
+            );
+        }
+        for disabled in ["0", "false", "", "bogus"] {
+            let mut ctx = TestContext::new()
+                .await
+                .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
+            ctx.set_config(ALLOW_SIGNUP_KEY, disabled);
+            let html = output_html(handle(&ctx, &login_msg(&[])).await).await;
+            assert!(
+                !crate::blocks::auth::helpers::signup_allowed(&ctx)
+                    .await
+                    .expect("config read"),
+                "the signup API must refuse {disabled:?}"
+            );
+            assert!(
+                !html.contains("/b/auth/signup"),
+                "the signup link must be hidden for {disabled:?}: {html}"
+            );
+        }
+    }
+
+    /// The same divergence on the OAuth flag: `=1` let `oauth/start.rs`
+    /// begin the flow while this page drew no button.
+    #[tokio::test]
+    async fn oauth_buttons_follow_the_same_truth_table_as_the_oauth_start_handler() {
+        let mut ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
+        ctx.set_config(ENABLE_OAUTH_KEY, "1");
+        ctx.set_config(OAUTH_GITHUB_CLIENT_ID_KEY, "gh_id");
+        ctx.set_config(OAUTH_GITHUB_CLIENT_SECRET_KEY, "gh_secret");
+        ctx.set_config(OAUTH_REDIRECT_URI_KEY, "https://app/cb");
+        let html = output_html(handle(&ctx, &login_msg(&[])).await).await;
+        assert!(
+            html.contains(r#"data-provider="github""#),
+            "ENABLE_OAUTH=1 must render the provider button the start handler accepts: {html}"
+        );
+    }
 
     fn login_msg(query: &[(&str, &str)]) -> Message {
         let mut msg = Message::new("http.request");
@@ -172,7 +258,9 @@ mod tests {
     /// ahead of the role-aware `default_redirect` the JSON API returns.
     #[tokio::test]
     async fn renders_safe_redirect_into_hidden_field() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
         let msg = login_msg(&[("redirect", "/b/userportal/profile")]);
         let html = output_html(handle(&ctx, &msg).await).await;
         assert!(
@@ -186,7 +274,9 @@ mod tests {
     /// dropped rather than rendered.
     #[tokio::test]
     async fn rejects_unsafe_redirect_renders_empty_hidden_field() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
         let msg = login_msg(&[("redirect", "//evil.com")]);
         let html = output_html(handle(&ctx, &msg).await).await;
         assert!(
@@ -200,7 +290,9 @@ mod tests {
     /// with `?email=...` so they don't have to retype it.
     #[tokio::test]
     async fn prefills_email_from_query_param() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
         let msg = login_msg(&[("email", "alice@example.com")]);
         let html = output_html(handle(&ctx, &msg).await).await;
         assert!(
@@ -213,7 +305,9 @@ mod tests {
     /// rendered (mirrors the 255-char cap `api/signup.rs` enforces on input).
     #[tokio::test]
     async fn ignores_overlong_email_query_param() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
         let long_email = format!("{}@example.com", "a".repeat(300));
         let msg = login_msg(&[("email", &long_email)]);
         let html = output_html(handle(&ctx, &msg).await).await;
@@ -225,7 +319,9 @@ mod tests {
     /// bare `<div>`s a screen reader can't tie to the field.
     #[tokio::test]
     async fn email_and_password_labels_are_associated_with_their_inputs() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
         let msg = login_msg(&[]);
         let html = output_html(handle(&ctx, &msg).await).await;
 
@@ -254,7 +350,9 @@ mod tests {
     /// duplicated by the panel.
     #[tokio::test]
     async fn brand_panel_shows_default_headline_and_tagline_without_duplicating_subtitle() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
         let msg = login_msg(&[]);
         let html = output_html(handle(&ctx, &msg).await).await;
 
@@ -281,7 +379,9 @@ mod tests {
     /// name (aria-label), since it renders no visible text.
     #[tokio::test]
     async fn password_toggle_button_has_non_empty_aria_label() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
         let msg = login_msg(&[]);
         let html = output_html(handle(&ctx, &msg).await).await;
 

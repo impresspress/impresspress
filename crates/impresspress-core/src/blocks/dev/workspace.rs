@@ -72,18 +72,22 @@ pub struct FileEntry {
 /// so the store's size is tracked here rather than recomputed from `files`,
 /// which cannot see the difference.
 ///
-/// Both counters are maintained by [`Workspace::record_blob_stored`] and
-/// [`Workspace::record_blob_freed`] only. Nothing else writes them, so
-/// "blobs written minus blobs reclaimed" is the whole of their definition.
+/// Both counters have exactly two writers. Between collections,
+/// [`Workspace::record_blob_stored`] charges each blob a write adds to the
+/// store; each collection then sets them to what the store actually holds
+/// ([`Workspace::reset_blob_totals`], from `super::gc`'s listing). The charge
+/// is what keeps the quota honest between collections, and the reset is what
+/// keeps it honest across a charge that was lost — a blob stored by a write
+/// whose manifest save then failed — which no write-side bookkeeping can see.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Workspace {
     /// Entries by path. The key and [`FileEntry::path`] are always equal —
     /// [`Workspace::insert`] is the only thing that writes either.
     #[serde(default)]
     pub files: BTreeMap<String, FileEntry>,
-    /// Total bytes of blobs this workspace has stored and not yet had
-    /// reclaimed, including blobs no `files` entry names any more. This is
-    /// what [`super::paths::MAX_WORKSPACE_BYTES`] bounds.
+    /// Total bytes of blobs in this workspace's store, including blobs no
+    /// `files` entry names any more. This is what
+    /// [`super::paths::MAX_WORKSPACE_BYTES`] bounds.
     #[serde(default)]
     pub blob_bytes: u64,
     /// How many blobs those bytes are spread over.
@@ -149,14 +153,20 @@ impl Workspace {
         self.blob_count = self.blob_count.saturating_add(1);
     }
 
-    /// Credit the workspace for a blob of `bytes` that was reclaimed.
+    /// Set both counters to what the blob store holds, and say whether that
+    /// changed them.
     ///
-    /// For Plan 4's garbage collector, which is the only thing that removes a
-    /// blob. Saturating, so a manifest whose counters were somehow lost cannot
-    /// underflow into a workspace that appears to have 16 exabytes of headroom.
-    pub fn record_blob_freed(&mut self, bytes: u64) {
-        self.blob_bytes = self.blob_bytes.saturating_sub(bytes);
-        self.blob_count = self.blob_count.saturating_sub(1);
+    /// For `super::gc` only, which counts `bytes` and `count` off its own
+    /// listing of the store after it has deleted what it collects. A reset,
+    /// never a subtraction of what was freed: a blob the write path failed to
+    /// charge is freed like any other, and subtracting its size from a total
+    /// that never included it would leave the workspace under-counted for
+    /// good.
+    pub fn reset_blob_totals(&mut self, bytes: u64, count: u32) -> bool {
+        let changed = self.blob_bytes != bytes || self.blob_count != count;
+        self.blob_bytes = bytes;
+        self.blob_count = count;
+        changed
     }
 
     /// The existing path that stops `path` from being stored, if any.
@@ -431,17 +441,21 @@ mod tests {
         assert_eq!(ws.total_bytes(), 0);
         assert_eq!(ws.blob_bytes, 200);
 
-        ws.record_blob_freed(100);
+        // The collector freed the first blob and counted what is left.
+        assert!(ws.reset_blob_totals(100, 1));
         assert_eq!(ws.blob_bytes, 100);
         assert_eq!(ws.blob_count, 1);
     }
 
+    /// A reset that matches the counters reports no change, which is what
+    /// spares the collector a `workspace.json` write on every activation.
     #[test]
-    fn freeing_more_than_was_stored_saturates_at_zero() {
+    fn a_reset_to_the_same_totals_changes_nothing() {
         let mut ws = Workspace::default();
-        ws.record_blob_freed(10);
-        assert_eq!(ws.blob_bytes, 0);
-        assert_eq!(ws.blob_count, 0);
+        ws.record_blob_stored(10);
+        assert!(!ws.reset_blob_totals(10, 1));
+        assert!(ws.reset_blob_totals(10, 2), "the count alone is a change");
+        assert_eq!((ws.blob_bytes, ws.blob_count), (10, 2));
     }
 
     /// Both directions of the file/directory clash, and the near misses that

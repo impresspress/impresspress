@@ -94,17 +94,38 @@ pub fn url(logical: &str) -> String {
     format!("{}{}", base_url(), entry(logical).filename)
 }
 
-/// The single embed point for every asset's bytes. Each arm is either the
-/// asset's own `include_str!`/`include_bytes!` literal or (for `app.css`)
-/// delegates to `css()`, itself an `include_str!` of the `build.rs`-assembled
-/// bundle — either way, exactly one `include_*!` per source file in the
-/// whole crate, so asset content has one source-level truth.
+/// The single embed point for every asset's bytes.
+///
+/// Two halves, because assets have two owners. [`shared_bytes`] below carries
+/// everything the shared chrome owns — one `include_*!` per file, exactly as
+/// before. Everything else is a *block's* asset, and its bytes are declared
+/// by that block ([`crate::blocks::static_asset_bytes`]), so this module names
+/// no block and carries no `block-*` feature gate of its own: adding an asset
+/// to the LLM block is a change inside `blocks/llm/`, not a new arm here.
+///
+/// The manifest stays one list either way (`build.rs` hashes every file on
+/// disk regardless of features), so `url()` and `/b/static/{filename}` behave
+/// identically whichever half owns the bytes.
 #[cfg(feature = "embed-assets")]
 pub fn bytes(logical: &str) -> Option<&'static [u8]> {
+    shared_bytes(logical).or_else(|| crate::blocks::static_asset_bytes(logical))
+}
+
+/// Bytes for the assets the shared chrome itself owns.
+///
+/// Each arm is either the asset's own `include_str!`/`include_bytes!` literal
+/// or (for `app.css`) delegates to `css()`, itself an `include_str!` of the
+/// `build.rs`-assembled bundle — either way, exactly one `include_*!` per
+/// source file, so asset content has one source-level truth.
+#[cfg(feature = "embed-assets")]
+fn shared_bytes(logical: &str) -> Option<&'static [u8]> {
     Some(match logical {
         "app.css" => css().as_bytes(),
         // htmx 2.x minified JS.
         "htmx.min.js" => include_str!("assets/htmx.min.js").as_bytes(),
+        // The shared chrome's own behaviour — command palette, mobile
+        // drawer, toasts, modals — in one file. See `chrome_js`.
+        "chrome.js" => chrome_js().as_bytes(),
         // The COMPOSED WebMCP script, assembled by `build.rs` from
         // `webmcp-core.js` and `webmcp.js` — see `webmcp_js`.
         "webmcp.js" => webmcp_js().as_bytes(),
@@ -140,44 +161,6 @@ pub fn bytes(logical: &str) -> Option<&'static [u8]> {
         // external URL or the implicit browser fallback to `/favicon.ico`
         // (which 404s by default).
         "favicon.ico" => include_bytes!("assets/favicon.ico"),
-        // marked.js (markdown parser), vendored from marked@14 — self-hosted
-        // instead of a jsdelivr CDN `<script>` so there's no external
-        // runtime fetch (CSP-friendly, no third-party availability/supply-
-        // chain dependency at page load). Only consumed by the LLM chat
-        // page (`blocks::llm::pages`), which is itself gated behind
-        // `block-llm` — feature-gated here too so a build without the LLM
-        // block (e.g. Cloudflare, which can't enable `block-llm`: the
-        // provider service isn't wasm32-compatible) doesn't embed this JS.
-        #[cfg(feature = "block-llm")]
-        "marked.min.js" => include_str!("assets/marked.min.js").as_bytes(),
-        // DOMPurify (HTML sanitizer), vendored from DOMPurify 3.2.4 —
-        // self-hosted instead of a CDN `<script>` so there's no external
-        // runtime fetch (CSP-friendly, no third-party availability/supply-
-        // chain dependency at page load). Loaded before `marked.js`/
-        // `llm-chat.js` so `renderMarkdown` can sanitize the parsed
-        // markdown before it reaches `innerHTML` (P0 stored-XSS fix). Like
-        // marked.js, only the LLM chat page loads this — gated behind
-        // `block-llm` for the same reason.
-        #[cfg(feature = "block-llm")]
-        "purify.min.js" => include_str!("assets/purify.min.js").as_bytes(),
-        // Embedded vanilla-JS bundle for the LLM chat surface — markdown,
-        // message rendering, model management, chat submission, thread
-        // creation/selection. Consumed by the unified LLM page handler and
-        // (for the conversation lens) by the Messages context_detail
-        // handler. Gated behind `block-llm`: Cloudflare currently cannot
-        // enable `block-llm` (the provider service isn't wasm32-compatible),
-        // so this JS has no consumer there — embedding it unconditionally
-        // was pure bloat.
-        #[cfg(feature = "block-llm")]
-        "llm-chat.js" => include_str!("assets/llm-chat.js").as_bytes(),
-        // Embedded vanilla-JS bundle for the file-browser surfaces —
-        // drag-drop upload, bulk select, kebab menus, share modal, upload
-        // modal, confirm-delete. Consumed by `pages_user::object_list_page`
-        // and `cloudstorage_page`, both in the `block-files`-gated
-        // `blocks::files` module — gated here to match, so a build without
-        // the Files block drops this JS too.
-        #[cfg(feature = "block-files")]
-        "files-browser.js" => include_str!("assets/files-browser.js").as_bytes(),
         _ => return None,
     })
 }
@@ -368,262 +351,36 @@ pub(crate) fn short_hash(content: &[u8]) -> String {
     hash.iter().take(4).map(|b| format!("{b:02x}")).collect()
 }
 
-/// marked.js URL with content hash, e.g. `/b/static/marked-a1b2c3d4.min.js`
-#[cfg(feature = "block-llm")]
-pub fn marked_js_url() -> String {
-    url("marked.min.js")
+/// The shared chrome's browser behaviour: command palette, mobile drawer,
+/// toasts and modals, as one hashed `/b/static/chrome-{hash}.js`.
+///
+/// Was four Rust raw strings — `palette_js`, `drawer_js`, `toast_js`,
+/// `modal_js` — inlined into the bottom of every rendered page, 196 lines
+/// re-sent uncached on every request. They are now one file, concatenated in
+/// exactly the order the page emitted them, loaded once and cached forever
+/// (the filename carries a content hash, so a changed script is a changed
+/// URL). See `assets/chrome.js`'s own header for the section order and for
+/// why two of the four sections are deliberately not wrapped in an IIFE.
+///
+/// Gated on `embed-assets` like [`css`], and for the same reason: without it
+/// these bytes are served from R2 or a CDN and must not be linked into the
+/// binary at all.
+#[cfg(feature = "embed-assets")]
+pub fn chrome_js() -> &'static str {
+    include_str!("assets/chrome.js")
 }
 
-/// DOMPurify JS URL with content hash, e.g. `/b/static/purify-a1b2c3d4.js`
-#[cfg(feature = "block-llm")]
-pub fn purify_js_url() -> String {
-    url("purify.min.js")
-}
-
-/// LLM chat JS URL with content hash, e.g. `/b/static/llm-chat-a1b2c3d4.js`.
-/// Not minified — readability matters for a script that's debugged in
-/// Chrome devtools.
-#[cfg(feature = "block-llm")]
-pub fn llm_chat_js_url() -> String {
-    url("llm-chat.js")
-}
-
-/// Files-browser JS URL with content hash, e.g. `/b/static/files-browser-a1b2c3d4.js`.
-#[cfg(feature = "block-files")]
-pub fn files_browser_js_url() -> String {
-    url("files-browser.js")
-}
-
-/// Small inline JS for toast notifications (triggered by htmx HX-Trigger).
-pub fn toast_js() -> &'static str {
-    r#"
-document.body.addEventListener("showToast", function(e) {
-    var d = e.detail || {};
-    var c = document.getElementById("toast-container");
-    if (!c) return;
-    var t = document.createElement("div");
-    var kind = ["success", "error", "warning", "info"].indexOf(d.type) >= 0 ? d.type : "info";
-    t.className = "toast toast-" + kind;
-    var message = document.createElement("span");
-    message.textContent = String(d.message || "");
-    var dismiss = document.createElement("button");
-    dismiss.className = "toast-dismiss";
-    dismiss.type = "button";
-    dismiss.setAttribute("aria-label", "Dismiss");
-    dismiss.textContent = "×";
-    dismiss.addEventListener("click", function() { t.remove(); });
-    t.appendChild(message);
-    t.appendChild(dismiss);
-    c.appendChild(t);
-    setTimeout(function() { t.remove(); }, 4000);
-});
-"#
-}
-
-/// Vanilla JS for the command palette — open/close, fuzzy filter,
-/// keyboard navigation. Embedded as a string the same way `toast_js()`
-/// and `modal_js()` are.
-pub fn palette_js() -> &'static str {
-    r#"
-(function () {
-  if (window.__cmdkInit) return;
-  window.__cmdkInit = true;
-  const el = document.getElementById('cmdk');
-  if (!el) return;
-  const input = document.getElementById('cmdk-input');
-  const list = document.getElementById('cmdk-list');
-
-  const items = () => Array.from(list.querySelectorAll('.palette__item'));
-  let selected = 0;
-
-  function open() {
-    el.dataset.open = 'true';
-    el.setAttribute('aria-hidden', 'false');
-    input.value = '';
-    apply('');
-    requestAnimationFrame(() => input.focus());
-  }
-  function close() {
-    el.dataset.open = 'false';
-    el.setAttribute('aria-hidden', 'true');
-  }
-  function visibleItems() { return items().filter(i => !i.classList.contains('is-hidden')); }
-
-  function apply(query) {
-    const q = query.trim().toLowerCase();
-    items().forEach(i => {
-      const k = (i.dataset.keywords || '').toLowerCase();
-      const match = !q || k.includes(q);
-      i.classList.toggle('is-hidden', !match);
-      i.setAttribute('aria-selected', 'false');
-    });
-    const vis = visibleItems();
-    selected = 0;
-    if (vis[0]) vis[0].setAttribute('aria-selected', 'true');
-  }
-
-  function move(delta) {
-    const vis = visibleItems();
-    if (!vis.length) return;
-    vis[selected]?.setAttribute('aria-selected', 'false');
-    selected = (selected + delta + vis.length) % vis.length;
-    vis[selected].setAttribute('aria-selected', 'true');
-    vis[selected].scrollIntoView({ block: 'nearest' });
-  }
-
-  function activate() {
-    const vis = visibleItems();
-    const sel = vis[selected];
-    if (!sel?.dataset.href) return;
-    if (sel.dataset.external === 'true') {
-      window.open(sel.dataset.href, '_blank', 'noopener,noreferrer');
-    } else {
-      window.location.assign(sel.dataset.href);
-    }
-  }
-
-  // Hotkeys
-  document.addEventListener('keydown', (e) => {
-    const isMod = e.metaKey || e.ctrlKey;
-    if (isMod && e.key.toLowerCase() === 'k') { e.preventDefault(); open(); return; }
-    if (el.dataset.open !== 'true') return;
-    if (e.key === 'Escape') { e.preventDefault(); close(); }
-    else if (e.key === 'ArrowDown') { e.preventDefault(); move(1); }
-    else if (e.key === 'ArrowUp') { e.preventDefault(); move(-1); }
-    else if (e.key === 'Enter') { e.preventDefault(); activate(); }
-  });
-
-  // Click triggers
-  document.addEventListener('click', (e) => {
-    const t = e.target.closest('[data-action]');
-    if (!t) return;
-    if (t.dataset.action === 'palette-open') { e.preventDefault(); open(); }
-    if (t.dataset.action === 'palette-close') { e.preventDefault(); close(); }
-  });
-
-  // The shortcut hint defaults to the Mac glyph; swap to Ctrl elsewhere so
-  // the advertised key matches what the keydown handler above accepts.
-  if (!/Mac|iPhone|iPad|iPod/.test(navigator.platform || '')) {
-    document.querySelectorAll('.topbar__palette-cmd').forEach((n) => { n.textContent = 'Ctrl'; });
-    document.querySelectorAll('.shell__palette-icon').forEach((n) => { n.textContent = 'Ctrl K'; });
-  }
-
-  // Linked table rows (`.data-table__row--linked`) style as clickable; make
-  // the whole row actually navigate via its row-href anchor, unless the
-  // click landed on an interactive element of its own.
-  document.addEventListener('click', (e) => {
-    const row = e.target.closest('.data-table__row--linked');
-    if (!row || e.target.closest('a, button, input, select, label, textarea')) return;
-    const anchor = row.querySelector('.data-table__row-href a');
-    if (anchor) anchor.click();
-  });
-
-  // Item click → navigate
-  list.addEventListener('click', (e) => {
-    const item = e.target.closest('.palette__item');
-    if (!item?.dataset.href) return;
-    if (item.dataset.external === 'true') {
-      window.open(item.dataset.href, '_blank', 'noopener,noreferrer');
-    } else {
-      window.location.assign(item.dataset.href);
-    }
-  });
-
-  input.addEventListener('input', (e) => apply(e.target.value));
-
-  // Keyboard scrolling for the app shell. The document never scrolls (the
-  // .shell grid is 100vh; .shell__body is the real scroller), so with no
-  // focused element PageDown/PageUp/Space/Home/End/arrows would silently do
-  // nothing. Registered after the palette handler above, so an open palette
-  // (which preventDefaults its own keys) wins. Only fires when the event
-  // target is the page itself — typing in fields and focused widgets keep
-  // their native behavior.
-  document.addEventListener('keydown', (e) => {
-    if (e.defaultPrevented || e.metaKey || e.ctrlKey || e.altKey) return;
-    if (e.target !== document.body && e.target !== document.documentElement) return;
-    const scroller = document.querySelector('.shell__body');
-    if (!scroller) return;
-    const pageStep = scroller.clientHeight * 0.9;
-    const lineStep = 40;
-    let dy;
-    switch (e.key) {
-      case 'PageDown': dy = pageStep; break;
-      case 'PageUp': dy = -pageStep; break;
-      case ' ': dy = e.shiftKey ? -pageStep : pageStep; break;
-      case 'ArrowDown': dy = lineStep; break;
-      case 'ArrowUp': dy = -lineStep; break;
-      case 'Home': scroller.scrollTo({ top: 0 }); e.preventDefault(); return;
-      case 'End': scroller.scrollTo({ top: scroller.scrollHeight }); e.preventDefault(); return;
-      default: return;
-    }
-    scroller.scrollBy({ top: dy });
-    e.preventDefault();
-  });
-})();
-"#
-}
-
-/// Small inline JS for modal close (Escape key + overlay click).
-pub fn modal_js() -> &'static str {
-    r#"
-document.addEventListener("keydown", function(e) {
-    if (e.key === "Escape") {
-        var m = document.querySelector('.modal-overlay:not([hidden])');
-        if (m) m.setAttribute("hidden", "");
-    }
-});
-function openModal(id) {
-    var m = document.getElementById(id);
-    if (m) m.removeAttribute("hidden");
-}
-function closeModal(id) {
-    var m = document.getElementById(id);
-    if (m) m.setAttribute("hidden", "");
-}
-document.body.addEventListener("closeModal", function(e) {
-    var d = e.detail || {};
-    if (d.id) closeModal(d.id);
-});
-"#
-}
-
-/// Vanilla JS for the mobile sidebar drawer. Toggles `body[data-drawer-open]`
-/// from clicks on `[data-action="drawer-open"]` (the hamburger), the overlay
-/// (`[data-action="drawer-close"]`), Escape, or any sidebar nav-link click
-/// (so navigation auto-collapses the drawer).
-pub fn drawer_js() -> &'static str {
-    r#"
-(function () {
-  if (window.__drawerInit) return;
-  window.__drawerInit = true;
-  var body = document.body;
-  function open() { body.setAttribute('data-drawer-open', 'true'); }
-  function close() { body.removeAttribute('data-drawer-open'); }
-  document.addEventListener('click', function (e) {
-    var t = e.target;
-    if (!(t instanceof Element)) return;
-    var actEl = t.closest('[data-action]');
-    var action = actEl ? actEl.getAttribute('data-action') : null;
-    if (action === 'drawer-open') { open(); e.preventDefault(); return; }
-    if (action === 'drawer-close') { close(); e.preventDefault(); return; }
-    if (body.hasAttribute('data-drawer-open') && t.closest('.sidebar a')) {
-      close();
-    }
-  });
-  document.addEventListener('keydown', function (e) {
-    if (e.key === 'Escape' && body.hasAttribute('data-drawer-open')) {
-      close();
-    }
-  });
-})();
-"#
+/// Chrome JS URL with content hash, e.g. `/b/static/chrome-a1b2c3d4.js`.
+pub fn chrome_js_url() -> String {
+    url("chrome.js")
 }
 
 #[cfg(test)]
 mod tests {
+    #[cfg(feature = "embed-assets")]
     #[test]
     fn toast_messages_are_rendered_as_text_not_html() {
-        let js = super::toast_js();
+        let js = super::chrome_js();
         assert!(
             !js.contains("innerHTML"),
             "toast content must not use an HTML sink"
@@ -765,6 +522,7 @@ mod tests {
     }
 
     /// Relative luminance per WCAG 2.1.
+    #[cfg(feature = "embed-assets")]
     fn luminance(hex: &str) -> f64 {
         let h = hex.trim_start_matches('#');
         let ch = |i| {
@@ -778,6 +536,7 @@ mod tests {
         0.2126 * ch(0) + 0.7152 * ch(2) + 0.0722 * ch(4)
     }
 
+    #[cfg(feature = "embed-assets")]
     fn contrast(a: &str, b: &str) -> f64 {
         let (x, y) = (luminance(a), luminance(b));
         let (hi, lo) = if x > y { (x, y) } else { (y, x) };
@@ -896,6 +655,7 @@ mod tests {
     /// `{`/`}` characters in prose (several exist in this bundle, e.g.
     /// base.css's "`hidden` attribute" comment) would otherwise corrupt
     /// `css_leaf_blocks`'s brace-depth scan.
+    #[cfg(feature = "embed-assets")]
     fn strip_css_comments(s: &str) -> String {
         let mut without_comments = String::with_capacity(s.len());
         let mut rest = s;
@@ -916,6 +676,7 @@ mod tests {
     /// contains `{` after being popped off the brace stack is a container
     /// (e.g. the `@media` wrapper itself) and is skipped -- its children
     /// are captured on their own pop.
+    #[cfg(feature = "embed-assets")]
     fn css_leaf_blocks(s: &str) -> Vec<(String, String)> {
         let without_comments = strip_css_comments(s);
         let s = without_comments.as_str();
@@ -964,12 +725,14 @@ mod tests {
     // `black`/`transparent` -- to actual RGBA by walking `tokens.css`'s
     // live `:root` values, so the single test below computes real WCAG
     // contrast instead of matching names.
+    #[cfg(feature = "embed-assets")]
     type Rgba = (u8, u8, u8, u8);
 
     /// Parses the assembled bundle's `:root { ... }` custom-property
     /// declarations into a `name -> raw value` map, e.g. `"--primary-color"
     /// -> "#fd3534"`. `styles/tokens.css` is first in build.rs's
     /// `CSS_FILES` order and the only file with a `:root` block.
+    #[cfg(feature = "embed-assets")]
     fn parse_root_tokens(s: &str) -> std::collections::HashMap<String, String> {
         let without_comments = strip_css_comments(s);
         let s = without_comments.as_str();
@@ -1008,6 +771,7 @@ mod tests {
     /// var(--y))` fallback and a `color-mix(in srgb, c1 p1%, c2 p2%)`
     /// argument list can contain commas one level deeper than the ones
     /// that actually separate arguments.
+    #[cfg(feature = "embed-assets")]
     fn split_top_level(s: &str) -> Vec<&str> {
         let mut parts = Vec::new();
         let mut depth = 0i32;
@@ -1027,11 +791,13 @@ mod tests {
         parts
     }
 
+    #[cfg(feature = "embed-assets")]
     fn hex_byte(s: &str) -> Option<u8> {
         u8::from_str_radix(s, 16).ok()
     }
 
     /// Parses a `#rgb`/`#rgba`/`#rrggbb`/`#rrggbbaa` literal.
+    #[cfg(feature = "embed-assets")]
     fn parse_hex(h: &str) -> Option<Rgba> {
         let h = h.trim_start_matches('#');
         let double = |c: char| -> Option<u8> { hex_byte(&format!("{c}{c}")) };
@@ -1079,6 +845,7 @@ mod tests {
     /// this bundle today, checked by grep while writing this) -- callers
     /// treat `None` as "can't verify this rule" and skip it rather than
     /// assuming compliance.
+    #[cfg(feature = "embed-assets")]
     fn resolve_color(
         value: &str,
         tokens: &std::collections::HashMap<String, String>,
@@ -1158,6 +925,7 @@ mod tests {
     /// Alpha-composites `fg` over an opaque `base` -- e.g. a translucent
     /// tint like the old `--accent-info-bg`'s `#fd353419` over the page's
     /// white surface.
+    #[cfg(feature = "embed-assets")]
     fn composite_over(fg: Rgba, base: (u8, u8, u8)) -> (u8, u8, u8) {
         let (r, g, b, a) = fg;
         if a == 255 {
@@ -1171,6 +939,7 @@ mod tests {
         (mix(r, base.0), mix(g, base.1), mix(b, base.2))
     }
 
+    #[cfg(feature = "embed-assets")]
     fn hex_of(rgb: (u8, u8, u8)) -> String {
         format!("#{:02x}{:02x}{:02x}", rgb.0, rgb.1, rgb.2)
     }
@@ -1240,9 +1009,11 @@ mod tests {
         const CALLER_SUPPLIED: &[&str] = &[
             // ui/components/table.rs sets this per-column on the <th>.
             "--col-width",
-            // ui/components/chart.rs sets these per-datapoint: the sparkline's
-            // end-dot offset and each bar's height fraction.
+            // ui/components/chart.rs sets these per-datapoint: the line
+            // chart's endpoint-dot offset, each y-axis label's offset and
+            // each bar's height fraction.
             "--dot-y",
+            "--tick-y",
             "--size",
             // ui/components/chart.rs sets the series colour on the wrapper.
             "--chart-color",
@@ -1280,6 +1051,7 @@ mod tests {
 
     /// Selectors this contrast guard does not hold to the 4.5:1 text floor,
     /// each with its own reason -- not a silent pass.
+    #[cfg(feature = "embed-assets")]
     const CONTRAST_EXEMPT_SELECTORS: &[&str] = &[
         // `.db-table-group__icon` wraps `icons::package()`/`icons::database()`
         // (database.rs) -- an SVG icon, not text; `color` only feeds the
@@ -1303,6 +1075,7 @@ mod tests {
     /// genuinely checked instead of waved through -- the navy panels are the
     /// only place in the bundle where text sits on a non-white surface set by
     /// a parent.
+    #[cfg(feature = "embed-assets")]
     const ANCESTOR_BACKGROUNDS: &[(&str, &str)] = &[
         // `.sidebar`'s navy slab is painted by `.sidebar__nav` in
         // components/nav.css (`background: var(--bg-sidebar)`); every
@@ -1454,17 +1227,21 @@ mod tests {
         );
     }
 
+    #[cfg(feature = "embed-assets")]
     #[test]
-    fn palette_js_present_and_self_invoking() {
-        let js = super::palette_js();
+    fn chrome_js_carries_the_palette_section() {
+        let js = super::chrome_js();
         assert!(js.contains("cmdk"));
         assert!(js.contains("Meta+K") || js.contains("metaKey"));
-        assert!(js.starts_with("\n(function") || js.contains("(function "));
+        assert!(js.contains("(function "));
+        // Idempotent guard: the section must survive being evaluated twice.
+        assert!(js.contains("__cmdkInit"));
     }
 
+    #[cfg(feature = "embed-assets")]
     #[test]
-    fn drawer_js_handles_open_close_esc_and_navlink() {
-        let js = super::drawer_js();
+    fn chrome_js_drawer_section_handles_open_close_esc_and_navlink() {
+        let js = super::chrome_js();
         assert!(js.contains("'drawer-open'"));
         assert!(js.contains("'drawer-close'"));
         assert!(js.contains("'Escape'"));
@@ -1474,114 +1251,101 @@ mod tests {
         assert!(js.contains("__drawerInit"));
     }
 
+    /// The inverse of the pin PR #46 shipped. That one required `openModal`
+    /// and `closeModal` to be top-level declarations, because pages reached
+    /// them from `onclick` attribute strings and an IIFE would have made them
+    /// silently dead. Those attributes are `data-action="modal-open"` /
+    /// `"modal-close"` now, read by the delegated listener in the same
+    /// section, and the htmx response-header channel covers the rest — so the
+    /// helpers are internal, and re-exposing them would be a global with no
+    /// caller. This is the same coverage pointed the other way, not coverage
+    /// dropped: what it guards is that the modal section still handles every
+    /// way a modal is opened or closed.
+    #[cfg(feature = "embed-assets")]
     #[test]
-    #[cfg(all(feature = "block-llm", feature = "embed-assets"))]
-    fn llm_chat_js_is_self_invoking_and_exposes_init() {
-        let js = std::str::from_utf8(super::bytes("llm-chat.js").expect("llm-chat.js embedded"))
-            .unwrap();
-        assert!(js.contains("(function ()") || js.contains("(function()"));
-        assert!(js.contains("__impresspressLlmChatLoaded"));
-        assert!(js.contains("window.impresspressLlmChat = { init: init }"));
-        for sym in [
-            "handleChatSubmit",
-            "createNewThread",
-            "selectThread",
-            "onModelChange",
-            "unloadLocalModel",
-        ] {
+    fn chrome_js_owns_the_modal_verbs_without_exposing_globals() {
+        let js = super::chrome_js();
+        assert!(
+            js.contains("if (window.__modalInit) return;"),
+            "the modal section must be a guarded IIFE"
+        );
+        // Matched on the name alone, at column zero, rather than on one exact
+        // spelling: `function openModal (id) {` and `function openModal(id){`
+        // are the same global, and pinning a single spelling would let a
+        // re-globalised helper back in on a whitespace change. The assignment
+        // forms are covered too, because `window.openModal = …` is just as
+        // global as a declaration.
+        for name in ["openModal", "closeModal"] {
+            let declaration = format!("function {name}");
             assert!(
-                js.contains(&format!("window.{sym} = {sym}")),
-                "missing global re-export for {sym}"
+                !js.lines().any(|l| l.starts_with(&declaration)),
+                "{name} must not be a top-level (global) function declaration"
+            );
+            let assignment = format!("window.{name}");
+            assert!(
+                !js.contains(&assignment),
+                "{name} must not be published on `window` either"
+            );
+        }
+        for verb in [
+            "\"modal-open\"",
+            "\"modal-close\"",
+            "\"reveal-toggle\"",
+            "\"copy-text\"",
+            "\"mirror-value\"",
+        ] {
+            assert!(js.contains(verb), "chrome must handle the {verb} verb");
+        }
+        for hook in [
+            ".modal-overlay[data-modal-dismiss]",
+            "data-stop-propagation",
+            "data-submit-on-enter",
+        ] {
+            assert!(js.contains(hook), "chrome must handle {hook}");
+        }
+        // Both directions of the htmx response-header channel: `closeModal`
+        // was already there, `openModal` replaced the four auto-show scripts.
+        for event in ["\"closeModal\"", "\"openModal\""] {
+            assert!(
+                js.contains(&format!("document.body.addEventListener({event}")),
+                "chrome must listen for the {event} htmx trigger"
             );
         }
     }
 
+    /// One asset, one hash, one `<script src>`: the four raw-string
+    /// accessors this replaced are gone, and nothing may reintroduce an
+    /// inline chrome script under a new name.
     #[test]
-    #[cfg(feature = "block-llm")]
-    fn purify_js_url_has_content_hash() {
-        let url = super::purify_js_url();
-        assert!(url.starts_with("/b/static/purify-"));
-        // Source file is `purify.min.js`; the manifest's `hashed_name` splits
-        // on the *first* dot, so the hashed filename keeps the full
-        // `.min.js` extension (same shape as `marked-{hash}.min.js`) rather
-        // than the pre-manifest ad-hoc `purify-{hash}.js`.
-        assert!(url.ends_with(".min.js"));
+    fn chrome_js_url_has_content_hash() {
+        let url = super::chrome_js_url();
+        assert!(url.starts_with("/b/static/chrome-"), "{url}");
+        assert!(url.ends_with(".js"));
         let hash = url
-            .trim_start_matches("/b/static/purify-")
-            .trim_end_matches(".min.js");
+            .trim_start_matches("/b/static/chrome-")
+            .trim_end_matches(".js");
         assert_eq!(hash.len(), 8, "expected 8-char short hash, got: {hash}");
         assert!(hash.chars().all(|c| c.is_ascii_hexdigit()));
     }
 
+    /// The shared asset module must not know any block's assets. `bytes()`
+    /// resolves a block-owned key only by falling through to the block that
+    /// declares it (`blocks::static_asset_bytes`), which is what removed the
+    /// four `#[cfg(feature = "block-…")]` arms this module used to carry.
+    #[cfg(feature = "embed-assets")]
     #[test]
-    #[cfg(all(feature = "block-llm", feature = "embed-assets"))]
-    fn purify_js_is_dompurify_umd_build() {
-        let js =
-            std::str::from_utf8(super::bytes("purify.min.js").expect("purify.min.js embedded"))
-                .unwrap();
-        assert!(
-            js.contains("DOMPurify"),
-            "vendored asset should be DOMPurify"
-        );
-        // UMD build: `(e=...globalThis...||self).DOMPurify=t()` — assigns
-        // onto the global object (`window` in a browser) when there's no
-        // CommonJS/AMD module system, which is the load path llm-chat.js
-        // relies on for the bare `DOMPurify` global.
-        assert!(
-            js.contains(").DOMPurify=t()"),
-            "expected UMD build to assign a global .DOMPurify"
-        );
-    }
-
-    #[test]
-    #[cfg(all(feature = "block-files", feature = "embed-assets"))]
-    fn files_browser_js_exposes_init_and_handles_drag_drop() {
-        let js = std::str::from_utf8(
-            super::bytes("files-browser.js").expect("files-browser.js embedded"),
-        )
-        .unwrap();
-        assert!(
-            js.contains("impresspressFilesBrowser"),
-            "module namespace missing"
-        );
-        assert!(js.contains("dragenter"), "drag handler missing");
-        assert!(js.contains("dragover"), "drag handler missing");
-        assert!(
-            js.contains("'drop'") || js.contains("\"drop\""),
-            "drop handler missing"
-        );
-        assert!(js.contains("data-bulk-toggle"), "bulk-select missing");
-        assert!(js.contains("data-action-menu"), "kebab handler missing");
-        assert!(js.contains("dialog"), "modal uses <dialog>");
-    }
-
-    #[test]
-    #[cfg(feature = "block-files")]
-    fn files_browser_js_url_has_content_hash() {
-        let url = super::files_browser_js_url();
-        assert!(url.starts_with("/b/static/files-browser-"));
-        assert!(url.ends_with(".js"));
-        let hash = url
-            .trim_start_matches("/b/static/files-browser-")
-            .trim_end_matches(".js");
-        assert_eq!(hash.len(), 8);
-    }
-
-    #[test]
-    #[cfg(feature = "block-llm")]
-    fn llm_chat_js_url_has_content_hash() {
-        let url = super::llm_chat_js_url();
-        assert!(url.starts_with("/b/static/llm-chat-"));
-        assert!(url.ends_with(".js"));
-        assert!(
-            !url.ends_with(".min.js"),
-            "we deliberately ship un-minified"
-        );
-        let mid = url
-            .trim_start_matches("/b/static/llm-chat-")
-            .trim_end_matches(".js");
-        assert_eq!(mid.len(), 8, "expected 8-char short hash, got: {mid}");
-        assert!(mid.chars().all(|c| c.is_ascii_hexdigit()));
+    fn the_shared_half_owns_no_block_asset() {
+        for logical in [
+            "marked.min.js",
+            "purify.min.js",
+            "llm-chat.js",
+            "files-browser.js",
+        ] {
+            assert!(
+                super::shared_bytes(logical).is_none(),
+                "{logical} is a block's asset; the shared module must not embed it"
+            );
+        }
     }
 
     #[test]
@@ -1679,10 +1443,11 @@ mod tests {
     #[cfg(feature = "embed-assets")]
     #[test]
     fn embedded_bytes_agree_with_the_manifest() {
-        // The manifest always lists all 11 assets (build.rs panics on a missing
-        // file), but `bytes()` is cfg-gated per asset — under a lean build
-        // `marked.min.js` and friends are simply not compiled in. So: every
-        // asset that IS compiled in must match its manifest length...
+        // The manifest always lists every asset file on disk (build.rs panics
+        // on a missing one), but the bytes behind a block-owned key are only
+        // compiled in when that block is — under a lean build `marked.min.js`
+        // and friends are simply absent. So: every asset that IS compiled in
+        // must match its manifest length...
         for e in super::ASSETS {
             if let Some(b) = super::bytes(e.logical) {
                 assert_eq!(
@@ -1697,6 +1462,7 @@ mod tests {
         for logical in [
             "app.css",
             "htmx.min.js",
+            "chrome.js",
             "webmcp.js",
             "favicon.ico",
             "itim-latin.woff2",
@@ -1730,7 +1496,6 @@ mod tests {
     #[cfg(not(feature = "embed-assets"))]
     #[test]
     fn no_embed_build_has_no_asset_bytes_only_the_manifest() {
-        assert!(!cfg!(feature = "embed-assets"));
         assert!(
             !super::ASSETS.is_empty(),
             "build.rs still populates the manifest without embed-assets"

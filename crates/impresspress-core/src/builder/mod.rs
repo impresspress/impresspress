@@ -9,8 +9,10 @@
 //!   the fluent config/setter methods.
 //! - [`registration`] — the `build()` block-registration method (a second
 //!   `impl ImpresspressBuilder` block).
-//! - [`boot`] — the post-build lifecycle: [`boot`], [`post_start`],
-//!   [`BootHooks`], and the native-embedding `register_vector_block` helper.
+//! - [`boot`] — the one post-build lifecycle: [`boot`], [`InitPolicy`],
+//!   [`GrantSource`], [`BootHooks`], and the native-embedding
+//!   `register_vector_block` helper.
+//! - [`config`] — [`RuntimeConfig`], the one owner of both config surfaces.
 
 use std::{collections::HashMap, sync::Arc};
 
@@ -25,16 +27,38 @@ use wafer_run::Block;
 use crate::{features::BlockSettings, ExtraRoute, RouteAccess};
 
 mod boot;
+mod config;
 mod prepared;
 mod registration;
 
-pub use boot::{boot, post_start, strict_init_all_blocks, BootHooks};
+pub use boot::{
+    boot, BlockInitOutcome, BootHooks, BootReport, GrantSource, InitPolicy, StepOutcome,
+    DEPLOY_RESPONSE_SCHEMA_VERSION, PREPARE_RUNTIME_PLAN_KEY,
+};
+pub use config::{fill_config_service, RuntimeConfig, ServiceOnlyKey};
 pub use prepared::PreparedPlanExporter;
+/// Re-exported so `impresspress-cloudflare`'s wasm test lane can assert what
+/// this crate's own test code cannot: that a runtime built for wasm32 really
+/// does carry all six middleware blocks. See
+/// [`registration::register_middleware_blocks`].
+#[cfg(feature = "wasm")]
+pub use registration::register_discovered_blocks;
+#[cfg(all(test, feature = "block-fastembed"))]
+pub(crate) use registration::required_model_cache_dir;
+/// The alias list the builder installs, for `test_support::TestContext` to
+/// resolve calls through.
+#[cfg(any(test, feature = "test-support"))]
+pub(crate) use registration::{granted_llm_router, SERVICE_ALIASES};
+pub use registration::{register_middleware_blocks, MIDDLEWARE_BLOCKS};
 
 pub struct ImpresspressBuilder {
     database: Option<Arc<dyn DatabaseService>>,
     storage: Option<Arc<dyn StorageService>>,
     config: Option<Arc<dyn ConfigService>>,
+    /// The synchronous `ctx.config_get` surface, installed on the `Wafer` at
+    /// the end of `build()`. Set together with `config` by
+    /// [`RuntimeConfig::install`] — never separately.
+    config_snapshot: HashMap<String, String>,
     crypto: Option<Arc<dyn CryptoService>>,
     network: Option<Arc<dyn NetworkService>>,
     logger: Option<Arc<dyn LoggerService>>,
@@ -82,11 +106,19 @@ pub struct ImpresspressBuilder {
     /// (rather than feature-gated) so platforms can always pass it; the
     /// field is simply ignored when the feature is off.
     sqlite_db_path: Option<String>,
-    /// Browser-side `VectorService` + `EmbeddingService`. When both are
-    /// `Some`, `build()` registers `wafer-run/vector` (with the pair) and
-    /// `impresspress/transformers-embed` (with the embedding service). The
-    /// native `register_vector_block` path is gated behind the
-    /// `native-embedding` feature and remains unaffected.
+    /// Directory the native ONNX embedding model's weights are cached in
+    /// (downloaded there on first use).
+    ///
+    /// Only used by the `block-fastembed` feature (`impresspress/fastembed`,
+    /// which `native-embedding` implies). Kept as `Option` (rather than
+    /// feature-gated) so platforms can always pass it; a build with the
+    /// feature on and no directory is refused.
+    model_cache_dir: Option<std::path::PathBuf>,
+    /// Browser-side `VectorService` and `EmbeddingService`, each registered on
+    /// its own: `build()` registers `wafer-run/vector` over the vector
+    /// service and `impresspress/transformers-embed` over the embedding
+    /// service. The native `register_vector_block` path is gated behind the
+    /// `native-embedding` feature.
     extra_vector_service: Option<Arc<dyn wafer_core::interfaces::vector::service::VectorService>>,
     extra_embedding_service:
         Option<Arc<dyn wafer_core::interfaces::vector::service::EmbeddingService>>,
@@ -111,6 +143,7 @@ impl ImpresspressBuilder {
             database: None,
             storage: None,
             config: None,
+            config_snapshot: HashMap::new(),
             crypto: None,
             network: None,
             logger: None,
@@ -127,6 +160,7 @@ impl ImpresspressBuilder {
             extra_image_services: Vec::new(),
             extra_routes: Vec::new(),
             sqlite_db_path: None,
+            model_cache_dir: None,
             extra_vector_service: None,
             extra_embedding_service: None,
             config_source: None,
@@ -143,8 +177,16 @@ impl ImpresspressBuilder {
         self
     }
 
-    pub fn config(mut self, svc: Arc<dyn ConfigService>) -> Self {
+    /// Both config surfaces at once. Private on purpose: the only way in is
+    /// [`RuntimeConfig::install`], which cannot hand over one surface without
+    /// the other.
+    fn with_config_surfaces(
+        mut self,
+        svc: Arc<dyn ConfigService>,
+        snapshot: HashMap<String, String>,
+    ) -> Self {
         self.config = Some(svc);
+        self.config_snapshot = snapshot;
         self
     }
 
@@ -184,9 +226,10 @@ impl ImpresspressBuilder {
     /// Use this when block_settings can only be loaded *after* the wafer is
     /// built and `init_block(admin)` has created the backing table. Writes
     /// through the handle are visible to the router's `FeatureConfig`
-    /// (which holds the same `Arc<RwLock<BlockSettings>>`), so a follow-up
-    /// `init_all_blocks()` sees enablement state that matches the loaded
-    /// rows. The handle remains valid for the lifetime of the wafer.
+    /// (which holds the same `Arc<RwLock<BlockSettings>>`), so the blocks
+    /// [`boot`] initializes after the seed hook see enablement state that
+    /// matches the loaded rows. The handle remains valid for the lifetime of
+    /// the wafer.
     pub fn block_settings_handle(&self) -> Arc<std::sync::RwLock<BlockSettings>> {
         self.block_settings.clone()
     }
@@ -245,11 +288,9 @@ impl ImpresspressBuilder {
     }
 
     /// Inject a browser-side `VectorService` (e.g. `BrowserVectorService` from
-    /// `impresspress-browser`). When both `vector_service` and `embedding_service`
-    /// are provided, `build()` registers `wafer-run/vector` with the pair and
-    /// `impresspress/transformers-embed` with the embedding half. Mutually
-    /// exclusive with the `native-embedding` feature path — both produce
-    /// `wafer-run/vector` and would conflict on register.
+    /// `impresspress-browser`). `build()` registers `wafer-run/vector` over it.
+    /// Mutually exclusive with the `native-embedding` feature path — both
+    /// produce `wafer-run/vector`, and `build()` fails on the second register.
     pub fn vector_service(
         mut self,
         svc: Arc<dyn wafer_core::interfaces::vector::service::VectorService>,
@@ -259,7 +300,10 @@ impl ImpresspressBuilder {
     }
 
     /// Inject a browser-side `EmbeddingService` (e.g. `BrowserEmbeddingService`
-    /// from `impresspress-browser`). See `vector_service` for full semantics.
+    /// from `impresspress-browser`). `build()` registers
+    /// `impresspress/transformers-embed` over it. Refused in a build with the
+    /// `block-fastembed` feature, whose `impresspress/fastembed` already serves
+    /// `embedding@v1`.
     pub fn embedding_service(
         mut self,
         svc: Arc<dyn wafer_core::interfaces::vector::service::EmbeddingService>,
@@ -313,8 +357,10 @@ impl ImpresspressBuilder {
     ///
     /// `access` declares the auth tier:
     /// - [`RouteAccess::Public`] — no auth check.
-    /// - [`RouteAccess::Authenticated`] — rejects empty user_id with 403.
-    /// - [`RouteAccess::Admin`] — requires the `admin` role or 403.
+    /// - [`RouteAccess::Authenticated`] — a request with no identity is sent
+    ///   to login (a browser page) or refused `401` (an API call).
+    /// - [`RouteAccess::Admin`] — as `Authenticated`, and an identity without
+    ///   the `admin` role is refused `403`.
     pub fn add_route(
         mut self,
         prefix: impl Into<String>,
@@ -357,6 +403,18 @@ impl ImpresspressBuilder {
     /// `build()` call will return an error.
     pub fn sqlite_db_path(mut self, path: impl Into<String>) -> Self {
         self.sqlite_db_path = Some(path.into());
+        self
+    }
+
+    /// Set the directory the native ONNX embedding model is cached in.
+    ///
+    /// Consumed by the `block-fastembed` feature (which `native-embedding`
+    /// implies), whose `FastembedService` downloads the model there on first
+    /// use. Without it, a build with the feature on returns an error: the
+    /// directory is the embedder's to choose, and `wafer-block-fastembed`
+    /// reads none of its own.
+    pub fn model_cache_dir(mut self, dir: impl Into<std::path::PathBuf>) -> Self {
+        self.model_cache_dir = Some(dir.into());
         self
     }
 }

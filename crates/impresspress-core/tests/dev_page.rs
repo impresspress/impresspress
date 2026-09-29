@@ -6,10 +6,13 @@
 #![cfg(feature = "block-dev")]
 
 use impresspress_core::{
-    blocks::dev::{assets, test_support::FakeControl, validation::MAX_ARTIFACT_BYTES},
+    blocks::dev::{
+        assets,
+        test_support::{dev_with_accounts, signed_in_as, FakeControl},
+        validation::MAX_ARTIFACT_BYTES,
+    },
     test_support::{
-        admin_msg, anon_msg, auth_msg, output_html, output_http_header, output_http_status,
-        TestContext,
+        admin_msg, anon_msg, output_html, output_http_header, output_http_status, TestContext,
     },
 };
 use wafer_run::Message;
@@ -36,14 +39,19 @@ fn navigation(mut msg: Message) -> Message {
 
 #[tokio::test]
 async fn dev_page_is_admin_only_cross_origin_isolated_and_uncached() {
-    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    // A browser navigation carries the session cookie, so every request here
+    // presents one, and the router resolves it the way it resolves a
+    // visitor's.
+    let ctx = dev_with_accounts(FakeControl::new()).await;
+    let member = signed_in_as(&ctx, "user").await;
+    let operator = signed_in_as(&ctx, "admin").await;
 
     // Anonymous navigation → the login page, not the workspace. The router
     // is the gate (the page route is declared `Admin` like every other
     // `/b/dev` route), so this is the same 302 any admin page answers.
     assert_eq!(
         output_http_status(
-            ctx.dispatch(navigation(anon_msg("retrieve", "/b/dev")))
+            ctx.request(navigation(anon_msg("retrieve", "/b/dev")))
                 .await
         )
         .await,
@@ -52,7 +60,7 @@ async fn dev_page_is_admin_only_cross_origin_isolated_and_uncached() {
     // Signed in but not an admin is a genuine refusal, not a login problem.
     assert_eq!(
         output_http_status(
-            ctx.dispatch(navigation(auth_msg("retrieve", "/b/dev", "u1")))
+            ctx.request(navigation(member.cookie(anon_msg("retrieve", "/b/dev"))))
                 .await
         )
         .await,
@@ -67,15 +75,23 @@ async fn dev_page_is_admin_only_cross_origin_isolated_and_uncached() {
         ("cache-control", "no-store"),
     ] {
         assert_eq!(
-            output_http_header(ctx.dispatch(admin_msg("retrieve", "/b/dev")).await, header)
-                .await
-                .as_deref(),
+            output_http_header(
+                ctx.request(navigation(operator.cookie(anon_msg("retrieve", "/b/dev"))))
+                    .await,
+                header
+            )
+            .await
+            .as_deref(),
             Some(expected),
             "{header}"
         );
     }
 
-    let html = output_html(ctx.dispatch(admin_msg("retrieve", "/b/dev")).await).await;
+    let html = output_html(
+        ctx.request(navigation(operator.cookie(anon_msg("retrieve", "/b/dev"))))
+            .await,
+    )
+    .await;
     for id in [
         "dev-guide",
         "dev-files",
@@ -122,7 +138,7 @@ async fn other_pages_are_not_cross_origin_isolated() {
     let ctx = TestContext::with_dev(FakeControl::new()).await;
     assert_eq!(
         output_http_header(
-            ctx.dispatch(admin_msg("retrieve", "/b/dev/api/status"))
+            ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/status"))
                 .await,
             "cross-origin-opener-policy"
         )
@@ -137,7 +153,8 @@ async fn other_pages_are_not_cross_origin_isolated() {
 
 #[tokio::test]
 async fn the_page_assets_are_served_admin_only_and_revalidated() {
-    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    let ctx = dev_with_accounts(FakeControl::new()).await;
+    let operator = signed_in_as(&ctx, "admin").await;
 
     for (path, content_type) in [
         (
@@ -151,18 +168,23 @@ async fn the_page_assets_are_served_admin_only_and_revalidated() {
         ),
     ] {
         assert_eq!(
-            output_http_status(ctx.dispatch(anon_msg("retrieve", path)).await).await,
-            403,
+            output_http_status(ctx.request(anon_msg("retrieve", path)).await).await,
+            401,
             "{path} must be admin-only like the page it belongs to"
         );
         assert_eq!(
-            output_http_status(ctx.dispatch(admin_msg("retrieve", path)).await).await,
+            output_http_status(
+                ctx.request(operator.cookie(anon_msg("retrieve", path)))
+                    .await
+            )
+            .await,
             200,
             "{path}"
         );
         assert_eq!(
             output_http_header(
-                ctx.dispatch(admin_msg("retrieve", path)).await,
+                ctx.request(operator.cookie(anon_msg("retrieve", path)))
+                    .await,
                 "content-type"
             )
             .await
@@ -176,7 +198,8 @@ async fn the_page_assets_are_served_admin_only_and_revalidated() {
         // rebuild the way the hashed `/b/static/*` bundle is.
         assert_eq!(
             output_http_header(
-                ctx.dispatch(admin_msg("retrieve", path)).await,
+                ctx.request(operator.cookie(anon_msg("retrieve", path)))
+                    .await,
                 "cache-control"
             )
             .await
@@ -188,7 +211,7 @@ async fn the_page_assets_are_served_admin_only_and_revalidated() {
 
     assert_eq!(
         output_html(
-            ctx.dispatch(admin_msg("retrieve", "/b/dev/static/dev.js"))
+            ctx.request(operator.cookie(anon_msg("retrieve", "/b/dev/static/dev.js")))
                 .await
         )
         .await,
@@ -196,7 +219,7 @@ async fn the_page_assets_are_served_admin_only_and_revalidated() {
     );
     assert_eq!(
         output_html(
-            ctx.dispatch(admin_msg("retrieve", "/b/dev/static/dev.css"))
+            ctx.request(operator.cookie(anon_msg("retrieve", "/b/dev/static/dev.css")))
                 .await
         )
         .await,
@@ -204,7 +227,7 @@ async fn the_page_assets_are_served_admin_only_and_revalidated() {
     );
     assert_eq!(
         output_html(
-            ctx.dispatch(admin_msg("retrieve", "/b/dev/static/compiler-adapter.js"))
+            ctx.request(operator.cookie(anon_msg("retrieve", "/b/dev/static/compiler-adapter.js")))
                 .await
         )
         .await,
@@ -225,9 +248,12 @@ async fn the_page_assets_answer_conditional_get() {
     ] {
         let etag = format!("\"{hash}\"");
         assert_eq!(
-            output_http_header(ctx.dispatch(admin_msg("retrieve", path)).await, "etag")
-                .await
-                .as_deref(),
+            output_http_header(
+                ctx.dispatch_resolved(admin_msg("retrieve", path)).await,
+                "etag"
+            )
+            .await
+            .as_deref(),
             Some(etag.as_str()),
             "{path}"
         );
@@ -235,14 +261,14 @@ async fn the_page_assets_answer_conditional_get() {
         let mut fresh = admin_msg("retrieve", path);
         fresh.set_meta("http.header.if-none-match", &etag);
         assert_eq!(
-            output_http_status(ctx.dispatch(fresh).await).await,
+            output_http_status(ctx.dispatch_resolved(fresh).await).await,
             304,
             "{path}: a matching If-None-Match must produce a 304"
         );
         let mut fresh_body = admin_msg("retrieve", path);
         fresh_body.set_meta("http.header.if-none-match", &etag);
         assert_eq!(
-            output_html(ctx.dispatch(fresh_body).await).await,
+            output_html(ctx.dispatch_resolved(fresh_body).await).await,
             "",
             "{path}: a 304 must carry no body"
         );
@@ -250,7 +276,7 @@ async fn the_page_assets_answer_conditional_get() {
         let mut stale = admin_msg("retrieve", path);
         stale.set_meta("http.header.if-none-match", "\"not-the-current-hash\"");
         assert_eq!(
-            output_http_status(ctx.dispatch(stale).await).await,
+            output_http_status(ctx.dispatch_resolved(stale).await).await,
             200,
             "{path}: a mismatching If-None-Match must fall through to the full response"
         );

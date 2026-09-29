@@ -3,19 +3,33 @@
 //! per-path checks that had drifted (three paths hardcoded `len() < 8` and
 //! skipped the common-password blocklist — audit F21).
 
-use wafer_run::context::Context;
+use wafer_run::{context::Context, OutputStream};
 
-use crate::blocks::{auth::helpers::password_min_length, errors::ErrorCode};
+use crate::blocks::{auth::helpers::password_min_length, crud, errors::ErrorCode};
+
+/// A new password the account policy refuses: the error code and message a
+/// handler surfaces.
+pub(crate) type PasswordRefusal = (ErrorCode, String);
 
 /// Validate a caller-supplied new password against the account policy:
 /// configurable minimum length, a 1024-char maximum, no control characters,
-/// and a small common-password blocklist. Returns the error code + message a
-/// handler should surface, or `Ok(())` when the password is acceptable.
+/// and a small common-password blocklist.
+///
+/// The outer `Err` is the response for a policy that could not be read (the
+/// configured minimum length); the inner one is the policy's refusal, which
+/// each handler answers in its own shape.
 pub(crate) async fn validate_new_password(
     ctx: &dyn Context,
     pw: &str,
-) -> Result<(), (ErrorCode, String)> {
-    let min_len = password_min_length(ctx).await;
+) -> Result<Result<(), PasswordRefusal>, OutputStream> {
+    let min_len = password_min_length(ctx)
+        .await
+        .map_err(|e| crud::db_error_internal(e, "Could not read the password policy"))?;
+    Ok(check_new_password(pw, min_len))
+}
+
+/// [`validate_new_password`] once the minimum length is known.
+fn check_new_password(pw: &str, min_len: usize) -> Result<(), PasswordRefusal> {
     if pw.len() < min_len {
         return Err((
             ErrorCode::PasswordTooShort,
@@ -89,29 +103,32 @@ mod tests {
     use super::validate_new_password;
     use crate::{blocks::errors::ErrorCode, test_support::TestContext};
 
+    async fn check(ctx: &TestContext, pw: &str) -> Result<(), super::PasswordRefusal> {
+        match validate_new_password(ctx, pw).await {
+            Ok(verdict) => verdict,
+            Err(_) => panic!("the password policy must be readable"),
+        }
+    }
+
     #[tokio::test]
     async fn rejects_short_common_and_control_but_accepts_strong() {
-        let ctx = TestContext::with_auth().await; // password_min_length defaults to 8
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID); // password_min_length defaults to 8
 
         // Too short.
-        let e = validate_new_password(&ctx, "short").await.unwrap_err();
+        let e = check(&ctx, "short").await.unwrap_err();
         assert_eq!(e.0, ErrorCode::PasswordTooShort);
 
         // Common password (in the blocklist) even though length is fine.
-        let e = validate_new_password(&ctx, "password").await.unwrap_err();
+        let e = check(&ctx, "password").await.unwrap_err();
         assert_eq!(e.0, ErrorCode::InvalidInput);
 
         // Control character.
-        let e = validate_new_password(&ctx, "abcdefg\u{0007}h")
-            .await
-            .unwrap_err();
+        let e = check(&ctx, "abcdefg\u{0007}h").await.unwrap_err();
         assert_eq!(e.0, ErrorCode::InvalidInput);
 
         // Strong, uncommon passphrase → Ok.
-        assert!(
-            validate_new_password(&ctx, "correct-horse-battery-staple-9")
-                .await
-                .is_ok()
-        );
+        assert!(check(&ctx, "correct-horse-battery-staple-9").await.is_ok());
     }
 }

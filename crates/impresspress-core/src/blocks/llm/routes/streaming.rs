@@ -4,6 +4,15 @@
 //! the same terminal frames ([`SSE_DONE_FRAME`] / [`SSE_ERROR_FRAME`]) via
 //! the shared [`sse_json_frame`] encoder, so the wire format can't drift
 //! between them.
+//!
+//! Every SSE response ends in one of those two terminal frames followed by an
+//! explicit `Complete` ([`finish_sse`]). The error frame is the in-band
+//! failure signal, and a body that ends in it is whole: by the time it is
+//! sent the status line and every earlier frame are on the wire on a
+//! streaming transport, and an `Error` terminal would only abort that body,
+//! or turn it into a 500 on a buffering one, discarding the frame that says
+//! what happened. The one path without a terminal is a consumer that has
+//! already gone away, where there is no one left to send one to.
 
 use std::sync::Arc;
 
@@ -17,7 +26,7 @@ use wafer_run::{
 };
 
 use super::chat::MAX_BUFFERED_RESPONSE_BYTES;
-use crate::blocks::llm::messages_create;
+use crate::blocks::{llm::messages_create, messages::contracts::EntryRole};
 
 /// Terminal SSE frame for natural end-of-stream, letting clients distinguish
 /// it from a transport-level disconnect.
@@ -43,6 +52,16 @@ fn sse_json_frame<T: serde::Serialize>(item: &T) -> Option<Vec<u8>> {
     Some(frame)
 }
 
+/// End an SSE response: send `frame` (one of [`SSE_DONE_FRAME`] /
+/// [`SSE_ERROR_FRAME`]) and then the `Complete` terminal. A frame the
+/// consumer is no longer there to receive ends the producer without a
+/// terminal; the dropped sink then closes the stream as an error nobody reads.
+async fn finish_sse(sink: OutputSink, frame: &[u8]) {
+    if sink.send_chunk(frame.to_vec()).await.is_ok() {
+        let _ = sink.complete(Vec::new()).await;
+    }
+}
+
 /// Send the `text/event-stream` content-type as a mid-stream meta event so
 /// the HTTP listener writes the SSE header before the first `data:` frame.
 /// A send failure only means the consumer already dropped the stream; the
@@ -63,12 +82,20 @@ async fn send_sse_content_type(sink: &OutputSink) {
 /// client that refetches history on `[DONE]` sees the new message).
 ///
 /// Accumulation mirrors `handle_chat`: text deltas are concatenated up to
-/// [`MAX_BUFFERED_RESPONSE_BYTES`] (an overflowing delta stops accumulation
-/// with a warning at end-of-stream, while frames keep flowing to the
-/// client), and tool-call/empty deltas are forwarded but not accumulated. A
-/// service error or encode failure terminates the stream with an error frame
-/// and skips persistence — the same outcome as `handle_chat`, which returns
-/// a 500 without persisting when the stream errors.
+/// [`MAX_BUFFERED_RESPONSE_BYTES`] (the first overflowing delta ends
+/// accumulation for the rest of the stream, while frames keep flowing to the
+/// client), so what is stored is a prefix of the answer rather than one with
+/// a hole in it; tool-call/empty deltas are forwarded but not accumulated.
+///
+/// Reporting does not mirror it. `handle_chat` returns `truncated` because
+/// the body it returns *is* the capped text; here the client has already
+/// received every frame, so its copy is complete and there is nothing to
+/// flag on the wire — only the stored copy is shorter, which is logged at
+/// end-of-stream.
+///
+/// A service error or encode failure terminates the stream with an error
+/// frame and skips persistence — the same outcome as `handle_chat`, which
+/// returns a 500 without persisting when the stream errors.
 ///
 /// Generic over the chunk stream (rather than taking
 /// [`NativeTypedFrameStream`]`<ChatChunk>` directly, whose constructor is
@@ -95,21 +122,24 @@ where
         let mut truncated = false;
         while let Some(item) = stream.next().await {
             let Ok(chunk) = item else {
-                let _ = sink.send_chunk(SSE_ERROR_FRAME.to_vec()).await;
+                finish_sse(sink, SSE_ERROR_FRAME).await;
                 return;
             };
             if let ChunkDelta::Text(s) = &chunk.delta {
-                if content.len() + s.len() > MAX_BUFFERED_RESPONSE_BYTES {
-                    // Stop accumulating (same skip-the-delta semantics as
-                    // `handle_chat`) but keep forwarding frames — the client
-                    // still receives the full stream.
+                if truncated || content.len() + s.len() > MAX_BUFFERED_RESPONSE_BYTES {
+                    // Stop accumulating for the rest of the stream (same
+                    // stop-for-good semantics as `handle_chat`) but keep
+                    // forwarding frames — the client still receives the full
+                    // stream. Accepting a later delta that happens to fit
+                    // would store the end of the answer joined to its
+                    // beginning with the middle missing.
                     truncated = true;
                 } else {
                     content.push_str(s);
                 }
             }
             let Some(frame) = sse_json_frame(&chunk) else {
-                let _ = sink.send_chunk(SSE_ERROR_FRAME.to_vec()).await;
+                finish_sse(sink, SSE_ERROR_FRAME).await;
                 return;
             };
             if sink.send_chunk(frame).await.is_err() {
@@ -125,12 +155,35 @@ where
 
         // Natural end-of-stream: persist the assistant turn before
         // signalling `[DONE]`, so a client that refetches history on
-        // `[DONE]` already sees the new message. Persistence failure is
-        // non-fatal here, exactly as in `handle_chat` (`messages_create`
-        // logs and returns `None`).
-        let _ = messages_create(ctx.as_ref(), &msg, &thread_id, "assistant", &content).await;
+        // `[DONE]` already sees the new message.
+        //
+        // Which is exactly why a failed write cannot still send `[DONE]`: the
+        // refetch it triggers would replace a complete answer on screen with
+        // a conversation that never contained it. `handle_chat` answers the
+        // same failure with a status, but by this point the status line and
+        // every content frame are already on the wire, so the terminal frame
+        // is the only channel left — the same `event: error` a mid-stream
+        // service failure emits.
+        if let Err(error) = messages_create(
+            ctx.as_ref(),
+            &msg,
+            &thread_id,
+            EntryRole::Assistant,
+            &content,
+        )
+        .await
+        {
+            tracing::error!(
+                thread_id = %thread_id,
+                reply_bytes = content.len(),
+                error = %error,
+                "llm streamed assistant turn was delivered but could not be stored"
+            );
+            finish_sse(sink, SSE_ERROR_FRAME).await;
+            return;
+        }
 
-        let _ = sink.send_chunk(SSE_DONE_FRAME.to_vec()).await;
+        finish_sse(sink, SSE_DONE_FRAME).await;
     })
 }
 
@@ -160,14 +213,14 @@ where
             // terminate the stream with a final `event: error` frame, so the
             // consumer sees a clean SSE event instead of an abrupt disconnect.
             let Some(frame) = item.ok().and_then(|v| sse_json_frame(&v)) else {
-                let _ = sink.send_chunk(SSE_ERROR_FRAME.to_vec()).await;
+                finish_sse(sink, SSE_ERROR_FRAME).await;
                 return;
             };
             if sink.send_chunk(frame).await.is_err() {
                 return;
             }
         }
-        let _ = sink.send_chunk(SSE_DONE_FRAME.to_vec()).await;
+        finish_sse(sink, SSE_DONE_FRAME).await;
     })
 }
 
@@ -247,7 +300,7 @@ mod tests {
         let buf = out
             .collect_buffered()
             .await
-            .expect("producer auto-completes");
+            .expect("the error frame ends a whole SSE body, so the stream completes");
         let body = String::from_utf8(buf.body).expect("SSE body is utf8");
 
         assert!(
@@ -258,6 +311,95 @@ mod tests {
         assert!(
             ctx.calls().is_empty(),
             "an errored stream must not persist an assistant turn (mirrors handle_chat)"
+        );
+    }
+
+    /// An assistant turn the store refused ends the stream with an error
+    /// frame, not `[DONE]`.
+    ///
+    /// The persistence was `let _ =`, and `[DONE]` is precisely the signal a
+    /// client refetches history on — so the refetch replaced a complete
+    /// answer on screen with a conversation that never contained it. The
+    /// content frames are already on the wire and the status line is long
+    /// since committed, so unlike `handle_chat` this path has no status left
+    /// to change: the in-band error frame is the only channel it still has,
+    /// and it is the same frame a mid-stream service failure emits.
+    #[tokio::test]
+    async fn sse_chat_response_reports_a_failed_persist_instead_of_done() {
+        use crate::blocks::llm::routes::test_support::MessagesWriteFails;
+
+        let ctx = MessagesWriteFails::after(RecordingCtx::default().clone_arc(), 0);
+        let msg = Message::new("create:/b/llm/api/chat/stream");
+        let chunks: Vec<Result<ChatChunk, wafer_run::WaferError>> =
+            vec![Ok(ChatChunk::text("Hel")), Ok(ChatChunk::text("lo"))];
+
+        let out = sse_chat_response(
+            futures::stream::iter(chunks),
+            ctx.clone_arc(),
+            msg,
+            "thread-1".to_string(),
+        );
+        let buf = out.collect_buffered().await.expect("stream completes");
+        let body = String::from_utf8(buf.body).expect("SSE body is utf8");
+
+        assert!(
+            body.contains("Hel") && body.contains("lo"),
+            "the frames already delivered are still delivered, got: {body}"
+        );
+        assert!(
+            body.ends_with("event: error\ndata: {}\n\n"),
+            "a turn the store refused must not end in [DONE], got: {body}"
+        );
+        assert!(
+            !body.contains("[DONE]"),
+            "[DONE] is what a client refetches history on, got: {body}"
+        );
+    }
+
+    /// The persisted turn is a prefix of the answer, never a splice.
+    ///
+    /// The cap was checked per delta, so an overflowing delta was skipped and
+    /// a later, smaller one was appended anyway — the stored message then read
+    /// as a complete answer whose middle was missing. The client still sees
+    /// every frame; it is the stored text that must not lie.
+    #[tokio::test]
+    async fn sse_chat_response_stops_persisting_after_the_first_overflow() {
+        let ctx = RecordingCtx::default();
+        let msg = Message::new("create:/b/llm/api/chat/stream");
+        let head = "a".repeat(MAX_BUFFERED_RESPONSE_BYTES - 10);
+        let chunks: Vec<Result<ChatChunk, wafer_run::WaferError>> = vec![
+            Ok(ChatChunk::text(head.clone())),
+            // Overflows the remaining 10 bytes...
+            Ok(ChatChunk::text("B".repeat(100))),
+            // ...and this one would still fit, which is the bug.
+            Ok(ChatChunk::text("tail")),
+        ];
+
+        let out = sse_chat_response(
+            futures::stream::iter(chunks),
+            ctx.clone_arc(),
+            msg,
+            "thread-1".to_string(),
+        );
+        let buf = out.collect_buffered().await.expect("stream completes");
+        let body = String::from_utf8(buf.body).expect("SSE body is utf8");
+        assert!(
+            body.contains("tail"),
+            "every frame is still forwarded to the client"
+        );
+
+        let calls = ctx.calls();
+        assert_eq!(calls.len(), 1, "exactly one persistence call");
+        let body_json: serde_json::Value =
+            serde_json::from_slice(&calls[0].body).expect("persistence body is JSON");
+        let content = body_json["content"].as_str().expect("content is a string");
+        assert_eq!(
+            content, head,
+            "the stored turn stops at the last delta that fitted"
+        );
+        assert!(
+            !content.contains("tail"),
+            "a delta after the cap must not be spliced onto the prefix"
         );
     }
 

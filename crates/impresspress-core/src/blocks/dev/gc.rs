@@ -48,9 +48,29 @@
 //! in the listing were stored before it, their row was written before them, so
 //! the root read that follows the listing cannot miss it.
 //!
-//! The workspace is read under the same lock a file write takes, after the
-//! listing, for the same reason in the other store: a write stores its blob
-//! and saves the entry naming it inside one lock hold.
+//! The blob listing is taken under the same lock a file write takes, and the
+//! lock is held until the blob half is done. A write stores its blob and saves
+//! the entry naming it inside one lock hold, so the workspace read under that
+//! lock names every blob the listing holds that a write still wants.
+//!
+//! # The counters are read off the listing
+//!
+//! [`workspace::Workspace::blob_bytes`] is what the 64 MiB quota bounds, and
+//! the writers charge it as they store. A charge can be lost — a file write
+//! whose blob stored and whose `workspace.json` save failed leaves a blob in
+//! the store that no counter includes — and nothing on the write path can see
+//! that happen. So every collection sets both counters to what the listing
+//! says the store holds once the deletes are done, rather than subtracting
+//! what it freed from whatever the counters said. A subtraction would turn
+//! that lost charge into a permanent under-count: the collector would free
+//! the uncharged blob and take its size off a total that never included it.
+//! Read off the listing, a drift in either direction lasts until the next
+//! collection, and the quota is exact again after it.
+//!
+//! That is the other reason the lock is taken *before* the blob listing: a
+//! write that stored a blob after an unlocked listing would be charged in the
+//! workspace and missing from the listing, and resetting the counters from it
+//! would drop the charge.
 //!
 //! Each artifact is asked about once more, immediately before it goes, in case
 //! a stage arrived in between ([`repo::builds::is_in_flight_for_artifact`]) —
@@ -87,10 +107,13 @@ pub struct GcReport {
     pub artifacts_deleted: u32,
     /// Total size of everything deleted, blobs and artifacts together.
     ///
-    /// Not the same number the workspace is credited with: only the blob half
-    /// counts against its quota ([`workspace::Workspace::blob_bytes`]), which
-    /// is what design §6.6 bounds. This is the storage figure.
+    /// Not the workspace's quota figure: only the blob half counts against
+    /// that ([`workspace::Workspace::blob_bytes`]), which is what design §6.6
+    /// bounds. This is the storage figure.
     pub bytes_freed: u64,
+    /// How many build rows were dropped because the artifact they name is no
+    /// longer stored.
+    pub build_rows_dropped: u32,
 }
 
 /// A seam the collector yields at, once, between its listing and its roots.
@@ -107,6 +130,12 @@ pub struct GcReport {
 pub trait GcInterleave: wafer_run::MaybeSend + wafer_run::MaybeSync {
     /// Called once, after both folders have been listed and before any root
     /// has been read.
+    ///
+    /// **Called with `DevShared::workspace` held** — the collector takes it
+    /// before the blob listing (see "The counters are read off the listing").
+    /// An implementation that writes a workspace file, or does anything else
+    /// that takes that lock, deadlocks: it waits on the collector that is
+    /// waiting on it.
     async fn after_listing(&self);
 }
 
@@ -131,10 +160,29 @@ pub async fn collect_interleaved(
     shared: &DevShared,
     interleave: &dyn GcInterleave,
 ) -> Result<GcReport, WaferError> {
-    // 1. The listings, first and before anything else is read. They fix the
+    // 0. The settled build rows, read before the artifact listing — see
+    //    `stale_build_rows` for why that order makes the rows it drops safe
+    //    to drop.
+    let settled = repo::builds::list_settled(ctx).await?;
+
+    // 1. The listings, first and before any root is read. They fix the
     //    candidate set: an object stored after this point is not in it.
-    let blob_objects = list_all(ctx, blobs::FOLDER).await?;
+    //
+    //    The artifact folder is listed before the workspace lock is taken:
+    //    nothing in `workspace.json` describes an artifact, and a listing is
+    //    `O(folder)` on OPFS, so holding the lock across it would only make
+    //    saves and the status poll wait longer.
     let artifact_objects = list_all(ctx, artifacts::FOLDER).await?;
+
+    // The workspace lock, before the blob listing and held until the blob
+    // half is done (see "The counters are read off the listing" above).
+    //
+    // Deadlock-free for the reason `activation::adopt_site` documents:
+    // `files.rs` releases the lock before it asks for an activation, so
+    // nothing holding it is ever waiting on the queue this runs under, and
+    // nothing below takes another lock while holding it.
+    let serialized = shared.workspace.lock().await;
+    let blob_objects = list_all(ctx, blobs::FOLDER).await?;
 
     interleave.after_listing().await;
 
@@ -164,10 +212,17 @@ pub async fn collect_interleaved(
         live_artifacts.insert(build.artifact_sha256);
     }
 
-    // 3. The deletes.
+    // 3. The deletes. The artifact half needs no workspace lock — nothing in
+    //    `workspace.json` describes an artifact — so it is released first.
     let mut report = GcReport::default();
-    collect_blobs(ctx, shared, blob_objects, live_blobs, &mut report).await?;
+    collect_blobs(ctx, blob_objects, live_blobs, &mut report).await?;
+    drop(serialized);
+    let stale = stale_build_rows(settled, &artifact_objects);
     collect_artifacts(ctx, artifact_objects, &live_artifacts, &mut report).await?;
+    for id in stale {
+        repo::builds::delete(ctx, &id).await?;
+        report.build_rows_dropped += 1;
+    }
     Ok(report)
 }
 
@@ -180,12 +235,29 @@ pub async fn collect_interleaved(
 /// runs once per activation rather than three times a second.
 ///
 /// The two sources are the same bytes counted at the two ends that maintain
-/// them: [`workspace::Workspace`]'s blob counters are written by the file
-/// writes that store blobs and credited by [`collect`] as it frees them, and
-/// the builds table has a row per stored artifact because staging writes the
-/// row before the bytes and [`collect`] deletes the row with them.
-pub async fn storage_usage(ctx: &dyn Context) -> Result<StorageUsage, WaferError> {
-    let ws = workspace::load(ctx).await?;
+/// them: [`workspace::Workspace`]'s blob counters are charged by the file
+/// writes that store blobs and reset from the store's own listing by every
+/// [`collect`], and the builds table has a row per stored artifact because
+/// staging writes the row before the bytes and [`collect`] deletes the row
+/// with them.
+///
+/// The manifest read is under `DevShared::workspace`, like every other read of
+/// it (`super::files`' header): this is the *poll* the page runs three times a
+/// second while a tool call is outstanding, so it is the read most likely to
+/// land inside [`collect_blobs`]'s delete-and-save — and a progress panel that
+/// answers `500` while the collector works is the user-visible shape of that
+/// race. Pacing behind the collector is what the panel wants anyway.
+///
+/// Deadlock-free on the same rule as the mutators: the lock is held around the
+/// manifest load and nothing else, never across an activation.
+pub async fn storage_usage(
+    ctx: &dyn Context,
+    shared: &DevShared,
+) -> Result<StorageUsage, WaferError> {
+    let ws = {
+        let _serialized = shared.workspace.lock().await;
+        workspace::load(ctx).await?
+    };
     let artifacts = repo::builds::artifact_index(ctx).await?;
     Ok(StorageUsage {
         blobs: ws.blob_count,
@@ -197,49 +269,89 @@ pub async fn storage_usage(ctx: &dyn Context) -> Result<StorageUsage, WaferError
     })
 }
 
-/// Delete the unreachable blobs and credit the workspace for them.
+/// Delete the unreachable blobs, then set the workspace's blob counters to
+/// what the store holds.
+///
+/// The caller holds `DevShared::workspace`, and took it before it listed
+/// `candidates`. That is what makes both halves of this sound. The workspace
+/// read here cannot miss an entry for a blob that is a candidate: a write
+/// stores its blob and saves the entry naming it inside one lock hold, so
+/// either it finished before the listing (a root) or it has not started. And
+/// `candidates` minus what this deletes is exactly what the store holds, so it
+/// is what the counters are set to — see the module docs for why they are
+/// reset rather than decremented.
+///
+/// A delete that fails stops the deleting but not the reset: the objects not
+/// yet deleted, the failed one included, are still in the store and are
+/// counted as such, and the counters are saved before the failure is
+/// returned. Returning first would discard the credit for every blob this
+/// pass had already freed.
 async fn collect_blobs(
     ctx: &dyn Context,
-    shared: &DevShared,
     candidates: Vec<ObjectInfo>,
     mut live: BTreeSet<String>,
     report: &mut GcReport,
 ) -> Result<(), WaferError> {
-    // Under the same lock every file mutation takes, and for two reasons.
-    // Crediting the freed bytes is a read-modify-write of the whole manifest,
-    // so a write that loaded before it and saved after it would put them back.
-    // And a write stores its blob *inside* that lock, before it saves the
-    // entry naming it — so reading the workspace here, after the listing and
-    // under the lock, cannot miss an entry for a blob that is a candidate:
-    // either the write had not stored its blob when the listing ran (not a
-    // candidate) or it had already saved the entry (a root).
-    //
-    // Deadlock-free for the reason `activation::adopt_site` documents:
-    // `files.rs` releases the lock before it asks for an activation, so
-    // nothing holding it is ever waiting on the queue this runs under.
-    let _serialized = shared.workspace.lock().await;
     let mut ws = workspace::load(ctx).await?;
     live.extend(ws.files.values().map(|entry| entry.sha256.clone()));
 
-    let mut credited = false;
+    let mut stored_bytes = 0u64;
+    let mut stored_count = 0u32;
+    let mut failure = None;
     for object in candidates {
-        if live.contains(&object.key) {
-            continue;
-        }
-        blobs::delete(ctx, &object.key).await?;
         let size = size_of(&object);
-        ws.record_blob_freed(size);
-        report.blobs_deleted += 1;
-        report.bytes_freed += size;
-        credited = true;
+        if failure.is_none() && !live.contains(&object.key) {
+            match blobs::delete(ctx, &object.key).await {
+                Ok(()) => {
+                    report.blobs_deleted += 1;
+                    report.bytes_freed += size;
+                    continue;
+                }
+                Err(e) => failure = Some(e),
+            }
+        }
+        stored_bytes = stored_bytes.saturating_add(size);
+        stored_count = stored_count.saturating_add(1);
     }
     // Only when something changed: the collector runs after every activation,
     // and rewriting `workspace.json` each time to store the same bytes would
     // make every keystroke cost an extra object write.
-    if credited {
+    if ws.reset_blob_totals(stored_bytes, stored_count) {
         workspace::save(ctx, &ws).await?;
     }
-    Ok(())
+    failure.map_or(Ok(()), Err)
+}
+
+/// The settled build rows whose artifact the store no longer holds.
+///
+/// The collector deletes an artifact and then the rows naming it; if the row
+/// delete fails, the rows outlive their bytes. The artifact half of
+/// [`collect_artifacts`] walks the folder listing and so never meets them
+/// again, yet `dev_status` counts them in the artifact total and activation
+/// answers "is this artifact stored?" from them
+/// ([`repo::builds::artifact_index`]). They are found here instead, by the
+/// other direction: a row whose artifact is not in the listing.
+///
+/// Only rows that were already settled — `valid` or `invalid`, never
+/// `staged` — **when they were read, before the listing**. Every path that
+/// settles a row does so after its artifact is stored (staging stores the
+/// bytes before it validates them; the seed importer stores them before it
+/// records the row), so a row settled before the listing had its bytes down
+/// before the listing too, and missing from it means gone. A staged row makes
+/// no such promise: its bytes may be stored a moment after the listing, which
+/// is why staging's rows are roots rather than candidates here. And the rows
+/// are dropped by id, so a compile that stages the same bytes again after the
+/// read keeps its own row.
+fn stale_build_rows(settled: Vec<repo::builds::SettledRow>, listed: &[ObjectInfo]) -> Vec<String> {
+    let stored: BTreeSet<&str> = listed
+        .iter()
+        .filter_map(|object| artifacts::sha_of_key(&object.key))
+        .collect();
+    settled
+        .into_iter()
+        .filter(|row| !stored.contains(row.artifact_sha256.as_str()))
+        .map(|row| row.id)
+        .collect()
 }
 
 /// Delete the unreachable artifacts and the build rows that named them.
@@ -334,7 +446,7 @@ async fn list_all(ctx: &dyn Context, folder: &str) -> Result<Vec<ObjectInfo>, Wa
 ///
 /// `ObjectInfo::size` is signed because the wire type is; a negative size is
 /// not a thing an object store can hold, and clamping beats a wrapping cast
-/// that would credit the workspace with sixteen exabytes.
+/// that would count a sixteen-exabyte object into the workspace's quota.
 fn size_of(object: &ObjectInfo) -> u64 {
     object.size.max(0) as u64
 }

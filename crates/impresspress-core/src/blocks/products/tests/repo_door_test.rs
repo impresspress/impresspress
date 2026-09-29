@@ -1,16 +1,18 @@
-//! The products table has exactly one door. A read that goes around
-//! `repo::products` skips the `deleted_at` filter, and a soft-deleted
-//! product becomes visible again — which for the catalog means purchasable.
-//! The gate is a source scan because the table name is necessarily reachable
-//! (`mod.rs` registers it in `collections(...)`), so nothing but a test can
-//! catch a call site that names it directly.
+//! Which `repo::products` function a call site picks.
+//!
+//! *That* the products table is named only inside `repo::products` is now
+//! asserted by the crate-level `tests/repo_door.rs`, which owns one
+//! allowlist per table for every door in the crate — the three scans that
+//! used to live here moved there when the products tables joined it, because
+//! two allowlists for one table is precisely the drift a door exists to
+//! prevent. What stays here is what that gate cannot express: `repo::products`
+//! deliberately exposes functions that read and write *past* the soft-delete
+//! filter, and picking the wrong one is a bug no table-name scan can see. A
+//! read that goes around the `deleted_at` filter makes a soft-deleted product
+//! visible again — which for the catalog means purchasable.
 //!
 //! Scope: every `.rs` file in this crate, not just `src/blocks/products`.
-//! A table name is a string — any block can spell it out, and the admin
-//! block's database explorer and the WRAP layer both work in terms of raw
-//! table names. Scanning only the owning block left the whole rest of the
-//! crate free to read the products table directly and answer with rows the
-//! door would have filtered.
+//! `repo` is `pub(crate)`, so a call site can be anywhere in it.
 //!
 //! What this gate still does NOT cover, stated so it is not mistaken for
 //! more than it is:
@@ -26,31 +28,12 @@
 //!     itself here; but nothing re-checks that a listed file's reads are
 //!     still fixture setup rather than production reads.
 
-fn crate_sources() -> Vec<(String, String)> {
-    let root = std::path::Path::new(concat!(env!("CARGO_MANIFEST_DIR"), "/src"));
-    let mut out = Vec::new();
-    let mut stack = vec![root.to_path_buf()];
-    while let Some(dir) = stack.pop() {
-        for entry in std::fs::read_dir(&dir).expect("read source dir") {
-            let path = entry.expect("dir entry").path();
-            if path.is_dir() {
-                stack.push(path);
-            } else if path.extension().is_some_and(|e| e == "rs") {
-                let rel = path
-                    .strip_prefix(root)
-                    .expect("under root")
-                    .to_string_lossy()
-                    .into_owned();
-                out.push((rel, std::fs::read_to_string(&path).expect("read source")));
-            }
-        }
-    }
-    assert!(
-        out.len() > 100,
-        "the scan walks the whole crate; {} files means it lost its way",
-        out.len()
-    );
-    out
+use crate::test_support::source_scan::SourceWalk;
+
+/// The walk this gate runs over: every `.rs` file in the crate, with a floor
+/// so an empty scan cannot pass as a clean one.
+fn scan() -> SourceWalk {
+    SourceWalk::crate_src().least(100)
 }
 
 /// Whether `path` (relative to `src`) matches one of `allowlist`'s entries.
@@ -62,125 +45,20 @@ fn matches_allowlist(path: &str, allowlist: &[&str]) -> bool {
     allowlist.contains(&path)
 }
 
-const TABLE_LITERAL: &str = "impresspress__products__products";
-
-/// Files allowed to name the products table by its literal string. Listed
-/// one by one, deliberately: the previous blanket `tests/` entry exempted
-/// every test file that would ever exist, including one that quietly read
-/// the table raw and asserted on the unfiltered rows.
-const LITERAL_ALLOWED: &[&str] = &[
-    // the door itself
-    "blocks/products/repo/products.rs",
-    // this file: needs the literal in order to scan for it
-    "blocks/products/tests/repo_door_test.rs",
-    // seeds rows (including soft-deleted ones) straight into the table so the
-    // handler tests have something to act on; fixture setup, not a production
-    // read that has to respect the soft-delete filter
-    "blocks/products/tests/handler_tests.rs",
-    // the migration runner's own tests. They necessarily work below the repo
-    // layer: migration 020 exists to repair a `deleted_at = ''` row, and the
-    // repo layer is precisely what can no longer produce one, so the only way
-    // to seed the pre-migration state is against the table. The migration
-    // `.sql` files next to it spell the table out for the same reason — that
-    // is where the table is defined. (Matches CLAUDE.md's standing exceptions
-    // for migration-file runners and test-fixture setup.)
-    "blocks/products/migrations/mod.rs",
-];
-
-#[test]
-fn only_the_repo_module_names_the_products_table() {
-    let offenders: Vec<String> = crate_sources()
+/// The files, outside `allowlist`, that name `ident` — the shape both scans
+/// below run, stated once so the walk's own self-test drives the same filter
+/// over a planted tree.
+fn callers(walk: &SourceWalk, ident: &str, allowlist: &[&str]) -> Vec<String> {
+    walk.collect()
         .into_iter()
-        .filter(|(path, _)| !matches_allowlist(path, LITERAL_ALLOWED))
-        .filter(|(_, src)| src.contains(TABLE_LITERAL))
-        .map(|(path, _)| path)
-        .collect();
-    assert!(
-        offenders.is_empty(),
-        "these files name the products table directly and so bypass the \
-         soft-delete filter; route them through repo::products: {offenders:?}"
-    );
+        .filter(|file| !matches_allowlist(&file.rel, allowlist))
+        .filter(|file| file.text.contains(ident))
+        .map(|file| file.rel)
+        .collect()
 }
 
-/// The old const is gone. A file that still imports it would compile only by
-/// redefining it, which is the same bypass wearing the old name.
-///
-/// This file is excluded from its own scan (via `LITERAL_ALLOWED`): the
-/// literal text this test searches for necessarily appears in its own
-/// source below, which would otherwise make the assertion fail against
-/// itself forever.
-#[test]
-fn the_old_products_table_const_is_gone() {
-    let offenders: Vec<String> = crate_sources()
-        .into_iter()
-        .filter(|(path, _)| !matches_allowlist(path, LITERAL_ALLOWED))
-        .filter(|(_, src)| src.contains("PRODUCTS_TABLE"))
-        .map(|(path, _)| path)
-        .collect();
-    assert!(
-        offenders.is_empty(),
-        "PRODUCTS_TABLE still referenced in {offenders:?}"
-    );
-}
-
-/// The literal-string scan above only catches a call site that spells the
-/// table name out by hand. It misses the more likely mistake: naming the
-/// table through `repo::products::TABLE` itself (e.g. handing it straight to
-/// `db::list_all`) instead of calling a `repo::products` function. That
-/// compiles cleanly today because `TABLE` is `pub(crate)` for `mod.rs`'s
-/// `collections(...)` registration — so a caller who forgets to also append
-/// `repo::products::live_filter()` gets a silent soft-delete bypass with no
-/// warning from the compiler. This scan closes that gap: every use of the
-/// `products::TABLE` identifier (however many `super::`/`repo::` segments
-/// precede it) must be one of the entries on `TABLE_IDENT_ALLOWED`, each
-/// justified on why it isn't a soft-delete bypass.
-const TABLE_IDENT: &str = "products::TABLE";
-
-/// Files allowed to name the products table via the `repo::products::TABLE`
-/// identifier (as opposed to the literal string above). Per-file for the same
-/// reason as [`LITERAL_ALLOWED`].
-const TABLE_IDENT_ALLOWED: &[&str] = &[
-    // the door itself: `TABLE`'s own definition and internal uses
-    "blocks/products/repo/products.rs",
-    // `BlockInfo::collections(...)` is an advisory table listing for
-    // admin/WRAP discovery, not a query — nothing to filter
-    "blocks/products/mod.rs",
-    // fixtures seed rows (including soft-deleted ones) and assert on raw rows
-    // straight against the table; setup and assertion for the tests guarding
-    // the door, not production reads to filter
-    "blocks/products/tests/handler_tests.rs",
-    "blocks/products/tests/offer_management_tests.rs",
-    "blocks/products/tests/offer_pricing_tests.rs",
-    "blocks/products/tests/repo_door_test.rs",
-    "blocks/products/tests/seller_governance_tests.rs",
-    "blocks/products/tests/stripe_tests.rs",
-    // the data snapshot's export allowlist (`blocks/dev/data_snapshot.rs`)
-    // needs the table's name for its own `TABLE_ALLOWLIST`/`TABLE_EXCLUDED`
-    // bookkeeping and as a `DataSnapshot` JSON key; every actual read/write
-    // it does still goes through `list_all`/`upsert_from_snapshot`
-    // (re-exported from this module), never a query built on the name
-    // directly
-    "blocks/dev/data_snapshot.rs",
-];
-
-#[test]
-fn only_the_allowlist_names_the_products_table_via_the_const() {
-    let offenders: Vec<String> = crate_sources()
-        .into_iter()
-        .filter(|(path, _)| !matches_allowlist(path, TABLE_IDENT_ALLOWED))
-        .filter(|(_, src)| src.contains(TABLE_IDENT))
-        .map(|(path, _)| path)
-        .collect();
-    assert!(
-        offenders.is_empty(),
-        "these files name the products table via `products::TABLE` instead of \
-         calling a repo::products function, silently skipping the soft-delete \
-         filter for a caller who does not also remember `live_filter()`: {offenders:?}"
-    );
-}
-
-/// The three scans above prove that nothing *names the products table*
-/// outside `repo::products`. They say nothing about which of that module's
+/// The crate-level door test proves that nothing *names the products table*
+/// outside `repo::products`. It says nothing about which of that module's
 /// own functions a call site picks — and on the write side the choice is the
 /// whole correctness question.
 ///
@@ -195,8 +73,8 @@ fn only_the_allowlist_names_the_products_table_via_the_const() {
 /// soft-deleted product and every other gate in this file still passes.
 ///
 /// So they are distinguished by name, and each call site is listed here with
-/// its justification. This is the write-side twin of
-/// `only_the_allowlist_names_the_products_table_via_the_const`.
+/// its justification. This is the write-side twin of the crate-level
+/// `only_the_allowlist_names_a_platform_table_via_the_const`.
 ///
 /// What it does NOT cover, for the same reasons stated at the top of this
 /// file: other crates, non-Rust sources, and whether a listed file's uses are
@@ -244,14 +122,9 @@ const WRITE_ESCAPE_HATCHES: &[(&str, &[&str])] = &[
 
 #[test]
 fn write_side_escape_hatches_are_allowlisted() {
-    let sources = crate_sources();
+    let walk = scan();
     for (ident, allowlist) in WRITE_ESCAPE_HATCHES {
-        let offenders: Vec<&String> = sources
-            .iter()
-            .filter(|(path, _)| !matches_allowlist(path, allowlist))
-            .filter(|(_, src)| src.contains(ident))
-            .map(|(path, _)| path)
-            .collect();
+        let offenders = callers(&walk, ident, allowlist);
         assert!(
             offenders.is_empty(),
             "these files call `{ident}`, which writes past the soft-delete \
@@ -269,7 +142,7 @@ fn write_side_escape_hatches_are_allowlisted() {
 /// the identifiers only in order to scan for them).
 #[test]
 fn no_write_escape_hatch_allowlist_entry_is_dead() {
-    let sources = crate_sources();
+    let sources = scan().collect();
     for (ident, allowlist) in WRITE_ESCAPE_HATCHES {
         for entry in *allowlist {
             if *entry == "blocks/products/tests/repo_door_test.rs" {
@@ -277,7 +150,7 @@ fn no_write_escape_hatch_allowlist_entry_is_dead() {
             }
             let uses = sources
                 .iter()
-                .any(|(path, src)| path == entry && src.contains(ident));
+                .any(|file| &file.rel == entry && file.text.contains(ident));
             assert!(
                 uses,
                 "`{entry}` is allowlisted for `{ident}` but no longer calls it; \
@@ -290,9 +163,9 @@ fn no_write_escape_hatch_allowlist_entry_is_dead() {
 /// The read-side twin of [`WRITE_ESCAPE_HATCHES`], and the one that matters
 /// most for what a customer can see.
 ///
-/// The scans above prove nothing *names the products table* outside
-/// `repo::products`, and the write list proves no new call site writes past
-/// the soft-delete filter. Neither says anything about the four functions in
+/// The crate-level door test proves nothing *names the products table*
+/// outside `repo::products`, and the write list proves no new call site
+/// writes past the soft-delete filter. Neither says anything about the four functions in
 /// that module that deliberately *read* past it.
 ///
 /// Two of them span both sets, handing back a soft-deleted product's row as
@@ -356,14 +229,32 @@ const READ_ESCAPE_HATCHES: &[(&str, &[&str])] = &[
         &[
             // this file: needs the identifier in order to scan for it
             "blocks/products/tests/repo_door_test.rs",
+            // asserts that suspension reached the deleted rows too, which it
+            // can only do by reading the set that spans both.
+            "blocks/products/tests/seller_governance_tests.rs",
+        ],
+    ),
+    (
+        // One owner's rows whatever their soft-delete state — the named
+        // shape of the read above, and the one an accidental caller is most
+        // likely to reach for when it wanted `list_owned_by`.
+        "products::list_owned_by_including_deleted",
+        &[
+            // this file: needs the identifier in order to scan for it
+            "blocks/products/tests/repo_door_test.rs",
             // seller suspension, which is a fraud control and so has to cover
             // every row the seller owns — soft delete takes nothing down in
             // Stripe, so exempting the deleted rows would leave exactly them
             // still taking money.
             "blocks/products/handlers/sellers.rs",
-            // asserts that suspension reached the deleted rows too, which it
-            // can only do by reading the set that spans both.
-            "blocks/products/tests/seller_governance_tests.rs",
+            // pins that this read and `list_owned_by` differ in exactly the
+            // deleted rows — it has to name both to say so.
+            "blocks/products/tests/repo_tests.rs",
+            // pins that suspension's read is exhaustive: it seeds a catalog
+            // past the unpaged ceiling and asserts every row comes back,
+            // which is the same "covers every row the seller owns" property
+            // the `sellers.rs` entry above exists for.
+            "blocks/products/tests/bounded_read_tests.rs",
         ],
     ),
     (
@@ -412,21 +303,17 @@ const READ_ESCAPE_HATCHES: &[(&str, &[&str])] = &[
 
 #[test]
 fn read_side_escape_hatches_are_allowlisted() {
-    let sources = crate_sources();
+    let walk = scan();
     for (ident, allowlist) in READ_ESCAPE_HATCHES {
-        let offenders: Vec<&String> = sources
-            .iter()
-            .filter(|(path, _)| !matches_allowlist(path, allowlist))
-            .filter(|(_, src)| src.contains(ident))
-            .map(|(path, _)| path)
-            .collect();
+        let offenders = callers(&walk, ident, allowlist);
         assert!(
             offenders.is_empty(),
             "these files call `{ident}`, which reads past the soft-delete \
              filter and so can hand a soft-deleted product to a caller, \
              without being justified in READ_ESCAPE_HATCHES. Use `get` / \
-             `list_all` unless reading a deleted row is genuinely what the \
-             operation means, and say why here if it is: {offenders:?}"
+             `list_capped_live` unless reading a deleted row is genuinely \
+             what the operation means, and say why here if it is: \
+             {offenders:?}"
         );
     }
 }
@@ -436,7 +323,7 @@ fn read_side_escape_hatches_are_allowlisted() {
 /// pre-approves whatever that file does next.
 #[test]
 fn no_read_escape_hatch_allowlist_entry_is_dead() {
-    let sources = crate_sources();
+    let sources = scan().collect();
     for (ident, allowlist) in READ_ESCAPE_HATCHES {
         for entry in *allowlist {
             if *entry == "blocks/products/tests/repo_door_test.rs" {
@@ -444,7 +331,7 @@ fn no_read_escape_hatch_allowlist_entry_is_dead() {
             }
             let uses = sources
                 .iter()
-                .any(|(path, src)| path == entry && src.contains(ident));
+                .any(|file| &file.rel == entry && file.text.contains(ident));
             assert!(
                 uses,
                 "`{entry}` is allowlisted for `{ident}` but no longer calls it; \
@@ -452,4 +339,41 @@ fn no_read_escape_hatch_allowlist_entry_is_dead() {
             );
         }
     }
+}
+
+/// The *walk* reaches a planted caller, honours an allowlist entry, and reads
+/// only Rust.
+///
+/// Both scans above prove what they match; neither proves the walk ever
+/// opened a file. A root that moved or an extension filter that broke would
+/// leave them passing on an empty list — green, and blind to the call site
+/// they exist to catch. The floor on [`scan`] is the other half: it fails
+/// when the real tree comes back short.
+#[test]
+fn the_walk_reaches_the_files_it_claims_to_scan() {
+    const IDENT: &str = "products::purge";
+
+    let root = std::env::temp_dir().join(format!("products-repo-door-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&root);
+    std::fs::create_dir_all(root.join("handlers")).expect("temp tree");
+    std::fs::write(
+        root.join("handlers/caller.rs"),
+        format!("async fn f() {{ repo::{IDENT}(ctx, id).await }}\n"),
+    )
+    .expect("caller");
+    std::fs::write(
+        root.join("allowlisted.rs"),
+        format!("async fn f() {{ repo::{IDENT}(ctx, id).await }}\n"),
+    )
+    .expect("allowlisted caller");
+    std::fs::write(root.join("notes.txt"), IDENT).expect("non-rust");
+
+    let found = callers(&SourceWalk::new(&root), IDENT, &["allowlisted.rs"]);
+    std::fs::remove_dir_all(&root).expect("clean up");
+
+    assert_eq!(
+        found,
+        vec!["handlers/caller.rs".to_string()],
+        "expected exactly the planted caller"
+    );
 }

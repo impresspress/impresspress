@@ -1,5 +1,6 @@
 //! Test doubles for the [`RuntimeControl`], [`ShellSource`] and
-//! [`seed::SeedFetch`] seams.
+//! [`seed::SeedFetch`] seams, plus the request helpers every `dev_*.rs`
+//! integration file needs to reach the block at all.
 //!
 //! Exposed under `test-support` (as well as `cfg(test)`) so the `tests/`
 //! integration crates and downstream consumers can drive the dev block without
@@ -13,12 +14,86 @@ use std::{
     },
 };
 
+use wafer_run::{AuthLevel, BlockEndpoint, BlockInfo, OutputStream};
+
 use super::{
     blobs,
     control::{DynamicBlockSpec, RuntimeControl, ShellSource, ValidationFailure, ValidationStage},
     paths, seed,
     seed::{SeedFetch, SeedFile},
 };
+use crate::test_support::{admin_msg, output_json, Session, TestContext};
+
+// ---------------------------------------------------------------------------
+// Reaching the block
+// ---------------------------------------------------------------------------
+
+/// A [`TestContext::with_dev`] fixture that can also sign people in — auth's
+/// schema and [`TestContext::with_sign_in_added`] on top — for a test about
+/// who may reach `/b/dev`, which sends real credentials through
+/// [`TestContext::request`].
+pub async fn dev_with_accounts(control: Arc<dyn RuntimeControl>) -> TestContext {
+    TestContext::with_admin()
+        .await
+        .with_auth_added()
+        .await
+        .with_dev_added(control)
+        .await
+        .with_sign_in_added()
+}
+
+/// The password every account [`signed_in_as`] seeds signs in with.
+const ACCOUNT_PASSWORD: &str = "correct-horse-battery-staple";
+
+/// Seed an account with `role` on a [`dev_with_accounts`] fixture and sign it
+/// in through the login route.
+///
+/// Not `admin@example.com`: the workspace guide prints that address as the
+/// local credentials, so a page assertion on it must not be satisfied by the
+/// signed-in operator's own email.
+pub async fn signed_in_as(ctx: &TestContext, role: &str) -> Session {
+    let email = format!("{role}-account@example.com");
+    ctx.seed_account(&email, ACCOUNT_PASSWORD, role).await;
+    ctx.sign_in(&email, ACCOUNT_PASSWORD).await
+}
+
+/// `POST` a JSON body to a `/b/dev` route as an admin, through the router,
+/// the admin taken as already resolved ([`TestContext::dispatch_resolved`]).
+///
+/// Every `/b/dev` API is admin-only and takes its argument as a JSON body, so
+/// this is how each of the six `dev_*.rs` integration files opened every
+/// request it makes. What these requests exercise is the block behind the
+/// gate; who may pass the gate is asked with [`dev_with_accounts`].
+pub async fn dev_post(ctx: &TestContext, path: &str, body: serde_json::Value) -> OutputStream {
+    ctx.dispatch_resolved_json(admin_msg("create", path), &body)
+        .await
+}
+
+/// `GET` a `/b/dev` route as an admin, through the router — the admin taken
+/// as already resolved, as [`dev_post`].
+pub async fn dev_get(ctx: &TestContext, path: &str) -> OutputStream {
+    ctx.dispatch_resolved(admin_msg("retrieve", path)).await
+}
+
+/// The `/b/dev/api/status` projection — the generation, the block set and the
+/// store sizes, as the page reads them.
+pub async fn dev_status(ctx: &TestContext) -> serde_json::Value {
+    output_json(dev_get(ctx, "/b/dev/api/status").await).await
+}
+
+/// The `BlockInfo` a well-behaved `hello` guest reports: one public `GET` on
+/// its own prefix and nothing else.
+///
+/// The name is a parameter because half the rules under test are about the
+/// name (a guest outside its namespace, a hyphen, a reserved prefix); the
+/// endpoint is not, because no rule reads it.
+pub fn hello_info(name: &str) -> BlockInfo {
+    BlockInfo::new(name, "0.1.0", "http-handler@v1", "hello").endpoints(vec![BlockEndpoint::get(
+        "/b/hello/",
+    )
+    .auth(AuthLevel::Public)
+    .summary("hello")])
+}
 
 /// A [`RuntimeControl`] that records what it was asked to do instead of
 /// building anything.
@@ -354,6 +429,8 @@ pub struct FakeShell {
     files: BTreeMap<String, Vec<u8>>,
     /// Set by [`Self::failing_to_list`]: what `list` refuses with.
     list_failure: Option<String>,
+    /// How many files `fetch` has been asked for — read by [`Self::fetches`].
+    fetched: std::sync::atomic::AtomicUsize,
 }
 
 /// The `sw.js` [`FakeShell::new`] serves — a dev bundle's, trimmed to the
@@ -400,7 +477,14 @@ impl FakeShell {
         Self {
             files,
             list_failure: None,
+            fetched: std::sync::atomic::AtomicUsize::new(0),
         }
+    }
+
+    /// How many shell files have been fetched so far: what an export that
+    /// was refused before it read the runtime has to leave at zero.
+    pub fn fetches(&self) -> usize {
+        self.fetched.load(std::sync::atomic::Ordering::SeqCst)
     }
 
     /// Add or replace one file, chainable.
@@ -436,6 +520,8 @@ impl ShellSource for FakeShell {
     }
 
     async fn fetch(&self, path: &str) -> Result<Vec<u8>, String> {
+        self.fetched
+            .fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         self.files
             .get(path)
             .cloned()

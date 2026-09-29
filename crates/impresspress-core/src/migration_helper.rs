@@ -14,14 +14,30 @@
 //! The statement splitter handles `;` outside `--` comments. Block comments
 //! `/* ... */` and `;` inside string literals are not supported — the
 //! canonical .sql files don't use either.
+//!
+//! # A shipped .sql file is immutable, comments included
+//!
+//! Step 2 hashes the file's **whole text**, so editing a `--` comment in a
+//! migration that has already shipped changes its hash exactly as much as
+//! editing a statement does. On every deployment that already applied it,
+//! `current_hash` and `blessed_hash` then both differ from the code hash,
+//! step 5 logs `schema drift` on every boot, and clearing that requires a
+//! redeploy with `--run-migrations` — which re-runs that block's migrations
+//! from 001.
+//!
+//! So do not tidy prose in a shipped migration, even to fix a comment that
+//! names a since-renamed Rust item. Put the explanation in the block's
+//! `migrations/mod.rs` beside the test that covers the migration, where it is
+//! not hash-addressed and a reader is more likely to find it. Products'
+//! `slug_collision_cannot_fail_020` is the worked example.
 
 use wafer_core::clients::{config, database as db};
 use wafer_run::{context::Context, ErrorCode, LifecycleEvent, LifecycleType, WaferError};
 use wafer_sql_utils::Backend;
 
 use crate::{
-    admin_schema::BLOCK_SETTINGS_TABLE,
     features::{BlockSettings, MigrationState, BLOCK_SETTINGS_CONFIG_KEY},
+    platform_state::block_settings::{self, BlockSettingsPatch},
 };
 // NOTE: `BlockSettings::state_for` parses only the requested block's entry
 // out of the JSON map, avoiding the full-map materialization that
@@ -55,15 +71,18 @@ pub const DATABASE_BACKEND_KEY: &str = "WAFER_RUN_SHARED__DATABASE__BACKEND";
 /// Cheap to call per request: the value comes from the in-memory config
 /// snapshot via `config::get_default` (no DB hop), so call sites read it
 /// inline rather than threading a cached `Backend` through every signature.
-pub async fn db_backend(ctx: &dyn Context) -> Backend {
+///
+/// A failed read is returned: rendering the other dialect's SQL against the
+/// database would fail anyway, further from the cause.
+pub async fn db_backend(ctx: &dyn Context) -> Result<Backend, WaferError> {
     let backend = config::get_default(ctx, DATABASE_BACKEND_KEY, "sqlite")
-        .await
+        .await?
         .to_ascii_lowercase();
-    if backend == "postgres" {
+    Ok(if backend == "postgres" {
         Backend::Postgres
     } else {
         Backend::Sqlite
-    }
+    })
 }
 
 /// Read `WAFER_RUN_SHARED__DATABASE__BACKEND` from the config snapshot,
@@ -96,7 +115,10 @@ pub async fn apply_migrations(
     sqlite_files: &[&str],
     postgres_files: &[&str],
 ) -> Result<(), String> {
-    let files = match db_backend(ctx).await {
+    let backend = db_backend(ctx)
+        .await
+        .map_err(|e| format!("{block_name}: read the database backend: {e}"))?;
+    let files = match backend {
         Backend::Postgres => postgres_files,
         Backend::Sqlite => sqlite_files,
     };
@@ -168,9 +190,11 @@ pub async fn apply_if_blessed(
     }
 
     // Fresh install (no previous apply) bootstraps without operator consent —
-    // there's no prior schema to protect, and dev/test/browser-WASM modes
-    // can't pass `--run-migrations`. Operator gating still applies to
-    // SCHEMA CHANGES (current_hash non-empty + different code_hash below).
+    // there's no prior schema to protect, and dev/test modes can't pass
+    // `--run-migrations`. Operator gating still applies to SCHEMA CHANGES
+    // (current_hash non-empty + different code_hash below); the browser gives
+    // that consent on every boot, because loading its bundle is its deploy
+    // (`impresspress-web`'s `RuntimeFactory::build`).
     let is_fresh = state.current_hash.is_empty();
     let should_apply = is_fresh || run_requested || state.blessed_hash == code_hash;
     if !should_apply {
@@ -184,41 +208,17 @@ pub async fn apply_if_blessed(
         return Ok(());
     }
 
-    for stmt in split_statements(sql) {
-        if !has_executable_content(stmt) {
-            continue;
-        }
-        let trimmed = stmt.trim();
-        if let Err(e) = db::ddl(ctx, trimmed).await {
-            // ALTER TABLE ADD COLUMN is non-idempotent on SQLite/D1 — there's
-            // no `IF NOT EXISTS` syntax for columns. When a previous run
-            // already added the column, re-running raises "duplicate column
-            // name". Treat that as a benign no-op so the rest of the
-            // migration batch (and the final `write_state` stamp) can
-            // still run. Every other DDL failure propagates.
-            //
-            // This is the same tolerance pattern the per-write column-add
-            // path uses in `impresspress-cloudflare::D1DatabaseService::
-            // add_missing_columns`.
-            let msg = e.to_string();
-            if is_alter_add_column(trimmed) && is_duplicate_column_error(&msg) {
-                tracing::debug!(
-                    block = %block_name,
-                    stmt = %trimmed,
-                    err = %msg,
-                    "ddl: duplicate column, treating as idempotent no-op",
-                );
-                continue;
-            }
+    run_statements(sql, |stmt| db::ddl(ctx, stmt))
+        .await
+        .map_err(|failed| {
             tracing::warn!(
                 block = %block_name,
-                stmt = %trimmed,
-                err = %msg,
+                stmt = %failed.statement,
+                err = %failed.error,
                 "ddl failed",
             );
-            return Err(format!("ddl failed on `{trimmed}`: {e}"));
-        }
-    }
+            format!("ddl failed on `{}`: {}", failed.statement, failed.error)
+        })?;
 
     let new_state = MigrationState {
         current_hash: code_hash.clone(),
@@ -250,23 +250,59 @@ pub async fn apply_ddl_via_service(
     sql_files: &[&str],
 ) -> Result<(), String> {
     for sql in sql_files {
-        for stmt in split_statements(sql) {
-            if !has_executable_content(stmt) {
+        run_statements(sql, |stmt| db.exec_raw(stmt, &[]))
+            .await
+            .map_err(|failed| {
+                format!(
+                    "pre-wafer ddl failed on `{}`: {}",
+                    failed.statement, failed.error
+                )
+            })?;
+    }
+    Ok(())
+}
+
+/// A migration statement the database refused, and why.
+struct FailedStatement<'a> {
+    statement: &'a str,
+    error: String,
+}
+
+/// Run each statement of a migration batch through `exec`, in order, stopping
+/// at the first failure.
+///
+/// The one statement loop behind both [`apply_if_blessed`] and
+/// [`apply_ddl_via_service`], so what a replay test proves through the
+/// pre-wafer runner holds for the gated one. `ALTER TABLE ... ADD COLUMN` is
+/// non-idempotent on SQLite/D1, which have no `IF NOT EXISTS` for columns:
+/// when an earlier run already added the column the re-run raises "duplicate
+/// column", and that — only for an `ADD COLUMN` statement — is a benign no-op
+/// so the rest of the batch still runs. Every other failure is returned.
+async fn run_statements<'a, F, Fut, T, E>(
+    sql: &'a str,
+    mut exec: F,
+) -> Result<(), FailedStatement<'a>>
+where
+    F: FnMut(&'a str) -> Fut,
+    Fut: std::future::Future<Output = Result<T, E>>,
+    E: std::fmt::Display,
+{
+    for stmt in split_statements(sql) {
+        if !has_executable_content(stmt) {
+            continue;
+        }
+        let statement = stmt.trim();
+        if let Err(e) = exec(statement).await {
+            let error = e.to_string();
+            if is_alter_add_column(statement) && is_duplicate_column_error(&error) {
+                tracing::debug!(
+                    stmt = %statement,
+                    err = %error,
+                    "ddl: duplicate column, treating as idempotent no-op",
+                );
                 continue;
             }
-            let trimmed = stmt.trim();
-            if let Err(e) = db.exec_raw(trimmed, &[]).await {
-                let msg = e.to_string();
-                if is_alter_add_column(trimmed) && is_duplicate_column_error(&msg) {
-                    tracing::debug!(
-                        stmt = %trimmed,
-                        err = %msg,
-                        "pre-wafer ddl: duplicate column, treating as idempotent no-op",
-                    );
-                    continue;
-                }
-                return Err(format!("pre-wafer ddl failed on `{trimmed}`: {e}"));
-            }
+            return Err(FailedStatement { statement, error });
         }
     }
     Ok(())
@@ -291,67 +327,17 @@ async fn write_state(
     block_name: &str,
     state: &MigrationState,
 ) -> Result<(), String> {
-    let mut patch = std::collections::HashMap::new();
-    patch.insert(
-        "current_hash".to_string(),
-        serde_json::json!(state.current_hash),
-    );
-    patch.insert(
-        "blessed_hash".to_string(),
-        serde_json::json!(state.blessed_hash),
-    );
-    upsert_block_settings_fields(ctx, block_name, patch).await
-}
-
-/// Upsert a subset of columns on the `impresspress__admin__block_settings` row
-/// keyed by `block_name`. Creates the row with `enabled=true` if absent,
-/// preserves every column not present in `patch` otherwise.
-///
-/// Shared by `migration_helper::write_state` (migration hash columns) and
-/// `admin::settings::seed_defaults` (seed_defaults_hash column) so both
-/// hash-gates write through the same single-row-per-block primitive.
-pub(crate) async fn upsert_block_settings_fields(
-    ctx: &dyn Context,
-    block_name: &str,
-    patch: std::collections::HashMap<String, serde_json::Value>,
-) -> Result<(), String> {
-    use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
-
-    let opts = ListOptions {
-        filters: vec![Filter {
-            field: "block_name".into(),
-            operator: FilterOp::Equal,
-            value: serde_json::Value::String(block_name.to_string()),
-        }],
-        sort: vec![SortField {
-            field: "created_at".into(),
-            desc: false,
-        }],
-        limit: 1,
-        offset: 0,
-        skip_count: true,
-        ..Default::default()
-    };
-
-    let existing = db::list(ctx, BLOCK_SETTINGS_TABLE, &opts)
-        .await
-        .map_err(|e| format!("block_settings lookup: {e}"))?;
-
-    if !existing.records.is_empty() {
-        let id = existing.records[0].id.clone();
-        db::update(ctx, BLOCK_SETTINGS_TABLE, &id, patch)
-            .await
-            .map_err(|e| format!("block_settings update: {e}"))?;
-    } else {
-        let mut data = patch;
-        data.insert("block_name".to_string(), serde_json::json!(block_name));
-        data.entry("enabled".to_string())
-            .or_insert(serde_json::json!(true));
-        db::create(ctx, BLOCK_SETTINGS_TABLE, data)
-            .await
-            .map_err(|e| format!("block_settings create: {e}"))?;
-    }
-    Ok(())
+    block_settings::upsert_fields(
+        ctx,
+        block_name,
+        BlockSettingsPatch {
+            current_hash: Some(state.current_hash.clone()),
+            blessed_hash: Some(state.blessed_hash.clone()),
+            ..Default::default()
+        },
+    )
+    .await
+    .map_err(|e| format!("block_settings upsert: {e}"))
 }
 
 /// Compute a SHA-256 hex digest. Re-exported for callers (e.g.
@@ -578,6 +564,81 @@ mod tests {
             postgres_count, 14,
             "files postgres migration: expected 14 statements, got {postgres_count}"
         );
+
+        // 002: the duplicate-name repair and the unique index it makes
+        // creatable — two statements, and BOTH have to reach `db::ddl` or the
+        // index is never built on a database that already holds duplicates.
+        for (dialect, sql) in [
+            (
+                "sqlite",
+                include_str!("blocks/files/migrations/002_bucket_name_unique.sqlite.sql"),
+            ),
+            (
+                "postgres",
+                include_str!("blocks/files/migrations/002_bucket_name_unique.postgres.sql"),
+            ),
+        ] {
+            let count = split_statements(sql)
+                .into_iter()
+                .filter(|s| has_executable_content(s))
+                .count();
+            assert_eq!(
+                count, 2,
+                "files {dialect} migration 002: expected 2 statements, got {count}"
+            );
+        }
+    }
+
+    #[test]
+    fn admin_004_splits_into_its_repair_and_its_index() {
+        // Both statements have to reach `db::ddl`: without the `DELETE` the
+        // index cannot be created on a database that already repeats a grant.
+        for (dialect, sql) in [
+            (
+                "sqlite",
+                include_str!("blocks/admin/migrations/004_user_roles_unique.sqlite.sql"),
+            ),
+            (
+                "postgres",
+                include_str!("blocks/admin/migrations/004_user_roles_unique.postgres.sql"),
+            ),
+        ] {
+            let count = split_statements(sql)
+                .into_iter()
+                .filter(|s| has_executable_content(s))
+                .count();
+            assert_eq!(
+                count, 2,
+                "admin {dialect} migration 004: expected 2 statements, got {count}"
+            );
+        }
+    }
+
+    #[test]
+    fn admin_005_splits_into_its_column_and_its_repair() {
+        // The `ADD COLUMN` has to reach the runner on its own, so a re-run's
+        // duplicate-column error is recognised and the `UPDATE` still runs.
+        for (dialect, sql) in [
+            (
+                "sqlite",
+                include_str!("blocks/admin/migrations/005_wrap_grants_append_column.sqlite.sql"),
+            ),
+            (
+                "postgres",
+                include_str!("blocks/admin/migrations/005_wrap_grants_append_column.postgres.sql"),
+            ),
+        ] {
+            let stmts: Vec<&str> = split_statements(sql)
+                .into_iter()
+                .filter(|s| has_executable_content(s))
+                .collect();
+            assert_eq!(
+                stmts.len(),
+                2,
+                "admin {dialect} migration 005: expected 2 statements, got {stmts:?}"
+            );
+            assert!(is_alter_add_column(stmts[0]), "{dialect}: {}", stmts[0]);
+        }
     }
 
     #[test]
@@ -646,14 +707,17 @@ mod tests {
         // to add — mimicking the prod schema after a previous successful
         // apply, with the tracking row since gone.
         wafer_core::clients::database::ddl(
-            &ctx,
+            &ctx.fixture(),
             "CREATE TABLE IF NOT EXISTS dup_col_test (id TEXT PRIMARY KEY)",
         )
         .await
         .expect("setup: create table");
-        wafer_core::clients::database::ddl(&ctx, "ALTER TABLE dup_col_test ADD COLUMN name TEXT")
-            .await
-            .expect("setup: add column");
+        wafer_core::clients::database::ddl(
+            &ctx.fixture(),
+            "ALTER TABLE dup_col_test ADD COLUMN name TEXT",
+        )
+        .await
+        .expect("setup: add column");
 
         // Migration SQL re-asserts the same column. Without the fix this
         // statement returns "duplicate column name" and the batch aborts.
@@ -662,9 +726,13 @@ mod tests {
             ALTER TABLE dup_col_test ADD COLUMN name TEXT;\n\
         ";
 
-        apply_if_blessed(&ctx, "test/dup-add-column", migration_sql)
-            .await
-            .expect("benign duplicate ALTER must not abort the batch");
+        apply_if_blessed(
+            &ctx.clone().running_as("test/dup-add-column"),
+            "test/dup-add-column",
+            migration_sql,
+        )
+        .await
+        .expect("benign duplicate ALTER must not abort the batch");
     }
 
     /// Regression guard: only ALTER TABLE ADD COLUMN gets the duplicate
@@ -681,6 +749,67 @@ mod tests {
         assert!(
             err.contains("ddl failed"),
             "expected `ddl failed` in error string, got: {err}"
+        );
+    }
+
+    /// `/_deploy/prepare` applies every block's pending migrations in ONE
+    /// Worker invocation, so on a fresh database the statement count of every
+    /// SQLite migration file the crate ships has to fit well inside D1's
+    /// per-invocation query limit ([`D1_QUERIES_PER_INVOCATION_DEFAULT`]),
+    /// with the funnel's seeds, migration stamps and config reads in what is
+    /// left. Half the limit is that line.
+    ///
+    /// Read from the files rather than the blocks' `SQLITE_MIGRATIONS`
+    /// constants so the count covers every block whatever features this test
+    /// is built with. If this fails, the funnel has to apply migrations over
+    /// more than one invocation before the migration that crossed the line
+    /// ships; raising the threshold would only move where a first deploy
+    /// breaks.
+    ///
+    /// A guard: it passes on the shipped migrations by design, and fails only
+    /// when they grow past the line.
+    ///
+    /// [`D1_QUERIES_PER_INVOCATION_DEFAULT`]: crate::config_vars::D1_QUERIES_PER_INVOCATION_DEFAULT
+    #[test]
+    fn a_fresh_databases_migrations_fit_half_of_one_d1_invocation() {
+        let blocks = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/blocks");
+        let mut total = 0usize;
+        let mut per_block = Vec::new();
+        for block in std::fs::read_dir(&blocks).expect("read src/blocks") {
+            let dir = block.expect("block entry").path().join("migrations");
+            let Ok(files) = std::fs::read_dir(&dir) else {
+                continue;
+            };
+            let mut count = 0usize;
+            for file in files {
+                let path = file.expect("migration entry").path();
+                let is_sqlite = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .is_some_and(|name| name.ends_with(".sqlite.sql"));
+                if !is_sqlite {
+                    continue;
+                }
+                let sql = std::fs::read_to_string(&path).expect("read migration");
+                count += split_statements(&sql)
+                    .into_iter()
+                    .filter(|stmt| has_executable_content(stmt))
+                    .count();
+            }
+            total += count;
+            per_block.push((dir, count));
+        }
+        let limit = crate::config_vars::D1_QUERIES_PER_INVOCATION_DEFAULT as usize;
+        assert!(
+            total > 0,
+            "no SQLite migration found under {}",
+            blocks.display()
+        );
+        assert!(
+            total <= limit / 2,
+            "a fresh database's migrations are {total} statements, more than half of the \
+             {limit} D1 queries `/_deploy/prepare` may run in its one invocation: \
+             {per_block:?}"
         );
     }
 }

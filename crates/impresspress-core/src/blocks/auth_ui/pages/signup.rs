@@ -3,18 +3,26 @@
 use maud::{html, PreEscaped};
 use wafer_run::{context::Context, Message, OutputStream};
 
-use super::{pw_field, pw_toggle_js, signup_script, site_config};
+use super::{pw_field, signup_script, site_config};
 use crate::{
     blocks::auth_ui::redirect::is_safe_local_redirect,
+    config_vars::ALLOW_SIGNUP_KEY,
     ui::{self, components::auth_panel, templates::auth_split},
 };
 
 pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let config = site_config(ctx);
-    let allow_signup = ctx
-        .config_get("WAFER_RUN_SHARED__ALLOW_SIGNUP")
-        .unwrap_or("true")
-        == "true";
+    let config = match site_config(ctx).await {
+        Ok(site) => site,
+        Err(e) => {
+            return crate::blocks::crud::db_error_page(msg, e, "page: site config read failed")
+        }
+    };
+    let allow_signup = match crate::config_vars::get_bool(ctx, ALLOW_SIGNUP_KEY, true).await {
+        Ok(allowed) => allowed,
+        Err(e) => {
+            return crate::blocks::crud::db_error_page(msg, e, "Could not read the signup switch")
+        }
+    };
     let raw_redirect = msg.get_meta("req.query.redirect").to_string();
     // Validate redirect — only allow relative paths (prevent open redirect)
     let redirect = if is_safe_local_redirect(&raw_redirect) {
@@ -50,7 +58,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
                         }
                     }
 
-                    form #form .login-form onsubmit="return handleSignup(event)" {
+                    form #form .login-form {
                         input type="hidden" #redirect value=(redirect);
 
                         div .form-group {
@@ -72,7 +80,6 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     }
                 }
 
-                script { (PreEscaped(pw_toggle_js())) }
                 script { (PreEscaped(signup_script())) }
             },
         ),
@@ -93,7 +100,9 @@ mod tests {
     /// bare `<div>`s a screen reader can't tie to the field.
     #[tokio::test]
     async fn email_and_password_labels_are_associated_with_their_inputs() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
         let msg = Message::new("http.request");
         let html = output_html(handle(&ctx, &msg).await).await;
 
@@ -120,7 +129,9 @@ mod tests {
     /// name (aria-label), since it renders no visible text.
     #[tokio::test]
     async fn password_toggle_button_has_non_empty_aria_label() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
         let msg = Message::new("http.request");
         let html = output_html(handle(&ctx, &msg).await).await;
 
@@ -146,7 +157,9 @@ mod tests {
     /// to login copy on every auth page"); this locks that fix in place.
     #[tokio::test]
     async fn brand_panel_tagline_is_signup_appropriate() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
         let msg = Message::new("http.request");
         let html = output_html(handle(&ctx, &msg).await).await;
 

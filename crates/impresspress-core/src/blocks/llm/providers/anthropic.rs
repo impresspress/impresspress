@@ -15,10 +15,8 @@ use wafer_core::interfaces::llm::service::{
     TokenUsage, ToolDefinition,
 };
 
-use super::{
-    config::ProviderConfig,
-    sse::{DecodeBatch, SseFrame, SseFrameStream},
-};
+use super::config::ProviderConfig;
+use crate::llm_wire::sse::{DecodeBatch, SseFrame, SseFrameStream};
 
 pub const ANTHROPIC_VERSION: &str = "2023-06-01";
 
@@ -275,9 +273,13 @@ impl AnthropicSseDecoder {
     }
 
     pub fn push(&mut self, bytes: &[u8]) -> DecodeBatch {
-        if !self.frames.feed(bytes) {
-            tracing::warn!("anthropic sse: non-utf8 bytes — dropping");
-            return DecodeBatch::default();
+        let lost = self.frames.feed(bytes);
+        if lost.any() {
+            // The frames that did decode are still in the buffer, so drain
+            // them: they are the prefix of the answer that survived. `lost`
+            // travels with the batch so the consumer can end the stream
+            // instead of delivering a reply with a hole in it.
+            tracing::warn!(%lost, "anthropic sse: transport lost part of the stream");
         }
 
         let mut out = Vec::new();
@@ -292,7 +294,18 @@ impl AnthropicSseDecoder {
             }
         }
 
-        DecodeBatch { chunks: out, done }
+        DecodeBatch {
+            chunks: out,
+            done,
+            lost,
+        }
+    }
+
+    /// Bytes received that never became a frame — see
+    /// [`SseFrameStream::has_unparsed_input`]. A transport that ends while
+    /// this is true was cut mid-frame.
+    pub fn has_unparsed_input(&self) -> bool {
+        self.frames.has_unparsed_input()
     }
 
     fn decode_frame(&mut self, frame: &SseFrame) -> (Vec<ChatChunk>, bool) {
@@ -674,6 +687,68 @@ mod tests {
         ";
         let mut d = AnthropicSseDecoder::new();
         let batch = d.push(stream.as_bytes());
+        assert!(batch.done);
+    }
+
+    /// Concatenate every text delta the decoder produced.
+    fn text_of(chunks: &[ChatChunk]) -> String {
+        chunks
+            .iter()
+            .filter_map(|c| match &c.delta {
+                ChunkDelta::Text(t) => Some(t.as_str()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    /// Non-ASCII answers must survive the transport splitting a frame at any
+    /// byte offset — including inside a character, where both halves are
+    /// invalid UTF-8 on their own. That split used to cost two whole network
+    /// chunks (several frames) and left a partial frame that corrupted the
+    /// JSON of the next one, so every offset is exercised.
+    #[test]
+    fn non_ascii_text_deltas_survive_a_split_at_every_byte_offset() {
+        let stream = "\
+            event: content_block_delta\n\
+            data: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"héllo \"}}\n\n\
+            event: content_block_delta\n\
+            data: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"🙂 日本語\"}}\n\n\
+            event: message_stop\n\
+            data: {}\n\n\
+        ";
+        let bytes = stream.as_bytes();
+        for split in 0..=bytes.len() {
+            let mut d = AnthropicSseDecoder::new();
+            let first = d.push(&bytes[..split]);
+            let mut chunks = first.chunks;
+            let mut done = first.done;
+            if !done {
+                let second = d.push(&bytes[split..]);
+                chunks.extend(second.chunks);
+                done |= second.done;
+            }
+            assert_eq!(
+                text_of(&chunks),
+                "héllo 🙂 日本語",
+                "content lost when the transport split at byte {split}"
+            );
+            assert!(done, "message_stop must still terminate (split at {split})");
+        }
+    }
+
+    /// A CRLF-framed stream — which SSE permits — must decode rather than
+    /// accumulate bytes forever while emitting nothing.
+    #[test]
+    fn crlf_framed_stream_decodes() {
+        let stream = "\
+            event: content_block_delta\r\n\
+            data: {\"index\":0,\"delta\":{\"type\":\"text_delta\",\"text\":\"hi\"}}\r\n\r\n\
+            event: message_stop\r\n\
+            data: {}\r\n\r\n\
+        ";
+        let mut d = AnthropicSseDecoder::new();
+        let batch = d.push(stream.as_bytes());
+        assert_eq!(text_of(&batch.chunks), "hi");
         assert!(batch.done);
     }
 

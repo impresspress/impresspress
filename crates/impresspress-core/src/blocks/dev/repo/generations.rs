@@ -4,7 +4,10 @@
 //! Rolling back publishes a *new* generation that copies an old one's
 //! manifests (design §7.2), so the history stays a straight line.
 
-use wafer_block::db::{Filter, FilterOp, FilterTree, ListOptions, SortField};
+use wafer_block::{
+    db::{Filter, FilterOp, FilterTree, ListOptions, SortField},
+    wire::database::BatchWrite,
+};
 use wafer_core::clients::database as db;
 use wafer_run::{context::Context, ErrorCode, WaferError};
 
@@ -263,6 +266,21 @@ pub async fn get(ctx: &dyn Context, id: &str) -> Result<GenerationRow, WaferErro
     decode(&db::get(ctx, TABLE, id).await?)
 }
 
+/// [`get`] for a caller that must tell the three outcomes apart: the outer
+/// `Result` is the read itself, `None` is no such row, and the inner `Result`
+/// is the row's decode. A missing or undecodable row is a fact about the
+/// ledger; a read that failed is not.
+pub async fn lookup(
+    ctx: &dyn Context,
+    id: &str,
+) -> Result<Option<Result<GenerationRow, WaferError>>, WaferError> {
+    match db::get(ctx, TABLE, id).await {
+        Ok(record) => Ok(Some(decode(&record))),
+        Err(e) if e.code == ErrorCode::NotFound => Ok(None),
+        Err(e) => Err(e),
+    }
+}
+
 /// Move a generation to `status`, optionally recording why it failed and when
 /// it went live.
 ///
@@ -302,13 +320,13 @@ pub async fn set_status(
 /// order it imposes is arbitrary; being arbitrary and *stable* is the whole
 /// requirement, and [`list_prunable`] orders rows the same way for exactly
 /// that reason.
-pub async fn list_recent(ctx: &dyn Context, limit: i64) -> Result<Vec<GenerationRow>, WaferError> {
+pub async fn list_recent(ctx: &dyn Context, limit: u32) -> Result<Vec<GenerationRow>, WaferError> {
     let list = db::list(
         ctx,
         TABLE,
         &ListOptions {
             sort: newest_first(),
-            limit: limit.clamp(1, MAX_LIST_LIMIT),
+            limit: Some(limit.clamp(1, MAX_LIST_LIMIT)),
             skip_count: true,
             ..Default::default()
         },
@@ -322,7 +340,7 @@ pub async fn list_recent(ctx: &dyn Context, limit: i64) -> Result<Vec<Generation
 /// It bounds a *page*, not the retention pass: [`super::super::retention`]
 /// deletes what a page holds and asks for the next one, so a ledger far past
 /// the window is collected in full rather than down to this many rows.
-const MAX_LIST_LIMIT: i64 = 200;
+const MAX_LIST_LIMIT: u32 = 200;
 
 /// The generation that is serving, or `None` on a fresh instance.
 ///
@@ -344,7 +362,7 @@ pub async fn find_active(ctx: &dyn Context) -> Result<Option<GenerationRow>, Waf
                 value: serde_json::json!(GenerationStatus::Active.as_str()),
             }],
             sort: newest_first(),
-            limit: 1,
+            limit: Some(1),
             skip_count: true,
             ..Default::default()
         },
@@ -369,7 +387,7 @@ pub async fn list_in_flight(ctx: &dyn Context) -> Result<Vec<GenerationRow>, Waf
         &ListOptions {
             filters: vec![status_in(GenerationStatus::is_in_flight)],
             sort: newest_first(),
-            limit: MAX_LIST_LIMIT,
+            limit: Some(MAX_LIST_LIMIT),
             skip_count: true,
             ..Default::default()
         },
@@ -421,7 +439,7 @@ pub async fn list_prunable(
                 ]),
             ])]),
             sort: newest_first(),
-            limit: MAX_LIST_LIMIT,
+            limit: Some(MAX_LIST_LIMIT),
             skip_count: true,
             ..Default::default()
         },
@@ -430,13 +448,28 @@ pub async fn list_prunable(
     list.records.iter().map(decode).collect()
 }
 
-/// Delete one row.
+/// Delete the rows `ids` names, as one transaction.
 ///
 /// Retention is the only caller: the ledger is append-only for as long as a
 /// generation is retained, and the one thing that removes a row is falling
-/// out of the window.
-pub async fn delete(ctx: &dyn Context, id: &str) -> Result<(), WaferError> {
-    db::delete(ctx, TABLE, id).await
+/// out of the window. One `db::batch` for a page of [`list_prunable`] —
+/// never more than [`MAX_LIST_LIMIT`] ids, well inside what one batch takes —
+/// so a pass deletes a page in one write (one OPFS flush in the browser)
+/// rather than one per row. An id no row has any more is not an error: the
+/// row is gone, which is what was asked.
+pub async fn delete_many(ctx: &dyn Context, ids: &[String]) -> Result<(), WaferError> {
+    if ids.is_empty() {
+        return Ok(());
+    }
+    let ops = ids
+        .iter()
+        .map(|id| BatchWrite::Delete {
+            collection: TABLE.to_string(),
+            id: id.clone(),
+        })
+        .collect();
+    db::batch(ctx, ops).await?;
+    Ok(())
 }
 
 /// A `status IN (…)` filter over the statuses `keep` accepts.
@@ -459,6 +492,12 @@ fn status_in(keep: impl Fn(GenerationStatus) -> bool) -> Filter {
 
 /// Newest first, with `id` breaking a `created_at` tie — the one ordering
 /// every listing here uses, and the one the retention boundary is defined in.
+///
+/// The database appends a table's primary key (`id` here) to a sorted list
+/// anyway, in the last sort term's direction. It is named here regardless because
+/// [`list_prunable`]'s boundary filter compares `id` in exactly this
+/// direction, and the order that filter depends on belongs beside it rather
+/// than in the runtime's defaults.
 fn newest_first() -> Vec<SortField> {
     vec![
         SortField {
@@ -869,17 +908,36 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn delete_removes_the_row_from_the_ledger() {
+    async fn delete_many_removes_exactly_the_named_rows_from_the_ledger() {
         let ctx = TestContext::with_dev(FakeControl::new()).await;
-        let row = insert(&ctx, &new_generation(GenerationCause::SiteWrite))
+        let mut rows = Vec::new();
+        for _ in 0..3 {
+            rows.push(
+                insert(&ctx, &new_generation(GenerationCause::SiteWrite))
+                    .await
+                    .expect("insert"),
+            );
+        }
+        let gone = [rows[0].id.clone(), rows[2].id.clone()];
+        delete_many(&ctx, &gone).await.expect("delete");
+        for id in &gone {
+            assert_eq!(
+                get(&ctx, id).await.expect_err("gone").code,
+                ErrorCode::NotFound
+            );
+        }
+        let left: Vec<String> = list_recent(&ctx, 10)
             .await
-            .expect("insert");
-        delete(&ctx, &row.id).await.expect("delete");
-        assert_eq!(
-            get(&ctx, &row.id).await.expect_err("gone").code,
-            ErrorCode::NotFound
-        );
-        assert!(list_recent(&ctx, 10).await.expect("list").is_empty());
+            .expect("list")
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+        assert_eq!(left, [rows[1].id.clone()]);
+
+        // An id no row has any more is not an error, and nothing is left to
+        // delete for an empty list.
+        delete_many(&ctx, &gone).await.expect("already gone");
+        delete_many(&ctx, &[]).await.expect("nothing to delete");
     }
 
     #[test]

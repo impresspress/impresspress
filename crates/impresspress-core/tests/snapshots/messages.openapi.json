@@ -225,11 +225,26 @@
     "get": {
       "parameters": [
         {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "description": "Context ID",
+            "type": "string"
+          }
+        },
+        {
           "in": "query",
           "name": "kind",
           "required": false,
           "schema": {
-            "description": "Filter by kind (message, artifact, notification, status)",
+            "description": "Filter by entry kind",
+            "enum": [
+              "message",
+              "artifact",
+              "notification",
+              "status"
+            ],
             "type": "string"
           }
         },
@@ -256,7 +271,12 @@
           "name": "role",
           "required": false,
           "schema": {
-            "description": "Filter by role (user, agent, system)",
+            "description": "Filter by sender role",
+            "enum": [
+              "user",
+              "assistant",
+              "system"
+            ],
             "type": "string"
           }
         }
@@ -277,6 +297,17 @@
       ]
     },
     "post": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "description": "Context ID",
+            "type": "string"
+          }
+        }
+      ],
       "requestBody": {
         "content": {
           "application/json": {
@@ -297,13 +328,24 @@
                 },
                 "kind": {
                   "default": "message",
-                  "description": "Entry kind: message, artifact, notification, status.",
+                  "description": "What this entry is.",
+                  "enum": [
+                    "message",
+                    "artifact",
+                    "notification",
+                    "status"
+                  ],
                   "type": "string"
                 },
                 "metadata": true,
                 "role": {
-                  "default": "",
-                  "description": "Sender role: user, agent, system.",
+                  "default": "user",
+                  "description": "Who produced it. `agent` is accepted as an alias of `assistant` and\nis stored as `assistant`.",
+                  "enum": [
+                    "user",
+                    "assistant",
+                    "system"
+                  ],
                   "type": "string"
                 },
                 "sender_id": {

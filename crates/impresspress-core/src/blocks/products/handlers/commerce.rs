@@ -6,18 +6,23 @@ use wafer_core::clients::{config, database::Record};
 use wafer_run::{context::Context, ErrorCode, InputStream, Message, OutputStream, WaferError};
 
 use crate::{
-    blocks::products::{
-        contracts::{
-            FulfillmentKind, GuestOrderStatus, MoneyBreakdown, OrderStatus, PricingPreviewRequest,
-            ReconciliationStatus, StorefrontConfig, StorefrontOffer, StorefrontProduct, StripeMode,
-            VariableVisibility, COMMERCE_SCHEMA_VERSION,
+    blocks::{
+        crud,
+        products::{
+            config::{STRIPE_PUBLISHABLE_KEY, STRIPE_SECRET_KEY},
+            contracts::{
+                ApprovalStatus, FulfillmentKind, GuestOrderStatus, MoneyBreakdown, OrderStatus,
+                PricingPreviewRequest, ProductStatus, ReconciliationStatus, StorefrontConfig,
+                StorefrontOffer, StorefrontProduct, StripeMode, SubscriptionStatus,
+                VariableVisibility, COMMERCE_SCHEMA_VERSION,
+            },
+            offer_pricing,
+            repo::{offers, payment_links, products, purchases},
+            stripe_secret_operations_allowed,
         },
-        offer_pricing,
-        repo::{offers, payment_links, products, purchases},
-        stripe_secret_operations_allowed,
     },
     http::{err_bad_request, err_internal, err_not_found, ok_json, ResponseBuilder},
-    util::{sha256_hex, RecordExt},
+    util::{sha256_hex, wire_str, RecordExt},
 };
 
 const STOREFRONT_WIDGET_JS: &str = include_str!("../assets/storefront.js");
@@ -38,14 +43,25 @@ fn validated_publishable_key(value: &str) -> Option<(String, StripeMode)> {
 }
 
 pub(crate) async fn handle_storefront_config(ctx: &dyn Context) -> OutputStream {
-    let key = config::get_default(ctx, "IMPRESSPRESS__PRODUCTS__STRIPE_PUBLISHABLE_KEY", "").await;
-    let secret = config::get_default(ctx, "IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "").await;
+    let settings = async {
+        Ok::<_, wafer_run::WaferError>((
+            config::get_default(ctx, STRIPE_PUBLISHABLE_KEY, "").await?,
+            config::get_default(ctx, STRIPE_SECRET_KEY, "").await?,
+            stripe_secret_operations_allowed(ctx),
+        ))
+    };
+    let (key, secret, secret_operations_allowed) = match settings.await {
+        Ok(settings) => settings,
+        Err(e) => {
+            return crate::blocks::crud::db_error_internal(e, "Could not read the Stripe settings")
+        }
+    };
     let validated = validated_publishable_key(&key);
     let matching_secret = validated.as_ref().is_some_and(|(key, _)| {
         super::super::stripe_client::publishable_livemode(key)
             .zip(super::super::stripe_client::secret_livemode(secret.trim()))
             .is_some_and(|(publishable, secret)| publishable == secret)
-    }) && stripe_secret_operations_allowed(ctx).await;
+    }) && secret_operations_allowed;
     let response = StorefrontConfig {
         schema_version: COMMERCE_SCHEMA_VERSION,
         embedded_checkout_available: matching_secret,
@@ -88,10 +104,13 @@ pub(crate) async fn handle_guest_order_status(ctx: &dyn Context, msg: &Message) 
     }
     let order = match purchases::get(ctx, order_id).await {
         Ok(order) => order,
-        Err(error) if error.code == ErrorCode::NotFound => {
-            return err_not_found("Order status not found");
+        Err(error) => {
+            return crud::db_error(
+                error,
+                "Order status not found",
+                "Could not load order status",
+            )
         }
-        Err(error) => return err_internal("Could not load order status", error),
     };
     let expected_hash = order.str_field("receipt_token_hash");
     let expires_at = order.str_field("receipt_token_expires_at");
@@ -111,10 +130,14 @@ pub(crate) async fn handle_guest_order_status(ctx: &dyn Context, msg: &Message) 
             Ok(currency) => currency,
             Err(error) => return err_internal("Order has invalid currency", error),
         };
-    let subscription_status = optional_nonempty(&order, "subscription_status");
-    let state = OrderStatus::from_record(&order)
-        .and_then(|status| Ok((status, ReconciliationStatus::from_record(&order)?)));
-    let (status, reconciliation_status) = match state {
+    let state = OrderStatus::from_record(&order).and_then(|status| {
+        Ok((
+            status,
+            ReconciliationStatus::from_record(&order)?,
+            SubscriptionStatus::from_record(&order)?,
+        ))
+    });
+    let (status, reconciliation_status, subscription_status) = match state {
         Ok(state) => state,
         Err(error) => return err_internal("Order row is outside the contract", error),
     };
@@ -181,33 +204,37 @@ fn fulfillment(record: &Record) -> Result<FulfillmentKind, WaferError> {
 }
 
 pub(crate) async fn handle_storefront_product(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let product_id = msg.var("product_id");
-    if product_id.is_empty() {
-        return err_bad_request("Missing product ID");
-    }
+    let product_id = match crud::path_var(msg, "product_id", "Missing product ID") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     let product = match products::get(ctx, product_id).await {
         Ok(product) => product,
-        Err(error) if error.code == ErrorCode::NotFound => {
-            return err_not_found("Product not found");
-        }
-        Err(error) => return err_internal("Could not load product", error),
+        Err(error) => return crud::db_error(error, "Product not found", "Could not load product"),
     };
     // `products::get` already answers `NotFound` for a soft-deleted row; only
     // `status`/`approval_status` are this handler's own rules to enforce.
-    if product.str_field("status") != "active" || product.str_field("approval_status") != "approved"
+    //
+    // The stored spelling against the variants' own, not a decode: this is a
+    // public storefront gate, and a row outside either contract has to stay
+    // invisible (404) rather than announce itself with a 500.
+    if product.str_field("status") != wire_str(&ProductStatus::Active)
+        || product.str_field("approval_status") != wire_str(&ApprovalStatus::Approved)
     {
         return err_not_found("Product not found");
     }
 
     let offer_rows = match offers::list_public_for_product(ctx, product_id).await {
         Ok(offers) => offers,
-        Err(error) => return err_internal("Could not load product offers", error),
+        Err(error) => return crud::db_error_internal(error, "Could not load product offers"),
     };
     let mut public_offers = Vec::with_capacity(offer_rows.len());
     for offer in offer_rows {
         let links = match payment_links::list_public_for_offer(ctx, &offer.id).await {
             Ok(links) => links,
-            Err(error) => return err_internal("Could not load offer Payment Links", error),
+            Err(error) => {
+                return crud::db_error_internal(error, "Could not load offer Payment Links")
+            }
         };
         public_offers.push(StorefrontOffer {
             id: offer.id,
@@ -252,15 +279,17 @@ pub(crate) async fn handle_storefront_product(ctx: &dyn Context, msg: &Message) 
 /// offer definition or a trusted total; every amount comes from server-owned
 /// versioned rows.
 pub(crate) async fn handle_preview(ctx: &dyn Context, input: InputStream) -> OutputStream {
-    let raw = input.collect_to_bytes().await;
+    let raw = match input.collect_to_bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => return OutputStream::error(e),
+    };
     let request: PricingPreviewRequest = match serde_json::from_slice(&raw) {
         Ok(request) => request,
         Err(error) => return err_bad_request(&format!("Invalid body: {error}")),
     };
     let offer = match offers::get_public(ctx, &request.offer_id).await {
         Ok(offer) => offer,
-        Err(error) if error.code == ErrorCode::NotFound => return err_not_found("Offer not found"),
-        Err(error) => return err_internal("Could not load offer", error),
+        Err(error) => return crud::db_error(error, "Offer not found", "Could not load offer"),
     };
     match offer_pricing::evaluate_offer(&offer, &request, offer_pricing::InputScope::Public) {
         Ok(preview) => ok_json(&preview),

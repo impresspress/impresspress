@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Page } from '@playwright/test';
 import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
 
 const ANON_ROUTES = [
@@ -22,7 +22,7 @@ const ADMIN_ROUTES = [
   // local and CI based on test-traffic volume. Same drift category Phase 4
   // PR-3 dropped admin-dashboard-mobile for, and PR-2 hit on admin-storage.
   { path: '/b/admin/email', name: 'admin-email' },
-  { path: '/b/admin/network', name: 'admin-network' },
+  // admin-network has a test of its own below: it seeds the rows it shows.
   { path: '/b/admin/variables', name: 'admin-variables' },
   { path: '/b/admin/permissions', name: 'admin-permissions' },
   { path: '/b/userportal/', name: 'portal-dashboard' },
@@ -68,18 +68,139 @@ const ADMIN_ROUTES = [
   { path: '/b/storage/admin/quotas', name: 'storage-admin-quotas' },
 ];
 
+// The tolerance is measured, not guessed. Baselines are CI's own render
+// (`regen-visual-baselines.yml`), so a matching page differs from its
+// baseline only by rendering noise — and across repeated CI runs of this
+// suite at zero tolerance that noise was a handful of pixels one colour
+// level apart (a per-pixel YIQ distance of 0.004 on Playwright's 0-1 scale;
+// nothing larger in any run). `threshold` sits just above that noise, and no
+// pixel beyond it is allowed, so a real change of even one pixel fails.
+//
+// A value that varies from run to run is masked rather than tolerated — see
+// `volatileMasks` below. A tolerance wide enough to absorb one would also
+// absorb real regressions: a 1% pixel ratio lets a 1280x720 capture differ
+// in 9,216 pixels, and Playwright's default per-pixel `threshold` of 0.2
+// ignores a change between two light greys outright.
 const COMMON_OPTS = {
   fullPage: true as const,
-  maxDiffPixelRatio: 0.01,
-  // Mask elements that vary per render (timestamps, counts, generated IDs).
-  // Tests can override per-route if needed.
+  threshold: 0.01,
+  maxDiffPixels: 0,
 };
+
+// The scroll containers of the app shell (`ui/styles/layouts/shell.css`).
+// `.shell` is exactly `100vh` tall and the page scrolls inside `.shell__body`
+// (and the sidebar's nav list inside `.sidebar__groups`), so the document
+// itself never scrolls and `fullPage` alone captures one viewport: the fold
+// sat at 720px on desktop and 812px on mobile, and nothing below it was
+// compared.
+const SHELL_SCROLLERS = '.shell__body, .sidebar__groups';
+
+// Grow the viewport until no on-screen shell scroller has anything left to
+// scroll, so the capture holds the whole page as the app lays it out on a
+// screen that tall. The page's own CSS stays untouched — overriding
+// `.shell`'s height instead would change the layout under test (the chat
+// page, for one, sizes itself to `100%` of `.shell__body`). Only scrollers
+// intersecting the viewport count: on mobile the sidebar is an off-canvas
+// drawer, and its nav list's overflow is not part of the page.
+//
+// The loop converges because the overflow it removes does not grow with the
+// viewport; a page whose content did would never settle, and that fails here
+// rather than producing an arbitrarily tall capture.
+//
+// Chromium's compositor caps a surface at 16,384px (its maximum texture
+// size), so a capture near or past that is not one to trust. The cap below
+// keeps a margin under it. The tallest capture today is
+// admin-variables at about 12,700px. A page that outgrows the cap fails here
+// by name, so the fix is a deliberate one — split the capture, or capture a
+// filtered view — rather than a baseline that silently stopped at the cap.
+const MAX_CAPTURE_HEIGHT = 16_000;
+
+async function growViewportToContent(page: Page) {
+  for (let pass = 0; pass < 5; pass++) {
+    const overflow = await page.evaluate((selector) => {
+      let most = 0;
+      for (const el of document.querySelectorAll(selector)) {
+        const box = el.getBoundingClientRect();
+        if (box.right <= 0 || box.left >= window.innerWidth) continue;
+        most = Math.max(most, el.scrollHeight - el.clientHeight);
+      }
+      return most;
+    }, SHELL_SCROLLERS);
+    if (overflow <= 0) return;
+    const size = page.viewportSize();
+    if (!size) throw new Error('growViewportToContent: the page has no fixed viewport');
+    const height = size.height + overflow;
+    if (height > MAX_CAPTURE_HEIGHT) {
+      throw new Error(
+        `growViewportToContent: ${page.url()} needs a ${height}px capture, over the ` +
+          `${MAX_CAPTURE_HEIGHT}px cap Chromium can screenshot reliably; split or filter this capture`,
+      );
+    }
+    await page.setViewportSize({ width: size.width, height });
+  }
+  throw new Error(`growViewportToContent: ${page.url()} still overflows after 5 passes`);
+}
+
+async function expectPageScreenshot(page: Page, name: string, mask?: ReturnType<typeof volatileMasks>) {
+  await growViewportToContent(page);
+  await expect(page).toHaveScreenshot(name, mask ? { ...COMMON_OPTS, mask } : COMMON_OPTS);
+}
+
+// What the admin captures mask: values that differ from one run to the next,
+// or with what ran before the capture.
+//
+// - Dates and timestamps, which the pages render as `<time>` — among them the
+//   dashboard charts' first/last-day labels, which move daily because the
+//   window ends today (`ui/components/chart.rs`), and every "Created" date
+//   the suite captures (users, the dashboard's Recent Users, both bucket
+//   lists).
+// - The storage-admin buckets table's Owner cell: the first 8 hex digits of
+//   the bootstrap admin's freshly generated UUIDv7. It is reached through the
+//   `tr[data-bucket]` rows `blocks/files/pages_admin.rs` renders, and the cell
+//   is monospaced there, so a new value does not change the column's width
+//   and the mask box stays put.
+// - Latencies the run measured itself. `data-volatile-metric` wraps the
+//   duration figures on the admin network page (`blocks/admin/pages/network.rs`).
+//   The mask covers the owning `<td>`, not the span: the span is as wide as
+//   its text, so "5ms" and "12ms" would paint different mask boxes. The
+//   admin dashboard's "Avg Response" tile is reached by its label instead,
+//   because `components::stat_card` takes its value as a plain `&str` with
+//   nowhere to hang an attribute — a Rust test pins that label so a rename
+//   cannot silently unmask the tile.
+// - Counts of the requests the suite itself made, which change whenever a
+//   spec or a capture is added ahead of the page: the dashboard's "Requests
+//   Today" tile (reached by its label, pinned by the same Rust test) and the
+//   admin database page's rows for the two log tables every request feeds
+//   (`blocks/admin/pages/database.rs` names each row in `data-db-table`).
+//   The whole row is masked, not the count: the count is as wide as its
+//   digits, so "95" and "105" would paint different mask boxes. The admin
+//   network page is captured against rows it seeds itself (see its test
+//   below).
+//
+// What stays unmasked, deliberately: the dashboard's error figures, error
+// chart and Recent Errors card are zero and empty on a healthy run, so an
+// error there is a regression the capture should catch. The request chart,
+// the request sparkline and the new-user chart plot everything on the last
+// day of the window whatever the count, and "Total Users" / "New Today" are
+// the one bootstrap admin, so none of them depends on what ran first. The
+// charts, the sparklines and "New Today" do depend on the UTC day: a run
+// whose server starts before midnight UTC and captures the dashboard after
+// it plots the traffic on two days and fails once; a rerun passes.
+function volatileMasks(page: Page) {
+  return [
+    page.locator('[data-relative-time], .relative-time, time'),
+    page.locator('tr[data-bucket] td[data-label="Owner"]'),
+    page.locator('td:has([data-volatile-metric]), .stat-card:has-text("Avg Response") .stat-value'),
+    page.locator('.stat-card:has-text("Requests Today") .stat-value'),
+    page.locator('li[data-db-table$="__request_logs"], li[data-db-table$="__storage_access_logs"]'),
+  ];
+}
 
 test.describe('visual baseline — anonymous', () => {
   for (const r of ANON_ROUTES) {
     test(`anon ${r.name}`, async ({ page }) => {
       await page.goto(r.path, { waitUntil: 'networkidle' });
-      await expect(page).toHaveScreenshot(`anon-${r.name}.png`, COMMON_OPTS);
+      await expectPageScreenshot(page, `anon-${r.name}.png`);
     });
   }
 });
@@ -92,21 +213,29 @@ test.describe('visual baseline — admin', () => {
   for (const r of ADMIN_ROUTES) {
     test(`admin ${r.name}`, async ({ page }) => {
       await page.goto(r.path, { waitUntil: 'networkidle' });
-      await expect(page).toHaveScreenshot(`admin-${r.name}.png`, {
-        ...COMMON_OPTS,
-        // Mask relative timestamps + per-run-variable cells (storage-admin
-        // tables display `owner_short` = first 8 chars of the bootstrap
-        // admin's freshly-generated UUIDv7, plus `created_at_short` for
-        // the bucket). See pages_admin.rs:254-259 for the tagged `td`
-        // cells. Without these masks the storage-admin screenshots drift
-        // ~0.02-0.05 pixel ratio between captures.
-        mask: [
-          page.locator('[data-relative-time], .relative-time, time'),
-          page.locator('td[data-label="Owner"], td[data-label="Created"], td[data-label="Created By"]'),
-        ],
-      });
+      await expectPageScreenshot(page, `admin-${r.name}.png`, volatileMasks(page));
     });
   }
+
+  // The inbound table summarises every request the server has logged, so
+  // unfiltered it lists whatever the specs and captures before it happened
+  // to request. Instead the capture filters the table to a path nothing else
+  // in the suite requests (the per-request detail endpoint), after
+  // requesting it a known number of times: one row, a known count, no errors.
+  // The request log is written before the response on the native server
+  // (`pipeline.rs`), so the rows exist once the requests return.
+  test('admin admin-network', async ({ page }) => {
+    const probe = '/b/admin/network/detail/inbound';
+    for (let i = 0; i < 3; i++) {
+      const res = await page.request.get(`${probe}?method=retrieve&path=/visual-baseline`);
+      expect(res.status(), `probe request ${i + 1}`).toBe(200);
+    }
+    await page.goto(`/b/admin/settings/network?search=${encodeURIComponent(probe)}`, {
+      waitUntil: 'networkidle',
+    });
+    await expect(page.locator('tr.expand-row')).toHaveCount(1);
+    await expectPageScreenshot(page, 'admin-admin-network.png', volatileMasks(page));
+  });
 });
 
 // ===== Phase 4 PR-3: 375px mobile pass =====
@@ -173,13 +302,7 @@ test.describe('visual baseline — admin vector', () => {
 
   test('admin-vector-list-desktop', async ({ page }) => {
     await page.goto('/b/vector/', { waitUntil: 'networkidle' });
-    await expect(page).toHaveScreenshot('admin-vector-list-desktop.png', {
-      ...COMMON_OPTS,
-      mask: [
-        page.locator('[data-relative-time], .relative-time, time'),
-        page.locator('td[data-label="Owner"], td[data-label="Created"], td[data-label="Created By"]'),
-      ],
-    });
+    await expectPageScreenshot(page, 'admin-vector-list-desktop.png', volatileMasks(page));
   });
 });
 
@@ -188,7 +311,7 @@ test.describe('visual baseline mobile — anonymous (375px)', () => {
     test(`anon-mobile ${r.name}`, async ({ page }) => {
       await page.setViewportSize(MOBILE_VIEWPORT);
       await page.goto(r.path, { waitUntil: 'networkidle' });
-      await expect(page).toHaveScreenshot(`anon-${r.name}-mobile.png`, COMMON_OPTS);
+      await expectPageScreenshot(page, `anon-${r.name}-mobile.png`);
     });
   }
 });
@@ -203,13 +326,7 @@ test.describe('visual baseline mobile — admin (375px)', () => {
     test(`admin-mobile ${r.name}`, async ({ page }) => {
       await page.setViewportSize(MOBILE_VIEWPORT);
       await page.goto(r.path, { waitUntil: 'networkidle' });
-      await expect(page).toHaveScreenshot(`admin-${r.name}-mobile.png`, {
-        ...COMMON_OPTS,
-        mask: [
-          page.locator('[data-relative-time], .relative-time, time'),
-          page.locator('td[data-label="Owner"], td[data-label="Created"], td[data-label="Created By"]'),
-        ],
-      });
+      await expectPageScreenshot(page, `admin-${r.name}-mobile.png`, volatileMasks(page));
     });
   }
 });

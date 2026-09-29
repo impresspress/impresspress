@@ -14,65 +14,20 @@ pub mod signup;
 use maud::{html, Markup};
 use wafer_run::context::Context;
 
-use crate::ui::{self, SiteConfig};
+use crate::{
+    blocks::auth_ui::OAUTH_REDIRECT_URI_KEY,
+    ui::{self, SiteConfig},
+};
 
-/// Build SiteConfig directly from `ctx.config_get(...)`.
+/// The auth pages' site config.
 ///
-/// Values come from the cached config snapshot — on cloudflare, populated
-/// once per isolate by `impresspress-cloudflare::config_cache::get_or_load`;
-/// on native, populated at boot by `seed_and_load_variables` in
-/// `impresspress::cli::server`. No D1 / SQLite read happens here.
-pub(super) fn site_config(ctx: &dyn Context) -> SiteConfig {
-    let auth_logo = ctx
-        .config_get("WAFER_RUN_SHARED__AUTH_LOGO_URL")
-        .unwrap_or("");
-    // Blank = no wordmark image; the pages render the pixel-art icon and the
-    // app name as text (see `ui::templates::brand_lockup`).
-    let logo_url = if auth_logo.is_empty() {
-        ctx.config_get("WAFER_RUN_SHARED__LOGO_URL")
-            .unwrap_or("")
-            .to_string()
-    } else {
-        auth_logo.to_string()
-    };
-
-    let embedded_scripts = ctx
-        .config_get("WAFER_RUN_SHARED__EMBEDDED_SCRIPTS")
-        .unwrap_or("")
-        .split(',')
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(str::to_string)
-        .collect();
-
-    SiteConfig {
-        app_name: ctx
-            .config_get("WAFER_RUN_SHARED__APP_NAME")
-            .unwrap_or("Impresspress")
-            .to_string(),
-        logo_url,
-        logo_icon_url: ctx
-            .config_get("WAFER_RUN_SHARED__LOGO_ICON_URL")
-            .map(str::to_string)
-            .unwrap_or_else(ui::assets::logo_icon_url),
-        favicon_url: ctx
-            .config_get("WAFER_RUN_SHARED__FAVICON_URL")
-            .map(str::to_string)
-            .unwrap_or_else(ui::assets::favicon_url),
-        primary_color: ctx
-            .config_get("WAFER_RUN_SHARED__PRIMARY_COLOR")
-            .unwrap_or("")
-            .to_string(),
-        embedded_scripts,
-        auth_headline: ctx
-            .config_get("WAFER_RUN_SHARED__AUTH_HEADLINE")
-            .unwrap_or(crate::config_vars::DEFAULT_AUTH_HEADLINE)
-            .to_string(),
-        auth_tagline: ctx
-            .config_get("WAFER_RUN_SHARED__AUTH_TAGLINE")
-            .unwrap_or(crate::config_vars::DEFAULT_AUTH_TAGLINE)
-            .to_string(),
-    }
+/// Was a synchronous near-copy of [`SiteConfig::load`] reading
+/// `ctx.config_get`, which serves the boot-time snapshot: an admin's saved
+/// branding did not reach the login page until the process restarted, and on
+/// Cloudflare never reached it at all. Delegates to the one async loader now,
+/// so these pages cannot drift from the rest of the site.
+pub(super) async fn site_config(ctx: &dyn Context) -> Result<SiteConfig, wafer_run::WaferError> {
+    SiteConfig::load_for_auth(ctx).await
 }
 
 /// True if the provider has all three credentials needed for the modern
@@ -84,19 +39,45 @@ pub(super) fn site_config(ctx: &dyn Context) -> SiteConfig {
 ///   the provider is encoded in the signed `state` JWT)
 ///
 /// These match what `oauth.rs` actually reads when building the auth_url.
-pub(super) fn oauth_provider_configured(ctx: &dyn Context, provider: &str) -> bool {
+///
+/// Read through the config client, not `ctx.config_get`. These three are
+/// admin-editable rows in the variables table, and that snapshot is frozen at
+/// boot: an operator who pasted OAuth credentials into the admin UI got no
+/// OAuth buttons until the process restarted, and on Cloudflare never, since
+/// no D1 row reaches that surface. Same defect as the branding reads, on a
+/// page where the symptom is a missing sign-in button rather than a wrong
+/// colour.
+///
+/// A failed read is returned: a button hidden because the config block
+/// refused the read would look exactly like a provider nobody configured.
+pub(in crate::blocks::auth_ui) async fn oauth_provider_configured(
+    ctx: &dyn Context,
+    provider: &str,
+) -> Result<bool, wafer_run::WaferError> {
+    use wafer_core::clients::config;
+
     let up = provider.to_ascii_uppercase();
-    !ctx.config_get(&format!("IMPRESSPRESS__AUTH_UI__OAUTH_{up}_CLIENT_ID"))
-        .unwrap_or("")
-        .is_empty()
-        && !ctx
-            .config_get(&format!("IMPRESSPRESS__AUTH_UI__OAUTH_{up}_CLIENT_SECRET"))
-            .unwrap_or("")
-            .is_empty()
-        && !ctx
-            .config_get("IMPRESSPRESS__AUTH_UI__OAUTH_REDIRECT_URI")
-            .unwrap_or("")
-            .is_empty()
+    let client_id = config::get_default(
+        ctx,
+        &format!("IMPRESSPRESS__AUTH_UI__OAUTH_{up}_CLIENT_ID"),
+        "",
+    )
+    .await?;
+    if client_id.is_empty() {
+        return Ok(false);
+    }
+    let client_secret = config::get_default(
+        ctx,
+        &format!("IMPRESSPRESS__AUTH_UI__OAUTH_{up}_CLIENT_SECRET"),
+        "",
+    )
+    .await?;
+    if client_secret.is_empty() {
+        return Ok(false);
+    }
+    Ok(!config::get_default(ctx, OAUTH_REDIRECT_URI_KEY, "")
+        .await?
+        .is_empty())
 }
 
 /// Display label for an OAuth provider button.
@@ -128,29 +109,26 @@ pub(super) fn oauth_provider_icon(provider: &str) -> Markup {
     }
 }
 
-/// Browser-side handler for OAuth buttons. Hits the existing JSON endpoint,
-/// reads `auth_url`, and redirects. The fetch path uses same-origin cookies
-/// implicitly. On error we surface the message in the existing `#error`
-/// area so it's consistent with the email/password flow.
+/// Browser-side handler for OAuth buttons: a top-level navigation to the
+/// start endpoint, which answers `302` to the provider.
 ///
-/// `login.rs` renders `#error`/`#info` via `components::alert`, which starts
-/// `hidden` (not an inline `display:none` style). `base.css` pins
-/// `[hidden] { display: none !important; }`, so revealing the element must
-/// clear the `hidden` IDL property (`el.hidden = false`), not set
-/// `el.style.display` — a plain inline style loses to that `!important`.
+/// Deliberately a navigation and not a `fetch`. The start endpoint sets the
+/// cookie that binds the flow to this browser, and a cookie set on a `fetch`
+/// response is only stored first-party when the page and the API share an
+/// origin — see `oauth::start`. Navigating also means there is no JSON to
+/// read and no error to surface here: a refused start renders the API's own
+/// error response, and the buttons themselves are only rendered for
+/// providers this deployment has configured (`oauth_provider_configured`).
 pub(super) fn oauth_button_script() -> &'static str {
     r#"
-async function oauthStart(provider){
-  var err=document.getElementById('error');
-  try{
-    var r=await fetch('/b/auth/oauth/login?provider='+encodeURIComponent(provider),{credentials:'same-origin'});
-    var d=await r.json();
-    if(!r.ok||!d.auth_url){throw new Error((d&&d.error&&d.error.message)||d&&d.message||'OAuth start failed');}
-    window.location.href=d.auth_url;
-  }catch(ex){
-    if(err){err.textContent=ex.message||'Failed to start OAuth flow';err.hidden=false;}
-  }
-}
+document.addEventListener('click',function(e){
+  if(!(e.target instanceof Element))return;
+  var el=e.target.closest('[data-action="oauth-start"]');
+  if(!el)return;
+  e.preventDefault();
+  var provider=el.getAttribute('data-provider')||'';
+  window.location.href='/b/auth/oauth/login?provider='+encodeURIComponent(provider);
+});
 "#
 }
 
@@ -165,16 +143,17 @@ pub(super) fn pw_field(id: &str, placeholder: &str, minlength: Option<&str>) -> 
                 placeholder=(placeholder)
                 required
                 minlength=[minlength];
-            button type="button" class="pw-toggle" aria-label="Toggle password visibility" onclick={"togglePw(this)"} {
+            // The reveal is chrome's shared `reveal-toggle` verb (the modal
+            // section of `ui/assets/chrome.js`), which every auth page loads
+            // through `ui::layout::page`. With no `data-reveal-show`/`-hide`
+            // operands the button keeps its one static label for both states,
+            // which is what the `togglePw(this)` helper this replaced did.
+            button type="button" class="pw-toggle" aria-label="Toggle password visibility"
+                data-action="reveal-toggle" data-reveal-target=(id) {
                 (ui::icons::eye_off())
             }
         }
     }
-}
-
-/// JS for password visibility toggle.
-pub(super) fn pw_toggle_js() -> &'static str {
-    r#"function togglePw(b){var i=b.parentElement.querySelector('input');if(i.type==='password'){i.type='text'}else{i.type='password'}}"#
 }
 
 /// JS that drives the login + forgot-password forms.
@@ -222,6 +201,12 @@ async function handleForgot(){
   try{await fetch('/b/auth/api/forgot-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email})})}catch(e){}
   showInfo('If that email is registered, a password reset link has been sent.');
 }
+document.addEventListener('submit',function(e){if(e.target&&e.target.id==='form')handleLogin(e)});
+document.addEventListener('click',function(e){
+  if(!(e.target instanceof Element))return;
+  var el=e.target.closest('[data-action="auth-forgot"]');
+  if(el){e.preventDefault();handleForgot()}
+});
 "#
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -250,6 +235,12 @@ async function handleForgot(){
   try{await fetch('/b/auth/api/forgot-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email})})}catch(e){}
   showInfo('If that email is registered, a password reset link has been sent.');
 }
+document.addEventListener('submit',function(e){if(e.target&&e.target.id==='form')handleLogin(e)});
+document.addEventListener('click',function(e){
+  if(!(e.target instanceof Element))return;
+  var el=e.target.closest('[data-action="auth-forgot"]');
+  if(el){e.preventDefault();handleForgot()}
+});
 "#
     }
 }
@@ -307,6 +298,7 @@ async function handleSignup(ev){
   }catch(ex){showErr('Something went wrong');btn.disabled=false;btn.textContent='Create Account'}
   return false;
 }
+document.addEventListener('submit',function(e){if(e.target&&e.target.id==='form')handleSignup(e)});
 "#
     }
     #[cfg(not(target_arch = "wasm32"))]
@@ -336,6 +328,7 @@ async function handleSignup(ev){
   }catch(ex){showErr('Something went wrong');btn.disabled=false;btn.textContent='Create Account'}
   return false;
 }
+document.addEventListener('submit',function(e){if(e.target&&e.target.id==='form')handleSignup(e)});
 "#
     }
 }
@@ -343,14 +336,24 @@ async function handleSignup(ev){
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::TestContext;
+    use crate::{
+        blocks::auth_ui::{
+            OAUTH_GITHUB_CLIENT_ID_KEY, OAUTH_GITHUB_CLIENT_SECRET_KEY, OAUTH_REDIRECT_URI_KEY,
+        },
+        config_vars::{
+            APP_NAME_KEY, AUTH_LOGO_URL_KEY, DEFAULT_APP_NAME, EMBEDDED_SCRIPTS_KEY, LOGO_URL_KEY,
+        },
+        test_support::TestContext,
+    };
 
     #[tokio::test]
     async fn site_config_reads_from_ctx_config_get_with_defaults() {
-        let ctx = TestContext::new().await;
-        let cfg = site_config(&ctx);
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
+        let cfg = site_config(&ctx).await.expect("site config");
 
-        assert_eq!(cfg.app_name, "Impresspress");
+        assert_eq!(cfg.app_name, DEFAULT_APP_NAME);
         assert_eq!(cfg.logo_url, "", "no wordmark image by default");
         assert_eq!(cfg.logo_icon_url, crate::ui::assets::logo_icon_url());
         assert_eq!(cfg.favicon_url, crate::ui::assets::favicon_url());
@@ -359,44 +362,49 @@ mod tests {
 
     #[tokio::test]
     async fn site_config_picks_auth_logo_when_set() {
-        let mut ctx = TestContext::new().await;
-        ctx.set_config(
-            "WAFER_RUN_SHARED__AUTH_LOGO_URL",
-            "https://example.com/auth.png",
-        );
-        ctx.set_config("WAFER_RUN_SHARED__LOGO_URL", "https://example.com/main.png");
+        let mut ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
+        ctx.set_config(AUTH_LOGO_URL_KEY, "https://example.com/auth.png");
+        ctx.set_config(LOGO_URL_KEY, "https://example.com/main.png");
 
-        let cfg = site_config(&ctx);
+        let cfg = site_config(&ctx).await.expect("site config");
         assert_eq!(cfg.logo_url, "https://example.com/auth.png");
     }
 
     #[tokio::test]
     async fn site_config_falls_back_to_logo_url_when_auth_logo_empty() {
-        let mut ctx = TestContext::new().await;
-        ctx.set_config("WAFER_RUN_SHARED__LOGO_URL", "https://example.com/main.png");
+        let mut ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
+        ctx.set_config(LOGO_URL_KEY, "https://example.com/main.png");
 
-        let cfg = site_config(&ctx);
+        let cfg = site_config(&ctx).await.expect("site config");
         assert_eq!(cfg.logo_url, "https://example.com/main.png");
     }
 
     #[tokio::test]
     async fn site_config_app_name_override() {
-        let mut ctx = TestContext::new().await;
-        ctx.set_config("WAFER_RUN_SHARED__APP_NAME", "MyApp");
+        let mut ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
+        ctx.set_config(APP_NAME_KEY, "MyApp");
 
-        let cfg = site_config(&ctx);
+        let cfg = site_config(&ctx).await.expect("site config");
         assert_eq!(cfg.app_name, "MyApp");
     }
 
     #[tokio::test]
     async fn site_config_embedded_scripts_splits_csv() {
-        let mut ctx = TestContext::new().await;
+        let mut ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
         ctx.set_config(
-            "WAFER_RUN_SHARED__EMBEDDED_SCRIPTS",
+            EMBEDDED_SCRIPTS_KEY,
             "https://a.example.com/a.js, https://b.example.com/b.js,",
         );
 
-        let cfg = site_config(&ctx);
+        let cfg = site_config(&ctx).await.expect("site config");
         assert_eq!(
             cfg.embedded_scripts,
             vec![
@@ -408,32 +416,40 @@ mod tests {
 
     #[tokio::test]
     async fn oauth_provider_configured_requires_all_three_keys() {
-        let mut ctx = TestContext::new().await;
-        ctx.set_config("IMPRESSPRESS__AUTH_UI__OAUTH_GITHUB_CLIENT_ID", "id");
-        ctx.set_config(
-            "IMPRESSPRESS__AUTH_UI__OAUTH_GITHUB_CLIENT_SECRET",
-            "secret",
-        );
+        let mut ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
+        ctx.set_config(OAUTH_GITHUB_CLIENT_ID_KEY, "id");
+        ctx.set_config(OAUTH_GITHUB_CLIENT_SECRET_KEY, "secret");
         assert!(
-            !oauth_provider_configured(&ctx, "github"),
+            !oauth_provider_configured(&ctx, "github")
+                .await
+                .expect("config read"),
             "should be false without REDIRECT_URI"
         );
 
-        ctx.set_config(
-            "IMPRESSPRESS__AUTH_UI__OAUTH_REDIRECT_URI",
-            "https://example.com/cb",
-        );
+        ctx.set_config(OAUTH_REDIRECT_URI_KEY, "https://example.com/cb");
         assert!(
-            oauth_provider_configured(&ctx, "github"),
+            oauth_provider_configured(&ctx, "github")
+                .await
+                .expect("config read"),
             "should be true once all three are set"
         );
     }
 
     #[tokio::test]
     async fn oauth_provider_configured_false_when_missing_any_key() {
-        let ctx = TestContext::new().await;
-        assert!(!oauth_provider_configured(&ctx, "github"));
-        assert!(!oauth_provider_configured(&ctx, "google"));
-        assert!(!oauth_provider_configured(&ctx, "microsoft"));
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
+        assert!(!oauth_provider_configured(&ctx, "github")
+            .await
+            .expect("config read"));
+        assert!(!oauth_provider_configured(&ctx, "google")
+            .await
+            .expect("config read"));
+        assert!(!oauth_provider_configured(&ctx, "microsoft")
+            .await
+            .expect("config read"));
     }
 }

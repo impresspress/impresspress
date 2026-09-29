@@ -1,20 +1,25 @@
 //! Bucket-ownership / access-control predicates. [`bucket_owned_by`] is the
-//! single ownership predicate for the files block; [`is_bucket_access_denied`]
+//! single ownership predicate for the files block; [`require_bucket_access`]
 //! layers the JSON-API admin-bypass policy on top of it.
 
-use wafer_run::{context::Context, Message};
+use wafer_run::{context::Context, Message, OutputStream, WaferError};
 
-use crate::blocks::files::repo;
+use crate::{
+    blocks::{crud, files::repo},
+    http::err_forbidden,
+};
 
-/// True when `user_id` owns a bucket named `bucket` (i.e.
-/// [`repo::buckets::find_owned`] finds a matching row). DB errors are
-/// logged and treated as "not owned" (fail closed).
+/// Whether `user_id` owns a bucket named `bucket` (i.e.
+/// [`repo::buckets::find_owned`] finds a matching row), or the read's own
+/// failure. A failed read is not an answer: it is never "not owned" — that
+/// would turn a WRAP denial or an outage into a 403 or 404 about the bucket —
+/// and never "owned". The caller answers it through the door.
 ///
 /// This is the single ownership predicate for the files block. Callers
 /// decide the admin policy on top of it:
-/// - JSON API handlers go through [`is_bucket_access_denied`], which grants
+/// - JSON API handlers go through [`require_bucket_access`], which grants
 ///   admins access to every bucket.
-/// - The SSR user portal (`pages_user::object_list_page`) deliberately does
+/// - The SSR user portal (`pages_user::objects::object_list_page`) deliberately does
 ///   NOT bypass for admins — the portal is strictly owner-scoped so an
 ///   admin browsing `/b/storage/` sees only their own buckets; cross-user
 ///   inspection happens via the admin pages instead.
@@ -22,26 +27,29 @@ pub(in crate::blocks::files) async fn bucket_owned_by(
     ctx: &dyn Context,
     user_id: &str,
     bucket: &str,
-) -> bool {
-    match repo::buckets::find_owned(ctx, bucket, user_id).await {
-        Ok(record) => record.is_some(),
-        Err(e) => {
-            tracing::warn!(error = %e, bucket = %bucket, "bucket-ownership check failed");
-            false
-        }
-    }
+) -> Result<bool, WaferError> {
+    Ok(repo::buckets::find_owned(ctx, bucket, user_id)
+        .await?
+        .is_some())
 }
 
-/// Check if the current user owns the given bucket (or is admin).
-/// Returns true if access is denied. See [`bucket_owned_by`] for the
-/// admin-bypass policy split between the JSON API and the SSR portal.
-pub(in crate::blocks::files) async fn is_bucket_access_denied(
+/// `Ok` when the current user owns the given bucket (or is admin); otherwise
+/// the response to send: the 403 for a bucket the caller does not own, or the
+/// ownership read's own failure through `crud::db_error_internal` (a WRAP
+/// denial is its 403, a quota its 429, anything else the 500). See
+/// [`bucket_owned_by`] for the admin-bypass policy split between the JSON API
+/// and the SSR portal.
+pub(in crate::blocks::files) async fn require_bucket_access(
     ctx: &dyn Context,
     msg: &Message,
     bucket: &str,
-) -> bool {
+) -> Result<(), OutputStream> {
     if crate::util::is_admin(msg) {
-        return false;
+        return Ok(());
     }
-    !bucket_owned_by(ctx, msg.user_id(), bucket).await
+    match bucket_owned_by(ctx, msg.user_id(), bucket).await {
+        Ok(true) => Ok(()),
+        Ok(false) => Err(err_forbidden("Access denied to this bucket")),
+        Err(e) => Err(crud::db_error_internal(e, "Bucket ownership check failed")),
+    }
 }

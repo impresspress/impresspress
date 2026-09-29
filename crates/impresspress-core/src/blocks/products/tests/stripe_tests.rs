@@ -14,7 +14,10 @@ use wafer_run::{Block, ErrorCode, InputStream, Message};
 use super::harness::*;
 use crate::{
     blocks::products::{
-        contracts::{OfferDefinitionRequest, PaymentLinkCreateRequest, PricingPreviewRequest},
+        contracts::{
+            OfferDefinitionRequest, OfferSyncStatus, PaymentLinkCreateRequest,
+            PricingPreviewRequest,
+        },
         offer_pricing, repo, stripe,
     },
     util::{hex_encode, sha256_hex, RecordExt},
@@ -163,6 +166,60 @@ async fn seed_active_offer(
         "checkout": {
             "automatic_tax": true,
             "collect_billing_address": true
+        }
+    }))
+    .unwrap();
+    let offer = repo::offers::create(ctx, product_id, "admin_1", &definition)
+        .await
+        .expect("create offer");
+    repo::offers::publish(ctx, product_id, &offer.offer.id)
+        .await
+        .expect("publish offer");
+    offer.offer.id
+}
+
+/// Seed a platform-owned product whose single active offer collects a
+/// shipping address, with `allowed` as the offer's allowed country list
+/// (empty = "the offer names none").
+async fn seed_shipping_offer(
+    ctx: &crate::test_support::TestContext,
+    product_id: &str,
+    allowed: &[&str],
+) -> String {
+    seed(
+        ctx,
+        repo::products::TABLE,
+        product_id,
+        HashMap::from([
+            ("name".to_string(), serde_json::json!("Shipped print")),
+            ("slug".to_string(), serde_json::json!(product_id)),
+            ("status".to_string(), serde_json::json!("active")),
+            ("approval_status".to_string(), serde_json::json!("approved")),
+            ("owner_kind".to_string(), serde_json::json!("platform")),
+            ("owner_id".to_string(), serde_json::json!("")),
+            ("created_by".to_string(), serde_json::json!("")),
+        ]),
+    )
+    .await;
+    let definition: OfferDefinitionRequest = serde_json::from_value(serde_json::json!({
+        "name": "Shipped print",
+        "mode": "payment",
+        "currency": "nzd",
+        "pricing_model": "fixed",
+        "interval_count": 1,
+        "usage_type": "licensed",
+        "billing_scheme": "per_unit",
+        "tax_behavior": "exclusive",
+        "variables": [],
+        "components": [{
+            "key": "base",
+            "label": "Print",
+            "required": true,
+            "amount": {"type": "fixed", "unit_amount_minor": 4000}
+        }],
+        "checkout": {
+            "collect_shipping_address": true,
+            "allowed_shipping_countries": allowed,
         }
     }))
     .unwrap();
@@ -1143,6 +1200,94 @@ async fn checkout_redelivery_backfills_missing_subscription_item_snapshot() {
     assert_eq!(event_row.data["status"], "processed");
 }
 
+/// A subscription delivery carrying a lifecycle state this build does not
+/// define is refused, not silently dropped.
+///
+/// `sync_commerce_subscription` takes a typed status now, so the wire value
+/// has to be parsed at the webhook boundary. Mapping an unparseable one to
+/// "no subscription" would have skipped the whole commerce branch and
+/// answered `200 received`, which tells Stripe the event was handled and
+/// leaves the projection silently stale. The 500 makes Stripe redeliver and
+/// puts the event row in the operator's failed queue.
+#[tokio::test]
+async fn a_subscription_status_outside_the_contract_fails_the_webhook() {
+    let ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET",
+        WEBHOOK_SECRET,
+    )])
+    .await;
+    seed(
+        &ctx,
+        repo::purchases::PURCHASES_TABLE,
+        "purchase_unknown_sub_status",
+        HashMap::from([
+            ("user_id".to_string(), serde_json::json!("buyer_unknown")),
+            (
+                "buyer_user_id".to_string(),
+                serde_json::json!("buyer_unknown"),
+            ),
+            ("status".to_string(), serde_json::json!("completed")),
+            ("total_cents".to_string(), serde_json::json!(2500)),
+            ("currency".to_string(), serde_json::json!("NZD")),
+            (
+                "stripe_subscription_id".to_string(),
+                serde_json::json!("sub_unknown_status"),
+            ),
+            (
+                "subscription_status".to_string(),
+                serde_json::json!("active"),
+            ),
+        ]),
+    )
+    .await;
+
+    let event = serde_json::json!({
+        "id": "evt_unknown_sub_status",
+        "type": "customer.subscription.updated",
+        "livemode": false,
+        "data": {"object": {
+            "id": "sub_unknown_status",
+            "status": "hibernating",
+            "cancel_at_period_end": false,
+            "canceled_at": null
+        }}
+    });
+    let (msg, input) = webhook_msg(&event, WEBHOOK_SECRET);
+    assert_eq!(
+        crate::test_support::output_http_status(stripe::handle_webhook(&ctx, &msg, input).await)
+            .await,
+        500,
+        "an unknown lifecycle state must make Stripe redeliver, not report success",
+    );
+
+    // The stored projection is untouched: nothing was applied, and nothing
+    // was quietly cleared either.
+    let purchase = repo::purchases::get(&ctx, "purchase_unknown_sub_status")
+        .await
+        .unwrap();
+    assert_eq!(purchase.data["subscription_status"], "active");
+
+    // And the event row is in the failed queue naming THIS reason. The
+    // assertion is on the reason, not just on the 500: without the refusal
+    // the delivery still fails, but three steps later and for the wrong
+    // reason — the commerce branch is skipped as "no subscription", the
+    // platform-billing lookup then finds no row of its own, and the operator
+    // is told the subscription is unowned rather than that its state is
+    // unrecognised.
+    let event_row = db::get(
+        &ctx,
+        "impresspress__products__stripe_events",
+        "evt_unknown_sub_status",
+    )
+    .await
+    .unwrap();
+    assert_eq!(event_row.data["status"], "failed");
+    assert_eq!(
+        event_row.data["last_error"], "subscription status was unsupported",
+        "the failure has to name the unrecognised state, not a downstream symptom",
+    );
+}
+
 #[tokio::test]
 async fn commerce_subscription_webhooks_keep_authoritative_lifecycle_state() {
     let ctx = ctx_with(&[(
@@ -1514,7 +1659,7 @@ async fn commerce_invoice_events_recover_past_due_without_resurrecting_or_reorde
     )
     .await
     .unwrap();
-    assert_eq!(platform.data["status"], "cancelled");
+    assert_eq!(platform.data["status"], "canceled");
     assert_eq!(platform.data["stripe_event_created"], 400);
 }
 
@@ -1634,7 +1779,7 @@ async fn same_second_subscription_update_cannot_resurrect_deleted_subscription()
     )
     .await
     .unwrap();
-    assert_eq!(platform.data["status"], "cancelled");
+    assert_eq!(platform.data["status"], "canceled");
     assert_eq!(platform.data["stripe_event_created"], 200);
 }
 
@@ -1942,7 +2087,7 @@ async fn invoice_payment_failed_after_deletion_does_not_regress_terminal_state()
     )
     .await
     .unwrap();
-    assert_eq!(platform.data["status"], "cancelled");
+    assert_eq!(platform.data["status"], "canceled");
     assert_eq!(platform.data["stripe_event_created"], 300);
     assert!(
         platform.data["grace_period_end"]
@@ -2077,7 +2222,7 @@ async fn platform_subscription_checkout_is_ordered_and_allows_newer_resubscripti
     )
     .await
     .unwrap();
-    assert_eq!(subscription.data["status"], "cancelled");
+    assert_eq!(subscription.data["status"], "canceled");
     assert_eq!(subscription.data["stripe_event_created"], 400);
 
     let resubscribe = checkout(
@@ -2923,8 +3068,20 @@ async fn dispute_webhooks_are_ordered_tenant_safe_and_immutable() {
 // Webhook — unhandled event types
 // ============================================================
 
+/// A type this block does not handle is ordinary traffic, and this is what
+/// "ordinary" means: acknowledged as received, recorded under the type
+/// Stripe actually sent, and sealed `processed` so a redelivery of the same
+/// id is deduped rather than re-run.
+///
+/// A Stripe destination can be subscribed to more event types than any one
+/// integration handles — the dashboard's "select all events" is one click —
+/// so this is the common case, not an edge one. Answering anything but 2xx
+/// would make Stripe retry the delivery on its backoff schedule and
+/// eventually mark the destination unhealthy, for an event no handler wants.
+/// The dispatcher's ignore arm was `_ =>` before this PR and is `None =>`
+/// after it; this test is the same assertion across both.
 #[tokio::test]
-async fn webhook_unhandled_event_returns_ok() {
+async fn webhook_unhandled_event_is_acknowledged_and_sealed() {
     let ctx = ctx_with(&[(
         "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET",
         WEBHOOK_SECRET,
@@ -2932,14 +3089,40 @@ async fn webhook_unhandled_event_returns_ok() {
     .await;
 
     let event = serde_json::json!({
+        "id": "evt_unhandled_type",
         "type": "payment_intent.created",
         "data": { "object": {} }
     });
     let (msg, input) = webhook_msg(&event, WEBHOOK_SECRET);
 
-    let out = stripe::handle_webhook(&ctx, &msg, input).await;
-    let body = output_to_json(out).await;
-    assert_eq!(body["received"], true);
+    let body = output_to_json(stripe::handle_webhook(&ctx, &msg, input).await).await;
+    // `duplicate` and `dead_letter` are skipped when false, so the whole
+    // body is the assertion: neither flag is set.
+    assert_eq!(body, serde_json::json!({ "received": true }));
+
+    // Recorded before the dispatch, so the row holds the raw type — the
+    // event_type column is Stripe's whole vocabulary, not the handled
+    // subset, which is why `WebhookEventSummary.event_type` stays a string.
+    let event_row = db::get(
+        &ctx,
+        "impresspress__products__stripe_events",
+        "evt_unhandled_type",
+    )
+    .await
+    .unwrap();
+    assert_eq!(event_row.data["event_type"], "payment_intent.created");
+    assert_eq!(
+        event_row.data["status"], "processed",
+        "an unhandled type is done, not queued for retry",
+    );
+
+    // And a redelivery of the same id is deduped rather than re-processed.
+    let (msg, input) = webhook_msg(&event, WEBHOOK_SECRET);
+    let body = output_to_json(stripe::handle_webhook(&ctx, &msg, input).await).await;
+    assert_eq!(
+        body,
+        serde_json::json!({ "received": true, "duplicate": true })
+    );
 }
 
 // ============================================================
@@ -2955,7 +3138,11 @@ async fn webhook_rejects_missing_secret_config() {
     let (msg, input) = webhook_msg(&event, "anything");
 
     let out = stripe::handle_webhook(&ctx, &msg, input).await;
-    assert!(output_is_error(out, ErrorCode::Internal).await);
+    // Unavailable, not Internal: the secret being unset means webhook
+    // processing is switched off, not that this deployment is broken. (It
+    // does not change redelivery — Stripe retries on any non-2xx.) See
+    // `err_unavailable` in `crate::http`.
+    assert!(output_is_error(out, ErrorCode::Unavailable).await);
 }
 
 #[tokio::test]
@@ -3047,7 +3234,9 @@ async fn checkout_rejects_when_stripe_not_configured() {
     );
 
     let out = stripe::handle_checkout(&ctx, &msg, input).await;
-    assert!(output_is_error(out, ErrorCode::Internal).await);
+    // Unavailable, not Internal: checkout is a PUBLIC endpoint on a default
+    // install with no Stripe keys, and "not configured" is not a fault.
+    assert!(output_is_error(out, ErrorCode::Unavailable).await);
 }
 
 #[tokio::test]
@@ -3218,7 +3407,7 @@ async fn catalog_sync_persists_fixed_prices_and_reuses_them_in_checkout_and_paym
     let synced = stripe::sync_offer_catalog(&ctx, product_id, &offer_id)
         .await
         .expect("synchronize immutable fixed rows");
-    assert_eq!(synced.sync_status, "synced");
+    assert_eq!(synced.sync_status, OfferSyncStatus::Synced);
     assert!(synced.sync_error.is_empty());
     assert_eq!(synced.offer.stripe_product_id, "prod_catalog");
     assert!(
@@ -3311,6 +3500,143 @@ async fn catalog_sync_persists_fixed_prices_and_reuses_them_in_checkout_and_paym
     assert!(link_form.contains("line_items[0][price_data][unit_amount]=100"));
 }
 
+/// [B21] A Stripe outage during catalog sync is retryable, not a rejection.
+///
+/// `stripe_catalog_post` classified every status of 400 or more as
+/// `FailedPrecondition` — terminal — while `StripeClient::request_json`, one
+/// file over, has always treated 429 and 5xx as `Internal`. So a Stripe 503
+/// reached the operator as `409 Stripe rejected catalog synchronization` and
+/// was written into the offer's `sync_error` in those words: a transient
+/// outage recorded as a permanent refusal, on the one row an operator would
+/// read to decide whether to retry.
+#[tokio::test]
+async fn catalog_sync_classifies_a_provider_outage_as_retryable() {
+    let mut ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY",
+        "sk_test_outage",
+    )])
+    .await;
+    let requests = register_stripe_sequence(
+        &mut ctx,
+        vec![(503, serde_json::json!({"error": {"type": "api_error"}}))],
+    );
+    let product_id = "product_catalog_outage";
+    let offer_id = seed_active_offer(&ctx, product_id, "").await;
+
+    let error = stripe::sync_offer_catalog(&ctx, product_id, &offer_id)
+        .await
+        .expect_err("a 503 must fail the sync");
+    assert_eq!(
+        error.code,
+        ErrorCode::Internal,
+        "a 503 is retryable, not a terminal rejection: {}",
+        error.message
+    );
+    assert!(error.message.contains("503"), "{}", error.message);
+    let failed = repo::offers::get_managed(&ctx, &offer_id).await.unwrap();
+    assert!(
+        !failed.sync_error.to_ascii_lowercase().contains("reject"),
+        "the persisted sync error must not call an outage a rejection: {}",
+        failed.sync_error
+    );
+    assert!(failed.sync_error.contains("503"), "{}", failed.sync_error);
+    assert_eq!(requests.lock().unwrap().len(), 1);
+}
+
+/// The other half of the same classification: a deterministic 400 stays
+/// terminal, because retrying it changes nothing.
+#[tokio::test]
+async fn catalog_sync_classifies_a_provider_rejection_as_terminal() {
+    let mut ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY",
+        "sk_test_rejected",
+    )])
+    .await;
+    register_stripe_sequence(
+        &mut ctx,
+        vec![(
+            400,
+            serde_json::json!({"error": {"code": "parameter_invalid_empty"}}),
+        )],
+    );
+    let product_id = "product_catalog_rejected";
+    let offer_id = seed_active_offer(&ctx, product_id, "").await;
+
+    let error = stripe::sync_offer_catalog(&ctx, product_id, &offer_id)
+        .await
+        .expect_err("a 400 must fail the sync");
+    assert_eq!(
+        error.code,
+        ErrorCode::FailedPrecondition,
+        "{}",
+        error.message
+    );
+    assert!(
+        error.message.contains("parameter_invalid_empty"),
+        "the provider's own error code must survive: {}",
+        error.message
+    );
+}
+
+/// [B21] The Payment-Link deactivate classified in the opposite direction:
+/// **every** failure was `Internal`, so a deterministic 400 was reported as
+/// retryable and the caller was invited to try it again forever.
+#[tokio::test]
+async fn payment_link_deactivation_classifies_a_provider_rejection_as_terminal() {
+    let mut ctx = ctx_with(&[
+        ("IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "sk_test_x"),
+        ("WAFER_RUN_SHARED__FRONTEND_URL", "https://shop.example"),
+    ])
+    .await;
+    let product_id = "product_link_deactivate";
+    let offer_id = seed_active_offer(&ctx, product_id, "").await;
+    let offer = repo::offers::get_managed(&ctx, &offer_id).await.unwrap();
+    let preview = offer_pricing::evaluate_offer(
+        &offer.offer,
+        &PricingPreviewRequest {
+            offer_id: offer_id.clone(),
+            quantity: 1,
+            inputs: serde_json::from_value(serde_json::json!({"pages": 2})).unwrap(),
+        },
+        offer_pricing::InputScope::Management,
+    )
+    .unwrap();
+    let pending = seed_pending_payment_link(&ctx, &offer_id, "deactivate-config", &preview).await;
+    let link_id = pending.managed.id;
+    repo::payment_links::mark_synced(
+        &ctx,
+        &link_id,
+        "plink_deactivate",
+        "https://buy.stripe.com/deactivate",
+    )
+    .await
+    .unwrap();
+    register_stripe_sequence(
+        &mut ctx,
+        vec![(
+            400,
+            serde_json::json!({"error": {"code": "resource_missing"}}),
+        )],
+    );
+
+    let error = stripe::deactivate_payment_link(&ctx, &offer_id, &link_id)
+        .await
+        .expect_err("Stripe rejected the deactivation");
+    assert_eq!(
+        error.code,
+        ErrorCode::FailedPrecondition,
+        "a 400 is a rejection, not an outage: {}",
+        error.message
+    );
+    assert!(
+        repo::payment_links::list_for_offer(&ctx, &offer_id)
+            .await
+            .unwrap()[0]
+            .active,
+        "a rejected deactivation must not deactivate the local row"
+    );
+}
+
 #[tokio::test]
 async fn catalog_sync_failure_is_visible_and_retry_reuses_the_persisted_product() {
     let mut ctx = ctx_with(&[(
@@ -3351,7 +3677,7 @@ async fn catalog_sync_failure_is_visible_and_retry_reuses_the_persisted_product(
     assert_eq!(error.code, ErrorCode::Internal);
     assert!(error.message.contains("immutable offer row"));
     let failed = repo::offers::get_managed(&ctx, &offer_id).await.unwrap();
-    assert_eq!(failed.sync_status, "failed");
+    assert_eq!(failed.sync_status, OfferSyncStatus::Failed);
     assert!(failed.sync_error.contains("immutable offer row"));
     assert!(failed
         .offer
@@ -3402,7 +3728,7 @@ async fn catalog_sync_failure_is_visible_and_retry_reuses_the_persisted_product(
     let retried = stripe::sync_offer_catalog(&ctx, product_id, &offer_id)
         .await
         .expect("retry catalog sync");
-    assert_eq!(retried.sync_status, "synced");
+    assert_eq!(retried.sync_status, OfferSyncStatus::Synced);
     assert!(retried.sync_error.is_empty());
     assert_eq!(
         retried
@@ -3512,7 +3838,7 @@ async fn catalog_reconciliation_refreshes_product_metadata_and_reactivates_fixed
     let reconciled = stripe::sync_offer_catalog(&ctx, product_id, &offer_id)
         .await
         .expect("repair inactive catalog objects");
-    assert_eq!(reconciled.sync_status, "synced");
+    assert_eq!(reconciled.sync_status, OfferSyncStatus::Synced);
 
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 4);
@@ -3681,7 +4007,7 @@ async fn seller_catalog_sync_creates_resources_in_the_owned_connected_account() 
     let synced = stripe::sync_offer_catalog(&ctx, product_id, &offer_id)
         .await
         .expect("sync seller catalog");
-    assert_eq!(synced.sync_status, "synced");
+    assert_eq!(synced.sync_status, OfferSyncStatus::Synced);
     let requests = requests.lock().unwrap();
     assert_eq!(requests.len(), 2);
     assert!(requests
@@ -3823,19 +4149,8 @@ async fn synced_offer_archive_is_provider_first_retryable_and_idempotent() {
         offer_pricing::InputScope::Management,
     )
     .unwrap();
-    let pending_link = repo::payment_links::create_pending(
-        &ctx,
-        &offer_id,
-        "",
-        "",
-        "",
-        false,
-        "archive-link-config",
-        &preview,
-        0,
-    )
-    .await
-    .unwrap();
+    let pending_link =
+        seed_pending_payment_link(&ctx, &offer_id, "archive-link-config", &preview).await;
     let link_id = pending_link.managed.id;
     repo::payment_links::mark_synced(
         &ctx,
@@ -3867,15 +4182,9 @@ async fn synced_offer_archive_is_provider_first_retryable_and_idempotent() {
             ),
         ],
     );
-    let path = format!("/admin/b/products/products/{product_id}/offers/{offer_id}");
+    let path = format!("/b/products/api/admin/products/{product_id}/offers/{offer_id}");
     let (msg, input) = delete_msg(&path, "admin_1");
-    assert!(
-        output_is_error(
-            dispatch_admin(&ctx, msg, input).await,
-            ErrorCode::AlreadyExists
-        )
-        .await
-    );
+    assert!(output_is_error(dispatch(&ctx, msg, input).await, ErrorCode::AlreadyExists).await);
     assert_eq!(
         repo::offers::get_managed(&ctx, &offer_id)
             .await
@@ -3926,13 +4235,13 @@ async fn synced_offer_archive_is_provider_first_retryable_and_idempotent() {
         ],
     );
     let (msg, input) = delete_msg(&path, "admin_1");
-    let archived = output_to_json(dispatch_admin(&ctx, msg, input).await).await;
+    let archived = output_to_json(dispatch(&ctx, msg, input).await).await;
     assert_eq!(archived["status"], "archived");
     assert_eq!(retry_requests.lock().unwrap().len(), 2);
 
     let idempotent_requests = register_stripe_sequence(&mut ctx, vec![]);
     let (msg, input) = delete_msg(&path, "admin_1");
-    let archived_again = output_to_json(dispatch_admin(&ctx, msg, input).await).await;
+    let archived_again = output_to_json(dispatch(&ctx, msg, input).await).await;
     assert_eq!(archived_again["status"], "archived");
     assert!(idempotent_requests.lock().unwrap().is_empty());
 }
@@ -4034,9 +4343,9 @@ async fn seller_suspension_archives_the_catalog_of_soft_deleted_products_too() {
             ),
         ],
     );
-    let path = "/admin/b/products/sellers/deleted_suspend_account/suspend";
+    let path = "/b/products/api/admin/sellers/deleted_suspend_account/suspend";
     let (msg, input) = admin_create_msg(path, serde_json::json!({}));
-    let suspended = output_to_json(dispatch_admin(&ctx, msg, input).await).await;
+    let suspended = output_to_json(dispatch(&ctx, msg, input).await).await;
     assert_eq!(suspended["status"], "suspended");
 
     {
@@ -4140,15 +4449,9 @@ async fn seller_suspension_fails_closed_until_connected_catalog_archival_succeed
             ),
         ],
     );
-    let path = "/admin/b/products/sellers/seller_suspend_account/suspend";
+    let path = "/b/products/api/admin/sellers/seller_suspend_account/suspend";
     let (msg, input) = admin_create_msg(path, serde_json::json!({}));
-    assert!(
-        output_is_error(
-            dispatch_admin(&ctx, msg, input).await,
-            ErrorCode::AlreadyExists,
-        )
-        .await
-    );
+    assert!(output_is_error(dispatch(&ctx, msg, input).await, ErrorCode::AlreadyExists,).await);
     assert_eq!(
         db::get(&ctx, repo::seller_accounts::TABLE, "seller_suspend_account")
             .await
@@ -4196,7 +4499,7 @@ async fn seller_suspension_fails_closed_until_connected_catalog_archival_succeed
         ],
     );
     let (msg, input) = admin_create_msg(path, serde_json::json!({}));
-    let suspended = output_to_json(dispatch_admin(&ctx, msg, input).await).await;
+    let suspended = output_to_json(dispatch(&ctx, msg, input).await).await;
     assert_eq!(suspended["status"], "suspended");
     assert_eq!(
         db::get(&ctx, repo::products::TABLE, product_id)
@@ -4206,6 +4509,77 @@ async fn seller_suspension_fails_closed_until_connected_catalog_archival_succeed
         "archived"
     );
     assert_eq!(retry_requests.lock().unwrap().len(), 2);
+}
+
+/// The two duplicated columns on the orders table are written together, by
+/// one writer, from one value each — and nothing in the tree compares them.
+///
+/// `amount_cents` mirrors `total_cents` and `user_id` mirrors
+/// `buyer_user_id`. Neither duplicate is published any more (`PurchaseView`
+/// carries `total_cents` and `buyer_user_id` only, and this is the PR that
+/// stopped it publishing both), and neither column can be dropped without a
+/// migration this phase deliberately defers. What is left is the risk that a
+/// future writer sets one of a pair and forgets the other, which nothing
+/// would notice: the internal read sets differ, so an order would list under
+/// one identity and access-check under another. This pins the invariant on
+/// the writer that creates the row.
+#[tokio::test]
+async fn a_created_order_writes_the_same_value_into_both_duplicated_columns() {
+    let mut ctx = ctx_with(&[
+        ("IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "sk_test_x"),
+        ("WAFER_RUN_SHARED__FRONTEND_URL", "https://shop.example"),
+    ])
+    .await;
+    register_stripe_network(
+        &mut ctx,
+        serde_json::json!({
+            "id": "cs_test_mirror",
+            "url": "https://checkout.stripe.com/c/pay/cs_test_mirror"
+        }),
+    );
+    let offer_id = seed_active_offer(&ctx, "product_mirror_checkout", "").await;
+
+    // A SIGNED-IN buyer, so both identity columns are non-empty and the
+    // assertion has something to compare. A guest order writes `""` into
+    // both, which would pass whatever the writer did.
+    let (msg, input) = create_msg(
+        "/b/products/checkout",
+        "user_mirror",
+        serde_json::json!({
+            "offer_id": offer_id,
+            "inputs": {"pages": 2},
+            "presentation": "hosted"
+        }),
+    );
+    let body = output_to_json(stripe::handle_checkout(&ctx, &msg, input).await).await;
+    let order_id = body["order_id"].as_str().expect("order id");
+
+    let order = db::get(&ctx, "impresspress__products__purchases", order_id)
+        .await
+        .expect("order row");
+    assert_eq!(
+        order.data["buyer_user_id"],
+        serde_json::json!("user_mirror"),
+        "the fixture must produce a signed-in order, or the mirror assertions \
+         below compare two empty strings"
+    );
+    assert_eq!(
+        order.data["user_id"], order.data["buyer_user_id"],
+        "`user_id` mirrors `buyer_user_id`; a writer that sets one and not the \
+         other makes an order list under one identity and access-check under \
+         another"
+    );
+    assert!(
+        order.data["total_cents"].as_i64().is_some_and(|v| v > 0),
+        "the fixture must charge something, or the amount assertion below \
+         compares two absent fields: {:?}",
+        order.data["total_cents"]
+    );
+    assert_eq!(
+        order.data["amount_cents"], order.data["total_cents"],
+        "`amount_cents` mirrors `total_cents`; a writer that sets one and not \
+         the other stores two answers for what the buyer was charged"
+    );
 }
 
 #[tokio::test]
@@ -4305,6 +4679,169 @@ async fn seller_offer_checkout_uses_direct_charge_header_and_application_fee() {
     assert!(form.contains("payment_intent_data[application_fee_amount]=27"));
 }
 
+/// [B22] A garbage application fee refuses the checkout instead of quietly
+/// taking no platform fee.
+///
+/// `SELLER_APPLICATION_FEE_BPS` was parsed with `.ok().filter(..)
+/// .unwrap_or(0)` on both money paths, so any value the `u16` parse rejected
+/// — a stray `%`, a percentage rather than basis points, a blanked field —
+/// charged the buyer in full and paid the platform nothing, with no error
+/// anywhere. Seller onboarding refused the identical value.
+#[tokio::test]
+async fn seller_offer_checkout_refuses_a_misconfigured_application_fee() {
+    let mut ctx = ctx_with(&[
+        ("IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "sk_test_x"),
+        ("WAFER_RUN_SHARED__FRONTEND_URL", "https://shop.example"),
+        ("WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS", "true"),
+        ("IMPRESSPRESS__PRODUCTS__SELLER_APPLICATION_FEE_BPS", "2.5%"),
+    ])
+    .await;
+    let requests = register_stripe_network(
+        &mut ctx,
+        serde_json::json!({"id": "must_not_be_used", "url": "https://example.invalid"}),
+    );
+    seed(
+        &ctx,
+        repo::seller_accounts::TABLE,
+        "seller_account_bad_fee",
+        HashMap::from([
+            ("user_id".to_string(), serde_json::json!("seller_bad_fee")),
+            ("status".to_string(), serde_json::json!("active")),
+            (
+                "stripe_account_id".to_string(),
+                serde_json::json!("acct_bad_fee"),
+            ),
+            ("details_submitted".to_string(), serde_json::json!(true)),
+            ("charges_enabled".to_string(), serde_json::json!(true)),
+            ("payouts_enabled".to_string(), serde_json::json!(true)),
+        ]),
+    )
+    .await;
+    let offer_id = seed_active_offer(&ctx, "seller_product_bad_fee", "seller_bad_fee").await;
+    let (msg, input) = create_msg(
+        "/b/products/checkout",
+        "",
+        serde_json::json!({"offer_id": offer_id, "inputs": {"pages": 4}}),
+    );
+    assert!(
+        output_is_error(
+            stripe::handle_checkout(&ctx, &msg, input).await,
+            ErrorCode::Internal
+        )
+        .await,
+        "a fee the platform cannot parse must refuse the sale, not take zero"
+    );
+    assert!(
+        requests.lock().unwrap().is_empty(),
+        "no Checkout Session may be created with a fee nobody could read"
+    );
+}
+
+/// [B23] With no platform country and no allowed shipping countries, a
+/// checkout that collects a shipping address is refused rather than shipped
+/// to the United States.
+///
+/// `stripe.rs` defaulted `PLATFORM_COUNTRY` to `"US"` and also fell back to
+/// `"US"` on an unreadable value, while the `ConfigVar` and seller
+/// onboarding default it to empty — so an NZ merchant who left it unset got
+/// a US-only Checkout and no error. Omitting the key instead is not an
+/// option: `allowed_countries` is a required member of Stripe's
+/// `shipping_address_collection`, so omitting it collects no address at all.
+#[tokio::test]
+async fn shipping_checkout_refuses_when_no_country_is_configured() {
+    let mut ctx = ctx_with(&[
+        ("IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "sk_test_x"),
+        ("WAFER_RUN_SHARED__FRONTEND_URL", "https://shop.example"),
+    ])
+    .await;
+    let requests = register_stripe_network(
+        &mut ctx,
+        serde_json::json!({"id": "must_not_be_used", "url": "https://example.invalid"}),
+    );
+    let offer_id = seed_shipping_offer(&ctx, "product_shipping_no_country", &[]).await;
+    let (msg, input) = create_msg(
+        "/b/products/checkout",
+        "",
+        serde_json::json!({"offer_id": offer_id, "inputs": {}}),
+    );
+    let out = stripe::handle_checkout(&ctx, &msg, input).await;
+    assert!(
+        output_is_error(out, ErrorCode::InvalidArgument).await,
+        "an offer collecting a shipping address with no country list and no platform country must refuse"
+    );
+    assert!(
+        requests.lock().unwrap().is_empty(),
+        "no Checkout Session may be created with a fabricated country list"
+    );
+}
+
+/// An offer that names its own shipping countries never needed the platform
+/// country and still does not: the refusal above is only for the offer that
+/// names none.
+#[tokio::test]
+async fn shipping_checkout_prefers_the_offers_own_country_list() {
+    let mut ctx = ctx_with(&[
+        ("IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "sk_test_x"),
+        ("WAFER_RUN_SHARED__FRONTEND_URL", "https://shop.example"),
+    ])
+    .await;
+    let requests = register_stripe_network(
+        &mut ctx,
+        serde_json::json!({
+            "id": "cs_test_offer_countries",
+            "url": "https://checkout.stripe.com/c/pay/cs_test_offer_countries"
+        }),
+    );
+    let offer_id = seed_shipping_offer(&ctx, "product_shipping_offer_list", &["au", "NZ"]).await;
+    let (msg, input) = create_msg(
+        "/b/products/checkout",
+        "",
+        serde_json::json!({"offer_id": offer_id, "inputs": {}}),
+    );
+    let body = output_to_json(stripe::handle_checkout(&ctx, &msg, input).await).await;
+    assert!(body["checkout_url"].is_string());
+    let requests = requests.lock().unwrap();
+    let form = String::from_utf8(requests[0].body.clone().unwrap()).unwrap();
+    assert!(
+        form.contains("shipping_address_collection[allowed_countries][0]=AU")
+            && form.contains("shipping_address_collection[allowed_countries][1]=NZ"),
+        "{form}"
+    );
+}
+
+/// The same offer ships once the platform country is set — and it ships to
+/// that country, not to the deleted `"US"` default.
+#[tokio::test]
+async fn shipping_checkout_uses_the_configured_platform_country() {
+    let mut ctx = ctx_with(&[
+        ("IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "sk_test_x"),
+        ("WAFER_RUN_SHARED__FRONTEND_URL", "https://shop.example"),
+        ("IMPRESSPRESS__PRODUCTS__PLATFORM_COUNTRY", "nz"),
+    ])
+    .await;
+    let requests = register_stripe_network(
+        &mut ctx,
+        serde_json::json!({
+            "id": "cs_test_shipping",
+            "url": "https://checkout.stripe.com/c/pay/cs_test_shipping"
+        }),
+    );
+    let offer_id = seed_shipping_offer(&ctx, "product_shipping_nz", &[]).await;
+    let (msg, input) = create_msg(
+        "/b/products/checkout",
+        "",
+        serde_json::json!({"offer_id": offer_id, "inputs": {}}),
+    );
+    let body = output_to_json(stripe::handle_checkout(&ctx, &msg, input).await).await;
+    assert!(body["checkout_url"].is_string());
+    let requests = requests.lock().unwrap();
+    let form = String::from_utf8(requests[0].body.clone().unwrap()).unwrap();
+    assert!(
+        form.contains("shipping_address_collection[allowed_countries][0]=NZ"),
+        "{form}"
+    );
+}
+
 #[tokio::test]
 async fn seller_offer_checkout_fails_closed_when_connect_charges_are_disabled() {
     let mut ctx = ctx_with(&[
@@ -4354,6 +4891,56 @@ async fn seller_offer_checkout_fails_closed_when_connect_charges_are_disabled() 
     );
 }
 
+/// A checkout preset's slug is unique per offer (migration 005's
+/// `checkout_presets_slug_uniq`): creating a second preset under a slug the
+/// offer already has, or renaming one onto it, is a 409 that says which slug —
+/// not the generic "same key" that leaves the admin to guess, nor anything of
+/// the index or the table.
+#[tokio::test]
+async fn a_taken_preset_slug_is_a_409_naming_the_slug() {
+    let ctx = ctx().await;
+    let offer_id = seed_active_offer(&ctx, "product_presets", "").await;
+    let presets =
+        format!("/b/products/api/admin/products/product_presets/offers/{offer_id}/presets");
+    let preset = |name: &str, slug: &str| serde_json::json!({"name": name, "slug": slug, "inputs": {"pages": 4}});
+    let expect_taken = |out: wafer_run::OutputStream| async move {
+        let parts = wafer_block::http_codec::collect_http_response(out).await;
+        let body: serde_json::Value = serde_json::from_slice(&parts.body).unwrap_or_default();
+        assert_eq!(parts.status, 409, "{body}");
+        assert_eq!(
+            body["message"],
+            serde_json::json!(
+                "A checkout preset with the slug \"four-pages\" already exists. \
+                 Choose a different slug."
+            ),
+            "{body}"
+        );
+        let text = body.to_string();
+        assert!(
+            !text.contains("impresspress__products") && !text.contains("UNIQUE"),
+            "schema leaked: {text}"
+        );
+    };
+
+    let (msg, input) = admin_create_msg(&presets, preset("Four pages", "four-pages"));
+    output_to_json(dispatch(&ctx, msg, input).await).await;
+
+    let (msg, input) = admin_create_msg(&presets, preset("Four again", "four-pages"));
+    expect_taken(dispatch(&ctx, msg, input).await).await;
+
+    let (msg, input) = admin_create_msg(&presets, preset("Eight pages", "eight-pages"));
+    let other = output_to_json(dispatch(&ctx, msg, input).await).await;
+    let other_id = other["id"].as_str().expect("preset id");
+    let (mut msg, input) = request_msg(
+        "update",
+        &format!("{presets}/{other_id}"),
+        "admin_1",
+        preset("Eight pages", "four-pages"),
+    );
+    msg.set_meta("auth.user_roles", "admin");
+    expect_taken(dispatch(&ctx, msg, input).await).await;
+}
+
 #[tokio::test]
 async fn admin_preset_payment_link_lifecycle_reuses_and_exposes_only_safe_url() {
     let mut ctx = ctx_with(&[
@@ -4369,7 +4956,7 @@ async fn admin_preset_payment_link_lifecycle_reuses_and_exposes_only_safe_url() 
         }),
     );
     let offer_id = seed_active_offer(&ctx, "product_payment_link", "").await;
-    let base = format!("/admin/b/products/products/product_payment_link/offers/{offer_id}");
+    let base = format!("/b/products/api/admin/products/product_payment_link/offers/{offer_id}");
 
     let (msg, input) = admin_create_msg(
         &format!("{base}/presets"),
@@ -4379,7 +4966,7 @@ async fn admin_preset_payment_link_lifecycle_reuses_and_exposes_only_safe_url() 
             "inputs": {"pages": 4}
         }),
     );
-    let preset = output_to_json(dispatch_admin(&ctx, msg, input).await).await;
+    let preset = output_to_json(dispatch(&ctx, msg, input).await).await;
     let preset_id = preset["id"].as_str().expect("preset id").to_string();
     assert_eq!(preset["inputs"]["pages"], 4);
     assert_eq!(preset["active"], true);
@@ -4390,7 +4977,7 @@ async fn admin_preset_payment_link_lifecycle_reuses_and_exposes_only_safe_url() 
         "after_completion_url": "https://shop.example/payment-link/thanks?session_id={CHECKOUT_SESSION_ID}"
     });
     let (msg, input) = admin_create_msg(&format!("{base}/payment-links"), create_body.clone());
-    let link = output_to_json(dispatch_admin(&ctx, msg, input).await).await;
+    let link = output_to_json(dispatch(&ctx, msg, input).await).await;
     let link_id = link["id"]
         .as_str()
         .expect("local Payment Link id")
@@ -4401,7 +4988,7 @@ async fn admin_preset_payment_link_lifecycle_reuses_and_exposes_only_safe_url() 
 
     // Same immutable configuration reuses the existing provider resource.
     let (msg, input) = admin_create_msg(&format!("{base}/payment-links"), create_body);
-    let reused = output_to_json(dispatch_admin(&ctx, msg, input).await).await;
+    let reused = output_to_json(dispatch(&ctx, msg, input).await).await;
     assert_eq!(reused["id"], link_id);
     assert_eq!(requests.lock().unwrap().len(), 1);
 
@@ -4420,7 +5007,7 @@ async fn admin_preset_payment_link_lifecycle_reuses_and_exposes_only_safe_url() 
     }
 
     let (msg, input) = get_msg("/b/products/storefront/product_payment_link", "");
-    let storefront = output_to_json(dispatch_user(&ctx, msg, input).await).await;
+    let storefront = output_to_json(dispatch(&ctx, msg, input).await).await;
     let public_link = &storefront["offers"][0]["payment_links"][0];
     assert_eq!(public_link["id"], link_id);
     assert_eq!(public_link["preset_id"], preset_id);
@@ -4429,7 +5016,7 @@ async fn admin_preset_payment_link_lifecycle_reuses_and_exposes_only_safe_url() 
     assert!(public_link.get("sync_status").is_none());
 
     let (msg, input) = delete_msg(&format!("{base}/payment-links/{link_id}"), "admin_1");
-    let deactivated = output_to_json(dispatch_admin(&ctx, msg, input).await).await;
+    let deactivated = output_to_json(dispatch(&ctx, msg, input).await).await;
     assert_eq!(deactivated["active"], false);
     {
         let requests_guard = requests.lock().unwrap();
@@ -4445,11 +5032,1295 @@ async fn admin_preset_payment_link_lifecycle_reuses_and_exposes_only_safe_url() 
     }
 
     let (msg, input) = get_msg("/b/products/storefront/product_payment_link", "");
-    let storefront = output_to_json(dispatch_user(&ctx, msg, input).await).await;
+    let storefront = output_to_json(dispatch(&ctx, msg, input).await).await;
     assert_eq!(
         storefront["offers"][0]["payment_links"],
         serde_json::json!([])
     );
+}
+
+/// What the Stripe stand-in does with a create it has not seen under the key.
+#[derive(Clone, Copy)]
+enum FreshOutcome {
+    /// Create a Payment Link and save the 200 under the key.
+    Create,
+    /// Execute and refuse with a 400, saved under the key like Stripe saves
+    /// every result of a request whose execution began.
+    Reject,
+}
+
+/// Rendezvous points for pinning two concurrent creates under one key. When
+/// `armed`, the first fresh execution signals `started` once its key is in
+/// flight and parks until `release`. A request that meets a key in flight
+/// signals `conflict_met` and answers its 409 only after `answer_conflict`.
+#[derive(Default)]
+struct HeldExecution {
+    started: tokio::sync::Notify,
+    release: tokio::sync::Notify,
+    conflict_met: tokio::sync::Notify,
+    answer_conflict: tokio::sync::Notify,
+    armed: std::sync::atomic::AtomicBool,
+}
+
+/// Stripe's idempotency scope: the `Stripe-Account` a key was sent for, and
+/// the key.
+type IdempotencyScope = (String, String);
+
+/// What Stripe saved under a key: the request body, and the status and body
+/// it answered.
+type SavedResult = (Vec<u8>, u16, serde_json::Value);
+
+/// A Stripe stand-in that applies Stripe's idempotency rules to
+/// `POST /v1/payment_links`:
+///
+/// - the first `rate_limited` requests get a 429, which Stripe's rate limiter
+///   answers before the idempotency layer, so nothing is saved;
+/// - a key whose original request is still executing gets a 409;
+/// - a saved key replays its saved status and body, but only for the same
+///   parameters; different parameters get a 400 `idempotency_error`;
+/// - an unseen key executes (see [`FreshOutcome`]) and saves the result.
+///
+/// Keys are scoped to the `Stripe-Account` they were sent for. A request to
+/// `/v1/payment_links/{id}` (deactivation) answers the link as inactive.
+#[derive(Clone, Default)]
+struct IdempotentPaymentLinkStripe {
+    requests: Arc<Mutex<Vec<Request>>>,
+    saved: Arc<Mutex<HashMap<IdempotencyScope, SavedResult>>>,
+    in_flight: Arc<Mutex<std::collections::HashSet<IdempotencyScope>>>,
+    links_created: Arc<Mutex<Vec<String>>>,
+    rate_limited: Arc<Mutex<usize>>,
+    /// Answer this many `POST /v1/payment_links/{id}` deactivations with a
+    /// 500 before letting one through.
+    deactivations_failed: Arc<Mutex<usize>>,
+    fresh_outcomes: Arc<Mutex<VecDeque<FreshOutcome>>>,
+    held: Arc<HeldExecution>,
+}
+
+fn stripe_response(status_code: u16, body: &serde_json::Value) -> Response {
+    Response {
+        status_code,
+        headers: HashMap::new(),
+        body: serde_json::to_vec(body).unwrap(),
+    }
+}
+
+#[async_trait]
+impl NetworkService for IdempotentPaymentLinkStripe {
+    async fn do_request(&self, request: &Request) -> Result<Response, NetworkError> {
+        self.requests.lock().unwrap().push(request.clone());
+        if !request.url.ends_with("/v1/payment_links") {
+            let id = request.url.rsplit('/').next().unwrap_or("").to_string();
+            {
+                let mut remaining = self.deactivations_failed.lock().unwrap();
+                if *remaining > 0 {
+                    *remaining -= 1;
+                    return Ok(stripe_response(
+                        500,
+                        &serde_json::json!({"error": {"type": "api_error"}}),
+                    ));
+                }
+            }
+            return Ok(stripe_response(
+                200,
+                &serde_json::json!({"id": id, "active": false}),
+            ));
+        }
+        {
+            let mut remaining = self.rate_limited.lock().unwrap();
+            if *remaining > 0 {
+                *remaining -= 1;
+                return Ok(stripe_response(
+                    429,
+                    &serde_json::json!({"error": {"type": "rate_limit_error"}}),
+                ));
+            }
+        }
+        let scope = (
+            request
+                .headers
+                .get("Stripe-Account")
+                .cloned()
+                .unwrap_or_default(),
+            request.headers["Idempotency-Key"].clone(),
+        );
+        let body = request.body.clone().unwrap_or_default();
+        if self.in_flight.lock().unwrap().contains(&scope) {
+            self.held.conflict_met.notify_one();
+            self.held.answer_conflict.notified().await;
+            return Ok(stripe_response(
+                409,
+                &serde_json::json!({"error": {"type": "idempotency_error"}}),
+            ));
+        }
+        let replay = self.saved.lock().unwrap().get(&scope).cloned();
+        if let Some((saved_body, status_code, response)) = replay {
+            if saved_body != body {
+                return Ok(stripe_response(
+                    400,
+                    &serde_json::json!({"error": {"type": "idempotency_error"}}),
+                ));
+            }
+            return Ok(stripe_response(status_code, &response));
+        }
+        self.in_flight.lock().unwrap().insert(scope.clone());
+        if self
+            .held
+            .armed
+            .swap(false, std::sync::atomic::Ordering::SeqCst)
+        {
+            self.held.started.notify_one();
+            self.held.release.notified().await;
+        }
+        let outcome = self
+            .fresh_outcomes
+            .lock()
+            .unwrap()
+            .pop_front()
+            .unwrap_or(FreshOutcome::Create);
+        let (status_code, response) = match outcome {
+            FreshOutcome::Create => {
+                let mut links = self.links_created.lock().unwrap();
+                let id = format!("plink_minted_{}", links.len() + 1);
+                links.push(id.clone());
+                (
+                    200,
+                    serde_json::json!({
+                        "id": id,
+                        "url": format!("https://buy.stripe.com/{id}"),
+                    }),
+                )
+            }
+            FreshOutcome::Reject => (
+                400,
+                serde_json::json!({"error": {
+                    "type": "invalid_request_error",
+                    "code": "account_invalid"
+                }}),
+            ),
+        };
+        self.saved
+            .lock()
+            .unwrap()
+            .insert(scope.clone(), (body, status_code, response.clone()));
+        self.in_flight.lock().unwrap().remove(&scope);
+        Ok(stripe_response(status_code, &response))
+    }
+}
+
+fn register_idempotent_payment_link_stripe(
+    ctx: &mut crate::test_support::TestContext,
+    rate_limited: usize,
+) -> IdempotentPaymentLinkStripe {
+    let stripe = IdempotentPaymentLinkStripe {
+        rate_limited: Arc::new(Mutex::new(rate_limited)),
+        ..Default::default()
+    };
+    let block: Arc<dyn Block> = Arc::new(wafer_core::service_blocks::network::NetworkBlock::new(
+        Arc::new(stripe.clone()),
+    ));
+    ctx.register_block("wafer-run/network", block);
+    stripe
+}
+
+/// The idempotency keys of every Payment Link create, in request order.
+fn idempotency_keys(stripe: &IdempotentPaymentLinkStripe) -> Vec<String> {
+    stripe
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request.url.ends_with("/v1/payment_links"))
+        .map(|request| request.headers["Idempotency-Key"].clone())
+        .collect()
+}
+
+/// Seed a platform offer plus a named preset, and return the product record,
+/// the offer id and the create request a Payment Link call sends.
+async fn seed_payment_link_configuration(
+    ctx: &crate::test_support::TestContext,
+    product_id: &str,
+) -> (db::Record, String, PaymentLinkCreateRequest) {
+    let offer_id = seed_active_offer(ctx, product_id, "").await;
+    let preset = repo::checkout_presets::create(
+        ctx,
+        &offer_id,
+        "admin_1",
+        &serde_json::from_value(serde_json::json!({
+            "name": "Three pages",
+            "slug": "three-pages",
+            "inputs": {"pages": 3}
+        }))
+        .unwrap(),
+    )
+    .await
+    .unwrap();
+    let product = db::get(ctx, repo::products::TABLE, product_id)
+        .await
+        .unwrap();
+    (
+        product,
+        offer_id,
+        PaymentLinkCreateRequest {
+            preset_id: Some(preset.id),
+            after_completion_url: None,
+        },
+    )
+}
+
+/// A retry of a configuration whose first attempt failed at Stripe must reach
+/// Stripe under the SAME idempotency key and re-drive the same local row, not
+/// insert a second row with a fresh key.
+#[tokio::test]
+async fn payment_link_retry_reuses_one_idempotency_key_and_one_row() {
+    let mut ctx = ctx_with(&[("IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "sk_test_x")]).await;
+    let stripe = register_idempotent_payment_link_stripe(&mut ctx, 1);
+    let (product, offer_id, request) =
+        seed_payment_link_configuration(&ctx, "product_link_retry").await;
+
+    let error = stripe::create_payment_link(&ctx, &product, &offer_id, &request)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::Internal, "{error:?}");
+    let failed = repo::payment_links::list_for_offer(&ctx, &offer_id)
+        .await
+        .unwrap();
+    assert_eq!(failed.len(), 1);
+    assert_eq!(failed[0].sync_status, "error");
+
+    let link = stripe::create_payment_link(&ctx, &product, &offer_id, &request)
+        .await
+        .expect("the retry must succeed");
+    assert_eq!(link.sync_status, "synced");
+    let keys = idempotency_keys(&stripe);
+    assert_eq!(keys.len(), 2, "two attempts, two requests: {keys:?}");
+    assert_eq!(keys[0], keys[1], "both attempts must share one key");
+    assert!(keys[0].starts_with("impresspress_payment_link_"));
+    assert_eq!(
+        link.id, failed[0].id,
+        "the retry must re-drive the failed row"
+    );
+    let rows = repo::payment_links::list_for_offer(&ctx, &offer_id)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "no orphan row may be left behind: {rows:?}");
+}
+
+/// Stripe created the link but recording it locally failed. The retry must
+/// adopt that same Stripe link into the same row — a second live Payment Link
+/// for one configuration is a second way to take the buyer's money.
+#[tokio::test]
+async fn payment_link_retry_adopts_the_link_stripe_created_when_recording_it_failed() {
+    let mut ctx = ctx_with(&[("IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "sk_test_x")]).await;
+    let stripe = register_idempotent_payment_link_stripe(&mut ctx, 0);
+    let (product, offer_id, request) =
+        seed_payment_link_configuration(&ctx, "product_link_adopt").await;
+
+    // A first attempt takes two filtered updates on the table: the pending
+    // row's attempt start, then `mark_synced`. Letting the first through
+    // fails only the write after Stripe has answered.
+    let failing = crate::test_support::FailingDbOpContext::new(
+        ctx.clone(),
+        vec![("database.update_where_count", repo::payment_links::TABLE)],
+    )
+    .after_passing(1);
+    stripe::create_payment_link(&failing, &product, &offer_id, &request)
+        .await
+        .expect_err("the local write after Stripe succeeded fails");
+    assert_eq!(
+        stripe.links_created.lock().unwrap().len(),
+        1,
+        "Stripe holds one live link after the first attempt"
+    );
+    let stuck = repo::payment_links::list_for_offer(&ctx, &offer_id)
+        .await
+        .unwrap();
+    assert_eq!(stuck.len(), 1);
+    assert_eq!(stuck[0].sync_status, "syncing");
+
+    let link = stripe::create_payment_link(&ctx, &product, &offer_id, &request)
+        .await
+        .expect("the retry must succeed");
+    assert_eq!(
+        stripe.links_created.lock().unwrap().len(),
+        1,
+        "the retry must adopt the existing Stripe link, not mint a second"
+    );
+    assert_eq!(link.url, "https://buy.stripe.com/plink_minted_1");
+    assert_eq!(
+        link.id, stuck[0].id,
+        "the retry must re-drive the stuck row"
+    );
+    let stored = repo::payment_links::get_for_offer(&ctx, &offer_id, &link.id)
+        .await
+        .unwrap();
+    assert_eq!(stored.stripe_payment_link_id, "plink_minted_1");
+    // The adopted link's metadata names the row that now records it, which is
+    // what a Payment Link checkout webhook resolves.
+    for request in stripe.requests.lock().unwrap().iter() {
+        let form = String::from_utf8(request.body.clone().unwrap()).unwrap();
+        assert!(form.contains(&format!(
+            "metadata[impresspress_payment_link_id]={}",
+            link.id
+        )));
+    }
+    assert_eq!(
+        repo::payment_links::list_for_offer(&ctx, &offer_id)
+            .await
+            .unwrap()
+            .len(),
+        1
+    );
+}
+
+/// Fail the write that records the link Stripe just minted, leaving a row in
+/// `syncing` over a live Payment Link. Returns the product, the offer and the
+/// stuck row's id.
+async fn a_live_link_no_row_records(
+    ctx: &crate::test_support::TestContext,
+    product_id: &str,
+    stripe: &IdempotentPaymentLinkStripe,
+) -> (db::Record, String, String) {
+    let (product, offer_id, request) = seed_payment_link_configuration(ctx, product_id).await;
+    // A first attempt takes two filtered updates on the table: the pending
+    // row's attempt start, then `mark_synced`. Letting the first through
+    // fails only the write after Stripe has answered.
+    let failing = crate::test_support::FailingDbOpContext::new(
+        ctx.clone(),
+        vec![("database.update_where_count", repo::payment_links::TABLE)],
+    )
+    .after_passing(1);
+    stripe::create_payment_link(&failing, &product, &offer_id, &request)
+        .await
+        .expect_err("the local write after Stripe succeeded fails");
+    assert_eq!(
+        stripe.links_created.lock().unwrap().clone(),
+        vec!["plink_minted_1".to_string()],
+        "Stripe holds one live link"
+    );
+    let stuck = repo::payment_links::get_for_offer(
+        ctx,
+        &offer_id,
+        &repo::payment_links::list_for_offer(ctx, &offer_id)
+            .await
+            .unwrap()[0]
+            .id,
+    )
+    .await
+    .unwrap();
+    assert_eq!(stuck.managed.sync_status, "syncing");
+    assert!(
+        stuck.stripe_payment_link_id.is_empty(),
+        "the row records no link id"
+    );
+    assert!(
+        !stuck.stripe_request.is_empty() && !stuck.stripe_request_at.is_empty(),
+        "the attempt's request is recorded before it is sent: {stuck:?}"
+    );
+    (product, offer_id, stuck.managed.id)
+}
+
+/// The requests the Stripe stand-in received, as `(url, body)`.
+fn stripe_calls(stripe: &IdempotentPaymentLinkStripe) -> Vec<(String, String)> {
+    stripe
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|request| {
+            (
+                request.url.clone(),
+                String::from_utf8_lossy(request.body.as_deref().unwrap_or_default()).into_owned(),
+            )
+        })
+        .collect()
+}
+
+/// How many times Stripe was told to take `stripe_payment_link_id` down.
+/// Sending the request is not the same as Stripe accepting it, so a test
+/// about retries counts these rather than asking whether one was ever sent.
+fn deactivations_of(stripe: &IdempotentPaymentLinkStripe, stripe_payment_link_id: &str) -> usize {
+    stripe_calls(stripe)
+        .iter()
+        .filter(|(url, body)| {
+            url.ends_with(&format!("/v1/payment_links/{stripe_payment_link_id}"))
+                && body.contains("active=false")
+        })
+        .count()
+}
+
+/// `true` when Stripe was told to take `stripe_payment_link_id` down.
+fn was_deactivated_at_stripe(calls: &[(String, String)], stripe_payment_link_id: &str) -> bool {
+    calls.iter().any(|(url, body)| {
+        url.ends_with(&format!("/v1/payment_links/{stripe_payment_link_id}"))
+            && body.contains("active=false")
+    })
+}
+
+/// Deactivate a Payment Link the way an admin does: the real
+/// `DELETE /b/products/api/admin/.../payment-links/{link_id}` route, through
+/// the central router.
+async fn deactivate_link_over_the_wire(
+    ctx: &crate::test_support::TestContext,
+    product_id: &str,
+    offer_id: &str,
+    link_id: &str,
+) -> wafer_run::OutputStream {
+    let (mut msg, input) = delete_msg(
+        &format!(
+            "/b/products/api/admin/products/{product_id}/offers/{offer_id}/payment-links/{link_id}"
+        ),
+        "admin_1",
+    );
+    msg.set_meta("auth.user_roles", "admin");
+    dispatch_routed(ctx, msg, input).await
+}
+
+/// Backdate a row's recorded Stripe request by `hours`, putting it outside
+/// Stripe's idempotency-key retention.
+async fn age_payment_link_request(
+    ctx: &crate::test_support::TestContext,
+    link_id: &str,
+    hours: i64,
+) {
+    db::update(
+        ctx,
+        repo::payment_links::TABLE,
+        link_id,
+        HashMap::from([(
+            "stripe_request_at".to_string(),
+            serde_json::json!((chrono::Utc::now() - chrono::Duration::hours(hours)).to_rfc3339()),
+        )]),
+    )
+    .await
+    .unwrap();
+}
+
+/// Seed an active row whose Stripe request went out too long ago to be
+/// re-sent: the shape a crashed synchronization leaves behind.
+async fn seed_unresolvable_payment_link(
+    ctx: &crate::test_support::TestContext,
+    offer_id: &str,
+    stripe_account_id: &str,
+) -> String {
+    let link_id = format!("link_stuck_{offer_id}");
+    seed(
+        ctx,
+        repo::payment_links::TABLE,
+        &link_id,
+        HashMap::from([
+            ("offer_id".to_string(), serde_json::json!(offer_id)),
+            (
+                "stripe_account_id".to_string(),
+                serde_json::json!(stripe_account_id),
+            ),
+            ("active".to_string(), serde_json::json!(true)),
+            ("sync_status".to_string(), serde_json::json!("syncing")),
+            (
+                "stripe_request".to_string(),
+                serde_json::json!("[[\"metadata[impresspress_payment_link_id]\",\"x\"]]"),
+            ),
+        ]),
+    )
+    .await;
+    age_payment_link_request(ctx, &link_id, 25).await;
+    link_id
+}
+
+/// The queued takedown of one Payment Link row. Panics when none was
+/// enqueued, which is the failure this whole area is about.
+async fn takedown_operation(ctx: &crate::test_support::TestContext, link_id: &str) -> db::Record {
+    repo::provider_operations::list(ctx, None, 1, 50)
+        .await
+        .expect("list provider operations")
+        .records
+        .into_iter()
+        .find(|operation| {
+            operation.str_field("operation_type")
+                == repo::provider_operations::PAYMENT_LINK_DEACTIVATE
+                && operation.str_field("aggregate_id") == link_id
+        })
+        .unwrap_or_else(|| panic!("no takedown operation was enqueued for {link_id}"))
+}
+
+/// A row whose attempt never recorded a link id can still have a live,
+/// buyable link at Stripe. Deactivating it must take that link down: an
+/// inactive local row over a live Payment Link is a checkout page that goes
+/// on charging buyers with nothing left to reconcile them against.
+#[tokio::test]
+async fn deactivating_a_row_with_no_recorded_link_takes_the_link_down_at_stripe() {
+    let mut ctx = ctx_with(&[("IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "sk_test_x")]).await;
+    let stripe = register_idempotent_payment_link_stripe(&mut ctx, 0);
+    let (product, offer_id, link_id) =
+        a_live_link_no_row_records(&ctx, "product_link_unrecorded", &stripe).await;
+
+    let deactivated =
+        output_to_json(deactivate_link_over_the_wire(&ctx, &product.id, &offer_id, &link_id).await)
+            .await;
+    assert_eq!(
+        deactivated["active"],
+        serde_json::json!(false),
+        "the row must come back deactivated: {deactivated}"
+    );
+
+    let calls = stripe_calls(&stripe);
+    assert!(
+        was_deactivated_at_stripe(&calls, "plink_minted_1"),
+        "the live link must be deactivated at Stripe: {calls:?}"
+    );
+    assert_eq!(
+        stripe.links_created.lock().unwrap().len(),
+        1,
+        "learning the link id must replay the saved result, not mint a second link"
+    );
+}
+
+/// Past Stripe's idempotency-key retention the saved result is gone, so
+/// re-sending the request would create a second live link rather than name
+/// the first. The row still retires — blocking on it would let one stuck link
+/// block an offer archival or a seller suspension — and the takedown
+/// dead-letters with what an operator has to do instead.
+#[tokio::test]
+async fn deactivating_a_row_whose_request_stripe_has_forgotten_dead_letters_the_takedown() {
+    let mut ctx = ctx_with(&[("IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "sk_test_x")]).await;
+    let stripe = register_idempotent_payment_link_stripe(&mut ctx, 0);
+    let (product, offer_id, link_id) =
+        a_live_link_no_row_records(&ctx, "product_link_forgotten", &stripe).await;
+    age_payment_link_request(&ctx, &link_id, 25).await;
+    let calls_before = stripe_calls(&stripe).len();
+
+    let deactivated =
+        output_to_json(deactivate_link_over_the_wire(&ctx, &product.id, &offer_id, &link_id).await)
+            .await;
+    assert_eq!(
+        deactivated["active"],
+        serde_json::json!(false),
+        "the row must retire even though its link cannot be named: {deactivated}"
+    );
+    assert_eq!(
+        stripe_calls(&stripe).len(),
+        calls_before,
+        "re-sending a forgotten request would mint a second live link"
+    );
+
+    let operation = takedown_operation(&ctx, &link_id).await;
+    assert_eq!(
+        operation.str_field("status"),
+        "dead_letter",
+        "no retry can do better, so the operation must not stay due: {:?}",
+        operation.data
+    );
+    let last_error = operation.str_field("last_error");
+    assert!(
+        last_error.contains(&format!("metadata[impresspress_payment_link_id]={link_id}")),
+        "the operator needs the handle the link actually carries: {last_error}"
+    );
+}
+
+/// A takedown that fails at Stripe must stay retryable, and the link it could
+/// not take down must be named by the row — otherwise the compensating call
+/// is one shot and its failure leaves exactly the live, unnamed link this all
+/// exists to prevent.
+#[tokio::test]
+async fn a_takedown_that_fails_at_stripe_is_retried_from_the_recorded_link_id() {
+    let mut ctx = ctx_with(&[("IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "sk_test_x")]).await;
+    let stripe = register_idempotent_payment_link_stripe(&mut ctx, 0);
+    // The one deactivation this create compensates with fails.
+    *stripe.deactivations_failed.lock().unwrap() = 1;
+    let (product, offer_id, request) =
+        seed_payment_link_configuration(&ctx, "product_link_takedown_retry").await;
+
+    stripe
+        .held
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let create = stripe::create_payment_link(&ctx, &product, &offer_id, &request);
+    let retire = async {
+        stripe.held.started.notified().await;
+        let rows = repo::payment_links::list_for_offer(&ctx, &offer_id)
+            .await
+            .unwrap();
+        repo::payment_links::deactivate_local(&ctx, &offer_id, &rows[0].id)
+            .await
+            .expect("retire the row mid-flight");
+        stripe.held.release.notify_one();
+        rows[0].id.clone()
+    };
+    let (created, link_id) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::join!(create, retire)
+    })
+    .await
+    .expect("the create must reach Stripe");
+    created.expect_err("a create whose row was retired cannot report success");
+
+    // The compensating deactivation failed, so the link is still live at
+    // Stripe — but the row names it and the operation is due.
+    let stored = repo::payment_links::get_for_offer(&ctx, &offer_id, &link_id)
+        .await
+        .unwrap();
+    assert_eq!(
+        stored.stripe_payment_link_id, "plink_minted_1",
+        "the retired row must record the link minted for it"
+    );
+    assert!(!stored.managed.active);
+    let operation = takedown_operation(&ctx, &link_id).await;
+    assert_eq!(
+        operation.str_field("status"),
+        "pending",
+        "a failed takedown must stay due: {:?}",
+        operation.data
+    );
+    assert_eq!(
+        deactivations_of(&stripe, "plink_minted_1"),
+        1,
+        "one attempt was made, and Stripe refused it"
+    );
+
+    // The worker that owns the queue finishes it.
+    let result = super::super::stripe_provider::reconcile_provider_operations(&ctx, 25)
+        .await
+        .expect("reconcile the queue");
+    assert_eq!(result.succeeded, 1, "{result:?}");
+    assert_eq!(
+        deactivations_of(&stripe, "plink_minted_1"),
+        2,
+        "the retry must send the takedown again: {:?}",
+        stripe_calls(&stripe)
+    );
+    assert_eq!(
+        takedown_operation(&ctx, &link_id).await.str_field("status"),
+        "succeeded"
+    );
+}
+
+/// The other way a link can refuse to go down: the row names it, but Stripe
+/// will not answer. A provider outage is exactly when a fraud control has to
+/// complete, so suspension retires the row, queues the takedown and carries
+/// on rather than stopping on the first failing link.
+#[tokio::test]
+async fn seller_suspension_is_not_blocked_when_stripe_refuses_the_takedown() {
+    let mut ctx = ctx_with(&[
+        (
+            "IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY",
+            "sk_test_stripe_down",
+        ),
+        ("WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS", "true"),
+    ])
+    .await;
+    let stripe = register_idempotent_payment_link_stripe(&mut ctx, 0);
+    // Every deactivation this test makes fails.
+    *stripe.deactivations_failed.lock().unwrap() = 10;
+    seed(
+        &ctx,
+        repo::seller_accounts::TABLE,
+        "seller_stripe_down_account",
+        HashMap::from([
+            (
+                "user_id".to_string(),
+                serde_json::json!("seller_stripe_down"),
+            ),
+            ("status".to_string(), serde_json::json!("active")),
+            (
+                "stripe_account_id".to_string(),
+                serde_json::json!("acct_stripe_down"),
+            ),
+            ("details_submitted".to_string(), serde_json::json!(true)),
+            ("charges_enabled".to_string(), serde_json::json!(true)),
+            ("payouts_enabled".to_string(), serde_json::json!(true)),
+            ("fee_basis_points".to_string(), serde_json::json!(200)),
+        ]),
+    )
+    .await;
+    let product_id = "seller_stripe_down_product";
+    let offer_id = seed_active_offer(&ctx, product_id, "seller_stripe_down").await;
+    // A fully synchronized link: the row names it, so this is not the
+    // unresolvable case — only Stripe is refusing.
+    let link_id = "link_stripe_down";
+    seed(
+        &ctx,
+        repo::payment_links::TABLE,
+        link_id,
+        HashMap::from([
+            ("offer_id".to_string(), serde_json::json!(&offer_id)),
+            (
+                "stripe_account_id".to_string(),
+                serde_json::json!("acct_stripe_down"),
+            ),
+            (
+                "stripe_payment_link_id".to_string(),
+                serde_json::json!("plink_stripe_down"),
+            ),
+            (
+                "url".to_string(),
+                serde_json::json!("https://buy.stripe.com/plink_stripe_down"),
+            ),
+            ("active".to_string(), serde_json::json!(true)),
+            ("sync_status".to_string(), serde_json::json!("synced")),
+        ]),
+    )
+    .await;
+
+    let (msg, input) = admin_create_msg(
+        "/b/products/api/admin/sellers/seller_stripe_down_account/suspend",
+        serde_json::json!({}),
+    );
+    let suspended = output_to_json(dispatch(&ctx, msg, input).await).await;
+    assert_eq!(
+        suspended["status"],
+        serde_json::json!("suspended"),
+        "a Stripe outage must not stop the fraud control: {suspended}"
+    );
+    assert_eq!(
+        db::get(&ctx, repo::products::TABLE, product_id)
+            .await
+            .unwrap()
+            .str_field("status"),
+        "archived"
+    );
+    assert!(
+        !repo::payment_links::get(&ctx, link_id)
+            .await
+            .unwrap()
+            .managed
+            .active,
+        "the row must retire even though its link is still live"
+    );
+    assert_eq!(
+        deactivations_of(&stripe, "plink_stripe_down"),
+        1,
+        "the takedown was attempted once, and Stripe refused it"
+    );
+    assert_eq!(
+        takedown_operation(&ctx, link_id).await.str_field("status"),
+        "pending",
+        "the link is still live, so the takedown must be due"
+    );
+
+    // And the queue an administrator reconciles finishes the job.
+    *stripe.deactivations_failed.lock().unwrap() = 0;
+    let result = super::super::stripe_provider::reconcile_provider_operations(&ctx, 25)
+        .await
+        .expect("reconcile the queue");
+    assert_eq!(result.succeeded, 1, "{result:?}");
+    assert_eq!(deactivations_of(&stripe, "plink_stripe_down"), 2);
+}
+
+/// Suspending a seller is a fraud control: it must not be stoppable by one
+/// Payment Link row whose Stripe link nothing can name any more.
+#[tokio::test]
+async fn seller_suspension_is_not_blocked_by_a_payment_link_that_cannot_be_resolved() {
+    let mut ctx = ctx_with(&[
+        (
+            "IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY",
+            "sk_test_stuck_link",
+        ),
+        ("WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS", "true"),
+    ])
+    .await;
+    let stripe = register_idempotent_payment_link_stripe(&mut ctx, 0);
+    seed(
+        &ctx,
+        repo::seller_accounts::TABLE,
+        "seller_stuck_link_account",
+        HashMap::from([
+            (
+                "user_id".to_string(),
+                serde_json::json!("seller_stuck_link"),
+            ),
+            ("status".to_string(), serde_json::json!("active")),
+            (
+                "stripe_account_id".to_string(),
+                serde_json::json!("acct_stuck_link"),
+            ),
+            ("details_submitted".to_string(), serde_json::json!(true)),
+            ("charges_enabled".to_string(), serde_json::json!(true)),
+            ("payouts_enabled".to_string(), serde_json::json!(true)),
+            ("fee_basis_points".to_string(), serde_json::json!(200)),
+        ]),
+    )
+    .await;
+    let product_id = "seller_stuck_link_product";
+    let offer_id = seed_active_offer(&ctx, product_id, "seller_stuck_link").await;
+    // A row whose attempt went out but never came back, long enough ago that
+    // Stripe has forgotten its idempotency key.
+    let link_id = seed_unresolvable_payment_link(&ctx, &offer_id, "acct_stuck_link").await;
+
+    let (msg, input) = admin_create_msg(
+        "/b/products/api/admin/sellers/seller_stuck_link_account/suspend",
+        serde_json::json!({}),
+    );
+    let suspended = output_to_json(dispatch(&ctx, msg, input).await).await;
+    assert_eq!(
+        suspended["status"],
+        serde_json::json!("suspended"),
+        "the fraud control must complete: {suspended}"
+    );
+    assert_eq!(
+        db::get(&ctx, repo::products::TABLE, product_id)
+            .await
+            .unwrap()
+            .str_field("status"),
+        "archived",
+        "suspension must reach the product rows"
+    );
+    assert!(
+        !repo::payment_links::get(&ctx, &link_id)
+            .await
+            .unwrap()
+            .managed
+            .active,
+        "the stuck link's row must still retire"
+    );
+    assert_eq!(
+        takedown_operation(&ctx, &link_id).await.str_field("status"),
+        "dead_letter",
+        "and what an operator must finish by hand must be queued for them"
+    );
+    assert!(
+        stripe.requests.lock().unwrap().is_empty(),
+        "a forgotten request must not be re-sent"
+    );
+}
+
+/// A row no request has ever been sent for has nothing at Stripe, and
+/// deactivates locally. (A guard: it passes before the re-send path exists
+/// too. The row here stores an empty JSON list; the shapes a row written
+/// before the column existed has are covered by
+/// `a_row_from_before_the_request_column_deactivates_locally`.)
+#[tokio::test]
+async fn deactivating_a_row_with_no_stripe_request_stays_local() {
+    let mut ctx = ctx_with(&[("IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "sk_test_x")]).await;
+    let stripe = register_idempotent_payment_link_stripe(&mut ctx, 0);
+    let product_id = "product_link_never_sent";
+    let offer_id = seed_active_offer(&ctx, product_id, "").await;
+    let offer = repo::offers::get_managed(&ctx, &offer_id).await.unwrap();
+    let preview = offer_pricing::evaluate_offer(
+        &offer.offer,
+        &PricingPreviewRequest {
+            offer_id: offer_id.clone(),
+            quantity: 1,
+            inputs: serde_json::from_value(serde_json::json!({"pages": 2})).unwrap(),
+        },
+        offer_pricing::InputScope::Management,
+    )
+    .unwrap();
+    let link_id = seed_pending_payment_link(&ctx, &offer_id, "never-sent", &preview)
+        .await
+        .managed
+        .id;
+
+    let deactivated =
+        output_to_json(deactivate_link_over_the_wire(&ctx, product_id, &offer_id, &link_id).await)
+            .await;
+    assert_eq!(
+        deactivated["active"],
+        serde_json::json!(false),
+        "{deactivated}"
+    );
+    assert!(
+        stripe.requests.lock().unwrap().is_empty(),
+        "a row with no request in flight must not reach Stripe"
+    );
+}
+
+/// The real shape of a row written before the `stripe_request` column: the
+/// migration's `DEFAULT ''` leaves it empty rather than an empty JSON list,
+/// and a row the database layer never gave the column at all reads the same.
+/// Both must hydrate as "no request in flight" — reading either as JSON would
+/// fail the row closed and make it undeactivatable.
+#[tokio::test]
+async fn a_row_from_before_the_request_column_deactivates_locally() {
+    let mut ctx = ctx_with(&[("IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "sk_test_x")]).await;
+    let stripe = register_idempotent_payment_link_stripe(&mut ctx, 0);
+    let product_id = "product_link_pre_migration";
+    let offer_id = seed_active_offer(&ctx, product_id, "").await;
+
+    // Seeded without the column: the database layer supplies the same
+    // default the migration gives an existing row.
+    let absent = "link_pre_migration_absent";
+    seed(
+        &ctx,
+        repo::payment_links::TABLE,
+        absent,
+        HashMap::from([
+            ("offer_id".to_string(), serde_json::json!(&offer_id)),
+            ("active".to_string(), serde_json::json!(true)),
+            ("sync_status".to_string(), serde_json::json!("syncing")),
+        ]),
+    )
+    .await;
+    // And the explicit empty string the `ALTER TABLE ... DEFAULT ''` writes.
+    let empty = "link_pre_migration_empty";
+    seed(
+        &ctx,
+        repo::payment_links::TABLE,
+        empty,
+        HashMap::from([
+            ("offer_id".to_string(), serde_json::json!(&offer_id)),
+            ("active".to_string(), serde_json::json!(true)),
+            ("sync_status".to_string(), serde_json::json!("syncing")),
+            ("stripe_request".to_string(), serde_json::json!("")),
+            ("stripe_request_at".to_string(), serde_json::json!("")),
+        ]),
+    )
+    .await;
+
+    for link_id in [absent, empty] {
+        let stored = repo::payment_links::get(&ctx, link_id).await.unwrap();
+        assert!(
+            stored.stripe_request.is_empty() && stored.stripe_request_at.is_empty(),
+            "{link_id} must read as no request in flight: {stored:?}"
+        );
+        let deactivated = output_to_json(
+            deactivate_link_over_the_wire(&ctx, product_id, &offer_id, link_id).await,
+        )
+        .await;
+        assert_eq!(
+            deactivated["active"],
+            serde_json::json!(false),
+            "{link_id}: {deactivated}"
+        );
+    }
+    assert!(
+        stripe.requests.lock().unwrap().is_empty(),
+        "neither shape has anything at Stripe to take down"
+    );
+}
+
+/// The other order of the same race: the row is retired while Stripe is
+/// minting its link. Nothing local will ever point at that link, so the
+/// create must take it down at Stripe instead of reporting success over a
+/// row that says the configuration is not for sale.
+#[tokio::test]
+async fn a_link_minted_for_a_row_retired_mid_flight_is_deactivated_at_stripe() {
+    let mut ctx = ctx_with(&[("IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "sk_test_x")]).await;
+    let stripe = register_idempotent_payment_link_stripe(&mut ctx, 0);
+    let (product, offer_id, request) =
+        seed_payment_link_configuration(&ctx, "product_link_retired").await;
+
+    // Park the create inside Stripe, retire its row there, then let it go:
+    // it comes back from Stripe holding a link its row no longer wants.
+    stripe
+        .held
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let create = stripe::create_payment_link(&ctx, &product, &offer_id, &request);
+    let retire = async {
+        stripe.held.started.notified().await;
+        let rows = repo::payment_links::list_for_offer(&ctx, &offer_id)
+            .await
+            .unwrap();
+        assert_eq!(
+            rows.len(),
+            1,
+            "the create writes its row before it calls Stripe"
+        );
+        repo::payment_links::deactivate_local(&ctx, &offer_id, &rows[0].id)
+            .await
+            .expect("retire the row mid-flight");
+        stripe.held.release.notify_one();
+        rows[0].id.clone()
+    };
+    let (created, link_id) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::join!(create, retire)
+    })
+    .await
+    .expect("the create must reach Stripe");
+
+    let error = created.expect_err("a create whose row was retired cannot report success");
+    assert_eq!(error.code, ErrorCode::Aborted, "{error:?}");
+    let calls = stripe_calls(&stripe);
+    assert!(
+        was_deactivated_at_stripe(&calls, "plink_minted_1"),
+        "the link minted for the retired row must be deactivated at Stripe: {calls:?}"
+    );
+    let stored = repo::payment_links::get_for_offer(&ctx, &offer_id, &link_id)
+        .await
+        .unwrap();
+    assert!(!stored.managed.active);
+    assert_eq!(
+        stored.stripe_payment_link_id, "plink_minted_1",
+        "the retired row must name the link so the takedown is retryable"
+    );
+    assert!(
+        stored.managed.url.is_empty() && stored.managed.sync_status != "synced",
+        "naming the link must not make a retired row sellable again: {stored:?}"
+    );
+    assert_eq!(
+        takedown_operation(&ctx, &link_id).await.str_field("status"),
+        "succeeded",
+        "the takedown settled inline, so nothing is left due"
+    );
+}
+
+/// A configuration that can never produce a valid Stripe request is refused
+/// before anything is written: retrying it must not pile up `syncing` rows.
+#[tokio::test]
+async fn an_invalid_payment_link_request_leaves_no_row_behind() {
+    // No offer country list and no platform country: the shipping section of
+    // the form cannot be built.
+    let mut ctx = ctx_with(&[("IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "sk_test_x")]).await;
+    let stripe = register_idempotent_payment_link_stripe(&mut ctx, 0);
+    let offer_id = seed_shipping_offer(&ctx, "product_link_no_country", &[]).await;
+    let product = db::get(&ctx, repo::products::TABLE, "product_link_no_country")
+        .await
+        .unwrap();
+    let request = PaymentLinkCreateRequest {
+        preset_id: None,
+        after_completion_url: None,
+    };
+    for _ in 0..2 {
+        let error = stripe::create_payment_link(&ctx, &product, &offer_id, &request)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::InvalidArgument, "{error:?}");
+    }
+    assert!(
+        repo::payment_links::list_for_offer(&ctx, &offer_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a request that fails to build must leave no row"
+    );
+
+    // A malformed platform country fails every attempt the same way.
+    ctx.set_config("IMPRESSPRESS__PRODUCTS__PLATFORM_COUNTRY", "not-a-country");
+    let (product, offer_id, request) =
+        seed_payment_link_configuration(&ctx, "product_link_bad_country").await;
+    for _ in 0..2 {
+        let error = stripe::create_payment_link(&ctx, &product, &offer_id, &request)
+            .await
+            .unwrap_err();
+        assert_eq!(error.code, ErrorCode::FailedPrecondition, "{error:?}");
+    }
+    assert!(
+        repo::payment_links::list_for_offer(&ctx, &offer_id)
+            .await
+            .unwrap()
+            .is_empty(),
+        "a malformed platform country must leave no row"
+    );
+    assert!(stripe.requests.lock().unwrap().is_empty());
+}
+
+/// Deactivating a link and asking for the same configuration again is an
+/// ordinary admin flow. It must mint a fresh Stripe link, not collide with
+/// the deactivated link's idempotency key (a parameter mismatch) or replay
+/// the deactivated link.
+#[tokio::test]
+async fn a_deactivated_configuration_can_be_recreated_as_a_new_stripe_link() {
+    let mut ctx = ctx_with(&[("IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "sk_test_x")]).await;
+    let stripe = register_idempotent_payment_link_stripe(&mut ctx, 0);
+    let (product, offer_id, request) =
+        seed_payment_link_configuration(&ctx, "product_link_recreate").await;
+
+    let first = stripe::create_payment_link(&ctx, &product, &offer_id, &request)
+        .await
+        .expect("the first link");
+    stripe::deactivate_payment_link(&ctx, &offer_id, &first.id)
+        .await
+        .expect("deactivate");
+    let second = stripe::create_payment_link(&ctx, &product, &offer_id, &request)
+        .await
+        .expect("recreating a deactivated configuration must succeed");
+
+    assert_eq!(
+        stripe.links_created.lock().unwrap().clone(),
+        vec!["plink_minted_1".to_string(), "plink_minted_2".to_string()],
+        "the recreate must be a new Stripe link"
+    );
+    assert_ne!(second.id, first.id);
+    assert_eq!(second.url, "https://buy.stripe.com/plink_minted_2");
+    assert_eq!(second.sync_status, "synced");
+    let keys = idempotency_keys(&stripe);
+    assert_ne!(keys[0], keys[1], "a recreate must not reuse the old key");
+}
+
+/// Two first attempts at one configuration that both find nothing must end
+/// as ONE row and ONE Stripe link, with neither request failing — not as two
+/// rows whose requests share a key with different parameters.
+#[tokio::test]
+async fn concurrent_first_attempts_share_one_row_and_one_stripe_link() {
+    let mut ctx = ctx_with(&[("IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "sk_test_x")]).await;
+    let stripe = register_idempotent_payment_link_stripe(&mut ctx, 0);
+    let (product, offer_id, request) =
+        seed_payment_link_configuration(&ctx, "product_link_race").await;
+
+    // Both racers finish the configuration lookup, and so both see no row,
+    // before either writes one.
+    let racing = crate::test_support::RendezvousDbOpContext::new(
+        ctx.clone(),
+        "database.list",
+        repo::payment_links::TABLE,
+        2,
+    );
+    let (left, right) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::join!(
+            stripe::create_payment_link(&racing, &product, &offer_id, &request),
+            stripe::create_payment_link(&racing, &product, &offer_id, &request),
+        )
+    })
+    .await
+    .expect("the racers must not deadlock");
+    let left = left.expect("the first racer must succeed");
+    let right = right.expect("the second racer must succeed");
+
+    assert_eq!(left.id, right.id, "both racers must land on one row");
+    assert_eq!(
+        stripe.links_created.lock().unwrap().len(),
+        1,
+        "one configuration, one Stripe link"
+    );
+    let rows = repo::payment_links::list_for_offer(&ctx, &offer_id)
+        .await
+        .unwrap();
+    assert_eq!(rows.len(), 1, "no race-loser row may be left: {rows:?}");
+    assert_eq!(rows[0].sync_status, "synced");
+}
+
+/// Stripe saves and replays the result of a request it began executing,
+/// including a 400 caused by Stripe-side state the seller can fix. A retry
+/// after such a refusal must reach Stripe under a fresh key, or it replays
+/// the stale refusal for as long as Stripe retains the key.
+#[tokio::test]
+async fn a_retry_after_a_definite_stripe_refusal_uses_a_fresh_key() {
+    let mut ctx = ctx_with(&[("IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "sk_test_x")]).await;
+    let stripe = register_idempotent_payment_link_stripe(&mut ctx, 0);
+    stripe
+        .fresh_outcomes
+        .lock()
+        .unwrap()
+        .push_back(FreshOutcome::Reject);
+    let (product, offer_id, request) =
+        seed_payment_link_configuration(&ctx, "product_link_refused").await;
+
+    let error = stripe::create_payment_link(&ctx, &product, &offer_id, &request)
+        .await
+        .unwrap_err();
+    assert_eq!(error.code, ErrorCode::FailedPrecondition, "{error:?}");
+
+    let link = stripe::create_payment_link(&ctx, &product, &offer_id, &request)
+        .await
+        .expect("once the Stripe-side cause is fixed, the retry must succeed");
+    let keys = idempotency_keys(&stripe);
+    assert_eq!(keys.len(), 2);
+    assert_ne!(keys[0], keys[1], "a definite refusal must retire its key");
+    assert_eq!(link.url, "https://buy.stripe.com/plink_minted_1");
+    let rows = repo::payment_links::list_for_offer(&ctx, &offer_id)
+        .await
+        .unwrap();
+    let refused = rows
+        .iter()
+        .find(|row| row.id != link.id)
+        .expect("the refused attempt stays on record");
+    assert!(!refused.active, "a refused attempt is not a live link");
+    assert_eq!(refused.sync_status, "error");
+}
+
+/// Two concurrent retries of one unfinished row share its key. The one
+/// Stripe answers with a 409 (the other is still executing) must not mark
+/// the row failed after the other has recorded the live link.
+#[tokio::test]
+async fn a_conflicting_retry_cannot_unsync_the_link_its_twin_recorded() {
+    // The first attempt is rate limited, which leaves an unfinished row.
+    let mut ctx = ctx_with(&[("IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "sk_test_x")]).await;
+    let stripe = register_idempotent_payment_link_stripe(&mut ctx, 1);
+    let (product, offer_id, request) =
+        seed_payment_link_configuration(&ctx, "product_link_twins").await;
+    stripe::create_payment_link(&ctx, &product, &offer_id, &request)
+        .await
+        .expect_err("rate limited");
+
+    // The first retry parks inside Stripe with the key in flight; the second
+    // meets it there and gets a 409, which it only sees once the first has
+    // been let go and has recorded the link.
+    stripe
+        .held
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    let held = stripe.held.clone();
+    let first = async {
+        let result = stripe::create_payment_link(&ctx, &product, &offer_id, &request).await;
+        held.answer_conflict.notify_one();
+        result
+    };
+    let second = async {
+        stripe.held.started.notified().await;
+        stripe::create_payment_link(&ctx, &product, &offer_id, &request).await
+    };
+    let let_first_go = async {
+        stripe.held.conflict_met.notified().await;
+        stripe.held.release.notify_one();
+    };
+    // A retry that never meets its twin in flight leaves the held execution
+    // parked; the timeout turns that into a failure instead of a hang.
+    let (first, second, ()) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::join!(first, second, let_first_go)
+    })
+    .await
+    .expect("the second retry must meet the first in flight at Stripe");
+    let first = first.expect("the executing retry records the link");
+    second.expect_err("the conflicting retry reports the conflict");
+
+    let stored = repo::payment_links::get_for_offer(&ctx, &offer_id, &first.id)
+        .await
+        .unwrap();
+    assert_eq!(
+        stored.managed.sync_status, "synced",
+        "a late conflict must not flip a recorded link to error"
+    );
+    assert!(stored.managed.active);
+    assert_eq!(stored.stripe_payment_link_id, "plink_minted_1");
+}
+
+/// The other order of the race above: the 409 reaches the conflicting retry
+/// while its twin is still executing. A 409 says nothing about the outcome,
+/// so it must not retire the row the twin is about to record the link on —
+/// a live link on a retired row would make the next request mint a second.
+#[tokio::test]
+async fn a_conflict_answered_mid_flight_does_not_retire_the_row() {
+    let mut ctx = ctx_with(&[("IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "sk_test_x")]).await;
+    let stripe = register_idempotent_payment_link_stripe(&mut ctx, 1);
+    let (product, offer_id, request) =
+        seed_payment_link_configuration(&ctx, "product_link_mid_flight").await;
+    stripe::create_payment_link(&ctx, &product, &offer_id, &request)
+        .await
+        .expect_err("rate limited");
+
+    stripe
+        .held
+        .armed
+        .store(true, std::sync::atomic::Ordering::SeqCst);
+    // The conflict is answered as soon as it is met, and the first retry is
+    // let go only once the second has finished recording its failure.
+    stripe.held.answer_conflict.notify_one();
+    let first = stripe::create_payment_link(&ctx, &product, &offer_id, &request);
+    let second = async {
+        stripe.held.started.notified().await;
+        let result = stripe::create_payment_link(&ctx, &product, &offer_id, &request).await;
+        stripe.held.release.notify_one();
+        result
+    };
+    let (first, second) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::join!(first, second)
+    })
+    .await
+    .expect("the second retry must meet the first in flight at Stripe");
+    let first = first.expect("the executing retry records the link");
+    second.expect_err("the conflicting retry reports the conflict");
+
+    let stored = repo::payment_links::get_for_offer(&ctx, &offer_id, &first.id)
+        .await
+        .unwrap();
+    assert!(
+        stored.managed.active,
+        "a 409 must not retire the row its twin records the link on"
+    );
+    assert_eq!(stored.managed.sync_status, "synced");
+    let again = stripe::create_payment_link(&ctx, &product, &offer_id, &request)
+        .await
+        .expect("the recorded link is reused");
+    assert_eq!(again.id, first.id);
+    assert_eq!(stripe.links_created.lock().unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -4802,19 +6673,8 @@ async fn payment_link_redelivery_resumes_partial_order_and_backfills_snapshot() 
         offer_pricing::InputScope::Management,
     )
     .unwrap();
-    let pending_link = repo::payment_links::create_pending(
-        &ctx,
-        &offer_id,
-        "",
-        "",
-        "",
-        false,
-        "resume-link-config",
-        &preview,
-        0,
-    )
-    .await
-    .unwrap();
+    let pending_link =
+        seed_pending_payment_link(&ctx, &offer_id, "resume-link-config", &preview).await;
     let link_id = pending_link.managed.id;
     repo::payment_links::mark_synced(
         &ctx,
@@ -5308,19 +7168,8 @@ async fn a_paid_link_for_a_soft_deleted_product_still_reconciles_into_an_order()
         offer_pricing::InputScope::Management,
     )
     .unwrap();
-    let pending_link = repo::payment_links::create_pending(
-        &ctx,
-        &offer_id,
-        "",
-        "",
-        "",
-        false,
-        "deleted-product-link-config",
-        &preview,
-        0,
-    )
-    .await
-    .unwrap();
+    let pending_link =
+        seed_pending_payment_link(&ctx, &offer_id, "deleted-product-link-config", &preview).await;
     let link_id = pending_link.managed.id;
     repo::payment_links::mark_synced(
         &ctx,
@@ -5394,4 +7243,1933 @@ async fn a_paid_link_for_a_soft_deleted_product_still_reconciles_into_an_order()
     // And the product is still deleted — reconciling a payment must not
     // resurrect a listing into the public catalog.
     assert!(repo::products::get(&ctx, product_id).await.is_err());
+}
+
+/// A buyer who cannot be checked is not a buyer who does not own it.
+///
+/// `user_owns_product` collapsed all three of its reads into `false` — the
+/// middle one literally as `Err(_) => false` — so a database outage answered
+/// "You must sign in and own the required product before purchasing this
+/// item." to a signed-in buyer who already owned it. That refusal names the
+/// buyer as the problem, is a 400 no client retries, and leaves no trace of
+/// the outage anywhere near the storefront.
+#[tokio::test]
+async fn a_gated_checkout_reports_an_outage_instead_of_denying_ownership() {
+    let ctx = ctx_with(&[("IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "sk_test_x")]).await;
+    seed(
+        &ctx,
+        repo::products::TABLE,
+        "prereq",
+        HashMap::from([
+            ("name".to_string(), serde_json::json!("Prerequisite")),
+            ("status".to_string(), serde_json::json!("active")),
+        ]),
+    )
+    .await;
+    let offer_id = seed_gated_offer(&ctx, "gated", "prereq").await;
+
+    // The positive control: with a healthy database the buyer genuinely does
+    // not own `prereq`, and that answer is unchanged.
+    let (msg, input) = create_msg(
+        "/b/products/checkout",
+        "buyer_1",
+        serde_json::json!({ "offer_id": offer_id }),
+    );
+    assert!(
+        output_is_error(
+            stripe::handle_checkout(&ctx, &msg, input).await,
+            ErrorCode::InvalidArgument,
+        )
+        .await,
+        "a buyer who really does not own the prerequisite still gets the 400"
+    );
+
+    // Now the subscription read — the first of the three — cannot answer.
+    let failing = crate::test_support::FailingDbOpContext::new(
+        ctx.clone(),
+        vec![("database.list", repo::subscriptions::SUBSCRIPTIONS_TABLE)],
+    );
+    let (msg, input) = create_msg(
+        "/b/products/checkout",
+        "buyer_1",
+        serde_json::json!({ "offer_id": offer_id }),
+    );
+    assert!(
+        output_is_error(
+            stripe::handle_checkout(&failing, &msg, input).await,
+            ErrorCode::Internal,
+        )
+        .await,
+        "an ownership check that could not run must report the outage, not deny the buyer"
+    );
+
+    // And the same for the line-item half, which the subscription read falls
+    // through to. It is only reached once the buyer has a completed order to
+    // look inside, so seed one — without it the check short-circuits on an
+    // empty id list and the read under test never runs.
+    seed(
+        &ctx,
+        repo::purchases::PURCHASES_TABLE,
+        "order_probe",
+        HashMap::from([
+            ("user_id".to_string(), serde_json::json!("buyer_1")),
+            ("buyer_user_id".to_string(), serde_json::json!("buyer_1")),
+            ("status".to_string(), serde_json::json!("completed")),
+            ("total_cents".to_string(), serde_json::json!(1000)),
+            ("currency".to_string(), serde_json::json!("USD")),
+        ]),
+    )
+    .await;
+    let failing = crate::test_support::FailingDbOpContext::new(
+        ctx.clone(),
+        vec![("database.list", "impresspress__products__line_items")],
+    );
+    let (msg, input) = create_msg(
+        "/b/products/checkout",
+        "buyer_1",
+        serde_json::json!({ "offer_id": offer_id }),
+    );
+    assert!(
+        output_is_error(
+            stripe::handle_checkout(&failing, &msg, input).await,
+            ErrorCode::Internal,
+        )
+        .await,
+        "the line-item half of the ownership check propagates too"
+    );
+}
+
+/// Seed a published offer on `product_id`, which requires `requires`.
+async fn seed_gated_offer(
+    ctx: &crate::test_support::TestContext,
+    product_id: &str,
+    requires: &str,
+) -> String {
+    seed(
+        ctx,
+        repo::products::TABLE,
+        product_id,
+        HashMap::from([
+            ("name".to_string(), serde_json::json!("Gated product")),
+            ("status".to_string(), serde_json::json!("active")),
+            ("requires".to_string(), serde_json::json!(requires)),
+        ]),
+    )
+    .await;
+    let definition: OfferDefinitionRequest = serde_json::from_value(serde_json::json!({
+        "name": "Plan",
+        "mode": "payment",
+        "currency": "usd",
+        "pricing_model": "fixed",
+        "usage_type": "licensed",
+        "billing_scheme": "per_unit",
+        "tax_behavior": "exclusive",
+        "components": [{
+            "key": "price",
+            "label": "Plan",
+            "required": true,
+            "amount": {"type": "fixed", "unit_amount_minor": 1000}
+        }]
+    }))
+    .expect("offer definition");
+    let offer = repo::offers::create(ctx, product_id, "admin_1", &definition)
+        .await
+        .expect("create offer");
+    repo::offers::publish(ctx, product_id, &offer.offer.id)
+        .await
+        .expect("publish offer");
+    offer.offer.id
+}
+
+/// A subscription whose owner could not be looked up is not an unowned one.
+///
+/// `find_user_by_stripe_sub` collapsed a failed read into `None`, and the
+/// `customer.subscription.updated` arm reads that as "nobody owns this":
+/// the addon-total sync and the outbound `products.subscription.updated`
+/// were both skipped and the delivery still answered Stripe with a success,
+/// so nothing retried and the platform's view of a paying account drifted
+/// silently.
+#[tokio::test]
+async fn a_subscription_update_whose_owner_lookup_fails_does_not_report_success() {
+    let ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET",
+        WEBHOOK_SECRET,
+    )])
+    .await;
+    seed(
+        &ctx,
+        repo::subscriptions::SUBSCRIPTIONS_TABLE,
+        "sub_owner_probe",
+        HashMap::from([
+            ("user_id".to_string(), serde_json::json!("owner_1")),
+            (
+                "stripe_subscription_id".to_string(),
+                serde_json::json!("sub_owner_probe"),
+            ),
+            ("status".to_string(), serde_json::json!("active")),
+            ("plan".to_string(), serde_json::json!("pro")),
+        ]),
+    )
+    .await;
+
+    let event = serde_json::json!({
+        "id": "evt_owner_probe",
+        "type": "customer.subscription.updated",
+        "livemode": false,
+        "data": {"object": {
+            "id": "sub_owner_probe",
+            "status": "active",
+            "cancel_at_period_end": false,
+            "canceled_at": null
+        }}
+    });
+
+    // Positive control: the same delivery succeeds against a healthy
+    // database, so the assertion below cannot pass because the event was
+    // malformed.
+    let (msg, input) = webhook_msg(&event, WEBHOOK_SECRET);
+    assert_eq!(
+        crate::test_support::output_http_status(stripe::handle_webhook(&ctx, &msg, input).await)
+            .await,
+        200,
+    );
+
+    // A second, identical delivery under an outage on the owner lookup.
+    // `stripe_events` de-duplicates by id, so this one carries its own.
+    let mut retry = event.clone();
+    retry["id"] = serde_json::json!("evt_owner_probe_2");
+    let failing = crate::test_support::FailingDbOpContext::new(
+        ctx.clone(),
+        vec![("database.list", repo::subscriptions::SUBSCRIPTIONS_TABLE)],
+    )
+    .after_passing(2);
+    let (msg, input) = webhook_msg(&retry, WEBHOOK_SECRET);
+    assert!(
+        output_is_error(
+            stripe::handle_webhook(&failing, &msg, input).await,
+            ErrorCode::Internal,
+        )
+        .await,
+        "an owner lookup that could not run must make Stripe redeliver, not report success"
+    );
+    let event_row = db::get(
+        &ctx,
+        "impresspress__products__stripe_events",
+        "evt_owner_probe_2",
+    )
+    .await
+    .unwrap();
+    assert_eq!(event_row.data["status"], "failed");
+    assert_eq!(
+        event_row.data["last_error"], "subscription owner lookup failed",
+        "the failure has to name the lookup, not a downstream symptom"
+    );
+}
+
+// ============================================================
+// Webhook signature rotation and add-on totals
+// ============================================================
+
+/// A `Stripe-Signature` header signed by several secrets at once, which is
+/// what Stripe sends for the whole window a rolled secret stays live.
+fn webhook_msg_signed_by(payload: &serde_json::Value, secrets: &[&str]) -> (Message, InputStream) {
+    let payload_bytes = serde_json::to_vec(payload).unwrap();
+    let timestamp = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    let mut signed = format!("{timestamp}.");
+    signed.push_str(&String::from_utf8_lossy(&payload_bytes));
+
+    let mut sig_header = format!("t={timestamp}");
+    for secret in secrets {
+        let sig = primitives::hmac_sha256(secret.as_bytes(), signed.as_bytes());
+        sig_header.push_str(&format!(",v1={}", hex_encode(&sig)));
+    }
+
+    let mut msg = Message::new("http.request");
+    msg.set_meta("req.action", "create");
+    msg.set_meta("req.resource", "/b/products/webhooks");
+    msg.set_meta("http.header.stripe-signature", &sig_header);
+    (msg, InputStream::from_bytes(payload_bytes))
+}
+
+/// Rolling the endpoint's signing secret leaves the retired one live for up
+/// to 24 hours, and Stripe signs every delivery in that window with both. The
+/// order of the `v1` values is Stripe's, not the endpoint's, so reading one
+/// of them rejected every delivery of the roll window whenever the configured
+/// secret's signature was not the last.
+#[tokio::test]
+async fn a_delivery_signed_during_a_secret_roll_is_accepted_whichever_v1_comes_last() {
+    let ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET",
+        WEBHOOK_SECRET,
+    )])
+    .await;
+    let retired = "whsec_the_secret_being_rolled_out";
+
+    let event = |id: &str| {
+        serde_json::json!({
+            "id": id,
+            "type": "charge.refunded",
+            "livemode": false,
+            "data": {"object": {"payment_intent": "pi_does_not_exist"}}
+        })
+    };
+
+    // The configured secret signs second…
+    let body = event("evt_roll_configured_last");
+    let (msg, input) = webhook_msg_signed_by(&body, &[retired, WEBHOOK_SECRET]);
+    assert_eq!(
+        output_to_json(stripe::handle_webhook(&ctx, &msg, input).await).await["received"],
+        true
+    );
+
+    // …and first.
+    let body = event("evt_roll_configured_first");
+    let (msg, input) = webhook_msg_signed_by(&body, &[WEBHOOK_SECRET, retired]);
+    assert_eq!(
+        output_to_json(stripe::handle_webhook(&ctx, &msg, input).await).await["received"],
+        true
+    );
+
+    // A delivery carrying no signature from the configured secret is still
+    // refused, so the two above cannot be passing because verification stopped
+    // happening.
+    let body = event("evt_roll_neither");
+    let (msg, input) = webhook_msg_signed_by(&body, &[retired, "whsec_a_third_secret"]);
+    assert!(
+        output_is_error(
+            stripe::handle_webhook(&ctx, &msg, input).await,
+            ErrorCode::Unauthenticated,
+        )
+        .await,
+        "a header with no signature from the configured secret must be rejected"
+    );
+}
+
+/// Seed a platform-billing subscription row that a
+/// `customer.subscription.updated` delivery can be matched against.
+async fn seed_platform_subscription(
+    ctx: &crate::test_support::TestContext,
+    stripe_subscription_id: &str,
+    user_id: &str,
+    status: &str,
+) {
+    seed(
+        ctx,
+        repo::subscriptions::SUBSCRIPTIONS_TABLE,
+        stripe_subscription_id,
+        HashMap::from([
+            ("user_id".to_string(), serde_json::json!(user_id)),
+            (
+                "stripe_subscription_id".to_string(),
+                serde_json::json!(stripe_subscription_id),
+            ),
+            ("status".to_string(), serde_json::json!(status)),
+            ("plan".to_string(), serde_json::json!("pro")),
+            ("stripe_event_created".to_string(), serde_json::json!(100)),
+            ("addon_r2_bytes".to_string(), serde_json::json!(5)),
+        ]),
+    )
+    .await;
+}
+
+/// Which Stripe object the platform stamped the add-on metadata on.
+///
+/// Stripe always serialises a subscription item's own `metadata`, as `{}` when
+/// it is unset, so a price-stamped add-on arrives with an empty object at item
+/// level beside the populated one on the price. A fixture that omits item
+/// `metadata` altogether is not a shape Stripe sends, and it hides a reader
+/// that tests the item object for presence rather than for the marker.
+#[derive(Clone, Copy)]
+enum AddonStamp {
+    Item,
+    Price,
+}
+
+/// A `customer.subscription.updated` event whose single add-on item reports
+/// `extra_r2_bytes` per unit at `quantity`, stamped on the object `stamp`
+/// names and with the other object carrying the empty metadata Stripe sends.
+fn subscription_updated_with_addon(
+    event_id: &str,
+    stripe_subscription_id: &str,
+    status: &str,
+    extra_r2_bytes: &str,
+    quantity: i64,
+    stamp: AddonStamp,
+) -> serde_json::Value {
+    let addon_metadata = serde_json::json!({
+        "addon_id": "storage_pack",
+        "extra_r2_bytes": extra_r2_bytes
+    });
+    let empty = serde_json::json!({});
+    let (item_metadata, price_metadata) = match stamp {
+        AddonStamp::Item => (&addon_metadata, &empty),
+        AddonStamp::Price => (&empty, &addon_metadata),
+    };
+    serde_json::json!({
+        "id": event_id,
+        "type": "customer.subscription.updated",
+        "created": 200,
+        "livemode": false,
+        "data": {"object": {
+            "id": stripe_subscription_id,
+            "status": status,
+            "items": {"data": [{
+                "quantity": quantity,
+                "metadata": item_metadata,
+                "price": {"id": "price_storage_pack", "metadata": price_metadata}
+            }]}
+        }}
+    })
+}
+
+/// Both stamping conventions are read.
+///
+/// The platform may carry the add-on metadata on the subscription item or on
+/// the price the item points at, and this block cannot see which it chose —
+/// nothing here creates those items any more (see `ADDON_ITEM_MARKER`). The
+/// reader looked at `item.metadata` and fell back to the price only when that
+/// key was absent, which on a real payload it never is: a price-stamped add-on
+/// read as `{}`, counted as nothing, and wrote zero quota to a paying
+/// subscriber. Testing the marker rather than the object's presence is what
+/// makes the fallback reachable.
+#[tokio::test]
+async fn addon_totals_are_read_from_whichever_object_carries_the_marker() {
+    let ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET",
+        WEBHOOK_SECRET,
+    )])
+    .await;
+
+    for (index, stamp) in [AddonStamp::Item, AddonStamp::Price]
+        .into_iter()
+        .enumerate()
+    {
+        let subscription_id = format!("sub_addon_stamp_{index}");
+        seed_platform_subscription(
+            &ctx,
+            &subscription_id,
+            &format!("owner_stamp_{index}"),
+            "active",
+        )
+        .await;
+
+        let event = subscription_updated_with_addon(
+            &format!("evt_addon_stamp_{index}"),
+            &subscription_id,
+            "active",
+            "1024",
+            3,
+            stamp,
+        );
+        let (msg, input) = webhook_msg(&event, WEBHOOK_SECRET);
+        assert_eq!(
+            output_to_json(stripe::handle_webhook(&ctx, &msg, input).await).await["received"],
+            true
+        );
+
+        let subscription = db::get(
+            &ctx,
+            repo::subscriptions::SUBSCRIPTIONS_TABLE,
+            &subscription_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            subscription.data["addon_r2_bytes"],
+            3072,
+            "the add-on is stamped on the {} and must still be counted",
+            match stamp {
+                AddonStamp::Item => "item",
+                AddonStamp::Price => "price",
+            }
+        );
+    }
+}
+
+/// An item marked on neither object is the base plan and contributes nothing —
+/// the marker test must not turn "no add-on here" into "read the price
+/// anyway".
+#[tokio::test]
+async fn a_base_plan_item_contributes_no_addon_total() {
+    let ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET",
+        WEBHOOK_SECRET,
+    )])
+    .await;
+    seed_platform_subscription(&ctx, "sub_addon_base", "owner_base", "active").await;
+
+    let event = serde_json::json!({
+        "id": "evt_addon_base",
+        "type": "customer.subscription.updated",
+        "created": 200,
+        "livemode": false,
+        "data": {"object": {
+            "id": "sub_addon_base",
+            "status": "active",
+            "items": {"data": [{
+                "quantity": 1,
+                "metadata": {},
+                "price": {"id": "price_pro", "lookup_key": "pro", "metadata": {
+                    // No marker: a plan price may carry metadata of its own.
+                    "extra_r2_bytes": "999999"
+                }}
+            }]}
+        }}
+    });
+    let (msg, input) = webhook_msg(&event, WEBHOOK_SECRET);
+    assert_eq!(
+        output_to_json(stripe::handle_webhook(&ctx, &msg, input).await).await["received"],
+        true
+    );
+
+    let subscription = db::get(
+        &ctx,
+        repo::subscriptions::SUBSCRIPTIONS_TABLE,
+        "sub_addon_base",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        subscription.data["addon_r2_bytes"], 0,
+        "an unmarked item must contribute nothing, so the totals write zeroes"
+    );
+}
+
+/// A `customer.subscription.updated` delivery with no `status` reports
+/// nothing about the lifecycle, so the platform row keeps the status it has
+/// while the plan the payload does carry is applied. Written as-is, the empty
+/// status ranks with the live statuses, so a newer statusless event would
+/// blank an active subscription's status to `""`.
+#[tokio::test]
+async fn a_subscription_update_without_a_status_keeps_the_stored_status() {
+    let ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET",
+        WEBHOOK_SECRET,
+    )])
+    .await;
+    seed_platform_subscription(&ctx, "sub_statusless", "owner_statusless", "active").await;
+    seed_platform_subscription(
+        &ctx,
+        "sub_statusless_canceled",
+        "owner_statusless_canceled",
+        "canceled",
+    )
+    .await;
+
+    let statusless = |event_id: &str, subscription_id: &str, created: i64, plan: &str| {
+        serde_json::json!({
+            "id": event_id,
+            "type": "customer.subscription.updated",
+            "created": created,
+            "livemode": false,
+            "data": {"object": {
+                "id": subscription_id,
+                "items": {"data": [{
+                    "quantity": 1,
+                    "metadata": {},
+                    "price": {"id": "price_plan", "lookup_key": plan, "metadata": {}}
+                }]}
+            }}
+        })
+    };
+    let deliver = |event: serde_json::Value| {
+        let ctx = &ctx;
+        async move {
+            let (msg, input) = webhook_msg(&event, WEBHOOK_SECRET);
+            let answer = output_to_json(stripe::handle_webhook(ctx, &msg, input).await).await;
+            assert_eq!(
+                answer["received"], true,
+                "{} was answered {answer}",
+                event["id"]
+            );
+        }
+    };
+    let row = |subscription_id: &'static str| {
+        let ctx = &ctx;
+        async move {
+            db::get(
+                ctx,
+                repo::subscriptions::SUBSCRIPTIONS_TABLE,
+                subscription_id,
+            )
+            .await
+            .unwrap()
+        }
+    };
+
+    deliver(statusless(
+        "evt_statusless_newer",
+        "sub_statusless",
+        200,
+        "business",
+    ))
+    .await;
+    let subscription = row("sub_statusless").await;
+    assert_eq!(
+        subscription.data["status"], "active",
+        "an event without a status must not overwrite the stored one"
+    );
+    assert_eq!(subscription.data["plan"], "business");
+    assert_eq!(subscription.data["stripe_event_created"], 200);
+
+    // Guard (passes without the fix too): the ordering rule still refuses a
+    // strictly older statusless event, so it cannot put an old plan back.
+    deliver(statusless(
+        "evt_statusless_older",
+        "sub_statusless",
+        150,
+        "starter",
+    ))
+    .await;
+    let subscription = row("sub_statusless").await;
+    assert_eq!(subscription.data["plan"], "business");
+    assert_eq!(subscription.data["stripe_event_created"], 200);
+
+    // A statusless event on a terminal row restates the terminal status, so
+    // it applies and reaches the compare-and-swap on a `canceled` row, whose
+    // filter has to match the stored text for the plan to land.
+    deliver(statusless(
+        "evt_statusless_canceled",
+        "sub_statusless_canceled",
+        200,
+        "business",
+    ))
+    .await;
+    let subscription = row("sub_statusless_canceled").await;
+    assert_eq!(subscription.data["status"], "canceled");
+    assert_eq!(subscription.data["plan"], "business");
+    assert_eq!(subscription.data["stripe_event_created"], 200);
+}
+
+/// `customer.subscription.deleted` stores the platform row as `canceled`. A
+/// later `customer.subscription.updated` that restates `canceled` is allowed
+/// by the transition rules, and its compare-and-swap filters on the parsed
+/// status re-serialised. That only matches because the deletion wrote the
+/// same spelling: had it written anything else, every attempt would read as
+/// a concurrent change and the delivery would fail until it dead-lettered.
+#[tokio::test]
+async fn a_canceled_update_after_the_deletion_is_applied_not_retried() {
+    let ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET",
+        WEBHOOK_SECRET,
+    )])
+    .await;
+    seed_platform_subscription(&ctx, "sub_deleted_then_updated", "owner_deleted", "active").await;
+
+    let deleted = serde_json::json!({
+        "id": "evt_deleted_first",
+        "type": "customer.subscription.deleted",
+        "created": 200,
+        "livemode": false,
+        "data": {"object": {
+            "id": "sub_deleted_then_updated",
+            "status": "canceled",
+            "canceled_at": 200
+        }}
+    });
+    let (msg, input) = webhook_msg(&deleted, WEBHOOK_SECRET);
+    assert_eq!(
+        output_to_json(stripe::handle_webhook(&ctx, &msg, input).await).await["received"],
+        true
+    );
+
+    // Immediate cancellation stamps both events with the same second.
+    let updated = serde_json::json!({
+        "id": "evt_updated_second",
+        "type": "customer.subscription.updated",
+        "created": 200,
+        "livemode": false,
+        "data": {"object": {
+            "id": "sub_deleted_then_updated",
+            "status": "canceled",
+            "items": {"data": [{
+                "quantity": 1,
+                "metadata": {},
+                "price": {"id": "price_plan", "lookup_key": "pro", "metadata": {}}
+            }]}
+        }}
+    });
+    let (msg, input) = webhook_msg(&updated, WEBHOOK_SECRET);
+    assert_eq!(
+        output_to_json(stripe::handle_webhook(&ctx, &msg, input).await).await["received"],
+        true,
+        "a canceled restatement of a canceled row must not fail the delivery"
+    );
+    let event_row = db::get(
+        &ctx,
+        "impresspress__products__stripe_events",
+        "evt_updated_second",
+    )
+    .await
+    .unwrap();
+    assert_eq!(event_row.data["status"], "processed");
+
+    let subscription = db::get(
+        &ctx,
+        repo::subscriptions::SUBSCRIPTIONS_TABLE,
+        "sub_deleted_then_updated",
+    )
+    .await
+    .unwrap();
+    assert_eq!(subscription.data["status"], "canceled");
+    assert_eq!(subscription.data["addon_r2_bytes"], 0);
+
+    // And the subscriber reads Stripe's spelling back from the endpoint that
+    // publishes the row.
+    let (msg, input) = get_msg("/b/products/subscription", "owner_deleted");
+    let body = output_to_json(dispatch(&ctx, msg, input).await).await;
+    assert_eq!(body["subscription"]["status"], "canceled", "{body}");
+}
+
+/// A failed invoice on a canceled row is refused by the transition rules
+/// (terminal -> `past_due`), so the delivery is answered and sealed, not
+/// retried into the dead-letter queue, and no grace window appears.
+#[tokio::test]
+async fn a_failed_invoice_on_a_canceled_row_is_refused_not_dead_lettered() {
+    let ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET",
+        WEBHOOK_SECRET,
+    )])
+    .await;
+    seed_platform_subscription(
+        &ctx,
+        "sub_failed_invoice",
+        "owner_failed_invoice",
+        "canceled",
+    )
+    .await;
+
+    let payment_failed = serde_json::json!({
+        "id": "evt_failed_invoice_canceled",
+        "type": "invoice.payment_failed",
+        "created": 400,
+        "livemode": false,
+        "data": {"object": {
+            "parent": {"subscription_details": {"subscription": "sub_failed_invoice"}}
+        }}
+    });
+    let (msg, input) = webhook_msg(&payment_failed, WEBHOOK_SECRET);
+    assert_eq!(
+        output_to_json(stripe::handle_webhook(&ctx, &msg, input).await).await["received"],
+        true
+    );
+    let event_row = db::get(
+        &ctx,
+        "impresspress__products__stripe_events",
+        "evt_failed_invoice_canceled",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        event_row.data["status"], "processed",
+        "a refused past-due write is not a failure to retry"
+    );
+
+    let subscription = db::get(
+        &ctx,
+        repo::subscriptions::SUBSCRIPTIONS_TABLE,
+        "sub_failed_invoice",
+    )
+    .await
+    .unwrap();
+    assert_eq!(subscription.data["status"], "canceled");
+    assert_eq!(subscription.data["stripe_event_created"], 100);
+    assert!(
+        subscription.data["grace_period_end"]
+            .as_str()
+            .unwrap_or("")
+            .is_empty(),
+        "a refused past-due write must not grant a fresh grace window"
+    );
+}
+
+/// The add-on totals are summed from payload numbers, so an amount or a
+/// quantity big enough to wrap would write a negative quota — a subscriber
+/// billed for storage handed less than none. The delivery fails instead.
+#[tokio::test]
+async fn an_addon_total_that_would_wrap_fails_the_delivery_instead_of_being_written() {
+    let ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET",
+        WEBHOOK_SECRET,
+    )])
+    .await;
+    seed_platform_subscription(&ctx, "sub_addon_overflow", "owner_overflow", "active").await;
+
+    let event = subscription_updated_with_addon(
+        "evt_addon_overflow",
+        "sub_addon_overflow",
+        "active",
+        &i64::MAX.to_string(),
+        2,
+        AddonStamp::Item,
+    );
+    let (msg, input) = webhook_msg(&event, WEBHOOK_SECRET);
+    assert!(
+        output_is_error(
+            stripe::handle_webhook(&ctx, &msg, input).await,
+            ErrorCode::Internal,
+        )
+        .await,
+        "an add-on total that cannot be represented must not be answered with a success"
+    );
+
+    let event_row = db::get(
+        &ctx,
+        "impresspress__products__stripe_events",
+        "evt_addon_overflow",
+    )
+    .await
+    .unwrap();
+    assert_eq!(event_row.data["status"], "failed");
+    assert_eq!(
+        event_row.data["last_error"], "add-on total synchronization failed",
+        "the failure has to name the sync, not a downstream symptom"
+    );
+
+    let subscription = db::get(
+        &ctx,
+        repo::subscriptions::SUBSCRIPTIONS_TABLE,
+        "sub_addon_overflow",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        subscription.data["addon_r2_bytes"], 5,
+        "the stored total must be left alone, not replaced by a wrapped one"
+    );
+}
+
+/// The write that records the totals is the point of the arm. Failing it used
+/// to be logged and nothing else, so the arm ran on to `mark_event_processed`
+/// and Stripe was told the delivery had succeeded — the subscriber kept paying
+/// for add-ons no row recorded, and nothing retried.
+#[tokio::test]
+async fn an_addon_total_write_that_fails_does_not_report_success() {
+    let ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET",
+        WEBHOOK_SECRET,
+    )])
+    .await;
+    seed_platform_subscription(&ctx, "sub_addon_write", "owner_write", "active").await;
+
+    let event = subscription_updated_with_addon(
+        "evt_addon_write",
+        "sub_addon_write",
+        "active",
+        "1024",
+        3,
+        AddonStamp::Item,
+    );
+
+    // The status/plan write lands first on the same table; only the add-on
+    // total write after it is failed.
+    let failing = crate::test_support::FailingDbOpContext::new(
+        ctx.clone(),
+        vec![(
+            "database.update_where_count",
+            repo::subscriptions::SUBSCRIPTIONS_TABLE,
+        )],
+    )
+    .after_passing(1);
+    let (msg, input) = webhook_msg(&event, WEBHOOK_SECRET);
+    assert!(
+        output_is_error(
+            stripe::handle_webhook(&failing, &msg, input).await,
+            ErrorCode::Internal,
+        )
+        .await,
+        "an add-on total write that could not run must make Stripe redeliver"
+    );
+
+    let event_row = db::get(
+        &ctx,
+        "impresspress__products__stripe_events",
+        "evt_addon_write",
+    )
+    .await
+    .unwrap();
+    assert_eq!(event_row.data["status"], "failed");
+    assert_eq!(
+        event_row.data["last_error"],
+        "add-on total synchronization failed"
+    );
+}
+
+/// Which subscription states have their add-on totals recorded.
+///
+/// The columns are a projection of what Stripe reports, and Stripe reports
+/// add-on items on a trialing or past-due subscription exactly as it does on
+/// an active one. Writing only `active` rows lost an add-on bought during a
+/// trial until the next `updated` delivery, and one bought while past due
+/// until the item set next changed; which lifecycle states earn the quota is
+/// the reading platform's decision, made from the `status` it is served
+/// beside them.
+///
+/// The states that stay excluded are the terminal ones — a row that can never
+/// go live again, because Stripe issues a new subscription id for a
+/// resubscription. `customer.subscription.updated` can be delivered after
+/// `customer.subscription.deleted`, and writing quota onto a canceled row
+/// would undo the zeroing `cancel_and_reset_addons` just did.
+#[tokio::test]
+async fn addon_totals_reach_every_live_subscription_state_and_no_terminal_one() {
+    let ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET",
+        WEBHOOK_SECRET,
+    )])
+    .await;
+
+    // (stored status, the status the delivery reports, the expected total).
+    // A terminal row is probed with an `active` delivery, which is the
+    // redelivery that would resurrect it; 5 is what `seed_platform_subscription`
+    // leaves in the column, so "unchanged" is distinguishable from "zeroed".
+    let cases: [(&str, &str, i64); 8] = [
+        ("incomplete", "incomplete", 3072),
+        ("trialing", "trialing", 3072),
+        ("active", "active", 3072),
+        ("past_due", "past_due", 3072),
+        ("unpaid", "unpaid", 3072),
+        ("paused", "paused", 3072),
+        ("canceled", "active", 5),
+        ("incomplete_expired", "active", 5),
+    ];
+
+    for (index, (stored, reported, expected)) in cases.into_iter().enumerate() {
+        let subscription_id = format!("sub_addon_state_{index}");
+        seed_platform_subscription(
+            &ctx,
+            &subscription_id,
+            &format!("owner_state_{index}"),
+            stored,
+        )
+        .await;
+
+        let event = subscription_updated_with_addon(
+            &format!("evt_addon_state_{index}"),
+            &subscription_id,
+            reported,
+            "1024",
+            3,
+            AddonStamp::Item,
+        );
+        let (msg, input) = webhook_msg(&event, WEBHOOK_SECRET);
+        assert_eq!(
+            output_to_json(stripe::handle_webhook(&ctx, &msg, input).await).await["received"],
+            true,
+            "the {stored} delivery has to be acknowledged"
+        );
+
+        let subscription = db::get(
+            &ctx,
+            repo::subscriptions::SUBSCRIPTIONS_TABLE,
+            &subscription_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            subscription.data["addon_r2_bytes"], expected,
+            "a {stored} subscription's add-on total"
+        );
+    }
+}
+
+/// The totals write carries the same ordering predicate every other write to
+/// this table carries. A delivery that failed and is retried after a newer one
+/// has landed must not put the older payload's totals back: `update_status_plan`
+/// refuses the stale status and answers `Ok(0)`, and the arm runs on to the
+/// add-on sync regardless, so without the predicate the stale totals were
+/// written over the current ones.
+#[tokio::test]
+async fn a_stale_redelivery_does_not_overwrite_newer_addon_totals() {
+    let ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET",
+        WEBHOOK_SECRET,
+    )])
+    .await;
+    // `seed_platform_subscription` stamps `stripe_event_created` at 100 and
+    // `subscription_updated_with_addon` builds events created at 200, so this
+    // row is a subscription whose newest applied event is later than both.
+    seed_platform_subscription(&ctx, "sub_addon_stale", "owner_stale", "active").await;
+    db::update(
+        &ctx,
+        repo::subscriptions::SUBSCRIPTIONS_TABLE,
+        "sub_addon_stale",
+        HashMap::from([
+            ("stripe_event_created".to_string(), serde_json::json!(500)),
+            ("addon_r2_bytes".to_string(), serde_json::json!(9000)),
+        ]),
+    )
+    .await
+    .expect("advance the row past the stale event");
+
+    let event = subscription_updated_with_addon(
+        "evt_addon_stale",
+        "sub_addon_stale",
+        "active",
+        "1024",
+        3,
+        AddonStamp::Item,
+    );
+    let (msg, input) = webhook_msg(&event, WEBHOOK_SECRET);
+    assert_eq!(
+        output_to_json(stripe::handle_webhook(&ctx, &msg, input).await).await["received"],
+        true,
+        "a stale delivery is still acknowledged — it is applied to nothing, not failed"
+    );
+
+    let subscription = db::get(
+        &ctx,
+        repo::subscriptions::SUBSCRIPTIONS_TABLE,
+        "sub_addon_stale",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        subscription.data["addon_r2_bytes"], 9000,
+        "an event older than the row must not write its totals"
+    );
+    assert_eq!(
+        subscription.data["stripe_event_created"], 500,
+        "the totals write must not move the column `update_status_plan` compare-and-swaps on"
+    );
+}
+
+/// The totals are quotas, so a negative one is not a smaller number — it is
+/// less capacity than none. Neither a negative per-unit amount nor a negative
+/// quantity may reach the column.
+#[tokio::test]
+async fn a_negative_addon_amount_or_quantity_fails_the_delivery() {
+    let ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET",
+        WEBHOOK_SECRET,
+    )])
+    .await;
+
+    for (index, (amount, quantity)) in [("-1024", 3), ("1024", -3)].into_iter().enumerate() {
+        let subscription_id = format!("sub_addon_negative_{index}");
+        seed_platform_subscription(
+            &ctx,
+            &subscription_id,
+            &format!("owner_negative_{index}"),
+            "active",
+        )
+        .await;
+
+        let event_id = format!("evt_addon_negative_{index}");
+        let event = subscription_updated_with_addon(
+            &event_id,
+            &subscription_id,
+            "active",
+            amount,
+            quantity,
+            AddonStamp::Item,
+        );
+        let (msg, input) = webhook_msg(&event, WEBHOOK_SECRET);
+        assert!(
+            output_is_error(
+                stripe::handle_webhook(&ctx, &msg, input).await,
+                ErrorCode::Internal,
+            )
+            .await,
+            "a negative add-on total must not be answered with a success \
+             (amount {amount}, quantity {quantity})"
+        );
+
+        let event_row = db::get(&ctx, "impresspress__products__stripe_events", &event_id)
+            .await
+            .unwrap();
+        assert_eq!(event_row.data["status"], "failed");
+        assert_eq!(
+            event_row.data["last_error"],
+            "add-on total synchronization failed"
+        );
+
+        let subscription = db::get(
+            &ctx,
+            repo::subscriptions::SUBSCRIPTIONS_TABLE,
+            &subscription_id,
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            subscription.data["addon_r2_bytes"], 5,
+            "the stored total must be left alone"
+        );
+    }
+}
+
+// ============================================================
+// The platform application fee: one fee, charged and shown alike
+// ============================================================
+
+/// A Stripe stand-in for a seller's whole selling life: Connect onboarding,
+/// the account refresh the seller API makes, a Checkout Session and a
+/// Payment Link. Each answer is picked by method and path, so the order the
+/// handlers call in is theirs to choose.
+#[derive(Clone, Default)]
+struct SellerLifecycleStripe {
+    requests: Arc<Mutex<Vec<Request>>>,
+    links_created: Arc<Mutex<usize>>,
+}
+
+const LIFECYCLE_ACCOUNT: &str = "acct_fee_lifecycle";
+
+fn lifecycle_account(active: bool) -> serde_json::Value {
+    serde_json::json!({
+        "id": LIFECYCLE_ACCOUNT,
+        "object": "account",
+        "country": "NZ",
+        "default_currency": "nzd",
+        "details_submitted": active,
+        "charges_enabled": active,
+        "payouts_enabled": active,
+        "controller": {"stripe_dashboard": {"type": "express"}},
+        "requirements": {"currently_due": []}
+    })
+}
+
+#[async_trait]
+impl NetworkService for SellerLifecycleStripe {
+    async fn do_request(&self, request: &Request) -> Result<Response, NetworkError> {
+        self.requests.lock().unwrap().push(request.clone());
+        let path = request
+            .url
+            .strip_prefix("https://api.stripe.com")
+            .unwrap_or(&request.url);
+        let body = match (request.method.as_str(), path) {
+            ("POST", "/v1/accounts") => lifecycle_account(false),
+            ("GET", p) if p == format!("/v1/accounts/{LIFECYCLE_ACCOUNT}") => {
+                lifecycle_account(true)
+            }
+            ("POST", "/v1/account_links") => serde_json::json!({
+                "object": "account_link",
+                "url": "https://connect.stripe.com/setup/fee-lifecycle",
+                "expires_at": 1_900_000_000_i64
+            }),
+            ("POST", "/v1/checkout/sessions") => serde_json::json!({
+                "id": "cs_fee_lifecycle",
+                "url": "https://checkout.stripe.com/c/pay/cs_fee_lifecycle"
+            }),
+            ("POST", "/v1/payment_links") => {
+                let mut created = self.links_created.lock().unwrap();
+                *created += 1;
+                serde_json::json!({
+                    "id": format!("plink_fee_lifecycle_{created}"),
+                    "url": format!("https://buy.stripe.com/fee_lifecycle_{created}")
+                })
+            }
+            (method, path) => panic!("unexpected Stripe request {method} {path}"),
+        };
+        Ok(Response {
+            status_code: 200,
+            headers: HashMap::new(),
+            body: serde_json::to_vec(&body).unwrap(),
+        })
+    }
+}
+
+/// The form bodies this lifecycle sent to `path`, in order.
+fn lifecycle_forms(stripe: &SellerLifecycleStripe, path: &str) -> Vec<String> {
+    stripe
+        .requests
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request.url == format!("https://api.stripe.com{path}"))
+        .map(|request| String::from_utf8(request.body.clone().unwrap()).unwrap())
+        .collect()
+}
+
+/// Whether a Stripe form carries `application_fee_amount={fee_minor}`, or
+/// no fee at all when `fee_minor` is 0 (a zero fee is omitted, not sent).
+fn carries_fee(form: &str, fee_minor: i64) -> bool {
+    if fee_minor == 0 {
+        !form.contains("application_fee_amount")
+    } else {
+        form.contains(&format!("application_fee_amount={fee_minor}"))
+    }
+}
+
+/// Create a seller preset for `pages` and a Payment Link for it, through the
+/// seller routes. Returns the link and the preset id.
+async fn create_preset_link(
+    ctx: &crate::test_support::TestContext,
+    base: &str,
+    slug: &str,
+    pages: u32,
+) -> (serde_json::Value, serde_json::Value) {
+    let (msg, input) = create_msg(
+        &format!("{base}/presets"),
+        "seller_fee",
+        serde_json::json!({"name": slug, "slug": slug, "inputs": {"pages": pages}}),
+    );
+    let preset = output_to_json(dispatch(ctx, msg, input).await).await;
+    let (msg, input) = create_msg(
+        &format!("{base}/payment-links"),
+        "seller_fee",
+        serde_json::json!({"preset_id": preset["id"]}),
+    );
+    (
+        output_to_json(dispatch(ctx, msg, input).await).await,
+        preset["id"].clone(),
+    )
+}
+
+/// What a seller is charged and shown follows the platform fee, whatever it
+/// was when they onboarded — for everything created after the change.
+///
+/// Onboarding stamped the platform fee of that moment into the seller row and
+/// nothing ever changed it. Checkout and Payment Links read a stored 0 as
+/// "use the platform fee" and any other value as the seller's own, while
+/// every seller page printed the stored value. So a seller onboarded at 0 bps
+/// was SHOWN 0.00% and CHARGED the raised fee, and a seller onboarded at a
+/// higher fee was charged that fee forever. Both directions are driven here,
+/// through the real onboarding, checkout, Payment Link, seller API and page
+/// routes: a new Checkout Session, a newly created Payment Link, the API and
+/// every page must agree on the fee the platform sets now.
+///
+/// A Payment Link created BEFORE the change is reused as it is, with the fee
+/// it was created with: the fee is not part of its configuration hash. That
+/// is the boundary `config::seller_fee_bps` documents.
+#[tokio::test]
+async fn a_changed_platform_fee_is_what_every_seller_is_charged_and_shown() {
+    // (fee at onboarding, fee after the change, the old link's fee on 1100
+    // minor units, the new checkout's fee on 1100, the new link's fee on
+    // 1200, the percentage every page prints)
+    for (onboarded_at, now, old_link_fee, checkout_fee, new_link_fee, shown) in [
+        ("0", "500", 0, 55, 60, "5.00%"),
+        ("500", "200", 55, 22, 24, "2.00%"),
+    ] {
+        let mut ctx = ctx_with(&[
+            ("IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "sk_test_x"),
+            ("WAFER_RUN_SHARED__FRONTEND_URL", "https://shop.example"),
+            ("WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS", "true"),
+            ("IMPRESSPRESS__PRODUCTS__PLATFORM_COUNTRY", "NZ"),
+            (
+                "IMPRESSPRESS__PRODUCTS__SELLER_APPLICATION_FEE_BPS",
+                onboarded_at,
+            ),
+        ])
+        .await;
+        let stripe = SellerLifecycleStripe::default();
+        let block: Arc<dyn Block> = Arc::new(
+            wafer_core::service_blocks::network::NetworkBlock::new(Arc::new(stripe.clone())),
+        );
+        ctx.register_block("wafer-run/network", block);
+
+        let (msg, input) = create_msg(
+            "/b/products/api/seller/onboarding",
+            "seller_fee",
+            serde_json::json!({
+                "return_url": "https://shop.example/seller/stripe/return",
+                "refresh_url": "https://shop.example/seller/stripe/refresh"
+            }),
+        );
+        let onboarded = output_to_json(dispatch(&ctx, msg, input).await).await;
+        assert_eq!(onboarded["account"]["stripe_account_id"], LIFECYCLE_ACCOUNT);
+
+        // The seller API refreshes the account from Stripe, which is what
+        // turns it active.
+        let (msg, input) = get_msg("/b/products/api/seller/account", "seller_fee");
+        let account = output_to_json(dispatch(&ctx, msg, input).await).await;
+        assert_eq!(account["status"], "active", "onboarded at {onboarded_at}");
+
+        // A Payment Link created at the onboarding fee.
+        let offer_id = seed_active_offer(&ctx, "product_fee_lifecycle", "seller_fee").await;
+        let base = format!("/b/products/api/products/product_fee_lifecycle/offers/{offer_id}");
+        let (old_link, old_preset) = create_preset_link(&ctx, &base, "four-pages", 4).await;
+        assert_eq!(old_link["url"], "https://buy.stripe.com/fee_lifecycle_1");
+
+        // The platform changes its fee.
+        ctx.set_config("IMPRESSPRESS__PRODUCTS__SELLER_APPLICATION_FEE_BPS", now);
+        let now_bps: u64 = now.parse().unwrap();
+
+        let (msg, input) = get_msg("/b/products/api/seller/account", "seller_fee");
+        let account = output_to_json(dispatch(&ctx, msg, input).await).await;
+        assert_eq!(
+            account["fee_basis_points"], now_bps,
+            "the seller API publishes today's fee (onboarded at {onboarded_at})"
+        );
+
+        let (msg, input) = create_msg(
+            "/b/products/checkout",
+            "",
+            serde_json::json!({"offer_id": offer_id, "inputs": {"pages": 4}}),
+        );
+        let checkout = output_to_json(dispatch(&ctx, msg, input).await).await;
+        assert_eq!(checkout["amounts"]["total_minor"], 1100);
+        assert_eq!(
+            checkout["amounts"]["platform_fee_minor"], checkout_fee,
+            "a new checkout charges today's fee (onboarded at {onboarded_at})"
+        );
+        let sessions = lifecycle_forms(&stripe, "/v1/checkout/sessions");
+        assert_eq!(sessions.len(), 1);
+        assert!(
+            sessions[0].contains(&format!(
+                "payment_intent_data[application_fee_amount]={checkout_fee}"
+            )),
+            "the Checkout Session carries today's fee (onboarded at {onboarded_at})"
+        );
+
+        // The link made before the change is reused, untouched.
+        let (msg, input) = create_msg(
+            &format!("{base}/payment-links"),
+            "seller_fee",
+            serde_json::json!({"preset_id": old_preset}),
+        );
+        let reused = output_to_json(dispatch(&ctx, msg, input).await).await;
+        assert_eq!(
+            reused["url"], old_link["url"],
+            "the existing link is reused"
+        );
+
+        // A link created after the change carries the new fee.
+        let (new_link, _) = create_preset_link(&ctx, &base, "eight-pages", 8).await;
+        assert_eq!(new_link["url"], "https://buy.stripe.com/fee_lifecycle_2");
+
+        let links = lifecycle_forms(&stripe, "/v1/payment_links");
+        assert_eq!(links.len(), 2, "the reuse sends nothing to Stripe");
+        assert!(
+            carries_fee(&links[0], old_link_fee),
+            "the pre-change link keeps its fee {old_link_fee} (onboarded at {onboarded_at})"
+        );
+        assert!(
+            carries_fee(&links[1], new_link_fee),
+            "a new Payment Link carries today's fee (onboarded at {onboarded_at})"
+        );
+
+        let local = repo::seller_accounts::get_for_user(&ctx, "seller_fee")
+            .await
+            .unwrap()
+            .expect("seller row");
+        for (path, admin) in [
+            ("/b/products/".to_string(), false),
+            ("/b/products/selling".to_string(), false),
+            (format!("/b/products/admin/sellers/{}", local.id), true),
+        ] {
+            let (msg, input) = if admin {
+                admin_get_msg(&path)
+            } else {
+                get_msg(&path, "seller_fee")
+            };
+            let html = output_to_html(dispatch(&ctx, msg, input).await).await;
+            assert!(
+                html.contains(shown),
+                "{path} shows today's fee {shown} (onboarded at {onboarded_at})"
+            );
+        }
+    }
+}
+
+/// A typo in the fee setting leaves the admin seller pages — and the suspend
+/// control on the detail page — working, and shows the fee as misconfigured
+/// rather than as a number nobody set.
+///
+/// The fee is a platform setting, so reading it could fail both pages with a
+/// 500, and the detail page is where an operator suspends a seller: a config
+/// typo would have switched the fraud control off in the UI.
+#[tokio::test]
+async fn an_unreadable_fee_setting_leaves_the_admin_seller_pages_and_suspension_working() {
+    let ctx = ctx_with(&[
+        ("WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS", "true"),
+        ("IMPRESSPRESS__PRODUCTS__SELLER_APPLICATION_FEE_BPS", "2.5%"),
+    ])
+    .await;
+    seed(
+        &ctx,
+        repo::seller_accounts::TABLE,
+        "seller_typo",
+        HashMap::from([
+            ("user_id".to_string(), serde_json::json!("user_typo")),
+            ("status".to_string(), serde_json::json!("active")),
+            (
+                "stripe_account_id".to_string(),
+                serde_json::json!("acct_typo"),
+            ),
+            ("details_submitted".to_string(), serde_json::json!(true)),
+            ("charges_enabled".to_string(), serde_json::json!(true)),
+            ("payouts_enabled".to_string(), serde_json::json!(true)),
+        ]),
+    )
+    .await;
+
+    let (msg, input) = admin_get_msg("/b/products/admin/sellers");
+    let list = output_to_html(dispatch(&ctx, msg, input).await).await;
+    assert!(list.contains("user_typo"), "the seller list renders");
+
+    let (msg, input) = admin_get_msg("/b/products/admin/sellers/seller_typo");
+    let detail = output_to_html(dispatch(&ctx, msg, input).await).await;
+    assert!(
+        detail.contains("data-seller-action=\"suspend\""),
+        "the suspend control renders"
+    );
+    assert!(
+        detail.contains("Misconfigured"),
+        "the fee is shown as misconfigured"
+    );
+
+    // The suspension itself lands; the answer that cannot carry a fee is a
+    // server fault (its logged label says the change is saved), not a 409.
+    let (msg, input) = admin_create_msg(
+        "/b/products/api/admin/sellers/seller_typo/suspend",
+        serde_json::json!({}),
+    );
+    assert_eq!(
+        crate::test_support::output_http_status(dispatch(&ctx, msg, input).await).await,
+        500,
+        "an unreadable fee setting is a server fault, not a 409 inviting a retry"
+    );
+    let row = db::get(&ctx, repo::seller_accounts::TABLE, "seller_typo")
+        .await
+        .unwrap();
+    assert_eq!(row.data["status"], "suspended", "the suspension is saved");
+}
+
+/// Checkout's seller lookup answers 400 only when the seller genuinely is not
+/// ready; a fault reading the seller is a 500.
+///
+/// Every `ready_for_user` error became 400 "this seller's Stripe account is
+/// not ready", so a database outage — or a seller row the block cannot
+/// decode — told the buyer the seller had not finished onboarding, and
+/// nothing reached the logs.
+#[tokio::test]
+async fn checkout_separates_a_seller_that_is_not_ready_from_a_failed_read() {
+    use crate::test_support::{output_http_status, FailingDbOpContext};
+
+    let ctx = ctx_with(&[
+        ("IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "sk_test_x"),
+        ("WAFER_RUN_SHARED__FRONTEND_URL", "https://shop.example"),
+        ("WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS", "true"),
+    ])
+    .await;
+    let seller = |status: &str| {
+        HashMap::from([
+            (
+                "user_id".to_string(),
+                serde_json::json!(format!("seller_{status}")),
+            ),
+            ("status".to_string(), serde_json::json!(status)),
+            (
+                "stripe_account_id".to_string(),
+                serde_json::json!(format!("acct_{status}")),
+            ),
+            ("details_submitted".to_string(), serde_json::json!(true)),
+            ("charges_enabled".to_string(), serde_json::json!(false)),
+        ])
+    };
+    seed(
+        &ctx,
+        repo::seller_accounts::TABLE,
+        "seller_restricted",
+        seller("restricted"),
+    )
+    .await;
+    // Not a `SellerStatus` spelling: the row exists and cannot be decoded.
+    seed(
+        &ctx,
+        repo::seller_accounts::TABLE,
+        "seller_dormant",
+        seller("dormant"),
+    )
+    .await;
+    let restricted = seed_active_offer(&ctx, "product_restricted", "seller_restricted").await;
+    let dormant = seed_active_offer(&ctx, "product_dormant", "seller_dormant").await;
+    let checkout = |offer_id: &str| {
+        create_msg(
+            "/b/products/checkout",
+            "",
+            serde_json::json!({"offer_id": offer_id, "inputs": {"pages": 4}}),
+        )
+    };
+
+    // Guard: a seller that cannot take charges yet is still the buyer's 400
+    // (passes before and after the fix).
+    let (msg, input) = checkout(&restricted);
+    assert_eq!(
+        output_http_status(dispatch(&ctx, msg, input).await).await,
+        400
+    );
+
+    let (msg, input) = checkout(&dormant);
+    assert_eq!(
+        output_http_status(dispatch(&ctx, msg, input).await).await,
+        500,
+        "an undecodable seller row is a server fault, not an unready seller"
+    );
+
+    let outage = FailingDbOpContext::new(
+        ctx.clone(),
+        vec![("database.list", repo::seller_accounts::TABLE)],
+    );
+    let (msg, input) = checkout(&restricted);
+    assert_eq!(
+        output_http_status(dispatch(&outage, msg, input).await).await,
+        500,
+        "a seller read that failed is a server fault, not an unready seller"
+    );
+}
+
+// ============================================================
+// Error mapping — the webhook dispatcher and the offer checkout
+// ============================================================
+
+/// A `refund.updated` delivery whose first read inside the dispatcher — the
+/// refund-ledger lookup — answers `code`, and the status the delivery gets.
+///
+/// The lookup is a `database.list` on the refunds table, which nothing before
+/// it in `handle_webhook` touches: the lease claim is on the events table. So
+/// the injected refusal lands on a dispatcher site, and the lease is already
+/// held when it does.
+async fn refund_webhook_status_when_the_ledger_read_answers(
+    code: ErrorCode,
+    event_id: &str,
+) -> (crate::test_support::TestContext, serde_json::Value, u16) {
+    let ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET",
+        WEBHOOK_SECRET,
+    )])
+    .await;
+    let event = serde_json::json!({
+        "id": event_id,
+        "type": "refund.updated",
+        "livemode": false,
+        "data": {"object": {
+            "id": format!("re_{event_id}"),
+            "status": "succeeded",
+            "livemode": false
+        }}
+    });
+    let failing = crate::test_support::FailingDbOpContext::failing_with(
+        ctx.clone(),
+        vec![("database.list", repo::refunds::TABLE)],
+        wafer_run::WaferError::new(code, "refused by the database client"),
+    );
+    let (msg, input) = webhook_msg(&event, WEBHOOK_SECRET);
+    let status = crate::test_support::output_http_status(
+        stripe::handle_webhook(&failing, &msg, input).await,
+    )
+    .await;
+    (ctx, event, status)
+}
+
+/// The lease the refused delivery held was released as a scheduled retry, and
+/// the next delivery after the backoff processes the event. A 4xx does not
+/// stop Stripe redelivering — every non-2xx is a failed delivery — and this
+/// is the local half: the refusal did not seal or strand the event.
+async fn assert_refused_delivery_is_retried(
+    ctx: &crate::test_support::TestContext,
+    event: &serde_json::Value,
+    event_id: &str,
+) {
+    let row = db::get(ctx, "impresspress__products__stripe_events", event_id)
+        .await
+        .unwrap();
+    assert_eq!(row.data["status"], "failed");
+    assert!(!row.str_field("next_retry_at").is_empty());
+
+    db::update(
+        ctx,
+        "impresspress__products__stripe_events",
+        event_id,
+        HashMap::from([(
+            "next_retry_at".to_string(),
+            serde_json::json!("2000-01-01T00:00:00Z"),
+        )]),
+    )
+    .await
+    .unwrap();
+    let (msg, input) = webhook_msg(event, WEBHOOK_SECRET);
+    let body = output_to_json(stripe::handle_webhook(ctx, &msg, input).await).await;
+    assert_eq!(body["received"], true);
+    let row = db::get(ctx, "impresspress__products__stripe_events", event_id)
+        .await
+        .unwrap();
+    assert_eq!(row.data["status"], "processed");
+}
+
+#[tokio::test]
+async fn webhook_database_denial_is_403_and_the_delivery_is_retried() {
+    let (ctx, event, status) = refund_webhook_status_when_the_ledger_read_answers(
+        ErrorCode::PermissionDenied,
+        "evt_ledger_denied",
+    )
+    .await;
+    assert_eq!(status, 403, "a WRAP denial inside the dispatcher is a 403");
+    assert_refused_delivery_is_retried(&ctx, &event, "evt_ledger_denied").await;
+}
+
+#[tokio::test]
+async fn webhook_database_quota_is_429_and_the_delivery_is_retried() {
+    let (ctx, event, status) = refund_webhook_status_when_the_ledger_read_answers(
+        ErrorCode::ResourceExhausted,
+        "evt_ledger_quota",
+    )
+    .await;
+    assert_eq!(
+        status, 429,
+        "a database quota inside the dispatcher is a 429"
+    );
+    assert_refused_delivery_is_retried(&ctx, &event, "evt_ledger_quota").await;
+}
+
+/// Guard (passes before and after the database tails were classified): a
+/// Stripe rate limit is Stripe's, not the database's, so the checkout it
+/// interrupts is the sanitized 500 — never the 429 a database quota earns.
+#[tokio::test]
+async fn checkout_stripe_rate_limit_stays_500() {
+    let mut ctx = ctx_with(&[
+        ("IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "sk_test_x"),
+        ("WAFER_RUN_SHARED__FRONTEND_URL", "https://shop.example"),
+        ("IMPRESSPRESS__PRODUCTS__STRIPE_ACCOUNT_COUNTRY", "NZ"),
+    ])
+    .await;
+    let requests = register_stripe_sequence(
+        &mut ctx,
+        vec![(429, serde_json::json!({"error": {"code": "rate_limit"}}))],
+    );
+    let offer_id = seed_active_offer(&ctx, "product_checkout_rate_limit", "").await;
+    let (msg, input) = create_msg(
+        "/b/products/checkout",
+        "",
+        serde_json::json!({
+            "offer_id": offer_id,
+            "quantity": 1,
+            "inputs": {"pages": 3},
+            "presentation": "hosted"
+        }),
+    );
+    assert_eq!(
+        crate::test_support::output_http_status(stripe::handle_checkout(&ctx, &msg, input).await)
+            .await,
+        500
+    );
+    let requests = requests.lock().unwrap().clone();
+    assert_eq!(
+        requests.len(),
+        1,
+        "the Stripe call is the failure under test"
+    );
+    assert!(requests[0].url.ends_with("/v1/checkout/sessions"));
+}
+
+/// A checkout whose order insert is refused by the database is that refusal's
+/// status, not a 500. The insert is the first write to the purchases table, so
+/// nothing has reached Stripe yet.
+#[tokio::test]
+async fn checkout_order_insert_denial_is_403_and_quota_is_429() {
+    for (code, status) in [
+        (ErrorCode::PermissionDenied, 403),
+        (ErrorCode::ResourceExhausted, 429),
+    ] {
+        let mut ctx = ctx_with(&[
+            ("IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "sk_test_x"),
+            ("WAFER_RUN_SHARED__FRONTEND_URL", "https://shop.example"),
+            ("IMPRESSPRESS__PRODUCTS__STRIPE_ACCOUNT_COUNTRY", "NZ"),
+        ])
+        .await;
+        let requests = register_stripe_sequence(&mut ctx, Vec::new());
+        let offer_id = seed_active_offer(&ctx, "product_checkout_denied", "").await;
+        let failing = crate::test_support::FailingDbOpContext::failing_with(
+            ctx.clone(),
+            vec![("database.create", repo::purchases::PURCHASES_TABLE)],
+            wafer_run::WaferError::new(code, "refused by the database client"),
+        );
+        let (msg, input) = create_msg(
+            "/b/products/checkout",
+            "",
+            serde_json::json!({
+                "offer_id": offer_id,
+                "quantity": 1,
+                "inputs": {"pages": 3},
+                "presentation": "hosted"
+            }),
+        );
+        assert_eq!(
+            crate::test_support::output_http_status(
+                stripe::handle_checkout(&failing, &msg, input).await
+            )
+            .await,
+            status,
+            "{code:?}"
+        );
+        assert!(requests.lock().unwrap().is_empty());
+    }
+}
+
+/// A Payment Link completion from a connected account other than the link's
+/// is an integrity mismatch, answered with the same 500 every other webhook
+/// identity mismatch gets — not the 403 the database door gives a WRAP
+/// denial, which is what it would be reported as if the mismatch carried
+/// `PermissionDenied`.
+#[tokio::test]
+async fn payment_link_account_mismatch_is_500_not_a_wrap_denial() {
+    let ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET",
+        WEBHOOK_SECRET,
+    )])
+    .await;
+    let product_id = "product_payment_link_foreign";
+    seed(
+        &ctx,
+        repo::products::TABLE,
+        product_id,
+        HashMap::from([
+            ("name".to_string(), serde_json::json!("Care plan")),
+            ("slug".to_string(), serde_json::json!(product_id)),
+            ("status".to_string(), serde_json::json!("active")),
+            ("approval_status".to_string(), serde_json::json!("approved")),
+            ("owner_kind".to_string(), serde_json::json!("platform")),
+        ]),
+    )
+    .await;
+    let definition: OfferDefinitionRequest = serde_json::from_value(serde_json::json!({
+        "name": "Monthly subscription",
+        "mode": "subscription",
+        "currency": "nzd",
+        "pricing_model": "fixed",
+        "recurring_interval": "month",
+        "interval_count": 1,
+        "usage_type": "licensed",
+        "billing_scheme": "per_unit",
+        "tax_behavior": "exclusive",
+        "components": [{
+            "key": "plan",
+            "label": "Care plan",
+            "required": true,
+            "amount": {"type": "fixed", "unit_amount_minor": 4900}
+        }]
+    }))
+    .unwrap();
+    let offer_id = repo::offers::create(&ctx, product_id, "admin_1", &definition)
+        .await
+        .unwrap()
+        .offer
+        .id;
+    repo::offers::publish(&ctx, product_id, &offer_id)
+        .await
+        .unwrap();
+    let managed = repo::offers::get_managed(&ctx, &offer_id).await.unwrap();
+    let preview = offer_pricing::evaluate_offer(
+        &managed.offer,
+        &PricingPreviewRequest {
+            offer_id: offer_id.clone(),
+            quantity: 1,
+            inputs: Default::default(),
+        },
+        offer_pricing::InputScope::Management,
+    )
+    .unwrap();
+    let link_id = seed_pending_payment_link(&ctx, &offer_id, "foreign-link-config", &preview)
+        .await
+        .managed
+        .id;
+
+    let event = serde_json::json!({
+        "id": "evt_payment_link_foreign",
+        "type": "checkout.session.completed",
+        "account": "acct_attacker",
+        "livemode": false,
+        "data": {"object": {
+            "id": "cs_payment_link_foreign",
+            "mode": "subscription",
+            "payment_status": "paid",
+            "metadata": {
+                "impresspress_payment_link_id": link_id,
+                "offer_id": offer_id,
+                "offer_version": "1"
+            },
+            "currency": "nzd",
+            "amount_total": 4900,
+            "livemode": false
+        }}
+    });
+    let (msg, input) = webhook_msg(&event, WEBHOOK_SECRET);
+    assert_eq!(
+        crate::test_support::output_http_status(stripe::handle_webhook(&ctx, &msg, input).await)
+            .await,
+        500
+    );
+    assert!(
+        repo::purchases::find_by_session(&ctx, "cs_payment_link_foreign")
+            .await
+            .unwrap()
+            .is_none(),
+        "a mismatched delivery must not create an order"
+    );
+}
+
+/// Seed a `charge.refunded` event (for an unknown PaymentIntent, so
+/// processing it is a no-op) whose last attempt died holding the processing
+/// lease: `processing`, the whole budget spent, the lease long lapsed.
+/// Returns the event `webhook_msg` redelivers — the stored hash is of the
+/// exact bytes it sends, so the redelivery and a replay both match.
+async fn seed_event_out_of_attempts(
+    ctx: &crate::test_support::TestContext,
+    id: &str,
+) -> serde_json::Value {
+    use base64ct::{Base64, Encoding};
+
+    let event = serde_json::json!({
+        "id": id,
+        "type": "charge.refunded",
+        "livemode": false,
+        "data": { "object": { "payment_intent": "pi_lapsed_unknown", "livemode": false } }
+    });
+    let payload = serde_json::to_vec(&event).unwrap();
+    seed(
+        ctx,
+        "impresspress__products__stripe_events",
+        id,
+        HashMap::from([
+            (
+                "event_type".to_string(),
+                serde_json::json!("charge.refunded"),
+            ),
+            ("status".to_string(), serde_json::json!("processing")),
+            (
+                "attempts".to_string(),
+                serde_json::json!(repo::MAX_ATTEMPTS),
+            ),
+            (
+                "processing_owner".to_string(),
+                serde_json::json!("crashed-worker"),
+            ),
+            (
+                "processing_started_at".to_string(),
+                serde_json::json!(
+                    (chrono::Utc::now() - chrono::Duration::seconds(3600)).to_rfc3339()
+                ),
+            ),
+            (
+                "payload_sha256".to_string(),
+                serde_json::json!(sha256_hex(&payload)),
+            ),
+            (
+                "payload_base64".to_string(),
+                serde_json::json!(Base64::encode_string(&payload)),
+            ),
+            (
+                "last_error".to_string(),
+                serde_json::json!("refund ledger unavailable"),
+            ),
+        ]),
+    )
+    .await;
+    event
+}
+
+/// An event whose last attempt died holding the processing lease has no
+/// outcome recorded. When a redelivery finds the budget spent, the webhook
+/// acknowledges it — Stripe then stops redelivering — so the row must be
+/// `dead_letter` with its reason by then: a row left `processing` can never
+/// be replayed from the admin queue.
+#[tokio::test]
+async fn an_event_out_of_attempts_on_a_lapsed_lease_is_dead_lettered_and_replayable() {
+    let ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET",
+        WEBHOOK_SECRET,
+    )])
+    .await;
+    let event = seed_event_out_of_attempts(&ctx, "evt_lapsed_last_attempt").await;
+
+    let (msg, input) = webhook_msg(&event, WEBHOOK_SECRET);
+    let body = output_to_json(dispatch(&ctx, msg, input).await).await;
+    assert_eq!(
+        body,
+        serde_json::json!({ "received": true, "dead_letter": true })
+    );
+
+    let row = db::get(
+        &ctx,
+        "impresspress__products__stripe_events",
+        "evt_lapsed_last_attempt",
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        row.data["status"], "dead_letter",
+        "an acknowledged event must not be left processing"
+    );
+    let reason = row.str_field("last_error");
+    assert!(
+        reason.contains("retry budget") && reason.contains("expired"),
+        "the reason must say the budget ran out on a lapsed lease: {reason:?}"
+    );
+    assert!(
+        reason.contains("refund ledger unavailable"),
+        "the earlier attempts' error must survive: {reason:?}"
+    );
+    assert!(!row.str_field("terminal_at").is_empty());
+    assert_eq!(row.str_field("processing_owner"), "");
+
+    let (replay, input) = admin_create_msg(
+        "/b/products/api/admin/webhook-events/evt_lapsed_last_attempt/replay",
+        serde_json::json!({}),
+    );
+    let replayed = output_to_json(dispatch(&ctx, replay, input).await).await;
+    assert_eq!(replayed["received"], true, "replay refused: {replayed}");
+    let row = db::get(
+        &ctx,
+        "impresspress__products__stripe_events",
+        "evt_lapsed_last_attempt",
+    )
+    .await
+    .unwrap();
+    assert_eq!(row.data["status"], "processed");
+}
+
+/// Two redeliveries of an out-of-budget event both read the row before
+/// either writes. Only the one whose dead-letter write still matches the row
+/// it read acknowledges; the other finds the row moved under it and must ask
+/// Stripe to retry (500) rather than acknowledge an outcome it did not
+/// record — and must leave the winner's row as the winner wrote it.
+#[tokio::test]
+async fn a_redelivery_that_loses_the_dead_letter_race_is_retried_not_acknowledged() {
+    let ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET",
+        WEBHOOK_SECRET,
+    )])
+    .await;
+    let event = seed_event_out_of_attempts(&ctx, "evt_dead_letter_race").await;
+    // Each delivery's one `get` of the row is held until both have made it,
+    // so both read owner `crashed-worker` before either writes.
+    let racing = crate::test_support::RendezvousDbOpContext::new(
+        ctx.clone(),
+        "database.get",
+        "impresspress__products__stripe_events",
+        2,
+    );
+    let (first, first_input) = webhook_msg(&event, WEBHOOK_SECRET);
+    let (second, second_input) = webhook_msg(&event, WEBHOOK_SECRET);
+    let (left, right) = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+        tokio::join!(
+            dispatch(&racing, first, first_input),
+            dispatch(&racing, second, second_input),
+        )
+    })
+    .await
+    .expect("both deliveries must pass the rendezvous");
+    let mut statuses = vec![
+        crate::test_support::output_http_status(left).await,
+        crate::test_support::output_http_status(right).await,
+    ];
+    statuses.sort_unstable();
+    assert_eq!(
+        statuses,
+        vec![200, 500],
+        "exactly one delivery acknowledges; the loser is retried"
+    );
+
+    let row = db::get(
+        &ctx,
+        "impresspress__products__stripe_events",
+        "evt_dead_letter_race",
+    )
+    .await
+    .unwrap();
+    assert_eq!(row.data["status"], "dead_letter");
+    assert_eq!(row.str_field("processing_owner"), "");
+    assert!(row.str_field("last_error").contains("retry budget"));
 }

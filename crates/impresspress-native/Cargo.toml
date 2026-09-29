@@ -48,3 +48,12 @@ serde_json = { workspace = true }
 
 [dev-dependencies]
 tempfile = "3"
+# Test-only: `tests/transport_body_cap.rs` asserts that
+# `impresspress_core::streaming::MAX_REQUEST_BODY_BYTES` — the cap the wasm
+# adapters enforce and the files block clamps its quota to — still matches the
+# `max_body_bytes` default declared by the listener this crate registers. The
+# library itself has no core dependency and does not gain one here.
+impresspress-core = { path = "../impresspress-core", default-features = false }
+
+[lints]
+workspace = true

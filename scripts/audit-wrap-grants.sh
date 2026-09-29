@@ -6,7 +6,12 @@
 # in `crates/impresspress-core/src/blocks/`, derives the calling block from the
 # file path and the table-owning block from the table's `{org}__{block}__`
 # prefix, and verifies the owning block declares a `ResourceGrant` covering
-# the call.
+# the call. A reference to `crate::platform_state::<module>` from a block is
+# walked the same way: that module's functions run under the calling block's
+# WRAP identity, so the reference is a database access on the module's
+# `TABLE` (Phase 3.7). So are the two references that reach the admin audit
+# table through its shared writer — `logs::audit_log` and
+# `ui::settings_form::save_settings` (Phase 3.8).
 #
 # Background: WRAP enforces cross-block table access at runtime, but only
 # when the calling site routes through the typed `db::*` client AND the
@@ -28,8 +33,8 @@
 #   - Network grants are NOT audited. impresspress/blocks/admin/mod.rs declares a
 #     default-allow `ResourceGrant::read("*", "*").typed(Network)`, which makes
 #     a meaningful "missing grant" finding impossible until the policy is
-#     locked down. See docs/superpowers/specs/2026-05-29-wave-23-wrap-audit-
-#     storage-design.md for the deferred-Network rationale.
+#     locked down. Auditing Network only becomes useful once that
+#     default-allow grant is narrowed.
 #   - Tables outside the `{org}__{block}__` convention (none currently exist
 #     in impresspress-core but flagged if found).
 #
@@ -46,7 +51,9 @@ set -euo pipefail
 
 cd "$(git rev-parse --show-toplevel)"
 
-BLOCKS_DIR="crates/impresspress-core/src/blocks"
+# The tree this audit walks. Overridable ONLY so the self-check below can
+# point a real run at a synthetic fixture; nothing else sets it.
+BLOCKS_DIR="${AUDIT_WRAP_GRANTS_FIXTURE_DIR:-crates/impresspress-core/src/blocks}"
 # The dev block's guest TEMPLATES are not host code: they are the sources of
 # sandbox blocks (`site/<name>`) that Rubrc compiles for wasm32-wasip1 in the
 # browser. Their `db::*` calls run inside the guest, as the guest block, and
@@ -130,6 +137,23 @@ while IFS= read -r line; do
 # start at column 0 in this codebase. Visibility modifier may be `pub`,
 # `pub(crate)`, `pub(super)`, etc.
 done < <(grep -rEn "${GREP_EXCLUDE[@]}" "^(pub(\([^)]+\))?[[:space:]]+)?const [A-Z_]+: &str = \"[^\"]+\"" "$BLOCKS_DIR" 2>/dev/null || true)
+
+# ---------- Phase 1.7: platform_state tables ----------
+# `crates/impresspress-core/src/platform_state/<module>.rs` owns one platform
+# table each, declared as `pub const TABLE`. Indexed by module name so Phase
+# 3.7 can resolve `platform_state::<module>` to the table it reaches.
+PLATFORM_STATE_DIR="crates/impresspress-core/src/platform_state"
+declare -A PLATFORM_TABLE       # module -> table name
+re_platform_table='const[[:space:]]+TABLE[[:space:]]*:[[:space:]]*&str[[:space:]]*=[[:space:]]*"([^"]+)"'
+while IFS= read -r line; do
+  file="${line%%:*}"
+  rest="${line#*:}"
+  rest="${rest#*:}"
+  if [[ "$rest" =~ $re_platform_table ]]; then
+    module="$(basename "$file" .rs)"
+    PLATFORM_TABLE["$module"]="${BASH_REMATCH[1]}"
+  fi
+done < <(grep -rEn "^pub const TABLE: &str = \"[^\"]+\"" "$PLATFORM_STATE_DIR" 2>/dev/null || true)
 
 # Parse `use ... as` aliases. Both crate-rooted and super-relative paths
 # matter — many files import `use crate::blocks::auth::USERS_COLLECTION as USERS`.
@@ -240,13 +264,18 @@ done < <(find "$BLOCKS_DIR" -path "$GUEST_TEMPLATES_DIR" -prune -o -name '*.rs' 
 # (multi-line aware) and resolving paths to their target files.
 
 # Print every `use ...;` statement in $file as a single line, with internal
-# whitespace collapsed. Handles multi-line brace forms.
+# whitespace collapsed. Handles multi-line brace forms. Line comments inside
+# a brace group (an `// audit-allow:` pragma on the platform_state entry of
+# a `use crate::{..}` group, say) are stripped before the `;` test, so a
+# `;` in comment text cannot end the statement early.
 read_use_statements() {
   awk '
     /^[[:space:]]*(pub(\([^)]+\))?[[:space:]]+)?use[[:space:]]/ {
       buf = $0
+      sub(/\/\/.*$/, "", buf)
       while (buf !~ /;/) {
         if ((getline next_line) <= 0) break
+        sub(/\/\/.*$/, "", next_line)
         buf = buf " " next_line
       }
       gsub(/[[:space:]]+/, " ", buf)
@@ -425,6 +454,18 @@ while IFS= read -r file; do
       module_part="${src_path%::*}"
       [ "$module_part" = "$src_path" ] && module_part=""
 
+      # `use crate::platform_state::<module>::TABLE [as ALIAS]` binds the
+      # platform table directly; the module lives outside `src/blocks/`, so
+      # the file walk below cannot reach it.
+      if [ "$src_const" = "TABLE" ] && [[ "$module_part" =~ ^crate::platform_state::([a-z_]+)$ ]]; then
+        pmodule="${BASH_REMATCH[1]}"
+        if [ -n "${PLATFORM_TABLE[$pmodule]:-}" ]; then
+          FILE_USE_VALUE["${file}::${alias}"]="${PLATFORM_TABLE[$pmodule]}"
+          FILE_USE_ALIAS["${file}::${alias}"]="TABLE"
+          continue
+        fi
+      fi
+
       # Resolve the source path to a target file.
       target_file=""
       if [ -n "$module_part" ]; then
@@ -501,15 +542,52 @@ for _ in 1 2 3; do
   [ "$changed" -eq 0 ] && break
 done
 
+# ---------- Phase 1.8: per-file platform_state references ----------
+# Which `platform_state` modules each block file reaches: every `use
+# crate::platform_state::<module>…` leaf (a whole-module import, an item
+# import, `self`, or an alias) plus every inline `platform_state::<module>::`
+# path. Read once here; the resolver consults it for `<module>::TABLE`
+# tokens and Phase 3.7 walks it.
+declare -A FILE_PLATFORM_MODULES   # file -> space-separated module names
+while IFS= read -r file; do
+  modules=""
+  while IFS= read -r stmt; do
+    [ -z "$stmt" ] && continue
+    body="${stmt#*use }"
+    body="${body%;*}"
+    while IFS= read -r entry; do
+      [ -z "$entry" ] && continue
+      src_path="${entry%%|*}"
+      if [[ "$src_path" =~ ^crate::platform_state::([a-z_]+)(::|$) ]]; then
+        modules="$modules ${BASH_REMATCH[1]}"
+      fi
+    done < <(explode_use_body "$body")
+  done < <(read_use_statements "$file")
+  while IFS= read -r match; do
+    [ -z "$match" ] && continue
+    match="${match#platform_state::}"
+    modules="$modules ${match%::}"
+  done < <(grep -oE "platform_state::[a-z_]+::" "$file" 2>/dev/null || true)
+  [ -z "${modules// /}" ] && continue
+  FILE_PLATFORM_MODULES["$file"]="$(echo "$modules" | tr ' ' '\n' | sort -u | tr '\n' ' ')"
+done < <(find "$BLOCKS_DIR" -path "$GUEST_TEMPLATES_DIR" -prune -o -name '*.rs' -print 2>/dev/null)
+
 # ---------- Phase 2: collect grants per-owning-block ----------
-# Pattern:  ResourceGrant::{read,read_write}(GRANTEE, RESOURCE)[.typed(TYPE)]
+# Pattern:  ResourceGrant::{read,read_write,append}(GRANTEE, RESOURCE)[.typed(TYPE)]
 # Grants live in a block's `BlockInfo::grants(vec![...])` — we attribute the
 # grant to the file's owning block (the directory or .rs filename under
 # blocks/).
 #
 # Each grant entry is encoded as:
-#   "${owner_block_id}|${grantee}|${resource}|${type}"
-# where TYPE is "Database" by default or whatever appears after .typed().
+#   "${owner_block_id}|${grantee}|${resource}|${type}|${kind}"
+# where KIND is the constructor (`read`, `read_write`, `append`). An `append`
+# grant is typed `Db` by construction and covers only inserts — see
+# `check_coverage`.
+# where TYPE is "Db" by default or the `ResourceType` variant named in
+# `.typed()`. The default and the `.typed()` spelling must be the SAME
+# string, and both must be a name upstream defines: a grant indexed under
+# any other type matches nothing in `check_coverage` and is dropped from
+# the audit without saying so.
 
 GRANTS=()
 
@@ -532,6 +610,21 @@ resolve_token() {
   fi
   # Stripped bare identifier (drop `module::path::` prefix).
   local bare="${tok##*::}"
+  # 0. `<module>::TABLE` naming a `platform_state` module the file imports
+  #    (`use crate::platform_state::{variables, ..}` then `variables::TABLE`),
+  #    or the fully qualified `crate::platform_state::<module>::TABLE`. The
+  #    modules live outside `src/blocks/`, so the file walk in 0c cannot
+  #    reach them; a block's own `repo::variables::TABLE` (products) does
+  #    not import `platform_state` and falls through to 0c.
+  if [[ "$tok" =~ (^|::)([a-z_]+)::TABLE$ ]]; then
+    local pmodule="${BASH_REMATCH[2]}"
+    if [ -n "${PLATFORM_TABLE[$pmodule]:-}" ]; then
+      if [[ "$tok" == *platform_state::* ]] || [[ " ${FILE_PLATFORM_MODULES[$file]:-} " == *" $pmodule "* ]]; then
+        echo "${PLATFORM_TABLE[$pmodule]}"
+        return
+      fi
+    fi
+  fi
   # 0a. `crate::blocks::BLOCK::NAME` — full path. Disambiguates colliding
   #     bare names across blocks (e.g. `VARIABLES_COLLECTION` exists in
   #     both admin and products). NAME may be a direct const in BLOCK or a
@@ -730,41 +823,139 @@ storage_path_to_owner() {
   echo ""
 }
 
+# Drop a `//` line comment from one line of Rust, ignoring a `//` that sits
+# inside a double-quoted string — a grant resource is routinely a URL
+# (`read("*", "https://api.example.com/*")`), and cutting at the scheme's
+# slashes would corrupt the argument this script then resolves. Escaped
+# quotes do not occur in these declarations and are not modelled.
+strip_rust_line_comment() {
+  awk '''{
+    inq = 0
+    for (i = 1; i <= length($0); i++) {
+      c = substr($0, i, 1)
+      if (c == "\"") { inq = !inq }
+      else if (!inq && c == "/" && substr($0, i + 1, 1) == "/") {
+        print substr($0, 1, i - 1); next
+      }
+    }
+    print
+  }''' <<< "$1"
+}
+
+# The `ResourceType` variants upstream defines
+# (wafer-block/src/types/grants.rs). Kept as the Rust variant spelling
+# because that is what `.typed(..)` writes and what this script indexes on;
+# anything else captured from a `.typed(..)` is a name one side made up.
+KNOWN_RESOURCE_TYPES="Db Config Storage Crypto Network Vector"
+
+is_known_resource_type() {
+  local candidate="$1" known
+  for known in $KNOWN_RESOURCE_TYPES; do
+    [ "$candidate" = "$known" ] && return 0
+  done
+  return 1
+}
+
+declare -i unparsed_grants=0
+declare -i bad_type_grants=0
+UNPARSED_GRANT_LINES=()
+BAD_TYPE_GRANT_LINES=()
+
 while IFS= read -r line; do
   file="${line%%:*}"
   rest="${line#*:}"
+  lineno="${rest%%:*}"
   rest="${rest#*:}"
-  # Match: ResourceGrant::read("a", "b")  or  ResourceGrant::read_write(IDENT, IDENT)
+  # Match: ResourceGrant::read("a", "b"), ResourceGrant::read_write(IDENT, IDENT)
+  # or ResourceGrant::append(IDENT, IDENT)
   # The args may be string literals or constant identifiers (with optional `super::module::` qualifier).
   # Bash requires the regex stored in a variable when it contains parens.
-  re_grant='ResourceGrant::(read|read_write)\(([^,]+),[[:space:]]*([^)]+)\)'
-  if [[ "$rest" =~ $re_grant ]]; then
+  re_grant='ResourceGrant::(read|read_write|append)\(([^,]+),[[:space:]]*([^)]+)\)'
+  # rustfmt breaks a declaration whose arguments do not fit onto continuation
+  # lines, leaving only `ResourceGrant::read_write(` on the matched line. Read
+  # the rest of the statement before testing: a grant the audit cannot see is
+  # reported as a MISSING grant for a call that IS granted, and the obvious
+  # way to silence that is a duplicate grant or a pragma.
+  stmt="$rest"
+  if ! [[ "$stmt" =~ $re_grant ]]; then
+    probe=$((lineno + 1))
+    until [[ "$stmt" == *')'* ]] || [ "$probe" -gt $((lineno + 8)) ]; do
+      # Comment-stripped: a `//` note on an argument's own line would
+      # otherwise be joined INTO that argument, and the garbage grantee that
+      # produces reports every call the grant covers as MISSING.
+      stmt="$stmt $(strip_rust_line_comment "$(sed -n "${probe}p" "$file" 2>/dev/null)")"
+      probe=$((probe + 1))
+    done
+  fi
+  if [[ "$stmt" =~ $re_grant ]]; then
     kind="${BASH_REMATCH[1]}"
     grantee_raw="${BASH_REMATCH[2]// /}"
     resource_raw="${BASH_REMATCH[3]// /}"
+    # A joined statement keeps rustfmt's trailing comma inside the captured
+    # final argument.
+    grantee_raw="${grantee_raw%,}"
+    resource_raw="${resource_raw%,}"
     grantee="$(resolve_token "$grantee_raw" "$file")"
     resource="$(resolve_token "$resource_raw" "$file")"
-    # Grant type: default Database; if the same line has .typed(...), pick that
-    type="Database"
+    # Grant type: default Db; `.typed(...)` on the same line picks
+    # another. rustfmt puts a long `.typed(...)` on its own continuation
+    # line, so that line is read too — without it admin's
+    # `read("*", "*").typed(Network)` and `read_write("*", "*").typed(Crypto)`
+    # index as Db wildcards that cover every admin-owned table for
+    # every caller, and no missing grant on an admin table can ever be
+    # reported.
+    #
+    # The default is spelled the way `ResourceType::Db` is, so a grant that
+    # declares its type explicitly indexes the same as one that leaves it
+    # open.
+    type="Db"
     re_typed='\.typed\(([^)]*ResourceType::)?([A-Za-z]+)\)'
-    if [[ "$rest" =~ $re_typed ]]; then
+    if [[ "$stmt" =~ $re_typed ]]; then
       type="${BASH_REMATCH[2]}"
+    else
+      next_line="$(sed -n "$((lineno + 1))p" "$file" 2>/dev/null)"
+      if [[ "$next_line" =~ ^[[:space:]]*\.typed ]] && [[ "$next_line" =~ $re_typed ]]; then
+        type="${BASH_REMATCH[2]}"
+      fi
+    fi
+    # The variant is captured as free text, so a name this script does not
+    # know is a grant indexed under a type nothing ever matches — invisible
+    # to `check_coverage`, and visible only as a false MISSING somewhere
+    # else. A typo and a genuine upstream addition look identical here, and
+    # both need a human, so the captured name is checked against the set
+    # upstream defines rather than trusted.
+    if ! is_known_resource_type "$type"; then
+      bad_type_grants=$((bad_type_grants + 1))
+      BAD_TYPE_GRANT_LINES+=("${file}:${lineno}: .typed(${type})")
+      echo "::warning file=${file},line=${lineno}::WRAP grant audit does not know ResourceType variant '${type}' (expected one of: ${KNOWN_RESOURCE_TYPES}); this grant is indexed under a type nothing matches"
     fi
     # Owning block = the block this file lives in
     owner="$(file_to_block_id "$file")"
     GRANTS+=("${owner}|${grantee}|${resource}|${type}|${kind}")
+  else
+    # A declaration this parser could not read is a grant the audit does not
+    # know exists — which is the exact silence this walk is for. It surfaces
+    # downstream as a MISSING finding for a call that IS granted, or as no
+    # finding at all when another grant happens to cover the same call, so
+    # it is announced here rather than left to be inferred.
+    unparsed_grants=$((unparsed_grants + 1))
+    UNPARSED_GRANT_LINES+=("${file}:${lineno}")
+    echo "::warning file=${file},line=${lineno}::WRAP grant audit could not parse this ResourceGrant declaration; it is absent from the grant index"
   fi
-done < <(grep -rEn "${GREP_EXCLUDE[@]}" "ResourceGrant::(read|read_write)\(" "$BLOCKS_DIR" 2>/dev/null || true)
+done < <(grep -rEn "${GREP_EXCLUDE[@]}" "ResourceGrant::(read|read_write|append)\(" "$BLOCKS_DIR" 2>/dev/null || true)
 
 # ---------- Phase 3: walk db::* callsites and check coverage ----------
 
-# Returns "OK" if a grant covers (caller, table); otherwise "MISSING".
-# Grant matches when:
-#   - resource_type is Database (or the grant's type is empty/wildcard)
+# Returns "OK" if a grant covers (caller, table, access); otherwise "MISSING".
+# ACCESS is `append` for an insert (`db::create`, the audit writer) and
+# `other` for everything else. Grant matches when:
+#   - resource_type is Db (or the grant's type is empty/wildcard)
 #   - grantee == caller OR grantee == "*"
 #   - resource == table OR (resource ends with "*" AND table starts with the prefix)
+#   - the grant is not `append`, or ACCESS is `append`: an append-only grant
+#     admits inserts and nothing else, not even a read
 check_coverage() {
-  local caller="$1" table="$2"
+  local caller="$1" table="$2" access="$3"
   local owner
   owner="$(table_to_owner "$table")"
   if [ -z "$owner" ]; then
@@ -776,9 +967,10 @@ check_coverage() {
     return
   fi
   for g in "${GRANTS[@]}"; do
-    IFS='|' read -r g_owner g_grantee g_resource g_type _g_kind <<< "$g"
+    IFS='|' read -r g_owner g_grantee g_resource g_type g_kind <<< "$g"
     [ "$g_owner" != "$owner" ] && continue
-    [ "$g_type" != "Database" ] && continue
+    [ "$g_type" != "Db" ] && continue
+    [ "$g_kind" = "append" ] && [ "$access" != "append" ] && continue
     if [ "$g_grantee" != "*" ] && [ "$g_grantee" != "$caller" ]; then
       continue
     fi
@@ -885,10 +1077,14 @@ while IFS= read -r line; do
   # Permit an optional `&` prefix on the arg. Pattern in a variable for bash regex.
   re_dbcall='db::(list|create|update|delete|count|get|find_one)[[:space:]]*\([[:space:]]*ctx[[:space:]]*,[[:space:]]*&?([A-Za-z_:]+|"[^"]+")[[:space:]]*[,)]'
   if [[ "$rest" =~ $re_dbcall ]]; then
+    op="${BASH_REMATCH[1]}"
     arg="${BASH_REMATCH[2]}"
     table="$(resolve_token "$arg" "$file")"
     caller="$(file_to_block_id "$file")"
-    pair_key="${caller}|${table}"
+    if [ "$op" = "create" ]; then access="append"; else access="other"; fi
+    # Keyed on the access too: a caller's insert and its update of the same
+    # table need different grants, so the first must not hide the second.
+    pair_key="${caller}|${table}|${access}"
     [ -n "${SEEN_PAIRS[$pair_key]:-}" ] && continue
     SEEN_PAIRS["$pair_key"]=1
     total=$((total + 1))
@@ -906,13 +1102,13 @@ while IFS= read -r line; do
       UNRESOLVED_LINES+=("${file}:${lineno}: ${caller} → ${table}")
       continue
     fi
-    result="$(check_coverage "$caller" "$table")"
+    result="$(check_coverage "$caller" "$table" "$access")"
     case "$result" in
       OK|OWN) ;;
       MISSING)
         missing=$((missing + 1))
         owner="$(table_to_owner "$table")"
-        MISSING_LINES+=("${file}:${lineno}: ${caller} → ${table} (owned by ${owner})")
+        MISSING_LINES+=("${file}:${lineno}: ${caller} → ${table} [db::${op}] (owned by ${owner})")
         ;;
       NON_CONVENTIONAL)
         nonconv=$((nonconv + 1))
@@ -921,6 +1117,120 @@ while IFS= read -r line; do
     esac
   fi
 done < <(grep -rEn "${GREP_EXCLUDE[@]}" "db::(list|create|update|delete|count|get|find_one)\(" "$BLOCKS_DIR" 2>/dev/null || true)
+
+# ---------- Phase 3.7: walk platform_state references ----------
+# A block reaches a platform table through
+# `crates/impresspress-core/src/platform_state/<module>.rs`, whose functions
+# run under the CALLING block's WRAP identity — the module is a codec plus
+# query helpers, not a service that acts as admin. Every `use
+# crate::platform_state::<module>…` leaf and every inline
+# `platform_state::<module>::` path in a block file is therefore a database
+# access on that module's table, checked exactly like a `db::*` callsite that
+# names it (same pragmas, same report). Without this, moving those calls out
+# of `src/blocks/` would silently un-audit every cross-block read of the
+# platform tables. The reported line is the file's first mention of
+# `platform_state`; an `// audit-allow:` pragma goes on the line above it.
+declare -i ps_total=0
+while IFS= read -r file; do
+  modules="${FILE_PLATFORM_MODULES[$file]:-}"
+  [ -z "${modules// /}" ] && continue
+  lineno="$(grep -n "platform_state" "$file" | head -1 | cut -d: -f1)"
+  [ -z "$lineno" ] && lineno=1
+  caller="$(file_to_block_id "$file")"
+  for module in $modules; do
+    [ -z "$module" ] && continue
+    table="${PLATFORM_TABLE[$module]:-<unresolved:platform_state::${module}>}"
+    # A platform_state module's functions read as well as write, so the
+    # reference is checked as a general access.
+    pair_key="${caller}|${table}|other"
+    [ -n "${SEEN_PAIRS[$pair_key]:-}" ] && continue
+    SEEN_PAIRS["$pair_key"]=1
+    ps_total=$((ps_total + 1))
+    total=$((total + 1))
+    if file_allows_audit_skip "$file" || has_allow_pragma "$file" "$lineno"; then
+      allowed=$((allowed + 1))
+      ALLOWED_LINES+=("${file}:${lineno}: ${caller} → ${table} (via platform_state::${module})")
+      continue
+    fi
+    if [[ "$table" == "<unresolved:"* ]]; then
+      unresolved=$((unresolved + 1))
+      UNRESOLVED_LINES+=("${file}:${lineno}: ${caller} → ${table}")
+      continue
+    fi
+    result="$(check_coverage "$caller" "$table" other)"
+    case "$result" in
+      OK|OWN) ;;
+      MISSING)
+        missing=$((missing + 1))
+        owner="$(table_to_owner "$table")"
+        MISSING_LINES+=("${file}:${lineno}: ${caller} → ${table} (owned by ${owner}, via platform_state::${module})")
+        ;;
+      NON_CONVENTIONAL)
+        nonconv=$((nonconv + 1))
+        NONCONV_LINES+=("${file}:${lineno}: ${caller} → ${table} (via platform_state::${module})")
+        ;;
+    esac
+  done
+done < <(find "$BLOCKS_DIR" -path "$GUEST_TEMPLATES_DIR" -prune -o -name '*.rs' -print 2>/dev/null)
+
+# ---------- Phase 3.8: walk admin-audit writer references ----------
+# The admin audit trail is one table with one writer,
+# `blocks::admin::logs::audit_log`, and blocks other than admin reach it:
+# directly (userportal's portal buttons) and through
+# `ui::settings_form::save_settings`, which audits every settings page it
+# serves. Like `platform_state`, that writer is a helper rather than a
+# service — it runs under the CALLING block's WRAP identity, so the row lands
+# only when the admin block grants that block the table.
+#
+# Neither reference is a `db::*` callsite in the caller's own file, and
+# `save_settings` does not even live under `src/blocks/`, so Phase 3
+# attributes both writes to the admin block and sees nothing to check. This
+# phase attributes them to the block that made the call, checked exactly like
+# a `db::*` callsite naming the table (same pragmas, same report).
+#
+# What it does NOT see, so this is not read as more than it is: the two
+# references are named literally below, so a call spelled through an
+# unqualified import (`use ...::save_settings;` then a bare
+# `save_settings(..)`) and any future shared helper outside `src/blocks/`
+# that wraps `audit_log` are both invisible until added to that pattern; and
+# because this phase honours Phase 3's pragmas, an `// audit-allow-file:`
+# added for a `db::*` callsite exempts that file's audit-writer calls too.
+AUDIT_WRITER_TABLE="${CONST_VALUE[AUDIT_LOGS_TABLE]:-}"
+if [ -z "$AUDIT_WRITER_TABLE" ]; then
+  echo "::error::AUDIT_LOGS_TABLE not indexed — the admin audit writer cannot be walked." >&2
+  exit 2
+fi
+declare -i audit_writer_total=0
+while IFS= read -r line; do
+  file="${line%%:*}"
+  rest="${line#*:}"
+  lineno="${rest%%:*}"
+  caller="$(file_to_block_id "$file")"
+  # The writer only inserts (`db::create`), so an append grant covers it.
+  pair_key="${caller}|${AUDIT_WRITER_TABLE}|append"
+  [ -n "${SEEN_PAIRS[$pair_key]:-}" ] && continue
+  SEEN_PAIRS["$pair_key"]=1
+  audit_writer_total=$((audit_writer_total + 1))
+  total=$((total + 1))
+  if file_allows_audit_skip "$file" || has_allow_pragma "$file" "$lineno"; then
+    allowed=$((allowed + 1))
+    ALLOWED_LINES+=("${file}:${lineno}: ${caller} → ${AUDIT_WRITER_TABLE} (via the audit writer)")
+    continue
+  fi
+  result="$(check_coverage "$caller" "$AUDIT_WRITER_TABLE" append)"
+  case "$result" in
+    OK|OWN) ;;
+    MISSING)
+      missing=$((missing + 1))
+      owner="$(table_to_owner "$AUDIT_WRITER_TABLE")"
+      MISSING_LINES+=("${file}:${lineno}: ${caller} → ${AUDIT_WRITER_TABLE} (owned by ${owner}, via the audit writer)")
+      ;;
+    NON_CONVENTIONAL)
+      nonconv=$((nonconv + 1))
+      NONCONV_LINES+=("${file}:${lineno}: ${caller} → ${AUDIT_WRITER_TABLE} (via the audit writer)")
+      ;;
+  esac
+done < <(grep -rEn "${GREP_EXCLUDE[@]}" "(audit_log|settings_form::save_settings)\(" "$BLOCKS_DIR" 2>/dev/null || true)
 
 # ---------- Phase 3.5: walk storage callsites and check coverage ----------
 # Mirrors Phase 3 but for typed Storage grants.
@@ -974,19 +1284,157 @@ while IFS= read -r line; do
   fi
 done < <(grep -rEn "${GREP_EXCLUDE[@]}" "clients::storage::(get|put|delete|list|create_folder|delete_folder|list_folders|get_stream)\(" "$BLOCKS_DIR" 2>/dev/null || true)
 
+# ---------- Phase 3.9: self-check ----------
+# Both ways this parser can fail are silent by construction: a declaration it
+# cannot read, and one whose `.typed(..)` names a variant it does not know,
+# each drop a grant out of the index and show up — if at all — as a MISSING
+# finding somewhere unrelated. Nothing downstream can tell that apart from a
+# grant that was never written, so the guards need their own proof.
+#
+# So the guards are exercised on every invocation, against synthetic
+# fixtures, through this same script: the real grep, the real multi-line
+# join, the real validation and the real exit code. `$AUDIT_WRAP_GRANTS_
+# FIXTURE_DIR` is what points a child run at a fixture instead of the repo,
+# and its presence is also what stops a child recursing.
+run_self_check() {
+  local tmp out status failures=0
+  tmp="$(mktemp -d)"
+  # shellcheck disable=SC2064
+  trap "rm -rf '$tmp'" RETURN
+
+  # Writes a two-block fixture: the admin block declaring the grant handed
+  # on stdin, and a userportal file whose `db::create` (or `db::$1`) on the
+  # admin table is covered by exactly that grant. The callsite is what makes
+  # a misread grant observable — a dropped or corrupted one stops covering
+  # the call, so the walk reports MISSING and the run fails.
+  _fixture() {
+    local op="${1:-create}"
+    rm -rf "${tmp:?}/blocks"
+    mkdir -p "$tmp/blocks/admin" "$tmp/blocks/userportal"
+    {
+      echo 'pub const FIXTURE_TABLE: &str = "impresspress__admin__fixture";'
+      # Phase 3.8 refuses to run without this constant, so the fixture
+      # carries it the way the admin block does.
+      echo 'pub const AUDIT_LOGS_TABLE: &str = "impresspress__admin__audit_logs";'
+      cat
+    } > "$tmp/blocks/admin/mod.rs"
+    cat > "$tmp/blocks/userportal/pages.rs" <<CALLER
+use crate::blocks::admin::FIXTURE_TABLE;
+async fn writes_the_admin_table(ctx: &dyn Context) {
+    let _ = db::${op}(ctx, FIXTURE_TABLE, data).await;
+}
+CALLER
+  }
+  _run() {
+    AUDIT_WRAP_GRANTS_FIXTURE_DIR="$tmp/blocks" bash "$0" 2>&1
+  }
+  _expect() {
+    local what="$1" want_status="$2" want_text="$3"
+    if [ "$status" != "$want_status" ]; then
+      echo "::error::WRAP grant audit self-check [$what]: expected exit $want_status, got $status" >&2
+      failures=$((failures + 1))
+    fi
+    if ! grep -qF "$want_text" <<< "$out"; then
+      echo "::error::WRAP grant audit self-check [$what]: output did not contain: $want_text" >&2
+      failures=$((failures + 1))
+    fi
+  }
+
+  # A variant name neither side defines. Parses cleanly, so only an explicit
+  # check against the upstream set can catch it by name (it also stops
+  # covering the callsite, which is the mystery MISSING it used to be).
+  _fixture <<'FIXTURE'
+    wafer_run::ResourceGrant::read_write("impresspress/userportal", FIXTURE_TABLE)
+        .typed(wafer_run::ResourceType::Database),
+FIXTURE
+  out="$(_run)" && status=0 || status=$?
+  _expect "unknown variant" 1 "does not know ResourceType variant 'Database'"
+
+  # A declaration whose closing paren never arrives.
+  _fixture <<'FIXTURE'
+    wafer_run::ResourceGrant::read_write(
+        "impresspress/userportal",
+FIXTURE
+  out="$(_run)" && status=0 || status=$?
+  _expect "unparsed declaration" 1 "could not parse this ResourceGrant declaration"
+
+  # The same grant spelled correctly: no warning, and a verdict is given.
+  _fixture <<'FIXTURE'
+    wafer_run::ResourceGrant::read_write("impresspress/userportal", FIXTURE_TABLE)
+        .typed(wafer_run::ResourceType::Db),
+FIXTURE
+  out="$(_run)" && status=0 || status=$?
+  _expect "well-formed grant" 0 "OK — no missing WRAP grants."
+
+  # A `//` note on an argument's own line must not become part of that
+  # argument: the grantee it corrupts is what turns covered calls MISSING.
+  _fixture <<'FIXTURE'
+    wafer_run::ResourceGrant::read_write(
+        // the portal writes the admin audit trail
+        "impresspress/userportal",
+        FIXTURE_TABLE,
+    )
+    .typed(wafer_run::ResourceType::Db),
+FIXTURE
+  out="$(_run)" && status=0 || status=$?
+  _expect "comment inside a declaration" 0 "OK — no missing WRAP grants."
+
+  # An append-only grant covers the insert...
+  _fixture <<'FIXTURE'
+    wafer_run::ResourceGrant::append("impresspress/userportal", FIXTURE_TABLE),
+FIXTURE
+  out="$(_run)" && status=0 || status=$?
+  _expect "append grant, insert" 0 "OK — no missing WRAP grants."
+
+  # ...and nothing else: an update under it is a missing grant.
+  _fixture update <<'FIXTURE'
+    wafer_run::ResourceGrant::append("impresspress/userportal", FIXTURE_TABLE),
+FIXTURE
+  out="$(_run)" && status=0 || status=$?
+  _expect "append grant, update" 1 "impresspress/userportal → impresspress__admin__fixture [db::update]"
+
+  if [ "$failures" -gt 0 ]; then
+    echo "::error::WRAP grant audit self-check failed (${failures} assertion(s)); the grant walk cannot be trusted." >&2
+    return 1
+  fi
+  return 0
+}
+
+if [ -z "${AUDIT_WRAP_GRANTS_FIXTURE_DIR:-}" ]; then
+  run_self_check || exit 2
+  self_check_note="self-check: parser guards verified against fixtures."
+else
+  self_check_note=""
+fi
+
 # ---------- Phase 4: report ----------
 
 echo
 echo "WRAP grant audit — $(date)"
 echo
 echo "Indexed: ${#CONST_VALUE[@]} constants, ${#GRANTS[@]} grant decls."
-echo "Database: ${total} unique (caller, table) pairs; ${allowed} pragma-allowed."
+[ -n "$self_check_note" ] && echo "$self_check_note"
+if [ "${#UNPARSED_GRANT_LINES[@]}" -gt 0 ]; then
+  echo "UNPARSED ResourceGrant declarations (${unparsed_grants}) — absent from the index above:"
+  printf '  %s\n' "${UNPARSED_GRANT_LINES[@]}"
+fi
+if [ "${#BAD_TYPE_GRANT_LINES[@]}" -gt 0 ]; then
+  echo "UNKNOWN ResourceType variants (${bad_type_grants}) — indexed under a type nothing matches:"
+  printf '  %s\n' "${BAD_TYPE_GRANT_LINES[@]}"
+fi
+echo "Database: ${total} unique (caller, table, access) triples; ${allowed} pragma-allowed (${ps_total} reached through platform_state, ${audit_writer_total} through the audit writer)."
 echo "Storage:  ${storage_total} unique (caller, resource) pairs; ${storage_allowed} pragma-allowed."
 echo
 
 if [ "${#MISSING_LINES[@]}" -gt 0 ]; then
   echo "MISSING grants (${missing}):"
   printf '  %s\n' "${MISSING_LINES[@]}"
+  echo
+fi
+
+if [ "${#ALLOWED_LINES[@]}" -gt 0 ]; then
+  echo "ALLOWED by pragma (${allowed}) — each carries its reason at the site:"
+  printf '  %s\n' "${ALLOWED_LINES[@]}"
   echo
 fi
 
@@ -1023,6 +1471,17 @@ fi
 if [ "$missing" -gt 0 ] || [ "$storage_missing" -gt 0 ]; then
   total_missing=$((missing + storage_missing))
   echo "::error::WRAP grant audit found ${total_missing} missing grant(s) (${missing} db + ${storage_missing} storage)."
+  exit 1
+fi
+
+# A grant the index could not read, or read under a name nothing matches, is
+# a hole in the very thing this script asserts. Whether it also produced a
+# MISSING finding is luck — another grant may happen to cover the same call
+# — so "no missing grants" is not a verdict this run is entitled to give.
+# Failing here is what keeps a knowingly incomplete index from riding into
+# main green.
+if [ "$unparsed_grants" -gt 0 ] || [ "$bad_type_grants" -gt 0 ]; then
+  echo "::error::WRAP grant audit index is incomplete: ${unparsed_grants} unparsed declaration(s), ${bad_type_grants} unknown ResourceType variant(s). No verdict on missing grants is possible until they are resolved."
   exit 1
 fi
 

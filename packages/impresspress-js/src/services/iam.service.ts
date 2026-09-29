@@ -1,5 +1,23 @@
 import { BaseService } from "./base.service";
-import { IAMRole } from "../types";
+
+/**
+ * One row of `GET /b/admin/api/iam/roles` — `AdminRoleView` on the server
+ * (`blocks/admin/iam.rs`). snake_case, like every impresspress API
+ * projection; `permissions` is advisory metadata for the IAM UI, WRAP
+ * grants are what the runtime actually enforces.
+ */
+export interface IAMRole {
+  id: string;
+  /** Unique role name — the value stored in `user_roles.role`. */
+  name: string;
+  description: string;
+  permissions: string[];
+  /** Built-in roles cannot be renamed or deleted. */
+  is_system: boolean;
+  /** RFC 3339. */
+  created_at: string;
+  updated_at: string;
+}
 
 /**
  * `GET /b/admin/api/iam/roles` response — `AdminRoleListResponse` on the
@@ -31,6 +49,17 @@ export interface UpdateRoleRequest {
   permissions?: string[];
 }
 
+/**
+ * `PATCH /b/admin/api/iam/roles/{id}` response — `AdminRoleUpdateResponse` on
+ * the server: the role as it now is, plus `warning` when the update was saved
+ * but a rename's grants did not all follow it. A rename rewrites each grant
+ * separately, so one can stop part-way; the role is renamed either way, and
+ * `warning` says which grants still name the old role and how to move them.
+ */
+export interface IAMRoleUpdateResponse extends IAMRole {
+  warning?: string | null;
+}
+
 export class IAMService extends BaseService {
   /**
    * List every role, sorted by name. Unwraps the server's
@@ -58,8 +87,8 @@ export class IAMService extends BaseService {
    * Update a role by its `id` (as returned by `getRoles` / `createRole`),
    * not by name — the route is keyed by row id.
    */
-  async updateRole(roleId: string, updates: UpdateRoleRequest): Promise<IAMRole> {
-    return this.request<IAMRole>({
+  async updateRole(roleId: string, updates: UpdateRoleRequest): Promise<IAMRoleUpdateResponse> {
+    return this.request<IAMRoleUpdateResponse>({
       method: "PATCH",
       url: `/b/admin/api/iam/roles/${roleId}`,
       data: updates,

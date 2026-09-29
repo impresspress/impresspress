@@ -1,0 +1,21 @@
+[
+  "DELETE /b/llm/api/config/{id} admin",
+  "DELETE /b/llm/api/providers/{id} admin",
+  "GET /b/llm/ admin",
+  "GET /b/llm/api/config authenticated",
+  "GET /b/llm/api/models authenticated",
+  "GET /b/llm/api/models/{backend_id}/{model_id}/status authenticated",
+  "GET /b/llm/api/providers admin",
+  "GET /b/llm/models admin",
+  "GET /b/llm/providers admin",
+  "GET /b/llm/settings admin",
+  "GET /b/llm/threads/{id} admin",
+  "PATCH /b/llm/api/providers/{id} admin",
+  "POST /b/llm/api/chat authenticated",
+  "POST /b/llm/api/chat/stream authenticated",
+  "POST /b/llm/api/config admin",
+  "POST /b/llm/api/models/{backend_id}/{model_id}/load admin",
+  "POST /b/llm/api/models/{backend_id}/{model_id}/unload admin",
+  "POST /b/llm/api/providers admin",
+  "POST /b/llm/api/providers/{id}/discover-models admin"
+]

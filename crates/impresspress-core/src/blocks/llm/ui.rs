@@ -15,16 +15,17 @@
 //! function directly (tests, future router changes).
 
 use maud::{html, Markup};
-use wafer_core::clients::{database as db, llm::ModelInfo};
+use wafer_core::clients::llm::ModelInfo;
 use wafer_run::{context::Context, Message, OutputStream};
 
 use super::{
     providers::config::ProviderConfig,
     schema::{row_to_config, TABLE as PROVIDERS_TABLE},
-    LlmBlock,
+    LlmBlock, EXAMPLE_KEY_VAR,
 };
 use crate::{
-    http::err_internal,
+    blocks::crud,
+    db_read::{self, Bound},
     ui::{self, components},
 };
 
@@ -36,8 +37,18 @@ use crate::{
 ///
 /// Fetches rows directly from the block's own collection (Option A: avoids a
 /// flash-of-empty during first paint).
+///
+/// The page renders the create form and the per-row actions only when the
+/// runtime can actually manage providers. A runtime built without the `llm`
+/// cargo feature holds a `NoopProviderAdmin`, and its CRUD handlers answer
+/// `501 Unimplemented` — but htmx does not swap on a non-2xx, so the
+/// administrator clicked and nothing visible happened at all. Before the
+/// handlers started refusing, the same click lied with a success. Neither is
+/// right: the page reads the same predicate the handlers do
+/// (`ProviderAdmin::manages_providers`) and says so instead of offering
+/// controls that cannot work.
 pub(super) async fn providers_page(
-    _block: &LlmBlock,
+    block: &LlmBlock,
     ctx: &dyn Context,
     msg: &Message,
 ) -> OutputStream {
@@ -46,33 +57,48 @@ pub(super) async fn providers_page(
 
     // Load all provider rows (both enabled and disabled) — the admin UI
     // wants the full picture, not just the in-flight set.
-    let configs: Vec<(String, ProviderConfig)> =
-        match db::list_all(ctx, PROVIDERS_TABLE, vec![]).await {
-            Ok(records) => records
-                .into_iter()
-                .filter_map(|rec| row_to_config(&rec).ok().map(|cfg| (rec.id, cfg)))
-                .collect(),
-            Err(e) => return err_internal("Database error", e),
-        };
+    let configs: Vec<(String, ProviderConfig)> = match db_read::list_bounded(
+        ctx,
+        PROVIDERS_TABLE,
+        vec![],
+        Bound::Curated("LLM providers are configured by an admin"),
+    )
+    .await
+    {
+        Ok(records) => records
+            .into_iter()
+            .filter_map(|rec| row_to_config(&rec).ok().map(|cfg| (rec.id, cfg)))
+            .collect(),
+        Err(e) => return crud::db_error_page(msg, e, "llm providers page: provider read failed"),
+    };
+
+    let manages = block.provider_admin.manages_providers();
 
     let content = html! {
         (components::page_header(
             "LLM Providers",
-            Some("Configure OpenAI, Anthropic, and OpenAI-compatible endpoints."),
+            Some(if manages {
+                "Configure OpenAI, Anthropic, and OpenAI-compatible endpoints."
+            } else {
+                "Read-only on this deployment."
+            }),
             None,
         ))
 
-        // Add-provider form. Posts JSON via htmx json-enc so the existing
-        // `POST /b/llm/api/providers` handler accepts the body without any
-        // form-urlencoded translation layer.
-        div .card .mb-6 {
-            h3 .card-title .mb-3 { "Add provider" }
-            (add_provider_form())
+        @if manages {
+            // Add-provider form. Posts `application/x-www-form-urlencoded`,
+            // which `POST /b/llm/api/providers` accepts alongside JSON.
+            div .card .mb-6 {
+                h3 .card-title .mb-3 { "Add provider" }
+                (add_provider_form())
+            }
+        } @else {
+            (cannot_manage_providers_notice())
         }
 
         // Providers table. Rendered by a pure helper for testability.
         div .card .card--flush {
-            (render_providers_table(&configs))
+            (render_providers_table(&configs, manages))
         }
     };
 
@@ -85,17 +111,54 @@ pub(super) async fn providers_page(
     .await
 }
 
+/// What the page says instead of the create form when the runtime holds a
+/// handle that cannot manage providers.
+///
+/// It names the two things an administrator needs: that the rows below are a
+/// read-only view, and where provider configuration lives on such a
+/// deployment. A browser runtime configures its providers inside
+/// `BrowserLlmService`, not through this block.
+fn cannot_manage_providers_notice() -> Markup {
+    html! {
+        div .card .mb-6 {
+            h3 .card-title .mb-3 { "This deployment cannot manage providers" }
+            p .text-muted {
+                "No provider backend is compiled into this runtime, so \
+                 creating, editing, discovering and deleting providers are \
+                 unavailable here — the API answers 501 for all four. Any \
+                 rows below are stored configuration, shown read-only."
+            }
+            p .text-muted .mt-2 {
+                "A browser deployment configures its providers inside its own \
+                 LLM service rather than through this page. A server \
+                 deployment gets these controls by building with the `llm` \
+                 feature."
+            }
+        }
+    }
+}
+
 /// Render the add-provider form. Separated out so the top-level page
 /// composition stays flat and the form markup is swappable without editing
 /// the outer shell.
+///
+/// A plain htmx form: it posts `application/x-www-form-urlencoded`, which is
+/// what the handler parses. Nothing here reshapes the body in the browser —
+/// the `models` text input and the `enabled` checkbox are coerced by
+/// `routes::providers::parse_create_provider_body`, which is one description
+/// of the field shapes instead of two.
+///
+/// Like every control on this page it needs htmx: there is no `action` or
+/// `method`, so the submit is htmx's or it is nothing.
+///
+/// `hx-swap="none"` because the response is the created provider as JSON for
+/// SDK callers; the page picks up the new row by reloading.
 fn add_provider_form() -> Markup {
     html! {
         form
             hx-post="/b/llm/api/providers"
-            hx-ext="json-enc"
-            hx-target="body"
             hx-swap="none"
-            hx-on--after-request="if(event.detail.successful){location.reload()}"
+            data-reload-on-success
         {
             div .form-row .gap-3 {
                 div .form-group {
@@ -133,17 +196,33 @@ fn add_provider_form() -> Markup {
                         type="text"
                         name="key_var"
                         id="new-key-var"
-                        placeholder="IMPRESSPRESS__LLM__OPENAI_KEY";
+                        placeholder=(EXAMPLE_KEY_VAR);
                     p .form-hint {
                         "Admin variable name holding the API key. Leave empty for providers that don't need auth."
                     }
                 }
+                div .form-group {
+                    label .form-label for="new-max-tokens-field" { "Token budget field" }
+                    // The empty option is the ordinary case. A select always
+                    // posts something, so `create_provider`'s form parser
+                    // drops the empty value rather than handing serde a token
+                    // the contract does not have.
+                    select .form-select name="max_tokens_field" id="new-max-tokens-field" {
+                        option value="" selected { "Follow the protocol" }
+                        option value="max_tokens" { "max_tokens" }
+                        option value="max_completion_tokens" { "max_completion_tokens" }
+                    }
+                    p .form-hint {
+                        "Only for an OpenAI-shaped endpoint that wants the other \
+                         spelling than its protocol's — an Azure OpenAI reasoning \
+                         deployment on open_ai_compatible needs \
+                         max_completion_tokens. The anthropic protocol refuses this."
+                    }
+                }
                 div .form-group .col-span-full {
                     label .form-label for="new-models" { "Models (comma-separated)" }
-                    // htmx's json-enc extension turns this into a plain string;
-                    // the server expects a JSON array, so we transform on
-                    // submit via the form's `hx-on::config-request` hook
-                    // below. Bare form post keeps the control accessible.
+                    // One text input; the handler splits it into the contract's
+                    // `models` array.
                     input
                         .form-input
                         type="text"
@@ -164,45 +243,30 @@ fn add_provider_form() -> Markup {
             div .flex .justify-end .mt-3 {
                 button .btn.btn--primary type="submit" { "Add provider" }
             }
-            // Normalize `models` CSV → JSON array, and coerce `enabled`
-            // checkbox to a bool before htmx serialises. Both transforms
-            // live on `htmx:config-request` so json-enc sees the final
-            // shape. No DOM surgery — just dict mutation on the event.
-            script {
-                (maud::PreEscaped(ADD_PROVIDER_JS))
-            }
         }
     }
 }
-
-/// `htmx:config-request` hook that normalises the add-provider form body.
-///
-/// `htmx json-enc` serialises form fields verbatim: `models` arrives as
-/// a CSV string and `enabled` as either `"true"` or `undefined`. The
-/// server wants `models: string[]` and `enabled: bool`, so we transform
-/// in place before the request is sent. Keeps the JSON contract consistent
-/// with the `/api/providers` handler without adding server-side
-/// translation.
-const ADD_PROVIDER_JS: &str = r#"
-document.currentScript.closest('form').addEventListener('htmx:configRequest', function(ev) {
-    var p = ev.detail.parameters;
-    if (typeof p.models === 'string') {
-        p.models = p.models.split(',').map(function(s){return s.trim();}).filter(Boolean);
-    }
-    p.enabled = (p.enabled === 'true' || p.enabled === true || p.enabled === 'on');
-});
-"#;
 
 /// Render the providers table. Pure function of the loaded configs — used
 /// directly by `providers_page` and by the unit tests that assert shape.
 ///
 /// `configs` is `(row_id, ProviderConfig)` pairs so the Delete /
 /// Discover-models actions can target the concrete row ID.
-fn render_providers_table(configs: &[(String, ProviderConfig)]) -> Markup {
+///
+/// `manages` is `ProviderAdmin::manages_providers()`. When it is false the
+/// Actions column is dropped entirely rather than rendered disabled: the two
+/// buttons in it are the only things there, and a runtime that answers 501 to
+/// both has no action to offer.
+fn render_providers_table(configs: &[(String, ProviderConfig)], manages: bool) -> Markup {
     html! {
         @if configs.is_empty() {
             div .empty-state {
-                "No providers configured yet. Use the form above to add one."
+                @if manages {
+                    "No providers configured yet. Use the form above to add one."
+                } @else {
+                    "No providers are configured, and this deployment cannot \
+                     add one."
+                }
             }
         } @else {
             div .table-container {
@@ -213,14 +277,15 @@ fn render_providers_table(configs: &[(String, ProviderConfig)]) -> Markup {
                             th { "Protocol" }
                             th { "Endpoint" }
                             th { "Key var" }
+                            th { "Budget field" }
                             th { "Models" }
                             th { "Enabled" }
-                            th { "Actions" }
+                            @if manages { th { "Actions" } }
                         }
                     }
                     tbody {
                         @for (id, cfg) in configs {
-                            (provider_row(id, cfg))
+                            (provider_row(id, cfg, manages))
                         }
                     }
                 }
@@ -231,7 +296,9 @@ fn render_providers_table(configs: &[(String, ProviderConfig)]) -> Markup {
 
 /// Single provider row. Extracted so the loop body stays readable and so
 /// tests can render a one-row fixture without touching the outer `<table>`.
-fn provider_row(id: &str, cfg: &ProviderConfig) -> Markup {
+///
+/// `manages` gates the Actions cell — see [`render_providers_table`].
+fn provider_row(id: &str, cfg: &ProviderConfig, manages: bool) -> Markup {
     let model_count = cfg.models.len();
     let models_label = if model_count == 0 {
         "(discover)".to_string()
@@ -254,6 +321,13 @@ fn provider_row(id: &str, cfg: &ProviderConfig) -> Markup {
                     span .text-muted .text-xs { "(none)" }
                 }
             }
+            td {
+                @if let Some(field) = cfg.max_tokens_field {
+                    code .text-xs { (field.as_str()) }
+                } @else {
+                    span .text-muted .text-xs { "(protocol)" }
+                }
+            }
             td .text-xs .truncate .llm-cell--models {
                 @if model_count == 0 {
                     span .text-muted { (models_label) }
@@ -269,24 +343,29 @@ fn provider_row(id: &str, cfg: &ProviderConfig) -> Markup {
                     span .badge.badge-warning { "Disabled" }
                 }
             }
-            td {
-                div .flex .gap-2 .flex-wrap {
-                    button
-                        .btn.btn--sm.btn--secondary
-                        hx-post={"/b/llm/api/providers/" (id) "/discover-models"}
-                        hx-confirm={"Discover models for \"" (cfg.name) "\" from its /v1/models endpoint?"}
-                        hx-on--after-request="if(event.detail.successful){location.reload()}"
-                    {
-                        "Discover"
-                    }
-                    button
-                        .btn.btn--sm.btn--danger
-                        hx-delete={"/b/llm/api/providers/" (id)}
-                        hx-confirm={"Delete provider \"" (cfg.name) "\"?"}
-                        hx-target="closest tr"
-                        hx-swap="outerHTML"
-                    {
-                        "Delete"
+            @if manages {
+                td {
+                    div .flex .gap-2 .flex-wrap {
+                        button
+                            .btn.btn--sm.btn--secondary
+                            hx-post={"/b/llm/api/providers/" (id) "/discover-models"}
+                            // The answer is the JSON model list; the page
+                            // reloads to show it, so nothing is swapped.
+                            hx-swap="none"
+                            hx-confirm={"Discover models for \"" (cfg.name) "\" from its /v1/models endpoint?"}
+                            data-reload-on-success
+                        {
+                            "Discover"
+                        }
+                        button
+                            .btn.btn--sm.btn--danger
+                            hx-delete={"/b/llm/api/providers/" (id)}
+                            hx-confirm={"Delete provider \"" (cfg.name) "\"?"}
+                            hx-target="closest tr"
+                            hx-swap="outerHTML"
+                        {
+                            "Delete"
+                        }
                     }
                 }
             }
@@ -316,7 +395,7 @@ pub(super) async fn models_page(
 
     let models = match wafer_core::clients::llm::list_models(ctx).await {
         Ok(m) => m,
-        Err(e) => return err_internal("llm list_models failed", e.message),
+        Err(e) => return crud::db_error_page(msg, e, "llm models page: list_models failed"),
     };
 
     let content = html! {
@@ -472,9 +551,90 @@ mod tests {
     // `tests/extra_routes_test.rs` (llm_admin_ui_*), not here, so these page
     // renderers no longer carry their own `is_admin` re-check.
 
+    /// The add-provider form is submitted with the browser's own encoding,
+    /// and `routes::providers::create_provider` parses that.
+    ///
+    /// The form used to declare `hx-ext="json-enc"` and carry a script that
+    /// reshaped the parameters for it. Neither did anything: no json-enc
+    /// extension is shipped with the chrome — asserted below against the
+    /// bytes actually served — and htmx silently ignores an extension it was
+    /// never given, so the body went out form-encoded either way and the
+    /// handler answered 400 to every submit.
+    #[test]
+    fn the_add_provider_form_declares_no_encoding_extension() {
+        let m = add_provider_form().into_string();
+
+        assert!(
+            !m.contains("hx-ext"),
+            "no htmx extension is shipped, so declaring one only misdescribes \
+             the request; got: {m}"
+        );
+        assert!(
+            !m.contains("<script"),
+            "the field coercions are the handler's, not the browser's; got: {m}"
+        );
+        assert!(
+            m.contains(r#"hx-post="/b/llm/api/providers""#),
+            "the form must post to the create endpoint; got: {m}"
+        );
+        for field in [
+            "name",
+            "protocol",
+            "endpoint",
+            "key_var",
+            "max_tokens_field",
+            "models",
+            "enabled",
+        ] {
+            assert!(
+                m.contains(&format!(r#"name="{field}""#)),
+                "the form must send `{field}` — `routes::providers`'s form tests \
+                 post exactly these; got: {m}"
+            );
+        }
+    }
+
+    /// What makes the assertion above true rather than merely asserted: no
+    /// script this deployment serves mentions json-enc, so nothing can be
+    /// registering it. Scanning htmx alone would have missed a
+    /// `htmx.defineExtension('json-enc', …)` in the shared chrome or in a
+    /// block's own bundle, which is exactly where a hand-rolled one would go.
+    ///
+    /// Ship an extension and this test is the place that says `hx-ext` may be
+    /// used again.
+    #[cfg(feature = "embed-assets")]
+    #[test]
+    fn no_shipped_script_registers_a_json_enc_extension() {
+        let mut scanned: Vec<&str> = Vec::new();
+        for asset in crate::ui::assets::ASSETS {
+            if !asset.logical.ends_with(".js") {
+                continue;
+            }
+            // A block's bundle is in the manifest even when that block is not
+            // compiled into this build; only the embedded ones can be read.
+            let Some(bytes) = crate::ui::assets::bytes(asset.logical) else {
+                continue;
+            };
+            assert!(
+                !String::from_utf8_lossy(bytes).contains("json-enc"),
+                "{} mentions json-enc — check whether an extension is now \
+                 registered before trusting `hx-ext`",
+                asset.logical
+            );
+            scanned.push(asset.logical);
+        }
+        // Without this the scan passes whether it read anything or not.
+        for required in ["htmx.min.js", "chrome.js"] {
+            assert!(
+                scanned.contains(&required),
+                "the scan must reach {required}; it read {scanned:?}"
+            );
+        }
+    }
+
     #[test]
     fn render_providers_table_empty_shows_hint() {
-        let m = render_providers_table(&[]).into_string();
+        let m = render_providers_table(&[], true).into_string();
         assert!(
             m.contains("No providers configured"),
             "empty-state hint missing; got: {m}"
@@ -496,7 +656,7 @@ mod tests {
                     ProviderProtocol::OpenAi,
                     "https://api.openai.com/v1",
                 )
-                .with_key_var("IMPRESSPRESS__LLM__OPENAI_KEY")
+                .with_key_var(EXAMPLE_KEY_VAR)
                 .with_models(vec!["gpt-4o".into(), "gpt-4o-mini".into()]),
             ),
             (
@@ -508,7 +668,7 @@ mod tests {
                 ),
             ),
         ];
-        let m = render_providers_table(&configs).into_string();
+        let m = render_providers_table(&configs, true).into_string();
 
         // Each provider's name and protocol token is rendered verbatim.
         assert!(m.contains("openai-main"));
@@ -528,10 +688,69 @@ mod tests {
         assert!(m.contains("/discover-models"), "discover action missing");
 
         // Key-var column renders verbatim, no masking/translation.
-        assert!(m.contains("IMPRESSPRESS__LLM__OPENAI_KEY"));
+        assert!(m.contains(EXAMPLE_KEY_VAR));
 
         // Model-count badge for the multi-model row.
         assert!(m.contains("gpt-4o"));
+    }
+
+    /// A runtime that cannot manage providers offers no control that would
+    /// answer 501.
+    ///
+    /// htmx does not swap on a non-2xx, so a rendered Discover or Delete
+    /// button on such a deployment is a control that does nothing visible at
+    /// all when clicked. The rows themselves stay: they are stored
+    /// configuration and an administrator should be able to see it.
+    #[test]
+    fn a_runtime_that_cannot_manage_providers_renders_no_action_controls() {
+        let configs = vec![(
+            "row-1".to_string(),
+            ProviderConfig::new(
+                "openai-main",
+                ProviderProtocol::OpenAi,
+                "https://api.openai.com/v1",
+            ),
+        )];
+
+        let m = render_providers_table(&configs, false).into_string();
+
+        assert!(
+            m.contains("openai-main"),
+            "the stored rows must still be visible; got: {m}"
+        );
+        for absent in ["/discover-models", "hx-delete", "Actions"] {
+            assert!(
+                !m.contains(absent),
+                "`{absent}` must not be rendered when the runtime cannot \
+                 manage providers; got: {m}"
+            );
+        }
+    }
+
+    /// And it says why, rather than showing a create form whose submit does
+    /// nothing visible.
+    #[test]
+    fn the_inert_notice_names_the_refusal_and_where_providers_are_configured() {
+        let m = cannot_manage_providers_notice().into_string();
+
+        assert!(m.contains("cannot manage providers"), "got: {m}");
+        assert!(
+            m.contains("501"),
+            "the notice must name what the API actually answers; got: {m}"
+        );
+    }
+
+    /// The empty state stops telling an administrator to use a form that is
+    /// not on the page.
+    #[test]
+    fn the_empty_state_does_not_point_at_a_form_that_is_not_rendered() {
+        let m = render_providers_table(&[], false).into_string();
+
+        assert!(m.contains("No providers"), "got: {m}");
+        assert!(
+            !m.contains("form above"),
+            "no create form is rendered on such a deployment; got: {m}"
+        );
     }
 
     #[test]

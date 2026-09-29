@@ -13,9 +13,10 @@
 //!
 //! The other two files are instantiated from a template: the block's name is
 //! its directory, its crate name, its block id (`site/<name>`), its route
-//! prefix (`/b/<name>/`) and its collection prefix (`site__<name>__`) all at
-//! once, and a template that got any one of those wrong would be refused by
-//! validation with a diagnostic the author did not cause.
+//! prefix (`/b/<name>/`) and its collection prefix (`site__<name>__`, a
+//! hyphen spelled `_`) all at once, and a template that got any one of those
+//! wrong would be refused by validation with a diagnostic the author did not
+//! cause.
 //!
 //! # Why the reference is served rather than shipped as a file
 //!
@@ -30,11 +31,11 @@ use wafer_run::{context::Context, ErrorCode, InputStream, OutputStream};
 use super::{
     blobs,
     contracts::{CreateBlockRequest, CreateBlockResponse, FileConflict, ReferenceResponse},
-    files, no_store, no_store_error,
+    files, no_store, no_store_db_error_internal, no_store_error,
     paths::{self, WorkspaceArea, BLOCK_NAME_RULE},
-    workspace, DevShared, WAFER_GUEST_VERSION,
+    validation, workspace, DevShared, WAFER_GUEST_VERSION,
 };
-use crate::{blocks::crud, http::err_internal};
+use crate::blocks::crud;
 
 /// The two starting points `dev_create_block` offers.
 ///
@@ -139,20 +140,22 @@ impl Template {
 ///
 /// Each anchor is one of the five places the block's name is load-bearing —
 /// the crate name, the block id, the route prefix, the collection prefix and
-/// the config prefix — which is exactly the set validation checks. The
-/// hyphenated spelling carries through the collection and config prefixes
-/// unchanged (`site__my-shop__rows`, `SITE__MY-SHOP__KEY`), because that is
-/// what the runtime's own resource convention uses.
+/// the config prefix — which is exactly the set validation checks. The two
+/// prefixes are [`validation::collection_prefix`] and its uppercase, the
+/// spelling validation requires, so a hyphen in the name becomes `_` there
+/// (`site__my_shop__rows`, `SITE__MY_SHOP__KEY`) and stays a hyphen in the
+/// other three.
 fn instantiate(source: &str, from: &str, to: &str) -> String {
+    let (from_prefix, to_prefix) = (
+        validation::collection_prefix(from),
+        validation::collection_prefix(to),
+    );
     source
         .replace(&format!("name = \"{from}\""), &format!("name = \"{to}\""))
         .replace(&format!("site/{from}"), &format!("site/{to}"))
         .replace(&format!("/b/{from}/"), &format!("/b/{to}/"))
-        .replace(&format!("site__{from}__"), &format!("site__{to}__"))
-        .replace(
-            &format!("SITE__{}__", from.to_uppercase()),
-            &format!("SITE__{}__", to.to_uppercase()),
-        )
+        .replace(&from_prefix, &to_prefix)
+        .replace(&from_prefix.to_uppercase(), &to_prefix.to_uppercase())
 }
 
 /// Marker the `hello` template's source is spliced into.
@@ -218,7 +221,7 @@ pub async fn handle_create(
     let _serialized = shared.workspace.lock().await;
     let mut ws = match workspace::load(ctx).await {
         Ok(ws) => ws,
-        Err(e) => return err_internal("dev workspace load", e),
+        Err(e) => return no_store_db_error_internal(e, "dev workspace load"),
     };
 
     // Refuse if ANY path under `blocks/<name>/` is taken, not just the three
@@ -238,8 +241,10 @@ pub async fn handle_create(
     // the first one's blob in the store while the `record_blob_stored` that
     // charges for it is discarded with `ws`. `check_quotas` bounds on
     // `blob_bytes` precisely because a blob no entry names still occupies the
-    // author's storage, so each such refusal would open a permanent hole in
-    // the accounting, and a caller sitting on the limit could widen it past
+    // author's storage, so each such refusal would open a hole in the
+    // accounting that stays open until the next collection resets the
+    // counters from the store (`super::gc`) — and a `blocks/` write triggers
+    // no collection, so a caller sitting on the limit could widen it past
     // `MAX_WORKSPACE_BYTES` by retrying. `files::handle_write` cannot reach
     // this shape — it writes one file — and nothing forces the interleave
     // here: every size and hash is known before the first store.
@@ -288,18 +293,19 @@ pub async fn handle_create(
             Err(e) => {
                 // The blobs already written are charged for even though this
                 // request is over and no entry will ever name them. They are
-                // in the store, `blob_bytes` is defined as what has been
-                // written and not yet reclaimed, and the collector credits
-                // them back when it reaches them — a workspace saved without
-                // them would under-report storage for good.
+                // in the store, `blob_bytes` is what the store holds, and the
+                // next collection frees them and resets the counters from
+                // what is left — a workspace saved without them would
+                // under-report storage until then.
                 if let Err(save) = workspace::save(ctx, &ws).await {
                     tracing::error!(
                         error = %save,
                         "dev workspace: a blob write failed and the bytes already stored \
-                         could not be recorded — blob_bytes now under-reports the store"
+                         could not be recorded — blob_bytes under-reports the store until the \
+                         next collection"
                     );
                 }
-                return err_internal("dev workspace blob write", e);
+                return no_store_db_error_internal(e, "dev workspace blob write");
             }
         }
     }
@@ -308,7 +314,7 @@ pub async fn handle_create(
         .map(|(path, sha, bytes)| ws.insert(path, sha, bytes.len() as u64))
         .collect();
     if let Err(e) = workspace::save(ctx, &ws).await {
-        return err_internal("dev workspace save", e);
+        return no_store_db_error_internal(e, "dev workspace save");
     }
 
     no_store().json(&CreateBlockResponse {
@@ -322,6 +328,7 @@ pub async fn handle_reference(_ctx: &dyn Context) -> OutputStream {
     no_store().json(&ReferenceResponse {
         wafer_guest_version: WAFER_GUEST_VERSION,
         markdown: reference_markdown(),
+        wafer_guest_module: Template::WAFER_GUEST.to_string(),
     })
 }
 
@@ -360,8 +367,10 @@ mod tests {
         assert!(cargo.contains(r#"name = "my-shop""#), "{cargo}");
         assert!(lib.contains(r#"Block::new("site/my-shop""#), "{lib}");
         assert!(lib.contains("/b/my-shop/subscribe"), "{lib}");
-        assert!(lib.contains("site__my-shop__subscribers"), "{lib}");
-        assert!(lib.contains("SITE__MY-SHOP__"), "{lib}");
+        assert!(lib.contains("site__my_shop__subscribers"), "{lib}");
+        assert!(lib.contains("SITE__MY_SHOP__"), "{lib}");
+        assert!(!lib.contains("site__my-shop__"), "{lib}");
+        assert!(!lib.contains("SITE__MY-SHOP__"), "{lib}");
         // The handler function names survive: a blanket replace would have
         // produced `fn subscribe_my-shop`, which is not an identifier.
         assert!(lib.contains("fn subscribe("), "{lib}");

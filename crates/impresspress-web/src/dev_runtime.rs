@@ -34,9 +34,15 @@
 //! `Context`, `Block`) is bounded on `wafer_run::MaybeSend + MaybeSync`, which
 //! is unbounded on `wasm32`. `Rc`, `Cell` and `RefCell` therefore cross those
 //! boundaries without an `unsafe` marker impl; the only cost is
-//! `clippy::arc_with_non_send_sync`, allowed at the three sites that build an
-//! `Arc` over a single-threaded value with the same justification the block
-//! registration path already carries.
+//! `clippy::arc_with_non_send_sync`, which the crate-level
+//! `expect(clippy::arc_with_non_send_sync)` in `lib.rs` turns off for wasm32
+//! and only wasm32.
+//!
+//! It fires at three sites here — both `Context::clone_arc` impls and
+//! `BrowserRuntimeControl::new` — and NOT on [`attach`]'s
+//! `Arc::new(BrowserShellSource)`, because `BrowserShellSource` is a fieldless
+//! unit struct and so is genuinely `Send + Sync`. That site carried a per-site
+//! allow for a lint that never fired there; it is gone.
 
 use std::{
     cell::{Cell, RefCell},
@@ -92,7 +98,10 @@ fn guest_limits() -> ResourceLimits {
 /// The capabilities are `spec.capabilities` — the **accepted** set the dev
 /// block's static rules produced, never the guest's own declaration. That is
 /// the whole security property of the inspect → rules → probe order, and it is
-/// preserved by this function having no other source for them.
+/// preserved by this function having no other source for them. `WasmiBlock`
+/// keeps them as the guest's bound: sealing the runtime narrows them to what
+/// the guest declares (and its `capabilities` block config), and never widens
+/// them, so a declaration can only ask for less than the spec admits.
 pub fn load_guest(
     spec: &DynamicBlockSpec,
     artifact: &[u8],
@@ -169,7 +178,6 @@ impl Context for DenyAllContext {
         // for a caller to retain, and a probe step's verdict must be decided
         // by the calls made *during* that step through the context the step
         // was given.
-        #[allow(clippy::arc_with_non_send_sync)]
         Arc::new(Self::default())
     }
 
@@ -182,9 +190,20 @@ impl Context for DenyAllContext {
         &self,
         resource: &str,
         _resource_type: wafer_run::ResourceType,
-        _is_write: bool,
+        _access: wafer_block::ResourceAccess,
     ) -> Result<(), WaferError> {
         Err(self.deny(&format!("resource {resource:?}")))
+    }
+
+    /// Admits nothing, as [`Self::check_resource_access`] does. Not counted:
+    /// this is a probe, never the authorization itself.
+    fn resource_access_admitted(
+        &self,
+        _resource: &str,
+        _resource_type: wafer_run::ResourceType,
+        _access: wafer_block::ResourceAccess,
+    ) -> bool {
+        false
     }
 }
 
@@ -263,7 +282,6 @@ struct RetainedRuntime {
 impl BrowserRuntimeControl {
     /// A control with no factory yet. `Arc` because that is what `DevShared`
     /// holds; single-threaded contents are fine (see the module header).
-    #[allow(clippy::arc_with_non_send_sync)]
     pub fn new() -> Arc<Self> {
         Arc::new(Self {
             factory: RefCell::new(Weak::new()),
@@ -347,7 +365,10 @@ impl RuntimeControl for BrowserRuntimeControl {
                  export, its memory, or the value it wrote could not be decoded",
             ));
         }
-        info.validate()
+        // Validated as the name it reports. `validate_static` then refuses a
+        // report that is not `site/{name}` (NAME_MISMATCH), the name the
+        // runtime registers it under, so the two cannot differ at registration.
+        info.validate(&info.name)
             .map_err(|e| ValidationFailure::new(ValidationStage::Info, format!("{e}")))?;
         Ok(info)
     }
@@ -491,7 +512,7 @@ impl RuntimeControl for BrowserRuntimeControl {
             dynamic.push((spec.clone(), block));
         }
 
-        let (wafer, _storage_block) = factory
+        let wafer = factory
             .build(&dynamic)
             .await
             .map_err(|e| describe_js(&e, "building the runtime"))?;
@@ -550,14 +571,13 @@ impl RuntimeControl for BrowserRuntimeControl {
 /// So this is that context, and it is deliberately thin:
 ///
 /// * `call_block` looks the block up in the live runtime and calls it. The
-///   runtime has already been sealed and `init_all_blocks` has run (see
+///   runtime has already been sealed and every block's `Init` has run (see
 ///   `builder::boot`), so there is no lazy init left to drive.
-/// * `caller_id` is the dev block. This is the load-bearing field:
-///   `ImpresspressStorageBlock` namespaces every folder by it, so a boot that
-///   reported anything else would read and write `unknown/…` instead of
-///   `impresspress/dev/…`. The storage block's own cross-block WRAP check —
-///   the one that admits the reach into `wafer-run/web/site` — still runs
-///   against the real grant list.
+/// * `caller_id` is the dev block. This is the load-bearing field: the
+///   storage handler behind `wafer-run/storage` resolves every plain folder
+///   into the caller's namespace, so a boot that reported no caller would be
+///   refused every plain folder, and one that reported another block would
+///   read and write that block's objects instead of `impresspress/dev/…`.
 /// * `check_resource_access` runs the **real** WRAP check — the identical
 ///   `wrap::check_access` call `RuntimeContext::check_resource_access` makes,
 ///   keyed on the same caller and against the runtime's own grants and admin
@@ -566,12 +586,12 @@ impl RuntimeControl for BrowserRuntimeControl {
 ///   which a bug in any of it was invisible. It admits what it has to:
 ///   `impresspress__dev__*` tables self-admit under the own-resource rule,
 ///   `__ddl__` / `__schema__` admit any attributable caller, and storage
-///   resources reach this call already rewritten by
-///   `ImpresspressStorageBlock` into un-prefixed paths — the block's own
-///   folder for blobs and artifacts, `wafer-run/web/site/…` for the publisher
-///   — which the storage self-admit rule allows exactly as it does for a
-///   request. That block's own cross-block gate runs too, because this
-///   context calls *into* it rather than around it.
+///   resources reach this call as the path the storage handler resolved:
+///   `impresspress/dev/…` for the block's own blobs and artifacts, which the
+///   owner rule admits, and `wafer-run/web/site/…` for the publisher, which
+///   the runtime grant `wafer-run/web/site/*` (`blocks::dev::wrap_grants`)
+///   admits — exactly as for a request, since the handler authorizes through
+///   this context's `check_resource_access` and nothing else.
 ///
 /// The one thing boot does not reproduce is `RuntimeContext::dispatch_call`'s
 /// `requires` / `allows_call_block` gate, which asks whether the *calling
@@ -593,9 +613,12 @@ struct BootContext {
 #[wafer_block::wafer_async_trait]
 impl Context for BootContext {
     async fn call_block(&self, block_name: &str, msg: Message, input: InputStream) -> OutputStream {
+        // The runtime's answer for nothing to dispatch to. `NotFound` is a
+        // service saying the thing a request names does not exist, which a
+        // client such as the config reader takes for "unset".
         let Some(block) = self.wafer.lookup_block(block_name).map(|(_, block)| block) else {
             return OutputStream::error(WaferError::new(
-                ErrorCode::NotFound,
+                ErrorCode::Unimplemented,
                 format!("block not found: {block_name}"),
             ));
         };
@@ -615,7 +638,6 @@ impl Context for BootContext {
     }
 
     fn clone_arc(&self) -> Arc<dyn Context> {
-        #[allow(clippy::arc_with_non_send_sync)]
         Arc::new(self.clone())
     }
 
@@ -623,16 +645,26 @@ impl Context for BootContext {
         &self,
         resource: &str,
         resource_type: wafer_run::ResourceType,
-        is_write: bool,
+        access: wafer_block::ResourceAccess,
     ) -> Result<(), WaferError> {
         wafer_run::wrap::check_access(
             Some(BLOCK_NAME),
             resource,
-            is_write,
+            access,
             Some(&resource_type),
             self.wafer.wrap_grants(),
             self.wafer.wrap_admin_block(),
         )
+    }
+
+    fn resource_access_admitted(
+        &self,
+        resource: &str,
+        resource_type: wafer_run::ResourceType,
+        access: wafer_block::ResourceAccess,
+    ) -> bool {
+        self.check_resource_access(resource, resource_type, access)
+            .is_ok()
     }
 }
 
@@ -820,10 +852,9 @@ pub fn attach(factory: RuntimeFactory) -> (Rc<RuntimeFactory>, Option<Sandbox>) 
         return (Rc::new(factory), None);
     }
     let control = BrowserRuntimeControl::new();
-    // `arc_with_non_send_sync`: `ShellSource` is `MaybeSend + MaybeSync`,
-    // unbounded on wasm32, for the same reason `RuntimeControl` is — this
-    // implementation resolves through a `JsFuture`.
-    #[allow(clippy::arc_with_non_send_sync)]
+    // `ShellSource` is `MaybeSend + MaybeSync`, unbounded on wasm32, for the
+    // same reason `RuntimeControl` is — this implementation resolves through a
+    // `JsFuture`.
     let shell: Arc<dyn ShellSource> = Arc::new(BrowserShellSource);
     let shared = DevShared::new(control.clone(), shell);
     let factory = Rc::new(factory.with_dev(shared.clone()));

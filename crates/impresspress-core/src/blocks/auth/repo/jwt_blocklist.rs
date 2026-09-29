@@ -1,10 +1,10 @@
 //! Row-level access over `wafer_run__auth__jwt_blocklist` (SEC-042).
 //!
 //! Logout calls [`insert`] with the request JWT's `jti` and `exp`.
-//! `pipeline::handle_request` calls [`contains`] after structural JWT
-//! validation in `crate::crypto::extract_auth_meta` — a hit means the
-//! caller logged out (or had their session terminated) before the token's
-//! natural expiry, so the request continues as unauthenticated.
+//! `crate::crypto::verify_access_token` calls [`contains`] after structural
+//! JWT validation — a hit means the caller logged out (or had their session
+//! terminated) before the token's natural expiry, so the token does not
+//! authenticate.
 //!
 //! Rows are at most one per access-token-lifetime per user. [`delete_expired`]
 //! sweeps rows whose `expires_at < cutoff`; presenting an expired JWT
@@ -16,9 +16,9 @@ use std::collections::HashMap;
 use serde_json::{json, Value};
 use wafer_block::db::{Filter, FilterOp};
 use wafer_core::clients::database as db;
-use wafer_run::context::Context;
+use wafer_run::{context::Context, WaferError};
 
-use super::{now_iso, RepoError};
+use super::{db_failed, now_iso};
 
 pub const TABLE: &str = "wafer_run__auth__jwt_blocklist";
 
@@ -33,7 +33,7 @@ pub struct NewBlocklistEntry<'a> {
 
 /// Insert a blocklist entry. Re-inserting an existing `jti` succeeds (best-
 /// effort idempotency) — logout-twice with the same JWT is a no-op.
-pub async fn insert(ctx: &dyn Context, new: NewBlocklistEntry<'_>) -> Result<(), RepoError> {
+pub async fn insert(ctx: &dyn Context, new: NewBlocklistEntry<'_>) -> Result<(), WaferError> {
     let now = now_iso();
     let mut data: HashMap<String, Value> = HashMap::new();
     data.insert("jti".into(), json!(new.jti));
@@ -47,38 +47,35 @@ pub async fn insert(ctx: &dyn Context, new: NewBlocklistEntry<'_>) -> Result<(),
             // logged-out twice (rare but possible if a browser tab and a
             // background tab both fire logout). Surface the error string
             // so callers can decide; the only current caller swallows it.
-            Err(RepoError::Db(format!("jwt_blocklist insert: {e}")))
+            Err(db_failed("jwt_blocklist insert", e))
         }
     }
 }
 
-/// True iff `jti` is in the blocklist, used by JWT validation in
-/// `pipeline::handle_request`.
+/// Whether `jti` is in the blocklist, used by
+/// `crate::crypto::verify_access_token`.
 ///
-/// `Ok` → blocklisted, `NOT_FOUND` → not blocklisted. Any other backend
-/// error (WRAP denial, connection blip) fails *closed* — returns `true`
-/// so the request continues as unauthenticated rather than silently
-/// re-enabling revoked JWTs until natural expiry. A `false` on transient
-/// errors is the bigger footgun: a logged-out user keeps full access for
-/// the remainder of the access-token lifetime.
-pub async fn contains(ctx: &dyn Context, jti: &str) -> bool {
+/// A found row is `Ok(true)`, `NOT_FOUND` is `Ok(false)`. Any other backend
+/// error (WRAP denial, connection blip) is returned: the lookup did not
+/// answer, and neither `false` (a logged-out token keeps full access for the
+/// rest of its lifetime) nor `true` (every signed-in caller looks signed out
+/// until the database recovers) is what it would have said. The verifier
+/// refuses the request on it.
+pub async fn contains(ctx: &dyn Context, jti: &str) -> Result<bool, WaferError> {
     use wafer_block::ErrorCode;
     match db::get_by_field(ctx, TABLE, "jti", json!(jti)).await {
-        Ok(_) => true,
-        Err(e) if e.code == ErrorCode::NotFound => false,
-        Err(e) => {
-            tracing::warn!(jti = %jti, "jwt_blocklist contains: db error — failing closed: {e}");
-            true
-        }
+        Ok(_) => Ok(true),
+        Err(e) if e.code == ErrorCode::NotFound => Ok(false),
+        Err(e) => Err(db_failed(&format!("jwt_blocklist contains {jti}"), e)),
     }
 }
 
 /// Deletes all rows whose `expires_at < cutoff`. Returns the number deleted.
-/// Best-effort sweeper — not required for correctness since `expires_at`
-/// always matches the JWT's natural expiry, so an expired-and-not-yet-pruned
-/// row is harmless (the JWT itself fails structural validation first).
-#[allow(dead_code)]
-pub async fn delete_expired(ctx: &dyn Context, cutoff: &str) -> Result<u64, RepoError> {
+/// Called by `auth::maintenance::sweep`. Best-effort for correctness —
+/// `expires_at` always matches the JWT's natural expiry, so an
+/// expired-and-not-yet-pruned row is harmless (the JWT itself fails structural
+/// validation first) — but the table has no other reader that removes rows.
+pub async fn delete_expired(ctx: &dyn Context, cutoff: &str) -> Result<u64, WaferError> {
     let n = db::delete_by_filters_count(
         ctx,
         TABLE,
@@ -89,7 +86,7 @@ pub async fn delete_expired(ctx: &dyn Context, cutoff: &str) -> Result<u64, Repo
         }],
     )
     .await
-    .map_err(|e| RepoError::Db(format!("jwt_blocklist delete_expired: {e}")))?;
+    .map_err(|e| db_failed("jwt_blocklist delete_expired", e))?;
     Ok(n.max(0) as u64)
 }
 
@@ -105,7 +102,9 @@ mod tests {
 
     #[tokio::test]
     async fn insert_then_contains_returns_true() {
-        let ctx = TestContext::with_auth().await;
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth::AUTH_BLOCK_ID);
         let exp = iso_plus_seconds(1800);
         insert(
             &ctx,
@@ -118,18 +117,22 @@ mod tests {
         .await
         .expect("insert");
 
-        assert!(contains(&ctx, "jti-1").await);
+        assert!(contains(&ctx, "jti-1").await.unwrap());
     }
 
     #[tokio::test]
     async fn contains_returns_false_for_unknown_jti() {
-        let ctx = TestContext::with_auth().await;
-        assert!(!contains(&ctx, "missing").await);
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth::AUTH_BLOCK_ID);
+        assert!(!contains(&ctx, "missing").await.unwrap());
     }
 
     #[tokio::test]
     async fn delete_expired_drops_only_expired_rows() {
-        let ctx = TestContext::with_auth().await;
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth::AUTH_BLOCK_ID);
         let past = iso_plus_seconds(-60);
         let future = iso_plus_seconds(1800);
         insert(
@@ -157,7 +160,7 @@ mod tests {
         let deleted = delete_expired(&ctx, &cutoff).await.expect("sweep");
         assert_eq!(deleted, 1);
 
-        assert!(!contains(&ctx, "old").await);
-        assert!(contains(&ctx, "new").await);
+        assert!(!contains(&ctx, "old").await.unwrap());
+        assert!(contains(&ctx, "new").await.unwrap());
     }
 }

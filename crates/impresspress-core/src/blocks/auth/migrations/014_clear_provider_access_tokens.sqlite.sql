@@ -1,0 +1,21 @@
+-- Clear every stored OAuth provider access token.
+--
+-- `wafer_run__auth__provider_links.access_token` held the bearer token the
+-- provider issued at sign-in: a live credential for the user's account at
+-- Google, GitHub or Microsoft, replayable there by anyone who reads it and
+-- without this deployment's involvement. Nothing in this codebase reads it
+-- back; the sign-in is done with the token once the profile is fetched.
+-- `provider_links::upsert` writes the column empty, and this clears the rows
+-- written before it did, including links nobody signs in through any more,
+-- which the upsert would never reach.
+--
+-- An UPDATE rather than a DROP COLUMN. The column is `NOT NULL` in 001 and
+-- SQLite cannot guard `DROP COLUMN` with `IF EXISTS`, while auth migrations
+-- re-run in full whenever the block's SQL hash changes: a DROP would fail on
+-- every later re-run. This statement is a no-op when re-run, on SQLite, D1
+-- and PostgreSQL alike.
+--
+-- Adding this file changes the hash, so the upgrade that applies it re-runs
+-- every auth migration, 012's sessions-table drop included. RELEASE.md spells
+-- out what that costs.
+UPDATE wafer_run__auth__provider_links SET access_token = '';

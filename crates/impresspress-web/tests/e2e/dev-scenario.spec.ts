@@ -429,7 +429,7 @@ test('the spec scenario: welcome → login → block → site → shop → shopp
   // Anonymous for real. `/b/dev` is an `Admin` extra route; a shopper who
   // could still reach it would mean the cookie clear did nothing and
   // everything below proved only that the admin can see their own work.
-  expect(await devStatusCode(shop)).toBe(403);
+  expect(await devStatusCode(shop)).toBe(401);
 
   await expect(shop.locator('h1')).toHaveText(SHOP_HEADING, { timeout: 60_000 });
   // Every product, by name and in the catalog's order — not just a count, so

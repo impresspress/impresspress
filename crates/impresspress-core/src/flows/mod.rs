@@ -68,7 +68,8 @@ pub fn register_site_main(
 /// but a **bag** of them, and this function is not their only author:
 ///
 /// * `wafer-run/security-headers` — the browser sandbox declares
-///   `{"csp": "… worker-src 'self' blob:; frame-src 'self'", "frame_ancestors": "self"}`
+///   `{"csp": "… worker-src 'self'; frame-src 'self'", "frame_ancestors": "self",
+///   "allow_blob_workers": true}`
 ///   so the `/b/dev` page can spawn its compiler worker and frame its own
 ///   live preview. Replacing that with `{"csp": <shared directives>}` dropped
 ///   both — silently, visible only as a browser refusing to start a worker.
@@ -89,12 +90,14 @@ pub fn register_site_main(
 /// anyway — two tables are not a union, they are an ordering.
 ///
 /// Within a merge, every key the flow does not set is preserved and the keys
-/// it does set win, except `csp`: a `;`-separated directive list that the
-/// security-headers block itself merges directive-by-directive over its hard
-/// baseline, so the two authors' values are **concatenated**, the consumer's
-/// first. `allowed_origins` is deliberately not concatenated — it is a
-/// comma-separated allow-list with its own separator, and joining two of them
-/// with `; ` would produce a value neither author meant.
+/// it does set win, except `csp`: a `;`-separated directive list, which is
+/// **combined directive by directive** — the consumer's directives first, a
+/// directive both authors name getting the union of their sources. Joining
+/// the two strings instead would repeat a directive, and the security-headers
+/// block (like a browser) keeps only the first occurrence of a name, so the
+/// shared value's `script-src https://js.stripe.com` would be dropped behind
+/// the consumer's own `script-src`. `allowed_origins` is deliberately not
+/// combined — it is a comma-separated allow-list with its own separator.
 pub fn site_main_block_configs(
     cors_allowed_origins: &str,
     csp_directives: &str,
@@ -170,9 +173,9 @@ fn declared<'a>(
         .map(|(_, config)| config)
 }
 
-/// `existing` with `additions` applied: keys in `concatenated` are joined
-/// `"<existing>; <addition>"`, every other key is overwritten, and keys only
-/// `existing` has are kept.
+/// `existing` with `additions` applied: keys in `csp_keys` are combined
+/// directive by directive ([`combine_csp`]), every other key is overwritten,
+/// and keys only `existing` has are kept.
 ///
 /// A non-object `existing` (or `None`) starts from an empty object — there is
 /// nothing to preserve in a config that is not a map of settings, and
@@ -180,7 +183,7 @@ fn declared<'a>(
 fn merged(
     existing: Option<&serde_json::Value>,
     additions: serde_json::Value,
-    concatenated: &[&str],
+    csp_keys: &[&str],
 ) -> serde_json::Value {
     let mut out = existing
         .and_then(|value| value.as_object())
@@ -191,18 +194,9 @@ fn merged(
     };
 
     for (key, addition) in additions {
-        let joined = concatenated.contains(&key.as_str()).then(|| {
+        let joined = csp_keys.contains(&key.as_str()).then(|| {
             let before = out.get(&key).and_then(|v| v.as_str()).unwrap_or("");
-            // Trim the separator off the left part so `"a;"` + `"b"` is
-            // `"a; b"` and not `"a;; b"`; the block's parser tolerates the
-            // empty directive, but the served header is a thing people read.
-            let before = before.trim().trim_end_matches(';').trim_end();
-            let after = addition.as_str().unwrap_or("").trim();
-            match (before.is_empty(), after.is_empty()) {
-                (true, _) => after.to_string(),
-                (false, true) => before.to_string(),
-                (false, false) => format!("{before}; {after}"),
-            }
+            combine_csp(before, addition.as_str().unwrap_or(""))
         });
         match joined {
             Some(joined) => out.insert(key, serde_json::Value::String(joined)),
@@ -210,6 +204,55 @@ fn merged(
         };
     }
     serde_json::Value::Object(out)
+}
+
+/// Two `;`-separated CSP directive lists as one: `before`'s directives in
+/// order, then `after`'s that `before` does not name. A directive both name
+/// keeps `before`'s sources and gains `after`'s it lacks, `'none'` included.
+/// What `'none'` beside other sources means is left to the security-headers
+/// block, which reads this value through `merge_csp`: in a directive it adds
+/// sources to, `'none'` is dropped from a list that has others; in the
+/// narrow-only `base-uri` and `form-action`, `'none'` wins over the rest.
+/// Names compare ASCII-case-insensitively, as a browser compares them; each is
+/// written as `before` (or, for a new one, `after`) spelled it.
+fn combine_csp(before: &str, after: &str) -> String {
+    let parse = |policy: &str| -> Vec<(String, Vec<String>)> {
+        policy
+            .split(';')
+            .filter_map(|directive| {
+                let mut tokens = directive.split_ascii_whitespace();
+                let name = tokens.next()?.to_string();
+                Some((name, tokens.map(str::to_string).collect()))
+            })
+            .collect()
+    };
+    let mut combined = parse(before);
+    for (name, sources) in parse(after) {
+        match combined
+            .iter_mut()
+            .find(|(existing, _)| existing.eq_ignore_ascii_case(&name))
+        {
+            Some((_, existing)) => {
+                for source in sources {
+                    if !existing.contains(&source) {
+                        existing.push(source);
+                    }
+                }
+            }
+            None => combined.push((name, sources)),
+        }
+    }
+    combined
+        .into_iter()
+        .map(|(name, sources)| {
+            if sources.is_empty() {
+                name
+            } else {
+                format!("{name} {}", sources.join(" "))
+            }
+        })
+        .collect::<Vec<_>>()
+        .join("; ")
 }
 
 #[cfg(test)]
@@ -224,9 +267,9 @@ mod tests {
         vec![(
             SECURITY_HEADERS_BLOCK.to_string(),
             serde_json::json!({
-                "csp": "default-src 'self'; frame-ancestors 'none'; \
-                        worker-src 'self' blob:; frame-src 'self'",
+                "csp": "default-src 'self'; worker-src 'self'; frame-src 'self'",
                 "frame_ancestors": "self",
+                "allow_blob_workers": true,
                 "cross_origin_isolation": "credentialless",
             }),
         )]
@@ -265,12 +308,15 @@ mod tests {
 
         let csp = merged["csp"].as_str().expect("csp is a string");
         // The consumer's directives survive…
-        assert!(csp.contains("worker-src 'self' blob:"), "{csp}");
-        assert!(csp.contains("frame-src 'self'"), "{csp}");
+        assert!(csp.contains("worker-src 'self'"), "{csp}");
         assert!(csp.contains("default-src 'self'"), "{csp}");
-        // …the shared ones are added…
+        // …the shared ones are added, a directive both name taking both
+        // authors' sources…
         assert!(csp.contains("script-src https://js.stripe.com"), "{csp}");
-        assert!(csp.contains("frame-src https://js.stripe.com"), "{csp}");
+        assert!(
+            csp.contains("frame-src 'self' https://js.stripe.com"),
+            "{csp}"
+        );
         // …in that order, joined by exactly one separator.
         assert!(
             csp.find("worker-src").unwrap() < csp.find("script-src https://js.stripe.com").unwrap(),
@@ -283,6 +329,8 @@ mod tests {
         // security-headers block rewrites that directive from the
         // `frame_ancestors` key at request time, whatever `csp` says.
         assert_eq!(merged["frame_ancestors"], serde_json::json!("self"));
+        // …the knob that lets the compiler worker spawn blob-URL workers…
+        assert_eq!(merged["allow_blob_workers"], serde_json::json!(true));
         // …including the isolation posture the preview iframe depends on: a
         // COEP document only embeds documents that carry COEP themselves.
         assert_eq!(
@@ -429,6 +477,110 @@ mod tests {
         .clone();
         assert_eq!(merged["csp"], serde_json::json!(STRIPE));
         assert_eq!(merged["frame_ancestors"], serde_json::json!("self"));
+    }
+
+    /// A directive both authors name is served once, with both authors'
+    /// sources. The security-headers block keeps the first occurrence of a
+    /// directive and refuses the rest, so two `script-src` entries would drop
+    /// Stripe's host from the policy the browser enforces.
+    #[test]
+    fn a_directive_both_authors_name_survives_the_security_headers_merge() {
+        let declared = vec![(
+            SECURITY_HEADERS_BLOCK.to_string(),
+            serde_json::json!({ "csp": "script-src 'self' 'wasm-unsafe-eval'; frame-src 'self'" }),
+        )];
+        let merged = config_for(
+            &site_main_block_configs("", STRIPE, &declared),
+            SECURITY_HEADERS_BLOCK,
+        )
+        .clone();
+        let csp = merged["csp"].as_str().unwrap();
+        assert_eq!(
+            csp,
+            "script-src 'self' 'wasm-unsafe-eval' https://js.stripe.com; \
+             frame-src 'self' https://js.stripe.com"
+        );
+        let served = wafer_block_security_headers::merge_csp("", csp);
+        assert!(served.refused.is_empty(), "{:?}", served.refused);
+        assert!(
+            served.policy.contains("https://js.stripe.com"),
+            "{}",
+            served.policy
+        );
+    }
+
+    /// The `Content-Security-Policy` the security-headers block serves for
+    /// `config`: its own baseline, merged with `config`'s `csp`.
+    async fn served_csp(config: &serde_json::Value) -> String {
+        use wafer_run::Block;
+
+        let ctx = crate::test_support::TestContext::new().await;
+        let block = wafer_block_security_headers::SecurityHeadersBlock::new();
+        block
+            .lifecycle(
+                &ctx,
+                wafer_run::LifecycleEvent {
+                    event_type: wafer_run::LifecycleType::Init,
+                    data: config.to_string().into_bytes(),
+                },
+            )
+            .await
+            .expect("security-headers init");
+        let out = block
+            .handle(
+                &ctx,
+                wafer_run::Message::new("retrieve:/"),
+                wafer_run::InputStream::empty(),
+            )
+            .await;
+        match out.collect_buffered().await {
+            Err(wafer_run::streams::output::TerminalNotResponse::Continue(msg)) => msg
+                .get_meta("resp.header.Content-Security-Policy")
+                .to_string(),
+            _ => panic!("security-headers is a middleware and continues"),
+        }
+    }
+
+    /// The sources a served `policy` gives `name`.
+    fn served_sources<'a>(policy: &'a str, name: &str) -> Vec<&'a str> {
+        policy
+            .split(';')
+            .map(|directive| directive.split_ascii_whitespace().collect::<Vec<_>>())
+            .find(|tokens| tokens.first() == Some(&name))
+            .map(|tokens| tokens[1..].to_vec())
+            .unwrap_or_default()
+    }
+
+    /// `'none'` from either author is served as the security-headers block
+    /// reads it: it gives way to the other author's sources in a directive
+    /// sources are added to, and it wins in the narrow-only `form-action` and
+    /// `base-uri`, so a deliberate `'none'` there is never loosened to
+    /// `'self'`.
+    #[tokio::test]
+    async fn none_is_served_as_the_security_headers_block_reads_it() {
+        let declared = vec![(
+            SECURITY_HEADERS_BLOCK.to_string(),
+            serde_json::json!({ "csp": "frame-src 'none'; form-action 'none'; base-uri 'self'" }),
+        )];
+        let shared = "frame-src https://js.stripe.com; form-action 'self'; base-uri 'none'";
+        let merged = config_for(
+            &site_main_block_configs("", shared, &declared),
+            SECURITY_HEADERS_BLOCK,
+        )
+        .clone();
+        let policy = served_csp(&merged).await;
+
+        assert_eq!(
+            served_sources(&policy, "frame-src"),
+            ["https://js.stripe.com"],
+            "{policy}"
+        );
+        assert_eq!(
+            served_sources(&policy, "form-action"),
+            ["'none'"],
+            "{policy}"
+        );
+        assert_eq!(served_sources(&policy, "base-uri"), ["'none'"], "{policy}");
     }
 
     /// A config that is not an object has no settings to preserve; the

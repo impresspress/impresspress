@@ -1,18 +1,41 @@
 import { BaseService } from "./base.service";
 
+/**
+ * One registered block, as `GET /b/admin/api/extensions` lists them.
+ * `blocks/admin/mod.rs::handle_extensions` projects exactly these five keys
+ * off wafer-run's `BlockInfo`; there is no description, author, config blob
+ * or metadata object anywhere in that response, and `enabled` is a literal
+ * `true` for every row (a registered block is by definition enabled — there
+ * is no server-side enable/disable lifecycle).
+ */
 export interface Extension {
+  /** Block name in the canonical `{org}/{block}` form. */
   name: string;
+  /** Semantic version of the block implementation. */
   version: string;
-  description: string;
-  author: string;
+  /** Interface identifier, e.g. `"middleware@v1"`. */
+  interface: string;
+  /** One-line human-readable summary of what the block does. */
+  summary: string;
+  /** Always `true` — every listed block is registered, hence enabled. */
   enabled: boolean;
-  config?: Record<string, any>;
-  metadata?: {
-    tags?: string[];
-    homepage?: string;
-    license?: string;
-  };
 }
+
+/**
+ * `call`'s options, split by whether the method carries a body.
+ *
+ * `BaseService.request` used to switch on the method and silently drop `data`
+ * for GET and DELETE. The shared client forwards it instead, and `fetch`
+ * throws "Request with GET/HEAD method cannot have body", which surfaces as an
+ * opaque `network_error`. Neither dropping the caller's payload nor failing at
+ * the transport is right, so the combination is unrepresentable and the
+ * compiler says so at the call site.
+ */
+type ExtensionCallParams = Record<string, any>;
+
+export type ExtensionCallOptions =
+  | { method?: "GET" | "DELETE"; data?: never; params?: ExtensionCallParams }
+  | { method: "POST" | "PUT" | "PATCH"; data?: any; params?: ExtensionCallParams };
 
 export class ExtensionsService extends BaseService {
   /** List all available extensions (registered blocks). `GET /b/admin/api/extensions`. */
@@ -32,16 +55,12 @@ export class ExtensionsService extends BaseService {
   async call<T = any>(
     extension: string,
     endpoint: string,
-    options?: {
-      method?: "GET" | "POST" | "PUT" | "DELETE" | "PATCH";
-      data?: any;
-      params?: Record<string, any>;
-    },
+    options?: ExtensionCallOptions,
   ): Promise<T> {
-    const queryString = options?.params ? this.buildQueryString(options.params) : "";
     return this.request<T>({
       method: options?.method || "GET",
-      url: `/b/${extension}/${endpoint}${queryString ? `?${queryString}` : ""}`,
+      url: `/b/${extension}/${endpoint}`,
+      params: options?.params,
       data: options?.data,
     });
   }
@@ -60,8 +79,17 @@ export interface ShareRecord {
   created_by: string;
   created_at: string;
   access_count: number;
-  expires_at?: string;
-  max_access_count?: number;
+  /**
+   * Absolute expiry, or `null` for a share that never expires.
+   *
+   * `null`, not absent. `ShareRow.expires_at` is an `Option<String>` with no
+   * `skip_serializing_if`, so the key is always present and carries JSON
+   * `null` when there is no expiry — this was declared `expires_at?: string`
+   * until `files.openapi.json` started describing the row and said otherwise.
+   */
+  expires_at: string | null;
+  /** Access cap, or `null` for unlimited. Always present — see `expires_at`. */
+  max_access_count: number | null;
 }
 
 export interface ListSharesResult {
@@ -73,11 +101,11 @@ export interface ListSharesResult {
  * Aligned to the real `impresspress/files` cloud-storage surface in
  * `crates/impresspress-core/src/blocks/files/cloud.rs`: per-object share
  * links and the caller's own quota/usage. There is no user-facing
- * access-log or access-stats endpoint (`/admin/b/cloudstorage/access-logs`
- * is admin-only and reached through the admin block's delegated HTTP
- * surface, not this one; `access-stats` does not exist at all) — both were
- * removed rather than pointed at a route that would 404 or silently expose
- * the wrong auth boundary.
+ * access-log or access-stats endpoint (`GET /b/cloudstorage/admin/access-logs`
+ * is declared `Admin` by the files block and is not part of this surface;
+ * `access-stats` does not exist at all) — both were removed rather than
+ * pointed at a route that would 404 or silently expose the wrong auth
+ * boundary.
  */
 export class CloudStorageExtension extends ExtensionsService {
   /** Create a share link for an object. `POST /b/cloudstorage/shares`. */
@@ -125,15 +153,31 @@ export class CloudStorageExtension extends ExtensionsService {
     });
   }
 
-  /** Get the current user's storage quota and usage. `GET /b/cloudstorage/quota`. */
+  /**
+   * Get the current user's storage quota and usage.
+   * `GET /b/cloudstorage/quota`.
+   *
+   * `usage` was `Record<string, unknown>` until the endpoint declared a
+   * response schema. It is two numbers, both computed over the caller's
+   * object rows by `blocks::files::quota::get_user_usage`.
+   */
   async getQuota(): Promise<{
     quota: {
       max_storage_bytes: number;
       max_file_size_bytes: number;
+      /** Most objects the caller may hold in any one bucket, in-flight uploads included. */
       max_files_per_bucket: number;
-      reset_period_days: number;
     };
-    usage: Record<string, unknown>;
+    usage: {
+      /** Bytes stored, in-flight (`pending`) uploads included. */
+      total_bytes: number;
+      /**
+       * Objects the caller owns across all buckets, in-flight uploads
+       * included. Not what the per-bucket `max_files_per_bucket` cap is
+       * checked against.
+       */
+      file_count: number;
+    };
   }> {
     return this.call("cloudstorage", "quota");
   }
@@ -502,7 +546,8 @@ export interface GuestOrderStatus {
   status: string;
   reconciliation_status: string;
   amounts: MoneyBreakdown;
-  subscription_status?: string;
+  /** Absent for a one-time order rather than `""`. */
+  subscription_status?: Exclude<SubscriptionStatus, "">;
   subscription_current_period_end?: string;
   subscription_cancel_at_period_end: boolean;
   paid_at?: string;
@@ -686,7 +731,60 @@ export interface ProviderReconcileResult {
   succeeded: number;
   retry_scheduled: number;
   dead_letter: number;
+  /** Operations whose state could not be written; a later run retries them. */
+  unrecorded: number;
 }
+
+/**
+ * Stripe's subscription lifecycle, as the order views publish it. `""` is the
+ * state of every non-subscription order, which is why it is the first value of
+ * the published list; the guest order view (`GuestOrderStatus`) omits the
+ * field for such an order instead.
+ */
+export type SubscriptionStatus =
+  | ""
+  | "incomplete"
+  | "incomplete_expired"
+  | "trialing"
+  | "active"
+  | "past_due"
+  | "unpaid"
+  | "paused"
+  | "canceled";
+
+/** The caller's platform subscription, as `GET /b/products/subscription` returns it. */
+export interface PlatformSubscription {
+  id: string;
+  plan: string;
+  status: SubscriptionStatus;
+  /** Stripe Subscription id, or empty. */
+  stripe_subscription_id: string;
+  /** RFC 3339 end of the grace period after a failed payment, or `null`. */
+  grace_period_end: string | null;
+  addon_projects: number;
+  addon_requests: number;
+  addon_r2_bytes: number;
+  addon_d1_bytes: number;
+  created_at: string;
+  updated_at: string;
+}
+
+/** Response of `GET /b/products/subscription`. */
+export interface PlatformSubscriptionResponse {
+  /** `null` when the caller has no subscription. */
+  subscription: PlatformSubscription | null;
+}
+
+/** The refund ledger's own state, distinct from the provider's `provider_status`. */
+export type RefundStatus = "pending" | "provider_succeeded" | "succeeded" | "failed";
+
+/** How far a seller account has got with Stripe Connect. */
+export type SellerStatus =
+  | "not_started"
+  | "onboarding"
+  | "restricted"
+  | "active"
+  | "suspended";
 
 export type DisputeStatus =
   | "warning_needs_response"
@@ -730,7 +828,10 @@ export interface Dispute {
  */
 export interface Purchase {
   id: string;
-  user_id: string;
+  /**
+   * The single published buyer identity. The row also carries a `user_id`
+   * column holding the same value, but the server publishes one answer.
+   */
   buyer_user_id: string;
   buyer_email: string;
   seller_account_id: string;
@@ -742,12 +843,15 @@ export interface Purchase {
   provider: string;
   livemode: boolean;
   currency: string;
-  amount_cents: number;
   subtotal_cents: number;
   discount_cents: number;
   tax_cents: number;
   shipping_cents: number;
   platform_fee_cents: number;
+  /**
+   * The single published amount, in minor units. The row also carries an
+   * `amount_cents` column holding the same value; the server publishes one.
+   */
   total_cents: number;
   refunded_total_cents: number;
   metadata: Record<string, unknown>;
@@ -760,7 +864,7 @@ export interface Purchase {
   payment_intent_event_created: number;
   reconciliation_status: string;
   reconciliation_error: string;
-  subscription_status: string;
+  subscription_status: SubscriptionStatus;
   subscription_current_period_end: string | null;
   subscription_cancel_at_period_end: boolean;
   subscription_canceled_at: string | null;
@@ -798,7 +902,7 @@ export interface BuyerOrder {
   metadata: Record<string, unknown>;
   provider_payment_status: "" | "succeeded" | "payment_failed" | "processing" | "requires_action" | "canceled";
   reconciliation_status: string;
-  subscription_status: string;
+  subscription_status: SubscriptionStatus;
   subscription_current_period_end: string | null;
   subscription_cancel_at_period_end: boolean;
   subscription_canceled_at: string | null;
@@ -866,7 +970,7 @@ export interface SellerOrder {
   provider_payment_error_message: string;
   reconciliation_status: string;
   reconciliation_error: string;
-  subscription_status: string;
+  subscription_status: SubscriptionStatus;
   subscription_current_period_end: string | null;
   subscription_cancel_at_period_end: boolean;
   payment_at: string | null;
@@ -936,7 +1040,7 @@ export interface Refund {
   amount_minor: number;
   target_refunded_total_minor: number;
   currency: string;
-  status: string;
+  status: RefundStatus;
   provider_status: string;
   provider_reason: string;
   note: string;
@@ -959,8 +1063,14 @@ export interface PurchaseDetail {
 export interface SellerAccount {
   id: string;
   user_id: string;
-  status: string;
-  approval_status: string;
+  status: SellerStatus;
+  /**
+   * Whether an administrator has suspended the account, derived from `status`.
+   * Two values, not the five of a product's `approval_status`: this field has
+   * only ever carried `approved` or `suspended`, and the published schema now
+   * says so.
+   */
+  approval_status: "approved" | "suspended";
   stripe_account_id?: string;
   capabilities: {
     details_submitted: boolean;
@@ -1223,7 +1333,7 @@ export class ProductsExtension extends ExtensionsService {
     return this.call("products", `purchases/${encodeURIComponent(orderId)}`);
   }
 
-  async getSubscription(): Promise<unknown> {
+  async getSubscription(): Promise<PlatformSubscriptionResponse> {
     return this.call("products", "subscription");
   }
 

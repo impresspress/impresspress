@@ -19,12 +19,11 @@ use super::{
         ResolvedComponent, VariableDefinition, VariableKind, VariableVisibility,
         COMMERCE_SCHEMA_VERSION,
     },
-    money::normalize_currency,
+    money::{normalize_currency, Decimal},
 };
 
 const MAX_CONDITION_DEPTH: usize = 32;
 const MAX_ORDER_QUANTITY: u64 = 1_000_000;
-const MAX_DECIMAL_SCALE: u32 = 9;
 const DEFAULT_MAX_TEXT_LENGTH: usize = 4096;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -54,130 +53,6 @@ impl fmt::Display for PricingError {
 }
 
 impl std::error::Error for PricingError {}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Decimal {
-    coefficient: i128,
-    scale: u32,
-}
-
-impl Decimal {
-    fn parse(input: &str) -> Result<Self, String> {
-        let input = input.trim();
-        let (negative, unsigned) = if let Some(value) = input.strip_prefix('-') {
-            (true, value)
-        } else {
-            (false, input.strip_prefix('+').unwrap_or(input))
-        };
-        let mut parts = unsigned.split('.');
-        let whole = parts.next().unwrap_or_default();
-        let fraction = parts.next().unwrap_or_default();
-        if parts.next().is_some()
-            || (whole.is_empty() && fraction.is_empty())
-            || !whole.bytes().all(|byte| byte.is_ascii_digit())
-            || !fraction.bytes().all(|byte| byte.is_ascii_digit())
-        {
-            return Err("must be a plain decimal number".to_string());
-        }
-        if fraction.len() > MAX_DECIMAL_SCALE as usize {
-            return Err(format!(
-                "must have at most {MAX_DECIMAL_SCALE} decimal places"
-            ));
-        }
-        let digits = format!("{}{}", if whole.is_empty() { "0" } else { whole }, fraction);
-        let mut coefficient = digits
-            .parse::<i128>()
-            .map_err(|_| "number is too large".to_string())?;
-        if negative {
-            coefficient = -coefficient;
-        }
-        let mut value = Self {
-            coefficient,
-            scale: fraction.len() as u32,
-        };
-        while value.scale > 0 && value.coefficient % 10 == 0 {
-            value.coefficient /= 10;
-            value.scale -= 1;
-        }
-        Ok(value)
-    }
-
-    fn from_json(value: &Value) -> Result<Self, String> {
-        match value {
-            Value::Number(value) => Self::parse(&value.to_string()),
-            Value::String(value) => Self::parse(value),
-            _ => Err("must be a number or decimal string".to_string()),
-        }
-    }
-
-    fn aligned(self, scale: u32) -> Result<i128, String> {
-        let multiplier = 10_i128
-            .checked_pow(scale.saturating_sub(self.scale))
-            .ok_or_else(|| "number is too large".to_string())?;
-        self.coefficient
-            .checked_mul(multiplier)
-            .ok_or_else(|| "number is too large".to_string())
-    }
-
-    fn compare(self, other: Self) -> Result<Ordering, String> {
-        let scale = self.scale.max(other.scale);
-        Ok(self.aligned(scale)?.cmp(&other.aligned(scale)?))
-    }
-
-    fn is_step_from(self, base: Self, step: Self) -> Result<bool, String> {
-        if step.coefficient <= 0 {
-            return Err("step must be greater than zero".to_string());
-        }
-        let scale = self.scale.max(base.scale).max(step.scale);
-        let difference = self
-            .aligned(scale)?
-            .checked_sub(base.aligned(scale)?)
-            .ok_or_else(|| "number is too large".to_string())?;
-        Ok(difference % step.aligned(scale)? == 0)
-    }
-
-    fn multiply_minor(self, amount_minor: i64) -> Result<i64, String> {
-        let numerator = self
-            .coefficient
-            .checked_mul(amount_minor as i128)
-            .ok_or_else(|| "calculated amount is too large".to_string())?;
-        let denominator = 10_i128
-            .checked_pow(self.scale)
-            .ok_or_else(|| "number is too large".to_string())?;
-        if numerator % denominator != 0 {
-            return Err(
-                "value does not resolve to a whole minor-unit amount; adjust the value or rate"
-                    .to_string(),
-            );
-        }
-        i64::try_from(numerator / denominator)
-            .map_err(|_| "calculated amount is too large".to_string())
-    }
-
-    fn as_u64(self) -> Option<u64> {
-        let denominator = 10_i128.checked_pow(self.scale)?;
-        if self.coefficient < 0 || self.coefficient % denominator != 0 {
-            return None;
-        }
-        u64::try_from(self.coefficient / denominator).ok()
-    }
-
-    fn canonical(self) -> String {
-        let sign = if self.coefficient < 0 { "-" } else { "" };
-        let digits = self.coefficient.unsigned_abs().to_string();
-        if self.scale == 0 {
-            return format!("{sign}{digits}");
-        }
-        let scale = self.scale as usize;
-        let padded = if digits.len() <= scale {
-            format!("{}{}", "0".repeat(scale + 1 - digits.len()), digits)
-        } else {
-            digits
-        };
-        let split = padded.len() - scale;
-        format!("{sign}{}.{}", &padded[..split], &padded[split..])
-    }
-}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 enum ValidatedValue {
@@ -209,10 +84,7 @@ impl ValidatedValue {
     fn decimal(&self) -> Option<Decimal> {
         match self {
             Self::Number(value) => Some(*value),
-            Self::Integer(value) => Some(Decimal {
-                coefficient: *value as i128,
-                scale: 0,
-            }),
+            Self::Integer(value) => Some(Decimal::from_integer(*value)),
             _ => None,
         }
     }
@@ -358,10 +230,7 @@ fn validate_bounds(definition: &VariableDefinition, value: Decimal) -> Result<()
     }
     if let Some(step) = definition.step.as_deref() {
         let step = Decimal::parse(step).map_err(bad_definition)?;
-        let base = minimum.unwrap_or(Decimal {
-            coefficient: 0,
-            scale: 0,
-        });
+        let base = minimum.unwrap_or(Decimal::from_integer(0));
         if !value.is_step_from(base, step).map_err(bad_definition)? {
             return Err(invalid_input(
                 definition,
@@ -462,13 +331,7 @@ fn parse_input(
                 .as_i64()
                 .or_else(|| value.as_str().and_then(|value| value.parse().ok()))
                 .ok_or_else(|| invalid_input(definition, "must be an integer"))?;
-            validate_bounds(
-                definition,
-                Decimal {
-                    coefficient: value as i128,
-                    scale: 0,
-                },
-            )?;
+            validate_bounds(definition, Decimal::from_integer(value))?;
             Ok(ValidatedValue::Integer(value))
         }
         VariableKind::Boolean => value

@@ -1,4 +1,6 @@
 import { BaseService } from "./base.service";
+import { NO_TIMEOUT } from "../http-client";
+import { ImpresspressError } from "../error";
 
 /**
  * Aligned to the REAL dispatch table in
@@ -43,7 +45,20 @@ export interface ListOptions {
   page_size?: number;
 }
 
-export interface UploadFileOptions {
+/**
+ * Bounds for a byte transfer. Uploads and downloads deliberately run with NO
+ * timeout by default — their duration is a function of file size and link
+ * speed, so any fixed ceiling is a cap on how big a file the SDK can move.
+ * Pass `timeout` to impose one, and/or `signal` to cancel.
+ */
+export interface TransferOptions {
+  /** Milliseconds before the transfer aborts. Omitted means: no limit. */
+  timeout?: number;
+  /** Cancel the transfer (the only bound that applies by default). */
+  signal?: AbortSignal;
+}
+
+export interface UploadFileOptions extends TransferOptions {
   /** Object key. Required unless `file` is a `File` (its `.name` is used as a fallback). */
   key?: string;
   contentType?: string;
@@ -60,15 +75,54 @@ export interface FileMetadataRecord {
   key: string;
   size: number;
   content_type: string;
-  status: string;
+  /**
+   * `pending` while the upload is in flight, `complete` once the blob is in
+   * storage. The two values the server's `ObjectStatus` enum defines — it is
+   * the type of the column now, so a row can hold nothing else.
+   *
+   * Search and recent listings only ever return `complete` rows; `pending`
+   * reaches a client only through a listing that does not filter on status.
+   */
+  status: 'pending' | 'complete';
   uploaded_by: string;
   uploaded_at: string;
 }
 
-export interface SearchResult {
-  items: FileMetadataRecord[];
+/**
+ * One row of the `impresspress__files__views` object-view audit table (see
+ * `crates/impresspress-core/src/blocks/files/repo/views.rs`), flattened from
+ * the wire `Record { id, data }` shape (`id` + the row's columns).
+ *
+ * This — not [`FileMetadataRecord`] — is what `/b/storage/api/recent`
+ * returns: `handle_recent` pages `repo::views::list_recent_for_user`, one row
+ * per tracked download, so the response carries the viewer and the view
+ * instant rather than the object's size, type or upload state.
+ */
+export interface FileViewRecord {
+  id: string;
+  /** Bucket holding the viewed object. */
+  bucket: string;
+  /** Object key within the bucket. */
+  key: string;
+  /** The viewer. */
+  user_id: string;
+  /** RFC 3339 instant of the view. */
+  viewed_at: string;
+  created_at: string;
+  updated_at: string;
+}
+
+/** The flattened form of the server's `RecordList` envelope. */
+export interface RecordListResult<T> {
+  items: T[];
   total: number;
 }
+
+/** `search`'s result: object-metadata rows. */
+export type SearchResult = RecordListResult<FileMetadataRecord>;
+
+/** `getRecentFiles`'s result: object-view audit rows. */
+export type RecentViewsResult = RecordListResult<FileViewRecord>;
 
 /**
  * Wire shape of wafer-core's `RecordList` (see
@@ -84,9 +138,9 @@ interface RecordListWire<T> {
   page_size: number;
 }
 
-function flattenRecordList(
-  result: RecordListWire<Omit<FileMetadataRecord, "id">>,
-): SearchResult {
+function flattenRecordList<T extends object>(
+  result: RecordListWire<T>,
+): RecordListResult<{ id: string } & T> {
   return {
     items: result.records.map((r) => ({ id: r.id, ...r.data })),
     total: result.total_count,
@@ -125,18 +179,25 @@ export class StorageService extends BaseService {
 
   /** List objects in a bucket. */
   async listObjects(bucketName: string, options?: ListOptions): Promise<ListObjectsResult> {
-    const queryString = options ? this.buildQueryString(options) : "";
     return this.request<ListObjectsResult>({
       method: "GET",
-      url: `/b/storage/api/buckets/${encodeURIComponent(bucketName)}/objects${queryString ? `?${queryString}` : ""}`,
+      url: `/b/storage/api/buckets/${encodeURIComponent(bucketName)}/objects`,
+      params: options as Record<string, unknown> | undefined,
     });
   }
 
-  /** Download an object's raw bytes. */
-  async downloadFile(bucketName: string, key: string): Promise<Blob> {
-    return this.requestBlob(
-      `/b/storage/api/buckets/${encodeURIComponent(bucketName)}/objects/${encodeObjectKey(key)}`,
-    );
+  /**
+   * Download an object's raw bytes. Runs with no timeout unless
+   * `options.timeout` sets one — see `TransferOptions`.
+   */
+  async downloadFile(bucketName: string, key: string, options?: TransferOptions): Promise<Blob> {
+    return this.request<Blob>({
+      method: "GET",
+      url: `/b/storage/api/buckets/${encodeURIComponent(bucketName)}/objects/${encodeObjectKey(key)}`,
+      responseType: "blob",
+      timeout: options?.timeout ?? NO_TIMEOUT,
+      signal: options?.signal,
+    });
   }
 
   /** Direct URL for downloading an object (e.g. for `<img src>` / `<a href>`). */
@@ -148,6 +209,9 @@ export class StorageService extends BaseService {
    * Upload a file to a bucket. `options.key` is required unless `file` is a
    * `File` (browser), whose `.name` is used as a fallback — mirrors the
    * server's multipart handling in `handle_upload_object`.
+   *
+   * Runs with no timeout unless `options.timeout` sets one — see
+   * `TransferOptions`.
    */
   async uploadFile(
     bucketName: string,
@@ -163,14 +227,20 @@ export class StorageService extends BaseService {
     } else if (typeof Buffer !== "undefined" && Buffer.isBuffer(file)) {
       formData.append("file", new Blob([new Uint8Array(file)]), options?.key ?? "file");
     } else {
-      throw new Error("Invalid file type");
+      throw new ImpresspressError(
+        "invalid_file_type",
+        "Invalid file type: expected a File, Blob, or Buffer",
+      );
     }
 
-    const keyQuery = options?.key ? `?key=${encodeURIComponent(options.key)}` : "";
-    return this.requestFormData(
-      `/b/storage/api/buckets/${encodeURIComponent(bucketName)}/objects${keyQuery}`,
-      formData,
-    );
+    return this.request({
+      method: "POST",
+      url: `/b/storage/api/buckets/${encodeURIComponent(bucketName)}/objects`,
+      data: formData,
+      params: options?.key ? { key: options.key } : undefined,
+      timeout: options?.timeout ?? NO_TIMEOUT,
+      signal: options?.signal,
+    });
   }
 
   /** Delete an object. */
@@ -196,23 +266,29 @@ export class StorageService extends BaseService {
     query: string,
     options?: { page?: number; page_size?: number },
   ): Promise<SearchResult> {
-    const params = { q: query, ...options };
     const result = await this.request<
       RecordListWire<Omit<FileMetadataRecord, "id">>
     >({
       method: "GET",
-      url: `/b/storage/api/search?${this.buildQueryString(params)}`,
+      url: "/b/storage/api/search",
+      params: { q: query, ...options },
     });
     return flattenRecordList(result);
   }
 
   /**
-   * The 20 most recently viewed objects for the current user.
+   * The current user's 20 most recent object views, newest first.
    * `GET /b/storage/api/recent` — takes no query parameters server-side.
+   *
+   * Returns audit rows ([`FileViewRecord`]), not object metadata: the
+   * endpoint pages `impresspress__files__views`, so each item names the
+   * object viewed (`bucket`, `key`) and when, and carries none of the
+   * object's own columns. Read the object's metadata with `search` or
+   * `listObjects` if you need size, content type or upload state.
    */
-  async getRecentFiles(): Promise<SearchResult> {
+  async getRecentFiles(): Promise<RecentViewsResult> {
     const result = await this.request<
-      RecordListWire<Omit<FileMetadataRecord, "id">>
+      RecordListWire<Omit<FileViewRecord, "id">>
     >({
       method: "GET",
       url: "/b/storage/api/recent",

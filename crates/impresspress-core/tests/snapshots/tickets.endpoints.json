@@ -1,0 +1,23 @@
+[
+  "GET /b/tickets/admin admin",
+  "GET /b/tickets/admin/endpoints admin",
+  "GET /b/tickets/admin/settings admin",
+  "GET /b/tickets/admin/tickets admin",
+  "GET /b/tickets/admin/tickets/{id} admin",
+  "GET /b/tickets/admin/types admin",
+  "GET /b/tickets/api/admin/status admin",
+  "GET /b/tickets/api/admin/tickets admin",
+  "GET /b/tickets/api/admin/tickets/{id} admin",
+  "GET /b/tickets/api/admin/tickets/{id}/analyses admin",
+  "GET /b/tickets/api/admin/types admin",
+  "GET /b/tickets/submit public",
+  "GET /b/tickets/submitted public",
+  "PATCH /b/tickets/api/admin/tickets/{id} admin",
+  "PATCH /b/tickets/api/admin/types/{id} admin",
+  "POST /b/tickets/api/admin/retention/prune admin",
+  "POST /b/tickets/api/admin/tickets admin",
+  "POST /b/tickets/api/admin/tickets/{id}/analyses admin",
+  "POST /b/tickets/api/admin/tickets/{id}/notes admin",
+  "POST /b/tickets/api/admin/types admin",
+  "POST /b/tickets/api/submissions public"
+]

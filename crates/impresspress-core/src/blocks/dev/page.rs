@@ -59,7 +59,12 @@ shop_update_product. Show me the live site when you are done.";
 /// Serve the workspace document.
 pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let shell = ui::Shell::simple("Workspace", ui::NavKind::Admin, "Workspace");
-    let markup = ui::shell_document(ctx, msg, shell, body()).await;
+    let markup = match ui::shell_document(ctx, msg, shell, body()).await {
+        Ok(markup) => markup,
+        Err(e) => {
+            return super::no_store_db_error_internal(e, "workspace page: site config read failed")
+        }
+    };
     no_store()
         .set_header("Cross-Origin-Opener-Policy", "same-origin")
         .set_header("Cross-Origin-Embedder-Policy", "credentialless")

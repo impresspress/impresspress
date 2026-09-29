@@ -7,8 +7,8 @@ use wafer_run::{AuthLevel, Block, ErrorCode, OutputStream};
 use super::{
     super::{contracts::OfferStatus, repo, ProductsBlock},
     harness::{
-        admin_create_msg, admin_get_msg, create_msg, ctx_with, dispatch_admin, dispatch_user,
-        get_msg, output_is_error, output_to_html, output_to_json, seed, update_msg,
+        admin_create_msg, admin_get_msg, create_msg, ctx_with, dispatch, get_msg, output_is_error,
+        output_to_html, output_to_json, seed, update_msg,
     },
 };
 
@@ -70,11 +70,11 @@ async fn create_seller_product(
     name: &str,
 ) -> String {
     let (msg, input) = create_msg(
-        "/b/products/products",
+        "/b/products/api/products",
         user_id,
         json!({"name": name, "slug": name.to_lowercase().replace(' ', "-")}),
     );
-    output_to_json(dispatch_user(test_ctx, msg, input).await).await["id"]
+    output_to_json(dispatch(test_ctx, msg, input).await).await["id"]
         .as_str()
         .expect("seller product id")
         .to_string()
@@ -86,11 +86,11 @@ async fn submit_product(
     product_id: &str,
 ) -> Value {
     let (msg, input) = update_msg(
-        &format!("/b/products/products/{product_id}"),
+        &format!("/b/products/api/products/{product_id}"),
         user_id,
         json!({"status": "active"}),
     );
-    output_to_json(dispatch_user(test_ctx, msg, input).await).await
+    output_to_json(dispatch(test_ctx, msg, input).await).await
 }
 
 async fn terminal_error(out: OutputStream) -> wafer_run::WaferError {
@@ -112,24 +112,24 @@ async fn admin_moderation_approves_rejects_and_resubmits_only_ready_sellers() {
     assert_eq!(pending["status"], "pending_review");
     assert_eq!(pending["approval_status"], "pending");
 
-    let path = format!("/admin/b/products/products/{approved_id}/approve");
+    let path = format!("/b/products/api/admin/products/{approved_id}/approve");
     let (msg, input) = admin_create_msg(&path, json!({}));
-    let approved = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    let approved = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(approved["status"], "active");
     assert_eq!(approved["approval_status"], "approved");
     assert!(approved["published_at"].as_str().is_some());
 
     let (msg, input) = admin_create_msg(&path, json!({}));
-    let repeated = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    let repeated = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(repeated["status"], "active");
 
     let rejected_id = create_seller_product(&test_ctx, "maker_ready", "Needs changes").await;
     submit_product(&test_ctx, "maker_ready", &rejected_id).await;
     let (msg, input) = admin_create_msg(
-        &format!("/admin/b/products/products/{rejected_id}/reject"),
+        &format!("/b/products/api/admin/products/{rejected_id}/reject"),
         json!({}),
     );
-    let rejected = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    let rejected = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(rejected["status"], "draft");
     assert_eq!(rejected["approval_status"], "rejected");
     let resubmitted = submit_product(&test_ctx, "maker_ready", &rejected_id).await;
@@ -140,12 +140,12 @@ async fn admin_moderation_approves_rejects_and_resubmits_only_ready_sellers() {
     let blocked_id = create_seller_product(&test_ctx, "maker_not_ready", "Blocked print").await;
     submit_product(&test_ctx, "maker_not_ready", &blocked_id).await;
     let (msg, input) = admin_create_msg(
-        &format!("/admin/b/products/products/{blocked_id}/approve"),
+        &format!("/b/products/api/admin/products/{blocked_id}/approve"),
         json!({}),
     );
     assert!(
         output_is_error(
-            dispatch_admin(&test_ctx, msg, input).await,
+            dispatch(&test_ctx, msg, input).await,
             ErrorCode::AlreadyExists,
         )
         .await
@@ -171,23 +171,23 @@ async fn suspension_archives_catalog_blocks_mutations_and_reactivation_stays_dra
     let published = submit_product(&test_ctx, "maker_governed", &product_id).await;
     assert_eq!(published["status"], "active");
 
-    let offers_path = format!("/b/products/products/{product_id}/offers");
+    let offers_path = format!("/b/products/api/products/{product_id}/offers");
     let (msg, input) = create_msg(&offers_path, "maker_governed", fixed_offer());
-    let offer = output_to_json(dispatch_user(&test_ctx, msg, input).await).await;
+    let offer = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     let offer_id = offer["offer"]["id"].as_str().expect("offer id");
     let (msg, input) = create_msg(
         &format!("{offers_path}/{offer_id}/publish"),
         "maker_governed",
         json!({}),
     );
-    let offer = output_to_json(dispatch_user(&test_ctx, msg, input).await).await;
+    let offer = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(offer["status"], "active");
 
     let (msg, input) = admin_create_msg(
-        "/admin/b/products/sellers/seller_governed/suspend",
+        "/b/products/api/admin/sellers/seller_governed/suspend",
         json!({}),
     );
-    let suspended = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    let suspended = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(suspended["status"], "suspended");
     assert_eq!(suspended["approval_status"], "suspended");
     assert!(
@@ -210,41 +210,41 @@ async fn suspension_archives_catalog_blocks_mutations_and_reactivation_stays_dra
     assert_eq!(offers[0].status, OfferStatus::Archived);
 
     let (msg, input) = update_msg(
-        &format!("/b/products/products/{product_id}"),
+        &format!("/b/products/api/products/{product_id}"),
         "maker_governed",
         json!({"name": "Bypass attempt"}),
     );
     assert!(
         output_is_error(
-            dispatch_user(&test_ctx, msg, input).await,
+            dispatch(&test_ctx, msg, input).await,
             ErrorCode::PermissionDenied,
         )
         .await
     );
     let (msg, input) = create_msg(
-        "/b/products/products",
+        "/b/products/api/products",
         "maker_governed",
         json!({"name": "Second bypass"}),
     );
     assert!(
         output_is_error(
-            dispatch_user(&test_ctx, msg, input).await,
+            dispatch(&test_ctx, msg, input).await,
             ErrorCode::PermissionDenied,
         )
         .await
     );
-    let (msg, input) = get_msg("/b/products/products", "maker_governed");
-    let visible = output_to_json(dispatch_user(&test_ctx, msg, input).await).await;
+    let (msg, input) = get_msg("/b/products/api/products", "maker_governed");
+    let visible = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(
         visible["records"].as_array().expect("owned products").len(),
         1
     );
 
     let (msg, input) = admin_create_msg(
-        "/admin/b/products/sellers/seller_governed/reactivate",
+        "/b/products/api/admin/sellers/seller_governed/reactivate",
         json!({}),
     );
-    let reactivated = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    let reactivated = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(reactivated["status"], "active");
     assert!(
         db::get(&test_ctx, repo::seller_accounts::TABLE, "seller_governed")
@@ -288,23 +288,23 @@ async fn suspended_seller_cannot_issue_refunds() {
     .await;
 
     let (msg, input) = admin_create_msg(
-        "/admin/b/products/sellers/seller_refund_gate/suspend",
+        "/b/products/api/admin/sellers/seller_refund_gate/suspend",
         json!({}),
     );
-    let suspended = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    let suspended = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(suspended["status"], "suspended");
 
     // A platform suspension stops money-moving mutations: issuing a refund
     // is one, and must be rejected like every other gated seller mutation
     // (admins can still refund the buyer via the admin refund route).
     let (msg, input) = create_msg(
-        "/b/products/seller/orders/pur_seller_gate/refund",
+        "/b/products/api/seller/orders/pur_seller_gate/refund",
         "maker_refund_gate",
         json!({}),
     );
     assert!(
         output_is_error(
-            dispatch_user(&test_ctx, msg, input).await,
+            dispatch(&test_ctx, msg, input).await,
             ErrorCode::PermissionDenied,
         )
         .await
@@ -327,7 +327,7 @@ async fn suspended_seller_cannot_restore_their_own_deleted_product() {
     let product_id = create_seller_product(&test_ctx, "maker_restore_gate", "Gated print").await;
 
     let (msg, input) = create_msg(
-        &format!("/b/products/products/{product_id}/restore"),
+        &format!("/b/products/api/products/{product_id}/restore"),
         "maker_restore_gate",
         json!({}),
     );
@@ -336,29 +336,25 @@ async fn suspended_seller_cannot_restore_their_own_deleted_product() {
     // product is live, so this is the "not deleted" 404, not a permission
     // error — a different code from the one asserted after suspension.
     assert!(
-        output_is_error(
-            dispatch_user(&test_ctx, msg, input).await,
-            ErrorCode::NotFound,
-        )
-        .await,
+        output_is_error(dispatch(&test_ctx, msg, input).await, ErrorCode::NotFound,).await,
         "an unsuspended owner must get past the suspension gate"
     );
 
     let (msg, input) = admin_create_msg(
-        "/admin/b/products/sellers/seller_restore_gate/suspend",
+        "/b/products/api/admin/sellers/seller_restore_gate/suspend",
         json!({}),
     );
-    let suspended = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    let suspended = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(suspended["status"], "suspended");
 
     let (msg, input) = create_msg(
-        &format!("/b/products/products/{product_id}/restore"),
+        &format!("/b/products/api/products/{product_id}/restore"),
         "maker_restore_gate",
         json!({}),
     );
     assert!(
         output_is_error(
-            dispatch_user(&test_ctx, msg, input).await,
+            dispatch(&test_ctx, msg, input).await,
             ErrorCode::PermissionDenied,
         )
         .await,
@@ -375,11 +371,11 @@ async fn admin_seller_api_and_pages_expose_owned_products_and_safe_capability_st
     submit_product(&test_ctx, "maker_visible", &product_id).await;
     create_seller_product(&test_ctx, "maker_other", "Other print").await;
 
-    let (msg, input) = admin_get_msg("/admin/b/products/sellers");
-    let list = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    let (msg, input) = admin_get_msg("/b/products/api/admin/sellers");
+    let list = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(list["sellers"].as_array().expect("sellers").len(), 2);
-    let (msg, input) = admin_get_msg("/admin/b/products/sellers/seller_visible");
-    let detail = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    let (msg, input) = admin_get_msg("/b/products/api/admin/sellers/seller_visible");
+    let detail = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(detail["seller"]["user_id"], "maker_visible");
     assert_eq!(detail["products"].as_array().expect("products").len(), 1);
     assert_eq!(detail["products"][0]["id"], product_id);
@@ -409,7 +405,11 @@ async fn admin_seller_api_and_pages_expose_owned_products_and_safe_capability_st
     .await;
     assert!(html.contains("Approve listing"));
     assert!(html.contains("Return to seller"));
-    assert!(html.contains("productManagerModerate"));
+    // The moderation verb the page renders. It used to be the JavaScript
+    // handler name, which was in the HTML only because the manager bundle was
+    // inlined into it; the bundle is an external file now, and the verb is the
+    // page's own half of the contract either way.
+    assert!(html.contains("data-action=\"pm-moderate\""));
 }
 
 #[test]
@@ -456,11 +456,11 @@ async fn activation_validates_merged_values_not_stale_record() {
     seed(&test_ctx, repo::products::TABLE, "prod_legacy_ccy", pd).await;
 
     let (msg, input) = update_msg(
-        "/b/products/products/prod_legacy_ccy",
+        "/b/products/api/products/prod_legacy_ccy",
         "legacy_seller",
         json!({"currency": "NZD", "status": "active"}),
     );
-    let body = output_to_json(dispatch_user(&test_ctx, msg, input).await).await;
+    let body = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(body["currency"], "NZD");
     assert_eq!(body["status"], "active");
 
@@ -474,11 +474,11 @@ async fn activation_validates_merged_values_not_stale_record() {
     seed(&test_ctx, repo::products::TABLE, "prod_stale_ccy", pd).await;
 
     let (msg, input) = update_msg(
-        "/b/products/products/prod_stale_ccy",
+        "/b/products/api/products/prod_stale_ccy",
         "legacy_seller",
         json!({"status": "active"}),
     );
-    let error = terminal_error(dispatch_user(&test_ctx, msg, input).await).await;
+    let error = terminal_error(dispatch(&test_ctx, msg, input).await).await;
     assert!(
         error.message.contains("currency is not allowed"),
         "{}",
@@ -501,7 +501,7 @@ async fn a_seller_cannot_outrun_the_product_cap_by_supplying_deleted_at() {
     .await;
 
     let (msg, input) = create_msg(
-        "/b/products/products",
+        "/b/products/api/products",
         "cap_dodger",
         json!({
             "name": "Invisible to the cap",
@@ -510,7 +510,7 @@ async fn a_seller_cannot_outrun_the_product_cap_by_supplying_deleted_at() {
             "deleted_at": "2020-01-01T00:00:00Z"
         }),
     );
-    let error = terminal_error(dispatch_user(&test_ctx, msg, input).await).await;
+    let error = terminal_error(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(error.code, ErrorCode::InvalidArgument);
     assert!(
         error.message.contains("deleted_at"),
@@ -529,7 +529,7 @@ async fn a_seller_cannot_outrun_the_product_cap_by_supplying_deleted_at() {
     // is refused. It would not be if a `deleted_at` body could land a row the
     // live-only count cannot see.
     let (msg, input) = create_msg(
-        "/b/products/products",
+        "/b/products/api/products",
         "cap_dodger",
         json!({
             "name": "Uses the slot",
@@ -538,13 +538,13 @@ async fn a_seller_cannot_outrun_the_product_cap_by_supplying_deleted_at() {
         }),
     );
     assert!(
-        output_to_json(dispatch_user(&test_ctx, msg, input).await).await["id"]
+        output_to_json(dispatch(&test_ctx, msg, input).await).await["id"]
             .as_str()
             .is_some()
     );
 
     let (msg, input) = create_msg(
-        "/b/products/products",
+        "/b/products/api/products",
         "cap_dodger",
         json!({
             "name": "Over the cap",
@@ -552,7 +552,7 @@ async fn a_seller_cannot_outrun_the_product_cap_by_supplying_deleted_at() {
             "currency": "USD"
         }),
     );
-    let error = terminal_error(dispatch_user(&test_ctx, msg, input).await).await;
+    let error = terminal_error(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(error.code, ErrorCode::InvalidArgument);
     assert!(
         error.message.contains("product limit reached (1)"),
@@ -596,22 +596,22 @@ async fn no_handler_path_can_write_an_empty_deleted_at() {
         "product_template_id": "simple_product",
         "currency": "USD"
     });
-    let (msg, input) = admin_create_msg("/admin/b/products/products", clean.clone());
-    let admin_id = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await["id"]
+    let (msg, input) = admin_create_msg("/b/products/api/admin/products", clean.clone());
+    let admin_id = output_to_json(dispatch(&test_ctx, msg, input).await).await["id"]
         .as_str()
         .expect("admin create")
         .to_string();
-    let (msg, input) = create_msg("/b/products/products", "blank_seller", clean);
-    let user_id = output_to_json(dispatch_user(&test_ctx, msg, input).await).await["id"]
+    let (msg, input) = create_msg("/b/products/api/products", "blank_seller", clean);
+    let user_id = output_to_json(dispatch(&test_ctx, msg, input).await).await["id"]
         .as_str()
         .expect("user create")
         .to_string();
 
     // All four create/update handlers refuse a body naming `deleted_at`, so
     // the column keeps its two-value invariant on every one of them.
-    let (msg, input) = admin_create_msg("/admin/b/products/products", blank.clone());
+    let (msg, input) = admin_create_msg("/b/products/api/admin/products", blank.clone());
     assert_eq!(
-        terminal_error(dispatch_admin(&test_ctx, msg, input).await)
+        terminal_error(dispatch(&test_ctx, msg, input).await)
             .await
             .code,
         ErrorCode::InvalidArgument,
@@ -619,14 +619,14 @@ async fn no_handler_path_can_write_an_empty_deleted_at() {
     );
 
     let (msg, input) = update_msg(
-        &format!("/admin/b/products/products/{admin_id}"),
+        &format!("/b/products/api/admin/products/{admin_id}"),
         "admin_1",
         json!({"deleted_at": ""}),
     );
     let mut msg = msg;
     msg.set_meta("auth.user_roles", "admin");
     assert_eq!(
-        terminal_error(dispatch_admin(&test_ctx, msg, input).await)
+        terminal_error(dispatch(&test_ctx, msg, input).await)
             .await
             .code,
         ErrorCode::InvalidArgument,
@@ -634,9 +634,9 @@ async fn no_handler_path_can_write_an_empty_deleted_at() {
     );
     assert_null(&test_ctx, &admin_id, "admin update").await;
 
-    let (msg, input) = create_msg("/b/products/products", "blank_seller", blank);
+    let (msg, input) = create_msg("/b/products/api/products", "blank_seller", blank);
     assert_eq!(
-        terminal_error(dispatch_user(&test_ctx, msg, input).await)
+        terminal_error(dispatch(&test_ctx, msg, input).await)
             .await
             .code,
         ErrorCode::InvalidArgument,
@@ -644,12 +644,12 @@ async fn no_handler_path_can_write_an_empty_deleted_at() {
     );
 
     let (msg, input) = update_msg(
-        &format!("/b/products/products/{user_id}"),
+        &format!("/b/products/api/products/{user_id}"),
         "blank_seller",
         json!({"deleted_at": ""}),
     );
     assert_eq!(
-        terminal_error(dispatch_user(&test_ctx, msg, input).await)
+        terminal_error(dispatch(&test_ctx, msg, input).await)
             .await
             .code,
         ErrorCode::InvalidArgument,
@@ -688,7 +688,7 @@ async fn admin_seller_policy_is_enforced_by_apis_and_reflected_in_the_wizard() {
     ])
     .await;
     let (msg, input) = create_msg(
-        "/b/products/products",
+        "/b/products/api/products",
         "policy_seller",
         json!({
             "name": "Allowed print",
@@ -697,26 +697,26 @@ async fn admin_seller_policy_is_enforced_by_apis_and_reflected_in_the_wizard() {
             "category": "Art"
         }),
     );
-    let allowed = output_to_json(dispatch_user(&test_ctx, msg, input).await).await;
+    let allowed = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     let product_id = allowed["id"].as_str().expect("allowed product").to_string();
 
     let (msg, input) = update_msg(
-        &format!("/b/products/products/{product_id}"),
+        &format!("/b/products/api/products/{product_id}"),
         "policy_seller",
         json!({"currency": "USD"}),
     );
-    let error = terminal_error(dispatch_user(&test_ctx, msg, input).await).await;
+    let error = terminal_error(dispatch(&test_ctx, msg, input).await).await;
     assert!(error.message.contains("currency is not allowed"));
     let (msg, input) = create_msg(
-        &format!("/b/products/products/{product_id}/duplicate"),
+        &format!("/b/products/api/products/{product_id}/duplicate"),
         "policy_seller",
         json!({}),
     );
-    let error = terminal_error(dispatch_user(&test_ctx, msg, input).await).await;
+    let error = terminal_error(dispatch(&test_ctx, msg, input).await).await;
     assert!(error.message.contains("product limit reached (1)"));
 
     let (msg, input) = create_msg(
-        "/b/products/products",
+        "/b/products/api/products",
         "policy_seller",
         json!({
             "name": "Over limit",
@@ -724,7 +724,7 @@ async fn admin_seller_policy_is_enforced_by_apis_and_reflected_in_the_wizard() {
             "currency": "NZD"
         }),
     );
-    let error = terminal_error(dispatch_user(&test_ctx, msg, input).await).await;
+    let error = terminal_error(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(error.code, ErrorCode::InvalidArgument);
     assert!(error.message.contains("product limit reached (1)"));
 
@@ -745,8 +745,8 @@ async fn admin_seller_policy_is_enforced_by_apis_and_reflected_in_the_wizard() {
             "category is not allowed",
         ),
     ] {
-        let (msg, input) = create_msg("/b/products/products", user_id, body);
-        let error = terminal_error(dispatch_user(&test_ctx, msg, input).await).await;
+        let (msg, input) = create_msg("/b/products/api/products", user_id, body);
+        let error = terminal_error(dispatch(&test_ctx, msg, input).await).await;
         assert_eq!(error.code, ErrorCode::InvalidArgument);
         assert!(error.message.contains(expected), "{}", error.message);
     }
@@ -754,15 +754,15 @@ async fn admin_seller_policy_is_enforced_by_apis_and_reflected_in_the_wizard() {
     let mut usd_offer = fixed_offer();
     usd_offer["currency"] = json!("usd");
     let (msg, input) = create_msg(
-        &format!("/b/products/products/{product_id}/offers"),
+        &format!("/b/products/api/products/{product_id}/offers"),
         "policy_seller",
         usd_offer,
     );
-    let error = terminal_error(dispatch_user(&test_ctx, msg, input).await).await;
+    let error = terminal_error(dispatch(&test_ctx, msg, input).await).await;
     assert!(error.message.contains("currency is not allowed"));
 
     let (msg, input) = admin_create_msg(
-        "/admin/b/products/products",
+        "/b/products/api/admin/products",
         json!({
             "name": "Unrestricted platform product",
             "product_template_id": "configurable_product",
@@ -771,7 +771,7 @@ async fn admin_seller_policy_is_enforced_by_apis_and_reflected_in_the_wizard() {
         }),
     );
     assert!(
-        output_to_json(dispatch_admin(&test_ctx, msg, input).await).await["id"]
+        output_to_json(dispatch(&test_ctx, msg, input).await).await["id"]
             .as_str()
             .is_some()
     );

@@ -11,6 +11,7 @@ use wafer_core::clients::database::Record;
 use wafer_run::{context::Context, Message, OutputStream};
 
 use crate::{
+    blocks::crud,
     http::redirect,
     ui::{icons, sidebar::nav_icon, SiteConfig, UserInfo},
     util::RecordExt,
@@ -29,8 +30,18 @@ pub async fn dashboard_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         return redirect(302, "/b/auth/login");
     }
 
-    let buttons = load_buttons(ctx).await;
-    let config = SiteConfig::load(ctx).await;
+    // The app tiles are this page's one read. Rendering without them would
+    // look like "no apps configured", so a failed read is an error page.
+    let buttons = match load_buttons(ctx).await {
+        Ok(buttons) => buttons,
+        Err(e) => return crud::db_error_page(msg, e, "userportal dashboard: buttons read failed"),
+    };
+    let config = match SiteConfig::load(ctx).await {
+        Ok(site) => site,
+        Err(e) => {
+            return crate::blocks::crud::db_error_page(msg, e, "page: site config read failed")
+        }
+    };
     let is_admin = UserInfo::from_message(msg).is_some_and(|u| u.is_admin());
 
     let body = html! {
@@ -69,16 +80,16 @@ fn nav_link(href: &str, icon: Markup, label: &str) -> Markup {
     }
 }
 
-async fn load_buttons(ctx: &dyn Context) -> Vec<DashboardButton> {
-    super::super::load_buttons(ctx)
-        .await
+async fn load_buttons(ctx: &dyn Context) -> Result<Vec<DashboardButton>, wafer_run::WaferError> {
+    Ok(super::super::load_buttons(ctx)
+        .await?
         .into_iter()
         .map(|r: Record| DashboardButton {
             label: r.str_field("label").to_string(),
             icon: r.str_field("icon").to_string(),
             path: r.str_field("path").to_string(),
         })
-        .collect()
+        .collect())
 }
 
 #[cfg(test)]
@@ -91,6 +102,7 @@ mod tests {
     use super::*;
     use crate::{
         blocks::userportal::UserPortalBlock,
+        config_vars::DEFAULT_APP_NAME,
         test_support::{
             anon_msg, auth_msg, output_header, output_html, output_status, TestContext,
         },
@@ -103,21 +115,7 @@ mod tests {
     }
 
     async fn seed_user(ctx: &TestContext, user_id: &str) {
-        db::exec_raw(
-            ctx,
-            "INSERT INTO wafer_run__auth__users (id, email, display_name, role, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?)",
-            &[
-                json!(user_id),
-                json!(format!("{user_id}@example.com")),
-                json!(user_id),
-                json!("user"),
-                json!("2026-01-01T00:00:00Z"),
-                json!("2026-01-01T00:00:00Z"),
-            ],
-        )
-        .await
-        .unwrap();
+        ctx.seed_auth_user(user_id).await;
     }
 
     fn button_data(
@@ -212,6 +210,32 @@ mod tests {
         assert!(html.contains("Files") && html.contains("/b/storage/"));
     }
 
+    /// An unreadable buttons table is the 500 page, not an account card
+    /// with the app tiles silently missing.
+    #[tokio::test]
+    async fn a_failed_buttons_read_is_a_500_not_a_card_without_tiles() {
+        let ctx = ctx_with_userportal().await;
+        seed_user(&ctx, "user-a").await;
+        db::create(
+            &ctx,
+            "impresspress__userportal__buttons",
+            button_data("Files", "folder", "/b/storage/", 0),
+        )
+        .await
+        .unwrap();
+        let ctx = ctx.break_list_reads();
+
+        let (status, html) = crate::blocks::userportal::test_support::browser_request(
+            &ctx,
+            auth_msg("retrieve", "/b/userportal/", "user-a"),
+            "",
+        )
+        .await;
+
+        assert_eq!(status, 500);
+        assert!(!html.contains("account-nav"), "{html}");
+    }
+
     #[tokio::test]
     async fn no_apps_omits_divider() {
         let ctx = ctx_with_userportal().await;
@@ -269,7 +293,7 @@ mod tests {
             "blank LOGO_URL must fall back to the app-name lockup; header was: {head}"
         );
         assert!(
-            head.contains("Impresspress"),
+            head.contains(DEFAULT_APP_NAME),
             "the fallback must name the site; header was: {head}"
         );
     }

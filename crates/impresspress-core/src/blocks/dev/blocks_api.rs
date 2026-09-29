@@ -60,7 +60,7 @@ use super::{
     blobs::sha256_hex,
     contracts::{ActivationResponse, StageBuildRequest, StageBuildResponse},
     control::DynamicBlockSpec,
-    generation, no_store, no_store_error, paths,
+    generation, no_store, no_store_db_error_internal, no_store_error, paths,
     repo::{
         self,
         builds::{BuildStatus, NewBuild},
@@ -69,7 +69,7 @@ use super::{
     validation::{self, Diagnostic},
     DevShared,
 };
-use crate::{blocks::crud, http::err_internal};
+use crate::blocks::crud;
 
 // ---------------------------------------------------------------------------
 // Staging
@@ -127,7 +127,7 @@ pub async fn handle_stage(
     // The third pre-execution refusal, for the same reason as the other two:
     // a module built against a different `wafer_guest.rs` is not a module
     // this runtime's ABI describes, and loading it would turn a one-line
-    // "rescaffold and recompile" into a trap inside wasmi. A request that
+    // "replace the module and recompile" into a trap inside wasmi. A request that
     // reports no version at all is a compiler that could not read the file;
     // it is recorded as `0` further down and nothing is checked.
     if let Some(reported) = request.wafer_guest_version {
@@ -142,14 +142,16 @@ pub async fn handle_stage(
 
     match stage(ctx, shared, &request, &artifact).await {
         Ok(response) => response,
-        Err(e) => err_internal("dev build stage", e),
+        Err(e) => no_store_db_error_internal(e, "dev build stage"),
     }
 }
 
 /// The part of staging that can fail on storage or the ledger.
 ///
-/// Split out so every `?` is a `500` with a correlation id, and the handler
-/// above is only the shape of the refusals that are *results*.
+/// Split out so every `?` is classified in one place by the handler above
+/// (`super::no_store_db_error_internal`: a WRAP denial is a `403`, a quota a
+/// `429`, anything else a `500` with a correlation id), and the handler is
+/// otherwise only the shape of the refusals that are *results*.
 async fn stage(
     ctx: &dyn Context,
     shared: &DevShared,
@@ -464,7 +466,7 @@ pub async fn handle_remove(ctx: &dyn Context, shared: &DevShared, msg: &Message)
     }
     match remove(ctx, shared, &name).await {
         Ok(response) => response,
-        Err(e) => err_internal("dev block remove", e),
+        Err(e) => no_store_db_error_internal(e, "dev block remove"),
     }
 }
 

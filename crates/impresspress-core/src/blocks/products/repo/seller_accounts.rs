@@ -11,17 +11,81 @@ use wafer_core::clients::database as db;
 use wafer_run::{context::Context, ErrorCode, WaferError};
 
 use crate::{
-    blocks::products::contracts::{ApprovalStatus, SellerAccount, SellerCapabilities},
-    util::RecordExt,
+    blocks::products::contracts::{
+        SellerAccount, SellerApproval, SellerCapabilities, SellerStatus,
+    },
+    db_read::{self, CappedList},
+    util::{enum_column, wire_str, RecordExt},
 };
 
 pub(crate) const TABLE: &str = "impresspress__products__seller_accounts";
+
+/// The seller-status ladder, computed once.
+///
+/// `set_admin_suspended`, `sync_account` and `sync_account_event` each held
+/// a verbatim copy of this `if` chain, reading the same three facts from
+/// three different places (an argument, the stored row, a merged snapshot).
+/// Three copies of a five-value ladder is three chances to add a state to
+/// one of them; the callers now differ only in where the three booleans
+/// come from.
+///
+/// `suspended` outranks everything: an administrator's suspension survives
+/// any capability change Stripe reports. Below it, charges enabled means
+/// the seller can be paid; details submitted without charges means Stripe
+/// is still deciding; neither means onboarding has not finished.
+/// [`SellerStatus::NotStarted`] is deliberately unreachable from here — it
+/// is the value `ensure_for_user` inserts before any Connect account
+/// exists, and no snapshot can put a row back into it.
+pub(crate) const fn ladder(
+    suspended: bool,
+    charges_enabled: bool,
+    details_submitted: bool,
+) -> SellerStatus {
+    if suspended {
+        SellerStatus::Suspended
+    } else if charges_enabled {
+        SellerStatus::Active
+    } else if details_submitted {
+        SellerStatus::Restricted
+    } else {
+        SellerStatus::Onboarding
+    }
+}
+
+/// The published approval state for a stored [`SellerStatus`].
+///
+/// The whole of `SellerAccount.approval_status`: a suspended account is
+/// suspended, every other state is approved. It was written inline as a
+/// ternary over a string comparison and typed as the five-variant
+/// `ApprovalStatus`, which describes the *product* moderation column;
+/// three of those five could never be produced here.
+pub(crate) const fn approval_from_status(status: SellerStatus) -> SellerApproval {
+    match status {
+        SellerStatus::Suspended => SellerApproval::Suspended,
+        SellerStatus::NotStarted
+        | SellerStatus::Onboarding
+        | SellerStatus::Restricted
+        | SellerStatus::Active => SellerApproval::Approved,
+    }
+}
+
+/// The `status` column of a seller row, as the enum that defines it.
+fn status_of(record: &db::Record) -> Result<SellerStatus, WaferError> {
+    enum_column(record, "status")
+}
+
+/// Whether the stored row is suspended.
+///
+/// The ladder's first argument, and the one question three call sites
+/// outside this module ask of a seller row they already hold.
+pub(crate) fn is_suspended_record(record: &db::Record) -> Result<bool, WaferError> {
+    Ok(status_of(record)? == SellerStatus::Suspended)
+}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct ReadySellerAccount {
     pub id: String,
     pub stripe_account_id: String,
-    pub fee_basis_points: u16,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -59,43 +123,140 @@ fn due_requirements(value: &Value) -> Vec<String> {
         .collect()
 }
 
-pub(crate) fn to_contract(record: &db::Record) -> Result<SellerAccount, WaferError> {
-    let fee_basis_points = u32::try_from(record.i64_field("fee_basis_points"))
-        .ok()
-        .filter(|value| *value <= 10_000)
-        .ok_or_else(|| {
-            WaferError::new(
-                ErrorCode::Internal,
-                "seller account has an invalid application fee",
-            )
-        })?;
-    let requirements = requirements_value(record);
-    let suspended = record.str_field("status") == "suspended";
-    Ok(SellerAccount {
-        id: record.id.clone(),
-        user_id: record.str_field("user_id").to_string(),
-        status: record.str_field("status").to_string(),
-        approval_status: if suspended {
-            ApprovalStatus::Suspended
-        } else {
-            ApprovalStatus::Approved
-        },
-        stripe_account_id: record.str_field("stripe_account_id").to_string(),
-        capabilities: SellerCapabilities {
-            details_submitted: record.bool_field("details_submitted"),
-            charges_enabled: record.bool_field("charges_enabled"),
-            payouts_enabled: record.bool_field("payouts_enabled"),
-            requirements_due: due_requirements(&requirements),
-        },
-        fee_basis_points,
-        livemode: record.bool_field("livemode"),
-        country: record.str_field("country").to_string(),
-        default_currency: record.str_field("default_currency").to_string(),
-        dashboard_type: record.str_field("dashboard_type").to_string(),
-        disabled_reason: record.str_field("requirements_disabled_reason").to_string(),
-        sync_error: record.str_field("sync_error").to_string(),
-        last_synced_at: record.str_field("last_synced_at").to_string(),
-    })
+/// Everything a stored seller row says about the account, decoded.
+///
+/// [`SellerAccount`] minus its `fee_basis_points`: the fee is a platform
+/// setting ([`crate::blocks::products::config::seller_fee_bps`]), not a fact
+/// about the row, so a surface that must render even when that setting cannot
+/// be read — the admin seller pages, where the suspend control lives — works
+/// from this and never has to invent a number. [`SellerRow::into_contract`]
+/// adds the fee for everything that publishes the contract.
+///
+/// The table's `fee_basis_points` column is neither read nor written: no path
+/// ever changed it after a row's first insert, so what it holds is not what
+/// anyone is charged.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct SellerRow {
+    pub id: String,
+    pub user_id: String,
+    pub status: SellerStatus,
+    pub approval_status: SellerApproval,
+    pub stripe_account_id: String,
+    pub capabilities: SellerCapabilities,
+    pub livemode: bool,
+    pub country: String,
+    pub default_currency: String,
+    pub dashboard_type: String,
+    pub disabled_reason: String,
+    pub sync_error: String,
+    pub last_synced_at: String,
+}
+
+impl SellerRow {
+    /// Decode a stored row. Fails only on a `status` outside the contract.
+    pub(crate) fn from_record(record: &db::Record) -> Result<Self, WaferError> {
+        let requirements = requirements_value(record);
+        let status = status_of(record)?;
+        Ok(Self {
+            id: record.id.clone(),
+            user_id: record.str_field("user_id").to_string(),
+            status,
+            approval_status: approval_from_status(status),
+            stripe_account_id: record.str_field("stripe_account_id").to_string(),
+            capabilities: SellerCapabilities {
+                details_submitted: record.bool_field("details_submitted"),
+                charges_enabled: record.bool_field("charges_enabled"),
+                payouts_enabled: record.bool_field("payouts_enabled"),
+                requirements_due: due_requirements(&requirements),
+            },
+            livemode: record.bool_field("livemode"),
+            country: record.str_field("country").to_string(),
+            default_currency: record.str_field("default_currency").to_string(),
+            dashboard_type: record.str_field("dashboard_type").to_string(),
+            disabled_reason: record.str_field("requirements_disabled_reason").to_string(),
+            sync_error: record.str_field("sync_error").to_string(),
+            last_synced_at: record.str_field("last_synced_at").to_string(),
+        })
+    }
+
+    /// The published [`SellerAccount`], carrying `fee_basis_points` as the
+    /// caller read it from the platform setting.
+    pub(crate) fn into_contract(self, fee_basis_points: u16) -> SellerAccount {
+        SellerAccount {
+            id: self.id,
+            user_id: self.user_id,
+            status: self.status,
+            approval_status: self.approval_status,
+            stripe_account_id: self.stripe_account_id,
+            capabilities: self.capabilities,
+            fee_basis_points: fee_basis_points.into(),
+            livemode: self.livemode,
+            country: self.country,
+            default_currency: self.default_currency,
+            dashboard_type: self.dashboard_type,
+            disabled_reason: self.disabled_reason,
+            sync_error: self.sync_error,
+            last_synced_at: self.last_synced_at,
+        }
+    }
+}
+
+/// The stored row as the published [`SellerAccount`]: [`SellerRow`] plus
+/// the platform fee the caller read.
+pub(crate) fn to_contract(
+    record: &db::Record,
+    fee_basis_points: u16,
+) -> Result<SellerAccount, WaferError> {
+    Ok(SellerRow::from_record(record)?.into_contract(fee_basis_points))
+}
+
+/// Seller accounts as decoded [`SellerRow`]s, and whether there are more
+/// than the read returned.
+///
+/// The admin seller list (`GET /b/products/api/admin/sellers`) and the admin
+/// sellers page rendered this from two verbatim copies of the same read plus
+/// the projection; a decode failure on any row is an error for the whole read,
+/// because a seller list missing the row that could not be decoded is a
+/// governance surface that silently hides an account.
+///
+/// The table holds one row per selling user, so it grows with the platform.
+/// That is why the read is capped rather than unpaged-and-hopeful: the same
+/// argument that makes an undecodable row fatal makes a silently dropped tail
+/// unacceptable, so the caller is handed the fact that it has a prefix.
+pub(crate) async fn list_rows(ctx: &dyn Context) -> Result<CappedList<SellerRow>, WaferError> {
+    db_read::list_capped(ctx, TABLE, vec![])
+        .await?
+        .try_map(|record| SellerRow::from_record(&record))
+}
+
+/// How many seller accounts exist, for the listing that shows a prefix.
+pub(crate) async fn count_all(ctx: &dyn Context) -> Result<i64, WaferError> {
+    db::count(ctx, TABLE, &[]).await
+}
+
+/// One seller account by its local id, as the stored row. `Ok(None)` when
+/// there is no such row.
+///
+/// Kept alongside [`get_row`] for the one caller — suspension — that
+/// must be able to act on a row whose contract projection would fail: an
+/// account whose stored `status` no longer decodes is exactly the one an
+/// operator most needs to be able to suspend.
+pub(crate) async fn get(ctx: &dyn Context, id: &str) -> Result<Option<db::Record>, WaferError> {
+    match db::get(ctx, TABLE, id).await {
+        Ok(record) => Ok(Some(record)),
+        Err(error) if error.code == ErrorCode::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
+}
+
+/// One seller account by its local id, decoded. `Ok(None)` when there is no
+/// such row, so a caller can answer 404 without matching on an error code.
+pub(crate) async fn get_row(ctx: &dyn Context, id: &str) -> Result<Option<SellerRow>, WaferError> {
+    match db::get(ctx, TABLE, id).await {
+        Ok(record) => SellerRow::from_record(&record).map(Some),
+        Err(error) if error.code == ErrorCode::NotFound => Ok(None),
+        Err(error) => Err(error),
+    }
 }
 
 pub(crate) async fn get_for_user(
@@ -110,9 +271,10 @@ pub(crate) async fn get_for_user(
 }
 
 pub(crate) async fn is_suspended(ctx: &dyn Context, user_id: &str) -> Result<bool, WaferError> {
-    Ok(get_for_user(ctx, user_id)
-        .await?
-        .is_some_and(|record| record.str_field("status") == "suspended"))
+    match get_for_user(ctx, user_id).await? {
+        Some(record) => is_suspended_record(&record),
+        None => Ok(false),
+    }
 }
 
 pub(crate) async fn get_by_stripe_account(
@@ -140,15 +302,11 @@ pub(crate) async fn set_admin_suspended(
 ) -> Result<db::Record, WaferError> {
     let current = db::get(ctx, TABLE, local_id).await?;
     let now = chrono::Utc::now().to_rfc3339();
-    let status = if suspended {
-        "suspended"
-    } else if current.bool_field("charges_enabled") {
-        "active"
-    } else if current.bool_field("details_submitted") {
-        "restricted"
-    } else {
-        "onboarding"
-    };
+    let status = ladder(
+        suspended,
+        current.bool_field("charges_enabled"),
+        current.bool_field("details_submitted"),
+    );
     db::update(
         ctx,
         TABLE,
@@ -172,7 +330,6 @@ pub(crate) async fn set_admin_suspended(
 pub(crate) async fn ensure_for_user(
     ctx: &dyn Context,
     user_id: &str,
-    fee_basis_points: u16,
 ) -> Result<db::Record, WaferError> {
     let digest = wafer_block::hash::sha256_hex(user_id.as_bytes());
     let id = format!("seller_{}", &digest[..32]);
@@ -183,10 +340,9 @@ pub(crate) async fn ensure_for_user(
         vec![
             ("id".to_string(), serde_json::json!(&id)),
             ("user_id".to_string(), serde_json::json!(user_id)),
-            ("status".to_string(), serde_json::json!("not_started")),
             (
-                "fee_basis_points".to_string(),
-                serde_json::json!(fee_basis_points),
+                "status".to_string(),
+                serde_json::json!(SellerStatus::NotStarted),
             ),
             ("created_at".to_string(), serde_json::json!(&now)),
             ("updated_at".to_string(), serde_json::json!(&now)),
@@ -204,15 +360,11 @@ pub(crate) async fn sync_account(
     snapshot: &StripeSellerSnapshot,
 ) -> Result<db::Record, WaferError> {
     let current = db::get(ctx, TABLE, local_id).await?;
-    let status = if current.str_field("status") == "suspended" {
-        "suspended"
-    } else if snapshot.charges_enabled {
-        "active"
-    } else if snapshot.details_submitted {
-        "restricted"
-    } else {
-        "onboarding"
-    };
+    let status = ladder(
+        is_suspended_record(&current)?,
+        snapshot.charges_enabled,
+        snapshot.details_submitted,
+    );
     let now = chrono::Utc::now().to_rfc3339();
     db::update(
         ctx,
@@ -352,15 +504,11 @@ pub(crate) async fn sync_account_event(
         } else {
             &snapshot.disabled_reason
         };
-        let status = if current.str_field("status") == "suspended" {
-            "suspended"
-        } else if charges_enabled {
-            "active"
-        } else if details_submitted {
-            "restricted"
-        } else {
-            "onboarding"
-        };
+        let status = ladder(
+            is_suspended_record(&current)?,
+            charges_enabled,
+            details_submitted,
+        );
         let now = chrono::Utc::now().to_rfc3339();
         let rows = db::update_by_filters_count(
             ctx,
@@ -379,7 +527,7 @@ pub(crate) async fn sync_account_event(
                 Filter {
                     field: "status".to_string(),
                     operator: FilterOp::Equal,
-                    value: serde_json::json!(current.str_field("status")),
+                    value: serde_json::json!(wire_str(&status_of(&current)?)),
                 },
                 Filter {
                     field: "charges_enabled".to_string(),
@@ -475,6 +623,9 @@ pub(crate) async fn mark_sync_error(
 
 /// Resolve the connected account used for direct charges. Capability state
 /// is checked at checkout time, so disabling charges in Stripe fails closed.
+///
+/// `FailedPrecondition` is the one answer about the seller — no account, or
+/// one that cannot take charges yet. Any other error is a fault reading it.
 pub(crate) async fn ready_for_user(
     ctx: &dyn Context,
     user_id: &str,
@@ -486,7 +637,7 @@ pub(crate) async fn ready_for_user(
         )
     })?;
     let stripe_account_id = record.str_field("stripe_account_id").to_string();
-    if record.str_field("status") != "active"
+    if status_of(&record)? != SellerStatus::Active
         || !record.bool_field("charges_enabled")
         || stripe_account_id.is_empty()
     {
@@ -495,18 +646,8 @@ pub(crate) async fn ready_for_user(
             "seller Stripe account is not ready to accept charges",
         ));
     }
-    let fee_basis_points = u16::try_from(record.i64_field("fee_basis_points"))
-        .ok()
-        .filter(|value| *value <= 10_000)
-        .ok_or_else(|| {
-            WaferError::new(
-                ErrorCode::Internal,
-                "seller account has an invalid application fee",
-            )
-        })?;
     Ok(ReadySellerAccount {
         id: record.id,
         stripe_account_id,
-        fee_basis_points,
     })
 }

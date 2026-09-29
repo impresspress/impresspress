@@ -1,4 +1,7 @@
-import { test, expect } from '@playwright/test';
+import { readFileSync } from 'node:fs';
+import { fileURLToPath } from 'node:url';
+
+import { test, expect, type BrowserContext, type Page } from '@playwright/test';
 import { MODEL_CONTEXT_POLYFILL } from './fixtures/model-context-polyfill';
 
 /**
@@ -246,4 +249,133 @@ test('a cold visitor gets WebMCP tools without a reload', async ({ page }) => {
     return t.length > 0 ? t.map((x) => x.name) : null;
   }, null, { timeout: 10_000 });
   expect(await names.jsonValue()).toContain('list_products');
+});
+
+// ── Migrations across service-worker restarts ───────────────────────────────
+//
+// The vendored sql.js the worker runs, loaded into the PAGE so a test can edit
+// the OPFS database while the worker is stopped. Inlined rather than fetched:
+// the page is controlled, so any fetch would start the worker again, and a
+// running worker flushes its own copy over the edit. The ESM build's one
+// `export default` becomes a global so it can go in as a classic script.
+const VENDOR = new URL('../../../impresspress-bundle/assets/vendor/', import.meta.url);
+const SQL_JS_SOURCE = readFileSync(fileURLToPath(new URL('sql-wasm-esm.js', VENDOR)), 'utf8')
+  .replace(/export default _sqlJs;\s*$/, 'globalThis.__initSqlJs = _sqlJs;');
+const SQL_WASM_BASE64 = readFileSync(fileURLToPath(new URL('sql-wasm.wasm', VENDOR))).toString('base64');
+
+const ADMIN = 'impresspress/admin';
+// Created by admin's 001 with `IF NOT EXISTS`, so re-applying the set brings
+// it back, and nothing reads it: dropping it is a harmless marker.
+const MARKER_INDEX = 'impresspress__admin__request_logs_created_at_idx';
+
+/** Worker-console lines the test reads: runtime starts, and SQLite's
+ * duplicate-column refusals — which only a migration re-run produces. */
+function watchWorker(context: BrowserContext) {
+  const seen = { starts: 0, duplicateColumns: [] as string[] };
+  context.on('console', (msg) => {
+    if (msg.page() !== null) return;
+    const text = msg.text();
+    if (text.includes('impresspress: WAFER runtime started')) seen.starts += 1;
+    if (/duplicate column name/i.test(text)) seen.duplicateColumns.push(text);
+  });
+  return seen;
+}
+
+/** Stop every service worker, as a browser does with an idle one. */
+async function stopWorkers(page: Page) {
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('ServiceWorker.enable');
+  await cdp.send('ServiceWorker.stopAllWorkers');
+  await cdp.detach();
+}
+
+/** Reload, and wait until a NEW worker has booted a runtime and served the
+ * login page — the start count is what proves the reload did not land on a
+ * worker that survived `stopWorkers`. */
+async function bootAgain(page: Page, seen: { starts: number }) {
+  const before = seen.starts;
+  await page.reload({ waitUntil: 'commit' });
+  await expect(page.locator('input#email')).toBeVisible({ timeout: 30_000 });
+  await expect.poll(() => seen.starts, { timeout: 30_000 }).toBe(before + 1);
+}
+
+/** Run `statements` against the OPFS database, in the page, while no worker
+ * is running; answer admin's recorded migration hash and whether the marker
+ * index exists. */
+async function onStoredDatabase(page: Page, statements: string[]) {
+  await page.addScriptTag({ content: SQL_JS_SOURCE });
+  return page.evaluate(
+    async ({ wasm, statements, admin, marker }) => {
+      const bytes = Uint8Array.from(atob(wasm), (c) => c.charCodeAt(0));
+      const init = (globalThis as unknown as { __initSqlJs: (c: object) => Promise<any> }).__initSqlJs;
+      const SQL = await init({ wasmBinary: bytes });
+      const root = await navigator.storage.getDirectory();
+      const handle = await root.getFileHandle('impresspress.db');
+      const db = new SQL.Database(new Uint8Array(await (await handle.getFile()).arrayBuffer()));
+      for (const sql of statements) db.run(sql);
+      if (statements.length > 0) {
+        const writable = await handle.createWritable();
+        await writable.write(db.export());
+        await writable.close();
+      }
+      const hash = db.exec(
+        'SELECT current_hash FROM impresspress__admin__block_settings WHERE block_name = ?',
+        [admin],
+      )[0]?.values[0]?.[0] as string | undefined;
+      const index = db.exec("SELECT 1 FROM sqlite_master WHERE type = 'index' AND name = ?", [marker]);
+      db.close();
+      return { hash, markerIndex: index.length > 0 };
+    },
+    { wasm: SQL_WASM_BASE64, statements, admin: ADMIN, marker: MARKER_INDEX },
+  );
+}
+
+test('a changed migration applies once, and a restart re-runs nothing', async ({ page, context }) => {
+  // A browser install's migrations run inside every block's `lifecycle(Init)`,
+  // gated on the hash recorded in `block_settings`. Two ways that gate went
+  // wrong, one per half of this test:
+  //
+  // - The runtime used to be built before that state was read, so every boot
+  //   looked like a fresh install and re-ran every block's whole set — the
+  //   "duplicate column name" warnings in the worker console (admin's ADD
+  //   COLUMNs), seen live on the dev sandbox.
+  // - Read the state but give no consent, and the gate treats a changed hash
+  //   as drift an operator must bless — which nobody can do in a browser, so
+  //   an install created by an older bundle would keep its schema forever.
+  //
+  // A "bundle with a new migration" is staged by rewinding what the database
+  // records instead: admin's hash set to one this bundle does not have, as an
+  // older bundle would have left it, and one of admin's indexes dropped so
+  // that re-applying the set is visible in the schema itself.
+  const seen = watchWorker(context);
+
+  // Boot 1: a fresh profile.
+  await page.goto('/', { waitUntil: 'commit' });
+  await page.waitForURL(/\/b\/auth\/login/, { timeout: 30_000 });
+  await expect(page.locator('input#email')).toBeVisible();
+  await expect.poll(() => seen.starts, { timeout: 30_000 }).toBe(1);
+
+  await stopWorkers(page);
+  const fresh = await onStoredDatabase(page, [
+    `UPDATE impresspress__admin__block_settings SET current_hash = 'older-bundle', ` +
+      `blessed_hash = 'older-bundle' WHERE block_name = '${ADMIN}'`,
+    `DROP INDEX ${MARKER_INDEX}`,
+  ]);
+  expect(fresh).toEqual({ hash: 'older-bundle', markerIndex: false });
+
+  // Boot 2: the changed set applies, and is recorded as applied.
+  await bootAgain(page, seen);
+  await stopWorkers(page);
+  const upgraded = await onStoredDatabase(page, []);
+  expect(upgraded.markerIndex, 'admin\'s changed migrations were not applied').toBe(true);
+  expect(upgraded.hash).toMatch(/^[0-9a-f]{64}$/);
+  // Re-applying admin's set re-runs its ADD COLUMNs, so this boot warned.
+  expect(seen.duplicateColumns.length).toBeGreaterThan(0);
+
+  // Boot 3: nothing changed, so nothing re-runs.
+  seen.duplicateColumns.length = 0;
+  await bootAgain(page, seen);
+  await stopWorkers(page);
+  expect(await onStoredDatabase(page, [])).toEqual(upgraded);
+  expect(seen.duplicateColumns).toEqual([]);
 });

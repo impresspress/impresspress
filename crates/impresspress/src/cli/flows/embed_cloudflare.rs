@@ -6,7 +6,8 @@ use std::path::Path;
 use anyhow::{bail, Result};
 
 use crate::cli::helpers::cloudflare::{
-    assets, build as cf_build, deploy as cf_deploy, env, profile_check, wrangler,
+    assets, build as cf_build, deploy as cf_deploy, env, first_create, password_hasher,
+    profile_check, wrangler,
 };
 
 pub async fn build(repo_root: &Path, release: bool) -> Result<()> {
@@ -29,8 +30,21 @@ pub async fn build(repo_root: &Path, release: bool) -> Result<()> {
 
     let wrangler_path = wrangler::generate(&cfg, repo_root, &out_dir)?;
     println!("-> {}", wrangler_path.display());
+    let hasher_path = wrangler::generate_password_hasher(&cfg, &out_dir)?;
+    println!("-> {}", hasher_path.display());
 
     cf_build::run(repo_root, release).await?;
+
+    // The password-hasher Worker the main Worker's crypto service calls: its
+    // own crate, staged against the consumer's `impresspress-password`.
+    let hasher_wasm = password_hasher::build(repo_root).await?;
+    if let Ok(meta) = std::fs::metadata(&hasher_wasm) {
+        println!(
+            "-> password-hasher Worker {} ({:.1} KB)",
+            hasher_wasm.display(),
+            meta.len() as f64 / 1024.0
+        );
+    }
 
     // Post-build: measure the produced WASM. Warns if it's likely to
     // exceed the Workers startup-CPU cap on cold-start.
@@ -73,6 +87,7 @@ pub async fn serve(repo_root: &Path, release: bool, port: Option<u16>) -> Result
 
     let out_dir = repo_root.join("target/impresspress-cloudflare");
     let wrangler_toml = out_dir.join("wrangler.toml");
+    let hasher_toml = out_dir.join(wrangler::PASSWORD_HASHER_CONFIG_FILE);
 
     // Ephemeral deploy token for this serve session: lets us drive the same
     // /_deploy/init funnel a production deploy uses (migrations + seeds,
@@ -85,7 +100,13 @@ pub async fn serve(repo_root: &Path, release: bool, port: Option<u16>) -> Result
     // `wrangler dev` is a long-running child: spawn (not status) so we can
     // POST the init funnel once it is up, then wait for it.
     let mut dev = tokio::process::Command::new("wrangler");
-    dev.args(["dev", "--config"]).arg(&wrangler_toml);
+    // Both Workers in one session, the main one first (it serves the port):
+    // the main Worker's Durable Object binding names the hasher's script,
+    // which `wrangler dev` resolves to the second config.
+    dev.args(["dev", "--config"])
+        .arg(&wrangler_toml)
+        .arg("--config")
+        .arg(&hasher_toml);
     let local_port = port.unwrap_or(8787);
     dev.args(["--port", &local_port.to_string()]);
     dev.args([
@@ -211,12 +232,24 @@ async fn wait_and_run_local_init(
 pub async fn deploy(repo_root: &Path, release: bool) -> Result<()> {
     let cfg = env::load(repo_root)?;
     let token_key = impresspress_core::config_vars::DEPLOY_TOKEN_KEY;
-    let deploy_token = std::env::var(token_key).map_err(|_| {
-        anyhow::anyhow!(
-            "{token_key} is not set. Provision it with `impresspress deploy secret` \
-             (or `wrangler secret put {token_key}`) and export it for deploys."
-        )
-    })?;
+
+    // Before the build: does the main Worker exist yet? A site's first deploy
+    // creates it (step 0a below); any later one needs the operator's deploy
+    // token, and is refused here, not after minutes of building, without it.
+    // An existing Worker missing either deploy secret (a first deploy that
+    // stopped part-way) is given it here.
+    let wrangler_cli = first_create::Wrangler::default();
+    let placeholder_toml =
+        first_create::generate_placeholder(&cfg, &repo_root.join(first_create::FIRST_CREATE_DIR))?;
+    let worker_secrets =
+        first_create::resolve_worker_secrets(|name| std::env::var(name).ok(), random_secret_bytes)?;
+    let main_worker = first_create::plan_main_worker(
+        &wrangler_cli,
+        &placeholder_toml,
+        &cfg.worker_name,
+        &worker_secrets,
+        std::env::var(token_key).ok(),
+    )?;
 
     build(repo_root, release).await?;
 
@@ -226,7 +259,7 @@ pub async fn deploy(repo_root: &Path, release: bool) -> Result<()> {
     // that build through a second, upload-only config. This prevents
     // either `versions upload` from compiling the Rust worker a second time.
     let assets_root = out_dir.join("assets");
-    let release_assets = assets::ReleaseManifest::from_staged_dir(&assets_root)?;
+    let release_assets = assets::release_manifest_from_staged_dir(&assets_root)?;
     let wasm_path = repo_root.join("build/index_bg.wasm");
     let wasm_sha256 = cf_deploy::artifact_sha256(&wasm_path)?;
     let application_identity =
@@ -238,6 +271,62 @@ pub async fn deploy(repo_root: &Path, release: bool) -> Result<()> {
     let mut deployment_gate =
         crate::cli::helpers::cloudflare::prepared::TwoStageDeploymentGate::new();
     let prepared_release_assets = release_assets.prepared_identity()?;
+
+    // 0. The password-hasher Worker first. Every version of the main Worker
+    //    this deploy uploads — the candidate `/_deploy/prepare` runs in, the
+    //    final one verified below — hashes through whichever hasher is
+    //    deployed, so the one this build pairs with has to be live before
+    //    any of them runs. The live main Worker keeps working meanwhile:
+    //    the hasher answers the previous release's protocol version too.
+    let hasher_toml = out_dir.join(wrangler::PASSWORD_HASHER_CONFIG_FILE);
+    cf_deploy::wrangler_deploy_password_hasher(&hasher_toml)?;
+    deployment_gate.password_hasher_deployed()?;
+    println!(
+        "-> deployed password-hasher Worker {}",
+        cfg.password_hasher.worker_name
+    );
+
+    // 0a. The main Worker. `wrangler versions upload` cannot create one, so
+    //     a site's first deploy creates it here as a placeholder that answers
+    //     503, with the deploy token and JWT secret its `/_deploy/*`
+    //     endpoints need; the final version promoted below replaces it.
+    let deploy_token = match main_worker {
+        first_create::MainWorkerPlan::Existing { deploy_token } => deploy_token,
+        first_create::MainWorkerPlan::Create => {
+            let deploy_token = first_create::create_main_worker(
+                &wrangler_cli,
+                &placeholder_toml,
+                &cfg.worker_name,
+                &worker_secrets,
+            )?;
+            println!(
+                "-> created Worker {} (a placeholder answering 503 until this deploy promotes)",
+                cfg.worker_name
+            );
+            deploy_token
+        }
+    };
+    deployment_gate.main_worker_ready()?;
+
+    // 0b. A site that set its pepper before hashing moved still has the keys
+    //     on the main Worker, which reads them no longer. Uploading on would
+    //     lock out peppered accounts and write unpeppered hashes, so the
+    //     deploy stops here until they are on the hasher (secret names only).
+    let leftovers = password_hasher::check_pepper_placement(
+        &cf_deploy::wrangler_secret_names(&out_dir.join("wrangler.toml"))?,
+        &cf_deploy::wrangler_secret_names(&hasher_toml)?,
+        &cfg.worker_name,
+        &cfg.password_hasher.worker_name,
+    )?;
+    deployment_gate.pepper_placement_checked()?;
+    for name in leftovers {
+        eprintln!(
+            "-> note: {name} is on the password-hasher Worker and still on {} too, which no \
+             longer reads it; delete it there: npx wrangler secret delete {name} --name {}",
+            cfg.worker_name, cfg.worker_name
+        );
+    }
+
     let candidate_toml = wrangler::generate_candidate_upload(
         &cfg,
         repo_root,
@@ -416,16 +505,36 @@ pub async fn deploy(repo_root: &Path, release: bool) -> Result<()> {
     cf_deploy::wrangler_versions_promote(&final_upload.version_id, &final_upload.wrangler_toml)?;
     println!("-> promoted {}", final_upload.version_id);
 
+    // 7. Worker-level settings last. Neither `wrangler versions upload` nor
+    //    `wrangler versions deploy` applies them — they are not part of a
+    //    Worker version — so the `[triggers] crons` schedule reaches the live
+    //    Worker only here. After promotion, deliberately: the schedule points
+    //    at whatever code is serving, and until this line runs that is still
+    //    the previous version.
+    let triggers_toml = wrangler::generate_triggers(&cfg, repo_root, &out_dir)?;
+    cf_deploy::wrangler_triggers_deploy(&triggers_toml)?;
+    println!(
+        "-> applied worker-level settings ({})",
+        if cfg.crons.is_empty() {
+            "no cron schedule".to_string()
+        } else {
+            format!("crons {}", cfg.crons.join(", "))
+        }
+    );
+
     println!();
     println!("deploy complete");
     Ok(())
 }
 
-/// `impresspress deploy secret`: provision the one-time-per-environment worker
-/// secrets (`IMPRESSPRESS_DEPLOY_TOKEN` + the auth JWT secret) via
-/// `wrangler secret put`. Each value is taken from the same-named env var when
-/// set, otherwise a fresh 32-byte hex token is generated. Requires the
-/// generated `wrangler.toml` (run `impresspress build --target cloudflare` first).
+/// `impresspress deploy secret`: set the worker secrets the deploy funnel
+/// needs (`IMPRESSPRESS_DEPLOY_TOKEN` + the auth JWT secret) via `wrangler
+/// secret put`. Each value is taken from the same-named env var when set,
+/// otherwise a fresh 32-byte hex token is generated — for the JWT secret that
+/// signs every user out. `impresspress deploy` sets both itself when it
+/// creates a site's Worker; this is for setting them again. Requires the
+/// generated `wrangler.toml` (run `impresspress build --target cloudflare`
+/// first).
 pub async fn deploy_secret(repo_root: &Path) -> Result<()> {
     let out_dir = repo_root.join("target/impresspress-cloudflare");
     let wrangler_toml = out_dir.join("wrangler.toml");
@@ -436,32 +545,16 @@ pub async fn deploy_secret(repo_root: &Path) -> Result<()> {
         );
     }
 
-    let deploy_token_key = impresspress_core::config_vars::DEPLOY_TOKEN_KEY;
-    for name in [
-        deploy_token_key,
-        impresspress_core::blocks::auth::JWT_SECRET_KEY,
-    ] {
-        // 32 random bytes → 64 hex chars. getrandom is already a dependency
-        // (used for variable seeding); no new crate for randomness.
-        let mut buf = [0u8; 32];
-        getrandom::getrandom(&mut buf).map_err(|e| anyhow::anyhow!("getrandom: {e}"))?;
-        let (value, generated) = cf_deploy::resolve_secret(std::env::var(name).ok(), &buf);
+    let secrets =
+        first_create::resolve_worker_secrets(|name| std::env::var(name).ok(), random_secret_bytes)?;
+    first_create::put_worker_secrets(&first_create::Wrangler::default(), &wrangler_toml, &secrets)
+}
 
-        cf_deploy::wrangler_secret_put(&wrangler_toml, name, &value)?;
-
-        if generated {
-            println!("-> generated and set worker secret {name}");
-            if name == deploy_token_key {
-                println!(
-                    "   IMPORTANT: export this for future `impresspress deploy` runs:\n     \
-                     export {name}={value}"
-                );
-            }
-        } else {
-            println!("-> set worker secret {name} (from env {name})");
-        }
-    }
-    Ok(())
+/// 32 random bytes for a generated worker secret (64 hex characters).
+fn random_secret_bytes() -> Result<[u8; 32]> {
+    let mut buf = [0u8; 32];
+    getrandom::getrandom(&mut buf).map_err(|e| anyhow::anyhow!("getrandom: {e}"))?;
+    Ok(buf)
 }
 
 #[cfg(test)]

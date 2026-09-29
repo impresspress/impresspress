@@ -1,0 +1,8 @@
+{
+  "status": 401,
+  "headers": {
+    "content-type": "application/json",
+    "www-authenticate": "Bearer realm=\"impresspress\", ApiKey realm=\"impresspress\""
+  },
+  "body": "{\"code\":\"not_authenticated\",\"error\":\"Unauthenticated\",\"message\":\"authentication required\"}"
+}

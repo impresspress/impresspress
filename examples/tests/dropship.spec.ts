@@ -101,17 +101,17 @@ test.describe("Dropship: Auth", () => {
 // Products (catalog)
 // ---------------------------------------------------------------------------
 test.describe("Dropship: Products", () => {
-  test("GET /b/products/api/catalog returns product list", async ({ request }) => {
+  test("GET /b/products/catalog returns product list", async ({ request }) => {
     const { token } = await signup(request);
-    const res = await request.get("/b/products/api/catalog", {
+    const res = await request.get("/b/products/catalog", {
       headers: { Authorization: `Bearer ${token}` },
     });
     expect(res.ok()).toBeTruthy();
   });
 
-  test("GET /b/products/api/types returns product types", async ({ request }) => {
+  test("GET /b/products/types returns product types", async ({ request }) => {
     const { token } = await signup(request);
-    const res = await request.get("/b/products/api/types", {
+    const res = await request.get("/b/products/types", {
       headers: { Authorization: `Bearer ${token}` },
     });
     expect(res.ok()).toBeTruthy();

@@ -30,9 +30,9 @@
 //!
 //! `DELETE /b/vector/api/indexes/{name}` and `DELETE /b/vector/api/{index}/{id}`
 //! both map to the `delete` action and both live under `/b/vector/api/`.
-//! The dispatcher checks the `indexes/` prefix first so the more specific
-//! route wins; only after that do we fall through to the generic
-//! `{index}/{id}` handler.
+//! The block's `ROUTES` table (mod.rs) lists the specific `indexes/{name}`
+//! row first so it wins; `{name}` / `{index}` / `{id}` reach the handlers
+//! here only as `endpoint_match::dispatch` bound them.
 
 use wafer_block::{
     db::{Filter, FilterOp, ListOptions},
@@ -57,8 +57,8 @@ use super::{
     service::{self, REGISTRY_TABLE, TABLE_PREFIX},
 };
 use crate::{
-    http::{err_bad_request, err_internal, err_internal_no_cause, err_not_found, ok_json},
-    util::path_param,
+    blocks::crud,
+    http::{err_bad_request, err_internal, err_internal_no_cause, err_unavailable, ok_json},
 };
 
 // Per-route dispatch now lives in `VectorBlock::handle` via the shared
@@ -83,11 +83,12 @@ use crate::{
 /// UI page uses to render its "backend not available" callout) disambiguates
 /// them and lets every handler degrade the same way instead of a handful
 /// misreporting "index not found" and the rest 500ing.
+///
+/// The status itself is [`crate::http::err_unavailable`]'s case verbatim — a
+/// capability that is not configured is unavailable, not broken. This wrapper
+/// exists on top of it only to name the one message its six call sites share.
 fn err_vector_backend_unavailable() -> OutputStream {
-    OutputStream::error(WaferError::new(
-        ErrorCode::Unavailable,
-        "vector backend (wafer-run/vector) is not available on this deployment",
-    ))
+    err_unavailable("vector backend (wafer-run/vector) is not available on this deployment")
 }
 
 // ---------------------------------------------------------------------------
@@ -119,7 +120,10 @@ pub(super) async fn create_index(
     if !service::vector_backend_available(ctx) {
         return err_vector_backend_unavailable();
     }
-    let raw = input.collect_to_bytes().await;
+    let raw = match input.collect_to_bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => return OutputStream::error(e),
+    };
     let body = match parse_create_index_body(&raw) {
         Ok(b) => b,
         Err(e) => return err_bad_request(&e),
@@ -160,7 +164,7 @@ pub(super) async fn create_index(
     };
 
     if let Err(e) = vclient::create_index(ctx, cfg.clone()).await {
-        return err_internal("create_index failed", e);
+        return crud::db_error_internal(e, "create_index failed");
     }
 
     // Record the index in the registry so queries against it can look up
@@ -194,7 +198,7 @@ pub(super) async fn create_index(
     )
     .await
     {
-        return err_internal("registry write failed", e);
+        return crud::db_error_internal(e, "registry write failed");
     }
 
     // htmx callers (the admin modal) want HTML back so the swap renders
@@ -203,7 +207,7 @@ pub(super) async fn create_index(
     if !msg.get_meta("http.header.hx-request").is_empty() {
         let body_html = match super::pages_ui::render_index_list_fragment(ctx).await {
             Ok(m) => m,
-            Err(e) => return err_internal("Failed to refresh", e),
+            Err(e) => return crud::db_error_internal(e, "Failed to refresh"),
         };
         let trigger = r#"{"showToast":{"message":"Index created","type":"success"},"closeModal":{"id":"create-vector-index"}}"#;
         return crate::http::ResponseBuilder::new()
@@ -238,7 +242,7 @@ pub(super) async fn list_indexes(ctx: &dyn Context) -> OutputStream {
     }
     match discover_indexes(ctx).await {
         Ok(indexes) => ok_json(&IndexListResponse { indexes }),
-        Err(e) => err_internal("list indexes failed", e),
+        Err(e) => crud::db_error_internal(e, "list indexes failed"),
     }
 }
 
@@ -272,37 +276,45 @@ pub(super) async fn delete_index(ctx: &dyn Context, msg: &Message) -> OutputStre
     if !service::vector_backend_available(ctx) {
         return err_vector_backend_unavailable();
     }
-    let name = path_param(msg, "name", "/b/vector/api/indexes/");
-    if name.is_empty() {
-        return err_bad_request("index name is required");
-    }
+    let name = match crud::path_var(msg, "name", "index name is required") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     if let Err(e) = service::validate_index_name(name) {
         return err_bad_request(&e.message);
     }
 
     let prefixed = service::prefixed_index_name(name);
-    match vclient::delete_index(ctx, &prefixed).await {
-        Ok(()) => {
-            // Clear the registry row. Best-effort — a missing registry table
-            // (pre-registry deployment) is not a failure, so we only surface
-            // errors that aren't about the table itself. The row-level
-            // `OR REPLACE` in create_index makes this robustly idempotent.
-            let _ = db::delete_by_filters(
-                ctx,
-                REGISTRY_TABLE,
-                vec![Filter {
-                    field: "prefixed_name".into(),
-                    operator: FilterOp::Equal,
-                    value: serde_json::json!(prefixed),
-                }],
-            )
-            .await;
-            ok_json(&AckResponse { ok: true })
+    let deleted = vclient::delete_index(ctx, &prefixed).await;
+    if let Err(e) = &deleted {
+        if e.code != ErrorCode::NotFound {
+            return crud::db_error_internal(e.clone(), "delete_index failed");
         }
-        Err(e) if e.code == ErrorCode::NotFound => {
-            err_not_found(&format!("index not found: {name}"))
-        }
-        Err(e) => err_internal("delete_index failed", e),
+    }
+    // Clear the registry row — also when the backend no longer holds the
+    // index, so a delete whose registry step failed can be retried to
+    // completion. The table is the block's own migration, so a failed delete
+    // is a failure: a row left behind keeps listing an index that is gone.
+    if let Err(e) = db::delete_by_filters(
+        ctx,
+        REGISTRY_TABLE,
+        vec![Filter {
+            field: "prefixed_name".into(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!(prefixed),
+        }],
+    )
+    .await
+    {
+        return crud::db_error_internal(e, "registry delete failed");
+    }
+    match deleted {
+        Ok(()) => ok_json(&AckResponse { ok: true }),
+        Err(e) => crud::db_error(
+            e,
+            &format!("index not found: {name}"),
+            "delete_index failed",
+        ),
     }
 }
 
@@ -314,7 +326,10 @@ pub(super) async fn upsert(ctx: &dyn Context, input: InputStream) -> OutputStrea
     if !service::vector_backend_available(ctx) {
         return err_vector_backend_unavailable();
     }
-    let raw = input.collect_to_bytes().await;
+    let raw = match input.collect_to_bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => return OutputStream::error(e),
+    };
     let body: UpsertRequest = match serde_json::from_slice(&raw) {
         Ok(b) => b,
         Err(e) => return err_bad_request(&format!("Invalid body: {e}")),
@@ -331,11 +346,12 @@ pub(super) async fn upsert(ctx: &dyn Context, input: InputStream) -> OutputStrea
     let entries: Vec<VectorEntry> = body.entries.into_iter().map(VectorEntry::from).collect();
     match vclient::upsert(ctx, &prefixed, entries).await {
         Ok(()) => ok_json(&AckResponse { ok: true }),
-        Err(e) if e.code == ErrorCode::NotFound => {
-            err_not_found(&format!("index not found: {}", body.index))
-        }
         Err(e) if e.code == ErrorCode::InvalidArgument => err_bad_request(&e.message),
-        Err(e) => err_internal("upsert failed", e),
+        Err(e) => crud::db_error(
+            e,
+            &format!("index not found: {}", body.index),
+            "upsert failed",
+        ),
     }
 }
 
@@ -361,29 +377,15 @@ pub(super) async fn delete_single(ctx: &dyn Context, msg: &Message) -> OutputStr
     let prefixed = service::prefixed_index_name(index);
     match vclient::delete(ctx, &prefixed, vec![id.to_string()]).await {
         Ok(()) => ok_json(&AckResponse { ok: true }),
-        Err(e) if e.code == ErrorCode::NotFound => {
-            err_not_found(&format!("index not found: {index}"))
-        }
-        Err(e) => err_internal("delete failed", e),
+        Err(e) => crud::db_error(e, &format!("index not found: {index}"), "delete failed"),
     }
 }
 
-/// Extract `{index}` and `{id}` from `/b/vector/api/{index}/{id}`.
-///
-/// Prefers the router-populated path variables when available, falling back
-/// to string-splitting for direct handler invocation (e.g. in tests).
+/// `({index}, {id})` as the block's route table bound them for
+/// `/b/vector/api/{index}/{id}`. Either is empty when the request matched
+/// no row.
 fn extract_index_and_id(msg: &Message) -> (&str, &str) {
-    let index = msg.var("index");
-    let id = msg.var("id");
-    if !index.is_empty() && !id.is_empty() {
-        return (index, id);
-    }
-
-    let rest = msg.path().strip_prefix("/b/vector/api/").unwrap_or("");
-    let mut parts = rest.split('/');
-    let index_part = parts.next().unwrap_or("");
-    let id_part = parts.next().unwrap_or("");
-    (index_part, id_part)
+    (msg.var("index"), msg.var("id"))
 }
 
 // ---------------------------------------------------------------------------
@@ -401,16 +403,20 @@ pub(super) async fn stats(ctx: &dyn Context) -> OutputStream {
     }
     let indexes = match discover_indexes(ctx).await {
         Ok(v) => v,
-        Err(e) => return err_internal("stats failed", e),
+        Err(e) => return crud::db_error_internal(e, "stats failed"),
     };
 
     let mut out: Vec<IndexStatsView> = Vec::with_capacity(indexes.len());
     for name in indexes {
         let prefixed = service::prefixed_index_name(&name);
-        // If count fails for a single index (e.g. table was dropped between
-        // discovery and count), fall back to 0 and keep going — stats should
-        // not 500 on a transient partial-state issue.
-        let count = vclient::count(ctx, &prefixed).await.unwrap_or(0);
+        // An index dropped between discovery and count is simply gone: it is
+        // left out. Any other failure is answered with its code — a refused
+        // count reported as `0` would be a claim nobody checked.
+        let count = match vclient::count(ctx, &prefixed).await {
+            Ok(count) => count,
+            Err(e) if e.code == ErrorCode::NotFound => continue,
+            Err(e) => return crud::db_error_internal(e, "stats count failed"),
+        };
         out.push(IndexStatsView { name, count });
     }
 
@@ -427,7 +433,10 @@ pub(super) async fn query(ctx: &dyn Context, input: InputStream) -> OutputStream
     if !service::vector_backend_available(ctx) {
         return err_vector_backend_unavailable();
     }
-    let raw = input.collect_to_bytes().await;
+    let raw = match input.collect_to_bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => return OutputStream::error(e),
+    };
     let mut body: QueryRequest = match serde_json::from_slice(&raw) {
         Ok(b) => b,
         Err(e) => return err_bad_request(&format!("Invalid body: {e}")),
@@ -447,7 +456,7 @@ pub(super) async fn query(ctx: &dyn Context, input: InputStream) -> OutputStream
     // registry table existed.
     let (model_id, keyword_search) = match load_index_metadata(ctx, &prefixed).await {
         Ok(m) => m,
-        Err(e) => return err_internal("load index metadata failed", e),
+        Err(e) => return crud::db_error_internal(e, "load index metadata failed"),
     };
 
     // Default mode reflects the index's declared capabilities. An index
@@ -469,13 +478,16 @@ pub(super) async fn query(ctx: &dyn Context, input: InputStream) -> OutputStream
     let vector = match (body.vector.take(), body.text.as_deref()) {
         (Some(v), _) if !v.is_empty() => v,
         (_, Some(text)) if !text.is_empty() => {
-            let block = embedding_block_for_model(&model_id);
+            let block = match embedding_block_for_model(ctx, &model_id) {
+                Ok(b) => b,
+                Err(e) => return OutputStream::error(e),
+            };
             match vclient::embed(ctx, block, vec![text.to_string()]).await {
                 Ok((_, _, mut vectors)) => match vectors.pop() {
                     Some(v) => v,
                     None => return err_internal_no_cause("embedding block returned no vectors"),
                 },
-                Err(e) => return err_internal("embed failed", e),
+                Err(e) => return crud::db_error_internal(e, "embed failed"),
             }
         }
         _ => return err_bad_request("either 'text' or 'vector' is required"),
@@ -507,11 +519,12 @@ pub(super) async fn query(ctx: &dyn Context, input: InputStream) -> OutputStream
         Ok(matches) => ok_json(&QueryResponse {
             matches: matches.into_iter().map(VectorMatchView::from).collect(),
         }),
-        Err(e) if e.code == ErrorCode::NotFound => {
-            err_not_found(&format!("index not found: {}", body.index))
-        }
         Err(e) if e.code == ErrorCode::InvalidArgument => err_bad_request(&e.message),
-        Err(e) => err_internal("query failed", e),
+        Err(e) => crud::db_error(
+            e,
+            &format!("index not found: {}", body.index),
+            "query failed",
+        ),
     }
 }
 
@@ -528,8 +541,11 @@ async fn load_index_metadata(
     ctx: &dyn Context,
     prefixed_index: &str,
 ) -> Result<(String, bool), WaferError> {
-    // First try the registry. An error here (e.g. the table doesn't exist)
-    // is treated as "no row", not fatal — we fall through to the scan.
+    // First try the registry. The registry table is created by the block's
+    // migration, so a failed read is a failure — answered with its code, never
+    // a fall-through to `DEFAULT_MODEL`, which would embed the query with a
+    // model the index may not have been built with. Only a missing ROW (an
+    // index created before the registry existed) falls through to the scan.
     let rows = db::list(
         ctx,
         REGISTRY_TABLE,
@@ -540,29 +556,27 @@ async fn load_index_metadata(
                 operator: FilterOp::Equal,
                 value: serde_json::json!(prefixed_index),
             }],
-            limit: 1,
+            limit: Some(1),
             skip_count: true,
             ..Default::default()
         },
     )
-    .await;
+    .await?;
 
-    if let Ok(rows) = rows {
-        if let Some(row) = rows.records.into_iter().next() {
-            let model = row
-                .data
-                .get("model")
-                .and_then(|v| v.as_str())
-                .unwrap_or(DEFAULT_MODEL)
-                .to_string();
-            let kw = row
-                .data
-                .get("keyword_search")
-                .and_then(|v| v.as_i64())
-                .map(|n| n != 0)
-                .unwrap_or(false);
-            return Ok((model, kw));
-        }
+    if let Some(row) = rows.records.into_iter().next() {
+        let model = row
+            .data
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or(DEFAULT_MODEL)
+            .to_string();
+        let kw = row
+            .data
+            .get("keyword_search")
+            .and_then(|v| v.as_i64())
+            .map(|n| n != 0)
+            .unwrap_or(false);
+        return Ok((model, kw));
     }
 
     // Fallback path: infer keyword_search from the typed describe op.
@@ -575,21 +589,51 @@ async fn load_index_metadata(
     Ok((DEFAULT_MODEL.to_string(), desc.keyword_search))
 }
 
-/// Map a model id to the embedding block that serves it on this runtime.
+/// The interface identifier every embedding block declares.
 ///
-/// On native we route everything to `impresspress/fastembed` — fastembed's
-/// catalog covers every model in our native-embed support matrix. Plan 2
-/// (Workers AI) and Plan 3 (browser/transformers) will split this by
-/// `model_id` so different models dispatch to different embedding blocks.
-fn embedding_block_for_model(_model_id: &str) -> &'static str {
-    #[cfg(target_arch = "wasm32")]
-    {
-        "impresspress/transformers-embed"
-    }
-    #[cfg(not(target_arch = "wasm32"))]
-    {
-        "impresspress/fastembed"
-    }
+/// `FastembedBlock` (native ONNX) and `TransformersEmbedBlock` (injected
+/// service, browser Transformers.js in practice) both publish `embedding@v1`
+/// in their `BlockInfo` and both delegate to
+/// `wafer_core::interfaces::vector::handler::handle_embedding_message`, so the
+/// declared protocol — not a block name and not the build target — is what
+/// says a block can embed.
+const EMBEDDING_INTERFACE: &str = "embedding@v1";
+
+/// Resolve the embedding block that serves `model_id` **on this runtime**.
+///
+/// Reads `ctx.registered_blocks()`, the same signal
+/// [`service::vector_backend_available`] reads for the vector backend, and
+/// picks the block declaring [`EMBEDDING_INTERFACE`]. At most one is ever
+/// registered: `builder::registration` registers `impresspress/fastembed`
+/// under `block-fastembed` and `impresspress/transformers-embed` over an
+/// injected embedding service, and refuses to build with both.
+///
+/// This used to be a `cfg(target_arch)` body naming `impresspress/fastembed`
+/// off wasm32 and `impresspress/transformers-embed` on it, with `model_id`
+/// ignored — so a native build with no embedding block registered (the
+/// default: `block-fastembed` is off in `default`) still handed its text to
+/// `impresspress/fastembed` and the absent capability surfaced as
+/// `500 embed failed` wrapping a `NotFound: block … not found`. That is the
+/// ambiguity `err_vector_backend_unavailable` documents for the vector
+/// backend, so the answer here is the same shape: `Unavailable`, naming the
+/// model that could not be embedded.
+fn embedding_block_for_model<'a>(
+    ctx: &'a dyn Context,
+    model_id: &str,
+) -> Result<&'a str, WaferError> {
+    ctx.registered_blocks()
+        .iter()
+        .find(|b| b.interface == EMBEDDING_INTERFACE)
+        .map(|b| b.name.as_str())
+        .ok_or_else(|| {
+            WaferError::new(
+                ErrorCode::Unavailable,
+                format!(
+                    "no embedding block is registered on this deployment, so \
+                     model '{model_id}' cannot be embedded"
+                ),
+            )
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -606,7 +650,10 @@ pub(super) async fn ingest(ctx: &dyn Context, input: InputStream) -> OutputStrea
     if !service::vector_backend_available(ctx) {
         return err_vector_backend_unavailable();
     }
-    let raw = input.collect_to_bytes().await;
+    let raw = match input.collect_to_bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => return OutputStream::error(e),
+    };
     let body: IngestRequest = match serde_json::from_slice(&raw) {
         Ok(b) => b,
         Err(e) => return err_bad_request(&format!("Invalid body: {e}")),
@@ -630,7 +677,30 @@ pub(super) async fn ingest(ctx: &dyn Context, input: InputStream) -> OutputStrea
     // query route does.
     let (model_id, _keyword_search) = match load_index_metadata(ctx, &prefixed).await {
         Ok(m) => m,
-        Err(e) => return err_internal("load index metadata failed", e),
+        Err(e) => return crud::db_error_internal(e, "load index metadata failed"),
+    };
+
+    // Resolve the embedding block BEFORE anything destructive runs. It needs
+    // only the context and `model_id`, both already in hand, and it is the
+    // last thing that can refuse this request outright — a deployment with no
+    // embedding block cannot finish an ingest at all.
+    //
+    // It used to sit below the prior-chunk delete, so an operator who dropped
+    // the embedding block (or whose injected `EmbeddingService` went away) lost
+    // every stored chunk of the next document re-ingested and got a 503 for it:
+    // the document fell out of search until an embedder returned AND someone
+    // re-ingested, with nothing to restore it in between. Same rule as the
+    // `list_ids` error handling below — a step that destroys must not run ahead
+    // of a check that can refuse.
+    //
+    // A document whose text is whitespace-only is refused here too, even
+    // though it would never reach `vclient::embed`. Refusing the whole request
+    // and leaving the index untouched is the point; answering 200 for an empty
+    // re-ingest while a non-empty one is refused would make "did my chunks get
+    // cleared?" depend on the body.
+    let embedding_block = match embedding_block_for_model(ctx, &model_id) {
+        Ok(b) => b,
+        Err(e) => return OutputStream::error(e),
     };
 
     // Re-ingestion safety: wipe any chunks we previously wrote for this
@@ -649,17 +719,27 @@ pub(super) async fn ingest(ctx: &dyn Context, input: InputStream) -> OutputStrea
     let prior_ids = match vclient::list_ids(ctx, &prefixed, prior_filter).await {
         Ok(ids) => ids,
         Err(e) if e.code == ErrorCode::NotFound => Vec::new(),
-        Err(e) => return err_internal("failed to list prior chunks", e),
+        Err(e) => return crud::db_error_internal(e, "failed to list prior chunks"),
     };
     if !prior_ids.is_empty() {
         if let Err(e) = vclient::delete(ctx, &prefixed, prior_ids).await {
-            return err_internal("failed to clear prior chunks", e);
+            return crud::db_error_internal(e, "failed to clear prior chunks");
         }
     }
 
     // Split into chunks. Empty / whitespace-only text produces no chunks;
-    // return early rather than inventing an empty entry.
-    //
+    // return early rather than inventing an empty entry. `ingestion::chunk`
+    // yields nothing exactly when the document has no whitespace-separated
+    // words, so answering the zero-chunk contract here is the same reply the
+    // `chunks.is_empty()` branch below gives. The prior-chunk cleanup above
+    // has already run, so re-ingesting a document that was emptied still
+    // clears its old chunks — an emptied document IS a request to drop it
+    // from the index.
+    let whitespace_tokens = body.text.split_whitespace().count() as u64;
+    if whitespace_tokens == 0 {
+        return ok_json(&IngestResponse { chunks_created: 0 });
+    }
+
     // The chunker counts whitespace-words as a proxy for tokens. To size
     // chunks against the embedder's real BPE limit (bge-m3 produces ~1.3-1.5
     // BPE tokens per whitespace word on English prose, more on CJK and heavy
@@ -669,38 +749,33 @@ pub(super) async fn ingest(ctx: &dyn Context, input: InputStream) -> OutputStrea
     // boundary. Falls back to DEFAULT_CHUNK_TOKENS if the embedder's
     // count_tokens returns 0 or the call errors — chunks may run slightly
     // over BPE-budget, which is the same approximation in use before this
-    // change.
-    let embedding_block = embedding_block_for_model(&model_id);
-    let whitespace_tokens = body.text.split_whitespace().count() as u64;
-    let effective_chunk_tokens = if whitespace_tokens == 0 {
-        DEFAULT_CHUNK_TOKENS
-    } else {
+    // change. `embedding_block` was resolved above the cleanup step.
+    let effective_chunk_tokens =
         match vclient::count_tokens(ctx, embedding_block, body.text.clone()).await {
             Ok(bpe) if bpe > 0 => {
                 let ratio = (bpe as f32) / (whitespace_tokens as f32);
                 ((DEFAULT_CHUNK_TOKENS as f32) / ratio.max(1.0)).round() as usize
             }
             _ => DEFAULT_CHUNK_TOKENS,
-        }
-    };
+        };
 
     let mut chunks = ingestion::chunk(&body.text, effective_chunk_tokens, DEFAULT_OVERLAP_RATIO);
     if body.contextual {
         match ingestion::add_context(ctx, &body.text, chunks).await {
             Ok(c) => chunks = c,
-            Err(e) => return err_internal("add_context failed", e),
+            Err(e) => return crud::db_error_internal(e, "add_context failed"),
         }
     }
     if chunks.is_empty() {
         return ok_json(&IngestResponse { chunks_created: 0 });
     }
 
-    // Embed via the right block for this model. On native today that's
-    // always `impresspress/fastembed`; see `embedding_block_for_model`.
+    // Embed via the block this runtime registered for the protocol; see
+    // `embedding_block_for_model`.
     let (_model_name, _dims, vectors) =
         match vclient::embed(ctx, embedding_block, chunks.clone()).await {
             Ok(tuple) => tuple,
-            Err(e) => return err_internal("embed failed", e),
+            Err(e) => return crud::db_error_internal(e, "embed failed"),
         };
 
     if vectors.len() != chunks.len() {
@@ -735,11 +810,12 @@ pub(super) async fn ingest(ctx: &dyn Context, input: InputStream) -> OutputStrea
     let n = entries.len();
     match vclient::upsert(ctx, &prefixed, entries).await {
         Ok(()) => ok_json(&IngestResponse { chunks_created: n }),
-        Err(e) if e.code == ErrorCode::NotFound => {
-            err_not_found(&format!("index not found: {}", body.index))
-        }
         Err(e) if e.code == ErrorCode::InvalidArgument => err_bad_request(&e.message),
-        Err(e) => err_internal("upsert failed", e),
+        Err(e) => crud::db_error(
+            e,
+            &format!("index not found: {}", body.index),
+            "upsert failed",
+        ),
     }
 }
 
@@ -751,16 +827,23 @@ pub(super) async fn ingest(ctx: &dyn Context, input: InputStream) -> OutputStrea
 ///
 /// Thin shim over `vclient::embed` — we look up which block serves the
 /// requested model on this runtime and dispatch. Empty `texts` is allowed
-/// (the embedding block returns an empty vector list).
+/// (the embedding block returns an empty vector list). A runtime with no
+/// embedding block registered answers 503, not 500.
 pub(super) async fn embed(ctx: &dyn Context, input: InputStream) -> OutputStream {
-    let raw = input.collect_to_bytes().await;
+    let raw = match input.collect_to_bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => return OutputStream::error(e),
+    };
     let body: EmbedRequest = match serde_json::from_slice(&raw) {
         Ok(b) => b,
         Err(e) => return err_bad_request(&format!("Invalid body: {e}")),
     };
 
     let model = body.model.unwrap_or_else(|| DEFAULT_MODEL.to_string());
-    let block = embedding_block_for_model(&model);
+    let block = match embedding_block_for_model(ctx, &model) {
+        Ok(b) => b,
+        Err(e) => return OutputStream::error(e),
+    };
 
     match vclient::embed(ctx, block, body.texts).await {
         Ok((model, dimensions, vectors)) => ok_json(&EmbedResponse {
@@ -769,7 +852,7 @@ pub(super) async fn embed(ctx: &dyn Context, input: InputStream) -> OutputStream
             vectors,
         }),
         Err(e) if e.code == ErrorCode::InvalidArgument => err_bad_request(&e.message),
-        Err(e) => err_internal("embed failed", e),
+        Err(e) => crud::db_error_internal(e, "embed failed"),
     }
 }
 
@@ -785,7 +868,7 @@ mod ingest_cleanup_tests {
     use wafer_run::{Block as RunBlock, BlockCategory, BlockInfo, LifecycleEvent};
 
     use super::*;
-    use crate::test_support::{output_is_error, output_json, TestContext};
+    use crate::test_support::{output_http_status, output_json, TestContext};
 
     /// Stub `wafer-run/vector` block that answers `vector.list_ids` with a
     /// caller-supplied error and errors loudly on anything else.
@@ -863,6 +946,46 @@ mod ingest_cleanup_tests {
         .expect("seed registry row");
     }
 
+    /// Register an embedding block so `ingest` gets past its resolver.
+    ///
+    /// `embedding_block_for_model` runs above the prior-chunk cleanup — a
+    /// deployment that cannot embed must not have its index modified — so
+    /// every ingest test needs one registered, whatever it is really about.
+    /// It is never called here: these tests send whitespace-only text, which
+    /// returns the zero-chunk response before `count_tokens`.
+    fn register_embedder(ctx: &mut TestContext) {
+        ctx.register_block(
+            "impresspress/transformers-embed",
+            Arc::new(
+                crate::blocks::transformers_embed::TransformersEmbedBlock::new(Arc::new(
+                    RefusingEmbeddingService,
+                )),
+            ),
+        );
+    }
+
+    /// The service behind [`register_embedder`]. Every method that would
+    /// actually embed panics: reaching one means an ingest test stopped being
+    /// short-circuited by its whitespace-only body and is now exercising a
+    /// path it does not describe.
+    struct RefusingEmbeddingService;
+
+    #[wafer_block::wafer_async_trait]
+    impl wafer_core::interfaces::vector::service::EmbeddingService for RefusingEmbeddingService {
+        fn model(&self) -> &str {
+            DEFAULT_MODEL
+        }
+        fn dimensions(&self) -> u32 {
+            384
+        }
+        async fn embed(
+            &self,
+            _texts: Vec<String>,
+        ) -> wafer_core::interfaces::vector::service::Result<Vec<Vec<f32>>> {
+            panic!("an ingest cleanup test reached a real embed call")
+        }
+    }
+
     /// Body for `ingest` with whitespace-only `text`, so `ingestion::chunk`
     /// produces zero chunks and the handler returns success right after the
     /// prior-chunk cleanup step — no embed/upsert vector call needed.
@@ -882,6 +1005,7 @@ mod ingest_cleanup_tests {
         let mut ctx = TestContext::with_vector().await;
         let prefixed = service::prefixed_index_name("cleanup_test_idx_denied");
         seed_registry_row(&ctx, &prefixed).await;
+        register_embedder(&mut ctx);
         ctx.register_block(
             "wafer-run/vector",
             Arc::new(StubVectorBlock {
@@ -898,11 +1022,14 @@ mod ingest_cleanup_tests {
         )
         .await;
 
-        assert!(
-            output_is_error(out, "Internal").await,
-            "a non-NotFound list_ids error must abort ingest via err_internal, \
-             not be silently swallowed — swallowing it would skip cleanup and \
-             leave stale tail chunks that queries then serve"
+        assert_eq!(
+            output_http_status(out).await,
+            403,
+            "a non-NotFound list_ids error must abort ingest, not be silently \
+             swallowed — swallowing it would skip cleanup and leave stale tail \
+             chunks that queries then serve. It aborts through \
+             `crud::db_error_internal` now, so the WRAP refusal this stub \
+             raises keeps its code instead of being sanitized into a 500."
         );
     }
 
@@ -911,6 +1038,7 @@ mod ingest_cleanup_tests {
         let mut ctx = TestContext::with_vector().await;
         let prefixed = service::prefixed_index_name("cleanup_test_idx_missing");
         seed_registry_row(&ctx, &prefixed).await;
+        register_embedder(&mut ctx);
         ctx.register_block(
             "wafer-run/vector",
             Arc::new(StubVectorBlock {
@@ -947,7 +1075,7 @@ mod contract_tests {
 
     use super::*;
     use crate::{
-        blocks::vector::test_support::{StubEmbeddingBlock, StubVectorBlock},
+        blocks::vector::test_support::{routed, StubEmbeddingBlock, StubVectorBlock},
         test_support::{auth_msg, output_is_error, output_json, TestContext},
     };
 
@@ -1027,6 +1155,32 @@ mod contract_tests {
                     );
                 }
                 other => panic!("{body}: expected InvalidArgument, got {other:?}"),
+            }
+        }
+    }
+
+    /// An index whose tables the database layer would refuse is refused at
+    /// the route, before the backend is asked to create anything: uppercase,
+    /// a hyphen, or a name long enough that a table name passes 63 bytes.
+    #[tokio::test]
+    async fn create_index_refuses_a_name_its_tables_cannot_have() {
+        let too_long = "a".repeat(service::MAX_INDEX_NAME_LEN + 1);
+        for name in ["Docs", "my-docs", too_long.as_str()] {
+            let ctx = ctx_with(StubVectorBlock::default()).await;
+
+            let out = create_index(
+                &ctx,
+                &create_msg(),
+                json_input(serde_json::json!({ "name": name })),
+            )
+            .await;
+
+            match out.collect_buffered().await {
+                Err(TerminalNotResponse::Error(e)) => {
+                    assert_eq!(e.code, ErrorCode::InvalidArgument, "{name}");
+                    assert!(e.message.contains("[a-z0-9_]"), "{name}: {}", e.message);
+                }
+                other => panic!("{name}: expected InvalidArgument, got {other:?}"),
             }
         }
     }
@@ -1239,7 +1393,7 @@ mod contract_tests {
             output_json(
                 delete_index(
                     &ctx,
-                    &auth_msg("delete", "/b/vector/api/indexes/docs", "user-1")
+                    &routed(auth_msg("delete", "/b/vector/api/indexes/docs", "user-1"))
                 )
                 .await
             )
@@ -1248,11 +1402,31 @@ mod contract_tests {
         );
         assert_eq!(
             output_json(
-                delete_single(&ctx, &auth_msg("delete", "/b/vector/api/docs/a", "user-1")).await
+                delete_single(
+                    &ctx,
+                    &routed(auth_msg("delete", "/b/vector/api/docs/a", "user-1"))
+                )
+                .await
             )
             .await,
             serde_json::json!({ "ok": true })
         );
+    }
+
+    /// The delete handlers read the variables the table bound, nothing else.
+    #[test]
+    fn delete_routes_bind_their_path_vars() {
+        let m = routed(auth_msg("delete", "/b/vector/api/indexes/docs", "user-1"));
+        assert_eq!(m.var("name"), "docs");
+
+        let m2 = routed(auth_msg("delete", "/b/vector/api/docs/a", "user-1"));
+        assert_eq!(extract_index_and_id(&m2), ("docs", "a"));
+
+        // A message that never went through the table binds nothing; the
+        // handlers then answer InvalidArgument rather than parse the path.
+        let m3 = auth_msg("delete", "/b/vector/api/docs/a", "user-1");
+        assert_eq!(extract_index_and_id(&m3), ("", ""));
+        assert_eq!(m3.var("name"), "");
     }
 
     #[tokio::test]
@@ -1341,9 +1515,9 @@ mod backend_availability_tests {
     }
 
     /// `TestContext::with_vector()` on its own — no `wafer-run/vector` block
-    /// registered — is exactly the default native-server configuration
-    /// (`docs/checks/...` bug report: native impresspress ships no
-    /// `wafer-run/vector` backend). Before this fix, `list_indexes` blindly
+    /// registered — is exactly the default native-server configuration: native
+    /// impresspress ships no `wafer-run/vector` backend. That is the shape a
+    /// live bug report hit. Before this fix, `list_indexes` blindly
     /// propagated the backend's `NotFound: block 'wafer-run/vector' not
     /// found` through `err_internal`, which is what surfaced as the live
     /// 500 `GET /b/vector/api/indexes` returned.
@@ -1409,6 +1583,463 @@ mod backend_availability_tests {
             output_is_error(out, "Unavailable").await,
             "create_index must report Unavailable (503), not NotFound or Internal, \
              when the wafer-run/vector backend isn't registered"
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests: what a refusal from the vector backend classifies as.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod denial_classification_tests {
+    use std::sync::Arc;
+
+    use async_trait::async_trait;
+    use wafer_run::{Block as RunBlock, BlockCategory, BlockInfo, LifecycleEvent};
+
+    use super::*;
+    use crate::{
+        blocks::vector::test_support::routed,
+        test_support::{auth_msg, output_http_status, TestContext},
+    };
+
+    /// A `wafer-run/vector` stand-in that refuses every op with one
+    /// caller-supplied error, so a handler's classification is the only
+    /// thing under test.
+    struct RefusingVectorBlock {
+        error: WaferError,
+    }
+
+    #[async_trait]
+    impl RunBlock for RefusingVectorBlock {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new(
+                "wafer-run/vector",
+                "0.0.1",
+                "vector@v1",
+                "stub vector block that refuses every op",
+            )
+            .category(BlockCategory::Service)
+        }
+
+        async fn handle(
+            &self,
+            _ctx: &dyn Context,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            OutputStream::error(self.error.clone())
+        }
+
+        async fn lifecycle(
+            &self,
+            _ctx: &dyn Context,
+            _e: LifecycleEvent,
+        ) -> Result<(), WaferError> {
+            Ok(())
+        }
+    }
+
+    /// A registry row for `prefixed`, so `load_index_metadata` resolves from
+    /// the database instead of falling through to `describe_index`.
+    async fn seed_registry_row(ctx: &dyn Context, prefixed: &str) {
+        db::upsert(
+            ctx,
+            REGISTRY_TABLE,
+            vec![
+                ("prefixed_name".to_string(), serde_json::json!(prefixed)),
+                ("model".to_string(), serde_json::json!(DEFAULT_MODEL)),
+                ("dimensions".to_string(), serde_json::json!(384)),
+                ("keyword_search".to_string(), serde_json::json!(0)),
+            ],
+            vec!["prefixed_name".to_string()],
+            OnConflict::SetColumns(vec![
+                "model".to_string(),
+                "dimensions".to_string(),
+                "keyword_search".to_string(),
+            ]),
+        )
+        .await
+        .expect("seed registry row");
+    }
+
+    async fn ctx_refusing_with(code: ErrorCode) -> TestContext {
+        let mut ctx = TestContext::with_vector().await;
+        ctx.register_block(
+            "wafer-run/vector",
+            Arc::new(RefusingVectorBlock {
+                error: WaferError::new(code, "WRAP: caller not authorized for this index"),
+            }),
+        );
+        ctx
+    }
+
+    fn json_input(value: serde_json::Value) -> InputStream {
+        InputStream::from_bytes(serde_json::to_vec(&value).expect("serialize body"))
+    }
+
+    /// The behaviour fix. `vclient::*` reaches the vector backend through
+    /// the same WRAP check every database call goes through, so a caller
+    /// without a grant on the index gets `PermissionDenied` — which every
+    /// handler here collapsed into `err_internal`, i.e. a 500 an operator
+    /// cannot tell from the backend being down.
+    #[tokio::test]
+    async fn a_denied_upsert_is_403_not_500() {
+        let ctx = ctx_refusing_with(ErrorCode::PermissionDenied).await;
+        let out = upsert(
+            &ctx,
+            json_input(serde_json::json!({
+                "index": "denied_idx",
+                "entries": [{"id": "a", "vector": [0.1, 0.2]}],
+            })),
+        )
+        .await;
+        assert_eq!(output_http_status(out).await, 403);
+    }
+
+    /// The registry row is seeded so `load_index_metadata` answers from the
+    /// database and the refusal under test is `vclient::query`'s own.
+    #[tokio::test]
+    async fn a_denied_query_is_403_not_500() {
+        let ctx = ctx_refusing_with(ErrorCode::PermissionDenied).await;
+        seed_registry_row(&ctx, &service::prefixed_index_name("denied_idx")).await;
+        let out = query(
+            &ctx,
+            json_input(serde_json::json!({
+                "index": "denied_idx",
+                "vector": [0.1, 0.2],
+            })),
+        )
+        .await;
+        assert_eq!(output_http_status(out).await, 403);
+    }
+
+    #[tokio::test]
+    async fn a_denied_single_delete_is_403_not_500() {
+        let ctx = ctx_refusing_with(ErrorCode::PermissionDenied).await;
+        let msg = routed(auth_msg(
+            "delete",
+            "/b/vector/api/denied_idx/vec-1",
+            "user-1",
+        ));
+        assert_eq!(
+            output_http_status(delete_single(&ctx, &msg).await).await,
+            403
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denied_index_delete_is_403_not_500() {
+        let ctx = ctx_refusing_with(ErrorCode::PermissionDenied).await;
+        let msg = routed(auth_msg(
+            "delete",
+            "/b/vector/api/indexes/denied_idx",
+            "user-1",
+        ));
+        assert_eq!(
+            output_http_status(delete_index(&ctx, &msg).await).await,
+            403
+        );
+    }
+
+    /// The metadata lookup `query` makes before it queries is the other
+    /// half: with no registry row it falls through to `describe_index`, and
+    /// a refusal there used to be a 500 too.
+    #[tokio::test]
+    async fn a_denied_index_metadata_lookup_is_403_not_500() {
+        let ctx = ctx_refusing_with(ErrorCode::PermissionDenied).await;
+        let out = query(
+            &ctx,
+            json_input(serde_json::json!({
+                "index": "unregistered_idx",
+                "vector": [0.1, 0.2],
+            })),
+        )
+        .await;
+        assert_eq!(output_http_status(out).await, 403);
+    }
+
+    /// The `NotFound` these handlers already answered stays a 404 with the
+    /// same "index not found" label, so the 403 above is the new
+    /// classification and not a blanket refusal. The up-front
+    /// `vector_backend_available` check is what keeps this `NotFound`
+    /// meaning "no such index" rather than "no such block".
+    #[tokio::test]
+    async fn a_missing_index_is_still_404() {
+        let ctx = ctx_refusing_with(ErrorCode::NotFound).await;
+        let out = upsert(
+            &ctx,
+            json_input(serde_json::json!({
+                "index": "gone_idx",
+                "entries": [{"id": "a", "vector": [0.1, 0.2]}],
+            })),
+        )
+        .await;
+        assert_eq!(output_http_status(out).await, 404);
+    }
+
+    /// And an `InvalidArgument` from the backend is still the caller's 400.
+    #[tokio::test]
+    async fn a_rejected_upsert_is_still_400() {
+        let ctx = ctx_refusing_with(ErrorCode::InvalidArgument).await;
+        let out = upsert(
+            &ctx,
+            json_input(serde_json::json!({
+                "index": "bad_idx",
+                "entries": [{"id": "a", "vector": [0.1, 0.2]}],
+            })),
+        )
+        .await;
+        assert_eq!(output_http_status(out).await, 400);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Tests: which block embeds is resolved from the runtime's registry, not
+// from the build target.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod embedding_block_resolution_tests {
+    use std::sync::Arc;
+
+    use wafer_core::interfaces::vector::service::{EmbeddingService, Result as VectorResult};
+
+    use super::*;
+    use crate::{
+        blocks::{
+            transformers_embed::TransformersEmbedBlock, vector::test_support::StubVectorBlock,
+        },
+        test_support::{output_http_status, TestContext},
+    };
+
+    /// The service `TransformersEmbedBlock` wraps. These tests never reach an
+    /// `embedding.embed` call — they are about *which block* the resolver
+    /// picks — but the real block takes a real service, and using the real
+    /// block is the point: its `BlockInfo` is what the resolver reads.
+    struct StubEmbeddingService;
+
+    #[wafer_block::wafer_async_trait]
+    impl EmbeddingService for StubEmbeddingService {
+        fn model(&self) -> &str {
+            "multilingual-e5-small"
+        }
+        fn dimensions(&self) -> u32 {
+            384
+        }
+        async fn embed(&self, texts: Vec<String>) -> VectorResult<Vec<Vec<f32>>> {
+            Ok(texts.iter().map(|_| vec![0.25f32; 384]).collect())
+        }
+    }
+
+    fn json_input(value: serde_json::Value) -> InputStream {
+        InputStream::from_bytes(serde_json::to_vec(&value).expect("serialize body"))
+    }
+
+    /// Seed the registry row `query` reads, so `load_index_metadata` resolves
+    /// from the DB and the stub vector block never sees a `describe_index`.
+    async fn seed_registry_row(ctx: &dyn Context, prefixed: &str) {
+        db::upsert(
+            ctx,
+            REGISTRY_TABLE,
+            vec![
+                ("prefixed_name".to_string(), serde_json::json!(prefixed)),
+                ("model".to_string(), serde_json::json!(DEFAULT_MODEL)),
+                ("dimensions".to_string(), serde_json::json!(384)),
+                ("keyword_search".to_string(), serde_json::json!(0)),
+            ],
+            vec!["prefixed_name".to_string()],
+            OnConflict::SetColumns(vec![
+                "model".to_string(),
+                "dimensions".to_string(),
+                "keyword_search".to_string(),
+            ]),
+        )
+        .await
+        .expect("seed registry row");
+    }
+
+    /// A `wafer-run/vector` stub that records every op it is asked for, so a
+    /// test can assert about calls that were **not** made.
+    struct RecordingVectorBlock {
+        ops: Arc<std::sync::Mutex<Vec<String>>>,
+        prior_ids: Vec<String>,
+    }
+
+    #[async_trait::async_trait]
+    impl wafer_run::Block for RecordingVectorBlock {
+        fn info(&self) -> wafer_run::BlockInfo {
+            wafer_run::BlockInfo::new(
+                "wafer-run/vector",
+                "0.0.1",
+                "vector@v1",
+                "recording stub vector block",
+            )
+            .category(wafer_run::BlockCategory::Service)
+        }
+
+        async fn handle(
+            &self,
+            _ctx: &dyn Context,
+            msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            self.ops
+                .lock()
+                .expect("ops mutex poisoned")
+                .push(msg.kind.clone());
+            match msg.kind.as_str() {
+                wafer_block::common::ServiceOp::VECTOR_LIST_IDS => {
+                    let resp = wafer_block::wire::vector::ListIdsResponse {
+                        ids: self.prior_ids.clone(),
+                    };
+                    OutputStream::respond(wafer_block::codec::encode(&resp).expect("encode"))
+                }
+                wafer_block::common::ServiceOp::VECTOR_DELETE => OutputStream::respond(Vec::new()),
+                other => OutputStream::error(WaferError::new(
+                    ErrorCode::Unimplemented,
+                    format!("RecordingVectorBlock: unhandled op {other}"),
+                )),
+            }
+        }
+
+        async fn lifecycle(
+            &self,
+            _ctx: &dyn Context,
+            _e: wafer_run::LifecycleEvent,
+        ) -> Result<(), WaferError> {
+            Ok(())
+        }
+    }
+
+    /// Re-ingesting a document on a deployment that has lost its embedder
+    /// must not destroy what is already indexed.
+    ///
+    /// `ingest` listed and deleted the document's prior chunks and only then
+    /// resolved the embedding block, so an operator who dropped the embedding
+    /// block (or whose injected `EmbeddingService` went away) lost every
+    /// stored chunk of the next document re-ingested and got a 503 for it.
+    /// Search silently stopped returning that document until an embedder came
+    /// back *and* someone re-ingested; nothing restored it in the meantime.
+    ///
+    /// Same class as the ingest cleanup rule above — a destructive step must
+    /// not run ahead of a check that can refuse the request — and the
+    /// resolver needs nothing the delete does not already have.
+    #[tokio::test]
+    async fn a_reingest_without_an_embedding_block_does_not_delete_the_prior_chunks() {
+        let ops = Arc::new(std::sync::Mutex::new(Vec::<String>::new()));
+        let mut ctx = TestContext::with_vector().await;
+        let prefixed = service::prefixed_index_name("docs");
+        seed_registry_row(&ctx, &prefixed).await;
+        ctx.register_block(
+            "wafer-run/vector",
+            Arc::new(RecordingVectorBlock {
+                ops: ops.clone(),
+                prior_ids: vec!["doc-1:0".into(), "doc-1:1".into()],
+            }),
+        );
+        // No embedding block: this deployment cannot embed.
+
+        let out = ingest(
+            &ctx,
+            json_input(serde_json::json!({
+                "index": "docs",
+                "document_id": "doc-1",
+                "text": "a document with real words in it",
+            })),
+        )
+        .await;
+
+        assert_eq!(
+            output_http_status(out).await,
+            503,
+            "no embedding block is registered, so the ingest is refused"
+        );
+        let seen = ops.lock().expect("ops mutex poisoned").clone();
+        assert!(
+            !seen
+                .iter()
+                .any(|op| op == wafer_block::common::ServiceOp::VECTOR_DELETE),
+            "the refused ingest must not have deleted the document's existing \
+             chunks — ops seen: {seen:?}"
+        );
+    }
+
+    /// A runtime with no embedding block registered cannot embed, and the
+    /// caller has to be able to tell that from a failed embedding call.
+    ///
+    /// `POST /b/vector/api/embed` used to hand its text to whichever block
+    /// name the *build target* named — `impresspress/fastembed` off wasm32 —
+    /// whether or not that block was registered, so a missing capability
+    /// surfaced as `500 embed failed` wrapping a `NotFound: block … not
+    /// found`. That is the same conflation `err_vector_backend_unavailable`
+    /// exists to prevent for the vector backend, and it gets the same
+    /// answer: 503.
+    #[tokio::test]
+    async fn embed_without_an_embedding_block_reports_the_capability_missing() {
+        let ctx = TestContext::with_vector().await;
+
+        let out = embed(&ctx, json_input(serde_json::json!({ "texts": ["a"] }))).await;
+
+        assert_eq!(
+            output_http_status(out).await,
+            503,
+            "no embedding block is registered on this runtime, so the answer is \
+             'this deployment cannot embed' (503), not 'the embedding failed' (500)"
+        );
+    }
+
+    /// Same for `query` with `text` instead of a pre-computed vector: the
+    /// vector backend is present, the embedder is not.
+    #[tokio::test]
+    async fn query_by_text_without_an_embedding_block_reports_the_capability_missing() {
+        let mut ctx = TestContext::with_vector().await;
+        ctx.register_block("wafer-run/vector", Arc::new(StubVectorBlock::default()));
+        seed_registry_row(&ctx, &service::prefixed_index_name("docs")).await;
+
+        let out = query(
+            &ctx,
+            json_input(serde_json::json!({ "index": "docs", "text": "hello" })),
+        )
+        .await;
+
+        assert_eq!(output_http_status(out).await, 503);
+    }
+
+    /// With an embedding block registered, the resolver names *that* block —
+    /// on native, where the deleted `cfg(target_arch)` body would have said
+    /// `impresspress/fastembed` regardless of what is actually there.
+    #[tokio::test]
+    async fn a_registered_embedding_block_is_the_one_resolved() {
+        let mut ctx = TestContext::with_vector().await;
+        ctx.register_block(
+            "impresspress/transformers-embed",
+            Arc::new(TransformersEmbedBlock::new(Arc::new(StubEmbeddingService))),
+        );
+
+        assert_eq!(
+            embedding_block_for_model(&ctx, DEFAULT_MODEL).expect("an embedding block"),
+            "impresspress/transformers-embed",
+        );
+    }
+
+    /// And the model id reaches the diagnostic, so an operator reading the
+    /// error knows what could not be embedded rather than only that
+    /// something could not be.
+    #[tokio::test]
+    async fn the_unavailable_error_names_the_model() {
+        let ctx = TestContext::with_vector().await;
+
+        let err = embedding_block_for_model(&ctx, "paraphrase-multilingual-MiniLM-L12-v2")
+            .expect_err("no embedding block is registered");
+
+        assert_eq!(err.code, ErrorCode::Unavailable);
+        assert!(
+            err.message
+                .contains("paraphrase-multilingual-MiniLM-L12-v2"),
+            "message was {:?}",
+            err.message
         );
     }
 }

@@ -11,18 +11,19 @@
 
 use maud::{html, Markup};
 use wafer_core::clients::database as db;
-use wafer_run::{context::Context, Message, OutputStream};
+use wafer_run::{context::Context, Message, OutputStream, WaferError};
 
 use super::{admin_page, crumb};
 use crate::{
     blocks::admin::database::{
-        introspect_columns, introspect_table_summaries, validate_readonly_query, TableSummary,
+        introspect_columns, introspect_table_summaries, validate_readonly_query, IntrospectError,
+        TableSummary,
     },
     ui::{
+        components::{self, Badge, BadgeVariant},
         html_response, icons,
         shell::Topbar,
-        templates::{list_page, PageHeader},
-        SiteConfig, UserInfo,
+        templates::list_page,
     },
     util::{now_millis, parse_form_body, url_path_encode as pct_encode},
 };
@@ -54,11 +55,10 @@ fn backend_badge(backend: wafer_sql_utils::Backend, table_count: usize) -> Marku
         wafer_sql_utils::Backend::Sqlite => "SQLite",
         wafer_sql_utils::Backend::Postgres => "PostgreSQL",
     };
-    html! {
-        span .badge .badge-info .text-xs title="Database backend" {
-            (label) " · " (table_count) " tables"
-        }
-    }
+    Badge::new(BadgeVariant::Info)
+        .classes("text-xs")
+        .title("Database backend")
+        .render(html! { (label) " · " (table_count) " tables" })
 }
 
 fn left_pane(tables: &[TableSummary], selected: Option<&str>, tab: Tab) -> Markup {
@@ -88,7 +88,7 @@ fn left_pane(tables: &[TableSummary], selected: Option<&str>, tab: Tab) -> Marku
                     placeholder="Filter tables…"
                     aria-label="Filter tables"
                     autocomplete="off"
-                    oninput="(function(e){var q=e.target.value.toLowerCase();var visible=0;document.querySelectorAll('[data-db-table]').forEach(function(li){var n=li.getAttribute('data-db-table');var show=n.indexOf(q)>=0;li.hidden=!show;if(show)visible++;});document.querySelectorAll('[data-db-group]').forEach(function(g){var anyVisible=g.querySelector('[data-db-table]:not([hidden])');g.hidden=!anyVisible;});var empty=document.getElementById('db-filter-empty');if(empty)empty.hidden=visible!==0;})(event)";
+                    data-action="db-table-filter";
             }
             div .db-table-groups {
                 @if tables.is_empty() {
@@ -159,9 +159,42 @@ fn left_pane(tables: &[TableSummary], selected: Option<&str>, tab: Tab) -> Marku
                 div #db-filter-empty .db-table-list__empty .text-muted .text-sm
                     hidden { "No tables match." }
             }
+            script { (maud::PreEscaped(TABLE_FILTER_JS)) }
         }
     }
 }
+
+/// The table-list filter, which used to be a 478-character minified `oninput`
+/// attribute: the longest LITERAL handler in the tree, though not the longest
+/// handler — `blocks/userportal/pages/security.rs:73` built a ~521-character
+/// one with `format!`. (The specification's figure of 430 was a miscount and
+/// is corrected here rather than copied.) Wherever it sat it was unreadable,
+/// unlintable and untestable. It hides `[data-db-table]` rows that do not match,
+/// collapses a `[data-db-group]` whose rows are all hidden, and reveals
+/// `#db-filter-empty` when nothing matches at all.
+const TABLE_FILTER_JS: &str = r#"
+(function () {
+  if (window.__dbTableFilterInit) return;
+  window.__dbTableFilterInit = true;
+  document.addEventListener('input', function (e) {
+    var el = e.target;
+    if (!(el instanceof Element)) return;
+    if (el.getAttribute('data-action') !== 'db-table-filter') return;
+    var query = el.value.toLowerCase();
+    var visible = 0;
+    document.querySelectorAll('[data-db-table]').forEach(function (row) {
+      var show = (row.getAttribute('data-db-table') || '').indexOf(query) >= 0;
+      row.hidden = !show;
+      if (show) visible++;
+    });
+    document.querySelectorAll('[data-db-group]').forEach(function (group) {
+      group.hidden = !group.querySelector('[data-db-table]:not([hidden])');
+    });
+    var empty = document.getElementById('db-filter-empty');
+    if (empty) empty.hidden = visible !== 0;
+  });
+})();
+"#;
 
 /// Split an `org__block` group key into a display-friendly `(org, block)`
 /// pair. `impresspress__admin` → `("impresspress", "admin")`. Leaves the value
@@ -203,75 +236,92 @@ fn right_pane_tabs(selected: Option<&str>, tab: Tab) -> Markup {
     ])
 }
 
-async fn schema_panel(ctx: &dyn Context, table: Option<&str>) -> Markup {
+/// The schema panel for the selected table, or `Err` when a read failed —
+/// the page then answers an error page rather than an empty schema and a
+/// `0` count.
+async fn schema_panel(ctx: &dyn Context, table: Option<&str>) -> Result<Markup, WaferError> {
     let Some(name) = table else {
-        return html! {
+        return Ok(html! {
             div .empty-state {
                 p { "Select a table on the left to view its schema." }
             }
-        };
+        });
     };
 
-    // The selected name is user input; an invalid identifier renders the same
-    // empty state as a table the backend can't introspect. Columns + row count
+    // The selected name is user input: a name the backend cannot quote, or
+    // one it has no table for, is said so in the panel. Columns + row count
     // come from the shared introspection routine used by the JSON API too.
-    let (columns, row_count) = introspect_columns(ctx, name).await;
+    let (columns, row_count) = match introspect_columns(ctx, name).await {
+        Ok(schema) => schema,
+        Err(IntrospectError::InvalidName) => {
+            return Ok(html! {
+                div .empty-state { p { "\"" (name) "\" is not a valid table name." } }
+            })
+        }
+        Err(IntrospectError::NoSuchTable) => {
+            return Ok(html! {
+                div .empty-state { p { "There is no table named \"" (name) "\"." } }
+            })
+        }
+        Err(IntrospectError::Read(e)) => return Err(e),
+    };
 
-    html! {
+    let rows: Vec<Vec<Markup>> = columns
+        .iter()
+        .map(|c| {
+            vec![
+                html! { span .font-medium { (c.name) } },
+                html! { span .text-muted { (c.ty) } },
+                html! { @if c.notnull { span aria-label="Yes" { (icons::check()) } } },
+                html! { @if c.pk { span aria-label="Yes" { (icons::check()) } } },
+                html! { span .text-muted { (c.default_value.as_deref().unwrap_or("")) } },
+            ]
+        })
+        .collect();
+
+    Ok(html! {
         div .db-panel {
             header .db-panel__head {
                 h3 { (name) }
                 span .text-muted .text-sm { (row_count) " rows" }
             }
-            @if columns.is_empty() {
-                div .empty-state { p { "No columns introspected (table may be empty or backend doesn't support it)." } }
-            } @else {
-                div .table-container {
-                    table .table {
-                        thead {
-                            tr {
-                                th { "Column" }
-                                th { "Type" }
-                                th { "Not null" }
-                                th { "PK" }
-                                th { "Default" }
-                            }
-                        }
-                        tbody {
-                            @for c in &columns {
-                                tr {
-                                    td .font-medium { (c.name) }
-                                    td .text-muted { (c.ty) }
-                                    td { @if c.notnull { span aria-label="Yes" { (icons::check()) } } }
-                                    td { @if c.pk { span aria-label="Yes" { (icons::check()) } } }
-                                    td .text-muted .text-sm { (c.default_value.as_deref().unwrap_or("")) }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+            (components::data_table::<fn(usize) -> Option<String>>(
+                &SCHEMA_COLUMNS,
+                rows,
+                None,
+                html! {},
+            ))
         }
-    }
+    })
 }
 
-async fn right_pane(ctx: &dyn Context, selected: Option<&str>, tab: Tab) -> Markup {
-    html! {
+async fn right_pane(
+    ctx: &dyn Context,
+    selected: Option<&str>,
+    tab: Tab,
+) -> Result<Markup, WaferError> {
+    let panel = match tab {
+        Tab::Schema => schema_panel(ctx, selected).await?,
+        Tab::Sql => sql_panel(selected, None, None),
+    };
+    Ok(html! {
         section .db-pane .db-pane--right {
             (right_pane_tabs(selected, tab))
-            div .db-panel-body {
-                @match tab {
-                    Tab::Schema => (schema_panel(ctx, selected).await),
-                    Tab::Sql => (sql_panel(selected, None, None)),
-                }
-            }
+            div .db-panel-body { (panel) }
         }
-    }
+    })
 }
 
 fn sql_panel(selected: Option<&str>, query: Option<&str>, result: Option<Markup>) -> Markup {
+    // A table the validator refuses is not prefilled with a query that cannot
+    // run: the panel says why and where to go instead, rather than handing an
+    // operator a Run button whose only outcome is a 403. Same text the API
+    // returns, from the same entry — the page cannot describe the rule
+    // differently from the rule.
+    let refused = selected.and_then(crate::secret_tables::secret_table_named_in);
     let initial = match (query, selected) {
         (Some(q), _) if !q.is_empty() => q.to_string(),
+        _ if refused.is_some() => "SELECT 1;".to_string(),
         (_, Some(t)) => format!("SELECT * FROM {t} LIMIT 100;"),
         _ => "SELECT 1;".to_string(),
     };
@@ -284,6 +334,9 @@ fn sql_panel(selected: Option<&str>, query: Option<&str>, result: Option<Markup>
             {
                 @if let Some(t) = selected {
                     input type="hidden" name="table" value=(t);
+                }
+                @if let Some(entry) = refused {
+                    p .text-muted .text-sm { (entry.refusal()) }
                 }
                 textarea name="query" rows="6" .db-sql__input
                     spellcheck="false"
@@ -323,30 +376,28 @@ fn render_sql_results(rows: &[db::Record], duration_ms: u128) -> Markup {
         }
     }
 
+    // The result grid's columns are the query's, so they are built per render
+    // rather than declared as a const the way the fixed tables are.
+    let cols: Vec<components::TableCol<'_>> = columns
+        .iter()
+        .map(|c| components::TableCol {
+            label: c.as_str(),
+            width: None,
+        })
+        .collect();
+    let cells: Vec<Vec<Markup>> = rows
+        .iter()
+        .map(|r| {
+            columns
+                .iter()
+                .map(|c| html! { @if let Some(v) = r.data.get(c) { (format_cell(v)) } })
+                .collect()
+        })
+        .collect();
+
     html! {
         p .text-muted .text-sm { (rows.len()) " rows in " (duration_ms) "ms" }
-        div .table-container {
-            table .table {
-                thead {
-                    tr {
-                        @for c in &columns { th { (c) } }
-                    }
-                }
-                tbody {
-                    @for r in rows {
-                        tr {
-                            @for c in &columns {
-                                td .text-sm {
-                                    @if let Some(v) = r.data.get(c) {
-                                        (format_cell(v))
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
-        }
+        (components::data_table::<fn(usize) -> Option<String>>(&cols, cells, None, html! {}))
     }
 }
 
@@ -365,35 +416,49 @@ fn render_sql_error(msg: &str) -> Markup {
 }
 
 pub async fn database_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let config = SiteConfig::load(ctx).await;
-    let user = UserInfo::from_message(msg);
-
-    let tables = introspect_table_summaries(ctx).await;
-    let backend = crate::db_backend(ctx).await;
+    let backend = match crate::db_backend(ctx).await {
+        Ok(backend) => backend,
+        Err(e) => {
+            return crate::blocks::crud::db_error_page(msg, e, "database page: backend read failed")
+        }
+    };
     let selected = msg.query("table");
+    let selected = (!selected.is_empty()).then_some(selected);
     let tab = Tab::from_query(msg.query("tab"));
 
+    // A failed listing, count or column read is an error page (403 for a WRAP
+    // denial, 429 for a quota, else 500), not an empty database.
+    let read = async {
+        let tables = introspect_table_summaries(ctx).await?;
+        let right = right_pane(ctx, selected, tab).await?;
+        Ok::<_, WaferError>((tables, right))
+    };
+    let (tables, right) = match read.await {
+        Ok(read) => read,
+        Err(e) => {
+            return crate::blocks::crud::db_error_page(
+                msg,
+                e,
+                "admin database page: introspection read failed",
+            )
+        }
+    };
+
     let body = list_page(
-        PageHeader {
-            title: "",
-            subtitle: None,
-            primary_action: None,
-        },
         None,
         html! {
             div .db-layout {
-                (left_pane(&tables, if selected.is_empty() { None } else { Some(selected) }, tab))
-                (right_pane(ctx, if selected.is_empty() { None } else { Some(selected) }, tab).await)
+                (left_pane(&tables, selected, tab))
+                (right)
             }
         },
         None,
     );
 
     admin_page(
+        ctx,
+        msg,
         "Database",
-        &config,
-        "/b/admin/database",
-        user.as_ref(),
         Topbar {
             crumbs: crumb("Database"),
             primary_action: Some(backend_badge(backend, tables.len())),
@@ -401,8 +466,8 @@ pub async fn database_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
             show_palette: true,
         },
         body,
-        msg,
     )
+    .await
 }
 
 pub async fn handle_database_query(
@@ -410,7 +475,10 @@ pub async fn handle_database_query(
     _msg: &Message,
     input: wafer_run::InputStream,
 ) -> OutputStream {
-    let raw = input.collect_to_bytes().await;
+    let raw = match input.collect_to_bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => return OutputStream::error(e),
+    };
     let form = parse_form_body(&raw);
     let query = form.get("query").cloned().unwrap_or_default();
 
@@ -431,9 +499,137 @@ pub async fn handle_database_query(
     html_response(fragment)
 }
 
+/// The schema panel's columns. Declared once so the `<td data-label>` the
+/// component stamps on every cell names the same column the header does.
+const SCHEMA_COLUMNS: [components::TableCol<'static>; 5] = [
+    components::TableCol {
+        label: "Column",
+        width: None,
+    },
+    components::TableCol {
+        label: "Type",
+        width: None,
+    },
+    components::TableCol {
+        label: "Not null",
+        width: None,
+    },
+    components::TableCol {
+        label: "PK",
+        width: None,
+    },
+    components::TableCol {
+        label: "Default",
+        width: None,
+    },
+];
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::{
+        blocks::admin::test_support::browser_request,
+        test_support::{admin_msg, TestContext},
+    };
+
+    /// The visual-baseline suite masks the table-list rows of the two log
+    /// tables every request writes to, by the suffix of their
+    /// `data-db-table` name, because their row counts follow the suite's own
+    /// traffic. Rename either table (or the attribute) and the selector
+    /// silently stops matching: the capture then fails on whatever ran
+    /// before it, not on the page. This reads the selectors out of the spec
+    /// and requires each to match a row this page renders.
+    #[tokio::test]
+    async fn the_log_table_rows_carry_the_names_the_visual_mask_keys_on() {
+        const SPEC: &str =
+            include_str!("../../../../../impresspress-web/tests/e2e/visual-baseline.spec.ts");
+        const PREFIX: &str = r#"li[data-db-table$=""#;
+        let suffixes: Vec<&str> = SPEC
+            .match_indices(PREFIX)
+            .map(|(at, _)| {
+                let rest = &SPEC[at + PREFIX.len()..];
+                &rest[..rest.find('"').expect("a closed selector")]
+            })
+            .collect();
+        assert_eq!(
+            suffixes,
+            ["__request_logs", "__storage_access_logs"],
+            "visual-baseline.spec.ts no longer masks the two log tables' rows"
+        );
+
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        let parts = browser_request(&ctx, admin_msg("retrieve", "/b/admin/database")).await;
+        assert_eq!(parts.status, 200);
+        let html = String::from_utf8(parts.body).expect("UTF-8 body");
+        for suffix in suffixes {
+            let rows = html
+                .match_indices(r#"<li data-db-table=""#)
+                .filter(|(at, _)| {
+                    let name = &html[at + r#"<li data-db-table=""#.len()..];
+                    name[..name.find('"').unwrap_or(0)].ends_with(suffix)
+                })
+                .count();
+            assert_eq!(
+                rows, 1,
+                "the mask `li[data-db-table$=\"{suffix}\"]` must match exactly one row: {html}"
+            );
+        }
+    }
+
+    /// A failed table listing is a 500, not a database with no tables.
+    #[tokio::test]
+    async fn a_failed_introspection_is_a_500_not_an_empty_database() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID)
+            .break_reads();
+
+        let parts = browser_request(&ctx, admin_msg("retrieve", "/b/admin/database")).await;
+
+        assert_eq!(parts.status, 500);
+        let html = String::from_utf8(parts.body).expect("UTF-8 body");
+        assert!(!html.contains("db-layout"), "{html}");
+    }
+
+    /// A selected name the backend has no table for says so, rather than an
+    /// empty schema with "0 rows" — and it is the visitor's typo, not a 500.
+    #[tokio::test]
+    async fn an_unknown_table_says_so() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        let mut msg = admin_msg("retrieve", "/b/admin/database");
+        msg.set_meta("req.query.table", "no_such_table");
+
+        let parts = browser_request(&ctx, msg).await;
+
+        assert_eq!(parts.status, 200);
+        let html = String::from_utf8(parts.body).expect("UTF-8 body");
+        assert!(
+            html.contains("There is no table named &quot;no_such_table&quot;."),
+            "{html}"
+        );
+        assert!(!html.contains("0 rows"), "{html}");
+    }
+
+    /// Control: a real table still shows its columns and count.
+    #[tokio::test]
+    async fn a_real_table_shows_its_schema() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        let mut msg = admin_msg("retrieve", "/b/admin/database");
+        msg.set_meta("req.query.table", crate::blocks::admin::ROLES_TABLE);
+
+        let parts = browser_request(&ctx, msg).await;
+
+        assert_eq!(parts.status, 200);
+        let html = String::from_utf8(parts.body).expect("UTF-8 body");
+        assert!(html.contains(" rows<"), "{html}");
+        assert!(html.contains(">name<"), "{html}");
+    }
 
     #[test]
     fn group_label_translates_underscores_to_dashes_in_org() {

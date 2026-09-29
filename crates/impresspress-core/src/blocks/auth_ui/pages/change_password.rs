@@ -3,11 +3,16 @@
 use maud::{html, PreEscaped};
 use wafer_run::{context::Context, Message, OutputStream};
 
-use super::{pw_field, pw_toggle_js, site_config};
+use super::{pw_field, site_config};
 use crate::ui::{self, components::auth_panel, templates::auth_split};
 
-pub async fn handle(ctx: &dyn Context, _msg: &Message) -> OutputStream {
-    let config = site_config(ctx);
+pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
+    let config = match site_config(ctx).await {
+        Ok(site) => site,
+        Err(e) => {
+            return crate::blocks::crud::db_error_page(msg, e, "page: site config read failed")
+        }
+    };
 
     let markup = ui::layout::page(
         "Change Password",
@@ -22,12 +27,12 @@ pub async fn handle(ctx: &dyn Context, _msg: &Message) -> OutputStream {
                         p .change-password-success-text {
                             "Password changed successfully!"
                         }
-                        button .login-button .auth-status__action onclick="history.back()" {
+                        button .login-button .auth-status__action data-action="history-back" {
                             "Go Back"
                         }
                     }
 
-                    form #form .login-form onsubmit="return handleChange(event)" {
+                    form #form .login-form {
                         div .form-group {
                             label .form-label for="current" { "Current Password" }
                             (pw_field("current", "Enter your current password", None))
@@ -47,11 +52,14 @@ pub async fn handle(ctx: &dyn Context, _msg: &Message) -> OutputStream {
                     }
 
                     div .text-center .mt-4 {
-                        a .btn .btn--ghost href="javascript:history.back()" { "Cancel" }
+                        // The one `javascript:` URL in the tree, and the same
+                        // hazard class as the `on*=` attributes this change
+                        // removes: it goes back, which is an action, so it is
+                        // a button that declares `history-back`.
+                        button .btn .btn--ghost type="button" data-action="history-back" { "Cancel" }
                     }
                 }
 
-                script { (PreEscaped(pw_toggle_js())) }
                 script { (PreEscaped(r#"
 var $=function(id){return document.getElementById(id)};
 function showErr(m){var e=$('error');e.textContent=m;e.hidden=false}
@@ -70,6 +78,13 @@ async function handleChange(ev){
   }catch(ex){showErr('Something went wrong');btn.disabled=false;btn.textContent='Change Password'}
   return false;
 }
+document.addEventListener('submit',function(e){if(e.target&&e.target.id==='form')handleChange(e)});
+document.addEventListener('click',function(e){
+  if(!(e.target instanceof Element))return;
+  if(!e.target.closest('[data-action="history-back"]'))return;
+  e.preventDefault();
+  history.back();
+});
 "#)) }
             },
         ),

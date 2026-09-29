@@ -80,17 +80,22 @@ pub struct OperationalStatus {
 /// expiry deletes, one auth rate-counter delete, and one singleton status write.
 pub const STATEMENT_COUNT: usize = 5;
 
-pub async fn prune(ctx: &dyn Context) -> MaintenanceResult {
-    let now = chrono::Utc::now();
+/// Run one retention pass as of `now`.
+///
+/// `now` is a parameter so a test can place the cutoffs against the rows it
+/// seeds; the routes pass the current time.
+pub async fn prune(ctx: &dyn Context, now: chrono::DateTime<chrono::Utc>) -> MaintenanceResult {
     let now_text = now.to_rfc3339();
-    // `updated_at` on the auth rate-counter table is stamped by the windowed
-    // upsert with SQL `CURRENT_TIMESTAMP`, which SQLite stores as
-    // `YYYY-MM-DD HH:MM:SS` text (UTC, space separator). The cutoff must use
-    // the same shape: RFC3339's `T`/offset compares wrong lexicographically
-    // on SQLite and does not bind against Postgres's TIMESTAMPTZ column.
-    let rate_cutoff = (now - chrono::Duration::hours(72))
-        .format("%Y-%m-%d %H:%M:%S")
-        .to_string();
+    // The auth rate-counter cutoff is RFC 3339, the one timestamp text every
+    // backend reads: Postgres binds it to the TIMESTAMPTZ `updated_at` column
+    // (and refuses any other spelling), and SQLite compares `updated_at` as
+    // text. On SQLite a row stamped by SQL `CURRENT_TIMESTAMP`
+    // (`YYYY-MM-DD HH:MM:SS`, a space where RFC 3339 has `T`) sorts below
+    // every cutoff of its own calendar date, so such a row can be swept up to
+    // a day early — still at least 48 hours after its last write. Sweeping a
+    // counter only resets it, and the declared windows (a minute to an hour,
+    // unless an operator configures longer) end long before that.
+    let rate_cutoff = (now - chrono::Duration::hours(72)).to_rfc3339();
     let mut result = MaintenanceResult {
         complete: true,
         analyses_deleted: 0,
@@ -127,13 +132,7 @@ pub async fn prune(ctx: &dyn Context) -> MaintenanceResult {
         &mut result.errors,
     )
     .await;
-    match db::delete_by_filters_count(
-        ctx,
-        crate::blocks::auth::RATE_LIMITS_TABLE,
-        vec![repo::before("updated_at", &rate_cutoff)],
-    )
-    .await
-    {
+    match crate::blocks::auth::repo::rate_limits::delete_updated_before(ctx, &rate_cutoff).await {
         Ok(count) => result.rate_counters_deleted = count,
         Err(error) => {
             tracing::warn!(error = %error, "ticket maintenance rate-counter prune failed");
@@ -146,7 +145,7 @@ pub async fn prune(ctx: &dyn Context) -> MaintenanceResult {
 }
 
 pub async fn status(ctx: &dyn Context) -> Result<OperationalStatus, WaferError> {
-    let security = SecurityReadiness::load(ctx).await;
+    let security = SecurityReadiness::load(ctx).await?;
     let new_tickets = repo::count_tickets(ctx, vec![repo::eq("status", "new")]).await?;
     let urgent_tickets = repo::count_tickets(ctx, vec![repo::eq("priority", "urgent")]).await?;
     let open_tickets = repo::count_tickets(
@@ -158,7 +157,13 @@ pub async fn status(ctx: &dyn Context) -> Result<OperationalStatus, WaferError> 
         }],
     )
     .await?;
-    let stored = db::get(ctx, repo::MAINTENANCE, "singleton").await.ok();
+    // No row yet is an instance that has never run maintenance; a read that
+    // failed is not that, and must not report the audit trail as healthy.
+    let stored = match db::get(ctx, repo::MAINTENANCE, "singleton").await {
+        Ok(record) => Some(record),
+        Err(error) if error.code == wafer_run::ErrorCode::NotFound => None,
+        Err(error) => return Err(error),
+    };
     let audit_degraded = stored
         .as_ref()
         .is_some_and(|record| super::service::bool_field(record, "audit_degraded"));
@@ -205,5 +210,84 @@ async fn store_result(ctx: &dyn Context, result: &MaintenanceResult) {
         if let Err(error) = db::create(ctx, repo::MAINTENANCE, create).await {
             tracing::warn!(error = %error, "ticket maintenance status write failed");
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use serde_json::{json, Value};
+    use wafer_core::clients::database as db;
+
+    use super::prune;
+    use crate::{blocks::auth::repo::rate_limits, test_support::TestContext};
+
+    async fn counter(ctx: &TestContext, id: &str, updated_at: &str) {
+        let mut row: HashMap<String, Value> = HashMap::new();
+        row.insert("id".into(), json!(id));
+        row.insert("key".into(), json!(format!("{id}-key")));
+        row.insert("count".into(), json!(1));
+        row.insert("window_start".into(), json!(0));
+        row.insert("created_at".into(), json!(updated_at));
+        row.insert("updated_at".into(), json!(updated_at));
+        db::create(ctx, rate_limits::TABLE, row)
+            .await
+            .expect("seed a rate counter");
+    }
+
+    /// The rate-counter cutoff is RFC 3339, which is what Postgres's
+    /// TIMESTAMPTZ binding accepts and what an RFC 3339 `updated_at` compares
+    /// against correctly as text. A counter written earlier on the cutoff's
+    /// own calendar date is swept; a `YYYY-MM-DD HH:MM:SS` cutoff
+    /// (`CURRENT_TIMESTAMP`'s spelling) sorts below that row, because `T`
+    /// sorts above the space, and would keep it. A row stamped in that
+    /// spelling on a later date stays either way, and so does a counter the
+    /// real windowed upsert has just written.
+    #[tokio::test]
+    async fn the_rate_counter_sweep_cuts_off_in_rfc3339() {
+        let ctx = TestContext::with_tickets().await;
+        let wall_clock = chrono::Utc::now().timestamp();
+        rate_limits::windowed_increment(&ctx, "just-written", "just-written-key", wall_clock, 0)
+            .await
+            .expect("the windowed upsert writes a counter");
+        let now = chrono::DateTime::parse_from_rfc3339("2026-09-25T12:00:00Z")
+            .expect("a fixed instant")
+            .with_timezone(&chrono::Utc);
+        // The cutoff is 72 hours earlier: 2026-09-22T12:00:00+00:00.
+        counter(&ctx, "old", "2026-09-20T00:00:00+00:00").await;
+        counter(
+            &ctx,
+            "earlier-on-the-cutoff-date",
+            "2026-09-22T06:00:00+00:00",
+        )
+        .await;
+        counter(
+            &ctx,
+            "later-on-the-cutoff-date",
+            "2026-09-22T18:00:00+00:00",
+        )
+        .await;
+        counter(&ctx, "current-timestamp-spelling", "2026-09-24 09:00:00").await;
+
+        let result = prune(&ctx, now).await;
+
+        assert!(result.errors.is_empty(), "{:?}", result.errors);
+        assert_eq!(result.rate_counters_deleted, 2);
+        let mut left: Vec<String> = crate::db_read::list_every(&ctx, rate_limits::TABLE, vec![])
+            .await
+            .expect("read the counters")
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+        left.sort();
+        assert_eq!(
+            left,
+            [
+                "current-timestamp-spelling",
+                "just-written",
+                "later-on-the-cutoff-date"
+            ]
+        );
     }
 }

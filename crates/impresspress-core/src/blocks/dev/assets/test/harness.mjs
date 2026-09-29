@@ -55,6 +55,10 @@ const tail = fs.readFileSync(path.join(here, '..', 'dev.js'), 'utf8');
  *   answers with — a `StatusResponse`. A function, for a test whose subject
  *   is what the page does when the answer CHANGES: the page polls it, and
  *   every mutating call ends with one more read of it.
+ * @param {Promise<void>|null} [options.statusGate]  when set, every status
+ *   request parks on this promise, so a test can fire more poll ticks WHILE
+ *   one is still outstanding — the only way to see the poll's in-flight
+ *   guard, since nothing else in this harness yields.
  */
 /** A Node timer that does not hold the process open. */
 const unref = (timer) => {
@@ -95,6 +99,7 @@ export function instantiate({
   // An idle sandbox with nothing live, which is what every test that does not
   // care about the status wants: no `activation`, no `active_generation`.
   status = {},
+  statusGate = null,
   exportManifest = null,
   exportZip = { status: 200, body: 'PK\u0003\u0004zip' },
   exportGate = null
@@ -107,6 +112,9 @@ export function instantiate({
   const downloads = [];
   const revoked = [];
   const fetchCalls = [];
+  // Every `setInterval` the tail has running, by id, so `fireInterval` can
+  // deliver a tick and a cleared interval stops receiving them.
+  const liveIntervals = new Map();
   // Every `window.addEventListener` the tail makes, so a test can fire the
   // real handler — `pagehide`'s `event.persisted` branch is a decision the
   // handler owns, and there is no other way to reach it.
@@ -279,7 +287,11 @@ export function instantiate({
         return answer(stage(JSON.parse(args[1].body)));
       }
       if (url === '/b/dev/api/status') {
-        return answer(typeof status === 'function' ? status() : status);
+        const body = () => (typeof status === 'function' ? status() : status);
+        // Read at RESOLUTION, not at call time, for the same reason
+        // `exportGate` exists: a parked request that had already snapshotted
+        // its answer could not show a test what changed while it was parked.
+        return statusGate ? statusGate.then(() => answer(body())) : answer(body());
       }
       if (url === '/b/dev/api/export/manifest') {
         // `null` is the 400 the endpoint answers on an instance that has
@@ -338,8 +350,19 @@ export function instantiate({
     AbortController,
     console,
     Promise,
-    setInterval: (fn, ms) => unref(globalThis.setInterval(fn, ms)),
-    clearInterval,
+    // Registered as well as scheduled: the poll interval is 300 ms and a test
+    // about what two ticks do to each other must not have to wait 600 ms for
+    // them. `fireInterval` below runs the callbacks of every interval that is
+    // still live, which is what a tick IS.
+    setInterval: (fn, ms) => {
+      const id = unref(globalThis.setInterval(fn, ms));
+      liveIntervals.set(id, fn);
+      return id;
+    },
+    clearInterval: (id) => {
+      liveIntervals.delete(id);
+      clearInterval(id);
+    },
     Date,
     Array,
     Math,
@@ -371,6 +394,7 @@ return {
   exportSite,
   updateExportButton,
   get exportInFlight() { return exportInFlight },
+  get statusInFlight() { return statusInFlight },
   get compilerManifest() { return compilerManifest }
 };`
   );
@@ -382,5 +406,11 @@ return {
       .filter((l) => l.type === type)
       .forEach((l) => l.listener(event));
   };
-  return { handle, fetchCalls, fireWindow, elements, tools, downloads, revoked };
+  // Deliver one tick to every interval the tail currently has running.
+  const fireInterval = () => {
+    for (const fn of [...liveIntervals.values()]) {
+      fn();
+    }
+  };
+  return { handle, fetchCalls, fireWindow, fireInterval, elements, tools, downloads, revoked };
 }

@@ -1,3 +1,5 @@
+pub mod assets;
+pub(crate) mod config;
 pub mod contracts;
 mod handlers;
 pub(crate) mod migrations;
@@ -6,6 +8,7 @@ pub mod offer_pricing;
 mod pages;
 mod purchase;
 mod repo;
+mod routes;
 mod stripe;
 mod stripe_client;
 mod stripe_provider;
@@ -13,29 +16,34 @@ mod stripe_provider;
 #[cfg(test)]
 mod tests;
 
-pub(crate) use handlers::{
-    GROUPS_TABLE, GROUP_TEMPLATES_TABLE, PRODUCT_TEMPLATES_TABLE, TYPES_TABLE,
-};
-// The products table's own door tests (`tests/repo_door_test.rs`) refuse a
-// call site outside `repo::products` that names the table directly — the
-// data snapshot's export allowlist is one, deliberately (it needs the name
-// for its `TABLE_ALLOWLIST`/`TABLE_EXCLUDED` bookkeeping and as the
-// `DataSnapshot` JSON key), and is listed in `TABLE_IDENT_ALLOWED` there
-// with its own justification rather than routed around the scanner through
-// an extra same-value constant under a different name. The two functions
-// alongside it are how it reads and writes the live set without a query
-// built directly on the name.
+// The crate-level door test (`tests/repo_door.rs`) refuses a call site
+// outside `repo::products` that names the table directly — the data
+// snapshot's export allowlist is one, deliberately (it needs the name for
+// its `TABLE_ALLOWLIST`/`TABLE_EXCLUDED` bookkeeping and as the
+// `DataSnapshot` JSON key), and is listed in `IDENT_ALLOWED` there with its
+// own justification rather than routed around the scanner through an extra
+// same-value constant under a different name. The two functions alongside it
+// are how it reads and writes the live set without a query built directly on
+// the name.
 //
 // `block-dev`-gated because `blocks::dev::data_snapshot` is the ONLY consumer
 // of all three, and the dev block is off in every default build: an
 // ungated re-export is three `unused_imports` warnings (and a dead
-// `upsert_from_snapshot`) in every build that does not compile the sandbox.
+// `snapshot_upsert`) in every build that does not compile the sandbox.
 // The gate says what the re-export is for as well as keeping the default
 // build warning-free.
 #[cfg(feature = "block-dev")]
 pub(crate) use repo::products::{
-    list_all as list_live_products, upsert_from_snapshot as upsert_product_from_snapshot, TABLE,
+    list_every_live as list_live_products, snapshot_upsert as product_snapshot_upsert, TABLE,
 };
+// `stripe_events` has two non-production readers and no production one, so
+// its re-export carries both of their cfgs rather than claiming the name is
+// always live: `blocks::dev::data_snapshot`'s closed-list bookkeeping under
+// `block-dev`, and, under the lib's own `cfg(test)`, the `secret_tables` pin
+// test that holds the admin SQL explorer's literal to this door's constant so
+// a renamed table cannot drop out of the refusal silently.
+#[cfg(any(feature = "block-dev", test))]
+pub(crate) use repo::stripe_events::TABLE as STRIPE_EVENTS_TABLE;
 // `repo` is private to this module (unlike `auth`'s `pub mod repo`, whose
 // table constants are meant to be named from anywhere in the crate) — these
 // re-exports are the curated exception list, extended here so
@@ -48,75 +56,34 @@ pub(crate) use repo::products::{
 #[cfg(feature = "block-dev")]
 pub(crate) use repo::{
     checkout_presets::TABLE as CHECKOUT_PRESETS_TABLE, disputes::TABLE as DISPUTES_TABLE,
-    entitlements::TABLE as ENTITLEMENTS_TABLE, offer_components::TABLE as OFFER_COMPONENTS_TABLE,
+    entitlements::TABLE as ENTITLEMENTS_TABLE, group_templates::TABLE as GROUP_TEMPLATES_TABLE,
+    groups::TABLE as GROUPS_TABLE, offer_components::TABLE as OFFER_COMPONENTS_TABLE,
     offers::TABLE as OFFERS_TABLE, payment_links::TABLE as PAYMENT_LINKS_TABLE,
+    product_templates::TABLE as PRODUCT_TEMPLATES_TABLE,
     product_versions::TABLE as PRODUCT_VERSIONS_TABLE,
     provider_operations::TABLE as PROVIDER_OPERATIONS_TABLE, refunds::TABLE as REFUNDS_TABLE,
-    seller_accounts::TABLE as SELLER_ACCOUNTS_TABLE, stripe_events::TABLE as STRIPE_EVENTS_TABLE,
+    seller_accounts::TABLE as SELLER_ACCOUNTS_TABLE,
     subscription_items::TABLE as SUBSCRIPTION_ITEMS_TABLE, subscriptions::SUBSCRIPTIONS_TABLE,
+    types::TABLE as TYPES_TABLE,
 };
 pub(crate) use repo::{
     purchases::{LINE_ITEMS_TABLE, PURCHASES_TABLE},
     variables::TABLE as VARIABLES_TABLE,
 };
-use wafer_core::clients::config;
-use wafer_run::{BlockEndpoint, BlockInfo, ConfigVar, InputType, InstanceMode};
+use wafer_run::{BlockInfo, ConfigVar, InputType, InstanceMode};
 
-use super::rate_limit::{
-    check_route_limits, check_user_rate_limit, LimitKey, RateLimit, RateLimitOutcome, RouteLimit,
-    UserRateLimiter,
+use self::config::{
+    AUTOMATIC_TAX, CHECKOUT_ALLOWED_ORIGINS, DEFAULT_CURRENCY, SELLER_ALLOWED_CATEGORIES,
+    SELLER_ALLOWED_CURRENCIES, SELLER_ALLOWED_TEMPLATES, SELLER_MAX_PRODUCTS,
+    SELLER_MODERATION_REQUIRED, STRIPE_API_URL, STRIPE_API_VERSION, STRIPE_PUBLISHABLE_KEY,
+    STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, WEBHOOK_SECRET, WEBHOOK_URL,
 };
+use super::rate_limit::{apply_route_limit, UserRateLimiter};
 use crate::{
     blocks::crud,
+    endpoint_match,
     http::{err_forbidden, err_not_found},
-    util,
 };
-
-/// The schema `.output::<T>()` would declare for `T`, as a value, for the one
-/// place a derived row must be embedded inside a hand-written envelope: the
-/// product duplication response, whose sibling `offers` field reaches the
-/// recursive `Condition` and so cannot be derived at all yet. Same settings
-/// as wafer-block's `self_contained_schema` (inlined, no `$schema`, serialize
-/// contract), which is private upstream.
-fn view_schema<T: schemars::JsonSchema>() -> serde_json::Value {
-    schemars::generate::SchemaSettings::draft2020_12()
-        .with(|settings| {
-            settings.inline_subschemas = true;
-            settings.meta_schema = None;
-            settings.contract = schemars::generate::Contract::Serialize;
-        })
-        .into_generator()
-        .into_root_schema_for::<T>()
-        .to_value()
-}
-
-/// Public commerce operations are keyed by client IP because guest storefronts
-/// deliberately have no authenticated user. Each category can be overridden
-/// (or disabled with `0`) through `WAFER_RUN_SHARED__RATE_LIMIT_<CATEGORY>`.
-const PUBLIC_RATE_LIMIT_ROUTES: &[RouteLimit] = &[
-    RouteLimit {
-        matches: |action, path| action == "create" && path == "/b/products/pricing/preview",
-        key: LimitKey::Ip,
-        category: "products_preview",
-        limit: RateLimit::PRODUCTS_PREVIEW,
-    },
-    RouteLimit {
-        matches: |action, path| action == "create" && path == "/b/products/checkout",
-        key: LimitKey::Ip,
-        category: "products_checkout",
-        limit: RateLimit::PRODUCTS_CHECKOUT,
-    },
-    RouteLimit {
-        matches: |action, path| {
-            action == "retrieve"
-                && path.starts_with("/b/products/orders/")
-                && path.ends_with("/status")
-        },
-        key: LimitKey::Ip,
-        category: "products_receipt",
-        limit: RateLimit::PRODUCTS_RECEIPT,
-    },
-];
 
 /// Adapter-injected runtime identity. The browser service-worker adapter sets
 /// this directly on its in-memory ConfigService after loading persisted
@@ -128,10 +95,17 @@ const PUBLIC_RATE_LIMIT_ROUTES: &[RouteLimit] = &[
 /// admin-writable `WAFER_RUN_SHARED__` prefix.
 pub const RUNTIME_KIND_CONFIG_KEY: &str = "__IMPRESSPRESS_RUNTIME_KIND__";
 
-pub(crate) async fn stripe_secret_operations_allowed(
-    ctx: &dyn wafer_run::context::Context,
-) -> bool {
-    config::get_default(ctx, RUNTIME_KIND_CONFIG_KEY, "server").await != "browser"
+/// Whether this runtime may hold Stripe secrets: every runtime but the
+/// browser.
+///
+/// Read off the synchronous `config_get` snapshot, where the browser adapter
+/// publishes it (`RuntimeConfig::both` puts it on both surfaces), and never
+/// through the config client: the key is runtime-owned and belongs to no
+/// block's namespace, so WRAP refuses `impresspress/products` a client read
+/// of it — and a refused read answered as the server default is exactly the
+/// browser runtime taking on secret-key operations.
+pub(crate) fn stripe_secret_operations_allowed(ctx: &dyn wafer_run::context::Context) -> bool {
+    ctx.config_get(RUNTIME_KIND_CONFIG_KEY) != Some("browser")
 }
 
 /// The products block's own declared config vars. Single source of truth for
@@ -221,7 +195,7 @@ const COUNTRY_OPTIONS: &[(&str, &str)] = &[
 pub(crate) fn config_vars() -> Vec<ConfigVar> {
     vec![
         ConfigVar::new(
-            "IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY",
+            STRIPE_SECRET_KEY,
             "Stripe API secret key",
             "",
         )
@@ -229,7 +203,7 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
         .input_type(InputType::Password)
         .optional(),
         ConfigVar::new(
-            "IMPRESSPRESS__PRODUCTS__STRIPE_PUBLISHABLE_KEY",
+            STRIPE_PUBLISHABLE_KEY,
             "Stripe publishable key used by embedded Checkout and static storefronts. This key is safe to send to browsers, but is masked in admin storage and pages to prevent accidental configuration disclosure.",
             "",
         )
@@ -237,7 +211,7 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
         .input_type(InputType::Password)
         .optional(),
         ConfigVar::new(
-            "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET",
+            STRIPE_WEBHOOK_SECRET,
             "Stripe webhook signing secret",
             "",
         )
@@ -245,21 +219,21 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
         .input_type(InputType::Password)
         .optional(),
         ConfigVar::new(
-            "IMPRESSPRESS__PRODUCTS__STRIPE_API_URL",
+            STRIPE_API_URL,
             "Stripe API base URL",
             "https://api.stripe.com",
         )
         .name("Stripe API URL")
         .input_type(InputType::Url),
         ConfigVar::new(
-            "IMPRESSPRESS__PRODUCTS__STRIPE_API_VERSION",
+            STRIPE_API_VERSION,
             "Stripe API version sent with every provider request and expected by the webhook destination",
             "2026-02-25.clover",
         )
         .name("Stripe API Version")
         .input_type(InputType::Text),
         ConfigVar::new(
-            "IMPRESSPRESS__PRODUCTS__DEFAULT_CURRENCY",
+            DEFAULT_CURRENCY,
             "Currency preselected for new products and offers",
             "USD",
         )
@@ -267,7 +241,7 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
         .input_type(InputType::Select)
         .options(CURRENCY_OPTIONS),
         ConfigVar::new(
-            "IMPRESSPRESS__PRODUCTS__PLATFORM_COUNTRY",
+            config::PLATFORM_COUNTRY,
             "Country of the platform Stripe account; also the seller onboarding default",
             "",
         )
@@ -276,14 +250,14 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
         .options(COUNTRY_OPTIONS)
         .optional(),
         ConfigVar::new(
-            "IMPRESSPRESS__PRODUCTS__AUTOMATIC_TAX",
+            AUTOMATIC_TAX,
             "Enable Stripe automatic tax by default for new offers",
             "false",
         )
         .name("Automatic Tax")
         .input_type(InputType::Toggle),
         ConfigVar::new(
-            "IMPRESSPRESS__PRODUCTS__CHECKOUT_ALLOWED_ORIGINS",
+            CHECKOUT_ALLOWED_ORIGINS,
             "Comma-separated HTTPS origins allowed for Checkout return and cancel URLs; localhost HTTP origins are accepted in development",
             "",
         )
@@ -291,21 +265,21 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
         .input_type(InputType::Text)
         .optional(),
         ConfigVar::new(
-            "IMPRESSPRESS__PRODUCTS__SELLER_APPLICATION_FEE_BPS",
-            "Default platform application fee for connected-account sales, in basis points (0-10000)",
+            config::SELLER_APPLICATION_FEE_BPS,
+            "Platform application fee for connected-account sales, in basis points (0-10000)",
             "0",
         )
         .name("Seller Application Fee (bps)")
         .input_type(InputType::Number),
         ConfigVar::new(
-            "IMPRESSPRESS__PRODUCTS__SELLER_MODERATION_REQUIRED",
+            SELLER_MODERATION_REQUIRED,
             "Require admin approval before a user-owned product can be published",
             "true",
         )
         .name("Moderate Seller Products")
         .input_type(InputType::Toggle),
         ConfigVar::new(
-            "IMPRESSPRESS__PRODUCTS__SELLER_ALLOWED_TEMPLATES",
+            SELLER_ALLOWED_TEMPLATES,
             "Optional comma-separated product template IDs sellers may use; blank allows every template",
             "",
         )
@@ -313,7 +287,7 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
         .input_type(InputType::Text)
         .optional(),
         ConfigVar::new(
-            "IMPRESSPRESS__PRODUCTS__SELLER_ALLOWED_CURRENCIES",
+            SELLER_ALLOWED_CURRENCIES,
             "Optional comma-separated ISO currency codes sellers may use; blank allows every valid currency",
             "",
         )
@@ -321,7 +295,7 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
         .input_type(InputType::Text)
         .optional(),
         ConfigVar::new(
-            "IMPRESSPRESS__PRODUCTS__SELLER_ALLOWED_CATEGORIES",
+            SELLER_ALLOWED_CATEGORIES,
             "Optional comma-separated product categories sellers may use; blank allows every category",
             "",
         )
@@ -329,14 +303,14 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
         .input_type(InputType::Text)
         .optional(),
         ConfigVar::new(
-            "IMPRESSPRESS__PRODUCTS__SELLER_MAX_PRODUCTS",
+            SELLER_MAX_PRODUCTS,
             "Maximum non-deleted products per seller; 0 means unlimited",
             "0",
         )
         .name("Seller Product Limit")
         .input_type(InputType::Number),
         ConfigVar::new(
-            "IMPRESSPRESS__PRODUCTS__WEBHOOK_URL",
+            WEBHOOK_URL,
             "Webhook URL for billing events",
             "",
         )
@@ -344,7 +318,7 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
         .input_type(InputType::Url)
         .optional(),
         ConfigVar::new(
-            "IMPRESSPRESS__PRODUCTS__WEBHOOK_SECRET",
+            WEBHOOK_SECRET,
             "Webhook signing secret",
             "",
         )
@@ -360,135 +334,8 @@ crate::impresspress_feature_block! {
     fields: { limiter: UserRateLimiter },
     name: "impresspress/products",
     info: |_this| {
-        use wafer_run::{AuthLevel, CollectionSchema};
+        use wafer_run::CollectionSchema;
 
-        // Path parameter schemas stay hand-written. They restate the route
-        // template, and no handler deserializes them — every one reads
-        // `msg.var(..)` by name. A struct declared only to feed
-        // `.path_params::<T>()` would have no runtime user and would
-        // generate a byte-identical parameter list. Query parameters are
-        // typed wherever a handler reads more than one (`contracts::
-        // PageQuery`, `ProductListQuery`, …: `from_message` is the handler's
-        // only reader); the few endpoints that read a single `msg.query(..)`
-        // keep the hand-written form beside that call.
-        let id_path_schema = serde_json::json!({
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["id"],
-            "properties": {"id": {"type": "string"}}
-        });
-        let product_id_path_schema = serde_json::json!({
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["product_id"],
-            "properties": {"product_id": {"type": "string"}}
-        });
-        let offer_path_schema = serde_json::json!({
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["product_id", "offer_id"],
-            "properties": {
-                "product_id": {"type": "string"},
-                "offer_id": {"type": "string"}
-            }
-        });
-        let preset_path_schema = serde_json::json!({
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["product_id", "offer_id", "preset_id"],
-            "properties": {
-                "product_id": {"type": "string"},
-                "offer_id": {"type": "string"},
-                "preset_id": {"type": "string"}
-            }
-        });
-        let link_path_schema = serde_json::json!({
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["product_id", "offer_id", "link_id"],
-            "properties": {
-                "product_id": {"type": "string"},
-                "offer_id": {"type": "string"},
-                "link_id": {"type": "string"}
-            }
-        });
-        // NOT derivable: `Condition` is recursive (`All`/`Any` hold child
-        // `Condition`s), and it reaches these three schemas through
-        // `OfferComponent`/`OfferComponentDraft`. schemars cannot inline a
-        // cycle, so it closes it with `{"$ref": "#/$defs/Condition"}` plus a
-        // sibling `$defs`. Embedded in an OpenAPI document that pointer
-        // resolves against the *document* root, where no `$defs` exists — a
-        // dangling reference that reads as an ordinary `$ref` in a diff.
-        // Verified by swapping one call site and reading the output. These
-        // stay hand-written until `generate_openapi` hoists definitions into
-        // `components/schemas` and rewrites the pointers.
-        let offer_definition_schema = serde_json::json!({
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["name", "mode", "currency", "pricing_model", "usage_type", "billing_scheme", "tax_behavior", "components"],
-            "properties": {
-                "name": {"type": "string"},
-                "mode": {"type": "string", "enum": ["payment", "subscription"]},
-                "currency": {"type": "string"},
-                "pricing_model": {"type": "string", "enum": ["fixed", "components"]},
-                "recurring_interval": {"type": ["string", "null"], "enum": ["day", "week", "month", "year", null]},
-                "interval_count": {"type": "integer", "minimum": 1, "default": 1},
-                "usage_type": {"type": "string", "enum": ["licensed", "metered"]},
-                "billing_scheme": {"type": "string", "enum": ["per_unit", "tiered"]},
-                "tax_behavior": {"type": "string", "enum": ["unspecified", "inclusive", "exclusive"]},
-                "variables": {"type": "array", "items": {"type": "object"}},
-                "components": {"type": "array", "items": {"type": "object"}},
-                "checkout": {"type": "object"}
-            }
-        });
-        let managed_offer_schema = serde_json::json!({
-            "type": "object",
-            "additionalProperties": false,
-            "required": ["status", "sync_status", "sync_error", "offer"],
-            "properties": {
-                "status": {"type": "string", "enum": ["draft", "active", "archived"]},
-                "sync_status": {"type": "string"},
-                "sync_error": {"type": "string"},
-                "offer": {
-                    "type": "object",
-                    "required": ["id", "product_id", "version", "name", "mode", "currency", "pricing_model", "interval_count", "usage_type", "billing_scheme", "tax_behavior", "variables", "components", "checkout", "stripe_product_id", "stripe_price_id"],
-                    "properties": {
-                        "id": {"type": "string"},
-                        "product_id": {"type": "string"},
-                        "version": {"type": "integer"},
-                        "name": {"type": "string"},
-                        "mode": {"type": "string", "enum": ["payment", "subscription"]},
-                        "currency": {"type": "string"},
-                        "pricing_model": {"type": "string", "enum": ["fixed", "components"]},
-                        "recurring_interval": {"type": ["string", "null"]},
-                        "interval_count": {"type": "integer"},
-                        "usage_type": {"type": "string"},
-                        "billing_scheme": {"type": "string"},
-                        "tax_behavior": {"type": "string"},
-                        "variables": {"type": "array", "items": {"type": "object"}},
-                        "components": {"type": "array", "items": {"type": "object"}},
-                        "checkout": {"type": "object"},
-                        "stripe_product_id": {"type": "string"},
-                        "stripe_price_id": {"type": "string"}
-                    }
-                }
-            }
-        });
-        let offer_list_schema = serde_json::json!({
-            "type": "object",
-            "required": ["offers"],
-            "properties": {"offers": {"type": "array", "items": managed_offer_schema}}
-        });
-        // Half derived: `product` is `contracts::ProductView`; `offers` stays
-        // hand-written because `ManagedOffer` is recursive (see above).
-        let product_duplicate_schema = serde_json::json!({
-            "type": "object",
-            "required": ["product", "offers"],
-            "properties": {
-                "product": view_schema::<contracts::ProductView>(),
-                "offers": {"type": "array", "items": managed_offer_schema}
-            }
-        });
         BlockInfo::new("impresspress/products", "0.0.1", "http-handler@v1", "Products, pricing, purchases, and payment integration")
             .instance_mode(InstanceMode::Singleton)
             .requires(vec!["wafer-run/database".into(), "wafer-run/config".into(), "wafer-run/network".into()])
@@ -500,12 +347,12 @@ crate::impresspress_feature_block! {
             // Cloudflare D1 build).
             .collections(vec![
                 CollectionSchema::new(repo::products::TABLE),
-                CollectionSchema::new(GROUPS_TABLE),
-                CollectionSchema::new(TYPES_TABLE),
+                CollectionSchema::new(repo::groups::TABLE),
+                CollectionSchema::new(repo::types::TABLE),
                 CollectionSchema::new(PURCHASES_TABLE),
                 CollectionSchema::new(LINE_ITEMS_TABLE),
-                CollectionSchema::new(GROUP_TEMPLATES_TABLE),
-                CollectionSchema::new(PRODUCT_TEMPLATES_TABLE),
+                CollectionSchema::new(repo::group_templates::TABLE),
+                CollectionSchema::new(repo::product_templates::TABLE),
                 CollectionSchema::new(VARIABLES_TABLE),
                 CollectionSchema::new(repo::subscriptions::SUBSCRIPTIONS_TABLE),
                 CollectionSchema::new(repo::product_versions::TABLE),
@@ -522,1030 +369,58 @@ crate::impresspress_feature_block! {
             ])
             .category(wafer_run::BlockCategory::Feature)
             .description("Product catalog and offer-based commerce. Manages typed customer inputs, itemized pricing, orders, sellers, and Stripe checkout for one-time and recurring products.")
-            // Declared in full so the central router enforces each tier from
-            // the declared `AuthLevel` — the block dropped its in-handler
-            // `is_admin` preambles, so any admin path NOT declared here would
-            // silently fall back to the Public prefix tier (a regression). All
-            // `/b/products/admin/*` SSR pages and `/b/products/api/admin/*`
-            // JSON routes are `Admin`; the public catalog stays Public; the
-            // user-facing purchase/checkout/subscription routes are
-            // `Authenticated`.
-            .endpoints(vec![
-                // Authenticated commerce portal pages. Declare both root
-                // forms because endpoint matching is trailing-slash aware.
-                BlockEndpoint::get("/b/products")
-                    .summary("Commerce portal")
-                    .auth(AuthLevel::Authenticated),
-                BlockEndpoint::get("/b/products/")
-                    .summary("Commerce portal")
-                    .auth(AuthLevel::Authenticated),
-                BlockEndpoint::get("/b/products/my-products")
-                    .summary("Manage own products")
-                    .auth(AuthLevel::Authenticated),
-                BlockEndpoint::get("/b/products/my-products/new")
-                    .summary("Create own product")
-                    .auth(AuthLevel::Authenticated),
-                BlockEndpoint::get("/b/products/my-products/{id}")
-                    .summary("Manage own product")
-                    .auth(AuthLevel::Authenticated),
-                // `{id}` matches exactly one segment and `match_template`
-                // rejects a path with segments left over, so the declaration
-                // above does NOT cover `.../{id}/close`. Undeclared it would
-                // fall to `declared_access`'s `Authenticated` fallback, which
-                // happens to be the right tier — but the page's whole job is
-                // acting on a soft-deleted product, so which tier it answers
-                // at is stated here rather than inherited.
-                BlockEndpoint::get("/b/products/my-products/{id}/close")
-                    .summary("Close own deleted product's Stripe surface")
-                    .description("Archive the offers and deactivate the payment links of a product the caller owns and has deleted, without restoring it to the catalog.")
-                    .auth(AuthLevel::Authenticated),
-                BlockEndpoint::get("/b/products/my-purchases")
-                    .summary("View own purchases")
-                    .auth(AuthLevel::Authenticated),
-                BlockEndpoint::get("/b/products/my-purchases/{id}")
-                    .summary("View own purchase detail")
-                    .auth(AuthLevel::Authenticated),
-                BlockEndpoint::get("/b/products/selling")
-                    .summary("Seller dashboard")
-                    .auth(AuthLevel::Authenticated),
-                BlockEndpoint::get("/b/products/selling/orders")
-                    .summary("Seller orders")
-                    .auth(AuthLevel::Authenticated),
-                BlockEndpoint::get("/b/products/selling/orders/{id}")
-                    .summary("Seller order detail")
-                    .auth(AuthLevel::Authenticated),
-                // SSR admin pages.
-                //
-                // The overview is served by `handle()` for BOTH the canonical
-                // slash form (`/b/products/admin/`, the `admin_url`) and the
-                // bare no-slash form (`/b/products/admin`) via its
-                // `"" | "/" => overview` dispatch arm. The central router's
-                // matcher is trailing-slash-significant, so BOTH forms must be
-                // declared `Admin` — declaring only the slash form would leave
-                // the no-slash form governed solely by the Public `/b/products`
-                // prefix tier, letting an anonymous request reach the admin
-                // overview (the dispatch table and the declared surface must
-                // agree on every path the block actually answers).
-                BlockEndpoint::get("/b/products/admin").summary("Overview").auth(AuthLevel::Admin),
-                BlockEndpoint::get("/b/products/admin/").summary("Overview").auth(AuthLevel::Admin),
-                BlockEndpoint::get("/b/products/admin/manage").summary("Manage products").auth(AuthLevel::Admin),
-                BlockEndpoint::get("/b/products/admin/new").summary("Create product").auth(AuthLevel::Admin),
-                BlockEndpoint::get("/b/products/admin/products/{id}").summary("Manage product").auth(AuthLevel::Admin),
-                // `/b/products` is a PUBLIC route prefix, so this declaration
-                // is the only thing that makes the page admin-only.
-                BlockEndpoint::get("/b/products/admin/products/{id}/close")
-                    .summary("Close a deleted product's Stripe surface")
-                    .description("Archive the offers and deactivate the payment links of a soft-deleted product, without restoring it to the catalog.")
-                    .auth(AuthLevel::Admin),
-                BlockEndpoint::get("/b/products/admin/groups").summary("Manage groups").auth(AuthLevel::Admin),
-
-                BlockEndpoint::get("/b/products/admin/purchases").summary("Purchases").auth(AuthLevel::Admin),
-                BlockEndpoint::get("/b/products/admin/purchases/{id}").summary("Purchase detail").auth(AuthLevel::Admin),
-                BlockEndpoint::get("/b/products/admin/sellers").summary("Seller governance and moderation").auth(AuthLevel::Admin),
-                BlockEndpoint::get("/b/products/admin/sellers/{id}").summary("Seller capability and product detail").auth(AuthLevel::Admin),
-                BlockEndpoint::get("/b/products/admin/stripe").summary("Stripe setup").auth(AuthLevel::Admin),
-                BlockEndpoint::get("/b/products/admin/settings").summary("Product settings").auth(AuthLevel::Admin),
-                BlockEndpoint::post("/b/products/admin/settings").summary("Save product settings").auth(AuthLevel::Admin),
-                // JSON admin API — products
-                BlockEndpoint::get("/b/products/api/admin/products")
-                    .summary("List products")
-                    .auth(AuthLevel::Admin)
-                    .query_params::<contracts::ProductListQuery>()
-                    .output::<contracts::ProductListResponse>()
-                    .tags(&["products", "admin"]),
-                BlockEndpoint::post("/b/products/api/admin/products")
-                    .summary("Create product")
-                    .auth(AuthLevel::Admin)
-                    .input::<contracts::CreateProductRequest>()
-                    .output::<contracts::ProductView>()
-                    .tags(&["products", "admin"]),
-                BlockEndpoint::get("/b/products/api/admin/products/{id}")
-                    .summary("Get product")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(id_path_schema.clone())
-                    .output::<contracts::ProductView>()
-                    .tags(&["products", "admin"]),
-                BlockEndpoint::patch("/b/products/api/admin/products/{id}")
-                    .summary("Update product")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(id_path_schema.clone())
-                    .input::<contracts::UpdateProductRequest>()
-                    .output::<contracts::ProductView>()
-                    .tags(&["products", "admin"]),
-                BlockEndpoint::delete("/b/products/api/admin/products/{id}")
-                    .summary("Delete product")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(id_path_schema.clone())
-                    .output::<crud::Deleted>()
-                    .tags(&["products", "admin"]),
-                BlockEndpoint::post("/b/products/api/admin/products/{id}/duplicate")
-                    .summary("Duplicate product and editable offers")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(id_path_schema.clone())
-                    .output_schema(product_duplicate_schema.clone())
-                    .tags(&["products", "admin"]),
-                BlockEndpoint::post("/b/products/api/admin/products/{id}/approve")
-                    .summary("Approve a seller product waiting for moderation")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(id_path_schema.clone())
-                    .output::<contracts::ProductView>()
-                    .tags(&["products", "admin", "moderation"]),
-                BlockEndpoint::post("/b/products/api/admin/products/{id}/reject")
-                    .summary("Return a seller product to draft after moderation")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(id_path_schema.clone())
-                    .output::<contracts::ProductView>()
-                    .tags(&["products", "admin", "moderation"]),
-                BlockEndpoint::post("/b/products/api/admin/products/{id}/restore")
-                    .summary("Restore a soft-deleted product")
-                    .description("Clears `deleted_at`, undoing `soft_delete`. A soft-deleted product is not editable through the normal admin PATCH until it is restored.")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(id_path_schema.clone())
-                    // Typed like the other 47 rows this branch projects, not
-                    // the raw `{id, data}` envelope it arrived with: it hands
-                    // back the same product row every other product endpoint
-                    // does, and `record_schema`/`product_schema` — its only
-                    // remaining callers — went away with the untyped path.
-                    .output::<contracts::ProductView>()
-                    .tags(&["products", "admin"]),
-                BlockEndpoint::get("/b/products/api/admin/products/{product_id}/offers")
-                    .summary("List product offers")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(product_id_path_schema.clone())
-                    .output_schema(offer_list_schema.clone())
-                    .tags(&["products", "admin", "offers"]),
-                BlockEndpoint::post("/b/products/api/admin/products/{product_id}/offers")
-                    .summary("Create product offer")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(product_id_path_schema.clone())
-                    .input_schema(offer_definition_schema.clone())
-                    .output_schema(managed_offer_schema.clone())
-                    .tags(&["products", "admin", "offers"]),
-                BlockEndpoint::get("/b/products/api/admin/products/{product_id}/offers/{offer_id}")
-                    .summary("Get product offer")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(offer_path_schema.clone())
-                    .output_schema(managed_offer_schema.clone())
-                    .tags(&["products", "admin", "offers"]),
-                BlockEndpoint::post("/b/products/api/admin/products/{product_id}/offers/{offer_id}/preview")
-                    .summary("Preview draft or active product offer")
-                    .description("Evaluate an owner-visible immutable or draft offer with the server pricing engine. Browser totals are never trusted.")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(offer_path_schema.clone())
-                    .input::<contracts::PricingPreviewRequest>()
-                    .output::<contracts::PricingPreview>()
-                    .tags(&["products", "admin", "offers", "pricing"]),
-                BlockEndpoint::patch("/b/products/api/admin/products/{product_id}/offers/{offer_id}")
-                    .summary("Update draft offer")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(offer_path_schema.clone())
-                    .input_schema(offer_definition_schema.clone())
-                    .output_schema(managed_offer_schema.clone())
-                    .tags(&["products", "admin", "offers"]),
-                BlockEndpoint::post("/b/products/api/admin/products/{product_id}/offers/{offer_id}/publish")
-                    .summary("Publish offer")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(offer_path_schema.clone())
-                    .output_schema(managed_offer_schema.clone())
-                    .tags(&["products", "admin", "offers"]),
-                BlockEndpoint::post("/b/products/api/admin/products/{product_id}/offers/{offer_id}/sync")
-                    .summary("Synchronize immutable Product and fixed Prices to Stripe")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(offer_path_schema.clone())
-                    .output_schema(managed_offer_schema.clone())
-                    .tags(&["products", "admin", "offers", "stripe"]),
-                BlockEndpoint::post("/b/products/api/admin/products/{product_id}/offers/{offer_id}/duplicate")
-                    .summary("Duplicate offer")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(offer_path_schema.clone())
-                    .output_schema(managed_offer_schema.clone())
-                    .tags(&["products", "admin", "offers"]),
-                BlockEndpoint::delete("/b/products/api/admin/products/{product_id}/offers/{offer_id}")
-                    .summary("Archive offer")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(offer_path_schema.clone())
-                    .output_schema(managed_offer_schema.clone())
-                    .tags(&["products", "admin", "offers"]),
-                BlockEndpoint::get("/b/products/api/admin/products/{product_id}/offers/{offer_id}/presets")
-                    .summary("List checkout presets")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(offer_path_schema.clone())
-                    .output::<contracts::CheckoutPresetList>()
-                    .tags(&["products", "admin", "offers", "payment-links"]),
-                BlockEndpoint::post("/b/products/api/admin/products/{product_id}/offers/{offer_id}/presets")
-                    .summary("Create checkout preset")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(offer_path_schema.clone())
-                    .input::<contracts::CheckoutPresetRequest>()
-                    .output::<contracts::CheckoutPreset>()
-                    .tags(&["products", "admin", "offers", "payment-links"]),
-                BlockEndpoint::get("/b/products/api/admin/products/{product_id}/offers/{offer_id}/presets/{preset_id}")
-                    .summary("Get checkout preset")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(preset_path_schema.clone())
-                    .output::<contracts::CheckoutPreset>()
-                    .tags(&["products", "admin", "offers", "payment-links"]),
-                BlockEndpoint::patch("/b/products/api/admin/products/{product_id}/offers/{offer_id}/presets/{preset_id}")
-                    .summary("Update checkout preset")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(preset_path_schema.clone())
-                    .input::<contracts::CheckoutPresetRequest>()
-                    .output::<contracts::CheckoutPreset>()
-                    .tags(&["products", "admin", "offers", "payment-links"]),
-                BlockEndpoint::delete("/b/products/api/admin/products/{product_id}/offers/{offer_id}/presets/{preset_id}")
-                    .summary("Archive checkout preset")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(preset_path_schema.clone())
-                    .output::<contracts::CheckoutPreset>()
-                    .tags(&["products", "admin", "offers", "payment-links"]),
-                BlockEndpoint::get("/b/products/api/admin/products/{product_id}/offers/{offer_id}/payment-links")
-                    .summary("List Payment Links")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(offer_path_schema.clone())
-                    .output::<contracts::PaymentLinkList>()
-                    .tags(&["products", "admin", "offers", "payment-links", "stripe"]),
-                BlockEndpoint::post("/b/products/api/admin/products/{product_id}/offers/{offer_id}/payment-links")
-                    .summary("Create or reuse Payment Link")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(offer_path_schema.clone())
-                    .input::<contracts::PaymentLinkCreateRequest>()
-                    .output::<contracts::ManagedPaymentLink>()
-                    .tags(&["products", "admin", "offers", "payment-links", "stripe"]),
-                BlockEndpoint::delete("/b/products/api/admin/products/{product_id}/offers/{offer_id}/payment-links/{link_id}")
-                    .summary("Deactivate Payment Link")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(link_path_schema.clone())
-                    .output::<contracts::ManagedPaymentLink>()
-                    .tags(&["products", "admin", "offers", "payment-links", "stripe"]),
-                // JSON admin API — groups
-                BlockEndpoint::get("/b/products/api/admin/groups")
-                    .summary("List groups")
-                    .auth(AuthLevel::Admin)
-                    .query_params::<contracts::PageQuery>()
-                    .output::<contracts::GroupListResponse>()
-                    .tags(&["products", "admin", "groups"]),
-                BlockEndpoint::post("/b/products/api/admin/groups")
-                    .summary("Create group")
-                    .auth(AuthLevel::Admin)
-                    .input::<contracts::CreateGroupRequest>()
-                    .output::<contracts::GroupView>()
-                    .tags(&["products", "admin", "groups"]),
-                BlockEndpoint::patch("/b/products/api/admin/groups/{id}")
-                    .summary("Update group")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(id_path_schema.clone())
-                    .input::<contracts::UpdateGroupRequest>()
-                    .output::<contracts::GroupView>()
-                    .tags(&["products", "admin", "groups"]),
-                BlockEndpoint::delete("/b/products/api/admin/groups/{id}")
-                    .summary("Delete group")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(id_path_schema.clone())
-                    .output::<crud::Deleted>()
-                    .tags(&["products", "admin", "groups"]),
-                // JSON admin API — types
-                BlockEndpoint::get("/b/products/api/admin/types")
-                    .summary("List types")
-                    .auth(AuthLevel::Admin)
-                    .query_params::<contracts::PageQuery>()
-                    .output::<contracts::ProductTypeListResponse>()
-                    .tags(&["products", "admin", "types"]),
-                BlockEndpoint::post("/b/products/api/admin/types")
-                    .summary("Create type")
-                    .auth(AuthLevel::Admin)
-                    .input::<contracts::CreateProductTypeRequest>()
-                    .output::<contracts::ProductTypeView>()
-                    .tags(&["products", "admin", "types"]),
-                BlockEndpoint::delete("/b/products/api/admin/types/{id}")
-                    .summary("Delete type")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(id_path_schema.clone())
-                    .output::<crud::Deleted>()
-                    .tags(&["products", "admin", "types"]),
-                // JSON admin API — purchases + stats
-                BlockEndpoint::get("/b/products/api/admin/purchases")
-                    .summary("List purchases")
-                    .auth(AuthLevel::Admin)
-                    .query_params::<contracts::AdminPurchaseListQuery>()
-                    .output::<contracts::PurchaseListResponse>()
-                    .tags(&["products", "admin", "orders"]),
-                BlockEndpoint::get("/b/products/api/admin/purchases/{id}")
-                    .summary("Get purchase")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(id_path_schema.clone())
-                    .output::<contracts::PurchaseDetailResponse>()
-                    .tags(&["products", "admin", "orders"]),
-                BlockEndpoint::post("/b/products/api/admin/purchases/{id}/refund")
-                    .summary("Create an idempotent full or partial refund")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(id_path_schema.clone())
-                    .input::<contracts::RefundRequest>()
-                    .output::<contracts::RefundResult>()
-                    .tags(&["products", "admin", "refunds"]),
-                BlockEndpoint::get("/b/products/api/admin/stats")
-                    .summary("Commerce analytics separated by currency")
-                    .auth(AuthLevel::Admin)
-                    .output::<contracts::AdminStats>()
-                    .tags(&["products", "admin", "analytics"]),
-                BlockEndpoint::get("/b/products/api/admin/stripe/status")
-                    .summary("Validate Stripe connection and account mode")
-                    .auth(AuthLevel::Admin)
-                    .output::<contracts::StripeConnectionStatus>()
-                    .tags(&["products", "admin", "stripe"]),
-                BlockEndpoint::get("/b/products/api/admin/webhook-events")
-                    .summary("List safe Stripe webhook processing state")
-                    .auth(AuthLevel::Admin)
-                    .query_params_schema(serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "status": {"type": "string", "enum": ["pending", "processing", "failed", "processed", "dead_letter"]},
-                            "page": {"type": "integer", "minimum": 1},
-                            "page_size": {"type": "integer", "minimum": 1, "maximum": 100}
-                        }
-                    }))
-                    .output::<contracts::WebhookEventList>()
-                    .tags(&["products", "admin", "stripe", "webhooks"]),
-                BlockEndpoint::post("/b/products/api/admin/webhook-events/{id}/replay")
-                    .summary("Replay a failed or dead-letter Stripe webhook")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(id_path_schema.clone())
-                    .output::<contracts::WebhookAck>()
-                    .tags(&["products", "admin", "stripe", "webhooks"]),
-                BlockEndpoint::get("/b/products/api/admin/provider-operations")
-                    .summary("List safe Stripe provider reconciliation state")
-                    .auth(AuthLevel::Admin)
-                    .query_params_schema(serde_json::json!({
-                        "type": "object",
-                        "properties": {
-                            "status": {"type": "string", "enum": ["pending", "processing", "failed", "succeeded", "dead_letter"]},
-                            "page": {"type": "integer", "minimum": 1},
-                            "page_size": {"type": "integer", "minimum": 1, "maximum": 100}
-                        }
-                    }))
-                    .output::<contracts::ProviderOperationList>()
-                    .tags(&["products", "admin", "stripe", "reconciliation"]),
-                BlockEndpoint::post("/b/products/api/admin/provider-operations/reconcile")
-                    .summary("Claim and reconcile due Stripe provider operations")
-                    .description("Safe for an authenticated scheduler or manual administrator recovery action; leases and original Stripe idempotency keys prevent duplicate mutations.")
-                    .auth(AuthLevel::Admin)
-                    .query_params_schema(serde_json::json!({
-                        "type": "object",
-                        "properties": {"limit": {"type": "integer", "minimum": 1, "maximum": 100}}
-                    }))
-                    .output::<contracts::ProviderReconcileResult>()
-                    .tags(&["products", "admin", "stripe", "reconciliation"]),
-                BlockEndpoint::get("/b/products/api/admin/sellers")
-                    .summary("List seller accounts and capability state")
-                    .auth(AuthLevel::Admin)
-                    .output::<contracts::SellerAccountList>()
-                    .tags(&["products", "admin", "seller", "stripe-connect"]),
-                BlockEndpoint::get("/b/products/api/admin/sellers/{id}")
-                    .summary("Get seller account and owned products")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(id_path_schema.clone())
-                    .output::<contracts::AdminSellerDetail>()
-                    .tags(&["products", "admin", "seller", "stripe-connect"]),
-                BlockEndpoint::post("/b/products/api/admin/sellers/{id}/suspend")
-                    .summary("Suspend a seller after provider-safe offer archival")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(id_path_schema.clone())
-                    .output::<contracts::SellerAccount>()
-                    .tags(&["products", "admin", "seller", "stripe-connect"]),
-                BlockEndpoint::post("/b/products/api/admin/sellers/{id}/reactivate")
-                    .summary("Reactivate a seller for onboarding or sales")
-                    .auth(AuthLevel::Admin)
-                    .path_params_schema(id_path_schema.clone())
-                    .output::<contracts::SellerAccount>()
-                    .tags(&["products", "admin", "seller", "stripe-connect"]),
-                BlockEndpoint::get("/b/products/api/products")
-                    .summary("List own products")
-                    .auth(AuthLevel::Authenticated)
-                    .query_params::<contracts::ProductListQuery>()
-                    .output::<contracts::ProductListResponse>()
-                    .tags(&["products", "seller"]),
-                BlockEndpoint::post("/b/products/api/products")
-                    .summary("Create own product")
-                    .auth(AuthLevel::Authenticated)
-                    .input::<contracts::CreateProductRequest>()
-                    .output::<contracts::ProductView>()
-                    .tags(&["products", "seller"]),
-                BlockEndpoint::get("/b/products/api/products/{id}")
-                    .summary("Get own product")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(id_path_schema.clone())
-                    .output::<contracts::ProductView>()
-                    .tags(&["products", "seller"]),
-                BlockEndpoint::patch("/b/products/api/products/{id}")
-                    .summary("Update own product")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(id_path_schema.clone())
-                    .input::<contracts::UpdateProductRequest>()
-                    .output::<contracts::ProductView>()
-                    .tags(&["products", "seller"]),
-                BlockEndpoint::delete("/b/products/api/products/{id}")
-                    .summary("Delete own product")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(id_path_schema.clone())
-                    .output::<crud::Deleted>()
-                    .tags(&["products", "seller"]),
-                BlockEndpoint::post("/b/products/api/products/{id}/restore")
-                    .summary("Restore own soft-deleted product")
-                    .description("Clears `deleted_at` on a product the caller owns, undoing their own delete. The admin route is `/b/products/api/admin/products/{id}/restore`; this one is scoped to the caller's own products and answers 404 for anyone else's.")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(id_path_schema.clone())
-                    // Same typed view as the admin restore, because both
-                    // routes are the same write: `handle_user_restore_product`
-                    // and `handle_restore_product` share one `restore_product`
-                    // body, and it answers `ProductView::from_record`. The
-                    // `record_schema`/`product_schema` envelope this arrived
-                    // with described the untyped path and went away with it.
-                    .output::<contracts::ProductView>()
-                    .tags(&["products", "seller"]),
-                BlockEndpoint::post("/b/products/api/products/{id}/duplicate")
-                    .summary("Duplicate own product and editable offers")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(id_path_schema.clone())
-                    .output_schema(product_duplicate_schema)
-                    .tags(&["products", "seller"]),
-                BlockEndpoint::get("/b/products/api/products/{product_id}/offers")
-                    .summary("List own product offers")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(product_id_path_schema.clone())
-                    .output_schema(offer_list_schema)
-                    .tags(&["products", "seller", "offers"]),
-                BlockEndpoint::post("/b/products/api/products/{product_id}/offers")
-                    .summary("Create own product offer")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(product_id_path_schema)
-                    .input_schema(offer_definition_schema.clone())
-                    .output_schema(managed_offer_schema.clone())
-                    .tags(&["products", "seller", "offers"]),
-                BlockEndpoint::get("/b/products/api/products/{product_id}/offers/{offer_id}")
-                    .summary("Get own product offer")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(offer_path_schema.clone())
-                    .output_schema(managed_offer_schema.clone())
-                    .tags(&["products", "seller", "offers"]),
-                BlockEndpoint::post("/b/products/api/products/{product_id}/offers/{offer_id}/preview")
-                    .summary("Preview own draft or active offer")
-                    .description("Evaluate an owned immutable or draft offer with the server pricing engine. Browser totals are never trusted.")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(offer_path_schema.clone())
-                    .input::<contracts::PricingPreviewRequest>()
-                    .output::<contracts::PricingPreview>()
-                    .tags(&["products", "seller", "offers", "pricing"]),
-                BlockEndpoint::patch("/b/products/api/products/{product_id}/offers/{offer_id}")
-                    .summary("Update own draft offer")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(offer_path_schema.clone())
-                    .input_schema(offer_definition_schema)
-                    .output_schema(managed_offer_schema.clone())
-                    .tags(&["products", "seller", "offers"]),
-                BlockEndpoint::post("/b/products/api/products/{product_id}/offers/{offer_id}/publish")
-                    .summary("Publish own offer")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(offer_path_schema.clone())
-                    .output_schema(managed_offer_schema.clone())
-                    .tags(&["products", "seller", "offers"]),
-                BlockEndpoint::post("/b/products/api/products/{product_id}/offers/{offer_id}/sync")
-                    .summary("Synchronize own immutable Product and fixed Prices to Stripe")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(offer_path_schema.clone())
-                    .output_schema(managed_offer_schema.clone())
-                    .tags(&["products", "seller", "offers", "stripe"]),
-                BlockEndpoint::post("/b/products/api/products/{product_id}/offers/{offer_id}/duplicate")
-                    .summary("Duplicate own offer")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(offer_path_schema.clone())
-                    .output_schema(managed_offer_schema.clone())
-                    .tags(&["products", "seller", "offers"]),
-                BlockEndpoint::delete("/b/products/api/products/{product_id}/offers/{offer_id}")
-                    .summary("Archive own offer")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(offer_path_schema.clone())
-                    .output_schema(managed_offer_schema)
-                    .tags(&["products", "seller", "offers"]),
-                BlockEndpoint::get("/b/products/api/products/{product_id}/offers/{offer_id}/presets")
-                    .summary("List own checkout presets")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(offer_path_schema.clone())
-                    .output::<contracts::CheckoutPresetList>()
-                    .tags(&["products", "seller", "offers", "payment-links"]),
-                BlockEndpoint::post("/b/products/api/products/{product_id}/offers/{offer_id}/presets")
-                    .summary("Create own checkout preset")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(offer_path_schema.clone())
-                    .input::<contracts::CheckoutPresetRequest>()
-                    .output::<contracts::CheckoutPreset>()
-                    .tags(&["products", "seller", "offers", "payment-links"]),
-                BlockEndpoint::get("/b/products/api/products/{product_id}/offers/{offer_id}/presets/{preset_id}")
-                    .summary("Get own checkout preset")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(preset_path_schema.clone())
-                    .output::<contracts::CheckoutPreset>()
-                    .tags(&["products", "seller", "offers", "payment-links"]),
-                BlockEndpoint::patch("/b/products/api/products/{product_id}/offers/{offer_id}/presets/{preset_id}")
-                    .summary("Update own checkout preset")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(preset_path_schema.clone())
-                    .input::<contracts::CheckoutPresetRequest>()
-                    .output::<contracts::CheckoutPreset>()
-                    .tags(&["products", "seller", "offers", "payment-links"]),
-                BlockEndpoint::delete("/b/products/api/products/{product_id}/offers/{offer_id}/presets/{preset_id}")
-                    .summary("Archive own checkout preset")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(preset_path_schema)
-                    .output::<contracts::CheckoutPreset>()
-                    .tags(&["products", "seller", "offers", "payment-links"]),
-                BlockEndpoint::get("/b/products/api/products/{product_id}/offers/{offer_id}/payment-links")
-                    .summary("List own Payment Links")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(offer_path_schema.clone())
-                    .output::<contracts::PaymentLinkList>()
-                    .tags(&["products", "seller", "offers", "payment-links", "stripe"]),
-                BlockEndpoint::post("/b/products/api/products/{product_id}/offers/{offer_id}/payment-links")
-                    .summary("Create or reuse own Payment Link")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(offer_path_schema)
-                    .input::<contracts::PaymentLinkCreateRequest>()
-                    .output::<contracts::ManagedPaymentLink>()
-                    .tags(&["products", "seller", "offers", "payment-links", "stripe"]),
-                BlockEndpoint::delete("/b/products/api/products/{product_id}/offers/{offer_id}/payment-links/{link_id}")
-                    .summary("Deactivate own Payment Link")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(link_path_schema)
-                    .output::<contracts::ManagedPaymentLink>()
-                    .tags(&["products", "seller", "offers", "payment-links", "stripe"]),
-                // Authenticated user-owned groups and builder taxonomy. These
-                // routes used to rely on the products prefix's fail-closed
-                // fallback, which protected them but omitted them from
-                // discovery and made dispatch/declaration drift invisible.
-                BlockEndpoint::get("/b/products/groups")
-                    .summary("List own product groups")
-                    .auth(AuthLevel::Authenticated)
-                    .output::<contracts::GroupListResponse>()
-                    .tags(&["products", "seller"]),
-                BlockEndpoint::post("/b/products/groups")
-                    .summary("Create own product group")
-                    .auth(AuthLevel::Authenticated)
-                    .input::<contracts::CreateOwnGroupRequest>()
-                    .output::<contracts::GroupView>()
-                    .tags(&["products", "seller"]),
-                BlockEndpoint::get("/b/products/groups/{id}")
-                    .summary("Get own product group")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(id_path_schema.clone())
-                    .output::<contracts::GroupView>()
-                    .tags(&["products", "seller"]),
-                BlockEndpoint::patch("/b/products/groups/{id}")
-                    .summary("Update own product group")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(id_path_schema.clone())
-                    .input::<contracts::UpdateOwnGroupRequest>()
-                    .output::<contracts::GroupView>()
-                    .tags(&["products", "seller"]),
-                BlockEndpoint::delete("/b/products/groups/{id}")
-                    .summary("Delete own product group")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(id_path_schema.clone())
-                    .output::<crud::Deleted>()
-                    .tags(&["products", "seller"]),
-                BlockEndpoint::get("/b/products/groups/{id}/products")
-                    .summary("List products in own group")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(id_path_schema.clone())
-                    .query_params::<contracts::PageQuery>()
-                    .output::<contracts::ProductListResponse>()
-                    .tags(&["products", "seller"]),
-                BlockEndpoint::get("/b/products/types")
-                    .summary("List product types for the authenticated builder")
-                    .auth(AuthLevel::Authenticated)
-                    .query_params::<contracts::PageQuery>()
-                    .output::<contracts::ProductTypeListResponse>()
-                    .tags(&["products", "seller"]),
-                BlockEndpoint::get("/b/products/group-templates")
-                    .summary("List group templates for the authenticated builder")
-                    .auth(AuthLevel::Authenticated)
-                    .output::<contracts::GroupTemplateListResponse>()
-                    .tags(&["products", "seller"]),
-                BlockEndpoint::get("/b/products/api/seller/account")
-                    .summary("Seller Stripe account status")
-                    .auth(AuthLevel::Authenticated)
-                    .output::<contracts::SellerAccount>()
-                    .tags(&["products", "seller", "stripe-connect"]),
-                BlockEndpoint::get("/b/products/api/seller/stats")
-                    .summary("Seller analytics separated by currency")
-                    .auth(AuthLevel::Authenticated)
-                    .output::<contracts::SellerStats>()
-                    .tags(&["products", "seller", "analytics"]),
-                BlockEndpoint::get("/b/products/api/seller/orders")
-                    .summary("List seller-owned orders")
-                    .auth(AuthLevel::Authenticated)
-                    .query_params::<contracts::SellerOrderListQuery>()
-                    .output::<contracts::SellerOrderListResponse>()
-                    .tags(&["products", "seller", "orders"]),
-                BlockEndpoint::get("/b/products/api/seller/orders/{id}")
-                    .summary("Get seller-owned order")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(id_path_schema.clone())
-                    .output::<contracts::SellerOrderDetailResponse>()
-                    .tags(&["products", "seller", "orders"]),
-                BlockEndpoint::post("/b/products/api/seller/orders/{id}/refund")
-                    .summary("Refund a seller-owned order")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(id_path_schema.clone())
-                    .input::<contracts::RefundRequest>()
-                    .output::<contracts::RefundResult>()
-                    .tags(&["products", "seller", "orders", "refunds"]),
-                BlockEndpoint::post("/b/products/api/seller/onboarding")
-                    .summary("Create seller account and Stripe-hosted onboarding link")
-                    .auth(AuthLevel::Authenticated)
-                    .input::<contracts::SellerOnboardingRequest>()
-                    .output::<contracts::SellerOnboardingResponse>()
-                    .tags(&["products", "seller", "stripe-connect"]),
-                BlockEndpoint::post("/b/products/api/seller/dashboard")
-                    .summary("Create Stripe Express dashboard login link")
-                    .auth(AuthLevel::Authenticated)
-                    .output::<contracts::ProviderRedirect>()
-                    .tags(&["products", "seller", "stripe-connect"]),
-                // Public + authenticated user surface
-                // Public catalog — the anonymous surface of this block. Both
-                // endpoints publish `contracts::CatalogProductView`, whose
-                // field list (not the row) decides what a guest may read.
-                BlockEndpoint::get("/b/products/catalog")
-                    .summary("Browse catalog")
-                    .description("Public list of active products, sorted by name.")
-                    .query_params::<contracts::PageQuery>()
-                    .output::<contracts::CatalogProductListResponse>()
-                    .tags(&["products"])
-                    .agent_tool(
-                        "list_products",
-                        "List what this store sells, a page at a time, sorted \
-                         by name. This is the only way to discover a \
-                         product id: call it first, then pass an id to \
-                         `get_product` for that product's offers and pricing \
-                         inputs. There is no search — page through the \
-                         results to find a product by name.",
-                    ),
-                BlockEndpoint::get("/b/products/catalog/{id}")
-                    .summary("Product detail")
-                    .path_params_schema(serde_json::json!({
-                        "type": "object",
-                        "required": ["id"],
-                        "properties": {
-                            "id": {"type": "string"}
-                        }
-                    }))
-                    .output::<contracts::CatalogProductView>()
-                    .tags(&["products"]),
-                BlockEndpoint::get("/b/products/storefront.js")
-                    .summary("Framework-free product storefront widget")
-                    .description("Browser custom element for static sites. It loads only public product configuration and sends customer inputs to server-owned pricing and checkout endpoints.")
-                    .auth(AuthLevel::Public)
-                    .tags(&["products", "storefront"]),
-                BlockEndpoint::get("/b/products/storefront/config")
-                    .summary("Browser-safe storefront configuration")
-                    .description("Returns only a validated Stripe publishable key and mode. Secret keys, webhook secrets, provider ids, and API URLs are never exposed.")
-                    .auth(AuthLevel::Public)
-                    .output::<contracts::StorefrontConfig>()
-                    .tags(&["products", "storefront"])
-                    .agent_tool(
-                        "get_storefront_config",
-                        "Get this store's checkout configuration, including whether embedded \
-                         checkout is available. Call once before starting a checkout.",
-                    ),
-                BlockEndpoint::get("/b/products/storefront/{product_id}")
-                    .summary("Storefront product and offers")
-                    .description("Safe public product detail with active offer summaries and public pricing inputs; internal ownership, provider, and pricing-rule fields are omitted.")
-                    .path_params_schema(serde_json::json!({
-                        "type": "object",
-                        "additionalProperties": false,
-                        "required": ["product_id"],
-                        "properties": {
-                            "product_id": {"type": "string"}
-                        }
-                    }))
-                    .output::<contracts::StorefrontProduct>()
-                    .auth(AuthLevel::Public)
-                    .tags(&["products", "storefront"])
-                    .agent_tool(
-                        "get_product",
-                        "Get one product's full details and its purchasable offers, including \
-                         pricing inputs. Call this before previewing a price or starting checkout.",
-                    ),
-                BlockEndpoint::post("/b/products/webhooks")
-                    .summary("Receive signed Stripe webhook events")
-                    .description("Public transport endpoint authenticated by the Stripe-Signature HMAC header. Raw request bytes are verified before parsing or applying any side effect.")
-                    .auth(AuthLevel::Public)
-                    .input_schema(serde_json::json!({
-                        "type": "object",
-                        "required": ["type", "data"],
-                        "properties": {
-                            "id": {"type": "string"},
-                            "type": {"type": "string"},
-                            "account": {"type": "string"},
-                            "livemode": {"type": "boolean"},
-                            "data": {
-                                "type": "object",
-                                "required": ["object"],
-                                "properties": {"object": {"type": "object"}}
-                            }
-                        },
-                        "additionalProperties": true
-                    }))
-                    .output::<contracts::WebhookAck>()
-                    .tags(&["products", "stripe", "webhooks"]),
-                BlockEndpoint::post("/b/products/pricing/preview")
-                    .summary("Preview configured offer")
-                    .description("Evaluate a persisted active offer from validated customer inputs. Amounts are returned in integer minor units.")
-                    .input::<contracts::PricingPreviewRequest>()
-                    .output::<contracts::PricingPreview>()
-                    .auth(AuthLevel::Public)
-                    .tags(&["products", "pricing"])
-                    .agent_tool(
-                        "preview_price",
-                        "Calculate the exact total for an offer given the customer's chosen \
-                         options, before any payment. Returns amounts in integer minor units. \
-                         Use this to answer 'how much would X cost' without starting checkout.",
-                    ),
-                BlockEndpoint::post("/b/products/checkout")
-                    .summary("Stripe checkout")
-                    .description("Create a hosted or embedded Stripe Checkout Session from a public active offer. Guest checkout is supported and every amount is resolved from the immutable offer.")
-                    .input::<contracts::CheckoutRequest>()
-                    .output::<contracts::CheckoutResponse>()
-                    .auth(AuthLevel::Public)
-                    .tags(&["products", "checkout"])
-                    .agent_tool(
-                        "start_checkout",
-                        "Begin a purchase and return a Stripe checkout URL for the customer to \
-                         complete. Always send `presentation: \"hosted\"` — the `embedded` and \
-                         `payment_link` modes leave `checkout_url` null and return values only a \
-                         web page can use. This does NOT complete the payment: always give the \
-                         returned `checkout_url` to the customer so they can confirm and pay \
-                         themselves.",
-                    ),
-                BlockEndpoint::get("/b/products/orders/{id}/status")
-                    .summary("Guest checkout status")
-                    .description("Returns a minimal order projection when supplied with the short-lived receipt capability issued at checkout. Buyer and provider identifiers are omitted.")
-                    .auth(AuthLevel::Public)
-                    .path_params_schema(serde_json::json!({
-                        "type": "object",
-                        "required": ["id"],
-                        "properties": {"id": {"type": "string"}}
-                    }))
-                    .query_params_schema(serde_json::json!({
-                        "type": "object",
-                        "additionalProperties": false,
-                        "required": ["receipt_token"],
-                        "properties": {"receipt_token": {"type": "string"}}
-                    }))
-                    .output::<contracts::GuestOrderStatus>()
-                    .tags(&["products", "storefront"])
-                    .agent_tool(
-                        "get_order_status",
-                        "Check whether an order has been paid, using the receipt token issued \
-                         when checkout started. Use this after the customer says they have paid.",
-                    ),
-                BlockEndpoint::get("/b/products/purchases")
-                    .summary("List own purchases")
-                    .auth(AuthLevel::Authenticated)
-                    .query_params::<contracts::PageQuery>()
-                    .output::<contracts::BuyerOrderListResponse>()
-                    .tags(&["products", "orders"])
-                    .agent_tool(
-                        "list_my_purchases",
-                        "List the signed-in customer's own past purchases. Requires a signed-in \
-                         session; returns nothing useful for anonymous visitors.",
-                    ),
-                BlockEndpoint::get("/b/products/purchases/{id}")
-                    .summary("Get own purchase")
-                    .auth(AuthLevel::Authenticated)
-                    .path_params_schema(id_path_schema)
-                    .output::<contracts::BuyerOrderDetailResponse>()
-                    .tags(&["products", "orders"]),
-                BlockEndpoint::get("/b/products/subscription")
-                    .summary("Platform subscription status")
-                    .auth(AuthLevel::Authenticated)
-                    .output::<contracts::SubscriptionStatusResponse>()
-                    .tags(&["products", "subscriptions"]),
-                BlockEndpoint::post("/b/products/billing-portal")
-                    .summary("Create a Stripe Billing Portal session for an owned customer context")
-                    .auth(AuthLevel::Authenticated)
-                    .input::<contracts::BillingPortalRequest>()
-                    .output::<contracts::ProviderRedirect>()
-                    .tags(&["products", "subscriptions", "stripe"]),
-            ])
+            // Declared from the route table, so the central router enforces
+            // each tier from the level every row names — the block has no
+            // in-handler `is_admin` check (`routes::ROUTES`).
+            .endpoints(endpoint_match::declare(routes::ROUTES))
             .config_keys(config_vars())
             .admin_url("/b/products/admin/")
             .can_disable(true)
     },
-    handle: |this, ctx, msg, input| {
-        let path = msg.path().to_string();
-        let action = msg.action().to_string();
-
-        // Settings save (POST to admin settings page). Admin tier enforced
-        // centrally from the declared `POST /b/products/admin/settings`
-        // endpoint — no in-handler `is_admin` re-check.
-        if action == "create" && path == "/b/products/admin/settings" {
-            return pages::handle_save_settings(ctx, input).await;
-        }
-
-        // SSR pages (GET requests to specific page paths)
-        if action == "retrieve" && (path == "/b/products" || path.starts_with("/b/products/")) {
-            let sub = path.strip_prefix("/b/products").unwrap_or("/");
-            // Admin pages under /b/products/admin/... — Admin tier enforced
-            // centrally from the declared `/b/products/admin/*` endpoints.
-            if sub.starts_with("/admin") {
-                let admin_sub = sub.strip_prefix("/admin").unwrap_or("/");
-                return match admin_sub {
-                    "" | "/" => pages::overview(ctx, &msg).await,
-                    "/manage" => pages::manage_products(ctx, &msg).await,
-                    "/new" => pages::product_wizard(ctx, &msg, true).await,
-                    "/groups" => pages::groups(ctx, &msg).await,
-                    "/purchases" => pages::purchases(ctx, &msg).await,
-                    "/sellers" => pages::admin_sellers(ctx, &msg).await,
-                    "/stripe" => pages::stripe_setup(ctx, &msg).await,
-                    "/settings" => pages::settings(ctx, &msg).await,
-                    _ => {
-                        if let Some(purchase_id) = admin_sub.strip_prefix("/purchases/") {
-                            if !purchase_id.is_empty() && !purchase_id.contains('/') {
-                                return pages::admin_purchase_detail(ctx, &msg, purchase_id).await;
-                            }
-                        }
-                        if let Some(seller_id) = admin_sub.strip_prefix("/sellers/") {
-                            if !seller_id.is_empty() && !seller_id.contains('/') {
-                                return pages::admin_seller_detail(ctx, &msg, seller_id).await;
-                            }
-                        }
-                        if let Some(rest) = admin_sub.strip_prefix("/products/") {
-                            // `/products/{id}/close` first: the plain manager
-                            // below rejects any remainder containing a `/`,
-                            // so an ordering slip here is a 404, not a
-                            // mis-dispatch.
-                            if let Some(product_id) = rest.strip_suffix("/close") {
-                                if !product_id.is_empty() && !product_id.contains('/') {
-                                    return pages::deleted_product_close(
-                                        ctx,
-                                        &msg,
-                                        &util::url_path_decode(product_id),
-                                        true,
-                                    )
-                                    .await;
-                                }
-                            }
-                            // Decoded for the same reason `endpoint_match`
-                            // decodes its `{name}` bindings: the id reaches
-                            // here exactly as it appeared on the wire, and
-                            // both the pages that link here and
-                            // `productManagerDuplicate`'s
-                            // `encodeURIComponent` navigation put it there
-                            // encoded.
-                            if !rest.is_empty() && !rest.contains('/') {
-                                return pages::product_manager(
-                                    ctx,
-                                    &msg,
-                                    &util::url_path_decode(rest),
-                                    true,
-                                )
-                                .await;
-                            }
-                        }
-                        err_not_found("not found")
-                    }
-                };
-            }
-            // User-facing pages (require auth but not admin)
-            match sub {
-                "" | "/" => return pages::portal_home(ctx, &msg).await,
-                "/my-products" => {
-                    if !handlers::user_products_enabled(ctx).await {
-                        return err_forbidden("User product selling is disabled");
-                    }
-                    return pages::my_products(ctx, &msg).await;
-                }
-                "/my-products/new" => {
-                    if !handlers::user_products_enabled(ctx).await {
-                        return err_forbidden("User product selling is disabled");
-                    }
-                    return pages::product_wizard(ctx, &msg, false).await;
-                }
-                "/selling" => {
-                    if !handlers::user_products_enabled(ctx).await {
-                        return err_forbidden("User product selling is disabled");
-                    }
-                    return pages::seller_dashboard(ctx, &msg).await;
-                }
-                "/selling/orders" => {
-                    if !handlers::user_products_enabled(ctx).await {
-                        return err_forbidden("User product selling is disabled");
-                    }
-                    return pages::seller_orders(ctx, &msg).await;
-                }
-                _ if sub.starts_with("/selling/orders/") => {
-                    if !handlers::user_products_enabled(ctx).await {
-                        return err_forbidden("User product selling is disabled");
-                    }
-                    let purchase_id = sub.strip_prefix("/selling/orders/").unwrap_or_default();
-                    if !purchase_id.is_empty() && !purchase_id.contains('/') {
-                        return pages::seller_order_detail(ctx, &msg, purchase_id).await;
-                    }
-                }
-                _ if sub.starts_with("/my-products/") => {
-                    if !handlers::user_products_enabled(ctx).await {
-                        return err_forbidden("User product selling is disabled");
-                    }
-                    let rest = sub.strip_prefix("/my-products/").unwrap_or_default();
-                    // `/{id}/close` first, mirroring the admin branch above:
-                    // the plain manager below rejects any remainder holding a
-                    // `/`, so an ordering slip here is a 404 rather than a
-                    // mis-dispatch.
-                    if let Some(product_id) = rest.strip_suffix("/close") {
-                        if !product_id.is_empty() && !product_id.contains('/') {
-                            return pages::deleted_product_close(
-                                ctx,
-                                &msg,
-                                &util::url_path_decode(product_id),
-                                false,
-                            )
-                            .await;
-                        }
-                    }
-                    if !rest.is_empty() && !rest.contains('/') {
-                        return pages::product_manager(
-                            ctx,
-                            &msg,
-                            &util::url_path_decode(rest),
-                            false,
-                        )
-                        .await;
-                    }
-                }
-                "/my-purchases" => return pages::my_purchases(ctx, &msg).await,
-                _ if sub.starts_with("/my-purchases/") => {
-                    let purchase_id = sub.strip_prefix("/my-purchases/").unwrap_or_default();
-                    if !purchase_id.is_empty() && !purchase_id.contains('/') {
-                        return pages::my_purchase_detail(ctx, &msg, purchase_id).await;
-                    }
-                }
-                _ => {} // fall through to API handlers
-            }
-        }
-
-        // Webhook (no auth, no user rate limit)
-        if path == "/b/products/webhooks" || path.starts_with("/b/products/webhooks/") {
-            return stripe::handle_webhook(ctx, &msg, input).await;
-        }
-
-        // Guest pricing, checkout, and receipt polling use route-specific IP
-        // buckets. Other endpoints retain the read/write per-user buckets.
-        // Allowed(headers) is currently discarded because injecting headers
-        // into a streaming response requires platform middleware.
-        let matched_public_limit = match check_route_limits(
-            &this.limiter,
-            ctx,
-            &msg,
-            &action,
-            &path,
-            PUBLIC_RATE_LIMIT_ROUTES,
-        )
-        .await
-        {
-            Some(RateLimitOutcome::Limited(out)) => return out,
-            Some(_) => true,
-            None => false,
+    handle: |this, ctx, mut msg, input| {
+        // Auth is enforced centrally by `route_to_block` from each row's
+        // declared `AuthLevel`. The matcher binds `{id}`, `{product_id}`,
+        // `{offer_id}`, `{preset_id}` and `{link_id}` into `req.param.*` for
+        // the handlers' `msg.var` readers; nothing else in this block reads
+        // a path.
+        let Some(route) = endpoint_match::dispatch(&mut msg, routes::ROUTES) else {
+            return err_not_found("not found");
         };
-        if !matched_public_limit {
-            if let RateLimitOutcome::Limited(out) =
-                check_user_rate_limit(&this.limiter, ctx, &msg).await
+        // Guest pricing, checkout and receipt polling spend route-specific
+        // IP buckets; every other JSON route spends the per-user read/write
+        // bucket; pages and the webhook spend none. `Allowed` headers are
+        // discarded (see `apply_route_limit`).
+        if let Some((key, category, limit)) = routes::rate_limit_for(route) {
+            if let Some(limited) =
+                apply_route_limit(&this.limiter, ctx, &msg, key, category, limit).await
             {
-                return out;
+                return limited;
             }
         }
-
-        // Admin API at /b/products/api/admin/... — dispatched against the
-        // normalized `/admin/b/products/...` sub-path passed EXPLICITLY (no
-        // `req.resource` rewrite). Admin tier enforced centrally from the
-        // declared `/b/products/api/admin/*` endpoints; the in-block
-        // `is_admin` preamble is gone.
-        if let Some(rest) = path.strip_prefix("/b/products/api/admin") {
-            let norm = format!("/admin/b/products{rest}");
-            return handlers::handle_admin(ctx, &mut msg, &norm, input).await;
+        // Own products, groups and the seller surface exist only while
+        // `WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS` is on.
+        if let Some(refusal) = routes::user_products_refusal(route) {
+            match handlers::user_products_enabled(ctx).await {
+                Ok(true) => {}
+                Ok(false) => return err_forbidden(refusal),
+                Err(e) => {
+                    return crate::blocks::crud::db_error_internal(
+                        e,
+                        "Could not read the seller switch",
+                    )
+                }
+            }
         }
-
-        // User API at /b/products/api/... — normalized to /b/products/... and
-        // passed explicitly.
-        if let Some(rest) = path.strip_prefix("/b/products/api") {
-            let norm = format!("/b/products{rest}");
-            return handlers::handle_user(ctx, &mut msg, &norm, input).await;
+        // A platform suspension stops the seller's mutations while leaving
+        // their read-only catalog and order history available.
+        if routes::requires_unsuspended_seller(route) {
+            match repo::seller_accounts::is_suspended(ctx, msg.user_id()).await {
+                Ok(true) => return err_forbidden("Seller account is suspended"),
+                Ok(false) => {}
+                Err(error) => return crud::db_error_internal(error, "Could not verify seller status"),
+            }
         }
-
-        // User endpoints at /b/products/... (catalog, checkout, subscription,
-        // etc.) — the on-the-wire path is already normalized.
-        if path.starts_with("/b/products/") || path == "/b/products" {
-            return handlers::handle_user(ctx, &mut msg, &path, input).await;
-        }
-
-        err_not_found("not found")
+        handlers::run(ctx, &msg, route, input).await
     },
     lifecycle: |_this, ctx, event| {
         // Apply block-owned schema migrations. Migration 002 seeds the default

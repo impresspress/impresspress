@@ -1,26 +1,40 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
+
+# Mirrors the checks CI's `check` job runs, so a commit that passes here passes
+# there. That job lives in .github/workflows/ci-shared.yml, the one body both
+# `ci.yml` (pull requests) and `ci-main.yml` (merges) call; the callers hold no
+# job bodies of their own.
+#
+#   - rustfmt on the NIGHTLY toolchain. rustfmt.toml uses
+#     `imports_granularity` / `group_imports`, which stable rustfmt silently
+#     ignores, so a stable `cargo fmt` here produced files that CI's
+#     `cargo +nightly fmt --check` then rejected.
+#   - clippy over the same crate set and flags as CI: the host crates, with
+#     the wasm-only impresspress-web / impresspress-cloudflare excluded
+#     (they are compile-checked for wasm32 separately).
+#
+# Install once with:  git config core.hooksPath .githooks
 
 # ── Rust: fmt + clippy on staged .rs files ──────────────────────────
 RS_FILES=$(git diff --cached --name-only --diff-filter=ACMR -- '*.rs')
 if [ -n "$RS_FILES" ]; then
-  echo "Running cargo fmt..."
-  cargo fmt --all
+  echo "Running cargo +nightly fmt..."
+  cargo +nightly fmt --all
   git add $RS_FILES
 
-  echo "Running cargo clippy --fix..."
-  cargo clippy -p impresspress-core -p impresspress --fix --allow-dirty --allow-staged -- -D warnings 2>&1 || {
-    echo "❌ clippy found warnings it couldn't auto-fix. Please fix manually and re-stage."
-    exit 1
-  }
+  echo "Running cargo clippy --fix (CI's crate set and flags)..."
+  cargo clippy --locked --workspace \
+    --exclude impresspress-web --exclude impresspress-cloudflare \
+    --fix --allow-dirty --allow-staged
   git add $RS_FILES
 fi
 
 # ── JS/TS: prettier on staged files ─────────────────────────────────
 JS_FILES=$(git diff --cached --name-only --diff-filter=ACMR -- '*.js' '*.ts' '*.tsx' '*.jsx' '*.css')
 if [ -n "$JS_FILES" ]; then
-  # Find prettier: local cloud-dashboard install, or npx fallback
-  PRETTIER="$(git rev-parse --show-toplevel)/packages/cloud-dashboard/node_modules/.bin/prettier"
+  # Find prettier: the SDK package's devDependency, or one on PATH.
+  PRETTIER="$(git rev-parse --show-toplevel)/packages/impresspress-js/node_modules/.bin/prettier"
   if [ ! -x "$PRETTIER" ]; then
     PRETTIER="$(command -v prettier 2>/dev/null || echo "")"
   fi

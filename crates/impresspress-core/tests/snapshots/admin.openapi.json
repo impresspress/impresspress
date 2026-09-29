@@ -1,4 +1,60 @@
 {
+  "/b/admin/api/extensions": {
+    "get": {
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "items": {
+                  "description": "One row of `GET /b/admin/api/extensions`: a registered block, projected\noff wafer-run's `BlockInfo`.\n\nA closed field list for the same reason every view in this module is one\n— `BlockInfo` carries config keys, collection schemas, endpoint tables and\ncapability grants that this endpoint has never published and must not\nstart publishing because upstream grew a field.",
+                  "properties": {
+                    "enabled": {
+                      "description": "Whether the block is enabled.\n\nRead from the boot block-settings snapshot — the same source\n`routing::route_to_block`'s feature gate consults — so `false` means\nthe router answers \"endpoint not found\" for every one of this block's\nroutes. A block with no stored row reports `true`.",
+                      "type": "boolean"
+                    },
+                    "interface": {
+                      "description": "Interface identifier, e.g. `\"http-handler@v1\"`.",
+                      "type": "string"
+                    },
+                    "name": {
+                      "description": "Block name in the canonical `{org}/{block}` form.",
+                      "type": "string"
+                    },
+                    "summary": {
+                      "description": "One-line summary of what the block does.",
+                      "type": "string"
+                    },
+                    "version": {
+                      "description": "Semantic version of the block implementation.",
+                      "type": "string"
+                    }
+                  },
+                  "required": [
+                    "name",
+                    "version",
+                    "interface",
+                    "summary",
+                    "enabled"
+                  ],
+                  "type": "object"
+                },
+                "title": "Array_of_AdminExtensionView",
+                "type": "array"
+              }
+            }
+          },
+          "description": "Successful response"
+        }
+      },
+      "security": [
+        {
+          "bearerAuth": []
+        }
+      ],
+      "summary": "List registered blocks API"
+    }
+  },
   "/b/admin/api/iam/roles": {
     "get": {
       "responses": {
@@ -293,7 +349,7 @@
           "content": {
             "application/json": {
               "schema": {
-                "description": "A role definition as published by the admin API.",
+                "description": "`PATCH /b/admin/api/iam/roles/{id}` response body: the role as it now is.",
                 "properties": {
                   "created_at": {
                     "description": "RFC 3339 creation timestamp.",
@@ -325,6 +381,13 @@
                   "updated_at": {
                     "description": "RFC 3339 timestamp of the last modification.",
                     "type": "string"
+                  },
+                  "warning": {
+                    "description": "Present when the update was saved but a rename's grants did not all\nfollow it: says which still name the old role, and how to move them.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   }
                 },
                 "required": [
@@ -336,7 +399,7 @@
                   "created_at",
                   "updated_at"
                 ],
-                "title": "AdminRoleView",
+                "title": "AdminRoleUpdateResponse",
                 "type": "object"
               }
             }
@@ -516,7 +579,7 @@
             "application/json": {
               "schema": {
                 "additionalProperties": false,
-                "description": "Response body of `GET /b/admin/api/settings`: every configuration\nvariable, sorted by key.\n\n**Sensitive values are never present.** A variable is treated as sensitive\nwhen it is flagged sensitive in the database or its key ends in `_SECRET` or\n`_KEY`, and its value is replaced with `\"********\"` before the response is\nbuilt. Reading this endpoint cannot recover a secret, nor its length.",
+                "description": "Response body of `GET /b/admin/api/settings`: every configuration\nvariable, sorted by key.\n\n**Sensitive values are never present.** A variable is treated as sensitive\nwhen it is flagged sensitive in the database, or its key ends in `_SECRET`\nor `_KEY`, or its declaration is a password-typed or auto-generated\nvariable; its value is then replaced with `\"********\"` before the response\nis built. Reading this endpoint cannot recover a secret, nor its length.",
                 "properties": {
                   "settings": {
                     "items": {
@@ -527,7 +590,7 @@
                           "type": "string"
                         },
                         "sensitive": {
-                          "description": "Whether `value` is masked. True when the row carries the sensitive\nflag or the key ends in `_SECRET` or `_KEY`.",
+                          "description": "Whether `value` is masked. True when the row carries the sensitive\nflag, or the key is one this build knows to hold a secret: it ends in\n`_SECRET` or `_KEY`, or its declaration is a password-typed or\nauto-generated variable.",
                           "type": "boolean"
                         },
                         "value": {

@@ -198,9 +198,19 @@ fn free_plan_ten_ms_compatible_config(
     Ok(Some(compatible_toml))
 }
 
-/// Apply worker-level settings (routes, `preview_urls`, observability) from
-/// the generated toml to the live worker without uploading code.
-fn wrangler_triggers_deploy(wrangler_toml: &Path) -> Result<()> {
+/// Apply worker-level settings from the generated toml to the live worker
+/// without uploading code: routes and custom domains, the `workers.dev` /
+/// `preview_urls` subdomain state, cron schedules, queue consumers, and
+/// workflow bindings.
+///
+/// These are exactly the settings `wrangler versions upload` and `wrangler
+/// versions deploy` do **not** touch — versioned settings travel with a Worker
+/// version, worker-level ones do not — which is why the upload closes with
+/// "Changes to triggers (routes, custom domains, cron schedules, etc) must be
+/// applied with the command `wrangler triggers deploy`". `impresspress deploy`
+/// is those two commands, so without this call the `[triggers] crons` an
+/// operator configured would never reach the live Worker.
+pub fn wrangler_triggers_deploy(wrangler_toml: &Path) -> Result<()> {
     let status = Command::new("wrangler")
         .args(["triggers", "deploy", "--config"])
         .arg(wrangler_toml)
@@ -364,7 +374,12 @@ pub async fn call_deploy_verify(
             entry.sha256.as_str(),
         )
     });
-    for attempt in 0..=VERIFY_RETRY_SECS.len() {
+    // The attempt budget IS the delay list: one attempt, then one more for
+    // each delay it yields — seven attempts across the six delays above. The
+    // first `next()` that comes back empty is the terminal failure, which is
+    // why this loop needs neither an attempt counter nor an unreachable tail.
+    let mut backoff = VERIFY_RETRY_SECS.iter().copied();
+    loop {
         let response = client
             .post(&url)
             .header("x-deploy-token", token)
@@ -385,19 +400,22 @@ pub async fn call_deploy_verify(
                     .map(|(logical, immutable, hash)| (*logical, immutable.as_str(), *hash)),
             );
         }
-        if !status.is_server_error() || attempt == VERIFY_RETRY_SECS.len() {
+        let retry_in = if status.is_server_error() {
+            backoff.next()
+        } else {
+            None
+        };
+        let Some(delay) = retry_in else {
             bail!(
                 "{VERIFY_ENDPOINT} failed with {status}: {}",
                 String::from_utf8_lossy(&bytes)
             );
-        }
-        let delay = VERIFY_RETRY_SECS[attempt];
+        };
         eprintln!(
             "-> {VERIFY_ENDPOINT} returned {status}; retrying in {delay}s for KV propagation"
         );
         tokio::time::sleep(std::time::Duration::from_secs(delay)).await;
     }
-    unreachable!("bounded verify retry loop always returns")
 }
 
 /// Exercise an ordinary final-candidate route through preview-host lockdown.
@@ -443,9 +461,10 @@ pub async fn smoke_authenticated_get(preview_url: &str, token: &str, path: &str)
 /// spread across many. An isolate that lands in a colo whose KV copy is still
 /// stale fails `prepared_generation_matches`, abandons the packaged plan, and
 /// pays a full dynamic runtime build inside its own request budget. On the
-/// free plan that build does not fit in 10 ms of CPU or ~50 subrequests, so it
-/// surfaces as a 500 ("Worker exceeded resource limits" / "Too many
-/// subrequests") rather than the cheap 503 the runtime used to return.
+/// free plan that build does not fit in 10 ms of CPU, so it surfaces as a 500
+/// ("Worker exceeded resource limits", or "Too many subrequests" when its
+/// D1/KV/R2 calls also pass the 1,000 internal-service subrequests an
+/// invocation may make) rather than the cheap 503 the runtime used to return.
 ///
 /// This is a plain WAIT, deliberately not a warm-up: it issues no requests to
 /// the smoke paths, so the burst still measures genuinely cold isolates and
@@ -644,34 +663,49 @@ pub async fn smoke_preview_lockdown(preview_url: &str) -> Result<()> {
     Ok(())
 }
 
-/// Set a worker secret via `wrangler secret put <NAME> --config <toml>`,
-/// piping the value on stdin (never as an argv arg, which would leak it into
-/// the process table). Stdout/stderr inherit so wrangler's own confirmation
-/// shows through. One-time provisioning helper behind `impresspress deploy secret`.
-pub fn wrangler_secret_put(wrangler_toml: &Path, name: &str, value: &str) -> Result<()> {
-    let mut child = Command::new("wrangler")
-        .args(["secret", "put", name, "--config"])
+/// Deploy the password-hasher Worker with plain `wrangler deploy`: it uploads
+/// and activates in one step, and applies the config's Durable Object
+/// migration, which `wrangler versions upload` cannot carry. The hasher has no
+/// preview to verify first — Cloudflare generates none for a Worker that
+/// implements a Durable Object — so what keeps a deploy safe is the protocol's
+/// compatibility rule (`impresspress_password::protocol`): the hasher answers
+/// the live main Worker's requests as well as the new one's.
+pub fn wrangler_deploy_password_hasher(wrangler_toml: &Path) -> Result<()> {
+    let status = Command::new("wrangler")
+        .args(["deploy", "--config"])
         .arg(wrangler_toml)
-        .stdin(Stdio::piped())
-        .spawn()
-        .context("spawn wrangler secret put")?;
-    child
-        .stdin
-        .take()
-        .context("wrangler secret put stdin unavailable")?
-        .write_all(value.as_bytes())
-        .context("write secret value to wrangler stdin")?;
-    let status = child.wait().context("wait for wrangler secret put")?;
+        .status()
+        .context("run wrangler deploy for the password-hasher Worker")?;
     if !status.success() {
         bail!(
-            "wrangler secret put {name} failed (exit {:?})",
+            "wrangler deploy of the password-hasher Worker failed (exit {:?})",
             status.code()
         );
     }
     Ok(())
 }
 
-/// Resolve a secret value for `impresspress deploy secret`: reuse a caller-provided
+/// The NAMES of a Worker's secrets, via `wrangler secret list --format json`
+/// against `wrangler_toml`'s Worker. Wrangler prints names and types only;
+/// no value is ever read.
+pub fn wrangler_secret_names(wrangler_toml: &Path) -> Result<Vec<String>> {
+    let output = Command::new("wrangler")
+        .args(["secret", "list", "--format", "json", "--config"])
+        .arg(wrangler_toml)
+        .output()
+        .context("run wrangler secret list")?;
+    if !output.status.success() {
+        bail!(
+            "wrangler secret list --config {} failed (exit {:?}): {}",
+            wrangler_toml.display(),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+    super::password_hasher::parse_secret_names(&String::from_utf8_lossy(&output.stdout))
+}
+
+/// Resolve a worker secret's value (see `first_create::resolve_worker_secrets`): reuse a caller-provided
 /// value (from the same-named env var) when present and non-empty, otherwise
 /// generate one by hex-encoding `random_bytes`. Returns `(value, generated)`
 /// where `generated` is `true` when the value was freshly minted (so the CLI
@@ -1155,9 +1189,9 @@ mod tests {
         R2ObjectClient, CONCURRENT_SMOKE_MAX_IN_FLIGHT, CONCURRENT_SMOKE_TOTAL_REQUESTS,
         FREE_PLAN_CPU_LIMIT_ERROR, FREE_PLAN_CPU_LIMIT_ERROR_CODE,
     };
+    use crate::cli::helpers::cloudflare::assets::release_manifest_from_staged_dir;
     #[cfg(feature = "embed-assets")]
     use crate::cli::helpers::cloudflare::assets::ui_asset_entries;
-    use crate::cli::helpers::cloudflare::assets::ReleaseManifest;
 
     fn configured_smoke_paths() -> Vec<String> {
         [
@@ -1549,7 +1583,7 @@ mod tests {
         std::fs::create_dir_all(staged.path().join("site/media")).unwrap();
         std::fs::write(staged.path().join("site/media/hero.webp"), b"hero").unwrap();
         std::fs::write(staged.path().join("site/app.js"), b"app").unwrap();
-        let release = ReleaseManifest::from_staged_dir(staged.path()).unwrap();
+        let release = release_manifest_from_staged_dir(staged.path()).unwrap();
         let mut r2 = MemoryR2::default();
         r2.objects
             .insert("site/media/hero.webp".into(), b"legacy-hero".to_vec());
@@ -1604,7 +1638,7 @@ mod tests {
     fn final_deployment_record_binds_second_worker_to_plan_without_reuploading_assets() {
         let staged = tempfile::tempdir().unwrap();
         std::fs::write(staged.path().join("hero.webp"), b"hero").unwrap();
-        let release = ReleaseManifest::from_staged_dir(staged.path()).unwrap();
+        let release = release_manifest_from_staged_dir(staged.path()).unwrap();
         let mut r2 = MemoryR2::default();
         let plan_hash = format!("sha256:{}", "c".repeat(64));
 
@@ -1636,7 +1670,7 @@ mod tests {
     fn release_upload_preflights_local_bytes_before_remote_mutation() {
         let staged = tempfile::tempdir().unwrap();
         std::fs::write(staged.path().join("hero.webp"), b"v1").unwrap();
-        let release = ReleaseManifest::from_staged_dir(staged.path()).unwrap();
+        let release = release_manifest_from_staged_dir(staged.path()).unwrap();
         std::fs::write(staged.path().join("hero.webp"), b"v2").unwrap();
         let mut r2 = MemoryR2::default();
 
@@ -1660,10 +1694,10 @@ mod tests {
     fn release_upload_aborts_on_remote_byte_mismatch() {
         let staged = tempfile::tempdir().unwrap();
         std::fs::write(staged.path().join("hero.webp"), b"hero").unwrap();
-        let release = ReleaseManifest::from_staged_dir(staged.path()).unwrap();
+        let release = release_manifest_from_staged_dir(staged.path()).unwrap();
         let immutable_key = release.immutable_key("hero.webp");
         let mut r2 = MemoryR2 {
-            corrupt_on_get: Some(immutable_key.clone()),
+            corrupt_on_get: Some(immutable_key),
             ..Default::default()
         };
 
@@ -1711,7 +1745,7 @@ mod tests {
     fn release_upload_retries_a_transient_verify_failure() {
         let staged = tempfile::tempdir().unwrap();
         std::fs::write(staged.path().join("hero.webp"), b"hero").unwrap();
-        let release = ReleaseManifest::from_staged_dir(staged.path()).unwrap();
+        let release = release_manifest_from_staged_dir(staged.path()).unwrap();
         let immutable_key = release.immutable_key("hero.webp");
         let mut r2 = FlakyOnceR2 {
             inner: MemoryR2::default(),

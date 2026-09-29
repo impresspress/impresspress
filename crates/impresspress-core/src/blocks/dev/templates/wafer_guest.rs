@@ -49,7 +49,10 @@
 //! storage folders / config keys imply), so the declaration and the code are
 //! one artifact — there is no separate manifest to keep in step.
 
-#![allow(dead_code)]
+#![expect(
+    dead_code,
+    reason = "this is the whole guest ABI; a block uses the part it needs"
+)]
 
 /// ABI version of this vendored module.
 ///
@@ -59,7 +62,7 @@
 /// `impresspress_core::blocks::dev::WAFER_GUEST_VERSION` and refuses a
 /// mismatch with a `wafer-guest-version` diagnostic — a block compiled
 /// against an older copy is rebuilt, not silently activated.
-pub const WAFER_GUEST_VERSION: u32 = 1;
+pub const WAFER_GUEST_VERSION: u32 = 2;
 
 /// The `BlockInfo::interface` every sandboxed block reports.
 ///
@@ -1169,11 +1172,11 @@ pub struct Block {
     pub summary: String,
     /// Platform services the block calls.
     pub requires: Vec<String>,
-    /// Database collections it may reach (`site__{name}__*`).
+    /// Database collections it may reach (`site__{name}__*`, `-` as `_`).
     pub collections: Vec<String>,
     /// Storage folders it may reach (`site/{name}` and below).
     pub storage_folders: Vec<String>,
-    /// Config keys it may read (`SITE__{NAME}__*`).
+    /// Config keys it may read (`SITE__{NAME}__*`, `-` as `_`).
     pub config_keys: Vec<String>,
     /// Endpoints it serves, in declaration order — which is also route
     /// precedence.
@@ -1217,7 +1220,8 @@ impl Block {
     }
 
     /// Claim a database collection. Must be `site__{name}__{table}` with the
-    /// block's own name — hyphens in the block name stay hyphens here.
+    /// block's own name, a hyphen in it spelled `_` (`my-shop` claims
+    /// `site__my_shop__*`), and only lowercase letters, digits and `_`.
     ///
     /// Claiming one also turns on the `schema` capability, which is what lets
     /// [`db::ensure_table`] create it. Raw DDL is never granted.
@@ -1233,9 +1237,9 @@ impl Block {
     }
 
     /// Claim a config key. Must start with `SITE__{NAME}__`, the block's own
-    /// name uppercased — hyphens in the block name stay hyphens here, as they
-    /// do in [`collection`](Block::collection), so `my-shop` claims
-    /// `SITE__MY-SHOP__*`.
+    /// name uppercased with a hyphen spelled `_`, as in
+    /// [`collection`](Block::collection), so `my-shop` claims
+    /// `SITE__MY_SHOP__*`.
     pub fn config_key(mut self, key: &str) -> Block {
         self.config_keys.push(key.to_string());
         self
@@ -1868,16 +1872,17 @@ impl Filter {
 
 /// Filters, sort order and paging for [`db::list`].
 ///
-/// `limit` is 0 by default, which the host reads as "no limit". Set one for
-/// anything a user can grow without bound.
+/// `limit` is unset by default, which returns every matching row. Set one
+/// for anything a user can grow without bound. An `offset` needs a `limit`:
+/// the host refuses a skip with no page size.
 #[derive(Clone, Debug, Default)]
 pub struct ListOptions {
     /// Predicates, combined with `AND`.
     pub filters: Vec<Filter>,
     /// Sort order: the column, and whether it is descending.
     pub sort: Vec<(String, bool)>,
-    /// Maximum rows; 0 means no limit.
-    pub limit: i64,
+    /// Maximum rows, at least 1; `None` returns every matching row.
+    pub limit: Option<u32>,
     /// Rows to skip.
     pub offset: i64,
 }
@@ -1900,9 +1905,9 @@ impl ListOptions {
         self
     }
 
-    /// Return at most `limit` rows.
-    pub fn limit(mut self, limit: i64) -> ListOptions {
-        self.limit = limit;
+    /// Return at most `limit` rows; the host refuses `0`.
+    pub fn limit(mut self, limit: u32) -> ListOptions {
+        self.limit = Some(limit);
         self
     }
 
@@ -1986,16 +1991,16 @@ pub mod db {
                 })
                 .collect(),
         );
-        let response = call(
-            DATABASE,
-            "database.list",
-            &Json::obj()
-                .set("collection", Json::str(collection))
-                .set("filters", filters_json(&options.filters))
-                .set("sort", sort)
-                .set("limit", Json::int(options.limit))
-                .set("offset", Json::int(options.offset)),
-        )?;
+        let mut request = Json::obj()
+            .set("collection", Json::str(collection))
+            .set("filters", filters_json(&options.filters))
+            .set("sort", sort)
+            .set("offset", Json::int(options.offset));
+        // Absent is "every row"; the host has no in-band spelling for it.
+        if let Some(limit) = options.limit {
+            request = request.set("limit", Json::int(i64::from(limit)));
+        }
+        let response = call(DATABASE, "database.list", &request)?;
         Ok(response
             .get("records")
             .and_then(Json::as_array)

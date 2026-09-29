@@ -1,0 +1,15 @@
+{
+  "//allowJs": "`test/api-coverage.test.ts` imports the ESM helpers under `scripts/` that `npm run generate:types` also uses. They are plain JS on purpose — they run under bare `node` in CI, before any build step — so they are allowed in, and inferred rather than checked.",
+  "//": "Type-checks the test suite alongside `src`. The build tsconfig deliberately excludes tests (they must not reach `dist`), which meant `types-compatibility.test.ts` — a file whose entire purpose is to fail to COMPILE when a type drifts — was never type-checked by anything. `npm test` runs this first.",
+  "extends": "./tsconfig.json",
+  "compilerOptions": {
+    "noEmit": true,
+    "declaration": false,
+    "declarationMap": false,
+    "rootDir": ".",
+    "allowJs": true,
+    "checkJs": false
+  },
+  "include": ["src/**/*", "test/**/*", "examples/**/*", "scripts/**/*"],
+  "exclude": ["node_modules", "dist"]
+}

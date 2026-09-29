@@ -15,12 +15,11 @@ use impresspress_core::{
             generations::{self, GenerationCause, GenerationStatus, NewGeneration},
             runtime_state::{self, ActivationPhase, RuntimeState},
         },
-        test_support::{FakeControl, FakeShell},
+        test_support::{dev_status, dev_with_accounts, signed_in_as, FakeControl, FakeShell},
         DevBlock, DevShared, RuntimeControl, ROUTES, WAFER_GUEST_VERSION,
     },
     test_support::{
-        admin_msg, anon_msg, auth_msg, output_http_header, output_http_status, output_json,
-        output_status, TestContext,
+        admin_msg, anon_msg, output_http_header, output_http_status, output_status, TestContext,
     },
 };
 use wafer_run::Block as _;
@@ -106,14 +105,6 @@ async fn active_generation_ctx(rebuilds: u64) -> (TestContext, String) {
     (ctx, generation.id)
 }
 
-async fn status_of(ctx: &TestContext) -> serde_json::Value {
-    output_json(
-        ctx.dispatch(admin_msg("retrieve", "/b/dev/api/status"))
-            .await,
-    )
-    .await
-}
-
 // ---------------------------------------------------------------------------
 // Fresh instance
 // ---------------------------------------------------------------------------
@@ -122,11 +113,11 @@ async fn status_of(ctx: &TestContext) -> serde_json::Value {
 async fn status_reports_no_generation_on_a_fresh_instance() {
     let ctx = TestContext::with_dev(FakeControl::new()).await;
     let out = ctx
-        .dispatch(admin_msg("retrieve", "/b/dev/api/status"))
+        .dispatch_resolved(admin_msg("retrieve", "/b/dev/api/status"))
         .await;
     assert_eq!(output_status(out).await, 200);
 
-    let body = status_of(&ctx).await;
+    let body = dev_status(&ctx).await;
     assert_eq!(body["active_generation"], serde_json::Value::Null);
     assert_eq!(body["runtime_generation"], 0);
     assert_eq!(body["blocks"], serde_json::json!([]));
@@ -141,7 +132,7 @@ async fn status_reports_no_generation_on_a_fresh_instance() {
 #[tokio::test]
 async fn status_projects_the_active_generation_and_its_blocks() {
     let (ctx, generation_id) = active_generation_ctx(0).await;
-    let body = status_of(&ctx).await;
+    let body = dev_status(&ctx).await;
 
     let active = &body["active_generation"];
     assert_eq!(active["id"], serde_json::json!(generation_id));
@@ -191,7 +182,7 @@ async fn status_reports_an_activation_in_flight_from_the_journal() {
     .await
     .expect("journal");
 
-    let body = status_of(&ctx).await;
+    let body = dev_status(&ctx).await;
     assert_eq!(body["activation"]["generation_id"], "gen-next");
     assert_eq!(body["activation"]["phase"], "building_runtime");
     // The previous generation is still what is serving until the swap lands.
@@ -207,7 +198,7 @@ async fn status_reports_an_activation_in_flight_from_the_journal() {
 #[tokio::test]
 async fn status_reports_the_runtimes_generation_not_the_journals() {
     let (ctx, _) = active_generation_ctx(2).await;
-    let body = status_of(&ctx).await;
+    let body = dev_status(&ctx).await;
     assert_eq!(body["runtime_generation"], 2);
     assert_eq!(body["wafer_guest_version"], WAFER_GUEST_VERSION);
 }
@@ -216,13 +207,13 @@ async fn status_reports_the_runtimes_generation_not_the_journals() {
 async fn status_follows_the_runtime_generation_as_it_is_bumped() {
     let control = FakeControl::new();
     let ctx = TestContext::with_dev(control.clone()).await;
-    assert_eq!(status_of(&ctx).await["runtime_generation"], 0);
+    assert_eq!(dev_status(&ctx).await["runtime_generation"], 0);
 
     control.rebuild(&[]).await.expect("rebuild");
-    assert_eq!(status_of(&ctx).await["runtime_generation"], 1);
+    assert_eq!(dev_status(&ctx).await["runtime_generation"], 1);
 
     control.rebuild(&[]).await.expect("rebuild");
-    assert_eq!(status_of(&ctx).await["runtime_generation"], 2);
+    assert_eq!(dev_status(&ctx).await["runtime_generation"], 2);
     assert_eq!(control.rebuilds().len(), 2);
 }
 
@@ -232,18 +223,15 @@ async fn status_follows_the_runtime_generation_as_it_is_bumped() {
 
 #[tokio::test]
 async fn status_is_admin_only() {
-    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    let ctx = dev_with_accounts(FakeControl::new()).await;
+    let member = signed_in_as(&ctx, "user").await;
     assert_eq!(
-        output_http_status(
-            ctx.dispatch(anon_msg("retrieve", "/b/dev/api/status"))
-                .await
-        )
-        .await,
-        403
+        output_http_status(ctx.request(anon_msg("retrieve", "/b/dev/api/status")).await).await,
+        401
     );
     assert_eq!(
         output_http_status(
-            ctx.dispatch(auth_msg("retrieve", "/b/dev/api/status", "u1"))
+            ctx.request(member.bearer(anon_msg("retrieve", "/b/dev/api/status")))
                 .await
         )
         .await,
@@ -263,13 +251,13 @@ async fn every_response_is_never_cached() {
     // header claim cannot be satisfied by an unexpected response shape.
     for (path, expected_status) in [("/b/dev/api/status", 200), ("/b/dev/nope", 404)] {
         assert_eq!(
-            output_http_status(ctx.dispatch(admin_msg("retrieve", path)).await).await,
+            output_http_status(ctx.dispatch_resolved(admin_msg("retrieve", path)).await).await,
             expected_status,
             "{path}"
         );
         assert_eq!(
             output_http_header(
-                ctx.dispatch(admin_msg("retrieve", path)).await,
+                ctx.dispatch_resolved(admin_msg("retrieve", path)).await,
                 "Cache-Control"
             )
             .await

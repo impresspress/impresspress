@@ -5,7 +5,7 @@
 //! not exist in a default-feature build, so these tests must not compile
 //! there.
 //!
-//! `PRODUCTS_TABLE`/`OFFERS_TABLE`/`PURCHASES_TABLE`/`ADMIN_USER_ROLES_TABLE`
+//! `PRODUCTS_TABLE`/`OFFERS_TABLE`/`PURCHASES_TABLE`
 //! below restate table names `impresspress-core` keeps `pub(crate)` (the
 //! products ones are further gated by that block's own door tests —
 //! `blocks/products/tests/repo_door_test.rs` — which refuse a re-export
@@ -18,22 +18,26 @@
 use std::collections::BTreeSet;
 
 use impresspress_core::{
-    admin_schema,
     blocks::{
         admin::AdminBlock,
-        auth::repo::users,
+        auth::repo::{local_credentials, users},
         dev::{
+            self,
             data_snapshot::{self, DataSnapshot},
             seed::{self, SeedManifest},
             test_support::{seed_file, FakeControl, MapFetch},
         },
         products::ProductsBlock,
     },
-    test_support::TestContext,
+    platform_state::{user_roles, variables},
+    test_support::{TestContext, WriteLog},
     util::json_map,
 };
 use serde_json::json;
-use wafer_core::clients::database as db;
+use wafer_core::{
+    clients::database as db,
+    interfaces::database::service::{DatabaseError, DatabaseService, StatementBudget},
+};
 use wafer_run::Block;
 
 // ---------------------------------------------------------------------------
@@ -47,7 +51,6 @@ const PRODUCT_VERSIONS_TABLE: &str = "impresspress__products__product_versions";
 const CHECKOUT_PRESETS_TABLE: &str = "impresspress__products__checkout_presets";
 const PRODUCTS_VARIABLES_TABLE: &str = "impresspress__products__variables";
 const PURCHASES_TABLE: &str = "impresspress__products__purchases";
-const ADMIN_USER_ROLES_TABLE: &str = "impresspress__admin__user_roles";
 
 // ---------------------------------------------------------------------------
 // Coverage: every declared table has a decision.
@@ -145,6 +148,16 @@ fn every_declared_table_of_the_three_blocks_has_an_export_decision() {
 // Fixtures
 // ---------------------------------------------------------------------------
 
+/// `ctx` running as `impresspress/dev`, the block whose code the snapshot
+/// is, in a deployment carrying the grants its consumer hands
+/// `ImpresspressBuilder::wrap_grants` ([`dev::wrap_grants`]). What the
+/// export reads and the import writes is authorized against exactly those.
+fn as_dev(ctx: &TestContext) -> TestContext {
+    let mut dev = ctx.fixture();
+    dev.add_deployment_grants(dev::wrap_grants());
+    dev.running_as(dev::BLOCK_NAME)
+}
+
 /// Insert one row directly, honoring the supplied `id` — the same
 /// direct-write pattern `blocks::products::tests::harness::seed` uses inside
 /// the crate, reimplemented here because that helper is `#[cfg(test)]`
@@ -152,7 +165,7 @@ fn every_declared_table_of_the_three_blocks_has_an_export_decision() {
 async fn seed_row(ctx: &TestContext, table: &str, id: &str, data: serde_json::Value) {
     let mut map = json_map(data);
     map.insert("id".to_string(), serde_json::Value::String(id.to_string()));
-    db::create(ctx, table, map)
+    db::create(&ctx.fixture(), table, map)
         .await
         .unwrap_or_else(|e| panic!("seed into {table} failed: {} ({:?})", e.message, e.code));
 }
@@ -229,7 +242,7 @@ async fn seed_product_and_order(ctx: &TestContext) -> String {
 
     seed_row(
         ctx,
-        ADMIN_USER_ROLES_TABLE,
+        user_roles::TABLE,
         "role_owner_admin",
         json!({ "user_id": user_id, "role": "admin" }),
     )
@@ -238,7 +251,7 @@ async fn seed_product_and_order(ctx: &TestContext) -> String {
     // Never exported: the `sensitive` flag is set.
     seed_row(
         ctx,
-        admin_schema::VARIABLES_TABLE,
+        variables::TABLE,
         "var_secret",
         json!({
             "key": "WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_PASSWORD",
@@ -250,7 +263,7 @@ async fn seed_product_and_order(ctx: &TestContext) -> String {
     // Exported: ordinary site config.
     seed_row(
         ctx,
-        admin_schema::VARIABLES_TABLE,
+        variables::TABLE,
         "var_public",
         json!({
             "key": "WAFER_RUN_SHARED__APP_NAME",
@@ -263,7 +276,7 @@ async fn seed_product_and_order(ctx: &TestContext) -> String {
     // CLAUDE.md reserves that prefix for infrastructure config.
     seed_row(
         ctx,
-        admin_schema::VARIABLES_TABLE,
+        variables::TABLE,
         "var_infra",
         json!({
             "key": "IMPRESSPRESS_INTERNAL_FLAG",
@@ -282,15 +295,19 @@ async fn seed_product_and_order(ctx: &TestContext) -> String {
 
 #[tokio::test]
 async fn export_carries_products_but_never_secrets_or_orders() {
-    let ctx = TestContext::with_products().await.with_auth_added().await;
+    let ctx = TestContext::with_products()
+        .await
+        .fixture()
+        .with_auth_added()
+        .await;
     seed_product_and_order(&ctx).await;
 
-    let snap = data_snapshot::export(&ctx).await.unwrap();
+    let snap = data_snapshot::export(&as_dev(&ctx)).await.unwrap();
 
     assert_eq!(snap.tables[PRODUCTS_TABLE].len(), 1);
     assert!(!snap.tables.contains_key(PURCHASES_TABLE));
 
-    let vars = &snap.tables[admin_schema::VARIABLES_TABLE];
+    let vars = &snap.tables[variables::TABLE];
     assert_eq!(
         vars.len(),
         1,
@@ -337,7 +354,11 @@ async fn export_carries_products_but_never_secrets_or_orders() {
 /// variable is a legitimate row and not an orphan.
 #[tokio::test]
 async fn a_soft_deleted_products_offers_and_versions_do_not_travel() {
-    let ctx = TestContext::with_products().await.with_auth_added().await;
+    let ctx = TestContext::with_products()
+        .await
+        .fixture()
+        .with_auth_added()
+        .await;
     seed_product_and_order(&ctx).await;
 
     // A second product, its own offer, that offer's component and a version
@@ -425,7 +446,7 @@ async fn a_soft_deleted_products_offers_and_versions_do_not_travel() {
     .await
     .expect("soft-delete the second product");
 
-    let snap = data_snapshot::export(&ctx).await.unwrap();
+    let snap = data_snapshot::export(&as_dev(&ctx)).await.unwrap();
 
     // Sorted: which rows a table carries is the subject, and their order is
     // the database's listing order rather than anything this asserts.
@@ -471,10 +492,14 @@ async fn a_soft_deleted_products_offers_and_versions_do_not_travel() {
 
 #[tokio::test]
 async fn import_replaces_users_and_upserts_products_so_ownership_survives() {
-    let src = TestContext::with_products().await.with_auth_added().await;
+    let src = TestContext::with_products()
+        .await
+        .fixture()
+        .with_auth_added()
+        .await;
     let admin_id = seed_product_and_order(&src).await;
 
-    let snap = data_snapshot::export(&src).await.unwrap();
+    let snap = data_snapshot::export(&as_dev(&src)).await.unwrap();
     assert_eq!(
         snap.tables[users::TABLE][0]["id"].as_str().unwrap(),
         admin_id
@@ -483,7 +508,11 @@ async fn import_replaces_users_and_upserts_products_so_ownership_survives() {
     // Fresh: a different context, its own (differently-id'd) rows if it had
     // any — here, none at all, which is the more common "first import"
     // shape than a context that already has a bootstrap admin.
-    let dst = TestContext::with_products().await.with_auth_added().await;
+    let dst = TestContext::with_products()
+        .await
+        .fixture()
+        .with_auth_added()
+        .await;
     seed_row(
         &dst,
         users::TABLE,
@@ -493,15 +522,15 @@ async fn import_replaces_users_and_upserts_products_so_ownership_survives() {
     .await;
     seed_row(
         &dst,
-        ADMIN_USER_ROLES_TABLE,
+        user_roles::TABLE,
         "role_fresh_bootstrap",
         json!({ "user_id": "user_fresh_bootstrap", "role": "admin" }),
     )
     .await;
 
-    let report = data_snapshot::import(&dst, &snap).await.unwrap();
+    let report = data_snapshot::import(&as_dev(&dst), &snap).await.unwrap();
     assert_eq!(report.tables[users::TABLE], 1);
-    assert_eq!(report.tables[ADMIN_USER_ROLES_TABLE], 1);
+    assert_eq!(report.tables[user_roles::TABLE], 1);
 
     let users_rows = db::list_all(&dst, users::TABLE, Vec::new()).await.unwrap();
     assert_eq!(
@@ -511,7 +540,7 @@ async fn import_replaces_users_and_upserts_products_so_ownership_survives() {
     );
     assert_eq!(users_rows[0].id, admin_id);
 
-    let role_rows = db::list_all(&dst, ADMIN_USER_ROLES_TABLE, Vec::new())
+    let role_rows = db::list_all(&dst, user_roles::TABLE, Vec::new())
         .await
         .unwrap();
     assert_eq!(
@@ -528,7 +557,7 @@ async fn import_replaces_users_and_upserts_products_so_ownership_survives() {
     assert_eq!(products[0].data["created_by"], json!(admin_id));
 
     // Importing again is idempotent.
-    data_snapshot::import(&dst, &snap).await.unwrap();
+    data_snapshot::import(&as_dev(&dst), &snap).await.unwrap();
     assert_eq!(
         db::list_all(&dst, PRODUCTS_TABLE, Vec::new())
             .await
@@ -545,9 +574,55 @@ async fn import_replaces_users_and_upserts_products_so_ownership_survives() {
     );
 }
 
+/// A bundle exported before admin migration 004 can repeat a grant; the
+/// destination's unique index over `(user_id, role)` would refuse the twin
+/// and fail the whole import. The twin is dropped instead, keeping the same
+/// survivor 004 keeps.
+#[tokio::test]
+async fn import_collapses_twin_grants_from_a_pre_004_bundle() {
+    let ctx = TestContext::with_products()
+        .await
+        .fixture()
+        .with_auth_added()
+        .await;
+    let grant = |id: &str, user: &str, role: &str, at: &str| {
+        json_map(json!({
+            "id": id, "user_id": user, "role": role, "assigned_by": "",
+            "created_at": at, "updated_at": at,
+        }))
+        .into_iter()
+        .collect::<serde_json::Map<String, serde_json::Value>>()
+    };
+    let mut snap = DataSnapshot {
+        schema_version: data_snapshot::SCHEMA_VERSION,
+        tables: std::collections::BTreeMap::new(),
+    };
+    snap.tables.insert(
+        user_roles::TABLE.to_string(),
+        vec![
+            grant("ur_later", "alice", "admin", "2026-02-01T00:00:00Z"),
+            grant("ur_first", "alice", "admin", "2026-01-01T00:00:00Z"),
+            grant("ur_other", "alice", "editor", "2026-03-01T00:00:00Z"),
+        ],
+    );
+
+    let report = data_snapshot::import(&as_dev(&ctx), &snap)
+        .await
+        .expect("a bundle repeating a grant still imports");
+    assert_eq!(report.tables[user_roles::TABLE], 2);
+    let mut ids: Vec<String> = db::list_all(&ctx, user_roles::TABLE, Vec::new())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    ids.sort();
+    assert_eq!(ids, vec!["ur_first", "ur_other"]);
+}
+
 #[tokio::test]
 async fn import_refuses_a_table_outside_this_builds_allowlist() {
-    let ctx = TestContext::with_products().await;
+    let ctx = TestContext::with_products().await.fixture();
     let mut snap = DataSnapshot {
         schema_version: data_snapshot::SCHEMA_VERSION,
         tables: std::collections::BTreeMap::new(),
@@ -556,19 +631,401 @@ async fn import_refuses_a_table_outside_this_builds_allowlist() {
         "impresspress__products__stripe_events".to_string(),
         vec![json_map(json!({ "id": "evt_1" })).into_iter().collect()],
     );
-    let err = data_snapshot::import(&ctx, &snap).await.unwrap_err();
+    let err = data_snapshot::import(&as_dev(&ctx), &snap)
+        .await
+        .unwrap_err();
     assert_eq!(err.code, wafer_run::ErrorCode::InvalidArgument);
 }
 
 #[tokio::test]
 async fn import_refuses_a_schema_version_this_build_does_not_read() {
-    let ctx = TestContext::with_products().await;
+    let ctx = TestContext::with_products().await.fixture();
     let snap = DataSnapshot {
         schema_version: data_snapshot::SCHEMA_VERSION + 1,
         tables: std::collections::BTreeMap::new(),
     };
-    let err = data_snapshot::import(&ctx, &snap).await.unwrap_err();
+    let err = data_snapshot::import(&as_dev(&ctx), &snap)
+        .await
+        .unwrap_err();
     assert_eq!(err.code, wafer_run::ErrorCode::InvalidArgument);
+}
+
+/// Import is the ONE write to the variables table that does not pass through
+/// `NewVariable::into_row`: it upserts the bundle's own columns straight
+/// through `db::upsert`, and its pre-flight refuses only
+/// `is_instance_owned_key`. So a bundle understating a `sensitive` column
+/// re-creates exactly the row the flag work exists to prevent — served in the
+/// clear by `GET /b/admin/api/settings/{key}` and KV-cacheable — until some
+/// later boot happens to run the repair pass.
+///
+/// Corrected rather than refused: an understated flag is far more likely a
+/// bundle built by an older build than an attack, and refusing the whole
+/// import would make every such bundle unusable.
+#[tokio::test]
+async fn import_raises_a_sensitive_flag_the_bundle_understated() {
+    // A declared `InputType::Password` var, spelled with neither `_SECRET` nor
+    // `_KEY` — so only its declaration knows it holds a credential, and only
+    // the stored `sensitive` flag can carry that to the read path.
+    let key = "WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_PASSWORD";
+    let ctx = TestContext::with_products().await.fixture();
+    let mut tables = std::collections::BTreeMap::new();
+    tables.insert(
+        variables::TABLE.to_string(),
+        vec![json_map(json!({
+            "id": "var_imported",
+            "key": key,
+            "value": "hunter2",
+            "sensitive": false,
+            "created_at": STAMP,
+            "updated_at": STAMP,
+        }))
+        .into_iter()
+        .collect()],
+    );
+    let snap = DataSnapshot {
+        schema_version: data_snapshot::SCHEMA_VERSION,
+        tables,
+    };
+
+    data_snapshot::import(&as_dev(&ctx), &snap)
+        .await
+        .expect("an understated flag is corrected, not refused");
+
+    let vars = db::list_all(&ctx, variables::TABLE, Vec::new())
+        .await
+        .unwrap();
+    let row = vars
+        .iter()
+        .find(|v| v.data["key"] == json!(key))
+        .expect("the row was imported");
+    assert_eq!(
+        row.data["sensitive"],
+        json!(1),
+        "import is the one write that bypasses `NewVariable::into_row`, so it has to \
+         apply the same rule itself: {row:?}"
+    );
+}
+
+/// An imported row must not arrive claiming to be an admin edit of THIS
+/// instance.
+///
+/// `updated_by` is the admin-ownership marker that makes a row outrank the
+/// process environment. A bundle carries the EXPORTING instance's column, and
+/// an admin over there is not an admin over here — importing it verbatim would
+/// let a seed bundle silently pin keys against this deployment's own `.env`,
+/// and the boot log would blame an admin edit that never happened here.
+#[tokio::test]
+async fn import_clears_another_instances_admin_ownership_marker() {
+    let key = "WAFER_RUN_SHARED__APP_NAME";
+    let ctx = TestContext::with_products().await.fixture();
+    let mut tables = std::collections::BTreeMap::new();
+    tables.insert(
+        variables::TABLE.to_string(),
+        vec![json_map(json!({
+            "id": "var_imported",
+            "key": key,
+            "value": "FromBundle",
+            "sensitive": false,
+            "updated_by": "admin_on_another_instance",
+            "created_at": STAMP,
+            "updated_at": STAMP,
+        }))
+        .into_iter()
+        .collect()],
+    );
+    let snap = DataSnapshot {
+        schema_version: data_snapshot::SCHEMA_VERSION,
+        tables,
+    };
+
+    data_snapshot::import(&as_dev(&ctx), &snap)
+        .await
+        .expect("import");
+
+    let vars = db::list_all(&ctx, variables::TABLE, Vec::new())
+        .await
+        .unwrap();
+    let row = vars
+        .iter()
+        .find(|v| v.data["key"] == json!(key))
+        .expect("the row was imported");
+    assert_eq!(
+        row.data["updated_by"],
+        json!(""),
+        "an imported row must be seeder-owned here, so this deployment's own \
+         environment can still seed it: {row:?}"
+    );
+}
+
+/// The other direction of the same column: an import must not REVOKE an
+/// ownership marker a local admin set.
+///
+/// `Mode::Upsert` writes the bundle's columns over the destination's, so
+/// blanking `updated_by` in the imported row — which is right for an INSERT —
+/// would erase a local admin's claim on a conflict and hand their key back to
+/// the local `.env`. The column is therefore dropped from the update set.
+#[tokio::test]
+async fn import_does_not_revoke_a_local_admin_ownership_marker() {
+    let key = "WAFER_RUN_SHARED__APP_NAME";
+    let ctx = TestContext::with_products().await.fixture();
+
+    // This instance already has the key, pinned by a local admin.
+    variables::insert(
+        &ctx,
+        variables::NewVariable {
+            key: key.to_string(),
+            value: "LocalAdminChoice".to_string(),
+            name: String::new(),
+            description: String::new(),
+            warning: String::new(),
+            sensitive: false,
+            updated_by: "local_admin".to_string(),
+            block: variables::block_for_key(key),
+        },
+    )
+    .await
+    .expect("seed the local pinned row");
+
+    let mut tables = std::collections::BTreeMap::new();
+    tables.insert(
+        variables::TABLE.to_string(),
+        vec![json_map(json!({
+            "id": "var_from_bundle",
+            "key": key,
+            "value": "FromBundle",
+            "sensitive": false,
+            "updated_by": "",
+            "created_at": STAMP,
+            "updated_at": STAMP,
+        }))
+        .into_iter()
+        .collect()],
+    );
+    let snap = DataSnapshot {
+        schema_version: data_snapshot::SCHEMA_VERSION,
+        tables,
+    };
+
+    data_snapshot::import(&as_dev(&ctx), &snap)
+        .await
+        .expect("import");
+
+    let row = variables::get_by_key(&ctx, key)
+        .await
+        .expect("get")
+        .expect("row");
+    assert_eq!(
+        row.value, "FromBundle",
+        "the bundle's VALUE still lands — that is what an import is for"
+    );
+    assert_eq!(
+        row.updated_by, "local_admin",
+        "but the local admin's ownership marker survives the import"
+    );
+}
+
+/// A snapshot carries ordinary site config — that is what an export is FOR —
+/// but never a key the runtime owns.
+///
+/// `admin::ops::reject_runtime_owned_key` refuses these on the admin write
+/// path, and `ui::settings_form`'s `CONFIG_SET` refuses them too. This import
+/// writes the same table through `db::upsert` and passed neither, so a bundle
+/// could plant `__IMPRESSPRESS_RUNTIME_KIND__` or `IMPRESSPRESS_DEPLOY_TOKEN`
+/// in the variables table of every instance that seeds from it.
+///
+/// The planted row is INERT FOR READS — `blocks::config`'s
+/// `served_only_from_boot_map` answers those keys from the boot map whatever
+/// the table holds, which is what PR #65 fixed — so this is a forged row that
+/// shows up on the admin Variables page and travels on into the next export,
+/// not a config override. It still must not land.
+#[tokio::test]
+async fn import_refuses_a_runtime_owned_variable_key() {
+    for key in [
+        // internal, adapter-injected (`__…__`)
+        "__IMPRESSPRESS_RUNTIME_KIND__",
+        "__IMPRESSPRESS_BLOCK_SETTINGS_JSON__",
+        // infrastructure (`IMPRESSPRESS_*` with no `__`)
+        "IMPRESSPRESS_DEPLOY_TOKEN",
+    ] {
+        let ctx = TestContext::with_products().await.fixture();
+        let mut tables = std::collections::BTreeMap::new();
+        tables.insert(
+            variables::TABLE.to_string(),
+            vec![json_map(json!({
+                "id": "var_forged",
+                "key": key,
+                "value": "browser",
+                "sensitive": false,
+                "created_at": STAMP,
+                "updated_at": STAMP,
+            }))
+            .into_iter()
+            .collect()],
+        );
+        let snap = DataSnapshot {
+            schema_version: data_snapshot::SCHEMA_VERSION,
+            tables,
+        };
+
+        let err = data_snapshot::import(&as_dev(&ctx), &snap)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, wafer_run::ErrorCode::InvalidArgument, "{key}");
+
+        // Refused in PRE-FLIGHT, like the allowlist and schema-version checks
+        // above: a bundle that names one forged key writes none of its rows,
+        // rather than importing most of them and failing partway.
+        let vars = db::list_all(&ctx, variables::TABLE, Vec::new())
+            .await
+            .unwrap();
+        assert!(
+            !vars.iter().any(|v| v.data["key"] == json!(key)),
+            "a refused import must not have written {key}: {vars:?}",
+        );
+    }
+}
+
+/// The one reserved key the first version of this guard missed.
+///
+/// `WAFER_RUN__AUTH__JWT_SECRET` carries no `IMPRESSPRESS_` prefix and is not
+/// `__…__`-bracketed, so `is_runtime_owned_key` does not name it — but
+/// `blocks::config`'s `served_only_from_boot_map` DOES reserve it, precisely
+/// so a stored row cannot rotate the signing key under a running process.
+///
+/// Unlike every key the guard already refuses, a planted one here is NOT
+/// inert. `seed_jwt_secret` writes through `insert_if_absent`, so a row that
+/// is already present wins and auto-generation never fires, and
+/// `impresspress_server::build_native_runtime` hands that value to boot as the HMAC key for every session
+/// JWT and CSRF token. A bundle shared between instances would give each of
+/// them one signing secret its author knows — exactly what per-instance
+/// auto-generation exists to prevent.
+///
+/// Nothing legitimate carries such a row: the `_SECRET` suffix makes it
+/// unexportable, so this can only be hand-authored.
+#[tokio::test]
+async fn import_refuses_a_planted_jwt_secret() {
+    let ctx = TestContext::with_products().await.fixture();
+    let key = impresspress_core::blocks::auth::JWT_SECRET_KEY;
+    let mut tables = std::collections::BTreeMap::new();
+    tables.insert(
+        variables::TABLE.to_string(),
+        vec![json_map(json!({
+            "id": "var_forged_jwt",
+            "key": key,
+            "value": "00000000000000000000000000000000",
+            "sensitive": true,
+            "created_at": STAMP,
+            "updated_at": STAMP,
+        }))
+        .into_iter()
+        .collect()],
+    );
+    let snap = DataSnapshot {
+        schema_version: data_snapshot::SCHEMA_VERSION,
+        tables,
+    };
+
+    let err = data_snapshot::import(&as_dev(&ctx), &snap)
+        .await
+        .unwrap_err();
+    assert_eq!(err.code, wafer_run::ErrorCode::InvalidArgument);
+
+    let vars = db::list_all(&ctx, variables::TABLE, Vec::new())
+        .await
+        .unwrap();
+    assert!(
+        !vars.iter().any(|v| v.data["key"] == json!(key)),
+        "a refused import must not have planted a signing secret: {vars:?}",
+    );
+}
+
+/// The env-precedence transition's gate row never travels in a bundle.
+///
+/// It records that a one-time upgrade pass has run on THIS database. Exported
+/// and re-imported it would disarm that pass on a deployment that has not run
+/// it — silently turning off the protection for every pre-upgrade admin edit on
+/// the importing side.
+///
+/// It is already held back, by the rule that holds back every
+/// `IMPRESSPRESS_`-prefixed key (`variable_is_exportable`): the gate is
+/// `IMPRESSPRESS__ADMIN__ENV_PRECEDENCE_TRANSITION`, which is block-scoped
+/// config describing the exporting instance, exactly what that rule exists for.
+/// Asserted here rather than left to be re-derived, because the consequence of
+/// the prefix rule ever narrowing is not obvious from the gate's own code.
+#[test]
+fn the_env_precedence_transition_gate_is_not_exportable() {
+    let row: serde_json::Map<String, serde_json::Value> = json_map(json!({
+        "key": variables::ENV_PRECEDENCE_TRANSITION_KEY,
+        "value": "done",
+        "sensitive": false,
+    }))
+    .into_iter()
+    .collect();
+    assert!(
+        !data_snapshot::variable_is_exportable(&row),
+        "the gate row must never reach another deployment's database"
+    );
+}
+
+/// The other side of that boundary: the guard refuses only what the RUNTIME
+/// owns, not everything with a prefix.
+///
+/// `WAFER_RUN_SHARED__*` is the half an export exists to carry, and
+/// `IMPRESSPRESS__{BLOCK}__*` is ordinary database-backed block config —
+/// `variable_is_exportable` holds the latter back at export time because it
+/// describes the exporting instance, but a bundle that legitimately carries
+/// one (hand-authored, or from a build whose filter differs) must still
+/// import rather than being refused as a forgery.
+#[tokio::test]
+async fn import_accepts_ordinary_config_keys() {
+    let ctx = TestContext::with_products().await.fixture();
+    let mut tables = std::collections::BTreeMap::new();
+    tables.insert(
+        variables::TABLE.to_string(),
+        vec![
+            json_map(json!({
+                "id": "var_shared",
+                "key": "WAFER_RUN_SHARED__APP_NAME",
+                "value": "The print shop",
+                "sensitive": false,
+                "created_at": STAMP,
+                "updated_at": STAMP,
+            }))
+            .into_iter()
+            .collect(),
+            json_map(json!({
+                "id": "var_block_scoped",
+                "key": "IMPRESSPRESS__PRODUCTS__PLATFORM_COUNTRY",
+                "value": "NZ",
+                "sensitive": false,
+                "created_at": STAMP,
+                "updated_at": STAMP,
+            }))
+            .into_iter()
+            .collect(),
+        ],
+    );
+    let snap = DataSnapshot {
+        schema_version: data_snapshot::SCHEMA_VERSION,
+        tables,
+    };
+
+    data_snapshot::import(&as_dev(&ctx), &snap)
+        .await
+        .expect("ordinary config must still import");
+
+    let vars = db::list_all(&ctx, variables::TABLE, Vec::new())
+        .await
+        .unwrap();
+    for key in [
+        "WAFER_RUN_SHARED__APP_NAME",
+        "IMPRESSPRESS__PRODUCTS__PLATFORM_COUNTRY",
+    ] {
+        assert!(
+            vars.iter().any(|v| v.data["key"] == json!(key)),
+            "{key} must have imported: {vars:?}",
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -605,7 +1062,7 @@ fn mixed_snapshot() -> DataSnapshot {
         .collect()],
     );
     tables.insert(
-        admin_schema::VARIABLES_TABLE.to_string(),
+        variables::TABLE.to_string(),
         vec![json_map(json!({
             "id": "var_seeded",
             "key": "WAFER_RUN_SHARED__APP_NAME",
@@ -653,6 +1110,7 @@ async fn seed_import_applies_data_json_when_present() {
     let control = FakeControl::new();
     let ctx = TestContext::with_products()
         .await
+        .fixture()
         .with_auth_added()
         .await
         .with_dev_added(control.clone())
@@ -679,7 +1137,7 @@ async fn seed_import_applies_data_json_when_present() {
     assert_eq!(products.len(), 1);
     assert_eq!(products[0].id, "prod_seeded");
 
-    let vars = db::list_all(&ctx, admin_schema::VARIABLES_TABLE, Vec::new())
+    let vars = db::list_all(&ctx, variables::TABLE, Vec::new())
         .await
         .unwrap();
     assert_eq!(vars.len(), 1);
@@ -699,6 +1157,7 @@ async fn seed_import_fails_when_data_json_does_not_verify() {
     let control = FakeControl::new();
     let ctx = TestContext::with_products()
         .await
+        .fixture()
         .with_dev_added(control.clone())
         .await;
     let data_bytes = serde_json::to_vec(&mixed_snapshot()).unwrap();
@@ -764,7 +1223,7 @@ const STAMP: &str = "2026-09-03T00:00:00Z";
 /// test that only had the first.
 #[tokio::test]
 async fn an_import_lands_on_rows_the_destination_seeded_with_its_own_ids() {
-    let ctx = TestContext::with_products().await;
+    let ctx = TestContext::with_products().await.fixture();
 
     // What the DESTINATION seeded for itself, with its own ids.
     seed_row(
@@ -776,7 +1235,7 @@ async fn an_import_lands_on_rows_the_destination_seeded_with_its_own_ids() {
     .await;
     seed_row(
         &ctx,
-        admin_schema::VARIABLES_TABLE,
+        variables::TABLE,
         "var_minted_here",
         json!({
             "key": "WAFER_RUN_SHARED__APP_NAME",
@@ -813,7 +1272,7 @@ async fn an_import_lands_on_rows_the_destination_seeded_with_its_own_ids() {
         ],
     );
     tables.insert(
-        admin_schema::VARIABLES_TABLE.to_string(),
+        variables::TABLE.to_string(),
         vec![
             json_map(json!({
                 "id": "var_minted_over_there",
@@ -842,7 +1301,7 @@ async fn an_import_lands_on_rows_the_destination_seeded_with_its_own_ids() {
         tables,
     };
 
-    data_snapshot::import(&ctx, &snapshot)
+    data_snapshot::import(&as_dev(&ctx), &snapshot)
         .await
         .expect("an import must land on rows the destination seeded for itself");
 
@@ -867,7 +1326,7 @@ async fn an_import_lands_on_rows_the_destination_seeded_with_its_own_ids() {
     // the id the snapshot gave it.
     assert!(roles.iter().any(|r| r.id == "role_editor"), "{roles:?}");
 
-    let vars = db::list_all(&ctx, admin_schema::VARIABLES_TABLE, Vec::new())
+    let vars = db::list_all(&ctx, variables::TABLE, Vec::new())
         .await
         .unwrap();
     let app_name: Vec<_> = vars
@@ -885,7 +1344,7 @@ async fn an_import_lands_on_rows_the_destination_seeded_with_its_own_ids() {
 /// natural key rather than the id.
 #[tokio::test]
 async fn re_importing_one_snapshot_converges_on_the_natural_key() {
-    let ctx = TestContext::with_products().await;
+    let ctx = TestContext::with_products().await.fixture();
     let mut tables = std::collections::BTreeMap::new();
     tables.insert(
         ADMIN_ROLES_TABLE.to_string(),
@@ -903,8 +1362,12 @@ async fn re_importing_one_snapshot_converges_on_the_natural_key() {
         tables,
     };
 
-    data_snapshot::import(&ctx, &snapshot).await.unwrap();
-    data_snapshot::import(&ctx, &snapshot).await.unwrap();
+    data_snapshot::import(&as_dev(&ctx), &snapshot)
+        .await
+        .unwrap();
+    data_snapshot::import(&as_dev(&ctx), &snapshot)
+        .await
+        .unwrap();
 
     let roles = db::list_all(&ctx, ADMIN_ROLES_TABLE, Vec::new())
         .await
@@ -1094,4 +1557,299 @@ fn sqlite_migration_sql() -> String {
         }
     }
     out
+}
+
+// ---------------------------------------------------------------------------
+// Write cost: one call per import, not one per row.
+// ---------------------------------------------------------------------------
+
+/// `n` users (a `Mode::Replace` table) and `n` products (a `Mode::Upsert`
+/// one).
+fn wide_snapshot(users_n: usize, products_n: usize) -> DataSnapshot {
+    let mut tables = std::collections::BTreeMap::new();
+    tables.insert(
+        users::TABLE.to_string(),
+        (0..users_n)
+            .map(|i| {
+                json_map(json!({
+                    "id": format!("user_{i}"),
+                    "email": format!("owner{i}@example.com"),
+                    "display_name": format!("Owner {i}"),
+                }))
+                .into_iter()
+                .collect()
+            })
+            .collect(),
+    );
+    tables.insert(
+        PRODUCTS_TABLE.to_string(),
+        (0..products_n)
+            .map(|i| {
+                json_map(json!({
+                    "id": format!("prod_{i}"),
+                    "name": format!("Widget {i}"),
+                    "status": "active",
+                    "created_at": "2026-01-01T00:00:00Z",
+                    "updated_at": "2026-01-01T00:00:00Z",
+                }))
+                .into_iter()
+                .collect()
+            })
+            .collect(),
+    );
+    DataSnapshot {
+        schema_version: data_snapshot::SCHEMA_VERSION,
+        tables,
+    }
+}
+
+async fn counting_ctx() -> (TestContext, std::sync::Arc<std::sync::Mutex<WriteLog>>) {
+    TestContext::with_products()
+        .await
+        .fixture()
+        .with_auth_added()
+        .await
+        .record_writes()
+}
+
+/// **An import is one write, not one per row.** The replaced table's delete
+/// and rows and every upserted row go in ONE `batch`; not one row goes through
+/// a single-row `create` or `upsert`, nor a `create_many` of its own. In the
+/// browser each database call is a whole-database save to OPFS, so this is
+/// the difference between one save and one per row.
+#[tokio::test]
+async fn an_import_is_one_batch_not_one_call_per_row() {
+    let (ctx, log) = counting_ctx().await;
+
+    let report = data_snapshot::import(&as_dev(&ctx), &wide_snapshot(30, 30))
+        .await
+        .expect("import");
+
+    {
+        let log = log.lock().unwrap();
+        assert_eq!(log.creates, 0, "no row goes through a single-row create");
+        assert_eq!(log.upserts, 0, "no row goes through a single-row upsert");
+        assert!(log.create_many_rows.is_empty(), "no create_many call");
+        assert_eq!(
+            log.batch_ops,
+            [1 + 30 + 30],
+            "one batch: the users' delete, 30 creates, 30 product upserts"
+        );
+    }
+    assert_eq!(report.tables.get(users::TABLE), Some(&30));
+    assert_eq!(report.tables.get(PRODUCTS_TABLE), Some(&30));
+    assert_eq!(
+        db::list_all(&ctx, users::TABLE, Vec::new())
+            .await
+            .unwrap()
+            .len(),
+        30
+    );
+    assert_eq!(
+        db::list_all(&ctx, PRODUCTS_TABLE, Vec::new())
+            .await
+            .unwrap()
+            .len(),
+        30
+    );
+}
+
+/// Native SQLite has no per-invocation statement limit, so an import larger
+/// than any fixed per-call cap (the handler once refused a call over 1000
+/// rows or ops) is still one call, not split into several transactions.
+#[tokio::test]
+async fn an_import_past_a_thousand_rows_is_still_one_batch() {
+    let (ctx, log) = counting_ctx().await;
+
+    data_snapshot::import(&as_dev(&ctx), &wide_snapshot(1001, 1001))
+        .await
+        .expect("import");
+
+    let log = log.lock().unwrap();
+    assert!(log.create_many_rows.is_empty());
+    assert_eq!(log.batch_ops, [1 + 1001 + 1001]);
+}
+
+// ---------------------------------------------------------------------------
+// Atomicity: a failed import leaves every table as it was.
+// ---------------------------------------------------------------------------
+
+/// A destination holding one account with its password and its admin role —
+/// the rows a failed import must leave in place.
+async fn ctx_with_an_existing_owner() -> TestContext {
+    let ctx = TestContext::with_products()
+        .await
+        .fixture()
+        .with_auth_added()
+        .await;
+    seed_row(
+        &ctx,
+        users::TABLE,
+        "user_existing",
+        json!({ "email": "existing@example.com", "display_name": "Existing Owner" }),
+    )
+    .await;
+    seed_row(
+        &ctx,
+        local_credentials::TABLE,
+        "cred_existing",
+        json!({
+            "user_id": "user_existing",
+            "password_hash": "$argon2id$existing",
+            "created_at": STAMP,
+        }),
+    )
+    .await;
+    seed_row(
+        &ctx,
+        user_roles::TABLE,
+        "role_existing",
+        json!({ "user_id": "user_existing", "role": "admin" }),
+    )
+    .await;
+    ctx
+}
+
+async fn ids_in(ctx: &TestContext, table: &str) -> Vec<String> {
+    let mut ids: Vec<String> = db::list_all(ctx, table, Vec::new())
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|r| r.id)
+        .collect();
+    ids.sort();
+    ids
+}
+
+/// A snapshot whose credential rows repeat an id fails on the second one —
+/// after its users were written and the old credentials cleared, if those
+/// were separate writes. The import is one transaction, so the failure
+/// leaves the destination's users, credentials and roles exactly as they
+/// were: its owner can still sign in.
+#[tokio::test]
+async fn a_failed_import_leaves_the_existing_users_and_credentials_in_place() {
+    let ctx = ctx_with_an_existing_owner().await;
+    let row = |value: serde_json::Value| -> serde_json::Map<String, serde_json::Value> {
+        json_map(value).into_iter().collect()
+    };
+    let mut snap = DataSnapshot {
+        schema_version: data_snapshot::SCHEMA_VERSION,
+        tables: std::collections::BTreeMap::new(),
+    };
+    snap.tables.insert(
+        users::TABLE.to_string(),
+        vec![
+            row(json!({ "id": "user_a", "email": "a@example.com", "display_name": "A" })),
+            row(json!({ "id": "user_b", "email": "b@example.com", "display_name": "B" })),
+        ],
+    );
+    snap.tables.insert(
+        local_credentials::TABLE.to_string(),
+        vec![
+            row(json!({
+                "id": "cred_dup", "user_id": "user_a",
+                "password_hash": "$argon2id$a", "created_at": STAMP,
+            })),
+            row(json!({
+                "id": "cred_dup", "user_id": "user_b",
+                "password_hash": "$argon2id$b", "created_at": STAMP,
+            })),
+        ],
+    );
+
+    let err = data_snapshot::import(&as_dev(&ctx), &snap)
+        .await
+        .expect_err("a repeated credential id cannot import");
+    assert_eq!(err.code, wafer_run::ErrorCode::AlreadyExists, "{err:?}");
+
+    assert_eq!(ids_in(&ctx, users::TABLE).await, ["user_existing"]);
+    assert_eq!(
+        ids_in(&ctx, local_credentials::TABLE).await,
+        ["cred_existing"]
+    );
+    assert_eq!(ids_in(&ctx, user_roles::TABLE).await, ["role_existing"]);
+}
+
+/// Reports a fixed per-invocation statement budget in front of the real
+/// SQLite service, the way a Cloudflare D1 service reports its query limit.
+/// Every operation is the inner service's.
+struct BudgetedDb {
+    inner: std::sync::Arc<dyn DatabaseService>,
+    budget: StatementBudget,
+}
+
+impl BudgetedDb {
+    fn inner_service(&self) -> &dyn DatabaseService {
+        self.inner.as_ref()
+    }
+}
+
+wafer_core::forward_database_service! {
+    impl DatabaseService for BudgetedDb {
+        forward_to inner_service();
+
+        ops {
+            get: forward,
+            list: forward,
+            create: forward,
+            create_many: forward,
+            update: forward,
+            delete: forward,
+            count: forward,
+            sum: forward,
+            query_raw: forward,
+            exec_raw: forward,
+            delete_where: forward,
+            delete_where_count: forward,
+            take_where: forward,
+            update_where: forward,
+            update_where_count: forward,
+            increment_field_where: forward,
+            upsert: forward,
+            aggregate: forward,
+            batch: forward,
+            insert_guarded: forward,
+            update_guarded: forward,
+            ensure_schema_table: forward,
+            ensure_schema_tables: forward,
+            schema_table_exists: forward,
+            schema_columns: forward,
+            schema_drop_table: forward,
+            schema_add_column: forward,
+            set_strict_schema: forward,
+            statement_budget: custom,
+        }
+
+        fn statement_budget(&self) -> Result<StatementBudget, DatabaseError> {
+            Ok(self.budget)
+        }
+    }
+}
+
+/// An import is admitted against the backend's statement budget as a whole:
+/// one that does not fit what the invocation has left is refused before
+/// anything runs. Split into one call per table, its first calls would each
+/// fit and commit, and the refusal would land partway through.
+#[tokio::test]
+async fn an_import_over_the_statement_budget_writes_nothing() {
+    let ctx = ctx_with_an_existing_owner()
+        .await
+        .wrap_database_service(|inner| {
+            std::sync::Arc::new(BudgetedDb {
+                inner,
+                // 61 statements fit the limit; 40 are left.
+                budget: StatementBudget::Limited {
+                    limit: 100,
+                    used: 60,
+                },
+            })
+        });
+
+    let err = data_snapshot::import(&as_dev(&ctx), &wide_snapshot(30, 30))
+        .await
+        .expect_err("61 statements do not fit the 40 left");
+    assert_eq!(err.code, wafer_run::ErrorCode::ResourceExhausted, "{err:?}");
+
+    assert_eq!(ids_in(&ctx, users::TABLE).await, ["user_existing"]);
+    assert!(ids_in(&ctx, PRODUCTS_TABLE).await.is_empty());
 }

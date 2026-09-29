@@ -7,15 +7,19 @@ use wafer_core::clients::{config, database as db};
 use wafer_run::{context::Context, OutputStream};
 
 use crate::{
-    blocks::products::{money, repo},
-    http::{err_bad_request, err_internal},
+    blocks::{
+        crud,
+        products::{
+            config::{
+                SELLER_ALLOWED_CATEGORIES, SELLER_ALLOWED_CURRENCIES, SELLER_ALLOWED_TEMPLATES,
+                SELLER_MAX_PRODUCTS,
+            },
+            money, repo,
+        },
+    },
+    http::err_bad_request,
     util::RecordExt,
 };
-
-const TEMPLATES_KEY: &str = "IMPRESSPRESS__PRODUCTS__SELLER_ALLOWED_TEMPLATES";
-const CURRENCIES_KEY: &str = "IMPRESSPRESS__PRODUCTS__SELLER_ALLOWED_CURRENCIES";
-const CATEGORIES_KEY: &str = "IMPRESSPRESS__PRODUCTS__SELLER_ALLOWED_CATEGORIES";
-const MAX_PRODUCTS_KEY: &str = "IMPRESSPRESS__PRODUCTS__SELLER_MAX_PRODUCTS";
 
 fn csv_values(raw: &str, uppercase: bool) -> HashSet<String> {
     raw.split(',')
@@ -31,16 +35,27 @@ fn csv_values(raw: &str, uppercase: bool) -> HashSet<String> {
         .collect()
 }
 
-async fn configured_values(ctx: &dyn Context, key: &str, uppercase: bool) -> HashSet<String> {
-    csv_values(&config::get_default(ctx, key, "").await, uppercase)
+async fn configured_values(
+    ctx: &dyn Context,
+    key: &str,
+    uppercase: bool,
+) -> Result<HashSet<String>, wafer_run::WaferError> {
+    Ok(csv_values(
+        &config::get_default(ctx, key, "").await?,
+        uppercase,
+    ))
 }
 
-pub(crate) async fn allowed_templates(ctx: &dyn Context) -> HashSet<String> {
-    configured_values(ctx, TEMPLATES_KEY, false).await
+pub(crate) async fn allowed_templates(
+    ctx: &dyn Context,
+) -> Result<HashSet<String>, wafer_run::WaferError> {
+    configured_values(ctx, SELLER_ALLOWED_TEMPLATES, false).await
 }
 
-pub(crate) async fn allowed_currencies(ctx: &dyn Context) -> HashSet<String> {
-    configured_values(ctx, CURRENCIES_KEY, true).await
+pub(crate) async fn allowed_currencies(
+    ctx: &dyn Context,
+) -> Result<HashSet<String>, wafer_run::WaferError> {
+    configured_values(ctx, SELLER_ALLOWED_CURRENCIES, true).await
 }
 
 pub(crate) async fn validate_product_fields(
@@ -51,7 +66,9 @@ pub(crate) async fn validate_product_fields(
         let Some(template) = template.as_str() else {
             return Err(err_bad_request("product_template_id must be a string"));
         };
-        let allowed = allowed_templates(ctx).await;
+        let allowed = allowed_templates(ctx).await.map_err(|e| {
+            crate::blocks::crud::db_error_internal(e, "Could not read the seller policy")
+        })?;
         if !allowed.is_empty() && !allowed.contains(&template.trim().to_ascii_lowercase()) {
             return Err(err_bad_request(
                 "This product template is not allowed for sellers",
@@ -68,7 +85,11 @@ pub(crate) async fn validate_product_fields(
         let Some(category) = category.as_str() else {
             return Err(err_bad_request("category must be a string"));
         };
-        let allowed = configured_values(ctx, CATEGORIES_KEY, false).await;
+        let allowed = configured_values(ctx, SELLER_ALLOWED_CATEGORIES, false)
+            .await
+            .map_err(|e| {
+                crate::blocks::crud::db_error_internal(e, "Could not read the seller policy")
+            })?;
         if !allowed.is_empty()
             && !category.trim().is_empty()
             && !allowed.contains(&category.trim().to_ascii_lowercase())
@@ -124,7 +145,9 @@ pub(crate) async fn validate_currency(
     currency: &str,
 ) -> Result<(), OutputStream> {
     let currency = money::normalize_currency(currency).map_err(err_bad_request)?;
-    let allowed = allowed_currencies(ctx).await;
+    let allowed = allowed_currencies(ctx).await.map_err(|e| {
+        crate::blocks::crud::db_error_internal(e, "Could not read the seller policy")
+    })?;
     if !allowed.is_empty() && !allowed.contains(&currency) {
         return Err(err_bad_request("This currency is not allowed for sellers"));
     }
@@ -135,7 +158,11 @@ pub(crate) async fn ensure_product_capacity(
     ctx: &dyn Context,
     user_id: &str,
 ) -> Result<(), OutputStream> {
-    let configured = config::get_default(ctx, MAX_PRODUCTS_KEY, "0").await;
+    let configured = config::get_default(ctx, SELLER_MAX_PRODUCTS, "0")
+        .await
+        .map_err(|e| {
+            crate::blocks::crud::db_error_internal(e, "Could not read the seller limit")
+        })?;
     let limit = match configured.trim().parse::<i64>() {
         Ok(limit) if limit >= 0 => limit,
         Ok(_) | Err(_) => {
@@ -158,7 +185,7 @@ pub(crate) async fn ensure_product_capacity(
         }],
     )
     .await
-    .map_err(|error| err_internal("Could not enforce seller product limit", error))?;
+    .map_err(|error| crud::db_error_internal(error, "Could not enforce seller product limit"))?;
     if count >= limit {
         return Err(err_bad_request(&format!(
             "Seller product limit reached ({limit}); delete a product or ask an administrator to raise the limit"

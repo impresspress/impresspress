@@ -97,8 +97,7 @@ function handleCancel(msg) {
 // gizza-ai (and any future page-side consumer) imports this to drive
 // CreateMLCEngine in the window without going through the SW. Required because
 // Chrome's FetchEvent.respondWith() lifetime cap (~5 min) kills the SW-routed
-// load path on cold WebLLM downloads — see the handoff at
-// docs/superpowers/handoffs/2026-05-07-gizza-ai-model-load-page-direct-handoff.md.
+// load path on cold WebLLM downloads.
 //
 // _engine / _engineModel are the same module-scoped state read by the SW chat
 // path's handleChatStream below. ESM modules are singletons within a realm, so

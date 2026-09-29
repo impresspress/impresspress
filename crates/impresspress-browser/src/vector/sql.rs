@@ -52,8 +52,9 @@ pub fn build_create_index_sql(prefixed_name: &str, keyword_search: bool) -> Vec<
 /// inside the same sql.js OPFS database that stores each index's own
 /// `_vectors`/`_fts`/`_meta` tables. Named with a leading/trailing `__` so
 /// it can never collide with a `{prefixed_name}_vectors|_fts|_meta` table —
-/// index names are restricted to `[A-Za-z0-9_]` and none of those suffixes
-/// match this literal name.
+/// index names are `[a-z0-9_]` (a legacy index keeps its uppercase letters
+/// until `rename_index` moves it) and none of those suffixes match this
+/// literal name.
 pub const REGISTRY_TABLE: &str = "__vector_index_registry__";
 
 /// Idempotent DDL for the registry table. Safe to run before every write or
@@ -96,6 +97,21 @@ pub fn build_registry_select_sql(name: &str) -> (String, Vec<serde_json::Value>)
             r#"SELECT dimensions, metric, keyword_search FROM "{REGISTRY_TABLE}" WHERE name = ?"#
         ),
         vec![serde_json::json!(name)],
+    )
+}
+
+/// `(sql, params)` listing every registered index whose name starts with
+/// `prefix`, in lexical order. The prefix is compared literally (`substr`,
+/// not `LIKE`, so `_` in it is not a wildcard).
+pub fn build_registry_list_sql(prefix: &str) -> (String, Vec<serde_json::Value>) {
+    (
+        format!(
+            r#"SELECT name FROM "{REGISTRY_TABLE}" WHERE substr(name, 1, ?) = ? ORDER BY name"#
+        ),
+        vec![
+            serde_json::json!(prefix.chars().count()),
+            serde_json::json!(prefix),
+        ],
     )
 }
 
@@ -199,6 +215,21 @@ pub fn parse_registry_row(row: &serde_json::Value) -> Result<(u32, DistanceMetri
         .ok_or_else(|| "registry row missing/non-numeric keyword_search".to_string())?
         != 0;
     Ok((dimensions, metric, keyword_search))
+}
+
+/// Every table one index owns, in the order [`build_create_index_sql`]
+/// creates them.
+///
+/// The names are spelled here, beside the DDL that creates and drops them,
+/// so a caller that has to act on the whole set — invalidating the database
+/// service's cached schema for it, say — cannot drift from the builders.
+pub fn index_tables(prefixed_name: &str, keyword_search: bool) -> Vec<String> {
+    let mut out = vec![format!("{prefixed_name}_vectors")];
+    if keyword_search {
+        out.push(format!("{prefixed_name}_fts"));
+    }
+    out.push(format!("{prefixed_name}_meta"));
+    out
 }
 
 pub fn build_delete_index_sql(prefixed_name: &str, keyword_search: bool) -> Vec<String> {
@@ -389,9 +420,93 @@ pub fn build_upsert_sql_stmts(
     out
 }
 
+/// The statements that move index `from` to `to`, run by
+/// `BrowserVectorService::rename_index` inside one transaction once it has
+/// checked the names (`check_rename`), that `from` is registered and that
+/// nothing occupies `to`.
+///
+/// Each of the index's tables moves `from` → staging → `to`. SQLite compares
+/// table names case-insensitively, so a direct `Docs_meta` → `docs_meta`
+/// rename is refused as "already another table". The staging stem
+/// `{to}-rename` can never be an index's own name, because index names never
+/// contain `-`. FTS5 renames its shadow tables along with the virtual table.
+/// The registry row moves last, in the same transaction.
+pub fn build_rename_index_sql(from: &str, to: &str, keyword_search: bool) -> Vec<PreparedStmt> {
+    let staging = format!("{to}-rename");
+    let mut out = Vec::new();
+    for ((old, stage), new) in index_tables(from, keyword_search)
+        .into_iter()
+        .zip(index_tables(&staging, keyword_search))
+        .zip(index_tables(to, keyword_search))
+    {
+        out.push(PreparedStmt {
+            sql: format!(r#"ALTER TABLE "{old}" RENAME TO "{stage}""#),
+            params: Vec::new(),
+        });
+        out.push(PreparedStmt {
+            sql: format!(r#"ALTER TABLE "{stage}" RENAME TO "{new}""#),
+            params: Vec::new(),
+        });
+    }
+    out.push(PreparedStmt {
+        sql: format!(r#"UPDATE "{REGISTRY_TABLE}" SET name = ? WHERE name = ?"#),
+        params: vec![serde_json::json!(to), serde_json::json!(from)],
+    });
+    out
+}
+
+/// `(sql, params)` listing every table that would stand in `to`'s way: one
+/// named like any of `to`'s tables ignoring case (SQLite's own rule for table
+/// names) that is not one of `from`'s own tables, which become `to`'s. Any
+/// row means two indexes differ only by case, and the move is refused rather
+/// than merging them. The FTS name is checked even when `from` has no keyword
+/// search: the moved index would otherwise pick that table up as its own.
+pub fn build_rename_conflicts_sql(from: &str, to: &str) -> (String, Vec<serde_json::Value>) {
+    let targets = index_tables(to, true);
+    let own = index_tables(from, true);
+    let placeholders = |n: usize| vec!["lower(?)"; n].join(", ");
+    let own_placeholders = vec!["?"; own.len()].join(", ");
+    let mut params: Vec<serde_json::Value> = targets.iter().map(|t| serde_json::json!(t)).collect();
+    params.extend(own.iter().map(|t| serde_json::json!(t)));
+    (
+        format!(
+            "SELECT name FROM sqlite_master WHERE lower(name) IN ({}) AND name NOT IN ({own_placeholders})",
+            placeholders(targets.len()),
+        ),
+        params,
+    )
+}
+
 #[cfg(test)]
 mod tests {
+
     use super::*;
+
+    /// [`index_tables`] claims to name every table the create/delete builders
+    /// touch. Enforced rather than asserted in prose: each statement has to
+    /// name the table at its position, in both keyword-search shapes.
+    #[test]
+    fn index_tables_names_the_table_each_built_statement_touches() {
+        for keyword_search in [false, true] {
+            let tables = index_tables("idx", keyword_search);
+            for (builder, statements) in [
+                ("create", build_create_index_sql("idx", keyword_search)),
+                ("delete", build_delete_index_sql("idx", keyword_search)),
+            ] {
+                assert_eq!(
+                    statements.len(),
+                    tables.len(),
+                    "{builder} builds one statement per table (keyword_search = {keyword_search})"
+                );
+                for (statement, table) in statements.iter().zip(&tables) {
+                    assert!(
+                        statement.contains(table.as_str()),
+                        "{builder} statement {statement:?} does not name {table}"
+                    );
+                }
+            }
+        }
+    }
 
     #[test]
     fn create_index_with_keyword_emits_three_tables() {
@@ -772,5 +887,167 @@ mod tests {
     fn parse_registry_row_rejects_missing_keyword_search() {
         let row = serde_json::json!({ "dimensions": 3, "metric": "cosine" });
         assert!(parse_registry_row(&row).is_err());
+    }
+
+    /// The rename statements move a legacy index — tables, entries, keyword
+    /// search and registry row — to its lowercase name on a real SQLite, the
+    /// engine sql.js compiles to. The legacy index is built by this module's
+    /// own create statements, which are what the browser wrote under a
+    /// mixed-case name before names had to be lowercase.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_rename_statements_move_a_mixed_case_index_with_its_rows() {
+        let conn = rusqlite::Connection::open_in_memory().expect("sqlite");
+        conn.execute_batch(&build_registry_ddl()).expect("registry");
+        let from = "impresspress__vector__Docs";
+        let to = "impresspress__vector__docs";
+        for stmt in build_create_index_sql(from, true) {
+            conn.execute_batch(&stmt).expect("legacy create");
+        }
+        let reg = build_registry_upsert_sql(from, 3, DistanceMetric::Cosine, true);
+        conn.execute(&reg.sql, rusqlite::params![from, 3, "cosine", 1])
+            .expect("legacy registry row");
+        conn.execute_batch(&format!(
+            r#"INSERT INTO "{from}_vectors" (id, vector, metadata, text) VALUES ('a', x'00', '{{}}', 'hello');
+               INSERT INTO "{from}_meta" (id, rowid, metadata, text) VALUES ('a', 1, '{{}}', 'hello');
+               INSERT INTO "{from}_fts" (id, text) VALUES ('a', 'hello');"#
+        ))
+        .expect("legacy rows");
+
+        let (conflicts, params) = build_rename_conflicts_sql(from, to);
+        let taken: Vec<String> = conn
+            .prepare(&conflicts)
+            .unwrap()
+            .query_map(
+                rusqlite::params_from_iter(params.iter().map(|p| p.as_str().unwrap())),
+                |r| r.get(0),
+            )
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert!(
+            taken.is_empty(),
+            "the index's own tables are not in the way: {taken:?}"
+        );
+
+        conn.execute_batch("BEGIN").unwrap();
+        for stmt in build_rename_index_sql(from, to, true) {
+            let params: Vec<String> = stmt
+                .params
+                .iter()
+                .map(|p| p.as_str().unwrap().to_string())
+                .collect();
+            conn.execute(&stmt.sql, rusqlite::params_from_iter(params))
+                .unwrap_or_else(|e| panic!("{}: {e}", stmt.sql));
+        }
+        conn.execute_batch("COMMIT").unwrap();
+
+        let names: std::collections::BTreeSet<String> = conn
+            .prepare("SELECT name FROM sqlite_master WHERE type='table'")
+            .unwrap()
+            .query_map([], |r| r.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        for table in index_tables(to, true) {
+            assert!(names.contains(&table), "{table} missing from {names:?}");
+        }
+        assert!(
+            !names
+                .iter()
+                .any(|n| n.starts_with(from) || n.contains("-rename")),
+            "no legacy or staging table is left: {names:?}"
+        );
+        let text: String = conn
+            .query_row(
+                &format!(r#"SELECT text FROM "{to}_fts" WHERE "{to}_fts" MATCH 'hello'"#),
+                [],
+                |r| r.get(0),
+            )
+            .expect("keyword search moved with the index");
+        assert_eq!(text, "hello");
+        let meta: i64 = conn
+            .query_row(&format!(r#"SELECT COUNT(*) FROM "{to}_meta""#), [], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(meta, 1);
+        let (sel, sel_params) = build_registry_select_sql(to);
+        let dims: i64 = conn
+            .query_row(
+                &sel,
+                rusqlite::params![sel_params[0].as_str().unwrap()],
+                |r| r.get(0),
+            )
+            .expect("the registry row moved");
+        assert_eq!(dims, 3);
+    }
+
+    /// A table named like one of `to`'s, in any case, that is not one of
+    /// `from`'s own is a conflict: two indexes differ only by case.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn a_case_twin_is_reported_as_a_conflict() {
+        let conn = rusqlite::Connection::open_in_memory().expect("sqlite");
+        let from = "impresspress__vector__Docs";
+        let to = "impresspress__vector__docs";
+        for stmt in build_create_index_sql(from, false) {
+            conn.execute_batch(&stmt).expect("legacy create");
+        }
+        // An FTS table under the lowercase name, left by another index.
+        conn.execute_batch(&format!(
+            r#"CREATE VIRTUAL TABLE "{to}_fts" USING fts5(id UNINDEXED, text)"#
+        ))
+        .unwrap();
+        let (conflicts, params) = build_rename_conflicts_sql(from, to);
+        let taken: Vec<String> = conn
+            .prepare(&conflicts)
+            .unwrap()
+            .query_map(
+                rusqlite::params_from_iter(params.iter().map(|p| p.as_str().unwrap())),
+                |r| r.get(0),
+            )
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(taken, vec![format!("{to}_fts")]);
+    }
+
+    /// The catalog lists registered names under a literal prefix, in order:
+    /// `_` in the prefix is not a wildcard, and a legacy mixed-case name is
+    /// listed as stored.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_registry_lists_the_names_under_a_literal_prefix() {
+        let conn = rusqlite::Connection::open_in_memory().expect("sqlite");
+        conn.execute_batch(&build_registry_ddl()).expect("registry");
+        for name in [
+            "impresspress__vector__docs",
+            "impresspress__vector__Notes",
+            "impresspressXvectorXother",
+            "other__vector__x",
+        ] {
+            let reg = build_registry_upsert_sql(name, 3, DistanceMetric::Cosine, false);
+            conn.execute(&reg.sql, rusqlite::params![name, 3, "cosine", 0])
+                .expect("row");
+        }
+        let (sql, params) = build_registry_list_sql("impresspress__vector__");
+        let names: Vec<String> = conn
+            .prepare(&sql)
+            .unwrap()
+            .query_map(
+                rusqlite::params![params[0].as_i64().unwrap(), params[1].as_str().unwrap()],
+                |r| r.get(0),
+            )
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            names,
+            vec![
+                "impresspress__vector__Notes".to_string(),
+                "impresspress__vector__docs".to_string(),
+            ]
+        );
     }
 }

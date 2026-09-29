@@ -8,12 +8,19 @@ use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
 use wafer_core::clients::database as db;
 use wafer_run::{context::Context, WaferError};
 
-// Table-name constants live in `crate::messages_schema` so consumers
-// (e.g. the LLM chat UI) can reference them without compiling this module.
-// Re-exported here so existing `messages::service::{CONTEXTS_TABLE,
-// ENTRIES_TABLE}` references inside the messages block continue to resolve.
-pub use crate::messages_schema::{CONTEXTS_TABLE, ENTRIES_TABLE};
+use super::contracts::{EntryKind, EntryRole};
 use crate::util::json_map;
+
+/// Table backing `impresspress/messages` contexts (conversations, tasks,
+/// notifications, …). Owned by this block, and named only inside it: the one
+/// consumer outside `blocks/messages/` was the LLM chat page, which reads
+/// both tables through `ctx.call_block("impresspress/messages", ..)` now.
+pub const CONTEXTS_TABLE: &str = "impresspress__messages__contexts";
+
+/// Table backing `impresspress/messages` entries (messages, artifacts,
+/// notifications, status changes). Owned by this block; see
+/// [`CONTEXTS_TABLE`].
+pub const ENTRIES_TABLE: &str = "impresspress__messages__entries";
 
 /// Build an `Equal` filter for `field` when `value` is present. Mirrors the
 /// per-field `if let Some(...) { filters.push(...) }` pattern used across
@@ -31,9 +38,11 @@ fn maybe_eq(field: &str, value: Option<&str>) -> Option<Filter> {
 // Context operations
 // ---------------------------------------------------------------------------
 
-// The context row's columns, one argument each — the same shape
-// `send_message` below already carries an allow for.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "`ctx` plus one argument for each context-row value the caller \
+              supplies; a struct would be this list with a name on it"
+)]
 pub async fn create_context(
     ctx: &dyn Context,
     owner_id: &str,
@@ -75,7 +84,7 @@ pub struct ListContextsParams {
     pub status: Option<String>,
     pub sender_id: Option<String>,
     pub parent_id: Option<String>,
-    pub page_size: i64,
+    pub page_size: u32,
     pub offset: i64,
 }
 
@@ -100,7 +109,7 @@ pub async fn list_contexts(
             field: "updated_at".to_string(),
             desc: true,
         }],
-        limit: params.page_size,
+        limit: Some(params.page_size),
         offset: params.offset,
         skip_count: false,
         ..Default::default()
@@ -153,15 +162,17 @@ pub async fn delete_context(ctx: &dyn Context, id: &str) -> Result<(), WaferErro
 // Entry operations
 // ---------------------------------------------------------------------------
 
-// One argument per message field the caller must supply; a param-struct
-// refactor is out of scope for a lint sweep (behavior-preserving cleanup only).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "`ctx` plus one argument for each entry-row value the caller \
+              supplies; a struct would be this list with a name on it"
+)]
 pub async fn add_entry(
     ctx: &dyn Context,
     owner_id: &str,
     context_id: &str,
-    kind: &str,
-    role: &str,
+    kind: EntryKind,
+    role: EntryRole,
     sender_id: &str,
     content: &str,
     content_type: Option<&str>,
@@ -197,9 +208,9 @@ pub async fn add_entry(
 }
 
 pub struct ListEntriesParams {
-    pub kind: Option<String>,
-    pub role: Option<String>,
-    pub page_size: i64,
+    pub kind: Option<EntryKind>,
+    pub role: Option<EntryRole>,
+    pub page_size: u32,
     pub offset: i64,
 }
 
@@ -214,18 +225,18 @@ pub async fn list_entries(
         value: serde_json::Value::String(context_id.to_string()),
     }];
 
-    if let Some(ref k) = params.kind {
+    if let Some(kind) = params.kind {
         filters.push(Filter {
             field: "kind".to_string(),
             operator: FilterOp::Equal,
-            value: serde_json::Value::String(k.clone()),
+            value: serde_json::json!(kind),
         });
     }
-    if let Some(ref r) = params.role {
+    if let Some(role) = params.role {
         filters.push(Filter {
             field: "role".to_string(),
             operator: FilterOp::Equal,
-            value: serde_json::Value::String(r.clone()),
+            value: serde_json::json!(role),
         });
     }
 
@@ -235,7 +246,7 @@ pub async fn list_entries(
             field: "created_at".to_string(),
             desc: false,
         }],
-        limit: params.page_size,
+        limit: Some(params.page_size),
         offset: params.offset,
         skip_count: false,
         ..Default::default()

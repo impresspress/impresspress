@@ -11,7 +11,8 @@
 //!
 //! The block-settings load + hash-gated seed and the auto-generated-secret
 //! seeder that used to live here now live in `impresspress-core`
-//! (`features::load_and_seed_block_settings`, `boot::seed_auto_generated`) so
+//! (`platform_state::block_settings::load_and_seed`,
+//! `platform_state::variables::seed_auto_generated`) so
 //! all three targets share one implementation. This module is now just the
 //! binding-name registry.
 

@@ -23,11 +23,10 @@ use super::{
     contracts::{
         ActivationResponse, GenerationDetail, GenerationListQuery, GenerationListResponse,
     },
-    generation, no_store, no_store_error,
+    generation, no_store, no_store_db_error, no_store_db_error_internal, no_store_error,
     repo::{self, generations::GenerationCause},
     retention, DevShared,
 };
-use crate::http::err_internal;
 
 /// Default page size: the retention window, so the default listing is exactly
 /// the set of generations that can still be rolled back to.
@@ -40,12 +39,15 @@ pub async fn handle_list(ctx: &dyn Context, msg: &Message) -> OutputStream {
         .unwrap_or(DEFAULT_LIMIT);
     match list(ctx, limit).await {
         Ok(response) => no_store().json(&response),
-        Err(e) => err_internal("dev generation list", e),
+        // The listing names no row, so a `NotFound` from it is a missing
+        // ledger table — a 500, not a 404 telling the caller they have no
+        // generations. A refusal is still a 403.
+        Err(e) => no_store_db_error_internal(e, "dev generation list"),
     }
 }
 
 async fn list(ctx: &dyn Context, limit: u32) -> Result<GenerationListResponse, WaferError> {
-    let rows = repo::generations::list_recent(ctx, i64::from(limit)).await?;
+    let rows = repo::generations::list_recent(ctx, limit).await?;
     let mut generations = Vec::with_capacity(rows.len());
     for row in &rows {
         let manifest = generation::from_row(row)?;
@@ -63,11 +65,9 @@ pub async fn handle_detail(ctx: &dyn Context, msg: &Message) -> OutputStream {
     match detail(ctx, &id).await {
         Ok(response) => no_store().json(&response),
         // A generation id that is not in the ledger is a 404 the caller can
-        // act on, not an internal failure.
-        Err(e) if e.code == ErrorCode::NotFound => {
-            no_store_error(ErrorCode::NotFound, &format!("no generation {id:?}"))
-        }
-        Err(e) => err_internal("dev generation detail", e),
+        // act on, not an internal failure — and a WRAP refusal on the
+        // ledger is a 403, which is what the shared classification adds.
+        Err(e) => no_store_db_error(e, &format!("no generation {id:?}"), "dev generation detail"),
     }
 }
 
@@ -105,10 +105,13 @@ pub async fn handle_rollback(ctx: &dyn Context, shared: &DevShared, msg: &Messag
 
     let target = match generation::load(ctx, &id).await {
         Ok((_row, manifest)) => manifest,
-        Err(e) if e.code == ErrorCode::NotFound => {
-            return no_store_error(ErrorCode::NotFound, &format!("no generation {id:?}"));
+        Err(e) => {
+            return no_store_db_error(
+                e,
+                &format!("no generation {id:?}"),
+                "dev generation rollback",
+            )
         }
-        Err(e) => return err_internal("dev generation rollback", e),
     };
 
     // A new generation carrying the target's contents — not the target row

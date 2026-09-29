@@ -37,7 +37,7 @@ const INBOX_COLUMNS: &[&str] = &[
 pub async fn list_types(
     ctx: &dyn Context,
     public_only: bool,
-    limit: i64,
+    limit: u32,
     offset: i64,
 ) -> Result<db::RecordList, WaferError> {
     let mut filters = Vec::new();
@@ -60,7 +60,7 @@ pub async fn list_types(
                     desc: false,
                 },
             ],
-            limit: limit.clamp(1, 100),
+            limit: Some(limit.clamp(1, 100)),
             offset: offset.max(0),
             skip_count: public_only,
             ..Default::default()
@@ -136,7 +136,7 @@ impl TicketFilters<'_> {
 pub async fn list_tickets(
     ctx: &dyn Context,
     filters: &TicketFilters<'_>,
-    limit: i64,
+    limit: u32,
     offset: i64,
 ) -> Result<db::RecordList, WaferError> {
     db::list(
@@ -148,7 +148,7 @@ pub async fn list_tickets(
                 field: "created_at".into(),
                 desc: true,
             }],
-            limit: limit.clamp(1, 100),
+            limit: Some(limit.clamp(1, 100)),
             offset: offset.max(0),
             skip_count: false,
             columns: Some(INBOX_COLUMNS.iter().map(|s| (*s).to_string()).collect()),
@@ -171,7 +171,7 @@ pub async fn find_by_dedupe(
         TICKETS,
         &ListOptions {
             filters: vec![eq("dedupe_hash", dedupe_hash)],
-            limit: 1,
+            limit: Some(1),
             skip_count: true,
             ..Default::default()
         },
@@ -195,10 +195,11 @@ pub async fn update_ticket(
     db::update(ctx, TICKETS, id, data).await
 }
 
-// One row per timeline entry, and the row has eight columns the caller
-// chooses. Grouping them into a struct would move the same eight names one
-// level down and buy nothing.
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "`ctx` plus one argument for each value a timeline row records; a \
+              struct would move the same names one level down"
+)]
 pub async fn append_event(
     ctx: &dyn Context,
     ticket_id: &str,
@@ -226,7 +227,7 @@ pub async fn append_event(
 pub async fn list_events(
     ctx: &dyn Context,
     ticket_id: &str,
-    limit: i64,
+    limit: u32,
 ) -> Result<Vec<db::Record>, WaferError> {
     let rows = db::list(
         ctx,
@@ -237,7 +238,7 @@ pub async fn list_events(
                 field: "created_at".into(),
                 desc: true,
             }],
-            limit: limit.clamp(1, 201),
+            limit: Some(limit.clamp(1, 201)),
             skip_count: true,
             ..Default::default()
         },
@@ -277,7 +278,7 @@ pub async fn create_analysis(
 pub async fn list_analyses(
     ctx: &dyn Context,
     ticket_id: &str,
-    limit: i64,
+    limit: u32,
 ) -> Result<Vec<db::Record>, WaferError> {
     let rows = db::list(
         ctx,
@@ -288,7 +289,7 @@ pub async fn list_analyses(
                 field: "created_at".into(),
                 desc: true,
             }],
-            limit: limit.clamp(1, 101),
+            limit: Some(limit.clamp(1, 101)),
             skip_count: true,
             ..Default::default()
         },

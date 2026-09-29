@@ -20,7 +20,7 @@ use wafer_core::{
 use wafer_run::{context::Context, ErrorCode, WaferError};
 
 /// Storage folder the artifacts live in, relative to the block's own
-/// namespace — `wafer-run/storage` rewrites it to
+/// namespace — `wafer-run/storage` resolves it to
 /// `impresspress/dev/artifacts`.
 pub const FOLDER: &str = "artifacts";
 
@@ -28,7 +28,7 @@ pub const FOLDER: &str = "artifacts";
 /// no request context to route through `wafer-run/storage`.
 ///
 /// Derived from the block name rather than written out, because that is what
-/// `impresspress_core::blocks::storage::resolve_folder` does with an
+/// `wafer_core::interfaces::storage::handler::resolve_folder` does with an
 /// own-namespace folder: `{caller}/{folder}`. A literal here would be a second
 /// statement of the namespacing rule, free to drift from the first.
 pub fn namespaced_folder() -> String {
@@ -104,13 +104,19 @@ pub async fn get_direct(
 
 /// Whether an artifact is stored under `sha`.
 ///
-/// A keyed `get` rather than a prefix `list`, for the reasons
+/// A keyed streaming read, dropped unread, for the reasons
 /// [`super::blobs::exists`] documents: `list` of a folder nothing has written
-/// yet is not portable across the storage backends this runs on, and it is
-/// `O(folder)` on OPFS.
+/// yet is not portable across the storage backends this runs on, it is
+/// `O(folder)` on OPFS, and a buffered `get` would transfer up to
+/// [`super::validation::MAX_ARTIFACT_BYTES`] to answer a yes or no.
+///
+/// Nothing in the block asks this — tests use it to observe the store.
+/// Activation answers the same question from the builds ledger
+/// ([`artifact_index`](super::repo::builds::artifact_index)), which costs no
+/// storage call at all — see `activation::missing_content`.
 pub async fn exists(ctx: &dyn Context, sha: &str) -> Result<bool, WaferError> {
-    match storage::get(ctx, FOLDER, &key_for(sha)).await {
-        Ok(_) => Ok(true),
+    match storage::get_stream(ctx, FOLDER, &key_for(sha)).await {
+        Ok(_unread) => Ok(true),
         Err(e) if e.code == ErrorCode::NotFound => Ok(false),
         Err(e) => Err(e),
     }

@@ -6,12 +6,8 @@ use wafer_run::{context::Context, Message, OutputStream};
 
 use crate::{
     blocks::files::repo,
-    ui::{
-        self,
-        shell::Crumb,
-        templates::{list_page, PageHeader},
-    },
-    util::RecordExt,
+    db_read::CappedList,
+    ui::{self, shell::Crumb, templates::list_page},
 };
 
 #[derive(Clone, Debug)]
@@ -20,14 +16,36 @@ pub struct QuotaInfo {
     pub limit_bytes: i64,
 }
 
+/// A share as the owner sees it on `/b/cloudstorage/`.
+///
+/// A render-side projection of [`repo::shares::ShareRow`] — the columns the
+/// table renders, with no decoding of its own.
 #[derive(Clone, Debug)]
 pub struct ShareRow {
+    /// The share row's primary key — what `DELETE /b/cloudstorage/shares/{id}`
+    /// is keyed on, and therefore what the revoke button has to carry. The
+    /// token is the public credential, not the resource's name.
+    pub id: String,
     pub token: String,
     pub bucket: String,
     pub key: String,
     pub created_at: String,
     pub expires_at: Option<String>,
     pub access_count: i64,
+}
+
+impl From<&repo::shares::ShareRow> for ShareRow {
+    fn from(row: &repo::shares::ShareRow) -> Self {
+        Self {
+            id: row.id.clone(),
+            token: row.token.clone(),
+            bucket: row.bucket.clone(),
+            key: row.key.clone(),
+            created_at: row.created_at.clone(),
+            expires_at: row.expires_at.clone(),
+            access_count: row.access_count,
+        }
+    }
 }
 
 fn quota_pct(used: i64, limit: i64) -> i64 {
@@ -70,7 +88,7 @@ pub fn render_shares_table(rows: &[ShareRow]) -> Markup {
             } }
             tbody {
                 @for r in rows {
-                    tr data-share-token=(r.token) {
+                    tr data-share-id=(r.id) {
                         td data-label="Token" { code { (r.token) } }
                         td data-label="Source" { (r.bucket) "/" (r.key) }
                         td data-label="Created" { (r.created_at) }
@@ -79,10 +97,16 @@ pub fn render_shares_table(rows: &[ShareRow]) -> Markup {
                         }
                         td data-label="Accesses" { (r.access_count) }
                         td {
+                            // `data-share-id`, not the token: the revoke
+                            // button's only action is
+                            // `DELETE /b/cloudstorage/shares/{id}`, which is
+                            // keyed on the row id. It also doubles as the
+                            // marker that tells `files-browser.js`'s kebab
+                            // this is the shares table.
                             button .kebab-trigger
                                 type="button"
                                 data-action-menu
-                                data-token=(r.token)
+                                data-share-id=(r.id)
                                 aria-label={"Actions for share " (r.token)}
                             { "⋯" }
                         }
@@ -93,48 +117,18 @@ pub fn render_shares_table(rows: &[ShareRow]) -> Markup {
     }
 }
 
-async fn list_shares_for_user(ctx: &dyn Context, user_id: &str) -> Vec<ShareRow> {
-    match repo::shares::list_all_for_user(ctx, user_id).await {
-        Ok(records) => records
-            .into_iter()
-            .map(|r| ShareRow {
-                token: r
-                    .data
-                    .get("token")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                bucket: r
-                    .data
-                    .get("bucket")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                key: r
-                    .data
-                    .get("key")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                created_at: r
-                    .data
-                    .get("created_at")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                expires_at: r
-                    .data
-                    .get("expires_at")
-                    .and_then(|v| v.as_str())
-                    .map(str::to_string),
-                access_count: r.i64_field("access_count"),
-            })
-            .collect(),
-        Err(e) => {
-            tracing::warn!(error = %e, "shares list failed");
-            Vec::new()
-        }
-    }
+/// The user's share links, or the failure that stopped us reading them.
+///
+/// The quota card on the same page already refuses to render a figure it
+/// could not read; an empty share table is the same lie in table form ("you
+/// have shared nothing"), so it fails the page the same way.
+async fn list_shares_for_user(
+    ctx: &dyn Context,
+    user_id: &str,
+) -> Result<CappedList<ShareRow>, wafer_run::WaferError> {
+    Ok(repo::shares::list_all_for_user(ctx, user_id)
+        .await?
+        .map(|row| ShareRow::from(&row)))
 }
 
 /// GET `/b/cloudstorage/` — share list with quota card.
@@ -144,31 +138,44 @@ pub async fn cloudstorage_page(ctx: &dyn Context, msg: &Message) -> OutputStream
         return crate::ui::not_found_response(msg);
     }
 
-    let shares = list_shares_for_user(ctx, &user_id).await;
-    // Same quota source as upload enforcement (`quota::check_quota`), so
+    let shares = match list_shares_for_user(ctx, &user_id).await {
+        Ok(rows) => rows,
+        Err(e) => {
+            return crate::blocks::crud::db_error_page(msg, e, "cloud storage page: share list")
+        }
+    };
+    // Same quota source as upload enforcement (`repo::objects::reserve_upload`
+    // sums the same rows, and caps them at the same `max_storage_bytes`), so
     // the card can never disagree with what the API enforces.
+    //
+    // A quota card showing "0 B used" during an outage misleads; the page
+    // fails like the API does, and on the first read that fails.
+    let used_bytes = match crate::blocks::files::quota::get_used_bytes(ctx, &user_id).await {
+        Ok(used_bytes) => used_bytes,
+        Err(e) => {
+            return crate::blocks::crud::db_error_page(msg, e, "cloud storage page: usage lookup")
+        }
+    };
+    let limit = match crate::blocks::files::quota::get_user_quota(ctx, &user_id).await {
+        Ok(limit) => limit,
+        Err(e) => {
+            return crate::blocks::crud::db_error_page(msg, e, "cloud storage page: quota lookup")
+        }
+    };
     let quota = QuotaInfo {
-        used_bytes: crate::blocks::files::quota::get_used_bytes(ctx, &user_id).await,
-        limit_bytes: crate::blocks::files::quota::get_user_quota(ctx, &user_id)
-            .await
-            .max_storage_bytes,
+        used_bytes,
+        limit_bytes: limit.max_storage_bytes,
     };
 
     let shares_with_js = html! {
-        (render_shares_table(&shares))
+        @if shares.truncated {
+            p .text-muted .text-sm { "Showing the first " (shares.rows.len()) " share links." }
+        }
+        (render_shares_table(&shares.rows))
         (super::render_bootstrap_script("", ""))
     };
 
-    let body = list_page(
-        PageHeader {
-            title: "",
-            subtitle: None,
-            primary_action: None,
-        },
-        Some(render_quota_card(&quota)),
-        shares_with_js,
-        None,
-    );
+    let body = list_page(Some(render_quota_card(&quota)), shares_with_js, None);
 
     ui::shell_page(
         ctx,
@@ -191,6 +198,36 @@ pub async fn cloudstorage_page(ctx: &dyn Context, msg: &Message) -> OutputStream
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The user share projection renders the full token and the full
+    /// timestamps — nothing is cut on this page — and reads no field itself.
+    #[test]
+    fn user_share_projection_carries_the_row_through_uncut() {
+        let row = repo::shares::ShareRow::from_record(&wafer_core::clients::database::Record {
+            id: "s1".to_string(),
+            data: [
+                ("token", serde_json::json!("tok12345abcdef-more")),
+                ("bucket", serde_json::json!("photos")),
+                ("key", serde_json::json!("a.png")),
+                ("created_at", serde_json::json!("2026-05-06T10:00:00Z")),
+                ("expires_at", serde_json::json!("2026-06-06T10:00:00Z")),
+                ("access_count", serde_json::json!("4")),
+            ]
+            .into_iter()
+            .map(|(k, v)| (k.to_string(), v))
+            .collect(),
+        });
+        let projected = ShareRow::from(&row);
+        assert_eq!(projected.token, "tok12345abcdef-more");
+        assert_eq!(projected.bucket, "photos");
+        assert_eq!(projected.key, "a.png");
+        assert_eq!(projected.created_at, "2026-05-06T10:00:00Z");
+        assert_eq!(
+            projected.expires_at.as_deref(),
+            Some("2026-06-06T10:00:00Z")
+        );
+        assert_eq!(projected.access_count, 4);
+    }
 
     #[test]
     fn render_quota_card_under_quota() {
@@ -232,6 +269,7 @@ mod tests {
     #[test]
     fn render_shares_table_with_rows() {
         let rows = vec![ShareRow {
+            id: "s1".into(),
             token: "abc12345".into(),
             bucket: "photos".into(),
             key: "a.png".into(),
@@ -337,6 +375,57 @@ mod integration_tests {
         assert!(!body.contains("theirs"), "other-user share leaked: {body}");
     }
 
+    /// The revoke button must carry what the revoke route is keyed on.
+    ///
+    /// Nothing here is re-typed from either side: the attribute comes from
+    /// the `dataset` key `files-browser.js` reads, its value is taken out of
+    /// the rendered page, and the URL is the one the bundle builds from it.
+    /// That value then goes through the block's real route table into the
+    /// real handler — so a page rendering the share TOKEN where the route
+    /// wants the row id fails here, as a revoke that 404s in the browser.
+    #[tokio::test]
+    async fn the_revoke_button_carries_what_the_delete_route_is_keyed_on() {
+        use crate::{
+            blocks::files::{
+                cloud,
+                test_support::{revoke_id_attribute, revoke_url, routed},
+            },
+            test_support::{auth_msg, output_json},
+        };
+
+        let ctx = TestContext::with_files().await;
+        let mut share: HashMap<String, serde_json::Value> = HashMap::new();
+        share.insert("token".into(), json!("tok123abc"));
+        share.insert("bucket".into(), json!("photos"));
+        share.insert("key".into(), json!("a.png"));
+        share.insert("created_by".into(), json!("admin_1"));
+        let seeded = repo::shares::seed(&ctx, share).await.expect("seed share");
+
+        let body =
+            output_html(cloudstorage_page(&ctx, &admin_msg("retrieve", "/b/cloudstorage/")).await)
+                .await;
+
+        // The value the kebab hands `revokeShare`, read off the page.
+        let attr = format!("{}=\"", revoke_id_attribute());
+        let at = body.find(&attr).unwrap_or_else(|| {
+            panic!("the shares table renders no `{attr}` for the kebab to read: {body}")
+        }) + attr.len();
+        let revoke_key = &body[at..at + body[at..].find('"').expect("attribute value ends")];
+
+        let msg = routed(auth_msg("delete", &revoke_url(revoke_key), "admin_1"));
+        let out = cloud::handle_delete_share(&ctx, &msg).await;
+
+        assert_eq!(
+            output_json(out).await["deleted"],
+            json!(true),
+            "the value the revoke button carries must address the share on the delete route"
+        );
+        assert!(
+            repo::shares::find_by_id(&ctx, &seeded.id).await.is_err(),
+            "the share must be gone after the button's request"
+        );
+    }
+
     #[tokio::test]
     async fn cloudstorage_page_includes_files_browser_js() {
         let ctx = TestContext::with_files().await;
@@ -352,6 +441,35 @@ mod integration_tests {
         assert!(
             body.contains("/b/static/files-browser-"),
             "files-browser.js script tag missing: {body}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod outage_tests {
+    //! A share listing that FAILED is not "no share links".
+    //!
+    //! The quota card beside it already fails the page (Phase 2); the share
+    //! table did not, so an outage rendered a page that said the user had
+    //! shared nothing.
+
+    use super::*;
+    use crate::{
+        blocks::files::repo,
+        test_support::{admin_msg, output_http_status, FailingDbOpContext, TestContext},
+    };
+
+    #[tokio::test]
+    async fn a_failing_share_list_renders_the_error_page_not_an_empty_one() {
+        let ctx = TestContext::with_files().await;
+        let failing =
+            FailingDbOpContext::new(ctx.clone(), vec![("database.list", repo::shares::TABLE)]);
+
+        let out = cloudstorage_page(&failing, &admin_msg("retrieve", "/b/cloudstorage/")).await;
+        assert_eq!(
+            output_http_status(out).await,
+            500,
+            "an unreadable share list must not render as no shares"
         );
     }
 }

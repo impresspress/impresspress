@@ -51,6 +51,13 @@
 //! signature. Bindings the body doesn't use must be spelled with a leading
 //! underscore (`_this`, `_ctx`), exactly like unused function parameters.
 //!
+//! `handle`'s `msg` binding *is* the generated method's parameter pattern — a
+//! `pat_param`, so anything a function parameter accepts is accepted here,
+//! including `_` and a destructuring pattern. A body that mutates the message
+//! (e.g. `endpoint_match::dispatch(&mut msg, …)`) declares `mut msg`; the
+//! blocks that don't mutate it say plain `msg`, and no `unused_mut`
+//! suppression is needed anywhere.
+//!
 //! `lifecycle` is optional; when omitted the `Block` trait's no-op default is
 //! used (the embedding wrappers, which have no migrations, rely on this).
 
@@ -77,7 +84,7 @@ macro_rules! impresspress_feature_block {
         $(fields: { $($field:ident : $fty:ty),+ $(,)? },)?
         name: $name:literal,
         info: |$ithis:ident| $iexpr:expr,
-        handle: |$hthis:ident, $hctx:ident, $hmsg:ident, $hinput:ident| $hexpr:expr,
+        handle: |$hthis:ident, $hctx:ident, $hmsg:pat_param, $hinput:ident| $hexpr:expr,
         $(lifecycle: |$lthis:ident, $lctx:ident, $levent:ident| $lexpr:expr,)?
     ) => {
         $(#[$attr])*
@@ -110,17 +117,11 @@ macro_rules! impresspress_feature_block {
             async fn handle(
                 &self,
                 ctx: &dyn $crate::blocks::feature_block::__private::Context,
-                msg: $crate::blocks::feature_block::__private::Message,
+                $hmsg: $crate::blocks::feature_block::__private::Message,
                 input: $crate::blocks::feature_block::__private::InputStream,
             ) -> $crate::blocks::feature_block::__private::OutputStream {
                 let $hthis = self;
                 let $hctx = ctx;
-                // Some blocks mutate `msg` in their dispatch (e.g. messages'
-                // `endpoint_match::dispatch(&mut msg, …)`); others don't. Bind
-                // `mut` unconditionally and silence the lint for the
-                // non-mutating blocks.
-                #[allow(unused_mut)]
-                let mut $hmsg = msg;
                 let $hinput = input;
                 $hexpr
             }

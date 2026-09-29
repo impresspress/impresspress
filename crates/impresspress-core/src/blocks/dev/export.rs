@@ -50,13 +50,13 @@ use wafer_run::{context::Context, ErrorCode, OutputStream, WaferError};
 use super::{
     artifacts, blobs,
     contracts::{ExportFile, ExportManifest},
-    data_snapshot, generation, no_store, no_store_error_status, repo,
+    data_snapshot, generation, no_store, no_store_db_error_internal, no_store_error_status, repo,
     seed::{self, SeedBlock, SeedManifest},
     workspace,
     zip::ZipWriter,
     DevShared,
 };
-use crate::http::err_internal;
+use crate::{config_vars::APP_NAME_KEY, http::err_internal};
 
 /// The line `sw.js` carries when it was built for a dev deployment, and the
 /// one it must carry after an export.
@@ -213,7 +213,41 @@ async fn assemble(ctx: &dyn Context, shared: &DevShared) -> Result<Assembled, Re
     let Some((row, manifest)) = generation::active(ctx).await.map_err(Refusal::Internal)? else {
         return Err(Refusal::NothingPublished);
     };
-    let ws = workspace::load(ctx).await.map_err(Refusal::Internal)?;
+    // The MANIFEST read is locked; the content reads below are not, and the
+    // split is the whole of this module's concurrency position (see
+    // [`content_gone`]). `workspace::load` snapshots `workspace.json` and then
+    // reads its bytes, so a save landing between those two steps invalidates
+    // the snapshot and the browser storage layer reports that as an internal
+    // error — `super::files`' failure mode 1, and a `500` on an export that
+    // asked for nothing unusual. The section is one small JSON read, which is
+    // not what the "do not hold this across an export" argument is about.
+    let ws = {
+        let _serialized = shared.workspace.lock().await;
+        workspace::load(ctx).await.map_err(Refusal::Internal)?
+    };
+
+    // --- the data snapshot -----------------------------------------------
+    //
+    // First, before the shell and before any stored content: it is the one
+    // part of the bundle with a size limit, and an export that is going to be
+    // refused should cost one snapshot, not the runtime's wasm and the whole
+    // site as well.
+    //
+    // Compact, not pretty-printed: the file's reader is the importer, and
+    // indentation repeated on every row would spend a sizeable share of
+    // [`seed::MAX_DATA_BYTES`] on whitespace.
+    let snapshot = data_snapshot::export(ctx)
+        .await
+        .map_err(Refusal::Internal)?;
+    let data_bytes = serde_json::to_vec(&snapshot)
+        .map_err(|e| Refusal::Internal(encoding_error("the data snapshot", e)))?;
+    // The importer's bound, applied here so an export is never a bundle its
+    // own importer refuses.
+    if data_bytes.len() > seed::MAX_DATA_BYTES {
+        return Err(Refusal::DataTooLarge {
+            bytes: data_bytes.len(),
+        });
+    }
 
     // --- the shell -------------------------------------------------------
     let listed = shared.shell.list().await.map_err(Refusal::Shell)?;
@@ -244,11 +278,6 @@ async fn assemble(ctx: &dyn Context, shared: &DevShared) -> Result<Assembled, Re
     }
 
     // --- the seed --------------------------------------------------------
-    let snapshot = data_snapshot::export(ctx)
-        .await
-        .map_err(Refusal::Internal)?;
-    let data_bytes = serde_json::to_vec_pretty(&snapshot)
-        .map_err(|e| Refusal::Internal(encoding_error("the data snapshot", e)))?;
     let tables: BTreeMap<String, usize> = snapshot
         .tables
         .iter()
@@ -349,7 +378,9 @@ async fn assemble(ctx: &dyn Context, shared: &DevShared) -> Result<Assembled, Re
             tables: &tables,
             source_verdicts: &source_verdicts,
         },
-    );
+    )
+    .await
+    .map_err(Refusal::Internal)?;
 
     let mut entries = Vec::with_capacity(shell.len() + seed_entries.len() + 3);
     entries.push(Entry {
@@ -507,36 +538,50 @@ fn short_id(generation_id: &str) -> String {
 /// exact thing `two_exports_of_the_same_generation_are_identical` exists to
 /// deny. The generation's own creation time is also the more useful fact: it
 /// is when the site being exported came to be.
-fn render_readme(ctx: &dyn Context, facts: &ReadmeFacts<'_>) -> String {
-    // The literal, as every other reader of this shared variable spells it
-    // (`blocks::auth_ui::pages`, `pipeline`): `config_vars` declares it in
+async fn render_readme(ctx: &dyn Context, facts: &ReadmeFacts<'_>) -> Result<String, WaferError> {
+    use wafer_core::clients::config;
+
+    // Through the config client, not `ctx.config_get`: that snapshot is
+    // frozen at boot, so an export made after an admin renamed the site still
+    // carried the old name, and on Cloudflare carried the default whatever
+    // the name was. The literal is spelled as every other reader spells it
+    // (`ui::SiteConfig`, `pipeline`): `config_vars` declares it in
     // `shared_config_vars()` without exporting a constant for the key.
-    let title = ctx
-        .config_get("WAFER_RUN_SHARED__APP_NAME")
-        .filter(|name| !name.is_empty())
-        .unwrap_or("Your ImpressPress site");
-    let admin_email = ctx
-        .config_get(crate::blocks::auth::config::BOOTSTRAP_ADMIN_EMAIL_KEY)
-        .filter(|email| !email.is_empty())
-        .unwrap_or("the account you signed in with");
+    let title = config::get_default(ctx, APP_NAME_KEY, "").await?;
+    let title = if title.is_empty() {
+        "Your ImpressPress site".to_string()
+    } else {
+        title
+    };
+    let admin_email = config::get_default(
+        ctx,
+        crate::blocks::auth::config::BOOTSTRAP_ADMIN_EMAIL_KEY,
+        "",
+    )
+    .await?;
+    let admin_email = if admin_email.is_empty() {
+        "the account you signed in with".to_string()
+    } else {
+        admin_email
+    };
     let rows: usize = facts.tables.values().sum();
     // A plain textual substitution, not a template engine: every value is a
     // number or a short string this function produced, and
     // `export_zip_contains_shell_seed_sources_and_data_with_dev_off` asserts
     // no `{{` survives.
-    README_TEMPLATE
-        .replace("{{TITLE}}", title)
+    Ok(README_TEMPLATE
+        .replace("{{TITLE}}", &title)
         .replace("{{DATE}}", facts.created_at)
         .replace("{{GENERATION_ID}}", facts.generation_id)
         .replace("{{SHELL_FILES}}", &facts.shell_files.to_string())
         .replace("{{SITE_FILES}}", &facts.site_files.to_string())
         .replace("{{BLOCKS}}", &facts.blocks.to_string())
         .replace("{{TABLE_ROWS}}", &rows.to_string())
-        .replace("{{ADMIN_EMAIL}}", admin_email)
+        .replace("{{ADMIN_EMAIL}}", &admin_email)
         .replace(
             "{{BLOCK_SOURCES}}",
             &render_source_verdicts(facts.source_verdicts),
-        )
+        ))
 }
 
 /// Whether the sources an export ships for one block are the ones its
@@ -642,12 +687,19 @@ const WORKSPACE_CHANGED: &str = "the workspace changed while the export was bein
 /// Why an export could not be produced.
 ///
 /// Three shapes, because they reach the caller three different ways: a
-/// precondition the agent can act on (publish something first), a host-side
-/// failure the agent cannot (the shell would not read), and everything the
-/// storage or ledger refused, which is already a [`WaferError`].
+/// precondition the agent can act on (publish something first, trim the
+/// data), a host-side failure the agent cannot (the shell would not read),
+/// and everything the storage or ledger refused, which is already a
+/// [`WaferError`].
 enum Refusal {
     /// Nothing has been published, so there is no site to export.
     NothingPublished,
+    /// The data snapshot serializes to more than [`seed::MAX_DATA_BYTES`],
+    /// so the bundle would be refused by the importer it exists to feed.
+    DataTooLarge {
+        /// How large `data.json` would have been.
+        bytes: usize,
+    },
     /// A blob or artifact the manifest names is no longer in the store: the
     /// workspace was edited (and collected) while this export was being
     /// assembled. See [`content_gone`].
@@ -658,15 +710,37 @@ enum Refusal {
     Internal(WaferError),
 }
 
+/// What [`Refusal::DataTooLarge`] says, on both surfaces — one wording for
+/// the same reason [`WORKSPACE_CHANGED`] is one string.
+fn data_too_large(bytes: usize) -> String {
+    format!(
+        "the data snapshot (seed/data.json) would be {bytes} bytes, and a bundle may carry at \
+         most {} — the limit the importer enforces — so this export could not be imported. \
+         Remove rows the snapshot carries (products, offers, config variables, accounts) and \
+         export again.",
+        seed::MAX_DATA_BYTES
+    )
+}
+
 /// A content read that came back [`ErrorCode::NotFound`] is the export losing
 /// a race, not an internal fault.
 ///
-/// [`assemble`] reads the manifest first and then each blob, holding no lock
-/// across the two — deliberately, because a 10 MB read under the workspace
-/// mutex would block editing for the length of an export. What that admits is
-/// a `blocks/`-source delete landing between them: `files::handle_delete`
-/// collects after a `blocks/` delete (nothing was published, so no activation
-/// will), and the blob this loop is about to read can be freed underneath it.
+/// [`assemble`] reads the manifest under `DevShared::workspace` and then reads
+/// each blob **outside** it — deliberately, because a 10 MB read under that
+/// mutex would block editing for the length of an export. This is the one
+/// place in the block where a read of stored content is not covered by the
+/// lock: `files::handle_read` holds it across its blob fetch precisely so an
+/// entry and its content are one view, and it can afford to because one file
+/// is capped at `paths::MAX_FILE_BYTES`. An export is not capped at anything.
+///
+/// What the split admits is a `blocks/`-source delete landing between the
+/// manifest and the blob: `files::handle_delete` collects after a `blocks/`
+/// delete (nothing was published, so no activation will), and the blob this
+/// loop is about to read can be freed underneath it. That is the *same* race
+/// `files::handle_read` closes with the lock, answered the other way — as a
+/// retry-able `409` rather than as a sanitized `500` — because the cost of
+/// closing it here is unbounded. `super::files`' header names both decisions
+/// so a maintainer finds them together.
 ///
 /// The site half cannot lose this race — the active generation is always
 /// retained and a compile finishing mid-export leaves the old generation
@@ -703,8 +777,13 @@ impl Refusal {
             Self::WorkspaceChanged => {
                 no_store_error_status(ErrorCode::Aborted, 409, WORKSPACE_CHANGED)
             }
+            // 413 and `ResourceExhausted`, as every other over-a-limit refusal
+            // in `/b/dev` is (`super::files`' header).
+            Self::DataTooLarge { bytes } => {
+                no_store_error_status(ErrorCode::ResourceExhausted, 413, &data_too_large(bytes))
+            }
             Self::Shell(message) => err_internal("dev export shell", message),
-            Self::Internal(error) => err_internal("dev export", error.message),
+            Self::Internal(error) => no_store_db_error_internal(error, "dev export"),
         }
     }
 
@@ -717,6 +796,9 @@ impl Refusal {
                 "there is nothing to export yet: no generation is active",
             ),
             Self::WorkspaceChanged => WaferError::new(ErrorCode::Aborted, WORKSPACE_CHANGED),
+            Self::DataTooLarge { bytes } => {
+                WaferError::new(ErrorCode::ResourceExhausted, data_too_large(bytes))
+            }
             Self::Shell(message) => WaferError::new(
                 ErrorCode::Internal,
                 format!("the static shell could not be read: {message}"),

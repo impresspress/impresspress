@@ -8,9 +8,8 @@ pub struct HashMapConfigService {
     vars: HashMap<String, String>,
 }
 
-// Safety: wasm32-unknown-unknown is single-threaded.
-unsafe impl Send for HashMapConfigService {}
-unsafe impl Sync for HashMapConfigService {}
+// No `unsafe impl Send/Sync`: a `HashMap<String, String>` is already both, so
+// the compiler derives them. See the note in `logger_service`.
 
 impl HashMapConfigService {
     pub fn new(vars: HashMap<String, String>) -> Self {
@@ -23,7 +22,18 @@ impl ConfigService for HashMapConfigService {
         self.vars.get(key).cloned()
     }
 
-    fn set(&self, _key: &str, _value: &str) {
-        // No-op — CF workers are stateless, config is loaded per-request from D1.
-    }
+    /// Deliberately a no-op, and deliberately silent about it.
+    ///
+    /// A Worker's config is loaded per request from D1; there is no isolate
+    /// state a `set` could usefully write to, and the durable copy is written
+    /// through the admin block's variables repo, not through this trait.
+    ///
+    /// It cannot report the refusal either: `ConfigService::set` returns `()`
+    /// upstream (`wafer-core`'s `interfaces/config/service.rs`), so making it a
+    /// `Result` is a producer change that lands on every other consumer of that
+    /// library for one adapter's benefit. Recorded rather than done — see spec
+    /// 2.10. Logging on every call was considered and rejected: nothing in the
+    /// tree calls `set` on this service, so the line would be noise waiting for
+    /// a caller that does not exist.
+    fn set(&self, _key: &str, _value: &str) {}
 }

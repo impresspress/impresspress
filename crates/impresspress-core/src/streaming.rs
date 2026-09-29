@@ -4,9 +4,9 @@
 //! A block declares that its response should stream — bytes flowing to the
 //! client while the producer is still working — by emitting its response
 //! headers as **leading `Meta` events** before the first body `Chunk`.
-//! [`wants_streaming`] is the single decision both the pipeline and the
-//! Cloudflare adapter consult, so they can never disagree about whether a
-//! given response streams or buffers.
+//! [`wants_streaming`] is the single decision the pipeline and BOTH wasm
+//! adapters consult — Cloudflare and the browser — so they can never disagree
+//! about whether a given response streams or buffers.
 //!
 //! Two streaming signals are honored:
 //! - A streaming `resp.content_type` (SSE / generic byte streams), matched by
@@ -15,6 +15,11 @@
 //!   download handlers whose real content-type (`image/*`, `application/pdf`,
 //!   …) is not one of the streaming families but which must still stream to
 //!   avoid buffering the whole object in the isolate.
+//!
+//! The transport byte caps live here too — response ([`MAX_BUFFERED_RESPONSE_BYTES`]),
+//! request ([`MAX_REQUEST_BODY_BYTES`]) and upstream fetch
+//! ([`MAX_NETWORK_RESPONSE_BYTES`]) — one declaration each, so an adapter and
+//! a block cannot enforce different numbers for the same limit.
 //!
 //! The buffered fallback ([`collect_capped_with_prelude`]) enforces a byte cap
 //! so a response that must be buffered (small SSR pages, JSON) cannot balloon
@@ -62,9 +67,112 @@ pub const STREAM_MARKER_VALUE: &str = "1";
 /// bodies are orders of magnitude smaller — chosen to catch a runaway buffered
 /// body before the Worker runtime rejects an oversized `Response`. It is
 /// independent of the outbound-fetch response cap
-/// (`network_service::DEFAULT_MAX_RESPONSE_BYTES`), which bounds a *streamed*
-/// upstream body on a different axis.
+/// ([`MAX_NETWORK_RESPONSE_BYTES`]), which bounds an *upstream* body on a
+/// different axis.
 pub const MAX_BUFFERED_RESPONSE_BYTES: usize = 100 * 1024 * 1024;
+
+/// Maximum body size a `NetworkService` reads from an *upstream* response, in
+/// bytes. SEC-020 — a hostile or runaway upstream cannot read unbounded into
+/// the isolate.
+///
+/// Both wasm adapters enforce this: `impresspress-cloudflare`'s
+/// `WorkerFetchService` and `impresspress-browser`'s `BrowserNetworkService`
+/// (which passes it across the bridge to `bridge.js`'s `httpFetch`, where the
+/// bytes are actually read). It is the same 50 MiB the native backend defaults
+/// to — `wafer_block_network::service::DEFAULT_MAX_RESPONSE_BYTES`, a **free**
+/// constant on that crate, not the method-scoped one the adapters' comments
+/// used to name — and it lives here rather than being re-declared per adapter,
+/// which is how it came to have three copies kept in step by comment.
+///
+/// It is not re-exported from the native crate: `wafer-block-network` pulls in
+/// reqwest and does not build for `wasm32-unknown-unknown`.
+///
+/// Unlike the native default this is **fixed**, not operator-tunable. Native
+/// reads `WAFER_RUN__NETWORK__MAX_RESPONSE_BYTES` from the process env at
+/// service construction; neither wasm adapter's unit-shaped service has config
+/// plumbing to read it from, and this is a security floor rather than a knob.
+pub const MAX_NETWORK_RESPONSE_BYTES: usize = 50 * 1024 * 1024;
+
+/// Maximum **request** body a transport admits, in bytes. A larger body is
+/// refused with HTTP 413 and never reaches a block whole.
+///
+/// Both wasm adapters read the body whole before building the
+/// `(Message, InputStream)` pair and enforce this constant there —
+/// `impresspress-cloudflare`'s `worker_request_to_message` and
+/// `impresspress-browser`'s `request_to_message`, which is why it is a single
+/// constant rather than a literal in each. The native listener
+/// (`wafer-block-http-listener`) streams the body instead, under its own
+/// `max_body_bytes` config, whose default is this same 10 MiB —
+/// `impresspress_native::serve::register_http_listener` does not set it, so
+/// the default is what it runs. It refuses a declared `Content-Length` over
+/// the cap before dispatch, and fails the `InputStream` of a body that grows
+/// past it (or stalls, or whose connection drops) with an `Err` item, which
+/// every consumer answers as a failure rather than storing the prefix.
+///
+/// It is the hard ceiling on an upload, so anything a block advertises as a
+/// per-request size limit has to be clamped to it — see
+/// [`crate::blocks::files::quota::clamp_to_transport`], which the files block's
+/// admin-editable per-file cap goes through.
+///
+/// # What the check does and does not buy
+///
+/// On the wasm adapters the cap is a contract, not a memory guard: the
+/// Cloudflare adapter checks a declared `Content-Length` first and returns
+/// without reading the stream, so a well-formed oversized upload never enters
+/// the isolate, but a chunked request (no length, or a lying one) is caught by
+/// the post-read check, by which time the bytes are already in the isolate —
+/// and the browser adapter reads the whole `ArrayBuffer` before it can measure
+/// it at all, so there the cap only changes the status, never the peak memory.
+///
+/// # Why it is not simply larger
+///
+/// The wasm adapters hold the body whole (128 MB on a Cloudflare Worker, one
+/// shared linear memory in the Service Worker), and a multipart upload holds
+/// the envelope and the extracted file at once. A genuinely larger upload
+/// needs those adapters to hand the transport's byte stream to
+/// `wafer_run::InputStream::from_stream`, mapping every read error to an `Err`
+/// item, and the files block to store it without collecting it first.
+///
+/// # Cross-repo coupling
+///
+/// The native half of this number is not ours: `wafer-block-http-listener`
+/// owns `max_body_bytes` and its default, and that default is a **private**
+/// const in that crate, reachable only through the `ConfigVar` the block
+/// declares. If wafer-run raises it and this stays put, the clamp above would
+/// enforce *below* what native accepts.
+/// `impresspress-native/tests/transport_body_cap.rs` reads the block's own
+/// declared default and fails if the two part company.
+pub const MAX_REQUEST_BODY_BYTES: usize = 10 * 1024 * 1024;
+
+/// Meta key an adapter sets (value [`BODY_TOO_LARGE_VALUE`]) on a message
+/// whose request body exceeded [`MAX_REQUEST_BODY_BYTES`].
+///
+/// The adapter hands the runtime this marker and an **empty** body rather than
+/// building a 413 itself: a response built outside the flow carries neither
+/// the CORS and security headers `wafer-run/cors` and
+/// `wafer-run/security-headers` put on the message nor a `request_logs` row.
+///
+/// [`crate::blocks::body_limit`] — a flow step ahead of the router — turns the
+/// marker into that 413, so the refusal does not depend on which route the
+/// request would have matched. `pipeline::handle_request` checks it too, first
+/// thing, for a consumer flow that dispatches to the router without that step.
+pub const META_REQ_BODY_TOO_LARGE: &str = "req.body_too_large";
+
+/// The value [`META_REQ_BODY_TOO_LARGE`] carries.
+pub const BODY_TOO_LARGE_VALUE: &str = "1";
+
+/// True when an adapter marked this message's body as over
+/// [`MAX_REQUEST_BODY_BYTES`].
+pub fn body_too_large(msg: &wafer_run::Message) -> bool {
+    msg.get_meta(META_REQ_BODY_TOO_LARGE) == BODY_TOO_LARGE_VALUE
+}
+
+/// The error message the 413 carries when a request body exceeds
+/// [`MAX_REQUEST_BODY_BYTES`]. Shared so the number a client is told is the
+/// number that was enforced.
+pub fn request_too_large_message() -> String {
+    format!("request body too large (limit {MAX_REQUEST_BODY_BYTES} bytes)")
+}
 
 /// True for content-types that should stream body chunks to the client as
 /// they're produced rather than buffer the entire response. Today: SSE and
@@ -74,14 +182,23 @@ pub fn is_streaming_content_type(ct: &str) -> bool {
     lower.starts_with("text/event-stream") || lower.starts_with("application/octet-stream")
 }
 
-/// The canonical `resp.content_type` among the leading meta entries, if any.
-/// Legacy aliases (a literal `Content-Type` meta key) are not honored — the
-/// canonical-keys-only policy is pinned by `wafer_block::http_codec`.
+/// The response content type among the leading meta entries, if any, as
+/// `wafer_block::http_codec` classifies it (`resp.content_type`, or any case
+/// of `resp.header.content-type`).
+///
+/// `None` as well when the leading meta holds an entry no transport can send.
+/// Such a response is answered with `http_codec::unsendable_response` before
+/// any header goes out, whichever path it takes: the buffered one through
+/// `http_codec::collect_http_response`, the streaming one in each adapter's
+/// `build_streaming_response`.
 pub fn leading_content_type(meta: &[MetaEntry]) -> Option<&str> {
-    http_codec::response_meta_parts(meta).find_map(|part| match part {
-        ResponseMetaPart::ContentType(ct) => Some(ct),
-        _ => None,
-    })
+    http_codec::response_meta_parts(meta)
+        .ok()?
+        .into_iter()
+        .find_map(|part| match part {
+            ResponseMetaPart::ContentType(ct) => Some(ct),
+            _ => None,
+        })
 }
 
 /// True when the response carries the explicit [`META_RESP_STREAM`] opt-in
@@ -142,8 +259,8 @@ async fn forward_event(sink: OutputSink, ev: StreamEvent) -> Option<OutputSink> 
             let _ = sink.error(*err).await;
             None
         }
-        StreamEvent::Drop => {
-            let _ = sink.drop_request().await;
+        StreamEvent::Drop { meta } => {
+            let _ = sink.drop_request_with_meta(meta).await;
             None
         }
         StreamEvent::Continue(msg) => {
@@ -162,6 +279,10 @@ async fn forward_event(sink: OutputSink, ev: StreamEvent) -> Option<OutputSink> 
 /// doesn't want to drain the body into memory: the leading meta reaches the
 /// adapter before the first body chunk, so headers are applied before the body
 /// finishes.
+///
+/// A source that ends without a terminal event is replayed as an `Error`
+/// terminal: whatever it sent may be a truncated prefix, and nothing here can
+/// tell a finished body from a cut one.
 pub fn rebuild_streaming(
     leading_meta: Vec<MetaEntry>,
     next_event: Option<StreamEvent>,
@@ -174,9 +295,7 @@ pub fn rebuild_streaming(
             }
         }
         let Some(next_event) = next_event else {
-            // The stream ended right after its leading meta with no terminal;
-            // close out as an empty Complete.
-            let _ = sink.complete(Vec::new()).await;
+            let _ = sink.error(no_terminal_error()).await;
             return;
         };
         let Some(mut sink) = forward_event(sink, next_event).await else {
@@ -189,8 +308,13 @@ pub fn rebuild_streaming(
                 None => return,
             }
         }
-        // `rest` ended without a terminal; `from_producer` auto-Completes.
+        let _ = sink.error(no_terminal_error()).await;
     })
+}
+
+/// The error a stream that ended without a terminal event is answered with.
+fn no_terminal_error() -> WaferError {
+    WaferError::from(TerminalNotResponse::Malformed)
 }
 
 /// Outcome of draining a buffered response under a size cap.
@@ -270,8 +394,8 @@ pub async fn collect_capped_with_prelude(
             Some(StreamEvent::Error(err)) => {
                 return CappedCollect::Terminal(Err(TerminalNotResponse::Error(*err)))
             }
-            Some(StreamEvent::Drop) => {
-                return CappedCollect::Terminal(Err(TerminalNotResponse::Drop))
+            Some(StreamEvent::Drop { meta: drop_meta }) => {
+                return CappedCollect::Terminal(Err(TerminalNotResponse::Drop { meta: drop_meta }))
             }
             Some(StreamEvent::Continue(msg)) => {
                 return CappedCollect::Terminal(Err(TerminalNotResponse::Continue(msg)))
@@ -308,7 +432,7 @@ pub fn terminal_to_stream(result: Result<BufferedResponse, TerminalNotResponse>)
         Ok(buf) => OutputStream::respond_with_meta(buf.body, buf.meta),
         Err(TerminalNotResponse::Halt(buf)) => OutputStream::halt(buf.body, buf.meta),
         Err(TerminalNotResponse::Error(err)) => OutputStream::error(err),
-        Err(TerminalNotResponse::Drop) => OutputStream::drop_request(),
+        Err(TerminalNotResponse::Drop { meta }) => OutputStream::drop_request_with_meta(meta),
         Err(TerminalNotResponse::Continue(msg)) => OutputStream::continue_with(msg),
         Err(TerminalNotResponse::Malformed) => OutputStream::error(WaferError::new(
             wafer_run::ErrorCode::Internal,
@@ -385,20 +509,42 @@ pub fn stream_download(
 
 /// View the body-carrying events of a streaming response as a
 /// `Stream<Item = Result<Vec<u8>, WaferError>>`, prepending the already-peeked
-/// `first_chunk`. `Chunk`s map to `Ok(bytes)`; an `Error` terminal maps to a
-/// final `Err(e)`; mid-body `Meta` is dropped (too late to affect headers) and
-/// every other terminal ends the stream. Adapters pipe this straight into a
-/// platform `ReadableStream` body.
+/// `first_chunk`. Adapters pipe this straight into a platform `ReadableStream`
+/// body, which is already committed to a status and headers, so an `Err` item
+/// is the only way left to say the body is not whole: the adapter aborts the
+/// body on it instead of ending it cleanly.
+///
+/// `Chunk`s map to `Ok(bytes)` and mid-body `Meta` is dropped (too late to
+/// affect headers). A `Complete`, `Drop` or `Continue` terminal ends the body.
+/// Three endings are a final `Err`, because the bytes before them are a
+/// truncated prefix: an `Error` terminal; a stream that ends with no terminal
+/// at all; and a `Halt`, which carries a whole response of its own and cannot
+/// follow the `first_chunk` this body has already sent.
 pub fn download_body_stream(
     first_chunk: Vec<u8>,
     rest: OutputStream,
 ) -> impl futures::Stream<Item = Result<Vec<u8>, WaferError>> + 'static {
     let head = futures::stream::iter(std::iter::once(Ok(first_chunk)));
-    let tail = rest.filter_map(|ev| async move {
-        match ev {
-            StreamEvent::Chunk(bytes) => Some(Ok(bytes)),
-            StreamEvent::Error(err) => Some(Err(*err)),
-            _ => None,
+    // `None` once a terminal has been read, so nothing follows it.
+    let tail = futures::stream::unfold(Some(rest), |state| async move {
+        let mut rest = state?;
+        loop {
+            let item = match rest.next().await {
+                Some(StreamEvent::Chunk(bytes)) => return Some((Ok(bytes), Some(rest))),
+                Some(StreamEvent::Meta(_)) => continue,
+                Some(
+                    StreamEvent::Complete { .. }
+                    | StreamEvent::Drop { .. }
+                    | StreamEvent::Continue(_),
+                ) => return None,
+                Some(StreamEvent::Error(err)) => Err(*err),
+                Some(StreamEvent::Halt { .. }) => Err(WaferError::new(
+                    wafer_run::ErrorCode::Internal,
+                    "a Halt terminal cannot follow a streamed body",
+                )),
+                None => Err(no_terminal_error()),
+            };
+            return Some((item, None));
         }
     });
     head.chain(tail)
@@ -564,7 +710,9 @@ mod tests {
         // The marker is inert to the HTTP header layer.
         assert!(
             http_codec::response_meta_parts(&m)
-                .all(|p| !matches!(p, ResponseMetaPart::Header { name, .. } if name == "stream")),
+                .expect("the download meta is sendable")
+                .iter()
+                .all(|p| !matches!(p, ResponseMetaPart::Header { name, .. } if *name == "stream")),
             "the streaming marker must never surface as a response header"
         );
     }
@@ -635,11 +783,24 @@ mod tests {
         .await;
         assert_eq!(parts.status, 403);
 
-        // Drop → 204.
+        // Drop → 204, keeping the headers the drop carries (a flow's CORS
+        // headers on a dropped preflight).
         let parts =
-            http_codec::collect_http_response(terminal_to_stream(Err(TerminalNotResponse::Drop)))
-                .await;
+            http_codec::collect_http_response(terminal_to_stream(Err(TerminalNotResponse::Drop {
+                meta: vec![meta(
+                    "resp.header.access-control-allow-origin",
+                    "https://a.example",
+                )],
+            })))
+            .await;
         assert_eq!(parts.status, 204);
+        assert!(
+            parts.headers.iter().any(|(k, v)| k
+                .eq_ignore_ascii_case("access-control-allow-origin")
+                && v == "https://a.example"),
+            "{:?}",
+            parts.headers
+        );
     }
 
     #[tokio::test]
@@ -675,6 +836,98 @@ mod tests {
             items.last().unwrap().is_err(),
             "error terminal must surface"
         );
+    }
+
+    /// A stream whose terminal has already been read: what a source that ends
+    /// with no terminal event looks like to whoever reads it next. No
+    /// `OutputSink` produces one (a dropped sink sends an `Error`), but a
+    /// consumer is handed an `OutputStream`, not a promise about where it
+    /// came from.
+    async fn stream_without_terminal() -> OutputStream {
+        let mut spent = OutputStream::respond_with_meta(Vec::new(), Vec::new());
+        while spent.next().await.is_some() {}
+        spent
+    }
+
+    /// A download body whose source stops with no terminal is a truncated
+    /// prefix, so it ends in an `Err` the adapter aborts the body on — never
+    /// in a clean end that passes the prefix off as the whole file.
+    #[tokio::test]
+    async fn download_body_stream_errors_when_the_source_has_no_terminal() {
+        let items: Vec<Result<Vec<u8>, WaferError>> =
+            download_body_stream(b"head".to_vec(), stream_without_terminal().await)
+                .collect()
+                .await;
+        assert_eq!(items.len(), 2, "{items:?}");
+        assert_eq!(items[0].as_deref().ok(), Some(&b"head"[..]));
+        assert!(
+            items[1].is_err(),
+            "a body with no terminal must not end cleanly"
+        );
+    }
+
+    /// A `Halt` carries a whole response of its own, so it cannot follow the
+    /// first chunk this body already sent: the bytes before it are not the
+    /// response, and the body must not end as if they were.
+    #[tokio::test]
+    async fn download_body_stream_errors_on_a_halt_after_the_body_started() {
+        let rest = OutputStream::halt(b"a whole other response".to_vec(), Vec::new());
+        let items: Vec<Result<Vec<u8>, WaferError>> =
+            download_body_stream(b"head".to_vec(), rest).collect().await;
+        assert_eq!(items.len(), 2, "{items:?}");
+        assert!(items[1].is_err(), "a Halt mid-body must not end cleanly");
+    }
+
+    /// A producer that stops mid-body without a terminal hands the download
+    /// an `Error` (wafer-run's dropped-sink terminal), which the body
+    /// surfaces. This passes without the no-terminal arm above: it pins the
+    /// contract the adapters rely on, not this function's own branch.
+    #[tokio::test]
+    async fn download_body_stream_errors_when_the_producer_stops_without_a_terminal() {
+        let rest = OutputStream::from_producer(|sink, _cancel| async move {
+            sink.send_chunk(b"partial".to_vec()).await.ok();
+        });
+        let items: Vec<Result<Vec<u8>, WaferError>> =
+            download_body_stream(b"head".to_vec(), rest).collect().await;
+        assert!(
+            items.last().is_some_and(Result::is_err),
+            "a producer cut off mid-body must not end cleanly: {items:?}"
+        );
+    }
+
+    /// A stream that ends right after its leading meta, with no terminal, is
+    /// replayed as an error rather than as an empty success.
+    #[tokio::test]
+    async fn rebuild_streaming_errors_when_the_source_ends_after_its_meta() {
+        let leading = vec![meta(META_RESP_CONTENT_TYPE, "text/event-stream")];
+        let rebuilt = rebuild_streaming(leading, None, stream_without_terminal().await);
+        assert!(
+            matches!(
+                rebuilt.collect_buffered().await,
+                Err(TerminalNotResponse::Error(_))
+            ),
+            "a stream with no terminal must not replay as a Complete"
+        );
+    }
+
+    /// Same for a source that ends mid-body with no terminal: the replay ends
+    /// in an explicit `Error` of its own.
+    #[tokio::test]
+    async fn rebuild_streaming_errors_when_the_source_ends_mid_body() {
+        let leading = vec![meta(META_RESP_CONTENT_TYPE, "text/event-stream")];
+        let rebuilt = rebuild_streaming(
+            leading,
+            Some(StreamEvent::Chunk(b"first".to_vec())),
+            stream_without_terminal().await,
+        );
+        match rebuilt.collect_buffered().await {
+            Err(TerminalNotResponse::Error(e)) => assert_eq!(
+                e.message,
+                WaferError::from(TerminalNotResponse::Malformed).message,
+                "the replay names the missing terminal"
+            ),
+            other => panic!("expected an Error terminal, got {other:?}"),
+        }
     }
 
     #[tokio::test]

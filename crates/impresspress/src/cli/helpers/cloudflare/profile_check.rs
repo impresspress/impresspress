@@ -30,9 +30,12 @@
 //! These checks emit warnings to stderr; they never error or block the
 //! build. Users can ignore the warnings if they have a reason to.
 
-use std::path::Path;
+use std::{
+    path::{Path, PathBuf},
+    process::Command,
+};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 /// Warn if the WASM exceeds this size. At the slow end of Liftoff's cited
 /// range (~10 MB/sec), the real 1000ms startup budget buys about 10 MB
@@ -42,16 +45,10 @@ use anyhow::{Context, Result};
 /// the warning past a cap that doesn't exist).
 const WASM_SIZE_WARN_BYTES: u64 = 8 * 1024 * 1024;
 
-/// Inspect the consumer's `Cargo.toml` for `[profile.release]` settings
-/// and emit a warning if size optimizations are missing.
+/// Inspect the `[profile.release]` the consumer's build uses and emit a
+/// warning if size optimizations are missing.
 pub fn check_release_profile(repo_root: &Path) -> Result<()> {
-    let cargo_toml = repo_root.join("Cargo.toml");
-    let raw = std::fs::read_to_string(&cargo_toml)
-        .with_context(|| format!("read {}", cargo_toml.display()))?;
-    let parsed: toml::Value =
-        toml::from_str(&raw).with_context(|| format!("parse {}", cargo_toml.display()))?;
-
-    let issues = collect_profile_issues(&parsed);
+    let (cargo_toml, issues) = release_profile_issues(repo_root)?;
     if issues.is_empty() {
         return Ok(());
     }
@@ -63,12 +60,15 @@ pub fn check_release_profile(repo_root: &Path) -> Result<()> {
     eprintln!("    REJECTS the deployment with `error code: 10021` (\"Script");
     eprintln!("    startup exceeded CPU time limit\"); nothing goes live.");
     eprintln!();
-    eprintln!("    Cargo.toml issues found:");
+    eprintln!("    {} issues found:", cargo_toml.display());
     for issue in &issues {
         eprintln!("      • {issue}");
     }
     eprintln!();
-    eprintln!("    Suggested [profile.release] in your Cargo.toml:");
+    eprintln!(
+        "    Suggested [profile.release] in {}:",
+        cargo_toml.display()
+    );
     eprintln!();
     eprintln!("      [profile.release]");
     eprintln!("      opt-level = \"z\"");
@@ -78,6 +78,45 @@ pub fn check_release_profile(repo_root: &Path) -> Result<()> {
     eprintln!("      panic = \"abort\"");
     eprintln!();
     Ok(())
+}
+
+/// The manifest whose `[profile.release]` building `repo_root`'s crate uses,
+/// and the problems found in it.
+///
+/// Cargo reads profiles only from the workspace root's manifest and ignores
+/// (with a warning) any in a member's, so for a crate that is a workspace
+/// member the member's own `Cargo.toml` is the wrong file to inspect: it has
+/// no `[profile.release]` even when the workspace sets every setting. The
+/// file is the one `cargo locate-project --workspace` names — the crate's
+/// own manifest when it is not a member of any workspace.
+pub fn release_profile_issues(repo_root: &Path) -> Result<(PathBuf, Vec<String>)> {
+    let cargo_toml = workspace_manifest(repo_root)?;
+    let raw = std::fs::read_to_string(&cargo_toml)
+        .with_context(|| format!("read {}", cargo_toml.display()))?;
+    let parsed: toml::Value =
+        toml::from_str(&raw).with_context(|| format!("parse {}", cargo_toml.display()))?;
+    Ok((cargo_toml, collect_profile_issues(&parsed)))
+}
+
+/// `cargo locate-project --workspace` run from `repo_root`: the manifest of
+/// the workspace root the crate there builds in.
+fn workspace_manifest(repo_root: &Path) -> Result<PathBuf> {
+    let output = Command::new("cargo")
+        .args(["locate-project", "--workspace", "--message-format", "plain"])
+        .current_dir(repo_root)
+        .output()
+        .context("run cargo locate-project --workspace")?;
+    if !output.status.success() {
+        bail!(
+            "cargo locate-project --workspace in {} failed (exit {:?}): {}",
+            repo_root.display(),
+            output.status.code(),
+            String::from_utf8_lossy(&output.stderr).trim()
+        );
+    }
+    let path = String::from_utf8(output.stdout)
+        .context("cargo locate-project printed a non-UTF-8 path")?;
+    Ok(PathBuf::from(path.trim_end_matches(['\n', '\r'])))
 }
 
 /// Measure the produced WASM and warn if it's likely to exceed the
@@ -354,6 +393,66 @@ codegen-units = 1
 strip = true
 "#;
         assert!(collect_profile_issues(&parse(toml)).is_empty());
+    }
+
+    const IDEAL_PROFILE: &str = r#"
+[profile.release]
+opt-level = "z"
+lto = true
+codegen-units = 1
+strip = true
+panic = "abort"
+"#;
+
+    fn write(path: &Path, body: &str) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, body).unwrap();
+    }
+
+    /// A workspace member's build uses the workspace root's profile, so a
+    /// member whose root sets every size setting is not warned about — its
+    /// own manifest, which has no `[profile.release]`, is not the file.
+    #[test]
+    fn a_workspace_member_is_checked_against_the_workspace_roots_profile() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path();
+        write(
+            &root.join("Cargo.toml"),
+            &format!("[workspace]\nmembers = [\"member\"]\nresolver = \"2\"\n{IDEAL_PROFILE}"),
+        );
+        write(
+            &root.join("member/Cargo.toml"),
+            "[package]\nname = \"member\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        );
+        write(&root.join("member/src/lib.rs"), "");
+
+        let (manifest, issues) = release_profile_issues(&root.join("member")).unwrap();
+        assert_eq!(
+            manifest.canonicalize().unwrap(),
+            root.join("Cargo.toml").canonicalize().unwrap()
+        );
+        assert!(issues.is_empty(), "{issues:?}");
+    }
+
+    /// A crate outside any workspace is its own root: its manifest is the
+    /// one checked, and a missing profile there is still reported.
+    #[test]
+    fn a_standalone_crate_is_checked_against_its_own_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let root = tmp.path().join("app");
+        write(
+            &root.join("Cargo.toml"),
+            "[package]\nname = \"app\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n[workspace]\n",
+        );
+        write(&root.join("src/lib.rs"), "");
+
+        let (manifest, issues) = release_profile_issues(&root).unwrap();
+        assert_eq!(
+            manifest.canonicalize().unwrap(),
+            root.join("Cargo.toml").canonicalize().unwrap()
+        );
+        assert_eq!(issues.len(), 1, "{issues:?}");
+        assert!(issues[0].contains("[profile.release] is missing"));
     }
 
     #[test]

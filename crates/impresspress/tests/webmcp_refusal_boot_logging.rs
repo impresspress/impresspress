@@ -10,7 +10,7 @@
 //! same snapshot the router — and therefore the manifest endpoint — is built
 //! from), `build()` now runs `wafer_core::discovery::generate_webmcp_report`
 //! once and logs each refusal at `warn!`. `build()` runs once per `Wafer`
-//! construction; mirroring `crates/impresspress/src/cli/server.rs`'s native
+//! construction; mirroring `impresspress_server::build_native_runtime`'s native
 //! boot path here exercises the exact same call.
 
 use std::{path::Path, sync::Arc};
@@ -126,7 +126,7 @@ const REFUSAL_WARNING: &str = "webmcp: endpoint opted in to agent-tool exposure 
 
 /// Build one `ImpresspressBuilder` runtime over a scratch sqlite file +
 /// local storage root — the same construction native boot uses
-/// (`crates/impresspress/src/cli/server.rs::run`, minus the admin-table
+/// (`impresspress_server::build_native_runtime`, minus the admin-table
 /// pre-seeding and HTTP-listener steps `build()` itself doesn't need: it is
 /// a synchronous, no-I/O block-registration method). Every block in `extras`
 /// is registered before `block_infos` is captured, so all of them
@@ -150,27 +150,39 @@ async fn build_runtime_with_extra_blocks(
         .await
         .expect("construct local storage service");
 
-    let mut builder = ImpresspressBuilder::new()
-        .database(database)
-        .storage(storage)
-        .config(Arc::new(
-            wafer_core::service_blocks::config::EnvConfigService::new(),
-        ))
+    // `RuntimeConfig::install` is the only way to hand a `ConfigService` to the
+    // builder, so a caller cannot fill the async surface and forget the
+    // synchronous snapshot. This harness needs neither key: it is testing what
+    // `build()` logs, not what blocks read.
+    let (builder, ()) = impresspress_core::builder::RuntimeConfig::new().install(
+        ImpresspressBuilder::new()
+            .database(database)
+            .storage(storage),
+        |map| {
+            (
+                impresspress_core::builder::fill_config_service(
+                    Arc::new(wafer_core::service_blocks::config::EnvConfigService::new()),
+                    map,
+                ),
+                (),
+            )
+        },
+    );
+    let mut builder = builder
         .crypto(
             impresspress_native::make_jwt_crypto_service(
                 "webmcp-refusal-boot-logging-test-jwt-secret".to_string(),
+                Default::default(),
             )
             .expect("jwt crypto service"),
         )
-        .network(impresspress_native::make_fetch_network_service().expect("network service"))
+        .network(impresspress_native::make_fetch_network_service())
         .logger(impresspress_native::make_tracing_logger());
     for (name, block) in extras {
         builder = builder.extra_block(name, block);
     }
 
-    let (wafer, _storage_block) = builder.build().expect("build impresspress runtime");
-
-    wafer
+    builder.build().expect("build impresspress runtime")
 }
 
 /// The hook this fix relies on: `ImpresspressBuilder::build()` must compute
@@ -290,24 +302,22 @@ async fn webmcp_refusal_boot_log_includes_scope() {
          OutputSchemaNotAnObject (field only): {refusal_logs:?}"
     );
 
-    let tool_scoped: Vec<&String> = refusal_logs
+    let tool_scoped = refusal_logs
         .iter()
         .filter(|m| m.contains("scope=tool "))
-        .collect();
+        .count();
     assert_eq!(
-        tool_scoped.len(),
-        2,
+        tool_scoped, 2,
         "both DuplicateToolName refusals must be logged with scope=tool (the whole tool was \
          refused): {refusal_logs:?}"
     );
 
-    let output_schema_scoped: Vec<&String> = refusal_logs
+    let output_schema_scoped = refusal_logs
         .iter()
         .filter(|m| m.contains("scope=outputSchema "))
-        .collect();
+        .count();
     assert_eq!(
-        output_schema_scoped.len(),
-        1,
+        output_schema_scoped, 1,
         "the OutputSchemaNotAnObject refusal must be logged with scope=outputSchema (only the \
          field was dropped, the tool was still published): {refusal_logs:?}"
     );

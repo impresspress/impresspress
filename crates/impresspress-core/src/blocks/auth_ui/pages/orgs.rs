@@ -6,7 +6,7 @@ use maud::{html, Markup};
 use wafer_run::{context::Context, Message, OutputStream};
 
 use crate::{
-    blocks::auth::repo::orgs,
+    blocks::{auth::repo::orgs, crud},
     http::redirect,
     ui::{self, SiteConfig},
 };
@@ -18,7 +18,12 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
         return redirect(302, "/b/auth/login");
     }
 
-    let orgs_list = orgs::list_for_user(ctx, &user_id).await.unwrap_or_default();
+    // A failed read is an error page, never the "no claimed organizations"
+    // copy: that would tell a user who owns orgs that they own none.
+    let orgs_list = match orgs::list_for_user(ctx, &user_id).await {
+        Ok(list) => list,
+        Err(e) => return crud::db_error_page(msg, e, "orgs page: list_for_user failed"),
+    };
     let body = html! {
         p .text-muted .m-0 .mb-4 .text-sm {
             "Orgs you've claimed via GitHub, Google, or Microsoft sign-in."
@@ -26,7 +31,12 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
         (render_orgs_body(&orgs_list))
     };
 
-    let config = SiteConfig::load(ctx).await;
+    let config = match SiteConfig::load(ctx).await {
+        Ok(site) => site,
+        Err(e) => {
+            return crate::blocks::crud::db_error_page(msg, e, "page: site config read failed")
+        }
+    };
     let markup = ui::layout::page(
         "Organizations",
         &config,
@@ -69,38 +79,24 @@ fn render_orgs_body(orgs: &[orgs::OrgRow]) -> Markup {
 
 #[cfg(test)]
 mod tests {
-    use serde_json::json;
-    use wafer_core::clients::database as db;
 
     use super::*;
     use crate::{
-        blocks::auth::repo::orgs::{upsert_claimed, NewClaim},
+        blocks::auth::repo::orgs::fixtures::seed_claimed_org,
         test_support::{
             anon_msg, auth_msg, output_header, output_html, output_status, TestContext,
         },
     };
 
     async fn seed_user(ctx: &TestContext, user_id: &str) {
-        db::exec_raw(
-            ctx,
-            "INSERT INTO wafer_run__auth__users (id, email, display_name, role, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?)",
-            &[
-                json!(user_id),
-                json!(format!("{user_id}@example.com")),
-                json!(user_id),
-                json!("user"),
-                json!("2026-01-01T00:00:00Z"),
-                json!("2026-01-01T00:00:00Z"),
-            ],
-        )
-        .await
-        .unwrap();
+        ctx.seed_auth_user(user_id).await;
     }
 
     #[tokio::test]
     async fn anonymous_redirects_to_login() {
-        let ctx = TestContext::with_auth().await;
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
         let msg = anon_msg("retrieve", "/b/auth/orgs");
         let resp = handle(&ctx, &msg).await;
         assert_eq!(output_status(resp).await, 302);
@@ -108,7 +104,9 @@ mod tests {
 
     #[tokio::test]
     async fn anonymous_redirect_sets_location() {
-        let ctx = TestContext::with_auth().await;
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
         let msg = anon_msg("retrieve", "/b/auth/orgs");
         let resp = handle(&ctx, &msg).await;
         assert_eq!(
@@ -119,7 +117,9 @@ mod tests {
 
     #[tokio::test]
     async fn empty_renders_empty_state_copy() {
-        let ctx = TestContext::with_auth().await;
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
         seed_user(&ctx, "user-a").await;
         let msg = auth_msg("retrieve", "/b/auth/orgs", "user-a");
         let resp = handle(&ctx, &msg).await;
@@ -130,30 +130,28 @@ mod tests {
 
     #[tokio::test]
     async fn populated_renders_one_row_per_org() {
-        let ctx = TestContext::with_auth().await;
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
         seed_user(&ctx, "user-a").await;
-        upsert_claimed(
+        seed_claimed_org(
             &ctx,
-            NewClaim {
-                name: "alpha",
-                owner_user_id: "user-a",
-                verified_via: "github",
-                verified_ref: "gh-1",
-            },
+            "alpha",
+            "user-a",
+            "github",
+            "gh-1",
+            "2026-01-01T00:00:00Z",
         )
-        .await
-        .unwrap();
-        upsert_claimed(
+        .await;
+        seed_claimed_org(
             &ctx,
-            NewClaim {
-                name: "beta",
-                owner_user_id: "user-a",
-                verified_via: "google",
-                verified_ref: "gg-2",
-            },
+            "beta",
+            "user-a",
+            "google",
+            "gg-2",
+            "2026-01-02T00:00:00Z",
         )
-        .await
-        .unwrap();
+        .await;
 
         let msg = auth_msg("retrieve", "/b/auth/orgs", "user-a");
         let resp = handle(&ctx, &msg).await;
@@ -162,5 +160,29 @@ mod tests {
         assert!(html.contains("beta"));
         assert!(html.contains("github"));
         assert!(html.contains("google"));
+    }
+
+    #[tokio::test]
+    async fn a_failed_read_is_a_500_not_the_empty_state() {
+        use wafer_run::Block;
+
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
+        seed_user(&ctx, "user-a").await;
+        let ctx = ctx.break_reads();
+        let mut msg = auth_msg("retrieve", "/b/auth/orgs", "user-a");
+        msg.set_meta("http.header.accept", "text/html");
+        // Through the block's router, the path a browser request takes.
+        let resp = crate::blocks::auth_ui::AuthUiBlock::default()
+            .handle(&ctx, msg, wafer_run::InputStream::empty())
+            .await;
+        let parts = wafer_block::http_codec::collect_http_response(resp).await;
+        let (status, html) = (parts.status, String::from_utf8_lossy(&parts.body));
+        assert_eq!(status, 500, "a failed read must not render a page: {html}");
+        assert!(
+            !html.contains("No claimed organizations"),
+            "a failed read must not claim the user owns no orgs: {html}"
+        );
     }
 }

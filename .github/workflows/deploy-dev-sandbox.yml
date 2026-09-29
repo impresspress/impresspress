@@ -17,6 +17,14 @@ on:
       # asset overlay (`cli/helpers/overlays.rs`) closely enough that
       # build.sh's own failure message names a stale CLI as the cause.
       - 'crates/impresspress/**'
+      # The native server boot (`impresspress-server`) and the native services
+      # it builds on, path dependencies declared unconditionally in
+      # `crates/impresspress/Cargo.toml`. The CLI reaches them only from
+      # `serve`, so they cannot change what this job ships — but they can break
+      # the `cargo install` the job depends on, and a break that skips its own
+      # gate is the failure this list exists to prevent.
+      - 'crates/impresspress-server/**'
+      - 'crates/impresspress-native/**'
       # The workspace manifest and the lockfile the `--locked` install
       # resolves against: a wafer-run pin bump changes what every crate above
       # compiles to without touching one of their paths.
@@ -35,9 +43,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout wafer-run
-        run: git clone --depth 1 https://github.com/wafer-run/wafer-run.git "$GITHUB_WORKSPACE/../wafer-run"
-
       - uses: dtolnay/rust-toolchain@stable
         with:
           targets: wasm32-unknown-unknown
@@ -47,7 +52,8 @@ jobs:
         with:
           # Pin explicitly — unpinned "latest" falls back to v0.9.1 on a GitHub
           # API flake, and v0.9.1 can't parse `license.workspace = true`.
-          # This is live push-to-main infra; matches ci.yml's pin.
+          # This is live push-to-main infra; matches `build-wasm.yml`'s pin,
+          # which is the one CI builds with.
           version: 'v0.15.0'
 
       # `cargo install --path crates/impresspress` runs the impresspress build.rs,
@@ -57,7 +63,7 @@ jobs:
       # own feature-on wasm goes into pkg-dev/, built separately by build.sh below.
       - name: Pre-build impresspress-web wasm (build.rs prereq)
         working-directory: crates/impresspress-web
-        run: wasm-pack build --target web --release --out-dir pkg
+        run: wasm-pack build --target web --release --out-dir pkg -- --locked
 
       - name: Install impresspress CLI
         run: cargo install --path crates/impresspress --locked

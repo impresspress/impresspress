@@ -25,16 +25,13 @@
 //! WRAP's own-namespace rule, the `schema` capability, and the real database
 //! handler.
 //!
-//! Two things this cannot claim. `WasmiBlock`'s linker defines every host
+//! One thing this cannot claim: `WasmiBlock`'s linker defines every host
 //! import regardless of the capability set — enforcement is per call, off the
 //! store's host state — so there is no load-time import filtering here to
-//! exercise. And `Wafer::start()` recomputes each block's effective
-//! capabilities as `declared ∩ config` and pushes them back into the block
-//! (`runtime/seal.rs::compute_effective_capabilities`), so the set passed at
-//! load is replaced before the first request. Loading through the production
-//! constructor with the accepted spec still matters: it is the call
-//! production makes, it is what a probe (which never reaches `start`) runs
-//! under, and it keeps this test honest if either of those two facts changes.
+//! exercise. The capabilities passed at load are the guest's bound:
+//! `Wafer::start()` narrows them to what the guest declares (∩ its
+//! `capabilities` block config) and never widens them, so a guest runs under
+//! at most the accepted spec, as it does in the sandbox.
 //!
 //! # When it does not run
 //!
@@ -47,10 +44,23 @@
 
 use std::{path::Path, process::Command, sync::Arc};
 
-use impresspress_core::blocks::dev::{control::DynamicBlockSpec, validation};
-use wafer_block::{http_codec, streams::input::InputStream, BlockCapabilities, Message};
+use impresspress_core::blocks::dev::{control::DynamicBlockSpec, scaffold::Template, validation};
+use wafer_block::{
+    abi::{GuestAction, GuestResult},
+    http_codec,
+    streams::input::InputStream,
+    BlockCapabilities, ErrorCode, Message, MetaEntry, WaferError,
+};
 use wafer_block_sqlite::service::SQLiteDatabaseService;
 use wafer_run::{wasm::WasmiBlock, ResourceLimits, Wafer};
+
+/// The canonical guest support module, compiled for the host, so a test can
+/// render a `BlockInfo` exactly as a sandbox block does.
+///
+/// It carries its own `#![expect(dead_code)]` — this file uses only part of
+/// the API — so this declaration must not add a second one.
+#[path = "../src/blocks/dev/templates/wafer_guest.rs"]
+mod wafer_guest;
 
 // ---------------------------------------------------------------------------
 // Building a template
@@ -154,16 +164,51 @@ fn build_template(name: &str) -> Vec<u8> {
         .join(name);
     let out = tempfile::tempdir().expect("tempdir");
     copy_dir_all(&source, out.path()).expect("copy the template");
+    build_crate(name, out.path())
+}
 
-    let package = package_name(
-        &std::fs::read_to_string(out.path().join("Cargo.toml")).expect("read Cargo.toml"),
-    );
+/// Scaffold `template` as block `name` — the three files `dev_create_block`
+/// writes, from [`Template::files`] itself — and build it.
+///
+/// The one edit is the one an author makes before a second block from the
+/// same template can run beside the first: agent tool names are unique
+/// across a runtime, and the template's is not derived from the block name.
+fn build_scaffolded(template: Template, name: &str) -> Vec<u8> {
+    build_scaffolded_with(template, name, |content| content)
+}
+
+/// [`build_scaffolded`], with `edit` applied to every file's content — the
+/// change an author makes to the template before compiling it.
+fn build_scaffolded_with(
+    template: Template,
+    name: &str,
+    edit: impl Fn(String) -> String,
+) -> Vec<u8> {
+    let out = tempfile::tempdir().expect("tempdir");
+    let block_dir = format!("blocks/{name}/");
+    let tool = format!("\"subscribe_{}\"", name.replace('-', "_"));
+    for (path, content) in template.files(name) {
+        let content = edit(content.replace("\"subscribe_newsletter\"", &tool));
+        let relative = path
+            .strip_prefix(&block_dir)
+            .unwrap_or_else(|| panic!("{path} is outside {block_dir}"));
+        let target = out.path().join(relative);
+        std::fs::create_dir_all(target.parent().expect("a parent")).expect("create the directory");
+        std::fs::write(&target, content).expect("write the scaffolded file");
+    }
+    build_crate(name, out.path())
+}
+
+/// Build the crate at `dir` for `wasm32-wasip1` and return the module.
+fn build_crate(name: &str, dir: &Path) -> Vec<u8> {
+    let package =
+        package_name(&std::fs::read_to_string(dir.join("Cargo.toml")).expect("read Cargo.toml"));
     // `--offline` is the assertion, not an optimization: a template with a
     // single dependency would fail here rather than quietly working on a
     // machine with a warm registry cache. `--target-dir` is explicit so an
     // ambient `CARGO_TARGET_DIR` cannot move the artifact out from under the
     // read below.
-    let target_dir = out.path().join("target");
+    let target_dir = dir.join("target");
     let status = Command::new("cargo")
         .args([
             "build",
@@ -174,7 +219,7 @@ fn build_template(name: &str) -> Vec<u8> {
         ])
         .arg("--target-dir")
         .arg(&target_dir)
-        .current_dir(out.path())
+        .current_dir(dir)
         .status()
         .expect("run cargo");
     assert!(
@@ -235,9 +280,10 @@ fn golden_wafer() -> Wafer {
 ///    [`ResourceLimits::default`], which is the fuel/memory pair
 ///    `dev_runtime::guest_limits` also builds.
 ///
-/// A `load_from_bytes` here would be `BlockCapabilities::unrestricted()` — a
-/// set no staged block is ever handed, and one that would make step 2's
-/// refusals irrelevant to what actually ran.
+/// A `load_from_bytes` here would carry no bound at all, leaving the guest's
+/// capabilities to whatever an operator's `capabilities` block config states
+/// (`none()` without one) — a set that has nothing to do with step 2's
+/// refusals.
 fn load_as_the_sandbox_does(name: &str, wasm: &[u8]) -> (WasmiBlock, DynamicBlockSpec) {
     let inspected = WasmiBlock::load_with_capabilities(wasm, BlockCapabilities::none())
         .unwrap_or_else(|e| panic!("inspect-load {name}: {e}"));
@@ -378,8 +424,8 @@ async fn table_template_creates_its_table_and_serves_its_endpoints() {
     let one: serde_json::Value = serde_json::from_slice(&out.body).expect("by-id body");
     assert_eq!(one["email"], "a@b.c", "{one}");
 
-    // The duplicate check the template makes explicitly, rather than leaning
-    // on the UNIQUE constraint.
+    // A second signup for the address: refused by the UNIQUE constraint,
+    // which the host reports to the guest as `AlreadyExists`.
     let out = wafer
         .run_block(
             "site/newsletter",
@@ -475,4 +521,392 @@ async fn a_compiled_template_reports_the_block_info_the_sandbox_accepts() {
     assert!(spec
         .capabilities
         .allows_collection("site__newsletter__subscribers"));
+}
+
+/// POST one signup to `name`'s `subscribe` endpoint and return the status.
+async fn subscribe(wafer: &Wafer, name: &str, email: &str) -> u16 {
+    let out = wafer
+        .run_block(
+            &format!("site/{name}"),
+            http_msg(
+                "POST",
+                &format!("/b/{name}/subscribe"),
+                &[("auth.user_id", "")],
+            ),
+            InputStream::from_bytes(format!(r#"{{"email":"{email}"}}"#).into_bytes()),
+        )
+        .await
+        .collect_buffered()
+        .await
+        .expect("a buffered response");
+    http_codec::resolve_status(&out.meta, 200)
+}
+
+/// The emails `name`'s admin listing returns, in listing order.
+async fn subscriber_emails(wafer: &Wafer, name: &str) -> Vec<String> {
+    let out = wafer
+        .run_block(
+            &format!("site/{name}"),
+            http_msg(
+                "GET",
+                &format!("/b/{name}/subscribers"),
+                &[("auth.user_id", "admin_1"), ("auth.user_roles", "admin")],
+            ),
+            InputStream::empty(),
+        )
+        .await
+        .collect_buffered()
+        .await
+        .expect("a buffered response");
+    let listing: serde_json::Value = serde_json::from_slice(&out.body).unwrap_or_else(|e| {
+        panic!(
+            "{name} listing body ({e}): {:?}",
+            String::from_utf8_lossy(&out.body)
+        )
+    });
+    listing["subscribers"]
+        .as_array()
+        .unwrap_or_else(|| panic!("{name} listing has no subscribers array: {listing}"))
+        .iter()
+        .map(|row| row["email"].as_str().expect("an email").to_string())
+        .collect()
+}
+
+/// Register `name`, scaffolded from the `table` template and admitted as the
+/// sandbox admits it.
+fn register_scaffolded(wafer: &mut Wafer, name: &str) {
+    let wasm = build_scaffolded(Template::Table, name);
+    let (block, spec) = load_as_the_sandbox_does(name, &wasm);
+    assert_eq!(spec.name, format!("site/{name}"));
+    wafer
+        .register_block(format!("site/{name}"), Arc::new(block))
+        .unwrap_or_else(|e| panic!("register site/{name}: {e}"));
+}
+
+/// A block with a hyphen in its name, scaffolded as `dev_create_block`
+/// scaffolds it, can write a row and read it back.
+///
+/// The hyphen is what makes this a different test from the `newsletter` one:
+/// the collection the block claims is the table the database writes, only if
+/// the claimed spelling is one the database uses as written.
+#[tokio::test]
+async fn a_hyphenated_block_round_trips_its_own_rows() {
+    if !buildable() {
+        return;
+    }
+    let mut wafer = golden_wafer();
+    register_scaffolded(&mut wafer, "my-shop");
+    let wafer = wafer.start().await.expect("start the runtime");
+
+    assert_eq!(subscribe(&wafer, "my-shop", "mine@example.com").await, 200);
+    assert_eq!(
+        subscriber_emails(&wafer, "my-shop").await,
+        vec!["mine@example.com".to_string()],
+    );
+}
+
+/// `site/my-shop` and `site/myshop` are two blocks with two sets of tables:
+/// neither sees a row the other wrote.
+///
+/// A name with its hyphen removed is always another legal block name, so
+/// this is the pair a stripped identifier would merge.
+#[tokio::test]
+async fn a_hyphenated_block_cannot_reach_its_unhyphenated_twin() {
+    if !buildable() {
+        return;
+    }
+    let mut wafer = golden_wafer();
+    register_scaffolded(&mut wafer, "myshop");
+    register_scaffolded(&mut wafer, "my-shop");
+    let wafer = wafer.start().await.expect("start the runtime");
+
+    assert_eq!(subscribe(&wafer, "myshop", "twin@example.com").await, 200);
+    assert_eq!(subscribe(&wafer, "my-shop", "mine@example.com").await, 200);
+
+    assert_eq!(
+        subscriber_emails(&wafer, "my-shop").await,
+        vec!["mine@example.com".to_string()],
+        "site/my-shop reads only its own rows",
+    );
+    assert_eq!(
+        subscriber_emails(&wafer, "myshop").await,
+        vec!["twin@example.com".to_string()],
+        "site/myshop's table holds only its own rows",
+    );
+}
+
+/// A list with no `limit` returns every row. The guest SDK leaves `limit`
+/// out of the request when the author set none; the host refuses a `0`
+/// page size, which is what the SDK used to send for "no limit".
+#[tokio::test]
+async fn a_list_without_a_limit_returns_every_row() {
+    if !buildable() {
+        return;
+    }
+    // The edit below must remove something, or this is the paged listing.
+    assert!(
+        Template::Table
+            .files("unpaged")
+            .iter()
+            .any(|(_, content)| content.contains(".limit(200)")),
+        "the table template's listing is paged at 200"
+    );
+    let wasm = build_scaffolded_with(Template::Table, "unpaged", |content| {
+        content.replace(".limit(200)", "")
+    });
+    let (block, _spec) = load_as_the_sandbox_does("unpaged", &wasm);
+    let mut wafer = golden_wafer();
+    wafer
+        .register_block("site/unpaged", Arc::new(block))
+        .expect("register site/unpaged");
+    let wafer = wafer.start().await.expect("start the runtime");
+
+    assert_eq!(subscribe(&wafer, "unpaged", "one@example.com").await, 200);
+    assert_eq!(subscribe(&wafer, "unpaged", "two@example.com").await, 200);
+    let mut emails = subscriber_emails(&wafer, "unpaged").await;
+    emails.sort();
+    assert_eq!(
+        emails,
+        vec!["one@example.com".to_string(), "two@example.com".to_string()]
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The header contract
+// ---------------------------------------------------------------------------
+
+/// A guest written against the raw ABI rather than the template SDK, so it
+/// can return what a hostile author could: the SDK only ever renders a
+/// `Respond`.
+///
+/// Its `BlockInfo` is the one the SDK renders for two public `GET` endpoints
+/// and no capabilities, so the sandbox's rules admit it as they would any
+/// block. `GET /b/hostile/echo` answers with the request frame the host
+/// handed it, byte for byte, so the test reads exactly what the guest saw.
+/// Every other request answers an `Error` whose meta tries to set a session
+/// cookie, a redirect and a CORS grant beside one ordinary header.
+fn build_hostile_guest() -> Vec<u8> {
+    fn unused(_: &wafer_guest::Request, _: &wafer_guest::Ctx) -> wafer_guest::Response {
+        wafer_guest::Response::text(500, "never dispatched: the raw guest routes itself")
+    }
+    let info = wafer_guest::render_block_info(
+        &wafer_guest::Block::new("site/hostile", "Tries every egress")
+            .endpoint(
+                wafer_guest::Endpoint::new(wafer_guest::Method::Get, "/b/hostile/echo", unused)
+                    .auth(wafer_guest::Auth::Public),
+            )
+            .endpoint(
+                wafer_guest::Endpoint::new(wafer_guest::Method::Get, "/b/hostile/fail", unused)
+                    .auth(wafer_guest::Auth::Public),
+            ),
+    );
+    let entry = |key: &str, value: &str| MetaEntry {
+        key: key.to_string(),
+        value: value.to_string(),
+    };
+    let error = serde_json::to_string(&GuestResult {
+        action: GuestAction::Error,
+        response: None,
+        error: Some(WaferError {
+            code: ErrorCode::PermissionDenied,
+            message: "refused".to_string(),
+            meta: vec![
+                entry("resp.set_cookie.0", "session=attacker; Path=/"),
+                entry("resp.header.location", "https://evil.example/"),
+                entry("resp.header.access-control-allow-origin", "*"),
+                entry("resp.header.x-guest", "kept"),
+            ],
+        }),
+        message: None,
+    })
+    .expect("render the error result");
+
+    let source = format!(
+        r####"
+const INFO: &str = r###"{info}"###;
+const ERROR_RESULT: &str = r###"{error}"###;
+
+fn pack(bytes: &'static [u8]) -> i64 {{
+    ((bytes.as_ptr() as u32 as i64) << 32) | bytes.len() as i64
+}}
+
+#[no_mangle]
+pub extern "C" fn __wafer_alloc(size: i32) -> i32 {{
+    Box::leak(vec![0u8; size.max(0) as usize].into_boxed_slice()).as_mut_ptr() as i32
+}}
+
+#[no_mangle]
+pub extern "C" fn __wafer_host_codec() -> i32 {{
+    1
+}}
+
+#[no_mangle]
+pub extern "C" fn __wafer_info() -> i64 {{
+    pack(INFO.as_bytes())
+}}
+
+#[no_mangle]
+pub extern "C" fn __wafer_handle(ptr: i32, len: i32) -> i64 {{
+    let frame = unsafe {{ std::slice::from_raw_parts(ptr as *const u8, len as usize) }};
+    let echo = b"/b/hostile/echo";
+    if !frame.windows(echo.len()).any(|w| w == echo) {{
+        return pack(ERROR_RESULT.as_bytes());
+    }}
+    let mut out = String::from(r#"{{"action":"Respond","response":{{"data":["#);
+    for (i, byte) in frame.iter().enumerate() {{
+        if i > 0 {{
+            out.push(',');
+        }}
+        out.push_str(&byte.to_string());
+    }}
+    out.push_str(r#"],"meta":[]}},"error":null,"message":null}}"#);
+    pack(Box::leak(out.into_bytes().into_boxed_slice()))
+}}
+
+#[no_mangle]
+pub extern "C" fn __wafer_lifecycle(_ptr: i32, _len: i32) -> i64 {{
+    pack(br#"{{"Ok":null}}"#)
+}}
+"####
+    );
+    let dir = tempfile::tempdir().expect("tempdir");
+    std::fs::create_dir_all(dir.path().join("src")).expect("create src");
+    std::fs::write(dir.path().join("src/lib.rs"), source).expect("write the guest");
+    let manifest = std::fs::read_to_string(
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("src/blocks/dev/templates/hello/Cargo.toml"),
+    )
+    .expect("read the hello manifest")
+    .replace("name = \"hello\"", "name = \"hostile\"");
+    std::fs::write(dir.path().join("Cargo.toml"), manifest).expect("write the manifest");
+    build_crate("hostile", dir.path())
+}
+
+/// The hostile guest, admitted as the sandbox admits it, in a started runtime.
+async fn hostile_runtime() -> Arc<Wafer> {
+    let wasm = build_hostile_guest();
+    let (block, spec) = load_as_the_sandbox_does("hostile", &wasm);
+    assert_eq!(spec.name, "site/hostile");
+    let mut wafer = golden_wafer();
+    wafer
+        .register_block("site/hostile", Arc::new(block))
+        .expect("register site/hostile");
+    wafer.start().await.expect("start the runtime")
+}
+
+/// A sandbox guest never sees the request's credentials. The service worker
+/// puts the admin's session cookie on every same-origin request it forwards,
+/// `/b/{name}/` included, so this is the header a guest would otherwise read.
+/// An ordinary header does arrive, so the guest is shown the request.
+#[tokio::test]
+async fn a_guest_never_sees_the_session_cookie_or_authorization() {
+    if !buildable() {
+        return;
+    }
+    let wafer = hostile_runtime().await;
+
+    let msg = http_codec::build_http_message(
+        "GET",
+        "/b/hostile/echo",
+        "",
+        "127.0.0.1",
+        [
+            ("cookie", "impresspress_session=admin-session"),
+            ("authorization", "Bearer admin-token"),
+            ("x-probe", "visible"),
+        ],
+    );
+    let out = wafer
+        .run_block("site/hostile", msg, InputStream::empty())
+        .await
+        .collect_buffered()
+        .await
+        .expect("a buffered response");
+    let seen = String::from_utf8(out.body).expect("the echoed frame is JSON text");
+
+    assert!(
+        seen.contains("visible"),
+        "the guest was shown the request: {seen}"
+    );
+    assert!(
+        !seen.contains("admin-session"),
+        "the session cookie reached the guest: {seen}"
+    );
+    assert!(
+        !seen.contains("admin-token"),
+        "the credential reached the guest: {seen}"
+    );
+}
+
+/// An `Error` a guest returns cannot set a cookie, a redirect or a CORS
+/// grant: the HTTP response the codec renders from it carries none of them,
+/// only the ordinary header the guest set.
+#[tokio::test]
+async fn a_guest_error_cannot_set_a_cookie_or_a_sensitive_header() {
+    if !buildable() {
+        return;
+    }
+    let wafer = hostile_runtime().await;
+
+    let out = wafer
+        .run_block(
+            "site/hostile",
+            http_msg("GET", "/b/hostile/fail", &[("auth.user_id", "")]),
+            InputStream::empty(),
+        )
+        .await;
+    let parts = http_codec::collect_http_response(out).await;
+
+    assert_eq!(parts.status, 403);
+    let header = |name: &str| {
+        parts
+            .headers
+            .iter()
+            .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            .map(|(_, v)| v.as_str())
+    };
+    assert_eq!(header("x-guest"), Some("kept"), "{:?}", parts.headers);
+    for name in ["set-cookie", "location", "access-control-allow-origin"] {
+        assert_eq!(header(name), None, "{name} crossed: {:?}", parts.headers);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Native discovery
+// ---------------------------------------------------------------------------
+
+/// A block the deployment built and placed under `blocks/` runs with the
+/// capabilities it declares: native discovery approves the declaration of the
+/// deployment's own blocks. A block loaded with no stated bound runs with
+/// none, and the `table` template's `Init` then cannot create its table.
+#[tokio::test]
+async fn a_discovered_block_runs_with_the_capabilities_it_declares() {
+    if !buildable() {
+        return;
+    }
+    let wasm = build_template("table");
+    let root = tempfile::tempdir().expect("tempdir");
+    let target = root.path().join("blocks/newsletter/target");
+    std::fs::create_dir_all(&target).expect("create the block's target dir");
+    std::fs::write(target.join("block.wasm"), &wasm).expect("place the block");
+
+    let mut wafer = golden_wafer();
+    impresspress_core::builder::register_discovered_blocks(&mut wafer, root.path())
+        .expect("discover the block");
+    let wafer = wafer.start().await.expect("start the runtime");
+
+    let effective = wafer
+        .effective_capabilities("site/newsletter")
+        .expect("the discovered block has effective capabilities");
+    assert!(
+        effective.schema,
+        "the declared schema capability: {effective:?}"
+    );
+    assert!(
+        effective.allows_collection("site__newsletter__subscribers"),
+        "the declared collection: {effective:?}"
+    );
+    assert_eq!(
+        subscribe(&wafer, "newsletter", "found@example.com").await,
+        200
+    );
 }

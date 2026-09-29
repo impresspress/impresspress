@@ -18,6 +18,9 @@
 //! - Contains a backslash anywhere
 //! - Contains `\r`, `\n`, `\t`, or any other ASCII control char
 //! - Contains `%2F%2F` (encoded `//`) or `%5C` (encoded `\`)
+//! - Contains a character outside ASCII: the value is sent as a `Location`
+//!   header, which carries ASCII only (a browser sends such a path
+//!   percent-encoded)
 
 /// Returns `true` only when `path` is safe to plug into a `Location:` header
 /// or an `<a href>` without enabling an open redirect.
@@ -31,10 +34,11 @@ pub fn is_safe_local_redirect(path: &str) -> bool {
     if bytes.len() >= 2 && (bytes[1] == b'/' || bytes[1] == b'\\') {
         return false;
     }
-    // Reject any backslash or control character anywhere.
+    // Reject any backslash, control character or non-ASCII character
+    // anywhere.
     if path
         .chars()
-        .any(|c| c == '\\' || (c.is_control() && c != ' '))
+        .any(|c| c == '\\' || !c.is_ascii() || (c.is_control() && c != ' '))
     {
         return false;
     }
@@ -64,16 +68,42 @@ pub const USER_PORTAL_HOME: &str = "/b/userportal/";
 /// dead-end. Non-admins now default to [`USER_PORTAL_HOME`] instead; admins
 /// keep the operator-configured destination.
 ///
-/// `configured_admin_default` must already be validated by the caller (via
-/// [`is_safe_local_redirect`]) — this function does not re-validate it,
-/// matching every existing call site's `is_safe_local_redirect(..) ..else
-/// "/b/admin/"` fallback pattern.
+/// `configured_admin_default` must already be validated — every caller takes
+/// it from [`configured_admin_default`], which is where that happens; this
+/// function does not re-validate it.
 pub fn default_post_login_redirect(is_admin: bool, configured_admin_default: &str) -> String {
     if is_admin {
         configured_admin_default.to_string()
     } else {
         USER_PORTAL_HOME.to_string()
     }
+}
+
+/// The admin landing page when none is configured, and when the configured
+/// one fails [`is_safe_local_redirect`].
+pub const ADMIN_HOME: &str = "/b/admin/";
+
+/// The operator-configured admin post-login destination
+/// (`WAFER_RUN_SHARED__POST_LOGIN_REDIRECT`), validated: [`ADMIN_HOME`]
+/// when it is unset or would leave this origin.
+///
+/// A failed read is returned, not answered with [`ADMIN_HOME`]: the caller
+/// is mid sign-in, and a config block that refused the read is a fault to
+/// report rather than a destination to guess.
+pub async fn configured_admin_default(
+    ctx: &dyn wafer_run::context::Context,
+) -> Result<String, wafer_run::WaferError> {
+    let configured = wafer_core::clients::config::get_default(
+        ctx,
+        crate::config_vars::POST_LOGIN_REDIRECT_KEY,
+        ADMIN_HOME,
+    )
+    .await?;
+    Ok(if is_safe_local_redirect(&configured) {
+        configured
+    } else {
+        ADMIN_HOME.to_string()
+    })
 }
 
 #[cfg(test)]
@@ -87,6 +117,16 @@ mod tests {
         assert!(is_safe_local_redirect("/b/admin/users?page=2"));
         assert!(is_safe_local_redirect("/path/with/multiple/segments"));
         assert!(is_safe_local_redirect("/with-fragment#section"));
+    }
+
+    /// The value becomes a `Location` header, which the HTTP codec refuses
+    /// with a 500 when it holds a character outside ASCII; an unencoded
+    /// `?redirect=/b/café` must fall back to the default instead.
+    #[test]
+    fn rejects_a_path_outside_ascii() {
+        assert!(!is_safe_local_redirect("/b/caf\u{e9}"));
+        assert!(!is_safe_local_redirect("/b/userportal/\u{2014}"));
+        assert!(is_safe_local_redirect("/b/caf%C3%A9"));
     }
 
     #[test]

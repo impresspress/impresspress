@@ -1,16 +1,117 @@
 name: Release
 
+# This workflow has NEVER produced a release. No `v*` tag has ever existed on
+# this fork or upstream, so it has never run on a tag and the `publish` job
+# below has never executed — every line here is untested-by-history rather than
+# proven-by-baseline. The `workflow_dispatch` `dry_run` input exists for
+# exactly that reason: it runs every job this workflow has except
+# `gh release create`, so the version guard, the wasm build and all five
+# cross-compile targets can be exercised on a branch before a tag is ever
+# pushed. Those dry runs are the only runs this workflow has.
+# See `RELEASE.md`.
+
 on:
   push:
     tags:
       - 'v*'
 
+  # Pre-flight. `gh workflow run release.yml --ref <ref> -f dry_run=true` runs
+  # THAT ref's version of this file. With `dry_run: true` the `publish` job is
+  # skipped and nothing is created on GitHub; everything before it runs for
+  # real.
+  #
+  # Dispatching a BRANCH is the pre-flight; dispatching a TAG with
+  # `dry_run: false` is the way to re-run a release whose publish step failed
+  # after the artifacts were built. The `verify-tag` job below refuses the
+  # second shape on a non-tag ref, because `gh release create --verify-tag`
+  # cannot work without one.
+  #
+  # This trigger was dispatchable from the branch that added it, before that
+  # branch merged: `release.yml` already existed on the default branch, so the
+  # workflow had an id, and GitHub read the trigger from the file at the
+  # requested ref. See `ci-main.yml`'s dispatch comment for the general rule —
+  # a new FILE has to land first, a new trigger on an existing file does not.
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Build and package everything, but do not create a GitHub Release.'
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+
 env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  # Nothing checks the tag against the manifest today, and the two have already
+  # drifted in the documentation: the workspace is `version = "0.1.0"` while
+  # `RELEASE.md`'s worked example tags `v0.2.0`. A mismatch would publish a
+  # Release named for one version containing binaries that report another, with
+  # no gate. This job is that gate, and it runs before anything is built so a
+  # mistyped tag costs seconds rather than a full five-target matrix.
+  verify-tag:
+    name: Tag matches Cargo.toml version
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Compare the tag to the workspace version
+        env:
+          # `github.ref_type` is 'tag' for a tag push and for a dispatch whose
+          # ref is a tag; 'branch' for a pre-flight dispatch off a branch.
+          REF_TYPE: ${{ github.ref_type }}
+          REF_NAME: ${{ github.ref_name }}
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+          # The workspace version, from the `[workspace.package]` table only —
+          # a bare `grep '^version'` would also match a dependency's.
+          VERSION=$(sed -n '/^\[workspace\.package\]/,/^\[/p' Cargo.toml \
+            | sed -n 's/^version = "\(.*\)"$/\1/p' | head -1)
+          if [ -z "$VERSION" ]; then
+            echo "::error::could not read version from [workspace.package] in Cargo.toml"
+            exit 1
+          fi
+          echo "Cargo.toml workspace version: $VERSION"
+          echo "Expected tag:                 v$VERSION"
+          echo "expected tag: \`v$VERSION\` (Cargo.toml \`[workspace.package] version = \"$VERSION\"\`)" >> "$GITHUB_STEP_SUMMARY"
+
+          if [ "$REF_TYPE" = "tag" ]; then
+            echo "Tag being released:           $REF_NAME"
+            if [ "$REF_NAME" != "v$VERSION" ]; then
+              echo "::error::tag $REF_NAME does not match Cargo.toml version $VERSION (expected v$VERSION). Update the workspace version, or retag."
+              exit 1
+            fi
+            echo "Tag and manifest agree."
+          else
+            echo "Ref $REF_NAME is a branch, so there is no tag to compare."
+            if [ "$DRY_RUN" != "true" ]; then
+              echo "::error::a non-dry-run dispatch must target a tag; \`gh release create --verify-tag\` has nothing to verify on a branch. Re-run with dry_run: true, or dispatch the tag."
+              exit 1
+            fi
+            echo "Dry run: push \`v$VERSION\` when this workflow is green."
+          fi
+
+  # The wasm the release binaries embed. `crates/impresspress/build.rs`
+  # `include_bytes!`s `crates/impresspress-web/pkg/impresspress_web_bg.wasm`
+  # and exits non-zero when it is missing, so no release binary can be built
+  # until that wasm exists.
+  #
+  # This used to be a 35-line copy of `build-wasm.yml`'s job. It is now the
+  # call, so the release wasm is built by the same pinned wasm-pack, with the
+  # same flags, as every CI run's. That copy was left in place when the
+  # reusable workflow landed (#57) because this workflow had never run and the
+  # change could not be proved; the `dry_run` input added above is what proves
+  # it.
+  build-wasm:
+    needs: verify-tag
+    uses: ./.github/workflows/build-wasm.yml
+
   build:
     name: Build (${{ matrix.name }})
+    needs: build-wasm
     strategy:
       fail-fast: false
       matrix:
@@ -42,9 +143,6 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - name: Checkout wafer-run
-        run: git clone --depth 1 https://github.com/wafer-run/wafer-run.git "$GITHUB_WORKSPACE/../wafer-run"
-
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -69,8 +167,18 @@ jobs:
           sudo apt-get update -qq
           sudo apt-get install -y -qq gcc-mingw-w64-x86-64 g++-mingw-w64-x86-64
 
+      # build.rs `include_bytes!`s the impresspress-web wasm; download the
+      # prebuilt pkg/ so it finds it (the same step every CI job takes).
+      - name: Download impresspress-web pkg/
+        uses: actions/download-artifact@v4
+        with:
+          name: impresspress-web-pkg
+          path: crates/impresspress-web/pkg
+
+      # `--locked`: a release must resolve exactly the dependency set CI
+      # tested, never a fresh resolution of the git pins.
       - name: Build
-        run: cargo build -p impresspress --release --target ${{ matrix.target }}
+        run: cargo build --locked -p impresspress --release --target ${{ matrix.target }}
 
       - name: Package (tar.gz)
         if: matrix.ext == 'tar.gz'
@@ -91,9 +199,18 @@ jobs:
           name: ${{ matrix.name }}
           path: ${{ env.ASSET }}
 
-  release:
+  # The only job a dry run skips. Everything above it — the guard, the wasm,
+  # all five targets and their packaging — runs identically either way, which
+  # is what makes the dry run worth anything.
+  publish:
     name: Publish Release
     needs: build
+    # `inputs` exists only for `workflow_dispatch`, so on a tag push
+    # `inputs.dry_run` is null and `null != true` is already true. The explicit
+    # `push` arm makes that independent of how the null coerces rather than
+    # resting on it: the failure mode it removes is a tag push that builds all
+    # five targets green and silently publishes nothing.
+    if: github.event_name == 'push' || inputs.dry_run != true
     runs-on: ubuntu-latest
     permissions:
       contents: write
@@ -102,13 +219,20 @@ jobs:
         with:
           path: artifacts
 
+      # `--verify-tag`: refuse to create a release for a tag that does not
+      # exist in the repository. Without it `gh release create` happily CREATES
+      # the tag from whatever the default branch happens to point at, so a
+      # deleted or mistyped tag would silently produce a release built from one
+      # commit and tagged at another.
       - name: Create release
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
           VERSION="${GITHUB_REF_NAME}"
           FILES=$(find artifacts -type f \( -name '*.tar.gz' -o -name '*.zip' \))
           gh release create "$VERSION" $FILES \
             --repo ${{ github.repository }} \
             --title "$VERSION" \
+            --verify-tag \
             --generate-notes

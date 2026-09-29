@@ -8,7 +8,10 @@
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
-use impresspress_core::{PreparedRuntimePlan, PreparedRuntimePlanSummary, WaferLockIdentity};
+use impresspress_core::{
+    builder::{BootReport, DEPLOY_RESPONSE_SCHEMA_VERSION},
+    PreparedRuntimePlan, PreparedRuntimePlanSummary, WaferLockIdentity,
+};
 use serde::{Deserialize, Serialize};
 
 pub const PREPARE_ENDPOINT: &str = "/_deploy/prepare";
@@ -18,11 +21,23 @@ pub const PREPARED_MODULE_DIR: &str = "prepared-runtime";
 pub const PREPARED_PLAN_FILE: &str = "prepared-runtime-plan.prepared.json";
 pub const PREPARED_SHIM_FILE: &str = "shim.mjs";
 pub const PREPARED_TEXT_GLOB: &str = "**/*.prepared.json";
-pub const PREPARE_RESPONSE_SCHEMA_VERSION: u32 = 1;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum TwoStageState {
     Built,
+    /// The password-hasher Worker is deployed. Before any version of the main
+    /// Worker is uploaded: every version — the candidate `/_deploy/prepare`
+    /// runs in, the final one verified before promotion — calls whichever
+    /// hasher is deployed, so the one it was built against must already be
+    /// there.
+    PasswordHasherDeployed,
+    /// The main Worker exists with its deploy secrets: already there, or just
+    /// created as a placeholder (`first_create`). The pepper check lists its
+    /// secrets and every upload targets it, so both need it to exist.
+    MainWorkerReady,
+    /// Neither Worker's secrets leave the pepper behind on the main Worker
+    /// (`password_hasher::check_pepper_placement`).
+    PepperPlacementChecked,
     CandidateUploaded,
     AssetsVerified,
     Prepared,
@@ -49,8 +64,32 @@ impl TwoStageDeploymentGate {
         }
     }
 
+    pub fn password_hasher_deployed(&mut self) -> Result<()> {
+        self.advance(
+            TwoStageState::Built,
+            TwoStageState::PasswordHasherDeployed,
+            "password-hasher deploy",
+        )
+    }
+
+    pub fn main_worker_ready(&mut self) -> Result<()> {
+        self.advance(
+            TwoStageState::PasswordHasherDeployed,
+            TwoStageState::MainWorkerReady,
+            "main Worker creation check",
+        )
+    }
+
+    pub fn pepper_placement_checked(&mut self) -> Result<()> {
+        self.advance(
+            TwoStageState::MainWorkerReady,
+            TwoStageState::PepperPlacementChecked,
+            "pepper placement check",
+        )
+    }
+
     pub fn candidate_uploaded(&mut self, version: &str, wasm_sha256: &str) -> Result<()> {
-        self.expect(TwoStageState::Built, "candidate upload")?;
+        self.expect(TwoStageState::PepperPlacementChecked, "candidate upload")?;
         self.candidate_version = Some(version.to_string());
         self.wasm_sha256 = Some(wasm_sha256.to_string());
         self.state = TwoStageState::CandidateUploaded;
@@ -196,38 +235,23 @@ fn dependency_lock_identity(repo_root: &Path) -> Result<WaferLockIdentity> {
         .with_context(|| format!("validate {}", path.display()))
 }
 
+/// The `/_deploy/prepare` envelope.
+///
+/// `deny_unknown_fields` stays here and is *not* inherited by
+/// [`BootReport`]: this envelope is the document that carries
+/// [`DEPLOY_RESPONSE_SCHEMA_VERSION`], and a field appearing beside a version
+/// this CLI claims to understand means the Worker is speaking a contract this
+/// CLI cannot see all of — while the plan it is about to package and promote
+/// comes out of that same document. Its three members are all load-bearing;
+/// the nested report's are not.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PrepareResponse {
     pub schema_version: u32,
-    pub init_report: PrepareInitReport,
+    /// The runtime's own report, deserialized as the very struct
+    /// `impresspress_core::builder::boot` serialized — see [`BootReport`].
+    pub init_report: BootReport,
     pub plan: PreparedRuntimePlan,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PrepareInitReport {
-    pub sealed: bool,
-    pub seed: PrepareStepOutcome,
-    pub blocks: Vec<PrepareBlockOutcome>,
-    pub ok: bool,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PrepareStepOutcome {
-    pub ok: bool,
-    #[serde(default)]
-    pub error: Option<String>,
-}
-
-#[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PrepareBlockOutcome {
-    pub block: String,
-    pub ok: bool,
-    #[serde(default)]
-    pub error: Option<String>,
 }
 
 pub fn parse_prepare_response(bytes: &[u8]) -> Result<PrepareResponse> {
@@ -237,11 +261,11 @@ pub fn parse_prepare_response(bytes: &[u8]) -> Result<PrepareResponse> {
         .plan
         .validate_deployable()
         .context("validate deployable prepared runtime plan")?;
-    if response.schema_version != PREPARE_RESPONSE_SCHEMA_VERSION {
+    if response.schema_version != DEPLOY_RESPONSE_SCHEMA_VERSION {
         bail!(
             "unsupported /_deploy/prepare response schema {}; expected {}",
             response.schema_version,
-            PREPARE_RESPONSE_SCHEMA_VERSION
+            DEPLOY_RESPONSE_SCHEMA_VERSION
         );
     }
     if !response.init_report.ok
@@ -346,10 +370,11 @@ pub fn parse_verify_response(
 ) -> Result<VerifyResponse> {
     let response: VerifyResponse =
         serde_json::from_slice(bytes).context("decode strict /_deploy/verify response")?;
-    if response.schema_version != 1 {
+    if response.schema_version != DEPLOY_RESPONSE_SCHEMA_VERSION {
         bail!(
-            "unsupported /_deploy/verify response schema {}; expected 1",
-            response.schema_version
+            "unsupported /_deploy/verify response schema {}; expected {}",
+            response.schema_version,
+            DEPLOY_RESPONSE_SCHEMA_VERSION
         );
     }
     if !response.ok {
@@ -376,6 +401,7 @@ pub fn parse_verify_response(
 #[cfg(test)]
 mod tests {
     use impresspress_core::{
+        builder::{BlockInitOutcome, StepOutcome},
         PreparedReleaseAssets, PreparedRuntimeStructure, PREPARED_RUNTIME_PLAN_SCHEMA_VERSION,
     };
 
@@ -483,6 +509,55 @@ mod tests {
         assert!(parse_prepare_response(&successful_prepare_json(&unbound)).is_err());
     }
 
+    /// The `/_deploy/prepare` init report is the runtime's own
+    /// [`BootReport`], not a shape the CLI re-describes. A round trip through
+    /// the producer's serializer and the consumer's parser is what makes a
+    /// renamed field a compile error here instead of a decode failure against
+    /// a Worker that is already live.
+    #[test]
+    fn the_runtimes_own_boot_report_round_trips_through_the_deploy_parser() {
+        let plan = plan();
+        let report = BootReport {
+            sealed: true,
+            seed: StepOutcome {
+                ok: true,
+                error: None,
+            },
+            blocks: vec![BlockInitOutcome {
+                block: "impresspress/admin".into(),
+                ok: true,
+                error: None,
+            }],
+            ok: true,
+        };
+        let body = serde_json::to_vec(&serde_json::json!({
+            "schema_version": DEPLOY_RESPONSE_SCHEMA_VERSION,
+            "init_report": report,
+            "plan": plan,
+        }))
+        .unwrap();
+
+        let parsed = parse_prepare_response(&body).unwrap();
+        assert_eq!(parsed.init_report, report);
+    }
+
+    /// A Worker that grows a step in its boot report must not break every CLI
+    /// built before it. The report is a status document nested inside an
+    /// envelope that already carries `schema_version`, so an added field
+    /// cannot change the meaning of the four flags this parser gates the
+    /// deploy on — refusing it would force a lockstep CLI upgrade for a purely
+    /// additive change.
+    #[test]
+    fn an_added_boot_report_field_does_not_break_an_older_deploy_parser() {
+        let plan = plan();
+        let mut body: serde_json::Value =
+            serde_json::from_slice(&successful_prepare_json(&plan)).unwrap();
+        body["init_report"]["migrations"] = serde_json::json!({ "ok": true });
+
+        let parsed = parse_prepare_response(&serde_json::to_vec(&body).unwrap()).unwrap();
+        assert!(parsed.init_report.ok);
+    }
+
     #[test]
     fn stages_deterministic_text_module_and_wrapper_without_wasm() {
         let out = tempfile::tempdir().unwrap();
@@ -517,7 +592,7 @@ mod tests {
         .unwrap();
         parse_verify_response(&body, &plan, None).unwrap();
 
-        let mut wrong_plan = plan.clone();
+        let mut wrong_plan = plan;
         wrong_plan.application.id = "other".into();
         assert!(parse_verify_response(&body, &wrong_plan, None).is_err());
     }
@@ -525,7 +600,7 @@ mod tests {
     #[test]
     fn verify_accepts_verified_empty_present_release_set_with_null_asset() {
         let staged = tempfile::tempdir().unwrap();
-        let release = crate::cli::helpers::cloudflare::assets::ReleaseManifest::from_staged_dir(
+        let release = crate::cli::helpers::cloudflare::assets::release_manifest_from_staged_dir(
             staged.path(),
         )
         .unwrap();
@@ -564,6 +639,19 @@ mod tests {
     fn two_stage_gate_enforces_order_and_identical_wasm() {
         let mut gate = TwoStageDeploymentGate::new();
         assert!(gate.prepared().is_err());
+        assert!(
+            gate.candidate_uploaded("candidate-1", "wasm-a").is_err(),
+            "no main Worker version before the password hasher it calls is deployed"
+        );
+        gate.password_hasher_deployed().unwrap();
+        assert!(gate.password_hasher_deployed().is_err());
+        assert!(
+            gate.candidate_uploaded("candidate-1", "wasm-a").is_err(),
+            "no main Worker version before the pepper's placement is checked"
+        );
+        assert!(gate.pepper_placement_checked().is_err());
+        gate.main_worker_ready().unwrap();
+        gate.pepper_placement_checked().unwrap();
         gate.candidate_uploaded("candidate-1", "wasm-a").unwrap();
         assert!(gate.final_uploaded("final-1", "wasm-a").is_err());
         gate.assets_verified().unwrap();

@@ -23,15 +23,33 @@
 
 use std::collections::{BTreeMap, HashMap};
 
-use serde::{de::DeserializeOwned, Deserialize, Serialize};
+use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use wafer_core::clients::database::{Record, RecordList};
-use wafer_run::{ErrorCode, Message, WaferError};
+use wafer_run::{Message, WaferError};
 
-use crate::util::{json_map, RecordExt};
+use crate::util::{enum_column, json_map, RecordExt};
 
 pub const COMMERCE_SCHEMA_VERSION: u32 = 1;
 
+/// Moderation state of a **product**: the `approval_status` column of
+/// `impresspress__products__products`.
+///
+/// The five variants describe the product moderation ladder a seller
+/// listing walks — `draft` before submission, `pending` while an
+/// administrator has it, then `approved`, `rejected` or `suspended`. It was
+/// also the declared type of `SellerAccount.approval_status`, where only
+/// two of the five could ever be produced (`repo::seller_accounts` derives
+/// that field from one boolean); a seller account has never had a `draft`
+/// or a `rejected` state, and publishing three unreachable values as part
+/// of that contract said it did. The field is [`SellerApproval`] now.
+///
+/// Not to be confused with [`ProductStatus`], the *publication* state on
+/// the same table's `status` column. They are two columns and two
+/// vocabularies: a submitted listing is `status = pending_review` and
+/// `approval_status = pending` at the same time, which review bug B11 read
+/// as one value spelled two ways. `products::tests::status_enum_tests`
+/// pins that they are not.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum ApprovalStatus {
@@ -39,6 +57,61 @@ pub enum ApprovalStatus {
     Pending,
     Approved,
     Rejected,
+    Suspended,
+}
+
+/// Whether a seller account may sell: the two-valued projection
+/// `SellerAccount.approval_status` publishes.
+///
+/// `repo::seller_accounts::to_contract` computes this from one fact —
+/// whether the row's `status` is `suspended` — so `approved` and
+/// `suspended` are the only values that have ever reached a client. This
+/// type is that sentence; the five-variant [`ApprovalStatus`] it replaces
+/// on this field describes a different column entirely.
+///
+/// - `approved` — not suspended. Whether the account can actually take
+///   money is [`SellerStatus`] and [`SellerCapabilities`], not this.
+/// - `suspended` — an administrator has suspended the account.
+///
+/// The variants carry no doc comments of their own, here or in any of this
+/// module's other published status enums, and that is deliberate: schemars
+/// renders a unit-variant enum as one flat `{"enum": [...]}` only while
+/// every variant is undocumented. Describing one splits the published field
+/// into a `oneOf` of `const` subschemas — a change to the schema every SDK
+/// generator reads, for prose that belongs on the type anyway.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SellerApproval {
+    Approved,
+    Suspended,
+}
+
+/// How far a seller account has got with Stripe Connect: the `status`
+/// column of `impresspress__products__seller_accounts`.
+///
+/// A ladder, and it was computed by hand in three places
+/// (`set_admin_suspended`, `sync_account`, `sync_account_event`) from the
+/// same three booleans, plus a fourth literal in `ensure_for_user` and a
+/// fifth in `stripe_provider`. `repo::seller_accounts::ladder` is the one
+/// computation now; this is the one vocabulary.
+///
+/// - `not_started` — the row exists because the user asked to sell; no
+///   Connect account has been created yet.
+/// - `onboarding` — a Connect account exists and Stripe still wants
+///   information.
+/// - `restricted` — Stripe has the seller's details but has not enabled
+///   charges.
+/// - `active` — charges are enabled: the seller can be paid.
+/// - `suspended` — an administrator has suspended the account. Outranks
+///   every capability state: a suspended account stays suspended however
+///   its Stripe capabilities move.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum SellerStatus {
+    NotStarted,
+    Onboarding,
+    Restricted,
+    Active,
     Suspended,
 }
 
@@ -59,12 +132,52 @@ pub enum OfferMode {
     Subscription,
 }
 
+/// Lifecycle state of an offer: the `status` column of
+/// `impresspress__products__offers`.
+///
+/// The type existed before this PR but nothing wrote it: every transition
+/// wrote a string literal and `repo::offers` re-spelled the three variants
+/// back out for its compare-and-swap expectations, so the CAS guard and
+/// the column could drift apart silently. Both are this type now.
+///
+/// - `draft` — editable; the only state whose definition may still change.
+/// - `active` — published and purchasable; the definition is immutable.
+/// - `archived` — withdrawn. Existing orders keep referring to it by
+///   version.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(rename_all = "snake_case")]
 pub enum OfferStatus {
     Draft,
     Active,
     Archived,
+}
+
+/// Where an offer stands against its Stripe Product/Price: the
+/// `sync_status` column of `impresspress__products__offers`.
+///
+/// Distinct from [`OfferStatus`]: an offer is `active` locally the moment
+/// it is published, and only becomes `synced` once Stripe has the matching
+/// Price. The two were both plain strings and both called "status" on the
+/// same row.
+///
+/// `impresspress__products__payment_links` has a `sync_status` column with
+/// a *different* value set (`not_synced`, `syncing`, `synced`, `error` —
+/// note `error`, not `failed`). It is deliberately not typed with this
+/// enum; giving it one means either changing a stored literal or carrying a
+/// fourth spelling, and that is its own decision.
+///
+/// - `not_synced` — never sent to Stripe. The column's default.
+/// - `syncing` — a synchronization is in flight.
+/// - `synced` — Stripe holds a Product and Price matching this offer
+///   version.
+/// - `failed` — the last synchronization failed; `sync_error` says why.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OfferSyncStatus {
+    NotSynced,
+    Syncing,
+    Synced,
+    Failed,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -479,7 +592,7 @@ pub struct OfferDefinitionRequest {
 #[serde(deny_unknown_fields)]
 pub struct ManagedOffer {
     pub status: OfferStatus,
-    pub sync_status: String,
+    pub sync_status: OfferSyncStatus,
     #[serde(default)]
     pub sync_error: String,
     pub offer: Offer,
@@ -674,6 +787,27 @@ pub enum OrderStatus {
 }
 
 impl OrderStatus {
+    /// Every status this contract defines, in declaration order.
+    ///
+    /// The commerce analytics needs the value set as data, not as a `match`:
+    /// it filters and groups the orders table by the stored `status`
+    /// spelling, so it has to name the whole set in a query. Keeping the list
+    /// here — beside the enum — is what stops a second, drifting copy of it
+    /// growing inside `repo::purchases`.
+    ///
+    /// `status_enum_tests::order_status_all_lists_every_variant` keeps the
+    /// list honest: its `slot` match is exhaustive, so a seventh variant
+    /// stops that test compiling, and its assertion then checks the variant
+    /// reached this array too.
+    pub const ALL: [Self; 6] = [
+        Self::Pending,
+        Self::CheckoutStarted,
+        Self::Completed,
+        Self::PartiallyRefunded,
+        Self::Refunded,
+        Self::Failed,
+    ];
+
     /// Parse the `status` column of an order row.
     pub fn from_record(record: &Record) -> Result<Self, WaferError> {
         enum_column(record, "status")
@@ -734,6 +868,143 @@ impl ReconciliationStatus {
     }
 }
 
+/// The provider's own view of the order's payment: the
+/// `provider_payment_status` column of
+/// `impresspress__products__purchases`.
+///
+/// Stripe's PaymentIntent vocabulary, owned here because it is our column.
+/// It is not [`ReconciliationStatus`], which is *our* reading of the same
+/// events; both live on the same row and the two were both bare strings.
+///
+/// [`Self::Unset`] is a real state, not a null stand-in: the column is
+/// `TEXT NOT NULL DEFAULT ''` (`016_payment_intent_state.sqlite.sql`) and
+/// every order carries it until a PaymentIntent event arrives, which is
+/// why `""` has always been the first entry in this field's published
+/// value list. Modelling it as a variant is what keeps that list — and
+/// every stored row — exactly as it is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum ProviderPaymentStatus {
+    #[serde(rename = "")]
+    Unset,
+    Succeeded,
+    PaymentFailed,
+    Processing,
+    RequiresAction,
+    Canceled,
+}
+
+/// A subscription's lifecycle state, as Stripe reports it: the
+/// `subscription_status` column of `impresspress__products__purchases`.
+///
+/// The complete Stripe set, not the subset the repo happens to write
+/// today. `sync_commerce_subscription` copies `data.object.status` from a
+/// `customer.subscription.*` delivery straight into the column, so any
+/// status Stripe can emit can be stored — including `incomplete`, which
+/// the phase spec's variant list omits. Typing the column with a narrower
+/// set than its writer accepts would turn a legitimate Stripe state into a
+/// decode failure on the order view, so the type carries all of them.
+///
+/// [`Self::Unset`] is the state of every non-subscription order: the
+/// column is `TEXT NOT NULL DEFAULT ''`
+/// (`009_commerce_subscription_state.sqlite.sql`).
+///
+/// The same vocabulary is the `status` column of the platform-billing
+/// projection (`impresspress__products__subscriptions`).
+//
+// Each variant has exactly one spelling, Stripe's, and it is the only one
+// either column stores: every write serialises a variant, and migration
+// `022_canonical_subscription_status` rewrote the British `cancelled` the
+// projection used to store. A stored value outside the set — that spelling
+// included — is refused by `enum_column` as a data fault, so the lifecycle
+// comparisons and the compare-and-swap filters, which compare the stored
+// text against a serialised variant, always compare like with like.
+#[derive(
+    Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema,
+)]
+#[serde(rename_all = "snake_case")]
+pub enum SubscriptionStatus {
+    #[default]
+    #[serde(rename = "")]
+    Unset,
+    Incomplete,
+    IncompleteExpired,
+    Trialing,
+    Active,
+    PastDue,
+    Unpaid,
+    Paused,
+    Canceled,
+}
+
+impl SubscriptionStatus {
+    /// Every variant, in declaration order. SQL cannot ask the type which
+    /// statuses are terminal, so a filter over the column names them from
+    /// this list.
+    pub const ALL: [Self; 9] = [
+        Self::Unset,
+        Self::Incomplete,
+        Self::IncompleteExpired,
+        Self::Trialing,
+        Self::Active,
+        Self::PastDue,
+        Self::Unpaid,
+        Self::Paused,
+        Self::Canceled,
+    ];
+
+    /// Parse the `subscription_status` column of an order row.
+    pub fn from_record(record: &Record) -> Result<Self, WaferError> {
+        enum_column(record, "subscription_status")
+    }
+
+    /// Whether this is the column default: the order is not a subscription.
+    pub const fn is_unset(&self) -> bool {
+        matches!(self, Self::Unset)
+    }
+
+    /// Schema of a field that is omitted rather than sent as
+    /// [`Self::Unset`]: this type's own schema without the value `Unset`
+    /// serialises to, since that value never reaches the wire.
+    pub fn set_schema(generator: &mut schemars::SchemaGenerator) -> schemars::Schema {
+        let mut schema = <Self as schemars::JsonSchema>::json_schema(generator);
+        if let Some(values) = schema
+            .get_mut("enum")
+            .and_then(serde_json::Value::as_array_mut)
+        {
+            values.retain(|value| {
+                serde_json::from_value::<Self>(value.clone())
+                    .map_or(true, |status| !status.is_unset())
+            });
+        }
+        schema
+    }
+
+    /// Whether the subscription can never become live again.
+    ///
+    /// Stripe issues a new subscription id for a resubscription, so a
+    /// canceled or expired projection is final for its id. This is what
+    /// `repo::subscription_transition_allowed` refuses to move away from.
+    pub const fn is_terminal(self) -> bool {
+        matches!(self, Self::Canceled | Self::IncompleteExpired)
+    }
+
+    /// How far along the lifecycle this status is, for ordering
+    /// same-second webhook deliveries: terminal outranks delinquency,
+    /// which outranks every live status. Immediate cancellation makes
+    /// Stripe emit `customer.subscription.updated` and
+    /// `customer.subscription.deleted` with the same `created` second;
+    /// ranking keeps the deletion authoritative regardless of delivery
+    /// order.
+    pub const fn rank(self) -> u8 {
+        match self {
+            Self::Canceled | Self::IncompleteExpired => 2,
+            Self::PastDue | Self::Unpaid => 1,
+            Self::Unset | Self::Incomplete | Self::Trialing | Self::Active | Self::Paused => 0,
+        }
+    }
+}
+
 /// Minimal order state exposed to a guest who presents the checkout receipt
 /// capability. Buyer details and all Stripe resource ids remain private.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -746,9 +1017,10 @@ pub struct GuestOrderStatus {
     /// Where the order stands against the provider's view of it.
     pub reconciliation_status: ReconciliationStatus,
     pub amounts: MoneyBreakdown,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    #[schemars(required)]
-    pub subscription_status: Option<String>,
+    /// Stripe subscription lifecycle state; absent for a one-time order.
+    #[serde(default, skip_serializing_if = "SubscriptionStatus::is_unset")]
+    #[schemars(schema_with = "SubscriptionStatus::set_schema")]
+    pub subscription_status: SubscriptionStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(extend("format" = "date-time"))]
     #[schemars(required)]
@@ -856,12 +1128,15 @@ pub struct SellerCapabilities {
 pub struct SellerAccount {
     pub id: String,
     pub user_id: String,
-    pub status: String,
-    pub approval_status: ApprovalStatus,
+    /// How far the account has got with Stripe Connect.
+    pub status: SellerStatus,
+    /// Whether an administrator has suspended the account. Derived from
+    /// `status`; the two move together.
+    pub approval_status: SellerApproval,
     #[serde(default)]
     pub stripe_account_id: String,
     pub capabilities: SellerCapabilities,
-    /// Platform fee applied to this seller's sales, in basis points.
+    /// The platform application fee new Checkout Sessions and Payment Links carry, in basis points.
     #[schemars(range(max = 10000))]
     pub fee_basis_points: u32,
     #[serde(default)]
@@ -885,6 +1160,11 @@ pub struct SellerAccount {
 #[serde(deny_unknown_fields)]
 pub struct SellerAccountList {
     pub sellers: Vec<SellerAccount>,
+    /// How many seller accounts exist, which is not `sellers.len()` when the
+    /// listing is showing a prefix.
+    pub total_count: i64,
+    /// Whether more seller accounts exist than `sellers` lists.
+    pub truncated: bool,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1005,6 +1285,31 @@ pub struct RefundRequest {
 #[serde(rename_all = "snake_case")]
 pub enum RefundResultStatus {
     Pending,
+    Succeeded,
+    Failed,
+}
+
+/// Ledger state of a refund row: the `status` column of
+/// `impresspress__products__refunds`.
+///
+/// Not the same set as [`RefundResultStatus`], which is the answer one
+/// refund *request* gets, and not the same as the row's `provider_status`,
+/// which is Stripe's own state for the refund. The distinguishing variant
+/// is [`Self::ProviderSucceeded`]: the provider has paid the money back but
+/// the order's refunded total has not been settled yet, a local-only state
+/// with no counterpart at Stripe. It is why the column needs its own type
+/// rather than reusing either neighbour.
+///
+/// - `pending` — recorded; the provider has not answered.
+/// - `provider_succeeded` — the provider refunded; the order total has not
+///   been settled yet.
+/// - `succeeded` — settled against the order's refunded total.
+/// - `failed` — the provider refused or canceled the refund.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum RefundStatus {
+    Pending,
+    ProviderSucceeded,
     Succeeded,
     Failed,
 }
@@ -1144,6 +1449,114 @@ impl WebhookAck {
     }
 }
 
+/// Declare [`StripeEventType`] and the list of every variant in one place.
+///
+/// `ALL` has to be complete or the setup page under-reports what the
+/// destination must subscribe to, and a hand-written `ALL` beside a
+/// hand-written enum is exactly the second list this type exists to remove.
+/// Generating both from one `Variant => "wire.name"` table is what makes
+/// completeness a property of the declaration rather than of a test.
+macro_rules! stripe_event_types {
+    ($(#[$doc:meta])* $($variant:ident => $wire:literal,)+) => {
+        $(#[$doc])*
+        #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+        pub enum StripeEventType {
+            $(#[serde(rename = $wire)] $variant,)+
+        }
+
+        impl StripeEventType {
+            /// Every handled type, in the order the setup page lists them.
+            pub const ALL: &'static [Self] = &[$(Self::$variant,)+];
+        }
+    };
+}
+
+stripe_event_types! {
+    /// A Stripe webhook `type` this block does something with.
+    ///
+    /// Not a column: `stripe_events.event_type` records whatever Stripe
+    /// sent, including the types this block ignores, so
+    /// [`WebhookEventSummary`] keeps publishing that field as a string.
+    /// This type is the *handled* set — the one thing the webhook
+    /// dispatcher and the Stripe setup page both need to agree on, and did
+    /// not, because each spelled the 21 names out on its own.
+    ///
+    /// [`Self::from_wire`] returning `None` is not an error. A destination
+    /// can be subscribed to more event types than this block handles
+    /// (Stripe's dashboard offers "all events"), so an unhandled type is
+    /// ordinary traffic: the dispatcher ignores it and acknowledges the
+    /// delivery, which is what its former `_ =>` arm did.
+    ///
+    /// The variants carry no doc comments deliberately. Nothing publishes
+    /// this type today, but the moment something does, per-variant docs
+    /// turn a flat `{"enum": [...]}` into a `oneOf` of `const` subschemas
+    /// and move the snapshot for no reason — the trap PR #30 hit on eight
+    /// fields.
+    AccountUpdated => "account.updated",
+    CheckoutSessionCompleted => "checkout.session.completed",
+    CheckoutSessionAsyncPaymentSucceeded => "checkout.session.async_payment_succeeded",
+    CheckoutSessionAsyncPaymentFailed => "checkout.session.async_payment_failed",
+    PaymentIntentSucceeded => "payment_intent.succeeded",
+    PaymentIntentPaymentFailed => "payment_intent.payment_failed",
+    PaymentIntentProcessing => "payment_intent.processing",
+    PaymentIntentRequiresAction => "payment_intent.requires_action",
+    PaymentIntentCanceled => "payment_intent.canceled",
+    CustomerSubscriptionUpdated => "customer.subscription.updated",
+    CustomerSubscriptionDeleted => "customer.subscription.deleted",
+    InvoicePaid => "invoice.paid",
+    InvoicePaymentSucceeded => "invoice.payment_succeeded",
+    InvoicePaymentFailed => "invoice.payment_failed",
+    ChargeDisputeCreated => "charge.dispute.created",
+    ChargeDisputeUpdated => "charge.dispute.updated",
+    ChargeDisputeClosed => "charge.dispute.closed",
+    RefundCreated => "refund.created",
+    RefundUpdated => "refund.updated",
+    RefundFailed => "refund.failed",
+    ChargeRefunded => "charge.refunded",
+}
+
+impl StripeEventType {
+    /// The event `type` of a delivery, or `None` for a type this block does
+    /// not handle.
+    ///
+    /// The counterpart of [`crate::util::wire_str`], through the same serde
+    /// definition, so the name decoded here is the name the setup page
+    /// rendered.
+    pub fn from_wire(value: &str) -> Option<Self> {
+        serde_json::from_value(serde_json::Value::String(value.to_string())).ok()
+    }
+}
+
+/// Where a received Stripe event is in the block's own processing queue:
+/// the `status` column of `impresspress__products__stripe_events`.
+///
+/// The five values were five `const &str` in `stripe.rs`, used both as
+/// written values and as match patterns against `record.str_field`, and
+/// re-spelled a second time in the admin filter and a third in this
+/// module's schema. `stripe.rs` matches this type now, so a variant added
+/// here stops the lease state machine compiling rather than falling
+/// through one of its arms.
+///
+/// Deliberately NOT merged with [`OperationStatus`], which differs in
+/// exactly one variant (`processed` here, `succeeded` there): reconciling
+/// them changes stored values, and this phase does not.
+///
+/// - `pending` — recorded, not yet leased.
+/// - `processing` — a delivery holds the processing lease.
+/// - `failed` — the last attempt failed; `next_retry_at` schedules another.
+/// - `processed` — handled; further deliveries of the same event id are
+///   ignored.
+/// - `dead_letter` — out of attempts. Only a replay moves it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EventStatus {
+    Pending,
+    Processing,
+    Failed,
+    Processed,
+    DeadLetter,
+}
+
 /// Safe operational projection of a Stripe event. The signed payload and
 /// processing owner are never serialized to the admin API.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1152,8 +1565,7 @@ pub struct WebhookEventSummary {
     pub id: String,
     pub event_type: String,
     /// One of `pending`, `processing`, `failed`, `processed`, `dead_letter`.
-    #[schemars(extend("enum" = ["pending", "processing", "failed", "processed", "dead_letter"]))]
-    pub status: String,
+    pub status: EventStatus,
     #[serde(default)]
     pub stripe_account_id: String,
     pub livemode: bool,
@@ -1191,6 +1603,31 @@ pub struct WebhookEventList {
     pub page_size: i64,
 }
 
+/// Where a durable provider operation is in its retry schedule: the
+/// `status` column of `impresspress__products__provider_operations`.
+///
+/// One variant apart from [`EventStatus`] — a completed operation is
+/// `succeeded`, a handled event is `processed` — and the two were both
+/// written as bare strings against columns named `status` on tables read
+/// by the same admin page. Merging the vocabularies would change stored
+/// values, so they stay two types and the difference is stated here.
+///
+/// - `pending` — enqueued, not yet leased.
+/// - `processing` — a worker holds the lease.
+/// - `failed` — the last attempt failed; `next_attempt_at` schedules
+///   another.
+/// - `succeeded` — completed.
+/// - `dead_letter` — out of attempts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum OperationStatus {
+    Pending,
+    Processing,
+    Failed,
+    Succeeded,
+    DeadLetter,
+}
+
 /// Safe administrator projection of a durable Stripe provider operation.
 /// Request/response payloads, idempotency keys, and lease owners stay private.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
@@ -1207,8 +1644,7 @@ pub struct ProviderOperationSummary {
     #[serde(default)]
     pub stripe_account_id: String,
     /// One of `pending`, `processing`, `failed`, `succeeded`, `dead_letter`.
-    #[schemars(extend("enum" = ["pending", "processing", "failed", "succeeded", "dead_letter"]))]
-    pub status: String,
+    pub status: OperationStatus,
     pub attempts: u64,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     #[schemars(extend("format" = "date-time"))]
@@ -1250,6 +1686,11 @@ pub struct ProviderReconcileResult {
     pub succeeded: u64,
     pub retry_scheduled: u64,
     pub dead_letter: u64,
+    /// Operations whose state could not be written; a later run retries them.
+    // A claim, dead-letter or outcome write that failed. The operation keeps
+    // its previous state (a lost outcome leaves it leased until the lease
+    // lapses) and each failure is logged with its operation id.
+    pub unrecorded: u64,
 }
 
 // ---------------------------------------------------------------------------
@@ -1267,24 +1708,6 @@ pub struct ProviderReconcileResult {
 //
 // The `{records, total_count, page, page_size}` list envelope is unchanged;
 // only the row moves from `{id, data: {…}}` to the flat view.
-
-/// Parse `column` of `record` into the enum that defines its value set.
-///
-/// A stored value outside the set is a data-integrity error: it is reported
-/// as `Internal`, naming the row and the value, and never mapped to a
-/// default. The handler turns that into the 500-with-reference response.
-fn enum_column<T: DeserializeOwned>(record: &Record, column: &str) -> Result<T, WaferError> {
-    let value = record.str_field(column);
-    serde_json::from_value(Value::String(value.to_string())).map_err(|_| {
-        WaferError::new(
-            ErrorCode::Internal,
-            format!(
-                "row {} holds {column} {value:?}, which the contract does not define",
-                record.id
-            ),
-        )
-    })
-}
 
 /// A nullable timestamp column as `Option<String>`.
 ///
@@ -1350,8 +1773,7 @@ pub struct ProductView {
     pub currency: String,
     /// Publication state: `draft`, `pending_review` (seller product awaiting
     /// moderation), `active` (in the public catalog) or `archived`.
-    #[schemars(extend("enum" = ["draft", "pending_review", "active", "archived"]))]
-    pub status: String,
+    pub status: ProductStatus,
     pub category: String,
     pub tags: Vec<String>,
     /// Free-form key/value metadata attached by the product builder.
@@ -1378,9 +1800,10 @@ pub struct ProductView {
     /// Seller account the product sells through; empty for platform products.
     pub seller_account_id: String,
     /// Moderation state: `draft`, `pending` (submitted for review), `approved`,
-    /// `rejected` or `suspended`.
-    #[schemars(extend("enum" = ["draft", "pending", "approved", "rejected", "suspended"]))]
-    pub approval_status: String,
+    /// `rejected` or `suspended`. A different column and a different
+    /// vocabulary from `status` — a listing awaiting review is
+    /// `status = pending_review` and `approval_status = pending` at once.
+    pub approval_status: ApprovalStatus,
     /// How a purchase is fulfilled.
     #[schemars(extend("enum" = ["none", "manual", "download", "entitlement", "webhook"]))]
     pub fulfillment_kind: String,
@@ -1410,14 +1833,14 @@ pub struct ProductView {
 
 impl ProductView {
     /// Project a products-table row.
-    pub fn from_record(record: &Record) -> Self {
-        Self {
+    pub fn from_record(record: &Record) -> Result<Self, WaferError> {
+        Ok(Self {
             id: record.id.clone(),
             name: record.str_field("name").to_string(),
             description: record.str_field("description").to_string(),
             slug: record.str_field("slug").to_string(),
             currency: record.str_field("currency").to_string(),
-            status: record.str_field("status").to_string(),
+            status: enum_column(record, "status")?,
             category: record.str_field("category").to_string(),
             tags: record.string_list_field("tags"),
             metadata: record.json_object_field("metadata"),
@@ -1432,7 +1855,7 @@ impl ProductView {
             owner_kind: record.str_field("owner_kind").to_string(),
             owner_id: record.str_field("owner_id").to_string(),
             seller_account_id: record.str_field("seller_account_id").to_string(),
-            approval_status: record.str_field("approval_status").to_string(),
+            approval_status: enum_column(record, "approval_status")?,
             fulfillment_kind: record.str_field("fulfillment_kind").to_string(),
             stripe_product_id: record.str_field("stripe_product_id").to_string(),
             current_version: record.i64_field("current_version"),
@@ -1441,7 +1864,7 @@ impl ProductView {
             deleted_at: timestamp_field(record, "deleted_at"),
             created_at: record.str_field("created_at").to_string(),
             updated_at: record.str_field("updated_at").to_string(),
-        }
+        })
     }
 }
 
@@ -1489,9 +1912,15 @@ pub struct CatalogProductView {
     pub category: String,
     /// ISO 4217 presentment currency.
     pub currency: String,
+    // The *type* is the whole column's, because a projection that narrowed
+    // it to the one value the query happens to select would have to be
+    // widened again the moment the query did. The *published value list*
+    // stays the one value, because that is a true statement about this
+    // endpoint's responses and re-narrowing it later would break every
+    // consumer that had widened to match — so the `extend` stays too.
     /// Always `active`: the catalog lists active products only.
     #[schemars(extend("enum" = ["active"]))]
-    pub status: String,
+    pub status: ProductStatus,
     /// Units in stock; `0` when inventory is not tracked.
     pub stock: i64,
     /// Group the product is listed under, or empty.
@@ -1521,8 +1950,8 @@ pub struct CatalogProductView {
 
 impl CatalogProductView {
     /// Project a products-table row for the public catalog.
-    pub fn from_record(record: &Record) -> Self {
-        Self {
+    pub fn from_record(record: &Record) -> Result<Self, WaferError> {
+        Ok(Self {
             id: record.id.clone(),
             name: record.str_field("name").to_string(),
             slug: record.str_field("slug").to_string(),
@@ -1531,7 +1960,7 @@ impl CatalogProductView {
             tags: record.string_list_field("tags"),
             category: record.str_field("category").to_string(),
             currency: record.str_field("currency").to_string(),
-            status: record.str_field("status").to_string(),
+            status: enum_column(record, "status")?,
             stock: record.i64_field("stock"),
             group_id: record.str_field("group_id").to_string(),
             type_id: record.str_field("type_id").to_string(),
@@ -1543,7 +1972,7 @@ impl CatalogProductView {
             published_at: timestamp_field(record, "published_at"),
             created_at: record.str_field("created_at").to_string(),
             updated_at: record.str_field("updated_at").to_string(),
-        }
+        })
     }
 }
 
@@ -1561,13 +1990,26 @@ pub struct CatalogProductListResponse {
 }
 
 impl CatalogProductListResponse {
-    /// Project a `RecordList` of active product rows.
+    /// Project a `RecordList` of active product rows. Same row-not-page
+    /// degradation as [`PurchaseListResponse::from_record_list`]: a row
+    /// whose `status` is outside the contract costs that row, not the
+    /// page, and is logged at ERROR with its id.
     pub fn from_record_list(list: &RecordList) -> Self {
         Self {
             records: list
                 .records
                 .iter()
-                .map(CatalogProductView::from_record)
+                .filter_map(|record| match CatalogProductView::from_record(record) {
+                    Ok(view) => Some(view),
+                    Err(e) => {
+                        tracing::error!(
+                            product_id = %record.id,
+                            error = %e,
+                            "product row is outside the published contract and was omitted from the page"
+                        );
+                        None
+                    }
+                })
                 .collect(),
             total_count: list.total_count,
             page: list.page,
@@ -1590,10 +2032,25 @@ pub struct ProductListResponse {
 }
 
 impl ProductListResponse {
-    /// Project a `RecordList` of product rows.
+    /// Project a `RecordList` of product rows. Same row-not-page
+    /// degradation as [`PurchaseListResponse::from_record_list`].
     pub fn from_record_list(list: &RecordList) -> Self {
         Self {
-            records: list.records.iter().map(ProductView::from_record).collect(),
+            records: list
+                .records
+                .iter()
+                .filter_map(|record| match ProductView::from_record(record) {
+                    Ok(view) => Some(view),
+                    Err(e) => {
+                        tracing::error!(
+                            product_id = %record.id,
+                            error = %e,
+                            "product row is outside the published contract and was omitted from the page"
+                        );
+                        None
+                    }
+                })
+                .collect(),
             total_count: list.total_count,
             page: list.page,
             page_size: list.page_size,
@@ -1665,6 +2122,55 @@ impl ProductListQuery {
     }
 }
 
+/// Longest product slug, in bytes. The wizard derives a slug from the name
+/// and cuts it to this length, and both edit forms cap their input at it.
+pub const PRODUCT_SLUG_MAX_LEN: usize = 160;
+
+/// The product slug grammar, as the published schema and the edit forms'
+/// `pattern` state it. The empty alternative is the column default: a
+/// product with no web address.
+pub const PRODUCT_SLUG_PATTERN: &str = "^(?:[a-z0-9]+(?:-[a-z0-9]+)*)?$";
+
+/// Refuse a product slug outside [`PRODUCT_SLUG_PATTERN`] or longer than
+/// [`PRODUCT_SLUG_MAX_LEN`], with the message the caller is shown.
+pub fn check_product_slug(slug: &str) -> Result<(), String> {
+    if slug.len() > PRODUCT_SLUG_MAX_LEN {
+        return Err(format!(
+            "slug must be at most {PRODUCT_SLUG_MAX_LEN} characters"
+        ));
+    }
+    let well_formed = slug.is_empty()
+        || slug.split('-').all(|run| {
+            !run.is_empty()
+                && run
+                    .bytes()
+                    .all(|byte| byte.is_ascii_lowercase() || byte.is_ascii_digit())
+        });
+    if !well_formed {
+        return Err(
+            "slug may contain only lowercase letters, numbers, and single hyphens between them"
+                .to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// `value` brought into the product slug grammar, at most `max_len` bytes:
+/// ASCII letters lowercased, every run of anything else one hyphen, no
+/// hyphen at either end. Empty when `value` has no ASCII letter or digit.
+pub fn slug_from(value: &str, max_len: usize) -> String {
+    let mut slug = String::new();
+    for c in value.chars() {
+        if c.is_ascii_alphanumeric() {
+            slug.push(c.to_ascii_lowercase());
+        } else if !slug.is_empty() && !slug.ends_with('-') {
+            slug.push('-');
+        }
+    }
+    slug.truncate(max_len);
+    slug.trim_end_matches('-').to_string()
+}
+
 // The write requests are closed field lists too, and that is the point: the
 // column-map path they replace wrote every key it was sent. On the seller
 // create path that included `seller_account_id`, `stripe_product_id`,
@@ -1682,7 +2188,10 @@ pub struct CreateProductRequest {
     pub name: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Web address of the product: lowercase letters and digits in runs
+    /// joined by single hyphens, at most 160 characters. Empty means none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = PRODUCT_SLUG_MAX_LEN), regex(pattern = PRODUCT_SLUG_PATTERN))]
     pub slug: Option<String>,
     /// ISO 4217 currency. A seller product defaults to the platform default
     /// currency when omitted.
@@ -1739,7 +2248,10 @@ pub struct UpdateProductRequest {
     pub name: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
+    /// Web address of the product: lowercase letters and digits in runs
+    /// joined by single hyphens, at most 160 characters. Empty means none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[schemars(length(max = PRODUCT_SLUG_MAX_LEN), regex(pattern = PRODUCT_SLUG_PATTERN))]
     pub slug: Option<String>,
     /// ISO 4217 currency.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -2128,10 +2640,13 @@ impl GroupTemplateListResponse {
 pub struct PurchaseView {
     /// Stable order identifier.
     pub id: String,
-    /// Legacy owner column; equals `buyer_user_id` for orders placed while
-    /// signed in and is empty for guest orders.
-    pub user_id: String,
-    /// Signed-in buyer's user id, or empty for a guest order.
+    // The row also carries a `user_id` column holding the same value — one
+    // writer sets both — and this view used to publish it too, so a drifted
+    // row put two answers to one question on the wire. `buyer_user_id` is
+    // the one per-row ownership is decided on, so it is the one published.
+    // The column stays; it is simply not a field.
+    /// Signed-in buyer's user id, or empty for a guest order. The order's
+    /// single buyer identity.
     pub buyer_user_id: String,
     /// Buyer's email address as captured at checkout, or empty.
     pub buyer_email: String,
@@ -2161,14 +2676,16 @@ pub struct PurchaseView {
     pub livemode: bool,
     /// ISO 4217 currency of every amount on the order.
     pub currency: String,
-    /// Legacy amount column, in minor units. Prefer `total_cents`.
-    pub amount_cents: i64,
     pub subtotal_cents: i64,
     pub discount_cents: i64,
     pub tax_cents: i64,
     pub shipping_cents: i64,
     pub platform_fee_cents: i64,
-    /// Final charged amount in minor units.
+    // The row also carries an `amount_cents` column holding the same value —
+    // one writer sets both — and this view used to publish it too, under a
+    // field whose own description said to prefer this one. The column stays;
+    // it is simply not a field.
+    /// Final charged amount in minor units. The order's single amount.
     pub total_cents: i64,
     /// Sum of succeeded refunds in minor units.
     pub refunded_total_cents: i64,
@@ -2182,8 +2699,7 @@ pub struct PurchaseView {
     /// Stripe Checkout Session id, or empty.
     pub provider_session_id: String,
     /// Latest PaymentIntent state received from the provider.
-    #[schemars(extend("enum" = ["", "succeeded", "payment_failed", "processing", "requires_action", "canceled"]))]
-    pub provider_payment_status: String,
+    pub provider_payment_status: ProviderPaymentStatus,
     pub provider_payment_error_code: String,
     pub provider_payment_error_message: String,
     /// Provider timestamp (Unix seconds) of the PaymentIntent event that
@@ -2199,7 +2715,7 @@ pub struct PurchaseView {
     pub reconciliation_error: String,
     /// Stripe subscription lifecycle state for subscription orders, or
     /// empty.
-    pub subscription_status: String,
+    pub subscription_status: SubscriptionStatus,
     /// RFC 3339 end of the current billing period, or `null`.
     #[schemars(extend("format" = "date-time"))]
     pub subscription_current_period_end: Option<String>,
@@ -2275,11 +2791,11 @@ pub struct BuyerOrderView {
     /// priced against and the shipping amounts allowed at checkout.
     pub metadata: serde_json::Map<String, Value>,
     /// Latest payment state received from the provider.
-    pub provider_payment_status: String,
+    pub provider_payment_status: ProviderPaymentStatus,
     /// Where the order stands against the provider's view of it.
     pub reconciliation_status: ReconciliationStatus,
     /// Stripe subscription lifecycle state for subscription orders, or empty.
-    pub subscription_status: String,
+    pub subscription_status: SubscriptionStatus,
     /// RFC 3339 end of the current billing period, or `null`.
     #[schemars(extend("format" = "date-time"))]
     pub subscription_current_period_end: Option<String>,
@@ -2320,9 +2836,9 @@ impl BuyerOrderView {
             total_cents: record.i64_field("total_cents"),
             refunded_total_cents: record.i64_field("refunded_total_cents"),
             metadata: record.json_object_field("metadata"),
-            provider_payment_status: record.str_field("provider_payment_status").to_string(),
+            provider_payment_status: enum_column(record, "provider_payment_status")?,
             reconciliation_status: ReconciliationStatus::from_record(record)?,
-            subscription_status: record.str_field("subscription_status").to_string(),
+            subscription_status: SubscriptionStatus::from_record(record)?,
             subscription_current_period_end: timestamp_field(
                 record,
                 "subscription_current_period_end",
@@ -2353,8 +2869,8 @@ pub struct BuyerRefundView {
     pub purchase_id: String,
     pub amount_minor: i64,
     pub currency: String,
-    /// Ledger state: `pending`, `provider_succeeded`, `succeeded` or `failed`.
-    pub status: String,
+    /// Ledger state.
+    pub status: RefundStatus,
     /// The provider's own state for the refund. Empty until the provider
     /// answers; `succeeded` for a refund recorded without a provider. Kept
     /// for the buyer because "has my money actually gone back" is the
@@ -2370,17 +2886,17 @@ pub struct BuyerRefundView {
 
 impl BuyerRefundView {
     /// Project an `impresspress__products__refunds` row for the buyer.
-    pub fn from_record(record: &Record) -> Self {
-        Self {
+    pub fn from_record(record: &Record) -> Result<Self, WaferError> {
+        Ok(Self {
             id: record.id.clone(),
             purchase_id: record.str_field("purchase_id").to_string(),
             amount_minor: record.i64_field("amount_minor"),
             currency: record.str_field("currency").to_string(),
-            status: record.str_field("status").to_string(),
+            status: enum_column(record, "status")?,
             provider_status: record.str_field("provider_status").to_string(),
             completed_at: timestamp_field(record, "completed_at"),
             created_at: record.str_field("created_at").to_string(),
-        }
+        })
     }
 }
 
@@ -2482,14 +2998,14 @@ pub struct SellerOrderView {
     /// Stripe Checkout Session id, or empty.
     pub provider_session_id: String,
     /// Latest PaymentIntent state received from the provider.
-    pub provider_payment_status: String,
+    pub provider_payment_status: ProviderPaymentStatus,
     pub provider_payment_error_code: String,
     pub provider_payment_error_message: String,
     /// Where the order stands against the provider's view of it.
     pub reconciliation_status: ReconciliationStatus,
     pub reconciliation_error: String,
     /// Stripe subscription lifecycle state, or empty.
-    pub subscription_status: String,
+    pub subscription_status: SubscriptionStatus,
     /// RFC 3339 end of the current billing period, or `null`.
     #[schemars(extend("format" = "date-time"))]
     pub subscription_current_period_end: Option<String>,
@@ -2535,7 +3051,7 @@ impl SellerOrderView {
             metadata: record.json_object_field("metadata"),
             stripe_payment_intent_id: record.str_field("stripe_payment_intent_id").to_string(),
             provider_session_id: record.str_field("provider_session_id").to_string(),
-            provider_payment_status: record.str_field("provider_payment_status").to_string(),
+            provider_payment_status: enum_column(record, "provider_payment_status")?,
             provider_payment_error_code: record
                 .str_field("provider_payment_error_code")
                 .to_string(),
@@ -2544,7 +3060,7 @@ impl SellerOrderView {
                 .to_string(),
             reconciliation_status: ReconciliationStatus::from_record(record)?,
             reconciliation_error: record.str_field("reconciliation_error").to_string(),
-            subscription_status: record.str_field("subscription_status").to_string(),
+            subscription_status: SubscriptionStatus::from_record(record)?,
             subscription_current_period_end: timestamp_field(
                 record,
                 "subscription_current_period_end",
@@ -2615,7 +3131,6 @@ impl PurchaseView {
     pub fn from_record(record: &Record) -> Result<Self, WaferError> {
         Ok(Self {
             id: record.id.clone(),
-            user_id: record.str_field("user_id").to_string(),
             buyer_user_id: record.str_field("buyer_user_id").to_string(),
             buyer_email: record.str_field("buyer_email").to_string(),
             seller_account_id: record.str_field("seller_account_id").to_string(),
@@ -2627,7 +3142,6 @@ impl PurchaseView {
             provider: record.str_field("provider").to_string(),
             livemode: record.bool_field("livemode"),
             currency: record.str_field("currency").to_string(),
-            amount_cents: record.i64_field("amount_cents"),
             subtotal_cents: record.i64_field("subtotal_cents"),
             discount_cents: record.i64_field("discount_cents"),
             tax_cents: record.i64_field("tax_cents"),
@@ -2639,7 +3153,7 @@ impl PurchaseView {
             stripe_payment_intent_id: record.str_field("stripe_payment_intent_id").to_string(),
             provider_payment_intent_id: record.str_field("provider_payment_intent_id").to_string(),
             provider_session_id: record.str_field("provider_session_id").to_string(),
-            provider_payment_status: record.str_field("provider_payment_status").to_string(),
+            provider_payment_status: enum_column(record, "provider_payment_status")?,
             provider_payment_error_code: record
                 .str_field("provider_payment_error_code")
                 .to_string(),
@@ -2649,7 +3163,7 @@ impl PurchaseView {
             payment_intent_event_created: record.i64_field("payment_intent_event_created"),
             reconciliation_status: ReconciliationStatus::from_record(record)?,
             reconciliation_error: record.str_field("reconciliation_error").to_string(),
-            subscription_status: record.str_field("subscription_status").to_string(),
+            subscription_status: SubscriptionStatus::from_record(record)?,
             subscription_current_period_end: timestamp_field(
                 record,
                 "subscription_current_period_end",
@@ -2846,7 +3360,13 @@ impl LineItemView {
 // the rule `ProviderOperationSummary` already states for the block's
 // provider operations ("request/response payloads, idempotency keys ... stay
 // private"): `idempotency_key`, the Stripe idempotency key the refund was
-// claimed under, and `response_json`, the raw provider response.
+// claimed under, and `response_json`. The latter is NOT the raw provider
+// response, as this comment used to say: every writer passes a summary this
+// block builds itself (`stripe.rs` assembles `{id, status, amount_minor,
+// livemode, source}`; the reconciliation path in `purchase.rs` forwards that
+// same stored text). Still withheld — a provider's own view of a refund is
+// not part of the order contract — but withheld as bookkeeping, not as a
+// payload that might carry anything of Stripe's.
 /// One refund on an order: `impresspress__products__refunds`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct RefundView {
@@ -2864,9 +3384,8 @@ pub struct RefundView {
     /// The order's `refunded_total_cents` once this refund succeeds.
     pub target_refunded_total_minor: i64,
     pub currency: String,
-    /// Ledger state: `pending`, `provider_succeeded`, `succeeded` or
-    /// `failed`.
-    pub status: String,
+    /// Ledger state.
+    pub status: RefundStatus,
     /// The provider's own state for the refund (`pending`, `requires_action`,
     /// `succeeded`, `failed` or `canceled`). Empty until the provider answers;
     /// `succeeded` for a refund recorded without a provider, which the ledger
@@ -2896,8 +3415,8 @@ pub struct RefundView {
 
 impl RefundView {
     /// Project an `impresspress__products__refunds` row.
-    pub fn from_record(record: &Record) -> Self {
-        Self {
+    pub fn from_record(record: &Record) -> Result<Self, WaferError> {
+        Ok(Self {
             id: record.id.clone(),
             purchase_id: record.str_field("purchase_id").to_string(),
             provider_refund_id: record.str_field("provider_refund_id").to_string(),
@@ -2906,7 +3425,7 @@ impl RefundView {
             amount_minor: record.i64_field("amount_minor"),
             target_refunded_total_minor: record.i64_field("target_refunded_total_minor"),
             currency: record.str_field("currency").to_string(),
-            status: record.str_field("status").to_string(),
+            status: enum_column(record, "status")?,
             provider_status: record.str_field("provider_status").to_string(),
             provider_reason: record.str_field("provider_reason").to_string(),
             note: record.str_field("note").to_string(),
@@ -2917,7 +3436,39 @@ impl RefundView {
             stripe_event_created: record.i64_field("stripe_event_created"),
             created_at: record.str_field("created_at").to_string(),
             updated_at: record.str_field("updated_at").to_string(),
-        }
+        })
+    }
+}
+
+/// Where a dispute stands with the card network: the `status` column of
+/// `impresspress__products__disputes`.
+///
+/// Stripe's eight dispute states. They were a `matches!` list in
+/// `repo::disputes::supported_status`, a second `matches!` in `is_closed`
+/// and a third spelling in this module's schema; the three could drift and
+/// nothing would notice, because the validator and the schema were read by
+/// different people.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum DisputeStatus {
+    WarningNeedsResponse,
+    WarningUnderReview,
+    WarningClosed,
+    NeedsResponse,
+    UnderReview,
+    Won,
+    Lost,
+    Prevented,
+}
+
+impl DisputeStatus {
+    /// Whether the dispute has reached a state the network will not move
+    /// from. `repo::disputes` stamps `closed_at` on exactly these.
+    pub const fn is_closed(self) -> bool {
+        matches!(
+            self,
+            Self::WarningClosed | Self::Won | Self::Lost | Self::Prevented
+        )
     }
 }
 
@@ -2935,8 +3486,12 @@ pub struct DisputeView {
     /// Stripe Charge id the dispute was raised against, or empty.
     pub provider_charge_id: String,
     pub payment_intent_id: String,
-    #[schemars(extend("enum" = ["warning_needs_response", "warning_under_review", "warning_closed", "needs_response", "under_review", "won", "lost", "prevented"]))]
-    pub status: String,
+    // A doc comment where there was none, deliberately: schemars inlines the
+    // *type's* doc as the published `description` when the field has none,
+    // and this module's enum docs carry the reasoning that produced them,
+    // which is not what belongs in a published schema.
+    /// Where the dispute stands with the card network.
+    pub status: DisputeStatus,
     pub amount_minor: i64,
     pub currency: String,
     /// Provider's dispute reason, or empty.
@@ -2961,8 +3516,8 @@ pub struct DisputeView {
 
 impl DisputeView {
     /// Project an `impresspress__products__disputes` row.
-    pub fn from_record(record: &Record) -> Self {
-        Self {
+    pub fn from_record(record: &Record) -> Result<Self, WaferError> {
+        Ok(Self {
             id: record.id.clone(),
             purchase_id: record.str_field("purchase_id").to_string(),
             seller_account_id: record.str_field("seller_account_id").to_string(),
@@ -2970,7 +3525,7 @@ impl DisputeView {
             provider_dispute_id: record.str_field("provider_dispute_id").to_string(),
             provider_charge_id: record.str_field("provider_charge_id").to_string(),
             payment_intent_id: record.str_field("payment_intent_id").to_string(),
-            status: record.str_field("status").to_string(),
+            status: enum_column(record, "status")?,
             amount_minor: record.i64_field("amount_minor"),
             currency: record.str_field("currency").to_string(),
             reason: record.str_field("reason").to_string(),
@@ -2980,7 +3535,7 @@ impl DisputeView {
             closed_at: timestamp_field(record, "closed_at"),
             created_at: record.str_field("created_at").to_string(),
             updated_at: record.str_field("updated_at").to_string(),
-        }
+        })
     }
 }
 
@@ -3008,7 +3563,7 @@ pub struct SubscriptionView {
     /// Plan name.
     pub plan: String,
     /// Stripe subscription lifecycle state.
-    pub status: String,
+    pub status: SubscriptionStatus,
     /// Stripe Subscription id, or empty.
     pub stripe_subscription_id: String,
     /// RFC 3339 end of the grace period after a failed payment, or `null`.
@@ -3028,12 +3583,13 @@ pub struct SubscriptionView {
 }
 
 impl SubscriptionView {
-    /// Project an `impresspress__products__subscriptions` row.
-    pub fn from_record(record: &Record) -> Self {
-        Self {
+    /// Project an `impresspress__products__subscriptions` row. A `status`
+    /// outside [`SubscriptionStatus`] is an `Internal` fault naming the row.
+    pub fn from_record(record: &Record) -> Result<Self, WaferError> {
+        Ok(Self {
             id: record.id.clone(),
             plan: record.str_field("plan").to_string(),
-            status: record.str_field("status").to_string(),
+            status: enum_column(record, "status")?,
             stripe_subscription_id: record.str_field("stripe_subscription_id").to_string(),
             grace_period_end: timestamp_field(record, "grace_period_end"),
             addon_projects: record.i64_field("addon_projects"),
@@ -3042,7 +3598,7 @@ impl SubscriptionView {
             addon_d1_bytes: record.i64_field("addon_d1_bytes"),
             created_at: record.str_field("created_at").to_string(),
             updated_at: record.str_field("updated_at").to_string(),
-        }
+        })
     }
 }
 
@@ -3057,8 +3613,15 @@ pub struct SubscriptionStatusResponse {
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AdminSellerDetail {
     pub seller: SellerAccount,
-    /// Every product owned by the seller's user, in any publication state.
+    /// The seller's live catalog — products the seller's user owns that have
+    /// not been soft-deleted, in any publication state.
     pub products: Vec<ProductView>,
+    /// Whether the seller owns more live products than `products` lists.
+    ///
+    /// Nothing caps a seller's catalog, so the listing is read up to a
+    /// ceiling; this is how a client tells a complete catalog from a prefix
+    /// of one.
+    pub truncated: bool,
 }
 
 #[cfg(test)]
@@ -3230,5 +3793,50 @@ mod tests {
         }))
         .unwrap();
         assert!(matches!(condition, Condition::All { .. }));
+    }
+
+    /// The guest receipt omits `subscription_status` for a one-time order
+    /// rather than sending `""`, so its published enum lists every status
+    /// but that one: a client generated from the schema must not handle a
+    /// value the server never sends.
+    #[test]
+    fn guest_subscription_status_schema_omits_the_unset_value() {
+        use super::{GuestOrderStatus, SubscriptionStatus};
+
+        // The schema the route publishes, subschemas inlined.
+        let schema = crate::endpoint_match::response_schema_of::<GuestOrderStatus>();
+        let published = schema
+            .get("properties")
+            .and_then(|properties| properties.get("subscription_status"))
+            .and_then(|field| field.get("enum"))
+            .expect("subscription_status publishes an enum");
+        let sent: Vec<serde_json::Value> = SubscriptionStatus::ALL
+            .iter()
+            .filter(|status| !status.is_unset())
+            .map(|status| serde_json::to_value(status).unwrap())
+            .collect();
+        assert_eq!(published, &serde_json::Value::Array(sent));
+    }
+
+    #[test]
+    fn product_slug_grammar() {
+        use super::{check_product_slug, PRODUCT_SLUG_MAX_LEN};
+
+        for good in ["", "a", "a1-b2", "0", &"z".repeat(PRODUCT_SLUG_MAX_LEN)] {
+            assert_eq!(check_product_slug(good), Ok(()), "{good:?}");
+        }
+        for bad in [
+            "-",
+            "a-",
+            "-a",
+            "a--b",
+            "A",
+            "a b",
+            "a_b",
+            "caf\u{e9}",
+            &"z".repeat(PRODUCT_SLUG_MAX_LEN + 1),
+        ] {
+            assert!(check_product_slug(bad).is_err(), "{bad:?}");
+        }
     }
 }

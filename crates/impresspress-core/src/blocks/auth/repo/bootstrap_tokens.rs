@@ -7,10 +7,13 @@
 use serde_json::json;
 use wafer_block::db::{Filter, FilterOp};
 use wafer_core::clients::database as db;
-use wafer_run::context::Context;
+use wafer_run::{context::Context, WaferError};
 
-use super::{now_iso, RepoError};
-use crate::util::hex_encode;
+use super::{db_failed, now_iso};
+use crate::{
+    db_read::{self, Bound},
+    util::hex_encode,
+};
 
 pub const TABLE: &str = "wafer_run__auth__bootstrap_tokens";
 
@@ -21,7 +24,7 @@ pub async fn insert(
     ctx: &dyn Context,
     token_hash: Vec<u8>,
     expires_at: &str,
-) -> Result<(), RepoError> {
+) -> Result<(), WaferError> {
     use std::collections::HashMap;
 
     use serde_json::Value;
@@ -36,7 +39,7 @@ pub async fn insert(
 
     db::create(ctx, TABLE, data)
         .await
-        .map_err(|e| RepoError::Db(format!("bootstrap_tokens insert: {e}")))?;
+        .map_err(|e| db_failed("bootstrap_tokens insert", e))?;
     Ok(())
 }
 
@@ -44,7 +47,7 @@ pub async fn insert(
 ///
 /// Compared as ISO-8601 strings to match the text format the migration
 /// schema stores.
-pub async fn is_valid(ctx: &dyn Context, token_hash: &[u8]) -> Result<bool, RepoError> {
+pub async fn is_valid(ctx: &dyn Context, token_hash: &[u8]) -> Result<bool, WaferError> {
     let now = now_iso();
     let hex = hex_encode(token_hash);
     let filters = vec![
@@ -59,9 +62,14 @@ pub async fn is_valid(ctx: &dyn Context, token_hash: &[u8]) -> Result<bool, Repo
             value: json!(now),
         },
     ];
-    let records = db::list_all(ctx, TABLE, filters)
-        .await
-        .map_err(|e| RepoError::Db(format!("bootstrap_tokens lookup: {e}")))?;
+    let records = db_read::list_bounded(
+        ctx,
+        TABLE,
+        filters,
+        Bound::UniqueKey("bootstrap_tokens.token_hash is declared UNIQUE"),
+    )
+    .await
+    .map_err(|e| db_failed("bootstrap_tokens lookup", e))?;
     Ok(!records.is_empty())
 }
 
@@ -72,20 +80,25 @@ pub async fn is_valid(ctx: &dyn Context, token_hash: &[u8]) -> Result<bool, Repo
 /// Single-use semantics: even if multiple rows happened to share the same
 /// hash (shouldn't, but the schema doesn't enforce uniqueness here), this
 /// removes all of them so subsequent `is_valid` calls return false.
-pub async fn delete_by_hash(ctx: &dyn Context, token_hash: &[u8]) -> Result<(), RepoError> {
+pub async fn delete_by_hash(ctx: &dyn Context, token_hash: &[u8]) -> Result<(), WaferError> {
     let hex = hex_encode(token_hash);
     let filters = vec![Filter {
         field: "token_hash".into(),
         operator: FilterOp::Equal,
         value: json!(hex),
     }];
-    let records = db::list_all(ctx, TABLE, filters)
-        .await
-        .map_err(|e| RepoError::Db(format!("bootstrap_tokens lookup for delete: {e}")))?;
+    let records = db_read::list_bounded(
+        ctx,
+        TABLE,
+        filters,
+        Bound::UniqueKey("bootstrap_tokens.token_hash is declared UNIQUE"),
+    )
+    .await
+    .map_err(|e| db_failed("bootstrap_tokens lookup for delete", e))?;
     for record in records {
         db::delete(ctx, TABLE, &record.id)
             .await
-            .map_err(|e| RepoError::Db(format!("bootstrap_tokens delete: {e}")))?;
+            .map_err(|e| db_failed("bootstrap_tokens delete", e))?;
     }
     Ok(())
 }
@@ -104,7 +117,7 @@ pub async fn delete_by_hash(ctx: &dyn Context, token_hash: &[u8]) -> Result<(), 
 /// serializes the two `DELETE`s, so at most one caller's `take_valid_by_hash`
 /// returns `true`. Callers MUST perform this consumption *before* creating
 /// the privileged account, so only the winner of the atomic take proceeds.
-pub async fn take_valid_by_hash(ctx: &dyn Context, token_hash: &[u8]) -> Result<bool, RepoError> {
+pub async fn take_valid_by_hash(ctx: &dyn Context, token_hash: &[u8]) -> Result<bool, WaferError> {
     let now = now_iso();
     let hex = hex_encode(token_hash);
     let filters = vec![
@@ -121,7 +134,7 @@ pub async fn take_valid_by_hash(ctx: &dyn Context, token_hash: &[u8]) -> Result<
     ];
     let records = db::take_by_filters(ctx, TABLE, filters)
         .await
-        .map_err(|e| RepoError::Db(format!("bootstrap_tokens take_valid_by_hash: {e}")))?;
+        .map_err(|e| db_failed("bootstrap_tokens take_valid_by_hash", e))?;
     Ok(!records.is_empty())
 }
 
@@ -144,11 +157,7 @@ mod typed_client_tests {
 
     #[tokio::test]
     async fn insert_then_validate_round_trips_under_wrap() {
-        let ctx = TestContext::with_auth().await.with_wrap(
-            "wafer-run/auth",
-            vec![],
-            "impresspress/admin",
-        );
+        let ctx = TestContext::with_auth().await.running_as("wafer-run/auth");
         let hash = vec![0xab_u8; 32];
         insert(&ctx, hash.clone(), &future_iso(3600)).await.unwrap();
         assert!(is_valid(&ctx, &hash).await.unwrap());
@@ -156,22 +165,14 @@ mod typed_client_tests {
 
     #[tokio::test]
     async fn unknown_hash_is_invalid() {
-        let ctx = TestContext::with_auth().await.with_wrap(
-            "wafer-run/auth",
-            vec![],
-            "impresspress/admin",
-        );
+        let ctx = TestContext::with_auth().await.running_as("wafer-run/auth");
         let hash = vec![0xcd_u8; 32];
         assert!(!is_valid(&ctx, &hash).await.unwrap());
     }
 
     #[tokio::test]
     async fn expired_hash_is_invalid() {
-        let ctx = TestContext::with_auth().await.with_wrap(
-            "wafer-run/auth",
-            vec![],
-            "impresspress/admin",
-        );
+        let ctx = TestContext::with_auth().await.running_as("wafer-run/auth");
         let hash = vec![0xef_u8; 32];
         insert(&ctx, hash.clone(), &past_iso(3600)).await.unwrap();
         assert!(!is_valid(&ctx, &hash).await.unwrap());
@@ -179,11 +180,7 @@ mod typed_client_tests {
 
     #[tokio::test]
     async fn insert_then_delete_round_trips_under_wrap() {
-        let ctx = TestContext::with_auth().await.with_wrap(
-            "wafer-run/auth",
-            vec![],
-            "impresspress/admin",
-        );
+        let ctx = TestContext::with_auth().await.running_as("wafer-run/auth");
         let hash = vec![0xff_u8; 32];
         insert(&ctx, hash.clone(), &future_iso(3600)).await.unwrap();
         assert!(is_valid(&ctx, &hash).await.unwrap());
@@ -193,11 +190,7 @@ mod typed_client_tests {
 
     #[tokio::test]
     async fn take_valid_by_hash_consumes_the_row_exactly_once() {
-        let ctx = TestContext::with_auth().await.with_wrap(
-            "wafer-run/auth",
-            vec![],
-            "impresspress/admin",
-        );
+        let ctx = TestContext::with_auth().await.running_as("wafer-run/auth");
         let hash = vec![0x11_u8; 32];
         insert(&ctx, hash.clone(), &future_iso(3600)).await.unwrap();
 
@@ -211,24 +204,59 @@ mod typed_client_tests {
         );
     }
 
+    /// The same single-use contract as
+    /// [`take_valid_by_hash_consumes_the_row_exactly_once`], but over a
+    /// file-backed database — the read/write-split topology every native
+    /// deployment runs, and the one the in-memory fixture above cannot
+    /// produce (see [`TestContext::new_on_disk`]).
+    ///
+    /// `take_valid_by_hash` is a `DELETE … RETURNING`, a write. Dispatched
+    /// down the read path it reaches a `SQLITE_OPEN_READ_ONLY` connection and
+    /// fails, and `wafer-block-sqlite`'s pre-fix `run_fetch` dropped that
+    /// per-row failure as if it were a decode error, so the whole call
+    /// returned `Ok(vec![])` — no rows, no error. That is `Ok(false)` here,
+    /// and the redemption handler (`POST /b/auth/api/bootstrap`,
+    /// [`crate::blocks::auth_ui::api::bootstrap`]) answers `Ok(false)` with
+    /// `err_unauthorized("invalid or expired bootstrap token")`: on native,
+    /// redemption of a perfectly valid token could not succeed at all. The
+    /// failure is closed, not open — the token is never accepted, so it is
+    /// also never replayed — but it is invisible to every in-memory test,
+    /// which is why this one exists.
+    #[tokio::test]
+    async fn take_valid_by_hash_consumes_the_row_on_a_file_backed_database() {
+        let ctx = TestContext::with_auth_on_disk()
+            .await
+            .running_as("wafer-run/auth");
+        let hash = vec![0x44_u8; 32];
+        insert(&ctx, hash.clone(), &future_iso(3600)).await.unwrap();
+
+        assert!(
+            take_valid_by_hash(&ctx, &hash).await.unwrap(),
+            "the take must reach the write connection and delete the row: a \
+             valid, unexpired bootstrap token that reports itself unconsumable \
+             makes redemption answer 401 on every native deployment"
+        );
+        assert!(
+            !is_valid(&ctx, &hash).await.unwrap(),
+            "the redeemed token must be gone from the table, not merely \
+             reported as taken"
+        );
+        assert!(
+            !take_valid_by_hash(&ctx, &hash).await.unwrap(),
+            "second take on the same hash must find nothing left to consume"
+        );
+    }
+
     #[tokio::test]
     async fn take_valid_by_hash_unknown_hash_returns_false() {
-        let ctx = TestContext::with_auth().await.with_wrap(
-            "wafer-run/auth",
-            vec![],
-            "impresspress/admin",
-        );
+        let ctx = TestContext::with_auth().await.running_as("wafer-run/auth");
         let hash = vec![0x22_u8; 32];
         assert!(!take_valid_by_hash(&ctx, &hash).await.unwrap());
     }
 
     #[tokio::test]
     async fn take_valid_by_hash_does_not_consume_an_expired_row() {
-        let ctx = TestContext::with_auth().await.with_wrap(
-            "wafer-run/auth",
-            vec![],
-            "impresspress/admin",
-        );
+        let ctx = TestContext::with_auth().await.running_as("wafer-run/auth");
         let hash = vec![0x33_u8; 32];
         insert(&ctx, hash.clone(), &past_iso(3600)).await.unwrap();
 

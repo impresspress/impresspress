@@ -6,13 +6,14 @@ use super::{
         AdminPurchaseListQuery, BuyerOrderDetailResponse, BuyerOrderListResponse, BuyerOrderView,
         BuyerRefundView, DisputeView, LineItemView, OrderStatus, PageQuery, PurchaseDetailResponse,
         PurchaseListResponse, PurchaseView, RefundRequest, RefundResult, RefundResultStatus,
-        RefundView, SellerOrderDetailResponse, SellerOrderListQuery, SellerOrderListResponse,
-        SellerOrderView,
+        RefundStatus, RefundView, SellerOrderDetailResponse, SellerOrderListQuery,
+        SellerOrderListResponse, SellerOrderView,
     },
     repo, stripe_provider,
 };
 use crate::{
-    http::{err_bad_request, err_forbidden, err_internal, err_not_found, ok_json},
+    blocks::crud,
+    http::{err_bad_request, err_forbidden, err_internal, ok_json},
     util::RecordExt,
 };
 
@@ -31,7 +32,7 @@ async fn order_page(
 ) -> Result<wafer_core::clients::database::RecordList, OutputStream> {
     repo::purchases::list_paginated(ctx, filters, i64::from(page), i64::from(page_size))
         .await
-        .map_err(|e| err_internal("Database error", e))
+        .map_err(|e| crud::db_error_internal(e, "Database error"))
 }
 
 pub async fn handle_list_user(ctx: &dyn Context, msg: &Message) -> OutputStream {
@@ -77,7 +78,7 @@ pub async fn handle_list_seller(ctx: &dyn Context, msg: &Message) -> OutputStrea
     let account = match repo::seller_accounts::get_for_user(ctx, msg.user_id()).await {
         Ok(Some(account)) => account,
         Ok(None) => return err_forbidden("Complete seller setup before viewing seller orders"),
-        Err(error) => return err_internal("Database error", error),
+        Err(error) => return crud::db_error_internal(error, "Database error"),
     };
     let query = SellerOrderListQuery::from_message(msg);
     let mut filters = vec![Filter {
@@ -113,14 +114,30 @@ async fn order_relations(
     Ok(OrderRelations {
         line_items: repo::purchases::list_line_items(ctx, purchase_id)
             .await
-            .map_err(|e| err_internal("Could not load purchase line items", e))?,
+            .map_err(|e| crud::db_error_internal(e, "Could not load purchase line items"))?,
         refunds: repo::refunds::list_for_purchase(ctx, purchase_id)
             .await
-            .map_err(|e| err_internal("Could not load purchase refunds", e))?,
+            .map_err(|e| crud::db_error_internal(e, "Could not load purchase refunds"))?,
         disputes: repo::disputes::list_for_purchase(ctx, purchase_id)
             .await
-            .map_err(|e| err_internal("Could not load purchase disputes", e))?,
+            .map_err(|e| crud::db_error_internal(e, "Could not load purchase disputes"))?,
     })
+}
+
+/// The child rows of one order, projected, or the 500 a row outside its
+/// contract earns.
+///
+/// A *detail* response fails loudly where [`PurchaseListResponse::from_record_list`]
+/// degrades: a page of orders that drops one unreadable row still answers the
+/// question the caller asked, but an order detail that silently omits a refund
+/// or a dispute answers it wrongly. The row is the response here.
+fn child_rows<T>(
+    rows: impl IntoIterator<Item = Result<T, wafer_run::WaferError>>,
+    entity: &str,
+) -> Result<Vec<T>, OutputStream> {
+    rows.into_iter()
+        .collect::<Result<Vec<T>, _>>()
+        .map_err(|error| err_internal(&format!("{entity} row is outside the contract"), error))
 }
 
 /// The caller's own order. Disputes are not included: a dispute is a matter
@@ -137,6 +154,20 @@ async fn buyer_order_response(
         Ok(view) => view,
         Err(error) => return err_internal("Order row is outside the contract", error),
     };
+    let refunds = match child_rows(
+        relations.refunds.iter().map(BuyerRefundView::from_record),
+        "Refund",
+    ) {
+        Ok(refunds) => refunds,
+        Err(out) => return out,
+    };
+    let disputes = match child_rows(
+        relations.disputes.iter().map(DisputeView::from_record),
+        "Dispute",
+    ) {
+        Ok(disputes) => disputes,
+        Err(out) => return out,
+    };
     ok_json(&BuyerOrderDetailResponse {
         purchase: view,
         line_items: relations
@@ -144,16 +175,8 @@ async fn buyer_order_response(
             .iter()
             .map(LineItemView::from_record)
             .collect(),
-        refunds: relations
-            .refunds
-            .iter()
-            .map(BuyerRefundView::from_record)
-            .collect(),
-        disputes: relations
-            .disputes
-            .iter()
-            .map(DisputeView::from_record)
-            .collect(),
+        refunds,
+        disputes,
     })
 }
 
@@ -170,6 +193,20 @@ async fn seller_order_response(
         Ok(view) => view,
         Err(error) => return err_internal("Order row is outside the contract", error),
     };
+    let refunds = match child_rows(
+        relations.refunds.iter().map(RefundView::from_record),
+        "Refund",
+    ) {
+        Ok(refunds) => refunds,
+        Err(out) => return out,
+    };
+    let disputes = match child_rows(
+        relations.disputes.iter().map(DisputeView::from_record),
+        "Dispute",
+    ) {
+        Ok(disputes) => disputes,
+        Err(out) => return out,
+    };
     ok_json(&SellerOrderDetailResponse {
         purchase: view,
         line_items: relations
@@ -177,16 +214,8 @@ async fn seller_order_response(
             .iter()
             .map(LineItemView::from_record)
             .collect(),
-        refunds: relations
-            .refunds
-            .iter()
-            .map(RefundView::from_record)
-            .collect(),
-        disputes: relations
-            .disputes
-            .iter()
-            .map(DisputeView::from_record)
-            .collect(),
+        refunds,
+        disputes,
     })
 }
 
@@ -203,6 +232,20 @@ async fn purchase_response(
         Ok(view) => view,
         Err(error) => return err_internal("Order row is outside the contract", error),
     };
+    let refunds = match child_rows(
+        relations.refunds.iter().map(RefundView::from_record),
+        "Refund",
+    ) {
+        Ok(refunds) => refunds,
+        Err(out) => return out,
+    };
+    let disputes = match child_rows(
+        relations.disputes.iter().map(DisputeView::from_record),
+        "Dispute",
+    ) {
+        Ok(disputes) => disputes,
+        Err(out) => return out,
+    };
     ok_json(&PurchaseDetailResponse {
         purchase: view,
         line_items: relations
@@ -210,43 +253,20 @@ async fn purchase_response(
             .iter()
             .map(LineItemView::from_record)
             .collect(),
-        refunds: relations
-            .refunds
-            .iter()
-            .map(RefundView::from_record)
-            .collect(),
-        disputes: relations
-            .disputes
-            .iter()
-            .map(DisputeView::from_record)
-            .collect(),
+        refunds,
+        disputes,
     })
 }
 
 pub async fn handle_get(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    // Prefer the router-populated `{id}` path var (set by the endpoint
-    // matcher), falling back to stripping the known prefixes for hand-built
-    // test messages.
-    let id = {
-        let var = msg.var("id");
-        if !var.is_empty() {
-            var
-        } else {
-            msg.path()
-                .strip_prefix("/admin/b/products/purchases/")
-                .or_else(|| msg.path().strip_prefix("/b/products/purchases/"))
-                .unwrap_or("")
-                .trim_matches('/')
-        }
+    let id = match crud::path_id(msg, "Purchase") {
+        Ok(value) => value,
+        Err(response) => return response,
     };
-    if id.is_empty() {
-        return err_bad_request("Missing purchase ID");
-    }
 
     let purchase = match repo::purchases::get(ctx, id).await {
         Ok(p) => p,
-        Err(e) if e.code == ErrorCode::NotFound => return err_not_found("Purchase not found"),
-        Err(e) => return err_internal("Database error", e),
+        Err(e) => return crud::db_error(e, "Purchase not found", "Database error"),
     };
 
     // A buyer may read only their own order. An admin reading this same path
@@ -271,45 +291,30 @@ pub async fn handle_get(ctx: &dyn Context, msg: &Message) -> OutputStream {
 /// output types: routing already gates this one at `AuthLevel::Admin`, so
 /// there is no ownership check to make here.
 pub async fn handle_get_admin(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let id = {
-        let var = msg.var("id");
-        if !var.is_empty() {
-            var
-        } else {
-            msg.path()
-                .strip_prefix("/admin/b/products/api/admin/purchases/")
-                .or_else(|| msg.path().strip_prefix("/b/products/api/admin/purchases/"))
-                .unwrap_or("")
-                .trim_matches('/')
-        }
+    let id = match crud::path_id(msg, "Purchase") {
+        Ok(value) => value,
+        Err(response) => return response,
     };
-    if id.is_empty() {
-        return err_bad_request("Missing purchase ID");
-    }
     let purchase = match repo::purchases::get(ctx, id).await {
         Ok(p) => p,
-        Err(e) if e.code == ErrorCode::NotFound => return err_not_found("Purchase not found"),
-        Err(e) => return err_internal("Database error", e),
+        Err(e) => return crud::db_error(e, "Purchase not found", "Database error"),
     };
     purchase_response(ctx, purchase).await
 }
 
 pub async fn handle_get_seller(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let id = msg.var("id");
-    if id.is_empty() {
-        return err_bad_request("Missing purchase ID");
-    }
+    let id = match crud::path_id(msg, "Purchase") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     let account = match repo::seller_accounts::get_for_user(ctx, msg.user_id()).await {
         Ok(Some(account)) => account,
         Ok(None) => return err_forbidden("Complete seller setup before viewing seller orders"),
-        Err(error) => return err_internal("Database error", error),
+        Err(error) => return crud::db_error_internal(error, "Database error"),
     };
     let purchase = match repo::purchases::get(ctx, id).await {
         Ok(purchase) => purchase,
-        Err(error) if error.code == ErrorCode::NotFound => {
-            return err_not_found("Purchase not found")
-        }
-        Err(error) => return err_internal("Database error", error),
+        Err(error) => return crud::db_error(error, "Purchase not found", "Database error"),
     };
     if purchase.str_field("seller_account_id") != account.id {
         return err_forbidden("Access denied");
@@ -317,18 +322,49 @@ pub async fn handle_get_seller(ctx: &dyn Context, msg: &Message) -> OutputStream
     seller_order_response(ctx, purchase).await
 }
 
+/// The refund ledger state of a row, or the response a value outside the
+/// contract earns.
+///
+/// The ledger's own column, not the provider's: `provider_status` beside it
+/// carries Stripe's vocabulary and stays a string.
+fn refund_status(
+    record: &wafer_core::clients::database::Record,
+) -> Result<RefundStatus, OutputStream> {
+    repo::refunds::status_of(record)
+        .map_err(|error| err_internal("Refund row is outside the contract", error))
+}
+
+/// One refund's outcome as the client is told it, or the 500 an undecodable
+/// ledger row earns.
+fn refund_json(
+    purchase: &wafer_core::clients::database::Record,
+    refund: &wafer_core::clients::database::Record,
+) -> OutputStream {
+    match refund_result(purchase, refund) {
+        Ok(result) => ok_json(&result),
+        Err(out) => out,
+    }
+}
+
 fn refund_result(
     purchase: &wafer_core::clients::database::Record,
     refund: &wafer_core::clients::database::Record,
-) -> RefundResult {
-    RefundResult {
+) -> Result<RefundResult, OutputStream> {
+    // Three ledger states collapse into two answers: the API's
+    // `RefundResultStatus` says only whether the money is back, and
+    // `provider_succeeded` — the provider has paid but the order's refunded
+    // total has not been settled — is not yet "back". It has always been
+    // reported as `pending`, and this match is where that stops being an
+    // accident of a `_` arm. The `_` arm also matched `canceled`, which is a
+    // value of the row's `provider_status` and never of its `status`.
+    Ok(RefundResult {
         purchase_id: purchase.id.clone(),
         refund_id: refund.id.clone(),
         provider_refund_id: refund.str_field("provider_refund_id").to_string(),
-        status: match refund.str_field("status") {
-            "succeeded" => RefundResultStatus::Succeeded,
-            "failed" | "canceled" => RefundResultStatus::Failed,
-            _ => RefundResultStatus::Pending,
+        status: match refund_status(refund)? {
+            RefundStatus::Succeeded => RefundResultStatus::Succeeded,
+            RefundStatus::Failed => RefundResultStatus::Failed,
+            RefundStatus::Pending | RefundStatus::ProviderSucceeded => RefundResultStatus::Pending,
         },
         provider_status: refund.str_field("provider_status").to_string(),
         amount_minor: refund.i64_field("amount_minor"),
@@ -336,7 +372,7 @@ fn refund_result(
         order_total_minor: purchase.i64_field("total_cents"),
         currency: purchase.str_field("currency").to_ascii_uppercase(),
         livemode: refund.bool_field("livemode"),
-    }
+    })
 }
 
 fn manual_refund_result(
@@ -365,28 +401,11 @@ fn valid_refund_operation_key(value: &str) -> bool {
             .all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'-'))
 }
 
-fn admin_refund_id(msg: &Message) -> String {
-    // `/admin/b/products/purchases/{id}/refund` — prefer the matcher-bound
-    // `{id}`, falling back to prefix/suffix stripping for hand-built tests.
-    {
-        let var = msg.var("id");
-        if !var.is_empty() {
-            var.to_string()
-        } else {
-            msg.path()
-                .strip_prefix("/admin/b/products/purchases/")
-                .and_then(|s| s.strip_suffix("/refund"))
-                .unwrap_or("")
-                .to_string()
-        }
-    }
-}
-
 pub async fn handle_refund(ctx: &dyn Context, msg: &Message, input: InputStream) -> OutputStream {
-    let id = admin_refund_id(msg);
-    if id.is_empty() {
-        return err_bad_request("Missing purchase ID");
-    }
+    let id = match crud::path_id(msg, "Purchase") {
+        Ok(value) => value.to_string(),
+        Err(response) => return response,
+    };
     refund_purchase(ctx, msg, input, id).await
 }
 
@@ -395,21 +414,18 @@ pub async fn handle_seller_refund(
     msg: &Message,
     input: InputStream,
 ) -> OutputStream {
-    let id = msg.var("id").to_string();
-    if id.is_empty() {
-        return err_bad_request("Missing purchase ID");
-    }
+    let id = match crud::path_id(msg, "Purchase") {
+        Ok(value) => value.to_string(),
+        Err(response) => return response,
+    };
     let account = match repo::seller_accounts::get_for_user(ctx, msg.user_id()).await {
         Ok(Some(account)) => account,
         Ok(None) => return err_forbidden("Complete seller setup before refunding seller orders"),
-        Err(error) => return err_internal("Database error", error),
+        Err(error) => return crud::db_error_internal(error, "Database error"),
     };
     let purchase = match repo::purchases::get(ctx, &id).await {
         Ok(purchase) => purchase,
-        Err(error) if error.code == ErrorCode::NotFound => {
-            return err_not_found("Purchase not found")
-        }
-        Err(error) => return err_internal("Database error", error),
+        Err(error) => return crud::db_error(error, "Purchase not found", "Database error"),
     };
     if purchase.str_field("seller_account_id") != account.id {
         return err_forbidden("Access denied");
@@ -423,7 +439,10 @@ async fn refund_purchase(
     input: InputStream,
     id: String,
 ) -> OutputStream {
-    let raw = input.collect_to_bytes().await;
+    let raw = match input.collect_to_bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => return OutputStream::error(e),
+    };
     // An absent body is a legitimate "no reason given" (every caller today
     // sends `{}` for that, but a genuinely empty body is treated the same
     // way defensively). A NON-empty body that fails to parse is malformed
@@ -463,10 +482,7 @@ async fn refund_purchase(
 
     let purchase = match repo::purchases::get(ctx, &id).await {
         Ok(purchase) => purchase,
-        Err(error) if error.code == ErrorCode::NotFound => {
-            return err_not_found("Purchase not found")
-        }
-        Err(error) => return err_internal("Database error", error),
+        Err(error) => return crud::db_error(error, "Purchase not found", "Database error"),
     };
     let order_status = match OrderStatus::from_record(&purchase) {
         Ok(status) => status,
@@ -507,7 +523,7 @@ async fn refund_purchase(
         // recorded outcome instead of deducting a second time.
         let existing = match repo::refunds::get_by_idempotency_key(ctx, &idempotency_key).await {
             Ok(existing) => existing,
-            Err(error) => return err_internal("Could not inspect refund ledger", error),
+            Err(error) => return crud::db_error_internal(error, "Could not inspect refund ledger"),
         };
         let claim = if let Some(existing) = existing {
             if existing.str_field("purchase_id") != id {
@@ -524,10 +540,16 @@ async fn refund_purchase(
                     "Refund idempotency key was already used for a different request",
                 );
             }
-            if existing.str_field("status") == "succeeded" {
+            let existing_status = match refund_status(&existing) {
+                Ok(status) => status,
+                Err(out) => return out,
+            };
+            if existing_status == RefundStatus::Succeeded {
                 let current = match repo::purchases::get(ctx, &id).await {
                     Ok(current) => current,
-                    Err(error) => return err_internal("Could not load refunded purchase", error),
+                    Err(error) => {
+                        return crud::db_error_internal(error, "Could not load refunded purchase")
+                    }
                 };
                 return ok_json(&manual_refund_result(
                     &current,
@@ -580,7 +602,9 @@ async fn refund_purchase(
             {
                 return err_bad_request(&error.message)
             }
-            Err(error) => return err_internal("Could not claim refund operation", error),
+            Err(error) => {
+                return crud::db_error_internal(error, "Could not claim refund operation")
+            }
         };
         // Apply against the claimed absolute target so a retry of an
         // interrupted operation converges instead of deducting again.
@@ -595,7 +619,10 @@ async fn refund_purchase(
         {
             Ok(updated) => {
                 if let Err(error) = repo::refunds::mark_succeeded(ctx, &refund.id).await {
-                    return err_internal("Could not record manual refund outcome", error);
+                    return crud::db_error_internal(
+                        error,
+                        "Could not record manual refund outcome",
+                    );
                 }
                 ok_json(&manual_refund_result(
                     &updated,
@@ -605,7 +632,7 @@ async fn refund_purchase(
             Err(error) if error.code == ErrorCode::FailedPrecondition => {
                 err_bad_request(&error.message)
             }
-            Err(error) => err_internal("Could not record manual refund", error),
+            Err(error) => crud::db_error_internal(error, "Could not record manual refund"),
         };
     }
     if payment_intent_id.is_empty() {
@@ -614,7 +641,7 @@ async fn refund_purchase(
 
     let existing = match repo::refunds::get_by_idempotency_key(ctx, &idempotency_key).await {
         Ok(existing) => existing,
-        Err(error) => return err_internal("Could not inspect refund ledger", error),
+        Err(error) => return crud::db_error_internal(error, "Could not inspect refund ledger"),
     };
     let provider_reason = body
         .provider_reason
@@ -683,7 +710,7 @@ async fn refund_purchase(
         {
             return err_bad_request(&error.message)
         }
-        Err(error) => return err_internal("Could not claim refund operation", error),
+        Err(error) => return crud::db_error_internal(error, "Could not claim refund operation"),
     };
     let provider_operation = match repo::provider_operations::ensure(
         ctx,
@@ -697,28 +724,39 @@ async fn refund_purchase(
     .await
     {
         Ok(operation) => operation,
-        Err(error) => return err_internal("Could not enqueue refund reconciliation", error),
+        Err(error) => {
+            return crud::db_error_internal(error, "Could not enqueue refund reconciliation")
+        }
     };
 
-    if refund.str_field("status") == "succeeded" {
+    let claimed_status = match refund_status(&refund) {
+        Ok(status) => status,
+        Err(out) => return out,
+    };
+    if claimed_status == RefundStatus::Succeeded {
         if let Err(error) = repo::provider_operations::resolve_unleased(
             ctx,
             &provider_operation.id,
             true,
-            refund.str_field("response_json"),
+            &refund.json_text_field("response_json"),
             "",
         )
         .await
         {
-            return err_internal("Could not complete refund reconciliation operation", error);
+            return crud::db_error_internal(
+                error,
+                "Could not complete refund reconciliation operation",
+            );
         }
         let current = match repo::purchases::get(ctx, &id).await {
             Ok(current) => current,
-            Err(error) => return err_internal("Could not load refunded purchase", error),
+            Err(error) => {
+                return crud::db_error_internal(error, "Could not load refunded purchase")
+            }
         };
-        return ok_json(&refund_result(&current, &refund));
+        return refund_json(&current, &refund);
     }
-    if refund.str_field("status") == "provider_succeeded" {
+    if claimed_status == RefundStatus::ProviderSucceeded {
         let current = match repo::purchases::reconcile_refund_total(
             ctx,
             &id,
@@ -729,28 +767,35 @@ async fn refund_purchase(
         .await
         {
             Ok(current) => current,
-            Err(error) => return err_internal("Could not reconcile successful refund", error),
+            Err(error) => {
+                return crud::db_error_internal(error, "Could not reconcile successful refund")
+            }
         };
         refund = match repo::refunds::mark_succeeded(ctx, &refund.id).await {
             Ok(refund) => refund,
-            Err(error) => return err_internal("Could not complete refund ledger", error),
+            Err(error) => {
+                return crud::db_error_internal(error, "Could not complete refund ledger")
+            }
         };
         if let Err(error) = repo::provider_operations::resolve_unleased(
             ctx,
             &provider_operation.id,
             true,
-            refund.str_field("response_json"),
+            &refund.json_text_field("response_json"),
             "",
         )
         .await
         {
-            return err_internal("Could not complete refund reconciliation operation", error);
+            return crud::db_error_internal(
+                error,
+                "Could not complete refund reconciliation operation",
+            );
         }
-        return ok_json(&refund_result(&current, &refund));
+        return refund_json(&current, &refund);
     }
-    if refund.str_field("status") == "pending" && !refund.str_field("provider_refund_id").is_empty()
+    if claimed_status == RefundStatus::Pending && !refund.str_field("provider_refund_id").is_empty()
     {
-        return ok_json(&refund_result(&purchase, &refund));
+        return refund_json(&purchase, &refund);
     }
 
     let params = stripe_provider::StripeRefundParams {
@@ -824,7 +869,9 @@ async fn refund_purchase(
     .await
     {
         Ok(refund) => refund,
-        Err(error) => return err_internal("Could not record Stripe refund response", error),
+        Err(error) => {
+            return crud::db_error_internal(error, "Could not record Stripe refund response")
+        }
     };
     if provider.status != "succeeded" {
         if matches!(provider.status.as_str(), "failed" | "canceled") {
@@ -837,10 +884,10 @@ async fn refund_purchase(
             )
             .await
             {
-                return err_internal("Could not resolve failed refund operation", error);
+                return crud::db_error_internal(error, "Could not resolve failed refund operation");
             }
         }
-        return ok_json(&refund_result(&purchase, &refund));
+        return refund_json(&purchase, &refund);
     }
     let updated = match repo::purchases::reconcile_refund_total(
         ctx,
@@ -852,11 +899,13 @@ async fn refund_purchase(
     .await
     {
         Ok(updated) => updated,
-        Err(error) => return err_internal("Could not reconcile successful Stripe refund", error),
+        Err(error) => {
+            return crud::db_error_internal(error, "Could not reconcile successful Stripe refund")
+        }
     };
     refund = match repo::refunds::mark_succeeded(ctx, &refund.id).await {
         Ok(refund) => refund,
-        Err(error) => return err_internal("Could not complete refund ledger", error),
+        Err(error) => return crud::db_error_internal(error, "Could not complete refund ledger"),
     };
     if let Err(error) = repo::provider_operations::resolve_unleased(
         ctx,
@@ -867,7 +916,10 @@ async fn refund_purchase(
     )
     .await
     {
-        return err_internal("Could not complete refund reconciliation operation", error);
+        return crud::db_error_internal(
+            error,
+            "Could not complete refund reconciliation operation",
+        );
     }
-    ok_json(&refund_result(&updated, &refund))
+    refund_json(&updated, &refund)
 }

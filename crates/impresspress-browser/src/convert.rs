@@ -7,17 +7,14 @@
 //! reading the request body/headers, the Service-Worker cookie re-injection,
 //! and building `web_sys::Response` (buffered or `ReadableStream`-backed).
 
-use futures::{SinkExt, StreamExt};
+use futures::StreamExt;
+use impresspress_core::streaming::{self, CappedCollect};
 use js_sys::{ArrayBuffer, Uint8Array};
 use wafer_block::{
     http_codec::{self, ResponseMetaPart},
-    meta::META_RESP_CONTENT_TYPE,
     stream::StreamEvent,
-    streams::{
-        input::InputStream,
-        output::{BufferedResponse, OutputStream, TerminalNotResponse},
-    },
-    Message, MetaEntry, MetaGet,
+    streams::{input::InputStream, output::OutputStream},
+    Message, MetaEntry,
 };
 use wasm_bindgen::prelude::*;
 use wasm_bindgen_futures::JsFuture;
@@ -34,6 +31,20 @@ use web_sys::{Headers, ResponseInit};
 /// the `web_sys` body/header reads and the Service-Worker cookie re-injection
 /// are browser-specific. The remote address is always `"127.0.0.1"` — in a
 /// Service Worker the request comes from the same device.
+///
+/// A body over [`streaming::MAX_REQUEST_BODY_BYTES`] is dropped rather than
+/// dispatched: the message is marked with
+/// [`streaming::META_REQ_BODY_TOO_LARGE`] and paired with an empty
+/// `InputStream`, and `impresspress_core::pipeline::handle_request` answers
+/// 413 from inside the flow — where the CORS and security headers and the
+/// `request_logs` row are. An `Err` here becomes the Service Worker's own
+/// failure and the client sees a fetch that died rather than a status; a
+/// `Response` built here would skip the flow.
+///
+/// Unlike the Cloudflare adapter there is no pre-read check to make: a
+/// `Request` handed to a Service Worker is read through `array_buffer()`, so
+/// the bytes are resident before their length can be measured. The cap
+/// changes the status, not the peak memory.
 pub async fn request_to_message(
     request: &web_sys::Request,
 ) -> Result<(Message, InputStream), JsValue> {
@@ -51,17 +62,18 @@ pub async fn request_to_message(
         search
     };
 
-    // Read body bytes via ArrayBuffer.
-    const MAX_BODY_SIZE: usize = 10 * 1024 * 1024; // 10MB
-    let body: Vec<u8> = {
+    // Read body bytes via ArrayBuffer, and measure them against the shared
+    // transport cap. An over-cap body is dropped here rather than copied out.
+    let (body, too_large): (Vec<u8>, bool) = {
         let promise = request.array_buffer()?;
         let ab_val = JsFuture::from(promise).await?;
         let ab: ArrayBuffer = ab_val.dyn_into()?;
         let arr = Uint8Array::new(&ab);
-        if arr.length() as usize > MAX_BODY_SIZE {
-            return Err(JsValue::from_str("Request body too large"));
+        if arr.length() as usize > streaming::MAX_REQUEST_BODY_BYTES {
+            (Vec::new(), true)
+        } else {
+            (arr.to_vec(), false)
         }
-        arr.to_vec()
     };
 
     // Collect headers into (name, value) pairs for the codec.
@@ -163,15 +175,23 @@ pub async fn request_to_message(
     }
 
     // `build_http_message` builds `kind`, `http.*` and normalized `req.*` meta
-    // from the method+path. The browser serves paths as-received (no `/api`
-    // prefix to strip, unlike the Cloudflare adapter), so no post-fixup.
-    let msg = http_codec::build_http_message(
+    // from the method+path. Paths are served exactly as received — nothing in
+    // the request path rewrites them.
+    let mut msg = http_codec::build_http_message(
         &method,
         &path,
         &raw_query,
         "127.0.0.1",
         header_pairs.iter().map(|(k, v)| (k.as_str(), v.as_str())),
     );
+
+    if too_large {
+        msg.set_meta(
+            streaming::META_REQ_BODY_TOO_LARGE,
+            streaming::BODY_TOO_LARGE_VALUE,
+        );
+        return Ok((msg, InputStream::empty()));
+    }
 
     Ok((msg, InputStream::from_bytes(body)))
 }
@@ -276,6 +296,30 @@ fn fetch_site_for(
         // is provably ours passes. An absent one is refused rather than
         // reported as `none` — see the note above; this function never
         // returns `none`.
+        //
+        // `collapsible_match` wants this folded into a match guard, with the
+        // refusal falling through to `_` below. Refused on purpose: the
+        // refusal is the security-relevant half, and as a fall-through its
+        // target is whatever arm happens to sit last. Any arm added between
+        // this one and `_` would silently take it over. Kept adjacent to the
+        // condition it belongs to, so the verdict does not depend on arm
+        // order.
+        //
+        // `"cors" | "no-cors"` above is the same shape and clippy does not
+        // flag it — not because an or-pattern cannot carry a guard (it can:
+        // `"cors" | "no-cors" if cond => ..` compiles), simply because the
+        // lint does not fire there.
+        //
+        // The lint itself is toolchain-dependent: measured absent on 1.94.0
+        // and present on 1.98.0. On a toolchain that does not fire it the
+        // `expect` below reports itself as unfulfilled, which is the honest
+        // signal — an `allow` would have read as inert instead.
+        #[expect(
+            clippy::collapsible_match,
+            reason = "the suggested guard leaves the refusal as a fall-through to \
+                      whatever arm sits last; keeping it adjacent to its condition \
+                      is what makes the verdict independent of arm order"
+        )]
         "navigate" => {
             if !referrer.is_empty() && origin_of(referrer) == self_origin {
                 "same-origin"
@@ -313,8 +357,8 @@ fn origin_of(url: &str) -> &str {
 /// Only the canonical `resp.*` meta keys are honored — legacy aliases
 /// (`http.status`, `http.resp.header.*`, `http.resp.set-cookie.*`, a literal
 /// `Content-Type` meta key) are ignored by `http_codec`.
-fn apply_response_meta(headers: &Headers, meta: &[MetaEntry]) -> Result<(), JsValue> {
-    for part in http_codec::response_meta_parts(meta) {
+fn apply_response_parts(headers: &Headers, parts: &[ResponseMetaPart<'_>]) -> Result<(), JsValue> {
+    for part in parts {
         match part {
             ResponseMetaPart::Status(_) => {}
             ResponseMetaPart::Header { name, value } => headers.set(name, value)?,
@@ -325,9 +369,24 @@ fn apply_response_meta(headers: &Headers, meta: &[MetaEntry]) -> Result<(), JsVa
     Ok(())
 }
 
-/// True when `meta` carries an explicit `resp.content_type` entry.
-fn has_content_type(meta: &[MetaEntry]) -> bool {
-    MetaGet::contains_key(meta, META_RESP_CONTENT_TYPE)
+/// Apply transport-neutral [`http_codec::HttpResponseParts`] to a
+/// `web_sys::Response`.
+///
+/// `Set-Cookie` is appended, since the parts may carry several; every other
+/// header is set, so a name the parts repeat in a different case (a
+/// `resp.header.content-type` beside the codec's own `Content-Type`) ends as
+/// one header, the later value winning — what [`apply_response_parts`] does
+/// for a streamed response.
+fn parts_to_response(parts: http_codec::HttpResponseParts) -> Result<web_sys::Response, JsValue> {
+    let headers = Headers::new()?;
+    for (name, value) in &parts.headers {
+        if name.eq_ignore_ascii_case("set-cookie") {
+            headers.append(name, value)?;
+        } else {
+            headers.set(name, value)?;
+        }
+    }
+    make_response(parts.body, parts.status, headers)
 }
 
 /// Build a `web_sys::Response` from raw bytes, a status code, and a
@@ -352,231 +411,115 @@ fn make_response(
     }
 }
 
-/// Pull `Meta` events off the front of an `OutputStream`, stopping at the
-/// first non-Meta event. Returns the accumulated meta and the next event
-/// (if any). Used by `output_to_response` to peek the response's headers
-/// before deciding whether to stream the body or buffer it.
-async fn drain_leading_meta(output: &mut OutputStream) -> (Vec<MetaEntry>, Option<StreamEvent>) {
-    let mut meta = Vec::new();
-    while let Some(ev) = output.next().await {
-        match ev {
-            StreamEvent::Meta(entry) => meta.push(entry),
-            other => return (meta, Some(other)),
-        }
-    }
-    (meta, None)
-}
-
 /// Build a JS `ReadableStream` that yields `first_chunk` and then every
-/// subsequent `Chunk` event from `remaining`. Mid-body `Meta` is dropped
-/// (too late to apply to HTTP headers); any terminal closes the stream.
+/// subsequent `Chunk` event from `remaining`.
+///
+/// The framing is [`streaming::download_body_stream`] — the same function the
+/// Cloudflare adapter pipes into its Worker `ReadableStream`, so the two agree
+/// on what a mid-body failure means: an `Error` terminal (which is also how
+/// wafer-run ends a stream whose producer stopped without a terminal), a
+/// stream with no terminal at all, or a `Halt` after the body started becomes
+/// an `Err` item, which errors the JS stream and aborts the response body.
+/// Mid-body `Meta` is dropped, and a `Complete`, `Drop` or `Continue` terminal
+/// ends the body cleanly.
+///
+/// The status is already committed by the time a body read fails, so an error
+/// cannot be downgraded to a 413/500 — but a reader that gets an abort knows
+/// the bytes are incomplete, which a clean end-of-stream does not tell it. No
+/// file download sets `Content-Length`, so this is the client's only signal.
 fn make_streaming_body(
     first_chunk: Vec<u8>,
-    mut remaining: OutputStream,
+    remaining: OutputStream,
 ) -> wasm_streams::ReadableStream {
-    use futures::channel::mpsc;
-    let (mut tx, rx) = mpsc::channel::<Result<JsValue, JsValue>>(8);
-
-    // Channel cap is 8 and we have one item to send — try_send fits. If it
-    // fails (caller dropped the stream before consuming) we just discard.
-    let _ = tx.try_send(Ok(JsValue::from(Uint8Array::from(first_chunk.as_slice()))));
-
-    wasm_bindgen_futures::spawn_local(async move {
-        while let Some(ev) = remaining.next().await {
-            match ev {
-                StreamEvent::Chunk(bytes) => {
-                    let val: Result<JsValue, JsValue> =
-                        Ok(JsValue::from(Uint8Array::from(bytes.as_slice())));
-                    if tx.send(val).await.is_err() {
-                        // Browser dropped the response stream — stop pumping.
-                        return;
-                    }
-                }
-                // Mid-body Meta is too late to apply to HTTP headers; drop it.
-                StreamEvent::Meta(_) => {}
-                // Any terminal closes the body. Error after partial body has
-                // already streamed bytes can't change the HTTP status — log
-                // and close cleanly so the browser sees a normal end-of-body.
-                StreamEvent::Error(err) => {
-                    web_sys::console::warn_1(
-                        &format!(
-                            "impresspress-browser: streaming response aborted: {}",
-                            err.message
-                        )
-                        .into(),
-                    );
-                    return;
-                }
-                StreamEvent::Complete { .. }
-                | StreamEvent::Drop
-                | StreamEvent::Continue(_)
-                | StreamEvent::Halt { .. } => {
-                    // Mid-body Halt cannot change the HTTP status (headers
-                    // already flushed); treat it as another terminal that
-                    // closes the body cleanly. The browser sees a normal
-                    // end-of-stream.
-                    return;
-                }
-            }
-        }
+    let body = streaming::download_body_stream(first_chunk, remaining).map(|chunk| {
+        chunk
+            .map(|bytes| JsValue::from(Uint8Array::from(bytes.as_slice())))
+            .map_err(|err| {
+                JsValue::from_str(&format!(
+                    "impresspress-browser: streaming response aborted: {}",
+                    err.message
+                ))
+            })
     });
 
-    wasm_streams::ReadableStream::from_stream(rx)
+    wasm_streams::ReadableStream::from_stream(body)
 }
 
 /// Convert a WAFER `OutputStream` into a browser `web_sys::Response`.
 ///
-/// Two paths:
-/// 1. **Streaming** — for blocks that emit leading `Meta` events declaring
-///    `Content-Type: text/event-stream` (or `application/octet-stream`)
-///    BEFORE the first `Chunk`. We classify the leading meta with
-///    `http_codec::response_meta_parts` and apply status + headers to a
-///    `Response` backed by a `ReadableStream`, piping subsequent chunks
-///    straight to the browser — so a multi-minute SSE response isn't held
-///    back behind a buffer that flushes at the very end (which Chrome's idle
-///    keep-alive treats as a hung fetch and drops with `net::ERR_FAILED`).
-///    The meta is applied *before the body finishes*, so this path must NOT
-///    route through `collect_http_response` (which buffers).
+/// Two paths, and the choice between them is [`streaming::wants_streaming`] —
+/// the single decision the request pipeline and every other adapter consult,
+/// so the browser cannot disagree with Cloudflare about whether a given
+/// response streams. The body framing of the streaming path is shared with it
+/// too ([`streaming::download_body_stream`], via [`make_streaming_body`]), so
+/// neither can they disagree about what a mid-body failure does to the body:
+/// 1. **Streaming** — for blocks that declare streaming intent in leading
+///    `Meta` events BEFORE the first `Chunk`, either with a streaming
+///    `resp.content_type` (SSE, `application/octet-stream`) or with the
+///    explicit [`streaming::META_RESP_STREAM`] marker that large binary
+///    download handlers set on a real content type (`application/pdf`,
+///    `image/*`, …). Status + headers are applied to a `Response` backed by a
+///    `ReadableStream` and subsequent chunks are piped straight to the browser
+///    — so a multi-minute SSE response isn't held back behind a buffer that
+///    flushes at the very end (which Chrome's idle keep-alive treats as a hung
+///    fetch and drops with `net::ERR_FAILED`), and a large download never sits
+///    in the Service Worker's heap whole. This path must NOT route through
+///    `collect_http_response` (which buffers).
 /// 2. **Buffered** (default) — for blocks that emit `Chunk(bytes),
 ///    Complete{meta}` via `respond_with_meta`. Status, headers, and body all
 ///    live in the terminal, so we read the whole stream before building the
-///    `Response`. The terminal-event mapping mirrors
-///    `http_codec::collect_http_response` (whose drift decisions —
-///    `Continue` → empty `200`, default `Content-Type: application/json`,
-///    `Ok`/`Halt` identical — are pinned by the codec's tests).
+///    `Response` — under [`streaming::MAX_BUFFERED_RESPONSE_BYTES`], so an
+///    over-large body becomes a clean **413** instead of exhausting the one
+///    linear memory the whole page's runtime shares. The terminal is rendered
+///    by `http_codec::collect_http_response` itself, as on Cloudflare, so the
+///    status, headers, drift decisions and the `500` for meta no transport
+///    can send are the codec's.
 pub async fn output_to_response(mut output: OutputStream) -> Result<web_sys::Response, JsValue> {
-    // Peek leading Meta events without consuming Chunks. The streaming path is
-    // signalled by an early Content-Type meta; buffered blocks send no Meta
-    // before their first Chunk, so this returns an empty vec for them and the
-    // buffered branch below handles the terminal.
-    let (leading_meta, next_event) = drain_leading_meta(&mut output).await;
+    // Peek leading Meta events without consuming Chunks. Buffered blocks send
+    // no Meta before their first Chunk, so this returns an empty vec for them
+    // and the buffered branch below handles the terminal.
+    let (leading_meta, next_event) = streaming::drain_leading_meta(&mut output).await;
 
-    let leading_ct = http_codec::response_meta_parts(&leading_meta).find_map(|part| match part {
-        ResponseMetaPart::ContentType(ct) => Some(ct.to_string()),
-        _ => None,
-    });
-
-    if let (Some(ct), Some(StreamEvent::Chunk(first))) = (leading_ct, &next_event) {
-        if is_streaming_content_type(&ct) {
-            return build_streaming_response(leading_meta, first.clone(), output);
-        }
+    if streaming::wants_streaming(&leading_meta) {
+        return match next_event {
+            // Declared streaming AND a body chunk to forward — stream it.
+            Some(StreamEvent::Chunk(first)) => {
+                build_streaming_response(leading_meta, first, output)
+            }
+            // Declared streaming but the terminal arrived before any body
+            // (empty SSE / empty download) — render the (short) buffered form.
+            other => finalise_capped(collect_capped(output, leading_meta, other).await).await,
+        };
     }
 
-    // Buffered path — drain the remainder, prepending the leading meta + the
-    // event we peeked, then map the terminal to a response exactly as
-    // `http_codec::collect_http_response` would for a non-peeked stream.
-    let terminal = collect_buffered_with_prelude(output, leading_meta, next_event).await;
-    finalise_buffered(terminal)
+    finalise_capped(collect_capped(output, leading_meta, next_event).await).await
 }
 
-/// True for content-types that should stream body chunks to the browser as
-/// they're produced rather than buffer the entire response. Today: SSE and
-/// generic byte streams (which feature blocks use for downloads / archives).
-fn is_streaming_content_type(ct: &str) -> bool {
-    let lower = ct.to_ascii_lowercase();
-    lower.starts_with("text/event-stream") || lower.starts_with("application/octet-stream")
-}
-
-/// Drain the remaining stream into a buffered terminal, prepending the
-/// already-peeked leading meta + next event. Mirrors the contract of
-/// `OutputStream::collect_buffered` (a `Halt` terminal replaces any streamed
-/// prelude), reproduced here because `impresspress-browser` cannot depend on
-/// `impresspress-core`'s `pipeline::collect_buffered_with_prelude`.
-async fn collect_buffered_with_prelude(
+/// Drain the remainder of a buffered response under the shared byte cap.
+async fn collect_capped(
     rest: OutputStream,
     leading_meta: Vec<MetaEntry>,
     next_event: Option<StreamEvent>,
-) -> Result<BufferedResponse, TerminalNotResponse> {
-    match next_event {
-        Some(StreamEvent::Chunk(first)) => match rest.collect_buffered().await {
-            Ok(buf) => {
-                let mut body = first;
-                body.extend(buf.body);
-                let mut meta = leading_meta;
-                meta.extend(buf.meta);
-                Ok(BufferedResponse { body, meta })
-            }
-            Err(terminal) => Err(terminal),
-        },
-        Some(StreamEvent::Meta(_)) => unreachable!("drain_leading_meta consumes Meta events"),
-        Some(StreamEvent::Complete { meta }) => {
-            let mut all_meta = leading_meta;
-            all_meta.extend(meta);
-            Ok(BufferedResponse {
-                body: Vec::new(),
-                meta: all_meta,
-            })
-        }
-        Some(StreamEvent::Halt { body, meta }) => {
-            // Halt carries a complete response; per the `collect_buffered`
-            // contract any prior streamed events — the prelude included — are
-            // replaced by its payload.
-            Err(TerminalNotResponse::Halt(BufferedResponse { body, meta }))
-        }
-        Some(StreamEvent::Error(err)) => Err(TerminalNotResponse::Error(*err)),
-        Some(StreamEvent::Drop) => Err(TerminalNotResponse::Drop),
-        Some(StreamEvent::Continue(msg)) => Err(TerminalNotResponse::Continue(msg)),
-        None => Err(TerminalNotResponse::Malformed),
-    }
+) -> CappedCollect {
+    streaming::collect_capped_with_prelude(
+        rest,
+        leading_meta,
+        next_event,
+        streaming::MAX_BUFFERED_RESPONSE_BYTES,
+    )
+    .await
 }
 
-/// Map a buffered terminal to a `web_sys::Response`, mirroring
-/// `http_codec::collect_http_response`'s terminal handling (the codec maps to
-/// transport-neutral parts; we apply them to `web_sys` types here).
-fn finalise_buffered(
-    result: Result<BufferedResponse, TerminalNotResponse>,
-) -> Result<web_sys::Response, JsValue> {
-    match result {
-        // Ok and Halt are the single buffered code path (codec finding 55).
-        Ok(buf) | Err(TerminalNotResponse::Halt(buf)) => {
-            let status = http_codec::resolve_status(&buf.meta, 200);
+/// Render a capped buffered collection to a `web_sys::Response`.
+async fn finalise_capped(collected: CappedCollect) -> Result<web_sys::Response, JsValue> {
+    match collected {
+        CappedCollect::Terminal(result) => parts_to_response(
+            http_codec::collect_http_response(streaming::terminal_to_stream(result)).await,
+        ),
+        CappedCollect::OverLimit => {
             let headers = Headers::new()?;
-            apply_response_meta(&headers, &buf.meta)?;
-            if !has_content_type(&buf.meta) {
-                headers.set("Content-Type", http_codec::DEFAULT_RESPONSE_CONTENT_TYPE)?;
-            }
-            make_response(buf.body, status, headers)
-        }
-
-        Err(TerminalNotResponse::Error(err)) => {
-            let status = http_codec::resolve_error_status(&err);
-            let headers = Headers::new()?;
-            apply_response_meta(&headers, &err.meta)?;
-            // Error bodies ARE JSON; a `resp.content_type` on the error meta is
-            // superseded (exactly one Content-Type, matching the codec).
-            headers.set("Content-Type", http_codec::DEFAULT_RESPONSE_CONTENT_TYPE)?;
-            // Surface the precise application code (set via
-            // `WaferError::with_detail_code`, carried as `error.code` meta) as a
-            // machine-readable `code` field; the coarse wafer code stays in
-            // `error`. Omitted when no detail code was attached.
-            let mut body = serde_json::json!({
-                "error": err.code,
-                "message": err.message,
-            });
-            if let Some(detail) = err.detail_code() {
-                body["code"] = serde_json::Value::String(detail.to_string());
-            }
-            let body = body.to_string().into_bytes();
-            make_response(body, status, headers)
-        }
-
-        Err(TerminalNotResponse::Drop) => make_response(Vec::new(), 204, Headers::new()?),
-
-        Err(TerminalNotResponse::Continue(msg)) => {
-            // Codec drift: `Continue` at the HTTP boundary → empty-body 200
-            // with the message's response meta applied (nowhere to forward).
-            let headers = Headers::new()?;
-            apply_response_meta(&headers, &msg.meta)?;
-            headers.set("Content-Type", http_codec::DEFAULT_RESPONSE_CONTENT_TYPE)?;
-            make_response(Vec::new(), 200, headers)
-        }
-
-        Err(TerminalNotResponse::Malformed) => {
-            web_sys::console::error_1(
-                &"impresspress-browser: stream ended without terminal event".into(),
-            );
-            let headers = Headers::new()?;
-            make_response(b"internal server error".to_vec(), 500, headers)
+            headers.set("Content-Type", "text/plain; charset=utf-8")?;
+            make_response(b"payload too large".to_vec(), 413, headers)
         }
     }
 }
@@ -585,16 +528,33 @@ fn finalise_buffered(
 /// status + headers) and an `OutputStream` whose remaining events are piped
 /// into the body. Meta is classified and applied *before* the body finishes —
 /// the whole point of the streaming path.
+///
+/// Leading meta no transport can send is answered with the codec's
+/// `unsendable_response` here, before a status or a byte is committed: once
+/// the body streams, a failure can only abort it. Handed the whole leading
+/// meta, the codec's 500 keeps the terminal's sendable security and CORS
+/// headers (`Content-Security-Policy`, `X-Frame-Options`, …) and drops the
+/// ones describing the body it replaces (`Content-Disposition`,
+/// `Content-Encoding`, cache headers), adding `Cache-Control: no-store`.
 fn build_streaming_response(
     leading_meta: Vec<MetaEntry>,
     first_chunk: Vec<u8>,
     remaining: OutputStream,
 ) -> Result<web_sys::Response, JsValue> {
+    let parts = match http_codec::response_meta_parts(&leading_meta) {
+        Ok(parts) => parts,
+        Err(invalid) => {
+            return parts_to_response(http_codec::unsendable_response(&leading_meta, &invalid))
+        }
+    };
     let status = http_codec::resolve_status(&leading_meta, 200);
     let headers = Headers::new()?;
-    apply_response_meta(&headers, &leading_meta)?;
+    apply_response_parts(&headers, &parts)?;
 
-    if !has_content_type(&leading_meta) {
+    if !parts
+        .iter()
+        .any(|part| matches!(part, ResponseMetaPart::ContentType(_)))
+    {
         // Streaming bodies without an explicit Content-Type fall back to
         // octet-stream rather than the JSON default the buffered path uses.
         headers.set("Content-Type", "application/octet-stream")?;
@@ -773,5 +733,448 @@ mod fetch_site_tests {
         assert_eq!(origin_of("http://127.0.0.1:8082"), "http://127.0.0.1:8082");
         assert_eq!(origin_of("about:client"), "");
         assert_eq!(origin_of(""), "");
+    }
+}
+
+/// The two response-shaping defects this adapter carried: a response that
+/// declared streaming intent was buffered anyway unless its content type
+/// happened to be SSE or `application/octet-stream`, and a buffered response
+/// had no ceiling at all.
+///
+/// These build real `OutputStream`s and real `web_sys::Response`s, so they run
+/// under `wasm-pack test --node` (Node ≥18 provides `Response`/`Headers`, and
+/// `OutputStream::from_producer` is `wasm_bindgen_futures::spawn_local` on this
+/// target).
+#[cfg(all(test, target_arch = "wasm32"))]
+mod response_tests {
+    use std::{cell::Cell, rc::Rc};
+
+    use futures::channel::oneshot;
+    use impresspress_core::streaming::{
+        MAX_BUFFERED_RESPONSE_BYTES, META_RESP_STREAM, STREAM_MARKER_VALUE,
+    };
+    use wafer_block::{
+        meta::META_RESP_CONTENT_TYPE, streams::output::OutputStream, ErrorCode, MetaEntry,
+        WaferError,
+    };
+    use wasm_bindgen::JsValue;
+    use wasm_bindgen_futures::JsFuture;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::output_to_response;
+
+    fn meta(key: &str, value: &str) -> MetaEntry {
+        MetaEntry {
+            key: key.to_string(),
+            value: value.to_string(),
+        }
+    }
+
+    /// Yield to the JS microtask queue once.
+    async fn tick() {
+        let _ = JsFuture::from(js_sys::Promise::resolve(&JsValue::UNDEFINED)).await;
+    }
+
+    /// **Fails on the pre-fix tree.** A download handler declares its response
+    /// streams with the `resp.stream` marker on its real content type — an
+    /// `application/pdf` is not one of the two streaming content-type families
+    /// the old private `is_streaming_content_type` recognised, so the browser
+    /// buffered the whole object into the Service Worker's heap while
+    /// Cloudflare, reading the same marker through `streaming::wants_streaming`,
+    /// streamed it.
+    ///
+    /// "Streamed" is asserted the only way it is observable: the response
+    /// resolves while the producer is still parked mid-body. A buffered
+    /// implementation cannot return until the terminal arrives, so it resolves
+    /// only after the release below and fails on `released` — it does not hang.
+    #[wasm_bindgen_test]
+    async fn a_marked_stream_response_streams_rather_than_buffering() {
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+
+        let stream = OutputStream::from_producer(move |sink, _cancel| async move {
+            let _ = sink
+                .send_meta(meta(META_RESP_STREAM, STREAM_MARKER_VALUE))
+                .await;
+            let _ = sink
+                .send_meta(meta(META_RESP_CONTENT_TYPE, "application/pdf"))
+                .await;
+            let _ = sink.send_chunk(b"%PDF-1.7 first".to_vec()).await;
+            // Park mid-body: a real download is still reading from storage here.
+            let _ = release_rx.await;
+            let _ = sink.send_chunk(b" rest".to_vec()).await;
+            let _ = sink.complete(Vec::new()).await;
+        });
+
+        let released = Rc::new(Cell::new(false));
+        wasm_bindgen_futures::spawn_local({
+            let released = released.clone();
+            async move {
+                // Enough turns for a buffering implementation to have settled
+                // into waiting on the producer before the body is released.
+                for _ in 0..32 {
+                    tick().await;
+                }
+                released.set(true);
+                let _ = release_tx.send(());
+            }
+        });
+
+        let resp = output_to_response(stream).await.expect("build response");
+
+        assert!(
+            !released.get(),
+            "the response only resolved after the body completed — it buffered"
+        );
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap().as_deref(),
+            Some("application/pdf"),
+            "the declared content type must survive the streaming path"
+        );
+        assert!(
+            resp.body().is_some(),
+            "a streamed response is backed by a ReadableStream"
+        );
+    }
+
+    /// A streamed response whose leading meta holds a header value no
+    /// transport can send (a CR/LF, here) is answered with the codec's 500
+    /// before a status or a byte goes out — never streamed without the entry,
+    /// and never with it. Once the body streams, a failure can only abort it.
+    ///
+    /// The 500 keeps the terminal's sendable security headers and drops the
+    /// ones describing the body it replaces, so the error page is served
+    /// under the same frame policy as the page it stands in for.
+    #[wasm_bindgen_test]
+    async fn a_stream_with_an_unsendable_header_is_a_500_before_it_starts() {
+        let stream = OutputStream::from_producer(|sink, _cancel| async move {
+            let _ = sink
+                .send_meta(meta(META_RESP_STREAM, STREAM_MARKER_VALUE))
+                .await;
+            let _ = sink
+                .send_meta(meta(META_RESP_CONTENT_TYPE, "application/pdf"))
+                .await;
+            let _ = sink
+                .send_meta(meta("resp.header.X-Frame-Options", "DENY"))
+                .await;
+            let _ = sink
+                .send_meta(meta(
+                    "resp.header.Content-Disposition",
+                    "inline\r\nX-Injected: 1",
+                ))
+                .await;
+            let _ = sink.send_chunk(b"%PDF-1.7".to_vec()).await;
+            let _ = sink.complete(Vec::new()).await;
+        });
+
+        let resp = output_to_response(stream).await.expect("build response");
+
+        assert_eq!(resp.status(), 500);
+        assert_eq!(
+            resp.headers().get("content-disposition").unwrap(),
+            None,
+            "the refused header is never sent"
+        );
+        assert_eq!(
+            resp.headers().get("x-frame-options").unwrap().as_deref(),
+            Some("DENY"),
+            "the terminal's security headers survive on its 500"
+        );
+        assert_eq!(
+            resp.headers().get("cache-control").unwrap().as_deref(),
+            Some("no-store"),
+            "the 500 must not be cached"
+        );
+    }
+
+    /// A buffered answer whose meta no transport can send is the codec's 500
+    /// as well: the buffered path is `http_codec::collect_http_response`'s.
+    #[wasm_bindgen_test]
+    async fn a_buffered_answer_with_an_unsendable_header_is_a_500() {
+        let stream = OutputStream::respond_with_meta(
+            b"<p>ok</p>".to_vec(),
+            vec![meta("resp.header.X-Note", "caf\u{e9}")],
+        );
+
+        let resp = output_to_response(stream).await.expect("build response");
+
+        assert_eq!(resp.status(), 500);
+        assert_eq!(resp.headers().get("x-note").unwrap(), None);
+    }
+
+    /// A marked stream that terminates before any body chunk (an empty
+    /// download) still renders — it takes the short buffered form rather than
+    /// building a `ReadableStream` with nothing in it.
+    #[wasm_bindgen_test]
+    async fn a_marked_stream_with_no_body_still_renders() {
+        let stream = OutputStream::from_producer(|sink, _cancel| async move {
+            let _ = sink
+                .send_meta(meta(META_RESP_STREAM, STREAM_MARKER_VALUE))
+                .await;
+            let _ = sink
+                .send_meta(meta(META_RESP_CONTENT_TYPE, "application/pdf"))
+                .await;
+            let _ = sink.complete(Vec::new()).await;
+        });
+
+        let resp = output_to_response(stream).await.expect("build response");
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap().as_deref(),
+            Some("application/pdf")
+        );
+    }
+
+    /// A streaming content type with no marker still streams — the marker is
+    /// an addition to the old rule, not a replacement for it.
+    #[wasm_bindgen_test]
+    async fn a_streaming_content_type_still_streams_without_the_marker() {
+        let (release_tx, release_rx) = oneshot::channel::<()>();
+
+        let stream = OutputStream::from_producer(move |sink, _cancel| async move {
+            let _ = sink
+                .send_meta(meta(META_RESP_CONTENT_TYPE, "text/event-stream"))
+                .await;
+            let _ = sink.send_chunk(b"data: one\n\n".to_vec()).await;
+            let _ = release_rx.await;
+            let _ = sink.complete(Vec::new()).await;
+        });
+
+        let released = Rc::new(Cell::new(false));
+        wasm_bindgen_futures::spawn_local({
+            let released = released.clone();
+            async move {
+                for _ in 0..32 {
+                    tick().await;
+                }
+                released.set(true);
+                let _ = release_tx.send(());
+            }
+        });
+
+        let resp = output_to_response(stream).await.expect("build response");
+
+        assert!(!released.get(), "SSE must not be buffered");
+        assert_eq!(
+            resp.headers().get("content-type").unwrap().as_deref(),
+            Some("text/event-stream")
+        );
+    }
+
+    /// **Fails on the pre-fix tree**, which had no cap: the buffered path
+    /// concatenated whatever arrived until the Service Worker's linear memory
+    /// gave out, taking the page's whole runtime with it. Over the cap is a
+    /// clean 413.
+    ///
+    /// The first chunk is one byte and the second is the whole cap, so the
+    /// collector rejects on the second before copying it — the peak allocation
+    /// is the one oversized chunk this test creates, not two of them.
+    #[wasm_bindgen_test]
+    async fn a_buffered_response_over_the_cap_is_413() {
+        let stream = OutputStream::from_producer(|sink, _cancel| async move {
+            let _ = sink.send_chunk(vec![b'x'; 1]).await;
+            let _ = sink
+                .send_chunk(vec![b'x'; MAX_BUFFERED_RESPONSE_BYTES])
+                .await;
+            let _ = sink.complete(Vec::new()).await;
+        });
+
+        let resp = output_to_response(stream).await.expect("build response");
+
+        assert_eq!(resp.status(), 413);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap().as_deref(),
+            Some("text/plain; charset=utf-8")
+        );
+    }
+
+    /// **Fails on the pre-fix tree.** A download whose storage read fails
+    /// mid-body used to end the `ReadableStream` cleanly (a `console.warn` and
+    /// `return` from the hand-written pump), so the browser saw a normal
+    /// end-of-body: the partial file landed on disk looking complete. No
+    /// download path sets `Content-Length`, so the reader has no other way to
+    /// tell. Routed through `streaming::download_body_stream` — the framing
+    /// Cloudflare already used — the `Error` terminal errors the stream, and
+    /// reading the body rejects.
+    #[wasm_bindgen_test]
+    async fn a_mid_body_error_aborts_the_body_instead_of_ending_it() {
+        let stream = OutputStream::from_producer(|sink, _cancel| async move {
+            let _ = sink
+                .send_meta(meta(META_RESP_STREAM, STREAM_MARKER_VALUE))
+                .await;
+            let _ = sink
+                .send_meta(meta(META_RESP_CONTENT_TYPE, "application/pdf"))
+                .await;
+            let _ = sink.send_chunk(b"%PDF-1.7 first half".to_vec()).await;
+            let _ = sink
+                .error(WaferError::new(
+                    ErrorCode::Unavailable,
+                    "object read failed",
+                ))
+                .await;
+        });
+
+        let resp = output_to_response(stream).await.expect("build response");
+
+        // The status is already committed by the time the read fails — the
+        // signal is the aborted body, not the status.
+        assert_eq!(resp.status(), 200);
+        let read = JsFuture::from(resp.array_buffer().expect("array_buffer")).await;
+        assert!(
+            read.is_err(),
+            "a truncated download must not read back as a complete body"
+        );
+    }
+
+    /// A producer that stops mid-body without a terminal — it returned early,
+    /// panicked or was cancelled — aborts the body too. wafer-run ends such a
+    /// stream with an `Error` terminal, and the status is already committed,
+    /// so the aborted body is the only way left to say the file is not whole.
+    #[wasm_bindgen_test]
+    async fn a_producer_that_stops_mid_body_aborts_the_body() {
+        let stream = OutputStream::from_producer(|sink, _cancel| async move {
+            let _ = sink
+                .send_meta(meta(META_RESP_STREAM, STREAM_MARKER_VALUE))
+                .await;
+            let _ = sink
+                .send_meta(meta(META_RESP_CONTENT_TYPE, "application/pdf"))
+                .await;
+            let _ = sink.send_chunk(b"%PDF-1.7 first half".to_vec()).await;
+        });
+
+        let resp = output_to_response(stream).await.expect("build response");
+
+        assert_eq!(resp.status(), 200);
+        let read = JsFuture::from(resp.array_buffer().expect("array_buffer")).await;
+        assert!(
+            read.is_err(),
+            "a body cut off without a terminal must not read back as complete"
+        );
+    }
+
+    /// The same path without a failure still delivers every byte — the abort
+    /// above is the error case, not a stream that drops its tail.
+    #[wasm_bindgen_test]
+    async fn a_streamed_body_delivers_every_chunk() {
+        let stream = OutputStream::from_producer(|sink, _cancel| async move {
+            let _ = sink
+                .send_meta(meta(META_RESP_STREAM, STREAM_MARKER_VALUE))
+                .await;
+            let _ = sink
+                .send_meta(meta(META_RESP_CONTENT_TYPE, "application/pdf"))
+                .await;
+            let _ = sink.send_chunk(b"one ".to_vec()).await;
+            let _ = sink.send_chunk(b"two ".to_vec()).await;
+            let _ = sink.send_chunk(b"three".to_vec()).await;
+            let _ = sink.complete(Vec::new()).await;
+        });
+
+        let resp = output_to_response(stream).await.expect("build response");
+        let text = JsFuture::from(resp.text().expect("text"))
+            .await
+            .expect("read");
+        assert_eq!(text.as_string().as_deref(), Some("one two three"));
+    }
+
+    /// An error answers with the codec's error body, detail code included,
+    /// and keeps the error meta's headers: both cookies (appended, not the
+    /// last one set) and one `Content-Type`, the JSON the body is, even when
+    /// the error meta names another. The body is compared byte for byte with
+    /// `http_codec::error_to_http_response`, the renderer native and
+    /// Cloudflare go through.
+    ///
+    /// The error is built here, so this is the contract for a NATIVE block's
+    /// error, which may set cookies (a 401 that clears a session). A WASM
+    /// guest's error never arrives with a cookie or another sensitive header
+    /// it did not declare: `WasmiBlock` strips them from every guest egress,
+    /// and the sandbox refuses a guest that declares any
+    /// (`impresspress-core`'s `wafer_guest_golden` pins that end to end).
+    #[wasm_bindgen_test]
+    async fn an_error_answers_with_the_codecs_error_body_and_headers() {
+        let mut err = WaferError::new(ErrorCode::Unauthenticated, "Not authenticated")
+            .with_detail_code("not_authenticated");
+        err.meta.push(meta("resp.set_cookie.a", "a=1; Path=/"));
+        err.meta.push(meta("resp.set_cookie.b", "b=2; Path=/"));
+        err.meta.push(meta("resp.header.Retry-After", "30"));
+        err.meta.push(meta(META_RESP_CONTENT_TYPE, "text/html"));
+        let expected = wafer_block::http_codec::error_to_http_response(&err);
+
+        let resp = output_to_response(OutputStream::error(err))
+            .await
+            .expect("build response");
+
+        assert_eq!(resp.status(), 401);
+        let headers = resp.headers();
+        assert_eq!(
+            headers.get("content-type").unwrap().as_deref(),
+            Some("application/json")
+        );
+        assert_eq!(headers.get("retry-after").unwrap().as_deref(), Some("30"));
+        let cookies = headers.get("set-cookie").unwrap().unwrap_or_default();
+        assert!(
+            cookies.contains("a=1") && cookies.contains("b=2"),
+            "both cookies must reach the client: {cookies}"
+        );
+        let text = JsFuture::from(resp.text().unwrap()).await.unwrap();
+        let body = text.as_string().expect("a text body");
+        assert_eq!(body.as_bytes(), expected.body.as_slice());
+        let json: serde_json::Value = serde_json::from_str(&body).expect("a JSON body");
+        assert_eq!(json["code"], "not_authenticated");
+    }
+
+    /// A drop answers 204 with the headers the flow's drop carries (its CORS
+    /// headers, a cookie a middleware set) and no `Content-Type`, as the
+    /// codec renders it for native and Cloudflare.
+    #[wasm_bindgen_test]
+    async fn a_drop_keeps_its_headers_and_has_no_content_type() {
+        let drop = OutputStream::drop_request_with_meta(vec![
+            meta(
+                "resp.header.Access-Control-Allow-Origin",
+                "https://a.example",
+            ),
+            meta("resp.set_cookie.0", "s=1; Path=/"),
+            meta(META_RESP_CONTENT_TYPE, "text/html"),
+        ]);
+
+        let resp = output_to_response(drop).await.expect("build response");
+
+        assert_eq!(resp.status(), 204);
+        let headers = resp.headers();
+        assert_eq!(
+            headers
+                .get("access-control-allow-origin")
+                .unwrap()
+                .as_deref(),
+            Some("https://a.example")
+        );
+        assert_eq!(
+            headers.get("set-cookie").unwrap().as_deref(),
+            Some("s=1; Path=/")
+        );
+        assert_eq!(headers.get("content-type").unwrap(), None);
+    }
+
+    /// And a body that fits is unaffected — the cap must not change the
+    /// ordinary buffered response at all.
+    #[wasm_bindgen_test]
+    async fn a_buffered_response_within_the_cap_is_unchanged() {
+        let stream = OutputStream::from_producer(|sink, _cancel| async move {
+            let _ = sink.send_chunk(b"hello ".to_vec()).await;
+            let _ = sink.send_chunk(b"world".to_vec()).await;
+            let _ = sink
+                .complete(vec![meta(META_RESP_CONTENT_TYPE, "text/plain")])
+                .await;
+        });
+
+        let resp = output_to_response(stream).await.expect("build response");
+
+        assert_eq!(resp.status(), 200);
+        assert_eq!(
+            resp.headers().get("content-type").unwrap().as_deref(),
+            Some("text/plain")
+        );
+        let text = JsFuture::from(resp.text().unwrap()).await.unwrap();
+        assert_eq!(text.as_string().as_deref(), Some("hello world"));
     }
 }

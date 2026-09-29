@@ -10,8 +10,8 @@ use super::{
         offer_pricing, repo, ProductsBlock,
     },
     harness::{
-        admin_create_msg, admin_get_msg, create_msg, ctx, ctx_with, delete_msg, dispatch_admin,
-        dispatch_user, output_is_error, output_to_json, request_msg, seed, update_msg,
+        admin_create_msg, admin_get_msg, create_msg, ctx, ctx_with, delete_msg, dispatch,
+        output_is_error, output_to_json, request_msg, seed, seed_pending_payment_link, update_msg,
     },
 };
 use crate::util::RecordExt;
@@ -99,9 +99,9 @@ async fn admin_offer_lifecycle_preserves_versions_and_storefront_visibility() {
     let test_ctx = ctx().await;
     seed_product(&test_ctx, "product_print", "").await;
 
-    let collection = "/admin/b/products/products/product_print/offers";
+    let collection = "/b/products/api/admin/products/product_print/offers";
     let (msg, input) = admin_create_msg(collection, offer_definition(25));
-    let created = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    let created = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     let offer_id = created["offer"]["id"].as_str().unwrap().to_string();
     let component_id = created["offer"]["components"][0]["id"]
         .as_str()
@@ -117,7 +117,7 @@ async fn admin_offer_lifecycle_preserves_versions_and_storefront_visibility() {
         &format!("{detail}/preview"),
         json!({"offer_id": offer_id, "quantity": 2, "inputs": {"pages": 4}}),
     );
-    let draft_preview = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    let draft_preview = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(draft_preview["amounts"]["total_minor"], 200);
 
     let (msg, input) = create_msg(
@@ -125,13 +125,7 @@ async fn admin_offer_lifecycle_preserves_versions_and_storefront_visibility() {
         "",
         json!({"offer_id": offer_id, "inputs": {"pages": 4}}),
     );
-    assert!(
-        output_is_error(
-            dispatch_user(&test_ctx, msg, input).await,
-            ErrorCode::NotFound
-        )
-        .await
-    );
+    assert!(output_is_error(dispatch(&test_ctx, msg, input).await, ErrorCode::NotFound).await);
 
     let (msg, input) = admin_create_msg(
         &format!("{detail}/preview"),
@@ -139,14 +133,14 @@ async fn admin_offer_lifecycle_preserves_versions_and_storefront_visibility() {
     );
     assert!(
         output_is_error(
-            dispatch_admin(&test_ctx, msg, input).await,
+            dispatch(&test_ctx, msg, input).await,
             ErrorCode::InvalidArgument
         )
         .await
     );
 
     let (msg, input) = update_msg(&detail, "admin_1", offer_definition(30));
-    let updated = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    let updated = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(updated["offer"]["version"], 2);
     assert_eq!(updated["offer"]["components"][0]["id"], component_id);
     assert_eq!(
@@ -155,7 +149,7 @@ async fn admin_offer_lifecycle_preserves_versions_and_storefront_visibility() {
     );
 
     let (msg, input) = admin_create_msg(&format!("{detail}/publish"), json!({}));
-    let published = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    let published = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(published["status"], "active");
 
     let (msg, input) = create_msg(
@@ -163,26 +157,26 @@ async fn admin_offer_lifecycle_preserves_versions_and_storefront_visibility() {
         "",
         json!({"offer_id": offer_id, "quantity": 2, "inputs": {"pages": 4}}),
     );
-    let preview = output_to_json(dispatch_user(&test_ctx, msg, input).await).await;
+    let preview = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(preview["amounts"]["total_minor"], 240);
 
     let (msg, input) = update_msg(&detail, "admin_1", offer_definition(40));
     assert!(
         output_is_error(
-            dispatch_admin(&test_ctx, msg, input).await,
+            dispatch(&test_ctx, msg, input).await,
             ErrorCode::AlreadyExists
         )
         .await
     );
 
     let (msg, input) = admin_create_msg(&format!("{detail}/duplicate"), json!({}));
-    let duplicate = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    let duplicate = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(duplicate["status"], "draft");
     assert_eq!(duplicate["offer"]["version"], 1);
     assert_ne!(duplicate["offer"]["id"], offer_id);
 
     let (msg, input) = delete_msg(&detail, "admin_1");
-    let archived = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    let archived = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(archived["status"], "archived");
 
     let (msg, input) = create_msg(
@@ -190,16 +184,10 @@ async fn admin_offer_lifecycle_preserves_versions_and_storefront_visibility() {
         "",
         json!({"offer_id": offer_id, "inputs": {"pages": 4}}),
     );
-    assert!(
-        output_is_error(
-            dispatch_user(&test_ctx, msg, input).await,
-            ErrorCode::NotFound
-        )
-        .await
-    );
+    assert!(output_is_error(dispatch(&test_ctx, msg, input).await, ErrorCode::NotFound).await);
 
     let (msg, input) = admin_get_msg(collection);
-    let list = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    let list = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(list["offers"].as_array().unwrap().len(), 2);
 }
 
@@ -207,9 +195,9 @@ async fn admin_offer_lifecycle_preserves_versions_and_storefront_visibility() {
 async fn admin_preview_accepts_admin_only_inputs_that_public_preview_rejects() {
     let test_ctx = ctx().await;
     seed_product(&test_ctx, "product_scoped_preview", "").await;
-    let collection = "/admin/b/products/products/product_scoped_preview/offers";
+    let collection = "/b/products/api/admin/products/product_scoped_preview/offers";
     let (msg, input) = admin_create_msg(collection, offer_definition(25));
-    let created = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    let created = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     let offer_id = created["offer"]["id"].as_str().unwrap().to_string();
     let detail = format!("{collection}/{offer_id}");
 
@@ -219,12 +207,12 @@ async fn admin_preview_accepts_admin_only_inputs_that_public_preview_rejects() {
         "inputs": {"pages": 4, "note": "internal proof batch"}
     });
     let (msg, input) = admin_create_msg(&format!("{detail}/preview"), body.clone());
-    let preview = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    let preview = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(preview["amounts"]["total_minor"], 100);
     assert_eq!(preview["inputs"]["note"], "internal proof batch");
 
     let (msg, input) = admin_create_msg(&format!("{detail}/publish"), json!({}));
-    let published = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    let published = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(published["status"], "active");
 
     // The identical request is rejected on the public preview route: the
@@ -232,7 +220,7 @@ async fn admin_preview_accepts_admin_only_inputs_that_public_preview_rejects() {
     let (msg, input) = create_msg("/b/products/pricing/preview", "", body);
     assert!(
         output_is_error(
-            dispatch_user(&test_ctx, msg, input).await,
+            dispatch(&test_ctx, msg, input).await,
             ErrorCode::InvalidArgument
         )
         .await
@@ -371,9 +359,9 @@ async fn publish_fails_cleanly_when_the_draft_revision_moved_after_its_read() {
     let landed = repo::offers::update_if_current(
         &test_ctx,
         &offer_id,
-        "draft",
+        OfferStatus::Draft,
         Some(0),
-        HashMap::from([("status".to_string(), json!("active"))]),
+        HashMap::from([("status".to_string(), json!(OfferStatus::Active))]),
     )
     .await
     .unwrap();
@@ -433,14 +421,14 @@ async fn publish_fails_cleanly_when_the_draft_revision_moved_after_its_read() {
 async fn offer_writes_are_strict_and_validate_the_complete_definition() {
     let test_ctx = ctx().await;
     seed_product(&test_ctx, "product_strict", "").await;
-    let path = "/admin/b/products/products/product_strict/offers";
+    let path = "/b/products/api/admin/products/product_strict/offers";
 
     let mut unknown = offer_definition(25);
     unknown["client_total"] = json!(1);
     let (msg, input) = admin_create_msg(path, unknown);
     assert!(
         output_is_error(
-            dispatch_admin(&test_ctx, msg, input).await,
+            dispatch(&test_ctx, msg, input).await,
             ErrorCode::InvalidArgument
         )
         .await
@@ -451,7 +439,7 @@ async fn offer_writes_are_strict_and_validate_the_complete_definition() {
     let (msg, input) = admin_create_msg(path, invalid);
     assert!(
         output_is_error(
-            dispatch_admin(&test_ctx, msg, input).await,
+            dispatch(&test_ctx, msg, input).await,
             ErrorCode::InvalidArgument
         )
         .await
@@ -481,15 +469,15 @@ async fn storefront_detail_exposes_only_active_safe_configuration() {
         ]),
     )
     .await;
-    let collection = "/admin/b/products/products/product_storefront/offers";
+    let collection = "/b/products/api/admin/products/product_storefront/offers";
     let (msg, input) = admin_create_msg(collection, offer_definition(25));
-    let active = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    let active = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     let active_id = active["offer"]["id"].as_str().unwrap().to_string();
     let (msg, input) = admin_create_msg(&format!("{collection}/{active_id}/publish"), json!({}));
-    output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    output_to_json(dispatch(&test_ctx, msg, input).await).await;
 
     let (msg, input) = admin_create_msg(collection, offer_definition(99));
-    let draft = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    let draft = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(draft["status"], "draft");
 
     let (msg, input) = request_msg(
@@ -498,7 +486,7 @@ async fn storefront_detail_exposes_only_active_safe_configuration() {
         "",
         json!({}),
     );
-    let body = output_to_json(dispatch_user(&test_ctx, msg, input).await).await;
+    let body = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(body["schema_version"], 1);
     assert_eq!(body["name"], "Public print shop");
     assert_eq!(body["tags"], json!(["print", "custom"]));
@@ -530,13 +518,7 @@ async fn storefront_detail_exposes_only_active_safe_configuration() {
         "",
         json!({}),
     );
-    assert!(
-        output_is_error(
-            dispatch_user(&test_ctx, msg, input).await,
-            ErrorCode::NotFound
-        )
-        .await
-    );
+    assert!(output_is_error(dispatch(&test_ctx, msg, input).await, ErrorCode::NotFound).await);
 }
 
 #[tokio::test]
@@ -544,36 +526,30 @@ async fn seller_offer_routes_enforce_feature_gate_and_product_ownership() {
     let test_ctx = ctx_with(&[("WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS", "true")]).await;
     seed_product(&test_ctx, "seller_product", "seller_a").await;
 
-    let collection = "/b/products/products/seller_product/offers";
+    let collection = "/b/products/api/products/seller_product/offers";
     let (msg, input) = create_msg(collection, "seller_a", offer_definition(15));
-    let created = output_to_json(dispatch_user(&test_ctx, msg, input).await).await;
+    let created = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     let offer_id = created["offer"]["id"].as_str().unwrap().to_string();
     assert_eq!(created["status"], "draft");
 
     let detail = format!("{collection}/{offer_id}");
     let (msg, input) = request_msg("retrieve", &detail, "seller_b", json!({}));
-    assert!(
-        output_is_error(
-            dispatch_user(&test_ctx, msg, input).await,
-            ErrorCode::NotFound
-        )
-        .await
-    );
+    assert!(output_is_error(dispatch(&test_ctx, msg, input).await, ErrorCode::NotFound).await);
 
     let (msg, input) = request_msg("retrieve", collection, "seller_a", json!({}));
-    let own = output_to_json(dispatch_user(&test_ctx, msg, input).await).await;
+    let own = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(own["offers"].as_array().unwrap().len(), 1);
 
     let disabled = ctx().await;
     seed_product(&disabled, "disabled_product", "seller_a").await;
     let (msg, input) = create_msg(
-        "/b/products/products/disabled_product/offers",
+        "/b/products/api/products/disabled_product/offers",
         "seller_a",
         offer_definition(15),
     );
     assert!(
         output_is_error(
-            dispatch_user(&disabled, msg, input).await,
+            dispatch(&disabled, msg, input).await,
             ErrorCode::PermissionDenied
         )
         .await
@@ -587,7 +563,7 @@ async fn seller_product_publication_requires_moderation_and_protects_ownership()
     // A create body reaching for ownership or approval state is refused
     // outright — no product is created at all.
     let (msg, input) = create_msg(
-        "/b/products/products",
+        "/b/products/api/products",
         "seller_a",
         json!({
             "name": "Seller print",
@@ -598,25 +574,26 @@ async fn seller_product_publication_requires_moderation_and_protects_ownership()
     );
     assert!(
         output_is_error(
-            dispatch_user(&test_ctx, msg, input).await,
+            dispatch(&test_ctx, msg, input).await,
             ErrorCode::InvalidArgument
         )
         .await
     );
     assert!(
-        repo::products::list_all(&test_ctx, vec![])
+        repo::products::list_capped_live(&test_ctx, vec![])
             .await
             .unwrap()
+            .rows
             .is_empty(),
         "a refused create must not have landed a row"
     );
 
     let (msg, input) = create_msg(
-        "/b/products/products",
+        "/b/products/api/products",
         "seller_a",
         json!({"name": "Seller print", "status": "active"}),
     );
-    let created = output_to_json(dispatch_user(&test_ctx, msg, input).await).await;
+    let created = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     let product_id = created["id"].as_str().unwrap().to_string();
     assert_eq!(created["status"], "draft");
     assert_eq!(created["approval_status"], "draft");
@@ -628,7 +605,7 @@ async fn seller_product_publication_requires_moderation_and_protects_ownership()
     // the product does not enter review as a side effect of a body that also
     // tried to re-parent it.
     let (msg, input) = update_msg(
-        &format!("/b/products/products/{product_id}"),
+        &format!("/b/products/api/products/{product_id}"),
         "seller_a",
         json!({
             "status": "active",
@@ -639,7 +616,7 @@ async fn seller_product_publication_requires_moderation_and_protects_ownership()
     );
     assert!(
         output_is_error(
-            dispatch_user(&test_ctx, msg, input).await,
+            dispatch(&test_ctx, msg, input).await,
             ErrorCode::InvalidArgument
         )
         .await
@@ -649,11 +626,11 @@ async fn seller_product_publication_requires_moderation_and_protects_ownership()
     assert_eq!(untouched.str_field("owner_id"), "seller_a");
 
     let (msg, input) = update_msg(
-        &format!("/b/products/products/{product_id}"),
+        &format!("/b/products/api/products/{product_id}"),
         "seller_a",
         json!({"status": "active"}),
     );
-    let submitted = output_to_json(dispatch_user(&test_ctx, msg, input).await).await;
+    let submitted = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(submitted["status"], "pending_review");
     assert_eq!(submitted["approval_status"], "pending");
     assert_eq!(submitted["owner_id"], "seller_a");
@@ -672,20 +649,20 @@ async fn seller_product_can_publish_directly_when_moderation_is_disabled() {
     ])
     .await;
     let (msg, input) = create_msg(
-        "/b/products/products",
+        "/b/products/api/products",
         "seller_a",
         json!({"name": "Instant product"}),
     );
-    let created = output_to_json(dispatch_user(&test_ctx, msg, input).await).await;
+    let created = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     let product_id = created["id"].as_str().unwrap().to_string();
     assert_eq!(created["approval_status"], "approved");
 
     let (msg, input) = update_msg(
-        &format!("/b/products/products/{product_id}"),
+        &format!("/b/products/api/products/{product_id}"),
         "seller_a",
         json!({"status": "active"}),
     );
-    let published = output_to_json(dispatch_user(&test_ctx, msg, input).await).await;
+    let published = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(published["status"], "active");
     assert_eq!(published["approval_status"], "approved");
     assert!(published["published_at"].as_str().is_some());
@@ -759,13 +736,13 @@ fn offer_routes_declare_admin_and_seller_auth_tiers() {
 async fn an_admin_can_close_a_soft_deleted_products_money_surface() {
     let test_ctx = ctx().await;
     seed_product(&test_ctx, "product_gone", "").await;
-    let collection = "/admin/b/products/products/product_gone/offers";
+    let collection = "/b/products/api/admin/products/product_gone/offers";
 
     let (msg, input) = admin_create_msg(collection, offer_definition(25));
-    let created = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    let created = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     let offer_id = created["offer"]["id"].as_str().unwrap().to_string();
     let (msg, input) = admin_create_msg(&format!("{collection}/{offer_id}/publish"), json!({}));
-    output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    output_to_json(dispatch(&test_ctx, msg, input).await).await;
 
     // A Payment Link that has not reached Stripe yet, so deactivating it is
     // a purely local write and the test needs no Stripe stand-in.
@@ -782,13 +759,10 @@ async fn an_admin_can_close_a_soft_deleted_products_money_surface() {
         offer_pricing::InputScope::Management,
     )
     .unwrap();
-    let link_id = repo::payment_links::create_pending(
-        &test_ctx, &offer_id, "", "", "", false, "close-me", &preview, 0,
-    )
-    .await
-    .unwrap()
-    .managed
-    .id;
+    let link_id = seed_pending_payment_link(&test_ctx, &offer_id, "close-me", &preview)
+        .await
+        .managed
+        .id;
 
     repo::products::soft_delete(&test_ctx, "product_gone")
         .await
@@ -796,7 +770,7 @@ async fn an_admin_can_close_a_soft_deleted_products_money_surface() {
 
     // Discovery: an admin has to be able to see what there is to close.
     let (msg, input) = admin_get_msg(collection);
-    let listed = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    let listed = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(
         listed["offers"].as_array().map(Vec::len),
         Some(1),
@@ -804,7 +778,7 @@ async fn an_admin_can_close_a_soft_deleted_products_money_surface() {
     );
     let links_url = format!("{collection}/{offer_id}/payment-links");
     let (msg, input) = admin_get_msg(&links_url);
-    let links = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    let links = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(
         links["payment_links"].as_array().map(Vec::len),
         Some(1),
@@ -814,7 +788,7 @@ async fn an_admin_can_close_a_soft_deleted_products_money_surface() {
     // Closing: deactivate the link, then archive the offer.
     let (mut msg, input) = delete_msg(&format!("{links_url}/{link_id}"), "admin_1");
     msg.set_meta("auth.user_roles", "admin");
-    let deactivated = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    let deactivated = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(
         deactivated["active"], false,
         "the Payment Link must deactivate: {deactivated}"
@@ -822,7 +796,7 @@ async fn an_admin_can_close_a_soft_deleted_products_money_surface() {
 
     let (mut msg, input) = delete_msg(&format!("{collection}/{offer_id}"), "admin_1");
     msg.set_meta("auth.user_roles", "admin");
-    let archived = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    let archived = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(
         archived["status"], "archived",
         "the offer must archive: {archived}"
@@ -840,39 +814,33 @@ async fn an_admin_can_close_a_soft_deleted_products_money_surface() {
 async fn a_seller_can_close_their_soft_deleted_products_money_surface() {
     let test_ctx = ctx_with(&[("WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS", "true")]).await;
     seed_product(&test_ctx, "seller_gone", "seller_a").await;
-    let collection = "/b/products/products/seller_gone/offers";
+    let collection = "/b/products/api/products/seller_gone/offers";
 
     let (msg, input) = create_msg(collection, "seller_a", offer_definition(15));
-    let created = output_to_json(dispatch_user(&test_ctx, msg, input).await).await;
+    let created = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     let offer_id = created["offer"]["id"].as_str().unwrap().to_string();
     let (msg, input) = create_msg(
         &format!("{collection}/{offer_id}/publish"),
         "seller_a",
         json!({}),
     );
-    output_to_json(dispatch_user(&test_ctx, msg, input).await).await;
+    output_to_json(dispatch(&test_ctx, msg, input).await).await;
 
     repo::products::soft_delete(&test_ctx, "seller_gone")
         .await
         .expect("soft delete");
 
     let (msg, input) = request_msg("retrieve", collection, "seller_a", json!({}));
-    let listed = output_to_json(dispatch_user(&test_ctx, msg, input).await).await;
+    let listed = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(listed["offers"].as_array().map(Vec::len), Some(1));
 
     let (msg, input) = delete_msg(&format!("{collection}/{offer_id}"), "seller_a");
-    let archived = output_to_json(dispatch_user(&test_ctx, msg, input).await).await;
+    let archived = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     assert_eq!(archived["status"], "archived", "{archived}");
 
     // Someone else's deleted product is still nobody else's business.
     let (msg, input) = delete_msg(&format!("{collection}/{offer_id}"), "seller_b");
-    assert!(
-        output_is_error(
-            dispatch_user(&test_ctx, msg, input).await,
-            ErrorCode::NotFound
-        )
-        .await
-    );
+    assert!(output_is_error(dispatch(&test_ctx, msg, input).await, ErrorCode::NotFound).await);
 }
 
 /// The widening is exactly "close what is already open". Anything that
@@ -882,10 +850,10 @@ async fn a_seller_can_close_their_soft_deleted_products_money_surface() {
 async fn a_soft_deleted_product_still_refuses_every_offer_operation_that_opens_something() {
     let test_ctx = ctx().await;
     seed_product(&test_ctx, "product_shut", "").await;
-    let collection = "/admin/b/products/products/product_shut/offers";
+    let collection = "/b/products/api/admin/products/product_shut/offers";
 
     let (msg, input) = admin_create_msg(collection, offer_definition(25));
-    let created = output_to_json(dispatch_admin(&test_ctx, msg, input).await).await;
+    let created = output_to_json(dispatch(&test_ctx, msg, input).await).await;
     let offer_id = created["offer"]["id"].as_str().unwrap().to_string();
 
     repo::products::soft_delete(&test_ctx, "product_shut")
@@ -895,21 +863,13 @@ async fn a_soft_deleted_product_still_refuses_every_offer_operation_that_opens_s
     // create
     let (msg, input) = admin_create_msg(collection, offer_definition(30));
     assert!(
-        output_is_error(
-            dispatch_admin(&test_ctx, msg, input).await,
-            ErrorCode::NotFound
-        )
-        .await,
+        output_is_error(dispatch(&test_ctx, msg, input).await, ErrorCode::NotFound).await,
         "a new offer on a deleted product"
     );
     // publish
     let (msg, input) = admin_create_msg(&format!("{collection}/{offer_id}/publish"), json!({}));
     assert!(
-        output_is_error(
-            dispatch_admin(&test_ctx, msg, input).await,
-            ErrorCode::NotFound
-        )
-        .await,
+        output_is_error(dispatch(&test_ctx, msg, input).await, ErrorCode::NotFound).await,
         "publishing an offer on a deleted product"
     );
     // update
@@ -920,31 +880,19 @@ async fn a_soft_deleted_product_still_refuses_every_offer_operation_that_opens_s
     );
     msg.set_meta("auth.user_roles", "admin");
     assert!(
-        output_is_error(
-            dispatch_admin(&test_ctx, msg, input).await,
-            ErrorCode::NotFound
-        )
-        .await,
+        output_is_error(dispatch(&test_ctx, msg, input).await, ErrorCode::NotFound).await,
         "editing an offer on a deleted product"
     );
     // duplicate
     let (msg, input) = admin_create_msg(&format!("{collection}/{offer_id}/duplicate"), json!({}));
     assert!(
-        output_is_error(
-            dispatch_admin(&test_ctx, msg, input).await,
-            ErrorCode::NotFound
-        )
-        .await,
+        output_is_error(dispatch(&test_ctx, msg, input).await, ErrorCode::NotFound).await,
         "duplicating an offer on a deleted product"
     );
     // sync to Stripe
     let (msg, input) = admin_create_msg(&format!("{collection}/{offer_id}/sync"), json!({}));
     assert!(
-        output_is_error(
-            dispatch_admin(&test_ctx, msg, input).await,
-            ErrorCode::NotFound
-        )
-        .await,
+        output_is_error(dispatch(&test_ctx, msg, input).await, ErrorCode::NotFound).await,
         "syncing an offer on a deleted product"
     );
     // open a NEW Payment Link
@@ -953,21 +901,13 @@ async fn a_soft_deleted_product_still_refuses_every_offer_operation_that_opens_s
         json!({"preset_id": ""}),
     );
     assert!(
-        output_is_error(
-            dispatch_admin(&test_ctx, msg, input).await,
-            ErrorCode::NotFound
-        )
-        .await,
+        output_is_error(dispatch(&test_ctx, msg, input).await, ErrorCode::NotFound).await,
         "a new Payment Link on a deleted product"
     );
     // and the offer detail read stays 404, matching the product's own 404
     let (msg, input) = admin_get_msg(&format!("{collection}/{offer_id}"));
     assert!(
-        output_is_error(
-            dispatch_admin(&test_ctx, msg, input).await,
-            ErrorCode::NotFound
-        )
-        .await,
+        output_is_error(dispatch(&test_ctx, msg, input).await, ErrorCode::NotFound).await,
         "reading one offer of a deleted product"
     );
 }

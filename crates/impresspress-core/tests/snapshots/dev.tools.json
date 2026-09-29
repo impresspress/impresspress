@@ -77,7 +77,7 @@
               "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
               "properties": {
                 "approval_status": {
-                  "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`.",
+                  "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
                   "enum": [
                     "draft",
                     "pending",
@@ -364,6 +364,9 @@
             ]
           },
           "slug": {
+            "description": "Web address of the product: lowercase letters and digits in runs\njoined by single hyphens, at most 160 characters. Empty means none.",
+            "maxLength": 160,
+            "pattern": "^(?:[a-z0-9]+(?:-[a-z0-9]+)*)?$",
             "type": [
               "string",
               "null"
@@ -440,7 +443,7 @@
         "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
         "properties": {
           "approval_status": {
-            "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`.",
+            "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
             "enum": [
               "draft",
               "pending",
@@ -716,6 +719,9 @@
             ]
           },
           "slug": {
+            "description": "Web address of the product: lowercase letters and digits in runs\njoined by single hyphens, at most 160 characters. Empty means none.",
+            "maxLength": 160,
+            "pattern": "^(?:[a-z0-9]+(?:-[a-z0-9]+)*)?$",
             "type": [
               "string",
               "null"
@@ -794,7 +800,7 @@
         "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
         "properties": {
           "approval_status": {
-            "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`.",
+            "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
             "enum": [
               "draft",
               "pending",
@@ -1049,7 +1055,7 @@
         "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
         "properties": {
           "approval_status": {
-            "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`.",
+            "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
             "enum": [
               "draft",
               "pending",
@@ -4005,7 +4011,7 @@
         "additionalProperties": false,
         "properties": {
           "name": {
-            "description": "The block's short name, e.g. `newsletter`. It becomes the directory\n`blocks/<name>/`, the crate name, the block id `site/<name>`, the\nroute prefix `/b/<name>/` and the collection prefix `site__<name>__`.\n2 to 32 characters: a lowercase letter followed by lowercase letters,\ndigits and hyphens, with no doubled hyphen and no trailing hyphen.",
+            "description": "The block's short name, e.g. `newsletter`. It becomes the directory\n`blocks/<name>/`, the crate name, the block id `site/<name>`, the\nroute prefix `/b/<name>/` and the collection prefix `site__<name>__`\n(a hyphen spelled `_` there). 2 to 32 characters: a lowercase letter\nfollowed by lowercase letters, digits and hyphens, with no doubled\nhyphen and no trailing hyphen.",
             "type": "string"
           },
           "template": {
@@ -4333,6 +4339,10 @@
             "description": "The authoring guide, as Markdown: the API, the host services, the\nnamespace rules, the limits, the diagnostic codes, and both templates\nin full.",
             "type": "string"
           },
+          "wafer_guest_module": {
+            "description": "The current `src/wafer_guest.rs`, verbatim: what a block built against\nan older copy writes over its own before compiling again.",
+            "type": "string"
+          },
           "wafer_guest_version": {
             "description": "The `WAFER_GUEST_VERSION` of the support module this reference\ndocuments and `POST /b/dev/api/blocks` writes.",
             "format": "uint32",
@@ -4342,7 +4352,8 @@
         },
         "required": [
           "wafer_guest_version",
-          "markdown"
+          "markdown",
+          "wafer_guest_module"
         ],
         "type": "object"
       }

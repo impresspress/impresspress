@@ -68,6 +68,16 @@ impl Context for RecordingContext {
         )
     }
 
+    /// Admits nothing, as the fail-closed `check_resource_access` default
+    /// this context keeps does.
+    fn resource_access_admitted(
+        &self,
+        _resource: &str,
+        _resource_type: wafer_run::ResourceType,
+        _access: wafer_block::ResourceAccess,
+    ) -> bool {
+        false
+    }
     fn is_cancelled(&self) -> bool {
         false
     }
@@ -131,7 +141,7 @@ async fn response_status(stream: OutputStream) -> i64 {
 /// Like [`response_status`], but also returns the `Location` response header
 /// (`resp.header.Location` meta) for redirect assertions. A redirect is always
 /// a Response terminal, so the header only exists on the `Ok` path; Error
-/// terminals (the JSON 403 contract) carry no `Location`.
+/// terminals (the JSON 401/403 refusals) carry no `Location`.
 async fn response_status_and_location(stream: OutputStream) -> (i64, Option<String>) {
     match stream.collect_buffered().await {
         Ok(buf) => {
@@ -221,7 +231,7 @@ async fn authenticated_extra_route_forbids_empty_user_id() {
     let input = InputStream::empty();
     let stream = routing::route_to_block(&ctx, msg, input, &features, &[], &extras).await;
     let status = response_status(stream).await;
-    assert_eq!(status, 403, "Authenticated + empty user_id should be 403");
+    assert_eq!(status, 401, "Authenticated + empty user_id should be 401");
 
     assert!(
         ctx.calls().is_empty(),
@@ -291,13 +301,13 @@ async fn admin_extra_route_allows_admin() {
 }
 
 // ---------------------------------------------------------------------------
-// F3: unauthenticated HTML requests redirect to login instead of a bare 403.
+// F3: unauthenticated HTML requests redirect to login instead of a bare refusal.
 //
 // Stale-cookie and no-cookie requests both reach `check_access` with an empty
 // `user_id` (crypto.rs silently leaves identity unset on any invalid token), so
 // fixing the anonymous case fixes the stale-session dead-end at the single
 // enforcement point. Browser (HTML) requests get a 302 to the login page with a
-// `?redirect=` return path; API callers keep the JSON 403 contract. The
+// `?redirect=` return path; API callers get the JSON 401. The
 // role-failure case (authenticated non-admin) must NOT redirect — that's a real
 // 403, not a "you need to log in".
 // ---------------------------------------------------------------------------
@@ -456,20 +466,31 @@ async fn public_declared_endpoint_passes_without_auth() {
 }
 
 #[tokio::test]
-async fn undeclared_path_falls_back_to_prefix_tier() {
-    let ctx = RecordingContext::new();
+async fn undeclared_path_falls_back_to_authenticated_not_the_prefix_tier() {
     let features = AllEnabled;
     let infos = legalpages_infos();
 
     // `/b/legalpages/api/documents` (no `{id}`) is NOT in the declared
-    // endpoint list above. The coarse prefix route for `/b/legalpages/api` is
-    // Admin (the backstop), so a non-admin is still rejected — an undeclared
-    // path can never be LESS protected than its prefix tier.
+    // endpoint list above, and the block's only prefix entry is the
+    // Public-tier `/b/legalpages`. An undeclared path falls to
+    // `Authenticated`, never to the prefix's own tier: an anonymous caller is
+    // denied, a logged-in caller reaches the block, and the block's table
+    // dispatch answers 404 for a path it does not declare. (The real block
+    // declares this path `admin`; see `routing::tests::
+    // legalpages_admin_and_api_paths_are_denied_without_the_admin_role`.)
+    let ctx = RecordingContext::new();
+    let msg = make_msg("/b/legalpages/api/documents");
+    let stream =
+        routing::route_to_block(&ctx, msg, InputStream::empty(), &features, &infos, &[]).await;
+    assert_eq!(response_status(stream).await, 401);
+    assert!(ctx.calls().is_empty());
+
+    let ctx = RecordingContext::new();
     let msg = make_msg_with_user("/b/legalpages/api/documents", "user-1");
     let stream =
         routing::route_to_block(&ctx, msg, InputStream::empty(), &features, &infos, &[]).await;
-    assert_eq!(response_status(stream).await, 403);
-    assert!(ctx.calls().is_empty());
+    assert_eq!(response_status(stream).await, 200);
+    assert_eq!(ctx.calls(), vec!["impresspress/legalpages".to_string()]);
 }
 
 /// `block_infos` mirroring the llm block's mixed-tier declarations: chat is
@@ -564,7 +585,7 @@ async fn files_admin_pages_reject_non_admin_and_public_share_passes() {
     .await;
     assert_eq!(response_status(s1).await, 403);
 
-    // Anonymous → 403 on the Authenticated bucket list.
+    // Anonymous → 401 on the Authenticated bucket list.
     let ctx2 = RecordingContext::new();
     let bucket_list = make_msg("/b/storage/");
     let s2 = routing::route_to_block(
@@ -576,7 +597,7 @@ async fn files_admin_pages_reject_non_admin_and_public_share_passes() {
         &[],
     )
     .await;
-    assert_eq!(response_status(s2).await, 403);
+    assert_eq!(response_status(s2).await, 401);
 
     // Anonymous → 200 dispatch on the Public direct-share link.
     let ctx3 = RecordingContext::new();
@@ -736,7 +757,10 @@ async fn tickets_real_endpoint_contract_exposes_only_the_three_public_routes() {
     ];
 
     for (action, path) in admin_cases {
-        for mut msg in [make_msg(path), make_msg_with_user(path, "user-1")] {
+        for (mut msg, status) in [
+            (make_msg(path), 401),
+            (make_msg_with_user(path, "user-1"), 403),
+        ] {
             let ctx = RecordingContext::new();
             msg.set_meta("req.action", action);
             let stream =
@@ -744,7 +768,7 @@ async fn tickets_real_endpoint_contract_exposes_only_the_three_public_routes() {
                     .await;
             assert_eq!(
                 response_status(stream).await,
-                403,
+                status,
                 "{action} {path} must reject callers without the admin role"
             );
             assert!(ctx.calls().is_empty(), "{path} must not dispatch");
@@ -798,7 +822,7 @@ async fn products_owned_group_taxonomy_and_pricing_routes_enforce_real_declarati
         .await;
         assert_eq!(
             response_status(denied).await,
-            403,
+            401,
             "anonymous {action} {path} must be rejected before dispatch"
         );
         assert!(anonymous_ctx.calls().is_empty());
@@ -828,8 +852,8 @@ async fn products_owned_group_taxonomy_and_pricing_routes_enforce_real_declarati
 }
 
 /// Assert that every variant of an admin overview path is gated `Admin`
-/// centrally (403 before dispatch) for both anonymous and authenticated
-/// non-admin callers, driving the block's REAL declared endpoints.
+/// centrally (refused before dispatch: 401 anonymous, 403 for an
+/// authenticated non-admin), driving the block's REAL declared endpoints.
 async fn assert_admin_overview_gated(block_name: &str, paths: &[&str]) {
     let infos = vec![real_block_info(block_name)];
 
@@ -841,7 +865,7 @@ async fn assert_admin_overview_gated(block_name: &str, paths: &[&str]) {
             .await;
         assert_eq!(
             response_status(s).await,
-            403,
+            401,
             "anonymous {path} ({block_name}) must be rejected (admin overview)"
         );
         assert!(
@@ -976,9 +1000,9 @@ async fn declared_admin_endpoint_under_a_public_extra_route_rejects_anonymous() 
         &guest_extra(),
     )
     .await;
-    // 403, the same refusal `authenticated_extra_route_forbids_empty_user_id`
+    // 401, the same refusal `authenticated_extra_route_forbids_empty_user_id`
     // asserts for a non-HTML request with no session.
-    assert_eq!(response_status(stream).await, 403);
+    assert_eq!(response_status(stream).await, 401);
     assert!(ctx.calls().is_empty(), "must not dispatch to the block");
 }
 
@@ -1034,7 +1058,7 @@ async fn an_undeclared_path_under_a_declaring_block_falls_back_to_authenticated(
         &guest_extra(),
     )
     .await;
-    assert_eq!(response_status(stream).await, 403);
+    assert_eq!(response_status(stream).await, 401);
     assert!(ctx.calls().is_empty());
 }
 
@@ -1065,7 +1089,7 @@ async fn a_refined_route_to_a_block_that_declares_no_endpoints_is_not_public() {
         &extras,
     )
     .await;
-    assert_eq!(response_status(stream).await, 403);
+    assert_eq!(response_status(stream).await, 401);
     assert!(ctx.calls().is_empty(), "must not dispatch to the block");
 }
 
@@ -1097,7 +1121,7 @@ async fn declaring_one_endpoint_does_not_lock_a_plain_extra_route() {
         &extras,
     )
     .await;
-    assert_eq!(response_status(stream).await, 403);
+    assert_eq!(response_status(stream).await, 401);
 
     // ...while every OTHER path keeps the tier the route was registered with.
     let ctx = RecordingContext::new();
@@ -1157,4 +1181,83 @@ async fn an_extra_route_to_a_block_that_declares_no_endpoints_keeps_its_tier() {
     .await;
     assert_eq!(response_status(stream).await, 200);
     assert_eq!(ctx.calls(), vec!["gizza-ai/chat".to_string()]);
+}
+
+/// The six admin JSON rows the files block took over from the admin block's
+/// delegation. They used to sit behind the coarse `Admin` prefix `/b/admin/`;
+/// now they live under the `Public`-tier prefixes `/b/storage/` and
+/// `/b/cloudstorage/`, so each row's declared `AuthLevel` is the entire gate.
+/// `(req.action, path)`; the quota update is a PATCH, hence `update`.
+#[cfg(feature = "block-files")]
+const FILES_ADMIN_API_ROWS: &[(&str, &str)] = &[
+    ("retrieve", "/b/cloudstorage/admin/shares"),
+    ("retrieve", "/b/cloudstorage/admin/access-logs"),
+    ("retrieve", "/b/cloudstorage/admin/quotas"),
+    ("update", "/b/cloudstorage/admin/quotas/u-1"),
+    ("retrieve", "/b/storage/admin/api/buckets"),
+    ("retrieve", "/b/storage/admin/api/stats"),
+];
+
+#[cfg(feature = "block-files")]
+fn files_admin_api_msg(action: &str, path: &str, caller: Option<(&str, bool)>) -> Message {
+    let mut msg = match caller {
+        None => make_msg(path),
+        Some((user, false)) => make_msg_with_user(path, user),
+        Some((user, true)) => make_msg_with_admin(path, user),
+    };
+    msg.set_meta("req.action", action);
+    msg
+}
+
+/// Anonymous and logged-in non-admin callers are refused before dispatch on
+/// every relocated admin row, driving `route_to_block` with the block's real
+/// declaration. Failures are collected so one run reports every case.
+#[cfg(feature = "block-files")]
+#[tokio::test]
+async fn files_admin_api_rows_reject_anonymous_and_non_admin() {
+    let infos = vec![real_block_info("impresspress/files")];
+    let mut failures = Vec::new();
+    for (action, path) in FILES_ADMIN_API_ROWS {
+        for (label, caller, expected) in [
+            ("anonymous", None, 401),
+            ("non-admin", Some(("user-1", false)), 403),
+        ] {
+            let ctx = RecordingContext::new();
+            let msg = files_admin_api_msg(action, path, caller);
+            let s =
+                routing::route_to_block(&ctx, msg, InputStream::empty(), &AllEnabled, &infos, &[])
+                    .await;
+            let status = response_status(s).await;
+            if status != expected || !ctx.calls().is_empty() {
+                failures.push(format!(
+                    "{label} {action} {path}: status {status}, dispatched to {:?}",
+                    ctx.calls()
+                ));
+            }
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
+}
+
+/// An admin reaches dispatch on every relocated admin row, so the gate
+/// above is a gate and not a dead route.
+#[cfg(feature = "block-files")]
+#[tokio::test]
+async fn files_admin_api_rows_allow_admin() {
+    let infos = vec![real_block_info("impresspress/files")];
+    let mut failures = Vec::new();
+    for (action, path) in FILES_ADMIN_API_ROWS {
+        let ctx = RecordingContext::new();
+        let msg = files_admin_api_msg(action, path, Some(("admin-1", true)));
+        let s = routing::route_to_block(&ctx, msg, InputStream::empty(), &AllEnabled, &infos, &[])
+            .await;
+        let status = response_status(s).await;
+        if status != 200 || ctx.calls() != vec!["impresspress/files".to_string()] {
+            failures.push(format!(
+                "admin {action} {path}: status {status}, dispatched to {:?}",
+                ctx.calls()
+            ));
+        }
+    }
+    assert!(failures.is_empty(), "{}", failures.join("\n"));
 }

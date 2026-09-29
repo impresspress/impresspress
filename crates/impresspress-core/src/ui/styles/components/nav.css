@@ -90,7 +90,6 @@
    into a vertical scroller that silently clips icon tops behind the hidden
    scrollbars. */
 .products-tabs .tabs { overflow-x: visible; }
-.products-tabs + header, .products-tabs + .page-header { margin-top: 0; }
 
 /* ===== Editor tab strip (blocks/legalpages/pages.rs) =====
  * Migrated from that file's page-local `EDITOR_CSS` `<style>` block (task

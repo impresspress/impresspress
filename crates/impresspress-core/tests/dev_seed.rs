@@ -19,7 +19,7 @@ use impresspress_core::{
         control::{DynamicBlockSpec, DynamicRoute, RouteAccessKind},
         repo::{self, generations::GenerationCause, runtime_state},
         seed::{self, SeedBlock, SeedManifest},
-        test_support::{seed_file as file, FakeControl, MapFetch},
+        test_support::{hello_info, seed_file as file, FakeControl, MapFetch},
         validation, workspace,
     },
     test_support::TestContext,
@@ -50,28 +50,18 @@ fn hello_spec() -> DynamicBlockSpec {
     }
 }
 
-/// The `BlockInfo` the seeded `hello` artifact reports through
-/// [`FakeControl::inspect`].
+/// A control whose `inspect` reports the shared `hello` guest — what the
+/// bundle fixture below describes.
 ///
-/// A seed import now runs the four rules that read the guest's own report
-/// (name, endpoints inside the route prefix, agent tool names, capabilities
-/// against `requires`), so a fixture whose control reported nothing useful
-/// would refuse every bundle below for a reason none of them is about. The
-/// declared spec has to be exactly what those rules produce from this, which
-/// is why the endpoint is under `/b/hello/` and the name is `site/hello`.
-fn hello_info() -> BlockInfo {
-    BlockInfo::new("site/hello", "0.1.0", "http-handler@v1", "hello").endpoints(vec![
-        BlockEndpoint::get("/b/hello/")
-            .auth(AuthLevel::Public)
-            .summary("hello"),
-    ])
-}
-
-/// A control whose `inspect` reports [`hello_info`] — the guest the bundle
-/// fixture below describes.
+/// A seed import runs the four rules that read the guest's own report (name,
+/// endpoints inside the route prefix, agent tool names, capabilities against
+/// `requires`), so a fixture whose control reported nothing useful would
+/// refuse every bundle below for a reason none of them is about. The declared
+/// spec has to be exactly what those rules produce from `hello_info`, which is
+/// why the endpoint is under `/b/hello/` and the name is `site/hello`.
 fn hello_control() -> Arc<FakeControl> {
     let control = FakeControl::new();
-    control.set_validated_info(hello_info());
+    control.set_validated_info(hello_info("site/hello"));
     control
 }
 
@@ -706,6 +696,55 @@ async fn a_seeded_spec_that_grants_more_than_the_module_asks_for_is_refused() {
         "{error}"
     );
     assert!(error.contains("site__hello__notes"), "{error}");
+}
+
+/// The other direction of the same equality: the module declares a
+/// capability the manifest does not carry. Refused too — the check is that
+/// the two describe one block, not only that the manifest asks for no more.
+#[tokio::test]
+async fn a_module_that_asks_for_more_than_the_seeded_spec_is_refused() {
+    let mut info = hello_info("site/hello");
+    info.capabilities = Some(BlockCapabilities {
+        collections: Allowlist::Only(BTreeSet::from(["site__hello__notes".to_string()])),
+        ..BlockCapabilities::none()
+    });
+    let control = FakeControl::new();
+    control.set_validated_info(info);
+    let ctx = TestContext::with_dev(control.clone()).await;
+
+    let error = seed::import(&ctx, control.as_ref(), &manifest(), &bundle())
+        .await
+        .expect_err("a module declaring more than its spec must refuse the import");
+    assert!(
+        error.contains("does not report") && error.contains("site/hello"),
+        "{error}"
+    );
+    assert!(error.contains("site__hello__notes"), "{error}");
+}
+
+/// A bundle exported with a hyphenated block that still claims the hyphen
+/// spelling (`site__my-shop__*`) is refused on import: that spelling is read
+/// and written as `site__myshop__*`, another block's tables.
+#[tokio::test]
+async fn a_seeded_hyphenated_block_claiming_the_hyphen_spelling_is_refused() {
+    let (ctx, control) = fixture().await;
+    let mut manifest = manifest();
+    let spec = &mut manifest.blocks[0].spec;
+    spec.name = "site/my-shop".to_string();
+    spec.routes[0].prefix = "/b/my-shop/".to_string();
+    spec.capabilities = BlockCapabilities {
+        collections: Allowlist::Only(BTreeSet::from(["site__my-shop__notes".to_string()])),
+        ..BlockCapabilities::none()
+    };
+    let bundle = bundle()
+        .with(&seed::artifact_url("my-shop"), ARTIFACT)
+        .with(&seed::source_url("my-shop", "src/lib.rs"), LIB_RS);
+
+    let error = seed::import(&ctx, control.as_ref(), &manifest, &bundle)
+        .await
+        .expect_err("the hyphen spelling must refuse the import");
+    assert!(error.contains("cap-collection"), "{error}");
+    assert!(error.contains("site__my-shop__notes"), "{error}");
 }
 
 /// The seeded build row records the guest's own `BlockInfo`, exactly as

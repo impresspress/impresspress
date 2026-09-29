@@ -8,11 +8,22 @@ export { StorageService } from './services/storage.service';
 export { IAMService } from './services/iam.service';
 export * from './services/extensions.service';
 
-// Export types
-export * from './types';
+// Export the SDK config type (every wire shape is exported from its service)
+export type { ImpresspressConfig } from './types';
 
 // Export the error type and helpers every service throws/maps
-export { ImpresspressError, isNotFoundError, isUnauthorizedError } from './error';
+export {
+  ImpresspressError,
+  isNotFoundError,
+  isStatementBudgetError,
+  isUnauthorizedError,
+  STATEMENT_BUDGET_DETAIL_CODES,
+} from './error';
+export type { SdkErrorCode } from './error';
+
+// Export the one HTTP client every service shares, and its timeout vocabulary
+export { HttpClient, DEFAULT_TIMEOUT_MS, NO_TIMEOUT } from './http-client';
+export type { HttpClientConfig, HttpRequestOptions, HttpMethod } from './http-client';
 
 // Export the OAuth popup abstraction (advanced usage — most callers just use
 // `client.auth.signInWithOAuthPopup`)
@@ -40,11 +51,19 @@ export type {
   StorageObjectInfo,
   ListObjectsResult,
   ListOptions,
+  TransferOptions,
   UploadFileOptions,
+  FileMetadataRecord,
+  FileViewRecord,
+  RecordListResult,
+  SearchResult,
+  RecentViewsResult,
 } from './services/storage.service';
 
 export type {
+  IAMRole,
   IAMRoleListResponse,
+  IAMRoleUpdateResponse,
   CreateRoleRequest,
   UpdateRoleRequest,
 } from './services/iam.service';

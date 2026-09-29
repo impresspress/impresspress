@@ -1,5 +1,5 @@
 import { BaseService } from "./base.service";
-import { isNotFoundError, isUnauthorizedError } from "../error";
+import { ImpresspressError, isNotFoundError, isUnauthorizedError } from "../error";
 import { PopupAuthSession } from "../popup-auth-session";
 
 /**
@@ -12,8 +12,9 @@ export type OAuthProviderName = "google" | "github" | "microsoft";
 /**
  * The real shape returned under the `user` key by `POST /login`,
  * `POST /signup`, and `GET /me` — see `blocks/auth_ui/api/{login,signup,me}.rs`.
- * Distinct from the generated `AuthUser`/`User` DB-row types, which model a
- * different (out of date) column set that these endpoints never return.
+ * This is the whole user surface the SDK exposes: the endpoints project a
+ * session view, not a table row, and there is no column set behind it to
+ * mirror.
  */
 export interface AuthSessionUser {
   id: string;
@@ -37,13 +38,51 @@ export interface SignInResult {
   default_redirect: string;
 }
 
-export interface SignUpResult {
-  user: { id: string; email: string; name?: string; roles?: string[] };
-  emailVerified: boolean;
-  message?: string;
-  tokens?: AuthTokens;
-  default_redirect?: string;
-}
+/**
+ * What `signUp` resolves to, told apart by `emailVerified`: `true` means the
+ * user is signed in and `tokens` are set; `false` means verification is
+ * pending, nothing was issued, and `user` carries the address alone — that
+ * reply reads the same whether or not the address was already registered.
+ */
+export type SignUpResult =
+  | {
+      emailVerified: true;
+      user: AuthSessionUser;
+      tokens: AuthTokens;
+      default_redirect: string;
+      message?: undefined;
+    }
+  | {
+      emailVerified: false;
+      user: { email: string; id?: undefined; name?: undefined; roles?: undefined };
+      message: string;
+      tokens?: undefined;
+      default_redirect?: undefined;
+    };
+
+/**
+ * The two bodies `POST /b/auth/api/signup` answers, told apart by
+ * `email_verified`. Only the reply that signed the user in names the account;
+ * the one awaiting verification carries the address alone, because it must
+ * read the same whether or not that address was already registered.
+ * `test/generated-contract.test.ts` checks the server's published union fits
+ * this one.
+ */
+export type SignUpReply =
+  | {
+      email_verified: true;
+      access_token: string;
+      refresh_token: string;
+      token_type: string;
+      expires_in: number;
+      default_redirect: string;
+      user: AuthSessionUser;
+    }
+  | {
+      email_verified: false;
+      message: string;
+      user: { email: string };
+    };
 
 export interface SignUpOptions {
   email: string;
@@ -78,40 +117,32 @@ export class AuthService extends BaseService {
 
   /** Create an account. Auto-signs in unless email verification is required. */
   async signUp(options: SignUpOptions): Promise<SignUpResult> {
-    const res = await this.request<{
-      email_verified: boolean;
-      message?: string;
-      access_token?: string;
-      refresh_token?: string;
-      token_type?: string;
-      expires_in?: number;
-      default_redirect?: string;
-      user: { id: string; email: string; name?: string; roles?: string[] };
-    }>({
+    const res = await this.request<SignUpReply>({
       method: "POST",
       url: "/b/auth/api/signup",
       data: options,
     });
 
-    const tokens =
-      res.access_token && res.refresh_token
-        ? {
-            access_token: res.access_token,
-            refresh_token: res.refresh_token,
-            token_type: res.token_type ?? "Bearer",
-            expires_in: res.expires_in ?? 0,
-          }
-        : undefined;
-
-    if (tokens) {
-      this.tokens = tokens;
-      this.currentUser = res.user as AuthSessionUser;
+    if (!res.email_verified) {
+      return {
+        user: { email: res.user.email },
+        emailVerified: false,
+        message: res.message,
+      };
     }
+
+    const tokens: AuthTokens = {
+      access_token: res.access_token,
+      refresh_token: res.refresh_token,
+      token_type: res.token_type,
+      expires_in: res.expires_in,
+    };
+    this.tokens = tokens;
+    this.currentUser = res.user;
 
     return {
       user: res.user,
-      emailVerified: res.email_verified,
-      message: res.message,
+      emailVerified: true,
       tokens,
       default_redirect: res.default_redirect,
     };
@@ -232,7 +263,10 @@ export class AuthService extends BaseService {
   async refreshSession(refreshToken?: string): Promise<AuthTokens> {
     const token = refreshToken ?? this.tokens?.refresh_token;
     if (!token) {
-      throw new Error("No refresh token available — sign in first or pass one explicitly");
+      throw new ImpresspressError(
+        "no_refresh_token",
+        "No refresh token available — sign in first or pass one explicitly",
+      );
     }
     const tokens = await this.request<AuthTokens>({
       method: "POST",
@@ -262,23 +296,35 @@ export class AuthService extends BaseService {
   }
 
   /**
-   * Start an OAuth flow. `GET /b/auth/oauth/login?provider=`, which returns
-   * `{ auth_url, provider }` for the caller to navigate to (full-page
-   * redirect or a popup — see `signInWithOAuthPopup`).
+   * Start an OAuth flow: returns `{ auth_url, provider }` where `auth_url` is
+   * `GET /b/auth/oauth/login?provider=` on this deployment, for the caller to
+   * NAVIGATE to — a full-page redirect or a popup (see
+   * `signInWithOAuthPopup`). That endpoint answers `302` to the provider.
+   *
+   * Deliberately builds the URL instead of calling it. The start endpoint
+   * sets the cookie that binds the flow to this browser, and a cookie set on
+   * a `fetch` response is a third-party write whenever the page is served
+   * from another origin than the API — Safari blocks it, Firefox partitions
+   * it, and the OAuth callback would then reject every sign-in. Navigating
+   * makes the browser first-party at the API origin, so the binding is
+   * stored wherever this page came from.
    */
   async signInWithOAuth(
     provider: OAuthProviderName,
   ): Promise<{ auth_url: string; provider: string }> {
-    return this.request<{ auth_url: string; provider: string }>({
-      method: "GET",
-      url: `/b/auth/oauth/login?provider=${encodeURIComponent(provider)}`,
-    });
+    const base = this.config.url.replace(/\/+$/, "");
+    return {
+      auth_url: `${base}/b/auth/oauth/login?provider=${encodeURIComponent(provider)}`,
+      provider,
+    };
   }
 
   /**
    * Sign in via an OAuth popup. Single consolidated implementation (see
-   * `PopupAuthSession`) — the server sets an httpOnly cookie and redirects
-   * the popup to `FRONTEND_URL`, with no `postMessage` contract of its own,
+   * `PopupAuthSession`) — the popup opens at this deployment's OAuth start
+   * endpoint, which redirects it on to the provider; the server then sets an
+   * httpOnly cookie and redirects the popup to `FRONTEND_URL`, with no
+   * `postMessage` contract of its own,
    * so the session is finalized by polling for the popup closing and then
    * verifying the cookie via `getUser()`. A `postMessage({type: "oauth-success"
    * | "oauth-error", error?})` from the popup (e.g. a consumer-built bridge
@@ -312,7 +358,7 @@ export class AuthService extends BaseService {
           return undefined;
         }
         if (message.error) {
-          throw new Error(message.error);
+          throw new ImpresspressError("oauth_error", message.error);
         }
         return true;
       },
@@ -324,7 +370,10 @@ export class AuthService extends BaseService {
 
     const user = await this.getUser();
     if (!user) {
-      throw new Error("Authentication failed");
+      throw new ImpresspressError(
+        "authentication_failed",
+        "Authentication failed: the popup completed but no session was established",
+      );
     }
     return user;
   }

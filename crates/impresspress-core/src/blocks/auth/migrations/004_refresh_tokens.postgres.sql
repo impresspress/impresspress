@@ -1,5 +1,5 @@
--- See 003_refresh_tokens.sqlite.sql for the rationale (SEC-032/SEC-039).
-DROP TABLE IF EXISTS wafer_run__auth__tokens;
+-- See `004_refresh_tokens.sqlite.sql` for the rationale (SEC-032/SEC-039),
+-- and for why this file must not DROP the table.
 
 CREATE TABLE IF NOT EXISTS wafer_run__auth__tokens (
     id           TEXT PRIMARY KEY,

@@ -10,7 +10,10 @@ use serde_json::Value;
 use wafer_core::clients::{config, network};
 use wafer_run::{context::Context, ErrorCode, WaferError};
 
-use super::stripe_secret_operations_allowed;
+use super::{
+    config::{STRIPE_API_URL, STRIPE_API_VERSION, STRIPE_SECRET_KEY},
+    stripe_secret_operations_allowed,
+};
 
 pub(crate) const DEFAULT_API_VERSION: &str = "2026-02-25.clover";
 
@@ -24,38 +27,27 @@ pub(crate) struct StripeClient {
 
 impl StripeClient {
     pub(crate) async fn load(ctx: &dyn Context) -> Result<Self, WaferError> {
-        if !stripe_secret_operations_allowed(ctx).await {
+        if !stripe_secret_operations_allowed(ctx) {
             return Err(WaferError::new(
                 ErrorCode::FailedPrecondition,
                 "Stripe secret-key operations are disabled in the browser runtime; configure a trusted remote commerce API instead",
             ));
         }
-        let secret_key =
-            config::get_default(ctx, "IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "").await;
+        let secret_key = config::get_default(ctx, STRIPE_SECRET_KEY, "").await?;
         let livemode = secret_livemode(&secret_key).ok_or_else(|| {
             WaferError::new(
                 ErrorCode::FailedPrecondition,
                 "Stripe secret key must be a test or live secret key",
             )
         })?;
-        let api_version = config::get_default(
-            ctx,
-            "IMPRESSPRESS__PRODUCTS__STRIPE_API_VERSION",
-            DEFAULT_API_VERSION,
-        )
-        .await;
+        let api_version = config::get_default(ctx, STRIPE_API_VERSION, DEFAULT_API_VERSION).await?;
         if !super::stripe::is_stable_stripe_api_version(&api_version) {
             return Err(WaferError::new(
                 ErrorCode::FailedPrecondition,
                 "Stripe API version must be a stable named release",
             ));
         }
-        let api_url = config::get_default(
-            ctx,
-            "IMPRESSPRESS__PRODUCTS__STRIPE_API_URL",
-            "https://api.stripe.com",
-        )
-        .await;
+        let api_url = config::get_default(ctx, STRIPE_API_URL, "https://api.stripe.com").await?;
         Ok(Self {
             secret_key,
             api_url: api_url.trim_end_matches('/').to_string(),
@@ -64,6 +56,13 @@ impl StripeClient {
         })
     }
 
+    /// Send a request and decode its JSON body, classifying any failure.
+    ///
+    /// Every Stripe call in the block goes through here or through
+    /// [`Self::request_json_optional`], so one place decides whether a
+    /// failure is retryable. Hand-rolled copies of this decision disagreed in
+    /// both directions: the catalog pair called a 503 a terminal rejection,
+    /// and the Payment-Link writes called a deterministic 400 retryable.
     pub(crate) async fn request_json(
         &self,
         ctx: &dyn Context,
@@ -73,6 +72,51 @@ impl StripeClient {
         idempotency_key: Option<&str>,
         form: Option<Vec<(String, String)>>,
     ) -> Result<Value, WaferError> {
+        let response = self
+            .send(ctx, method, path, stripe_account, idempotency_key, form)
+            .await?;
+        if response.status_code >= 400 {
+            return Err(classify(path, response.status_code, &response.body));
+        }
+        decode(&response.body)
+    }
+
+    /// [`Self::request_json`] with one addition: **404 means the object is
+    /// not there**, which is a fact rather than a failure.
+    ///
+    /// The catalog reconciliation reads a stored Stripe id to find out
+    /// whether the object still exists, and a Stripe object that was deleted
+    /// in the dashboard answers 404. That policy lives here rather than in
+    /// the caller so no call site has to re-derive a status from an error to
+    /// find out what happened.
+    pub(crate) async fn request_json_optional(
+        &self,
+        ctx: &dyn Context,
+        method: &str,
+        path: &str,
+        stripe_account: Option<&str>,
+    ) -> Result<Option<Value>, WaferError> {
+        let response = self
+            .send(ctx, method, path, stripe_account, None, None)
+            .await?;
+        if response.status_code == 404 {
+            return Ok(None);
+        }
+        if response.status_code >= 400 {
+            return Err(classify(path, response.status_code, &response.body));
+        }
+        decode(&response.body).map(Some)
+    }
+
+    async fn send(
+        &self,
+        ctx: &dyn Context,
+        method: &str,
+        path: &str,
+        stripe_account: Option<&str>,
+        idempotency_key: Option<&str>,
+        form: Option<Vec<(String, String)>>,
+    ) -> Result<network::NetworkResponse, WaferError> {
         let headers = request_headers(
             &self.secret_key,
             &self.api_version,
@@ -80,7 +124,7 @@ impl StripeClient {
             idempotency_key,
         );
         let body = form.map(encode_form);
-        let response = send_raw(
+        send_raw(
             ctx,
             method,
             &format!("{}{}", self.api_url, path),
@@ -93,39 +137,50 @@ impl StripeClient {
                 ErrorCode::Internal,
                 format!("Stripe request could not be completed: {error}"),
             )
-        })?;
-        if response.status_code >= 400 {
-            let decoded: Value = serde_json::from_slice(&response.body).unwrap_or_default();
-            let code = provider_error_code(&decoded);
-            // 429 and 5xx are ambiguous: Stripe may have applied the mutation
-            // before failing, so they classify like a transport failure
-            // (`Internal`) — callers keep their durable claim and retry with
-            // the same idempotency key. Only the remaining 4xx responses are
-            // deterministic rejections that terminally fail an operation.
-            if response.status_code == 429 || response.status_code >= 500 {
-                return Err(WaferError::new(
-                    ErrorCode::Internal,
-                    format!(
-                        "Stripe request could not be completed (HTTP {}, code {code})",
-                        response.status_code
-                    ),
-                ));
-            }
-            return Err(WaferError::new(
-                ErrorCode::FailedPrecondition,
-                format!(
-                    "Stripe rejected the request (HTTP {}, code {code})",
-                    response.status_code
-                ),
-            ));
-        }
-        serde_json::from_slice(&response.body).map_err(|_| {
-            WaferError::new(
-                ErrorCode::Internal,
-                "Stripe returned an unreadable response",
-            )
         })
     }
+}
+
+/// The one place a Stripe HTTP status becomes an error code.
+///
+/// 409, 429 and 5xx are ambiguous, so they classify like a transport failure
+/// (`Internal`) — callers keep their durable claim and retry with the same
+/// idempotency key. A 5xx may have applied the mutation before failing; a 409
+/// means another request under the same key is still executing and its
+/// outcome is not known yet. Only the remaining 4xx responses are definite
+/// rejections that terminally fail an operation.
+///
+/// The provider's own body is logged, never returned: it can name the
+/// connected account and the request's parameters, and this error reaches a
+/// storefront buyer.
+fn classify(path: &str, status_code: u16, body: &[u8]) -> WaferError {
+    let decoded: Value = serde_json::from_slice(body).unwrap_or_default();
+    let code = provider_error_code(&decoded);
+    tracing::error!(
+        status = status_code,
+        path = %path,
+        body = %String::from_utf8_lossy(body),
+        "Stripe request failed"
+    );
+    if matches!(status_code, 409 | 429) || status_code >= 500 {
+        return WaferError::new(
+            ErrorCode::Internal,
+            format!("Stripe request could not be completed (HTTP {status_code}, code {code})"),
+        );
+    }
+    WaferError::new(
+        ErrorCode::FailedPrecondition,
+        format!("Stripe rejected the request (HTTP {status_code}, code {code})"),
+    )
+}
+
+fn decode(body: &[u8]) -> Result<Value, WaferError> {
+    serde_json::from_slice(body).map_err(|_| {
+        WaferError::new(
+            ErrorCode::Internal,
+            "Stripe returned an unreadable response",
+        )
+    })
 }
 
 pub(crate) fn secret_livemode(key: &str) -> Option<bool> {

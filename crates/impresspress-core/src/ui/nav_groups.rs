@@ -12,11 +12,13 @@ fn item(label: &str, href: &str, icon: fn() -> Markup) -> NavItem {
         icon,
         external: false,
         block: None,
+        section: None,
     }
 }
 
 /// A nav item backed by an optional (feature-gated) block. The item only
-/// renders when its block is registered — see [`retain_registered`].
+/// renders when its block is registered AND enabled — see
+/// [`retain_reachable`].
 fn block_item(label: &str, href: &str, icon: fn() -> Markup, block: &'static str) -> NavItem {
     NavItem {
         block: Some(block),
@@ -24,16 +26,44 @@ fn block_item(label: &str, href: &str, icon: fn() -> Markup, block: &'static str
     }
 }
 
-/// Drop nav items whose backing block isn't registered in this deployment,
-/// then drop groups left empty. Which blocks exist varies per target
-/// (`impresspress/vector` isn't compiled into every wasm build; Cloudflare
-/// ships without `impresspress/llm`) — a static nav that ignores that links
-/// straight into "block not found". Called by `ui::shell_page` with
-/// `ctx.registered_blocks()`.
-pub fn retain_registered(groups: &mut Vec<NavGroup>, registered: &std::collections::HashSet<&str>) {
+/// Drop nav items whose backing block won't serve in this deployment, then
+/// drop groups left empty.
+///
+/// Two separate reasons a link would land on "block not found", and the
+/// router applies both:
+///
+/// - NOT REGISTERED. Which blocks exist varies per target
+///   (`impresspress/vector` isn't compiled into every wasm build; Cloudflare
+///   ships without `impresspress/llm`).
+/// - REGISTERED BUT DISABLED. `routing::route_to_block` feature-gates every
+///   route on `FeatureConfig::is_block_enabled` and answers
+///   `err_not_found("endpoint not found")` when it is off. Filtering on
+///   registration alone left a live link to every such block —
+///   `impresspress/tickets` ships `default_enabled(false)`, so its sidebar
+///   entry 404'd on a default install.
+///
+/// Enablement is read through [`crate::routing::feature_gate_name`] so this
+/// asks exactly what the router asks: the router gates on `route.block`,
+/// which for the inspector is `impresspress/inspector` even though its
+/// `BlockInfo` is named `wafer-run/inspector`. (It does not make an inspector
+/// toggle work — every writer keys rows by `BlockInfo::name` — but the
+/// inspector declares no `can_disable`, so it has neither a row nor a
+/// toggle.)
+///
+/// Called by [`super::shell_document`] with `ctx.registered_blocks()` and the
+/// boot config snapshot — the same source the router's gate consults.
+pub fn retain_reachable(
+    groups: &mut Vec<NavGroup>,
+    registered: &std::collections::HashSet<&str>,
+    features: &dyn crate::features::FeatureConfig,
+) {
     for g in groups.iter_mut() {
-        g.items
-            .retain(|i| i.block.is_none_or(|b| registered.contains(b)));
+        g.items.retain(|i| {
+            i.block.is_none_or(|b| {
+                registered.contains(b)
+                    && features.is_block_enabled(crate::routing::feature_gate_name(b))
+            })
+        });
     }
     groups.retain(|g| !g.items.is_empty());
 }
@@ -51,14 +81,24 @@ pub fn admin() -> Vec<NavGroup> {
         NavGroup {
             label: Some("Data".to_string()),
             items: vec![
-                item("Storage", "/b/storage/admin/", icons::hard_drive),
+                // `/b/storage/` is gated on `impresspress/files`, which is
+                // `can_disable(true)` — a bare `item` here stayed visible and
+                // 404'd once an operator turned Files off.
+                block_item(
+                    "Storage",
+                    "/b/storage/admin/",
+                    icons::hard_drive,
+                    "impresspress/files",
+                )
+                .in_section("/b/storage/admin"),
                 item("Database", "/b/admin/database", icons::server),
                 block_item(
                     "Vector indexes",
                     "/b/vector/",
                     icons::network,
                     "impresspress/vector",
-                ),
+                )
+                .in_section("/b/vector"),
             ],
         },
         NavGroup {
@@ -69,14 +109,16 @@ pub fn admin() -> Vec<NavGroup> {
                     "/b/messages/",
                     icons::file_text,
                     "impresspress/messages",
-                ),
+                )
+                .in_section("/b/messages"),
                 block_item(
                     "Tickets",
                     "/b/tickets/admin/tickets",
                     icons::file_text,
                     "impresspress/tickets",
-                ),
-                block_item("LLM", "/b/llm/", icons::robot, "impresspress/llm"),
+                )
+                .in_section("/b/tickets/admin"),
+                block_item("LLM", "/b/llm/", icons::robot, "impresspress/llm").in_section("/b/llm"),
             ],
         },
         NavGroup {
@@ -86,14 +128,18 @@ pub fn admin() -> Vec<NavGroup> {
                 "/b/products/admin/",
                 icons::shopping_cart,
                 "impresspress/products",
-            )],
+            )
+            .in_section("/b/products/admin")],
         },
         NavGroup {
             label: Some("System".to_string()),
             items: vec![
                 item("Blocks", "/b/admin/blocks", icons::package),
                 item("Logs", "/b/admin/logs", icons::file_text),
-                item("Settings", "/b/admin/settings/email", icons::settings),
+                // The item links to the first settings page but stands for
+                // all of them (Email, Network, Variables, Permissions).
+                item("Settings", "/b/admin/settings/email", icons::settings)
+                    .in_section("/b/admin/settings"),
             ],
         },
     ]
@@ -105,10 +151,29 @@ pub fn portal() -> Vec<NavGroup> {
         NavGroup {
             label: Some("Account".to_string()),
             items: vec![
-                item("Profile", "/b/userportal/profile", icons::user),
+                // `/b/userportal` is gated on `impresspress/userportal`,
+                // which is `can_disable(true)`. Organizations is NOT: it
+                // lives under `/b/auth/`, gated on `impresspress/auth-ui`,
+                // which is always on.
+                block_item(
+                    "Profile",
+                    "/b/userportal/profile",
+                    icons::user,
+                    "impresspress/userportal",
+                ),
                 item("Organizations", "/b/auth/orgs", icons::users),
-                item("Sessions", "/b/userportal/sessions", icons::shield),
-                item("Security", "/b/userportal/security", icons::lock),
+                block_item(
+                    "Sessions",
+                    "/b/userportal/sessions",
+                    icons::shield,
+                    "impresspress/userportal",
+                ),
+                block_item(
+                    "Security",
+                    "/b/userportal/security",
+                    icons::lock,
+                    "impresspress/userportal",
+                ),
             ],
         },
         NavGroup {
@@ -119,21 +184,27 @@ pub fn portal() -> Vec<NavGroup> {
                     "/b/products/",
                     icons::package,
                     "impresspress/products",
-                ),
-                item("Files", "/b/storage/", icons::folder),
+                )
+                .in_section("/b/products"),
+                // Same gate as "Shares" below — both are `/b/storage`-family
+                // paths served by `impresspress/files`.
+                block_item("Files", "/b/storage/", icons::folder, "impresspress/files")
+                    .in_section("/b/storage"),
                 // `/b/cloudstorage/` routes to the files block (see routing.rs).
                 block_item(
                     "Shares",
                     "/b/cloudstorage/",
                     icons::link,
                     "impresspress/files",
-                ),
+                )
+                .in_section("/b/cloudstorage"),
                 block_item(
                     "Legal",
                     "/b/legalpages/admin/privacy",
                     icons::file_text,
                     "impresspress/legalpages",
-                ),
+                )
+                .in_section("/b/legalpages/admin"),
             ],
         },
     ]
@@ -284,15 +355,119 @@ mod tests {
         assert_eq!(shares.href, "/b/cloudstorage/");
     }
 
+    /// Every block enabled — the state an untouched deployment is in, and
+    /// what `BlockSettings` reports for any block with no row.
+    fn all_enabled() -> crate::features::BlockSettings {
+        crate::features::BlockSettings::default()
+    }
+
+    /// One block explicitly disabled; every other name defaults to enabled.
+    fn with_disabled(name: &str) -> crate::features::BlockSettings {
+        crate::features::BlockSettings::from_map(std::collections::HashMap::from([(
+            name.to_string(),
+            false,
+        )]))
+    }
+
+    /// A registered block whose enablement is off still fails the router's
+    /// feature gate, which answers `err_not_found("endpoint not found")` —
+    /// so its sidebar entry is a link to a 404. `impresspress/tickets` is
+    /// the shipped instance: it declares `default_enabled(false)`, so a
+    /// default install seeds it disabled and the Communication group offered
+    /// a dead "Tickets" link on every admin page.
+    /// The same dead-link failure reached items that never declared a block
+    /// at all. `/b/storage/` is served by `impresspress/files` and
+    /// `/b/userportal` by `impresspress/userportal` — both `can_disable(true)`
+    /// — yet "Storage", "Files", "Profile", "Sessions" and "Security" were
+    /// plain `item(..)` entries, so disabling either block left them pointing
+    /// at "endpoint not found" while the correctly-gated "Shares" vanished.
     #[test]
-    fn retain_registered_drops_unregistered_blocks_and_empty_groups() {
+    fn retain_reachable_drops_items_whose_gating_block_is_disabled() {
+        let registered: std::collections::HashSet<&str> =
+            ["impresspress/files", "impresspress/userportal"].into();
+
+        let mut admin_groups = admin();
+        retain_reachable(
+            &mut admin_groups,
+            &registered,
+            &with_disabled("impresspress/files"),
+        );
+        let admin_labels: Vec<&str> = admin_groups
+            .iter()
+            .flat_map(|g| g.items.iter())
+            .map(|i| i.label.as_str())
+            .collect();
+        assert!(
+            !admin_labels.contains(&"Storage"),
+            "/b/storage/ is gated on impresspress/files; its link must go too",
+        );
+        assert!(
+            admin_labels.contains(&"Database"),
+            "an admin-served page stays: impresspress/admin cannot be disabled",
+        );
+
+        let mut portal_groups = portal();
+        retain_reachable(
+            &mut portal_groups,
+            &registered,
+            &with_disabled("impresspress/userportal"),
+        );
+        let portal_labels: Vec<&str> = portal_groups
+            .iter()
+            .flat_map(|g| g.items.iter())
+            .map(|i| i.label.as_str())
+            .collect();
+        for dead in ["Profile", "Sessions", "Security"] {
+            assert!(
+                !portal_labels.contains(&dead),
+                "/b/userportal is gated on impresspress/userportal; {dead} must go",
+            );
+        }
+        assert!(
+            portal_labels.contains(&"Organizations"),
+            "Organizations is /b/auth/, gated on the always-on auth-ui block",
+        );
+        assert!(
+            portal_labels.contains(&"Files"),
+            "files is still enabled here, so its portal link stays",
+        );
+    }
+
+    #[test]
+    fn retain_reachable_drops_a_registered_but_disabled_block() {
+        let mut groups = admin();
+        let registered: std::collections::HashSet<&str> =
+            ["impresspress/tickets", "impresspress/messages"].into();
+        retain_reachable(
+            &mut groups,
+            &registered,
+            &with_disabled("impresspress/tickets"),
+        );
+
+        let labels: Vec<&str> = groups
+            .iter()
+            .flat_map(|g| g.items.iter())
+            .map(|i| i.label.as_str())
+            .collect();
+        assert!(
+            !labels.contains(&"Tickets"),
+            "a disabled block's route 404s — its nav link must not render",
+        );
+        assert!(
+            labels.contains(&"Messages"),
+            "a registered, enabled block keeps its link",
+        );
+    }
+
+    #[test]
+    fn retain_reachable_drops_unregistered_blocks_and_empty_groups() {
         // A deployment without vector/llm/messages (e.g. Cloudflare) must not
         // show nav links into "block not found" — and the Communication group,
         // left empty, must disappear entirely.
         let mut groups = admin();
         let registered: std::collections::HashSet<&str> =
             ["impresspress/admin", "impresspress/files"].into();
-        retain_registered(&mut groups, &registered);
+        retain_reachable(&mut groups, &registered, &all_enabled());
 
         let labels: Vec<&str> = groups
             .iter()
@@ -314,7 +489,7 @@ mod tests {
     }
 
     #[test]
-    fn retain_registered_keeps_everything_when_all_blocks_present() {
+    fn retain_reachable_keeps_everything_when_all_blocks_present() {
         let mut groups = admin();
         let registered: std::collections::HashSet<&str> = [
             "impresspress/vector",
@@ -322,10 +497,11 @@ mod tests {
             "impresspress/llm",
             "impresspress/products",
             "impresspress/tickets",
+            "impresspress/files",
         ]
         .into();
         let before: usize = groups.iter().map(|g| g.items.len()).sum();
-        retain_registered(&mut groups, &registered);
+        retain_reachable(&mut groups, &registered, &all_enabled());
         let after: usize = groups.iter().map(|g| g.items.len()).sum();
         assert_eq!(before, after, "fully-featured deployment keeps every item");
     }

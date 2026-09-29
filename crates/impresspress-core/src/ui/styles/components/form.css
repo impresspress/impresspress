@@ -197,7 +197,7 @@
  * that this rule lives above `.mt-0` in the same file — the ordinary
  * component-before-utility convention is sufficient again. */
 .products-form-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); gap: 0 var(--space-4); }
-.products-form-grid--compact { grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); }
+.products-form-grid--compact { grid-template-columns: repeat(auto-fit, minmax(min(170px, 100%), 1fr)); }
 .products-choice-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: var(--space-3); }
 .products-choice { display: flex; gap: var(--space-3); align-items: flex-start; padding: var(--space-3) var(--space-4); border: 1px solid var(--border-color); border-radius: 12px; background: var(--surface-1); cursor: pointer; }
 .products-choice:has(input:checked) { border-color: var(--primary-color); background: color-mix(in srgb, var(--primary-color) 5%, var(--surface-1)); box-shadow: 0 0 0 2px color-mix(in srgb, var(--primary-color) 10%, transparent); }
@@ -230,7 +230,8 @@ body:has(.products-tabs) .filter-bar { margin: var(--space-4) 0; padding: var(--
 .wizard-step-check svg { width: .75rem; height: .75rem; }
 .product-wizard-actions { position: sticky; bottom: 0; z-index: 2; display: flex; justify-content: space-between; gap: var(--space-4); flex-wrap: wrap; margin-top: var(--space-4); padding: var(--space-3) 0; border-top: 1px solid var(--border-color); background: var(--surface-1); }
 .product-wizard-actions__buttons { display: flex; gap: var(--space-3); margin-left: auto; }
-/* Rows built client-side by `PRODUCT_MANAGER_JS` (pricing preview, saved
+/* Rows built client-side by `blocks/products/assets/products-manager.js`
+ * (pricing preview, saved
  * checkout presets, Stripe Payment Links) — previously `row.style.cssText=
  * '…'` (task 12e). */
 .product-preview-row { display: flex; justify-content: space-between; gap: var(--space-4); padding: var(--space-1) 0; border-bottom: 1px solid var(--border-color); }
@@ -240,7 +241,10 @@ body:has(.products-tabs) .filter-bar { margin: var(--space-4) 0; padding: var(--
 @media (max-width: 760px) {
 	.products-actions { width: 100%; }
 	.product-wizard-progress { overflow: visible; }
-	.product-wizard-progress ol { min-width: 0; gap: var(--space-1); }
+	/* Five equal columns are ~52px each on a phone, narrower than "4.
+	   Checkout", so the labels ran into each other and off the card. Three
+	   columns fit every label; the steps continue on a second row. */
+	.product-wizard-progress ol { grid-template-columns: repeat(3, minmax(0, 1fr)); min-width: 0; gap: var(--space-1); }
 	.product-wizard-progress li { font-size: .72rem; white-space: nowrap; }
 	.product-wizard-actions { display: grid; }
 	.product-wizard-actions > .btn { width: 100%; }
@@ -374,15 +378,18 @@ body:has(.products-tabs) .filter-bar { margin: var(--space-4) 0; padding: var(--
 
 /* ===== Auto-fit grids =====
  * Named by their `minmax()` pixel floor so call sites read the same value
- * they select; combine with `.gap-*` and `.mt-*` for spacing. */
+ * they select; combine with `.gap-*` and `.mt-*` for spacing. The floor is
+ * `min(<floor>, 100%)`: in a container narrower than the floor the single
+ * column shrinks to the container instead of holding the floor and running
+ * past its edge (a 320px track in a 294px card body on a 375px phone). */
 .grid { display: grid; }
-.grid-auto-150 { grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
-.grid-auto-180 { grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); }
-.grid-auto-220 { grid-template-columns: repeat(auto-fit, minmax(220px, 1fr)); }
-.grid-auto-240 { grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); }
-.grid-auto-260 { grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); }
-.grid-auto-280 { grid-template-columns: repeat(auto-fit, minmax(280px, 1fr)); }
-.grid-auto-320 { grid-template-columns: repeat(auto-fit, minmax(320px, 1fr)); }
+.grid-auto-150 { grid-template-columns: repeat(auto-fit, minmax(min(150px, 100%), 1fr)); }
+.grid-auto-180 { grid-template-columns: repeat(auto-fit, minmax(min(180px, 100%), 1fr)); }
+.grid-auto-220 { grid-template-columns: repeat(auto-fit, minmax(min(220px, 100%), 1fr)); }
+.grid-auto-240 { grid-template-columns: repeat(auto-fit, minmax(min(240px, 100%), 1fr)); }
+.grid-auto-260 { grid-template-columns: repeat(auto-fit, minmax(min(260px, 100%), 1fr)); }
+.grid-auto-280 { grid-template-columns: repeat(auto-fit, minmax(min(280px, 100%), 1fr)); }
+.grid-auto-320 { grid-template-columns: repeat(auto-fit, minmax(min(320px, 100%), 1fr)); }
 /* Two fixed, unequally-weighted columns — the shipping origin/destination
  * row is the only user of this shape. */
 .grid-shipping { grid-template-columns: minmax(180px, 1fr) minmax(280px, 2fr); }

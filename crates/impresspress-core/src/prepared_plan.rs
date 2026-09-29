@@ -17,7 +17,14 @@ use serde::{Deserialize, Serialize};
 use crate::features::BlockState;
 
 /// Current deployment-plan schema. Import rejects every other version.
-pub const PREPARED_RUNTIME_PLAN_SCHEMA_VERSION: u32 = 1;
+///
+/// 2: `PreparedRoute` lost `router_final` (the router's per-path carve-out
+/// flag, deleted with the carve-outs) and `refine_undeclared` became
+/// required. A plan exported by a schema-1 build is refused rather than read
+/// with a field missing: a real one spells `router_final`, which
+/// `deny_unknown_fields` rejects during deserialization, and one that does
+/// not is rejected by the version gate in `validate`.
+pub const PREPARED_RUNTIME_PLAN_SCHEMA_VERSION: u32 = 2;
 
 /// Fail-closed sentinel used by the backwards-compatible structure-only
 /// constructor. Deploy tooling must use `new_with_config_generation` with the
@@ -34,6 +41,13 @@ pub const PREPARED_PLAN_HASH_VAR: &str = "IMPRESSPRESS_PREPARED_PLAN_HASH";
 pub const PREPARED_PLAN_MODULE_SHA256_VAR: &str = "IMPRESSPRESS_PREPARED_PLAN_MODULE_SHA256";
 pub const RELEASE_ASSET_MANIFEST_SHA256_VAR: &str = "IMPRESSPRESS_RELEASE_ASSET_MANIFEST_SHA256";
 pub const RELEASE_ASSET_KEYS_SHA256_VAR: &str = "IMPRESSPRESS_RELEASE_ASSET_KEYS_SHA256";
+
+/// Version-bound Worker vars exposing the immutable release asset set: the
+/// deploy writes them into the generated `wrangler.toml`, the Worker reads
+/// them to resolve release-managed keys without a mutable global pointer.
+pub const RELEASE_ASSET_ID_VAR: &str = "IMPRESSPRESS_RELEASE_ASSET_ID";
+pub const RELEASE_ASSET_PREFIX_VAR: &str = "IMPRESSPRESS_RELEASE_ASSET_PREFIX";
+pub const RELEASE_ASSET_MANIFEST_VAR: &str = "IMPRESSPRESS_RELEASE_ASSET_MANIFEST";
 
 const SHA256_PREFIX: &str = "sha256:";
 
@@ -294,6 +308,10 @@ pub enum PreparedResourceType {
     Crypto,
     Network,
     Vector,
+    Auth,
+    Llm,
+    Image,
+    Embedding,
 }
 
 /// One deployment-owned WRAP grant.
@@ -307,9 +325,70 @@ pub struct PreparedResourceGrant {
     pub grantee: String,
     pub resource: String,
     #[serde(default)]
-    pub write: bool,
+    pub write: PreparedGrantWrite,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub resource_type: Option<PreparedResourceType>,
+}
+
+/// What a [`PreparedResourceGrant`] lets its grantee do.
+///
+/// Encoded as `false` / `true` / `"append"` — the same spelling as
+/// `wafer_block::types::GrantWrite` — so every plan exported before append
+/// grants existed still imports unchanged, and a build that predates them
+/// refuses a plan carrying `"append"` rather than reading it as read-only.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, PartialOrd, Ord)]
+pub enum PreparedGrantWrite {
+    /// Read-only (`false`).
+    #[default]
+    Read,
+    /// Read-write (`true`).
+    ReadWrite,
+    /// Append-only on a database collection (`"append"`).
+    Append,
+}
+
+const PREPARED_GRANT_WRITE_APPEND: &str = "append";
+
+impl Serialize for PreparedGrantWrite {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        match self {
+            Self::Read => serializer.serialize_bool(false),
+            Self::ReadWrite => serializer.serialize_bool(true),
+            Self::Append => serializer.serialize_str(PREPARED_GRANT_WRITE_APPEND),
+        }
+    }
+}
+
+impl<'de> Deserialize<'de> for PreparedGrantWrite {
+    fn deserialize<D: serde::Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        struct Visitor;
+
+        impl serde::de::Visitor<'_> for Visitor {
+            type Value = PreparedGrantWrite;
+
+            fn expecting(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+                write!(f, "a boolean or the string `{PREPARED_GRANT_WRITE_APPEND}`")
+            }
+
+            fn visit_bool<E: serde::de::Error>(self, v: bool) -> Result<PreparedGrantWrite, E> {
+                Ok(if v {
+                    PreparedGrantWrite::ReadWrite
+                } else {
+                    PreparedGrantWrite::Read
+                })
+            }
+
+            fn visit_str<E: serde::de::Error>(self, v: &str) -> Result<PreparedGrantWrite, E> {
+                if v == PREPARED_GRANT_WRITE_APPEND {
+                    Ok(PreparedGrantWrite::Append)
+                } else {
+                    Err(E::invalid_value(serde::de::Unexpected::Str(v), &self))
+                }
+            }
+        }
+
+        deserializer.deserialize_any(Visitor)
+    }
 }
 
 /// One route in matching order. Route order is semantic and is not sorted.
@@ -320,15 +399,11 @@ pub struct PreparedRoute {
     pub access: PreparedRouteAccess,
     pub block: String,
     pub dispatch_to: String,
-    pub router_final: bool,
     /// Consumer routes only: whether a path the block has not declared an
     /// endpoint for falls back to `Authenticated` rather than standing at
-    /// `access` (`routing::ExtraRoute::refined` vs `::new`).
-    ///
-    /// `default` so a plan exported before this field existed still imports —
-    /// and imports as `false`, which is `ExtraRoute::new`, which is what every
-    /// route in such a plan was.
-    #[serde(default)]
+    /// `access` (`routing::ExtraRoute::refined` vs `::new`). Always `false`
+    /// for a built-in route, whose undeclared policy is `declared_access`'s
+    /// own fail-closed default.
     pub refine_undeclared: bool,
 }
 
@@ -882,7 +957,6 @@ mod tests {
                 access: PreparedRouteAccess::Public,
                 block: "impresspress/system".into(),
                 dispatch_to: "impresspress/system".into(),
-                router_final: false,
                 refine_undeclared: false,
             }],
             built_in_route_count: 1,
@@ -1098,5 +1172,77 @@ mod tests {
                 &PreparedReleaseAssets::absent(),
             )
             .is_err());
+    }
+
+    fn exported_plan() -> serde_json::Value {
+        let plan = PreparedRuntimePlan::new(
+            "example",
+            hash('b'),
+            WaferLockIdentity::absent(),
+            PreparedReleaseAssets::absent(),
+            structure(),
+        )
+        .unwrap();
+        serde_json::to_value(plan).unwrap()
+    }
+
+    /// A plan exported by a build on schema 1 is refused by the version gate
+    /// before any content or hash check, so the error names the version
+    /// rather than a mismatch the operator cannot act on.
+    #[test]
+    fn a_version_1_plan_is_rejected_at_import() {
+        let mut exported = exported_plan();
+        exported["schema_version"] = serde_json::json!(1);
+        let error =
+            PreparedRuntimePlan::from_json(&serde_json::to_vec(&exported).unwrap()).unwrap_err();
+        assert!(
+            matches!(
+                error,
+                PreparedPlanError::UnsupportedSchema {
+                    actual: 1,
+                    expected: 2
+                }
+            ),
+            "{error}"
+        );
+    }
+
+    /// Schema 1 carried `PreparedRoute.router_final`, the router's per-path
+    /// carve-out flag. A plan that still spells it is refused as a whole,
+    /// and the refusal names the field.
+    #[test]
+    fn a_plan_exported_with_router_final_is_rejected_at_import() {
+        let mut exported = exported_plan();
+        exported["schema_version"] = serde_json::json!(1);
+        for route in exported["structure"]["routes"].as_array_mut().unwrap() {
+            route["router_final"] = serde_json::json!(false);
+        }
+        let error =
+            PreparedRuntimePlan::from_json(&serde_json::to_vec(&exported).unwrap()).unwrap_err();
+        assert!(matches!(error, PreparedPlanError::Json(_)), "{error}");
+        assert!(error.to_string().contains("router_final"), "{error}");
+    }
+
+    #[test]
+    fn a_version_2_plan_round_trips_and_carries_no_router_final() {
+        assert_eq!(PREPARED_RUNTIME_PLAN_SCHEMA_VERSION, 2);
+        let plan = PreparedRuntimePlan::new(
+            "example",
+            hash('b'),
+            WaferLockIdentity::absent(),
+            PreparedReleaseAssets::absent(),
+            structure(),
+        )
+        .unwrap();
+        assert_eq!(plan.schema_version, 2);
+
+        let exported = serde_json::to_value(&plan).unwrap();
+        for route in exported["structure"]["routes"].as_array().unwrap() {
+            assert!(route.get("router_final").is_none(), "{route}");
+            assert!(route.get("refine_undeclared").is_some(), "{route}");
+        }
+
+        let bytes = plan.to_json_pretty().unwrap();
+        assert_eq!(PreparedRuntimePlan::from_json(&bytes).unwrap(), plan);
     }
 }

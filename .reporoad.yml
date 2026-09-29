@@ -1,0 +1,10 @@
+# Customize this repository's building on https://reporoad.suppers.chatgpt.site
+version: 1
+style: cafe
+color: "#b29165"
+roof: gable
+signText: impresspress
+garden: true
+support:
+  sponsor: true
+  helpWanted: false

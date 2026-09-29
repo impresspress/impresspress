@@ -9,30 +9,68 @@
 //! browser drops a nested form's start tag, silently breaking the tab's
 //! Save/Add (see the `tabbed_page` docs and the tests below).
 //!
-//! Routes:
-//!   /b/admin/settings              → 308 redirect to /b/admin/settings/email
+//! Routes (rows of the admin block's `ROUTES`, one literal row per tab):
+//!   /b/admin/settings/             → 308 redirect to /b/admin/settings/email
 //!   /b/admin/settings/email        → email::settings_body
 //!   /b/admin/settings/network      → network::settings_body
 //!   /b/admin/settings/variables    → variables::settings_body
 //!   /b/admin/settings/permissions  → permissions::settings_body
 
-use wafer_run::{context::Context, Message, OutputStream};
+use wafer_run::{context::Context, Message, OutputStream, WaferError};
 
 use super::{admin_page, crumb, email, network, permissions, variables};
 use crate::ui::{
     shell::Topbar,
-    templates::{tabbed_page, FormSection, PageHeader},
-    SiteConfig, UserInfo,
+    templates::{tabbed_page, FormSection},
 };
 
 /// Render the settings page for the given tab. `tab` is one of
 /// "email" / "network" / "variables" / "permissions"; unknown values
 /// fall back to "email".
+///
+/// Every tab body hands back a `Result`, and a failed read fails the whole
+/// page through `crud::db_error_page`. `network` and `permissions` used to
+/// swallow one into the empty table a healthy deployment with nothing
+/// configured renders — "no inbound requests", "no custom grants". `email` is
+/// a form, and a form filled from defaults because the stored values could
+/// not be read would write those defaults back on Save.
 pub async fn settings_page(ctx: &dyn Context, msg: &Message, tab: &str) -> OutputStream {
-    let config = SiteConfig::load(ctx).await;
-    let user = UserInfo::from_message(msg);
-    let path = msg.path().to_string();
+    match render(ctx, msg, tab).await {
+        Ok(page) => page,
+        Err(e) => {
+            crate::blocks::crud::db_error_page(msg, e, "admin settings page: tab read failed")
+        }
+    }
+}
 
+/// [`settings_page`] re-rendered by a handler whose write has landed
+/// (`done`), as the htmx swap its control makes. A failed read cannot be the
+/// error page here: htmx 2 swaps only a 2xx, so the pre-write page would stay
+/// on screen under no sign the write happened. It is a notice saying the
+/// write landed and why the page could not be reloaded, classified by
+/// `crud::db_error_notice`.
+pub(super) async fn settings_page_after_write(
+    ctx: &dyn Context,
+    msg: &Message,
+    tab: &str,
+    done: &str,
+) -> OutputStream {
+    match render(ctx, msg, tab).await {
+        Ok(page) => page,
+        Err(e) => {
+            let reason = crate::blocks::crud::db_error_notice(
+                e,
+                "admin settings page: re-read after a write failed",
+            );
+            crate::ui::swap_notice_response(&format!(
+                "{done}, but the settings could not be reloaded: {reason}. Reload the page to \
+                 see them."
+            ))
+        }
+    }
+}
+
+async fn render(ctx: &dyn Context, msg: &Message, tab: &str) -> Result<OutputStream, WaferError> {
     let active = match tab {
         "email" | "network" | "variables" | "permissions" => tab,
         _ => "email",
@@ -69,13 +107,9 @@ pub async fn settings_page(ctx: &dyn Context, msg: &Message, tab: &str) -> Outpu
         // normalized above) render the email body.
         _ => email::settings_body(ctx, msg).await,
     };
+    let body_markup = body_markup?;
 
     let form_body = tabbed_page(
-        PageHeader {
-            title: "",
-            subtitle: None,
-            primary_action: None,
-        },
         tabs,
         vec![FormSection {
             title: tab_title(active),
@@ -84,11 +118,10 @@ pub async fn settings_page(ctx: &dyn Context, msg: &Message, tab: &str) -> Outpu
         }],
     );
 
-    admin_page(
+    Ok(admin_page(
+        ctx,
+        msg,
         "Settings",
-        &config,
-        &path,
-        user.as_ref(),
         Topbar {
             crumbs: crumb("Settings"),
             primary_action: None,
@@ -96,8 +129,8 @@ pub async fn settings_page(ctx: &dyn Context, msg: &Message, tab: &str) -> Outpu
             show_palette: true,
         },
         form_body,
-        msg,
     )
+    .await)
 }
 
 fn tab_title(active: &str) -> &'static str {
@@ -126,6 +159,28 @@ fn tab_description(active: &str) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::test_support::{admin_msg, output_html, TestContext};
+
+    /// The email tab is a form whose Save posts every field. When the stored
+    /// values cannot be read the page is a 500, never that form filled from
+    /// the boot map and the declared defaults — saving it would write those
+    /// over the stored settings.
+    #[tokio::test]
+    async fn a_failed_read_renders_no_email_form() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID)
+            .break_reads();
+
+        let parts = crate::blocks::admin::test_support::browser_request(
+            &ctx,
+            admin_msg("retrieve", "/b/admin/settings/email"),
+        )
+        .await;
+
+        assert_eq!(parts.status, 500);
+        let html = String::from_utf8(parts.body).expect("UTF-8 body");
+        assert!(!html.contains("<form"), "{html}");
+    }
 
     /// Maximum `<form>` nesting depth in `html`. HTML forms cannot nest —
     /// a browser drops a nested `<form>` start tag entirely (its
@@ -161,8 +216,16 @@ mod tests {
     /// assertion below is relative to it.
     const CHROME_FORMS: usize = 1;
 
+    /// The admin schema has to be applied: the network and permissions tab
+    /// bodies read `impresspress__admin__{request_logs,wrap_grants}`, and a
+    /// fixture without them is a fixture whose page never renders. These
+    /// tests ran on a bare `TestContext::new()` and passed only because both
+    /// reads swallowed "no such table" into an empty table — the same
+    /// swallow this PR removes.
     async fn render_tab(tab: &str) -> String {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         let msg = admin_msg("retrieve", &format!("/b/admin/settings/{tab}"));
         output_html(settings_page(&ctx, &msg, tab).await).await
     }
@@ -234,7 +297,9 @@ mod tests {
 
     #[tokio::test]
     async fn permissions_database_subtab_grant_modal_form_is_not_nested() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         let mut msg = admin_msg("retrieve", "/b/admin/settings/permissions");
         msg.set_meta("req.query.subtab", "database");
         let html = output_html(settings_page(&ctx, &msg, "permissions").await).await;

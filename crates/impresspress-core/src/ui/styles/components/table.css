@@ -20,32 +20,16 @@
 
 .table tbody tr:hover { background: var(--bg-hover); }
 
-.table th.sortable { cursor: pointer; user-select: none; }
-.table th.sortable:hover { color: var(--text-primary); }
-
-/* Pagination */
+/* Pagination — the base rule only. The `.pagination-info`/`-controls`/`-btn`
+   family that stood here belonged to a hand-written pagination nobody renders
+   any more; `components::pagination` emits `.pagination__*` (further down this
+   file) instead.
+   This block stays, and deleting it is not a tidy-up: `.pagination` is defined
+   TWICE at equal specificity, and the second definition sets `padding`, not
+   `margin`. `margin-top: var(--space-6)` below is the only source of the live
+   nav's top margin, so removing this rule moves every page that paginates. */
 .pagination {
 	display: flex; align-items: center; gap: var(--space-2); margin-top: var(--space-6);
-}
-
-.pagination-info {
-	font-size: 0.875rem; color: var(--text-secondary); margin-right: auto;
-}
-
-.pagination-controls { display: flex; gap: var(--space-1); }
-
-.pagination-btn {
-	padding: var(--space-2) var(--space-3);
-	border: 1px solid var(--border-color);
-	background: white; color: var(--text-primary);
-	border-radius: 4px; cursor: pointer; font-size: 0.875rem;
-}
-
-.pagination-btn:hover { background: var(--bg-hover); }
-.pagination-btn:disabled { opacity: 0.5; cursor: not-allowed; }
-.pagination-btn.active {
-	background: var(--primary-button); color: white;
-	border-color: var(--primary-button);
 }
 
 /* Empty State */
@@ -76,6 +60,13 @@
 .data-table tbody td { padding: var(--space-2) var(--space-3); font-size: var(--text-sm); border-bottom: 1px dashed var(--border-light); color: var(--text-primary); }
 .data-table tbody tr:last-child td { border-bottom: none; }
 .data-table__row--linked:hover { background: var(--bg-hover); cursor: pointer; }
+/* A text link in a cell -- a bucket, a file, a folder. With no rule of its
+   own it rendered in the browser's default blue and underline, the one
+   unstyled element in the table. The row-link chevron (below) and a `.btn`
+   in a cell keep their own treatment. --primary-button is the AA-safe text
+   red (4.99:1 on white, computed), as for every other text link here. */
+.data-table td:not(.data-table__row-href) a:not(.btn) { color: var(--primary-button); font-weight: 500; text-decoration: none; }
+.data-table td:not(.data-table__row-href) a:not(.btn):hover { text-decoration: underline; }
 .data-table__row-href { width: 3rem; text-align: right; color: var(--text-muted); }
 /* The chevron is the row's accessible link; give it a real touch target
    (~44px) — the rest of the row is made clickable by the delegated handler
@@ -98,6 +89,15 @@
    flex + gap keeps it baseline-aligned with the text instead of the
    default inline SVG's slight descender offset. */
 .row--folder__link { display: inline-flex; align-items: center; gap: var(--space-2); }
+/* A long free-form value in a cell -- a URL, a stored setting. It may break
+   at any character, so its column can be narrower than the whole value and
+   the table fits the card instead of scrolling part of itself out of view.
+   An identifier (a path, a key, a block name) wraps between its parts
+   instead, through `components::breakable_id`. Only the cells that carry
+   such values opt in: in the table layout algorithm this also lowers the
+   column's minimum width, and a short label given it could be squeezed onto
+   two lines. */
+.data-table .cell-wrap { overflow-wrap: anywhere; }
 
 /* ===== Empty state ===== */
 .empty { text-align: center; padding: var(--space-8) var(--space-4); color: var(--text-secondary); }
@@ -142,7 +142,6 @@
   border: 1px solid var(--border-color);
   border-radius: 6px;
 }
-.db-table-list { list-style: none; margin: 0; padding: 0; max-height: 60vh; overflow-y: auto; }
 .db-table-list__item {
   display: flex;
   align-items: baseline;
@@ -295,24 +294,18 @@
 	.data-table td:last-child { padding-top: var(--space-2); }
 }
 /* ===== Mobile table fallback =====
-   `.table-container` already has `overflow-x: auto`, but several admin
-   pages render `.table` directly (Logs, Network, Permissions) without the
-   wrapper. Apply the same scroll behavior to the parent .card so the page
-   body never blows out the viewport on narrow screens. */
+   This block used to also give an unwrapped `.table` its own horizontal
+   scroll, because the Logs, Network and Permissions administration pages
+   rendered `.table` directly, outside a `.table-container`. None of them
+   does any more — they render `.data-table`, which collapses to cards below
+   720px instead of scrolling — and every `.table` left in the tree is inside
+   a `.table-container`, which already has `overflow-x: auto`. Those two
+   selectors matched nothing and are gone.
+   The nowrap below is still live: it keeps the remaining raw tables'
+   columns (Permissions / Crypto pills) from wrapping inside that scroll. */
 @media (max-width: 720px) {
-	.card > .table,
-	.card .table:not(.table-container .table) {
-		display: block;
-		overflow-x: auto;
-		-webkit-overflow-scrolling: touch;
-	}
-	/* Permissions / Crypto pills: prevent column wrap that wastes space. */
 	.table th, .table td { white-space: nowrap; }
 }
-
-/* ===== Users table: don't wrap the Created date column ===== */
-.users-table td[data-label="Created"],
-.users-table .col-created { white-space: nowrap; }
 
 /* ===== Sessions row (userportal) — less cramped =====
    The data-table → card collapse on mobile leaves a row that's tight.

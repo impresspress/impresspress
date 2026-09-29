@@ -22,8 +22,12 @@ pub mod openai;
 pub mod openai_compatible;
 #[cfg(feature = "llm")]
 mod service;
-#[cfg(feature = "llm")]
-pub(crate) mod sse;
+
+/// Loopback providers, one per wire protocol, that the chat and
+/// contextual-retrieval tests drive the real encoders against — see the
+/// module doc.
+#[cfg(all(test, feature = "llm"))]
+pub(crate) mod fake_provider;
 
 #[cfg(feature = "llm")]
 pub use service::ProviderLlmService;

@@ -91,7 +91,10 @@ pub fn restore_wafer(previous: Rc<wafer_run::Wafer>) {
 /// Convert a browser `Request` into a WAFER `Message`, dispatch through
 /// the currently active `Wafer`'s `site-main` flow, and return a browser
 /// `Response`. Returns a 503-shaped `Response` if called before
-/// `store_wafer`. Internal errors return a 500-shaped `Response`.
+/// `store_wafer`; internal errors return a 500-shaped `Response`. A request
+/// body over `impresspress_core::streaming::MAX_REQUEST_BODY_BYTES` is marked
+/// by `convert::request_to_message` and answered 413 by the flow, like any
+/// other refusal.
 ///
 /// The `Rc` is cloned synchronously (before the first `.await`), so a
 /// `replace_wafer` that lands mid-dispatch does not affect this call — it
@@ -165,5 +168,45 @@ mod tests {
     fn replace_before_store_is_an_error() {
         reset();
         assert!(replace_wafer(empty_wafer()).is_err());
+    }
+
+    /// **Fails on the pre-fix tree**, where an over-cap body left
+    /// `request_to_message` as a `JsValue` error: `dispatch_request` returns
+    /// `Err`, the Service Worker's `respondWith` rejects, and the uploader's
+    /// `fetch` fails with no status at all. The body is now dropped and the
+    /// message marked, and the flow answers 413 — the assertion of the status
+    /// itself lives with the code that builds it
+    /// (`impresspress_core::pipeline`'s `oversized_body_tests`), because an
+    /// empty `Wafer` has no `site-main` flow to answer through.
+    #[wasm_bindgen_test]
+    async fn an_over_cap_request_body_is_marked_and_dropped() {
+        let body = js_sys::Uint8Array::new_with_length(
+            (impresspress_core::streaming::MAX_REQUEST_BODY_BYTES + 1) as u32,
+        );
+        let init = web_sys::RequestInit::new();
+        init.set_method("POST");
+        init.set_body(&body);
+        let request = web_sys::Request::new_with_str_and_init(
+            "https://dev.impresspress.org/b/storage/api/buckets/photos/objects?key=big.bin",
+            &init,
+        )
+        .expect("build request");
+
+        let (msg, input) = convert::request_to_message(&request)
+            .await
+            .expect("conversion must not fail the fetch");
+
+        assert!(
+            impresspress_core::streaming::body_too_large(&msg),
+            "the marker the pipeline refuses on"
+        );
+        let forwarded = input
+            .collect_to_bytes()
+            .await
+            .expect("an in-memory body does not fail");
+        assert!(
+            forwarded.is_empty(),
+            "an oversized body must not reach a block"
+        );
     }
 }

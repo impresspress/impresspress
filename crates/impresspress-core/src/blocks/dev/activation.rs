@@ -38,7 +38,7 @@ use serde::{Deserialize, Serialize};
 use wafer_run::{context::Context, ErrorCode, OutputStream, WaferError};
 
 use super::{
-    artifacts, blobs,
+    blobs,
     contracts::{GenerationSummary, SiteManifest},
     control::DynamicBlockSpec,
     gc,
@@ -82,11 +82,13 @@ pub struct ProgressStep {
     pub detail: String,
 }
 
-/// Why an activation did not happen.
+/// Why an activation did not happen — or, for [`Self::RollbackNotAdopted`],
+/// why one that did happen did not finish.
 ///
-/// Three kinds, because they mean three different things to the caller: the
+/// Four kinds, because they mean four different things to the caller: the
 /// request described a state that cannot be built (fix the request), the host
-/// could not build it (retry or roll back), or persistence failed (retry).
+/// could not build it (retry or roll back), persistence failed (retry), or a
+/// rollback went live and left the workspace behind (retry the rollback).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ActivationError {
     /// The manifest referenced content that is not stored. Reported as `422`:
@@ -97,6 +99,17 @@ pub enum ActivationError {
     Runtime(String),
     /// The ledger, the journal or the object store failed. `500`.
     Storage(String),
+    /// A rollback committed — the generation carrying the target's contents
+    /// is live and journalled — and replacing the workspace's `site/` half
+    /// with the target's then failed. `500`, because the request did not
+    /// finish; but the message says the rollback is live, because telling
+    /// the caller it failed would send them after a rollback that happened.
+    RollbackNotAdopted {
+        /// The generation that went live.
+        generation_id: String,
+        /// Why the workspace could not be updated.
+        message: String,
+    },
 }
 
 impl ActivationError {
@@ -104,7 +117,7 @@ impl ActivationError {
     pub fn status(&self) -> u16 {
         match self {
             Self::Validation(_) => 422,
-            Self::Runtime(_) | Self::Storage(_) => 500,
+            Self::Runtime(_) | Self::Storage(_) | Self::RollbackNotAdopted { .. } => 500,
         }
     }
 
@@ -122,7 +135,9 @@ impl ActivationError {
     pub fn into_response(self) -> OutputStream {
         let code = match self {
             Self::Validation(_) => ErrorCode::InvalidArgument,
-            Self::Runtime(_) | Self::Storage(_) => ErrorCode::Internal,
+            Self::Runtime(_) | Self::Storage(_) | Self::RollbackNotAdopted { .. } => {
+                ErrorCode::Internal
+            }
         };
         no_store_error_status(code, self.status(), &self.to_string())
     }
@@ -140,6 +155,22 @@ impl std::fmt::Display for ActivationError {
             }
             Self::Runtime(message) => write!(f, "the runtime could not be rebuilt: {message}"),
             Self::Storage(message) => write!(f, "the activation could not be stored: {message}"),
+            // Says what IS true before what is not, and what to do about it.
+            // The retry repairs because it is an ordinary rollback: staged
+            // against a live generation with the same manifests,
+            // `activate_staged` rebuilds nothing and publishes nothing, and
+            // `adopt_site` then runs again.
+            Self::RollbackNotAdopted {
+                generation_id,
+                message,
+            } => write!(
+                f,
+                "the rollback is live — generation {generation_id} is serving the rolled-back \
+                 site and blocks — but the workspace's site/ files could not be updated to \
+                 match it: {message}. Until they are, the next site write publishes the \
+                 pre-rollback site again. Retrying the same rollback repairs the workspace: it \
+                 stages the same contents, which are already live, and updates the files."
+            ),
         }
     }
 }
@@ -227,6 +258,7 @@ impl ActivationIntent {
 /// current now.
 async fn compose(
     ctx: &dyn Context,
+    shared: &super::DevShared,
     intent: ActivationIntent,
     previous: Option<&(GenerationRow, GenerationManifest)>,
 ) -> Result<GenerationManifest, ActivationError> {
@@ -234,12 +266,12 @@ async fn compose(
         || previous.map_or_else(Vec::new, |(_row, manifest)| manifest.blocks.clone());
     Ok(match intent {
         ActivationIntent::SiteOnly => {
-            GenerationManifest::staged(workspace_site(ctx).await?, active_blocks())
+            GenerationManifest::staged(workspace_site(ctx, shared).await?, active_blocks())
         }
         ActivationIntent::BlockSet { site, blocks } => {
             let site = match site {
                 Some(site) => site,
-                None => workspace_site(ctx).await?,
+                None => workspace_site(ctx, shared).await?,
             };
             GenerationManifest::staged(site, blocks)
         }
@@ -251,8 +283,56 @@ async fn compose(
 }
 
 /// The workspace's `site/` half as a site manifest, read from storage.
-async fn workspace_site(ctx: &dyn Context) -> Result<SiteManifest, ActivationError> {
-    let ws = workspace::load(ctx).await.map_err(storage_error)?;
+///
+/// # Why this read is locked
+///
+/// This is the manifest read that backs **every ordinary edit**, not a rare
+/// one: `files::handle_write` and `files::handle_delete` release
+/// `DevShared::workspace` before they publish — deliberately, so editing never
+/// waits behind a runtime rebuild — and this function then reads the manifest
+/// back inside the activation that publish asked for. That released gap is
+/// exactly where a second concurrent write takes the lock and saves the
+/// manifest, and an unlocked read straddling a save is `super::files`' first
+/// failure mode: `workspace::load` snapshots `workspace.json` and then reads
+/// its bytes, a save between the two steps replaces the file, and the browser
+/// storage layer reports the invalidated snapshot as an internal error rather
+/// than a miss. The write whose content was already saved then answers a
+/// sanitized `500`.
+///
+/// So it takes the same mutex as the mutators. The section is one small JSON
+/// read; nothing else is inside it.
+///
+/// # Deadlock
+///
+/// Stated here rather than by analogy to the other holders, because this is
+/// the only acquisition that happens *inside* the activation queue.
+///
+/// 1. **Nothing enters the queue holding this lock.** Every caller of
+///    [`request`] — `files::publish_if_site`, `blocks_api`'s stage and remove,
+///    `generations_api`'s rollback, and the browser host's seed import — holds
+///    no `DevShared::workspace` guard when it calls. `files.rs` closes its
+///    guard's scope before it publishes; the three block-set callers hold
+///    `DevShared::compile` instead; the seed importer holds neither. So no
+///    task can be waiting on this queue while holding the mutex this takes.
+/// 2. **It does not nest with [`adopt_site`].** Both acquisitions live in
+///    [`activate`], but they are sequential, not nested: this guard's scope
+///    ends when this function returns, which is inside `compose`, and
+///    `adopt_site` runs only after `activate_staged` has finished.
+/// 3. **The one lock ordering in the block still has no reverse edge.**
+///    `compile` is taken above this (`blocks_api`, `generations_api`) and this
+///    lock is taken below it; nothing anywhere takes `compile` while holding
+///    `workspace`, so `compile → workspace` is the only order that exists.
+/// 4. **The guard is never held across an `await` on anything but storage.**
+///    `workspace::load` is one object read; there is no activation request, no
+///    runtime rebuild and no ledger write inside the section.
+async fn workspace_site(
+    ctx: &dyn Context,
+    shared: &super::DevShared,
+) -> Result<SiteManifest, ActivationError> {
+    let ws = {
+        let _serialized = shared.workspace.lock().await;
+        workspace::load(ctx).await.map_err(storage_error)?
+    };
     Ok(SiteManifest {
         files: workspace::site_manifest(&ws),
     })
@@ -484,7 +564,7 @@ async fn activate(
         .await
         .map_err(storage_error)?;
     let previous = load_previous(ctx, &state).await?;
-    let mut manifest = compose(ctx, intent, previous.as_ref()).await?;
+    let mut manifest = compose(ctx, shared, intent, previous.as_ref()).await?;
 
     // The id is minted here, not by the repo, because the manifest has to
     // carry it before it is hashed (design §11.3) — and the parent is
@@ -514,10 +594,17 @@ async fn activate(
     // workspace pointing at content the published site does not have. The
     // reverse order would rewrite the workspace on every refused rollback —
     // including the ordinary case of a target whose blobs have been collected.
+    //
+    // Which means a failure here arrives after the commit, with the rollback
+    // already serving — so it is reported as exactly that, never as a
+    // rollback that did not happen.
     if adopts_site {
-        adopt_site(ctx, shared, &manifest.site)
-            .await
-            .map_err(storage_error)?;
+        adopt_site(ctx, shared, &manifest.site).await.map_err(|e| {
+            ActivationError::RollbackNotAdopted {
+                generation_id: row.id.clone(),
+                message: e.message,
+            }
+        })?;
     }
     Ok(outcome)
 }
@@ -542,7 +629,10 @@ async fn adopt_site(
     // Deadlock-free because the lock is *only* ever held around a
     // read-modify-write of `workspace.json`: `files.rs` drops it before it
     // asks for an activation, so nothing holding it is ever waiting on this
-    // queue.
+    // queue. The other acquisition inside the queue — `workspace_site`, in
+    // `compose` — is sequential with this one rather than nested: its guard's
+    // scope ends before `compose` returns, and this runs after
+    // `activate_staged`. `workspace_site` carries the full argument.
     let _serialized = shared.workspace.lock().await;
     let mut ws = workspace::load(ctx).await?;
     let stale: Vec<String> = ws
@@ -850,10 +940,30 @@ async fn load_previous(
 /// Content the manifest names that the stores do not hold — empty when
 /// everything is there.
 ///
-/// Presence *is* the hash check: both stores are content-addressed, so the key
-/// a manifest names is the hash of the bytes filed under it. Re-reading and
-/// re-hashing every blob would make each keystroke cost a full pass over the
-/// site to learn something the key already states.
+/// Only presence is checked, never content: both stores are content-addressed,
+/// so the key a manifest names is the hash of the bytes filed under it, and
+/// re-reading and re-hashing every blob would make each keystroke cost a full
+/// pass over the site to learn something the key already states.
+///
+/// Presence is asked as cheaply as each store allows, because this runs on
+/// every activation — every site-file save included — over the WHOLE manifest,
+/// not just what changed:
+///
+/// * **Artifacts** are answered by the builds ledger
+///   ([`repo::builds::artifact_index`]) with no storage call at all. Every
+///   stored artifact has a row — staging inserts the row before it stores the
+///   bytes, the seed importer records one for each artifact it stores, and the
+///   collector deletes the rows with the bytes — so the index is the store's
+///   own table of contents. One ledger read replaces a probe per block, and a
+///   block's artifact is up to [`super::validation::MAX_ARTIFACT_BYTES`]. The
+///   one way the two can disagree is a collection that deleted an artifact
+///   and then failed to drop its rows. Until the next collection drops them
+///   (`gc`'s stale-row pass), this answers "stored" for that artifact: a
+///   manifest that changes the block set then fails at the rebuild, which
+///   reads every artifact it loads, but one that keeps the block set — a site
+///   write — commits naming it, as the generation before it already did.
+/// * **Blobs** have no ledger, so each is probed with [`blobs::exists`], which
+///   opens the object and declines its body rather than reading it.
 ///
 /// The `Err` is a storage failure — the store could not answer — which is a
 /// different thing from the store answering that content is gone.
@@ -867,15 +977,17 @@ async fn missing_content(
             missing.push(format!("no blob is stored for site content {sha}"));
         }
     }
-    for spec in &manifest.blocks {
-        if !artifacts::exists(ctx, &spec.artifact_sha256)
+    if !manifest.blocks.is_empty() {
+        let stored = repo::builds::artifact_index(ctx)
             .await
-            .map_err(storage_error)?
-        {
-            missing.push(format!(
-                "no artifact is stored for block {} ({})",
-                spec.name, spec.artifact_sha256
-            ));
+            .map_err(storage_error)?;
+        for spec in &manifest.blocks {
+            if !stored.contains_key(&spec.artifact_sha256) {
+                missing.push(format!(
+                    "no artifact is stored for block {} ({})",
+                    spec.name, spec.artifact_sha256
+                ));
+            }
         }
     }
     Ok(missing)
@@ -910,8 +1022,12 @@ pub async fn converge_on_boot(
     let (previous, state) = active_or_clear(ctx, &state).await?;
     retire_abandoned(ctx, &state, previous.as_ref()).await;
     if let Some(desired) = state.desired_generation_id.clone() {
-        match generation::load(ctx, &desired).await {
-            Ok((row, manifest)) => {
+        match load_journalled(ctx, &desired)
+            .await
+            .map_err(|e| e.message)?
+        {
+            Journalled::Loaded(loaded) => {
+                let (row, manifest) = *loaded;
                 // A failed convergence is not a failed boot, and the failure
                 // is not discarded: `activate_staged` has already written it
                 // to the generation's `failure_message` and put the journal
@@ -936,14 +1052,16 @@ pub async fn converge_on_boot(
             // never serve again over a row nothing can use. Treat it as a
             // convergence that failed: restore what is live, clear the
             // journal, and record the refusal on the row when there is one.
-            Err(e) => {
+            // (A read that merely failed is not this: it returned above, and
+            // the next boot converges on the row.)
+            Journalled::Dangling(reason) => {
                 tracing::error!(
                     generation_id = %desired,
-                    error = %e.message,
+                    error = %reason,
                     "dev sandbox: the activation journal names a generation that cannot be \
                      loaded; restoring the active generation",
                 );
-                abandon_dangling(ctx, &desired, &e.message).await?;
+                abandon_dangling(ctx, &desired, &reason).await?;
                 restore_active_site(ctx, None, previous.as_ref()).await?;
                 clear_journal(ctx, &state).await?;
             }
@@ -1045,11 +1163,27 @@ async fn retire_abandoned(
         vouched.extend(manifest.blocks.iter().map(|b| b.artifact_sha256.clone()));
     }
     if let Some(desired) = state.desired_generation_id.as_deref() {
-        // A desired that cannot be loaded vouches for nothing; the
-        // dangling-desired arm in `converge_on_boot` deals with the row
-        // itself.
-        if let Ok((_row, manifest)) = generation::load(ctx, desired).await {
-            vouched.extend(manifest.blocks.iter().map(|b| b.artifact_sha256.clone()));
+        match load_journalled(ctx, desired).await {
+            Ok(Journalled::Loaded(loaded)) => {
+                let (_row, manifest) = &*loaded;
+                vouched.extend(manifest.blocks.iter().map(|b| b.artifact_sha256.clone()));
+            }
+            // A dangling desired vouches for nothing; the dangling-desired
+            // arm in `converge_on_boot` deals with the row itself.
+            Ok(Journalled::Dangling(_)) => {}
+            // A read that failed says nothing about what the desired
+            // generation names, so no build can be judged unvouched: retiring
+            // them now could close the very compile this boot converges on.
+            // They stay in flight for the next boot to settle.
+            Err(e) => {
+                tracing::error!(
+                    generation_id = %desired,
+                    error = %e.message,
+                    "dev sandbox: could not read the journalled generation; leaving the builds \
+                     in flight for the next boot",
+                );
+                return;
+            }
         }
     }
 
@@ -1097,6 +1231,10 @@ async fn retire_abandoned(
 /// `desired` that is *also* unloadable falls into the dangling-desired arm
 /// below and is abandoned there.
 ///
+/// A read of the row that merely failed is not a dangling pointer
+/// ([`load_journalled`]): it is returned, and the pointer kept for the next
+/// boot.
+///
 /// Returns the journal as it stands afterwards, so the caller reads the
 /// cleared state rather than the one it passed in.
 async fn active_or_clear(
@@ -1106,16 +1244,16 @@ async fn active_or_clear(
     let Some(id) = state.active_generation_id.clone() else {
         return Ok((None, state.clone()));
     };
-    match generation::load(ctx, &id).await {
-        Ok(loaded) => Ok((Some(loaded), state.clone())),
-        Err(e) => {
+    match load_journalled(ctx, &id).await.map_err(|e| e.message)? {
+        Journalled::Loaded(loaded) => Ok((Some(*loaded), state.clone())),
+        Journalled::Dangling(reason) => {
             tracing::error!(
                 generation_id = %id,
-                error = %e.message,
+                error = %reason,
                 "dev sandbox: the activation journal names an active generation that cannot be \
                  loaded; clearing it and booting with nothing dynamic",
             );
-            abandon_dangling(ctx, &id, &e.message).await?;
+            abandon_dangling(ctx, &id, &reason).await?;
             let cleared = RuntimeState {
                 active_generation_id: None,
                 ..state.clone()
@@ -1149,6 +1287,40 @@ async fn restore_active_site(
     publish_site(ctx, published, &manifest.site)
         .await
         .map_err(|e| e.message)
+}
+
+/// A generation the journal names, as boot recovery reads it.
+enum Journalled {
+    /// The row and its manifest.
+    Loaded(Box<(GenerationRow, GenerationManifest)>),
+    /// The row is gone, or a manifest column does not parse — nothing a retry
+    /// can change — with why.
+    Dangling(String),
+}
+
+/// Load the generation `id` the journal names, telling a dangling pointer
+/// ([`Journalled::Dangling`]) from a read that failed (`Err`).
+///
+/// The two must not be confused: a dangling pointer is cleared and its row
+/// abandoned, which is right for a row nothing can ever use and destructive
+/// for one a transient fault or a WRAP denial merely hid. So only a missing
+/// row, or a row or manifest that does not decode, is dangling; every other
+/// failure is returned for boot to give up on, leaving the journal as it
+/// was for the next boot.
+async fn load_journalled(ctx: &dyn Context, id: &str) -> Result<Journalled, WaferError> {
+    let row = match repo::generations::lookup(ctx, id).await? {
+        Some(Ok(row)) => row,
+        Some(Err(e)) => return Ok(Journalled::Dangling(e.message)),
+        None => {
+            return Ok(Journalled::Dangling(format!(
+                "generation {id} does not exist"
+            )))
+        }
+    };
+    Ok(match generation::from_row(&row) {
+        Ok(manifest) => Journalled::Loaded(Box::new((row, manifest))),
+        Err(e) => Journalled::Dangling(e.message),
+    })
 }
 
 /// Record why a generation the journal pointed at could not be converged on.

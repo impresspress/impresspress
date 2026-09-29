@@ -1,8 +1,13 @@
-use wafer_run::{BlockEndpoint, BlockInfo, InstanceMode};
+use wafer_run::{BlockInfo, HttpMethod, InstanceMode, OutputStream};
 
+// `ResponseBuilder` serves an asset's bytes, which only exist when the
+// assets are compiled in; without the feature the block still declares and
+// routes `/b/static/{filename}` and answers 404.
+#[cfg(feature = "embed-assets")]
+use crate::http::ResponseBuilder;
 use crate::{
-    http::{err_not_found, ok_json, ResponseBuilder},
-    routing,
+    endpoint_match::{self, EndpointRoute},
+    http::{err_not_found, ok_json},
 };
 
 /// Resolve a hashed filename (the part after `/b/static/`) to its bytes and
@@ -16,88 +21,84 @@ pub(crate) fn static_asset(filename: &str) -> Option<(&'static [u8], &'static st
     Some((crate::ui::assets::bytes(e.logical)?, e.content_type))
 }
 
+#[derive(Clone, Copy)]
+enum Route {
+    Health,
+    /// One embedded asset, addressed by its content-hashed filename.
+    Asset,
+}
+
+/// The block's HTTP surface. Every embedded asset (CSS, htmx, the WebMCP
+/// script, fonts, logos, favicon) is served from the one `{filename}` row:
+/// filenames are content-hashed (`app-{hash}.css`), the lookup is by exact
+/// filename against the build-time manifest, and a stale hash is therefore a
+/// 404. One row rather than one per asset keeps `itim-latin-` /
+/// `itim-latin-ext-` (and the two logo sizes) from depending on table order,
+/// which a per-asset `{hash}` template would reintroduce.
+const ROUTES: &[EndpointRoute<Route>] = &[
+    EndpointRoute::public(HttpMethod::Get, "/health", Route::Health).summary("Health check"),
+    EndpointRoute::public(HttpMethod::Get, "/b/static/{filename}", Route::Asset)
+        .summary("Embedded static asset (content-hashed filename)"),
+];
+
+/// Serve the manifest entry named `filename`, or 404.
+fn serve_asset(filename: &str) -> OutputStream {
+    #[cfg(feature = "embed-assets")]
+    if let Some((body, content_type)) = static_asset(filename) {
+        return ResponseBuilder::new()
+            .set_header("Cache-Control", "public, max-age=31536000, immutable")
+            .body(body.to_vec(), content_type);
+    }
+    // Either the filename is not in the manifest (a stale or made-up hash),
+    // or assets were not compiled in. In the second case the deployer is
+    // responsible for publishing them and pointing IMPRESSPRESS_ASSET_BASE_URL
+    // at them; reaching this arm means that did not happen.
+    #[cfg(not(feature = "embed-assets"))]
+    let _ = filename;
+    err_not_found("not found")
+}
+
 crate::impresspress_feature_block! {
     /// System health checks and embedded static assets (`impresspress/system`).
     pub struct SystemBlock;
     name: "impresspress/system",
     info: |_this| {
-        // Base set: assets served regardless of feature flags. The LLM
-        // (marked/purify/llm-chat) and Files (files-browser) assets are
-        // conditionally appended below — they're feature-gated in
-        // `ui::assets` behind `block-llm`/`block-files` respectively (those
-        // blocks are their only consumers), so a build without the block
-        // doesn't advertise an endpoint it can't serve.
-        #[allow(unused_mut)]
-        let mut endpoints = vec![
-            BlockEndpoint::get("/health").summary("Health check"),
-            BlockEndpoint::get("/b/static/app-{hash}.css").summary("Embedded CSS"),
-            BlockEndpoint::get("/b/static/htmx-{hash}.min.js").summary("Embedded htmx JS"),
-            BlockEndpoint::get("/b/static/webmcp-{hash}.js").summary("Embedded WebMCP registration JS"),
-            BlockEndpoint::get("/b/static/itim-latin-{hash}.woff2").summary("Embedded Itim font (latin)"),
-            BlockEndpoint::get("/b/static/itim-latin-ext-{hash}.woff2").summary("Embedded Itim font (latin-ext)"),
-            BlockEndpoint::get("/b/static/impresspress-logo-{hash}.png").summary("Embedded Impresspress square logo (32px pixel art)"),
-            BlockEndpoint::get("/b/static/impresspress-logo-2x-{hash}.png").summary("Embedded Impresspress square logo at 2x (64px)"),
-            BlockEndpoint::get("/b/static/favicon-{hash}.ico").summary("Embedded Impresspress favicon"),
-        ];
-        #[cfg(feature = "block-llm")]
-        endpoints.extend([
-            BlockEndpoint::get("/b/static/marked-{hash}.min.js").summary("Embedded marked.js"),
-            BlockEndpoint::get("/b/static/purify-{hash}.js").summary("Embedded DOMPurify JS"),
-            BlockEndpoint::get("/b/static/llm-chat-{hash}.js").summary("Embedded LLM chat JS"),
-        ]);
-        #[cfg(feature = "block-files")]
-        endpoints.push(
-            BlockEndpoint::get("/b/static/files-browser-{hash}.js")
-                .summary("Embedded files-browser JS"),
-        );
         BlockInfo::new("impresspress/system", "0.0.1", "http-handler@v1", "System health and embedded static assets")
             .instance_mode(InstanceMode::Singleton)
             .category(wafer_run::BlockCategory::Infrastructure)
             .description("Core system services including health checks and embedded static assets (CSS, JavaScript).")
-            .endpoints(endpoints)
+            .endpoints(endpoint_match::declare(ROUTES))
     },
-    handle: |_this, _ctx, msg, _input| {
-        let path = msg.path();
-
-        if path == "/health" {
-            return ok_json(&serde_json::json!({"status": "ok"}));
+    handle: |_this, _ctx, mut msg, _input| {
+        let Some(route) = endpoint_match::dispatch(&mut msg, ROUTES) else {
+            return err_not_found("not found");
+        };
+        match route {
+            Route::Health => ok_json(&serde_json::json!({"status": "ok"})),
+            Route::Asset => serve_asset(msg.var("filename")),
         }
-
-        // Embedded static assets (CSS, JS, fonts) with content-hash URLs for
-        // cache busting. Looked up by exact filename against the build-time
-        // manifest (`static_asset`, above) — no prefix/suffix scanning, so no
-        // ordering hazard between e.g. `itim-latin-` and `itim-latin-ext-`.
-        if let Some(filename) = path.strip_prefix(routing::STATIC_PREFIX) {
-            #[cfg(feature = "embed-assets")]
-            if let Some((body, content_type)) = static_asset(filename) {
-                return ResponseBuilder::new()
-                    .set_header("Cache-Control", "public, max-age=31536000, immutable")
-                    .body(body.to_vec(), content_type);
-            }
-            #[cfg(not(feature = "embed-assets"))]
-            {
-                // Assets were not compiled in. The deployer is responsible for
-                // publishing them and pointing IMPRESSPRESS_ASSET_BASE_URL at
-                // them (Task 4); reaching this arm means that did not happen.
-                let _ = filename;
-            }
-        }
-
-        err_not_found("not found")
     },
 }
 
 #[cfg(test)]
 mod tests {
-    use wafer_run::{
-        context::Context, Block, InputStream, Message, OutputStream, META_RESP_CONTENT_TYPE,
-    };
+    // Read only by the asset-serving tests below (and by the `NopCtx` those
+    // tests call `handle` with), and `serve_asset` answers 404 without
+    // `embed-assets`, so those tests are gated on it.
+    #[cfg(feature = "embed-assets")]
+    use wafer_run::{context::Context, InputStream, OutputStream, META_RESP_CONTENT_TYPE};
+    use wafer_run::{Block, Message};
 
     use super::*;
+    #[cfg(feature = "embed-assets")]
     use crate::ui::assets;
 
+    // The only thing that ever passes a context to `SystemBlock::handle` is an
+    // asset-serving test, and those are gated on `embed-assets`.
+    #[cfg(feature = "embed-assets")]
     #[derive(Clone)]
     struct NopCtx;
+    #[cfg(feature = "embed-assets")]
     #[async_trait::async_trait]
     impl Context for NopCtx {
         async fn call_block(
@@ -107,6 +108,16 @@ mod tests {
             _input: InputStream,
         ) -> OutputStream {
             panic!("call_block not used");
+        }
+        /// Admits nothing, as the fail-closed `check_resource_access` default
+        /// this context keeps does.
+        fn resource_access_admitted(
+            &self,
+            _resource: &str,
+            _resource_type: wafer_run::ResourceType,
+            _access: wafer_block::ResourceAccess,
+        ) -> bool {
+            false
         }
         fn is_cancelled(&self) -> bool {
             false
@@ -123,7 +134,7 @@ mod tests {
     #[cfg(all(feature = "block-llm", feature = "embed-assets"))]
     async fn system_handle_serves_llm_chat_js() {
         let block = SystemBlock::new();
-        let url = assets::llm_chat_js_url();
+        let url = crate::blocks::llm::assets::llm_chat_js_url();
         let mut msg = Message::new(format!("retrieve:{url}"));
         msg.set_meta(wafer_run::META_REQ_ACTION, "retrieve");
         msg.set_meta(wafer_run::META_REQ_RESOURCE, url);
@@ -151,7 +162,7 @@ mod tests {
     #[cfg(all(feature = "block-files", feature = "embed-assets"))]
     async fn system_handle_serves_files_browser_js() {
         let block = SystemBlock::new();
-        let url = assets::files_browser_js_url();
+        let url = crate::blocks::files::assets::files_browser_js_url();
         let mut msg = Message::new(format!("retrieve:{url}"));
         msg.set_meta(wafer_run::META_REQ_ACTION, "retrieve");
         msg.set_meta(wafer_run::META_REQ_RESOURCE, url);
@@ -179,7 +190,7 @@ mod tests {
     #[cfg(all(feature = "block-llm", feature = "embed-assets"))]
     async fn system_handle_serves_marked_js() {
         let block = SystemBlock::new();
-        let url = assets::marked_js_url();
+        let url = crate::blocks::llm::assets::marked_js_url();
         let mut msg = Message::new(format!("retrieve:{url}"));
         msg.set_meta(wafer_run::META_REQ_ACTION, "retrieve");
         msg.set_meta(wafer_run::META_REQ_RESOURCE, url);
@@ -207,7 +218,7 @@ mod tests {
     #[cfg(all(feature = "block-llm", feature = "embed-assets"))]
     async fn system_handle_serves_purify_js() {
         let block = SystemBlock::new();
-        let url = assets::purify_js_url();
+        let url = crate::blocks::llm::assets::purify_js_url();
         let mut msg = Message::new(format!("retrieve:{url}"));
         msg.set_meta(wafer_run::META_REQ_ACTION, "retrieve");
         msg.set_meta(wafer_run::META_REQ_RESOURCE, url);
@@ -261,26 +272,22 @@ mod tests {
 
     /// `declared_access` (`routing.rs`) fails closed to `AuthLevel::
     /// Authenticated` for any path a block does not declare as a
-    /// `BlockEndpoint` — this is the endpoint declaration this block adds
-    /// alongside htmx/CSS/fonts (`system.rs`'s `endpoints` list). Checked
-    /// via `effective_access`, not `declared_access` directly: `/b/static/`
-    /// is mounted as `Route::router_declared_public` (`router_final`), so
-    /// the router's own `Public` declaration is what actually admits an
-    /// anonymous request regardless of this endpoint entry (proved
-    /// end-to-end by `routing::tests::webmcp_script_asset_is_publicly_reachable`,
-    /// which registers no `BlockInfo` at all and still dispatches) —
-    /// `effective_access` is the resolver that mirrors exactly what the
-    /// router enforces (it's the same one `pipeline.rs` plugs into the
-    /// WebMCP manifest generator), so it's the correct thing to assert
-    /// against here.
+    /// `BlockEndpoint` — the one asset row in `ROUTES` is that declaration,
+    /// and it is what admits an anonymous asset request: the router carries
+    /// no per-path entry for `/b/static/` (proved end-to-end by
+    /// `routing::tests::webmcp_script_asset_is_publicly_reachable`, which
+    /// drives the real request through `route_to_block` with this block's
+    /// `info()`). Checked here via `effective_access`, the resolver that
+    /// mirrors exactly what the router enforces (the same one `pipeline.rs`
+    /// plugs into the WebMCP manifest generator).
     #[test]
     fn webmcp_script_asset_is_publicly_reachable() {
         let info = SystemBlock::new().info();
         let ep = info
             .endpoints
             .iter()
-            .find(|e| e.path == "/b/static/webmcp-{hash}.js")
-            .expect("webmcp asset endpoint not declared in SystemBlock::info()");
+            .find(|e| e.path == "/b/static/{filename}")
+            .expect("static asset endpoint not declared in SystemBlock::info()");
         assert_eq!(
             crate::routing::effective_access(&info, ep, &[]),
             wafer_run::AuthLevel::Public,
@@ -288,6 +295,95 @@ mod tests {
              effective auth level above Public would silently disable tools \
              on the public storefront"
         );
+    }
+
+    /// `info().endpoints` is generated from `ROUTES`.
+    #[test]
+    fn info_endpoints_come_from_the_table() {
+        let declared = SystemBlock::new().info().endpoints;
+        assert_eq!(declared.len(), ROUTES.len());
+        for (ep, row) in declared.iter().zip(ROUTES) {
+            assert_eq!(ep.method, row.method, "{}", row.template);
+            assert_eq!(ep.path, row.template);
+            assert_eq!(ep.auth, row.auth, "{}", row.template);
+        }
+    }
+
+    /// The asset row's template is the same literal the URL builders use.
+    #[test]
+    fn asset_row_sits_under_the_static_prefix() {
+        let row = ROUTES
+            .iter()
+            .find(|r| matches!(r.handler, Route::Asset))
+            .expect("asset row");
+        assert_eq!(row.method, wafer_run::HttpMethod::Get);
+        assert_eq!(row.template, "/b/static/{filename}");
+        assert!(row.template.starts_with(crate::routing::STATIC_PREFIX));
+        assert_eq!(row.auth, wafer_run::AuthLevel::Public);
+    }
+
+    /// Every file in the build-time manifest resolves to the asset row with
+    /// its exact filename bound, whatever the hash happens to be.
+    #[test]
+    fn every_manifest_asset_dispatches_to_the_asset_row() {
+        for entry in crate::ui::assets::ASSETS {
+            let url = format!("{}{}", crate::routing::STATIC_PREFIX, entry.filename);
+            let mut msg = Message::new(format!("retrieve:{url}"));
+            msg.set_meta(wafer_run::META_REQ_ACTION, "retrieve");
+            msg.set_meta(wafer_run::META_REQ_RESOURCE, &url);
+            let route = crate::endpoint_match::dispatch(&mut msg, ROUTES);
+            assert!(matches!(route, Some(Route::Asset)), "{url}");
+            assert_eq!(msg.var("filename"), entry.filename);
+        }
+    }
+
+    /// A URL with a stale hash names a file that is not in the manifest and
+    /// must 404, never receive the current bytes under an `immutable` header.
+    #[tokio::test]
+    #[cfg(feature = "embed-assets")]
+    async fn a_stale_hash_is_not_found() {
+        let block = SystemBlock::new();
+        let url = "/b/static/app-0000000000000000.css";
+        let mut msg = Message::new(format!("retrieve:{url}"));
+        msg.set_meta(wafer_run::META_REQ_ACTION, "retrieve");
+        msg.set_meta(wafer_run::META_REQ_RESOURCE, url);
+        let out = block.handle(&NopCtx, msg, InputStream::empty()).await;
+        assert!(crate::test_support::output_is_error(out, "NotFound").await);
+    }
+
+    /// A literal nested path has more than one segment after the prefix, so
+    /// no row matches it and it 404s before any lookup.
+    #[test]
+    fn a_nested_static_path_matches_no_row() {
+        let url = "/b/static/../../etc/passwd";
+        let mut msg = Message::new(format!("retrieve:{url}"));
+        msg.set_meta(wafer_run::META_REQ_ACTION, "retrieve");
+        msg.set_meta(wafer_run::META_REQ_RESOURCE, url);
+        assert!(crate::endpoint_match::dispatch(&mut msg, ROUTES).is_none());
+    }
+
+    /// A percent-encoded traversal is one segment on the wire, so it DOES
+    /// match the `{filename}` row and reaches `serve_asset` decoded. What
+    /// keeps it harmless is not the matcher but the lookup: `static_asset`
+    /// is an exact-match allowlist over the build-time manifest and never
+    /// touches a filesystem, so the decoded name finds nothing and 404s.
+    #[tokio::test]
+    #[cfg(feature = "embed-assets")]
+    async fn an_encoded_traversal_binds_but_finds_no_manifest_entry() {
+        let url = "/b/static/..%2F..%2Fetc%2Fpasswd";
+        let mut msg = Message::new(format!("retrieve:{url}"));
+        msg.set_meta(wafer_run::META_REQ_ACTION, "retrieve");
+        msg.set_meta(wafer_run::META_REQ_RESOURCE, url);
+        assert!(matches!(
+            crate::endpoint_match::dispatch(&mut msg, ROUTES),
+            Some(Route::Asset)
+        ));
+        assert_eq!(msg.var("filename"), "../../etc/passwd");
+
+        let out = SystemBlock::new()
+            .handle(&NopCtx, msg, InputStream::empty())
+            .await;
+        assert!(crate::test_support::output_is_error(out, "NotFound").await);
     }
 
     #[cfg(feature = "embed-assets")]

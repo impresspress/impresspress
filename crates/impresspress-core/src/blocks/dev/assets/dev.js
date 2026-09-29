@@ -33,7 +33,8 @@
 // (below).
 var abort = new AbortController();
 
-// A 401/403 means this document is still on screen but its session is not.
+// A 401 means this document is still on screen but its session is not; a 403
+// that its session no longer carries the admin role the tools need.
 // Tearing the tools down is the honest response — an agent left holding
 // tools whose every call now fails would keep retrying against a page that
 // cannot answer, and the human would see no reason why.
@@ -223,6 +224,19 @@ var lastRuntimeGeneration = null;
 // reading a workspace that is about to change again.
 var outstanding = 0;
 
+// Whether a status request is already outstanding.
+//
+// The interval fires on a timer and the request is not instant, so without
+// this a slow answer is met by another tick, and another. That matters
+// because `/b/dev/api/status` reads the workspace manifest under
+// `DevShared::workspace` (`blocks/dev/gc.rs::storage_usage`): during a
+// collector pass, which holds that mutex across a loop of sequential deletes,
+// every tick issued would take a place in a first-in-first-out queue and the
+// user's next save would land behind all of them. With the guard the pass
+// costs one waiter, whatever it takes — and a poll that is skipped loses
+// nothing, since each response is a complete picture rather than a delta.
+var statusInFlight = false;
+
 // ~300 ms while a mutating call is outstanding (design §7.5). There is no
 // push channel: the block answers `no-store` precisely so this poll always
 // sees the journal as it stands.
@@ -231,7 +245,21 @@ function startPolling() {
     return;
   }
   polling = setInterval(function () {
-    api.get('/b/dev/api/status').then(json).then(observe).catch(logError);
+    if (statusInFlight) {
+      return;
+    }
+    statusInFlight = true;
+    api
+      .get('/b/dev/api/status')
+      .then(json)
+      .then(observe)
+      .catch(logError)
+      .then(function () {
+        // A `then` after the `catch`, so the flag is cleared on a refusal as
+        // well as on an answer: a guard that leaked on failure would stop the
+        // panel updating for the rest of the session.
+        statusInFlight = false;
+      });
   }, 300);
 }
 
@@ -301,7 +329,7 @@ function withProgress(execute) {
       // The LAST call out of the room turns the lights off and does the
       // catch-up once, rather than every call racing to redraw a workspace
       // its siblings are still changing. Skip it once aborted — the handler
-      // already stopped polling, and the endpoints below would just 403.
+      // already stopped polling, and the endpoints below would just refuse.
       if (outstanding === 0 && !abort.signal.aborted) {
         stopPolling();
         await refreshAfterChange();
@@ -367,7 +395,7 @@ var MUTATING = /^(dev_write_file|dev_delete_file|dev_create_block|dev_rollback|d
 // Every name this page registered. `registerTool`'s options bag takes an
 // `AbortSignal`, but a browser (or a polyfill) that ignores it would leave
 // this page's tools live on the agent after the page is gone — with the
-// document's session cookie no longer riding along, so every call 403s. The
+// document's session cookie no longer riding along, so every call is a 401. The
 // list is the fallback: on abort, unregister exactly these by name.
 var registered = [];
 
@@ -417,10 +445,10 @@ function unregisterPageTools() {
 // Their `execute` comes from `toolOptions` (webmcp-core.js) and fetches
 // without going through this file's `api`, so `check` never sees the
 // response — and a refusal arrives as a RESULT (`isError` plus
-// `Request failed (403): …`), never as a rejection. Reading that text back
+// `Request failed (401): …`), never as a rejection. Reading that text back
 // is what lets the same "the session is gone, take the tools away" rule
 // apply to a tool call as to a pane refresh; without it the page would keep
-// offering tools that 403 for the rest of the session.
+// offering tools that are refused for the rest of the session.
 var SESSION_GONE = /^Request failed \((401|403)\)/;
 
 function withSessionCheck(execute) {

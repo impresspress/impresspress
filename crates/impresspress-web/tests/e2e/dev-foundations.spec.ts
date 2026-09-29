@@ -18,7 +18,7 @@ import { bootServiceWorker, loginAdmin, WELCOME_PHRASE } from './fixtures/dev-sa
  * The first test is the anonymous half: **seed-on-boot** (a fresh origin
  * serving `/seed/manifest.json` imports generation 0 and publishes its site),
  * the published site's `no-cache` header, and design §13 — `/b/dev` is
- * admin-only at the router, so an anonymous visitor gets a `403`.
+ * admin-only at the router, so an anonymous visitor gets a `401`.
  *
  * The second test is the pipeline, in order:
  *
@@ -186,9 +186,9 @@ test('a fresh origin seeds itself, serves the seeded site, and keeps the sandbox
   // Design §13's other half: `/b/dev` is registered as an `Admin` extra route,
   // and that router registration — not a check in any handler — is the whole
   // gate. A `fetch` sends `Accept: */*`, so an anonymous caller gets the JSON
-  // `403` rather than the browser redirect to the login page.
+  // `401` rather than the browser redirect to the login page.
   const sandbox = await page.evaluate(async () => (await fetch('/b/dev/api/status')).status);
-  expect(sandbox).toBe(403);
+  expect(sandbox).toBe(401);
 
   // The CSP the sandbox relaxes, and the other half of `smoke.spec.ts`'s
   // "the default bundle has no dev block": that one asserts the unrelaxed

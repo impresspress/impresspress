@@ -6,18 +6,19 @@
 //! - API endpoints reference
 
 use maud::{html, Markup, PreEscaped};
-use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
-use wafer_core::clients::database as db;
-use wafer_run::{context::Context, ErrorCode, InputStream, Message, OutputStream};
+use wafer_run::{context::Context, InputStream, Message, OutputStream, WaferError};
 
-use super::service;
-use crate::{
-    http::{err_bad_request, err_internal, err_not_found, ok_json, ResponseBuilder},
-    ui::{self, components, icons, settings_form},
-    util::{json_map, RecordExt},
+use super::{
+    contracts::{DocumentStatus, DocumentType},
+    repo::documents::{self, DocumentRow, NewDraft},
+    service,
 };
-
-const COLLECTION: &str = super::COLLECTION;
+use crate::{
+    blocks::crud,
+    http::{err_bad_request, ok_json, ResponseBuilder},
+    ui::{self, components, icons, settings_form},
+    util::wire_str,
+};
 
 // ---------------------------------------------------------------------------
 // Document lookup
@@ -26,89 +27,48 @@ const COLLECTION: &str = super::COLLECTION;
 /// Find the current document for a given type.
 /// Prefers the latest draft (so admin sees their in-progress edits),
 /// then falls back to the published version.
-async fn find_current_doc(ctx: &dyn Context, doc_type: &str) -> Option<db::Record> {
-    // First try latest draft
-    let opts = ListOptions {
-        filters: vec![
-            Filter {
-                field: "doc_type".into(),
-                operator: FilterOp::Equal,
-                value: serde_json::json!(doc_type),
-            },
-            Filter {
-                field: "status".into(),
-                operator: FilterOp::Equal,
-                value: serde_json::json!("draft"),
-            },
-        ],
-        sort: vec![SortField {
-            field: "updated_at".into(),
-            desc: true,
-        }],
-        limit: 1,
-        ..Default::default()
-    };
-    if let Ok(result) = db::list(ctx, COLLECTION, &opts).await {
-        if let Some(record) = result.records.into_iter().next() {
-            return Some(record);
-        }
+///
+/// A read failure is an `Err`, not an empty editor: rendering "no document"
+/// over a database error invites the admin to type a replacement into a form
+/// whose save then forks the document they could not see.
+async fn find_current_doc(
+    ctx: &dyn Context,
+    doc_type: DocumentType,
+) -> Result<Option<DocumentRow>, WaferError> {
+    if let Some(draft) = documents::find_latest_draft(ctx, doc_type).await? {
+        return Ok(Some(draft));
     }
-
-    // Fall back to published
-    let opts = ListOptions {
-        filters: vec![
-            Filter {
-                field: "doc_type".into(),
-                operator: FilterOp::Equal,
-                value: serde_json::json!(doc_type),
-            },
-            Filter {
-                field: "status".into(),
-                operator: FilterOp::Equal,
-                value: serde_json::json!("published"),
-            },
-        ],
-        sort: vec![SortField {
-            field: "updated_at".into(),
-            desc: true,
-        }],
-        limit: 1,
-        ..Default::default()
-    };
-    if let Ok(result) = db::list(ctx, COLLECTION, &opts).await {
-        result.records.into_iter().next()
-    } else {
-        None
-    }
+    documents::find_published(ctx, doc_type).await
 }
 
 // ---------------------------------------------------------------------------
 // Editor page (Privacy / Terms)
 // ---------------------------------------------------------------------------
 
-pub async fn editor_page(ctx: &dyn Context, msg: &Message, doc_type: &str) -> OutputStream {
-    let doc = find_current_doc(ctx, doc_type).await;
-    let default_title = if doc_type == "privacy" {
-        "Privacy Policy"
-    } else {
-        "Terms of Service"
+pub async fn editor_page(ctx: &dyn Context, msg: &Message, doc_type: DocumentType) -> OutputStream {
+    let doc = match find_current_doc(ctx, doc_type).await {
+        Ok(doc) => doc,
+        Err(e) => return crud::db_error_internal(e, "Failed to load the legal document"),
     };
+    let default_title = doc_type.title();
 
     let (doc_id, title, content, status, updated_at, version) = match &doc {
-        Some(d) => {
-            let t = d.str_field("title");
-            let title = if t.is_empty() { default_title } else { t };
-            let ver = super::service::doc_version(d).unwrap_or(1);
-            (
-                d.id.as_str(),
-                title,
-                d.str_field("content"),
-                d.str_field("status"),
-                d.str_field("updated_at"),
-                ver,
-            )
-        }
-        None => ("", default_title, "", "none", "", 1),
+        Some(d) => (
+            d.id.as_str(),
+            if d.title.is_empty() {
+                default_title
+            } else {
+                d.title.as_str()
+            },
+            d.content.as_str(),
+            Some(d.status),
+            d.updated_at.as_str(),
+            d.version,
+        ),
+        // `None` is genuinely "this type has no row yet", which is not one of
+        // the three stored statuses — hence `Option` rather than a fourth
+        // variant nothing can ever be written as.
+        None => ("", default_title, "", None, "", 1),
     };
 
     let page_content = editor_markup_for_test(
@@ -127,29 +87,20 @@ pub async fn editor_page(ctx: &dyn Context, msg: &Message, doc_type: &str) -> Ou
 /// Build the editor markup. Split out from `editor_page` so it can be
 /// unit-tested without a `Context`.
 pub(super) fn editor_markup_for_test(
-    doc_type: &str,
+    doc_type: DocumentType,
     doc_id: &str,
     title: &str,
     content: &str,
-    status: &str,
+    status: Option<DocumentStatus>,
     updated_at: &str,
     version: i64,
 ) -> Markup {
-    let default_title = if doc_type == "privacy" {
-        "Privacy Policy"
-    } else {
-        "Terms of Service"
-    };
-    let badge_class = match status {
-        "published" => "badge-success",
-        "draft" => "badge-warning",
-        _ => "badge-info",
-    };
-    let badge_text = match status {
-        "published" => "Published",
-        "draft" => "Draft",
-        "archived" => "Archived",
-        _ => "No document",
+    let default_title = doc_type.title();
+    let (badge_class, badge_text) = match status {
+        Some(DocumentStatus::Published) => ("badge-success", "Published"),
+        Some(DocumentStatus::Draft) => ("badge-warning", "Draft"),
+        Some(DocumentStatus::Archived) => ("badge-info", "Archived"),
+        None => ("badge-info", "No document"),
     };
 
     html! {
@@ -160,7 +111,7 @@ pub(super) fn editor_markup_for_test(
                 span #status-badge .badge .(badge_class) { (badge_text) }
                 span .badge .editor-status__version .text-xs .cursor-pointer
                     title="Click to change version"
-                    onclick="promptVersion()"
+                    data-action="legalpages-prompt-version"
                 { "v" span #version-display { (version) } }
                 @if !updated_at.is_empty() {
                     span .text-muted .text-xs {
@@ -170,15 +121,15 @@ pub(super) fn editor_markup_for_test(
             }
             div .flex .gap-2 {
                 a .btn .btn--sm .btn--ghost
-                    href={"/b/legalpages/" (doc_type)}
+                    href={"/b/legalpages/" (wire_str(&doc_type))}
                     target="_blank"
                 {
                     "Open public page"
                 }
-                button #btn-save .btn .btn--sm .btn--secondary onclick="saveDocument(false)" {
+                button #btn-save .btn .btn--sm .btn--secondary data-action="legalpages-save" {
                     "Save Draft"
                 }
-                button #btn-publish .btn .btn--sm .btn--primary onclick="saveDocument(true)" {
+                button #btn-publish .btn .btn--sm .btn--primary data-action="legalpages-publish" {
                     "Publish"
                 }
             }
@@ -192,19 +143,22 @@ pub(super) fn editor_markup_for_test(
             placeholder="Document title";
 
         // Hidden fields used by save handler JS
-        input #doc-type type="hidden" value=(doc_type);
+        input #doc-type type="hidden" value=(wire_str(&doc_type));
         input #doc-id type="hidden" value=(doc_id);
         input #doc-version type="hidden" value=(version);
 
         // Tab strip
         div .editor-tabs {
+            // `data-tab` already names the pane; the delegated listener
+            // in EDITOR_JS reads it, so the tab needs no second spelling of
+            // its own name inside a JavaScript string.
             button .editor-tab .editor-tab--active type="button"
                 data-tab="edit"
-                onclick="setEditorTab('edit')"
+                data-action="legalpages-editor-tab"
             { "Edit" }
             button .editor-tab type="button"
                 data-tab="preview"
-                onclick="setEditorTab('preview')"
+                data-action="legalpages-editor-tab"
             { "Preview" }
         }
 
@@ -229,8 +183,16 @@ pub(super) fn editor_markup_for_test(
 
 const EDITOR_JS: &str = r#"
 (function() {
+    // Guarded: the editor is a `ui::shell_page`, so navigating to it can be an
+    // htmx partial swap, which returns the body verbatim (`ui/mod.rs:226`) and
+    // re-executes this script against a `document` that outlived the swap.
+    // Everything below is declarations and two registrations, so running it
+    // once is enough. The keydown listener predates the delegated click one
+    // and had the same accumulation bug; both are covered now.
+    if (window.__legalpagesEditorInit) return;
+    window.__legalpagesEditorInit = true;
     // Preview wiring: vanilla JS fetch (no json-enc htmx extension loaded)
-    window.setEditorTab = function(name) {
+    function setEditorTab(name) {
         document.querySelectorAll('.editor-tab').forEach(function(t) {
             t.classList.toggle('editor-tab--active', t.dataset.tab === name);
         });
@@ -253,9 +215,9 @@ const EDITOR_JS: &str = r#"
                     '<p class="text-danger">Preview failed: ' + err.message + '</p>';
             });
         }
-    };
+    }
 
-    window.promptVersion = function() {
+    function promptVersion() {
         var current = document.getElementById('doc-version').value;
         var v = prompt('Set version number:', current);
         if (v !== null && v.trim() !== '') {
@@ -265,7 +227,7 @@ const EDITOR_JS: &str = r#"
                 document.getElementById('version-display').textContent = num;
             }
         }
-    };
+    }
 
     // Ctrl+S / Cmd+S → save draft
     document.addEventListener('keydown', function(e) {
@@ -276,7 +238,7 @@ const EDITOR_JS: &str = r#"
     });
 
     // Save handler (reads textarea .value)
-    window.saveDocument = function(publish) {
+    function saveDocument(publish) {
         var title = document.getElementById('title-input').value;
         var content = document.getElementById('editor').value;
         var docType = document.getElementById('doc-type').value;
@@ -321,7 +283,21 @@ const EDITOR_JS: &str = r#"
             btn.disabled = false;
             btn.textContent = origText;
         });
-    };
+    }
+
+    // One delegated listener for the editor's four controls. They used to be
+    // `onclick` attributes, which is why the three helpers above had to be
+    // `window.*` globals; see the rule in `ui/assets/chrome.js`.
+    document.addEventListener('click', function(e) {
+        if (!(e.target instanceof Element)) return;
+        var el = e.target.closest('[data-action]');
+        if (!el) return;
+        var action = el.getAttribute('data-action');
+        if (action === 'legalpages-editor-tab') setEditorTab(el.dataset.tab);
+        else if (action === 'legalpages-save') saveDocument(false);
+        else if (action === 'legalpages-publish') saveDocument(true);
+        else if (action === 'legalpages-prompt-version') promptVersion();
+    });
 })();
 "#;
 
@@ -478,7 +454,10 @@ pub async fn endpoints_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
 
 #[derive(serde::Deserialize)]
 struct SaveRequest {
-    doc_type: String,
+    /// Typed, so the editor cannot save a document the block has no route
+    /// to serve. Two other doors onto the same column — the JSON create in
+    /// `mod.rs` and `handle_publish` below — are typed for the same reason.
+    doc_type: DocumentType,
     title: String,
     content: String,
     #[serde(default)]
@@ -490,7 +469,10 @@ struct SaveRequest {
 /// Save a draft document. If the current doc is published, creates a new draft
 /// so the live version stays untouched until the admin explicitly publishes.
 pub async fn handle_save(ctx: &dyn Context, msg: &Message, input: InputStream) -> OutputStream {
-    let raw = input.collect_to_bytes().await;
+    let raw = match input.collect_to_bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => return OutputStream::error(e),
+    };
     let body: SaveRequest = match serde_json::from_slice(&raw) {
         Ok(b) => b,
         // Previously returned 200 OK with an `error` key — htmx clients
@@ -499,55 +481,49 @@ pub async fn handle_save(ctx: &dyn Context, msg: &Message, input: InputStream) -
         Err(e) => return err_bad_request(&format!("Invalid request: {e}")),
     };
 
-    // If editing a published document, create a new draft instead of modifying the live version
-    let should_create_new = if body.doc_id.is_empty() {
-        true
+    // Three outcomes, not two. The lookup used to fold its `Err` into "no
+    // such document, create a draft", so a transient read failure forked the
+    // document the admin was editing into a second row and answered 200
+    // (B10). An error is now reported; only a genuinely absent row, or a
+    // *published* one, creates a draft.
+    let existing = if body.doc_id.is_empty() {
+        None
     } else {
-        match db::get(ctx, COLLECTION, &body.doc_id).await {
-            Ok(doc) => {
-                doc.data
-                    .get("status")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or("")
-                    == "published"
-            }
-            Err(_) => true,
+        match documents::get(ctx, &body.doc_id).await {
+            Ok(found) => found,
+            Err(e) => return crud::db_error_internal(e, "Failed to load the legal-page document"),
         }
     };
 
-    if should_create_new {
-        // Draft shape lives in `service::create_draft` (shared with the JSON
-        // API's document-create handler in `mod.rs`).
-        match service::create_draft(
+    // Editing a published document creates a new draft instead of modifying
+    // the live version, so the published text stays untouched until the admin
+    // explicitly publishes again.
+    let saved = match existing {
+        Some(doc) if doc.status != DocumentStatus::Published => {
+            documents::update_content(ctx, &doc.id, Some(&body.title), Some(&body.content))
+                .await
+                .map(|row| row.id)
+        }
+        _ => documents::insert_draft(
             ctx,
-            &body.doc_type,
-            &body.title,
-            &body.content,
-            msg.user_id(),
+            NewDraft {
+                doc_type: body.doc_type,
+                title: &body.title,
+                content: &body.content,
+                created_by: msg.user_id(),
+            },
         )
         .await
-        {
-            Ok(record) => ok_json(&serde_json::json!({
-                "doc_id": record.id,
-                "status": "draft",
-                "message": "Draft saved"
-            })),
-            Err(e) => err_internal("Failed to save legal-page draft", e),
-        }
-    } else {
-        let data = json_map(serde_json::json!({
-            "title": body.title,
-            "content": body.content,
-            "updated_at": crate::util::now_rfc3339()
-        }));
-        match db::update(ctx, COLLECTION, &body.doc_id, data).await {
-            Ok(_) => ok_json(&serde_json::json!({
-                "doc_id": body.doc_id,
-                "status": "draft",
-                "message": "Draft saved"
-            })),
-            Err(e) => err_internal("Failed to save legal-page draft", e),
-        }
+        .map(|row| row.id),
+    };
+
+    match saved {
+        Ok(doc_id) => ok_json(&serde_json::json!({
+            "doc_id": doc_id,
+            "status": DocumentStatus::Draft,
+            "message": "Draft saved"
+        })),
+        Err(e) => crud::db_error_internal(e, "Failed to save legal-page draft"),
     }
 }
 
@@ -555,7 +531,10 @@ pub async fn handle_save(ctx: &dyn Context, msg: &Message, input: InputStream) -
 /// of the same type (publish-then-archive ordering lives in
 /// `service::publish_document`).
 pub async fn handle_publish(ctx: &dyn Context, msg: &Message, input: InputStream) -> OutputStream {
-    let raw = input.collect_to_bytes().await;
+    let raw = match input.collect_to_bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => return OutputStream::error(e),
+    };
     let body: SaveRequest = match serde_json::from_slice(&raw) {
         Ok(b) => b,
         // Previously returned 200 OK with an `error` key — clients would
@@ -567,7 +546,7 @@ pub async fn handle_publish(ctx: &dyn Context, msg: &Message, input: InputStream
     let published = match service::publish_document(
         ctx,
         service::PublishRequest {
-            doc_type: &body.doc_type,
+            doc_type: body.doc_type,
             doc_id: &body.doc_id,
             title: Some(&body.title),
             content: Some(&body.content),
@@ -578,13 +557,12 @@ pub async fn handle_publish(ctx: &dyn Context, msg: &Message, input: InputStream
     .await
     {
         Ok(p) => p,
-        Err(e) if e.code == ErrorCode::NotFound => return err_not_found("Document not found"),
-        Err(e) => return err_internal("Failed to publish legal page", e),
+        Err(e) => return crud::db_error(e, "Document not found", "Failed to publish legal page"),
     };
 
     ok_json(&serde_json::json!({
-        "doc_id": published.record.id,
-        "status": "published",
+        "doc_id": published.row.id,
+        "status": DocumentStatus::Published,
         "version": published.version,
         "message": format!("Published as v{}", published.version)
     }))
@@ -622,6 +600,19 @@ pub async fn settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     };
 
     let saved = msg.query("saved") == "1";
+    let form =
+        match settings_form::settings_form(ctx, "/b/legalpages/admin/settings", &sections, preview)
+            .await
+        {
+            Ok(form) => form,
+            Err(e) => {
+                return crud::db_error_page(
+                    msg,
+                    e,
+                    "legalpages settings: current values read failed",
+                )
+            }
+        };
 
     let content = html! {
         (components::page_header("Settings", Some("Customize the public legal pages appearance"), None))
@@ -633,7 +624,7 @@ pub async fn settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
             }
         }
 
-        (settings_form::settings_form(ctx, "/b/legalpages/admin/settings", &sections, preview).await)
+        (form)
     };
 
     ui::shell_page(
@@ -645,8 +636,12 @@ pub async fn settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     .await
 }
 
-pub async fn handle_save_settings(ctx: &dyn Context, input: InputStream) -> OutputStream {
-    settings_form::save_settings(ctx, input, &super::config_vars(), "legalpages").await
+pub async fn handle_save_settings(
+    ctx: &dyn Context,
+    msg: &Message,
+    input: InputStream,
+) -> OutputStream {
+    settings_form::save_settings(ctx, msg, input, &super::config_vars(), "legalpages").await
 }
 
 // ---------------------------------------------------------------------------
@@ -670,7 +665,10 @@ pub(super) fn render_preview_fragment(markdown: &str) -> String {
 /// Returns the rendered HTML fragment for direct htmx swap into the
 /// preview pane.
 pub async fn handle_render_preview(_ctx: &dyn Context, input: InputStream) -> OutputStream {
-    let raw = input.collect_to_bytes().await;
+    let raw = match input.collect_to_bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => return OutputStream::error(e),
+    };
     let body: PreviewRequest = match serde_json::from_slice(&raw) {
         Ok(b) => b,
         Err(e) => return err_bad_request(&format!("Invalid request: {e}")),

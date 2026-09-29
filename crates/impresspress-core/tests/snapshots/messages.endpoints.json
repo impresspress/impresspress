@@ -1,0 +1,13 @@
+[
+  "DELETE /b/messages/api/contexts/{id} authenticated",
+  "DELETE /b/messages/api/entries/{id} authenticated",
+  "GET /b/messages/ admin",
+  "GET /b/messages/api/contexts authenticated",
+  "GET /b/messages/api/contexts/{id} authenticated",
+  "GET /b/messages/api/contexts/{id}/entries authenticated",
+  "GET /b/messages/api/entries/{id} authenticated",
+  "GET /b/messages/contexts/{id} admin",
+  "PATCH /b/messages/api/contexts/{id} authenticated",
+  "POST /b/messages/api/contexts authenticated",
+  "POST /b/messages/api/contexts/{id}/entries authenticated"
+]

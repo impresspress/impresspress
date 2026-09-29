@@ -56,11 +56,14 @@ pub mod zip;
 #[cfg(any(test, feature = "test-support"))]
 pub mod test_support;
 
+#[cfg(test)]
+mod error_mapping_tests;
+
 use std::sync::Arc;
 
 use wafer_run::{
-    context::Context, AuthLevel, Block, BlockEndpoint, BlockInfo, CollectionSchema, HttpMethod,
-    InputStream, InstanceMode, LifecycleEvent, Message, OutputStream, WaferError,
+    context::Context, Block, BlockInfo, CollectionSchema, HttpMethod, InputStream, InstanceMode,
+    LifecycleEvent, Message, OutputStream, WaferError,
 };
 
 pub use self::control::{
@@ -68,7 +71,7 @@ pub use self::control::{
     ValidationFailure, ValidationStage,
 };
 use crate::{
-    endpoint_match::{self, EndpointRoute},
+    endpoint_match::{self, request_schema_of, response_schema_of, EndpointRoute},
     http::ResponseBuilder,
 };
 
@@ -83,7 +86,7 @@ pub const ROUTE_PREFIX: &str = "/b/dev";
 /// `wafer_guest.rs` ABI version the block scaffolder currently writes.
 /// Published in the status response so the page can tell whether a block it
 /// compiled earlier was built against a stale guest shim.
-pub const WAFER_GUEST_VERSION: u32 = 1;
+pub const WAFER_GUEST_VERSION: u32 = 2;
 
 /// In-block dispatch targets, one per declared HTTP endpoint.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -128,7 +131,12 @@ pub enum Route {
     ApiExport,
 }
 
-/// Method + path-template dispatch table, mirroring `info().endpoints`.
+/// The block's HTTP surface: what `handle()` dispatches on and what the
+/// workspace `info()` generates its endpoints from (an exported bundle
+/// declares none of it; see [`DevBlock::runtime_only`]). Every row is
+/// `Admin` (design §13); the router is the sole gate, so the declaration is
+/// what pins that tier where the router can enforce it. The matcher binds
+/// `{id}` / `{name}` into `req.param.*` for the handlers' `msg.var` readers.
 ///
 /// Reading and deleting are `POST`s, not a `GET` with a query and a `DELETE`
 /// with one: a workspace path is a `/`-separated string with its own
@@ -136,77 +144,163 @@ pub enum Route {
 /// percent-encode it correctly to name a file in a subdirectory. The path
 /// travels in the JSON body, where it needs no encoding at all.
 pub const ROUTES: &[EndpointRoute<Route>] = &[
-    EndpointRoute::new(HttpMethod::Get, "/b/dev", Route::Page),
-    EndpointRoute::new(HttpMethod::Get, "/b/dev/static/dev.js", Route::PageScript),
-    EndpointRoute::new(
+    // The document and its three assets carry no schemas — there is no JSON
+    // contract to describe, and `has_schema()` therefore keeps all four out
+    // of `/openapi.json` exactly as it keeps the HTML pages of every other
+    // block out.
+    EndpointRoute::admin(HttpMethod::Get, "/b/dev", Route::Page)
+        .summary("The workspace document")
+        .description(
+            "The sandbox's HTML workspace: file tree and editor, the live site in a \
+             sandboxed iframe, the activation progress panel, and the page-scoped agent \
+             tools registered from /b/dev/api/tools.json.",
+        ),
+    EndpointRoute::admin(HttpMethod::Get, "/b/dev/static/dev.js", Route::PageScript)
+        .summary("The workspace page's script"),
+    EndpointRoute::admin(
         HttpMethod::Get,
         "/b/dev/static/dev.css",
         Route::PageStylesheet,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("The workspace page's stylesheet"),
+    EndpointRoute::admin(
         HttpMethod::Get,
         "/b/dev/static/compiler-adapter.js",
         Route::PageCompilerAdapter,
-    ),
-    EndpointRoute::new(HttpMethod::Get, "/b/dev/api/status", Route::ApiStatus),
-    EndpointRoute::new(HttpMethod::Get, "/b/dev/api/files", Route::ApiFilesList),
-    EndpointRoute::new(
+    )
+    .summary("The page half of the in-browser compiler protocol"),
+    EndpointRoute::admin(HttpMethod::Get, "/b/dev/api/status", Route::ApiStatus)
+        .summary("Sandbox status")
+        .output(response_schema_of::<contracts::StatusResponse>),
+    EndpointRoute::admin(HttpMethod::Get, "/b/dev/api/files", Route::ApiFilesList)
+        .summary("List workspace files")
+        .query_params(request_schema_of::<contracts::FileListQuery>)
+        .output(response_schema_of::<contracts::FileListResponse>),
+    EndpointRoute::admin(
         HttpMethod::Post,
         "/b/dev/api/files/read",
         Route::ApiFilesRead,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Read a workspace file")
+    .input(request_schema_of::<contracts::FileReadRequest>)
+    .output(response_schema_of::<contracts::FileReadResponse>),
+    EndpointRoute::admin(
         HttpMethod::Post,
         "/b/dev/api/files/write",
         Route::ApiFilesWrite,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Write a workspace file")
+    .input(request_schema_of::<contracts::FileWriteRequest>)
+    .output(response_schema_of::<contracts::FileWriteResponse>),
+    EndpointRoute::admin(
         HttpMethod::Post,
         "/b/dev/api/files/delete",
         Route::ApiFilesDelete,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Delete a workspace file")
+    .input(request_schema_of::<contracts::FileDeleteRequest>)
+    .output(response_schema_of::<contracts::FileDeleteResponse>),
+    EndpointRoute::admin(
         HttpMethod::Get,
         "/b/dev/api/generations",
         Route::ApiGenerations,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("List generations")
+    .query_params(request_schema_of::<contracts::GenerationListQuery>)
+    .output(response_schema_of::<contracts::GenerationListResponse>),
+    EndpointRoute::admin(
         HttpMethod::Get,
         "/b/dev/api/generations/{id}",
         Route::ApiGenerationDetail,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Read one generation")
+    .path_params(request_schema_of::<contracts::GenerationPathParams>)
+    .output(response_schema_of::<contracts::GenerationDetail>),
+    EndpointRoute::admin(
         HttpMethod::Post,
         "/b/dev/api/generations/{id}/rollback",
         Route::ApiGenerationRollback,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Republish an earlier generation")
+    .path_params(request_schema_of::<contracts::GenerationPathParams>)
+    .output(response_schema_of::<contracts::ActivationResponse>),
+    EndpointRoute::admin(
         HttpMethod::Post,
         "/b/dev/api/builds/stage",
         Route::ApiBuildStage,
-    ),
-    EndpointRoute::new(HttpMethod::Post, "/b/dev/api/blocks", Route::ApiBlockCreate),
-    EndpointRoute::new(
+    )
+    .summary("Stage and activate a compiled block")
+    .input(request_schema_of::<contracts::StageBuildRequest>)
+    .output(response_schema_of::<contracts::StageBuildResponse>),
+    EndpointRoute::admin(HttpMethod::Post, "/b/dev/api/blocks", Route::ApiBlockCreate)
+        .summary("Scaffold a new block from a template")
+        .description(
+            "Writes blocks/<name>/{Cargo.toml, src/lib.rs, src/wafer_guest.rs}. The \
+             support module is written verbatim — it is the guest ABI and must not be \
+             hand-written or edited. Writing source activates nothing; compile the \
+             block to make it serve.",
+        )
+        .input(request_schema_of::<contracts::CreateBlockRequest>)
+        .output(response_schema_of::<contracts::CreateBlockResponse>),
+    EndpointRoute::admin(
         HttpMethod::Post,
         "/b/dev/api/blocks/{name}/remove",
         Route::ApiBlockRemove,
-    ),
-    EndpointRoute::new(HttpMethod::Get, "/b/dev/api/reference", Route::ApiReference),
-    EndpointRoute::new(
+    )
+    .summary("Remove a block from the runtime")
+    .path_params(request_schema_of::<contracts::BlockPathParams>)
+    .output(response_schema_of::<contracts::ActivationResponse>),
+    EndpointRoute::admin(HttpMethod::Get, "/b/dev/api/reference", Route::ApiReference)
+        .summary("The backend-block authoring reference")
+        .description(
+            "The guide for writing a block: the wafer_guest.rs API, the database / \
+             storage / config services, the namespace and capability rules, the limits, \
+             the diagnostic codes, and both templates in full.",
+        )
+        .output(response_schema_of::<contracts::ReferenceResponse>),
+    // Deliberately carries no `.agent_tool(..)`: this endpoint IS a tool
+    // manifest, and a tool that named itself in its own output is exactly
+    // the leak `dev_tools_manifest.rs`'s
+    // `no_dev_or_shop_tool_leaks_into_the_global_manifest` exists to catch.
+    // See `tools` for what it publishes instead.
+    EndpointRoute::admin(
         HttpMethod::Get,
         "/b/dev/api/tools.json",
         Route::ApiToolsJson,
+    )
+    .summary("Page-scoped WebMCP tool manifest")
+    .description(
+        "The curated `dev_*` and `shop_*` tools the /b/dev page registers for its \
+         in-page agent — a page-scoped WebMCP manifest, not the deployment-wide one \
+         at /b/webmcp/manifest.json.",
     ),
     // `/export/manifest` BEFORE `/export`: `endpoint_match` walks this table
     // in order and `/b/dev/api/export` is a literal template, not a prefix,
     // so the order is not load-bearing today — it is written this way so the
     // more specific path stays first if either ever gains a `{…}` segment.
-    EndpointRoute::new(
+    EndpointRoute::admin(
         HttpMethod::Get,
         "/b/dev/api/export/manifest",
         Route::ApiExportManifest,
-    ),
-    EndpointRoute::new(HttpMethod::Get, "/b/dev/api/export", Route::ApiExport),
+    )
+    .summary("Preview the export bundle")
+    .description(
+        "What `GET /b/dev/api/export` would produce, without producing it: every \
+         entry of the zip with its size, the totals, and the rows of each data \
+         table the snapshot carries. Read it to see what an export would contain \
+         before downloading one.",
+    )
+    .output(response_schema_of::<contracts::ExportManifest>),
+    // No `.output(..)`: the body is a zip, not JSON. Declared all the same,
+    // because the declaration is what pins its `Admin` tier where the router
+    // can enforce it.
+    EndpointRoute::admin(HttpMethod::Get, "/b/dev/api/export", Route::ApiExport)
+        .summary("Export the site as a runnable static bundle")
+        .description(
+            "A zip of the runtime shell with the sandbox turned off, the site files, \
+             every compiled block and its source, and a data snapshot — servable from \
+             any static host and re-importable as a seed.",
+        ),
 ];
 
 /// A response builder pre-seeded with `Cache-Control: no-store`.
@@ -260,9 +354,54 @@ pub(crate) fn no_store_error_status(
     OutputStream::error(error)
 }
 
+/// [`crate::blocks::crud::db_error`] for a `/b/dev` response.
+///
+/// The classification is not re-derived here — `crud::classify_db_error` is
+/// the one place that decides what a failed database call means, and a
+/// second copy is exactly what `tests/error_door.rs` exists to stop. What
+/// this adds is the sealing: every `/b/dev` response carries
+/// `Cache-Control: no-store` (design §12), and an `OutputStream`'s meta is
+/// fixed when it is built, so the header has to go on the error *before* it
+/// is sealed. The `Internal` arm still goes through
+/// [`crate::http::err_internal`], the one deliberate exception
+/// [`no_store_error`] already documents.
+pub(crate) fn no_store_db_error(error: WaferError, not_found: &str, context: &str) -> OutputStream {
+    seal_no_store(
+        crate::blocks::crud::classify_db_error(error, Some(not_found), context),
+        context,
+    )
+}
+
+/// [`no_store_db_error`] for a call whose `NotFound` is NOT the client's row
+/// — the [`crate::blocks::crud::db_error_internal`] of this pair, and split
+/// for the same reason: a `NotFound` from a listing the block addressed
+/// itself names no generation of the caller's.
+pub(crate) fn no_store_db_error_internal(error: WaferError, context: &str) -> OutputStream {
+    seal_no_store(
+        crate::blocks::crud::classify_db_error(error, None, context),
+        context,
+    )
+}
+
+/// Seal a [`crate::blocks::crud::DbFailure`] as a `/b/dev` response.
+fn seal_no_store(failure: crate::blocks::crud::DbFailure, context: &str) -> OutputStream {
+    match failure {
+        crate::blocks::crud::DbFailure::Refused(refusal) => {
+            OutputStream::error(with_no_store(refusal.into_error()))
+        }
+        crate::blocks::crud::DbFailure::Internal(fault) => {
+            crate::http::err_internal(context, fault.into_error())
+        }
+    }
+}
+
 /// A [`WaferError`] carrying the block-wide `Cache-Control: no-store`.
 fn no_store_wafer_error(code: wafer_run::ErrorCode, message: &str) -> WaferError {
-    let mut error = WaferError::new(code, message);
+    with_no_store(WaferError::new(code, message))
+}
+
+/// `error` with the block-wide `Cache-Control: no-store` header attached.
+fn with_no_store(mut error: WaferError) -> WaferError {
     error.meta.push(wafer_run::MetaEntry {
         key: format!(
             "{}Cache-Control",
@@ -364,14 +503,13 @@ pub struct DevShared {
 impl DevShared {
     /// Build the shared state around the two host seams.
     ///
-    /// `arc_with_non_send_sync`: [`RuntimeControl`] is bounded on
-    /// `MaybeSend + MaybeSync`, which is unbounded on wasm32 — that is what
-    /// lets the browser control hold the live `Rc<Wafer>` and its factory. On
-    /// wasm32 the resulting `Arc` therefore is not `Send`/`Sync`, and on that
-    /// single-threaded target it does not need to be; on native the same
-    /// bounds are `Send + Sync` and the lint does not fire at all. The same
-    /// allowance the block registration path already carries.
-    #[allow(clippy::arc_with_non_send_sync)]
+    /// [`RuntimeControl`] is bounded on `MaybeSend + MaybeSync`, which is
+    /// unbounded on wasm32 — that is what lets the browser control hold the
+    /// live `Rc<Wafer>` and its factory. The `Arc` this returns is therefore
+    /// not `Send`/`Sync` on that target, and on a single-threaded one it does
+    /// not need to be; see the crate-level
+    /// `expect(clippy::arc_with_non_send_sync)` in `lib.rs` for why the lint
+    /// that says so is off for wasm32 only.
     pub fn new(control: Arc<dyn RuntimeControl>, shell: Arc<dyn ShellSource>) -> Arc<Self> {
         Arc::new(Self {
             control,
@@ -465,138 +603,8 @@ impl Block for DevBlock {
             return base;
         }
 
-        base.endpoints(vec![
-            // The document and its three assets carry no schemas — there is no
-            // JSON contract to describe, and `has_schema()` therefore keeps
-            // all four out of `/openapi.json` exactly as it keeps the HTML
-            // pages of every other block out. They are declared all the same:
-            // `routes_and_endpoints_stay_in_lockstep` requires the dispatch
-            // table and this list to be the same set, and the declaration is
-            // what pins their `Admin` tier where the router can enforce it.
-            BlockEndpoint::get("/b/dev")
-                .summary("The workspace document")
-                .description(
-                    "The sandbox's HTML workspace: file tree and editor, the live site in a \
-                     sandboxed iframe, the activation progress panel, and the page-scoped agent \
-                     tools registered from /b/dev/api/tools.json.",
-                )
-                .auth(AuthLevel::Admin),
-            BlockEndpoint::get("/b/dev/static/dev.js")
-                .summary("The workspace page's script")
-                .auth(AuthLevel::Admin),
-            BlockEndpoint::get("/b/dev/static/dev.css")
-                .summary("The workspace page's stylesheet")
-                .auth(AuthLevel::Admin),
-            BlockEndpoint::get("/b/dev/static/compiler-adapter.js")
-                .summary("The page half of the in-browser compiler protocol")
-                .auth(AuthLevel::Admin),
-            BlockEndpoint::get("/b/dev/api/status")
-                .summary("Sandbox status")
-                .auth(AuthLevel::Admin)
-                .output::<contracts::StatusResponse>(),
-            BlockEndpoint::get("/b/dev/api/files")
-                .summary("List workspace files")
-                .auth(AuthLevel::Admin)
-                .query_params::<contracts::FileListQuery>()
-                .output::<contracts::FileListResponse>(),
-            BlockEndpoint::post("/b/dev/api/files/read")
-                .summary("Read a workspace file")
-                .auth(AuthLevel::Admin)
-                .input::<contracts::FileReadRequest>()
-                .output::<contracts::FileReadResponse>(),
-            BlockEndpoint::post("/b/dev/api/files/write")
-                .summary("Write a workspace file")
-                .auth(AuthLevel::Admin)
-                .input::<contracts::FileWriteRequest>()
-                .output::<contracts::FileWriteResponse>(),
-            BlockEndpoint::post("/b/dev/api/files/delete")
-                .summary("Delete a workspace file")
-                .auth(AuthLevel::Admin)
-                .input::<contracts::FileDeleteRequest>()
-                .output::<contracts::FileDeleteResponse>(),
-            BlockEndpoint::get("/b/dev/api/generations")
-                .summary("List generations")
-                .auth(AuthLevel::Admin)
-                .query_params::<contracts::GenerationListQuery>()
-                .output::<contracts::GenerationListResponse>(),
-            BlockEndpoint::get("/b/dev/api/generations/{id}")
-                .summary("Read one generation")
-                .auth(AuthLevel::Admin)
-                .path_params::<contracts::GenerationPathParams>()
-                .output::<contracts::GenerationDetail>(),
-            BlockEndpoint::post("/b/dev/api/generations/{id}/rollback")
-                .summary("Republish an earlier generation")
-                .auth(AuthLevel::Admin)
-                .path_params::<contracts::GenerationPathParams>()
-                .output::<contracts::ActivationResponse>(),
-            BlockEndpoint::post("/b/dev/api/builds/stage")
-                .summary("Stage and activate a compiled block")
-                .auth(AuthLevel::Admin)
-                .input::<contracts::StageBuildRequest>()
-                .output::<contracts::StageBuildResponse>(),
-            BlockEndpoint::post("/b/dev/api/blocks")
-                .summary("Scaffold a new block from a template")
-                .description(
-                    "Writes blocks/<name>/{Cargo.toml, src/lib.rs, src/wafer_guest.rs}. The \
-                     support module is written verbatim — it is the guest ABI and must not be \
-                     hand-written or edited. Writing source activates nothing; compile the \
-                     block to make it serve.",
-                )
-                .auth(AuthLevel::Admin)
-                .input::<contracts::CreateBlockRequest>()
-                .output::<contracts::CreateBlockResponse>(),
-            BlockEndpoint::post("/b/dev/api/blocks/{name}/remove")
-                .summary("Remove a block from the runtime")
-                .auth(AuthLevel::Admin)
-                .path_params::<contracts::BlockPathParams>()
-                .output::<contracts::ActivationResponse>(),
-            BlockEndpoint::get("/b/dev/api/reference")
-                .summary("The backend-block authoring reference")
-                .description(
-                    "The guide for writing a block: the wafer_guest.rs API, the database / \
-                     storage / config services, the namespace and capability rules, the limits, \
-                     the diagnostic codes, and both templates in full.",
-                )
-                .auth(AuthLevel::Admin)
-                .output::<contracts::ReferenceResponse>(),
-            // Deliberately carries no `.agent_tool(..)`: this endpoint IS a
-            // tool manifest, and a tool that named itself in its own output
-            // is exactly the leak
-            // `dev_tools_manifest.rs`'s `no_dev_or_shop_tool_leaks_into_the_global_manifest`
-            // exists to catch. See `tools` for what it publishes instead.
-            BlockEndpoint::get("/b/dev/api/tools.json")
-                .summary("Page-scoped WebMCP tool manifest")
-                .description(
-                    "The curated `dev_*` and `shop_*` tools the /b/dev page registers for its \
-                     in-page agent — a page-scoped WebMCP manifest, not the deployment-wide one \
-                     at /b/webmcp/manifest.json.",
-                )
-                .auth(AuthLevel::Admin),
-            BlockEndpoint::get("/b/dev/api/export/manifest")
-                .summary("Preview the export bundle")
-                .description(
-                    "What `GET /b/dev/api/export` would produce, without producing it: every \
-                     entry of the zip with its size, the totals, and the rows of each data \
-                     table the snapshot carries. Read it to see what an export would contain \
-                     before downloading one.",
-                )
-                .auth(AuthLevel::Admin)
-                .output::<contracts::ExportManifest>(),
-            // No `.output::<..>()`: the body is a zip, not JSON. It is
-            // declared all the same because `routes_and_endpoints_stay_in_lockstep`
-            // requires the dispatch table and this list to be the same set,
-            // and the declaration is what pins its `Admin` tier where the
-            // router can enforce it.
-            BlockEndpoint::get("/b/dev/api/export")
-                .summary("Export the site as a runnable static bundle")
-                .description(
-                    "A zip of the runtime shell with the sandbox turned off, the site files, \
-                     every compiled block and its source, and a data snapshot — servable from \
-                     any static host and re-importable as a seed.",
-                )
-                .auth(AuthLevel::Admin),
-        ])
-        .admin_url(ROUTE_PREFIX)
+        base.endpoints(endpoint_match::declare(ROUTES))
+            .admin_url(ROUTE_PREFIX)
     }
 
     async fn handle(
@@ -616,8 +624,8 @@ impl Block for DevBlock {
             Route::PageStylesheet => page::handle_stylesheet(&msg),
             Route::PageCompilerAdapter => page::handle_compiler_adapter(&msg),
             Route::ApiStatus => status::handle(ctx, &self.shared).await,
-            Route::ApiFilesList => files::handle_list(ctx, &msg).await,
-            Route::ApiFilesRead => files::handle_read(ctx, input).await,
+            Route::ApiFilesList => files::handle_list(ctx, &self.shared, &msg).await,
+            Route::ApiFilesRead => files::handle_read(ctx, &self.shared, input).await,
             Route::ApiFilesWrite => files::handle_write(ctx, &self.shared, input).await,
             Route::ApiFilesDelete => files::handle_delete(ctx, &self.shared, input).await,
             Route::ApiGenerations => generations_api::handle_list(ctx, &msg).await,
@@ -800,7 +808,7 @@ mod tests {
         let site_grant = &grants[0];
         assert_eq!(site_grant.grantee, BLOCK_NAME);
         assert_eq!(site_grant.resource, "wafer-run/web/site/*");
-        assert!(site_grant.write);
+        assert_eq!(site_grant.write, wafer_block::GrantWrite::Full);
         // Typed to Storage: an untyped grant would also admit a database
         // collection or config key that happened to match the pattern.
         assert_eq!(
@@ -817,7 +825,7 @@ mod tests {
         assert_eq!(db_grants.len(), data_snapshot::TABLE_ALLOWLIST.len());
         for grant in db_grants {
             assert_eq!(grant.grantee, BLOCK_NAME);
-            assert!(grant.write);
+            assert_eq!(grant.write, wafer_block::GrantWrite::Full);
             assert_eq!(grant.resource_type, Some(wafer_run::ResourceType::Db));
             assert!(
                 !grant.resource.ends_with('*'),
@@ -831,6 +839,29 @@ mod tests {
                 "{:?} is not on TABLE_ALLOWLIST",
                 grant.resource
             );
+        }
+    }
+
+    /// `info().endpoints` is generated from `ROUTES`; nothing else declares
+    /// an endpoint for this block. Every row and every declaration is
+    /// `Admin`, so the summary is compared too: it is what proves the rows
+    /// carry the declaration rather than merely matching it.
+    #[test]
+    fn info_endpoints_come_from_the_table() {
+        use wafer_run::Block as _;
+
+        let declared = DevBlock::with_workspace(DevShared::new(
+            test_support::FakeControl::new(),
+            std::sync::Arc::new(test_support::FakeShell::new()),
+        ))
+        .info()
+        .endpoints;
+        assert_eq!(declared.len(), ROUTES.len());
+        for (ep, row) in declared.iter().zip(ROUTES) {
+            assert_eq!(ep.method, row.method, "{}", row.template);
+            assert_eq!(ep.path, row.template);
+            assert_eq!(ep.auth, row.auth, "{}", row.template);
+            assert_eq!(ep.summary, row.summary, "{}", row.template);
         }
     }
 

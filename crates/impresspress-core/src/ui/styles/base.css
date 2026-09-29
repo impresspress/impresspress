@@ -14,15 +14,17 @@ html, body {
 	background: var(--bg-secondary);
 	color: var(--text-primary);
 }
-input, textarea, select, [contenteditable="true"] {
-	/* Form controls don't inherit the body's font-family by default -- browsers
-	 * apply their own UA form-control stack instead (most visibly, `textarea`'s
-	 * UA default is `monospace`, which reads as a jarring mismatch next to a
-	 * `.form-input` sibling in the same section -- caught rendering the
-	 * `form_page` template preview during the 12d design pass). `button`
-	 * already sets this itself (see `.btn` in components/button.css); this
-	 * covers every other native form control app-wide. */
+/* Form controls don't inherit the body's font-family by default -- browsers
+ * apply their own UA form-control stack instead (most visibly, `textarea`'s
+ * UA default is `monospace`, which reads as a jarring mismatch next to a
+ * `.form-input` sibling in the same section, and a plain `<button>` renders
+ * in the system UI font -- the portal's `.account-card__signout` did). This
+ * rule is the one place every native control, `button` included, takes the
+ * UI font; component rules do not restate it. */
+button, input, textarea, select {
 	font-family: inherit;
+}
+input, textarea, select, [contenteditable="true"] {
 	-webkit-user-select: text !important;
 	user-select: text !important;
 }

@@ -5,7 +5,7 @@
 //!
 //! - `token_hash` — `sha256_hex(raw_refresh_jwt)`, the lookup key on refresh.
 //! - `family` — stable across rotations, lets us detect reuse: if a request
-//!   arrives with a refresh token whose row is `revoked = 1` but the family
+//!   arrives with a refresh token whose row is revoked but the family
 //!   still has any live row, the attacker is using a stolen-and-rotated
 //!   token. We revoke the whole family.
 //! - `generation` — increments on each rotation. The first token in a family
@@ -13,17 +13,20 @@
 //! - `revoked` — set when a token rotates (don't delete, the row is needed
 //!   for reuse detection) or when an entire family is invalidated.
 //!
-//! See `migrations/003_refresh_tokens.{sqlite,postgres}.sql` for the schema.
+//! See `migrations/004_refresh_tokens.{sqlite,postgres}.sql` for the schema.
 
 use std::collections::HashMap;
 
 use serde_json::{json, Value};
 use wafer_block::db::{Filter, FilterOp};
 use wafer_core::clients::database as db;
-use wafer_run::context::Context;
+use wafer_run::{context::Context, WaferError};
 
-use super::{now_iso, RepoError};
-use crate::util::{sha256_hex, RecordExt};
+use super::{db_failed, now_iso};
+use crate::{
+    db_read::{self, Bound},
+    util::{sha256_hex, RecordExt},
+};
 
 pub const TABLE: &str = "wafer_run__auth__tokens";
 
@@ -45,7 +48,7 @@ pub async fn insert(
     family: &str,
     generation: i64,
     expires_at: &str,
-) -> Result<(), RepoError> {
+) -> Result<(), WaferError> {
     let id = uuid::Uuid::now_v7().to_string();
     let mut data: HashMap<String, Value> = HashMap::new();
     data.insert("id".into(), json!(id));
@@ -61,7 +64,7 @@ pub async fn insert(
 
     db::create(ctx, TABLE, data)
         .await
-        .map_err(|e| RepoError::Db(format!("tokens insert: {e}")))?;
+        .map_err(|e| db_failed("tokens insert", e))?;
     Ok(())
 }
 
@@ -80,15 +83,20 @@ pub struct TokenRow {
 pub async fn find_by_token(
     ctx: &dyn Context,
     raw_token: &str,
-) -> Result<Option<TokenRow>, RepoError> {
+) -> Result<Option<TokenRow>, WaferError> {
     let filters = vec![Filter {
         field: "token_hash".into(),
         operator: FilterOp::Equal,
         value: json!(hash(raw_token)),
     }];
-    let records = db::list_all(ctx, TABLE, filters)
-        .await
-        .map_err(|e| RepoError::Db(format!("tokens lookup: {e}")))?;
+    let records = db_read::list_bounded(
+        ctx,
+        TABLE,
+        filters,
+        Bound::UniqueKey("wafer_run__auth__tokens_token_hash_uniq"),
+    )
+    .await
+    .map_err(|e| db_failed("tokens lookup", e))?;
     Ok(records.into_iter().next().map(row_from_record))
 }
 
@@ -98,7 +106,7 @@ pub async fn find_by_token(
 /// request hits a revoked row but `family_has_live_row` is true, the row
 /// being presented was already rotated and the family is under attack —
 /// revoke the whole family.
-pub async fn family_has_live_row(ctx: &dyn Context, family: &str) -> Result<bool, RepoError> {
+pub async fn family_has_live_row(ctx: &dyn Context, family: &str) -> Result<bool, WaferError> {
     let filters = vec![
         Filter {
             field: "family".into(),
@@ -111,25 +119,60 @@ pub async fn family_has_live_row(ctx: &dyn Context, family: &str) -> Result<bool
             value: json!(false),
         },
     ];
-    let records = db::list_all(ctx, TABLE, filters)
-        .await
-        .map_err(|e| RepoError::Db(format!("tokens family lookup: {e}")))?;
+    let records = db_read::list_bounded(
+        ctx,
+        TABLE,
+        filters,
+        Bound::OnePer(
+            "live generation in one refresh-token family — rotation revokes the predecessor",
+        ),
+    )
+    .await
+    .map_err(|e| db_failed("tokens family lookup", e))?;
     Ok(!records.is_empty())
 }
 
-/// Mark a single row as revoked.
-pub async fn revoke_by_id(ctx: &dyn Context, id: &str) -> Result<(), RepoError> {
+/// Claim a single row for rotation: mark it revoked, but only while it is
+/// still live.
+///
+/// Compare-and-set. `revoked = false` is part of the UPDATE's own `WHERE`, so
+/// the read the caller did beforehand cannot go stale between the two: the
+/// backend evaluates the condition and the write in one statement. Returns
+/// `true` when this caller is the one that revoked the row, `false` when the
+/// row was already revoked by the time the statement ran (or has gone).
+///
+/// `false` is what stops a second successor being minted. Rotation is a
+/// read-then-write, and nothing in the schema stops two live generations in a
+/// family — the UNIQUE index covers `token_hash` alone. Without the condition,
+/// two requests carrying the same refresh token both read a live row, both
+/// revoke it, and both mint a successor, so the family ends up with two live
+/// tokens and a stolen one refreshes forever without ever surfacing as reuse.
+/// What the caller does with `false` is its own decision; see
+/// `auth_ui::api::refresh::refuse_not_live`.
+pub async fn revoke_if_live(ctx: &dyn Context, id: &str) -> Result<bool, WaferError> {
+    let filters = vec![
+        Filter {
+            field: "id".into(),
+            operator: FilterOp::Equal,
+            value: json!(id),
+        },
+        Filter {
+            field: "revoked".into(),
+            operator: FilterOp::Equal,
+            value: json!(false),
+        },
+    ];
     let mut data: HashMap<String, Value> = HashMap::new();
     data.insert("revoked".into(), json!(true));
-    db::update(ctx, TABLE, id, data)
+    let n = db::update_by_filters_count(ctx, TABLE, filters, data)
         .await
-        .map_err(|e| RepoError::Db(format!("tokens revoke_by_id: {e}")))?;
-    Ok(())
+        .map_err(|e| db_failed("tokens revoke_if_live", e))?;
+    Ok(n > 0)
 }
 
 /// Mark every row in `family` as revoked. Used both for normal logout-style
 /// invalidation and for reuse-attack detection.
-pub async fn revoke_family(ctx: &dyn Context, family: &str) -> Result<(), RepoError> {
+pub async fn revoke_family(ctx: &dyn Context, family: &str) -> Result<(), WaferError> {
     let filters = vec![Filter {
         field: "family".into(),
         operator: FilterOp::Equal,
@@ -139,14 +182,14 @@ pub async fn revoke_family(ctx: &dyn Context, family: &str) -> Result<(), RepoEr
     data.insert("revoked".into(), json!(true));
     db::update_by_filters(ctx, TABLE, filters, data)
         .await
-        .map_err(|e| RepoError::Db(format!("tokens revoke_family: {e}")))?;
+        .map_err(|e| db_failed("tokens revoke_family", e))?;
     Ok(())
 }
 
 /// Mark every row owned by `user_id` as revoked. Used by logout,
 /// password-reset, and password-change flows to invalidate sessions
 /// across all the user's devices.
-pub async fn revoke_all_for_user(ctx: &dyn Context, user_id: &str) -> Result<(), RepoError> {
+pub async fn revoke_all_for_user(ctx: &dyn Context, user_id: &str) -> Result<(), WaferError> {
     let filters = vec![Filter {
         field: "user_id".into(),
         operator: FilterOp::Equal,
@@ -156,8 +199,34 @@ pub async fn revoke_all_for_user(ctx: &dyn Context, user_id: &str) -> Result<(),
     data.insert("revoked".into(), json!(true));
     db::update_by_filters(ctx, TABLE, filters, data)
         .await
-        .map_err(|e| RepoError::Db(format!("tokens revoke_all_for_user: {e}")))?;
+        .map_err(|e| db_failed("tokens revoke_all_for_user", e))?;
     Ok(())
+}
+
+/// Deletes rows whose `expires_at < cutoff`. Returns the number deleted.
+///
+/// Rotation revokes rather than deletes — the tombstone is what the SEC-039
+/// reuse check reads — so without this the table only ever grows: a browser
+/// tab adds a row every 30 minutes and nothing has ever removed one. A row
+/// past its `expires_at` can no longer serve reuse detection either, because
+/// the refresh handler rejects an expired refresh JWT on signature verify
+/// before it ever looks the row up.
+///
+/// Called by `auth::maintenance::sweep`. `cutoff` is compared as an ISO-8601
+/// string, the format `now_iso` writes.
+pub async fn delete_expired(ctx: &dyn Context, cutoff: &str) -> Result<u64, WaferError> {
+    let n = db::delete_by_filters_count(
+        ctx,
+        TABLE,
+        vec![Filter {
+            field: "expires_at".into(),
+            operator: FilterOp::LessThan,
+            value: json!(cutoff),
+        }],
+    )
+    .await
+    .map_err(|e| db_failed("tokens delete_expired", e))?;
+    Ok(n.max(0) as u64)
 }
 
 fn row_from_record(record: db::Record) -> TokenRow {
@@ -189,22 +258,15 @@ mod tests {
             .to_string()
     }
 
-    async fn seed_user(ctx: &TestContext, id: &str, email: &str) {
-        use crate::blocks::auth::USERS_TABLE;
-        let mut data: HashMap<String, Value> = HashMap::new();
-        data.insert("id".into(), json!(id));
-        data.insert("email".into(), json!(email));
-        data.insert("display_name".into(), json!(email));
-        data.insert("role".into(), json!("user"));
-        data.insert("email_verified".into(), json!(true));
-        data.insert("created_at".into(), json!(crate::util::now_rfc3339()));
-        data.insert("updated_at".into(), json!(crate::util::now_rfc3339()));
-        db::create(ctx, USERS_TABLE, data).await.unwrap();
+    async fn seed_user(ctx: &TestContext, id: &str, _email: &str) {
+        ctx.seed_auth_user(id).await;
     }
 
     #[tokio::test]
     async fn insert_then_find_by_token_round_trips() {
-        let ctx = TestContext::with_auth().await;
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth::AUTH_BLOCK_ID);
         seed_user(&ctx, "user-1", "u1@example.com").await;
         insert(&ctx, "user-1", "raw-jwt", "fam-1", 0, &future_iso(3600))
             .await
@@ -220,7 +282,9 @@ mod tests {
 
     #[tokio::test]
     async fn raw_token_is_never_stored() {
-        let ctx = TestContext::with_auth().await;
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth::AUTH_BLOCK_ID);
         seed_user(&ctx, "user-1", "u1@example.com").await;
         let raw = "secret-refresh-token-do-not-store";
         insert(&ctx, "user-1", raw, "fam-1", 0, &future_iso(3600))
@@ -228,7 +292,7 @@ mod tests {
             .unwrap();
 
         // No row should contain the raw token. Verify by scanning every row.
-        let records = db::list_all(&ctx, TABLE, vec![]).await.unwrap();
+        let records = db_read::list_every(&ctx, TABLE, vec![]).await.unwrap();
         assert_eq!(records.len(), 1, "exactly one row was inserted");
         let serialized = serde_json::to_string(&records[0].data).unwrap();
         assert!(
@@ -243,13 +307,15 @@ mod tests {
     async fn rotate_marks_old_revoked_and_keeps_family() {
         // Simulate the refresh handler's rotation: insert v0, then revoke
         // v0 + insert v1 under the same family with generation+1.
-        let ctx = TestContext::with_auth().await;
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth::AUTH_BLOCK_ID);
         seed_user(&ctx, "user-1", "u1@example.com").await;
         insert(&ctx, "user-1", "tok-v0", "fam-1", 0, &future_iso(3600))
             .await
             .unwrap();
         let old = find_by_token(&ctx, "tok-v0").await.unwrap().unwrap();
-        revoke_by_id(&ctx, &old.id).await.unwrap();
+        assert!(revoke_if_live(&ctx, &old.id).await.unwrap());
         insert(&ctx, "user-1", "tok-v1", "fam-1", 1, &future_iso(3600))
             .await
             .unwrap();
@@ -271,13 +337,15 @@ mod tests {
     async fn reuse_detection_revokes_whole_family() {
         // After rotation, presenting the OLD (revoked) token should reveal
         // a live family — the handler's response is to revoke the family.
-        let ctx = TestContext::with_auth().await;
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth::AUTH_BLOCK_ID);
         seed_user(&ctx, "user-1", "u1@example.com").await;
         insert(&ctx, "user-1", "tok-v0", "fam-1", 0, &future_iso(3600))
             .await
             .unwrap();
         let old = find_by_token(&ctx, "tok-v0").await.unwrap().unwrap();
-        revoke_by_id(&ctx, &old.id).await.unwrap();
+        assert!(revoke_if_live(&ctx, &old.id).await.unwrap());
         insert(&ctx, "user-1", "tok-v1", "fam-1", 1, &future_iso(3600))
             .await
             .unwrap();
@@ -295,8 +363,35 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn only_the_first_claim_of_a_row_revokes_it() {
+        // The rotation claim is a compare-and-set, so the second caller to
+        // reach an already-revoked row is told it lost — the signal the
+        // refresh handler turns into reuse detection.
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth::AUTH_BLOCK_ID);
+        seed_user(&ctx, "user-1", "u1@example.com").await;
+        insert(&ctx, "user-1", "tok-v0", "fam-1", 0, &future_iso(3600))
+            .await
+            .unwrap();
+        let row = find_by_token(&ctx, "tok-v0").await.unwrap().unwrap();
+
+        assert!(
+            revoke_if_live(&ctx, &row.id).await.unwrap(),
+            "the first claim revokes the live row"
+        );
+        assert!(
+            !revoke_if_live(&ctx, &row.id).await.unwrap(),
+            "a second claim of the same row must report that it lost"
+        );
+        assert!(!revoke_if_live(&ctx, "no-such-row").await.unwrap());
+    }
+
+    #[tokio::test]
     async fn revoke_all_for_user_invalidates_every_family() {
-        let ctx = TestContext::with_auth().await;
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth::AUTH_BLOCK_ID);
         seed_user(&ctx, "user-1", "u1@example.com").await;
         insert(&ctx, "user-1", "tok-a", "fam-a", 0, &future_iso(3600))
             .await

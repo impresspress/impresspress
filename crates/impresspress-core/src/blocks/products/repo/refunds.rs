@@ -6,7 +6,10 @@ use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
 use wafer_core::clients::database::{self as db, Record};
 use wafer_run::{context::Context, ErrorCode, WaferError};
 
-use crate::util::RecordExt;
+use crate::{
+    blocks::products::contracts::RefundStatus,
+    util::{enum_column, RecordExt},
+};
 
 pub(crate) const TABLE: &str = "impresspress__products__refunds";
 
@@ -41,6 +44,11 @@ async fn get_by_field_optional(
     }
 }
 
+/// The refund row with `id`; `NotFound` when there is none.
+pub(crate) async fn get(ctx: &dyn Context, id: &str) -> Result<Record, WaferError> {
+    db::get(ctx, TABLE, id).await
+}
+
 pub(crate) async fn get_by_idempotency_key(
     ctx: &dyn Context,
     idempotency_key: &str,
@@ -72,14 +80,17 @@ async fn active_for_purchase(
                 Filter {
                     field: "status".to_string(),
                     operator: FilterOp::In,
-                    value: serde_json::json!(["pending", "provider_succeeded"]),
+                    value: serde_json::json!([
+                        RefundStatus::Pending,
+                        RefundStatus::ProviderSucceeded,
+                    ]),
                 },
             ],
             sort: vec![SortField {
                 field: "created_at".to_string(),
                 desc: true,
             }],
-            limit: 1,
+            limit: Some(1),
             skip_count: true,
             ..Default::default()
         },
@@ -109,13 +120,20 @@ fn validate_existing(record: &Record, claim: &RefundClaim) -> Result<(), WaferEr
 pub(crate) async fn claim(ctx: &dyn Context, claim: &RefundClaim) -> Result<Record, WaferError> {
     if let Some(existing) = get_by_idempotency_key(ctx, &claim.idempotency_key).await? {
         validate_existing(&existing, claim)?;
-        if matches!(existing.str_field("status"), "failed" | "canceled") {
+        // `failed` is the only terminal state a claim can be revived
+        // from. The arm this replaces also matched `canceled`, which is a
+        // value of the row's `provider_status` column and has never been a
+        // value of `status` — the type is what makes that visible.
+        if status_of(&existing)? == RefundStatus::Failed {
             return db::update(
                 ctx,
                 TABLE,
                 &existing.id,
                 HashMap::from([
-                    ("status".to_string(), serde_json::json!("pending")),
+                    (
+                        "status".to_string(),
+                        serde_json::json!(RefundStatus::Pending),
+                    ),
                     ("last_error".to_string(), serde_json::json!("")),
                     (
                         "updated_at".to_string(),
@@ -161,7 +179,10 @@ pub(crate) async fn claim(ctx: &dyn Context, claim: &RefundClaim) -> Result<Reco
             serde_json::json!(claim.target_refunded_total_minor),
         ),
         ("currency".to_string(), serde_json::json!(&claim.currency)),
-        ("status".to_string(), serde_json::json!("pending")),
+        (
+            "status".to_string(),
+            serde_json::json!(RefundStatus::Pending),
+        ),
         (
             "provider_reason".to_string(),
             serde_json::json!(&claim.provider_reason),
@@ -216,11 +237,7 @@ pub(crate) async fn record_provider_response(
         }
         return Ok(current);
     }
-    let local_status = match provider_status {
-        "succeeded" => "provider_succeeded",
-        "failed" | "canceled" => "failed",
-        _ => "pending",
-    };
+    let local_status = ledger_status(provider_status, None);
     let rows = db::update_by_filters_count(
         ctx,
         TABLE,
@@ -270,6 +287,32 @@ pub(crate) async fn record_provider_response(
             "refund provider response changed concurrently",
         ))
     }
+}
+
+/// The ledger state a provider state implies.
+///
+/// `current` is the ledger's own state where the caller has already read
+/// it: a refund the ledger has already settled stays [`RefundStatus::Succeeded`]
+/// when the provider re-reports success, rather than dropping back to
+/// [`RefundStatus::ProviderSucceeded`]. The two call sites spelled this
+/// mapping twice, differing only in that clause.
+///
+/// The provider's own vocabulary stays a `&str` here: it is Stripe's
+/// `refunds.status` field, a different set from this column's, and giving
+/// it a type is a separate change with its own published-field decision
+/// (`RefundView.provider_status`).
+fn ledger_status(provider_status: &str, current: Option<RefundStatus>) -> RefundStatus {
+    match provider_status {
+        "succeeded" if current == Some(RefundStatus::Succeeded) => RefundStatus::Succeeded,
+        "succeeded" => RefundStatus::ProviderSucceeded,
+        "failed" | "canceled" => RefundStatus::Failed,
+        _ => RefundStatus::Pending,
+    }
+}
+
+/// The `status` column of a refund row, as the enum that defines it.
+pub(crate) fn status_of(record: &Record) -> Result<RefundStatus, WaferError> {
+    enum_column(record, "status")
 }
 
 fn is_terminal_provider_status(status: &str) -> bool {
@@ -333,12 +376,7 @@ pub(crate) async fn record_webhook_response(
                 ),
             ));
         }
-        let local_status = match provider_status {
-            "succeeded" if current.str_field("status") == "succeeded" => "succeeded",
-            "succeeded" => "provider_succeeded",
-            "failed" | "canceled" => "failed",
-            _ => "pending",
-        };
+        let local_status = ledger_status(provider_status, Some(status_of(&current)?));
         let rows = db::update_by_filters_count(
             ctx,
             TABLE,
@@ -401,7 +439,10 @@ pub(crate) async fn mark_succeeded(ctx: &dyn Context, id: &str) -> Result<Record
         TABLE,
         id,
         HashMap::from([
-            ("status".to_string(), serde_json::json!("succeeded")),
+            (
+                "status".to_string(),
+                serde_json::json!(RefundStatus::Succeeded),
+            ),
             (
                 "provider_status".to_string(),
                 serde_json::json!("succeeded"),
@@ -423,7 +464,10 @@ pub(crate) async fn mark_failed(
         TABLE,
         id,
         HashMap::from([
-            ("status".to_string(), serde_json::json!("failed")),
+            (
+                "status".to_string(),
+                serde_json::json!(RefundStatus::Failed),
+            ),
             ("last_error".to_string(), serde_json::json!(message)),
             (
                 "updated_at".to_string(),
@@ -446,7 +490,10 @@ pub(crate) async fn mark_retryable_error(
         TABLE,
         id,
         HashMap::from([
-            ("status".to_string(), serde_json::json!("pending")),
+            (
+                "status".to_string(),
+                serde_json::json!(RefundStatus::Pending),
+            ),
             ("last_error".to_string(), serde_json::json!(message)),
             (
                 "updated_at".to_string(),

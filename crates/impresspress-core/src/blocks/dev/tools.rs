@@ -416,7 +416,9 @@ mod tests {
         // Every deployment that is not a sandbox is in this state, never
         // serves `/b/dev/api/tools.json`, and must not pay a warn line per
         // `SELECTIONS` row for a manifest it does not publish.
-        let ctx = TestContext::with_admin().await;
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::dev::BLOCK_NAME);
         assert!(
             !ctx.registered_blocks()
                 .iter()

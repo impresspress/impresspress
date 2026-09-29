@@ -101,20 +101,22 @@ fn ui_asset_entries_carry_hashed_keys_and_content_types() {
 #[cfg(all(
     feature = "embed-assets",
     not(feature = "block-llm"),
-    not(feature = "block-files")
+    not(feature = "block-files"),
+    not(feature = "block-products")
 ))]
 #[test]
 fn ui_asset_entries_skips_block_gated_assets_instead_of_panicking() {
     let entries = ui_asset_entries();
-    // The base set (app.css, htmx, webmcp, fonts, logos, favicon) still
-    // publishes; exactly the 4 block-llm/block-files-gated logical assets
-    // (marked.min.js, purify.min.js, llm-chat.js, files-browser.js) are
-    // absent from the manifest's bytes on this feature set and must be
-    // skipped, not panic the whole publish.
+    // The base set (app.css, htmx, chrome.js, webmcp, fonts, logos, favicon)
+    // still publishes; exactly the 11 block-gated logical assets are absent
+    // from the manifest's bytes on this feature set and must be skipped, not
+    // panic the whole publish. They are `marked.min.js`, `purify.min.js` and
+    // `llm-chat.js` (block-llm), `files-browser.js` (block-files) and the
+    // seven `products-*.js` bundles (block-products).
     assert!(!entries.is_empty());
     assert_eq!(
         entries.len(),
-        impresspress_core::ui::assets::ASSETS.len() - 4,
-        "expected exactly the 4 block-llm/block-files-gated assets to be skipped"
+        impresspress_core::ui::assets::ASSETS.len() - 11,
+        "expected exactly the 11 block-gated assets to be skipped"
     );
 }

@@ -1,13 +1,224 @@
-//! Release-key inventory and folder-management utilities.
+//! The release asset set: where its objects live ([`RELEASES_ROOT`]), what
+//! describes it ([`ReleaseManifest`]), and the key inventory a request-time
+//! read resolves through ([`ReleaseInventory`]).
 //!
-//! Consumed by the Cloudflare runtime; the byte contract is produced by
-//! the CLI's `ReleaseManifest::logical_keys_json()`.
+//! One module for both ends on purpose. `impresspress deploy` writes the
+//! manifest and the inventory beside the immutable objects it uploads; the
+//! Cloudflare Worker re-reads both — the manifest during `/_deploy/verify`'s
+//! deep verification, the inventory on every release read — and re-derives the
+//! digests bound into the prepared plan from them. Every one of those
+//! comparisons is between bytes the deployer produced and bytes the runtime
+//! parsed, so the two sides cannot each own a copy of the shape: they used to,
+//! and the copies differed in exactly the field (`deny_unknown_fields`) that
+//! decides whether an unrecognised manifest fails closed.
+//!
+//! The one thing that stays on the deploy side is walking a staged directory
+//! to produce [`ReleaseAssetEntry`] values — that is filesystem work with no
+//! runtime counterpart. Everything downstream of the entries lives here.
 
 use std::{collections::HashSet, sync::Arc};
 
+use serde::{Deserialize, Serialize};
 use wafer_core::interfaces::storage::service::{StorageError, StorageService};
 
 use crate::isolate_cell::IsolateCell;
+
+/// Reserved R2 namespace for immutable, deploy-managed release objects.
+///
+/// The deployer writes release objects only in this namespace (plus
+/// per-Worker-version deployment records). It never lists, deletes, or
+/// rewrites mutable logical business/user keys already present in the bucket,
+/// and the runtime refuses any release prefix that does not start here.
+pub const RELEASES_ROOT: &str = ".impresspress/releases/v1";
+
+/// Schema version of the `manifest.json` object written under a release
+/// prefix. Part of the asset-set digest, so a bump changes every prefix.
+pub const RELEASE_MANIFEST_SCHEMA_VERSION: u32 = 1;
+
+/// One published release object: the logical key a page requests, and the
+/// bytes' identity.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseAssetEntry {
+    pub logical_key: String,
+    pub size: u64,
+    pub sha256: String,
+    pub content_type: String,
+}
+
+/// Deterministic identity and inventory of one release asset set.
+///
+/// `asset_set_sha256` hashes the compact JSON encoding of `schema_version` and
+/// the sorted `files` array. It deliberately excludes timestamps, repository
+/// paths, and the derived immutable prefix, so equal bytes at equal logical
+/// keys produce the same identity on every machine.
+///
+/// `deny_unknown_fields` here and on [`ReleaseAssetEntry`] is load-bearing on
+/// the *reading* side: a manifest carrying a field this build does not know
+/// about was written under a different release contract, and `/_deploy/verify`
+/// must fail rather than silently verify a document it only half-understands.
+#[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub struct ReleaseManifest {
+    pub schema_version: u32,
+    pub asset_set_sha256: String,
+    pub immutable_prefix: String,
+    pub files: Vec<ReleaseAssetEntry>,
+}
+
+/// Exactly the bytes `asset_set_sha256` is taken over. Private, so the digest
+/// has one definition rather than one per side of the deploy.
+#[derive(Serialize)]
+struct ManifestIdentity<'a> {
+    schema_version: u32,
+    files: &'a [ReleaseAssetEntry],
+}
+
+/// What can go wrong deriving a manifest's identity. A real error type rather
+/// than a `String` because both ends propagate it into their own: the deployer
+/// into `anyhow`, the Worker into `Box<dyn Error>`.
+#[derive(Debug, thiserror::Error)]
+pub enum ReleaseManifestError {
+    #[error("serialize {what}: {source}")]
+    Serialize {
+        what: &'static str,
+        #[source]
+        source: serde_json::Error,
+    },
+    #[error("construct prepared release-asset identity: {0}")]
+    PreparedIdentity(#[from] crate::prepared_plan::PreparedPlanError),
+}
+
+impl ReleaseManifest {
+    /// Build the manifest for a set of published entries, sorting them into
+    /// the strictly-ascending logical-key order the digest is defined over and
+    /// deriving the immutable prefix from that digest.
+    ///
+    /// Sorting here rather than at the caller is what makes the runtime's
+    /// `logical_keys_strictly_sorted()` check meaningful: the invariant is
+    /// established once, at construction, and re-checked on parse.
+    pub fn from_entries(mut files: Vec<ReleaseAssetEntry>) -> Result<Self, ReleaseManifestError> {
+        files.sort_by(|left, right| left.logical_key.cmp(&right.logical_key));
+        let asset_set_sha256 = asset_set_digest(RELEASE_MANIFEST_SCHEMA_VERSION, &files)?;
+        let immutable_prefix = format!("{RELEASES_ROOT}/{asset_set_sha256}");
+        Ok(Self {
+            schema_version: RELEASE_MANIFEST_SCHEMA_VERSION,
+            asset_set_sha256,
+            immutable_prefix,
+            files,
+        })
+    }
+
+    pub fn manifest_key(&self) -> String {
+        format!("{}/manifest.json", self.immutable_prefix)
+    }
+
+    pub fn keys_key(&self) -> String {
+        format!("{}/keys.json", self.immutable_prefix)
+    }
+
+    pub fn immutable_key(&self, logical_key: &str) -> String {
+        format!("{}/{logical_key}", self.immutable_prefix)
+    }
+
+    /// The exact bytes written to `{prefix}/manifest.json`, digested by
+    /// [`Self::manifest_sha256`] and re-read by `/_deploy/verify`.
+    pub fn to_pretty_json(&self) -> Result<Vec<u8>, ReleaseManifestError> {
+        let mut bytes =
+            serde_json::to_vec_pretty(self).map_err(|source| ReleaseManifestError::Serialize {
+                what: "release manifest",
+                source,
+            })?;
+        bytes.push(b'\n');
+        Ok(bytes)
+    }
+
+    /// Compact, sorted exact-key representation bound into the Worker version.
+    /// The runtime uses exact membership to redirect release reads without
+    /// touching business/user keys.
+    pub fn logical_keys_json(&self) -> Result<String, ReleaseManifestError> {
+        serde_json::to_string(&self.logical_keys()).map_err(|source| {
+            ReleaseManifestError::Serialize {
+                what: "release asset key set",
+                source,
+            }
+        })
+    }
+
+    pub fn logical_keys(&self) -> Vec<&str> {
+        self.files
+            .iter()
+            .map(|entry| entry.logical_key.as_str())
+            .collect()
+    }
+
+    /// Whether `files` is in the strictly ascending logical-key order the
+    /// asset-set digest is defined over. False for a duplicated key too, which
+    /// is why this is not merely `is_sorted`.
+    pub fn logical_keys_strictly_sorted(&self) -> bool {
+        self.files
+            .windows(2)
+            .all(|pair| pair[0].logical_key < pair[1].logical_key)
+    }
+
+    /// Re-derive `asset_set_sha256` from the parsed entries. `/_deploy/verify`
+    /// compares this against the stored field, so a manifest cannot vouch for
+    /// itself.
+    /// Re-derives from `self.schema_version`, not from
+    /// [`RELEASE_MANIFEST_SCHEMA_VERSION`]: the whole point is to hash what
+    /// was parsed. `/_deploy/verify` refuses a version mismatch before
+    /// reaching here, so today the two are always equal — but this is a public
+    /// method on a public type, and handed a manifest from a future contract
+    /// it must derive that manifest's digest and disagree, not silently derive
+    /// a digest for a document nobody wrote.
+    pub fn recomputed_asset_set_sha256(&self) -> Result<String, ReleaseManifestError> {
+        asset_set_digest(self.schema_version, &self.files)
+    }
+
+    pub fn canonical_asset_set_sha256(&self) -> String {
+        format!("sha256:{}", self.asset_set_sha256)
+    }
+
+    pub fn manifest_sha256(&self) -> Result<String, ReleaseManifestError> {
+        Ok(format!(
+            "sha256:{}",
+            crate::util::sha256_hex(&self.to_pretty_json()?)
+        ))
+    }
+
+    pub fn logical_keys_sha256(&self) -> Result<String, ReleaseManifestError> {
+        Ok(format!(
+            "sha256:{}",
+            crate::util::sha256_hex(self.logical_keys_json()?.as_bytes())
+        ))
+    }
+
+    pub fn prepared_identity(&self) -> Result<crate::PreparedReleaseAssets, ReleaseManifestError> {
+        crate::PreparedReleaseAssets::present(
+            self.canonical_asset_set_sha256(),
+            self.immutable_prefix.clone(),
+            self.manifest_key(),
+            self.manifest_sha256()?,
+            self.logical_keys_sha256()?,
+        )
+        .map_err(ReleaseManifestError::PreparedIdentity)
+    }
+}
+
+fn asset_set_digest(
+    schema_version: u32,
+    files: &[ReleaseAssetEntry],
+) -> Result<String, ReleaseManifestError> {
+    let canonical = serde_json::to_vec(&ManifestIdentity {
+        schema_version,
+        files,
+    })
+    .map_err(|source| ReleaseManifestError::Serialize {
+        what: "release asset identity",
+        source,
+    })?;
+    Ok(crate::util::sha256_hex(&canonical))
+}
 
 /// Checks if a logical key is normalized (no empty components, no `.` or `..`, no leading/trailing slash, no backslash).
 /// Shared by both CLI and runtime inventory validation.
@@ -125,6 +336,108 @@ mod tests {
         let bytes = serde_json::to_vec(keys).unwrap();
         let sha = format!("sha256:{}", crate::util::sha256_hex(&bytes));
         (bytes, sha)
+    }
+
+    fn entry(logical_key: &str, body: &[u8]) -> ReleaseAssetEntry {
+        ReleaseAssetEntry {
+            logical_key: logical_key.to_string(),
+            size: body.len() as u64,
+            sha256: crate::util::sha256_hex(body),
+            content_type: "text/plain".into(),
+        }
+    }
+
+    /// The immutable prefix is the one place the deploy-time writer and the
+    /// request-time reader have to agree on a byte-for-byte string. They used
+    /// to agree by both spelling `.impresspress/releases/v1` in their own
+    /// crate.
+    #[test]
+    fn the_immutable_prefix_is_the_releases_root_and_the_asset_set_digest() {
+        let manifest =
+            ReleaseManifest::from_entries(vec![entry("public/app.css", b"body{}")]).unwrap();
+
+        assert_eq!(
+            manifest.immutable_prefix,
+            format!("{RELEASES_ROOT}/{}", manifest.asset_set_sha256)
+        );
+        assert_eq!(
+            manifest.immutable_key("public/app.css"),
+            format!("{}/public/app.css", manifest.immutable_prefix)
+        );
+        assert_eq!(
+            manifest.manifest_key(),
+            format!("{}/manifest.json", manifest.immutable_prefix)
+        );
+    }
+
+    /// What `/_deploy/verify` re-derives from an R2 object must be what the
+    /// deployer computed from the local files, and the entries must come back
+    /// in the strictly sorted order the digest was taken over.
+    #[test]
+    fn a_written_manifest_reparses_to_the_same_asset_set_identity() {
+        let manifest = ReleaseManifest::from_entries(vec![
+            entry("public/app.css", b"body{}"),
+            entry("content/index.md", b"# hi"),
+        ])
+        .unwrap();
+
+        let bytes = manifest.to_pretty_json().unwrap();
+        let reparsed: ReleaseManifest = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(reparsed, manifest);
+        assert_eq!(
+            reparsed.recomputed_asset_set_sha256().unwrap(),
+            manifest.asset_set_sha256
+        );
+        assert!(reparsed.logical_keys_strictly_sorted());
+        assert_eq!(
+            reparsed.logical_keys(),
+            vec!["content/index.md", "public/app.css"]
+        );
+    }
+
+    /// The recompute hashes the *parsed* schema version. A manifest written
+    /// under a later contract must fail to vouch for itself here rather than
+    /// be handed a digest derived under this build's version — which is what
+    /// hashing the constant would produce, and which would look like agreement
+    /// only because the verify endpoint happens to reject the version first.
+    #[test]
+    fn recomputing_follows_the_parsed_schema_version_not_this_builds_constant() {
+        let manifest =
+            ReleaseManifest::from_entries(vec![entry("public/app.css", b"body{}")]).unwrap();
+        assert_eq!(
+            manifest.recomputed_asset_set_sha256().unwrap(),
+            manifest.asset_set_sha256
+        );
+
+        let future = ReleaseManifest {
+            schema_version: RELEASE_MANIFEST_SCHEMA_VERSION + 1,
+            ..manifest
+        };
+        assert_ne!(
+            future.recomputed_asset_set_sha256().unwrap(),
+            future.asset_set_sha256,
+            "a manifest from a later contract must not be handed this \
+             contract's digest"
+        );
+    }
+
+    /// `deny_unknown_fields` came from the Worker's half of the twin and is
+    /// load-bearing: a manifest carrying a field this build does not know was
+    /// written under a different release contract, and verification must fail
+    /// rather than ignore it. Merging the twins must not drop it.
+    #[test]
+    fn a_manifest_from_a_contract_this_build_does_not_know_is_refused() {
+        let manifest =
+            ReleaseManifest::from_entries(vec![entry("public/app.css", b"body{}")]).unwrap();
+        let mut value: serde_json::Value =
+            serde_json::from_slice(&manifest.to_pretty_json().unwrap()).unwrap();
+
+        value["compression"] = serde_json::json!("brotli");
+        assert!(serde_json::from_value::<ReleaseManifest>(value.clone()).is_err());
+
+        value.as_object_mut().unwrap().remove("compression");
+        value["files"][0]["encoding"] = serde_json::json!("br");
+        assert!(serde_json::from_value::<ReleaseManifest>(value).is_err());
     }
 
     #[test]

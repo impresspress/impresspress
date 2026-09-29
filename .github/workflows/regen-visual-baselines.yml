@@ -4,7 +4,7 @@ name: Regen Visual Baselines
 # suite with `--update-snapshots` against a target branch, then commits and
 # pushes any baseline diffs back to that branch.
 #
-# Why this exists: CI's font/AA rendering on ubuntu-latest drifts deterministically
+# Why this exists: CI's font/AA rendering on the pinned runner image drifts deterministically
 # from local Linux renders for content-heavy mobile cards-table baselines
 # (see Phase 5d-C/E handoff). The CI render is the canonical baseline, so when
 # a PR touches UI that lands on a flaky-mobile route, regen from CI here.
@@ -13,6 +13,18 @@ name: Regen Visual Baselines
 #   gh workflow run regen-visual-baselines.yml -f branch=<branch-name>
 #
 # Or from the Actions UI: select the workflow and provide a branch input.
+#
+# If the dispatch 404s, this file is present on the default branch but not
+# indexed in that repository's Actions — which is what a fork gets when Actions
+# were disabled at fork time. Pushing a change to this file on the default
+# branch re-indexes it. Until then the fallback is to take the render straight
+# from a failing run: the `playwright-report-visual` artifact holds the
+# `*-actual.png` the runner produced, which is byte-identical to what
+# `--update-snapshots` would have written here.
+#
+# The bot push this workflow makes does NOT retrigger a pull request's checks,
+# so after a baseline lands, push again yourself or the pull request keeps its
+# stale verdict.
 
 on:
   workflow_dispatch:
@@ -28,7 +40,13 @@ permissions:
 jobs:
   regen:
     name: Regen visual baselines on ${{ inputs.branch }}
-    runs-on: ubuntu-latest
+    # The same pinned image as the jobs in `ci-shared.yml` that compare
+    # against what this workflow renders (`e2e-visual`, `products-browser`,
+    # `product-examples`): the Ubuntu release supplies the fonts and
+    # fontconfig (`playwright install --with-deps` installs them through
+    # apt), so a baseline is only valid on the release that rendered it. Move
+    # all four labels together, then regen.
+    runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@v4
         with:
@@ -50,9 +68,6 @@ jobs:
           # secret; the final step below warns when that happened.
           token: ${{ secrets.BASELINE_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
 
-      - name: Checkout wafer-run
-        run: git clone --depth 1 https://github.com/wafer-run/wafer-run.git "$GITHUB_WORKSPACE/../wafer-run"
-
       - name: Install Rust
         uses: dtolnay/rust-toolchain@stable
         with:
@@ -67,7 +82,8 @@ jobs:
         uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
         with:
           # Pin explicitly — unpinned "latest" falls back to v0.9.1 on a GitHub
-          # API flake, which can't parse `license.workspace = true`. Matches ci.yml.
+          # API flake, which can't parse `license.workspace = true`. Matches
+          # `build-wasm.yml`, where CI's copy of this pin lives.
           version: 'v0.15.0'
 
       - name: Setup Node
@@ -77,7 +93,7 @@ jobs:
 
       - name: Pre-build impresspress-web wasm (build.rs prereq)
         working-directory: crates/impresspress-web
-        run: wasm-pack build --target web --release --out-dir pkg
+        run: wasm-pack build --target web --release --out-dir pkg -- --locked
 
       - name: Install impresspress CLI
         run: cargo install --path crates/impresspress --locked
@@ -88,8 +104,10 @@ jobs:
 
       - name: Install Playwright
         working-directory: crates/impresspress-web
+        # `npm ci`, as CI's `e2e-visual` job does: the lockfile pins the
+        # Playwright release, and with it the Chromium build that renders.
         run: |
-          npm install
+          npm ci
           npx playwright install chromium --with-deps
 
       - name: Start native impresspress server in background
@@ -119,9 +137,18 @@ jobs:
         working-directory: crates/impresspress-web
         env:
           TEST_PORT: 8093
+        # The same package script CI's `e2e-visual` job runs, so the same specs
+        # run in the same order against the same database. The specs share
+        # that database, so whatever an earlier spec leaves behind reaches a
+        # later capture unless the suite masks it; running visual-baseline.spec.ts
+        # alone would render baselines from a database CI never sees. The
+        # counts that follow the suite's own traffic (request-log figures on
+        # the admin dashboard, database and network pages) are masked or
+        # seeded in the spec — see `volatileMasks` there.
+        #
         # `--update-snapshots` overwrites mismatched PNGs in place.
         # Test step succeeds even if snapshots changed; we detect via git diff below.
-        run: npx playwright test --config=tests/playwright.visual-baseline.config.ts tests/e2e/visual-baseline.spec.ts --update-snapshots
+        run: npm run e2e:visual -- --update-snapshots
 
       - name: Stop servers
         if: always()

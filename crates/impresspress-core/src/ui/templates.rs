@@ -1,54 +1,26 @@
-//! Page templates — six standard layouts used by every block, plus a tiny
+//! Page templates — the standard layouts used by every block, plus a tiny
 //! status template. Each template returns the body markup that goes inside
 //! the shell (or the standalone `auth_split` / `status_page`). Pages
 //! declare their template inputs and call one function — no bespoke
 //! page HTML outside this module.
+//!
+//! None of these templates renders a page header. The shell's topbar owns the
+//! page's `h1` (`ui::shell::render_topbar`); a body-level heading is
+//! `components::page_header`, rendered by the page into the template's body.
 
 use maud::{html, Markup, PreEscaped, DOCTYPE};
 
 use super::{assets, SiteConfig};
 
-/// Header line for list / detail / form pages.
-pub struct PageHeader<'a> {
-    pub title: &'a str,
-    pub subtitle: Option<&'a str>,
-    pub primary_action: Option<Markup>, // typically a `components::button(...)` invocation
-}
-
-fn render_header(h: &PageHeader<'_>) -> Markup {
-    if h.title.is_empty() && h.subtitle.is_none() && h.primary_action.is_none() {
-        return html! {};
-    }
-    html! {
-        header .page-header {
-            div .page-header__text {
-                // h2, not h1: the shell topbar owns the page's single h1.
-                @if !h.title.is_empty() { h2 .page-header__title { (h.title) } }
-                @if let Some(s) = h.subtitle { p .page-header__subtitle { (s) } }
-            }
-            @if let Some(a) = &h.primary_action {
-                div .page-header__action { (a.clone()) }
-            }
-        }
-    }
-}
-
 /// `list_page` template.
 ///
 /// Sections (each rendered when present):
-///   - Page header: title + optional subtitle + optional primary action
 ///   - Filter row: free-form markup the page provides (search input, facets)
 ///   - Table: `components::data_table` already handled by caller
 ///   - Pagination: `components::pagination` already handled by caller
-pub fn list_page(
-    header: PageHeader<'_>,
-    filters: Option<Markup>,
-    table: Markup,
-    pagination: Option<Markup>,
-) -> Markup {
+pub fn list_page(filters: Option<Markup>, table: Markup, pagination: Option<Markup>) -> Markup {
     html! {
         div .page .page--list {
-            (render_header(&header))
             @if let Some(f) = filters { div .page-filters { (f) } }
             div .page-body { (table) }
             @if let Some(p) = pagination { div .page-pagination { (p) } }
@@ -119,20 +91,20 @@ pub struct FormSection<'a> {
     pub body: Markup,
 }
 
-/// Shared tab-rail + sections chrome used by [`form_page`] and
-/// [`tabbed_page`] — the `.form-grid` with an optional `.form-tabs` left
-/// rail and the `.form-sections` column.
-fn form_grid(tabs: Option<Vec<(String, String, bool)>>, sections: Vec<FormSection<'_>>) -> Markup {
-    let has_tabs = tabs.is_some();
+/// The tab-rail + sections chrome behind [`tabbed_page`] — the `.form-grid`,
+/// its `.form-tabs` left rail and the `.form-sections` column.
+///
+/// The rail is not optional, and this signature is why: `form_page`, the
+/// single-column template that passed no tabs, had no callers and is gone, so
+/// `.form-grid` without `.form-grid--with-tabs` reached no page.
+fn form_grid(tabs: Vec<(String, String, bool)>, sections: Vec<FormSection<'_>>) -> Markup {
     html! {
-        div .(if has_tabs { "form-grid form-grid--with-tabs" } else { "form-grid" }) {
-            @if let Some(t) = tabs {
-                nav .form-tabs aria-label="Form sections" {
-                    ul {
-                        @for (label, href, active) in t {
-                            li .(if active { "is-active" } else { "" }) {
-                                a href=(href) aria-current=[active.then_some("page")] { (label) }
-                            }
+        div .form-grid .form-grid--with-tabs {
+            nav .form-tabs aria-label="Form sections" {
+                ul {
+                    @for (label, href, active) in tabs {
+                        li .(if active { "is-active" } else { "" }) {
+                            a href=(href) aria-current=[active.then_some("page")] { (label) }
                         }
                     }
                 }
@@ -154,40 +126,9 @@ fn form_grid(tabs: Option<Vec<(String, String, bool)>>, sections: Vec<FormSectio
     }
 }
 
-/// `form_page` template.
-///
-/// The whole page is ONE `<form>` posting to `submit_url`, with a sticky
-/// save bar. Section bodies therefore must not contain `<form>` elements of
-/// their own (HTML forms cannot nest — the browser drops a nested form's
-/// start tag). For a tabbed shell whose tab bodies own their forms, use
-/// [`tabbed_page`] instead.
-///
-/// `tabs` is an optional left-rail of section anchors. Pass `None` for a
-/// single-column form.
-pub fn form_page(
-    header: PageHeader<'_>,
-    tabs: Option<Vec<(String, String, bool)>>, // (label, href, is_active)
-    sections: Vec<FormSection<'_>>,
-    submit_url: &str,
-    method: &str,
-    save_label: &str,
-) -> Markup {
-    html! {
-        div .page .page--form {
-            (render_header(&header))
-            form .form-page action=(submit_url) method=(method) {
-                (form_grid(tabs, sections))
-                footer .form-bar {
-                    button type="submit" .btn .btn--primary .btn--md { (save_label) }
-                }
-            }
-        }
-    }
-}
-
-/// `tabbed_page` template — the same tab-rail + section chrome as
-/// [`form_page`], but form-LESS: a `div.form-page` instead of the outer
-/// `<form>`, and no sticky save bar.
+/// `tabbed_page` template — a tab rail over section bodies, form-LESS: the
+/// `div.form-page` groups the sections but is not itself a `<form>`, and the
+/// page carries no save bar of its own.
 ///
 /// For tabbed shells whose tab bodies own their submission story. HTML forms
 /// cannot nest, so a shell that wraps tab bodies in a `<form>` silently
@@ -197,35 +138,31 @@ pub fn form_page(
 /// own complete `<form>` + submit control (or none, for read-only tabs).
 /// Used by the admin Settings page.
 pub fn tabbed_page(
-    header: PageHeader<'_>,
     tabs: Vec<(String, String, bool)>, // (label, href, is_active)
     sections: Vec<FormSection<'_>>,
 ) -> Markup {
     html! {
         div .page .page--form {
-            (render_header(&header))
             div .form-page {
-                (form_grid(Some(tabs), sections))
+                (form_grid(tabs, sections))
             }
         }
     }
 }
 
-pub struct StatTile<'a> {
-    pub label: &'a str,
-    pub value: &'a str, // pre-formatted (caller decides rounding/units)
-    pub icon: Markup,
-    pub spark: Option<Markup>,
-}
-
+/// `stats` are rendered tiles — `components::stat_card(..)` calls the page
+/// makes itself. The template lays them out in `.stats-grid` and does not
+/// describe them: a struct of the four `stat_card` arguments existed only so
+/// this function could make that call, which made `stat_card`'s signature the
+/// second place a tile's shape was written down.
+///
 /// `top_card` renders between the stat tiles and `dashboard-grid` — e.g. the
 /// admin dashboard's three chart cards. The name is positional relative to
 /// `dashboard-grid` (the two-column primary/secondary row below it), not
 /// relative to the page as a whole: stats always render first, matching the
 /// mockup's stats → charts → tables order.
 pub fn dashboard_page(
-    header: PageHeader<'_>,
-    stats: Vec<StatTile<'_>>,
+    stats: Vec<Markup>,
     primary_card: Markup,
     secondary_card: Markup,
     full_width_card: Option<Markup>,
@@ -233,12 +170,9 @@ pub fn dashboard_page(
 ) -> Markup {
     html! {
         div .page .page--dashboard {
-            (render_header(&header))
             @if !stats.is_empty() {
                 div .stats-grid {
-                    @for s in &stats {
-                        (crate::ui::components::stat_card(s.label, s.value, s.icon.clone(), s.spark.clone()))
-                    }
+                    @for s in &stats { (s) }
                 }
             }
             @if let Some(tc) = top_card { div .dashboard-top { (tc) } }
@@ -251,6 +185,10 @@ pub fn dashboard_page(
     }
 }
 
+/// The `id` of [`chat_page`]'s scrolling message pane, for a control that has
+/// to address it — the messages composer scrolls it after a post.
+pub const CHAT_MESSAGES_ID: &str = "chat-messages";
+
 pub fn chat_page(
     thread_list: Markup,
     messages: Markup,
@@ -261,7 +199,7 @@ pub fn chat_page(
         div .page--chat {
             aside .chat-threads { (thread_list) }
             section .chat-main {
-                div .chat-messages { (messages) }
+                div .chat-messages #(CHAT_MESSAGES_ID) { (messages) }
                 div .chat-composer { (composer) }
             }
             @if let Some(r) = right_rail {
@@ -527,47 +465,28 @@ pub fn public_page(opts: PublicPage<'_>, body: Markup) -> Markup {
 
 #[cfg(test)]
 mod tests {
-    use maud::PreEscaped;
-
     use super::*;
-    use crate::ui::components::{button, BtnVariant, CtrlSize};
+    use crate::ui::components::stat_card;
 
     #[test]
-    fn list_page_renders_header_table_pagination() {
-        let header = PageHeader {
-            title: "Users",
-            subtitle: Some("142 total"),
-            primary_action: Some(button(
-                BtnVariant::Primary,
-                CtrlSize::Md,
-                "+ Invite",
-                PreEscaped(String::new()),
-            )),
-        };
+    fn list_page_renders_filters_table_pagination() {
+        let filters = Some(html! { form .probe-filters { "search" } });
         let table = html! { div .data-table { table {} } };
         let pagination = Some(html! { nav .pagination { "1/4" } });
-        let s = list_page(header, None, table, pagination).into_string();
+        let s = list_page(filters, table, pagination).into_string();
         assert!(s.contains("page--list"));
-        assert!(s.contains(">Users<"));
-        assert!(s.contains("142 total"));
-        assert!(s.contains("+ Invite"));
+        assert!(s.contains("page-filters"));
+        assert!(s.contains("probe-filters"));
         assert!(s.contains("data-table"));
         assert!(s.contains("page-pagination"));
     }
 
     #[test]
     fn list_page_omits_optional_sections_when_absent() {
-        let header = PageHeader {
-            title: "Empty",
-            subtitle: None,
-            primary_action: None,
-        };
         let table = html! { div .empty { "none" } };
-        let s = list_page(header, None, table, None).into_string();
+        let s = list_page(None, table, None).into_string();
         assert!(!s.contains("page-filters"));
         assert!(!s.contains("page-pagination"));
-        assert!(!s.contains("page-header__action"));
-        assert!(!s.contains("page-header__subtitle"));
     }
 
     #[test]
@@ -617,13 +536,8 @@ mod tests {
     }
 
     #[test]
-    fn form_page_with_tabs_marks_active() {
-        let header = PageHeader {
-            title: "Settings",
-            subtitle: None,
-            primary_action: None,
-        };
-        let tabs = Some(vec![
+    fn tabbed_page_marks_the_active_tab() {
+        let tabs = vec![
             (
                 "Email".to_string(),
                 "/b/admin/settings/email".to_string(),
@@ -634,70 +548,42 @@ mod tests {
                 "/b/admin/settings/network".to_string(),
                 true,
             ),
-        ]);
+        ];
         let sections = vec![FormSection {
             title: "Network",
-            description: None,
-            body: html! { "..." },
+            description: Some("Outbound requests"),
+            body: html! { form action="/b/admin/settings/network" { "..." } },
         }];
-        let s = form_page(
-            header,
-            tabs,
-            sections,
-            "/b/admin/settings/network",
-            "post",
-            "Save",
-        )
-        .into_string();
+        let s = tabbed_page(tabs, sections).into_string();
         assert!(s.contains("form-grid--with-tabs"));
         assert!(s.contains(r#"aria-current="page""#));
         assert!(s.contains("is-active"));
-        assert!(s.contains(r#"action="/b/admin/settings/network""#));
-        assert!(s.contains(">Save</button>"));
-    }
-
-    #[test]
-    fn form_page_without_tabs_uses_single_column() {
-        let header = PageHeader {
-            title: "Profile",
-            subtitle: None,
-            primary_action: None,
-        };
-        let sections = vec![FormSection {
-            title: "Account",
-            description: Some("Public info"),
-            body: html! { "..." },
-        }];
-        let s = form_page(header, None, sections, "/me", "post", "Update").into_string();
-        assert!(!s.contains("form-grid--with-tabs"));
-        assert!(s.contains("Account"));
-        assert!(s.contains("Public info"));
+        assert!(s.contains("Network"));
+        assert!(s.contains("Outbound requests"));
+        // Form-LESS by construction: the tab body owns the only <form>.
+        assert_eq!(s.matches("<form").count(), 1);
+        assert!(!s.contains(r#"<form class="form-page""#));
     }
 
     #[test]
     fn dashboard_renders_stats_and_cards() {
-        let header = PageHeader {
-            title: "Dashboard",
-            subtitle: None,
-            primary_action: None,
-        };
         let stats = vec![
-            StatTile {
-                label: "Users",
-                value: "142",
-                icon: html! { span .probe-icon-users {} },
-                spark: Some(html! { span .probe-spark {} }),
-            },
-            StatTile {
-                label: "Storage",
-                value: "1.2 GB",
-                icon: html! { span .probe-icon-storage {} },
-                spark: None,
-            },
+            stat_card(
+                "Users",
+                "142",
+                html! { span .probe-icon-users {} },
+                Some(html! { span .probe-spark {} }),
+            ),
+            stat_card(
+                "Storage",
+                "1.2 GB",
+                html! { span .probe-icon-storage {} },
+                None,
+            ),
         ];
         let primary = html! { section .card { "Quick actions" } };
         let secondary = html! { section .card { "Recent activity" } };
-        let s = dashboard_page(header, stats, primary, secondary, None, None).into_string();
+        let s = dashboard_page(stats, primary, secondary, None, None).into_string();
         assert!(s.contains("stats-grid"));
         assert!(s.contains(">Users<"));
         assert!(s.contains("142"));
@@ -710,19 +596,8 @@ mod tests {
 
     #[test]
     fn dashboard_page_renders_optional_top_card_between_stats_and_grid() {
-        let header = PageHeader {
-            title: "Dash",
-            subtitle: None,
-            primary_action: None,
-        };
         let m = dashboard_page(
-            header,
-            vec![StatTile {
-                label: "Users",
-                value: "1",
-                icon: html! { span .probe-icon {} },
-                spark: None,
-            }],
+            vec![stat_card("Users", "1", html! { span .probe-icon {} }, None)],
             html! { div #primary {} },
             html! { div #secondary {} },
             None,

@@ -127,16 +127,27 @@
  * instead, so it stays circular regardless of the plot's rendered aspect
  * ratio.
  */
+/* The vertical padding is room for the outermost y-axis labels: each is
+ * centred on its gridline, so half of the top and bottom labels sits outside
+ * the plot, and without it the "0" ran into the date labels underneath. */
 .chart {
 	display: flex;
 	align-items: stretch;
 	height: 180px;
+	padding-block: var(--space-2);
 }
 
+/* The y-axis labels share the axis's single grid cell, so the column is as
+ * wide as the widest label, and each is moved to its gridline by `--tick-y`
+ * (the label's distance from the top of the plot, set per tick by
+ * `ui/components/chart.rs` from the same axis that places the gridline). A
+ * percentage `top` on a relatively positioned grid item resolves against
+ * the grid area — the plot's full height — and the translate centres the
+ * label on the line. Distributing the labels with `space-between` instead
+ * put each label's edge, not its middle, on the outer lines, and could not
+ * express ticks that are not evenly spread across the labels shown. */
 .chart__yaxis {
-	display: flex;
-	flex-direction: column;
-	justify-content: space-between;
+	display: grid;
 	padding-right: var(--space-2);
 	font-size: var(--text-xs);
 	color: var(--text-muted);
@@ -144,6 +155,11 @@
 }
 
 .chart__ytick {
+	grid-area: 1 / 1;
+	align-self: start;
+	position: relative;
+	top: var(--tick-y);
+	transform: translateY(-50%);
 	line-height: 1;
 }
 

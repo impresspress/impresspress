@@ -9,9 +9,9 @@ use crate::{
             repo::users::{self, UserRow},
         },
         auth_ui::contracts::{MeResponse, MeUser, UpdateMeRequest},
-        errors::{error_response, ErrorCode},
+        crud,
     },
-    http::{err_bad_request, err_internal, err_not_found, ok_json},
+    http::{err_bad_request, err_not_found, ok_json},
 };
 
 /// The one projection both handlers share. `PATCH` used to build its own
@@ -35,14 +35,21 @@ fn me_response(user: UserRow, roles: Vec<String>) -> MeResponse {
 pub async fn handle_get(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let user_id = msg.user_id();
     if user_id.is_empty() {
-        return error_response(ErrorCode::NotAuthenticated, "Not authenticated");
+        return crate::http::err_unauthenticated("Not authenticated");
     }
-    let Ok(Some(user)) = users::find_by_id(ctx, user_id).await else {
-        return err_not_found("User not found");
+    let user = match users::find_by_id(ctx, user_id).await {
+        Ok(Some(user)) => user,
+        // A valid token whose row is gone: the account was deleted while the
+        // access token was still live.
+        Ok(None) => return err_not_found("User not found"),
+        // A read that could not run is not a deleted account. 404 is the one
+        // answer a signed-in caller must never get from an outage — no
+        // client retries it, and it reads as "you no longer exist".
+        Err(e) => return crud::db_error_internal(e, "Could not load the signed-in user"),
     };
     let roles = match get_user_roles(ctx, user_id).await {
         Ok(r) => r,
-        Err(e) => return err_internal("Failed to resolve user roles", e),
+        Err(e) => return crud::db_error_internal(e, "Failed to resolve user roles"),
     };
     ok_json(&me_response(user, roles))
 }
@@ -50,10 +57,13 @@ pub async fn handle_get(ctx: &dyn Context, msg: &Message) -> OutputStream {
 pub async fn handle_update(ctx: &dyn Context, msg: &Message, input: InputStream) -> OutputStream {
     let user_id = msg.user_id();
     if user_id.is_empty() {
-        return error_response(ErrorCode::NotAuthenticated, "Not authenticated");
+        return crate::http::err_unauthenticated("Not authenticated");
     }
 
-    let raw = input.collect_to_bytes().await;
+    let raw = match input.collect_to_bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => return OutputStream::error(e),
+    };
     let body: UpdateMeRequest = match serde_json::from_slice(&raw) {
         Ok(b) => b,
         Err(e) => return err_bad_request(&format!("Invalid body: {e}")),
@@ -72,11 +82,11 @@ pub async fn handle_update(ctx: &dyn Context, msg: &Message, input: InputStream)
         Ok(user) => {
             let roles = match get_user_roles(ctx, user_id).await {
                 Ok(r) => r,
-                Err(e) => return err_internal("Failed to resolve user roles", e),
+                Err(e) => return crud::db_error_internal(e, "Failed to resolve user roles"),
             };
             ok_json(&me_response(user, roles))
         }
-        Err(e) => err_internal("Update failed", e.to_string()),
+        Err(e) => crud::db_error(e, "User not found", "Update failed"),
     }
 }
 
@@ -96,6 +106,8 @@ mod tests {
                 display_name: "Ada".to_string(),
                 avatar_url: None,
                 role: "user".to_string(),
+                email_verified: false,
+                verification_token_hash: None,
             },
         )
         .await
@@ -111,7 +123,9 @@ mod tests {
     /// response must be exactly what a subsequent `GET` returns.
     #[tokio::test]
     async fn update_returns_the_same_envelope_as_get() {
-        let ctx = TestContext::with_auth().await;
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
         let user = seed_user(&ctx).await;
 
         let updated = output_json(
@@ -150,7 +164,9 @@ mod tests {
     /// the handler must refuse what the schema refuses.
     #[tokio::test]
     async fn update_rejects_a_body_the_schema_rejects() {
-        let ctx = TestContext::with_auth().await;
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
         let user = seed_user(&ctx).await;
 
         let out = handle_update(
@@ -162,9 +178,74 @@ mod tests {
         assert!(output_is_error(out, "InvalidArgument").await);
     }
 
+    /// Every auth-ui API handler's own identity check answers what the
+    /// router's gate does: 401, the challenge, and `not_authenticated`.
+    #[tokio::test]
+    async fn the_auth_api_handlers_refuse_no_identity_with_the_challenge() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
+        let empty = || InputStream::from_bytes(b"{}".to_vec());
+        let answers = [
+            (
+                "GET me",
+                handle_get(&ctx, &anon_msg("retrieve", "/b/auth/api/me")).await,
+            ),
+            (
+                "PATCH me",
+                handle_update(&ctx, &anon_msg("update", "/b/auth/api/me"), empty()).await,
+            ),
+            (
+                "change password",
+                super::super::change_password::handle(
+                    &ctx,
+                    &anon_msg("create", "/b/auth/api/change-password"),
+                    empty(),
+                )
+                .await,
+            ),
+            (
+                "list api keys",
+                super::super::api_keys::handle_list(
+                    &ctx,
+                    &anon_msg("retrieve", "/b/auth/api/api-keys"),
+                )
+                .await,
+            ),
+            (
+                "create api key",
+                super::super::api_keys::handle_create(
+                    &ctx,
+                    &anon_msg("create", "/b/auth/api/api-keys"),
+                    empty(),
+                )
+                .await,
+            ),
+        ];
+        for (label, out) in answers {
+            let parts = wafer_block::http_codec::collect_http_response(out).await;
+            let body = String::from_utf8_lossy(&parts.body).into_owned();
+            assert_eq!(parts.status, 401, "{label}: {body}");
+            assert!(
+                parts.headers.iter().any(|(name, value)| {
+                    name.eq_ignore_ascii_case("WWW-Authenticate")
+                        && value == crate::http::WWW_AUTHENTICATE
+                }),
+                "{label}: {:?}",
+                parts.headers
+            );
+            assert!(
+                body.contains(r#""code":"not_authenticated""#),
+                "{label}: {body}"
+            );
+        }
+    }
+
     #[tokio::test]
     async fn update_requires_a_signed_in_caller() {
-        let ctx = TestContext::with_auth().await;
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
         let out = handle_update(
             &ctx,
             &anon_msg("update", "/b/auth/api/me"),
@@ -172,5 +253,28 @@ mod tests {
         )
         .await;
         assert!(output_is_error(out, "Unauthenticated").await);
+    }
+
+    /// A read that could not run is not "your account does not exist".
+    /// `handle_get` collapsed both into `404 User not found`, so a database
+    /// outage told a signed-in caller their account was gone — on a status
+    /// no client retries and with nothing anywhere near the response to say
+    /// an outage had happened.
+    #[tokio::test]
+    async fn an_unreadable_user_row_is_an_outage_not_a_missing_account() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
+        let user = seed_user(&ctx).await;
+        // The lookup under test is the handler's first read, so a database
+        // whose reads all fail lands on it and on nothing earlier.
+        let failing = ctx.break_reads();
+
+        let out = handle_get(&failing, &auth_msg("retrieve", "/b/auth/api/me", &user.id)).await;
+
+        assert!(
+            output_is_error(out, "Internal").await,
+            "a failed lookup of the caller's own row must not answer 404"
+        );
     }
 }

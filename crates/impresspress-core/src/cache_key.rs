@@ -6,7 +6,7 @@
 //! logic lives here so it's host-testable; `impresspress-cloudflare` is
 //! excluded from `cargo test --workspace`.
 
-use crate::blocks::admin::{BLOCK_SETTINGS_TABLE, VARIABLES_TABLE, WRAP_GRANTS_TABLE};
+use crate::platform_state::{block_settings, variables, wrap_grants};
 
 /// Tables that this wrapper caches in KV.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -20,8 +20,8 @@ pub enum CachedTable {
 /// Returns Some when `table` is one of the cached tables.
 pub fn classify_table(table: &str) -> Option<CachedTable> {
     match table {
-        t if t == VARIABLES_TABLE => Some(CachedTable::Variables),
-        t if t == BLOCK_SETTINGS_TABLE => Some(CachedTable::BlockSettings),
+        t if t == variables::TABLE => Some(CachedTable::Variables),
+        t if t == block_settings::TABLE => Some(CachedTable::BlockSettings),
         _ => None,
     }
 }
@@ -38,7 +38,7 @@ pub const CONFIG_VERSION_KEY: &str = "cfg:v1:config_version";
 /// grants at build). Tables read fresh per request (roles, permissions,
 /// user_roles) do NOT bump.
 pub fn bumps_config_version(table: &str) -> bool {
-    table == VARIABLES_TABLE || table == BLOCK_SETTINGS_TABLE || table == WRAP_GRANTS_TABLE
+    table == variables::TABLE || table == block_settings::TABLE || table == wrap_grants::TABLE
 }
 
 use wafer_block::db::{Filter, FilterOp, ListOptions};
@@ -46,10 +46,10 @@ use wafer_block::db::{Filter, FilterOp, ListOptions};
 /// Minimum `limit` value treated as "all matching rows". Matches the
 /// `D1ConfigSource` and admin block list shapes. Anything smaller is
 /// treated as paginated and bypasses cache.
-const FULL_LIMIT_THRESHOLD: i64 = 10_000;
+const FULL_LIMIT_THRESHOLD: u32 = 10_000;
 
 /// Reserved cache-key value for the full-table `block_settings` read —
-/// `runner::load_block_settings`'s eager filterless list. Real block names
+/// `platform_state::block_settings::load`'s eager filterless list. Real block names
 /// are always `{org}/{block}` (slash-delimited), so this slash-free
 /// sentinel can never collide with a per-block key.
 const ALL_ROWS_SENTINEL: &str = "__all__";
@@ -92,7 +92,7 @@ pub fn block_list_opts(table: CachedTable, value: &str) -> ListOptions {
             operator: FilterOp::Equal,
             value: serde_json::Value::String(value.to_string()),
         }],
-        limit: FULL_LIMIT_THRESHOLD,
+        limit: Some(FULL_LIMIT_THRESHOLD),
         offset: 0,
         skip_count: true,
         ..Default::default()
@@ -104,17 +104,17 @@ pub fn block_list_opts(table: CachedTable, value: &str) -> ListOptions {
 /// Two callers with deliberately different outcomes, both served by this one
 /// constructor so the shape cannot drift between them:
 ///
-/// - [`crate::features::load_block_settings`]'s full-table read — recognized
+/// - [`crate::platform_state::block_settings::load`]'s full-table read — recognized
 ///   by [`read_key`] and cached under the `__all__` sentinel;
 /// - `D1ConfigSource`'s single variables snapshot — deliberately NOT cached
 ///   (see `read_key`'s zero-filter arm, and the test that pins it). One
 ///   uncached D1 query replaces one KV read per configured block, which on a
-///   22-block deployment is 22 KV reads traded for a single indexed query
-///   against a table of a few dozen rows.
+///   22-block deployment is 22 KV reads traded for a single unfiltered read
+///   of a table of a few dozen rows.
 pub fn full_table_list_opts() -> ListOptions {
     ListOptions {
         filters: Vec::new(),
-        limit: FULL_LIMIT_THRESHOLD,
+        limit: Some(FULL_LIMIT_THRESHOLD),
         offset: 0,
         skip_count: true,
         ..Default::default()
@@ -124,22 +124,27 @@ pub fn full_table_list_opts() -> ListOptions {
 /// Returns Some(kv_key) iff `opts` matches a cacheable read shape:
 /// either the canonical "load all rows for one block" single-filter shape,
 /// or — for `block_settings` only — the eager filterless full-table read
-/// (`runner::load_block_settings`).
+/// (`platform_state::block_settings::load`).
 pub fn read_key(table: CachedTable, opts: &ListOptions) -> Option<String> {
     // Shape gate shared by both read kinds: an unsorted, unpaginated,
     // count-skipping "give me every matching row" list.
     if !opts.skip_count
         || opts.offset != 0
-        || opts.limit < FULL_LIMIT_THRESHOLD
+        || !matches!(opts.limit, Some(limit) if limit >= FULL_LIMIT_THRESHOLD)
         || !opts.sort.is_empty()
     {
         return None;
     }
     match opts.filters.len() {
-        // Full-table read. Only `block_settings` issues this (the eager
-        // `load_block_settings` list with no filter); cache it under the
-        // all-rows sentinel. Variables is always read per-block, so a
-        // filterless variables list is not a recognized shape.
+        // Full-table read. For `block_settings` (the eager filterless list
+        // `platform_state::block_settings::read_rows` issues, reached from
+        // `load` and `load_and_seed`) cache it under the all-rows sentinel.
+        // For `variables` REFUSE it: the only filterless
+        // variables list is `D1ConfigSource`'s whole-table snapshot, and
+        // there is no invalidation story for a whole-table variables key —
+        // `invalidate_keys` emits the all-rows key for `block_settings`
+        // alone, so a variables write would leave such an entry stale until
+        // its TTL.
         0 => match table {
             CachedTable::BlockSettings => Some(format_key(table, ALL_ROWS_SENTINEL)),
             CachedTable::Variables => None,
@@ -182,7 +187,7 @@ pub fn write_key(table: CachedTable, row: &HashMap<String, serde_json::Value>) -
 ///
 /// Always includes the per-row key when the identity column is extractable.
 /// For `block_settings` it additionally includes the all-rows key, because
-/// `load_block_settings`'s cached full-table read depends on every row — so
+/// `block_settings::read_rows`' cached full-table read depends on every row — so
 /// any insert / toggle / delete must drop it. The all-rows key is emitted
 /// unconditionally for `block_settings` (even when the per-row key can't be
 /// extracted) so the full-table cache can never be left stale.
@@ -250,24 +255,33 @@ fn sensitive_check_columns(table: CachedTable) -> Option<(&'static str, &'static
 /// `ConfigVar`-driven settings form use to mask/redact secrets
 /// ([`crate::util::is_sensitive_key`]), so the cache-write policy can never
 /// drift from the display-masking policy: a row is sensitive when its
-/// `sensitive` flag is set OR its key follows the `_SECRET`/`_KEY` suffix
-/// convention.
+/// `sensitive` flag is set OR its key is one the build knows to hold a secret
+/// — the `_SECRET`/`_KEY` suffix convention, or a declared `ConfigVar` that is
+/// `InputType::Password` or `auto_generate`. The declaration half matters
+/// here specifically: `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_PASSWORD`
+/// carries neither suffix, so a legacy row with the flag still clear was
+/// judged cacheable and a plaintext admin password was copied into a globally
+/// replicated store.
 ///
-/// Uses [`crate::util::json_as_i64`] (not a bare `v.as_i64()`) for the
+/// Uses [`crate::util::flag_is_set`] (not a bare `v.as_i64()`) for the
 /// `sensitive` column so this stays in exact parity with the display-masking
 /// path: the SQLite service can round-trip a lazily-added column as a TEXT
-/// `"1"` string, and a flag-only-sensitive row stored that way must still be
-/// treated as sensitive here, or it would leak into KV while the display
-/// path correctly masks it.
+/// `"1"` string, a bool, or a float, and a flag-only-sensitive row stored any
+/// of those ways must still be treated as sensitive here, or it would leak
+/// into KV while the display path correctly masks it. See the note in the
+/// body on why `json_as_i64` was the wrong decoder for exactly this.
 pub fn row_is_sensitive(table: CachedTable, row: &HashMap<String, serde_json::Value>) -> bool {
     let Some((key_col, sensitive_col)) = sensitive_check_columns(table) else {
         return false;
     };
     let key = row.get(key_col).and_then(|v| v.as_str()).unwrap_or("");
-    let sensitive_flag = row
-        .get(sensitive_col)
-        .and_then(crate::util::json_as_i64)
-        .unwrap_or(0);
+    // `flag_is_set`, not `json_as_i64`: that conversion answers `None` for a
+    // JSON bool and for the string `"true"`, so a row stored in either shape
+    // read as UNFLAGGED here while `RecordExt::bool_field` — which the repair
+    // pass and the row codec use — read it as flagged. The row was therefore
+    // skipped as "already fine" and cached as "not sensitive" at the same
+    // time. One truth table for the column, shared with both.
+    let sensitive_flag = i64::from(row.get(sensitive_col).is_some_and(crate::util::flag_is_set));
     crate::util::is_sensitive_key(key, sensitive_flag)
 }
 
@@ -307,7 +321,7 @@ mod tests {
                 operator: FilterOp::Equal,
                 value: serde_json::Value::String(value.into()),
             }],
-            limit: 10_000,
+            limit: Some(10_000),
             offset: 0,
             skip_count: true,
             ..Default::default()
@@ -367,7 +381,7 @@ mod tests {
     #[test]
     fn read_key_no_filters_returns_none() {
         let opts = ListOptions {
-            limit: 10_000,
+            limit: Some(10_000),
             skip_count: true,
             ..Default::default()
         };
@@ -398,7 +412,7 @@ mod tests {
     #[test]
     fn read_key_small_limit_returns_none() {
         let mut opts = canonical_opts("block", "WAFER_RUN__AUTH");
-        opts.limit = 50;
+        opts.limit = Some(50);
         assert_eq!(read_key(CachedTable::Variables, &opts), None);
     }
 
@@ -467,14 +481,14 @@ mod tests {
         assert_eq!(write_key(CachedTable::Variables, &r), None);
     }
 
-    // --- Full-table block_settings read (the eager `load_block_settings`) ---
+    // --- Full-table block_settings read (`block_settings::read_rows`) ---
 
-    /// The shape `load_block_settings` actually issues: no filter, full
-    /// limit, skip_count, no offset, no sort.
+    /// The shape `platform_state::block_settings::read_rows` actually issues:
+    /// no filter, full limit, skip_count, no offset, no sort.
     fn full_table_opts() -> ListOptions {
         ListOptions {
             offset: 0,
-            limit: 10_000,
+            limit: Some(10_000),
             skip_count: true,
             ..Default::default()
         }
@@ -525,7 +539,7 @@ mod tests {
         for mutate in [
             |o: &mut ListOptions| o.skip_count = false,
             |o: &mut ListOptions| o.offset = 100,
-            |o: &mut ListOptions| o.limit = 50,
+            |o: &mut ListOptions| o.limit = Some(50),
             |o: &mut ListOptions| {
                 o.sort.push(wafer_block::db::SortField {
                     field: "block_name".into(),
@@ -585,8 +599,8 @@ mod tests {
     }
 
     /// Even when the per-row key can't be extracted, the full-table key must
-    /// still be invalidated so the cached `load_block_settings` read can't go
-    /// stale.
+    /// still be invalidated so the cached `block_settings::read_rows` read
+    /// can't go stale.
     #[test]
     fn invalidate_keys_block_settings_missing_column_still_drops_all() {
         let r = row("id", serde_json::Value::String("bs_123".into()));
@@ -693,6 +707,25 @@ mod tests {
     }
 
     #[test]
+    fn row_is_sensitive_true_for_a_declared_password_var_even_if_flag_unset() {
+        // `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_PASSWORD` is declared
+        // `InputType::Password` and spelled with neither `_SECRET` nor `_KEY`,
+        // so a row an older build stored unflagged was judged KV-cacheable —
+        // copying a plaintext admin password into a globally replicated store
+        // for up to the 24h row TTL. The declaration is the only thing that
+        // knows, so the masking predicate has to ask it.
+        let key = crate::blocks::auth::config::BOOTSTRAP_ADMIN_PASSWORD_KEY;
+        assert!(
+            !crate::config_vars::has_sensitive_suffix(key),
+            "the point of this test is a key the suffix rule cannot catch"
+        );
+        assert!(row_is_sensitive(
+            CachedTable::Variables,
+            &variables_row(key, 0)
+        ));
+    }
+
+    #[test]
     fn row_is_sensitive_false_for_plain_row() {
         assert!(!row_is_sensitive(
             CachedTable::Variables,
@@ -704,7 +737,7 @@ mod tests {
     fn row_is_sensitive_true_when_flag_set_as_string() {
         // A lazily-added column can round-trip as TEXT ("1") rather than a
         // JSON number. `row_is_sensitive` must accept that the same way the
-        // display-masking path (`crate::util::json_as_i64`) does, or a
+        // display-masking path (`crate::util::flag_is_set`) does, or a
         // string-stored sensitive flag would leak into the KV cache while
         // still being masked on display — see the parity note on
         // `row_is_sensitive`.
@@ -757,8 +790,8 @@ mod tests {
     fn every_classified_table_bumps_config_version() {
         for table in [CachedTable::Variables, CachedTable::BlockSettings] {
             let table_name = match table {
-                CachedTable::Variables => VARIABLES_TABLE,
-                CachedTable::BlockSettings => BLOCK_SETTINGS_TABLE,
+                CachedTable::Variables => variables::TABLE,
+                CachedTable::BlockSettings => block_settings::TABLE,
             };
             assert_eq!(
                 classify_table(table_name),

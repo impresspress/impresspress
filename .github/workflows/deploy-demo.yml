@@ -3,9 +3,35 @@ name: Deploy Browser Demo
 on:
   push:
     branches: [main]
+    # Every input this job actually builds from. A path missing here is not a
+    # skipped run — it is demo.impresspress.org silently left on stale code
+    # until some unrelated change happens to trip the filter. Modelled on
+    # `deploy-dev-sandbox.yml`, which builds the same way.
     paths:
       - 'crates/impresspress-web/**'
       - 'crates/impresspress-core/**'
+      # `impresspress-web` depends on `impresspress-browser` by path, so the
+      # OPFS/database/network adapters compile into the wasm this job ships.
+      - 'crates/impresspress-browser/**'
+      # `cargo install --path crates/impresspress` below builds the CLI that
+      # the `impresspress build --target web` step then runs, and that build
+      # renders `sw.js` / `loader.js` / `index.html` out of the bundler's
+      # asset overlay.
+      - 'crates/impresspress/**'
+      - 'crates/impresspress-bundle/**'
+      # The native server boot (`impresspress-server`) and the native services
+      # it builds on, both path dependencies `crates/impresspress/Cargo.toml`
+      # declares unconditionally. The CLI reaches them only from `serve`, not
+      # the `build` path, so they cannot change the shipped wasm — but they
+      # can break the `cargo install` this job depends on, and a break that
+      # skips its own gate is the failure this list exists to prevent.
+      - 'crates/impresspress-server/**'
+      - 'crates/impresspress-native/**'
+      # The workspace manifest and the lockfile the `--locked` install
+      # resolves against: a wafer-run pin bump changes what every crate above
+      # compiles to without touching one of their paths.
+      - 'Cargo.toml'
+      - 'Cargo.lock'
       - '.github/workflows/deploy-demo.yml'
   workflow_dispatch:
 
@@ -14,9 +40,6 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-
-      - name: Checkout wafer-run
-        run: git clone --depth 1 https://github.com/wafer-run/wafer-run.git "$GITHUB_WORKSPACE/../wafer-run"
 
       - uses: dtolnay/rust-toolchain@stable
         with:
@@ -27,7 +50,8 @@ jobs:
         with:
           # Pin explicitly — unpinned "latest" falls back to v0.9.1 on a GitHub
           # API flake, and v0.9.1 can't parse `license.workspace = true`.
-          # This is live push-to-main infra; matches ci.yml's pin.
+          # This is live push-to-main infra; matches `build-wasm.yml`'s pin,
+          # which is the one CI builds with.
           version: 'v0.15.0'
 
       # `cargo install --path crates/impresspress` runs the impresspress build.rs,
@@ -35,7 +59,7 @@ jobs:
       # build.rs finds it in the canonical pkg/ location.
       - name: Pre-build impresspress-web wasm (build.rs prereq)
         working-directory: crates/impresspress-web
-        run: wasm-pack build --target web --release --out-dir pkg
+        run: wasm-pack build --target web --release --out-dir pkg -- --locked
 
       - name: Install impresspress CLI
         run: cargo install --path crates/impresspress --locked

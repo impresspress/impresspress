@@ -12,8 +12,9 @@
 //! Consumed by `impresspress-cloudflare::logger_service::ConsoleLoggerService`,
 //! which resolves the minimum emitted level once per logger construction
 //! from the `IMPRESSPRESS_CF_LOG_LEVEL` worker var (read in
-//! `impresspress-cloudflare/src/lib.rs::make_console_logger`), falling back
-//! to a compile-time default when the var is unset or unparseable.
+//! `impresspress-cloudflare/src/environment.rs::CfEnvironment::capture`, with
+//! every other var and secret that crate consumes), falling back to a
+//! compile-time default when the var is unset or unparseable.
 
 /// Log severity, ordered low-to-high so `level >= min_level` is a plain
 /// integer comparison.

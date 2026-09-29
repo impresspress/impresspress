@@ -78,7 +78,7 @@ pub const RETAINED_GENERATIONS: usize = 20;
 /// pinned blobs against the workspace quota forever and, past the cap, would
 /// start pushing the serving generation out of this set.
 pub async fn retained(ctx: &dyn Context) -> Result<Vec<GenerationRow>, WaferError> {
-    let mut rows = generations::list_recent(ctx, RETAINED_GENERATIONS as i64).await?;
+    let mut rows = generations::list_recent(ctx, RETAINED_GENERATIONS as u32).await?;
     if rows.len() < RETAINED_GENERATIONS {
         // The whole ledger is inside the window: the other two queries could
         // only return rows this one already holds.
@@ -107,11 +107,11 @@ pub async fn retained(ctx: &dyn Context) -> Result<Vec<GenerationRow>, WaferErro
 ///
 /// The boundary is the oldest row the window keeps, and the pass deletes
 /// strictly below it. Paged rather than listed whole: every row a page holds
-/// is deleted before the next page is asked for, so an empty page means done
-/// and a ledger far past the window is collected in full rather than down to
-/// one page's worth of rows.
+/// is deleted — in one write, [`generations::delete_many`] — before the next
+/// page is asked for, so an empty page means done and a ledger far past the
+/// window is collected in full rather than down to one page's worth of rows.
 pub async fn prune(ctx: &dyn Context) -> Result<Vec<GenerationRow>, WaferError> {
-    let newest = generations::list_recent(ctx, RETAINED_GENERATIONS as i64).await?;
+    let newest = generations::list_recent(ctx, RETAINED_GENERATIONS as u32).await?;
     let Some(boundary) = newest.get(RETAINED_GENERATIONS - 1) else {
         // Fewer rows than the window holds: nothing is outside it.
         return Ok(Vec::new());
@@ -119,14 +119,13 @@ pub async fn prune(ctx: &dyn Context) -> Result<Vec<GenerationRow>, WaferError> 
 
     let mut pruned = Vec::new();
     loop {
-        let batch = generations::list_prunable(ctx, boundary).await?;
-        if batch.is_empty() {
+        let page = generations::list_prunable(ctx, boundary).await?;
+        if page.is_empty() {
             return Ok(pruned);
         }
-        for row in batch {
-            generations::delete(ctx, &row.id).await?;
-            pruned.push(row);
-        }
+        let ids: Vec<String> = page.iter().map(|row| row.id.clone()).collect();
+        generations::delete_many(ctx, &ids).await?;
+        pruned.extend(page);
     }
 }
 
@@ -179,6 +178,27 @@ mod tests {
             .into_iter()
             .map(|row| row.id)
             .collect()
+    }
+
+    /// **A page is one write.** The rows a pass prunes go in one `batch`
+    /// of deletes rather than a `delete` each — in the browser, one OPFS
+    /// save instead of one per generation.
+    #[tokio::test]
+    async fn a_pass_deletes_its_page_in_one_batch() {
+        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        for _ in 0..RETAINED_GENERATIONS + 5 {
+            row(&ctx, GenerationStatus::Superseded).await;
+        }
+        let (ctx, log) = ctx.record_writes();
+
+        assert_eq!(prune(&ctx).await.expect("prune").len(), 5);
+
+        {
+            let log = log.lock().expect("log");
+            assert_eq!(log.deletes, 0, "no generation goes through a single delete");
+            assert_eq!(log.batch_ops, [5]);
+        }
+        assert_eq!(ledger(&ctx).await.len(), RETAINED_GENERATIONS);
     }
 
     #[tokio::test]

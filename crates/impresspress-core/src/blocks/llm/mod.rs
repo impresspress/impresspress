@@ -1,25 +1,33 @@
+pub mod assets;
 pub mod contracts;
+#[cfg(test)]
+mod error_mapping_tests;
 pub mod migrations;
 pub mod pages;
 pub mod provider_admin;
 pub mod providers;
+pub(crate) mod repo;
 pub mod routes;
 pub mod schema;
 pub mod ui;
 
 use std::sync::Arc;
 
-use wafer_core::clients::{config, database as db};
+use wafer_core::clients::config;
 use wafer_run::{
-    context::Context, Block, BlockEndpoint, BlockInfo, ConfigVar, HttpMethod, InputStream,
+    context::Context, Block, BlockInfo, ConfigVar, HttpMethod, InputStream, InputType,
     InstanceMode, LifecycleEvent, LifecycleType, Message, OutputStream, WaferError,
 };
 
 use self::provider_admin::ProviderAdmin;
 use crate::{
-    endpoint_match::{self, EndpointRoute},
-    http::{err_bad_request, err_internal, err_not_found, ok_json},
-    util::json_map,
+    blocks::{
+        crud,
+        messages::contracts::{EntryKind, EntryRole},
+    },
+    endpoint_match::{self, request_schema_of, response_schema_of, EndpointRoute},
+    http::{err_bad_request, err_not_found, ok_json},
+    llm_target::{DefaultTarget, DEFAULT_MAX_TOKENS_VAR},
 };
 
 /// In-block dispatch targets, one per declared HTTP endpoint.
@@ -43,73 +51,156 @@ enum Route {
     ListModels,
     GetConfig,
     PostConfig,
+    DeleteConfig,
 }
 
-/// Method + path-template dispatch table, mirroring `info().endpoints`.
-/// Sub-resource templates (`.../discover-models`, `.../load`, `.../status`)
-/// precede the generic `.../{id}` / `.../models` templates so the specific
-/// route wins (the old `ends_with` ordering). `{id}`/`{backend_id}`/
-/// `{model_id}` are bound into `req.param.*`.
+/// The block's HTTP surface: what `handle()` dispatches on and what
+/// `info().endpoints` is generated from. Sub-resource templates
+/// (`.../discover-models`, `.../load`, `.../status`) precede the generic
+/// `.../{id}` / `.../models` templates so the specific route wins.
+/// `{id}`/`{backend_id}`/`{model_id}` are bound into `req.param.*`.
+///
+/// The chat UI is reached from the ADMIN sidebar (nav_groups::admin
+/// "Communication" group); the pre-refactor `handle()` gated every non-API
+/// page on `is_admin`, so the pages are declared `Admin` to keep that exact
+/// outcome as the single, centrally enforced policy.
 const ROUTES: &[EndpointRoute<Route>] = &[
     // UI pages
-    EndpointRoute::new(HttpMethod::Get, "/b/llm/", Route::ChatPage),
-    EndpointRoute::new(HttpMethod::Get, "/b/llm/threads/{id}", Route::ThreadPage),
-    EndpointRoute::new(HttpMethod::Get, "/b/llm/settings", Route::SettingsPage),
-    EndpointRoute::new(HttpMethod::Get, "/b/llm/providers", Route::ProvidersPage),
-    EndpointRoute::new(HttpMethod::Get, "/b/llm/models", Route::ModelsPage),
+    EndpointRoute::admin(HttpMethod::Get, "/b/llm/", Route::ChatPage).summary("Chat UI"),
+    EndpointRoute::admin(HttpMethod::Get, "/b/llm/threads/{id}", Route::ThreadPage)
+        .summary("Chat UI (thread permalink)"),
+    EndpointRoute::admin(HttpMethod::Get, "/b/llm/settings", Route::SettingsPage)
+        .summary("LLM settings page"),
+    EndpointRoute::admin(HttpMethod::Get, "/b/llm/providers", Route::ProvidersPage)
+        .summary("Providers admin"),
+    EndpointRoute::admin(HttpMethod::Get, "/b/llm/models", Route::ModelsPage)
+        .summary("Models admin"),
     // Chat API
-    EndpointRoute::new(HttpMethod::Post, "/b/llm/api/chat", Route::Chat),
-    EndpointRoute::new(
+    EndpointRoute::authenticated(HttpMethod::Post, "/b/llm/api/chat", Route::Chat)
+        .summary("Send a chat message")
+        .input(request_schema_of::<contracts::ChatRequest>)
+        .output(response_schema_of::<contracts::ChatResponse>),
+    // Same request as `/api/chat`; the response is `text/event-stream`, one
+    // `data:` frame per `ChatChunk`, then `data: [DONE]` (or `event: error`).
+    // No `.output(..)`: it would publish an `application/json` schema for a
+    // body this endpoint never sends, and the frame type is wafer-run's
+    // `ChatChunk`, which carries no JsonSchema derive to mirror.
+    EndpointRoute::authenticated(
         HttpMethod::Post,
         "/b/llm/api/chat/stream",
         Route::ChatStream,
-    ),
+    )
+    .summary("Send a chat message (SSE streaming)")
+    .input(request_schema_of::<contracts::ChatRequest>),
     // Provider CRUD (specific sub-resource first)
-    EndpointRoute::new(
+    EndpointRoute::admin(
         HttpMethod::Post,
         "/b/llm/api/providers/{id}/discover-models",
         Route::DiscoverModels,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Discover provider models via /v1/models")
+    .path_params(provider_id_path_schema)
+    .output(response_schema_of::<contracts::DiscoveredModelsResponse>),
+    EndpointRoute::admin(
         HttpMethod::Get,
         "/b/llm/api/providers",
         Route::ListProviders,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("List configured LLM providers")
+    .output(response_schema_of::<contracts::ProviderListResponse>),
+    EndpointRoute::admin(
         HttpMethod::Post,
         "/b/llm/api/providers",
         Route::CreateProvider,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Create LLM provider")
+    .input(request_schema_of::<contracts::CreateProviderRequest>)
+    .output(response_schema_of::<contracts::ProviderView>),
+    EndpointRoute::admin(
         HttpMethod::Patch,
         "/b/llm/api/providers/{id}",
         Route::UpdateProvider,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Update LLM provider")
+    .path_params(provider_id_path_schema)
+    .input(request_schema_of::<contracts::UpdateProviderRequest>)
+    .output(response_schema_of::<contracts::ProviderView>),
+    EndpointRoute::admin(
         HttpMethod::Delete,
         "/b/llm/api/providers/{id}",
         Route::DeleteProvider,
-    ),
-    // Models endpoints (specific sub-resources first)
-    EndpointRoute::new(
+    )
+    .summary("Delete LLM provider")
+    .path_params(provider_id_path_schema)
+    .output(response_schema_of::<contracts::ProviderDeleteResponse>),
+    // Models (specific sub-resources first)
+    EndpointRoute::authenticated(
         HttpMethod::Get,
         "/b/llm/api/models/{backend_id}/{model_id}/status",
         Route::ModelStatus,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Model status (ready / loading / unloaded)")
+    .path_params(model_path_schema)
+    .output(response_schema_of::<contracts::ModelStatusResponse>),
+    // Takes no body; answers `text/event-stream`, one `data:` frame per
+    // `LoadProgress`, then `data: [DONE]`. No `.output(..)` for the same
+    // reason as `/api/chat/stream`.
+    EndpointRoute::admin(
         HttpMethod::Post,
         "/b/llm/api/models/{backend_id}/{model_id}/load",
         Route::LoadModel,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Load a model (SSE progress)")
+    .path_params(model_path_schema),
+    EndpointRoute::admin(
         HttpMethod::Post,
         "/b/llm/api/models/{backend_id}/{model_id}/unload",
         Route::UnloadModel,
-    ),
-    EndpointRoute::new(HttpMethod::Get, "/b/llm/api/models", Route::ListModels),
-    // Config
-    EndpointRoute::new(HttpMethod::Get, "/b/llm/api/config", Route::GetConfig),
-    EndpointRoute::new(HttpMethod::Post, "/b/llm/api/config", Route::PostConfig),
+    )
+    .summary("Unload a model")
+    .path_params(model_path_schema)
+    .output(response_schema_of::<contracts::ModelUnloadResponse>),
+    EndpointRoute::authenticated(HttpMethod::Get, "/b/llm/api/models", Route::ListModels)
+        .summary("List available models (aggregated across backends)")
+        .output(response_schema_of::<contracts::ModelListResponse>),
+    // Config.
+    //
+    // The read is `Authenticated`: it answers the two deployment-wide
+    // defaults (`IMPRESSPRESS__LLM__DEFAULT_PROVIDER` /
+    // `..._DEFAULT_MODEL`), which every caller of the `Authenticated`
+    // `/b/llm/api/chat` is already chatting against — no per-user row, no
+    // credential.
+    //
+    // The two writes are `Admin`. A thread override is keyed by `thread_id`
+    // alone and neither handler takes an identity, so at `Authenticated`
+    // any logged-in caller could pin ANY thread to any configured backend —
+    // or delete any override — including threads they cannot read.
+    //
+    // The delete's only caller is the admin settings page
+    // (`pages::settings_page`, itself `Admin`), which lists the overrides
+    // read-only with one `hx-delete` per row. Nothing in this repo calls the
+    // POST at all: no page posts to it and no JS fetches it, so today it is
+    // published API surface (it carries a request schema and reaches the
+    // generated SDK) with no in-tree consumer. OPEN: either an admin UI
+    // grows a form that creates an override — the reason the endpoint
+    // exists — or the endpoint goes, and with it the only writer of
+    // `repo::settings`. `Admin` is the right tier under either answer, so
+    // that question is not settled here.
+    EndpointRoute::authenticated(HttpMethod::Get, "/b/llm/api/config", Route::GetConfig)
+        .summary("Get default provider/model config")
+        .output(response_schema_of::<contracts::LlmConfigResponse>),
+    EndpointRoute::admin(HttpMethod::Post, "/b/llm/api/config", Route::PostConfig)
+        .summary("Update per-thread provider/model override")
+        .input(request_schema_of::<contracts::ConfigUpdateRequest>)
+        .output(response_schema_of::<contracts::ConfigUpdateResponse>),
+    EndpointRoute::admin(
+        HttpMethod::Delete,
+        "/b/llm/api/config/{id}",
+        Route::DeleteConfig,
+    )
+    .summary("Remove a per-thread provider/model override")
+    .path_params(override_id_path_schema)
+    .output(response_schema_of::<contracts::ConfigDeleteResponse>),
 ];
 
 /// LLM feature block. Owns the provider admin UI + chat thread persistence.
@@ -132,16 +223,60 @@ pub struct LlmBlock {
 }
 
 impl LlmBlock {
+    /// The name the block registers and reports under.
+    pub const BLOCK_NAME: &'static str = "impresspress/llm";
+
     pub fn new(provider_admin: Arc<dyn ProviderAdmin>) -> Self {
         Self { provider_admin }
     }
 }
 
-pub(crate) const SETTINGS_TABLE: &str = "impresspress__llm__settings";
-
 pub(super) const DEFAULT_PROVIDER_VAR: &str = "IMPRESSPRESS__LLM__DEFAULT_PROVIDER";
 pub(super) const DEFAULT_MODEL_VAR: &str = "IMPRESSPRESS__LLM__DEFAULT_MODEL";
 pub(super) const DEFAULT_PROVIDER: &str = "impresspress/provider-llm";
+
+/// The variable name the provider form suggests for a provider's API key.
+///
+/// An example, not a declared key: an admin names whichever variable holds
+/// the key in the provider's `key_var`, and `routes::reload_provider_service`
+/// resolves it into the in-memory provider.
+pub(super) const EXAMPLE_KEY_VAR: &str = "IMPRESSPRESS__LLM__OPENAI_KEY";
+
+/// Output-token budget used when a chat request names none.
+///
+/// Anthropic's Messages API requires `max_tokens` on every request, so a
+/// request that carries none is refused by the encoder before it reaches the
+/// provider (`providers::anthropic::EncodeError::MissingMaxTokens`). Every
+/// protocol therefore gets a budget from here, which also bounds
+/// OpenAI-protocol replies — those are unbounded when the field is absent.
+pub(super) const DEFAULT_MAX_TOKENS: u32 = 4096;
+
+/// The output-token budget for a request that names none: the configured
+/// [`DEFAULT_MAX_TOKENS_VAR`], or [`DEFAULT_MAX_TOKENS`] when it is unset,
+/// unparseable, or zero.
+///
+/// Zero is rejected rather than forwarded: Anthropic answers `400` for
+/// `max_tokens: 0`, so honouring it would turn a mis-typed variable into a
+/// provider error on every chat instead of a logged fallback. A failed read
+/// is returned, not answered with the built-in default.
+pub(super) async fn default_max_tokens(ctx: &dyn Context) -> Result<u32, WaferError> {
+    let raw = config::get_default(ctx, DEFAULT_MAX_TOKENS_VAR, "").await?;
+    if raw.is_empty() {
+        return Ok(DEFAULT_MAX_TOKENS);
+    }
+    Ok(match raw.parse::<u32>() {
+        Ok(value) if value > 0 => value,
+        _ => {
+            tracing::warn!(
+                var = DEFAULT_MAX_TOKENS_VAR,
+                value = %raw,
+                fallback = DEFAULT_MAX_TOKENS,
+                "llm max-token budget is not a positive integer — using the built-in default"
+            );
+            DEFAULT_MAX_TOKENS
+        }
+    })
+}
 
 // The previous in-process `default_target()` helper has moved to a
 // `GET /b/llm/api/internal/default-target` route — see
@@ -156,62 +291,205 @@ pub(super) const DEFAULT_PROVIDER: &str = "impresspress/provider-llm";
 // Inter-block call helpers
 // ---------------------------------------------------------------------------
 
-/// Call the messages block to create an entry in a context.
+/// One thread in the chat sidebar, as `impresspress/messages` reports it.
+///
+/// Not a published contract: it is the decoded shape of another block's
+/// response, and the three fields are exactly what the sidebar renders.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct ContextView {
+    /// The context id, which is the llm thread id.
+    pub id: String,
+    /// Display title. Empty renders as "Untitled".
+    pub title: String,
+    /// RFC 3339 timestamp the list is ordered by.
+    pub updated_at: String,
+}
+
+/// Read one column out of a messages-block record as the wire delivers it.
+///
+/// The `database.list` envelope puts the column map under `data`; the
+/// top-level fallback is kept from `history_to_messages`, which has carried
+/// it since before the entries list went through `call_block`. Shared so the
+/// two readers of a messages record (the chat page's bootstrap carrier and
+/// the model-history builder) cannot drift apart on it.
+pub(super) fn record_field<'a>(record: &'a serde_json::Value, field: &str) -> &'a str {
+    record
+        .get("data")
+        .and_then(|data| data.get(field))
+        .or_else(|| record.get(field))
+        .and_then(serde_json::Value::as_str)
+        .unwrap_or_default()
+}
+
+/// The messages block's decoded answer, or the error it terminated with.
+///
+/// Shared by every call this module makes, so a read and a write cannot end
+/// up classifying the same transport failure differently: whatever the callee
+/// refused with (its `NotFound` for an unknown thread, a WRAP
+/// `PermissionDenied`) is carried back as it stands, and only a stream that
+/// ended some other way, or a body that is not JSON, is minted here.
+async fn answer_of(out: OutputStream, what: &str) -> Result<serde_json::Value, WaferError> {
+    let buffered = out
+        .collect_buffered()
+        .await
+        .map_err(|terminal| match terminal {
+            wafer_run::streams::output::TerminalNotResponse::Error(error) => error,
+            other => WaferError::new(
+                wafer_run::ErrorCode::Internal,
+                format!("{what}: the messages block did not answer: {other:?}"),
+            ),
+        })?;
+    serde_json::from_slice(&buffered.body).map_err(|error| {
+        WaferError::new(
+            wafer_run::ErrorCode::Internal,
+            format!("{what}: could not decode the messages block's answer: {error}"),
+        )
+    })
+}
+
+/// The records of a `{records: [...], total_count: n}` list answer, or the
+/// error the callee terminated with. An answer with no `records` array is an
+/// internal failure, not an empty list: the sidebar and the history would
+/// otherwise claim a thread holds nothing.
+async fn records_of(out: OutputStream, what: &str) -> Result<Vec<serde_json::Value>, WaferError> {
+    answer_of(out, what)
+        .await?
+        .get("records")
+        .and_then(serde_json::Value::as_array)
+        .cloned()
+        .ok_or_else(|| {
+            WaferError::new(
+                wafer_run::ErrorCode::Internal,
+                format!("{what}: the messages block's answer has no `records` array"),
+            )
+        })
+}
+
+/// Call the messages block to list the caller's threads — the chat page's
+/// sidebar.
+///
+/// `page_size=50` is the cap the page's own `db::list` used, and the messages
+/// block orders contexts by `updated_at` descending for every caller, so the
+/// set is the one the direct read produced except for the owner filter the
+/// block applies (`rest.rs::list_contexts`): the sidebar is owner-scoped now,
+/// as it is for every other caller of that route.
+pub(super) async fn messages_list_contexts(
+    ctx: &dyn Context,
+    original_msg: &Message,
+) -> Result<Vec<ContextView>, WaferError> {
+    let resource = "/b/messages/api/contexts?page_size=50";
+    let msg = crate::util::block_request("retrieve", "GET", resource, original_msg);
+
+    let records = records_of(
+        ctx.call_block("impresspress/messages", msg, InputStream::empty())
+            .await,
+        "thread list",
+    )
+    .await?;
+
+    Ok(records
+        .iter()
+        .map(|record| ContextView {
+            id: record
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .to_string(),
+            title: record_field(record, "title").to_string(),
+            updated_at: record_field(record, "updated_at").to_string(),
+        })
+        .collect())
+}
+
+/// Call the messages block to create an entry in a context, returning the id
+/// of the stored entry.
+///
+/// `role` is the messages block's own [`EntryRole`], not a string: the entry
+/// this writes is replayed to the model by
+/// `routes::chat::history_to_messages`, and a role neither side agreed on
+/// was replayed as the *user* (B20).
+///
+/// It used to return `Option`, collapsing an encode bug, an unreachable
+/// messages block and an undecodable answer into the same `None` the two
+/// callers then discarded with `let _ =`. So a turn could fail to store while
+/// the model was still called and the request still ended in a normal
+/// completion — and the *next* request, which rebuilds the model's history
+/// from that store, could not see the turn the answer belonged to. Returning
+/// the id is what makes "it was stored" and "here is what was stored"
+/// inseparable: there is no longer a value a caller can publish for a write
+/// that did not happen.
 pub(super) async fn messages_create(
     ctx: &dyn Context,
     original_msg: &Message,
     context_id: &str,
-    role: &str,
+    role: EntryRole,
     content: &str,
-) -> Option<serde_json::Value> {
+) -> Result<String, WaferError> {
     // Serializing a plain `{kind, role, content}` map can only fail on a JSON
-    // serializer bug. Surface it via tracing rather than sending an empty
-    // body to the messages block, which would 400 with a confusing error.
-    let body = match serde_json::to_vec(&serde_json::json!({
-        "kind": "message",
+    // serializer bug, but sending an empty body to the messages block would
+    // 400 with a confusing error, so it stops here.
+    let body = serde_json::to_vec(&serde_json::json!({
+        "kind": EntryKind::Message,
         "role": role,
         "content": content,
-    })) {
-        Ok(b) => b,
-        Err(e) => {
-            tracing::error!("messages_create: failed to encode entry body: {e}");
-            return None;
-        }
-    };
+    }))
+    .map_err(|error| {
+        WaferError::new(
+            wafer_run::ErrorCode::Internal,
+            format!("entry write: could not encode the entry body: {error}"),
+        )
+    })?;
 
     let resource = format!("/b/messages/api/contexts/{context_id}/entries");
     let mut msg = crate::util::block_request("create", "POST", &resource, original_msg);
     msg.set_meta("req.content_type", "application/json");
 
-    let out = ctx
-        .call_block("impresspress/messages", msg, InputStream::from_bytes(body))
-        .await;
-    if let Ok(buf) = out.collect_buffered().await {
-        return serde_json::from_slice::<serde_json::Value>(&buf.body).ok();
-    }
-    None
+    let answer = answer_of(
+        ctx.call_block("impresspress/messages", msg, InputStream::from_bytes(body))
+            .await,
+        "entry write",
+    )
+    .await?;
+    // `{"id": …}` is the flat shape; `database.create` answers wrap the row
+    // under `data`. Both spellings reach this module (`record_field` carries
+    // the same pair for the read half).
+    answer
+        .get("id")
+        .or_else(|| answer.get("data").and_then(|data| data.get("id")))
+        .and_then(serde_json::Value::as_str)
+        .filter(|id| !id.is_empty())
+        .map(str::to_string)
+        .ok_or_else(|| {
+            WaferError::new(
+                wafer_run::ErrorCode::Internal,
+                "entry write: the messages block named no stored entry",
+            )
+        })
 }
 
 /// Call the messages block to list entries in a context.
+///
+/// Shared by the chat page's bootstrap carrier and the model-history builder.
+///
+/// It used to end in `.unwrap_or_default()`, and that is the swallow that let
+/// a dead read ship: when `util::block_request` put `path?query` into
+/// `req.resource`, this call matched no route and 404'd on every request, so
+/// the chat had no history and the sidebar was empty — and nothing failed.
+/// The two callers want different things from the error (the page renders it,
+/// the chat prelude refuses to prompt a paid provider with no history), so it
+/// is theirs to decide, not this function's to discard.
 pub(super) async fn messages_list(
     ctx: &dyn Context,
     original_msg: &Message,
     context_id: &str,
-) -> Vec<serde_json::Value> {
+) -> Result<Vec<serde_json::Value>, WaferError> {
     let resource = format!("/b/messages/api/contexts/{context_id}/entries?kind=message");
     let msg = crate::util::block_request("retrieve", "GET", &resource, original_msg);
 
     let out = ctx
         .call_block("impresspress/messages", msg, InputStream::empty())
         .await;
-    if let Ok(buf) = out.collect_buffered().await {
-        if let Ok(v) = serde_json::from_slice::<serde_json::Value>(&buf.body) {
-            if let Some(records) = v.get("records").and_then(|r| r.as_array()) {
-                return records.clone();
-            }
-        }
-    }
-    vec![]
+    records_of(out, "entry list").await
 }
 
 // ---------------------------------------------------------------------------
@@ -220,22 +498,27 @@ pub(super) async fn messages_list(
 
 impl LlmBlock {
     /// Resolve which provider block and model to use for a request.
+    ///
+    /// Returns `Err` when the per-thread override cannot be read. Falling
+    /// back to the global default on a database outage would route a
+    /// thread's traffic to a backend its owner had pinned away from, and the
+    /// caller would never learn.
     pub(super) async fn resolve_provider(
         &self,
         ctx: &dyn Context,
         thread_id: &str,
         req_provider: Option<&str>,
         req_model: Option<&str>,
-    ) -> (String, String) {
+    ) -> Result<(String, String), WaferError> {
         // Check per-thread override first
-        let thread_setting = self.get_thread_setting(ctx, thread_id).await;
+        let thread_setting = repo::settings::find_for_thread(ctx, thread_id).await?;
 
         let provider_block = thread_setting
             .as_ref()
-            .and_then(|s| s.data.get("provider_block").and_then(|v| v.as_str()))
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .or_else(|| req_provider.map(|s| s.to_string()))
+            .map(|setting| setting.provider_block.as_str())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or_else(|| req_provider.map(str::to_string))
             .unwrap_or_else(|| {
                 // Will be filled below from config
                 String::new()
@@ -243,15 +526,15 @@ impl LlmBlock {
 
         let model = thread_setting
             .as_ref()
-            .and_then(|s| s.data.get("model").and_then(|v| v.as_str()))
-            .filter(|s| !s.is_empty())
-            .map(|s| s.to_string())
-            .or_else(|| req_model.map(|s| s.to_string()))
+            .map(|setting| setting.model.as_str())
+            .filter(|value| !value.is_empty())
+            .map(str::to_string)
+            .or_else(|| req_model.map(str::to_string))
             .unwrap_or_default();
 
         let default_provider =
-            config::get_default(ctx, DEFAULT_PROVIDER_VAR, DEFAULT_PROVIDER).await;
-        let default_model = config::get_default(ctx, DEFAULT_MODEL_VAR, "").await;
+            config::get_default(ctx, DEFAULT_PROVIDER_VAR, DEFAULT_PROVIDER).await?;
+        let default_model = config::get_default(ctx, DEFAULT_MODEL_VAR, "").await?;
 
         let final_provider = if provider_block.is_empty() {
             default_provider
@@ -265,57 +548,77 @@ impl LlmBlock {
             model
         };
 
-        (final_provider, final_model)
+        Ok((final_provider, final_model))
     }
 
-    /// Get the per-thread settings record from the DB, if any.
-    ///
-    /// Returns the whole [`db::Record`] (not just its `data`) so callers that
-    /// need the record id for a follow-up update don't have to re-query.
-    async fn get_thread_setting(&self, ctx: &dyn Context, thread_id: &str) -> Option<db::Record> {
-        db::get_by_field(
-            ctx,
-            SETTINGS_TABLE,
-            "thread_id",
-            serde_json::Value::String(thread_id.to_string()),
-        )
-        .await
-        .ok()
+    /// `DELETE /b/llm/api/config/{id}` — remove one per-thread override. The
+    /// settings page renders a delete control for every override row; this
+    /// is the route it targets. That control swaps the answer over its own
+    /// row (`hx-target="closest tr"`, `outerHTML`), so an `HX-Request` gets an
+    /// empty HTML body — the row goes — while an API caller gets the JSON
+    /// receipt.
+    async fn handle_delete_config(&self, ctx: &dyn Context, msg: &Message) -> OutputStream {
+        let id = match crud::path_id(msg, "Override") {
+            Ok(value) => value.to_string(),
+            Err(response) => return response,
+        };
+        match repo::settings::delete(ctx, &id).await {
+            Ok(()) if crate::ui::is_htmx(msg) => crate::ui::html_response(maud::html! {}),
+            Ok(()) => ok_json(&contracts::ConfigDeleteResponse { deleted: true }),
+            Err(e) => crud::db_error(e, "Override not found", "Database error"),
+        }
     }
 
     // --- Config ---
 
-    /// Inter-block discovery: returns the default `(provider, model)` target
-    /// other blocks should use when they have no caller-supplied preference.
+    /// Inter-block discovery: returns the default target other blocks should
+    /// use when they have no caller-supplied preference, as a
+    /// [`DefaultTarget`] — the one type both sides of this route serde, so
+    /// the body cannot be described differently at each end.
     ///
-    /// Wire format:
-    /// * `200 {"provider": "...", "model": "..."}` when configured
-    /// * `200 {"provider": null, "model": null}` when no model is configured
-    ///   (callers should take a degraded path — same contract as the previous
-    ///   in-process `default_target()` returning `None`).
+    /// Answers `200` either way: [`DefaultTarget::unconfigured`] when no
+    /// provider or model is set, which callers take a degraded path on (the
+    /// same contract as the previous in-process `default_target()` returning
+    /// `None`).
+    ///
+    /// `max_tokens` travels with the target rather than being read by the
+    /// caller: [`DEFAULT_MAX_TOKENS_VAR`] is this block's own variable, and a
+    /// caller that has to reach a completion needs a budget for it —
+    /// Anthropic-protocol providers refuse a request that carries none.
     async fn handle_default_target(&self, ctx: &dyn Context) -> OutputStream {
-        let provider = config::get_default(ctx, DEFAULT_PROVIDER_VAR, DEFAULT_PROVIDER).await;
-        let model = config::get_default(ctx, DEFAULT_MODEL_VAR, "").await;
-        if model.is_empty() || provider.is_empty() {
-            return ok_json(&serde_json::json!({
-                "provider": serde_json::Value::Null,
-                "model": serde_json::Value::Null,
-            }));
+        match Self::default_target(ctx).await {
+            Ok(target) => ok_json(&target),
+            Err(e) => crud::db_error_internal(e, "Could not read the default llm target"),
         }
-        ok_json(&serde_json::json!({
-            "provider": provider,
-            "model": model,
-        }))
+    }
+
+    /// [`Self::handle_default_target`]'s answer; a failed read is returned
+    /// rather than reported as an unconfigured target.
+    async fn default_target(ctx: &dyn Context) -> Result<DefaultTarget, WaferError> {
+        let provider = config::get_default(ctx, DEFAULT_PROVIDER_VAR, DEFAULT_PROVIDER).await?;
+        let model = config::get_default(ctx, DEFAULT_MODEL_VAR, "").await?;
+        if model.is_empty() || provider.is_empty() {
+            return Ok(DefaultTarget::unconfigured());
+        }
+        Ok(DefaultTarget::configured(
+            &provider,
+            &model,
+            default_max_tokens(ctx).await?,
+        ))
     }
 
     async fn handle_get_config(&self, ctx: &dyn Context) -> OutputStream {
-        let default_provider =
-            config::get_default(ctx, DEFAULT_PROVIDER_VAR, DEFAULT_PROVIDER).await;
-        let default_model = config::get_default(ctx, DEFAULT_MODEL_VAR, "").await;
-        ok_json(&contracts::LlmConfigResponse {
-            default_provider,
-            default_model,
-        })
+        let defaults = async {
+            Ok::<_, WaferError>(contracts::LlmConfigResponse {
+                default_provider: config::get_default(ctx, DEFAULT_PROVIDER_VAR, DEFAULT_PROVIDER)
+                    .await?,
+                default_model: config::get_default(ctx, DEFAULT_MODEL_VAR, "").await?,
+            })
+        };
+        match defaults.await {
+            Ok(response) => ok_json(&response),
+            Err(e) => crud::db_error_internal(e, "Could not read the default llm target"),
+        }
     }
 
     /// `POST /b/llm/api/config`. Three outcomes, two of them successful:
@@ -327,7 +630,10 @@ impl LlmBlock {
     async fn handle_post_config(&self, ctx: &dyn Context, input: InputStream) -> OutputStream {
         use contracts::{ConfigAcknowledgement, ConfigUpdateResponse, ThreadOverrideView};
 
-        let raw = input.collect_to_bytes().await;
+        let raw = match input.collect_to_bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => return OutputStream::error(e),
+        };
         let body: contracts::ConfigUpdateRequest = match serde_json::from_slice(&raw) {
             Ok(b) => b,
             Err(e) => return err_bad_request(&format!("Invalid body: {e}")),
@@ -344,46 +650,43 @@ impl LlmBlock {
             );
         }
 
-        // Per-thread override update
+        // Per-thread override update. The lookup's error is NOT "no
+        // override": treating it as one used to write a second row for a
+        // thread that already had one.
         if let Some(thread_id) = body.thread_id {
-            let existing = self.get_thread_setting(ctx, &thread_id).await;
+            let existing = match repo::settings::find_for_thread(ctx, &thread_id).await {
+                Ok(existing) => existing,
+                Err(e) => return crud::db_error_internal(e, "Database error"),
+            };
 
-            if let Some(record) = existing {
-                // Update the existing record in place — the single fetch above
-                // already gave us both the id and the current data.
-                let mut data = record.data;
-                if let Some(pb) = body.provider_block {
-                    data.insert("provider_block".to_string(), serde_json::json!(pb));
+            let written = match existing {
+                // Update the existing row in place — the single fetch above
+                // already gave us both the id and the current values.
+                Some(row) => {
+                    repo::settings::update(
+                        ctx,
+                        &row,
+                        body.provider_block.as_deref(),
+                        body.model.as_deref(),
+                    )
+                    .await
                 }
-                if let Some(m) = body.model {
-                    data.insert("model".to_string(), serde_json::json!(m));
+                None => {
+                    repo::settings::insert(
+                        ctx,
+                        &thread_id,
+                        body.provider_block.as_deref().unwrap_or_default(),
+                        body.model.as_deref().unwrap_or_default(),
+                    )
+                    .await
                 }
-                crate::util::stamp_updated(&mut data);
-                match db::update(ctx, SETTINGS_TABLE, &record.id, data).await {
-                    Ok(r) => {
-                        return ok_json(&ConfigUpdateResponse::Override(
-                            ThreadOverrideView::from_record(&r),
-                        ))
-                    }
-                    Err(e) => return err_internal("Database error", e),
-                }
-            } else {
-                // Create new per-thread setting
-                let mut data = json_map(serde_json::json!({
-                    "thread_id": thread_id,
-                    "provider_block": body.provider_block.unwrap_or_default(),
-                    "model": body.model.unwrap_or_default(),
-                }));
-                crate::util::stamp_created(&mut data);
-                match db::create(ctx, SETTINGS_TABLE, data).await {
-                    Ok(r) => {
-                        return ok_json(&ConfigUpdateResponse::Override(
-                            ThreadOverrideView::from_record(&r),
-                        ))
-                    }
-                    Err(e) => return err_internal("Database error", e),
-                }
-            }
+            };
+            return match written {
+                Ok(row) => ok_json(&ConfigUpdateResponse::Override(ThreadOverrideView::from(
+                    &row,
+                ))),
+                Err(e) => crud::db_error_internal(e, "Database error"),
+            };
         }
 
         ok_json(&ConfigUpdateResponse::Acknowledged(ConfigAcknowledgement {
@@ -400,11 +703,26 @@ impl LlmBlock {
 // Block trait implementation
 // ---------------------------------------------------------------------------
 
+/// Path parameters of `DELETE /b/llm/api/config/{id}`.
+fn override_id_path_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id"],
+        "properties": {
+            "id": {
+                "type": "string",
+                "description": "Override row id, as returned by `POST /b/llm/api/config`."
+            }
+        }
+    })
+}
+
 /// Path-parameter schema for the `/b/llm/api/providers/{id}…` routes.
 ///
 /// Hand-written rather than derived: every handler reads the id with
-/// `path_param(msg, "id", ..)` by name, so a struct declared only to feed
-/// `.path_params::<T>()` would have no runtime user (the `tickets` /
+/// `msg.var("id")` by name, so a struct declared only to feed a derived
+/// path-params schema would have no runtime user (the `tickets` /
 /// `messages` precedent).
 fn provider_id_path_schema() -> serde_json::Value {
     serde_json::json!({
@@ -444,10 +762,8 @@ fn model_path_schema() -> serde_json::Value {
 #[wafer_block::wafer_async_trait]
 impl Block for LlmBlock {
     fn info(&self) -> BlockInfo {
-        use wafer_run::AuthLevel;
-
         BlockInfo::new(
-            "impresspress/llm",
+            Self::BLOCK_NAME,
             "0.0.1",
             "http-handler@v1",
             "LLM orchestrator — routes to provider or local backends",
@@ -469,100 +785,7 @@ impl Block for LlmBlock {
             "LLM orchestrator. Routes chat requests to provider-llm or local-llm backends, \
              manages thread history via the messages block, and provides the main chat UI.",
         )
-        .endpoints(vec![
-            BlockEndpoint::post("/b/llm/api/chat")
-                .summary("Send a chat message")
-                .auth(AuthLevel::Authenticated)
-                .input::<contracts::ChatRequest>()
-                .output::<contracts::ChatResponse>(),
-            // Same request as `/api/chat`; the response is
-            // `text/event-stream` — one `data:` frame per `ChatChunk`, then
-            // `data: [DONE]` (or `event: error`). No `.output::<T>()`: it
-            // would publish an `application/json` schema for a body this
-            // endpoint never sends, and the frame type is wafer-run's
-            // `ChatChunk`, which carries no JsonSchema derive to mirror.
-            BlockEndpoint::post("/b/llm/api/chat/stream")
-                .summary("Send a chat message (SSE streaming)")
-                .auth(AuthLevel::Authenticated)
-                .input::<contracts::ChatRequest>(),
-            BlockEndpoint::get("/b/llm/api/providers")
-                .summary("List configured LLM providers")
-                .auth(AuthLevel::Admin)
-                .output::<contracts::ProviderListResponse>(),
-            BlockEndpoint::post("/b/llm/api/providers")
-                .summary("Create LLM provider")
-                .auth(AuthLevel::Admin)
-                .input::<contracts::CreateProviderRequest>()
-                .output::<contracts::ProviderView>(),
-            BlockEndpoint::patch("/b/llm/api/providers/{id}")
-                .summary("Update LLM provider")
-                .auth(AuthLevel::Admin)
-                .path_params_schema(provider_id_path_schema())
-                .input::<contracts::UpdateProviderRequest>()
-                .output::<contracts::ProviderView>(),
-            BlockEndpoint::delete("/b/llm/api/providers/{id}")
-                .summary("Delete LLM provider")
-                .auth(AuthLevel::Admin)
-                .path_params_schema(provider_id_path_schema())
-                .output::<contracts::ProviderDeleteResponse>(),
-            BlockEndpoint::post("/b/llm/api/providers/{id}/discover-models")
-                .summary("Discover provider models via /v1/models")
-                .auth(AuthLevel::Admin)
-                .path_params_schema(provider_id_path_schema())
-                .output::<contracts::DiscoveredModelsResponse>(),
-            BlockEndpoint::get("/b/llm/api/models")
-                .summary("List available models (aggregated across backends)")
-                .auth(AuthLevel::Authenticated)
-                .output::<contracts::ModelListResponse>(),
-            BlockEndpoint::get("/b/llm/api/models/{backend_id}/{model_id}/status")
-                .summary("Model status (ready / loading / unloaded)")
-                .auth(AuthLevel::Authenticated)
-                .path_params_schema(model_path_schema())
-                .output::<contracts::ModelStatusResponse>(),
-            // Takes no body; answers `text/event-stream`, one `data:` frame
-            // per `LoadProgress`, then `data: [DONE]`. No `.output::<T>()`
-            // for the same reason as `/api/chat/stream`.
-            BlockEndpoint::post("/b/llm/api/models/{backend_id}/{model_id}/load")
-                .summary("Load a model (SSE progress)")
-                .auth(AuthLevel::Admin)
-                .path_params_schema(model_path_schema()),
-            BlockEndpoint::post("/b/llm/api/models/{backend_id}/{model_id}/unload")
-                .summary("Unload a model")
-                .auth(AuthLevel::Admin)
-                .path_params_schema(model_path_schema())
-                .output::<contracts::ModelUnloadResponse>(),
-            BlockEndpoint::get("/b/llm/api/config")
-                .summary("Get default provider/model config")
-                .auth(AuthLevel::Authenticated)
-                .output::<contracts::LlmConfigResponse>(),
-            BlockEndpoint::post("/b/llm/api/config")
-                .summary("Update per-thread provider/model override")
-                .auth(AuthLevel::Authenticated)
-                .input::<contracts::ConfigUpdateRequest>()
-                .output::<contracts::ConfigUpdateResponse>(),
-            // Chat UI is reached from the ADMIN sidebar (nav_groups::admin
-            // "Communication" group); the pre-refactor `handle()` gated every
-            // non-API page on `is_admin`, so the chat UI was admin-only in
-            // practice. Declaring it `Admin` (and the thread permalink too)
-            // makes that the single declared, centrally-enforced policy —
-            // preserving the exact prior auth outcome (the declared
-            // `Authenticated` was drift the old blanket gate overrode).
-            BlockEndpoint::get("/b/llm/")
-                .summary("Chat UI")
-                .auth(AuthLevel::Admin),
-            BlockEndpoint::get("/b/llm/threads/{id}")
-                .summary("Chat UI (thread permalink)")
-                .auth(AuthLevel::Admin),
-            BlockEndpoint::get("/b/llm/settings")
-                .summary("LLM settings page")
-                .auth(AuthLevel::Admin),
-            BlockEndpoint::get("/b/llm/providers")
-                .summary("Providers admin")
-                .auth(AuthLevel::Admin),
-            BlockEndpoint::get("/b/llm/models")
-                .summary("Models admin")
-                .auth(AuthLevel::Admin),
-        ])
+        .endpoints(endpoint_match::declare(ROUTES))
         .config_keys(vec![
             ConfigVar::new(
                 DEFAULT_PROVIDER_VAR,
@@ -577,6 +800,20 @@ impl Block for LlmBlock {
             )
             .name("Default Model")
             .optional(),
+            ConfigVar::new(
+                DEFAULT_MAX_TOKENS_VAR,
+                "Largest reply, in output tokens, a chat request that names no \
+                 budget of its own may generate. Anthropic-protocol providers \
+                 refuse a request without one; OpenAI-protocol providers are \
+                 capped by it too, where the field's absence would otherwise \
+                 leave the reply unbounded. The usable ceiling belongs to the \
+                 model, not to this setting: a value above what the configured \
+                 model accepts is refused by the provider (Anthropic answers \
+                 400), so raise it against the model you actually run.",
+                &DEFAULT_MAX_TOKENS.to_string(),
+            )
+            .name("Default Max Tokens")
+            .input_type(InputType::Number),
         ])
         .can_disable(true)
         .default_enabled(true)
@@ -592,9 +829,10 @@ impl Block for LlmBlock {
         // `(provider, model)` target. Only accessible from another block (the
         // caller_id is set by `ctx.call_block`); never reachable from external
         // HTTP because the shared pipeline strips the caller id. It is NOT a
-        // declared HTTP endpoint, so it stays a handler-owned guard ahead of
-        // the matcher.
-        if msg.action() == "retrieve" && msg.path() == "/b/llm/api/internal/default-target" {
+        // declared HTTP endpoint (declaring it would publish it), so it stays
+        // a handler-owned guard ahead of the matcher; this is the one path
+        // read in this block outside `endpoint_match::dispatch`.
+        if msg.action() == "retrieve" && msg.path() == DefaultTarget::RESOURCE {
             if ctx.caller_id().is_none() {
                 return crate::http::err_not_found("not found");
             }
@@ -602,11 +840,12 @@ impl Block for LlmBlock {
         }
 
         // Auth is enforced centrally by `route_to_block` from the declared
-        // endpoint `AuthLevel` (chat/config/models-list → Authenticated; UI
-        // pages, provider CRUD, model load/unload → Admin). The block holds
+        // endpoint `AuthLevel` (chat, the config READ and models-list →
+        // Authenticated; UI pages, provider CRUD, model load/unload and the
+        // two config WRITES → Admin). The block holds
         // no `user_id`/`is_admin` preamble and the provider/model handlers no
         // longer re-check `is_admin`. `{id}`/`{backend_id}`/`{model_id}` are
-        // bound into `req.param.*` for the handlers' `path_param` readers.
+        // bound into `req.param.*` for the handlers' `msg.var` readers.
         let Some(route) = endpoint_match::dispatch(&mut msg, ROUTES) else {
             return err_not_found("not found");
         };
@@ -628,6 +867,7 @@ impl Block for LlmBlock {
             Route::ListModels => routes::list_models(self, ctx, &msg).await,
             Route::GetConfig => self.handle_get_config(ctx).await,
             Route::PostConfig => self.handle_post_config(ctx, input).await,
+            Route::DeleteConfig => self.handle_delete_config(ctx, &msg).await,
         }
     }
 
@@ -643,22 +883,59 @@ impl Block for LlmBlock {
         crate::migration_helper::lifecycle_init(
             ctx,
             &event,
-            "impresspress/llm",
+            Self::BLOCK_NAME,
             migrations::SQLITE_MIGRATIONS,
             migrations::POSTGRES_MIGRATIONS,
         )
         .await?;
         if matches!(event.event_type, LifecycleType::Init) {
-            // Always load enabled providers into the in-memory service on
-            // startup so chat dispatch finds them without waiting for an
-            // admin CRUD write. Non-fatal if it fails — admins can trigger
-            // a reload via any provider write.
-            if let Err(e) = routes::reload_provider_service(ctx, self.provider_admin.as_ref()).await
-            {
-                tracing::warn!("initial provider reload failed: {e}");
+            // Load enabled providers into the in-memory service on startup
+            // so chat dispatch finds them without waiting for an admin CRUD
+            // write. Non-fatal if it fails — admins can trigger a reload via
+            // any provider write.
+            //
+            // Skipped entirely on a runtime with no configurable provider
+            // router (a `NoopProviderAdmin` handle: browser and any other
+            // build without the native provider backend). There, "no reload
+            // happened" is the correct state and not a degradation, so it
+            // must not be reported as one — `configure` now answers
+            // `NotSupported` rather than silently accepting, and warning on
+            // every boot about a capability the deployment never had would
+            // be noise an operator has to learn to ignore.
+            if self.provider_admin.manages_providers() {
+                if let Err(e) =
+                    routes::reload_provider_service(ctx, self.provider_admin.as_ref()).await
+                {
+                    tracing::warn!("initial provider reload failed: {e}");
+                }
+            } else {
+                tracing::debug!(
+                    "provider reload skipped: this runtime has no configurable provider router"
+                );
             }
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod table_tests {
+    use std::sync::Arc;
+
+    use super::*;
+
+    /// `info().endpoints` is generated from `ROUTES`; nothing else declares
+    /// an endpoint for this block.
+    #[test]
+    fn info_endpoints_come_from_the_table() {
+        let block = LlmBlock::new(Arc::new(provider_admin::NoopProviderAdmin));
+        let declared = block.info().endpoints;
+        assert_eq!(declared.len(), ROUTES.len());
+        for (ep, row) in declared.iter().zip(ROUTES) {
+            assert_eq!(ep.method, row.method, "{}", row.template);
+            assert_eq!(ep.path, row.template);
+            assert_eq!(ep.auth, row.auth, "{}", row.template);
+        }
     }
 }
 
@@ -669,10 +946,96 @@ mod config_tests {
     use wafer_run::{streams::output::TerminalNotResponse, ErrorCode, InputStream};
 
     use super::*;
-    use crate::test_support::{output_json, TestContext};
+    use crate::test_support::{admin_msg, output_json, TestContext};
 
     fn block() -> LlmBlock {
         LlmBlock::new(Arc::new(provider_admin::NoopProviderAdmin))
+    }
+
+    /// The output-token budget comes from the declared variable, and a value
+    /// that is not a positive integer falls back instead of reaching a
+    /// provider as garbage (or as `max_tokens: 0`, which Anthropic answers
+    /// `400` to).
+    #[tokio::test]
+    async fn the_max_token_budget_is_read_from_its_variable() {
+        let mut ctx = TestContext::with_llm().await;
+        assert_eq!(
+            default_max_tokens(&ctx).await.expect("read"),
+            DEFAULT_MAX_TOKENS,
+            "an unset variable is the built-in default"
+        );
+
+        ctx.set_config(DEFAULT_MAX_TOKENS_VAR, "1500");
+        assert_eq!(default_max_tokens(&ctx).await.expect("read"), 1500);
+
+        for bad in ["0", "-1", "lots", "4096.5", " 4096"] {
+            ctx.set_config(DEFAULT_MAX_TOKENS_VAR, bad);
+            assert_eq!(
+                default_max_tokens(&ctx).await.expect("read"),
+                DEFAULT_MAX_TOKENS,
+                "{bad:?} is not a usable budget and must fall back"
+            );
+        }
+    }
+
+    /// An operator changes the budget on the admin Variables screen, which
+    /// renders `info().config_keys`. A variable the block reads but does not
+    /// declare is unreachable there — and its default would be a number
+    /// hardcoded in one handler, which is what the project's config rules
+    /// exist to prevent.
+    #[test]
+    fn the_block_declares_the_max_token_variable() {
+        let declared = block().info().config_keys;
+        let var = declared
+            .iter()
+            .find(|v| v.key == DEFAULT_MAX_TOKENS_VAR)
+            .expect("the llm block must declare the variable it reads");
+        assert_eq!(var.input_type, InputType::Number);
+        assert_eq!(
+            var.default,
+            DEFAULT_MAX_TOKENS.to_string(),
+            "the declared default and the fallback are one number"
+        );
+    }
+
+    /// The settings page renders `hx-delete="/b/llm/api/config/{id}"` for
+    /// every per-thread override; that request must reach a route that
+    /// removes the row, not the block's 404 fallback.
+    #[tokio::test]
+    async fn delete_config_removes_the_thread_override() {
+        let ctx = TestContext::with_llm().await;
+        let created = output_json(
+            block()
+                .handle_post_config(
+                    &ctx,
+                    body(serde_json::json!({
+                        "thread_id": "t1",
+                        "provider_block": "openai-main",
+                        "model": "gpt-4o",
+                    })),
+                )
+                .await,
+        )
+        .await;
+        let id = created["id"].as_str().expect("row id").to_string();
+
+        let out = block()
+            .handle(
+                &ctx,
+                admin_msg("delete", &format!("/b/llm/api/config/{id}")),
+                InputStream::from_bytes(Vec::new()),
+            )
+            .await;
+
+        assert_eq!(
+            output_json(out).await["deleted"],
+            serde_json::json!(true),
+            "the settings page's delete button must reach a route"
+        );
+        let rows = repo::settings::list_all(&ctx)
+            .await
+            .expect("list overrides");
+        assert!(rows.rows.is_empty(), "the override row must be gone");
     }
 
     fn body(value: serde_json::Value) -> InputStream {
@@ -797,11 +1160,11 @@ mod config_tests {
         .await;
 
         assert_eq!(out, serde_json::json!({ "updated": true }));
-        let rows = db::list_all(&ctx, SETTINGS_TABLE, vec![])
+        let rows = repo::settings::list_all(&ctx)
             .await
             .expect("list overrides");
         assert!(
-            rows.is_empty(),
+            rows.rows.is_empty(),
             "an acknowledgement must not have written an override"
         );
     }
@@ -853,14 +1216,77 @@ mod config_tests {
                 }
                 other => panic!("{value}: expected InvalidArgument, got {other:?}"),
             }
-            let rows = db::list_all(&ctx, SETTINGS_TABLE, vec![])
+            let rows = repo::settings::list_all(&ctx)
                 .await
                 .expect("list overrides");
             assert!(
-                rows.is_empty(),
+                rows.rows.is_empty(),
                 "{value}: a refused request must not have written an override"
             );
         }
+    }
+
+    /// A settings-table read that FAILS is not "no override".
+    ///
+    /// `get_thread_setting` ended in `.ok()`, so a database outage looked
+    /// exactly like an absent row: `handle_post_config` took its "create"
+    /// branch and wrote a SECOND override for a thread that already had one,
+    /// leaving two rows the `thread_id` lookup then picks between
+    /// arbitrarily; and `resolve_provider` silently fell back to the global
+    /// default provider and model, billing a thread's traffic to a backend
+    /// its owner had pinned away from.
+    #[tokio::test]
+    async fn a_failing_settings_read_is_an_error_not_an_absent_override() {
+        let ctx = TestContext::with_llm().await;
+        output_json(
+            block()
+                .handle_post_config(
+                    &ctx,
+                    body(serde_json::json!({
+                        "thread_id": "t1",
+                        "provider_block": "openai-main",
+                        "model": "gpt-4o",
+                    })),
+                )
+                .await,
+        )
+        .await;
+
+        let failing = crate::test_support::FailingDbOpContext::new(
+            ctx.clone(),
+            vec![("database.list", repo::settings::TABLE)],
+        );
+
+        match block()
+            .handle_post_config(
+                &failing,
+                body(serde_json::json!({ "thread_id": "t1", "model": "gpt-4o-mini" })),
+            )
+            .await
+            .collect_buffered()
+            .await
+        {
+            Err(TerminalNotResponse::Error(e)) => assert_eq!(e.code, ErrorCode::Internal),
+            other => panic!("a failed lookup must not be treated as an absent row: {other:?}"),
+        }
+        let rows = repo::settings::list_all(&ctx)
+            .await
+            .expect("list overrides");
+        assert_eq!(
+            rows.rows.len(),
+            1,
+            "the failed lookup must not have created a second override for t1"
+        );
+
+        assert_eq!(
+            block()
+                .resolve_provider(&failing, "t1", None, None)
+                .await
+                .expect_err("the outage surfaces")
+                .code,
+            ErrorCode::Internal,
+            "a failed settings read must not fall back to the default provider/model"
+        );
     }
 
     #[tokio::test]
@@ -874,6 +1300,134 @@ mod config_tests {
         assert_eq!(
             out,
             serde_json::json!({ "default_provider": "openai-main", "default_model": "gpt-4o" })
+        );
+    }
+}
+
+#[cfg(test)]
+mod access_tests {
+    use std::sync::Arc;
+
+    use super::*;
+    use crate::test_support::{anon_msg, output_http_status, output_json, Session, TestContext};
+
+    /// A context that routes `/b/llm/*` to the real block and can sign people
+    /// in, so each request below presents a real token.
+    async fn ctx() -> TestContext {
+        let mut ctx = TestContext::with_llm()
+            .await
+            .with_auth_added()
+            .await
+            .with_sign_in_added();
+        ctx.register_block(
+            "impresspress/llm",
+            Arc::new(LlmBlock::new(Arc::new(provider_admin::NoopProviderAdmin))),
+        );
+        ctx
+    }
+
+    async fn signed_in(ctx: &TestContext, role: &str) -> Session {
+        let email = format!("{role}@example.com");
+        ctx.seed_account(&email, "correct-horse-battery-staple", role)
+            .await;
+        ctx.sign_in(&email, "correct-horse-battery-staple").await
+    }
+
+    fn override_body(thread_id: &str) -> InputStream {
+        InputStream::from_bytes(
+            serde_json::to_vec(&serde_json::json!({
+                "thread_id": thread_id,
+                "provider_block": "attacker-proxy",
+                "model": "gpt-4o",
+            }))
+            .expect("serialize body"),
+        )
+    }
+
+    /// A thread override is keyed by `thread_id` alone and the handler takes
+    /// no identity, so `Authenticated` meant any logged-in caller could pin
+    /// any thread — one they cannot even read — to any configured backend.
+    /// The write is admin-only, enforced by the router.
+    ///
+    /// Driven through `TestContext::request` with a real token, so both the
+    /// credential check and the access gate are the ones production runs.
+    #[tokio::test]
+    async fn a_non_admin_cannot_pin_a_thread_to_a_backend() {
+        let ctx = ctx().await;
+        let member = signed_in(&ctx, "user").await;
+
+        assert_eq!(
+            output_http_status(
+                ctx.request_with_input(
+                    member.bearer(anon_msg("create", "/b/llm/api/config")),
+                    override_body("someone-elses-thread"),
+                )
+                .await
+            )
+            .await,
+            403,
+        );
+        assert!(
+            repo::settings::list_all(&ctx)
+                .await
+                .expect("list overrides")
+                .rows
+                .is_empty(),
+            "the refused request must not have written an override"
+        );
+    }
+
+    /// The delete is the same decision from the other side: without it, any
+    /// logged-in caller could drop the admin's override for any thread.
+    #[tokio::test]
+    async fn a_non_admin_cannot_delete_an_override() {
+        let ctx = ctx().await;
+        let admin = signed_in(&ctx, "admin").await;
+        let member = signed_in(&ctx, "user").await;
+
+        let created = output_json(
+            ctx.request_with_input(
+                admin.bearer(anon_msg("create", "/b/llm/api/config")),
+                override_body("t1"),
+            )
+            .await,
+        )
+        .await;
+        let id = created["id"].as_str().expect("row id").to_string();
+
+        assert_eq!(
+            output_http_status(
+                ctx.request(member.bearer(anon_msg("delete", &format!("/b/llm/api/config/{id}"),)))
+                    .await
+            )
+            .await,
+            403,
+        );
+        assert_eq!(
+            repo::settings::list_all(&ctx)
+                .await
+                .expect("list overrides")
+                .rows
+                .len(),
+            1,
+            "the refused delete must have left the override in place"
+        );
+    }
+
+    /// The read stays `Authenticated`: it publishes the two deployment-wide
+    /// defaults, which every caller of the equally-`Authenticated`
+    /// `/b/llm/api/chat` is already chatting against.
+    #[tokio::test]
+    async fn the_config_read_is_still_open_to_any_logged_in_caller() {
+        let ctx = ctx().await;
+        let member = signed_in(&ctx, "user").await;
+        assert_eq!(
+            output_http_status(
+                ctx.request(member.bearer(anon_msg("retrieve", "/b/llm/api/config")))
+                    .await
+            )
+            .await,
+            200,
         );
     }
 }

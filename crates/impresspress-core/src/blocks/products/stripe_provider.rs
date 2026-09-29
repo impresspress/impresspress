@@ -12,16 +12,20 @@ use wafer_core::clients::config;
 use wafer_run::{context::Context, ErrorCode, WaferError};
 
 use super::{
+    config::{
+        platform_country, seller_fee_bps, CHECKOUT_ALLOWED_ORIGINS, STRIPE_API_VERSION,
+        STRIPE_PUBLISHABLE_KEY, STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET,
+    },
     contracts::{
-        ApprovalStatus, BillingPortalRequest, ProviderReconcileResult, ProviderRedirect,
-        SellerAccount, SellerCapabilities, SellerOnboardingRequest, SellerOnboardingResponse,
-        StripeConnectionState, StripeConnectionStatus,
+        BillingPortalRequest, ProviderReconcileResult, ProviderRedirect, RefundStatus,
+        SellerAccount, SellerApproval, SellerCapabilities, SellerOnboardingRequest,
+        SellerOnboardingResponse, SellerStatus, StripeConnectionState, StripeConnectionStatus,
     },
     repo,
     stripe_client::{publishable_livemode, secret_livemode, StripeClient, DEFAULT_API_VERSION},
     stripe_secret_operations_allowed,
 };
-use crate::util::RecordExt;
+use crate::{config_vars::FRONTEND_URL_KEY, util::RecordExt};
 
 fn bool_at(value: &Value, pointer: &str) -> bool {
     value
@@ -83,23 +87,16 @@ fn capabilities(value: &Value) -> BTreeMap<String, String> {
         .collect()
 }
 
-async fn connection_base(ctx: &dyn Context) -> (String, bool, bool, String) {
-    let publishable =
-        config::get_default(ctx, "IMPRESSPRESS__PRODUCTS__STRIPE_PUBLISHABLE_KEY", "").await;
-    let webhook =
-        config::get_default(ctx, "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET", "").await;
-    let api_version = config::get_default(
-        ctx,
-        "IMPRESSPRESS__PRODUCTS__STRIPE_API_VERSION",
-        DEFAULT_API_VERSION,
-    )
-    .await;
-    (
+async fn connection_base(ctx: &dyn Context) -> Result<(String, bool, bool, String), WaferError> {
+    let publishable = config::get_default(ctx, STRIPE_PUBLISHABLE_KEY, "").await?;
+    let webhook = config::get_default(ctx, STRIPE_WEBHOOK_SECRET, "").await?;
+    let api_version = config::get_default(ctx, STRIPE_API_VERSION, DEFAULT_API_VERSION).await?;
+    Ok((
         publishable.clone(),
         !publishable.trim().is_empty(),
         !webhook.trim().is_empty(),
         api_version,
-    )
+    ))
 }
 
 fn connection_error(
@@ -133,61 +130,65 @@ fn connection_error(
     }
 }
 
-pub(crate) async fn connection_status(ctx: &dyn Context) -> StripeConnectionStatus {
-    let secret = config::get_default(ctx, "IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY", "").await;
+/// The Stripe connection as the admin sees it. A failed settings read is
+/// returned rather than drawn as "not configured".
+pub(crate) async fn connection_status(
+    ctx: &dyn Context,
+) -> Result<StripeConnectionStatus, WaferError> {
+    let secret = config::get_default(ctx, STRIPE_SECRET_KEY, "").await?;
     let (publishable, publishable_configured, webhook_configured, api_version) =
-        connection_base(ctx).await;
-    if !stripe_secret_operations_allowed(ctx).await {
-        return connection_error(
+        connection_base(ctx).await?;
+    if !stripe_secret_operations_allowed(ctx) {
+        return Ok(connection_error(
             !secret.trim().is_empty(),
             false,
             publishable_configured,
             false,
             api_version,
             "Stripe secret-key operations are disabled in the browser runtime; use a trusted remote commerce API or pre-created Payment Links",
-        );
+        ));
     }
     if secret.trim().is_empty() {
-        return connection_error(
+        return Ok(connection_error(
             false,
             false,
             publishable_configured,
             webhook_configured,
             api_version,
             "Stripe secret key is not configured",
-        );
+        ));
     }
     let Some(livemode) = secret_livemode(&secret) else {
-        return connection_error(
+        return Ok(connection_error(
             true,
             false,
             publishable_configured,
             webhook_configured,
             api_version,
             "Stripe secret key format is invalid",
-        );
+        ));
     };
     if publishable_configured && publishable_livemode(&publishable) != Some(livemode) {
-        return connection_error(
+        return Ok(connection_error(
             true,
             livemode,
             publishable_configured,
             webhook_configured,
             api_version,
             "Stripe secret and publishable keys are from different modes",
-        );
+        ));
     }
     let client = match StripeClient::load(ctx).await {
         Ok(client) => client,
         Err(error) => {
-            return connection_error(
+            return Ok(connection_error(
                 true,
                 livemode,
                 publishable_configured,
                 webhook_configured,
                 api_version,
                 error.message,
-            )
+            ))
         }
     };
     let account = match client
@@ -196,28 +197,28 @@ pub(crate) async fn connection_status(ctx: &dyn Context) -> StripeConnectionStat
     {
         Ok(account) => account,
         Err(error) => {
-            return connection_error(
+            return Ok(connection_error(
                 true,
                 livemode,
                 publishable_configured,
                 webhook_configured,
                 api_version,
                 error.message,
-            )
+            ))
         }
     };
     let account_id = string_at(&account, "/id");
     if !account_id.starts_with("acct_") {
-        return connection_error(
+        return Ok(connection_error(
             true,
             livemode,
             publishable_configured,
             webhook_configured,
             api_version,
             "Stripe credential check returned an incomplete account",
-        );
+        ));
     }
-    StripeConnectionStatus {
+    Ok(StripeConnectionStatus {
         state: if livemode {
             StripeConnectionState::ConnectedLive
         } else {
@@ -237,18 +238,12 @@ pub(crate) async fn connection_status(ctx: &dyn Context) -> StripeConnectionStat
         webhook_secret_configured: webhook_configured,
         api_version,
         error: String::new(),
-    }
+    })
 }
 
 async fn validate_redirect(ctx: &dyn Context, url: &str) -> Result<(), WaferError> {
-    let frontend = config::get_default(
-        ctx,
-        "WAFER_RUN_SHARED__FRONTEND_URL",
-        "http://localhost:5173",
-    )
-    .await;
-    let allowed =
-        config::get_default(ctx, "IMPRESSPRESS__PRODUCTS__CHECKOUT_ALLOWED_ORIGINS", "").await;
+    let frontend = config::get_default(ctx, FRONTEND_URL_KEY, "http://localhost:5173").await?;
+    let allowed = config::get_default(ctx, CHECKOUT_ALLOWED_ORIGINS, "").await?;
     if url.trim().is_empty() || !super::stripe::is_allowed_checkout_url(url, &frontend, &allowed) {
         return Err(WaferError::new(
             ErrorCode::InvalidArgument,
@@ -258,30 +253,12 @@ async fn validate_redirect(ctx: &dyn Context, url: &str) -> Result<(), WaferErro
     Ok(())
 }
 
-async fn configured_fee(ctx: &dyn Context) -> Result<u16, WaferError> {
-    config::get_default(
-        ctx,
-        "IMPRESSPRESS__PRODUCTS__SELLER_APPLICATION_FEE_BPS",
-        "0",
-    )
-    .await
-    .parse::<u16>()
-    .ok()
-    .filter(|value| *value <= 10_000)
-    .ok_or_else(|| {
-        WaferError::new(
-            ErrorCode::FailedPrecondition,
-            "seller application fee must be between 0 and 10000 basis points",
-        )
-    })
-}
-
 fn not_started_account(user_id: &str, fee_basis_points: u16) -> SellerAccount {
     SellerAccount {
         id: String::new(),
         user_id: user_id.to_string(),
-        status: "not_started".to_string(),
-        approval_status: ApprovalStatus::Approved,
+        status: SellerStatus::NotStarted,
+        approval_status: SellerApproval::Approved,
         stripe_account_id: String::new(),
         capabilities: SellerCapabilities {
             details_submitted: false,
@@ -304,13 +281,13 @@ pub(crate) async fn seller_status(
     ctx: &dyn Context,
     user_id: &str,
 ) -> Result<SellerAccount, WaferError> {
-    let fee = configured_fee(ctx).await?;
+    let fee = seller_fee_bps(ctx).await?;
     let Some(local) = repo::seller_accounts::get_for_user(ctx, user_id).await? else {
         return Ok(not_started_account(user_id, fee));
     };
     let account_id = local.str_field("stripe_account_id").to_string();
-    if account_id.is_empty() || local.str_field("status") == "suspended" {
-        return repo::seller_accounts::to_contract(&local);
+    if account_id.is_empty() || repo::seller_accounts::is_suspended_record(&local)? {
+        return repo::seller_accounts::to_contract(&local, fee);
     }
     let Ok(client) = StripeClient::load(ctx).await else {
         let stale = repo::seller_accounts::mark_sync_error(
@@ -319,7 +296,7 @@ pub(crate) async fn seller_status(
             "Stripe account status could not be refreshed",
         )
         .await?;
-        return repo::seller_accounts::to_contract(&stale);
+        return repo::seller_accounts::to_contract(&stale, fee);
     };
     let path = format!("/v1/accounts/{}", crate::util::url_path_encode(&account_id));
     let Ok(remote) = client
@@ -332,11 +309,11 @@ pub(crate) async fn seller_status(
             "Stripe account status could not be refreshed",
         )
         .await?;
-        return repo::seller_accounts::to_contract(&stale);
+        return repo::seller_accounts::to_contract(&stale, fee);
     };
     let snapshot = account_snapshot(&remote, client.livemode)?;
     let record = repo::seller_accounts::sync_account(ctx, &local.id, &snapshot).await?;
-    repo::seller_accounts::to_contract(&record)
+    repo::seller_accounts::to_contract(&record, fee)
 }
 
 pub(crate) async fn start_seller_onboarding(
@@ -346,10 +323,10 @@ pub(crate) async fn start_seller_onboarding(
 ) -> Result<SellerOnboardingResponse, WaferError> {
     validate_redirect(ctx, &request.return_url).await?;
     validate_redirect(ctx, &request.refresh_url).await?;
-    let fee = configured_fee(ctx).await?;
+    let fee = seller_fee_bps(ctx).await?;
     let client = StripeClient::load(ctx).await?;
-    let mut local = repo::seller_accounts::ensure_for_user(ctx, user_id, fee).await?;
-    if local.str_field("status") == "suspended" {
+    let mut local = repo::seller_accounts::ensure_for_user(ctx, user_id).await?;
+    if repo::seller_accounts::is_suspended_record(&local)? {
         return Err(WaferError::new(
             ErrorCode::PermissionDenied,
             "seller account is suspended",
@@ -357,18 +334,7 @@ pub(crate) async fn start_seller_onboarding(
     }
     let account_id = local.str_field("stripe_account_id").to_string();
     if account_id.is_empty() {
-        let country = config::get_default(ctx, "IMPRESSPRESS__PRODUCTS__PLATFORM_COUNTRY", "")
-            .await
-            .trim()
-            .to_ascii_uppercase();
-        if !country.is_empty()
-            && (country.len() != 2 || !country.bytes().all(|byte| byte.is_ascii_alphabetic()))
-        {
-            return Err(WaferError::new(
-                ErrorCode::FailedPrecondition,
-                "platform country must be a two-letter country code",
-            ));
-        }
+        let country = platform_country(ctx).await?;
         let mut form = vec![
             ("type".to_string(), "express".to_string()),
             (
@@ -384,8 +350,11 @@ pub(crate) async fn start_seller_onboarding(
                 user_id.to_string(),
             ),
         ];
-        if !country.is_empty() {
-            form.push(("country".to_string(), country));
+        // Omitted when the platform has no configured country: Stripe then
+        // infers the connected account's country from onboarding, which is
+        // what this path has always done for a blank value.
+        if let Some(country) = country {
+            form.push(("country".to_string(), country.as_str().to_string()));
         }
         let remote = client
             .request_json(
@@ -445,7 +414,7 @@ pub(crate) async fn start_seller_onboarding(
         ));
     }
     Ok(SellerOnboardingResponse {
-        account: repo::seller_accounts::to_contract(&local)?,
+        account: repo::seller_accounts::to_contract(&local, fee)?,
         url,
         expires_at,
     })
@@ -685,7 +654,10 @@ pub(crate) async fn retrieve_refund(
     decode_refund_response(&value, params, Some(refund_id), client.livemode)
 }
 
-enum RefundReconcileOutcome {
+/// What one run of a claimed provider operation achieved, whatever kind it
+/// is: completed, worth another attempt, or finished in a state only an
+/// operator can move.
+enum OperationOutcome {
     Succeeded(String),
     Retry(String),
     Terminal(String, String),
@@ -694,16 +666,11 @@ enum RefundReconcileOutcome {
 async fn reconcile_refund_operation(
     ctx: &dyn Context,
     operation: &wafer_core::clients::database::Record,
-) -> Result<RefundReconcileOutcome, WaferError> {
-    let refund = wafer_core::clients::database::get(
-        ctx,
-        repo::refunds::TABLE,
-        operation.str_field("aggregate_id"),
-    )
-    .await?;
-    if refund.str_field("status") == "succeeded" {
-        return Ok(RefundReconcileOutcome::Succeeded(
-            refund.str_field("response_json").to_string(),
+) -> Result<OperationOutcome, WaferError> {
+    let refund = repo::refunds::get(ctx, operation.str_field("aggregate_id")).await?;
+    if repo::refunds::status_of(&refund)? == RefundStatus::Succeeded {
+        return Ok(OperationOutcome::Succeeded(
+            refund.json_text_field("response_json"),
         ));
     }
     let purchase = repo::purchases::get(ctx, refund.str_field("purchase_id")).await?;
@@ -776,8 +743,8 @@ async fn reconcile_refund_operation(
             )
             .await?;
             ledger = repo::refunds::mark_succeeded(ctx, &ledger.id).await?;
-            Ok(RefundReconcileOutcome::Succeeded(
-                ledger.str_field("response_json").to_string(),
+            Ok(OperationOutcome::Succeeded(
+                ledger.json_text_field("response_json"),
             ))
         }
         "failed" | "canceled" => {
@@ -787,12 +754,12 @@ async fn reconcile_refund_operation(
                 "Stripe reports that the refund is terminal and was not completed",
             )
             .await?;
-            Ok(RefundReconcileOutcome::Terminal(
+            Ok(OperationOutcome::Terminal(
                 "Stripe refund failed or was canceled".to_string(),
                 response_json,
             ))
         }
-        _ => Ok(RefundReconcileOutcome::Retry(format!(
+        _ => Ok(OperationOutcome::Retry(format!(
             "Stripe refund remains {}",
             provider.status
         ))),
@@ -802,66 +769,128 @@ async fn reconcile_refund_operation(
 /// Claim and reconcile a bounded batch. It is safe to invoke from an
 /// authenticated scheduler or the administrator recovery panel; leases prevent
 /// overlapping workers and Stripe mutations retain their original idempotency
-/// key.
+/// key. A write that fails for one operation is logged and counted in
+/// `unrecorded`; the rest of the batch still runs.
 pub(crate) async fn reconcile_provider_operations(
     ctx: &dyn Context,
     limit: usize,
 ) -> Result<ProviderReconcileResult, WaferError> {
-    let claims = repo::provider_operations::claim_due(ctx, limit.clamp(1, 100)).await?;
+    let batch = repo::provider_operations::claim_due(ctx, limit.clamp(1, 100)).await?;
     let mut result = ProviderReconcileResult {
-        claimed: claims.len() as u64,
+        claimed: batch.claims.len() as u64,
+        dead_letter: batch.dead_lettered,
+        unrecorded: batch.failures.len() as u64,
         ..ProviderReconcileResult::default()
     };
-    for claim in claims {
-        let outcome = match claim.record.str_field("operation_type") {
-            repo::provider_operations::REFUND_RECONCILE => {
-                reconcile_refund_operation(ctx, &claim.record).await
-            }
-            other => Ok(RefundReconcileOutcome::Terminal(
-                format!("unsupported provider operation type: {other}"),
-                "{}".to_string(),
-            )),
-        };
-        match outcome {
-            Ok(RefundReconcileOutcome::Succeeded(response_json)) => {
-                repo::provider_operations::mark_completed(
-                    ctx,
-                    &claim.record.id,
-                    &claim.owner,
-                    &response_json,
-                )
-                .await?;
-                result.succeeded += 1;
-            }
-            Ok(RefundReconcileOutcome::Terminal(message, response_json)) => {
-                repo::provider_operations::resolve_unleased(
-                    ctx,
-                    &claim.record.id,
-                    false,
-                    &response_json,
-                    &message,
-                )
-                .await?;
-                result.dead_letter += 1;
-            }
-            Ok(RefundReconcileOutcome::Retry(message)) | Err(WaferError { message, .. }) => {
-                repo::provider_operations::mark_retry(
-                    ctx,
-                    &claim.record.id,
-                    &claim.owner,
-                    claim.attempts,
-                    &message,
-                )
-                .await?;
-                if claim.attempts >= 8 {
-                    result.dead_letter += 1;
-                } else {
-                    result.retry_scheduled += 1;
-                }
+    for (id, error) in &batch.failures {
+        tracing::error!(
+            operation_id = %id,
+            error = %error,
+            "could not claim or dead-letter a due provider operation"
+        );
+    }
+    for claim in batch.claims {
+        match record_operation_outcome(ctx, &claim).await {
+            Ok(Recorded::Succeeded) => result.succeeded += 1,
+            Ok(Recorded::RetryScheduled) => result.retry_scheduled += 1,
+            Ok(Recorded::DeadLettered) => result.dead_letter += 1,
+            Err(error) => {
+                tracing::error!(
+                    operation_id = %claim.record.id,
+                    attempts = claim.attempts,
+                    error = %error,
+                    "could not record a provider operation's outcome"
+                );
+                result.unrecorded += 1;
             }
         }
     }
     Ok(result)
+}
+
+/// Take down the Payment Link of the row this operation names. The row id is
+/// the aggregate, so a takedown queued by a deactivation, by an archived
+/// offer or by a create whose row was retired mid-flight is the same
+/// operation under the same Stripe idempotency key.
+async fn take_down_payment_link_operation(
+    ctx: &dyn Context,
+    operation: &wafer_core::clients::database::Record,
+) -> Result<OperationOutcome, WaferError> {
+    match super::stripe::take_down_payment_link(ctx, operation.str_field("aggregate_id")).await? {
+        super::stripe::PaymentLinkTakedown::Settled => {
+            Ok(OperationOutcome::Succeeded("{}".to_string()))
+        }
+        super::stripe::PaymentLinkTakedown::Unresolvable(reason) => {
+            Ok(OperationOutcome::Terminal(reason, "{}".to_string()))
+        }
+    }
+}
+
+/// Where [`record_operation_outcome`] left one claimed operation.
+enum Recorded {
+    Succeeded,
+    RetryScheduled,
+    DeadLettered,
+}
+
+/// Run one claimed operation and write its outcome under the claim's lease.
+/// A failure of the operation itself is an outcome (retry or dead letter);
+/// only a failed bookkeeping write is an `Err`.
+async fn record_operation_outcome(
+    ctx: &dyn Context,
+    claim: &repo::provider_operations::OperationClaim,
+) -> Result<Recorded, WaferError> {
+    let outcome = match claim.record.str_field("operation_type") {
+        repo::provider_operations::REFUND_RECONCILE => {
+            reconcile_refund_operation(ctx, &claim.record).await
+        }
+        repo::provider_operations::PAYMENT_LINK_DEACTIVATE => {
+            take_down_payment_link_operation(ctx, &claim.record).await
+        }
+        other => Ok(OperationOutcome::Terminal(
+            format!("unsupported provider operation type: {other}"),
+            "{}".to_string(),
+        )),
+    };
+    match outcome {
+        Ok(OperationOutcome::Succeeded(response_json)) => {
+            repo::provider_operations::mark_completed(
+                ctx,
+                &claim.record.id,
+                &claim.owner,
+                &response_json,
+            )
+            .await?;
+            Ok(Recorded::Succeeded)
+        }
+        Ok(OperationOutcome::Terminal(message, response_json)) => {
+            repo::provider_operations::resolve_unleased(
+                ctx,
+                &claim.record.id,
+                false,
+                &response_json,
+                &message,
+            )
+            .await?;
+            Ok(Recorded::DeadLettered)
+        }
+        Ok(OperationOutcome::Retry(message)) | Err(WaferError { message, .. }) => {
+            match repo::provider_operations::mark_retry(
+                ctx,
+                &claim.record.id,
+                &claim.owner,
+                claim.attempts,
+                &message,
+            )
+            .await?
+            {
+                repo::provider_operations::RetryRecorded::Scheduled => Ok(Recorded::RetryScheduled),
+                repo::provider_operations::RetryRecorded::DeadLettered => {
+                    Ok(Recorded::DeadLettered)
+                }
+            }
+        }
+    }
 }
 
 pub(crate) async fn sync_connected_account(

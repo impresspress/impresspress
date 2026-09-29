@@ -10,6 +10,7 @@ use wafer_run::{context::Context, ErrorCode, WaferError};
 
 use crate::{
     blocks::products::contracts::{AmountRule, OfferComponentDraft},
+    db_read::{self, Bound},
     util::{stamp_created, stamp_updated, RecordExt},
 };
 
@@ -98,7 +99,13 @@ pub(crate) async fn list_for_offer(
     ctx: &dyn Context,
     offer_id: &str,
 ) -> Result<Vec<Record>, WaferError> {
-    db::list_all(ctx, TABLE, vec![offer_filter(offer_id)]).await
+    db_read::list_bounded(
+        ctx,
+        TABLE,
+        vec![offer_filter(offer_id)],
+        Bound::OnePer("component on one offer"),
+    )
+    .await
 }
 
 pub(crate) async fn set_stripe_price_id(

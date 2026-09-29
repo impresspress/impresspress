@@ -6,81 +6,21 @@
 use std::cell::Cell;
 
 use wafer_block::http_codec;
-use wafer_core::clients::{config as config_client, database as db};
+use wafer_core::clients::config as config_client;
 use wafer_run::{
-    context::Context, streams::output::TerminalNotResponse, AuthLevel, BlockInfo, ErrorCode,
-    InputStream, Message, MetaEntry, OutputStream, WaferError, META_REQ_RESOURCE,
+    context::Context, streams::output::TerminalNotResponse, AuthLevel, BlockEndpoint, BlockInfo,
+    ErrorCode, InputStream, Message, MetaEntry, OutputStream, WaferError,
 };
 
 use crate::{
+    config_vars::{APP_NAME_KEY, DEFAULT_APP_NAME, ENVIRONMENT_KEY},
     endpoint_match,
     features::FeatureConfig,
     http::ResponseBuilder,
+    platform_state::request_logs::{self, NewRequestLog},
     routing::{self, ExtraRoute},
     ui,
 };
-
-/// How the pipeline persists the per-request audit row.
-///
-/// `Inline` (default; native): `db::create` awaited on the response path —
-/// today's behavior. `Queued` (Cloudflare): the completed row is pushed to a
-/// thread-local queue; the platform entry drains it after dispatch and
-/// attaches the write to `ctx.wait_until`, so responses stop paying one D1
-/// write of latency. Rows are plain data, so it does not matter which
-/// interleaved request's drain flushes them.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RequestLogMode {
-    Inline,
-    Queued,
-}
-
-/// One queued audit row (table + column map), ready for `DatabaseService::create`.
-pub struct QueuedRequestLog {
-    pub table: &'static str,
-    pub data: std::collections::HashMap<String, serde_json::Value>,
-}
-
-thread_local! {
-    static REQUEST_LOG_MODE: Cell<RequestLogMode> = const { Cell::new(RequestLogMode::Inline) };
-    /// Queued audit rows for this isolate.
-    ///
-    /// [`IsolateCell`](crate::IsolateCell) rather than `RefCell`: this is
-    /// isolate-lifetime state on the request path, and the push below can
-    /// reallocate the `Vec` — a wide enough window for a Cloudflare hard stop
-    /// to land in. A borrow flag stranded that way stays set for the life of
-    /// the isolate and traps every later request that logs. See
-    /// `crate::isolate_cell`.
-    static REQUEST_LOG_QUEUE: crate::IsolateCell<Vec<QueuedRequestLog>> =
-        const { crate::IsolateCell::new() };
-}
-
-/// Select the request-log persistence mode for this thread (isolate).
-/// The Cloudflare target sets it (idempotently) at the top of every request;
-/// native never calls it.
-pub fn set_request_log_mode(mode: RequestLogMode) {
-    REQUEST_LOG_MODE.with(|m| m.set(mode));
-}
-
-fn request_log_mode() -> RequestLogMode {
-    REQUEST_LOG_MODE.with(Cell::get)
-}
-
-fn enqueue_request_log(
-    table: &'static str,
-    data: std::collections::HashMap<String, serde_json::Value>,
-) {
-    REQUEST_LOG_QUEUE.with(|queue| {
-        let mut rows = queue.take().unwrap_or_default();
-        rows.push(QueuedRequestLog { table, data });
-        queue.set(rows);
-    });
-}
-
-/// Take every queued row, clearing the queue. The platform entry calls this
-/// after each dispatch and persists the rows off the response path.
-pub fn drain_queued_request_logs() -> Vec<QueuedRequestLog> {
-    REQUEST_LOG_QUEUE.with(|queue| queue.take().unwrap_or_default())
-}
 
 /// The `AuthLevel` ceiling for this request, used to filter the WebMCP tool
 /// manifest.
@@ -110,29 +50,131 @@ fn caller_auth_level(msg: &Message) -> AuthLevel {
     AuthLevel::Authenticated
 }
 
-/// Every registered block with its endpoint list narrowed to what `caller`
-/// may invoke, resolved with `routing::effective_access` — the filter the
-/// WebMCP manifest applies, reused so `/openapi.json`, the agent card and the
-/// manifest cannot disagree about who is told an endpoint exists. Blocks are
-/// kept even when nothing in them is visible, so block-level metadata the
-/// documents carry stays stable across tiers.
-fn visible_to_caller(
-    block_infos: &[BlockInfo],
-    caller: AuthLevel,
-    extra_routes: &[ExtraRoute],
-) -> Vec<BlockInfo> {
-    let ceiling = endpoint_match::auth_rank(caller);
+/// The registered blocks the admin feature toggle leaves on — the set every
+/// discovery projection (`/openapi.json`, the agent card and the WebMCP
+/// manifest) is generated from.
+///
+/// `block_infos` is every REGISTERED block, but `route_to_block` 404s any
+/// block the toggle has turned off (routing.rs's feature gate, backed by the
+/// live `block_settings` row). Describing a disabled block's endpoints would
+/// hand the reader routes that 404 on every call, so the documents are built
+/// from the enabled subset only — gated under the same name the router gates
+/// with (`feature_gate_name`; the inspector's `BlockInfo` name and its
+/// route's `block` name differ).
+fn enabled_infos(block_infos: &[BlockInfo], features: &dyn FeatureConfig) -> Vec<BlockInfo> {
     block_infos
         .iter()
-        .map(|block| {
-            let mut visible = block.clone();
-            visible.endpoints.retain(|ep| {
-                endpoint_match::auth_rank(routing::effective_access(block, ep, extra_routes))
-                    <= ceiling
-            });
-            visible
-        })
+        .filter(|b| features.is_block_enabled(routing::feature_gate_name(&b.name)))
+        .cloned()
         .collect()
+}
+
+/// The 413 a request whose body exceeded
+/// [`crate::streaming::MAX_REQUEST_BODY_BYTES`] is answered with.
+///
+/// An ordinary error terminal: `ResourceExhausted` with an explicit
+/// `resp.status` of 413, because `ErrorCode` has no payload-too-large member
+/// and `http_codec::resolve_error_status` lets the error's own status win over
+/// the code's 429. Its message is [`crate::streaming::request_too_large_message`],
+/// so the JSON error envelope names the limit that was enforced.
+///
+/// It has to stop the flow: a plain response terminal does not. The executor
+/// stores its body, applies its meta to the message and runs the next step, so
+/// a refusal built that way ahead of the router is followed by the router
+/// serving its own body over it — `an_oversized_body_to_an_unrouted_path_is_413_not_the_spa`
+/// caught exactly that, with the `wafer-run/web` fallback reached and its
+/// `index.html` served under a 413 status. An error under `on_error: stop`
+/// ends the flow, and the executor carries the response headers the
+/// middleware steps (`wafer-run/cors`, `wafer-run/security-headers`) left on
+/// the message onto it, so a cross-origin uploader's browser can read the 413
+/// instead of reporting a CORS failure.
+///
+/// `oversized_body_flow.rs` pins that against the real executor, the real
+/// `site-main` flow and the real middleware blocks.
+///
+/// [`refuse_oversized_body`] is what callers want: this builds the answer,
+/// that one also records it.
+pub fn payload_too_large_error() -> OutputStream {
+    let mut error = WaferError::new(
+        ErrorCode::ResourceExhausted,
+        crate::streaming::request_too_large_message(),
+    );
+    error.meta.push(MetaEntry {
+        key: wafer_run::META_RESP_STATUS.to_string(),
+        value: "413".to_string(),
+    });
+    OutputStream::error(error)
+}
+
+/// Refuse a request whose body the transport would not carry: the 413 from
+/// [`payload_too_large_error`], plus the `request_logs` row any other
+/// refusal would have written.
+///
+/// Two callers, and they cannot both fire for one request:
+/// [`crate::blocks::body_limit::BodyLimitBlock`] is a flow step ahead of the
+/// router, so in the site-main flow it answers first and
+/// `impresspress/router` never runs; [`handle_request`]'s own check covers a
+/// consumer whose flow dispatches to the router without that step.
+///
+/// The row carries no user id when the block answers: it runs before JWT
+/// validation, and a refusal that never reached authentication has no
+/// authenticated caller to name. Everything else — method, path, client IP,
+/// the 413, the duration — is what a routed refusal records, and
+/// `block_infos` / `extra_routes` are what keep the path out of the
+/// `<unmatched>` collapse.
+pub async fn refuse_oversized_body(
+    ctx: &dyn Context,
+    msg: &Message,
+    block_infos: &[BlockInfo],
+    extra_routes: &[ExtraRoute],
+) -> OutputStream {
+    write_request_log(
+        ctx,
+        NewRequestLog {
+            method: msg.action(),
+            path: msg.path(),
+            status_code: 413,
+            error_message: "",
+            duration_ms: 0,
+            client_ip: msg.remote_addr(),
+            user_id: msg.user_id(),
+        },
+        block_infos,
+        extra_routes,
+    )
+    .await;
+    payload_too_large_error()
+}
+
+/// Refuse a request whose credential could not be checked, with the error
+/// `crate::blocks::auth::credential_check_failed` classified, plus the
+/// `request_logs` row any other refusal would have written.
+///
+/// The row carries no user id: the credential that would have named one is
+/// exactly what could not be checked.
+async fn refuse_unchecked_credential(
+    ctx: &dyn Context,
+    msg: &Message,
+    error: WaferError,
+    block_infos: &[BlockInfo],
+    extra_routes: &[ExtraRoute],
+) -> OutputStream {
+    write_request_log(
+        ctx,
+        NewRequestLog {
+            method: msg.action(),
+            path: msg.path(),
+            status_code: i64::from(http_codec::resolve_error_status(&error)),
+            error_message: &error.message,
+            duration_ms: 0,
+            client_ip: msg.remote_addr(),
+            user_id: "",
+        },
+        block_infos,
+        extra_routes,
+    )
+    .await;
+    OutputStream::error(error)
 }
 
 /// Handle a impresspress request.
@@ -141,7 +183,11 @@ fn visible_to_caller(
 /// after building a Message from the incoming HTTP request.
 ///
 /// Steps:
-/// 1. Strip `/api` prefix (CF convention — native doesn't use it)
+/// 1. Refuse a request whose body the transport would not carry
+///    ([`crate::streaming::META_REQ_BODY_TOO_LARGE`]) with a 413 — before
+///    everything else, including the discovery/WebMCP early returns, because
+///    its body is already gone. In the site-main flow
+///    [`crate::blocks::body_limit`] has answered before this function runs.
 /// 2. Validate JWT and set auth meta
 /// 3. CSRF: enforce the Fetch-Metadata/Origin policy for cookie-authenticated
 ///    unsafe-method requests (see `crate::csrf`)
@@ -156,10 +202,11 @@ fn visible_to_caller(
 /// returned `OutputStream` as `StreamEvent::Error`. Request-log
 /// persistence failures are intentionally swallowed (best-effort) so a
 /// failing audit-log table never breaks the response.
-// This is the single request-pipeline entry point; each argument is a distinct
-// piece of request/runtime context and a param-struct refactor is out of scope
-// for a lint sweep (behavior-preserving cleanup only).
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the single request-pipeline entry point: each argument is a distinct \
+              piece of request or runtime context, none derivable here from another"
+)]
 pub async fn handle_request(
     ctx: &dyn Context,
     mut msg: Message,
@@ -174,24 +221,52 @@ pub async fn handle_request(
     // 0. (Discovery documents moved below step 2 — they are filtered by the
     //    caller's tier, which is not known here.)
 
-    // 1. Strip /api prefix from resource path
-    let resource = msg.path().to_string();
-    if let Some(stripped) = resource.strip_prefix("/api") {
-        msg.set_meta(META_REQ_RESOURCE, stripped);
+    // 1. A body the transport refused to carry never becomes a block call.
+    //    The adapter marked the message and handed over an empty body, so
+    //    every route below would be answering a request whose body is gone —
+    //    including the four early returns further down, which would otherwise
+    //    serve a discovery document or the WebMCP asset as if nothing had
+    //    happened. First, therefore, and before authentication, which a
+    //    request with no body to act on does not need.
+    //
+    //    In the site-main flow this is unreachable: `impresspress/body-limit`
+    //    is a step ahead of the router and answers first, which is what
+    //    extends the refusal to the paths that never reach this function
+    //    (`wafer-run/web`'s `/**` fallback). This is the same refusal for a
+    //    consumer flow that routes here without that step.
+    if crate::streaming::body_too_large(&msg) {
+        return refuse_oversized_body(ctx, &msg, block_infos, extra_routes).await;
     }
 
-    // 2. Validate JWT or API key and set auth meta
+    // 2. Validate JWT or API key and set auth meta. A credential the check
+    //    could not be completed for (its database read failed) refuses the
+    //    request here: continuing as anonymous would answer a signed-in
+    //    caller "sign in" — the router redirects a page to the login form
+    //    and refuses an API call "authentication required" — for as long as
+    //    the database is unreachable.
     if let Some(header) = auth_header {
-        if header.starts_with("Bearer ") {
+        let checked = if header.starts_with("Bearer ") {
             // [SEC-038] Read the deployment's expected issuer once per request
             // so JWTs minted under a different deployment's FRONTEND_URL get
             // rejected even if their HMAC secret matches. [SEC-042] also
             // consults the JWT blocklist via the ctx-aware extractor.
-            let expected_iss = crate::blocks::auth::helpers::expected_issuer(ctx).await;
-            crate::crypto::extract_auth_meta(ctx, header, jwt_secret, &expected_iss, &mut msg)
-                .await;
+            let expected_iss = match crate::crypto::expected_issuer(ctx).await {
+                Ok(expected_iss) => expected_iss,
+                Err(e) => {
+                    return crate::blocks::crud::db_error_internal(
+                        e,
+                        "pipeline: token issuer read failed",
+                    )
+                }
+            };
+            crate::crypto::extract_auth_meta(ctx, header, jwt_secret, &expected_iss, &mut msg).await
         } else if let Some(api_key) = header.strip_prefix("ApiKey ") {
-            crate::blocks::auth::authenticate_api_key(ctx, api_key, &mut msg).await;
+            crate::blocks::auth::authenticate_api_key(ctx, api_key, &mut msg).await
+        } else {
+            Ok(())
+        };
+        if let Err(error) = checked {
+            return refuse_unchecked_credential(ctx, &msg, error, block_infos, extra_routes).await;
         }
     }
 
@@ -224,23 +299,43 @@ pub async fn handle_request(
         // the existing single-sourced display-name config var (already used
         // for emails, the login page, and the browser `<title>` — see
         // `blocks/email.rs`, `ui/mod.rs`), so discovery documents reuse it
-        // instead of inventing a second name knob; it falls back to the
-        // constant `"Impresspress"`, never to the host.
-        let project_name =
-            config_client::get_default(ctx, "WAFER_RUN_SHARED__APP_NAME", "Impresspress").await;
+        // instead of inventing a second name knob; it falls back to
+        // `DEFAULT_APP_NAME`, never to the host.
+        let project_name = match config_client::get_default(ctx, APP_NAME_KEY, DEFAULT_APP_NAME)
+            .await
+        {
+            Ok(name) => name,
+            Err(e) => {
+                return crate::blocks::crud::db_error_internal(e, "discovery: app name read failed")
+            }
+        };
 
-        // Same ceiling and the same resolver as the manifest below, so the
+        // Same block set, ceiling and resolver as the manifest below, so the
         // three projections of one declaration agree on who is told about
         // it. Two projections with different disclosure rules is the pattern
-        // that produced the `dedupe_hash` leak.
+        // that produced the `dedupe_hash` leak. The resolver also decides
+        // each operation's OpenAPI `security` requirement, so a Public
+        // endpoint the router gates as Admin is published with `bearerAuth`.
         let caller = caller_auth_level(&msg);
-        let visible_infos = visible_to_caller(block_infos, caller, extra_routes);
+        let enabled_infos = enabled_infos(block_infos, features);
+        let effective_auth = |block: &BlockInfo, ep: &BlockEndpoint| {
+            routing::effective_access(block, ep, extra_routes)
+        };
 
         let body = if is_openapi {
-            wafer_core::discovery::generate_openapi(&visible_infos, &project_name, "", &server_url)
+            wafer_core::discovery::generate_openapi(
+                &enabled_infos,
+                caller,
+                effective_auth,
+                &project_name,
+                &crate::blocks::errors::openapi_description(),
+                &server_url,
+            )
         } else {
             wafer_core::discovery::generate_agent_card(
-                &visible_infos,
+                &enabled_infos,
+                caller,
+                effective_auth,
                 &project_name,
                 "",
                 &server_url,
@@ -255,7 +350,15 @@ pub async fn handle_request(
         // server-side fetchers) don't care about CORS so they still see the
         // body.
         let environment =
-            config_client::get_default(ctx, "WAFER_RUN_SHARED__ENVIRONMENT", "development").await;
+            match config_client::get_default(ctx, ENVIRONMENT_KEY, "development").await {
+                Ok(environment) => environment,
+                Err(e) => {
+                    return crate::blocks::crud::db_error_internal(
+                        e,
+                        "discovery: environment read failed",
+                    )
+                }
+            };
         let is_dev = environment.eq_ignore_ascii_case("development");
 
         // Per-caller by construction, like the manifest: a shared cache
@@ -273,20 +376,7 @@ pub async fn handle_request(
     // identity, like the discovery documents above.
     if path == "/b/webmcp/manifest.json" {
         let caller = caller_auth_level(&msg);
-
-        // `block_infos` is every REGISTERED block, but `route_to_block`
-        // 404s any block the admin feature toggle has turned off
-        // (routing.rs's feature gate, backed by the live `block_settings`
-        // row). Advertising a disabled block's tools would hand the agent
-        // names that 404 on every call, so the manifest is generated from
-        // the enabled subset only — gated under the same name the router
-        // gates with (`feature_gate_name`; the inspector's `BlockInfo` name
-        // and its route's `block` name differ).
-        let enabled_infos: Vec<BlockInfo> = block_infos
-            .iter()
-            .filter(|b| features.is_block_enabled(routing::feature_gate_name(&b.name)))
-            .cloned()
-            .collect();
+        let enabled_infos = enabled_infos(block_infos, features);
 
         // MUST resolve the auth ceiling with `routing::effective_access`, not
         // the plain `ep.auth`. This router admits on `max(prefix_tier,
@@ -411,72 +501,84 @@ pub async fn handle_request(
     if crate::streaming::wants_streaming(&leading_meta) {
         if crate::streaming::has_stream_marker(&leading_meta) {
             let status_code = i64::from(http_codec::resolve_status(&leading_meta, 200));
-            let status_label = if status_code >= 400 { "ERROR" } else { "OK" };
             let duration_ms = i64::try_from(crate::util::now_millis().saturating_sub(start_ms))
                 .unwrap_or(i64::MAX);
             write_request_log(
                 ctx,
-                RequestLogRow {
+                NewRequestLog {
                     method: &method,
                     path: &path,
-                    status_label,
                     status_code,
                     error_message: "",
                     duration_ms,
                     client_ip: &client_ip,
                     user_id: &user_id,
                 },
+                block_infos,
+                extra_routes,
             )
             .await;
         }
         return crate::streaming::rebuild_streaming(leading_meta, next_event, stream);
     }
 
-    let (status_label, status_code, error_message, reply): (
-        &'static str,
-        i64,
-        String,
-        OutputStream,
-    ) = match crate::streaming::collect_buffered_with_prelude(stream, leading_meta, next_event)
-        .await
-    {
-        Ok(buf) => {
-            let code = i64::from(http_codec::resolve_status(&buf.meta, 200));
-            (
-                "OK",
-                code,
+    let (status_code, error_message, reply): (i64, String, OutputStream) =
+        match crate::streaming::collect_buffered_with_prelude(stream, leading_meta, next_event)
+            .await
+        {
+            Ok(buf) => {
+                let code = i64::from(http_codec::resolve_status(&buf.meta, 200));
+                (code, String::new(), replay_buffered(buf.body, buf.meta))
+            }
+            Err(TerminalNotResponse::Error(err)) => {
+                // The error's OWN code decides the logged status. This was
+                // hardcoded 500, so a `NotFound` was recorded as a server error.
+                //
+                // Only the audit row was wrong, never the response: every adapter
+                // renders an error through `http_codec::error_to_http_response`
+                // (native and Cloudflare via `collect_http_response`), which
+                // resolves the status with `resolve_error_status`, so the client
+                // is served the 404/403/401 the error means.
+                // The row simply disagreed with the response that was sent —
+                // which is what an audit row exists not to do, and what defeats
+                // `RequestLogPolicy::Errors`: it selects on `status_code`, so
+                // every attacker-minted junk URL would have counted as a 5xx and
+                // been kept. Same function as the adapters use, so the two cannot
+                // drift. See `an_unmatched_endpoint_is_logged_404_not_500`.
+                //
+                // An error carrying an explicit `META_RESP_STATUS` override can
+                // resolve below 400; the row's label follows the code, as on every
+                // arm. See `the_label_follows_the_resolved_status`.
+                let message = err.message.clone();
+                let code = i64::from(http_codec::resolve_error_status(&err));
+                (code, message, OutputStream::error(err))
+            }
+            Err(TerminalNotResponse::Drop { meta }) => (
+                204,
                 String::new(),
-                replay_buffered(buf.body, buf.meta),
-            )
-        }
-        Err(TerminalNotResponse::Error(err)) => {
-            let message = err.message.clone();
-            ("ERROR", 500, message, OutputStream::error(err))
-        }
-        Err(TerminalNotResponse::Drop) => ("OK", 204, String::new(), OutputStream::drop_request()),
-        Err(TerminalNotResponse::Continue(m)) => {
-            ("OK", 200, String::new(), OutputStream::continue_with(m))
-        }
-        Err(TerminalNotResponse::Malformed) => (
-            "ERROR",
-            500,
-            "stream ended without terminal event".to_string(),
-            OutputStream::error(WaferError {
-                code: ErrorCode::Internal,
-                message: "stream ended without terminal event".to_string(),
-                meta: vec![],
-            }),
-        ),
-        Err(TerminalNotResponse::Halt(buf)) => {
-            let code = i64::from(http_codec::resolve_status(&buf.meta, 200));
-            (
-                "OK",
-                code,
-                String::new(),
-                OutputStream::from_buffered_response(buf),
-            )
-        }
-    };
+                OutputStream::drop_request_with_meta(meta),
+            ),
+            Err(TerminalNotResponse::Continue(m)) => {
+                (200, String::new(), OutputStream::continue_with(m))
+            }
+            Err(TerminalNotResponse::Malformed) => (
+                500,
+                "stream ended without terminal event".to_string(),
+                OutputStream::error(WaferError {
+                    code: ErrorCode::Internal,
+                    message: "stream ended without terminal event".to_string(),
+                    meta: vec![],
+                }),
+            ),
+            Err(TerminalNotResponse::Halt(buf)) => {
+                let code = i64::from(http_codec::resolve_status(&buf.meta, 200));
+                (
+                    code,
+                    String::new(),
+                    OutputStream::from_buffered_response(buf),
+                )
+            }
+        };
 
     // 4. Log the request (best-effort, don't block the response).
     // `now_millis()` reads wall clock — saturating_sub guards against clock
@@ -486,34 +588,370 @@ pub async fn handle_request(
         i64::try_from(crate::util::now_millis().saturating_sub(start_ms)).unwrap_or(i64::MAX);
     write_request_log(
         ctx,
-        RequestLogRow {
+        NewRequestLog {
             method: &method,
             path: &path,
-            status_label,
             status_code,
             error_message: &error_message,
             duration_ms,
             client_ip: &client_ip,
             user_id: &user_id,
         },
+        block_infos,
+        extra_routes,
     )
     .await;
 
     reply
 }
 
-/// Fields of one `request_logs` audit row. Bundled into a struct so
-/// [`write_request_log`] stays a two-argument call (the row shape is shared by
-/// the buffered response tail and the streamed-download branch).
-struct RequestLogRow<'a> {
-    method: &'a str,
-    path: &'a str,
-    status_label: &'a str,
-    status_code: i64,
-    error_message: &'a str,
-    duration_ms: i64,
-    client_ip: &'a str,
-    user_id: &'a str,
+/// Whether a route's `{name}` path variable binds a capability rather than an
+/// identifier.
+///
+/// The convention, and the whole of it: the variable is called `token`, or
+/// ends in `_token`. `/b/storage/direct/{token}` is the case that exists —
+/// the share link's token IS the credential, checked by equality against
+/// `impresspress__files__cloud_shares.token`.
+///
+/// Deliberately NOT `{id}`, which is a row id: redacting it would cost the
+/// audit log the thing an operator opens it for. Deliberately not a substring
+/// match either — `{tokenize}` is not a token.
+///
+/// `{key}` is the one worth spelling out, because it has two meanings in this
+/// build and neither is a capability:
+///
+///  * an object key inside a storage bucket
+///    (`/b/storage/api/buckets/{bucket}/objects/{key}`) — a filename, and
+///    knowing it grants nothing: those routes are authenticated and
+///    authorize per bucket;
+///  * a config variable's NAME
+///    (`/b/admin/api/settings/{key}`, `/b/admin/variables/{key}` and their
+///    `/edit` and `/reset-to-environment` siblings) — the key, never the
+///    value. `WAFER_RUN__AUTH__JWT_SECRET` in a path says which secret an
+///    admin opened, which is exactly what an audit row is for; the value it
+///    holds is what [`crate::secret_tables`] keeps out of every read surface.
+///
+/// So both are logged as they arrived.
+fn path_var_is_capability(name: &str) -> bool {
+    let name = name.to_ascii_lowercase();
+    name == "token" || name.ends_with("_token")
+}
+
+/// The `{name}` variables a route template binds, rest-variable marker
+/// (`...`) stripped.
+fn template_vars(template: &str) -> impl Iterator<Item = &str> {
+    template.split('/').filter_map(|seg| {
+        seg.strip_prefix('{')
+            .and_then(|s| s.strip_suffix('}'))
+            .map(|name| name.strip_suffix("...").unwrap_or(name))
+    })
+}
+
+/// Every declared endpoint template that binds a capability path variable.
+///
+/// Derived from the blocks' own `BlockInfo::endpoints` — the same declarations
+/// the router resolves access from — so a new route that puts a capability in
+/// its path is covered the day it is declared, with nothing to remember to add
+/// here. `exactly_one_declared_route_carries_a_capability_in_its_path` is
+/// where a reviewer is told that the set changed.
+fn capability_path_templates(block_infos: &[BlockInfo]) -> Vec<&str> {
+    block_infos
+        .iter()
+        .flat_map(|info| info.endpoints.iter())
+        .map(|ep| ep.path.as_str())
+        .filter(|template| template_vars(template).any(path_var_is_capability))
+        .collect()
+}
+
+/// A path in the shape [`redact_capability_path_vars`] compares against a
+/// route template: lowercased, with trailing slashes removed.
+///
+/// Neither transformation is what the ROUTER does — routing is case-sensitive
+/// and `/b/storage/direct/x/` genuinely resolves to nothing. That asymmetry is
+/// the point: the router's job is to decide what to serve, and this one's is
+/// to decide what must not be written down, which has to be the more
+/// suspicious of the two.
+fn normalize_for_match(path: &str) -> String {
+    path.trim_end_matches('/').to_ascii_lowercase()
+}
+
+/// `path` with every capability-bound segment replaced by the variable's own
+/// name, or `None` when `path` resembles no such route.
+///
+/// `/b/storage/direct/sharetok-9f3c…` becomes `/b/storage/direct/{token}`: the
+/// row still says which route was hit, which is what the audit log is for,
+/// and carries none of the credential.
+///
+/// Matching is by route template, not by the path variables the router bound,
+/// and that is the point: a request that 404s binds nothing, and a *failed*
+/// share access is exactly when someone goes looking in the logs. A redaction
+/// that only worked once a route had resolved would leak on every probe.
+///
+/// # It matches more loosely than the router does, deliberately
+///
+/// A URL that only NEARLY names the route still carries a live token, and the
+/// ways of nearly naming it are ordinary user error rather than attacks: a
+/// pasted share link with a trailing slash, a client that capitalised the
+/// host-style prefix. Both 404 — no file is served — and both would otherwise
+/// put the capability into the audit table in the clear.
+///
+/// So the match runs against a normalised path ([`normalize_for_match`]:
+/// lowercased, trailing slashes trimmed) while the REBUILD takes its literal
+/// and non-capability segments from the path as it arrived. The row therefore
+/// keeps the casing that explains why the request missed, and loses only the
+/// stray trailing slash and the credential.
+///
+/// Over-matching here is the cheap direction: the worst it can do is print
+/// `{token}` in place of one segment of a path that was never going to serve
+/// anything. Under-matching logs a live capability. `an_ordinary_path_variable_is_logged_verbatim`
+/// and `redaction_keeps_every_other_segment` pin the other direction, so the
+/// looseness cannot grow into redacting identifiers.
+///
+/// What it still does NOT normalise, stated rather than implied: duplicated
+/// (`/b//storage/…`) or percent-encoded (`%2f`) separators, and `.`/`..`
+/// segments. Those change how the path splits rather than how a segment reads,
+/// and no adapter this runtime ships hands them through — but a path shaped
+/// that way is matched by no template and so is logged as it arrived.
+fn redact_capability_path_vars(path: &str, block_infos: &[BlockInfo]) -> Option<String> {
+    let normalized = normalize_for_match(path);
+    for template in capability_path_templates(block_infos) {
+        if endpoint_match::match_template(template, &normalized).is_none() {
+            continue;
+        }
+        let template_segments: Vec<&str> = template.split('/').collect();
+        // Rebuilt from the path as it ARRIVED, not from the normalised copy,
+        // so the row keeps the request's own casing. The trailing-slash trim
+        // is what makes the two align segment for segment.
+        let path_segments: Vec<&str> = path.trim_end_matches('/').split('/').collect();
+        let mut out: Vec<&str> = Vec::with_capacity(path_segments.len());
+        for (i, segment) in template_segments.iter().enumerate() {
+            let var = segment.strip_prefix('{').and_then(|s| s.strip_suffix('}'));
+            let Some(var) = var else {
+                // A literal segment. Taken from the PATH, not the template:
+                // the match was case-insensitive, and the row should show the
+                // request as it arrived.
+                out.push(path_segments.get(i).copied().unwrap_or(segment));
+                continue;
+            };
+            let rest = var.ends_with("...");
+            let name = var.strip_suffix("...").unwrap_or(var);
+            if path_var_is_capability(name) {
+                out.push(segment);
+                if rest {
+                    // A rest variable binds every remaining segment, all of
+                    // them part of the capability.
+                    break;
+                }
+            } else if rest {
+                out.extend(path_segments.iter().skip(i));
+                break;
+            } else {
+                out.push(path_segments.get(i).copied().unwrap_or(segment));
+            }
+        }
+        return Some(out.join("/"));
+    }
+    None
+}
+
+/// The stored `path` for a request that resembles no declared route.
+///
+/// The path is attacker-supplied. Storing it verbatim lets anyone mint
+/// unbounded DISTINCT values by walking `/aaa1`, `/aaa2`, … and puts their
+/// text into every surface that reads the table (the admin Logs page, the
+/// Network page, the SQL explorer). A request that names no route carries no
+/// routing information worth keeping, so all of them collapse to this one
+/// label.
+///
+/// Deliberately narrower than "every 404": a 404 from a route that DOES exist
+/// is the diagnostic case, and [`redact_capability_path_vars`] exists to keep
+/// exactly those rows readable while removing the credential. Collapsing on
+/// the status code would have thrown that away — a mistyped share link would
+/// have become `<unmatched>` instead of `/b/storage/direct/{token}`.
+/// See [`resembles_a_declared_route`].
+pub const UNMATCHED_PATH_LABEL: &str = "<unmatched>";
+
+/// Whether `path` resembles a route this build serves.
+///
+/// Matched the same loose way [`redact_capability_path_vars`] matches, and for
+/// the same reason: this decides what is worth writing down, not what to
+/// serve, so it must be the more generous of the two. A path that ALMOST names
+/// a route is a user's mistake and keeps its row; only one that names nothing
+/// at all collapses.
+///
+/// Three things count as naming a route, because a block's declared
+/// `BlockEndpoint`s are not all of the routing table:
+///
+///  * **`/`**, which no block declares and every public site serves most.
+///    [`routing::route_to_block`] answers it from an arm of its own, above all
+///    block dispatch — a redirect, or the landing page through
+///    `wafer-run/web`, whose `BlockInfo` declares no endpoints at all. Without
+///    this arm the single highest-traffic request on a site would be stored in
+///    the same bucket as attacker junk, which is the opposite of what the
+///    collapse is for.
+///  * `extra_routes`, the prefixes a consumer registered through
+///    `ImpresspressBuilder::add_route`, whose paths are declared as endpoints
+///    nowhere this function can see.
+///  * every declared `BlockEndpoint` template.
+///
+/// [`routing::ROUTES`] is deliberately NOT consulted, and it is NOT redundant
+/// with the endpoint templates: its entries are prefixes, so an *undeclared*
+/// path beneath one (`/b/admin/aaa1`, `/b/admin/aaa2`, …) routes to the block
+/// and is refused by the access gate without ever matching a template.
+/// Consulting the prefixes would keep exactly those rows — the unbounded
+/// attacker-minted key space this collapse exists to close. A real endpoint
+/// under the same prefix matches its own template and is kept.
+fn resembles_a_declared_route(
+    path: &str,
+    block_infos: &[BlockInfo],
+    extra_routes: &[ExtraRoute],
+) -> bool {
+    if path == "/" {
+        return true;
+    }
+    let normalized = normalize_for_match(path);
+    if extra_routes
+        .iter()
+        .any(|route| normalized.starts_with(&normalize_for_match(&route.prefix)))
+    {
+        return true;
+    }
+    block_infos
+        .iter()
+        .flat_map(|info| info.endpoints.iter())
+        .any(|endpoint| endpoint_match::match_template(&endpoint.path, &normalized).is_some())
+}
+
+/// What `request_logs` keeps. Set by
+/// [`crate::config_vars::REQUEST_LOG_CONFIG_KEY`].
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RequestLogPolicy {
+    /// Every request (minus static assets and `/health`). The default.
+    All,
+    /// Server errors only — 5xx.
+    ///
+    /// 4xx is deliberately excluded even though it looks diagnostic: it is
+    /// entirely attacker-mintable (any GET to a non-route is a 404, and any
+    /// unauthenticated GET to a private one is a 401) and Cloudflare's edge
+    /// analytics already counts it. 5xx is the only class carrying an
+    /// `error_message` no edge log can reconstruct.
+    Errors,
+    /// Nothing.
+    Off,
+}
+
+impl RequestLogPolicy {
+    /// Parse the config value. Anything unrecognised — including an empty
+    /// string and an absent key — is [`RequestLogPolicy::All`], so a typo
+    /// degrades to today's behaviour rather than silently disabling the audit
+    /// trail.
+    pub fn parse(raw: Option<&str>) -> Self {
+        match raw.map(str::trim).unwrap_or_default() {
+            "errors" => Self::Errors,
+            "off" => Self::Off,
+            _ => Self::All,
+        }
+    }
+
+    /// Whether this policy writes any row at all.
+    pub fn writes_rows(self) -> bool {
+        self != Self::Off
+    }
+
+    fn keeps(self, status_code: i64) -> bool {
+        match self {
+            Self::All => true,
+            Self::Errors => status_code >= 500,
+            Self::Off => false,
+        }
+    }
+
+    /// Whether [`REQUEST_LOG_CEILING_PER_WINDOW`] applies.
+    ///
+    /// Only under [`Errors`](Self::Errors), and the asymmetry is the point.
+    ///
+    /// `All` is an operator saying "record everything", so a ceiling there
+    /// would be the thing that binds rather than a backstop — and it binds
+    /// *first-come-first-served*, so a flood of 200s in the first minute of an
+    /// hour would silence a genuine 5xx in the fiftieth. That is exactly the
+    /// wrong triage order, and on Cloudflare the budget is per isolate, a
+    /// count Cloudflare controls and varies by traffic and colo, so an
+    /// operator could not even predict what fraction of the audit trail
+    /// survived. A nondeterministic cap on an audit log is worse than no cap:
+    /// the operator asked for every row, and the honest answer to "that is too
+    /// many rows" is `errors`, not a silent sample of `all`.
+    ///
+    /// Under `Errors` the kept class is 5xx only, so the ceiling is a genuine
+    /// backstop against an error storm rather than a quota on ordinary
+    /// traffic, and first-come-first-served is a fair sample *within one
+    /// class*: the first 200 errors of an hour describe the storm as well as
+    /// any other 200 would.
+    fn is_bounded(self) -> bool {
+        matches!(self, Self::Errors)
+    }
+}
+
+/// The most `request_logs` rows one isolate/thread will write in one window
+/// **under [`RequestLogPolicy::Errors`]** — see
+/// [`is_bounded`](RequestLogPolicy::is_bounded) for why it is that policy and
+/// no other.
+///
+/// The backstop against an error storm: `Errors` already drops everything an
+/// attacker can mint directly, so what is left to bound is a 5xx loop the
+/// application itself generates. Real error traffic never approaches this;
+/// a storm hits it immediately.
+///
+/// It bounds a thread-local, so it is per *isolate* on Cloudflare and per
+/// *tokio worker thread* natively. A flood therefore still multiplies by
+/// whatever that count is — which is why it is a backstop behind the policy
+/// rather than the thing the policy relies on.
+pub const REQUEST_LOG_CEILING_PER_WINDOW: usize = 200;
+
+/// The ceiling's window. Long enough that a flood cannot simply wait it out at
+/// a useful rate, short enough that a genuine incident is not silenced all day.
+const REQUEST_LOG_WINDOW_MS: u64 = 3_600_000;
+
+thread_local! {
+    /// `(window start ms, rows written in it)` for this isolate/thread.
+    static REQUEST_LOG_BUDGET: Cell<(u64, usize)> = const { Cell::new((0, 0)) };
+}
+
+/// Claim one row against this isolate's ceiling; `false` means refuse to write.
+///
+/// Warns on the transition into a saturated window, once per window rather
+/// than once per refused row: an audit log that has quietly stopped recording
+/// looks exactly like a deployment with no traffic, which is the same reason
+/// [`write_request_log`] warns when an insert fails.
+fn claim_request_log_budget(now_ms: u64) -> bool {
+    REQUEST_LOG_BUDGET.with(|budget| {
+        let (window_start, used) = budget.get();
+        let (window_start, used) = if now_ms.saturating_sub(window_start) >= REQUEST_LOG_WINDOW_MS {
+            (now_ms, 0)
+        } else {
+            (window_start, used)
+        };
+        if used >= REQUEST_LOG_CEILING_PER_WINDOW {
+            budget.set((window_start, used));
+            return false;
+        }
+        budget.set((window_start, used + 1));
+        if used + 1 == REQUEST_LOG_CEILING_PER_WINDOW {
+            tracing::warn!(
+                ceiling = REQUEST_LOG_CEILING_PER_WINDOW,
+                window_ms = REQUEST_LOG_WINDOW_MS,
+                "request_logs write ceiling reached — further audit rows are \
+                 dropped until the window rolls over"
+            );
+        }
+        true
+    })
+}
+
+/// Reset the isolate's ceiling. Tests only — a tokio worker thread outlives a
+/// fixture, so without this a count would depend on test ordering.
+#[cfg(test)]
+pub(crate) fn reset_request_log_budget_for_test() {
+    REQUEST_LOG_BUDGET.with(|budget| budget.set((0, 0)));
 }
 
 /// Write one `request_logs` audit row (best-effort; never fails the request).
@@ -524,37 +962,66 @@ struct RequestLogRow<'a> {
 /// Shared by the buffered response tail and the streamed-download branch so a
 /// download produces the same row on every platform, whether the adapter
 /// streams or buffers its body.
-async fn write_request_log(ctx: &dyn Context, row: RequestLogRow<'_>) {
+///
+/// Three filters run before anything is written, cheapest first: the
+/// static/health skip above, the operator's [`RequestLogPolicy`], and the
+/// per-isolate ceiling ([`claim_request_log_budget`]). Only then is the path
+/// rewritten — credential redaction, then the unmatched-path collapse — so a
+/// row that is never stored costs no template matching at all.
+async fn write_request_log(
+    ctx: &dyn Context,
+    row: NewRequestLog<'_>,
+    block_infos: &[BlockInfo],
+    extra_routes: &[ExtraRoute],
+) {
     if row.path.starts_with(routing::STATIC_PREFIX) || row.path == "/health" {
         return;
     }
-    let mut data = std::collections::HashMap::new();
-    data.insert("method".to_string(), serde_json::json!(row.method));
-    data.insert("path".to_string(), serde_json::json!(row.path));
-    data.insert("status".to_string(), serde_json::json!(row.status_label));
-    data.insert(
-        "status_code".to_string(),
-        serde_json::json!(row.status_code),
-    );
-    data.insert(
-        "duration_ms".to_string(),
-        serde_json::json!(row.duration_ms),
-    );
-    data.insert(
-        "error_message".to_string(),
-        serde_json::json!(row.error_message),
-    );
-    data.insert("client_ip".to_string(), serde_json::json!(row.client_ip));
-    data.insert("user_id".to_string(), serde_json::json!(row.user_id));
-    crate::util::stamp_created(&mut data);
-
-    match request_log_mode() {
-        RequestLogMode::Inline => {
-            // Best-effort: don't fail the request if logging fails.
-            let _ = db::create(ctx, crate::blocks::admin::REQUEST_LOGS_TABLE, data).await;
-        }
-        RequestLogMode::Queued => {
-            enqueue_request_log(crate::blocks::admin::REQUEST_LOGS_TABLE, data);
+    let policy =
+        RequestLogPolicy::parse(ctx.config_get(crate::config_vars::REQUEST_LOG_CONFIG_KEY));
+    if !policy.keeps(row.status_code) {
+        return;
+    }
+    // The budget is claimed before the insert, so a failed write still spends
+    // it. That is deliberate: under `errors` the thing worth bounding is the
+    // number of write ATTEMPTS an error storm makes, and on Cloudflare a
+    // failing D1 insert costs a subrequest exactly like a succeeding one.
+    if policy.is_bounded() && !claim_request_log_budget(crate::util::now_millis()) {
+        return;
+    }
+    // A capability that travels in the path is redacted here rather than at
+    // either call site, so both the buffered tail and the streamed-download
+    // branch are covered by the one rule — and so is every consumer of the
+    // table downstream (the admin Logs page, the Network page, the SQL
+    // explorer), because the secret never enters the row in the first place.
+    //
+    // Redaction runs FIRST and the collapse only where it found nothing: a
+    // redacted path already names a real route, so it is a row worth keeping,
+    // and a near-miss share link must stay `/b/storage/direct/{token}` rather
+    // than becoming `<unmatched>`.
+    let redacted = redact_capability_path_vars(row.path, block_infos);
+    let row = match &redacted {
+        Some(path) => NewRequestLog { path, ..row },
+        None if !resembles_a_declared_route(row.path, block_infos, extra_routes) => NewRequestLog {
+            path: UNMATCHED_PATH_LABEL,
+            ..row
+        },
+        None => row,
+    };
+    // Queued when the platform runs this request inside an
+    // `after_response::scope` (Cloudflare: the row is written after the
+    // response, from room held back for it); inserted here otherwise.
+    let queued = crate::after_response::QueuedRequestLog {
+        table: request_logs::TABLE,
+        data: row.to_data(),
+    };
+    if crate::after_response::queue_audit_row(queued).is_err() {
+        // Best-effort: don't fail the request if logging fails — but say
+        // so. The row being optional is the deliberate part; the silence
+        // was not, and a deployment whose audit log has quietly stopped
+        // recording looks exactly like one with no traffic.
+        if let Err(error) = request_logs::insert(ctx, &row).await {
+            tracing::warn!(%error, "request audit row not written");
         }
     }
 }
@@ -565,11 +1032,23 @@ fn replay_buffered(body: Vec<u8>, meta: Vec<MetaEntry>) -> OutputStream {
     OutputStream::respond_with_meta(body, meta)
 }
 
-#[cfg(test)]
+// Every test here asserts on the document generated from
+// `test_support::real_block_infos()`, which is itself gated on the full block
+// set: a build missing one of those blocks would be asserting about a
+// different document than the one this module describes.
+#[cfg(all(
+    test,
+    feature = "block-files",
+    feature = "block-messages",
+    feature = "block-products",
+    feature = "block-tickets",
+    feature = "block-llm",
+    feature = "block-vector"
+))]
 mod discovery_tests {
     //! Covers the two OpenAPI/agent-card fixes:
     //!  1. `info.title` (and the agent-card `name`) comes from
-    //!     `WAFER_RUN_SHARED__APP_NAME` (fallback `"Impresspress"`), never from
+    //!     `WAFER_RUN_SHARED__APP_NAME` (fallback `DEFAULT_APP_NAME`), never from
     //!     the `Host` header — an IP-addressed host used to yield the
     //!     literal title `"127"`.
     //!  2. The core developer-facing auth/storage/products endpoints now
@@ -580,11 +1059,11 @@ mod discovery_tests {
     //! `test_support.rs` now — shared with the per-block openapi snapshot
     //! gate (`tests/openapi_snapshot.rs`) so there is one implementation
     //! rather than two.
-
     use wafer_run::{AuthLevel, BlockEndpoint, BlockInfo, InputStream};
 
     use super::handle_request;
     use crate::{
+        config_vars::{APP_NAME_KEY, DEFAULT_APP_NAME},
         features::{AllEnabled, FeatureConfig},
         routing,
         test_support::{
@@ -596,14 +1075,16 @@ mod discovery_tests {
 
     #[tokio::test]
     async fn openapi_title_falls_back_to_impresspress_not_host_derived_127() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         // The exact host shape that produced the bug: an IP:port `Host`
         // header. `host.split('.').next()` on `"127.0.0.1:8093"` yields
         // the literal string `"127"`.
         let body = discovery_json(&ctx, "/openapi.json", "127.0.0.1:8093").await;
 
         assert_eq!(
-            body["info"]["title"], "Impresspress",
+            body["info"]["title"], DEFAULT_APP_NAME,
             "no WAFER_RUN_SHARED__APP_NAME configured — title must fall back to the constant, not derive from the Host header: {body}"
         );
         assert_ne!(body["info"]["title"], "127");
@@ -611,8 +1092,10 @@ mod discovery_tests {
 
     #[tokio::test]
     async fn openapi_title_honors_configured_app_name() {
-        let mut ctx = TestContext::new().await;
-        ctx.set_config("WAFER_RUN_SHARED__APP_NAME", "Acme Corp");
+        let mut ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
+        ctx.set_config(APP_NAME_KEY, "Acme Corp");
         let body = discovery_json(&ctx, "/openapi.json", "127.0.0.1:8093").await;
 
         assert_eq!(body["info"]["title"], "Acme Corp");
@@ -620,8 +1103,10 @@ mod discovery_tests {
 
     #[tokio::test]
     async fn agent_card_name_uses_the_same_configured_project_name() {
-        let mut ctx = TestContext::new().await;
-        ctx.set_config("WAFER_RUN_SHARED__APP_NAME", "Acme Corp");
+        let mut ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
+        ctx.set_config(APP_NAME_KEY, "Acme Corp");
         let body = discovery_json(&ctx, "/.well-known/agent.json", "127.0.0.1:8093").await;
 
         assert_eq!(
@@ -632,7 +1117,9 @@ mod discovery_tests {
 
     #[tokio::test]
     async fn openapi_documents_core_auth_endpoints_with_schemas() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let body = discovery_json(&ctx, "/openapi.json", "impresspress.example.com").await;
         let paths = &body["paths"];
 
@@ -720,7 +1207,9 @@ mod discovery_tests {
 
     #[tokio::test]
     async fn openapi_documents_core_storage_endpoints_with_schemas() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let body = discovery_json(&ctx, "/openapi.json", "impresspress.example.com").await;
         let paths = &body["paths"];
 
@@ -746,10 +1235,24 @@ mod discovery_tests {
             "list-objects response schema must match ObjectList {{objects, total_count}}: {list}"
         );
 
+        // The row is declared `…/objects/{key...}` — impresspress's matcher
+        // syntax for a rest segment. OpenAPI has no multi-segment parameter,
+        // so wafer-core's projection publishes it as a plain `{key}` naming
+        // the same parameter.
         let get_obj = &paths["/b/storage/api/buckets/{name}/objects/{key}"]["get"];
         assert!(
             !get_obj.is_null(),
             "get-object must appear in /openapi.json: {body}"
+        );
+        assert_eq!(
+            get_obj["parameters"]
+                .as_array()
+                .expect("get-object has path parameters")
+                .iter()
+                .filter(|p| p["in"] == "path" && p["name"] == "key")
+                .count(),
+            1,
+            "get-object must declare the rest segment as the {{key}} path param: {get_obj}"
         );
         assert!(
             get_obj["responses"]["200"].get("content").is_none(),
@@ -759,7 +1262,9 @@ mod discovery_tests {
 
     #[tokio::test]
     async fn openapi_documents_core_products_endpoints_with_schemas() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let body = discovery_json(&ctx, "/openapi.json", "impresspress.example.com").await;
         let paths = &body["paths"];
 
@@ -1231,7 +1736,9 @@ mod discovery_tests {
     /// the `dedupe_hash` leak; this closes the discovery-side half.
     #[tokio::test]
     async fn openapi_omits_endpoints_above_the_callers_tier() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let host = "impresspress.example.com";
 
         let anon = discovery_json_as(&ctx, "/openapi.json", host, None).await;
@@ -1272,7 +1779,9 @@ mod discovery_tests {
     async fn openapi_describes_admin_endpoints_to_an_admin() {
         // A real bearer, resolved by step 2 — not pre-set meta, which a
         // step-0 filter would also see. Needs the auth tables.
-        let ctx = TestContext::with_auth().await;
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let bearer = bearer_for_roles(&["admin"]);
         let mut msg = anon_msg("retrieve", "/openapi.json");
         msg.set_meta("http.header.host", "impresspress.example.com");
@@ -1297,9 +1806,50 @@ mod discovery_tests {
         );
     }
 
+    /// The document tells a client which errors it must not retry as they
+    /// stand — the statement budget's two codes — keyed on the `code` field
+    /// the SDK surfaces as `detailCode`.
+    #[tokio::test]
+    async fn openapi_documents_the_error_body_and_the_codes_not_to_retry() {
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
+        let mut msg = anon_msg("retrieve", "/openapi.json");
+        msg.set_meta("http.header.host", "impresspress.example.com");
+        let out = handle_request(
+            &ctx,
+            msg,
+            InputStream::from_bytes(Vec::new()),
+            None,
+            TEST_JWT_SECRET,
+            false,
+            &AllEnabled,
+            &real_block_infos(),
+            &[],
+        )
+        .await;
+        let doc: serde_json::Value = serde_json::from_slice(&collect_or_panic(out).await.body)
+            .expect("openapi response is valid JSON");
+        let description = doc["info"]["description"]
+            .as_str()
+            .expect("info.description is a string");
+        for code in [
+            wafer_block::wire::database::STATEMENT_BUDGET_EXHAUSTED,
+            wafer_block::wire::database::STATEMENT_BUDGET_EXCEEDS_LIMIT,
+        ] {
+            assert!(description.contains(code), "{code} missing: {description}");
+        }
+        assert!(
+            description.contains("do not retry it automatically"),
+            "{description}"
+        );
+    }
+
     #[tokio::test]
     async fn agent_card_omits_skills_above_the_callers_tier() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let host = "impresspress.example.com";
         fn skill_ids(card: &serde_json::Value) -> Vec<String> {
             card["skills"]
@@ -1334,7 +1884,9 @@ mod discovery_tests {
     /// the same reasoning as the manifest's `no-store`.
     #[tokio::test]
     async fn discovery_documents_are_not_cacheable() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         for path in ["/openapi.json", "/.well-known/agent.json"] {
             let headers = discovery_headers(&ctx, path, "impresspress.example.com").await;
             let cache_control = headers
@@ -1382,7 +1934,9 @@ mod discovery_tests {
 
     #[tokio::test]
     async fn webmcp_manifest_is_served_and_versioned() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let body = webmcp_manifest(&ctx, None, &real_block_infos(), &AllEnabled).await;
 
         assert_eq!(body["schema_version"], serde_json::json!(1));
@@ -1394,7 +1948,9 @@ mod discovery_tests {
 
     #[tokio::test]
     async fn webmcp_manifest_for_anonymous_caller_contains_no_privileged_tools() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
 
         // An unauthenticated request must see Public tools only. Anything
         // requiring a session is recon surface if its name is published
@@ -1424,7 +1980,9 @@ mod discovery_tests {
 
     #[tokio::test]
     async fn anonymous_manifest_exposes_the_storefront_purchase_path() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let body = webmcp_manifest(&ctx, None, &real_block_infos(), &AllEnabled).await;
         let names = tool_names(&body);
 
@@ -1457,7 +2015,9 @@ mod discovery_tests {
     /// a query param, so it pins the most contract surface of the six.
     #[tokio::test]
     async fn webmcp_manifest_pins_the_producer_invocation_contract() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let body = webmcp_manifest(&ctx, None, &real_block_infos(), &AllEnabled).await;
 
         let tool = body["tools"]
@@ -1500,7 +2060,9 @@ mod discovery_tests {
     ///    whose `required` names the fields a guest can always read.
     #[tokio::test]
     async fn webmcp_manifest_pins_the_producer_output_schema_contract() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let body = webmcp_manifest(&ctx, None, &real_block_infos(), &AllEnabled).await;
 
         let tool = body["tools"]
@@ -1550,7 +2112,9 @@ mod discovery_tests {
     /// `receipt_token`.
     #[tokio::test]
     async fn webmcp_manifest_pins_list_my_purchases_to_the_typed_order_rows() {
-        let ctx = TestContext::with_auth().await;
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let body = webmcp_manifest(&ctx, Some(&[]), &real_block_infos(), &AllEnabled).await;
 
         let tool = body["tools"]
@@ -1602,7 +2166,9 @@ mod discovery_tests {
     /// on top of that projection, and this pins the two together.
     #[tokio::test]
     async fn webmcp_manifest_pins_list_products_to_the_public_catalog_view() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let body = webmcp_manifest(&ctx, None, &real_block_infos(), &AllEnabled).await;
 
         let tool = body["tools"]
@@ -1671,7 +2237,9 @@ mod discovery_tests {
 
     #[tokio::test]
     async fn webmcp_manifest_is_not_cacheable() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let headers =
             discovery_headers(&ctx, "/b/webmcp/manifest.json", "impresspress.example.com").await;
 
@@ -1691,7 +2259,9 @@ mod discovery_tests {
     /// hardcode this path and get the same script.
     #[tokio::test]
     async fn webmcp_js_is_served_at_the_stable_path_for_anonymous_callers() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let mut msg = anon_msg("retrieve", ui::assets::WEBMCP_JS_STABLE_PATH);
         msg.set_meta("http.header.host", "impresspress.example.com");
         let out = handle_request(
@@ -1753,7 +2323,9 @@ mod discovery_tests {
     /// stale/foreign value still gets the full `200`.
     #[tokio::test]
     async fn webmcp_js_stable_path_answers_conditional_get() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let etag = format!("\"{}\"", ui::assets::webmcp_js_hash());
 
         let mut fresh = anon_msg("retrieve", ui::assets::WEBMCP_JS_STABLE_PATH);
@@ -1825,7 +2397,9 @@ mod discovery_tests {
 
     #[tokio::test]
     async fn webmcp_manifest_reflects_an_authenticated_caller() {
-        let ctx = TestContext::with_auth().await;
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
 
         // A valid session for a non-admin user (empty `roles` claim).
         let body = webmcp_manifest(&ctx, Some(&[]), &real_block_infos(), &AllEnabled).await;
@@ -1844,7 +2418,9 @@ mod discovery_tests {
     /// Authenticated.
     #[tokio::test]
     async fn webmcp_manifest_reflects_an_admin_caller() {
-        let ctx = TestContext::with_auth().await;
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let mut infos = real_block_infos();
         infos.push(admin_tool_block());
 
@@ -1918,7 +2494,9 @@ mod discovery_tests {
             "list_audit_log",
         ];
 
-        let ctx = TestContext::with_auth().await;
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let infos = real_block_infos();
 
         let admin_body = webmcp_manifest(&ctx, Some(&["admin"]), &infos, &AllEnabled).await;
@@ -1982,7 +2560,9 @@ mod discovery_tests {
             }
         }
 
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let infos = real_block_infos();
 
         let enabled = webmcp_manifest(&ctx, None, &infos, &AllEnabled).await;
@@ -1996,6 +2576,81 @@ mod discovery_tests {
             tool_names(&disabled),
             Vec::<&str>::new(),
             "a disabled block must contribute no tools — every call to it 404s: {disabled}"
+        );
+    }
+
+    /// `/openapi.json` and the agent card describe the same block set as the
+    /// manifest above: a block the admin toggle turned off 404s every route,
+    /// so neither document may describe one of its endpoints.
+    #[tokio::test]
+    async fn disabled_block_is_described_in_no_discovery_document() {
+        struct ProductsDisabled;
+        impl FeatureConfig for ProductsDisabled {
+            fn is_block_enabled(&self, full_name: &str) -> bool {
+                full_name != "impresspress/products"
+            }
+        }
+
+        async fn document(
+            ctx: &TestContext,
+            path: &str,
+            features: &dyn FeatureConfig,
+        ) -> serde_json::Value {
+            let mut msg = anon_msg("retrieve", path);
+            msg.set_meta("http.header.host", "impresspress.example.com");
+            let out = handle_request(
+                ctx,
+                msg,
+                InputStream::from_bytes(Vec::new()),
+                None,
+                TEST_JWT_SECRET,
+                false,
+                features,
+                &real_block_infos(),
+                &[],
+            )
+            .await;
+            serde_json::from_slice(&collect_or_panic(out).await.body)
+                .expect("discovery response is valid JSON")
+        }
+        fn product_skills(card: &serde_json::Value) -> Vec<String> {
+            card["skills"]
+                .as_array()
+                .expect("agent card skills array")
+                .iter()
+                .map(|s| s["id"].as_str().expect("skill id").to_string())
+                .filter(|id| id.starts_with("impresspress/products/"))
+                .collect()
+        }
+        const STOREFRONT: &str = "/b/products/storefront/config";
+
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
+
+        let enabled = document(&ctx, "/openapi.json", &AllEnabled).await;
+        assert!(
+            !enabled["paths"][STOREFRONT].is_null(),
+            "precondition: the products block is described while enabled: {}",
+            enabled["paths"]
+        );
+        let disabled = document(&ctx, "/openapi.json", &ProductsDisabled).await;
+        assert!(
+            disabled["paths"][STOREFRONT].is_null(),
+            "a disabled block's endpoints must not be in /openapi.json: {}",
+            disabled["paths"]
+        );
+
+        let enabled = document(&ctx, "/.well-known/agent.json", &AllEnabled).await;
+        assert!(
+            !product_skills(&enabled).is_empty(),
+            "precondition: the products block lists skills while enabled: {enabled}"
+        );
+        let disabled = document(&ctx, "/.well-known/agent.json", &ProductsDisabled).await;
+        assert_eq!(
+            product_skills(&disabled),
+            Vec::<String>::new(),
+            "a disabled block must list no skills in the agent card"
         );
     }
 
@@ -2058,7 +2713,9 @@ mod discovery_tests {
     /// `builder::registration::tests::webmcp_refusals_are_logged_once_at_build`).
     #[tokio::test]
     async fn webmcp_manifest_request_does_not_log_refusals() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         let infos = vec![duplicate_tool_name_block()];
 
         // Precondition: this fixture really does trigger a refusal — both
@@ -2093,10 +2750,15 @@ mod discovery_tests {
     }
 }
 
-/// End-to-end proof that `handle_request` actually wires
+/// End-to-end proof that the request path actually wires
 /// `crate::csrf::enforce_origin_policy` in — not just that the policy
 /// function itself is correct (covered exhaustively in `crate::csrf`'s own
-/// tests). Uses `extra_routes` to reach a dispatch-probe block the same way
+/// tests). Each request goes through `TestContext::request`: the router block
+/// takes the credential off the cookie or the `Authorization` header and says
+/// which, and `handle_request` verifies it and applies the policy. The
+/// session is a real one, signed in through the login route, so the
+/// cookie-vs-header distinction is the router's own, not a flag a test sets.
+/// Uses `extra_routes` to reach a dispatch-probe block the same way
 /// `routing::tests::extra_routes_honor_the_feature_gate` does, since the
 /// built-in `ROUTES` table has no test-only entry.
 #[cfg(test)]
@@ -2106,9 +2768,8 @@ mod csrf_wiring_tests {
 
     use super::*;
     use crate::{
-        features::AllEnabled,
         routing::{ExtraRoute, RouteAccess},
-        test_support::{auth_msg, TestContext},
+        test_support::{anon_msg, Session, TestContext},
     };
 
     struct DispatchProbeBlock;
@@ -2118,15 +2779,17 @@ mod csrf_wiring_tests {
             BlockInfo::new("test/csrf-probe", "0.0.1", "echo@v1", "csrf wiring probe")
                 .category(BlockCategory::Service)
         }
+        /// Answers with the identity the pipeline resolved.
         async fn handle(
             &self,
             _ctx: &dyn Context,
-            _msg: Message,
+            msg: Message,
             _input: InputStream,
         ) -> OutputStream {
-            ResponseBuilder::new()
-                .status(200)
-                .body(b"DISPATCHED".to_vec(), "text/plain")
+            ResponseBuilder::new().status(200).body(
+                format!("DISPATCHED as {:?}", msg.user_id()).into_bytes(),
+                "text/plain",
+            )
         }
         async fn lifecycle(
             &self,
@@ -2137,38 +2800,39 @@ mod csrf_wiring_tests {
         }
     }
 
-    async fn ctx_with_probe() -> TestContext {
-        let mut ctx = TestContext::new().await;
-        ctx.register_block("test/csrf-probe", std::sync::Arc::new(DispatchProbeBlock));
-        ctx
+    fn dispatched_as(user_id: &str) -> Vec<u8> {
+        format!("DISPATCHED as {user_id:?}").into_bytes()
     }
 
-    fn extra_route() -> Vec<ExtraRoute> {
-        vec![ExtraRoute::new(
+    /// A fixture that signs people in, with the probe mounted at
+    /// `/x/csrf-probe`, and a signed-in user.
+    async fn ctx_with_probe() -> (TestContext, Session) {
+        let mut ctx = TestContext::with_auth().await.with_sign_in_added();
+        ctx.register_block("test/csrf-probe", std::sync::Arc::new(DispatchProbeBlock));
+        ctx.add_extra_route(ExtraRoute::new(
             "/x/csrf-probe",
             "test/csrf-probe",
             RouteAccess::Public,
-        )]
+        ));
+        ctx.seed_account("user-1@example.com", "correct-horse-battery", "user")
+            .await;
+        let session = ctx
+            .sign_in("user-1@example.com", "correct-horse-battery")
+            .await;
+        (ctx, session)
+    }
+
+    fn probe_post(fetch_site: &str) -> Message {
+        let mut msg = anon_msg("create", "/x/csrf-probe");
+        msg.set_meta("http.header.sec-fetch-site", fetch_site);
+        msg
     }
 
     #[tokio::test]
     async fn cookie_authenticated_cross_site_post_is_rejected_before_dispatch() {
-        let ctx = ctx_with_probe().await;
-        let mut msg = auth_msg("create", "/x/csrf-probe", "user-1");
-        msg.set_meta("http.header.sec-fetch-site", "cross-site");
+        let (ctx, session) = ctx_with_probe().await;
 
-        let out = handle_request(
-            &ctx,
-            msg,
-            InputStream::empty(),
-            None, // no Authorization header — this credential came from the cookie
-            "test-secret",
-            true, // cookie_authenticated
-            &AllEnabled,
-            &[],
-            &extra_route(),
-        )
-        .await;
+        let out = ctx.request(session.cookie(probe_post("cross-site"))).await;
 
         assert!(
             crate::test_support::output_is_error(out, "PermissionDenied").await,
@@ -2178,57 +2842,56 @@ mod csrf_wiring_tests {
 
     #[tokio::test]
     async fn cookie_authenticated_same_origin_post_is_dispatched() {
-        let ctx = ctx_with_probe().await;
-        let mut msg = auth_msg("create", "/x/csrf-probe", "user-1");
-        msg.set_meta("http.header.sec-fetch-site", "same-origin");
+        let (ctx, session) = ctx_with_probe().await;
 
-        let out = handle_request(
-            &ctx,
-            msg,
-            InputStream::empty(),
-            None,
-            "test-secret",
-            true,
-            &AllEnabled,
-            &[],
-            &extra_route(),
-        )
-        .await;
+        let out = ctx.request(session.cookie(probe_post("same-origin"))).await;
 
         let buf = out
             .collect_buffered()
             .await
             .expect("same-origin cookie-authenticated POST must reach dispatch");
-        assert_eq!(buf.body, b"DISPATCHED");
+        assert_eq!(buf.body, dispatched_as(&session.user_id));
     }
 
     #[tokio::test]
     async fn bearer_authenticated_cross_site_post_is_not_blocked() {
-        // cookie_authenticated=false: this credential came from a real
-        // `Authorization: Bearer` header, not the cookie fallback — never
-        // CSRF-able, so the cross-site Sec-Fetch-Site value is irrelevant.
-        let ctx = ctx_with_probe().await;
-        let mut msg = auth_msg("create", "/x/csrf-probe", "user-1");
-        msg.set_meta("http.header.sec-fetch-site", "cross-site");
+        // A real `Authorization: Bearer` header, not the cookie fallback —
+        // never CSRF-able, so the cross-site Sec-Fetch-Site value is
+        // irrelevant.
+        let (ctx, session) = ctx_with_probe().await;
 
-        let out = handle_request(
-            &ctx,
-            msg,
-            InputStream::empty(),
-            None,
-            "test-secret",
-            false, // cookie_authenticated
-            &AllEnabled,
-            &[],
-            &extra_route(),
-        )
-        .await;
+        let out = ctx.request(session.bearer(probe_post("cross-site"))).await;
 
         let buf = out
             .collect_buffered()
             .await
             .expect("Bearer-authenticated cross-site POST must not be blocked");
-        assert_eq!(buf.body, b"DISPATCHED");
+        assert_eq!(buf.body, dispatched_as(&session.user_id));
+    }
+
+    /// A header wins over the cookie: the router resolves the credential
+    /// from `Authorization` when both are present, so a cross-site page
+    /// cannot make its cookie count by also sending a header it cannot know.
+    /// What it can send is a header that does not verify; the cookie is then
+    /// ignored, the request is anonymous, and there is no session to ride.
+    #[tokio::test]
+    async fn a_cookie_does_not_ride_along_with_a_bogus_header() {
+        let (ctx, session) = ctx_with_probe().await;
+
+        let mut msg = session.cookie(probe_post("cross-site"));
+        msg.set_meta("http.header.authorization", "Bearer not-a-token");
+        let out = ctx.request(msg).await;
+
+        // Dispatched (the probe is Public) — as nobody.
+        let buf = out
+            .collect_buffered()
+            .await
+            .expect("an anonymous request to a public route is dispatched");
+        assert_eq!(
+            buf.body,
+            dispatched_as(""),
+            "the cookie must not have signed it"
+        );
     }
 }
 
@@ -2339,9 +3002,6 @@ mod streaming_audit_tests {
     }
 
     async fn drive(ctx: &TestContext, path: &str, routes: &[ExtraRoute]) {
-        // Inline mode so the audit write lands in the DB synchronously (not the
-        // CF wait-until queue), making the row queryable in-test.
-        set_request_log_mode(RequestLogMode::Inline);
         let out = handle_request(
             ctx,
             anon_msg("retrieve", path),
@@ -2358,15 +3018,19 @@ mod streaming_audit_tests {
         let _ = out.collect_buffered().await;
     }
 
+    /// Read by the test, not by the router the requests ran as.
     async fn request_log_count(ctx: &TestContext) -> i64 {
-        db::count(ctx, crate::blocks::admin::REQUEST_LOGS_TABLE, &[])
+        request_logs::paginated(&ctx.fixture(), 1, 20, "", false)
             .await
             .expect("count request_logs")
+            .total_count
     }
 
     #[tokio::test]
     async fn streamed_download_with_marker_still_writes_request_log() {
-        let mut ctx = TestContext::with_admin().await;
+        let mut ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         ctx.register_block("test/dl", Arc::new(MarkedDownloadBlock));
         drive(&ctx, "/x/dl", &route("/x/dl", "test/dl")).await;
         assert_eq!(
@@ -2378,7 +3042,9 @@ mod streaming_audit_tests {
 
     #[tokio::test]
     async fn open_ended_sse_stream_skips_request_log() {
-        let mut ctx = TestContext::with_admin().await;
+        let mut ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
         ctx.register_block("test/sse", Arc::new(SseStreamBlock));
         drive(&ctx, "/x/sse", &route("/x/sse", "test/sse")).await;
         assert_eq!(
@@ -2387,35 +3053,1377 @@ mod streaming_audit_tests {
             "an open-ended SSE stream must skip the request_logs row"
         );
     }
+
+    /// Answers after yielding once, so two requests driven together
+    /// interleave inside the handler.
+    struct YieldingBlock;
+    #[async_trait]
+    impl RunBlock for YieldingBlock {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new("test/yield", "0.0.1", "echo@v1", "yielding probe")
+                .category(BlockCategory::Service)
+        }
+        async fn handle(
+            &self,
+            _ctx: &dyn Context,
+            _msg: Message,
+            _input: InputStream,
+        ) -> OutputStream {
+            let mut yielded = false;
+            std::future::poll_fn(|cx| {
+                if yielded {
+                    std::task::Poll::Ready(())
+                } else {
+                    yielded = true;
+                    cx.waker().wake_by_ref();
+                    std::task::Poll::Pending
+                }
+            })
+            .await;
+            OutputStream::respond(b"ok".to_vec())
+        }
+        async fn lifecycle(
+            &self,
+            _ctx: &dyn Context,
+            _e: LifecycleEvent,
+        ) -> Result<(), WaferError> {
+            Ok(())
+        }
+    }
+
+    /// Two requests interleaved in one isolate, each run inside its own
+    /// `after_response` scope (as the Cloudflare adapter runs every
+    /// dispatch): each request's audit row lands in its own scope — to be
+    /// written later from the room its own invocation held back — and none
+    /// is inserted inline.
+    #[tokio::test]
+    async fn interleaved_requests_queue_their_audit_rows_in_their_own_scopes() {
+        use crate::after_response::{scope, AfterResponse};
+
+        let mut ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
+        ctx.register_block("test/yield", Arc::new(YieldingBlock));
+        let routes = route("/x/", "test/yield");
+        let after_a = AfterResponse::new();
+        let after_b = AfterResponse::new();
+
+        tokio::join!(
+            scope(std::rc::Rc::clone(&after_a), drive(&ctx, "/x/a", &routes)),
+            scope(std::rc::Rc::clone(&after_b), drive(&ctx, "/x/b", &routes)),
+        );
+
+        let path = |after: &AfterResponse| {
+            let row = after.take_audit_row().expect("the request queued its row");
+            assert_eq!(row.table, request_logs::TABLE);
+            row.data["path"].as_str().unwrap().to_string()
+        };
+        assert_eq!(path(&after_a), "/x/a");
+        assert_eq!(path(&after_b), "/x/b");
+        assert_eq!(
+            request_log_count(&ctx).await,
+            0,
+            "a queued row is not also inserted on the response path"
+        );
+    }
 }
 
-#[cfg(test)]
-mod request_log_mode_tests {
-    use super::{
-        drain_queued_request_logs, enqueue_request_log, request_log_mode, set_request_log_mode,
-        RequestLogMode,
-    };
-    use crate::blocks::admin;
+// Driven through `test_support::real_block_infos()` — see `discovery_tests`
+// for why that needs the full block set. The route whose token must not be
+// logged is the files block's `/b/storage/direct/{token}`.
+#[cfg(all(
+    test,
+    feature = "block-files",
+    feature = "block-messages",
+    feature = "block-products",
+    feature = "block-tickets",
+    feature = "block-llm",
+    feature = "block-vector"
+))]
+mod secret_path_redaction_tests {
+    //! A capability that travels in the URL path must not be copied into the
+    //! audit log.
+    //!
+    //! `GET /b/storage/direct/{token}` is a public share link: the token IS the
+    //! credential, and `impresspress__files__cloud_shares.token` stores it in
+    //! the clear because the handler looks it up by equality. Writing the
+    //! request path verbatim into `impresspress__admin__request_logs` put that
+    //! same credential into an ops table that the admin Logs page, the Network
+    //! page and the SQL explorer all read — so refusing the shares table while
+    //! leaving the token in the log would have been a boundary with a hole in
+    //! it, not a boundary.
+    //!
+    //! Redaction happens where the row is written, so every consumer is fixed
+    //! by the one change, and it is derived from the route templates rather
+    //! than from a hardcoded path: any endpoint that binds a `{token}` /
+    //! `{*_token}` variable is covered the day it is declared.
 
+    use super::*;
+    use crate::{
+        features::AllEnabled,
+        platform_state::request_logs,
+        test_support::{anon_msg, real_block_infos, TestContext},
+    };
+
+    /// The value a share link carries. Distinctive enough that a substring
+    /// check over the whole stored row is meaningful.
+    const SHARE_TOKEN: &str = "sharetok-9f3c21aa77b4e5d1";
+
+    /// The `(path, status_code)` of every audit row, so a test can pin the
+    /// status its reasoning depends on instead of asserting it in a comment.
+    async fn logged_rows(ctx: &TestContext) -> Vec<(String, i64)> {
+        request_logs::paginated(ctx, 1, 50, "", false)
+            .await
+            .expect("list request_logs")
+            .rows
+            .iter()
+            .map(|r| (r.path.clone(), r.status_code))
+            .collect()
+    }
+
+    /// Drive one request through the real pipeline with the real blocks'
+    /// declared endpoints, and return the `(path, status_code)` rows it
+    /// logged.
+    ///
+    /// No request here reaches the share handler, which is the case that
+    /// matters: a *failed* share access is exactly when an operator goes
+    /// looking in the logs, and a redaction that only worked on the success
+    /// path would leak on every probe. Each fails at a different point, all
+    /// of them before any handler, and the tests pin the status rather than
+    /// asserting it in prose (the sentence this doc replaced claimed a 404
+    /// none of them produce):
+    ///
+    ///  * `/b/storage/direct/<tok>` IS declared — `real_block_infos` includes
+    ///    `FilesBlock::info()` — so it routes, and then dies in dispatch
+    ///    because this harness registers no block INSTANCE: "block
+    ///    'impresspress/files' not registered in TestContext";
+    ///  * a capitalised spelling misses the case-sensitive `/b/storage/`
+    ///    prefix in `routing::ROUTES` and is refused as "endpoint not found";
+    ///  * the trailing-slash spelling matches that prefix but is not a
+    ///    declared endpoint, so the access gate refuses it ("authentication
+    ///    required") before the block is called.
+    ///
+    /// All three are recorded with the status their own `ErrorCode` resolves
+    /// to — the audit tail no longer hardcodes 500 — which is the same code
+    /// the client was served. The near-miss test still asserts `>= 400` rather
+    /// than a code that says more than it knows: the three stop at three
+    /// different points and need not agree on which 4xx they are.
+    ///
+    /// None of them binds `{token}` as a path variable, which is why the
+    /// redaction matches templates itself instead of reading back what
+    /// routing bound.
+    async fn drive_and_read_rows(path: &str) -> Vec<(String, i64)> {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
+        let infos = real_block_infos();
+        let out = handle_request(
+            &ctx,
+            anon_msg("retrieve", path),
+            InputStream::empty(),
+            None,
+            "test-secret",
+            false,
+            &AllEnabled,
+            &infos,
+            &[],
+        )
+        .await;
+        let _ = out.collect_buffered().await;
+        logged_rows(&ctx).await
+    }
+
+    #[tokio::test]
+    async fn a_share_token_never_reaches_the_audit_log() {
+        let rows = drive_and_read_rows(&format!("/b/storage/direct/{SHARE_TOKEN}")).await;
+        assert_eq!(rows.len(), 1, "expected exactly one audit row: {rows:?}");
+        let (path, status) = &rows[0];
+        assert!(
+            !path.contains(SHARE_TOKEN),
+            "the share token was written to request_logs.path: {path:?}"
+        );
+        assert_eq!(
+            path, "/b/storage/direct/{token}",
+            "the row must still say which route was hit"
+        );
+        // Pinned, not asserted in prose: this path IS declared, so it resolves
+        // and then dies in dispatch because the harness registers no block
+        // instance. It never reached the share handler either way. The row
+        // records 501 because "block not registered" is
+        // `ErrorCode::Unimplemented`, as the runtime answers it, and the audit
+        // tail takes the error's own status — the code the client was served,
+        // see the `TerminalNotResponse::Error` arm of `handle_request`.
+        assert_eq!(*status, 501, "{rows:?}");
+    }
+
+    /// A URL that *nearly* names the share route still carries a live token,
+    /// and a near miss is ordinary user error rather than an attack: a pasted
+    /// link with a trailing slash, a hostname-style capitalisation. Both 404,
+    /// so no file is served — and both used to put the capability into
+    /// `request_logs.path` in the clear, which is the one table this whole
+    /// change exists to keep tokens out of.
+    #[tokio::test]
+    async fn a_near_miss_url_has_its_token_redacted_too() {
+        for path in [
+            // A trailing slash on a pasted share link.
+            format!("/b/storage/direct/{SHARE_TOKEN}/"),
+            // Capitalisation someone's client or their muscle memory added.
+            format!("/b/Storage/direct/{SHARE_TOKEN}"),
+            format!("/B/STORAGE/DIRECT/{SHARE_TOKEN}"),
+            // Both at once.
+            format!("/b/Storage/Direct/{SHARE_TOKEN}/"),
+        ] {
+            let rows = drive_and_read_rows(&path).await;
+            assert_eq!(rows.len(), 1, "{path}: {rows:?}");
+            let (logged, status) = &rows[0];
+            assert!(
+                !logged.contains(SHARE_TOKEN),
+                "{path}: the token reached request_logs.path as {logged:?}"
+            );
+            // Refused, never served — see the helper's doc for where each
+            // one stops. Nothing bound the token as a path variable, so only
+            // the template match could have found it.
+            assert!(
+                *status >= 400,
+                "{path} was served rather than refused: {rows:?}"
+            );
+        }
+    }
+
+    /// Redaction must not cost the audit log the casing an operator needs to
+    /// see WHY a request missed: the row keeps the path as it was typed, with
+    /// only the capability segment replaced.
+    #[tokio::test]
+    async fn a_near_miss_keeps_the_casing_that_explains_it() {
+        let rows = drive_and_read_rows(&format!("/b/Storage/direct/{SHARE_TOKEN}")).await;
+        assert_eq!(rows[0].0, "/b/Storage/direct/{token}");
+    }
+
+    #[tokio::test]
+    async fn an_ordinary_path_variable_is_logged_verbatim() {
+        // `{id}` is an identifier, not a capability: redacting it would cost
+        // the audit log the thing it exists for.
+        let rows = drive_and_read_rows("/b/admin/api/users/user_12345").await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].0, "/b/admin/api/users/user_12345");
+    }
+
+    /// The closed set: every declared endpoint that binds a secret path
+    /// variable, as the real blocks declare them.
+    ///
+    /// A new route that puts a capability in its path joins this list the day
+    /// it is declared, and this test is where a reviewer is told about it —
+    /// the derivation is by convention, but the convention having been applied
+    /// to something new is not something anyone should have to notice
+    /// unprompted.
     #[test]
-    fn default_mode_is_inline_and_drain_is_empty() {
-        assert_eq!(request_log_mode(), RequestLogMode::Inline);
-        assert!(drain_queued_request_logs().is_empty());
+    fn exactly_one_declared_route_carries_a_capability_in_its_path() {
+        let infos = real_block_infos();
+        let mut found: Vec<String> = capability_path_templates(&infos)
+            .into_iter()
+            .map(str::to_string)
+            .collect();
+        found.sort();
+        found.dedup();
+        assert_eq!(
+            found,
+            vec!["/b/storage/direct/{token}".to_string()],
+            "the set of routes carrying a capability in the path changed — \
+             confirm the new one is redacted in the audit log and update this list"
+        );
     }
 
     #[test]
-    fn queued_mode_accumulates_and_drain_clears() {
-        set_request_log_mode(RequestLogMode::Queued);
-        let mut data = std::collections::HashMap::new();
-        data.insert("path".to_string(), serde_json::json!("/x"));
-        enqueue_request_log(admin::REQUEST_LOGS_TABLE, data.clone());
-        enqueue_request_log(admin::REQUEST_LOGS_TABLE, data);
+    fn the_variable_convention_is_the_name_saying_token() {
+        assert!(path_var_is_capability("token"));
+        assert!(path_var_is_capability("share_token"));
+        assert!(path_var_is_capability("TOKEN"));
+        assert!(!path_var_is_capability("id"));
+        assert!(!path_var_is_capability("key"));
+        assert!(!path_var_is_capability("tokenize"));
+    }
 
-        let drained = drain_queued_request_logs();
-        assert_eq!(drained.len(), 2);
-        assert_eq!(drained[0].table, admin::REQUEST_LOGS_TABLE);
-        assert!(drain_queued_request_logs().is_empty(), "drain must clear");
+    /// Redaction replaces only the capability segment.
+    #[test]
+    fn redaction_keeps_every_other_segment() {
+        let infos = vec![
+            BlockInfo::new("t/x", "0", "http-handler@v1", "probe").endpoints(vec![
+                wafer_run::BlockEndpoint::get("/b/x/{bucket}/{token}/meta")
+                    .auth(wafer_run::AuthLevel::Public)
+                    .summary("probe"),
+            ]),
+        ];
+        assert_eq!(
+            redact_capability_path_vars("/b/x/photos/abc123/meta", &infos),
+            Some("/b/x/photos/{token}/meta".to_string())
+        );
+        assert_eq!(redact_capability_path_vars("/b/x/photos", &infos), None);
+    }
+}
 
-        set_request_log_mode(RequestLogMode::Inline); // restore for other tests
+#[cfg(test)]
+mod request_log_policy_tests {
+    //! What `request_logs` is allowed to cost.
+    //!
+    //! A row per request on a public unauthenticated route means anyone can
+    //! mint rows by sending GETs. Three layers answer that, and each is tested
+    //! here for the thing only it does:
+    //!
+    //!  1. [`RequestLogPolicy`] — WHICH requests deserve a row, the operator's
+    //!     choice, defaulting to today's "all of them";
+    //!  2. [`UNMATCHED_PATH_LABEL`] — what a row is allowed to STORE from a
+    //!     path nobody's route claims;
+    //!  3. [`REQUEST_LOG_CEILING_PER_WINDOW`] — HOW MANY rows, under
+    //!     `errors` only, as a backstop against a 5xx storm.
+    //!
+    //! The status fix belongs here too rather than beside them: layer 1
+    //! selects on `status_code`, so an audit tail that called every failure a
+    //! 500 would have made `Errors` keep exactly the attacker-minted traffic
+    //! it exists to drop.
+
+    use std::sync::Arc;
+
+    use wafer_block::core_types::{ErrorCode, LifecycleEvent, WaferError};
+    use wafer_run::Block as RunBlock;
+
+    use super::*;
+    use crate::{
+        config_vars::REQUEST_LOG_CONFIG_KEY,
+        features::AllEnabled,
+        platform_state::request_logs,
+        routing::{ExtraRoute, RouteAccess},
+        test_support::{anon_msg, TestContext},
+    };
+
+    /// Answers 200. The traffic a flood is made of, and the traffic
+    /// Cloudflare's edge analytics already counts for free.
+    struct OkBlock;
+
+    #[wafer_block::wafer_async_trait]
+    impl RunBlock for OkBlock {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new("test/ok", "0.1.0", "test/probe@v1", "ok probe")
+        }
+        async fn handle(&self, _c: &dyn Context, _m: Message, _i: InputStream) -> OutputStream {
+            OutputStream::respond(b"ok".to_vec())
+        }
+        async fn lifecycle(&self, _c: &dyn Context, _e: LifecycleEvent) -> Result<(), WaferError> {
+            Ok(())
+        }
+    }
+
+    /// Answers 500 — the only class carrying an `error_message` that no edge
+    /// log can reconstruct, which is why `errors` keeps it.
+    struct BoomBlock;
+
+    #[wafer_block::wafer_async_trait]
+    impl RunBlock for BoomBlock {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new("test/boom", "0.1.0", "test/probe@v1", "error probe")
+        }
+        async fn handle(&self, _c: &dyn Context, _m: Message, _i: InputStream) -> OutputStream {
+            OutputStream::error(WaferError::new(ErrorCode::Internal, "boom"))
+        }
+        async fn lifecycle(&self, _c: &dyn Context, _e: LifecycleEvent) -> Result<(), WaferError> {
+            Ok(())
+        }
+    }
+
+    /// Fails with an explicit `META_RESP_STATUS` below 400 — the case that
+    /// separates "the error's code" from "every error is an ERROR row".
+    struct RedirectingErrorBlock;
+
+    #[wafer_block::wafer_async_trait]
+    impl RunBlock for RedirectingErrorBlock {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new("test/moved", "0.1.0", "test/probe@v1", "redirect probe")
+        }
+        async fn handle(&self, _c: &dyn Context, _m: Message, _i: InputStream) -> OutputStream {
+            OutputStream::error(WaferError {
+                code: ErrorCode::Internal,
+                message: "moved".to_string(),
+                meta: vec![MetaEntry {
+                    key: wafer_run::META_RESP_STATUS.into(),
+                    value: "302".into(),
+                }],
+            })
+        }
+        async fn lifecycle(&self, _c: &dyn Context, _e: LifecycleEvent) -> Result<(), WaferError> {
+            Ok(())
+        }
+    }
+
+    /// Answers the styled HTML 500 page as a RESPONSE, the way a handler
+    /// that hit a failure it renders for a browser does. The pipeline sees a
+    /// buffered `Response` terminal carrying status 500, not an error.
+    struct HtmlServerErrorBlock;
+
+    #[wafer_block::wafer_async_trait]
+    impl RunBlock for HtmlServerErrorBlock {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new("test/page500", "0.1.0", "test/probe@v1", "html 500 probe")
+        }
+        async fn handle(&self, _c: &dyn Context, m: Message, _i: InputStream) -> OutputStream {
+            crate::ui::server_error_response(&m)
+        }
+        async fn lifecycle(&self, _c: &dyn Context, _e: LifecycleEvent) -> Result<(), WaferError> {
+            Ok(())
+        }
+    }
+
+    /// Answers a complete 403 through the `Halt` terminal.
+    struct HaltForbiddenBlock;
+
+    #[wafer_block::wafer_async_trait]
+    impl RunBlock for HaltForbiddenBlock {
+        fn info(&self) -> BlockInfo {
+            BlockInfo::new("test/halt403", "0.1.0", "test/probe@v1", "halt 403 probe")
+        }
+        async fn handle(&self, _c: &dyn Context, _m: Message, _i: InputStream) -> OutputStream {
+            OutputStream::halt(
+                b"forbidden".to_vec(),
+                vec![MetaEntry {
+                    key: wafer_run::META_RESP_STATUS.into(),
+                    value: "403".into(),
+                }],
+            )
+        }
+        async fn lifecycle(&self, _c: &dyn Context, _e: LifecycleEvent) -> Result<(), WaferError> {
+            Ok(())
+        }
+    }
+
+    const OK_ROUTE: &str = "/x/ok";
+    const BOOM_ROUTE: &str = "/x/boom";
+    const MOVED_ROUTE: &str = "/x/moved";
+    const PAGE_500_ROUTE: &str = "/x/page500";
+    const HALT_403_ROUTE: &str = "/x/halt403";
+
+    fn routes() -> Vec<ExtraRoute> {
+        vec![
+            ExtraRoute::new(OK_ROUTE, "test/ok", RouteAccess::Public),
+            ExtraRoute::new(BOOM_ROUTE, "test/boom", RouteAccess::Public),
+            ExtraRoute::new(MOVED_ROUTE, "test/moved", RouteAccess::Public),
+            ExtraRoute::new(PAGE_500_ROUTE, "test/page500", RouteAccess::Public),
+            ExtraRoute::new(HALT_403_ROUTE, "test/halt403", RouteAccess::Public),
+        ]
+    }
+
+    async fn ctx_with(policy: Option<&str>) -> TestContext {
+        let mut ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
+        if let Some(policy) = policy {
+            ctx.set_config(REQUEST_LOG_CONFIG_KEY, policy);
+        }
+        ctx.register_block("test/ok", Arc::new(OkBlock));
+        ctx.register_block("test/boom", Arc::new(BoomBlock));
+        ctx.register_block("test/moved", Arc::new(RedirectingErrorBlock));
+        ctx.register_block("test/page500", Arc::new(HtmlServerErrorBlock));
+        ctx.register_block("test/halt403", Arc::new(HaltForbiddenBlock));
+        ctx
+    }
+
+    /// `(path, status_code)` of every row written, sorted so a test states
+    /// which rows exist without also pinning `paginated`'s newest-first order.
+    async fn logged(ctx: &TestContext) -> Vec<(String, i64)> {
+        let mut rows: Vec<(String, i64)> = request_logs::paginated(ctx, 1, 1000, "", false)
+            .await
+            .expect("list request_logs")
+            .rows
+            .iter()
+            .map(|r| (r.path.clone(), r.status_code))
+            .collect();
+        rows.sort();
+        rows
+    }
+
+    /// Drive one request through the real pipeline. `register_block` mirrors
+    /// each block's `BlockInfo` into the context, but those carry no declared
+    /// `BlockEndpoint`s — the `ExtraRoute` prefix is what both routes the
+    /// request and makes the path resemble a declared route, which is exactly
+    /// the consumer-registered shape `resembles_a_declared_route` has to
+    /// honour.
+    async fn drive(ctx: &TestContext, path: &str) {
+        drive_msg(ctx, anon_msg("retrieve", path)).await;
+    }
+
+    /// [`drive`] with a caller-built request, for a test that needs headers.
+    async fn drive_msg(ctx: &TestContext, msg: Message) {
+        let out = handle_request(
+            ctx,
+            msg,
+            InputStream::empty(),
+            None,
+            "test-secret",
+            false,
+            &AllEnabled,
+            &[],
+            &routes(),
+        )
+        .await;
+        let _ = out.collect_buffered().await;
+    }
+
+    /// An error's own code decides the logged status.
+    ///
+    /// The tail hardcoded 500 for every `TerminalNotResponse::Error`, so an
+    /// unroutable path — `ErrorCode::NotFound`, which
+    /// `http_codec::error_code_to_http_status` maps to 404 — was RECORDED as a
+    /// server error while the client was correctly SERVED a 404 (every adapter
+    /// resolves its own status through `collect_http_response`). An audit row
+    /// that disagrees with the response that was sent is wrong on its own
+    /// terms, and it defeats `RequestLogPolicy::Errors`, which selects on this
+    /// number.
+    #[tokio::test]
+    async fn an_unmatched_endpoint_is_logged_404_not_500() {
+        let ctx = ctx_with(None).await;
+        reset_request_log_budget_for_test();
+        drive(&ctx, "/x/nope").await;
+        assert_eq!(
+            logged(&ctx).await.iter().map(|r| r.1).collect::<Vec<_>>(),
+            vec![404],
+            "an unroutable endpoint is a client error, not a server error",
+        );
+    }
+
+    /// The `status` label follows the resolved code on the error arm too. An
+    /// error carrying an explicit `META_RESP_STATUS` below 400 is served a
+    /// 3xx, so a row labelled ERROR beside it would disagree with the
+    /// response that was sent.
+    #[tokio::test]
+    async fn the_label_follows_the_resolved_status() {
+        let ctx = ctx_with(Some("all")).await;
+        reset_request_log_budget_for_test();
+        drive(&ctx, MOVED_ROUTE).await;
+
+        let rows = request_logs::paginated(&ctx, 1, 10, "", false)
+            .await
+            .expect("list request_logs")
+            .rows;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(rows[0].status_code, 302, "the override wins over the code");
+        assert_eq!(
+            rows[0].status, "OK",
+            "a sub-400 status must not be labelled ERROR",
+        );
+    }
+
+    /// The one stored row, and the dashboard's today/daily error counts over
+    /// it, after driving a single request.
+    async fn sole_row_and_dashboard_errors(
+        ctx: &TestContext,
+    ) -> (request_logs::RequestLogRow, i64, i64) {
+        let rows = request_logs::paginated(ctx, 1, 10, "", false)
+            .await
+            .expect("list request_logs")
+            .rows;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        let today_start = format!("{}T00:00:00", chrono::Utc::now().format("%Y-%m-%d"));
+        let today = request_logs::today_counts(ctx, &today_start)
+            .await
+            .expect("today_counts");
+        assert_eq!(today.requests, 1);
+        let daily: i64 = request_logs::daily_counts(ctx, &today_start)
+            .await
+            .expect("daily_counts")
+            .iter()
+            .map(|d| d.errors)
+            .sum();
+        (rows[0].clone(), today.errors, daily)
+    }
+
+    /// A handler that renders the styled HTML 500 page answers with a
+    /// buffered `Response`, not an error terminal. The row is still an error:
+    /// labelled so, and counted by the dashboard's tiles and series, the same
+    /// as the network page's `status_code` column counts it.
+    #[tokio::test]
+    async fn a_buffered_html_500_response_is_an_error_row() {
+        let ctx = ctx_with(Some("all")).await;
+        reset_request_log_budget_for_test();
+        let mut msg = anon_msg("retrieve", PAGE_500_ROUTE);
+        msg.set_meta("http.header.accept", "text/html");
+        drive_msg(&ctx, msg).await;
+
+        let (row, today_errors, daily_errors) = sole_row_and_dashboard_errors(&ctx).await;
+        assert_eq!(row.status_code, 500, "the styled page is a 500");
+        assert_eq!(today_errors, 1, "today_counts must count the 500");
+        assert_eq!(daily_errors, 1, "daily_counts must count the 500");
+        assert_eq!(row.status, "ERROR", "a buffered 500 must be labelled ERROR");
+    }
+
+    /// A complete 4xx through the `Halt` terminal is an error row too.
+    #[tokio::test]
+    async fn a_halted_4xx_response_is_an_error_row() {
+        let ctx = ctx_with(Some("all")).await;
+        reset_request_log_budget_for_test();
+        drive(&ctx, HALT_403_ROUTE).await;
+
+        let (row, today_errors, daily_errors) = sole_row_and_dashboard_errors(&ctx).await;
+        assert_eq!(row.status_code, 403);
+        assert_eq!(today_errors, 1, "today_counts must count the 403");
+        assert_eq!(daily_errors, 1, "daily_counts must count the 403");
+        assert_eq!(row.status, "ERROR", "a halted 403 must be labelled ERROR");
+    }
+
+    /// The buffered `Response` arm's success case: a 200 is not an error.
+    #[tokio::test]
+    async fn a_buffered_200_response_is_not_an_error_row() {
+        let ctx = ctx_with(Some("all")).await;
+        reset_request_log_budget_for_test();
+        drive(&ctx, OK_ROUTE).await;
+
+        let (row, today_errors, daily_errors) = sole_row_and_dashboard_errors(&ctx).await;
+        assert_eq!((row.status_code, row.status.as_str()), (200, "OK"));
+        assert_eq!((today_errors, daily_errors), (0, 0));
+    }
+
+    /// The default must not change for anyone who does not set the var.
+    #[tokio::test]
+    async fn the_default_policy_logs_every_request() {
+        let ctx = ctx_with(None).await;
+        reset_request_log_budget_for_test();
+        drive(&ctx, OK_ROUTE).await;
+        drive(&ctx, BOOM_ROUTE).await;
+        assert_eq!(
+            logged(&ctx).await,
+            vec![(BOOM_ROUTE.to_string(), 500), (OK_ROUTE.to_string(), 200),],
+            "an absent config key must mean `all`",
+        );
+    }
+
+    /// An unparseable value is `all` too: a typo must degrade to today's
+    /// behaviour rather than silently disable the audit trail.
+    #[tokio::test]
+    async fn an_unrecognised_policy_value_falls_back_to_all() {
+        for value in ["", "  ", "ERRORS", "none", "true"] {
+            let ctx = ctx_with(Some(value)).await;
+            reset_request_log_budget_for_test();
+            drive(&ctx, OK_ROUTE).await;
+            assert_eq!(
+                logged(&ctx).await.len(),
+                1,
+                "{value:?} is not a policy, so it must behave as `all`",
+            );
+        }
+    }
+
+    /// The whole point: a 200 is what a flood is made of, and the edge already
+    /// records it. Under `errors` it must cost zero database writes.
+    #[tokio::test]
+    async fn errors_policy_does_not_log_a_successful_request() {
+        let ctx = ctx_with(Some("errors")).await;
+        reset_request_log_budget_for_test();
+        drive(&ctx, OK_ROUTE).await;
+        assert_eq!(
+            logged(&ctx).await.len(),
+            0,
+            "a 200 under `errors` must write nothing",
+        );
+    }
+
+    /// …but the 5xx survives, because its `error_message` is the one field no
+    /// edge log can reconstruct.
+    #[tokio::test]
+    async fn errors_policy_still_logs_a_server_error() {
+        let ctx = ctx_with(Some("errors")).await;
+        reset_request_log_budget_for_test();
+        drive(&ctx, BOOM_ROUTE).await;
+        assert_eq!(
+            logged(&ctx).await,
+            vec![(BOOM_ROUTE.to_string(), 500)],
+            "a 5xx under `errors` must still be recorded",
+        );
+    }
+
+    /// A 4xx is fully attacker-minted and the edge counts it for free. This is
+    /// also the row that only passes because the status fix landed: under the
+    /// old hardcoded 500 an unroutable path would have been kept.
+    #[tokio::test]
+    async fn errors_policy_does_not_log_a_client_error() {
+        let ctx = ctx_with(Some("errors")).await;
+        reset_request_log_budget_for_test();
+        drive(&ctx, "/x/nope").await;
+        assert_eq!(
+            logged(&ctx).await.len(),
+            0,
+            "4xx is attacker-controlled volume; the edge already has it",
+        );
+    }
+
+    #[tokio::test]
+    async fn off_policy_logs_nothing_at_all() {
+        let ctx = ctx_with(Some("off")).await;
+        reset_request_log_budget_for_test();
+        drive(&ctx, BOOM_ROUTE).await;
+        assert_eq!(logged(&ctx).await.len(), 0, "`off` must write nothing");
+    }
+
+    /// The path is attacker-supplied. Storing it verbatim lets anyone mint
+    /// unbounded DISTINCT values and puts their text into every surface that
+    /// reads the table.
+    #[tokio::test]
+    async fn a_path_resembling_no_route_is_collapsed_not_stored_verbatim() {
+        let ctx = ctx_with(Some("all")).await;
+        reset_request_log_budget_for_test();
+        drive(&ctx, "/x/attacker-controlled-junk-9f2").await;
+        assert_eq!(
+            logged(&ctx).await,
+            vec![(UNMATCHED_PATH_LABEL.to_string(), 404)],
+            "the request is still counted, but none of its text is stored",
+        );
+    }
+
+    /// The other half of that rule, and the reason it is not "every 404": a
+    /// path that DOES name a route keeps its row readable. Here the route
+    /// exists and the block refuses the request — the diagnostic case an
+    /// operator opens the log for.
+    ///
+    /// Note what this does NOT cover, because an earlier draft of this comment
+    /// claimed it did: `secret_path_redaction_tests`' near-miss share link is
+    /// saved by the REDACTION arm, which fires first and returns `Some`, so
+    /// `resembles_a_declared_route` never runs for it. The two arms overlap by
+    /// construction — redaction matches a subset of the templates this
+    /// function matches — so the ordering is belt-and-braces, not load-bearing
+    /// for that case.
+    #[tokio::test]
+    async fn a_path_that_names_a_route_is_stored_even_when_it_fails() {
+        let ctx = ctx_with(Some("all")).await;
+        reset_request_log_budget_for_test();
+        drive(&ctx, &format!("{BOOM_ROUTE}/deeper")).await;
+        assert_eq!(
+            logged(&ctx).await,
+            vec![(format!("{BOOM_ROUTE}/deeper"), 500)],
+            "a path under a registered route must not be collapsed",
+        );
+    }
+
+    /// The backstop, under the one policy that has it: an error storm cannot
+    /// make one isolate write without limit.
+    #[tokio::test]
+    async fn an_error_storm_cannot_exceed_the_per_isolate_write_ceiling() {
+        let ctx = ctx_with(Some("errors")).await;
+        reset_request_log_budget_for_test();
+        for _ in 0..(REQUEST_LOG_CEILING_PER_WINDOW + 25) {
+            drive(&ctx, BOOM_ROUTE).await;
+        }
+        assert_eq!(
+            logged(&ctx).await.len(),
+            REQUEST_LOG_CEILING_PER_WINDOW,
+            "under `errors` the ceiling must hold no matter how many arrive",
+        );
+    }
+
+    /// …and `all` has no ceiling at all.
+    ///
+    /// An operator who asked to record everything gets everything. A ceiling
+    /// here would bind before the policy did, and it would bind
+    /// first-come-first-served — so a flood of 200s early in a window would
+    /// silence a genuine 5xx later in it, which is the wrong way round. The
+    /// honest answer to "that is too many rows" is `errors`, not a silent
+    /// sample of `all`. This drives past the ceiling deliberately: it is what
+    /// makes `the_default_policy_logs_every_request`'s name true rather than
+    /// true only for the first two requests.
+    #[tokio::test]
+    async fn the_all_policy_has_no_ceiling() {
+        let ctx = ctx_with(Some("all")).await;
+        reset_request_log_budget_for_test();
+        let total = REQUEST_LOG_CEILING_PER_WINDOW + 25;
+        for _ in 0..total {
+            drive(&ctx, OK_ROUTE).await;
+        }
+        assert_eq!(
+            logged(&ctx).await.len(),
+            total,
+            "`all` means all — no row may be dropped by a write ceiling",
+        );
+    }
+
+    /// The ceiling is the policy's, not the writer's: a 5xx that `all` would
+    /// have kept must not be refused because an `errors` run earlier in the
+    /// same window exhausted the budget. Pins that `is_bounded` gates the
+    /// claim rather than the claim happening regardless and being ignored.
+    #[tokio::test]
+    async fn an_exhausted_budget_does_not_reach_the_all_policy() {
+        reset_request_log_budget_for_test();
+        // The CURRENT window, not an arbitrary timestamp: `write_request_log`
+        // claims against `now_millis()`, so a budget filled at ms 1000 would
+        // simply have rolled over by then and the test would pass without
+        // exercising anything.
+        let now = crate::util::now_millis();
+        for _ in 0..REQUEST_LOG_CEILING_PER_WINDOW {
+            assert!(claim_request_log_budget(now));
+        }
+        assert!(
+            !claim_request_log_budget(now),
+            "pre-condition: this window is exhausted",
+        );
+
+        let ctx = ctx_with(Some("all")).await;
+        drive(&ctx, BOOM_ROUTE).await;
+        assert_eq!(
+            logged(&ctx).await,
+            vec![(BOOM_ROUTE.to_string(), 500)],
+            "`all` must not consult a budget it does not have",
+        );
+    }
+
+    // The only test in this module driven through the real block set — see
+    // `discovery_tests` for why that needs every block compiled.
+    #[cfg(all(
+        feature = "block-files",
+        feature = "block-messages",
+        feature = "block-products",
+        feature = "block-tickets",
+        feature = "block-llm",
+        feature = "block-vector"
+    ))]
+    #[tokio::test]
+    async fn repro_site_root_is_not_collapsed() {
+        let ctx = ctx_with(Some("all")).await;
+        reset_request_log_budget_for_test();
+        let infos = crate::test_support::real_block_infos();
+        let out = handle_request(
+            &ctx,
+            anon_msg("retrieve", "/"),
+            InputStream::empty(),
+            None,
+            "test-secret",
+            false,
+            &AllEnabled,
+            &infos,
+            &[],
+        )
+        .await;
+        let _ = out.collect_buffered().await;
+        let rows = logged(&ctx).await;
+        assert_eq!(rows.len(), 1, "{rows:?}");
+        assert_eq!(
+            rows[0].0, "/",
+            "the site root is the highest-traffic route on any public site; \
+             collapsing it destroys the signal the collapse exists to create",
+        );
+    }
+
+    /// Pure unit coverage of the parse, so the truth table is stated once and
+    /// the request-driving tests above only have to pin the behaviour.
+    #[test]
+    fn policy_parse_and_selection() {
+        assert_eq!(RequestLogPolicy::parse(None), RequestLogPolicy::All);
+        assert_eq!(RequestLogPolicy::parse(Some("")), RequestLogPolicy::All);
+        assert_eq!(
+            RequestLogPolicy::parse(Some(" errors ")),
+            RequestLogPolicy::Errors,
+        );
+        assert_eq!(RequestLogPolicy::parse(Some("off")), RequestLogPolicy::Off);
+        assert_eq!(
+            RequestLogPolicy::parse(Some("Errors")),
+            RequestLogPolicy::All,
+            "the value is matched exactly, lowercase — an unrecognised \
+             spelling degrades to `all` rather than to `off`",
+        );
+
+        assert!(RequestLogPolicy::All.keeps(200));
+        assert!(RequestLogPolicy::All.keeps(404));
+        assert!(!RequestLogPolicy::Errors.keeps(200));
+        assert!(!RequestLogPolicy::Errors.keeps(404));
+        assert!(RequestLogPolicy::Errors.keeps(500));
+        assert!(RequestLogPolicy::Errors.keeps(503));
+        assert!(!RequestLogPolicy::Off.keeps(500));
+
+        assert!(
+            RequestLogPolicy::Errors.is_bounded(),
+            "the ceiling is a backstop against a 5xx storm",
+        );
+        assert!(
+            !RequestLogPolicy::All.is_bounded(),
+            "`all` means all; a ceiling there would bind before the policy did",
+        );
+        assert!(
+            !RequestLogPolicy::Off.is_bounded(),
+            "`off` writes nothing, so there is nothing to bound",
+        );
+    }
+
+    /// The window rolls over, so a ceiling reached during an incident does not
+    /// silence the log for the rest of the deployment's life.
+    #[test]
+    fn the_ceiling_window_rolls_over() {
+        reset_request_log_budget_for_test();
+        for _ in 0..REQUEST_LOG_CEILING_PER_WINDOW {
+            assert!(claim_request_log_budget(1_000));
+        }
+        assert!(!claim_request_log_budget(1_000), "the window is exhausted",);
+        assert!(
+            claim_request_log_budget(1_000 + REQUEST_LOG_WINDOW_MS),
+            "a new window starts with a full budget",
+        );
+    }
+}
+
+#[cfg(test)]
+mod oversized_body_tests {
+    //! What a body the transport refused to carry becomes.
+    //!
+    //! The adapter marks the message and hands over an empty body
+    //! ([`crate::streaming::META_REQ_BODY_TOO_LARGE`]); everything after that
+    //! is here, on the real `handle_request`: the status, the shape of the
+    //! terminal (which is what decides whether it stops the flow —
+    //! `tests/oversized_body_flow.rs` pins that, and the headers the flow's
+    //! middleware adds to it, against the real executor), and the audit row.
+
+    use wafer_run::streams::output::TerminalNotResponse;
+
+    use super::*;
+    use crate::{
+        features::AllEnabled,
+        platform_state::request_logs,
+        routing::{ExtraRoute, RouteAccess},
+        streaming::{BODY_TOO_LARGE_VALUE, META_REQ_BODY_TOO_LARGE},
+        test_support::{anon_msg, TestContext},
+    };
+
+    const UPLOAD_PATH: &str = "/b/storage/api/buckets/p/objects";
+
+    /// A route declaration covering [`UPLOAD_PATH`], so the audit row keeps the
+    /// path instead of collapsing to [`UNMATCHED_PATH_LABEL`] — this suite
+    /// passes no `block_infos`, and an upload path nothing declares is exactly
+    /// the traffic that collapse exists for.
+    fn upload_route() -> Vec<ExtraRoute> {
+        vec![ExtraRoute::new(
+            "/b/storage/",
+            "impresspress/files",
+            RouteAccess::Public,
+        )]
+    }
+
+    fn marked(path: &str) -> Message {
+        let mut msg = anon_msg("create", path);
+        msg.set_meta(META_REQ_BODY_TOO_LARGE, BODY_TOO_LARGE_VALUE);
+        msg
+    }
+
+    async fn drive(ctx: &TestContext, msg: Message) -> OutputStream {
+        handle_request(
+            ctx,
+            msg,
+            InputStream::empty(),
+            None,
+            "test-secret",
+            false,
+            &AllEnabled,
+            &[],
+            &upload_route(),
+        )
+        .await
+    }
+
+    /// **Fails on the pre-fix tree**, where the adapters answered an oversized
+    /// body themselves: Cloudflare returned a `worker::Error` that `run` turned
+    /// into a 500 with a correlation id, and the browser failed the fetch with
+    /// no status at all. It is a 413 naming the limit now.
+    #[tokio::test]
+    async fn a_marked_body_is_refused_with_413_and_the_enforced_limit() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
+        let parts = http_codec::collect_http_response(drive(&ctx, marked(UPLOAD_PATH)).await).await;
+
+        assert_eq!(parts.status, 413);
+        let body: serde_json::Value =
+            serde_json::from_slice(&parts.body).expect("the error envelope is JSON");
+        assert_eq!(
+            body["message"],
+            crate::streaming::request_too_large_message(),
+            "the client is told the number that was enforced"
+        );
+    }
+
+    /// The refusal is an error terminal — not a plain response, which does
+    /// not short-circuit a flow, so a later step would serve its own body over
+    /// it. `tests/oversized_body_flow.rs` proves against the real executor
+    /// that the flow's CORS and security headers reach the wire on it; this
+    /// pins the terminal kind at the source.
+    #[tokio::test]
+    async fn the_refusal_is_an_error_terminal() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
+
+        match drive(&ctx, marked(UPLOAD_PATH))
+            .await
+            .collect_buffered()
+            .await
+        {
+            Err(TerminalNotResponse::Error(error)) => {
+                assert_eq!(http_codec::resolve_error_status(&error), 413);
+            }
+            other => panic!("expected an Error terminal, got {other:?}"),
+        }
+    }
+
+    /// And it is audited like any other refusal — the adapters' own 413 wrote
+    /// no `request_logs` row at all, so an operator could not see that an
+    /// upload had been turned away.
+    #[tokio::test]
+    async fn the_refusal_is_logged_with_its_own_status() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
+        let _ = drive(&ctx, marked(UPLOAD_PATH))
+            .await
+            .collect_buffered()
+            .await;
+
+        let rows = request_logs::paginated(&ctx, 1, 20, "", false)
+            .await
+            .expect("read request_logs")
+            .rows;
+        let row = rows
+            .iter()
+            .find(|r| r.path == UPLOAD_PATH)
+            .expect("the refused upload must be audited");
+        assert_eq!(row.status_code, 413);
+    }
+
+    /// An unmarked request is untouched — the check reads one meta key and
+    /// nothing else, so an ordinary upload cannot be refused by it.
+    #[tokio::test]
+    async fn an_unmarked_request_is_not_refused() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
+        let status = crate::test_support::output_http_status(
+            drive(&ctx, anon_msg("create", UPLOAD_PATH)).await,
+        )
+        .await;
+        assert_ne!(status, 413, "only the marker refuses");
+    }
+}
+
+// Every case routes through `test_support::real_block_infos()`, the real
+// route table the router's access gate reads, which is gated on the full
+// block set.
+#[cfg(all(
+    test,
+    feature = "block-files",
+    feature = "block-messages",
+    feature = "block-products",
+    feature = "block-tickets",
+    feature = "block-llm",
+    feature = "block-vector"
+))]
+mod credential_check_tests {
+    //! A credential whose check could not be completed — its database read
+    //! failed — refuses the request instead of letting it continue as
+    //! anonymous. Anonymous is the answer "sign in again": the router's gate
+    //! redirects a page to the login form and refuses an API call, so a
+    //! database blip would sign every user out of the UI.
+    //!
+    //! Every case drives `handle_request` with a real signed token (or a real
+    //! key) in the `Authorization` header, so step 2 is what resolves it; the
+    //! database fault is injected at the wire op the credential check sends.
+
+    use std::{collections::BTreeMap, sync::Arc, time::Duration};
+
+    use wafer_block_crypto::primitives;
+    use wafer_run::{ErrorCode, InputStream, OutputStream, WaferError};
+
+    use super::handle_request;
+    use crate::{
+        blocks::auth::repo::{api_keys, jwt_blocklist, users},
+        features::AllEnabled,
+        test_support::{
+            anon_msg, real_block_infos, FailingDbOpContext, TestContext, TEST_JWT_SECRET,
+        },
+    };
+
+    /// A user under a fresh id, so no earlier test has left its
+    /// `auth_version` in the verify-side cache — a cache hit would answer the
+    /// read this suite makes fail.
+    async fn seed_user(ctx: &TestContext) -> String {
+        users::insert(
+            &ctx.fixture(),
+            users::NewUser {
+                email: format!("{}@example.com", uuid::Uuid::new_v4()),
+                display_name: "Signed In".into(),
+                avatar_url: None,
+                role: "user".into(),
+                email_verified: true,
+                verification_token_hash: None,
+            },
+        )
+        .await
+        .expect("seed user")
+        .id
+    }
+
+    /// An access token for `sub` carrying a `jti`, signed and issued the way
+    /// `test_support::access_token_for` signs one, so step 2 reads the
+    /// blocklist as well as `auth_version`.
+    fn bearer(sub: &str) -> String {
+        let derived = primitives::derive_block_key(
+            TEST_JWT_SECRET.as_bytes(),
+            crate::blocks::auth_ui::AUTH_UI_BLOCK_ID,
+        );
+        let mut claims = BTreeMap::new();
+        claims.insert("sub".to_string(), serde_json::json!(sub));
+        claims.insert("type".to_string(), serde_json::json!("access"));
+        claims.insert(
+            "iss".to_string(),
+            serde_json::json!("http://localhost:5173"),
+        );
+        claims.insert("roles".to_string(), serde_json::json!(["user"]));
+        claims.insert(
+            "jti".to_string(),
+            serde_json::json!(uuid::Uuid::new_v4().to_string()),
+        );
+        let token = primitives::jwt_sign(claims, Duration::from_secs(3600), derived.as_bytes())
+            .expect("test jwt_sign");
+        format!("Bearer {token}")
+    }
+
+    /// `GET /b/auth/api/me` — a route the router admits only for a signed-in
+    /// caller — as a browser page (`html`) or an API call, with
+    /// `authorization`.
+    async fn get_me(
+        ctx: &dyn wafer_run::context::Context,
+        authorization: &str,
+        html: bool,
+    ) -> OutputStream {
+        let mut msg = anon_msg("retrieve", "/b/auth/api/me");
+        msg.set_meta(
+            "http.header.accept",
+            if html {
+                "text/html"
+            } else {
+                "application/json"
+            },
+        );
+        handle_request(
+            ctx,
+            msg,
+            InputStream::from_bytes(Vec::new()),
+            Some(authorization),
+            TEST_JWT_SECRET,
+            false,
+            &AllEnabled,
+            &real_block_infos(),
+            &[],
+        )
+        .await
+    }
+
+    /// Status, `Location` header and body of `out`, as an adapter would send
+    /// them.
+    async fn answer(out: OutputStream) -> (u16, String, String) {
+        let response = wafer_block::http_codec::collect_http_response(out).await;
+        let location = response
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("location"))
+            .map(|(_, v)| v.clone())
+            .unwrap_or_default();
+        let body = String::from_utf8_lossy(&response.body).into_owned();
+        (response.status, location, body)
+    }
+
+    async fn signed_in_fixture() -> (TestContext, String) {
+        let mut ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
+        ctx.set_config(crate::blocks::auth::JWT_SECRET_KEY, TEST_JWT_SECRET);
+        ctx.register_block(
+            crate::blocks::auth_ui::AUTH_UI_BLOCK_ID,
+            Arc::new(crate::blocks::auth_ui::AuthUiBlock::new()),
+        );
+        let uid = seed_user(&ctx).await;
+        (ctx, uid)
+    }
+
+    /// The control every case below departs from: with the database up, the
+    /// same token reaches the handler and is answered as its user.
+    #[tokio::test]
+    async fn a_signed_in_caller_reaches_the_route_while_the_database_answers() {
+        let (ctx, uid) = signed_in_fixture().await;
+        let (status, _, body) = answer(get_me(&ctx, &bearer(&uid), false).await).await;
+        assert_eq!(status, 200, "{body}");
+        assert!(body.contains(&uid), "{body}");
+    }
+
+    /// The `auth_version` read failing is a 503 — not the router's
+    /// "authentication required", and not, for a page, the redirect to the
+    /// login form that signs the user out of the UI.
+    #[tokio::test]
+    async fn a_failed_auth_version_read_is_a_503_not_a_sign_out() {
+        let (ctx, uid) = signed_in_fixture().await;
+        let down = FailingDbOpContext::new(ctx, vec![("database.get", users::TABLE)]);
+
+        let (status, location, body) = answer(get_me(&down, &bearer(&uid), false).await).await;
+        assert_eq!(status, 503, "{body}");
+        assert!(
+            body.contains("Authentication is temporarily unavailable"),
+            "the fault's own text stays in the log: {body}"
+        );
+
+        let (status, location_html, body) = answer(get_me(&down, &bearer(&uid), true).await).await;
+        assert_eq!(status, 503, "{body}");
+        assert!(
+            location.is_empty() && location_html.is_empty(),
+            "no redirect to the login form: {location} / {location_html}"
+        );
+    }
+
+    /// The JWT blocklist read failing is refused the same way. Before, the
+    /// lookup "failed closed" by reporting every token as blocklisted — so
+    /// during an outage every signed-in caller looked logged out.
+    #[tokio::test]
+    async fn a_failed_blocklist_read_is_a_503_not_a_sign_out() {
+        let (ctx, uid) = signed_in_fixture().await;
+        let down = FailingDbOpContext::new(ctx, vec![("database.list", jwt_blocklist::TABLE)]);
+
+        let (status, location, body) = answer(get_me(&down, &bearer(&uid), true).await).await;
+        assert_eq!(status, 503, "{body}");
+        assert!(
+            location.is_empty(),
+            "no redirect to the login form: {location}"
+        );
+        assert!(
+            !body.contains("simulated database outage") && !body.contains(jwt_blocklist::TABLE),
+            "the fault's own text stays in the log: {body}"
+        );
+    }
+
+    /// A WRAP refusal keeps the code the database classifier gives it — the
+    /// 403 "Access denied" — instead of becoming the login redirect.
+    #[tokio::test]
+    async fn a_refused_auth_version_read_keeps_its_403() {
+        let (ctx, uid) = signed_in_fixture().await;
+        let refused = FailingDbOpContext::failing_with(
+            ctx,
+            vec![("database.get", users::TABLE)],
+            WaferError::new(
+                ErrorCode::PermissionDenied,
+                "WRAP: impresspress/router may not read the users table",
+            ),
+        );
+
+        let (status, location, body) = answer(get_me(&refused, &bearer(&uid), true).await).await;
+        assert_eq!(status, 403, "{body}");
+        assert!(
+            location.is_empty(),
+            "no redirect to the login form: {location}"
+        );
+        assert!(body.contains("Access denied"), "{body}");
+        assert!(
+            !body.contains("impresspress/router"),
+            "the refusal's grant and table stay in the log: {body}"
+        );
+    }
+
+    /// `GET /b/auth/login` — a public page — with `authorization`, if any.
+    async fn get_login_page(
+        ctx: &dyn wafer_run::context::Context,
+        authorization: Option<&str>,
+    ) -> OutputStream {
+        let mut msg = anon_msg("retrieve", "/b/auth/login");
+        msg.set_meta("http.header.accept", "text/html");
+        handle_request(
+            ctx,
+            msg,
+            InputStream::from_bytes(Vec::new()),
+            authorization,
+            TEST_JWT_SECRET,
+            false,
+            &AllEnabled,
+            &real_block_infos(),
+            &[],
+        )
+        .await
+    }
+
+    /// A public route is refused too when it is presented a credential that
+    /// cannot be checked — the request names a caller, and the page would
+    /// otherwise be rendered for an anonymous one — while the same route
+    /// without a credential has nothing to check and is served as ever.
+    #[tokio::test]
+    async fn a_public_route_is_refused_only_when_it_presents_a_credential() {
+        let (ctx, uid) = signed_in_fixture().await;
+        let down = FailingDbOpContext::new(ctx, vec![("database.get", users::TABLE)]);
+
+        let (status, _, body) = answer(get_login_page(&down, None).await).await;
+        assert_eq!(status, 200, "no credential, nothing to check: {body}");
+
+        let (status, _, body) = answer(get_login_page(&down, Some(&bearer(&uid))).await).await;
+        assert_eq!(status, 503, "{body}");
+    }
+
+    /// A real key for a fresh user, so the API-key cases fail a read the
+    /// check actually reaches.
+    async fn seed_key(ctx: &TestContext) -> String {
+        let uid = seed_user(ctx).await;
+        let raw = format!("sb_test_{}", uuid::Uuid::new_v4().simple());
+        api_keys::insert(
+            &ctx.fixture(),
+            api_keys::NewApiKey {
+                user_id: &uid,
+                name: "test-key",
+                key_hash: &crate::util::sha256_hex(raw.as_bytes()),
+                key_prefix: "sb_test",
+                expires_at: None,
+            },
+        )
+        .await
+        .expect("seed api key");
+        format!("ApiKey {raw}")
+    }
+
+    /// The control for the API-key cases: with the database up, the key
+    /// reaches the route as its user.
+    #[tokio::test]
+    async fn a_valid_api_key_reaches_the_route_while_the_database_answers() {
+        let (ctx, _) = signed_in_fixture().await;
+        let key = seed_key(&ctx).await;
+        let (status, _, body) = answer(get_me(&ctx, &key, false).await).await;
+        assert_eq!(status, 200, "{body}");
+    }
+
+    /// The key is found, and the read of its user fails: a 503, not the
+    /// anonymous answer.
+    #[tokio::test]
+    async fn a_failed_api_key_user_lookup_is_a_503() {
+        let (ctx, _) = signed_in_fixture().await;
+        let key = seed_key(&ctx).await;
+        let down = FailingDbOpContext::new(ctx, vec![("database.get", users::TABLE)]);
+
+        let (status, _, body) = answer(get_me(&down, &key, false).await).await;
+        assert_eq!(status, 503, "{body}");
+    }
+
+    /// The key and its user are found, and the roles read fails: a 503, not
+    /// the anonymous answer and not an identity stamped with no roles.
+    #[tokio::test]
+    async fn a_failed_api_key_roles_lookup_is_a_503() {
+        let (ctx, _) = signed_in_fixture().await;
+        let key = seed_key(&ctx).await;
+        let down = FailingDbOpContext::new(
+            ctx,
+            vec![("database.list", crate::platform_state::user_roles::TABLE)],
+        );
+
+        let (status, _, body) = answer(get_me(&down, &key, false).await).await;
+        assert_eq!(status, 503, "{body}");
+    }
+
+    /// The API-key path is the same check over a different credential: a
+    /// failed key lookup is a 503, not the anonymous answer that tells the
+    /// key's holder it was revoked.
+    #[tokio::test]
+    async fn a_failed_api_key_lookup_is_a_503() {
+        let (ctx, _) = signed_in_fixture().await;
+        let down = FailingDbOpContext::new(ctx, vec![("database.list", api_keys::TABLE)]);
+
+        let (status, _, body) = answer(get_me(&down, "ApiKey any-key", false).await).await;
+        assert_eq!(status, 503, "{body}");
     }
 }

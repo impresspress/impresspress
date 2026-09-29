@@ -7,15 +7,18 @@
 //! type for what is withheld and why.
 
 use wafer_block::db::{Filter, FilterOp, SortField};
-use wafer_run::{context::Context, ErrorCode, Message, OutputStream};
+use wafer_run::{context::Context, Message, OutputStream};
 
 use crate::{
-    blocks::products::{
-        contracts::{CatalogProductListResponse, CatalogProductView, PageQuery},
-        repo,
+    blocks::{
+        crud,
+        products::{
+            contracts::{CatalogProductListResponse, CatalogProductView, PageQuery, ProductStatus},
+            repo,
+        },
     },
-    http::{err_bad_request, err_internal, err_not_found, ok_json},
-    util::RecordExt,
+    http::{err_internal, err_not_found, ok_json},
+    util::{wire_str, RecordExt},
 };
 
 pub(super) async fn handle_catalog(ctx: &dyn Context, msg: &Message) -> OutputStream {
@@ -43,34 +46,32 @@ pub(super) async fn handle_catalog(ctx: &dyn Context, msg: &Message) -> OutputSt
     .await
     {
         Ok(list) => ok_json(&CatalogProductListResponse::from_record_list(&list)),
-        Err(e) => err_internal("Database error", e),
+        // The table is the block's, not the request's: a `NotFound` here names
+        // no row of the caller's, so it stays a 500 rather than telling the
+        // caller their query found nothing.
+        Err(e) => crud::db_error_internal(e, "Database error"),
     }
 }
 
 pub(super) async fn handle_get_product_public(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let id = {
-        let var = msg.var("id");
-        if var.is_empty() {
-            msg.path()
-                .strip_prefix("/b/products/catalog/")
-                .unwrap_or("")
-        } else {
-            var
-        }
+    let id = match crud::path_id(msg, "Product") {
+        Ok(value) => value,
+        Err(response) => return response,
     };
-    if id.is_empty() {
-        return err_bad_request("Missing product ID");
-    }
 
     match repo::products::get(ctx, id).await {
         Ok(record) => {
-            let status = record.str_field("status");
-            if status != "active" {
+            // The stored spelling against the variant's own, not a decode: a
+            // row whose `status` is outside the contract has to stay invisible
+            // to the public catalog, and a 500 here would say it exists.
+            if record.str_field("status") != wire_str(&ProductStatus::Active) {
                 return err_not_found("Product not found");
             }
-            ok_json(&CatalogProductView::from_record(&record))
+            match CatalogProductView::from_record(&record) {
+                Ok(view) => ok_json(&view),
+                Err(error) => err_internal("Product row is outside the contract", error),
+            }
         }
-        Err(e) if e.code == ErrorCode::NotFound => err_not_found("Product not found"),
-        Err(e) => err_internal("Database error", e),
+        Err(e) => crud::db_error(e, "Product not found", "Database error"),
     }
 }

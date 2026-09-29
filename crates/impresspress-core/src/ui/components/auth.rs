@@ -90,7 +90,7 @@ pub fn oauth_button(provider: &str, label: &str, icon: Markup) -> Markup {
     html! {
         button type="button" class="btn btn-oauth"
             data-provider=(provider)
-            onclick={ "oauthStart('" (provider) "')" } {
+            data-action="oauth-start" {
             (icon)
             "Continue with " (label)
         }

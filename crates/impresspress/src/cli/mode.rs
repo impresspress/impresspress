@@ -78,13 +78,8 @@ fn walk_up_for_cargo_toml(start: &Path) -> Option<PathBuf> {
             if let Ok(text) = std::fs::read_to_string(&candidate) {
                 if let Ok(toml) = toml::from_str::<toml::Value>(&text) {
                     if toml.get("workspace").is_some() && toml.get("package").is_none() {
-                        match cur.parent() {
-                            Some(p) => {
-                                cur = p;
-                                continue;
-                            }
-                            None => return None,
-                        }
+                        cur = cur.parent()?;
+                        continue;
                     }
                 }
             }
@@ -94,10 +89,7 @@ fn walk_up_for_cargo_toml(start: &Path) -> Option<PathBuf> {
             // git root reached; stop.
             return None;
         }
-        match cur.parent() {
-            Some(p) => cur = p,
-            None => return None,
-        }
+        cur = cur.parent()?;
     }
 }
 

@@ -4,8 +4,12 @@
 /// shared impresspress-core pipeline (JWT validation, feature gates, admin checks,
 /// block dispatch). Non-API requests fall through to wafer-run/web for SPA serving.
 ///
-/// Infrastructure blocks (security headers, CORS, readonly guard)
-/// are applied inline before routing.
+/// Infrastructure blocks (security headers, CORS, readonly guard, the
+/// request-body limit) are applied inline before routing. `body-limit` is
+/// ahead of the router on purpose: a request whose body the transport refused
+/// must be answered 413 whichever route it would have matched, and the `/**`
+/// fallback below hands unclaimed paths to `wafer-run/web`, which would serve
+/// `index.html` and a 200 for one (see [`crate::blocks::body_limit`]).
 pub const JSON: &str = r#"{
     "id": "site-main",
     "name": "Site Main",
@@ -15,6 +19,7 @@ pub const JSON: &str = r#"{
         { "id": "security-headers", "block": "wafer-run/security-headers" },
         { "id": "cors", "block": "wafer-run/cors" },
         { "id": "readonly-guard", "block": "wafer-run/readonly-guard" },
+        { "id": "body-limit", "block": "impresspress/body-limit" },
         { "id": "router", "block": "wafer-run/router" }
     ],
     "config": { "on_error": "stop" },

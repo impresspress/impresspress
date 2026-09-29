@@ -31,6 +31,7 @@ default = [
     "block-tickets",
     "block-userportal",
     "block-products",
+    "block-signal",
     "embed-assets",
 ]
 sqlite = ["impresspress-core/sqlite"]
@@ -66,6 +67,7 @@ block-legalpages = ["impresspress-core/block-legalpages"]
 block-tickets = ["impresspress-core/block-tickets"]
 block-userportal = ["impresspress-core/block-userportal"]
 block-products = ["impresspress-core/block-products"]
+block-signal = ["impresspress-core/block-signal"]
 block-fastembed = ["impresspress-core/block-fastembed"]
 
 [dependencies]
@@ -73,6 +75,12 @@ block-fastembed = ["impresspress-core/block-fastembed"]
 # feature blocks). Absorbed today's impresspress (lib) crate.
 impresspress-core = { path = "../impresspress-core", default-features = false }
 impresspress-native = { path = "../impresspress-native" }
+# The native server boot (`run`, `build_native_runtime`) the `serve` flow runs.
+impresspress-server = { path = "../impresspress-server" }
+# The password pepper settings (native reads them from its environment), and
+# the Cloudflare password-hasher protocol names the deploy tooling writes into
+# both Workers' configs.
+impresspress-password = { path = "../impresspress-password" }
 # Browser-shell asset writer + bundle/template runner used by the
 # sealed × web and embed × web flows. Native std::fs tooling — lives in its
 # own crate so the native binary doesn't compile the wasm-bindgen `impresspress-browser`.
@@ -98,7 +106,6 @@ reqwest = { workspace = true }
 tracing = { workspace = true }
 
 # Config loading
-rusqlite = { workspace = true }
 
 # Serialization
 serde = { workspace = true }
@@ -115,10 +122,12 @@ uuid = { workspace = true }
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
 glob = "0.3"
-toml = "0.8"
+toml = "1"
 
 [dev-dependencies]
 tempfile = "3"
+wafer-block-sqlite = { workspace = true }
+wafer-sql-utils = { workspace = true }
 # `block-dev` for the test targets only: `tests/seed_bypass_prefix.rs` asserts
 # that the bundler's service-worker bypass prefix and the dev block's own seed
 # URL root are the same string, and the latter lives behind that feature. Not

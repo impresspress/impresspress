@@ -1,6 +1,4 @@
 //! EnvConfigSource: reads env vars for native target.
-//!
-//! Spec: docs/superpowers/specs/2026-05-15-lazy-block-init-design.md §2
 
 use impresspress_core::config_source::EnvConfigSource;
 use wafer_block::ConfigVar;

@@ -1,4 +1,4 @@
-//! Group CRUD: admin (`/admin/b/products/groups`) and user-owned
+//! Group CRUD: admin (`/b/products/api/admin/groups`) and user-owned
 //! (`/b/products/groups`, gated on `WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS`),
 //! plus the "products in a user's group" listing and the read-only
 //! group-templates listing.
@@ -7,11 +7,14 @@
 //! built from the row; every write body is a typed request whose fields are
 //! the only columns a client can reach.
 
-use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
-use wafer_core::clients::database as db;
+use wafer_block::db::{Filter, FilterOp};
 use wafer_run::{context::Context, InputStream, Message, OutputStream};
 
-use super::{default_template_id, GROUPS_TABLE, GROUP_TEMPLATES_TABLE};
+// `repo::groups::TABLE` is handed to the generic CRUD helpers below, each of
+// which takes its table from the caller — which is why this file names the
+// constant at all. Every query this file builds itself goes through
+// `repo::groups` / `repo::group_templates`. See the `groups` entry in
+// `tests/repo_door.rs`.
 use crate::{
     blocks::{
         crud,
@@ -21,21 +24,18 @@ use crate::{
                 GroupTemplateListResponse, GroupView, PageQuery, ProductListResponse,
                 UpdateGroupRequest, UpdateOwnGroupRequest,
             },
-            repo,
+            repo::{self, groups::TABLE as GROUPS_TABLE},
         },
     },
-    http::{err_bad_request, err_internal, err_unauthorized, ok_json},
+    http::{err_unauthenticated, ok_json},
 };
 
-/// User-owned group rows: `/b/products/groups/{id}`, owned via `user_id`.
+/// User-owned group rows (`/b/products/groups/{id}`), owned via `user_id`.
 const USER_GROUP: crud::OwnedResource<'static> = crud::OwnedResource {
     collection: GROUPS_TABLE,
-    path_prefix: "/b/products/groups/",
     owner_field: "user_id",
     label: "Group",
 };
-
-const ADMIN_GROUP_PREFIX: &str = "/admin/b/products/groups/";
 
 // --- Groups (admin) ---
 
@@ -85,7 +85,7 @@ pub(super) async fn handle_update_group(
     msg: &Message,
     input: InputStream,
 ) -> OutputStream {
-    let id = match crud::path_id(msg, ADMIN_GROUP_PREFIX, "Group") {
+    let id = match crud::path_id(msg, "Group") {
         Ok(id) => id,
         Err(response) => return response,
     };
@@ -100,7 +100,14 @@ pub(super) async fn handle_update_group(
 }
 
 pub(super) async fn handle_delete_group(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    crud::crud_delete(ctx, msg, GROUPS_TABLE, ADMIN_GROUP_PREFIX, "Group").await
+    let id = match crud::path_id(msg, "Group") {
+        Ok(id) => id,
+        Err(response) => return response,
+    };
+    match crud::delete_record(ctx, GROUPS_TABLE, id, "Group").await {
+        Ok(deleted) => ok_json(&deleted),
+        Err(response) => response,
+    }
 }
 
 // --- User's own groups ---
@@ -108,25 +115,17 @@ pub(super) async fn handle_delete_group(ctx: &dyn Context, msg: &Message) -> Out
 pub(super) async fn handle_user_list_groups(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let user_id = msg.user_id().to_string();
     if user_id.is_empty() {
-        return err_unauthorized("Not authenticated");
+        return err_unauthenticated("Not authenticated");
     }
 
-    let opts = ListOptions {
-        filters: vec![Filter {
-            field: "user_id".to_string(),
-            operator: FilterOp::Equal,
-            value: serde_json::Value::String(user_id),
-        }],
-        sort: vec![SortField {
-            field: "name".to_string(),
-            desc: false,
-        }],
-        limit: 1000,
-        ..Default::default()
-    };
-    match db::list(ctx, GROUPS_TABLE, &opts).await {
+    let owned = vec![Filter {
+        field: "user_id".to_string(),
+        operator: FilterOp::Equal,
+        value: serde_json::Value::String(user_id),
+    }];
+    match repo::groups::list_by_name(ctx, owned, 1000).await {
         Ok(result) => ok_json(&GroupListResponse::from_record_list(&result)),
-        Err(e) => err_internal("Database error", e),
+        Err(e) => crud::db_error_internal(e, "Database error"),
     }
 }
 
@@ -144,7 +143,7 @@ pub(super) async fn handle_user_create_group(
 ) -> OutputStream {
     let user_id = msg.user_id().to_string();
     if user_id.is_empty() {
-        return err_unauthorized("Not authenticated");
+        return err_unauthenticated("Not authenticated");
     }
 
     let request: CreateOwnGroupRequest = match crud::read_json_body(input).await {
@@ -164,11 +163,21 @@ pub(super) async fn handle_user_create_group(
         .get("group_template_id")
         .is_none_or(|v| v.as_str().is_some_and(str::is_empty))
     {
-        if let Some(default_id) = default_template_id(ctx, GROUP_TEMPLATES_TABLE).await {
-            body.insert(
-                "group_template_id".to_string(),
-                serde_json::Value::String(default_id),
-            );
+        match repo::group_templates::default_id(ctx).await {
+            Ok(Some(default_id)) => {
+                body.insert(
+                    "group_template_id".to_string(),
+                    serde_json::Value::String(default_id),
+                );
+            }
+            // No default template seeded: proceed without one, as this create
+            // always has.
+            Ok(None) => {}
+            // A read that failed is not "there is no default": writing the
+            // row anyway persists exactly the template-less group the default
+            // exists to prevent, and it outlives the outage looking
+            // deliberate.
+            Err(error) => return crud::db_error_internal(error, "Could not load group template"),
         }
     }
 
@@ -195,27 +204,19 @@ pub(super) async fn handle_user_update_group(
 }
 
 pub(super) async fn handle_user_delete_group(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    crud::crud_delete_owned(ctx, msg, &USER_GROUP).await
+    match crud::delete_owned(ctx, msg, &USER_GROUP).await {
+        Ok(deleted) => ok_json(&deleted),
+        Err(response) => response,
+    }
 }
 
 // Products in a user's group
 pub(super) async fn handle_user_group_products(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    // Path: /b/products/groups/{id}/products — prefer the matcher-bound `{id}`.
-    let group_id = {
-        let var = msg.var("id");
-        if var.is_empty() {
-            msg.path()
-                .strip_prefix("/b/products/groups/")
-                .unwrap_or("")
-                .strip_suffix("/products")
-                .unwrap_or("")
-        } else {
-            var
-        }
+    // `/b/products/groups/{id}/products`: `{id}` as the table bound it.
+    let group_id = match crud::path_id(msg, "Group") {
+        Ok(value) => value,
+        Err(response) => return response,
     };
-    if group_id.is_empty() {
-        return err_bad_request("Missing group ID");
-    }
 
     if let Err(resp) = crud::verify_owner(
         ctx,
@@ -249,7 +250,7 @@ pub(super) async fn handle_user_group_products(ctx: &dyn Context, msg: &Message)
     .await
     {
         Ok(list) => ok_json(&ProductListResponse::from_record_list(&list)),
-        Err(e) => err_internal("Database error", e),
+        Err(e) => crud::db_error_internal(e, "Database error"),
     }
 }
 
@@ -261,16 +262,8 @@ pub(super) async fn handle_user_list_group_templates(
     ctx: &dyn Context,
     _msg: &Message,
 ) -> OutputStream {
-    let opts = ListOptions {
-        sort: vec![SortField {
-            field: "name".to_string(),
-            desc: false,
-        }],
-        limit: 1000,
-        ..Default::default()
-    };
-    match db::list(ctx, GROUP_TEMPLATES_TABLE, &opts).await {
+    match repo::group_templates::list_by_name(ctx, 1000).await {
         Ok(result) => ok_json(&GroupTemplateListResponse::from_record_list(&result)),
-        Err(e) => err_internal("Database error", e),
+        Err(e) => crud::db_error_internal(e, "Database error"),
     }
 }

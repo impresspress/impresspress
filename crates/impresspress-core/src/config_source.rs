@@ -21,8 +21,6 @@
 //!
 //! Cloudflare's `D1ConfigSource` (in `impresspress-cloudflare`) is the third
 //! shape: it queries the variables table on demand.
-//!
-//! Spec: docs/superpowers/specs/2026-05-15-lazy-block-init-design.md §2
 
 use std::{collections::HashMap, sync::Arc};
 

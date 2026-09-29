@@ -1,0 +1,17 @@
+[
+  "DELETE /b/userportal/admin/buttons/{id} admin",
+  "DELETE /b/userportal/security/providers/{provider} authenticated",
+  "DELETE /b/userportal/sessions/{family} authenticated",
+  "GET /b/userportal/ authenticated",
+  "GET /b/userportal/admin/buttons admin",
+  "GET /b/userportal/admin/buttons/{id}/edit admin",
+  "GET /b/userportal/admin/settings admin",
+  "GET /b/userportal/config public",
+  "GET /b/userportal/profile authenticated",
+  "GET /b/userportal/security authenticated",
+  "GET /b/userportal/sessions authenticated",
+  "PATCH /b/userportal/admin/buttons/{id} admin",
+  "POST /b/userportal/admin/buttons admin",
+  "POST /b/userportal/admin/settings admin",
+  "POST /b/userportal/update-profile authenticated"
+]

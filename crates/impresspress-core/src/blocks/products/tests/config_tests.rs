@@ -59,10 +59,14 @@ async fn runtime_kind_is_adapter_injected_not_shared_config() {
     );
 
     let legacy = ctx_with(&[("WAFER_RUN_SHARED__RUNTIME__KIND", "browser")]).await;
-    assert!(crate::blocks::products::stripe_secret_operations_allowed(&legacy).await);
+    assert!(crate::blocks::products::stripe_secret_operations_allowed(
+        &legacy
+    ));
 
     let browser = ctx_with(&[(crate::blocks::products::RUNTIME_KIND_CONFIG_KEY, "browser")]).await;
-    assert!(!crate::blocks::products::stripe_secret_operations_allowed(&browser).await);
+    assert!(!crate::blocks::products::stripe_secret_operations_allowed(
+        &browser
+    ));
 }
 
 #[test]
@@ -91,4 +95,75 @@ fn enumerable_and_numeric_vars_use_typed_widgets() {
         var("IMPRESSPRESS__PRODUCTS__SELLER_MAX_PRODUCTS").input_type,
         InputType::Number
     );
+}
+
+// ---------------------------------------------------------------------------
+// The two config keys that had more than one reader (B22, B23)
+// ---------------------------------------------------------------------------
+
+/// [B22] A mis-set application fee is an error, not a silent zero.
+///
+/// Checkout and Payment Links parsed this key with `.ok().filter(..)
+/// .unwrap_or(0)` — so `SELLER_APPLICATION_FEE_BPS=2.5%` meant the platform
+/// took no fee at all and nothing said so, while seller onboarding refused
+/// the same value outright.
+#[tokio::test]
+async fn seller_fee_refuses_every_value_that_is_not_basis_points() {
+    use super::harness::{ctx, ctx_with};
+    use crate::blocks::products::config::seller_fee_bps;
+
+    for garbage in ["abc", "20000", "-1", "2.5", "", " ", "250 bps"] {
+        let context = ctx_with(&[(
+            "IMPRESSPRESS__PRODUCTS__SELLER_APPLICATION_FEE_BPS",
+            garbage,
+        )])
+        .await;
+        assert!(
+            seller_fee_bps(&context).await.is_err(),
+            "{garbage:?} must not resolve to a fee"
+        );
+    }
+    let configured =
+        ctx_with(&[("IMPRESSPRESS__PRODUCTS__SELLER_APPLICATION_FEE_BPS", "250")]).await;
+    assert_eq!(seller_fee_bps(&configured).await.unwrap(), 250);
+    let boundary = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__SELLER_APPLICATION_FEE_BPS",
+        "10000",
+    )])
+    .await;
+    assert_eq!(seller_fee_bps(&boundary).await.unwrap(), 10_000);
+    // Unset falls back to the `ConfigVar` default, which is a real value.
+    assert_eq!(seller_fee_bps(&ctx().await).await.unwrap(), 0);
+}
+
+/// [B23] One default for the platform country, and it is the empty one the
+/// `ConfigVar` declares.
+///
+/// `stripe.rs` and the product wizard both defaulted it to `"US"` *and* fell
+/// back to `"US"` on an invalid value, while seller onboarding defaulted it
+/// to `""` and refused an invalid one. So an NZ platform that never set the
+/// key onboarded with no country and shipped US-only.
+#[tokio::test]
+async fn platform_country_has_one_default_and_it_is_empty() {
+    use super::harness::{ctx, ctx_with};
+    use crate::blocks::products::config::platform_country;
+
+    assert!(platform_country(&ctx().await).await.unwrap().is_none());
+    let blank = ctx_with(&[("IMPRESSPRESS__PRODUCTS__PLATFORM_COUNTRY", "  ")]).await;
+    assert!(platform_country(&blank).await.unwrap().is_none());
+
+    let lower = ctx_with(&[("IMPRESSPRESS__PRODUCTS__PLATFORM_COUNTRY", " nz ")]).await;
+    assert_eq!(
+        platform_country(&lower).await.unwrap().unwrap().as_str(),
+        "NZ"
+    );
+
+    for invalid in ["NZL", "N", "N1", "12"] {
+        let context = ctx_with(&[("IMPRESSPRESS__PRODUCTS__PLATFORM_COUNTRY", invalid)]).await;
+        assert_eq!(
+            platform_country(&context).await.unwrap_err().code,
+            wafer_run::ErrorCode::FailedPrecondition,
+            "{invalid:?} is not a country code"
+        );
+    }
 }

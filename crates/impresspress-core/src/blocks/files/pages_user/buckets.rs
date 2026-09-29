@@ -5,24 +5,40 @@ use maud::{html, Markup, PreEscaped};
 use wafer_run::{context::Context, Message, OutputStream};
 
 use crate::{
-    blocks::files::repo,
+    blocks::{crud, files::repo},
+    db_read::CappedList,
     ui::{
         self,
-        components::{button, BtnVariant, CtrlSize},
+        components::{self, button, BtnVariant, CtrlSize},
         shell::Crumb,
-        templates::{list_page, PageHeader},
+        templates::list_page,
     },
     util::url_path_encode,
 };
 
 /// Aggregated bucket info as shown in the user-facing table:
 /// name, public flag, created-at ISO string, and live object count.
+///
+/// A render-side projection of [`repo::buckets::BucketRow`] — it holds no
+/// decoding of its own, only the object count, which comes from a second
+/// query rather than from the bucket row.
 #[derive(Clone, Debug)]
 pub struct BucketRow {
     pub name: String,
     pub public: bool,
     pub created_at: String,
     pub object_count: i64,
+}
+
+impl From<(&repo::buckets::BucketRow, i64)> for BucketRow {
+    fn from((row, object_count): (&repo::buckets::BucketRow, i64)) -> Self {
+        Self {
+            name: row.name.clone(),
+            public: row.public,
+            created_at: row.created_at.clone(),
+            object_count,
+        }
+    }
 }
 
 /// Render the bucket-list table (or empty state).
@@ -53,7 +69,7 @@ pub fn render_buckets_table(rows: &[BucketRow]) -> Markup {
                                 span .badge { "Private" }
                             }
                         }
-                        td data-label="Created" { (r.created_at) }
+                        td data-label="Created" { (components::timestamp(&r.created_at)) }
                         td data-label="Objects" { (r.object_count) }
                     }
                 }
@@ -113,63 +129,38 @@ pub fn render_new_bucket_modal() -> Markup {
 /// a single GROUP BY query on the objects table
 /// ([`repo::objects::count_by_bucket`], one row per bucket) so we avoid
 /// the previous N+1 count query per bucket.
-pub async fn list_buckets_for_user(ctx: &dyn Context, user_id: &str) -> Vec<BucketRow> {
+///
+/// Both reads propagate. Either one collapsing into an empty collection is
+/// indistinguishable from the truth it is standing in for — "this account
+/// has no buckets", and "this bucket holds no objects" — so the page it
+/// feeds renders an error rather than that lie.
+pub async fn list_buckets_for_user(
+    ctx: &dyn Context,
+    user_id: &str,
+) -> Result<CappedList<BucketRow>, wafer_run::WaferError> {
     use std::collections::HashMap;
 
-    let recs = match repo::buckets::list_owned_sorted(ctx, user_id).await {
-        Ok(records) => records,
-        Err(e) => {
-            tracing::warn!(error = %e, "files bucket list failed");
-            Vec::new()
-        }
-    };
+    let owned = repo::buckets::list_owned_sorted(ctx, user_id).await?;
+    let truncated = owned.truncated;
 
     // Restrict the GROUP BY to the buckets this user owns so the count
     // matches the previous per-bucket count semantics exactly (which
     // counted all objects in the bucket regardless of `uploaded_by`).
-    let bucket_names: Vec<String> = recs
-        .iter()
-        .filter_map(|r| r.data.get("name").and_then(|v| v.as_str()))
-        .map(str::to_string)
-        .collect();
+    let bucket_names: Vec<String> = owned.rows.iter().map(|r| r.name.clone()).collect();
     let counts_by_bucket: HashMap<String, i64> =
-        match repo::objects::count_by_bucket(ctx, &bucket_names).await {
-            Ok(counts) => counts,
-            Err(e) => {
-                tracing::warn!(error = %e, "files bucket object counts failed");
-                HashMap::new()
-            }
-        };
+        repo::objects::count_by_bucket(ctx, &bucket_names).await?;
 
-    let mut rows: Vec<BucketRow> = Vec::with_capacity(recs.len());
-    for r in recs {
-        let name = r
-            .data
-            .get("name")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let public = r
-            .data
-            .get("public")
-            .and_then(|v| v.as_bool())
-            .unwrap_or(false);
-        let created_at = r
-            .data
-            .get("created_at")
-            .and_then(|v| v.as_str())
-            .unwrap_or_default()
-            .to_string();
-        let object_count = counts_by_bucket.get(&name).copied().unwrap_or(0);
-
-        rows.push(BucketRow {
-            name,
-            public,
-            created_at,
-            object_count,
-        });
-    }
-    rows
+    Ok(CappedList {
+        truncated,
+        rows: owned
+            .rows
+            .iter()
+            .map(|row| {
+                let count = counts_by_bucket.get(&row.name).copied().unwrap_or(0);
+                BucketRow::from((row, count))
+            })
+            .collect(),
+    })
 }
 
 /// GET `/b/storage/` — bucket list for the calling user.
@@ -180,7 +171,10 @@ pub async fn bucket_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream 
         return ui::not_found_response(msg);
     }
 
-    let rows = list_buckets_for_user(ctx, &user_id).await;
+    let rows = match list_buckets_for_user(ctx, &user_id).await {
+        Ok(rows) => rows,
+        Err(e) => return crud::db_error_page(msg, e, "bucket list page"),
+    };
 
     let new_bucket_btn = button(
         BtnVariant::Primary,
@@ -191,23 +185,17 @@ pub async fn bucket_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream 
 
     // The table cell carries the modal markup + JS so it lives inside the
     // shelled response without needing a new template parameter.
-    let js_url = crate::ui::assets::files_browser_js_url();
+    let js_url = crate::blocks::files::assets::files_browser_js_url();
     let table_with_modal = html! {
-        (render_buckets_table(&rows))
+        @if rows.truncated {
+            p .text-muted .text-sm { "Showing the first " (rows.rows.len()) " buckets." }
+        }
+        (render_buckets_table(&rows.rows))
         (render_new_bucket_modal())
         script src=(js_url) defer {}
     };
 
-    let body = list_page(
-        PageHeader {
-            title: "",
-            subtitle: None,
-            primary_action: None,
-        },
-        None,
-        table_with_modal,
-        None,
-    );
+    let body = list_page(None, table_with_modal, None);
 
     ui::shell_page(
         ctx,
@@ -259,6 +247,17 @@ mod tests {
         assert!(html.contains("Private"));
         assert!(html.contains(">12<"));
         assert!(html.contains(r#"href="/b/storage/photos/""#));
+    }
+
+    /// The creation timestamp differs on every visual-baseline run, which
+    /// masks dates by the `<time>` element alone.
+    #[test]
+    fn render_buckets_table_renders_the_created_timestamp_as_a_time_element() {
+        let html = render_buckets_table(&[sample("photos", false, 0)]).into_string();
+        assert!(
+            html.contains(r#"<time datetime="2026-05-06T10:00:00.000Z">2026-05-06 10:00</time>"#),
+            "{html}"
+        );
     }
 
     #[test]
@@ -422,6 +421,72 @@ mod integration_tests {
         assert!(
             html.contains(r#"minlength="3""#) && html.contains(r#"maxlength="63""#),
             "length constraints missing: {html}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod outage_tests {
+    //! A read that FAILED is not "this user has no buckets".
+    //!
+    //! Both reads behind `/b/storage/` used to log a warning and substitute
+    //! an empty collection, so an outage rendered "No buckets yet" — exactly
+    //! what a brand-new account renders — and a bucket whose object count
+    //! could not be read rendered `0`.
+
+    use super::{super::test_helpers::seed_two_buckets, *};
+    use crate::{
+        blocks::files::repo,
+        test_support::{admin_msg, output_http_status, FailingDbOpContext, TestContext},
+    };
+
+    #[tokio::test]
+    async fn a_failing_bucket_list_renders_the_error_page_not_an_empty_one() {
+        let ctx = TestContext::with_files().await.break_reads();
+        let out = bucket_list_page(&ctx, &admin_msg("retrieve", "/b/storage/")).await;
+        assert_eq!(
+            output_http_status(out).await,
+            500,
+            "an unreadable bucket list must not render as an empty account"
+        );
+    }
+
+    /// The object-count aggregate is the page's SECOND read, and its failure
+    /// was just as invisible: every bucket rendered `0` objects.
+    #[tokio::test]
+    async fn a_failing_object_count_renders_the_error_page() {
+        let ctx = TestContext::with_files().await;
+        seed_two_buckets(&ctx, "admin_1").await;
+        let failing = FailingDbOpContext::new(
+            ctx.clone(),
+            vec![("database.aggregate", repo::objects::TABLE)],
+        );
+
+        let out = bucket_list_page(&failing, &admin_msg("retrieve", "/b/storage/")).await;
+        assert_eq!(
+            output_http_status(out).await,
+            500,
+            "an unreadable object count must not render as zero objects"
+        );
+    }
+
+    /// The success path is untouched: the page still renders the buckets and
+    /// their counts.
+    #[tokio::test]
+    async fn a_healthy_read_still_renders_the_buckets() {
+        let ctx = TestContext::with_files().await;
+        seed_two_buckets(&ctx, "admin_1").await;
+        let rows = list_buckets_for_user(&ctx, "admin_1")
+            .await
+            .expect("a healthy read succeeds");
+        assert_eq!(rows.rows.len(), 2);
+        assert_eq!(
+            rows.rows
+                .iter()
+                .find(|r| r.name == "photos")
+                .expect("photos bucket")
+                .object_count,
+            2
         );
     }
 }

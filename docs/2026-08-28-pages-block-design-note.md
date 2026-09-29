@@ -203,6 +203,14 @@ never reach the running Worker. Locally this works today; on Cloudflare
 "change it and the site changes" does not. #78 is the first commit of this
 effort, not the last.
 
+> **Correction (2026-09-14).** "the lazy per-block loader filters on
+> [`variables.block`]" no longer describes the code: `D1ConfigSource` reads
+> the whole variables table in one unfiltered query and groups by `block` in
+> memory, issuing no `WHERE block = ?`. The column still scopes a row to its
+> block — it is what the grouping keys on — so a row without it still reaches
+> no block. Only the query strategy changed; the note above is left as the
+> record of what was observed on 2026-08-28.
+
 Related: whatever caching is added must bump the KV `cfg:v1:config_version`
 stamp on write. A raw D1 write does not — that is exactly what bit the demo
 deploy, where the seeded bootstrap-admin row sat unread until the stamp moved.

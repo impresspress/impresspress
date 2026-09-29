@@ -19,7 +19,7 @@
 //! long-lived services directly.
 
 use std::{
-    collections::HashMap,
+    collections::{BTreeMap, HashMap},
     future::Future,
     pin::Pin,
     rc::Rc,
@@ -31,8 +31,11 @@ use std::{
     time::Duration,
 };
 
+pub(crate) use impresspress_core::prepared_plan::{
+    RELEASE_ASSET_ID_VAR, RELEASE_ASSET_MANIFEST_VAR, RELEASE_ASSET_PREFIX_VAR,
+};
 use impresspress_core::{
-    release_inventory::{is_normalized_logical_key, ReleaseInventory},
+    release_inventory::{is_normalized_logical_key, ReleaseInventory, RELEASES_ROOT},
     IsolateCell,
 };
 use wafer_block::{
@@ -43,8 +46,8 @@ use wafer_core::interfaces::{
     config::service::ConfigService,
     crypto::service::{CryptoError, CryptoService},
     database::service::{
-        AggregateSpec, Column, DatabaseError, DatabaseService, Record, RecordList, Table,
-        UpsertSpec,
+        AggregateSpec, CapGuard, Column, DatabaseError, DatabaseService, GuardedInsert,
+        GuardedUpdate, Record, RecordList, Table, UpsertSpec, WriteOp, WriteOutcome,
     },
     logger::service::{Field, LoggerService},
     network::service::{
@@ -57,12 +60,6 @@ use wafer_core::interfaces::{
     },
 };
 use wafer_run::{ConfigError, ConfigSource, EnvBlockConfig};
-
-pub(crate) const RELEASE_ASSET_ID_VAR: &str = "IMPRESSPRESS_RELEASE_ASSET_ID";
-pub(crate) const RELEASE_ASSET_PREFIX_VAR: &str = "IMPRESSPRESS_RELEASE_ASSET_PREFIX";
-pub(crate) const RELEASE_ASSET_MANIFEST_VAR: &str = "IMPRESSPRESS_RELEASE_ASSET_MANIFEST";
-
-const RELEASES_ROOT: &str = ".impresspress/releases/v1";
 
 /// Pure, Worker-version-bound release identity. This contains no R2 handle
 /// and no key inventory — the inventory itself is fetched lazily (and
@@ -87,20 +84,20 @@ thread_local! {
 }
 
 impl ReleaseAssetIdentity {
-    pub(crate) fn from_env(env: &worker::Env) -> Result<Option<Arc<Self>>, String> {
-        let id = env.var(RELEASE_ASSET_ID_VAR).ok().map(|v| v.to_string());
-        let prefix = env
-            .var(RELEASE_ASSET_PREFIX_VAR)
-            .ok()
-            .map(|v| v.to_string());
-        let manifest_key = env
-            .var(RELEASE_ASSET_MANIFEST_VAR)
-            .ok()
-            .map(|v| v.to_string());
-        let keys_sha256 = env
-            .var(impresspress_core::RELEASE_ASSET_KEYS_SHA256_VAR)
-            .ok()
-            .map(|v| v.to_string());
+    /// Parse the release-routing contract out of an already-captured
+    /// environment. The four vars are read once, by
+    /// [`CfEnvironment::capture`](crate::environment::CfEnvironment::capture);
+    /// this is the only thing that interprets them.
+    pub(crate) fn from_environment(
+        environment: &crate::environment::CfEnvironment,
+    ) -> Result<Option<Arc<Self>>, String> {
+        let vars = environment.release_asset_vars();
+        let (id, prefix, manifest_key, keys_sha256) = (
+            vars.id.map(str::to_string),
+            vars.prefix.map(str::to_string),
+            vars.manifest_key.map(str::to_string),
+            vars.keys_sha256.map(str::to_string),
+        );
 
         if id.is_none() && prefix.is_none() && manifest_key.is_none() && keys_sha256.is_none() {
             return Ok(None);
@@ -240,9 +237,13 @@ pub(crate) struct RequestServices {
 }
 
 impl RequestServices {
-    #[allow(clippy::too_many_arguments)]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "one argument per service handle the caller already owns; a bundle \
+                  struct would be this list with a name on it"
+    )]
     pub(crate) fn new(
-        env: &worker::Env,
+        environment: &crate::environment::CfEnvironment,
         database: Arc<dyn DatabaseService>,
         storage: Arc<dyn StorageService>,
         config: Arc<dyn ConfigService>,
@@ -259,14 +260,14 @@ impl RequestServices {
             network: Some(network),
             logger: Some(logger),
             config_source: Some(config_source),
-            release_assets: ReleaseAssetIdentity::from_env(env),
+            release_assets: ReleaseAssetIdentity::from_environment(environment),
             #[cfg(test)]
             marker: 0,
         })
     }
 
     #[cfg(test)]
-    fn marker(marker: usize) -> Rc<Self> {
+    pub(crate) fn marker(marker: usize) -> Rc<Self> {
         Rc::new(Self {
             database: None,
             storage: None,
@@ -320,6 +321,13 @@ thread_local! {
 
 fn current() -> Option<Rc<RequestServices>> {
     CURRENT.with(IsolateCell::get)
+}
+
+/// The marker of the bundle in scope, for a test outside this module that
+/// needs to know which request's services a future ran under.
+#[cfg(test)]
+pub(crate) fn current_marker() -> Option<usize> {
+    current().map(|services| services.marker)
 }
 
 /// Request-current immutable release identity, available only while the
@@ -417,6 +425,10 @@ fn network() -> Result<Arc<dyn NetworkService>, NetworkError> {
         })
 }
 
+/// The database service of the request being polled, looked up per call.
+/// Every answer, errors included, is that service's unchanged — so a write
+/// that duplicates a key is the `AlreadyExists` the `DatabaseService`
+/// contract names (see `database.rs`, "A taken key").
 #[derive(Default)]
 pub(crate) struct ScopedDatabaseService {
     strict_schema: AtomicBool,
@@ -554,8 +566,47 @@ impl DatabaseService for ScopedDatabaseService {
             .await
     }
 
-    async fn upsert(&self, collection: &str, spec: UpsertSpec) -> Result<i64, DatabaseError> {
+    async fn upsert(
+        &self,
+        collection: &str,
+        spec: UpsertSpec,
+    ) -> Result<Option<Record>, DatabaseError> {
         self.current()?.upsert(collection, spec).await
+    }
+
+    async fn create_many(
+        &self,
+        collection: &str,
+        rows: Vec<HashMap<String, serde_json::Value>>,
+    ) -> Result<i64, DatabaseError> {
+        self.current()?.create_many(collection, rows).await
+    }
+
+    async fn batch(&self, ops: Vec<WriteOp>) -> Result<Vec<WriteOutcome>, DatabaseError> {
+        self.current()?.batch(ops).await
+    }
+
+    async fn insert_guarded(
+        &self,
+        collection: &str,
+        data: HashMap<String, serde_json::Value>,
+        guards: &[CapGuard],
+    ) -> Result<GuardedInsert, DatabaseError> {
+        self.current()?
+            .insert_guarded(collection, data, guards)
+            .await
+    }
+
+    async fn update_guarded(
+        &self,
+        collection: &str,
+        filters: &[Filter],
+        data: HashMap<String, serde_json::Value>,
+        guards: &[CapGuard],
+    ) -> Result<GuardedUpdate, DatabaseError> {
+        self.current()?
+            .update_guarded(collection, filters, data, guards)
+            .await
     }
 
     async fn aggregate(
@@ -578,6 +629,10 @@ impl DatabaseService for ScopedDatabaseService {
         self.current()?.schema_table_exists(name).await
     }
 
+    async fn schema_columns(&self, table: &str) -> Result<Vec<String>, DatabaseError> {
+        self.current()?.schema_columns(table).await
+    }
+
     async fn schema_drop_table(&self, name: &str) -> Result<(), DatabaseError> {
         self.current()?.schema_drop_table(name).await
     }
@@ -591,6 +646,16 @@ impl DatabaseService for ScopedDatabaseService {
         if let Ok(service) = database() {
             service.set_strict_schema(enabled);
         }
+    }
+
+    /// The current request's D1 budget. Outside a request this is the same
+    /// "used outside request poll scope" error every other operation returns:
+    /// there is no invocation to report a budget for, and `Unbounded` would
+    /// be a lie.
+    fn statement_budget(
+        &self,
+    ) -> Result<wafer_core::interfaces::database::service::StatementBudget, DatabaseError> {
+        self.current()?.statement_budget()
     }
 }
 
@@ -745,46 +810,35 @@ impl ConfigService for ScopedConfigService {
 #[derive(Default)]
 pub(crate) struct ScopedCryptoService;
 
+#[wafer_block::wafer_async_trait]
 impl CryptoService for ScopedCryptoService {
-    fn hash(&self, password: &str) -> Result<String, CryptoError> {
-        crypto()?.hash(password)
+    async fn hash(&self, password: &str) -> Result<String, CryptoError> {
+        crypto()?.hash(password).await
     }
 
-    fn compare_hash(&self, password: &str, hash: &str) -> Result<(), CryptoError> {
-        crypto()?.compare_hash(password, hash)
+    async fn compare_hash(&self, password: &str, hash: &str) -> Result<(), CryptoError> {
+        crypto()?.compare_hash(password, hash).await
     }
 
-    fn sign(
-        &self,
-        claims: HashMap<String, serde_json::Value>,
-        expiry: Duration,
-    ) -> Result<String, CryptoError> {
-        crypto()?.sign(claims, expiry)
-    }
-
-    fn verify(&self, token: &str) -> Result<HashMap<String, serde_json::Value>, CryptoError> {
-        crypto()?.verify(token)
-    }
-
-    fn sign_for(
+    async fn sign_for(
         &self,
         block_id: &str,
-        claims: HashMap<String, serde_json::Value>,
+        claims: BTreeMap<String, serde_json::Value>,
         expiry: Duration,
     ) -> Result<String, CryptoError> {
-        crypto()?.sign_for(block_id, claims, expiry)
+        crypto()?.sign_for(block_id, claims, expiry).await
     }
 
-    fn verify_for(
+    async fn verify_for(
         &self,
         block_id: &str,
         token: &str,
-    ) -> Result<HashMap<String, serde_json::Value>, CryptoError> {
-        crypto()?.verify_for(block_id, token)
+    ) -> Result<BTreeMap<String, serde_json::Value>, CryptoError> {
+        crypto()?.verify_for(block_id, token).await
     }
 
-    fn random_bytes(&self, n: usize) -> Result<Vec<u8>, CryptoError> {
-        crypto()?.random_bytes(n)
+    async fn random_bytes(&self, n: usize) -> Result<Vec<u8>, CryptoError> {
+        crypto()?.random_bytes(n).await
     }
 }
 
@@ -817,20 +871,20 @@ impl ScopedLoggerService {
 }
 
 impl LoggerService for ScopedLoggerService {
-    fn debug(&self, msg: &str, fields: &[Field]) {
-        self.with_logger(|logger| logger.debug(msg, fields));
+    fn debug(&self, caller: Option<&str>, msg: &str, fields: &[Field]) {
+        self.with_logger(|logger| logger.debug(caller, msg, fields));
     }
 
-    fn info(&self, msg: &str, fields: &[Field]) {
-        self.with_logger(|logger| logger.info(msg, fields));
+    fn info(&self, caller: Option<&str>, msg: &str, fields: &[Field]) {
+        self.with_logger(|logger| logger.info(caller, msg, fields));
     }
 
-    fn warn(&self, msg: &str, fields: &[Field]) {
-        self.with_logger(|logger| logger.warn(msg, fields));
+    fn warn(&self, caller: Option<&str>, msg: &str, fields: &[Field]) {
+        self.with_logger(|logger| logger.warn(caller, msg, fields));
     }
 
-    fn error(&self, msg: &str, fields: &[Field]) {
-        self.with_logger(|logger| logger.error(msg, fields));
+    fn error(&self, caller: Option<&str>, msg: &str, fields: &[Field]) {
+        self.with_logger(|logger| logger.error(caller, msg, fields));
     }
 }
 
@@ -1042,7 +1096,7 @@ mod tests {
     }
 
     #[wasm_bindgen_test]
-    fn nested_scope_restores_outer_request_and_then_fails_closed() {
+    async fn nested_scope_restores_outer_request_and_then_fails_closed() {
         let outer = RequestServices::marker(1);
         let inner = RequestServices::marker(2);
         scope_sync(outer, || {
@@ -1052,7 +1106,7 @@ mod tests {
         });
         assert_eq!(marker(), None);
         assert!(ScopedConfigService.get("anything").is_none());
-        assert!(ScopedCryptoService.random_bytes(1).is_err());
+        assert!(ScopedCryptoService.random_bytes(1).await.is_err());
     }
 
     #[wasm_bindgen_test]
@@ -1100,13 +1154,10 @@ mod tests {
         )
         .is_err());
         // Manifest key doesn't match `{prefix}/manifest.json`.
-        assert!(ReleaseAssetIdentity::parse(
-            id,
-            prefix.clone(),
-            "wrong/manifest.json".into(),
-            valid_sha,
-        )
-        .is_err());
+        assert!(
+            ReleaseAssetIdentity::parse(id, prefix, "wrong/manifest.json".into(), valid_sha)
+                .is_err()
+        );
     }
 
     #[wasm_bindgen_test]

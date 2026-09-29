@@ -523,7 +523,7 @@
                       "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
                       "properties": {
                         "approval_status": {
-                          "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`.",
+                          "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
                           "enum": [
                             "draft",
                             "pending",
@@ -829,6 +829,9 @@
                   ]
                 },
                 "slug": {
+                  "description": "Web address of the product: lowercase letters and digits in runs\njoined by single hyphens, at most 160 characters. Empty means none.",
+                  "maxLength": 160,
+                  "pattern": "^(?:[a-z0-9]+(?:-[a-z0-9]+)*)?$",
                   "type": [
                     "string",
                     "null"
@@ -889,7 +892,7 @@
                 "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
                 "properties": {
                   "approval_status": {
-                    "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`.",
+                    "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
                     "enum": [
                       "draft",
                       "pending",
@@ -1160,7 +1163,7 @@
                 "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
                 "properties": {
                   "approval_status": {
-                    "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`.",
+                    "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
                     "enum": [
                       "draft",
                       "pending",
@@ -1462,6 +1465,9 @@
                   ]
                 },
                 "slug": {
+                  "description": "Web address of the product: lowercase letters and digits in runs\njoined by single hyphens, at most 160 characters. Empty means none.",
+                  "maxLength": 160,
+                  "pattern": "^(?:[a-z0-9]+(?:-[a-z0-9]+)*)?$",
                   "type": [
                     "string",
                     "null"
@@ -1519,7 +1525,7 @@
                 "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
                 "properties": {
                   "approval_status": {
-                    "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`.",
+                    "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
                     "enum": [
                       "draft",
                       "pending",
@@ -1745,7 +1751,7 @@
                 "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
                 "properties": {
                   "approval_status": {
-                    "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`.",
+                    "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
                     "enum": [
                       "draft",
                       "pending",
@@ -2094,7 +2100,7 @@
                     "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
                     "properties": {
                       "approval_status": {
-                        "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`.",
+                        "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
                         "enum": [
                           "draft",
                           "pending",
@@ -2327,7 +2333,7 @@
                 "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
                 "properties": {
                   "approval_status": {
-                    "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`.",
+                    "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
                     "enum": [
                       "draft",
                       "pending",
@@ -2555,7 +2561,7 @@
                 "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
                 "properties": {
                   "approval_status": {
-                    "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`.",
+                    "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
                     "enum": [
                       "draft",
                       "pending",
@@ -5453,13 +5459,20 @@
                     "format": "uint64",
                     "minimum": 0,
                     "type": "integer"
+                  },
+                  "unrecorded": {
+                    "description": "Operations whose state could not be written; a later run retries them.",
+                    "format": "uint64",
+                    "minimum": 0,
+                    "type": "integer"
                   }
                 },
                 "required": [
                   "claimed",
                   "succeeded",
                   "retry_scheduled",
-                  "dead_letter"
+                  "dead_letter",
+                  "unrecorded"
                 ],
                 "title": "ProviderReconcileResult",
                 "type": "object"
@@ -5558,11 +5571,6 @@
                     "items": {
                       "description": "An order row: `impresspress__products__purchases`, as published to the\nbuyer, the seller and administrators.",
                       "properties": {
-                        "amount_cents": {
-                          "description": "Legacy amount column, in minor units. Prefer `total_cents`.",
-                          "format": "int64",
-                          "type": "integer"
-                        },
                         "approved_at": {
                           "description": "RFC 3339 timestamp the order was approved, or `null`.",
                           "format": "date-time",
@@ -5576,7 +5584,7 @@
                           "type": "string"
                         },
                         "buyer_user_id": {
-                          "description": "Signed-in buyer's user id, or empty for a guest order.",
+                          "description": "Signed-in buyer's user id, or empty for a guest order. The order's\nsingle buyer identity.",
                           "type": "string"
                         },
                         "checkout_mode": {
@@ -5770,6 +5778,17 @@
                         },
                         "subscription_status": {
                           "description": "Stripe subscription lifecycle state for subscription orders, or\nempty.",
+                          "enum": [
+                            "",
+                            "incomplete",
+                            "incomplete_expired",
+                            "trialing",
+                            "active",
+                            "past_due",
+                            "unpaid",
+                            "paused",
+                            "canceled"
+                          ],
                           "type": "string"
                         },
                         "subtotal_cents": {
@@ -5781,7 +5800,7 @@
                           "type": "integer"
                         },
                         "total_cents": {
-                          "description": "Final charged amount in minor units.",
+                          "description": "Final charged amount in minor units. The order's single amount.",
                           "format": "int64",
                           "type": "integer"
                         },
@@ -5789,15 +5808,10 @@
                           "description": "RFC 3339 timestamp of the last modification.",
                           "format": "date-time",
                           "type": "string"
-                        },
-                        "user_id": {
-                          "description": "Legacy owner column; equals `buyer_user_id` for orders placed while\nsigned in and is empty for guest orders.",
-                          "type": "string"
                         }
                       },
                       "required": [
                         "id",
-                        "user_id",
                         "buyer_user_id",
                         "buyer_email",
                         "seller_account_id",
@@ -5809,7 +5823,6 @@
                         "provider",
                         "livemode",
                         "currency",
-                        "amount_cents",
                         "subtotal_cents",
                         "discount_cents",
                         "tax_cents",
@@ -5964,6 +5977,7 @@
                           "type": "string"
                         },
                         "status": {
+                          "description": "Where the dispute stands with the card network.",
                           "enum": [
                             "warning_needs_response",
                             "warning_under_review",
@@ -6119,11 +6133,6 @@
                   "purchase": {
                     "description": "An order row: `impresspress__products__purchases`, as published to the\nbuyer, the seller and administrators.",
                     "properties": {
-                      "amount_cents": {
-                        "description": "Legacy amount column, in minor units. Prefer `total_cents`.",
-                        "format": "int64",
-                        "type": "integer"
-                      },
                       "approved_at": {
                         "description": "RFC 3339 timestamp the order was approved, or `null`.",
                         "format": "date-time",
@@ -6137,7 +6146,7 @@
                         "type": "string"
                       },
                       "buyer_user_id": {
-                        "description": "Signed-in buyer's user id, or empty for a guest order.",
+                        "description": "Signed-in buyer's user id, or empty for a guest order. The order's\nsingle buyer identity.",
                         "type": "string"
                       },
                       "checkout_mode": {
@@ -6331,6 +6340,17 @@
                       },
                       "subscription_status": {
                         "description": "Stripe subscription lifecycle state for subscription orders, or\nempty.",
+                        "enum": [
+                          "",
+                          "incomplete",
+                          "incomplete_expired",
+                          "trialing",
+                          "active",
+                          "past_due",
+                          "unpaid",
+                          "paused",
+                          "canceled"
+                        ],
                         "type": "string"
                       },
                       "subtotal_cents": {
@@ -6342,7 +6362,7 @@
                         "type": "integer"
                       },
                       "total_cents": {
-                        "description": "Final charged amount in minor units.",
+                        "description": "Final charged amount in minor units. The order's single amount.",
                         "format": "int64",
                         "type": "integer"
                       },
@@ -6350,15 +6370,10 @@
                         "description": "RFC 3339 timestamp of the last modification.",
                         "format": "date-time",
                         "type": "string"
-                      },
-                      "user_id": {
-                        "description": "Legacy owner column; equals `buyer_user_id` for orders placed while\nsigned in and is empty for guest orders.",
-                        "type": "string"
                       }
                     },
                     "required": [
                       "id",
-                      "user_id",
                       "buyer_user_id",
                       "buyer_email",
                       "seller_account_id",
@@ -6370,7 +6385,6 @@
                       "provider",
                       "livemode",
                       "currency",
-                      "amount_cents",
                       "subtotal_cents",
                       "discount_cents",
                       "tax_cents",
@@ -6467,7 +6481,13 @@
                           "type": "string"
                         },
                         "status": {
-                          "description": "Ledger state: `pending`, `provider_succeeded`, `succeeded` or\n`failed`.",
+                          "description": "Ledger state.",
+                          "enum": [
+                            "pending",
+                            "provider_succeeded",
+                            "succeeded",
+                            "failed"
+                          ],
                           "type": "string"
                         },
                         "stripe_account_id": {
@@ -6708,11 +6728,9 @@
                       "additionalProperties": false,
                       "properties": {
                         "approval_status": {
+                          "description": "Whether an administrator has suspended the account. Derived from\n`status`; the two move together.",
                           "enum": [
-                            "draft",
-                            "pending",
                             "approved",
-                            "rejected",
                             "suspended"
                           ],
                           "type": "string"
@@ -6762,7 +6780,7 @@
                           "type": "string"
                         },
                         "fee_basis_points": {
-                          "description": "Platform fee applied to this seller's sales, in basis points.",
+                          "description": "The platform application fee new Checkout Sessions and Payment Links carry, in basis points.",
                           "format": "uint32",
                           "maximum": 10000,
                           "minimum": 0,
@@ -6780,6 +6798,14 @@
                           "type": "boolean"
                         },
                         "status": {
+                          "description": "How far the account has got with Stripe Connect.",
+                          "enum": [
+                            "not_started",
+                            "onboarding",
+                            "restricted",
+                            "active",
+                            "suspended"
+                          ],
                           "type": "string"
                         },
                         "stripe_account_id": {
@@ -6813,10 +6839,21 @@
                       "type": "object"
                     },
                     "type": "array"
+                  },
+                  "total_count": {
+                    "description": "How many seller accounts exist, which is not `sellers.len()` when the\nlisting is showing a prefix.",
+                    "format": "int64",
+                    "type": "integer"
+                  },
+                  "truncated": {
+                    "description": "Whether more seller accounts exist than `sellers` lists.",
+                    "type": "boolean"
                   }
                 },
                 "required": [
-                  "sellers"
+                  "sellers",
+                  "total_count",
+                  "truncated"
                 ],
                 "title": "SellerAccountList",
                 "type": "object"
@@ -6860,12 +6897,12 @@
                 "description": "Response body of `GET /b/products/api/admin/sellers/{id}`.",
                 "properties": {
                   "products": {
-                    "description": "Every product owned by the seller's user, in any publication state.",
+                    "description": "The seller's live catalog — products the seller's user owns that have\nnot been soft-deleted, in any publication state.",
                     "items": {
                       "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
                       "properties": {
                         "approval_status": {
-                          "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`.",
+                          "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
                           "enum": [
                             "draft",
                             "pending",
@@ -7059,11 +7096,9 @@
                     "additionalProperties": false,
                     "properties": {
                       "approval_status": {
+                        "description": "Whether an administrator has suspended the account. Derived from\n`status`; the two move together.",
                         "enum": [
-                          "draft",
-                          "pending",
                           "approved",
-                          "rejected",
                           "suspended"
                         ],
                         "type": "string"
@@ -7113,7 +7148,7 @@
                         "type": "string"
                       },
                       "fee_basis_points": {
-                        "description": "Platform fee applied to this seller's sales, in basis points.",
+                        "description": "The platform application fee new Checkout Sessions and Payment Links carry, in basis points.",
                         "format": "uint32",
                         "maximum": 10000,
                         "minimum": 0,
@@ -7131,6 +7166,14 @@
                         "type": "boolean"
                       },
                       "status": {
+                        "description": "How far the account has got with Stripe Connect.",
+                        "enum": [
+                          "not_started",
+                          "onboarding",
+                          "restricted",
+                          "active",
+                          "suspended"
+                        ],
                         "type": "string"
                       },
                       "stripe_account_id": {
@@ -7162,11 +7205,16 @@
                       "last_synced_at"
                     ],
                     "type": "object"
+                  },
+                  "truncated": {
+                    "description": "Whether the seller owns more live products than `products` lists.\n\nNothing caps a seller's catalog, so the listing is read up to a\nceiling; this is how a client tells a complete catalog from a prefix\nof one.",
+                    "type": "boolean"
                   }
                 },
                 "required": [
                   "seller",
-                  "products"
+                  "products",
+                  "truncated"
                 ],
                 "title": "AdminSellerDetail",
                 "type": "object"
@@ -7210,11 +7258,9 @@
                 "additionalProperties": false,
                 "properties": {
                   "approval_status": {
+                    "description": "Whether an administrator has suspended the account. Derived from\n`status`; the two move together.",
                     "enum": [
-                      "draft",
-                      "pending",
                       "approved",
-                      "rejected",
                       "suspended"
                     ],
                     "type": "string"
@@ -7264,7 +7310,7 @@
                     "type": "string"
                   },
                   "fee_basis_points": {
-                    "description": "Platform fee applied to this seller's sales, in basis points.",
+                    "description": "The platform application fee new Checkout Sessions and Payment Links carry, in basis points.",
                     "format": "uint32",
                     "maximum": 10000,
                     "minimum": 0,
@@ -7282,6 +7328,14 @@
                     "type": "boolean"
                   },
                   "status": {
+                    "description": "How far the account has got with Stripe Connect.",
+                    "enum": [
+                      "not_started",
+                      "onboarding",
+                      "restricted",
+                      "active",
+                      "suspended"
+                    ],
                     "type": "string"
                   },
                   "stripe_account_id": {
@@ -7354,11 +7408,9 @@
                 "additionalProperties": false,
                 "properties": {
                   "approval_status": {
+                    "description": "Whether an administrator has suspended the account. Derived from\n`status`; the two move together.",
                     "enum": [
-                      "draft",
-                      "pending",
                       "approved",
-                      "rejected",
                       "suspended"
                     ],
                     "type": "string"
@@ -7408,7 +7460,7 @@
                     "type": "string"
                   },
                   "fee_basis_points": {
-                    "description": "Platform fee applied to this seller's sales, in basis points.",
+                    "description": "The platform application fee new Checkout Sessions and Payment Links carry, in basis points.",
                     "format": "uint32",
                     "maximum": 10000,
                     "minimum": 0,
@@ -7426,6 +7478,14 @@
                     "type": "boolean"
                   },
                   "status": {
+                    "description": "How far the account has got with Stripe Connect.",
+                    "enum": [
+                      "not_started",
+                      "onboarding",
+                      "restricted",
+                      "active",
+                      "suspended"
+                    ],
                     "type": "string"
                   },
                   "stripe_account_id": {
@@ -8349,7 +8409,7 @@
                       "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
                       "properties": {
                         "approval_status": {
-                          "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`.",
+                          "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
                           "enum": [
                             "draft",
                             "pending",
@@ -8655,6 +8715,9 @@
                   ]
                 },
                 "slug": {
+                  "description": "Web address of the product: lowercase letters and digits in runs\njoined by single hyphens, at most 160 characters. Empty means none.",
+                  "maxLength": 160,
+                  "pattern": "^(?:[a-z0-9]+(?:-[a-z0-9]+)*)?$",
                   "type": [
                     "string",
                     "null"
@@ -8715,7 +8778,7 @@
                 "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
                 "properties": {
                   "approval_status": {
-                    "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`.",
+                    "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
                     "enum": [
                       "draft",
                       "pending",
@@ -8986,7 +9049,7 @@
                 "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
                 "properties": {
                   "approval_status": {
-                    "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`.",
+                    "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
                     "enum": [
                       "draft",
                       "pending",
@@ -9288,6 +9351,9 @@
                   ]
                 },
                 "slug": {
+                  "description": "Web address of the product: lowercase letters and digits in runs\njoined by single hyphens, at most 160 characters. Empty means none.",
+                  "maxLength": 160,
+                  "pattern": "^(?:[a-z0-9]+(?:-[a-z0-9]+)*)?$",
                   "type": [
                     "string",
                     "null"
@@ -9345,7 +9411,7 @@
                 "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
                 "properties": {
                   "approval_status": {
-                    "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`.",
+                    "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
                     "enum": [
                       "draft",
                       "pending",
@@ -9693,7 +9759,7 @@
                     "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
                     "properties": {
                       "approval_status": {
-                        "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`.",
+                        "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
                         "enum": [
                           "draft",
                           "pending",
@@ -9927,7 +9993,7 @@
                 "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
                 "properties": {
                   "approval_status": {
-                    "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`.",
+                    "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
                     "enum": [
                       "draft",
                       "pending",
@@ -12618,11 +12684,9 @@
                 "additionalProperties": false,
                 "properties": {
                   "approval_status": {
+                    "description": "Whether an administrator has suspended the account. Derived from\n`status`; the two move together.",
                     "enum": [
-                      "draft",
-                      "pending",
                       "approved",
-                      "rejected",
                       "suspended"
                     ],
                     "type": "string"
@@ -12672,7 +12736,7 @@
                     "type": "string"
                   },
                   "fee_basis_points": {
-                    "description": "Platform fee applied to this seller's sales, in basis points.",
+                    "description": "The platform application fee new Checkout Sessions and Payment Links carry, in basis points.",
                     "format": "uint32",
                     "maximum": 10000,
                     "minimum": 0,
@@ -12690,6 +12754,14 @@
                     "type": "boolean"
                   },
                   "status": {
+                    "description": "How far the account has got with Stripe Connect.",
+                    "enum": [
+                      "not_started",
+                      "onboarding",
+                      "restricted",
+                      "active",
+                      "suspended"
+                    ],
                     "type": "string"
                   },
                   "stripe_account_id": {
@@ -12821,11 +12893,9 @@
                     "additionalProperties": false,
                     "properties": {
                       "approval_status": {
+                        "description": "Whether an administrator has suspended the account. Derived from\n`status`; the two move together.",
                         "enum": [
-                          "draft",
-                          "pending",
                           "approved",
-                          "rejected",
                           "suspended"
                         ],
                         "type": "string"
@@ -12875,7 +12945,7 @@
                         "type": "string"
                       },
                       "fee_basis_points": {
-                        "description": "Platform fee applied to this seller's sales, in basis points.",
+                        "description": "The platform application fee new Checkout Sessions and Payment Links carry, in basis points.",
                         "format": "uint32",
                         "maximum": 10000,
                         "minimum": 0,
@@ -12893,6 +12963,14 @@
                         "type": "boolean"
                       },
                       "status": {
+                        "description": "How far the account has got with Stripe Connect.",
+                        "enum": [
+                          "not_started",
+                          "onboarding",
+                          "restricted",
+                          "active",
+                          "suspended"
+                        ],
                         "type": "string"
                       },
                       "stripe_account_id": {
@@ -13082,6 +13160,14 @@
                         },
                         "provider_payment_status": {
                           "description": "Latest PaymentIntent state received from the provider.",
+                          "enum": [
+                            "",
+                            "succeeded",
+                            "payment_failed",
+                            "processing",
+                            "requires_action",
+                            "canceled"
+                          ],
                           "type": "string"
                         },
                         "provider_session_id": {
@@ -13168,6 +13254,17 @@
                         },
                         "subscription_status": {
                           "description": "Stripe subscription lifecycle state, or empty.",
+                          "enum": [
+                            "",
+                            "incomplete",
+                            "incomplete_expired",
+                            "trialing",
+                            "active",
+                            "past_due",
+                            "unpaid",
+                            "paused",
+                            "canceled"
+                          ],
                           "type": "string"
                         },
                         "subtotal_cents": {
@@ -13346,6 +13443,7 @@
                           "type": "string"
                         },
                         "status": {
+                          "description": "Where the dispute stands with the card network.",
                           "enum": [
                             "warning_needs_response",
                             "warning_under_review",
@@ -13560,6 +13658,14 @@
                       },
                       "provider_payment_status": {
                         "description": "Latest PaymentIntent state received from the provider.",
+                        "enum": [
+                          "",
+                          "succeeded",
+                          "payment_failed",
+                          "processing",
+                          "requires_action",
+                          "canceled"
+                        ],
                         "type": "string"
                       },
                       "provider_session_id": {
@@ -13646,6 +13752,17 @@
                       },
                       "subscription_status": {
                         "description": "Stripe subscription lifecycle state, or empty.",
+                        "enum": [
+                          "",
+                          "incomplete",
+                          "incomplete_expired",
+                          "trialing",
+                          "active",
+                          "past_due",
+                          "unpaid",
+                          "paused",
+                          "canceled"
+                        ],
                         "type": "string"
                       },
                       "subtotal_cents": {
@@ -13766,7 +13883,13 @@
                           "type": "string"
                         },
                         "status": {
-                          "description": "Ledger state: `pending`, `provider_succeeded`, `succeeded` or\n`failed`.",
+                          "description": "Ledger state.",
+                          "enum": [
+                            "pending",
+                            "provider_succeeded",
+                            "succeeded",
+                            "failed"
+                          ],
                           "type": "string"
                         },
                         "stripe_account_id": {
@@ -15458,7 +15581,7 @@
                       "description": "A product row as published to its owner and to administrators: every\ncolumn of the products table.",
                       "properties": {
                         "approval_status": {
-                          "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`.",
+                          "description": "Moderation state: `draft`, `pending` (submitted for review), `approved`,\n`rejected` or `suspended`. A different column and a different\nvocabulary from `status` — a listing awaiting review is\n`status = pending_review` and `approval_status = pending` at once.",
                           "enum": [
                             "draft",
                             "pending",
@@ -15803,6 +15926,17 @@
                     "type": "string"
                   },
                   "subscription_status": {
+                    "description": "Stripe subscription lifecycle state; absent for a one-time order.",
+                    "enum": [
+                      "incomplete",
+                      "incomplete_expired",
+                      "trialing",
+                      "active",
+                      "past_due",
+                      "unpaid",
+                      "paused",
+                      "canceled"
+                    ],
                     "type": "string"
                   }
                 },
@@ -16105,6 +16239,14 @@
                         },
                         "provider_payment_status": {
                           "description": "Latest payment state received from the provider.",
+                          "enum": [
+                            "",
+                            "succeeded",
+                            "payment_failed",
+                            "processing",
+                            "requires_action",
+                            "canceled"
+                          ],
                           "type": "string"
                         },
                         "reconciliation_status": {
@@ -16176,6 +16318,17 @@
                         },
                         "subscription_status": {
                           "description": "Stripe subscription lifecycle state for subscription orders, or empty.",
+                          "enum": [
+                            "",
+                            "incomplete",
+                            "incomplete_expired",
+                            "trialing",
+                            "active",
+                            "past_due",
+                            "unpaid",
+                            "paused",
+                            "canceled"
+                          ],
                           "type": "string"
                         },
                         "subtotal_cents": {
@@ -16345,6 +16498,7 @@
                           "type": "string"
                         },
                         "status": {
+                          "description": "Where the dispute stands with the card network.",
                           "enum": [
                             "warning_needs_response",
                             "warning_under_review",
@@ -16544,6 +16698,14 @@
                       },
                       "provider_payment_status": {
                         "description": "Latest payment state received from the provider.",
+                        "enum": [
+                          "",
+                          "succeeded",
+                          "payment_failed",
+                          "processing",
+                          "requires_action",
+                          "canceled"
+                        ],
                         "type": "string"
                       },
                       "reconciliation_status": {
@@ -16615,6 +16777,17 @@
                       },
                       "subscription_status": {
                         "description": "Stripe subscription lifecycle state for subscription orders, or empty.",
+                        "enum": [
+                          "",
+                          "incomplete",
+                          "incomplete_expired",
+                          "trialing",
+                          "active",
+                          "past_due",
+                          "unpaid",
+                          "paused",
+                          "canceled"
+                        ],
                         "type": "string"
                       },
                       "subtotal_cents": {
@@ -16700,7 +16873,13 @@
                           "type": "string"
                         },
                         "status": {
-                          "description": "Ledger state: `pending`, `provider_succeeded`, `succeeded` or `failed`.",
+                          "description": "Ledger state.",
+                          "enum": [
+                            "pending",
+                            "provider_succeeded",
+                            "succeeded",
+                            "failed"
+                          ],
                           "type": "string"
                         }
                       },
@@ -17419,6 +17598,17 @@
                       },
                       "status": {
                         "description": "Stripe subscription lifecycle state.",
+                        "enum": [
+                          "",
+                          "incomplete",
+                          "incomplete_expired",
+                          "trialing",
+                          "active",
+                          "past_due",
+                          "unpaid",
+                          "paused",
+                          "canceled"
+                        ],
                         "type": "string"
                       },
                       "stripe_subscription_id": {

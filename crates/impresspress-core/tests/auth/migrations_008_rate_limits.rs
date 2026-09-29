@@ -1,53 +1,38 @@
 //! Apply migrations through 008; verify `wafer_run__auth__rate_limits`
 //! exists and satisfies the `OnConflict::WindowedCounter` upsert contract
-//! that `blocks/rate_limit.rs` relies on for the wasm32 (D1) counter path.
+//! that `auth::repo::rate_limits::windowed_increment` issues on the wasm32
+//! (D1) counter path.
 //!
 //! Before 008 the table had no in-repo migration at all, so on Cloudflare —
 //! the only platform that uses it — the windowed upsert failed against a
 //! missing table, the caller's `let _ =` swallowed the error, and rate
 //! limiting silently never triggered.
 
-use impresspress_core::blocks::auth::migrations;
-use serde_json::json;
-use wafer_block::{
-    db::{Filter, FilterOp},
-    wire::database::OnConflict,
+use impresspress_core::{
+    blocks::auth::{migrations, repo::rate_limits},
+    test_support::TestContext,
 };
+use serde_json::json;
+use wafer_block::db::{Filter, FilterOp};
 use wafer_core::clients::database as db;
 
-use crate::common::MigrationTestCtx;
+use crate::common::auth_fixture;
 
-/// Mirrors `blocks/rate_limit.rs`: same table, data shape, conflict target,
-/// and counter/window/timestamp field wiring.
-const TABLE: &str = "wafer_run__auth__rate_limits";
-
-async fn windowed_upsert(ctx: &MigrationTestCtx, key: &str, now: i64, window_cutoff: i64) {
+/// Drive the production upsert; the row id is only used for a brand-new
+/// counter, so it just has to be unique per call.
+async fn hit(ctx: &TestContext, key: &str, now: i64, window_cutoff: i64) -> i64 {
     let id = format!("rl-test-{key}-{now}");
-    db::upsert(
-        ctx,
-        TABLE,
-        vec![
-            ("id".to_string(), json!(id)),
-            ("key".to_string(), json!(key)),
-        ],
-        vec!["key".to_string()],
-        OnConflict::WindowedCounter {
-            count_field: "count".to_string(),
-            window_field: "window_start".to_string(),
-            now,
-            window_cutoff,
-            created_fields: vec!["created_at".to_string()],
-            updated_fields: vec!["updated_at".to_string()],
-        },
-    )
-    .await
-    .expect("windowed-counter upsert must succeed against the migrated table");
+    rate_limits::windowed_increment(ctx, &id, key, now, window_cutoff)
+        .await
+        .expect("windowed_increment must succeed against the migrated table")
 }
 
-async fn read_counter(ctx: &MigrationTestCtx, key: &str) -> (i64, i64) {
+/// The stored `(count, window_start)` for `key`, read independently of the
+/// function under test.
+async fn read_counter(ctx: &TestContext, key: &str) -> (i64, i64) {
     let rows = db::list_all(
         ctx,
-        TABLE,
+        rate_limits::TABLE,
         vec![Filter {
             field: "key".into(),
             operator: FilterOp::Equal,
@@ -73,25 +58,25 @@ async fn read_counter(ctx: &MigrationTestCtx, key: &str) -> (i64, i64) {
 
 #[tokio::test]
 async fn migration_008_rate_limits_supports_windowed_counter_upsert() {
-    let ctx = MigrationTestCtx::new().await;
+    let ctx = auth_fixture(impresspress_core::blocks::auth::AUTH_BLOCK_ID).await;
     migrations::apply(&ctx).await.expect("migration apply");
     migrations::apply(&ctx)
         .await
         .expect("second apply must succeed (idempotent)");
 
     // Two hits inside the same window increment the counter and keep the
-    // original window_start.
-    windowed_upsert(&ctx, "user-1", 1_000, 940).await;
-    windowed_upsert(&ctx, "user-1", 1_010, 950).await;
+    // original window_start; the returned value is the post-hit count.
+    assert_eq!(hit(&ctx, "user-1", 1_000, 940).await, 1);
+    assert_eq!(hit(&ctx, "user-1", 1_010, 950).await, 2);
     assert_eq!(read_counter(&ctx, "user-1").await, (2, 1_000));
 
     // A hit after the window expired (window_start < cutoff) resets the
     // counter and starts a new window.
-    windowed_upsert(&ctx, "user-1", 2_000, 1_940).await;
+    assert_eq!(hit(&ctx, "user-1", 2_000, 1_940).await, 1);
     assert_eq!(read_counter(&ctx, "user-1").await, (1, 2_000));
 
     // Independent keys do not interfere.
-    windowed_upsert(&ctx, "user-2", 2_000, 1_940).await;
+    assert_eq!(hit(&ctx, "user-2", 2_000, 1_940).await, 1);
     assert_eq!(read_counter(&ctx, "user-1").await, (1, 2_000));
     assert_eq!(read_counter(&ctx, "user-2").await, (1, 2_000));
 }

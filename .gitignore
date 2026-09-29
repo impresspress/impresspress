@@ -58,6 +58,10 @@ build/
 
 # Git worktrees
 .worktrees/
+# Claude Code creates its worktrees under .claude/worktrees/, each with its
+# own target/ (tens of GB); its per-machine settings live beside them.
+.claude/worktrees/
+.claude/settings.local.json
 
 # Package locks should be committed for reproducible builds
 

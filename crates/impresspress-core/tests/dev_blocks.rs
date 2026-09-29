@@ -27,23 +27,18 @@ use impresspress_core::{
             generations::GenerationCause,
         },
         seed::{self, SeedBlock, SeedManifest},
-        test_support::{seed_file, FakeControl, MapFetch},
+        test_support::{dev_post, dev_status, hello_info, seed_file, FakeControl, MapFetch},
         validation::MAX_ARTIFACT_BYTES,
     },
     test_support::{admin_msg, anon_msg, output_json, output_status, TestContext},
 };
 use serde_json::json;
 use wafer_block::{Allowlist, BlockCapabilities};
-use wafer_run::{AuthLevel, BlockEndpoint, BlockInfo, OutputStream};
+use wafer_run::{AuthLevel, BlockEndpoint, BlockInfo};
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// `POST` a JSON body to a `/b/dev` route as an admin, through the router.
-async fn dev_post(ctx: &TestContext, path: &str, body: serde_json::Value) -> OutputStream {
-    ctx.dispatch_json(admin_msg("create", path), &body).await
-}
 
 /// Standard base64 with padding — how an artifact travels in JSON.
 fn b64(bytes: &[u8]) -> String {
@@ -53,15 +48,6 @@ fn b64(bytes: &[u8]) -> String {
 /// A minimal wasm header. Nothing in these tests parses it; the bytes only
 /// have to be stable so their sha256 is.
 const ARTIFACT: &[u8] = b"\0asm\x01\0\0\0";
-
-/// The `BlockInfo` a well-behaved `hello` guest reports.
-fn hello_info(name: &str) -> BlockInfo {
-    BlockInfo::new(name, "0.1.0", "http-handler@v1", "hello").endpoints(vec![BlockEndpoint::get(
-        "/b/hello/",
-    )
-    .auth(AuthLevel::Public)
-    .summary("hello")])
-}
 
 /// A guest named `site/{name}` serving the one endpoint that implies.
 fn named_info(name: &str) -> BlockInfo {
@@ -104,14 +90,6 @@ fn codes(response: &serde_json::Value) -> Vec<&str> {
         .collect()
 }
 
-async fn status_of(ctx: &TestContext) -> serde_json::Value {
-    output_json(
-        ctx.dispatch(admin_msg("retrieve", "/b/dev/api/status"))
-            .await,
-    )
-    .await
-}
-
 // ---------------------------------------------------------------------------
 // The happy path
 // ---------------------------------------------------------------------------
@@ -140,7 +118,7 @@ async fn staging_a_valid_block_activates_a_generation_and_rebuilds_the_runtime()
     assert_eq!(rebuilds[0][0].routes.len(), 1);
     assert_eq!(rebuilds[0][0].routes[0].prefix, "/b/hello/");
 
-    let status = status_of(&ctx).await;
+    let status = dev_status(&ctx).await;
     assert_eq!(status["blocks"][0]["name"], "site/hello");
     assert_eq!(status["blocks"][0]["routes"][0]["prefix"], "/b/hello/");
 }
@@ -857,10 +835,10 @@ async fn removing_a_block_rebuilds_without_it_and_keeps_its_source() {
     // query would match no route template.
     let mut list = admin_msg("retrieve", "/b/dev/api/files");
     list.set_meta("req.query.prefix", "blocks/hello/");
-    let l = output_json(ctx.dispatch(list).await).await;
+    let l = output_json(ctx.dispatch_resolved(list).await).await;
     assert_eq!(l["files"].as_array().expect("files").len(), 1);
 
-    let status = status_of(&ctx).await;
+    let status = dev_status(&ctx).await;
     assert_eq!(status["blocks"].as_array().expect("blocks").len(), 0);
 }
 
@@ -917,9 +895,7 @@ async fn the_staging_and_removal_routes_are_admin_only() {
     let ctx = TestContext::with_dev(FakeControl::new()).await;
 
     for path in ["/b/dev/api/builds/stage", "/b/dev/api/blocks/hello/remove"] {
-        let out = ctx
-            .dispatch_json(anon_msg("create", path), &json!({}))
-            .await;
+        let out = ctx.request_json(anon_msg("create", path), &json!({})).await;
         let status = impresspress_core::test_support::output_http_status(out).await;
         assert!(
             status == 401 || status == 403,

@@ -26,3 +26,20 @@ async fn build_copies_frontend_to_data_storage_site() {
         "expected frontend file copied to {copied:?}"
     );
 }
+
+/// A present-but-malformed `impresspress.toml` is refused, not treated as
+/// "no config" (which would skip the operator's overlays without a word).
+#[tokio::test]
+async fn build_refuses_malformed_impresspress_toml() {
+    let tmp = tempdir().unwrap();
+    fs::write(tmp.path().join("impresspress.toml"), "[app\n").unwrap();
+
+    let err = sealed_native::build(tmp.path(), false)
+        .await
+        .expect_err("a malformed impresspress.toml must fail the build");
+    let msg = format!("{err:#}");
+    assert!(
+        msg.contains("parse") && msg.contains("impresspress.toml"),
+        "{msg}"
+    );
+}

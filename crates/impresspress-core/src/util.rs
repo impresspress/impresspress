@@ -22,27 +22,6 @@ pub fn now_millis() -> u64 {
     chrono::Utc::now().timestamp_millis() as u64
 }
 
-/// Extract a single path id from a request, preferring the router-populated
-/// `var` and falling back to stripping `prefix` off `msg.path()` and taking the
-/// first remaining segment.
-///
-/// Native axum routing populates path variables (`msg.var("id")`); the
-/// Cloudflare/browser adapters register a single block prefix and leave path
-/// extraction to the handler, so the prefix-strip fallback covers them (and
-/// direct handler calls in tests). Returns `""` when neither yields a value.
-pub fn path_param<'a>(msg: &'a wafer_run::Message, var: &str, prefix: &str) -> &'a str {
-    let v = msg.var(var);
-    if !v.is_empty() {
-        return v;
-    }
-    msg.path()
-        .strip_prefix(prefix)
-        .unwrap_or("")
-        .split('/')
-        .next()
-        .unwrap_or("")
-}
-
 /// Convert a serde_json::json!({...}) value into a HashMap for the database client.
 pub fn json_map(val: serde_json::Value) -> HashMap<String, serde_json::Value> {
     match val {
@@ -69,12 +48,58 @@ pub fn json_as_u64(v: &serde_json::Value) -> Option<u64> {
         .or_else(|| v.as_str().and_then(|s| s.parse().ok()))
 }
 
+/// Whether a stored BOOLEAN-ish column is set, for every shape a backend or a
+/// fixture can hand back: a JSON bool, any non-zero number, or the strings
+/// `"true"` / `"1"`.
+///
+/// THE truth table for such a column, and the reason it is a free function
+/// rather than only a [`RecordExt`] method: three readers of
+/// `impresspress__admin__variables.sensitive` each had their own, and they
+/// disagreed exactly where it mattered. `RecordExt::bool_field` accepted all
+/// the shapes above; [`is_sensitive_key`] compared an `i64` to `1`; and
+/// `cache_key::row_is_sensitive` converted with [`json_as_i64`], which yields
+/// `None` for a JSON bool and for `"true"`. So a row whose flag held `2`,
+/// `true` or `"true"` read as flagged by the repair pass — which therefore
+/// skipped it — while the settings API served it in the clear and the KV cache
+/// judged it cacheable. One predicate, used by every reader, is what stops
+/// that class of disagreement rather than the one instance of it.
+///
+/// The canonical stored form is still the integer `1`: the column is
+/// `INTEGER NOT NULL DEFAULT 0` on both backends and
+/// `VariableRow::to_data` writes `i64::from(bool)`. This predicate exists to
+/// read what is already there, not to license new spellings.
+pub fn flag_is_set(v: &serde_json::Value) -> bool {
+    match v {
+        serde_json::Value::Bool(b) => *b,
+        // `as_i64` alone is `None` for a float, so `1.0` read as UNSET while
+        // the doc said "any non-zero number". That is a shape this change set
+        // anticipates elsewhere — `variable_is_exportable` lists it, and
+        // `load_rows` names it — and getting it wrong was doubly bad: the row
+        // would have been served in the clear AND rewritten on every boot by a
+        // repair pass that could never make `flag_is_canonical_one` true. The
+        // truth table has to be total over the numbers a backend can produce.
+        serde_json::Value::Number(n) => n
+            .as_i64()
+            .map_or_else(|| n.as_f64().unwrap_or(0.0) != 0.0, |i| i != 0),
+        serde_json::Value::String(s) => s == "true" || s == "1",
+        _ => false,
+    }
+}
+
 /// Extension trait for convenient field access on database Records.
 ///
 /// The numeric accessors accept both JSON numbers and numeric strings
 /// (see [`json_as_i64`]) so TEXT-stored values never silently collapse
 /// to the zero default.
 pub trait RecordExt {
+    /// A `TEXT` column as the string it holds, `""` when missing or when the
+    /// value is not a JSON string.
+    ///
+    /// A JSON-encoded column is *not* one of these: the SQLite and browser
+    /// backends re-parse JSON-shaped text on read, so such a column arrives as
+    /// a `Value::Object` and this accessor answers `""` for a payload that is
+    /// plainly there. Reach for [`Self::json_value_field`],
+    /// [`Self::json_object_field`] or [`Self::json_text_field`] instead.
     fn str_field(&self, key: &str) -> &str;
     /// Field as `i64`, defaulting to `0` when missing/non-numeric.
     fn i64_field(&self, key: &str) -> i64;
@@ -111,6 +136,17 @@ pub trait RecordExt {
     /// holds anything else.
     fn json_array_field(&self, key: &str) -> Vec<serde_json::Value>;
 
+    /// A JSON-encoded `TEXT` column as its JSON *text*, for a caller that
+    /// carries the payload onward rather than inspecting it — re-persisting it
+    /// on another row, or rendering it.
+    ///
+    /// A backend that handed back the raw string returns it verbatim (it is
+    /// already the encoded text); a backend that re-parsed it gets the value
+    /// re-encoded, which can reorder object keys but never loses a field. `""`
+    /// when the column is absent, so an `is_empty()` guard still means
+    /// "nothing stored".
+    fn json_text_field(&self, key: &str) -> String;
+
     /// A JSON-encoded `TEXT` column that holds an array of strings. Elements
     /// that are not strings are dropped; a column holding anything but an
     /// array reads as empty. These columns are advisory metadata, not an
@@ -118,9 +154,15 @@ pub trait RecordExt {
     fn string_list_field(&self, key: &str) -> Vec<String>;
 }
 
-impl RecordExt for Record {
+/// The one implementation: every `Record` shape the runtime hands out —
+/// `wafer_core::clients::database::Record` under WRAP and
+/// `wafer_core::interfaces::database::service::Record` at boot — carries a
+/// `data: HashMap<String, Value>` column map, and the platform-state codecs
+/// decode that map for both. Implemented on the map so the two flavours
+/// share one accessor set; the `Record` impl below forwards to it.
+impl RecordExt for HashMap<String, serde_json::Value> {
     fn str_field(&self, key: &str) -> &str {
-        self.data.get(key).and_then(|v| v.as_str()).unwrap_or("")
+        self.get(key).and_then(|v| v.as_str()).unwrap_or("")
     }
 
     fn i64_field(&self, key: &str) -> i64 {
@@ -128,31 +170,26 @@ impl RecordExt for Record {
     }
 
     fn opt_i64_field(&self, key: &str) -> Option<i64> {
-        self.data.get(key).and_then(json_as_i64)
+        self.get(key).and_then(json_as_i64)
     }
 
     fn u64_field(&self, key: &str) -> u64 {
-        self.data.get(key).and_then(json_as_u64).unwrap_or(0)
+        self.get(key).and_then(json_as_u64).unwrap_or(0)
     }
 
     fn bool_field(&self, key: &str) -> bool {
-        match self.data.get(key) {
-            Some(serde_json::Value::Bool(b)) => *b,
-            Some(serde_json::Value::Number(n)) => n.as_i64().unwrap_or(0) != 0,
-            Some(serde_json::Value::String(s)) => s == "true" || s == "1",
-            _ => false,
-        }
+        self.get(key).is_some_and(flag_is_set)
     }
 
     fn opt_str_field(&self, key: &str) -> Option<String> {
-        match self.data.get(key) {
+        match self.get(key) {
             Some(serde_json::Value::String(value)) => Some(value.clone()),
             _ => None,
         }
     }
 
     fn json_value_field(&self, key: &str) -> serde_json::Value {
-        match self.data.get(key) {
+        match self.get(key) {
             Some(serde_json::Value::String(raw)) => {
                 serde_json::from_str(raw).unwrap_or(serde_json::Value::Null)
             }
@@ -175,6 +212,14 @@ impl RecordExt for Record {
         }
     }
 
+    fn json_text_field(&self, key: &str) -> String {
+        match self.get(key) {
+            Some(serde_json::Value::String(raw)) => raw.clone(),
+            Some(serde_json::Value::Null) | None => String::new(),
+            Some(value) => value.to_string(),
+        }
+    }
+
     fn string_list_field(&self, key: &str) -> Vec<String> {
         self.json_array_field(key)
             .into_iter()
@@ -183,6 +228,125 @@ impl RecordExt for Record {
                 _ => None,
             })
             .collect()
+    }
+}
+
+impl RecordExt for Record {
+    fn str_field(&self, key: &str) -> &str {
+        self.data.str_field(key)
+    }
+
+    fn i64_field(&self, key: &str) -> i64 {
+        self.data.i64_field(key)
+    }
+
+    fn opt_i64_field(&self, key: &str) -> Option<i64> {
+        self.data.opt_i64_field(key)
+    }
+
+    fn u64_field(&self, key: &str) -> u64 {
+        self.data.u64_field(key)
+    }
+
+    fn bool_field(&self, key: &str) -> bool {
+        self.data.bool_field(key)
+    }
+
+    fn opt_str_field(&self, key: &str) -> Option<String> {
+        self.data.opt_str_field(key)
+    }
+
+    fn json_value_field(&self, key: &str) -> serde_json::Value {
+        self.data.json_value_field(key)
+    }
+
+    fn json_object_field(&self, key: &str) -> serde_json::Map<String, serde_json::Value> {
+        self.data.json_object_field(key)
+    }
+
+    fn json_array_field(&self, key: &str) -> Vec<serde_json::Value> {
+        self.data.json_array_field(key)
+    }
+
+    fn json_text_field(&self, key: &str) -> String {
+        self.data.json_text_field(key)
+    }
+
+    fn string_list_field(&self, key: &str) -> Vec<String> {
+        self.data.string_list_field(key)
+    }
+}
+
+/// Parse `column` of `record` into the enum that defines its value set.
+///
+/// The one decode door for an enum'd column, crate-wide. A column whose
+/// values are a fixed set has exactly one type that names them and exactly
+/// one function that turns the stored text into that type, so a value the
+/// contract does not define cannot be read as a default by one caller and
+/// as an error by another — which is what having two doors
+/// (`products::contracts::enum_column` and `products::repo::offers::wire_enum`,
+/// which disagreed on the empty column) produced.
+///
+/// A stored value outside the set is a data-integrity fault: it is reported
+/// as [`ErrorCode::Internal`](wafer_run::ErrorCode::Internal) naming the row,
+/// the column and the value — the three things an operator needs to go and
+/// look at the row — and is never mapped onto a variant. An absent column, a
+/// SQL `NULL` and an empty string all read as `""`. That is refused unless
+/// `T` names `""` as a variant (`#[serde(rename = "")]`), which an enum does
+/// when its column's `NOT NULL DEFAULT ''` is itself a state, e.g.
+/// `products::contracts::SubscriptionStatus::Unset`. A column that is empty
+/// on some rows without `""` being a state of its enum wants
+/// [`enum_column_or`] and a typed fallback.
+pub fn enum_column<T: serde::de::DeserializeOwned>(
+    record: &Record,
+    column: &str,
+) -> Result<T, wafer_run::WaferError> {
+    let value = record.str_field(column);
+    serde_json::from_value(serde_json::Value::String(value.to_string())).map_err(|_| {
+        wafer_run::WaferError::new(
+            wafer_run::ErrorCode::Internal,
+            format!(
+                "row {} holds {column} {value:?}, which the contract does not define",
+                record.id
+            ),
+        )
+    })
+}
+
+/// [`enum_column`] for a column that is legitimately empty on some rows.
+///
+/// `empty` is a **typed variant**, not a spelling: the `&str` fallback this
+/// replaces let a caller name a default the enum did not define, so a
+/// mis-typed fallback failed at the same place — and with the same message —
+/// as genuinely corrupt data. Only the empty case takes the fallback; a
+/// non-empty value outside the set is still the fault [`enum_column`]
+/// reports.
+pub fn enum_column_or<T: serde::de::DeserializeOwned>(
+    record: &Record,
+    column: &str,
+    empty: T,
+) -> Result<T, wafer_run::WaferError> {
+    if record.str_field(column).is_empty() {
+        return Ok(empty);
+    }
+    enum_column(record, column)
+}
+
+/// An enum as the string it is stored, filtered and published as.
+///
+/// The counterpart of [`enum_column`], for the places a typed value has to
+/// go back out as text: a rendered badge, an `href` segment, a hidden form
+/// field the page's own JavaScript posts back. Serializing is what keeps
+/// those the same spelling the column holds without a per-variant label
+/// table beside the serde one to drift from it — the duplication
+/// `RefundReason::as_str` is the standing example of.
+pub fn wire_str<T: serde::Serialize>(value: &T) -> String {
+    match serde_json::to_value(value) {
+        Ok(serde_json::Value::String(text)) => text,
+        // Unreachable for the unit-variant enums this exists for; a type
+        // that serializes to something else has no single wire spelling to
+        // render and should not be asked for one.
+        _ => String::new(),
     }
 }
 
@@ -209,12 +373,34 @@ pub fn format_bytes(bytes: i64) -> String {
     }
 }
 
+/// Group a count with thousands separators for visible text: `10_000` →
+/// `"10,000"`, `999` → `"999"`, `-1_234` → `"-1,234"`.
+///
+/// For prose and stat text that states a limit, where an ungrouped `10000`
+/// reads as a different number at a glance. Table cells that render a raw
+/// count are left alone; this is not a general number formatter.
+pub fn format_count(count: i64) -> String {
+    let negative = count < 0;
+    let digits = count.unsigned_abs().to_string();
+    let mut out = String::with_capacity(digits.len() + digits.len() / 3 + 1);
+    if negative {
+        out.push('-');
+    }
+    for (i, ch) in digits.chars().enumerate() {
+        if i > 0 && (digits.len() - i).is_multiple_of(3) {
+            out.push(',');
+        }
+        out.push(ch);
+    }
+    out
+}
+
 /// Humanize an RFC 3339 timestamp for visible table text: `"2026-07-11 19:13"`
 /// (UTC, minute precision) instead of the raw nanosecond-resolution string
 /// [`now_rfc3339`] produces. Returns the input unchanged when it doesn't
 /// parse, so a malformed stored value degrades to what we have rather than
-/// hiding the row's timestamp — callers keep the full raw value in the
-/// machine-readable `<time datetime=...>` attribute either way.
+/// hiding the row's timestamp. `ui::components::timestamp` pairs this text
+/// with the machine-readable instant in a `<time datetime=...>`.
 pub fn format_timestamp(rfc3339: &str) -> String {
     match chrono::DateTime::parse_from_rfc3339(rfc3339) {
         Ok(dt) => dt
@@ -267,11 +453,26 @@ pub fn block_request(
     resource: &str,
     original: &wafer_run::Message,
 ) -> wafer_run::Message {
-    let mut msg = wafer_run::Message::new(format!("{action}:{resource}"));
+    // A query string is split off the path and decoded into `req.query.*`,
+    // exactly as `wafer_block::http_codec::request_from_http` does for a real
+    // request. Without this the whole `path?a=b` string landed in
+    // `req.resource`, where `endpoint_match::dispatch` compares it segment by
+    // segment against the route template — so `contexts/{id}/entries?kind=message`
+    // matched no row and the callee answered 404, while `msg.query("kind")`
+    // (which reads `req.query.kind`, never `req.resource`) read `""` anyway.
+    // Both `blocks::llm` calls that carry a filter were affected: the model
+    // history and the chat sidebar came back empty on every request.
+    let (path, query) = resource.split_once('?').unwrap_or((resource, ""));
+    let mut msg = wafer_run::Message::new(format!("{action}:{path}"));
     msg.set_meta("req.action", action);
-    msg.set_meta("req.resource", resource);
+    msg.set_meta("req.resource", path);
     msg.set_meta("http.method", method);
-    msg.set_meta("http.path", resource);
+    msg.set_meta("http.path", path);
+    msg.set_meta("http.raw_query", query);
+    for (name, value) in parse_form_body(query.as_bytes()) {
+        msg.set_meta(format!("http.query.{name}"), value.clone());
+        msg.set_meta(format!("req.query.{name}"), value);
+    }
     forward_auth_meta(&mut msg, original);
     msg
 }
@@ -315,8 +516,8 @@ pub fn url_path_encode(s: &str) -> String {
 /// in the Service Worker), so an id encoded into an `href` arrives with its
 /// escapes intact. Route matching has to happen on that encoded form — a
 /// decoded `/` would split the route — so the decode belongs on the extracted
-/// value, which is what `endpoint_match::dispatch_path` and the products
-/// block's SSR page dispatch both do with it.
+/// value, which is what `endpoint_match::dispatch` does with every variable
+/// it binds.
 ///
 /// A sequence that does not decode to valid UTF-8 yields `s` unchanged.
 /// Non-text bytes are never a record id or an object key here, so the
@@ -341,8 +542,8 @@ pub fn url_path_decode(s: &str) -> String {
 /// ranges alongside their IPv4 counterparts.
 ///
 /// Literal IP classification is delegated to the shared `wafer-net-security`
-/// predicates ([`wafer_core::security::is_blocked_ipv4`] /
-/// [`is_blocked_ipv6`](wafer_core::security::is_blocked_ipv6)) so this write
+/// predicates ([`wafer_net_security::is_blocked_ipv4`] /
+/// [`is_blocked_ipv6`](wafer_net_security::is_blocked_ipv6)) so this write
 /// gate stays in lock-step with the outbound fetch layer instead of
 /// hand-rolling its own (narrower) range list. That covers, beyond the RFC
 /// 1918 private ranges, the CGNAT (`100.64.0.0/10`), link-local, benchmarking,
@@ -419,12 +620,12 @@ pub(crate) fn validate_url_value(value: &str) -> Result<(), String> {
     // fetch layer blocks (CGNAT, multicast, NAT64/6to4 embeddings, …).
     match parsed.host() {
         Some(url::Host::Ipv4(v4)) => {
-            if wafer_core::security::is_blocked_ipv4(v4) {
+            if wafer_net_security::is_blocked_ipv4(v4) {
                 return Err("URL must not point to private/internal IP addresses".to_string());
             }
         }
         Some(url::Host::Ipv6(v6)) => {
-            if wafer_core::security::is_blocked_ipv6(v6) {
+            if wafer_net_security::is_blocked_ipv6(v6) {
                 return Err("URL must not point to private/internal IP addresses".to_string());
             }
         }
@@ -439,25 +640,131 @@ pub(crate) fn validate_url_value(value: &str) -> Result<(), String> {
     Ok(())
 }
 
+/// The write rule for a config value, keyed by its key: the single check
+/// every config-value write surface runs before storing anything — the admin
+/// variables create/update paths (`blocks::admin::ops`) and the `config.set`
+/// writer (`blocks::config`) — so a value one surface refuses cannot be stored
+/// through another. The settings form runs [`validate_declared_config_value`],
+/// the same rule with the var's declaration in hand.
+///
+/// - A `_URL` key runs [`validate_url_value`] (SSRF).
+/// - A key with a declared [`crate::config_vars::ConfigValueRule`] runs it,
+///   so a write accepts exactly the values its reader can use.
+pub(crate) fn validate_config_value(key: &str, value: &str) -> Result<(), String> {
+    config_value_rule(key, key.ends_with("_URL"), value)
+}
+
+/// [`validate_config_value`] for a declared var: its `InputType::Url` also
+/// selects the SSRF check, whatever the key's suffix.
+pub(crate) fn validate_declared_config_value(
+    var: &wafer_run::ConfigVar,
+    value: &str,
+) -> Result<(), String> {
+    config_value_rule(&var.key, var.is_url() || var.key.ends_with("_URL"), value)
+}
+
+fn config_value_rule(key: &str, is_url: bool, value: &str) -> Result<(), String> {
+    if is_url {
+        validate_url_value(value)?;
+    }
+    crate::config_vars::check_config_value(key, value)
+}
+
 /// Masked placeholder shown in place of a sensitive value.
 pub(crate) const MASKED_VALUE: &str = "********";
 
 /// SEC-060: a config value is sensitive when it's explicitly flagged
-/// sensitive **or** the key follows the `_SECRET` / `_KEY` suffix
-/// convention. "Explicitly flagged" means different things on each caller's
-/// substrate — the admin Variables table's DB `sensitive` column for ad hoc
-/// rows, or a declared [`ConfigVar`](wafer_run::ConfigVar)'s
-/// `InputType::Password` for the generic settings form — so callers pass
-/// their own flag in as `1`/`0`. The suffix half of the rule is what both
-/// sides share: masking on the flag alone leaked a `*_SECRET` value whenever
-/// a var/row wasn't explicitly marked.
+/// sensitive **or** the key's own spelling or DECLARATION says it holds a
+/// secret ([`crate::config_vars::is_sensitive_for_storage`]: the
+/// `_SECRET`/`_KEY` suffix convention, or a declared
+/// [`ConfigVar`](wafer_run::ConfigVar) that is `InputType::Password` or
+/// `auto_generate`).
 ///
-/// Single source of truth for "is this key sensitive", used by both the
-/// admin Variables page (`blocks::admin::ops`, re-exported from here) and
-/// the generic ConfigVar-driven settings form (`ui::settings_form`) so the
-/// two admin surfaces can't disagree on what gets redacted.
+/// "Explicitly flagged" means different things on each caller's substrate —
+/// the admin Variables table's DB `sensitive` column for ad hoc rows, or the
+/// `ConfigVar` in hand for the generic settings form — so callers pass their
+/// own flag in as `1`/`0`. The key half of the rule is what every caller
+/// shares, and it has to be the WHOLE key rule, not just the suffix: masking
+/// on the flag alone leaked a `*_SECRET` value whenever a var/row wasn't
+/// explicitly marked, and masking on the flag plus the suffix alone leaked
+/// `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_PASSWORD` — declared
+/// `InputType::Password`, spelled with neither suffix — for as long as a
+/// legacy row carried `sensitive = 0`, which on Cloudflare means until the
+/// next `/_deploy/init` ran [`crate::platform_state::variables::repair_sensitive_flags`].
+///
+/// Single source of truth for "is this key sensitive": the admin Variables
+/// page and its edit modal (`blocks::admin::ops`, re-exported from here), the
+/// settings JSON API (`blocks::admin::settings`), the generic
+/// ConfigVar-driven settings form (`ui::settings_form`), the edge-cache
+/// exclusion (`cache_key::row_is_sensitive`) and the export filter
+/// (`blocks::dev::data_snapshot::variable_is_exportable`) all ask this, so no
+/// two of them can disagree about what gets redacted — the modal masking a
+/// value the table beside it rendered in clear is exactly the drift this
+/// closes.
+///
+/// That list is the surfaces that ASK, not every surface that can publish a
+/// stored value. The admin SQL explorer (`POST /b/admin/api/database/query`
+/// and its SSR twin) cannot join it: `db::query_raw` returns records keyed by
+/// the column name the QUERY chose, so a mask keyed on `(table, column)` is
+/// defeated by `SELECT value AS v`. It is held to the same promise by a
+/// different mechanism — [`crate::secret_tables`] refuses, before execution,
+/// any query naming a table that stores credential material — which is why
+/// this enumeration can be read as covering every surface that publishes a
+/// stored value, even though the explorer is not on it.
+///
+/// It is deliberately the same key predicate the WRITE path applies when it
+/// decides what the stored flag gets ([`crate::config_vars::is_sensitive_for_storage`],
+/// at `platform_state::variables::NewVariable::into_row`). Reader and writer
+/// asking one question means the stored flag is a cache of the answer, never
+/// the only copy of it — so a row written before the funnel existed, or by a
+/// build that did not know the key, is still masked.
 pub(crate) fn is_sensitive_key(key: &str, sensitive_flag: i64) -> bool {
-    sensitive_flag == 1 || key.ends_with("_SECRET") || key.ends_with("_KEY")
+    sensitive_flag == 1 || crate::config_vars::is_sensitive_for_storage(key)
+}
+
+/// Whether a submitted `value` for `key` is the [`MASKED_VALUE`] a read path
+/// produced rather than a value its sender means.
+///
+/// The counterpart of [`is_sensitive_key`], for the write direction. Every read
+/// surface answers a sensitive key with `"********"`, so the read/modify/write
+/// loop a JSON client is built around — GET the settings, change one, PATCH
+/// them back — hands the mask straight back to the writer for every key it did
+/// not touch. Stored, it replaces the secret with eight asterisks; the worst
+/// case is a live `..._BOOTSTRAP_ADMIN_TOKEN`, which is what provisions the
+/// first admin.
+///
+/// Gated on sensitivity, not on the string alone: `"********"` is a perfectly
+/// ordinary value for a variable nothing masks (placeholder copy, a redaction
+/// marker), and refusing it there would be the write path inventing a reserved
+/// word. It is only a mask where something masked it — which is exactly the
+/// question [`is_sensitive_key`] answers, asked with the same stored flag the
+/// reader used.
+///
+/// All four write surfaces refuse it: the JSON API and the admin Variables
+/// modal through `blocks::admin::ops::update_variable`, the generic
+/// ConfigVar-driven form through `ui::settings_form::save_settings`, and
+/// `CONFIG_SET` itself (`blocks::config`'s `ConfigWrite::write`) — the last of
+/// which is what makes this claim true by construction rather than by accident
+/// of who calls what, since any block can reach that operation through
+/// `wafer_core::clients::config::set`. None of them silently drops it instead —
+/// a caller that is told "saved" while its write was discarded can never find
+/// out, because the next read hands it the same mask back. "Leave the stored
+/// value alone" has its own spelling on each surface (omit `value`; leave the
+/// masked field blank), and that spelling is what the refusal names.
+///
+/// `save_settings` is the one that does not use this predicate, and
+/// deliberately: WRAP denies four of its five callers (all but
+/// `admin::pages::email`, which runs as the admin block itself) the admin
+/// `variables` table, and a shared helper has to work for the four — so it
+/// cannot supply the stored flag the third argument stands for. It asks a
+/// question that needs no flag instead: would this mask REPLACE the value the
+/// field currently holds? That covers more than this predicate does, which is
+/// the only shape that lets it promise no half-applied save, and it stops
+/// short of refusing a submission that changes nothing. The exactness this
+/// predicate provides needs the row, and only the surfaces that can read the
+/// row get it.
+pub(crate) fn is_masked_submission(key: &str, sensitive_flag: i64, value: &str) -> bool {
+    value == MASKED_VALUE && is_sensitive_key(key, sensitive_flag)
 }
 
 /// Percent-encode a string for use as an OAuth / `application/x-www-form-urlencoded`
@@ -472,36 +779,318 @@ pub fn urlencode(s: &str) -> String {
 
 /// Parse a URL-encoded form body (htmx default) into a HashMap. Thin wrapper
 /// over [`url::form_urlencoded::parse`], which handles `+`→space and `%XX`
-/// decoding. Repeated keys collapse to the last value (the existing behaviour).
+/// decoding. Repeated keys collapse to the last value (the existing behaviour);
+/// a field that can legitimately be posted more than once needs
+/// [`form_values`] instead.
 pub fn parse_form_body(data: &[u8]) -> HashMap<String, String> {
     url::form_urlencoded::parse(data).into_owned().collect()
 }
 
+/// Every value posted under `key`, in wire order.
+///
+/// The half of a form body [`parse_form_body`]'s last-wins map cannot express.
+/// A control that can post its own name more than once — a multi-select, a
+/// checkbox group, or a client serialising an array — sends `k=a&k=b`, and
+/// reading that through the map silently keeps only `b`.
+pub fn form_values(data: &[u8], key: &str) -> Vec<String> {
+    url::form_urlencoded::parse(data)
+        .filter(|(k, _)| k == key)
+        .map(|(_, value)| value.into_owned())
+        .collect()
+}
+
 /// Parse a request body as either JSON or URL-encoded form into a JSON Value.
 ///
-/// Inspects the first non-whitespace byte: `{` → JSON, anything else →
-/// URL-encoded form (then promoted to a flat object). Lets one handler
-/// accept both htmx form posts and programmatic JSON clients without
+/// Inspects the first non-whitespace byte: `{` or `[` → JSON, anything else →
+/// URL-encoded form (then promoted to a flat object of strings). Lets one
+/// handler accept both htmx form posts and programmatic JSON clients without
 /// duplicating parse logic.
-pub fn parse_body_value(data: &[u8]) -> serde_json::Value {
+///
+/// A body that announces itself as JSON and then fails to parse is returned as
+/// the `serde_json` error, position and reason intact. Swallowing it into
+/// `Value::Null` cost the caller that sentence: every malformed JSON body came
+/// back to the client as "invalid type: null, expected struct …", which names
+/// neither the offending byte nor the fact that the body was not JSON at all.
+/// The form branch cannot fail — `form_urlencoded::parse` accepts any bytes.
+pub fn parse_body_value(data: &[u8]) -> Result<serde_json::Value, serde_json::Error> {
     let trimmed_start = data
         .iter()
         .position(|b| !b.is_ascii_whitespace())
         .unwrap_or(0);
     if data.get(trimmed_start) == Some(&b'{') || data.get(trimmed_start) == Some(&b'[') {
-        serde_json::from_slice(data).unwrap_or(serde_json::Value::Null)
-    } else {
-        let mut obj = serde_json::Map::new();
-        for (k, v) in parse_form_body(data) {
-            obj.insert(k, serde_json::Value::String(v));
-        }
-        serde_json::Value::Object(obj)
+        return serde_json::from_slice(data);
     }
+    let mut obj = serde_json::Map::new();
+    for (k, v) in parse_form_body(data) {
+        obj.insert(k, serde_json::Value::String(v));
+    }
+    Ok(serde_json::Value::Object(obj))
+}
+
+/// Encode client-side [`Filter`](wafer_block::db::Filter)s as all-leaf wire
+/// [`FilterNode`](wafer_block::wire::database::FilterNode)s for a typed
+/// `db::aggregate` request. Mirrors `wafer-core`'s internal
+/// `to_wire_filters` conversion (not exported for block code to reuse).
+pub(crate) fn to_wire_filters(
+    filters: &[wafer_block::db::Filter],
+) -> Vec<wafer_block::wire::database::FilterNode> {
+    use wafer_block::{db::FilterOp, wire::database as wire};
+    filters
+        .iter()
+        .map(|f| {
+            let operator = match f.operator {
+                FilterOp::Equal => "eq",
+                FilterOp::NotEqual => "neq",
+                FilterOp::GreaterThan => "gt",
+                FilterOp::GreaterEqual => "gte",
+                FilterOp::LessThan => "lt",
+                FilterOp::LessEqual => "lte",
+                FilterOp::Like => "like",
+                FilterOp::In => "in",
+                FilterOp::IsNull => "is_null",
+                FilterOp::IsNotNull => "is_not_null",
+            };
+            wire::FilterNode::Leaf(wire::FilterDef {
+                field: f.field.clone(),
+                operator: operator.to_string(),
+                value: f.value.clone(),
+                column: None,
+            })
+        })
+        .collect()
+}
+
+/// Read one aggregate output column as an exact integer.
+///
+/// Only a JSON integer is accepted. A float, a numeric string or an absent
+/// column is a decode fault, reported with the alias and the value rather
+/// than coerced into a plausible figure.
+///
+/// The caller is responsible for asking the database for an integer. A
+/// `COUNT(*)` or a `CaseWhenSum` is one on every backend. A `Sum` is not:
+/// PostgreSQL's `sum(bigint)` is `NUMERIC`, which `wafer-block-postgres`
+/// decodes through `BigDecimal` into `f64`, and SQLite sums to `REAL` as soon
+/// as one summed value is not an integer. So every `Sum` this reads carries
+/// [`bigint_cast`], which settles the type in the statement itself.
+/// A cast rounds a non-integral value on PostgreSQL and truncates it on
+/// SQLite, so it belongs only on columns that hold whole numbers — minor-unit
+/// money and quantities, which is all this reads.
+///
+/// Not folded into [`json_as_i64`]: that one is the coercion for *stored
+/// columns*, which accepts the numeric string a TEXT column hands back.
+///
+/// Gated on `block-products` because that block is its only caller: the
+/// commerce analytics is the one place in the crate that reads a `SUM` over a
+/// money column. The lean Cloudflare Worker builds without that block and
+/// lints dead code as an error, so the gate is the honest statement of who
+/// needs this rather than an `allow`.
+#[cfg(feature = "block-products")]
+pub(crate) fn aggregate_i64(record: &Record, alias: &str) -> Result<i64, wafer_run::WaferError> {
+    let fault = |detail: &str| {
+        wafer_run::WaferError::new(
+            wafer_run::ErrorCode::Internal,
+            format!("aggregate column {alias} is not an integer: {detail}"),
+        )
+    };
+    let Some(value) = record.data.get(alias) else {
+        return Err(fault("the column is absent from the result row"));
+    };
+    value.as_i64().ok_or_else(|| fault(&value.to_string()))
+}
+
+/// The `cast_as` for a `Sum` read through [`aggregate_i64`]: `BIGINT`, so the
+/// sum is an integer on every backend. Spelled from the allowlist
+/// `wafer-sql-utils` parses the wire value against, not typed out here.
+#[cfg(feature = "block-products")]
+pub(crate) fn bigint_cast() -> Option<String> {
+    Some(
+        wafer_sql_utils::aggregate::CastType::BigInt
+            .as_sql()
+            .to_string(),
+    )
+}
+
+/// Run ONE grouped-by-day aggregate over `table` for rows whose `created_at`
+/// is at or after `since_iso`, and return the per-day rows (one
+/// [`Record`](wafer_block::wire::database::Record) per day that has data,
+/// its day under the `created_at` alias). `aggregates` may carry several
+/// columns — a plain `Count` alongside a conditional `CaseWhenSum` — so a
+/// single statement can back multiple daily series over the same table.
+///
+/// Shared by the table modules that render a daily chart
+/// (`platform_state::request_logs::daily_counts`, the admin dashboard's
+/// users series) so the date-bucket shape is built once.
+pub(crate) async fn daily_grouped(
+    ctx: &dyn wafer_run::context::Context,
+    table: &str,
+    since_iso: &str,
+    extra_filters: Vec<wafer_block::db::Filter>,
+    aggregates: Vec<wafer_block::wire::database::AggregateColumnDef>,
+) -> Result<Vec<wafer_block::wire::database::Record>, wafer_run::WaferError> {
+    use wafer_block::{
+        db::{Filter, FilterOp},
+        wire::database as wire,
+    };
+    let mut filters = vec![Filter {
+        field: "created_at".into(),
+        operator: FilterOp::GreaterEqual,
+        value: serde_json::json!(since_iso),
+    }];
+    filters.extend(extra_filters);
+
+    let req = wire::AggregateRequest {
+        collection: table.to_string(),
+        select_columns: vec![],
+        aggregates,
+        filters: to_wire_filters(&filters),
+        group_by: vec![wire::GroupByDef::DateBucket {
+            field: "created_at".into(),
+        }],
+        sort: vec![],
+        limit: 0,
+    };
+    wafer_core::clients::database::aggregate(ctx, req).await
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blocks::auth::config::BOOTSTRAP_ADMIN_PASSWORD_KEY;
+
+    #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+    #[serde(rename_all = "snake_case")]
+    enum Colour {
+        Red,
+        SeaGreen,
+    }
+
+    fn coloured(value: serde_json::Value) -> Record {
+        Record {
+            id: "row-7".to_string(),
+            data: [("colour".to_string(), value)].into_iter().collect(),
+        }
+    }
+
+    #[test]
+    fn enum_column_reads_the_stored_spelling() {
+        assert_eq!(
+            enum_column::<Colour>(&coloured(serde_json::json!("sea_green")), "colour").unwrap(),
+            Colour::SeaGreen
+        );
+    }
+
+    /// A value outside the set is a data-integrity fault, never a default:
+    /// the message has to name the row, the column and the value, because
+    /// the operator's next move is to go and look at that row.
+    #[test]
+    fn enum_column_names_the_row_the_column_and_the_value() {
+        let err = enum_column::<Colour>(&coloured(serde_json::json!("chartreuse")), "colour")
+            .expect_err("refused");
+        assert_eq!(err.code, wafer_run::ErrorCode::Internal);
+        assert!(err.message.contains("row-7"), "{}", err.message);
+        assert!(err.message.contains("colour"), "{}", err.message);
+        assert!(err.message.contains("chartreuse"), "{}", err.message);
+    }
+
+    /// An absent column and a `NULL` one both read as `""`, which is not a
+    /// variant of anything — so both are the empty case, not a bad value.
+    #[test]
+    fn enum_column_refuses_an_empty_column() {
+        for empty in [serde_json::json!(""), serde_json::json!(null)] {
+            assert!(enum_column::<Colour>(&coloured(empty), "colour").is_err());
+        }
+        assert!(enum_column::<Colour>(
+            &Record {
+                id: "row-7".to_string(),
+                data: HashMap::new(),
+            },
+            "colour"
+        )
+        .is_err());
+    }
+
+    /// An enum that names `""` as a variant reads the empty column as that
+    /// variant: the column default is one of its states, not missing data.
+    #[test]
+    fn enum_column_reads_an_empty_column_as_a_variant_named_empty() {
+        #[derive(Debug, PartialEq, serde::Deserialize)]
+        enum Tint {
+            #[serde(rename = "")]
+            Unset,
+            #[serde(rename = "red")]
+            Red,
+        }
+        for empty in [serde_json::json!(""), serde_json::json!(null)] {
+            assert_eq!(
+                enum_column::<Tint>(&coloured(empty), "colour").unwrap(),
+                Tint::Unset
+            );
+        }
+        assert_eq!(
+            enum_column::<Tint>(&coloured(serde_json::json!("red")), "colour").unwrap(),
+            Tint::Red
+        );
+    }
+
+    /// The fallback is a typed variant, so a caller cannot supply a default
+    /// the enum does not define — the bug the `&str` fallback it replaces
+    /// made possible.
+    #[test]
+    fn enum_column_or_takes_the_fallback_only_for_an_empty_column() {
+        assert_eq!(
+            enum_column_or(&coloured(serde_json::json!("")), "colour", Colour::Red).unwrap(),
+            Colour::Red
+        );
+        assert_eq!(
+            enum_column_or(
+                &coloured(serde_json::json!("sea_green")),
+                "colour",
+                Colour::Red
+            )
+            .unwrap(),
+            Colour::SeaGreen
+        );
+        assert!(enum_column_or(
+            &coloured(serde_json::json!("chartreuse")),
+            "colour",
+            Colour::Red
+        )
+        .is_err());
+    }
+
+    /// A caller writes a URL, so a query string in one has to reach the
+    /// callee the way it does over HTTP: off the path and into
+    /// `req.query.*`. Leaving it on `req.resource` made the path match no
+    /// route at all — a silent 404 the two callers that used it swallowed.
+    #[test]
+    fn block_request_splits_a_query_string_off_the_path() {
+        let msg = block_request(
+            "retrieve",
+            "GET",
+            "/b/messages/api/contexts/c1/entries?kind=message&q=two+words",
+            &wafer_run::Message::new("http.request"),
+        );
+
+        assert_eq!(msg.path(), "/b/messages/api/contexts/c1/entries");
+        assert_eq!(msg.get_meta("http.path"), msg.path());
+        assert_eq!(msg.query("kind"), "message");
+        assert_eq!(msg.query("q"), "two words");
+        assert_eq!(msg.get_meta("http.query.kind"), "message");
+        assert_eq!(msg.get_meta("http.raw_query"), "kind=message&q=two+words");
+    }
+
+    #[test]
+    fn block_request_without_a_query_string_is_unchanged() {
+        let msg = block_request(
+            "create",
+            "POST",
+            "/b/messages/api/contexts/c1/entries",
+            &wafer_run::Message::new("http.request"),
+        );
+        assert_eq!(msg.path(), "/b/messages/api/contexts/c1/entries");
+        assert_eq!(msg.get_meta("http.raw_query"), "");
+        assert!(msg.query("kind").is_empty());
+    }
 
     #[test]
     fn parse_form_body_decodes_plus_to_space() {
@@ -516,6 +1105,58 @@ mod tests {
     }
 
     #[test]
+    fn form_values_keeps_every_value_a_repeated_key_carries() {
+        assert_eq!(form_values(b"k=a&k=b&other=c", "k"), vec!["a", "b"]);
+        assert_eq!(form_values(b"k=a+b&k=c%2Fd", "k"), vec!["a b", "c/d"]);
+        assert_eq!(form_values(b"k=", "k"), vec![""]);
+        assert!(form_values(b"k=a", "absent").is_empty());
+        // The last-wins map is what it cannot express.
+        assert_eq!(
+            parse_form_body(b"k=a&k=b").get("k").map(String::as_str),
+            Some("b")
+        );
+    }
+
+    #[test]
+    fn parse_body_value_reads_json_and_form_bodies() {
+        assert_eq!(
+            parse_body_value(br#"{"a":1}"#).expect("JSON object"),
+            serde_json::json!({"a": 1})
+        );
+        assert_eq!(
+            parse_body_value(b"  [1,2]").expect("JSON array after whitespace"),
+            serde_json::json!([1, 2])
+        );
+        assert_eq!(
+            parse_body_value(b"a=1&b=two+words").expect("a form body cannot fail"),
+            serde_json::json!({"a": "1", "b": "two words"}),
+            "form fields are strings — a form cannot say `1` the number"
+        );
+        assert_eq!(
+            parse_body_value(b"").expect("an empty body is an empty form"),
+            serde_json::json!({})
+        );
+    }
+
+    /// A body that opens with `{` claims to be JSON, so a failure to parse it
+    /// is a JSON error and must be reported as one. Returning `Value::Null`
+    /// instead handed the caller's `from_value` a type mismatch to describe,
+    /// and the byte position and reason were gone by then.
+    #[test]
+    fn a_malformed_json_body_reports_where_it_broke() {
+        let err = parse_body_value(b"{oops").expect_err("`{oops` is not JSON");
+        let message = err.to_string();
+        assert!(
+            message.contains("line 1 column 2"),
+            "the error must keep its position, got: {message}"
+        );
+        assert!(
+            message.contains("key must be a string"),
+            "the error must keep its reason, got: {message}"
+        );
+    }
+
+    #[test]
     fn parse_form_body_multiple_pairs_and_decoded_keys() {
         let parsed = parse_form_body(b"first+name=John+Doe&email=a%40b.com");
         assert_eq!(parsed.get("first name"), Some(&"John Doe".to_string()));
@@ -526,6 +1167,17 @@ mod tests {
     fn now_rfc3339_parses() {
         let s = now_rfc3339();
         let _: chrono::DateTime<chrono::Utc> = s.parse().expect("rfc3339 round-trip");
+    }
+
+    #[test]
+    fn format_count_groups_thousands() {
+        assert_eq!(format_count(0), "0");
+        assert_eq!(format_count(999), "999");
+        assert_eq!(format_count(1_000), "1,000");
+        assert_eq!(format_count(10_000), "10,000");
+        assert_eq!(format_count(1_234_567), "1,234,567");
+        assert_eq!(format_count(-1_234), "-1,234");
+        assert_eq!(format_count(i64::MIN), "-9,223,372,036,854,775,808");
     }
 
     #[test]
@@ -603,6 +1255,30 @@ mod tests {
             );
             assert_eq!(r.json_value_field("snap"), serde_json::json!({"x": [1]}));
         }
+    }
+
+    /// The accessor a caller reaches for when it carries a JSON column onward
+    /// instead of inspecting it. `str_field` cannot do this job: it answers
+    /// `""` for the decoded arm, which is how a payments audit trail was being
+    /// blanked on two of the three adapters.
+    #[test]
+    fn json_text_field_answers_the_encoded_text_on_both_arms() {
+        let decoded = record(serde_json::json!({"resp": {"id": "re_1"}, "blank": {}}));
+        let literal = record(serde_json::json!({"resp": "{\"id\":\"re_1\"}", "blank": "{}"}));
+        for r in [&decoded, &literal] {
+            assert_eq!(r.json_text_field("resp"), "{\"id\":\"re_1\"}");
+            assert_eq!(r.json_text_field("blank"), "{}");
+        }
+        // The trap this replaces: on the decoded arm — SQLite and the browser
+        // — `str_field` answers `""` for a payload that is plainly there,
+        // while the same read is correct against D1 and Postgres.
+        assert_eq!(decoded.str_field("resp"), "");
+        assert_eq!(literal.str_field("resp"), "{\"id\":\"re_1\"}");
+        // Absent and SQL NULL stay empty, so an `is_empty()` guard on the
+        // result still means "nothing stored".
+        let sparse = record(serde_json::json!({"null": null}));
+        assert_eq!(sparse.json_text_field("null"), "");
+        assert_eq!(sparse.json_text_field("absent"), "");
     }
 
     #[test]
@@ -1019,13 +1695,50 @@ mod tests {
     }
 
     #[test]
-    fn is_sensitive_key_honors_flag_and_suffix() {
+    fn is_sensitive_key_honors_flag_suffix_and_declaration() {
         // Flag set → sensitive regardless of name.
         assert!(is_sensitive_key("PLAIN", 1));
         // SEC-060: suffix makes it sensitive even when the flag is clear.
         assert!(is_sensitive_key("STRIPE_SECRET", 0));
         assert!(is_sensitive_key("JWT_KEY", 0));
-        // Neither flag nor suffix → not sensitive.
+        // The DECLARATION makes it sensitive even with neither flag nor
+        // suffix. This key is spelled neither `_SECRET` nor `_KEY`, so before
+        // the read path consulted the declaration a row written by an older
+        // build sat here unflagged and was served in the clear.
+        assert!(is_sensitive_key(BOOTSTRAP_ADMIN_PASSWORD_KEY, 0));
+        // None of the three → not sensitive.
         assert!(!is_sensitive_key("SITE_NAME", 0));
+    }
+
+    /// An aggregate that comes back as a float is a fault even when the
+    /// float is whole. `2500.0` is how an uncast `SUM(bigint)` reads on
+    /// PostgreSQL; accepting it would let a sum that is missing its
+    /// `BIGINT` cast pass on one backend and keep passing unnoticed.
+    #[cfg(feature = "block-products")]
+    #[test]
+    fn aggregate_i64_refuses_a_whole_float() {
+        let err = aggregate_i64(&record(serde_json::json!({"gross": 2500.0})), "gross")
+            .expect_err("a float is not an integer");
+        assert_eq!(err.code, wafer_run::ErrorCode::Internal);
+        assert!(err.message.contains("gross"), "{}", err.message);
+        assert!(err.message.contains("2500.0"), "{}", err.message);
+    }
+
+    #[cfg(feature = "block-products")]
+    #[test]
+    fn aggregate_i64_reads_an_integer_and_refuses_everything_else() {
+        let row = record(serde_json::json!({
+            "gross": 2500,
+            "negative": -7,
+            "fraction": 2500.5,
+            "text": "2500",
+            "null": null,
+        }));
+        assert_eq!(aggregate_i64(&row, "gross").unwrap(), 2500);
+        assert_eq!(aggregate_i64(&row, "negative").unwrap(), -7);
+        for alias in ["fraction", "text", "null", "absent"] {
+            let err = aggregate_i64(&row, alias).expect_err(alias);
+            assert!(err.message.contains(alias), "{}", err.message);
+        }
     }
 }

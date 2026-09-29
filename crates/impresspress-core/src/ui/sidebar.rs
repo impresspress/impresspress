@@ -2,7 +2,7 @@
 
 use maud::Markup;
 
-use super::icons;
+use super::{icons, NavItem};
 
 /// Resolve a *user-supplied* icon-name string (stored in the DB by the
 /// userportal admin-button editor, chosen from a fixed `ICON_OPTIONS`
@@ -47,7 +47,45 @@ pub fn nav_icon(name: &str) -> Markup {
 /// A group of nav items rendered with an optional uppercase label.
 pub struct NavGroup {
     pub label: Option<String>,
-    pub items: Vec<super::NavItem>,
+    pub items: Vec<NavItem>,
+}
+
+/// The one item to highlight for `path`: the item whose claim on it is the
+/// most specific, so at most one item is ever marked.
+///
+/// An item claims `path` when `path` is
+///
+/// - its `href`,
+/// - below its `href`, for an `href` without a trailing slash (`/b/admin/users`
+///   claims `/b/admin/users/{id}`; `/b/admin/` does not claim every admin
+///   page), or
+/// - inside its declared [`NavItem::section`] (`/b/admin/settings` claims
+///   `/b/admin/settings/network`).
+///
+/// The claim's strength is the length of the prefix that matched, so a
+/// section nested inside another item's (Storage's `/b/storage/admin` inside
+/// Files' `/b/storage`) wins over it. On a tie the first item in nav order
+/// wins.
+pub fn active_item<'a>(groups: &'a [NavGroup], path: &str) -> Option<&'a NavItem> {
+    let under = |prefix: &str| {
+        path.strip_prefix(prefix)
+            .is_some_and(|rest| rest.is_empty() || rest.starts_with('/'))
+    };
+    let claim = |item: &NavItem| -> Option<usize> {
+        let by_href = (path == item.href || (!item.href.ends_with('/') && under(&item.href)))
+            .then_some(item.href.len());
+        let by_section = item.section.filter(|s| under(s)).map(str::len);
+        by_href.max(by_section)
+    };
+    let mut best: Option<(usize, &NavItem)> = None;
+    for item in groups.iter().flat_map(|g| &g.items) {
+        if let Some(strength) = claim(item) {
+            if best.is_none_or(|(b, _)| strength > b) {
+                best = Some((strength, item));
+            }
+        }
+    }
+    best.map(|(_, item)| item)
 }
 
 /// Grouped sidebar — same layout as `sidebar(...)`, but items are
@@ -76,6 +114,7 @@ pub fn sidebar_grouped(
 ) -> maud::Markup {
     use maud::html;
 
+    let active = active_item(groups, current_path);
     html! {
         nav .sidebar aria-label="Primary" {
             div .sidebar__brand .sidebar__brand--text {
@@ -99,10 +138,7 @@ pub fn sidebar_grouped(
                             }
                             ul .sidebar__nav {
                                 @for item in &g.items {
-                                    @let active = current_path == item.href
-                                        || current_path
-                                            .strip_prefix(item.href.as_str())
-                                            .is_some_and(|rest| rest.starts_with('/'));
+                                    @let active = active.is_some_and(|a| std::ptr::eq(a, item));
                                     li {
                                         a href=(item.href)
                                           class={ "sidebar__nav-item" @if active { " is-active" } }
@@ -120,14 +156,14 @@ pub fn sidebar_grouped(
                         }
                     }
                 }
-                button .sidebar__collapse-toggle id="sidebar-collapse-btn" type="button" onclick="toggleSidebar()" aria-label="Toggle sidebar" {
+                button .sidebar__collapse-toggle id="sidebar-collapse-btn" type="button" data-action="sidebar-collapse" aria-label="Toggle sidebar" {
                     span .sidebar__collapse-icon-expanded { (icons::chevron_left()) }
                     span .sidebar__collapse-icon-collapsed { (icons::chevron_right()) }
                 }
             }
             @if let Some(u) = user {
                 div .sidebar__user-container {
-                    button .sidebar__user id="user-menu-btn" type="button" onclick="toggleProfileMenu()" {
+                    button .sidebar__user id="user-menu-btn" type="button" data-action="profile-menu-toggle" {
                         (crate::ui::components::avatar(&u.email, crate::ui::components::CtrlSize::Sm))
                         div .sidebar__user-text {
                             div .sidebar__user-email { (u.email) }
@@ -164,32 +200,49 @@ pub fn sidebar_grouped(
                 }
             }
         }
+        // The two controls above declare `data-action` and this one delegated
+        // listener reads it — the rule is written out in `ui/assets/chrome.js`,
+        // and the verbs `sidebar-collapse` and `profile-menu-toggle` belong to
+        // this file. The outside-click branch that closes the profile menu was
+        // already delegated; it now shares the listener rather than adding a
+        // second one.
         script { (maud::PreEscaped(r#"
-function toggleProfileMenu() {
-    var m = document.getElementById('profile-menu');
-    if (!m) return;
-    m.hidden = !m.hidden;
-}
-document.addEventListener('click', function(e) {
-    var m = document.getElementById('profile-menu');
-    var b = document.getElementById('user-menu-btn');
-    if (m && b && !b.contains(e.target) && !m.contains(e.target)) {
-        m.hidden = true;
-    }
-});
-function toggleSidebar() {
-    var s = document.querySelector('.sidebar');
-    if (!s) return;
-    s.classList.toggle('collapsed');
-    try { localStorage.setItem('sidebar.collapsed', s.classList.contains('collapsed') ? '1' : '0'); } catch (e) {}
-}
 (function() {
+    if (window.__sidebarInit) return;
+    window.__sidebarInit = true;
+    document.addEventListener('click', function(e) {
+        var t = e.target;
+        if (!(t instanceof Element)) return;
+        var el = t.closest('[data-action]');
+        var action = el ? el.getAttribute('data-action') : null;
+        if (action === 'profile-menu-toggle') {
+            var menu = document.getElementById('profile-menu');
+            if (menu) menu.hidden = !menu.hidden;
+            return;
+        }
+        if (action === 'sidebar-collapse') {
+            var s = document.querySelector('.sidebar');
+            if (s) {
+                s.classList.toggle('collapsed');
+                try { localStorage.setItem('sidebar.collapsed', s.classList.contains('collapsed') ? '1' : '0'); } catch (err) {}
+            }
+            // Deliberately no `return`: the collapse toggle is outside both the
+            // profile button and the profile menu, so under the two separate
+            // listeners this replaced it also dismissed an open profile menu.
+            // Falling through to the outside-click branch keeps that.
+        }
+        var m = document.getElementById('profile-menu');
+        var b = document.getElementById('user-menu-btn');
+        if (m && b && !b.contains(t) && !m.contains(t)) {
+            m.hidden = true;
+        }
+    });
     try {
         if (localStorage.getItem('sidebar.collapsed') === '1') {
             var s = document.querySelector('.sidebar');
             if (s) s.classList.add('collapsed');
         }
-    } catch (e) {}
+    } catch (err) {}
 })();
 "#)) }
     }
@@ -207,6 +260,7 @@ mod tests {
             icon: icons::package,
             external: false,
             block: None,
+            section: None,
         }
     }
 
@@ -332,6 +386,57 @@ mod tests {
         )
         .into_string();
         assert!(s.contains("is-active"));
+    }
+
+    fn active_label(groups: &[NavGroup], path: &str) -> Option<String> {
+        active_item(groups, path).map(|item| item.label.clone())
+    }
+
+    /// The Settings item links to the Email page, and matching on the link
+    /// alone left it unhighlighted on the other three settings pages. Every
+    /// settings page highlights it, and the rendered sidebar marks exactly one
+    /// item.
+    #[test]
+    fn settings_item_is_active_on_every_settings_page() {
+        let groups = crate::ui::nav_groups::admin();
+        for page in ["email", "network", "variables", "permissions"] {
+            let path = format!("/b/admin/settings/{page}");
+            assert_eq!(
+                active_label(&groups, &path).as_deref(),
+                Some("Settings"),
+                "{path}"
+            );
+            let s = sidebar_grouped(&groups, None, &path, "", "", "Impresspress").into_string();
+            assert_eq!(s.matches("is-active").count(), 1, "{path}: {s}");
+            assert!(
+                s.contains(r#"<a href="/b/admin/settings/email" class="sidebar__nav-item is-active" aria-current="page">"#),
+                "{path}: {s}"
+            );
+        }
+    }
+
+    /// A section's pages highlight the item that links into it, the most
+    /// specific claim wins where sections nest, and an item whose link ends in
+    /// `/` (Dashboard's `/b/admin/`) does not claim the pages below it.
+    #[test]
+    fn active_item_picks_the_most_specific_claim() {
+        let admin = crate::ui::nav_groups::admin();
+        let portal = crate::ui::nav_groups::portal();
+        let cases: [(&[NavGroup], &str, Option<&str>); 10] = [
+            (&admin, "/b/admin/", Some("Dashboard")),
+            (&admin, "/b/admin/users", Some("Users")),
+            (&admin, "/b/admin/database", Some("Database")),
+            (&admin, "/b/storage/admin/", Some("Storage")),
+            (&admin, "/b/storage/admin/buckets", Some("Storage")),
+            (&admin, "/b/products/admin/stripe", Some("Products")),
+            (&admin, "/b/admin/settingsx", None),
+            (&portal, "/b/storage/photos/", Some("Files")),
+            (&portal, "/b/products/my-products", Some("Products")),
+            (&portal, "/b/userportal/profile", Some("Profile")),
+        ];
+        for (groups, path, want) in cases {
+            assert_eq!(active_label(groups, path).as_deref(), want, "{path}");
+        }
     }
 
     /// Every user-selectable icon name (the userportal admin-button editor's

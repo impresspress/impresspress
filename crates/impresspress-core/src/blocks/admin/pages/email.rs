@@ -1,8 +1,13 @@
 use maud::Markup;
-use wafer_run::{context::Context, ConfigVar, InputStream, Message, OutputStream};
+use wafer_run::{context::Context, ConfigVar, InputStream, Message, OutputStream, WaferError};
 
 use crate::{
-    blocks::email,
+    blocks::{
+        email,
+        email::{
+            MAILGUN_API_KEY, MAILGUN_BASE_URL, MAILGUN_DOMAIN, MAILGUN_FROM, MAILGUN_REPLY_TO,
+        },
+    },
     config_vars,
     ui::{
         icons,
@@ -19,11 +24,11 @@ use crate::{
 /// source of truth, shared with `BlockInfo::config_keys` and the admin
 /// Variables page.
 const MAILGUN_KEYS: &[&str] = &[
-    "IMPRESSPRESS__EMAIL__MAILGUN_API_KEY",
-    "IMPRESSPRESS__EMAIL__MAILGUN_DOMAIN",
-    "IMPRESSPRESS__EMAIL__MAILGUN_FROM",
-    "IMPRESSPRESS__EMAIL__MAILGUN_REPLY_TO",
-    "IMPRESSPRESS__EMAIL__MAILGUN_BASE_URL",
+    MAILGUN_API_KEY,
+    MAILGUN_DOMAIN,
+    MAILGUN_FROM,
+    MAILGUN_REPLY_TO,
+    MAILGUN_BASE_URL,
 ];
 
 fn mailgun_vars() -> Vec<ConfigVar> {
@@ -41,8 +46,8 @@ fn mailgun_vars() -> Vec<ConfigVar> {
 /// fetch to `POST /b/admin/email` — the `SaveEmailSettings` route that
 /// [`handle_save_email_settings`] serves. Same pattern as every other
 /// block's admin settings page (products / userportal / legalpages /
-/// auth_ui).
-pub async fn settings_body(ctx: &dyn Context, _msg: &Message) -> Markup {
+/// auth_ui). `Err` when the current values could not be read.
+pub async fn settings_body(ctx: &dyn Context, _msg: &Message) -> Result<Markup, WaferError> {
     let vars = mailgun_vars();
     let section = SettingsSection::new("Mailgun Configuration", icons::globe(), &vars);
     settings_form::settings_form(ctx, "/b/admin/email", &[section], maud::html! {}).await
@@ -50,10 +55,10 @@ pub async fn settings_body(ctx: &dyn Context, _msg: &Message) -> Markup {
 
 pub async fn handle_save_email_settings(
     ctx: &dyn Context,
-    _msg: &Message,
+    msg: &Message,
     input: InputStream,
 ) -> OutputStream {
-    settings_form::save_settings(ctx, input, &mailgun_vars(), "email").await
+    settings_form::save_settings(ctx, msg, input, &mailgun_vars(), "email").await
 }
 
 #[cfg(test)]
@@ -62,26 +67,33 @@ mod tests {
     use wafer_run::{streams::output::TerminalNotResponse, InputStream};
 
     use super::*;
-    use crate::test_support::{anon_msg, output_json, TestContext};
+    use crate::{
+        blocks::{
+            admin::{test_support::routed, AdminBlock},
+            email::{MAILGUN_API_KEY, MAILGUN_DOMAIN},
+        },
+        test_support::{admin_msg, anon_msg, audit_rows, output_json, TestContext},
+        util::RecordExt,
+    };
 
     fn email_body() -> serde_json::Value {
         serde_json::json!({
-            "IMPRESSPRESS__EMAIL__MAILGUN_API_KEY": "key-123",
-            "IMPRESSPRESS__EMAIL__MAILGUN_DOMAIN": "mg.example.com",
+            MAILGUN_API_KEY: "key-123",
+            MAILGUN_DOMAIN: "mg.example.com",
         })
     }
 
     #[tokio::test]
     async fn save_email_settings_reports_failure_when_config_set_fails() {
-        // No `wafer-run/config` block registered on this TestContext, so every
-        // `config::set` call fails with NotFound (mirrors
-        // `save_settings_surfaces_config_set_failure` in `ui/settings_form.rs`,
-        // the established way this test infra exercises a config::set
-        // failure). Before the SB-1 fix, the save loop swallowed the error via
-        // `let _ = config::set(...)` and returned success anyway; the shared
-        // `settings_form::save_settings` helper this now delegates to carries
-        // the same fix.
-        let ctx = TestContext::new().await;
+        // Every `config::set` fails (mirrors
+        // `save_settings_surfaces_config_set_failure` in `ui/settings_form.rs`).
+        // A save loop that swallowed the error via `let _ = config::set(...)`
+        // would return success anyway; the shared `settings_form::save_settings`
+        // helper this delegates to must not.
+        let mut ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        ctx.refuse_config_writes();
         let msg = anon_msg("create", "/b/admin/email");
         let input = InputStream::from_bytes(serde_json::to_vec(&email_body()).unwrap());
 
@@ -98,10 +110,12 @@ mod tests {
 
     #[tokio::test]
     async fn save_email_settings_reports_success_when_all_writes_succeed() {
-        let mut ctx = TestContext::new().await;
+        let mut ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         // Registers a real `wafer-run/config` service block so `config::set`
         // succeeds (see `TestContext::set_config`).
-        ctx.set_config("IMPRESSPRESS__EMAIL__MAILGUN_API_KEY", "");
+        ctx.set_config(MAILGUN_API_KEY, "");
         let msg = anon_msg("create", "/b/admin/email");
         let input = InputStream::from_bytes(serde_json::to_vec(&email_body()).unwrap());
 
@@ -117,8 +131,41 @@ mod tests {
         assert_eq!(body["message"], "Settings saved");
 
         // The value was actually persisted, not just reported as saved.
-        let stored = config::get_default(&ctx, "IMPRESSPRESS__EMAIL__MAILGUN_API_KEY", "").await;
+        let stored = config::get_default(&ctx, MAILGUN_API_KEY, "")
+            .await
+            .expect("config read");
         assert_eq!(stored, "key-123");
+    }
+
+    /// Editing these same keys on the admin Variables page writes a
+    /// `variable.update` row (`ops::update_variable`). Saving them here wrote
+    /// none, so whether an admin's change was recorded depended on which page
+    /// they used. Driven through the block's own route table, so the handler
+    /// gets the `Message` the router hands it.
+    #[tokio::test]
+    async fn saving_the_email_settings_page_audits_the_keys_it_wrote() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+
+        let out = wafer_run::Block::handle(
+            &AdminBlock::new(),
+            &ctx,
+            routed(admin_msg("create", "/b/admin/email")),
+            InputStream::from_bytes(serde_json::to_vec(&email_body()).unwrap()),
+        )
+        .await;
+        assert_eq!(output_json(out).await["message"], "Settings saved");
+
+        let rows = audit_rows(&ctx, "settings.update").await;
+        assert_eq!(rows.len(), 1, "one row per save");
+        assert_eq!(rows[0].str_field("user_id"), "admin_1");
+        assert_eq!(
+            rows[0].str_field("resource"),
+            "settings/email (IMPRESSPRESS__EMAIL__MAILGUN_API_KEY, \
+             IMPRESSPRESS__EMAIL__MAILGUN_DOMAIN)",
+            "the row names the page and the keys this save actually wrote"
+        );
     }
 
     #[tokio::test]
@@ -135,11 +182,16 @@ mod tests {
         // attribute in plaintext, readable via page source / devtools — see
         // `settings_form.rs`'s own `password_field_is_masked_with_eye_toggle_
         // and_never_echoes_the_raw_value` test for the same contract).
-        let mut ctx = TestContext::new().await;
-        ctx.set_config("IMPRESSPRESS__EMAIL__MAILGUN_API_KEY", "super-secret-value");
+        let mut ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        ctx.set_config(MAILGUN_API_KEY, "super-secret-value");
         let msg = anon_msg("retrieve", "/b/admin/settings/email");
 
-        let html = settings_body(&ctx, &msg).await.into_string();
+        let html = settings_body(&ctx, &msg)
+            .await
+            .expect("the current values are readable")
+            .into_string();
 
         assert!(
             !html.contains("super-secret-value"),
@@ -151,7 +203,8 @@ mod tests {
         );
         assert!(
             html.contains(r#"aria-label="Reveal value""#)
-                && html.contains("i.type='text';this.title='Hide'"),
+                && html.contains(r#"data-action="reveal-toggle""#)
+                && html.contains(r#"data-reveal-hide="Hide""#),
             "the reveal/edit eye toggle must be present, with an accessible name: {html}"
         );
         assert!(
@@ -169,10 +222,15 @@ mod tests {
         // The base-URL field keeps its documented default-as-placeholder
         // behavior (was `field.default` in the old hand-rolled render; now
         // sourced from the same `ConfigVar.default` the block declares).
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         let msg = anon_msg("retrieve", "/b/admin/settings/email");
 
-        let html = settings_body(&ctx, &msg).await.into_string();
+        let html = settings_body(&ctx, &msg)
+            .await
+            .expect("the current values are readable")
+            .into_string();
 
         assert!(
             html.contains(email::DEFAULT_MAILGUN_BASE_URL),

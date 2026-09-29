@@ -1,6 +1,5 @@
 import { expect, test, type APIRequestContext } from '@playwright/test';
-import { ADMIN_STATE_PATH } from './fixtures/auth';
-import { ADMIN_EMAIL, ADMIN_PASSWORD } from './fixtures/global-setup';
+import { ADMIN_STATE_PATH, adminBearer } from './fixtures/auth';
 import { MODEL_CONTEXT_POLYFILL } from './fixtures/model-context-polyfill';
 import { SHOP_OFFER, uniqueShopProduct } from './fixtures/shop-fixture';
 import { execute, registeredTools } from './fixtures/webmcp-helpers';
@@ -83,17 +82,6 @@ test('refresh() re-registers the manifest without disturbing a tool it does not 
   // tool survived untouched.
   expect(after).toEqual([...before, 'stale_tool'].sort());
 });
-
-/** Bearer for the bootstrap admin — bearer auth is exempt from the CSRF origin policy, cookies are not. */
-async function adminBearer(request: APIRequestContext): Promise<string> {
-  const res = await request.post('/b/auth/api/login', {
-    data: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD },
-    headers: { 'Content-Type': 'application/json' },
-  });
-  expect(res.status(), await res.text()).toBe(200);
-  const { access_token } = (await res.json()) as { access_token: string };
-  return `Bearer ${access_token}`;
-}
 
 /**
  * One product with one published, component-priced offer — the shared

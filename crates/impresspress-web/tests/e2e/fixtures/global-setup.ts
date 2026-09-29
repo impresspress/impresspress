@@ -119,8 +119,9 @@ const TRANSPARENT_PNG_1X1 = Buffer.from([
 /**
  * Idempotent seed for the `photos` bucket used by visual-baseline storage-
  * objects routes. Creates the bucket (if missing), then puts `a.png` at root
- * and `nested/b.png` in a prefix. All writes are idempotent: re-creating the
- * bucket and re-uploading keys are both no-ops at the filesystem layer.
+ * and `nested/b.png` in a prefix. Re-running leaves the same state: a bucket
+ * that already exists is refused without changing anything, and re-uploading a
+ * key replaces the object with identical bytes.
  *
  * Errors are logged and swallowed — see callsite comment in globalSetup.
  *
@@ -131,10 +132,11 @@ async function seedStoragePhotos(req: APIRequestContext, accessToken: string): P
   const BUCKET = 'photos';
   const authHeader = { Authorization: `Bearer ${accessToken}` };
 
-  // 1. Create the bucket. The handler returns 200 on success and 500 if the
-  //    bucket already exists at the filesystem layer; we treat anything <500
-  //    as a successful idempotent state. (The current backend `create_folder`
-  //    is `mkdir -p` semantics, so re-creates also return 200.)
+  // 1. Create the bucket. The handler returns 200 on success and 409 when the
+  //    name is already taken -- `buckets.name` is UNIQUE, and the metadata
+  //    insert is the claim on it, so a re-run of this seed is a conflict, not
+  //    a second create. Either is the state we want, so anything <500 counts
+  //    as success and only a real fault is reported.
   try {
     const bucketRes = await req.post('/b/storage/api/buckets', {
       data: { name: BUCKET, public: false },

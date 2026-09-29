@@ -1,6 +1,4 @@
-use std::fmt::Write as _;
-
-use impresspress_core::log_level::LogLevel;
+use impresspress_core::{log_level::LogLevel, log_line::LogLine};
 use wafer_core::interfaces::logger::service::{Field, LoggerService};
 
 /// LoggerService using CF Worker's console bindings.
@@ -10,15 +8,18 @@ use wafer_core::interfaces::logger::service::{Field, LoggerService};
 /// implementation therefore (1) checks the configured minimum level *before*
 /// touching `fields` at all, so a suppressed `debug()` call costs one field
 /// read plus one enum comparison and nothing else, and (2) formats surviving
-/// calls into a single pre-sized `String` via `write!` instead of allocating
-/// one `String` per field plus an intermediate `Vec`.
+/// calls straight into the console macro's formatter.
 pub struct ConsoleLoggerService {
     min_level: LogLevel,
 }
 
-// Safety: wasm32-unknown-unknown is single-threaded.
-unsafe impl Send for ConsoleLoggerService {}
-unsafe impl Sync for ConsoleLoggerService {}
+// No `unsafe impl Send/Sync` here: `LogLevel` is a plain `Copy` enum, so the
+// compiler derives both. The pair that used to sit here claimed
+// "wasm32-unknown-unknown is single-threaded" — true, but irrelevant to a type
+// that is already `Send + Sync`, and an unnecessary `unsafe impl` teaches the
+// next reader that the crate hands them out by habit. The three that remain
+// (`database`, `network_service`, `storage`) wrap real JS handles and keep
+// their SAFETY comments; new code uses `MaybeSend` and the lint allow instead.
 
 /// Minimum level emitted when no runtime level is configured. Debug builds
 /// keep `debug()` output; release (production deploy) builds default to
@@ -35,7 +36,7 @@ impl ConsoleLoggerService {
     ///
     /// `level` is read at construction from the `IMPRESSPRESS_CF_LOG_LEVEL`
     /// worker var (`env.var`, set via `wrangler.toml` `[vars]` or the
-    /// dashboard — see `lib.rs::make_console_logger`), so an operator can
+    /// dashboard — see `services.rs::make_console_logger`), so an operator can
     /// raise or lower verbosity per deployment without rebuilding. `None`
     /// (var unset) or an unparseable value falls back to [`DEFAULT_LEVEL`].
     /// Resolved once, at construction — the per-isolate runtime is built at
@@ -61,49 +62,42 @@ pub(crate) fn resolve_level(raw: Option<&str>) -> LogLevel {
 }
 
 impl LoggerService for ConsoleLoggerService {
-    fn debug(&self, msg: &str, fields: &[Field]) {
+    fn debug(&self, caller: Option<&str>, msg: &str, fields: &[Field]) {
         if LogLevel::Debug.is_suppressed(self.min_level) {
             return;
         }
-        worker::console_debug!("[debug] {}{}", msg, Rendered(fields));
+        worker::console_debug!("[debug] {}", line(caller, msg, fields));
     }
 
-    fn info(&self, msg: &str, fields: &[Field]) {
+    fn info(&self, caller: Option<&str>, msg: &str, fields: &[Field]) {
         if LogLevel::Info.is_suppressed(self.min_level) {
             return;
         }
-        worker::console_log!("[info] {}{}", msg, Rendered(fields));
+        worker::console_log!("[info] {}", line(caller, msg, fields));
     }
 
-    fn warn(&self, msg: &str, fields: &[Field]) {
+    fn warn(&self, caller: Option<&str>, msg: &str, fields: &[Field]) {
         if LogLevel::Warn.is_suppressed(self.min_level) {
             return;
         }
-        worker::console_warn!("[warn] {}{}", msg, Rendered(fields));
+        worker::console_warn!("[warn] {}", line(caller, msg, fields));
     }
 
-    fn error(&self, msg: &str, fields: &[Field]) {
+    fn error(&self, caller: Option<&str>, msg: &str, fields: &[Field]) {
         if LogLevel::Error.is_suppressed(self.min_level) {
             return;
         }
-        worker::console_error!("[error] {}{}", msg, Rendered(fields));
+        worker::console_error!("[error] {}", line(caller, msg, fields));
     }
 }
 
-/// `Display` adapter that writes `" key=value key2=value2"` directly into the
-/// formatter, avoiding the `Vec<String>` + `.join(" ")` intermediate
-/// allocations of the previous implementation. Empty `fields` costs nothing
-/// beyond the slice-length check.
-struct Rendered<'a>(&'a [Field]);
-
-impl std::fmt::Display for Rendered<'_> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        for field in self.0 {
-            f.write_char(' ')?;
-            f.write_str(&field.key)?;
-            f.write_char('=')?;
-            write!(f, "{}", field.value)?;
-        }
-        Ok(())
+/// One record as `caller=… msg=… key=value…` (see
+/// `impresspress_core::log_line`), written straight into the console
+/// macro's formatter.
+fn line<'a>(caller: Option<&'a str>, msg: &'a str, fields: &'a [Field]) -> LogLine<'a> {
+    LogLine {
+        caller,
+        msg,
+        fields,
     }
 }

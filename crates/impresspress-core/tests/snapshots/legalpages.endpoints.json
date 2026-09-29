@@ -1,0 +1,19 @@
+[
+  "DELETE /b/legalpages/api/documents/{id} admin",
+  "GET /b/legalpages/admin admin",
+  "GET /b/legalpages/admin/endpoints admin",
+  "GET /b/legalpages/admin/privacy admin",
+  "GET /b/legalpages/admin/settings admin",
+  "GET /b/legalpages/admin/terms admin",
+  "GET /b/legalpages/api/documents admin",
+  "GET /b/legalpages/api/documents/{id} admin",
+  "GET /b/legalpages/privacy public",
+  "GET /b/legalpages/terms public",
+  "PATCH /b/legalpages/api/documents/{id} admin",
+  "PATCH /b/legalpages/api/documents/{id}/publish admin",
+  "POST /b/legalpages/admin/publish admin",
+  "POST /b/legalpages/admin/render-preview admin",
+  "POST /b/legalpages/admin/save admin",
+  "POST /b/legalpages/admin/settings admin",
+  "POST /b/legalpages/api/documents admin"
+]

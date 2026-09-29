@@ -1,19 +1,26 @@
+mod contracts;
+#[cfg(test)]
+mod error_mapping_tests;
 pub(crate) mod migrations;
 mod pages;
+mod repo;
 mod service;
 
 use maud::{html, Markup, PreEscaped};
-use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
-use wafer_core::clients::database as db;
 use wafer_run::{
-    context::Context, BlockEndpoint, BlockInfo, ConfigVar, ErrorCode, HttpMethod, InputStream,
-    InputType, InstanceMode, Message, OutputStream,
+    context::Context, BlockInfo, ConfigVar, HttpMethod, InputStream, InputType, InstanceMode,
+    Message, OutputStream, WaferError,
 };
 
+use self::{
+    contracts::{DocumentListView, DocumentType, DocumentView, UpdateDocumentRequest},
+    repo::documents::{self, NewDraft},
+};
 use crate::{
     blocks::crud,
-    endpoint_match::{self, EndpointRoute},
-    http::{err_bad_request, err_internal, err_not_found, ok_json, ResponseBuilder},
+    config_vars::PRIMARY_COLOR_KEY,
+    endpoint_match::{self, request_schema_of, EndpointRoute},
+    http::{err_bad_request, ok_json, require_row, ResponseBuilder},
     ui::{self, templates, SiteConfig},
 };
 
@@ -38,90 +45,150 @@ enum Route {
     ApiDelete,
 }
 
-/// Method + path-template dispatch table, mirroring `info().endpoints`. The
-/// JSON `.../{id}/publish` template precedes the generic `.../{id}` so the
-/// specific publish route wins (replacing the old `ends_with("/publish")`
-/// guard). The JSON publish is a PATCH (`update`) on the wire, matching the
-/// handler's historical dispatch.
+/// The block's HTTP surface: what `handle()` dispatches on and what
+/// `info().endpoints` is generated from. The JSON `.../{id}/publish` template
+/// precedes the generic `.../{id}` so the specific publish route wins
+/// (replacing the old `ends_with("/publish")` guard). The JSON publish is a
+/// PATCH (`update`) on the wire, matching the handler's historical dispatch.
+/// The matcher binds `{id}` into `req.param.id` for the handlers' `msg.var`
+/// readers.
+///
+/// The two published documents are `Public`. Every admin SSR sub-page,
+/// mutation and JSON endpoint is declared `Admin`, and these declarations
+/// are the gate: the router carries one `Public` prefix entry for
+/// `/b/legalpages` and no `Admin` entry above it, and the handlers do not
+/// re-check `is_admin`. `tests/snapshots/legalpages.endpoints.json` pins
+/// every level.
 const ROUTES: &[EndpointRoute<Route>] = &[
-    EndpointRoute::new(HttpMethod::Get, "/b/legalpages/terms", Route::PublicTerms),
-    EndpointRoute::new(
+    // Published documents
+    EndpointRoute::public(HttpMethod::Get, "/b/legalpages/terms", Route::PublicTerms)
+        .summary("Published terms of service"),
+    EndpointRoute::public(
         HttpMethod::Get,
         "/b/legalpages/privacy",
         Route::PublicPrivacy,
-    ),
-    EndpointRoute::new(HttpMethod::Get, "/b/legalpages/admin", Route::EditorPrivacy),
-    EndpointRoute::new(
+    )
+    .summary("Published privacy policy"),
+    // Admin editor pages
+    EndpointRoute::admin(HttpMethod::Get, "/b/legalpages/admin", Route::EditorPrivacy)
+        .summary("Admin editor (privacy)"),
+    EndpointRoute::admin(
         HttpMethod::Get,
         "/b/legalpages/admin/privacy",
         Route::EditorPrivacy,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Admin editor (privacy)"),
+    EndpointRoute::admin(
         HttpMethod::Get,
         "/b/legalpages/admin/terms",
         Route::EditorTerms,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Admin editor (terms)"),
+    EndpointRoute::admin(
         HttpMethod::Get,
         "/b/legalpages/admin/settings",
         Route::SettingsPage,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Admin settings page"),
+    EndpointRoute::admin(
         HttpMethod::Get,
         "/b/legalpages/admin/endpoints",
         Route::EndpointsPage,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Endpoints reference"),
+    // Admin editor mutations
+    EndpointRoute::admin(
         HttpMethod::Post,
         "/b/legalpages/admin/save",
         Route::AdminSave,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Save draft"),
+    EndpointRoute::admin(
         HttpMethod::Post,
         "/b/legalpages/admin/render-preview",
         Route::AdminRenderPreview,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Render markdown preview"),
+    EndpointRoute::admin(
         HttpMethod::Post,
         "/b/legalpages/admin/publish",
         Route::AdminPublish,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Publish from editor"),
+    EndpointRoute::admin(
         HttpMethod::Post,
         "/b/legalpages/admin/settings",
         Route::AdminSaveSettings,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Save settings"),
+    // JSON API (specific `{id}/publish` before the generic `{id}` rows)
+    EndpointRoute::admin(
         HttpMethod::Get,
         "/b/legalpages/api/documents",
         Route::ApiList,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("List documents"),
+    EndpointRoute::admin(
         HttpMethod::Post,
         "/b/legalpages/api/documents",
         Route::ApiCreate,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Create document"),
+    EndpointRoute::admin(
         HttpMethod::Patch,
         "/b/legalpages/api/documents/{id}/publish",
         Route::ApiPublish,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Publish document"),
+    EndpointRoute::admin(
         HttpMethod::Get,
         "/b/legalpages/api/documents/{id}",
         Route::ApiGet,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Get document"),
+    EndpointRoute::admin(
         HttpMethod::Patch,
         "/b/legalpages/api/documents/{id}",
         Route::ApiUpdate,
-    ),
-    EndpointRoute::new(
+    )
+    .summary("Update document")
+    .input(request_schema_of::<UpdateDocumentRequest>)
+    .path_params(id_path_schema),
+    EndpointRoute::admin(
         HttpMethod::Delete,
         "/b/legalpages/api/documents/{id}",
         Route::ApiDelete,
-    ),
+    )
+    .summary("Delete document"),
 ];
+
+/// Path-parameter schema for the `{id}` routes.
+///
+/// Hand-written rather than derived, the same way `tickets::id_path_schema`
+/// is: every handler reads the id with `msg.var("id")` by name, so a struct
+/// declared only to feed `request_schema_of::<T>` would have no runtime user.
+/// `tests/openapi_snapshot.rs::path_placeholders_and_path_parameters_agree`
+/// requires it of any published path that carries a `{…}` placeholder.
+fn id_path_schema() -> serde_json::Value {
+    serde_json::json!({
+        "type": "object",
+        "additionalProperties": false,
+        "required": ["id"],
+        "properties": {
+            "id": {
+                "type": "string",
+                "description": "Document identifier, as returned by the list endpoint."
+            }
+        }
+    })
+}
+
+/// Config key: the public legal pages' background colour.
+pub(crate) const BG_COLOR_KEY: &str = "IMPRESSPRESS__LEGALPAGES__BG_COLOR";
+/// Config key: where the public legal pages' back button points.
+pub(crate) const BACK_URL_KEY: &str = "IMPRESSPRESS__LEGALPAGES__BACK_URL";
+/// Config key: custom footer HTML on the public legal pages.
+pub(crate) const FOOTER_KEY: &str = "IMPRESSPRESS__LEGALPAGES__FOOTER";
 
 /// The legalpages block's own declared config vars. Single source of truth for
 /// both `BlockInfo::config_keys` and the admin settings page (rendered via
@@ -130,7 +197,7 @@ const ROUTES: &[EndpointRoute<Route>] = &[
 pub(crate) fn config_vars() -> Vec<ConfigVar> {
     vec![
         ConfigVar::new(
-            "IMPRESSPRESS__LEGALPAGES__BG_COLOR",
+            BG_COLOR_KEY,
             "Background color for public legal pages (empty = use design token default)",
             "",
         )
@@ -138,109 +205,79 @@ pub(crate) fn config_vars() -> Vec<ConfigVar> {
         .input_type(InputType::Color)
         .optional(),
         ConfigVar::new(
-            "IMPRESSPRESS__LEGALPAGES__BACK_URL",
+            BACK_URL_KEY,
             "Back button URL in the header (e.g., your website homepage)",
             "/",
         )
         .name("Back Button URL")
         .input_type(InputType::Url),
-        ConfigVar::new(
-            "IMPRESSPRESS__LEGALPAGES__FOOTER",
-            "Custom footer text (HTML allowed)",
-            "",
-        )
-        .name("Footer Text")
-        .input_type(InputType::Textarea)
-        .optional(),
+        ConfigVar::new(FOOTER_KEY, "Custom footer text (HTML allowed)", "")
+            .name("Footer Text")
+            .input_type(InputType::Textarea)
+            .optional(),
     ]
 }
 
-pub(crate) const COLLECTION: &str = "impresspress__legalpages__documents";
-
-/// Path prefix preceding the document id in the JSON API routes.
-const API_DOC_PREFIX: &str = "/b/legalpages/api/documents/";
+/// The document id `{id}` as the route table bound it, or the 400 a missing
+/// one turns into. A message that never went through
+/// `endpoint_match::dispatch` binds nothing and is refused here rather than
+/// parsed out of the path.
+fn document_id(msg: &Message) -> Result<&str, OutputStream> {
+    crud::path_id(msg, "Document")
+}
 
 impl LegalPagesBlock {
-    async fn handle_get_public(&self, ctx: &dyn Context, doc_type: &str) -> OutputStream {
+    async fn handle_get_public(&self, ctx: &dyn Context, doc_type: DocumentType) -> OutputStream {
         use wafer_core::clients::config;
 
-        let site = SiteConfig::load(ctx).await;
-        let bg_color = config::get_default(ctx, "IMPRESSPRESS__LEGALPAGES__BG_COLOR", "").await;
-        let back_url = config::get_default(ctx, "IMPRESSPRESS__LEGALPAGES__BACK_URL", "/").await;
-        let custom_footer = config::get_default(ctx, "IMPRESSPRESS__LEGALPAGES__FOOTER", "").await;
-        let primary_color = config::get_default(ctx, "WAFER_RUN_SHARED__PRIMARY_COLOR", "").await;
-
-        let type_label = if doc_type == "terms" {
-            "Terms of Service"
-        } else {
-            "Privacy Policy"
+        let chrome = async {
+            Ok::<_, wafer_run::WaferError>((
+                SiteConfig::load(ctx).await?,
+                config::get_default(ctx, BG_COLOR_KEY, "").await?,
+                config::get_default(ctx, BACK_URL_KEY, "/").await?,
+                config::get_default(ctx, FOOTER_KEY, "").await?,
+                config::get_default(ctx, PRIMARY_COLOR_KEY, "").await?,
+            ))
+        };
+        let (site, bg_color, back_url, custom_footer, primary_color) = match chrome.await {
+            Ok(chrome) => chrome,
+            Err(e) => return crud::db_error_internal(e, "legalpages: page config read failed"),
         };
 
-        let opts = ListOptions {
-            filters: vec![
-                Filter {
-                    field: "doc_type".to_string(),
-                    operator: FilterOp::Equal,
-                    value: serde_json::Value::String(doc_type.to_string()),
-                },
-                Filter {
-                    field: "status".to_string(),
-                    operator: FilterOp::Equal,
-                    value: serde_json::Value::String("published".to_string()),
-                },
-            ],
-            sort: vec![SortField {
-                field: "version".to_string(),
-                desc: true,
-            }],
-            limit: 1,
-            ..Default::default()
-        };
+        let type_label = doc_type.title();
 
-        let result = match db::list(ctx, COLLECTION, &opts).await {
-            Ok(r) => r,
+        let published = match documents::find_published(ctx, doc_type).await {
+            Ok(row) => row,
             Err(e) => {
-                tracing::warn!(error = %e, "legalpages: db list failed");
-                return err_internal("Database error", e);
+                return crud::db_error_internal(e, "legalpages: published document read failed")
             }
         };
 
-        let (title, content, version, meta) = if result.records.is_empty() {
-            (
+        let (title, content, version, meta) = match published {
+            None => (
                 type_label.to_string(),
                 markdown_to_html("No document has been published yet."),
                 1_i64,
                 String::new(),
-            )
-        } else {
-            let record = &result.records[0];
-            let title = record
-                .data
-                .get("title")
-                .and_then(|v| v.as_str())
-                .unwrap_or(type_label)
-                .to_string();
-            let raw_content = record
-                .data
-                .get("content")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let content = markdown_to_html(raw_content);
-            let published_at = record
-                .data
-                .get("published_at")
-                .and_then(|v| v.as_str())
-                .unwrap_or("");
-            let version = service::doc_version(record).unwrap_or(1);
-            let meta = if !published_at.is_empty() {
-                format!(
-                    "Last updated: {}",
-                    published_at.get(..10).unwrap_or(published_at),
-                )
-            } else {
-                String::new()
-            };
-            (title, content, version, meta)
+            ),
+            Some(doc) => {
+                let title = if doc.title.is_empty() {
+                    type_label.to_string()
+                } else {
+                    doc.title
+                };
+                let content = markdown_to_html(&doc.content);
+                let published_at = doc.published_at.unwrap_or_default();
+                let meta = if published_at.is_empty() {
+                    String::new()
+                } else {
+                    format!(
+                        "Last updated: {}",
+                        published_at.get(..10).unwrap_or(&published_at),
+                    )
+                };
+                (title, content, doc.version, meta)
+            }
         };
 
         let markup = render_legal_page(LegalPageInputs {
@@ -261,34 +298,18 @@ impl LegalPagesBlock {
     }
 
     async fn handle_admin_list(&self, ctx: &dyn Context, msg: &Message) -> OutputStream {
-        // Not a pure-CRUD list: it sorts by `updated_at` desc (editors expect
-        // most-recently-touched first), whereas `crud::list_page` defaults to
-        // `created_at` desc. Kept inline rather than widening the shared
-        // helper's signature — `blocks::crud` is owned by the products package.
-        let (_, page_size, offset) = msg.pagination_params(20);
-        let doc_type = msg.query("type");
-        let mut filters = Vec::new();
-        if !doc_type.is_empty() {
-            filters.push(Filter {
-                field: "doc_type".to_string(),
-                operator: FilterOp::Equal,
-                value: serde_json::Value::String(doc_type.to_string()),
-            });
-        }
-        let opts = ListOptions {
-            filters,
-            sort: vec![SortField {
-                field: "updated_at".to_string(),
-                desc: true,
-            }],
-            limit: page_size as i64,
-            offset: offset as i64,
-            skip_count: false,
-            ..Default::default()
+        let (page, page_size, _) = msg.pagination_params(20);
+        // A `?type=` outside the set is refused rather than answered with
+        // an empty page: "no such document type" and "this type has no
+        // documents" are different sentences and the client can act on only
+        // one of them.
+        let doc_type = match crud::enum_query::<DocumentType>(msg, "type") {
+            Ok(value) => value,
+            Err(resp) => return resp,
         };
-        match db::list(ctx, COLLECTION, &opts).await {
-            Ok(result) => ok_json(&result),
-            Err(e) => err_internal("Database error", e),
+        match documents::list_page(ctx, doc_type, page as i64, page_size as u32).await {
+            Ok(page) => ok_json(&DocumentListView::from_page(&page)),
+            Err(e) => crud::db_error_internal(e, "Database error"),
         }
     }
 
@@ -300,55 +321,60 @@ impl LegalPagesBlock {
     ) -> OutputStream {
         #[derive(serde::Deserialize)]
         struct CreateDoc {
-            doc_type: String,
+            /// Typed, so a `doc_type` no route can serve is a 400 rather
+            /// than a row the block can store and never show.
+            doc_type: DocumentType,
             title: String,
             content: String,
         }
-        let raw = input.collect_to_bytes().await;
+        let raw = match input.collect_to_bytes().await {
+            Ok(bytes) => bytes,
+            Err(e) => return OutputStream::error(e),
+        };
         let body: CreateDoc = match serde_json::from_slice(&raw) {
             Ok(b) => b,
             Err(e) => return err_bad_request(&format!("Invalid body: {e}")),
         };
 
-        // Draft shape lives in `service::create_draft` (shared with the
-        // admin editor's save handler in `pages.rs`).
-        match service::create_draft(
+        // Draft shape lives in `repo::documents::insert_draft` (shared with
+        // the admin editor's save handler in `pages.rs`).
+        match documents::insert_draft(
             ctx,
-            &body.doc_type,
-            &body.title,
-            &body.content,
-            msg.user_id(),
+            NewDraft {
+                doc_type: body.doc_type,
+                title: &body.title,
+                content: &body.content,
+                created_by: msg.user_id(),
+            },
         )
         .await
         {
-            Ok(record) => ok_json(&record),
-            Err(e) => err_internal("Database error", e),
+            Ok(row) => ok_json(&DocumentView::from_row(&row)),
+            Err(e) => crud::db_error_internal(e, "Database error"),
         }
     }
 
     async fn handle_admin_publish(&self, ctx: &dyn Context, msg: &Message) -> OutputStream {
-        let id = crate::util::path_param(msg, "id", API_DOC_PREFIX);
-        if id.is_empty() {
-            return err_bad_request("Missing document ID");
-        }
+        let id = match document_id(msg) {
+            Ok(id) => id,
+            Err(resp) => return resp,
+        };
 
         // Fetch the document first: its `doc_type` drives version
         // computation and which published siblings get archived.
-        let doc = match db::get(ctx, COLLECTION, id).await {
-            Ok(r) => r,
-            Err(e) if e.code == ErrorCode::NotFound => return err_not_found("Document not found"),
-            Err(e) => return err_internal("Database error", e),
+        let doc = match documents::get(ctx, id)
+            .await
+            .map_err(|e| crud::db_error(e, "Document not found", "Database error"))
+            .and_then(|row| require_row(row, "Document not found"))
+        {
+            Ok(doc) => doc,
+            Err(response) => return response,
         };
-        let doc_type = doc
-            .data
-            .get("doc_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
 
         match service::publish_document(
             ctx,
             service::PublishRequest {
-                doc_type,
+                doc_type: doc.doc_type,
                 doc_id: id,
                 title: None,
                 content: None,
@@ -358,49 +384,114 @@ impl LegalPagesBlock {
         )
         .await
         {
-            Ok(published) => ok_json(&published.record),
-            Err(e) => err_internal("Database error", e),
+            Ok(published) => ok_json(&DocumentView::from_row(&published.row)),
+            Err(e) => crud::db_error_internal(e, "Database error"),
         }
     }
 
-    async fn seed_defaults(&self, ctx: &dyn Context) {
-        let count = db::count(ctx, COLLECTION, &[]).await.unwrap_or(0);
-        if count > 0 {
-            return;
+    /// `GET /b/legalpages/api/documents/{id}`: the row.
+    async fn handle_admin_get(&self, ctx: &dyn Context, msg: &Message) -> OutputStream {
+        let id = match document_id(msg) {
+            Ok(id) => id,
+            Err(resp) => return resp,
+        };
+        match documents::get(ctx, id)
+            .await
+            .map_err(|e| crud::db_error(e, "Document not found", "Database error"))
+            .and_then(|row| require_row(row, "Document not found"))
+        {
+            Ok(row) => ok_json(&DocumentView::from_row(&row)),
+            Err(response) => response,
+        }
+    }
+
+    /// `PATCH /b/legalpages/api/documents/{id}`: the document's text.
+    ///
+    /// The body is a typed [`UpdateDocumentRequest`], not a column map. That
+    /// is the B10 fix: the handler used to hand whatever arrived to
+    /// `crud::update_record`, which writes every key as a column, so
+    /// `{"status":"published"}` published a document without going through
+    /// `service::publish_document` — and therefore without archiving the row
+    /// that was published before it. `deny_unknown_fields` makes the refusal
+    /// a 400 naming the field rather than a silently ignored key.
+    async fn handle_admin_update(
+        &self,
+        ctx: &dyn Context,
+        msg: &Message,
+        input: InputStream,
+    ) -> OutputStream {
+        let id = match document_id(msg) {
+            Ok(id) => id,
+            Err(resp) => return resp,
+        };
+        let body: UpdateDocumentRequest = match crud::read_json_body(input).await {
+            Ok(body) => body,
+            Err(resp) => return resp,
+        };
+        match documents::update_content(ctx, id, body.title.as_deref(), body.content.as_deref())
+            .await
+        {
+            Ok(row) => ok_json(&DocumentView::from_row(&row)),
+            Err(e) => crud::db_error(e, "Document not found", "Database error"),
+        }
+    }
+
+    /// `DELETE /b/legalpages/api/documents/{id}`.
+    async fn handle_admin_delete(&self, ctx: &dyn Context, msg: &Message) -> OutputStream {
+        let id = match document_id(msg) {
+            Ok(id) => id,
+            Err(resp) => return resp,
+        };
+        match documents::delete(ctx, id).await {
+            Ok(()) => ok_json(&crud::Deleted::done()),
+            Err(e) => crud::db_error(e, "Document not found", "Database error"),
+        }
+    }
+
+    /// Seed the two default documents, once, on Init.
+    ///
+    /// Returns `Result` and the lifecycle propagates it. The count used to be
+    /// read through `unwrap_or(0)`, which made a count that *failed*
+    /// indistinguishable from an empty table, so Init seeded a second set of
+    /// documents on top of the existing ones and still reported success
+    /// (B10).
+    async fn seed_defaults(&self, ctx: &dyn Context) -> Result<(), WaferError> {
+        if documents::count(ctx).await? > 0 {
+            return Ok(());
         }
 
-        for (doc_type, title, content) in &[
+        for (doc_type, content) in &[
             (
-                "terms",
-                "Terms of Service",
+                DocumentType::Terms,
                 "These are the default terms of service. Please update them in the admin panel.\n",
             ),
             (
-                "privacy",
-                "Privacy Policy",
+                DocumentType::Privacy,
                 "This is the default privacy policy. Please update it in the admin panel.\n",
             ),
         ] {
             // Seed through the same service fn both publish surfaces use —
             // the published-document shape (status/version/published_at/…)
-            // exists exactly once, in `service.rs`. The table is empty here
-            // (count == 0 above), so the archive pass is a no-op.
-            if let Err(e) = service::publish_document(
+            // exists exactly once, in `repo::documents`. The table is empty
+            // here (count == 0 above), so the archive pass is a no-op.
+            //
+            // A failure here fails Init too. Logging it left the deployment
+            // with one of the two documents and a successful boot, which is
+            // the same silence the count read used to have.
+            service::publish_document(
                 ctx,
                 service::PublishRequest {
-                    doc_type,
+                    doc_type: *doc_type,
                     doc_id: "",
-                    title: Some(title),
+                    title: Some(doc_type.title()),
                     content: Some(content),
                     version: 1,
                     created_by: "system",
                 },
             )
-            .await
-            {
-                tracing::warn!("Failed to seed default legal page '{doc_type}': {e}");
-            }
+            .await?;
         }
+        Ok(())
     }
 }
 
@@ -579,43 +670,29 @@ crate::impresspress_feature_block! {
     pub struct LegalPagesBlock;
     name: "impresspress/legalpages",
     info: |_this| {
-        use wafer_run::AuthLevel;
-
         BlockInfo::new("impresspress/legalpages", "0.0.1", "http-handler@v1", "Legal pages management with versioning and publishing")
             .instance_mode(InstanceMode::Singleton)
-            .requires(vec!["wafer-run/database".into()])
+            // `wafer-run/config`: `handle_get_public` reads this block's three
+            // theming keys plus `WAFER_RUN_SHARED__PRIMARY_COLOR`, and
+            // `SiteConfig::load` reads the shared site keys; without the
+            // entry the runtime refuses every one of those calls and the
+            // public page answers the refusal.
+            .requires(vec!["wafer-run/database".into(), "wafer-run/config".into()])
             .category(wafer_run::BlockCategory::Feature)
             .description("Legal document management with versioning and publishing. Create and manage terms of service, privacy policies, and other legal documents. Supports draft/published workflow with version tracking.")
-            // The admin SSR sub-pages and mutations are declared in full so
-            // the central router enforces their `Admin` tier from the declared
-            // `AuthLevel` — not merely from the `/b/legalpages/admin` prefix's
-            // route-table ordering, which was the sole gate before (the #1
-            // regression hazard this package closes).
-            .endpoints(vec![
-                BlockEndpoint::get("/b/legalpages/terms").summary("Published terms of service"),
-                BlockEndpoint::get("/b/legalpages/privacy").summary("Published privacy policy"),
-                BlockEndpoint::get("/b/legalpages/admin").summary("Admin editor (privacy)").auth(AuthLevel::Admin),
-                BlockEndpoint::get("/b/legalpages/admin/privacy").summary("Admin editor (privacy)").auth(AuthLevel::Admin),
-                BlockEndpoint::get("/b/legalpages/admin/terms").summary("Admin editor (terms)").auth(AuthLevel::Admin),
-                BlockEndpoint::get("/b/legalpages/admin/settings").summary("Admin settings page").auth(AuthLevel::Admin),
-                BlockEndpoint::get("/b/legalpages/admin/endpoints").summary("Endpoints reference").auth(AuthLevel::Admin),
-                BlockEndpoint::post("/b/legalpages/admin/save").summary("Save draft").auth(AuthLevel::Admin),
-                BlockEndpoint::post("/b/legalpages/admin/render-preview").summary("Render markdown preview").auth(AuthLevel::Admin),
-                BlockEndpoint::post("/b/legalpages/admin/publish").summary("Publish from editor").auth(AuthLevel::Admin),
-                BlockEndpoint::post("/b/legalpages/admin/settings").summary("Save settings").auth(AuthLevel::Admin),
-                BlockEndpoint::get("/b/legalpages/api/documents").summary("List documents").auth(AuthLevel::Admin),
-                BlockEndpoint::post("/b/legalpages/api/documents").summary("Create document").auth(AuthLevel::Admin),
-                BlockEndpoint::get("/b/legalpages/api/documents/{id}").summary("Get document").auth(AuthLevel::Admin),
-                BlockEndpoint::patch("/b/legalpages/api/documents/{id}/publish").summary("Publish document").auth(AuthLevel::Admin),
-                BlockEndpoint::patch("/b/legalpages/api/documents/{id}").summary("Update document").auth(AuthLevel::Admin),
-                BlockEndpoint::delete("/b/legalpages/api/documents/{id}").summary("Delete document").auth(AuthLevel::Admin),
-            ])
+            .endpoints(endpoint_match::declare(ROUTES))
             .config_keys(config_vars())
             .admin_url("/b/legalpages/admin")
             .can_disable(true)
-            .default_enabled(false)
+            // Ships enabled. This is the value the boot seed has written since
+            // it was introduced; the declaration used to say `false` and only
+            // the seed table was read, so nothing observed the disagreement.
+            // Whether legal pages *should* default off is a product decision
+            // (spec 5.6), and changing this line now re-seeds every row that
+            // an admin has not toggled.
+            .default_enabled(true)
     },
-    handle: |this, ctx, msg, input| {
+    handle: |this, ctx, mut msg, input| {
         // Auth is enforced centrally by `route_to_block` from the declared
         // endpoint `AuthLevel` (public reads, admin everything else) — the
         // block holds no `is_admin` preamble. Dispatch matches the same
@@ -624,28 +701,22 @@ crate::impresspress_feature_block! {
             return ui::not_found_response(&msg);
         };
         match route {
-            Route::PublicTerms => this.handle_get_public(ctx, "terms").await,
-            Route::PublicPrivacy => this.handle_get_public(ctx, "privacy").await,
-            Route::EditorPrivacy => pages::editor_page(ctx, &msg, "privacy").await,
-            Route::EditorTerms => pages::editor_page(ctx, &msg, "terms").await,
+            Route::PublicTerms => this.handle_get_public(ctx, DocumentType::Terms).await,
+            Route::PublicPrivacy => this.handle_get_public(ctx, DocumentType::Privacy).await,
+            Route::EditorPrivacy => pages::editor_page(ctx, &msg, DocumentType::Privacy).await,
+            Route::EditorTerms => pages::editor_page(ctx, &msg, DocumentType::Terms).await,
             Route::SettingsPage => pages::settings_page(ctx, &msg).await,
             Route::EndpointsPage => pages::endpoints_page(ctx, &msg).await,
             Route::AdminSave => pages::handle_save(ctx, &msg, input).await,
             Route::AdminRenderPreview => pages::handle_render_preview(ctx, input).await,
             Route::AdminPublish => pages::handle_publish(ctx, &msg, input).await,
-            Route::AdminSaveSettings => pages::handle_save_settings(ctx, input).await,
+            Route::AdminSaveSettings => pages::handle_save_settings(ctx, &msg, input).await,
             Route::ApiList => this.handle_admin_list(ctx, &msg).await,
-            Route::ApiGet => {
-                crud::crud_get(ctx, &msg, COLLECTION, API_DOC_PREFIX, "Document").await
-            }
+            Route::ApiGet => this.handle_admin_get(ctx, &msg).await,
             Route::ApiCreate => this.handle_admin_create(ctx, &msg, input).await,
             Route::ApiPublish => this.handle_admin_publish(ctx, &msg).await,
-            Route::ApiUpdate => {
-                crud::crud_update(ctx, &msg, input, COLLECTION, API_DOC_PREFIX, "Document").await
-            }
-            Route::ApiDelete => {
-                crud::crud_delete(ctx, &msg, COLLECTION, API_DOC_PREFIX, "Document").await
-            }
+            Route::ApiUpdate => this.handle_admin_update(ctx, &msg, input).await,
+            Route::ApiDelete => this.handle_admin_delete(ctx, &msg).await,
         }
     },
     lifecycle: |this, ctx, event| {
@@ -659,10 +730,600 @@ crate::impresspress_feature_block! {
         .await?;
         // Seed the default draft documents after migrations, only on Init.
         if matches!(event.event_type, wafer_run::LifecycleType::Init) {
-            this.seed_defaults(ctx).await;
+            this.seed_defaults(ctx).await?;
         }
         Ok(())
     },
+}
+
+/// A `TestContext` with the legalpages schema applied. Shared by every test
+/// module in the block so the fixture exists once.
+#[cfg(test)]
+pub(super) async fn test_ctx() -> crate::test_support::TestContext {
+    let ctx = crate::test_support::TestContext::with_admin()
+        .await
+        .running_as(crate::blocks::legalpages::LegalPagesBlock::BLOCK_NAME);
+    let sqlite: Vec<&str> = migrations::SQLITE_MIGRATIONS
+        .iter()
+        .map(|(_, sql)| *sql)
+        .collect();
+    crate::migration_helper::apply_migrations(
+        &ctx,
+        "impresspress/legalpages",
+        &sqlite,
+        migrations::POSTGRES_MIGRATIONS,
+    )
+    .await
+    .expect("apply legalpages migrations");
+    ctx
+}
+
+/// One stored document in whichever status the test needs, built the way the
+/// block builds one: a draft, optionally taken through a status transition.
+/// Nothing outside `repo::documents` spells the table.
+#[cfg(test)]
+pub(super) async fn seed_doc(
+    ctx: &dyn Context,
+    doc_type: DocumentType,
+    title: &str,
+    status: contracts::DocumentStatus,
+    version: i64,
+) -> documents::DocumentRow {
+    use contracts::DocumentStatus;
+
+    let draft = documents::insert_draft(
+        ctx,
+        NewDraft {
+            doc_type,
+            title,
+            content: "body",
+            created_by: "seed",
+        },
+    )
+    .await
+    .expect("seed draft");
+
+    match status {
+        DocumentStatus::Draft => draft,
+        DocumentStatus::Published => documents::mark_published(
+            ctx,
+            &draft.id,
+            version,
+            &crate::util::now_rfc3339(),
+            documents::PublishedContent::default(),
+        )
+        .await
+        .expect("seed published"),
+        DocumentStatus::Archived => {
+            documents::mark_archived(ctx, &draft.id)
+                .await
+                .expect("seed archived");
+            stored(ctx, &draft.id).await
+        }
+    }
+}
+
+/// The document `id`, which the caller knows exists.
+#[cfg(test)]
+pub(super) async fn stored(ctx: &dyn Context, id: &str) -> documents::DocumentRow {
+    documents::get(ctx, id)
+        .await
+        .expect("read document")
+        .expect("the document exists")
+}
+
+/// Every way a legalpages write used to be lost, each pinned as a regression.
+///
+/// Three of them are review bug B10: the generic PATCH that applied `status`
+/// and so bypassed `service::publish_document`, the save handler that read a
+/// lookup *error* as "create a new draft", and the Init seed that re-ran on a
+/// count error. Two more are the errors the publish path swallowed: a
+/// `latest_version` read that answered `0` on failure, and an archive pass
+/// that logged its failures at `warn` and answered `200`.
+#[cfg(test)]
+mod write_loss_tests {
+    use wafer_run::{Block as _, InputStream, LifecycleEvent, LifecycleType};
+
+    use super::{contracts::DocumentStatus, *};
+    use crate::test_support::{admin_msg, output_http_status, FailingDbOpContext};
+
+    /// Every document of `doc_type` currently in `published`, by id.
+    async fn published_ids(ctx: &dyn Context, doc_type: DocumentType) -> Vec<String> {
+        let mut ids: Vec<String> = documents::list_published(ctx, doc_type)
+            .await
+            .expect("list published")
+            .into_iter()
+            .map(|row| row.id)
+            .collect();
+        ids.sort();
+        ids
+    }
+
+    async fn row_count(ctx: &dyn Context) -> i64 {
+        documents::count(ctx).await.expect("count rows")
+    }
+
+    /// B10, defect 1. `PATCH /b/legalpages/api/documents/{id}` applies the
+    /// request body as a column map, so a client can set `status` directly
+    /// and skip `service::publish_document` — which is the only code that
+    /// archives the previously published sibling. The doc type is then left
+    /// with two rows claiming to be published, and the public page shows
+    /// whichever sorts first.
+    #[tokio::test]
+    async fn patch_cannot_write_the_status_column() {
+        let ctx = test_ctx().await;
+        let live = seed_doc(
+            &ctx,
+            DocumentType::Terms,
+            "Live Terms",
+            DocumentStatus::Published,
+            3,
+        )
+        .await;
+        let draft = seed_doc(
+            &ctx,
+            DocumentType::Terms,
+            "Draft Terms",
+            DocumentStatus::Draft,
+            1,
+        )
+        .await;
+
+        let out = LegalPagesBlock::new()
+            .handle(
+                &ctx,
+                admin_msg(
+                    "update",
+                    &format!("/b/legalpages/api/documents/{}", draft.id),
+                ),
+                InputStream::from_bytes(br#"{"status":"published"}"#.to_vec()),
+            )
+            .await;
+
+        let status = output_http_status(out).await;
+        assert_eq!(
+            published_ids(&ctx, DocumentType::Terms).await,
+            vec![live.id],
+            "publish must stay the only transition into `published`"
+        );
+        assert_eq!(
+            status, 400,
+            "PATCH must refuse a body that names a column it does not own"
+        );
+    }
+
+    /// B10, defect 2. `handle_save` mapped the lookup's `Err(_)` onto "create
+    /// a new draft", so a transient read failure silently forked the document
+    /// the admin was editing into a second row instead of reporting.
+    #[tokio::test]
+    async fn save_reports_a_failed_lookup_instead_of_forking_the_document() {
+        let ctx = test_ctx().await;
+        let draft = seed_doc(
+            &ctx,
+            DocumentType::Terms,
+            "Draft Terms",
+            DocumentStatus::Draft,
+            1,
+        )
+        .await;
+
+        let failing =
+            FailingDbOpContext::new(ctx.clone(), vec![("database.get", documents::TABLE)]);
+        let body = serde_json::to_vec(&serde_json::json!({
+            "doc_type": "terms",
+            "title": "Draft Terms",
+            "content": "edited",
+            "doc_id": draft.id,
+            "version": 1,
+        }))
+        .expect("serialize save body");
+
+        let out = pages::handle_save(
+            &failing,
+            &admin_msg("create", "/b/legalpages/admin/save"),
+            InputStream::from_bytes(body),
+        )
+        .await;
+
+        let status = output_http_status(out).await;
+        assert_eq!(
+            row_count(&ctx).await,
+            1,
+            "the failed save must not have created a second document"
+        );
+        assert_eq!(
+            status, 500,
+            "a failed lookup must be reported, not read as `create a new draft`"
+        );
+    }
+
+    /// B10, defect 3. `seed_defaults` read its "is the table already seeded?"
+    /// count through `unwrap_or(0)`, so a count that *failed* was
+    /// indistinguishable from an empty table and Init seeded a duplicate set
+    /// of documents on top of the existing ones. It returned `()`, so the
+    /// lifecycle could not see the failure either.
+    #[tokio::test]
+    async fn init_fails_when_the_seed_count_fails() {
+        let ctx = test_ctx().await;
+        let failing =
+            FailingDbOpContext::new(ctx.clone(), vec![("database.count", documents::TABLE)]);
+
+        let result = LegalPagesBlock::new()
+            .lifecycle(
+                &failing,
+                LifecycleEvent {
+                    event_type: LifecycleType::Init,
+                    data: Vec::new(),
+                },
+            )
+            .await;
+
+        assert_eq!(
+            row_count(&ctx).await,
+            0,
+            "Init must not have seeded on a count it could not read"
+        );
+        assert!(
+            result.is_err(),
+            "a count the seed cannot read must fail Init, not read as `table is empty`"
+        );
+    }
+
+    /// The counterpart of the two `FailingDbOpContext` tests above: on a
+    /// healthy context Init still seeds exactly the two default documents,
+    /// and running it twice does not duplicate them.
+    #[tokio::test]
+    async fn init_seeds_the_two_defaults_once() {
+        let ctx = test_ctx().await;
+        let event = || LifecycleEvent {
+            event_type: LifecycleType::Init,
+            data: Vec::new(),
+        };
+
+        LegalPagesBlock::new()
+            .lifecycle(&ctx, event())
+            .await
+            .expect("first init");
+        assert_eq!(row_count(&ctx).await, 2);
+
+        LegalPagesBlock::new()
+            .lifecycle(&ctx, event())
+            .await
+            .expect("second init");
+        assert_eq!(row_count(&ctx).await, 2, "Init is idempotent");
+    }
+
+    /// A `latest_version` that could not be read used to answer `0`, so the
+    /// next publish restarted the type at version 1 — and then, because the
+    /// publish itself succeeded, archived the real live document behind it.
+    /// The read now reports and nothing moves.
+    #[tokio::test]
+    async fn a_failed_version_read_stops_the_publish() {
+        let ctx = test_ctx().await;
+        let live = seed_doc(
+            &ctx,
+            DocumentType::Terms,
+            "Live Terms",
+            DocumentStatus::Published,
+            5,
+        )
+        .await;
+        let draft = seed_doc(
+            &ctx,
+            DocumentType::Terms,
+            "Next Terms",
+            DocumentStatus::Draft,
+            1,
+        )
+        .await;
+
+        let failing =
+            FailingDbOpContext::new(ctx.clone(), vec![("database.list", documents::TABLE)]);
+        let result = service::publish_document(
+            &failing,
+            service::PublishRequest {
+                doc_type: DocumentType::Terms,
+                doc_id: &draft.id,
+                title: None,
+                content: None,
+                version: 0,
+                created_by: "admin_1",
+            },
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "a version read that failed must not be read as `this type has no versions`"
+        );
+        let untouched = stored(&ctx, &live.id).await;
+        assert_eq!(untouched.status, DocumentStatus::Published);
+        assert_eq!(untouched.version, 5);
+        assert_eq!(stored(&ctx, &draft.id).await.status, DocumentStatus::Draft);
+    }
+
+    /// The archive pass runs after the new document is live, so a failure
+    /// there leaves the type with two published rows. That used to be a
+    /// `warn` and a `200`; it is now the caller's error, because it is a
+    /// state an operator has to be told about.
+    #[tokio::test]
+    async fn a_failed_archive_pass_surfaces() {
+        let ctx = test_ctx().await;
+        seed_doc(
+            &ctx,
+            DocumentType::Terms,
+            "Live Terms",
+            DocumentStatus::Published,
+            5,
+        )
+        .await;
+        let draft = seed_doc(
+            &ctx,
+            DocumentType::Terms,
+            "Next Terms",
+            DocumentStatus::Draft,
+            1,
+        )
+        .await;
+
+        // The publish itself is the first update; the archive pass is the
+        // one that follows it.
+        let failing =
+            FailingDbOpContext::new(ctx.clone(), vec![("database.update", documents::TABLE)])
+                .after_passing(1);
+        let result = service::publish_document(
+            &failing,
+            service::PublishRequest {
+                doc_type: DocumentType::Terms,
+                doc_id: &draft.id,
+                title: None,
+                content: None,
+                version: 6,
+                created_by: "admin_1",
+            },
+        )
+        .await;
+
+        assert!(
+            result.is_err(),
+            "an archive pass that failed must be reported, not logged and answered 200"
+        );
+        assert_eq!(
+            stored(&ctx, &draft.id).await.status,
+            DocumentStatus::Published
+        );
+    }
+
+    /// The typed PATCH still does what a PATCH is for.
+    #[tokio::test]
+    async fn patch_updates_the_text_and_nothing_else() {
+        let ctx = test_ctx().await;
+        let draft = seed_doc(
+            &ctx,
+            DocumentType::Terms,
+            "Draft Terms",
+            DocumentStatus::Draft,
+            1,
+        )
+        .await;
+
+        let out = LegalPagesBlock::new()
+            .handle(
+                &ctx,
+                admin_msg(
+                    "update",
+                    &format!("/b/legalpages/api/documents/{}", draft.id),
+                ),
+                InputStream::from_bytes(br#"{"title":"Revised Terms"}"#.to_vec()),
+            )
+            .await;
+        assert_eq!(output_http_status(out).await, 200);
+
+        let after = stored(&ctx, &draft.id).await;
+        assert_eq!(after.title, "Revised Terms");
+        assert_eq!(after.content, draft.content, "content was not sent");
+        assert_eq!(after.status, DocumentStatus::Draft);
+        assert_eq!(after.version, draft.version);
+    }
+
+    /// `version` is refused by name for the same reason `status` is: neither
+    /// is a column this endpoint owns.
+    #[tokio::test]
+    async fn patch_cannot_write_the_version_column() {
+        let ctx = test_ctx().await;
+        let draft = seed_doc(
+            &ctx,
+            DocumentType::Terms,
+            "Draft Terms",
+            DocumentStatus::Draft,
+            1,
+        )
+        .await;
+
+        let out = LegalPagesBlock::new()
+            .handle(
+                &ctx,
+                admin_msg(
+                    "update",
+                    &format!("/b/legalpages/api/documents/{}", draft.id),
+                ),
+                InputStream::from_bytes(br#"{"version":99}"#.to_vec()),
+            )
+            .await;
+
+        assert_eq!(output_http_status(out).await, 400);
+        assert_eq!(stored(&ctx, &draft.id).await.version, 1);
+    }
+
+    /// The editor's save handler on a *published* document still forks a new
+    /// draft rather than editing the live text — the `Ok(Some)` branch that
+    /// the three-way match had to keep.
+    #[tokio::test]
+    async fn saving_a_published_document_creates_a_draft() {
+        let ctx = test_ctx().await;
+        let live = seed_doc(
+            &ctx,
+            DocumentType::Terms,
+            "Live Terms",
+            DocumentStatus::Published,
+            2,
+        )
+        .await;
+
+        let body = serde_json::to_vec(&serde_json::json!({
+            "doc_type": "terms",
+            "title": "Live Terms",
+            "content": "an edit",
+            "doc_id": live.id,
+            "version": 2,
+        }))
+        .expect("serialize save body");
+        let out = pages::handle_save(
+            &ctx,
+            &admin_msg("create", "/b/legalpages/admin/save"),
+            InputStream::from_bytes(body),
+        )
+        .await;
+        assert_eq!(output_http_status(out).await, 200);
+
+        assert_eq!(row_count(&ctx).await, 2, "a new draft was created");
+        let untouched = stored(&ctx, &live.id).await;
+        assert_eq!(untouched.status, DocumentStatus::Published);
+        assert_eq!(untouched.content, "body", "the live text is untouched");
+    }
+
+    /// Saving a *draft* edits it in place. Two saves in a row must leave one
+    /// row, not three.
+    #[tokio::test]
+    async fn saving_a_draft_edits_it_in_place() {
+        let ctx = test_ctx().await;
+        let draft = seed_doc(
+            &ctx,
+            DocumentType::Terms,
+            "Draft Terms",
+            DocumentStatus::Draft,
+            1,
+        )
+        .await;
+
+        for text in ["first edit", "second edit"] {
+            let body = serde_json::to_vec(&serde_json::json!({
+                "doc_type": "terms",
+                "title": "Draft Terms",
+                "content": text,
+                "doc_id": draft.id,
+                "version": 1,
+            }))
+            .expect("serialize save body");
+            let out = pages::handle_save(
+                &ctx,
+                &admin_msg("create", "/b/legalpages/admin/save"),
+                InputStream::from_bytes(body),
+            )
+            .await;
+            assert_eq!(output_http_status(out).await, 200);
+        }
+
+        assert_eq!(row_count(&ctx).await, 1);
+        assert_eq!(stored(&ctx, &draft.id).await.content, "second edit");
+    }
+
+    /// Both surfaces that resolve "the published document of this type" now
+    /// go through one repo function, so a type that legacy data left with two
+    /// published rows resolves to the same one on both. `version` desc is the
+    /// order that answers "the latest published version".
+    #[tokio::test]
+    async fn the_public_page_and_the_editor_agree_on_which_row_is_published() {
+        use crate::test_support::{anon_msg, output_html};
+
+        let ctx = test_ctx().await;
+        seed_doc(
+            &ctx,
+            DocumentType::Terms,
+            "Older Terms",
+            DocumentStatus::Published,
+            1,
+        )
+        .await;
+        seed_doc(
+            &ctx,
+            DocumentType::Terms,
+            "Newer Terms",
+            DocumentStatus::Published,
+            9,
+        )
+        .await;
+
+        let public = output_html(
+            LegalPagesBlock::new()
+                .handle(
+                    &ctx,
+                    anon_msg("retrieve", "/b/legalpages/terms"),
+                    InputStream::from_bytes(Vec::new()),
+                )
+                .await,
+        )
+        .await;
+        assert!(public.contains("Newer Terms"), "{public}");
+
+        let editor = output_html(
+            pages::editor_page(
+                &ctx,
+                &admin_msg("retrieve", "/b/legalpages/admin/terms"),
+                DocumentType::Terms,
+            )
+            .await,
+        )
+        .await;
+        assert!(editor.contains("Newer Terms"), "{editor}");
+    }
+
+    /// The public page's theming comes out of config, so the block has to be
+    /// allowed to call the config block.
+    ///
+    /// Found by the requires sweep that Bug 2 (the files block calling
+    /// `wafer-run/crypto` undeclared) prompted: this block reads four config
+    /// keys in `handle_get_public` while `info().requires` named only
+    /// `wafer-run/database`, so the runtime refused every one of those calls
+    /// at the `call_block` boundary and the page rendered unthemed. A refused
+    /// read now fails the page instead, so without the entry this test sees
+    /// an error rather than an unthemed page.
+    ///
+    /// The fixture must run as the block (`running_as`) or the bug is
+    /// invisible here exactly as it was invisible in CI: the fixture's own
+    /// frame is unrestricted.
+    #[tokio::test]
+    async fn the_public_page_reads_its_theming_config() {
+        use crate::test_support::{anon_msg, output_html};
+
+        let mut ctx = test_ctx().await;
+        ctx.set_config(BG_COLOR_KEY, "#123456");
+        let ctx = ctx.running_as(LegalPagesBlock::BLOCK_NAME);
+        seed_doc(
+            &ctx,
+            DocumentType::Terms,
+            "Published Terms",
+            DocumentStatus::Published,
+            1,
+        )
+        .await;
+
+        let html = output_html(
+            LegalPagesBlock::new()
+                .handle(
+                    &ctx,
+                    anon_msg("retrieve", "/b/legalpages/terms"),
+                    InputStream::from_bytes(Vec::new()),
+                )
+                .await,
+        )
+        .await;
+
+        assert!(
+            html.contains("#123456"),
+            "the configured background colour must reach the rendered page: {html}"
+        );
+    }
 }
 
 #[cfg(test)]
@@ -832,11 +1493,11 @@ mod tests {
     #[test]
     fn editor_page_uses_textarea_not_contenteditable() {
         let markup = super::pages::editor_markup_for_test(
-            "terms",
+            DocumentType::Terms,
             "doc-123",
             "Terms of Service",
             "# heading\n\nbody",
-            "draft",
+            Some(contracts::DocumentStatus::Draft),
             "2026-05-19T00:00:00Z",
             1,
         );
@@ -845,7 +1506,155 @@ mod tests {
         assert!(!s.contains("contenteditable"), "no contenteditable allowed");
         assert!(s.contains(r#"data-tab="edit""#));
         assert!(s.contains(r#"data-tab="preview""#));
-        // Vanilla JS fetch path — URL lives in EDITOR_JS / onclick handler
+        // Vanilla JS fetch path — the URL lives in EDITOR_JS, reached
+        // through the delegated `legalpages-editor-tab` action
         assert!(s.contains("/b/legalpages/admin/render-preview"));
+    }
+}
+
+#[cfg(test)]
+mod table_tests {
+    use wafer_run::Block as _;
+
+    use super::*;
+
+    /// `info().endpoints` is generated from `ROUTES`; nothing else declares
+    /// an endpoint for this block.
+    #[test]
+    fn info_endpoints_come_from_the_table() {
+        let declared = LegalPagesBlock::new().info().endpoints;
+        assert_eq!(declared.len(), ROUTES.len());
+        for (ep, row) in declared.iter().zip(ROUTES) {
+            assert_eq!(ep.method, row.method, "{}", row.template);
+            assert_eq!(ep.path, row.template);
+            assert_eq!(ep.auth, row.auth, "{}", row.template);
+        }
+    }
+
+    /// The JSON handlers read the id the table bound, nothing else: an
+    /// unrouted message with an id in its path is refused, and the same
+    /// message routed through `ROUTES` binds the id.
+    #[tokio::test]
+    async fn publish_reads_only_the_bound_id() {
+        use crate::test_support::{admin_msg, output_is_error, TestContext};
+
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::legalpages::LegalPagesBlock::BLOCK_NAME);
+        let path = "/b/legalpages/api/documents/doc-7/publish";
+
+        let unrouted = LegalPagesBlock::new()
+            .handle_admin_publish(&ctx, &admin_msg("update", path))
+            .await;
+        assert!(
+            output_is_error(unrouted, "InvalidArgument").await,
+            "an unrouted message binds no id and must be refused, not parsed"
+        );
+
+        let mut msg = admin_msg("update", path);
+        assert!(matches!(
+            endpoint_match::dispatch(&mut msg, ROUTES),
+            Some(Route::ApiPublish)
+        ));
+        assert_eq!(msg.var("id"), "doc-7");
+    }
+
+    /// A WRAP refusal on the document read is a **403**, not the
+    /// `500 Internal server error (ref: …)` the old `Err(e) => err_internal`
+    /// tail produced. Before `crud::db_error` there was no arm in this repo
+    /// that could tell a missing grant from a corrupt row.
+    #[tokio::test]
+    async fn a_denied_document_read_is_403_not_500() {
+        use crate::test_support::{admin_msg, output_http_status, TestContext};
+
+        let ctx = TestContext::with_auth().await.running_as("test/ungranted");
+        let mut msg = admin_msg("retrieve", "/b/legalpages/api/documents/doc-7");
+        assert!(matches!(
+            endpoint_match::dispatch(&mut msg, ROUTES),
+            Some(Route::ApiGet)
+        ));
+
+        let out = LegalPagesBlock::new().handle_admin_get(&ctx, &msg).await;
+        assert_eq!(output_http_status(out).await, 403);
+    }
+
+    /// `doc_type` reached the column straight from the request body, and the
+    /// two routes that serve a document are hardcoded to `terms` and
+    /// `privacy` — so `{"doc_type":"cookies"}` created a row that every
+    /// public route 404s and no editor page can reach. It is a 400 now, and
+    /// the two spellings the block serves are the two `DocumentType`
+    /// defines.
+    #[tokio::test]
+    async fn a_doc_type_no_route_can_serve_is_refused() {
+        use crate::test_support::{admin_msg, output_http_status};
+
+        let ctx = test_ctx().await;
+        let body = serde_json::json!({
+            "doc_type": "cookies",
+            "title": "Cookie Policy",
+            "content": "# Cookies",
+        });
+        let out = LegalPagesBlock::new()
+            .handle_admin_create(
+                &ctx,
+                &admin_msg("create", "/b/legalpages/api/documents"),
+                InputStream::from_bytes(serde_json::to_vec(&body).expect("body")),
+            )
+            .await;
+        assert_eq!(output_http_status(out).await, 400);
+        assert_eq!(
+            documents::count(&ctx).await.expect("count"),
+            0,
+            "an unservable doc_type must not reach the table"
+        );
+
+        // The two the block does serve still create.
+        for doc_type in ["terms", "privacy"] {
+            let body = serde_json::json!({
+                "doc_type": doc_type,
+                "title": "T",
+                "content": "# T",
+            });
+            let out = LegalPagesBlock::new()
+                .handle_admin_create(
+                    &ctx,
+                    &admin_msg("create", "/b/legalpages/api/documents"),
+                    InputStream::from_bytes(serde_json::to_vec(&body).expect("body")),
+                )
+                .await;
+            assert_eq!(output_http_status(out).await, 200, "{doc_type} must create");
+        }
+    }
+
+    /// The editor's save and publish handlers take `doc_type` from their own
+    /// body, so they are a second door onto the same column.
+    #[tokio::test]
+    async fn the_editor_refuses_a_doc_type_no_route_can_serve() {
+        use crate::test_support::{admin_msg, output_http_status};
+
+        let ctx = test_ctx().await;
+        let body = serde_json::to_vec(&serde_json::json!({
+            "doc_type": "cookies",
+            "title": "Cookie Policy",
+            "content": "# Cookies",
+        }))
+        .expect("body");
+
+        let saved = pages::handle_save(
+            &ctx,
+            &admin_msg("create", "/b/legalpages/admin/save"),
+            InputStream::from_bytes(body.clone()),
+        )
+        .await;
+        assert_eq!(output_http_status(saved).await, 400);
+
+        let published = pages::handle_publish(
+            &ctx,
+            &admin_msg("create", "/b/legalpages/admin/publish"),
+            InputStream::from_bytes(body),
+        )
+        .await;
+        assert_eq!(output_http_status(published).await, 400);
+        assert_eq!(documents::count(&ctx).await.expect("count"), 0);
     }
 }

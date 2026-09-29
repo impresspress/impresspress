@@ -130,6 +130,13 @@ pub fn server_timing_header(outcome: CacheOutcome) -> String {
 /// signals that occur off the response path — inside `ctx.wait_until`
 /// closures, after the response has already been sent — which can never
 /// reach a `Server-Timing` header.
+///
+/// Values are logfmt-quoted when they need it (see [`quote_value`]). Several
+/// of the values this is called with are not token-shaped and never were: an
+/// error message is a sentence, and a cron expression is five fields separated
+/// by spaces. Emitted bare, the first space ends the field and everything
+/// after it parses as further keyless junk — one corrupt line, every time,
+/// for exactly the signals an operator reaches for when something is wrong.
 pub fn metric_line(name: &str, fields: &[(&str, &str)]) -> String {
     let mut out = String::with_capacity(8 + name.len());
     out.push_str("metric=");
@@ -138,9 +145,41 @@ pub fn metric_line(name: &str, fields: &[(&str, &str)]) -> String {
         out.push(' ');
         out.push_str(k);
         out.push('=');
-        out.push_str(v);
+        quote_value(v, &mut out);
     }
     out
+}
+
+/// Append one logfmt value: bare when it is a bare token, double-quoted with
+/// `\` and `"` escaped otherwise.
+///
+/// Quoting on need rather than always keeps the common case — counts, ids,
+/// booleans, cache labels — byte-identical to what this emitted before, so the
+/// numeric fields stay as greppable as they were.
+fn quote_value(value: &str, out: &mut String) {
+    let needs_quoting = value.is_empty()
+        || value
+            .chars()
+            .any(|c| c.is_whitespace() || c == '"' || c == '\\' || c == '=');
+    if !needs_quoting {
+        out.push_str(value);
+        return;
+    }
+    out.push('"');
+    for c in value.chars() {
+        if c == '"' || c == '\\' {
+            out.push('\\');
+        }
+        // A literal newline would split one metric line into two, the second
+        // of which has no `metric=` prefix and would be read as an unrelated
+        // log line. Escape the ASCII line breaks rather than emit them.
+        match c {
+            '\n' => out.push_str("\\n"),
+            '\r' => out.push_str("\\r"),
+            other => out.push(other),
+        }
+    }
+    out.push('"');
 }
 
 #[cfg(test)]
@@ -235,5 +274,44 @@ mod tests {
             metric_line("config_version_retry_failed", &[]),
             "metric=config_version_retry_failed"
         );
+    }
+
+    /// The two values this is most often called with — a cron expression and
+    /// an error message — both contain spaces. Bare, the first space would end
+    /// the field and the rest of the value would parse as keyless junk, so
+    /// every line carrying one would be unparseable.
+    #[test]
+    fn values_with_spaces_are_quoted_rather_than_splitting_the_line() {
+        assert_eq!(
+            metric_line(
+                "auth_maintenance_sweep",
+                &[("cron", "17 3 * * *"), ("sessions_deleted", "4")]
+            ),
+            r#"metric=auth_maintenance_sweep cron="17 3 * * *" sessions_deleted=4"#
+        );
+        assert_eq!(
+            metric_line(
+                "auth_maintenance_sweep_failed",
+                &[("error", "D1_ERROR: no such table")]
+            ),
+            r#"metric=auth_maintenance_sweep_failed error="D1_ERROR: no such table""#
+        );
+    }
+
+    #[test]
+    fn quoting_escapes_what_would_otherwise_end_the_value_or_the_line() {
+        assert_eq!(
+            metric_line("t", &[("v", r#"say "hi" \ bye"#)]),
+            r#"metric=t v="say \"hi\" \\ bye""#
+        );
+        assert_eq!(
+            metric_line("t", &[("v", "line one\nline two")]),
+            r#"metric=t v="line one\nline two""#
+        );
+        // An empty value is quoted too: `errors=` reads as a truncated line,
+        // `errors=""` as the successful sweep it actually is.
+        assert_eq!(metric_line("t", &[("errors", "")]), r#"metric=t errors="""#);
+        // `=` inside a value would look like the start of the next field.
+        assert_eq!(metric_line("t", &[("v", "a=b")]), r#"metric=t v="a=b""#);
     }
 }

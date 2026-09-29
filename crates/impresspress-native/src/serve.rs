@@ -4,8 +4,8 @@
 //! The shape is deliberately two-phase: `register_http_listener` attaches
 //! the `wafer-run/http-listener` block before start; `serve_until_shutdown`
 //! awaits a ctrl-c / SIGTERM signal and shuts the runtime down. Splitting
-//! them lets the consumer run post-start hooks (e.g., WRAP grant
-//! injection) between `wafer.start()` and the shutdown wait.
+//! them lets the consumer boot the runtime (seal, `Init`, the `Start`
+//! lifecycle, the socket bind) between the two.
 
 use std::sync::Arc;
 
@@ -15,22 +15,38 @@ use anyhow::{Context, Result};
 wafer_block::use_static_blocks!(wafer_block_http_listener);
 use wafer_run::Wafer;
 
+use crate::env::ListenerEnv;
+
 /// Register the `wafer-run/http-listener` block on `wafer` and configure
-/// it to bind `listen_addr` and dispatch through `flow_id`. Must be called
-/// before `wafer.start()`.
+/// it to bind `listen_addr`, dispatch through `flow_id`, and apply the
+/// settings `listener` holds. Must be called before `wafer.start()`.
 ///
 /// `flow_id` is the flow the listener hands requests to (e.g. `"site-main"`
 /// for impresspress, but downstream consumers of this library pick their
 /// own flow name).
-pub fn register_http_listener(wafer: &mut Wafer, listen_addr: &str, flow_id: &str) {
+pub fn register_http_listener(
+    wafer: &mut Wafer,
+    listen_addr: &str,
+    flow_id: &str,
+    listener: &ListenerEnv,
+) {
     // wafer-run/http-listener self-registers via register_static_block! in
-    // wafer-block-http-listener. The `use wafer_block_http_listener as _`
-    // above ensures the linker includes its .o file. We only need to set
-    // the block config here.
+    // wafer-block-http-listener. The `use_static_blocks!` above ensures the
+    // linker includes its .o file. We only need to set the block config here.
     wafer.add_block_config(
         "wafer-run/http-listener",
-        serde_json::json!({ "flow": flow_id, "listen": listen_addr }),
+        listener_config(listen_addr, flow_id, listener),
     );
+}
+
+/// The listener's block config: `flow`, `listen`, and only the settings the
+/// operator set, so every unset one keeps the listener's own default.
+fn listener_config(listen_addr: &str, flow_id: &str, listener: &ListenerEnv) -> serde_json::Value {
+    let mut config = serde_json::json!({ "flow": flow_id, "listen": listen_addr });
+    for (key, value) in listener.set() {
+        config[key] = serde_json::Value::String(value.to_string());
+    }
+    config
 }
 
 /// Await a graceful-shutdown signal (ctrl-c or SIGTERM on Unix), then call

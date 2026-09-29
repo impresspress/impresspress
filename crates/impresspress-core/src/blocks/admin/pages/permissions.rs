@@ -1,10 +1,13 @@
 use maud::{html, Markup};
-use wafer_core::clients::database as db;
+use wafer_block::GrantWrite;
 use wafer_run::{context::Context, Message, OutputStream};
 
 use crate::{
-    blocks::admin::WRAP_GRANTS_TABLE as WRAP_GRANTS,
-    ui::{components, icons},
+    platform_state::wrap_grants,
+    ui::{
+        components::{self, badge, Badge, BadgeVariant},
+        icons,
+    },
 };
 
 /// Render JUST the permissions settings body. The parent `settings_page`
@@ -15,14 +18,28 @@ use crate::{
 ///
 /// Internal sub-tabs use `?subtab=database|all` to avoid colliding with
 /// the parent path-segment tab system (`/settings/{tab}`).
-pub async fn settings_body(ctx: &dyn Context, msg: &Message) -> Markup {
+///
+/// Returns `Err` when the custom-grant read behind either subtab fails.
+/// "No custom grants" reads as "no one has been given extra access", which
+/// is the most misleading sentence this admin surface can print, so the
+/// parent renders the error page instead of it.
+pub async fn settings_body(
+    ctx: &dyn Context,
+    msg: &Message,
+) -> Result<Markup, wafer_run::WaferError> {
     let subtab = msg.query("subtab");
     let active_subtab = match subtab {
         "database" => "database",
         _ => "all",
     };
 
-    html! {
+    let content = if active_subtab == "database" {
+        permissions_database_tab(ctx, msg).await?
+    } else {
+        permissions_all_tab(ctx, msg).await?
+    };
+
+    Ok(html! {
         (components::tab_navigation(vec![
             components::Tab {
                 active: active_subtab == "all",
@@ -39,13 +56,9 @@ pub async fn settings_body(ctx: &dyn Context, msg: &Message) -> Markup {
         ]))
 
         div #permissions-content {
-            @if active_subtab == "database" {
-                (permissions_database_tab(ctx, msg).await)
-            } @else {
-                (permissions_all_tab(ctx, msg).await)
-            }
+            (content)
         }
-    }
+    })
 }
 
 /// Full settings page for permissions — used by WRAP grant mutation handlers
@@ -54,6 +67,31 @@ pub async fn settings_body(ctx: &dyn Context, msg: &Message) -> Markup {
 /// `settings_page` so both call paths share one composition.
 pub async fn permissions_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     super::settings::settings_page(ctx, msg, "permissions").await
+}
+
+/// The access a grant confers, as the grant tables badge it.
+fn access_badge(write: GrantWrite) -> Markup {
+    match write {
+        GrantWrite::Full => badge(BadgeVariant::Danger, "read + write"),
+        GrantWrite::Append => badge(BadgeVariant::Warning, "append only"),
+        GrantWrite::None => badge(BadgeVariant::Success, "read only"),
+    }
+}
+
+/// A code-declared grant as the "All" tab words it: the grantee, what it may
+/// do, and whose resource — `block` declared the grant, so the resource is
+/// the owning block's.
+fn code_grant_sentence(grantee: &str, verb: &str, owner: &str, resource: &str) -> String {
+    format!("{grantee} {verb} {owner}'s {resource}")
+}
+
+/// The access a grant confers, as the permissions summary words it.
+fn access_verb(write: GrantWrite) -> &'static str {
+    match write {
+        GrantWrite::Full => "can read and write",
+        GrantWrite::Append => "can only add rows to",
+        GrantWrite::None => "can read",
+    }
 }
 
 pub async fn grants_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
@@ -65,146 +103,122 @@ fn grants_code_tab(ctx: &dyn Context) -> Markup {
 
     html! {
         div .card .mt-4 {
-            div .card-header {
-                h3 .card-title { "Grants Declared in Code" }
-                p .text-muted .text-13 {
-                    "These grants are declared in block source code via BlockInfo.grants and cannot be modified here."
+            header .card__head {
+                div {
+                    h3 .card__title { "Grants Declared in Code" }
+                    p .card__subtitle {
+                        "These grants are declared in block source code via BlockInfo.grants and cannot be modified here."
+                    }
                 }
             }
             div .card__body {
-                table .table {
-                    thead {
-                        tr {
-                            th { "Block (Owner)" }
-                            th { "Grantee" }
-                            th { "Type" }
-                            th { "Resource Pattern" }
-                            th { "Access" }
-                        }
-                    }
-                    tbody {
-                        @for block in blocks {
-                            @for grant in &block.grants {
-                                tr {
-                                    td {
-                                        span .badge .badge-info { (block.name) }
-                                    }
-                                    td {
-                                        @if grant.grantee == "*" {
-                                            span .badge .badge-warning { "* (all blocks)" }
-                                        } @else {
-                                            code { (grant.grantee) }
-                                        }
-                                    }
-                                    td {
-                                        @if let Some(ref rt) = grant.resource_type {
-                                            span .badge .badge-info .text-11 { (rt) }
-                                        } @else {
-                                            span .badge .badge-secondary .text-11 { "all" }
-                                        }
-                                    }
-                                    td {
-                                        code .text-xs { (grant.resource) }
-                                    }
-                                    td {
-                                        @if grant.write {
-                                            span .badge .badge-danger { "read + write" }
-                                        } @else {
-                                            span .badge .badge-success { "read only" }
-                                        }
-                                    }
-                                }
+                @let rows: Vec<Vec<Markup>> = blocks.iter().flat_map(|block| {
+                    block.grants.iter().map(move |grant| vec![
+                        Badge::new(BadgeVariant::Info).render(components::breakable_id(&block.name)),
+                        html! {
+                            @if grant.grantee == "*" {
+                                (badge(BadgeVariant::Warning, "* (all blocks)"))
+                            } @else {
+                                code { (components::breakable_id(&grant.grantee)) }
                             }
-                        }
-                    }
-                }
+                        },
+                        html! {
+                            @if let Some(ref rt) = grant.resource_type {
+                                (Badge::new(BadgeVariant::Info).classes("text-11").render(html! { (rt) }))
+                            } @else {
+                                (Badge::new(BadgeVariant::Secondary).classes("text-11").render(html! { "all" }))
+                            }
+                        },
+                        html! { code .text-xs { (components::breakable_id(&grant.resource)) } },
+                        html! {
+                            (access_badge(grant.write))
+                        },
+                    ])
+                }).collect();
+
+                (components::data_table::<fn(usize) -> Option<String>>(
+                    &CODE_GRANT_COLUMNS,
+                    rows,
+                    None,
+                    // The raw table this replaced rendered its header over an
+                    // empty body when no block declared a grant, which read as
+                    // a broken table. The component renders the empty slot in
+                    // place of the whole table, so the slot has to say it.
+                    html! { p .text-center .text-muted { "No grants are declared in block source code." } },
+                ))
             }
         }
     }
 }
 
-pub(crate) async fn grants_custom_tab(ctx: &dyn Context, _msg: &Message) -> Markup {
-    let grants = db::list_all(ctx, WRAP_GRANTS, vec![])
-        .await
-        .unwrap_or_default();
+pub(crate) async fn grants_custom_tab(
+    ctx: &dyn Context,
+    _msg: &Message,
+) -> Result<Markup, wafer_run::WaferError> {
+    let grants = wrap_grants::list(ctx).await?;
 
     // Collect registered block names for the grantee dropdown
     let blocks = ctx.registered_blocks();
     let block_names: Vec<&str> = blocks.iter().map(|b| b.name.as_str()).collect();
 
-    html! {
+    Ok(html! {
         div .card .mt-4 {
-            div .card-header .flex .items-center .justify-between {
+            header .card__head {
                 div {
-                    h3 .card-title { "Custom Grants" }
-                    p .text-muted .text-13 {
+                    h3 .card__title { "Custom Grants" }
+                    p .card__subtitle {
                         "Add grants for third-party or WASM blocks. These are loaded at startup alongside code-declared grants."
                     }
                 }
-                button .btn .btn--primary .btn--sm onclick="openModal('add-grant-modal')" {
-                    (icons::plus()) " Add Grant"
+                div .card__actions {
+                    button .btn .btn--primary .btn--sm data-action="modal-open" data-modal-target="add-grant-modal" {
+                        (icons::plus()) " Add Grant"
+                    }
                 }
             }
             div .card__body {
                 @if grants.is_empty() {
                     p .text-muted { "No custom grants configured." }
                 } @else {
-                    table .table {
-                        thead {
-                            tr {
-                                th { "Grantee" }
-                                th { "Type" }
-                                th { "Resource Pattern" }
-                                th { "Access" }
-                                th { "Description" }
-                                th .w-60 {}
-                            }
-                        }
-                        tbody {
-                            @for grant in &grants {
-                                @let id = &grant.id;
-                                @let grantee = grant.data.get("grantee").and_then(|v| v.as_str()).unwrap_or("");
-                                @let resource = grant.data.get("resource").and_then(|v| v.as_str()).unwrap_or("");
-                                @let write = grant.data.get("write").map(|v| v.as_i64().unwrap_or(0) != 0 || v.as_str() == Some("1")).unwrap_or(false);
-                                @let rt = grant.data.get("resource_type").and_then(|v| v.as_str()).unwrap_or("");
-                                @let description = grant.data.get("description").and_then(|v| v.as_str()).unwrap_or("");
-                                tr {
-                                    td {
-                                        @if grantee == "*" {
-                                            span .badge .badge-warning { "* (all blocks)" }
-                                        } @else {
-                                            code { (grantee) }
-                                        }
-                                    }
-                                    td {
-                                        @if rt.is_empty() {
-                                            span .badge .badge-secondary .text-11 { "all" }
-                                        } @else {
-                                            span .badge .badge-info .text-11 { (rt) }
-                                        }
-                                    }
-                                    td {
-                                        code .text-xs { (resource) }
-                                    }
-                                    td {
-                                        @if write {
-                                            span .badge .badge-danger { "read + write" }
-                                        } @else {
-                                            span .badge .badge-success { "read only" }
-                                        }
-                                    }
-                                    td .text-13 { (description) }
-                                    td {
-                                        button .btn .btn--danger .btn--sm
-                                            hx-delete={"/b/admin/grants/rules/" (id)}
-                                            hx-target="#content"
-                                            hx-confirm="Delete this grant?"
-                                        { (icons::trash()) }
-                                    }
+                    @let rows: Vec<Vec<Markup>> = grants.iter().map(|grant| {
+                        let grantee = grant.grantee.as_str();
+                        let rt = grant.resource_type.as_str();
+                        vec![
+                            html! {
+                                @if grantee == "*" {
+                                    (badge(BadgeVariant::Warning, "* (all blocks)"))
+                                } @else {
+                                    code { (components::breakable_id(grantee)) }
                                 }
-                            }
-                        }
-                    }
+                            },
+                            html! {
+                                @if rt.is_empty() {
+                                    (Badge::new(BadgeVariant::Secondary).classes("text-11").render(html! { "all" }))
+                                } @else {
+                                    (Badge::new(BadgeVariant::Info).classes("text-11").render(html! { (rt) }))
+                                }
+                            },
+                            html! { code .text-xs { (components::breakable_id(&grant.resource)) } },
+                            html! {
+                                (access_badge(grant.write))
+                            },
+                            html! { span .text-13 { (grant.description) } },
+                            html! {
+                                button .btn .btn--danger .btn--sm
+                                    hx-delete={"/b/admin/grants/rules/" (grant.id)}
+                                    hx-target="#content"
+                                    hx-confirm="Delete this grant?"
+                                { (icons::trash()) }
+                            },
+                        ]
+                    }).collect();
+
+                    (components::data_table::<fn(usize) -> Option<String>>(
+                        &CUSTOM_GRANT_COLUMNS,
+                        rows,
+                        None,
+                        html! {},
+                    ))
                 }
             }
         }
@@ -227,7 +241,7 @@ pub(crate) async fn grants_custom_tab(ctx: &dyn Context, _msg: &Message) -> Mark
                         })
                     })
                     .collect();
-                serde_json::to_string(&block_data).unwrap_or_default()
+                crate::ui::script_json_escape(&serde_json::to_string(&block_data).unwrap_or_default())
             }))
             (maud::PreEscaped(r#";
             function updateGrantForm() {
@@ -279,9 +293,24 @@ pub(crate) async fn grants_custom_tab(ctx: &dyn Context, _msg: &Message) -> Mark
                         specificSelect.appendChild(opt);
                     });
                     resourceEl.value = specificSelect.value;
-                    specificSelect.onchange = function() { resourceEl.value = this.value; };
                 }
             }
+            // Guarded: this tab is reached by an htmx partial swap, which
+            // returns the body verbatim (`ui/mod.rs:226`) and re-executes the
+            // scripts in it against a `document` that outlived the swap. The
+            // `grantBlocks` assignment and the function declaration above are
+            // deliberately outside the guard -- they must be refreshed on
+            // every swap, and re-running them is idempotent. Only the
+            // registration accumulates.
+            (function () {
+                if (window.__grantFormDelegated) return;
+                window.__grantFormDelegated = true;
+                document.addEventListener('change', function (e) {
+                    var el = e.target;
+                    if (!(el instanceof Element)) return;
+                    if (el.getAttribute('data-action') === 'grant-form-update') updateGrantForm();
+                });
+            })();
             "#))
         }
 
@@ -303,7 +332,7 @@ pub(crate) async fn grants_custom_tab(ctx: &dyn Context, _msg: &Message) -> Mark
                 div .form-group {
                     label .form-label for="grant_owner" { "Access to which block's data?" }
                     select .form-input #grant_owner
-                        onchange="updateGrantForm()"
+                        data-action="grant-form-update"
                     {
                         option value="" disabled selected { "Select the data owner..." }
                         @for b in blocks.iter().filter(|b| b.name.contains('/')) {
@@ -317,7 +346,7 @@ pub(crate) async fn grants_custom_tab(ctx: &dyn Context, _msg: &Message) -> Mark
                 div .form-group {
                     label .form-label for="resource_type" { "What kind of data?" }
                     select .form-input #resource_type name="resource_type"
-                        onchange="updateGrantForm()"
+                        data-action="grant-form-update"
                     {
                         option value="" { "All (database + config + storage)" }
                         option value="db" { "Database tables" }
@@ -329,7 +358,7 @@ pub(crate) async fn grants_custom_tab(ctx: &dyn Context, _msg: &Message) -> Mark
                 div .form-group {
                     label .form-label for="grant_scope" { "How much access?" }
                     select .form-input #grant_scope
-                        onchange="updateGrantForm()"
+                        data-action="grant-form-update"
                     {
                         option value="all" { "All resources of this type" }
                         option value="specific" { "A specific resource" }
@@ -337,7 +366,12 @@ pub(crate) async fn grants_custom_tab(ctx: &dyn Context, _msg: &Message) -> Mark
                 }
                 div .form-group #specific_group hidden {
                     label .form-label for="specific_resource" { "Pick a resource" }
-                    select .form-input #specific_resource {}
+                    // Its value IS the computed resource pattern, so it mirrors
+                    // straight into the hidden `#resource` field below. That
+                    // used to be an `el.onchange = function() {…}` assignment
+                    // handed out each time the dropdown was repopulated.
+                    select .form-input #specific_resource
+                        data-action="mirror-value" data-mirror-target="resource" {}
                 }
                 // Hidden field that holds the computed resource pattern
                 input type="hidden" #resource name="resource";
@@ -356,12 +390,12 @@ pub(crate) async fn grants_custom_tab(ctx: &dyn Context, _msg: &Message) -> Mark
                         placeholder="e.g. Analytics block needs to read user profiles";
                 }
                 div .form-actions {
-                    button .btn .btn--secondary type="button" onclick="closeModal('add-grant-modal')" { "Cancel" }
+                    button .btn .btn--secondary type="button" data-action="modal-close" data-modal-target="add-grant-modal" { "Cancel" }
                     button .btn .btn--primary type="submit" { "Add Grant" }
                 }
             }
         }))
-    }
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -405,7 +439,10 @@ struct PermRow {
 
 /// "All" tab: combines code-declared and custom WRAP grants into one
 /// unified table with human-readable descriptions.
-async fn permissions_all_tab(ctx: &dyn Context, _msg: &Message) -> Markup {
+async fn permissions_all_tab(
+    ctx: &dyn Context,
+    _msg: &Message,
+) -> Result<Markup, wafer_run::WaferError> {
     let blocks = ctx.registered_blocks();
 
     // 1. Code grants (from block declarations)
@@ -422,12 +459,8 @@ async fn permissions_all_tab(ctx: &dyn Context, _msg: &Message) -> Markup {
             } else {
                 grant.grantee.clone()
             };
-            let verb = if grant.write {
-                "can read and write"
-            } else {
-                "can read"
-            };
-            let sentence = format!("{} {} {}' {}", grantee, verb, block.name, grant.resource);
+            let verb = access_verb(grant.write);
+            let sentence = code_grant_sentence(&grantee, verb, &block.name, &grant.resource);
             all_rows.push(PermRow {
                 type_label,
                 sentence,
@@ -438,31 +471,14 @@ async fn permissions_all_tab(ctx: &dyn Context, _msg: &Message) -> Markup {
         }
     }
 
-    // 2. Custom DB grants
-    let custom_grants = db::list_all(ctx, WRAP_GRANTS, vec![])
-        .await
-        .unwrap_or_default();
+    // 2. Custom DB grants. An unreadable grant table used to be dropped here
+    // and the page then rendered only the code-declared rows, so a custom
+    // grant an operator was auditing simply was not on the list.
+    let custom_grants = wrap_grants::list(ctx).await?;
     for grant in &custom_grants {
-        let grantee = grant
-            .data
-            .get("grantee")
-            .and_then(|v| v.as_str())
-            .unwrap_or("?");
-        let resource = grant
-            .data
-            .get("resource")
-            .and_then(|v| v.as_str())
-            .unwrap_or("?");
-        let write = grant
-            .data
-            .get("write")
-            .map(|v| v.as_i64().unwrap_or(0) != 0 || v.as_str() == Some("1"))
-            .unwrap_or(false);
-        let rt = grant
-            .data
-            .get("resource_type")
-            .and_then(|v| v.as_str())
-            .unwrap_or("");
+        let grantee = grant.grantee.as_str();
+        let resource = grant.resource.as_str();
+        let rt = grant.resource_type.as_str();
         let type_label = if rt.is_empty() {
             "DB/Config"
         } else {
@@ -473,11 +489,7 @@ async fn permissions_all_tab(ctx: &dyn Context, _msg: &Message) -> Markup {
         } else {
             grantee
         };
-        let verb = if write {
-            "can read and write"
-        } else {
-            "can read"
-        };
+        let verb = access_verb(grant.write);
         let sentence = format!("{grantee_display} {verb} {resource}");
         all_rows.push(PermRow {
             type_label: type_label.to_string(),
@@ -495,7 +507,7 @@ async fn permissions_all_tab(ctx: &dyn Context, _msg: &Message) -> Markup {
             .then_with(|| a.sort_key.cmp(&b.sort_key))
     });
 
-    html! {
+    Ok(html! {
         div .card .mt-4 {
             div .card__body {
                 @if all_rows.is_empty() {
@@ -503,50 +515,192 @@ async fn permissions_all_tab(ctx: &dyn Context, _msg: &Message) -> Markup {
                         "No permissions configured yet."
                     }
                 } @else {
-                    table .table {
-                        thead {
-                            tr {
-                                th .w-110 { "Type" }
-                                th { "Permission" }
-                                th .w-80 { "Origin" }
-                            }
-                        }
-                        tbody {
-                            @for row in &all_rows {
-                                tr {
-                                    td {
-                                        @let badge_class = match row.type_label.as_str() {
-                                            "DB" | "DB/Config" => "badge-info",
-                                            "Config" => "badge-info",
-                                            "Storage" => "badge-warning",
-                                            "Network" => "badge-success",
-                                            "Crypto" => "badge-secondary",
-                                            _ => "badge-secondary",
-                                        };
-                                        span .badge .(badge_class) .text-11 { (row.type_label) }
-                                    }
-                                    td .text-13 { (row.sentence) }
-                                    td {
-                                        @if row.origin == "code" {
-                                            span .badge .badge-secondary .text-10 { "code" }
-                                        } @else {
-                                            span .badge .badge-primary .text-10 { "custom" }
-                                        }
-                                    }
+                    @let rows: Vec<Vec<Markup>> = all_rows.iter().map(|row| {
+                        let variant = match row.type_label.as_str() {
+                            "DB" | "DB/Config" => BadgeVariant::Info,
+                            "Config" => BadgeVariant::Info,
+                            "Storage" => BadgeVariant::Warning,
+                            "Network" => BadgeVariant::Success,
+                            "Crypto" => BadgeVariant::Secondary,
+                            _ => BadgeVariant::Secondary,
+                        };
+                        vec![
+                            Badge::new(variant).classes("text-11").render(html! { (row.type_label) }),
+                            html! { span .text-13 { (row.sentence) } },
+                            html! {
+                                @if row.origin == "code" {
+                                    (Badge::new(BadgeVariant::Secondary).classes("text-10").render(html! { "code" }))
+                                } @else {
+                                    (Badge::new(BadgeVariant::Primary).classes("text-10").render(html! { "custom" }))
                                 }
-                            }
-                        }
-                    }
+                            },
+                        ]
+                    }).collect();
+
+                    (components::data_table::<fn(usize) -> Option<String>>(
+                        &PERMISSION_COLUMNS,
+                        rows,
+                        None,
+                        html! {},
+                    ))
                 }
             }
         }
-    }
+    })
 }
 
 /// "Database & Config" tab: wraps the existing grants_code_tab and grants_custom_tab.
-async fn permissions_database_tab(ctx: &dyn Context, msg: &Message) -> Markup {
-    html! {
-        (grants_custom_tab(ctx, msg).await)
+async fn permissions_database_tab(
+    ctx: &dyn Context,
+    msg: &Message,
+) -> Result<Markup, wafer_run::WaferError> {
+    let custom = grants_custom_tab(ctx, msg).await?;
+    Ok(html! {
+        (custom)
         (grants_code_tab(ctx))
+    })
+}
+
+/// The three permission tables' columns. Declared once each so the
+/// `<td data-label>` the component stamps on every cell names the same column
+/// its header does; the widths are the ones the old `th .w-60` / `.w-80` /
+/// `.w-110` utility classes gave those headers, and the unlabelled column is
+/// the one that only carries the delete control.
+const CODE_GRANT_COLUMNS: [components::TableCol<'static>; 5] = [
+    components::TableCol {
+        label: "Block (Owner)",
+        width: None,
+    },
+    components::TableCol {
+        label: "Grantee",
+        width: None,
+    },
+    components::TableCol {
+        label: "Type",
+        width: None,
+    },
+    components::TableCol {
+        label: "Resource Pattern",
+        width: None,
+    },
+    components::TableCol {
+        label: "Access",
+        width: None,
+    },
+];
+
+const CUSTOM_GRANT_COLUMNS: [components::TableCol<'static>; 6] = [
+    components::TableCol {
+        label: "Grantee",
+        width: None,
+    },
+    components::TableCol {
+        label: "Type",
+        width: None,
+    },
+    components::TableCol {
+        label: "Resource Pattern",
+        width: None,
+    },
+    components::TableCol {
+        label: "Access",
+        width: None,
+    },
+    components::TableCol {
+        label: "Description",
+        width: None,
+    },
+    components::TableCol {
+        label: "",
+        width: Some("60px"),
+    },
+];
+
+const PERMISSION_COLUMNS: [components::TableCol<'static>; 3] = [
+    components::TableCol {
+        label: "Type",
+        width: Some("110px"),
+    },
+    components::TableCol {
+        label: "Permission",
+        width: None,
+    },
+    components::TableCol {
+        label: "Origin",
+        width: Some("80px"),
+    },
+];
+
+#[cfg(test)]
+mod outage_tests {
+    //! Both permissions subtabs read the custom WRAP grants, and both used to
+    //! render an unreadable grant table as "no one has extra access" — the
+    //! single most misleading empty state on the admin surface.
+
+    use crate::{
+        blocks::admin::pages::settings::settings_page,
+        test_support::{admin_msg, output_http_status, TestContext},
+    };
+
+    #[tokio::test]
+    async fn a_failing_grant_read_renders_the_error_page_not_no_custom_grants() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID)
+            .break_reads();
+        let msg = admin_msg("retrieve", "/b/admin/settings/permissions");
+        assert_eq!(
+            output_http_status(settings_page(&ctx, &msg, "permissions").await).await,
+            500
+        );
+    }
+
+    #[tokio::test]
+    async fn a_failing_grant_read_fails_the_database_subtab_too() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID)
+            .break_reads();
+        let mut msg = admin_msg("retrieve", "/b/admin/settings/permissions");
+        msg.set_meta("req.query.subtab", "database");
+        assert_eq!(
+            output_http_status(settings_page(&ctx, &msg, "permissions").await).await,
+            500
+        );
+    }
+}
+
+#[cfg(test)]
+mod wording_tests {
+    use crate::{
+        blocks::admin::pages::settings::settings_page,
+        test_support::{admin_msg, output_html, TestContext},
+    };
+
+    /// The "All" tab words a code-declared grant as the grantee, what it may
+    /// do, and the owning block's resource. The possessive was written as a
+    /// bare apostrophe — "impresspress/admin' *" — on every code row.
+    #[tokio::test]
+    async fn a_code_grant_names_its_owner_with_a_possessive() {
+        use wafer_run::Block;
+
+        let mut ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        // The admin block's real declaration, so the rows are the grants it
+        // ships.
+        ctx.register_block_info(
+            crate::blocks::admin::ADMIN_BLOCK_ID,
+            crate::blocks::admin::AdminBlock::new().info(),
+        );
+        let msg = admin_msg("retrieve", "/b/admin/settings/permissions");
+        let html = output_html(settings_page(&ctx, &msg, "permissions").await).await;
+        // The admin block's network grant, whose resource is `*`: a platform
+        // table name here would bypass that table's repo door.
+        assert!(
+            html.contains("All blocks can read impresspress/admin's *"),
+            "{html}"
+        );
+        assert!(!html.contains("impresspress/admin' "), "{html}");
     }
 }

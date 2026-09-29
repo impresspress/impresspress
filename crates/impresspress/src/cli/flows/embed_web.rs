@@ -12,7 +12,7 @@ use crate::cli::{
 };
 
 pub async fn build(repo_root: &Path, release: bool) -> Result<()> {
-    let (cfg, _) = config::find_and_load(repo_root)?;
+    let (cfg, _) = config::find_and_load_required(repo_root)?;
 
     // 1. wafer build per block.
     blocks::build_all(repo_root).await?;
@@ -66,7 +66,7 @@ pub async fn serve(
     // accepted for CLI-symmetry but has nothing to do at this layer.
     build(repo_root, release).await?;
     let port = port.unwrap_or(8080);
-    let cfg = config::find_and_load(repo_root)?.0;
+    let cfg = config::find_and_load_required(repo_root)?.0;
     let dist = repo_root.join(&cfg.wasm.out_dir);
     eprintln!("serving {} on http://127.0.0.1:{port}", dist.display());
     http_server::serve_static(&dist, port).await

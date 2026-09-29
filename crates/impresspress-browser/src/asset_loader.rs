@@ -5,9 +5,6 @@
 //! listener is currently not shipped (ai-bridge.js was removed in the
 //! LLM refactor; no block in-tree declares external_assets, so
 //! `load_asset` is never invoked today).
-//!
-//! See `docs/superpowers/specs/2026-04-18-gizza-ai-design.md` §
-//! "External asset loading (host side)".
 
 use serde::{Deserialize, Serialize};
 use wafer_block::ExternalAsset;

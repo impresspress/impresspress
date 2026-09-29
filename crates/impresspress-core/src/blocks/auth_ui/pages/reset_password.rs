@@ -10,22 +10,19 @@ use crate::{
 };
 
 pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let logo_url = ctx
-        .config_get("WAFER_RUN_SHARED__AUTH_LOGO_URL")
-        .unwrap_or("")
-        .to_string();
-    let app_name = ctx
-        .config_get("WAFER_RUN_SHARED__APP_NAME")
-        .unwrap_or("Impresspress")
-        .to_string();
-    let auth_headline = ctx
-        .config_get("WAFER_RUN_SHARED__AUTH_HEADLINE")
-        .unwrap_or(crate::config_vars::DEFAULT_AUTH_HEADLINE)
-        .to_string();
-    let auth_tagline = ctx
-        .config_get("WAFER_RUN_SHARED__AUTH_TAGLINE")
-        .unwrap_or(crate::config_vars::DEFAULT_AUTH_TAGLINE)
-        .to_string();
+    // Through the async loader, not `ctx.config_get`: that snapshot is frozen
+    // at boot, so an admin's saved branding never reached this page without a
+    // restart, and on Cloudflare never reached it at all.
+    let site = match ui::SiteConfig::load_for_auth(ctx).await {
+        Ok(site) => site,
+        Err(e) => {
+            return crate::blocks::crud::db_error_page(msg, e, "page: site config read failed")
+        }
+    };
+    let logo_url = site.logo_url.clone();
+    let app_name = site.app_name.clone();
+    let auth_headline = site.auth_headline.clone();
+    let auth_tagline = site.auth_tagline;
 
     let token = msg.get_meta("req.query.token").to_string();
     if token.is_empty() {
@@ -40,11 +37,12 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
         );
     }
 
+    // Deliberately NOT `site` wholesale: this page has always rendered with a
+    // blank icon/primary colour and the stock favicon, and adopting the real
+    // ones here would be a visual change rather than the read-surface
+    // migration this is. Only the source of the four values it does use moves.
     let config = ui::SiteConfig {
-        app_name: ctx
-            .config_get("WAFER_RUN_SHARED__APP_NAME")
-            .unwrap_or("Impresspress")
-            .to_string(),
+        app_name,
         logo_url,
         logo_icon_url: String::new(),
         favicon_url: crate::ui::assets::favicon_url(),
@@ -64,7 +62,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     div #error .login-error hidden {}
                     div #success .login-success hidden {}
 
-                    form #form .login-form onsubmit="return handleReset(event)" {
+                    form #form .login-form {
                         input type="hidden" #reset-token name="token" value=(token);
 
                         div .form-group {
@@ -101,6 +99,7 @@ async function handleReset(e){
   btn.disabled=false;btn.textContent='Reset Password';
   return false;
 }
+document.addEventListener('submit',function(e){if(e.target&&e.target.id==='form')handleReset(e)});
 "#)) }
             },
         ),

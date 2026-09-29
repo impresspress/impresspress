@@ -6,6 +6,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::llm_wire::openai::MaxTokensField;
+
 // Derives `JsonSchema` because it is published as-is on the provider
 // contracts (`contracts::ProviderView` and the create/update requests):
 // the schema's `enum` is then the same three tokens `parse` accepts, so a
@@ -46,6 +48,20 @@ impl ProviderProtocol {
             Self::OpenAiCompatible => "open_ai_compatible",
         }
     }
+
+    /// Whether a provider on this protocol may declare a
+    /// [`ProviderConfig::max_tokens_field`] override.
+    ///
+    /// `false` for [`Anthropic`](Self::Anthropic): the Messages API carries
+    /// the budget in one field and offers no second spelling, so its encoder
+    /// never consults the override and storing one would be a setting that
+    /// does nothing.
+    pub fn accepts_max_tokens_field(self) -> bool {
+        match self {
+            Self::OpenAi | Self::OpenAiCompatible => true,
+            Self::Anthropic => false,
+        }
+    }
 }
 
 /// A single configured provider. Stored in the DB, loaded on lifecycle(Init),
@@ -77,6 +93,23 @@ pub struct ProviderConfig {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub key_var: Option<String>,
 
+    /// Which field carries the output-token budget in this provider's request
+    /// bodies. `None` — the usual case — means the one
+    /// [`protocol`](Self::protocol) implies.
+    ///
+    /// Set it for a server whose wire format departs from its protocol's usual
+    /// spelling. Azure OpenAI is declared `open_ai_compatible`, and that
+    /// protocol sends `max_tokens`, but an Azure *reasoning* deployment
+    /// answers `400` to anything but `max_completion_tokens`. The operator
+    /// says so; nothing here infers it from the model id or the endpoint host.
+    ///
+    /// Meaningless under [`ProviderProtocol::Anthropic`], whose wire format
+    /// has one budget field and no second spelling to choose between — the
+    /// provider CRUD routes refuse the pairing rather than store a value the
+    /// encoder would ignore.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_tokens_field: Option<MaxTokensField>,
+
     /// Explicit model list. Empty means "discover via `/v1/models`".
     #[serde(default)]
     pub models: Vec<String>,
@@ -92,7 +125,8 @@ fn default_enabled() -> bool {
 
 impl ProviderConfig {
     /// Minimal constructor. `api_key` / `key_var` / `models` default to
-    /// empty, `enabled` defaults to true.
+    /// empty, `max_tokens_field` to "whatever the protocol says", and
+    /// `enabled` to true.
     pub fn new(
         name: impl Into<String>,
         protocol: ProviderProtocol,
@@ -104,6 +138,7 @@ impl ProviderConfig {
             endpoint: endpoint.into(),
             api_key: None,
             key_var: None,
+            max_tokens_field: None,
             models: Vec::new(),
             enabled: true,
         }
@@ -121,6 +156,11 @@ impl ProviderConfig {
 
     pub fn with_models(mut self, models: Vec<String>) -> Self {
         self.models = models;
+        self
+    }
+
+    pub fn with_max_tokens_field(mut self, field: MaxTokensField) -> Self {
+        self.max_tokens_field = Some(field);
         self
     }
 }
@@ -172,6 +212,46 @@ mod tests {
         let json = serde_json::to_string(&cfg).unwrap();
         let decoded: ProviderConfig = serde_json::from_str(&json).unwrap();
         assert_eq!(decoded, cfg);
+    }
+
+    #[test]
+    fn config_serde_roundtrip_with_a_max_tokens_field() {
+        let cfg = ProviderConfig::new(
+            "azure-reasoning",
+            ProviderProtocol::OpenAiCompatible,
+            "https://example.openai.azure.com/openai/v1",
+        )
+        .with_max_tokens_field(MaxTokensField::MaxCompletionTokens);
+        let json = serde_json::to_value(&cfg).unwrap();
+        assert_eq!(
+            json["max_tokens_field"], "max_completion_tokens",
+            "the stored token is the wire field name, not a third spelling"
+        );
+        let decoded: ProviderConfig = serde_json::from_value(json).unwrap();
+        assert_eq!(decoded, cfg);
+    }
+
+    #[test]
+    fn config_has_no_max_tokens_field_when_missing() {
+        let json = r#"{
+            "name": "a",
+            "protocol": "open_ai_compatible",
+            "endpoint": "http://localhost:11434/v1"
+        }"#;
+        let cfg: ProviderConfig = serde_json::from_str(json).unwrap();
+        assert!(
+            cfg.max_tokens_field.is_none(),
+            "absent means `follow the protocol`, never a guessed spelling"
+        );
+    }
+
+    /// Anthropic's Messages API has one budget field, so there is nothing for
+    /// an override to choose and the CRUD routes refuse one.
+    #[test]
+    fn only_the_openai_shaped_protocols_accept_a_max_tokens_field() {
+        assert!(ProviderProtocol::OpenAi.accepts_max_tokens_field());
+        assert!(ProviderProtocol::OpenAiCompatible.accepts_max_tokens_field());
+        assert!(!ProviderProtocol::Anthropic.accepts_max_tokens_field());
     }
 
     #[test]

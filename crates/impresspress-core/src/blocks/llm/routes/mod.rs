@@ -24,7 +24,7 @@ mod providers;
 mod streaming;
 
 #[cfg(test)]
-mod test_support;
+pub(crate) mod test_support;
 
 pub(super) use chat::{handle_chat, handle_chat_stream};
 pub(super) use models::{list_models, load_model, model_status, unload_model};

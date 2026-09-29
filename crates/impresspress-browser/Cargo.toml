@@ -30,6 +30,13 @@ js-sys = "0.3"
 # instead of buffering the entire response.
 wasm-streams = "0.4"
 serde = { version = "1", features = ["derive"] }
+# Byte-buffer adapter for the two response bodies that arrive as a JS
+# `Uint8Array`. `serde_wasm_bindgen`'s bulk path lives in `deserialize_byte_buf`,
+# and serde's blanket `Vec<u8>` impl never reaches it — it goes through
+# `deserialize_seq`, whose fast path covers a JavaScript `Array` only, so a byte
+# array decoded one element at a time with an iterator-result object allocated
+# per byte. `#[serde(with = "serde_bytes")]` is what asks for the bulk path.
+serde_bytes = "0.11"
 serde_json = "1"
 chrono = { workspace = true }
 wafer-run = { workspace = true }
@@ -38,24 +45,53 @@ wafer-block = { workspace = true }
 # Shared SQL planning (DbExec primitives call introspect/ddl builders).
 wafer-sql-utils = { workspace = true }
 wafer-block-crypto = { workspace = true }
+# Shared platform logic this adapter must not re-implement: the streaming
+# decision + capped buffered collect (`impresspress_core::streaming`), the
+# URL-level SSRF precheck (`impresspress_core::ssrf`) and the OpenAI wire
+# codec (`impresspress_core::llm_wire::openai`). Same shape
+# `impresspress-web/Cargo.toml` already uses — `default-features = false` and
+# no `block-*` feature — and `impresspress-web` already depends on both this
+# crate and `impresspress-core`, so the only shipping bundle sees no new crate.
+impresspress-core = { path = "../impresspress-core", default-features = false }
 async-trait = "0.1"
+# The `tracing` facade, for `logger::init_console_tracing` — the subscriber that
+# routes framework events to the browser console. Without one installed,
+# `tracing`'s default dispatcher drops every event `impresspress-core` and
+# `wafer-run` emit, so "logged and skipped" means "silently skipped" here.
+tracing = { workspace = true }
 futures = "0.3"
 tokio-util = { version = "0.7", default-features = false }
 serde-wasm-bindgen = "0.6"
 hex = "0.4"
-pbkdf2 = "0.12"
-sha2 = "0.10"
-hmac = "0.12"
 base64ct = { version = "1", features = ["alloc"] }
 bytemuck = { version = "1", default-features = false }
-subtle = { version = "2", default-features = false }
+# `pbkdf2` / `sha2` / `hmac` / `subtle` were the hand-rolled PBKDF2 body in
+# `crypto.rs`. That body is now `wafer_block_crypto::primitives`, which owns
+# the derivation, the fixed 32-byte `dkLen` and the constant-time compare, so
+# this crate names no password primitive of its own.
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
+# No `use getrandom` remains in this crate — the entry is what turns on the
+# crate's wasm32 backend for the whole dependency graph (`wafer-block-crypto`'s
+# `random_bytes` and `uuid`'s v4 generator both reach it), which is a build
+# fact and not something a `use` can express. `impresspress-web` and
+# `impresspress-cloudflare` carry the same line for the same reason.
 getrandom = { version = "0.2", features = ["js"] }
 uuid = { version = "1", features = ["v4", "js"] }
 
+[target.'cfg(not(target_arch = "wasm32"))'.dev-dependencies]
+# Native tests run `vector::sql`'s statements on a real SQLite — the engine
+# sql.js compiles to — since the sql.js bridge itself is not available to a
+# native (or Node) test.
+rusqlite = { workspace = true }
+
 [target.'cfg(target_arch = "wasm32")'.dev-dependencies]
 wasm-bindgen-test = "0.3"
+# `RequestInit` is test-only: the adapter reads the `Request` the Service
+# Worker hands it and never builds one. The request-side wasm tests do build
+# one (a real `web_sys::Request` driven through `request_to_message`), so the
+# feature is declared for the test build rather than the shipped one.
+web-sys = { version = "0.3", features = ["RequestInit"] }
 # Enable the shared, backend-agnostic `DatabaseService` conformance suite
 # (`wafer_core::interfaces::database::conformance::run_conformance`) for the
 # `database.rs` conformance-wiring test module. Same crate as the normal

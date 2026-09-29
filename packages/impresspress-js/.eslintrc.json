@@ -15,7 +15,7 @@
     "ecmaVersion": 2022,
     "sourceType": "module"
   },
-  "ignorePatterns": ["dist", "node_modules", "src/types/generated"],
+  "ignorePatterns": ["dist", "node_modules"],
   "rules": {
     "@typescript-eslint/no-explicit-any": "warn",
     "@typescript-eslint/no-this-alias": "off",

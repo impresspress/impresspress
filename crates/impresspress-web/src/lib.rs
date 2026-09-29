@@ -4,6 +4,37 @@
 //! `ImpresspressBuilder` (from `impresspress-core`) to wire up the full Impresspress
 //! block suite + the app-specific `BrowserLlmService`.
 
+// `clippy::arc_with_non_send_sync` is stated once here, crate-wide and
+// target-scoped, rather than repeated at every `Arc::new`.
+//
+// wafer-run's service and block traits are bounded on
+// `wafer_block::compat::{MaybeSend, MaybeSync}`. Those are `Send`/`Sync` on
+// native, and on wasm32 they are *unbounded* blanket markers
+// (`impl<T: ?Sized> MaybeSend for T`) — which is precisely what lets this
+// crate hand `Cell`/`RefCell`-backed values (`BrowserRuntimeControl` and the
+// dev `Context` impls) across those trait boundaries with no
+// `unsafe impl Send`/`Sync`.
+//
+// The SMART POINTER is forced at the four sites the lint reaches — that is the
+// claim this allow rests on, and it is narrower than "the code is all
+// API-shaped". `ImpresspressBuilder::extra_block`, `DevShared::new` and
+// `Context::clone_arc` take or return `Arc<dyn _>` by value, and `Rc` does not
+// coerce into an `Arc<dyn Trait>` (E0605). On this single-threaded target none
+// of the four is making a cross-thread claim to be wrong about.
+//
+// Scoped to wasm32 even though this crate only ships to a browser, because
+// that is the actual precondition: on a native target the same bounds resolve
+// to real `Send + Sync`, the lint is accurate again, and this allow must not
+// silence it.
+#![cfg_attr(
+    target_arch = "wasm32",
+    expect(
+        clippy::arc_with_non_send_sync,
+        reason = "on this single-threaded target the `Arc` is forced by the \
+                  trait-object bounds, not chosen over an `Rc`"
+    )
+)]
+
 use std::sync::Arc;
 
 use impresspress_core::builder;
@@ -21,15 +52,19 @@ pub mod runtime_factory;
 
 pub use runtime_factory::{RuntimeFactory, RuntimeOptions, SandboxMode};
 
+/// The operator-level `csp` the browser runtime hands `wafer-run/security-headers`,
+/// which merges it directive by directive over its own baseline and refuses
+/// anything that would weaken it (`'unsafe-eval'`, a `frame-ancestors`
+/// directive — that one is the block's `frame_ancestors` key — or a repeated
+/// directive), so nothing here may be one of those.
 const IMPRESSPRESS_CSP: &str = concat!(
     "default-src 'self'; ",
-    "script-src 'self' 'unsafe-inline' 'unsafe-eval' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; ",
+    "script-src 'self' 'unsafe-inline' 'wasm-unsafe-eval' https://cdn.jsdelivr.net; ",
     "style-src 'self' 'unsafe-inline'; ",
     "img-src 'self' data: blob: https:; ",
     "font-src 'self' https:; ",
     "connect-src 'self' https://cdn.jsdelivr.net https://esm.run https://huggingface.co ",
         "https://raw.githubusercontent.com https://*.huggingface.co https://*.hf.co https://*.xethub.hf.co; ",
-    "frame-ancestors 'none'; ",
     "base-uri 'self'; ",
     "form-action 'self'",
 );
@@ -51,6 +86,15 @@ const IMPRESSPRESS_CSP: &str = concat!(
 /// same seeded variables, same CSP, same routes as `{ dev: false }`.
 #[wasm_bindgen]
 pub async fn initialize(options: JsValue) -> Result<(), JsValue> {
+    // Before anything that can log. `tracing`'s default dispatcher discards
+    // every event, so until this is installed each `warn!`/`error!` in
+    // `impresspress-core`, `wafer-run` and the browser adapter goes nowhere —
+    // and a framework failure the code deliberately survives (a malformed LLM
+    // chunk, a refused subrequest) leaves a console with nothing in it.
+    // Idempotent, and a `false` here only means someone installed a subscriber
+    // first, which is their prerogative.
+    let _ = impresspress_browser::init_console_tracing();
+
     if impresspress_browser::is_initialized() {
         return Ok(());
     }
@@ -93,7 +137,7 @@ pub async fn initialize(options: JsValue) -> Result<(), JsValue> {
     #[cfg(feature = "browser-devtools")]
     let (factory, sandbox) = dev_runtime::attach(factory);
 
-    let (wafer, _storage_block) = factory.build(&[]).await?;
+    let wafer = factory.build(&[]).await?;
 
     web_sys::console::log_1(&"impresspress: WAFER runtime started".into());
 
@@ -125,7 +169,7 @@ pub async fn initialize(options: JsValue) -> Result<(), JsValue> {
 ///    block's declared `ConfigVar`s from at its first `lifecycle(Init)`.
 ///  - `block_settings_handle` — the same `Arc<RwLock<BlockSettings>>` the
 ///    router's `FeatureConfig` reads, so the write is visible to the
-///    subsequent `init_all_blocks()` and every later request.
+///    remaining blocks' `Init` and every later request.
 ///  - `crypto` — the concrete `BrowserCryptoService`, rotated to the real JWT
 ///    secret so any not-yet-initialised block signs/verifies with it.
 ///
@@ -159,46 +203,48 @@ impl builder::BootHooks for BrowserBootHooks {
         );
         let features = config::load_block_settings(&self.db).await?;
 
-        for (key, value) in &vars {
-            self.config_svc.set(key, value);
-        }
         // The runtime resolves every block's DECLARED `ConfigVar`s through the
         // config source before it calls that block's `lifecycle(Init)` — a
         // required key it cannot resolve is `InitError::Permanent`, and the
         // block is then dead for the life of the runtime however well its
         // handlers would have coped with the value being absent. So the
-        // seeded map goes here as well as into the ConfigService: this is the
-        // half `init_all_blocks()` below actually consults.
+        // seeded map goes here as well as onto the two config surfaces: this
+        // is the half the remaining blocks' Init actually consults.
         self.config_source.publish(vars.clone());
-        // This adapter executes inside an end user's browser. Set the marker
-        // after persisted variables are published so a database/admin value
-        // cannot accidentally enable Stripe secret-key operations locally.
-        // Static pages may still use a remote trusted commerce API or
-        // pre-created Payment Links.
-        self.config_svc.set(
-            impresspress_core::blocks::products::RUNTIME_KIND_CONFIG_KEY,
-            "browser",
-        );
-        self.config_svc.set(
-            impresspress_core::features::BLOCK_SETTINGS_CONFIG_KEY,
-            &features.to_config_json(),
-        );
 
-        // `ctx.config_get` reads Wafer's synchronous snapshot, not the config
-        // service block. Publish the same post-migration values there before
-        // `init_all_blocks()` so migration/feature gates observe the seeded
-        // browser state rather than the empty pre-admin snapshot.
-        let mut snapshot = (**wafer.config_snapshot()).clone();
-        snapshot.extend(vars.iter().map(|(k, v)| (k.clone(), v.clone())));
-        snapshot.insert(
-            impresspress_core::blocks::products::RUNTIME_KIND_CONFIG_KEY.to_string(),
-            "browser".to_string(),
-        );
-        snapshot.insert(
-            impresspress_core::features::BLOCK_SETTINGS_CONFIG_KEY.to_string(),
-            features.to_config_json(),
-        );
-        wafer.set_config_snapshot(snapshot);
+        // Both config surfaces, published together — but only the values
+        // something has to read SYNCHRONOUSLY or that the runtime owns, not a
+        // copy of the variables table. The config block serves every stored
+        // variable from the table itself (`impresspress_core::blocks::config`),
+        // and now learns of this seeding through the config-write generation
+        // `variables::insert_if_absent` bumps. A table copy here would only put
+        // admin-editable keys onto the boot-frozen `ctx.config_get` snapshot,
+        // where the first synchronous reader of one silently gets a stale
+        // value — the defect class the config-store work removed.
+        let mut published = builder::RuntimeConfig::new();
+        published
+            // This adapter executes inside an end user's browser. The config
+            // block treats `__…__` keys as runtime-owned and never serves them
+            // from the table, so a database/admin value cannot enable Stripe
+            // secret-key operations locally. Static pages may still use a
+            // remote trusted commerce API or pre-created Payment Links.
+            .both(
+                impresspress_core::blocks::products::RUNTIME_KIND_CONFIG_KEY,
+                "browser",
+            )
+            .both(
+                impresspress_core::features::BLOCK_SETTINGS_CONFIG_KEY,
+                features.to_config_json(),
+            );
+        // `csrf` and `auth::service` read the secret per request off the
+        // synchronous snapshot; seeding just generated it if it was absent.
+        if let Some(secret) = vars.get(impresspress_core::blocks::auth::JWT_SECRET_KEY) {
+            published.both(
+                impresspress_core::blocks::auth::JWT_SECRET_KEY,
+                secret.clone(),
+            );
+        }
+        published.republish(wafer, &self.config_svc);
 
         *self
             .block_settings_handle

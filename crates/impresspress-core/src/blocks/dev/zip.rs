@@ -43,18 +43,31 @@ const LOCAL_HEADER_SIG: u32 = 0x0403_4b50;
 const CENTRAL_HEADER_SIG: u32 = 0x0201_4b50;
 const EOCD_SIG: u32 = 0x0605_4b50;
 
+// The three sizes below are `u64` rather than `usize` because their only use
+// is the archive-size arithmetic in `add`, which must not be done in a 32-bit
+// type — see `MAX_ARCHIVE_BYTES`.
+
 /// Fixed size of a local file header, before the file name.
-const LOCAL_HEADER_FIXED_LEN: usize = 30;
+const LOCAL_HEADER_FIXED_LEN: u64 = 30;
 
 /// Fixed size of a central directory record, before the file name.
-const CENTRAL_HEADER_FIXED_LEN: usize = 46;
+const CENTRAL_HEADER_FIXED_LEN: u64 = 46;
 
 /// Size of the end-of-central-directory record (no archive comment).
-const EOCD_LEN: usize = 22;
+const EOCD_LEN: u64 = 22;
 
 /// Ceiling every offset/size field in the classic (non-ZIP64) format can
 /// hold.
-const MAX_ARCHIVE_BYTES: usize = u32::MAX as usize;
+///
+/// `u64`, and the projected total in [`ZipWriter::add`] is widened to match,
+/// because `usize` is 32 bits on wasm32 — one of the two targets
+/// [`super::export`] serves `/b/dev/api/export` from, the browser sandbox
+/// being the other half of the native dev server. As a `usize` this constant
+/// WAS `usize::MAX` there, so `projected_total > MAX_ARCHIVE_BYTES` could
+/// never be true and the ceiling silently refused nothing on that target. It
+/// held only on 64-bit hosts, which is where the tests below run — so no test
+/// covers the regression, and none can without allocating 4 GiB.
+const MAX_ARCHIVE_BYTES: u64 = u32::MAX as u64;
 
 /// Ceiling on entry count: both the central directory's own header and the
 /// end-of-central-directory record count entries in a `u16` field.
@@ -117,7 +130,14 @@ pub struct ZipWriter {
     /// — data already written, plus the central directory, plus the EOCD —
     /// past the 4 GiB ceiling, without `finish` itself needing to be
     /// fallible.
-    central_dir_bytes: usize,
+    ///
+    /// `u64` to match the arithmetic it feeds, not because it can overflow:
+    /// the ceiling check in [`ZipWriter::add`] reads this field and refuses
+    /// the entry BEFORE the increment that would grow it, so it stays under
+    /// `MAX_ARCHIVE_BYTES` and would fit a 32-bit `usize`. The type keeps the
+    /// projected-size expression in one width instead of casting this operand
+    /// where that expression reads it.
+    central_dir_bytes: u64,
 }
 
 impl Default for ZipWriter {
@@ -167,16 +187,20 @@ impl ZipWriter {
 
         let offset = u32::try_from(self.buf.len()).map_err(|_| ZipError::TooLarge)?;
         let size = u32::try_from(bytes.len()).map_err(|_| ZipError::TooLarge)?;
-        let grows_by = LOCAL_HEADER_FIXED_LEN + path.len() + bytes.len();
-        let central_entry_len = CENTRAL_HEADER_FIXED_LEN + path.len();
+        // `u64` throughout, not `usize`: `offset` and `size` above cap
+        // `buf.len()` and `bytes.len()` at `u32::MAX` each, so on wasm32 —
+        // where `usize` is 32 bits — their sum overflows the type this used to
+        // be computed in, before the ceiling below could refuse it. `path_len`
+        // is `u16::MAX`-bounded by the check above, so the cast is lossless.
+        let path_len = path.len() as u64;
+        let grows_by = LOCAL_HEADER_FIXED_LEN + path_len + u64::from(size);
+        let central_entry_len = CENTRAL_HEADER_FIXED_LEN + path_len;
         // The full projected size of `finish`'s eventual output: this
         // entry's local header + data, every central directory record
         // (already-written ones plus this one), and the EOCD — not just the
         // data written so far. `finish` itself cannot fail, so every byte it
         // will ever write has to be accounted for here.
-        let projected_total = self
-            .buf
-            .len()
+        let projected_total = u64::from(offset)
             .saturating_add(grows_by)
             .saturating_add(self.central_dir_bytes)
             .saturating_add(central_entry_len)

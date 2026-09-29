@@ -434,7 +434,7 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
   // a shopper who could still reach it would mean the cookie clear did
   // nothing and everything below proved only that the admin can see their own
   // work.
-  expect(await shop.evaluate(async () => (await fetch('/b/dev/api/status')).status)).toBe(403);
+  expect(await shop.evaluate(async () => (await fetch('/b/dev/api/status')).status)).toBe(401);
 
   await expect(shop.locator('h1')).toHaveText(SHOP_HEADING, { timeout: 60_000 });
   await expect(shop.locator('.shop-product-name')).toHaveText(SHOP_PRODUCT.name, {

@@ -4,8 +4,8 @@
 //! offers, the owner's own account. [`export`] reads an explicit table
 //! allowlist into a [`DataSnapshot`]; [`import`] applies it back through the
 //! typed database client. **No SQL text is generated or executed anywhere in
-//! this module** — every write is `db::create`, `db::upsert` or
-//! `db::delete_by_filters`, exactly as amendment 9 requires and as
+//! this module** — the import is one `db::batch` of typed writes, exactly as
+//! amendment 9 requires and as
 //! `CLAUDE.md`'s "no raw SQL in block code" rule already demands of every
 //! other block.
 //!
@@ -43,7 +43,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
-use wafer_block::wire::database::OnConflict;
+use wafer_block::wire::database::{BatchWrite, OnConflict, UpsertRequest};
 use wafer_core::clients::database as db;
 use wafer_run::{context::Context, ErrorCode, WaferError};
 
@@ -54,26 +54,23 @@ use wafer_run::{context::Context, ErrorCode, WaferError};
 // `TABLE_IDENT_ALLOWED` with the same justification given there.
 use crate::blocks::products::TABLE as PRODUCTS_COLLECTION;
 use crate::{
-    admin_schema,
     blocks::{
-        admin::{
-            AUDIT_LOGS_TABLE, PERMISSIONS_TABLE, ROLES_TABLE, STORAGE_ACCESS_LOGS_TABLE,
-            USER_ROLES_TABLE, WRAP_GRANTS_TABLE,
-        },
+        admin::{AUDIT_LOGS_TABLE, PERMISSIONS_TABLE, ROLES_TABLE, STORAGE_ACCESS_LOGS_TABLE},
         auth::repo::{
-            api_keys, bootstrap_tokens, jwt_blocklist, local_credentials, oauth_pkce, orgs, pats,
-            provider_links, rate_limits, sessions, tokens, users,
+            api_keys, bootstrap_tokens, jwt_blocklist, local_credentials, maintenance, oauth_pkce,
+            orgs, pats, provider_links, rate_limits, sessions, tokens, users,
         },
         products::{
-            list_live_products, upsert_product_from_snapshot, CHECKOUT_PRESETS_TABLE,
-            DISPUTES_TABLE, ENTITLEMENTS_TABLE, GROUPS_TABLE, GROUP_TEMPLATES_TABLE,
-            LINE_ITEMS_TABLE, OFFERS_TABLE, OFFER_COMPONENTS_TABLE, PAYMENT_LINKS_TABLE,
-            PRODUCT_TEMPLATES_TABLE, PRODUCT_VERSIONS_TABLE, PROVIDER_OPERATIONS_TABLE,
-            PURCHASES_TABLE, REFUNDS_TABLE, SELLER_ACCOUNTS_TABLE, STRIPE_EVENTS_TABLE,
-            SUBSCRIPTIONS_TABLE, SUBSCRIPTION_ITEMS_TABLE, TYPES_TABLE,
-            VARIABLES_TABLE as PRODUCTS_VARIABLES_TABLE,
+            list_live_products, product_snapshot_upsert, CHECKOUT_PRESETS_TABLE, DISPUTES_TABLE,
+            ENTITLEMENTS_TABLE, GROUPS_TABLE, GROUP_TEMPLATES_TABLE, LINE_ITEMS_TABLE,
+            OFFERS_TABLE, OFFER_COMPONENTS_TABLE, PAYMENT_LINKS_TABLE, PRODUCT_TEMPLATES_TABLE,
+            PRODUCT_VERSIONS_TABLE, PROVIDER_OPERATIONS_TABLE, PURCHASES_TABLE, REFUNDS_TABLE,
+            SELLER_ACCOUNTS_TABLE, STRIPE_EVENTS_TABLE, SUBSCRIPTIONS_TABLE,
+            SUBSCRIPTION_ITEMS_TABLE, TYPES_TABLE, VARIABLES_TABLE as PRODUCTS_VARIABLES_TABLE,
         },
     },
+    // audit-allow: names the platform tables for the export allowlist/exclusion bookkeeping below — the two it reads (`variables`, `user_roles`) are granted by `dev::wrap_grants()`, which maps every `TABLE_ALLOWLIST` entry to `read_write(BLOCK_NAME, table)` and which the runtime honours from its flat grant list, and the audit attributes grants to the declaring file's block and cannot see it
+    platform_state::{block_settings, request_logs, user_roles, variables, wrap_grants},
 };
 
 /// Schema version this build's [`DataSnapshot`] reads and writes.
@@ -106,7 +103,7 @@ pub const BY_ID: &[&str] = &["id"];
 /// How [`import`] applies one allowlisted table's rows.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Mode {
-    /// `db::upsert` each row, with the named columns as the conflict target.
+    /// Upsert each row, with the named columns as the conflict target.
     /// Safe to run repeatedly — a second import of the same snapshot updates
     /// the same rows rather than duplicating them — and never removes a row
     /// the destination already has that the snapshot doesn't mention.
@@ -120,17 +117,17 @@ pub enum Mode {
     /// `UNIQUE` (`roles.name`, `permissions.name`, `variables.key`). Keyed on
     /// `id` those rows do not conflict on the id at all: they are INSERTs
     /// that then violate the unique index on the natural key, and the whole
-    /// import fails with a bare "internal database error". Design §10.2's
+    /// import fails on it. Design §10.2's
     /// promise that a bundle imports into a fresh instance is exactly the
     /// case where the destination has already seeded its own copies of these
     /// rows, so this is not a corner.
     ///
     /// On a conflict the destination keeps its OWN `id` (and its own value of
     /// the conflict columns, which are equal by definition) and takes every
-    /// other column from the snapshot — see [`import_row`].
+    /// other column from the snapshot — see [`upsert_op`].
     Upsert(&'static [&'static str]),
-    /// Delete every row in the destination table first, then `db::create`
-    /// each exported row. Reserved for the tables whose *set* must match the
+    /// Delete every row in the destination table, then insert the exported
+    /// rows, in the import's one transaction. Reserved for the tables whose *set* must match the
     /// snapshot exactly: a fresh instance's own bootstrap admin (and its
     /// role assignment, and its local credentials) must be gone once someone
     /// else's account is imported, not merged alongside it.
@@ -147,10 +144,10 @@ pub const TABLE_ALLOWLIST: &[(&str, Mode)] = &[
     // specific buyer, subscription or provider account — the shop's shape,
     // not its history. ---
     // Read and written through `products::list_live_products`/
-    // `upsert_product_from_snapshot`, never through the generic
-    // `db::list_all`/`db::upsert` path below — this table alone carries a
+    // `product_snapshot_upsert`, never through the generic
+    // `db::list_all`/upsert path below — this table alone carries a
     // soft-delete filter its own repo module's door tests enforce (see
-    // `export`/`import_row`).
+    // `export`/`upsert_op`).
     (PRODUCTS_COLLECTION, Mode::Upsert(BY_ID)),
     (GROUPS_TABLE, Mode::Upsert(BY_ID)),
     (TYPES_TABLE, Mode::Upsert(BY_ID)),
@@ -168,7 +165,7 @@ pub const TABLE_ALLOWLIST: &[(&str, Mode)] = &[
     (PRODUCTS_VARIABLES_TABLE, Mode::Upsert(BY_ID)),
     (OFFER_COMPONENTS_TABLE, Mode::Upsert(BY_ID)),
     (CHECKOUT_PRESETS_TABLE, Mode::Upsert(BY_ID)),
-    // --- admin: IAM catalog plus config. `VARIABLES_TABLE` is filtered row
+    // --- admin: IAM catalog plus config. `variables::TABLE` is filtered row
     // by row at export time (`variable_is_exportable`) rather than excluded
     // wholesale — most admin variables are ordinary site config (`APP_NAME`,
     // feature flags), exactly what a re-hosted copy needs to keep working.
@@ -180,7 +177,7 @@ pub const TABLE_ALLOWLIST: &[(&str, Mode)] = &[
     // `APP_NAME` variable and dies on that index. See [`Mode::Upsert`].
     (ROLES_TABLE, Mode::Upsert(&["name"])),
     (PERMISSIONS_TABLE, Mode::Upsert(&["name"])),
-    (admin_schema::VARIABLES_TABLE, Mode::Upsert(&["key"])),
+    (variables::TABLE, Mode::Upsert(&["key"])),
     // --- identity: the owner's own account, `Replace`d as a set so a fresh
     // instance's bootstrap admin is gone once someone else's is imported —
     // every `owner_id`/`created_by` an imported product carries still
@@ -188,7 +185,7 @@ pub const TABLE_ALLOWLIST: &[(&str, Mode)] = &[
     // module docs for why `local_credentials` travels with `users`. ---
     (users::TABLE, Mode::Replace),
     (local_credentials::TABLE, Mode::Replace),
-    (USER_ROLES_TABLE, Mode::Replace),
+    (user_roles::TABLE, Mode::Replace),
 ];
 
 /// Every table the products, admin and auth blocks declare that
@@ -209,11 +206,14 @@ pub const TABLE_EXCLUDED: &[&str] = &[
     STRIPE_EVENTS_TABLE, // webhook idempotency ledger — this instance's own delivery history
     // --- admin: operational logs, and infrastructure state the runtime
     // re-derives at every boot rather than something anyone authored. ---
-    admin_schema::BLOCK_SETTINGS_TABLE, // per-block enable flag + migration-hash tracking
-    admin_schema::REQUEST_LOGS_TABLE,
+    block_settings::TABLE, // per-block enable flag + migration-hash tracking
+    request_logs::TABLE,
     AUDIT_LOGS_TABLE,
     STORAGE_ACCESS_LOGS_TABLE,
-    WRAP_GRANTS_TABLE, // re-synced from every registered block's own `BlockInfo.grants()` at boot
+    // Admin-created WRAP grants. Authored, but access policy: an import that
+    // carried them would widen what blocks may touch on the destination
+    // without its operator granting it, so each deployment keeps its own.
+    wrap_grants::TABLE,
     // --- auth: session/credential plumbing scoped to this running
     // instance (bearer material this instance issued, not the owner's own
     // login — see `local_credentials` above), plus multi-tenant org
@@ -228,6 +228,10 @@ pub const TABLE_EXCLUDED: &[&str] = &[
     provider_links::TABLE,
     rate_limits::TABLE,
     orgs::TABLE,
+    // The sweeper's throttle singleton: one row holding when the expired-row
+    // sweep last ran on THIS instance. Exporting it would carry a foreign
+    // clock into the destination and suppress its first sweep.
+    maintenance::TABLE,
 ];
 
 /// Whether one row of `impresspress__admin__variables` may leave in an
@@ -245,11 +249,16 @@ pub const TABLE_EXCLUDED: &[&str] = &[
 ///
 /// Reuses [`crate::util::is_sensitive_key`] — the same SEC-060 rule the
 /// admin Variables page masks display values with (explicit `sensitive` flag
-/// **or** a `_SECRET`/`_KEY` suffix) — rather than checking the flag alone: a
-/// second, weaker sensitivity check here would be exactly the kind of
-/// disagreement that rule exists to prevent. Called with the flag already
-/// pinned to "clean false" (checked below), so it only evaluates the suffix
-/// half.
+/// **or** a key the build knows to hold a secret: the `_SECRET`/`_KEY` suffix,
+/// or a declared `Password`/`auto_generate` `ConfigVar`) — rather than checking
+/// the flag alone: a second, weaker sensitivity check here would be exactly the
+/// kind of disagreement that rule exists to prevent. Called with the flag
+/// already pinned to "clean false" (checked below), so it only evaluates the
+/// key half — which is the half that holds back a legacy
+/// `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_PASSWORD` row, still unflagged
+/// because this deployment has not run the repair pass. Export is the
+/// irreversible direction: a bundle that reaches another deployment cannot be
+/// recalled.
 ///
 /// The `IMPRESSPRESS_` prefix check is this module's own, additional rule,
 /// and it is deliberately the *broad* prefix — it matches both shapes
@@ -290,12 +299,31 @@ pub fn variable_is_exportable(row: &serde_json::Map<String, Value>) -> bool {
     if crate::util::is_sensitive_key(key, 0) {
         return false;
     }
-    !key.starts_with("IMPRESSPRESS_")
+    // Exactly the set [`import`] refuses, stated independently of the prefix
+    // rule below it. The two exist for different reasons — the prefix rule is
+    // about instance-specificity and also holds back block-scoped
+    // `IMPRESSPRESS__{BLOCK}__*` — so if it were ever narrowed to let that
+    // config travel, the infrastructure half would silently stop being
+    // filtered here while the importer still refused it, and this exporter
+    // would produce bundles its own importer rejects.
+    //
+    // It catches what the prefix rule cannot in any case: an internal key like
+    // `__IMPRESSPRESS_RUNTIME_KIND__` starts with `__`, so it clears
+    // `starts_with("IMPRESSPRESS_")`, and ends with `__` rather than a
+    // `_SECRET`/`_KEY` suffix, so it clears `is_sensitive_key` too.
+    !crate::config_vars::is_instance_owned_key(key) && !key.starts_with("IMPRESSPRESS_")
 }
 
 #[cfg(test)]
 mod variable_is_exportable_tests {
     use super::*;
+    use crate::{
+        blocks::{
+            email::MAILGUN_DOMAIN,
+            products::config::{CHECKOUT_ALLOWED_ORIGINS, PLATFORM_COUNTRY},
+        },
+        config_vars::{APP_NAME_KEY, REQUEST_LOG_CONFIG_KEY},
+    };
 
     fn row(fields: serde_json::Value) -> serde_json::Map<String, Value> {
         match fields {
@@ -307,11 +335,11 @@ mod variable_is_exportable_tests {
     #[test]
     fn a_clean_non_sensitive_row_exports() {
         assert!(variable_is_exportable(&row(serde_json::json!({
-            "key": "WAFER_RUN_SHARED__APP_NAME",
+            "key": APP_NAME_KEY,
             "sensitive": false,
         }))));
         assert!(variable_is_exportable(&row(serde_json::json!({
-            "key": "WAFER_RUN_SHARED__APP_NAME",
+            "key": APP_NAME_KEY,
             "sensitive": 0,
         }))));
     }
@@ -319,11 +347,11 @@ mod variable_is_exportable_tests {
     #[test]
     fn an_explicitly_sensitive_row_never_exports() {
         assert!(!variable_is_exportable(&row(serde_json::json!({
-            "key": "WAFER_RUN_SHARED__APP_NAME",
+            "key": APP_NAME_KEY,
             "sensitive": true,
         }))));
         assert!(!variable_is_exportable(&row(serde_json::json!({
-            "key": "WAFER_RUN_SHARED__APP_NAME",
+            "key": APP_NAME_KEY,
             "sensitive": 1,
         }))));
     }
@@ -340,10 +368,30 @@ mod variable_is_exportable_tests {
         }))));
     }
 
+    /// The irreversible half of the same leak: a row sensitive by DECLARATION
+    /// only, stored unflagged by an older build, must not travel inside a seed
+    /// bundle to another deployment. Nothing downstream can un-send it.
+    #[test]
+    fn a_declared_password_key_never_exports_even_when_the_flag_is_clear() {
+        let key = crate::blocks::auth::config::BOOTSTRAP_ADMIN_PASSWORD_KEY;
+        assert!(
+            !crate::config_vars::has_sensitive_suffix(key),
+            "the point of this test is a key the suffix rule cannot catch"
+        );
+        assert!(!variable_is_exportable(&row(serde_json::json!({
+            "key": key,
+            "sensitive": 0,
+        }))));
+        assert!(!variable_is_exportable(&row(serde_json::json!({
+            "key": key,
+            "sensitive": false,
+        }))));
+    }
+
     #[test]
     fn an_impresspress_prefixed_key_never_exports_even_when_the_flag_is_clear() {
         assert!(!variable_is_exportable(&row(serde_json::json!({
-            "key": "IMPRESSPRESS_INTERNAL_FLAG",
+            "key": REQUEST_LOG_CONFIG_KEY,
             "sensitive": false,
         }))));
     }
@@ -358,10 +406,36 @@ mod variable_is_exportable_tests {
     #[test]
     fn block_scoped_config_stays_with_the_instance_that_configured_it() {
         for key in [
-            "IMPRESSPRESS__PRODUCTS__CHECKOUT_ALLOWED_ORIGINS",
-            "IMPRESSPRESS__PRODUCTS__PLATFORM_COUNTRY",
-            "IMPRESSPRESS__EMAIL__MAILGUN_DOMAIN",
+            CHECKOUT_ALLOWED_ORIGINS,
+            PLATFORM_COUNTRY,
+            MAILGUN_DOMAIN,
             crate::blocks::dev::seed::SEED_ERROR_KEY,
+        ] {
+            assert!(
+                !variable_is_exportable(&row(serde_json::json!({
+                    "key": key,
+                    "sensitive": false,
+                }))),
+                "{key} must not travel into another instance's bundle"
+            );
+        }
+    }
+
+    /// The INTERNAL, adapter-injected class (`__…__`), which the prefix rule
+    /// above misses entirely: `__IMPRESSPRESS_RUNTIME_KIND__` starts with `__`,
+    /// not `IMPRESSPRESS_`, and ends with `__` rather than a `_SECRET`/`_KEY`
+    /// suffix, so it clears both existing checks.
+    ///
+    /// These are never variables-table config at all — a target's boot code
+    /// sets them directly — so a row carrying one is a mistake or a forgery,
+    /// and re-exporting it would carry that forgery into the next instance.
+    /// `__IMPRESSPRESS_RUNTIME_KIND__` is the one that matters: it is what
+    /// keeps Stripe secret-key operations off inside a visitor's browser.
+    #[test]
+    fn internal_runtime_keys_never_export() {
+        for key in [
+            "__IMPRESSPRESS_RUNTIME_KIND__",
+            "__IMPRESSPRESS_BLOCK_SETTINGS_JSON__",
         ] {
             assert!(
                 !variable_is_exportable(&row(serde_json::json!({
@@ -378,7 +452,7 @@ mod variable_is_exportable_tests {
     #[test]
     fn shared_config_travels() {
         assert!(variable_is_exportable(&row(serde_json::json!({
-            "key": "WAFER_RUN_SHARED__APP_NAME",
+            "key": APP_NAME_KEY,
             "sensitive": false,
         }))));
     }
@@ -387,19 +461,19 @@ mod variable_is_exportable_tests {
     fn odd_shapes_fail_closed_rather_than_defaulting_to_exportable() {
         // Missing `sensitive` entirely.
         assert!(!variable_is_exportable(&row(serde_json::json!({
-            "key": "WAFER_RUN_SHARED__APP_NAME",
+            "key": APP_NAME_KEY,
         }))));
         // `sensitive` present but not a clean 0/false shape.
         assert!(!variable_is_exportable(&row(serde_json::json!({
-            "key": "WAFER_RUN_SHARED__APP_NAME",
+            "key": APP_NAME_KEY,
             "sensitive": "0",
         }))));
         assert!(!variable_is_exportable(&row(serde_json::json!({
-            "key": "WAFER_RUN_SHARED__APP_NAME",
+            "key": APP_NAME_KEY,
             "sensitive": 0.5,
         }))));
         assert!(!variable_is_exportable(&row(serde_json::json!({
-            "key": "WAFER_RUN_SHARED__APP_NAME",
+            "key": APP_NAME_KEY,
             "sensitive": null,
         }))));
         // Missing `key` entirely, or `key` not a plain string.
@@ -414,6 +488,15 @@ mod variable_is_exportable_tests {
 }
 
 /// Read every [`TABLE_ALLOWLIST`] table's rows into a [`DataSnapshot`].
+///
+/// Exhaustive by requirement, not by preference: the bundle is restored with
+/// `Mode::Replace` over the live tables, so a table read only as far as some
+/// ceiling would delete every row past it on restore. The cost is that one
+/// table's rows are all in memory at once — an export is an operator action on
+/// a deployment whose size the operator knows, and a short bundle that looks
+/// complete is the worse failure. A snapshot too large to import is refused
+/// whole instead: `super::export` checks the serialized snapshot against
+/// [`super::seed::MAX_DATA_BYTES`], the bound the importer applies.
 pub async fn export(ctx: &dyn Context) -> Result<DataSnapshot, WaferError> {
     let mut tables = BTreeMap::new();
     // The ids each owning table actually exported: the live products, and the
@@ -429,7 +512,7 @@ pub async fn export(ctx: &dyn Context) -> Result<DataSnapshot, WaferError> {
         let records = if table == PRODUCTS_COLLECTION {
             list_live_products(ctx, Vec::new()).await?
         } else {
-            db::list_all(ctx, table, Vec::new()).await?
+            crate::db_read::list_every(ctx, table, Vec::new()).await?
         };
         let rows: Vec<serde_json::Map<String, Value>> = records
             .into_iter()
@@ -441,7 +524,33 @@ pub async fn export(ctx: &dyn Context) -> Result<DataSnapshot, WaferError> {
             // The one table with a per-row export decision — see
             // `variable_is_exportable`'s docs for why the check lives there
             // and not as a second `Mode`.
-            .filter(|row| table != admin_schema::VARIABLES_TABLE || variable_is_exportable(row))
+            //
+            // An excluded row is ANNOUNCED. Ad hoc keys are stored sensitive by
+            // default (`config_vars::is_sensitive_by_default_when_created`:
+            // nothing here knows what an undeclared key holds), and a sensitive
+            // row is not exportable — so a bundle legitimately leaves them
+            // behind, and an operator who is not told will find out only when
+            // the imported site is missing config. Saying which keys did not
+            // travel costs one line and is the difference between a decision
+            // and a surprise.
+            .filter(|row| {
+                if table == variables::TABLE && !variable_is_exportable(row) {
+                    // Bound outside the macro: `tracing`'s field syntax
+                    // resolves `Value` to its own trait, not `serde_json`'s.
+                    let key = row
+                        .get("key")
+                        .and_then(serde_json::Value::as_str)
+                        .unwrap_or("<no key>");
+                    tracing::info!(
+                        key = %key,
+                        "not exporting this config variable: it is sensitive, or names \
+                         instance-scoped infrastructure. The imported site will need it set \
+                         there"
+                    );
+                    return false;
+                }
+                true
+            })
             .filter(|row| owner_was_exported(table, row, &exported))
             .collect();
         if OWNED_TABLES.iter().any(|(_, _, owner)| *owner == table) {
@@ -619,7 +728,7 @@ pub struct ImportReport {
 /// A fixed list rather than the snapshot's own (incidental, alphabetical)
 /// `BTreeMap` order — `"impresspress__admin__user_roles"` sorts before
 /// `"wafer_run__auth__users"`, which is exactly backwards.
-const REPLACE_ORDER: &[&str] = &[users::TABLE, local_credentials::TABLE, USER_ROLES_TABLE];
+const REPLACE_ORDER: &[&str] = &[users::TABLE, local_credentials::TABLE, user_roles::TABLE];
 
 #[cfg(test)]
 mod replace_order_tests {
@@ -674,16 +783,24 @@ mod replace_order_tests {
 /// the module docs for why a name outside it is refused (`InvalidArgument`)
 /// rather than silently skipped or written anyway.
 ///
-/// **Not atomic.** Each table is deleted-then-recreated (`Replace`) or
-/// upserted (`Upsert`) independently — the typed database client this
-/// module is required to use (CLAUDE.md: no raw SQL in block code) exposes
-/// no cross-call transaction, so a crash or error partway through leaves
-/// whatever tables were already written in their new state and the rest in
-/// their old one. This is worth a `wafer-run` ticket (a transaction/batch op
-/// on `wafer_core::clients::database`) rather than working around it here.
-/// What keeps this safe in the meantime: every write is keyed on the
-/// snapshot's own row ids, so importing the same snapshot again (after a
-/// partial failure, or on purpose) converges to the same end state —
+/// The whole import is ONE `db::batch`, so one transaction: all of its
+/// writes or none, and one OPFS flush in the browser. Each `Replace` table is
+/// a filtered delete of every row (`BatchWrite::DeleteWhere` with no filters)
+/// followed by a `Create` per snapshot row, in [`REPLACE_ORDER`]; then every
+/// `Upsert` row of every other table. A write that fails (a duplicate key, a
+/// bad row) rolls all of it back, so a failed import leaves the users, their
+/// credentials and every other table as they were.
+///
+/// The database handler admits the batch, one statement per op, against the
+/// backend's statement budget before anything runs. SQLite and PostgreSQL
+/// take any size. On Cloudflare D1 an import larger than what the request has
+/// left is refused whole (`ResourceExhausted`, or `InvalidArgument` past the
+/// per-invocation limit) and nothing is written: a smaller bundle, or a
+/// raised `IMPRESSPRESS_D1_QUERIES_PER_INVOCATION` on a plan that allows it,
+/// is the fix, not a retry.
+///
+/// Every write is keyed on the snapshot's own row ids, so importing the same
+/// snapshot again converges to the same end state —
 /// `tests/dev_data_snapshot.rs`'s
 /// `import_replaces_users_and_upserts_products_so_ownership_survives` test
 /// re-imports and asserts no duplication.
@@ -712,7 +829,52 @@ pub async fn import(
         }
     }
 
+    // Third pre-flight pass, for the same reason as the two above: refuse
+    // before writing anything, so a bundle naming one forged key imports none
+    // of its rows rather than most of them and failing partway.
+    //
+    // `variables::TABLE` is the one allowlisted table whose rows carry a NAME
+    // the runtime reserves. `admin::ops::reject_runtime_owned_key` refuses
+    // these on the admin write path and `ui::settings_form`'s `CONFIG_SET`
+    // refuses them too; this import reaches the same table through
+    // `db::upsert`, so without this pass it is the one way in.
+    //
+    // The set is `is_instance_owned_key`, not the narrower
+    // `is_runtime_owned_key`, and the difference is the dangerous case. A
+    // planted INFRASTRUCTURE or INTERNAL row is inert for reads —
+    // `blocks::config`'s `served_only_from_boot_map` answers those from the
+    // boot map whatever the table holds (PR #65) — so it is only a forgery
+    // that shows on the admin Variables page and travels into the next
+    // export. The JWT SECRET is not inert: `seed_jwt_secret` writes through
+    // `insert_if_absent`, so a row already present wins and auto-generation
+    // never fires, and boot signs every session JWT and CSRF token with it.
+    // A bundle shared between instances would give each one a signing secret
+    // its author knows. Nothing legitimate carries either class — the secret
+    // is unexportable twice over (`_SECRET` suffix, and the `sensitive` flag
+    // the seeder sets) — so refusing them costs no real bundle.
+    //
+    // A row with no `key`, or a non-string one, is not judged here: no such
+    // value can spell a reserved name, and the upsert's `["key"]` conflict
+    // target is what refuses it.
+    if let Some(rows) = snapshot.tables.get(variables::TABLE) {
+        for row in rows {
+            let Some(key) = row.get("key").and_then(Value::as_str) else {
+                continue;
+            };
+            if crate::config_vars::is_instance_owned_key(key) {
+                return Err(WaferError::new(
+                    ErrorCode::InvalidArgument,
+                    format!(
+                        "the data snapshot carries the variable {key:?}, whose value this \
+                         instance owns; a seed bundle may not set it"
+                    ),
+                ));
+            }
+        }
+    }
+
     let mut report = ImportReport::default();
+    let mut writes = Vec::new();
     // `Replace` tables first, in `REPLACE_ORDER` — not the snapshot's own
     // alphabetical order. `Upsert` tables carry no such dependency (every
     // foreign id they reference — `product_id`, `offer_id` — is validated by
@@ -722,15 +884,24 @@ pub async fn import(
         let Some(rows) = snapshot.tables.get(table) else {
             continue;
         };
-        db::delete_by_filters(ctx, table, Vec::new()).await?;
-        for row in rows {
-            import_row(ctx, table, Mode::Replace, row).await?;
-        }
+        let rows = if table == user_roles::TABLE {
+            one_grant_per_user_and_role(rows)
+        } else {
+            rows.iter().collect()
+        };
+        writes.push(BatchWrite::DeleteWhere {
+            collection: table.to_string(),
+            filters: Vec::new(),
+        });
         report.tables.insert(table.to_string(), rows.len());
+        writes.extend(rows.into_iter().map(|row| BatchWrite::Create {
+            collection: table.to_string(),
+            data: imported_row(table, row).into_iter().collect(),
+        }));
     }
     for (table, rows) in &snapshot.tables {
         if REPLACE_ORDER.contains(&table.as_str()) {
-            continue; // already applied above, in dependency order
+            continue; // already queued above, in dependency order
         }
         // The mode comes from the allowlist rather than being assumed: it
         // carries the table's conflict target, and every remaining entry is
@@ -739,66 +910,181 @@ pub async fn import(
         // the list, so a lookup miss here is unreachable — and is reported
         // rather than defaulted, because defaulting to `BY_ID` is precisely
         // the assumption this field exists to stop making.
-        let Some((_, mode)) = TABLE_ALLOWLIST.iter().find(|(name, _)| name == table) else {
+        let Some((_, Mode::Upsert(conflict))) =
+            TABLE_ALLOWLIST.iter().find(|(name, _)| name == table)
+        else {
             return Err(WaferError::new(
                 ErrorCode::Internal,
-                format!("{table:?} passed the allowlist check but has no import mode"),
+                format!("{table:?} passed the allowlist check but has no upsert conflict target"),
             ));
         };
-        for row in rows {
-            import_row(ctx, table, *mode, row).await?;
-        }
+        writes.extend(rows.iter().map(|row| upsert_op(table, conflict, row)));
         report.tables.insert(table.clone(), rows.len());
+    }
+    if !writes.is_empty() {
+        // The per-op results (each created row as stored) are not needed: the
+        // report counts the snapshot's rows, which is what was written.
+        db::batch(ctx, writes).await?;
     }
     Ok(report)
 }
 
-/// Write one row into `table` under `mode`. Split out of [`import`] because
-/// the two modes' typed calls take different shapes (`create`'s owned
-/// `HashMap` vs. `upsert`'s ordered pair list) that don't share a body.
-async fn import_row(
-    ctx: &dyn Context,
-    table: &str,
-    mode: Mode,
-    row: &serde_json::Map<String, Value>,
-) -> Result<(), WaferError> {
-    match mode {
-        Mode::Replace => {
-            let data: HashMap<String, Value> = row.clone().into_iter().collect();
-            db::create(ctx, table, data).await?;
-        }
-        Mode::Upsert(conflict) => {
-            let data: Vec<(String, Value)> = row.clone().into_iter().collect();
-            // Neither `id` nor the conflict columns are updated on a
-            // conflict. The conflict columns are equal by definition (that is
-            // what conflicted), and `id` must stay the DESTINATION's: an
-            // import that rewrote it would break every row already pointing
-            // at it — a `user_roles.role_id`, say — to graft on an id whose
-            // only merit is that another instance happened to mint it.
-            let update_columns: Vec<String> = row
-                .keys()
-                .filter(|key| key.as_str() != "id" && !conflict.contains(&key.as_str()))
-                .cloned()
-                .collect();
-            let conflict: Vec<String> = conflict.iter().map(|c| (*c).to_string()).collect();
-            // Products alone: written through the repo module's own
-            // wholesale-upsert door, never the raw table name — see the
-            // comment on `TABLE_ALLOWLIST`'s products entry. The door takes
-            // the conflict target the allowlist declared, exactly as
-            // `db::upsert` does below, so there is one statement of it.
-            if table == PRODUCTS_COLLECTION {
-                upsert_product_from_snapshot(ctx, data, conflict, update_columns).await?;
-            } else {
-                db::upsert(
-                    ctx,
-                    table,
-                    data,
-                    conflict,
-                    OnConflict::SetColumns(update_columns),
-                )
-                .await?;
-            }
-        }
+/// A snapshot's grant rows with every repeat of a `(user_id, role)` pair
+/// dropped, in the snapshot's own order otherwise.
+///
+/// A bundle exported before admin migration 004 can carry twin grants, and
+/// the destination's unique index over the pair would refuse the second —
+/// failing the whole import. The twin
+/// grants nothing its survivor does not, so it is dropped rather than
+/// refused. The survivor is the least `(created_at, id)`, the pair 004 ranks
+/// by, compared bytewise so the choice does not depend on row order.
+fn one_grant_per_user_and_role(
+    rows: &[serde_json::Map<String, Value>],
+) -> Vec<&serde_json::Map<String, Value>> {
+    let text = |row: &serde_json::Map<String, Value>, field: &str| {
+        row.get(field)
+            .and_then(Value::as_str)
+            .unwrap_or_default()
+            .to_string()
+    };
+    let mut survivor: HashMap<(String, String), usize> = HashMap::new();
+    for (index, row) in rows.iter().enumerate() {
+        let rank = |i: usize| (text(&rows[i], "created_at"), text(&rows[i], "id"));
+        survivor
+            .entry((text(row, "user_id"), text(row, "role")))
+            .and_modify(|kept| {
+                if rank(index) < rank(*kept) {
+                    *kept = index;
+                }
+            })
+            .or_insert(index);
     }
-    Ok(())
+    let kept: std::collections::HashSet<usize> = survivor.into_values().collect();
+    rows.iter()
+        .enumerate()
+        .filter(|(index, _)| kept.contains(index))
+        .map(|(_, row)| row)
+        .collect()
+}
+
+/// Raise an imported `impresspress__admin__variables` row's `sensitive` column
+/// to what its key requires, exactly as
+/// [`crate::platform_state::variables::NewVariable::into_row`] does for every
+/// row this instance creates itself.
+///
+/// Import is the one write to this table that does NOT go through that funnel —
+/// it upserts the bundle's own columns straight through `db::batch` — and its
+/// pre-flight refuses only [`crate::config_vars::is_instance_owned_key`]. So a
+/// bundle carrying `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_PASSWORD` with
+/// `sensitive: 0` would re-create exactly the row this masking work exists to
+/// prevent: served in the clear by `GET /b/admin/api/settings/{key}` and
+/// KV-cacheable, until the next `/_deploy/init` or native boot happened to run
+/// the repair pass.
+///
+/// Raise-only, like the funnel: a bundle may mark a row sensitive that this
+/// build does not know to be, and that stands.
+fn raise_imported_sensitive_flag(row: &mut serde_json::Map<String, Value>) {
+    let Some(key) = row.get("key").and_then(Value::as_str) else {
+        return;
+    };
+    if !crate::config_vars::is_sensitive_for_storage(key) {
+        return;
+    }
+    // Write the canonical `1` UNCONDITIONALLY rather than returning early on a
+    // truthy-looking value. The early return used `RecordExt::bool_field`,
+    // which accepts `2`, `true` and `"true"` — shapes a bundle can carry and
+    // the declared `INTEGER` column does not use — so such a row imported
+    // unchanged. This is the one write path that accepts foreign data, so it
+    // is the one that must not trust the sender's spelling.
+    if row.get("sensitive") != Some(&serde_json::json!(1)) {
+        tracing::warn!(
+            key = %key,
+            "the imported data snapshot did not mark this config key sensitive in the \
+             canonical form; storing it sensitive, as its declaration requires"
+        );
+    }
+    row.insert("sensitive".to_string(), serde_json::json!(1));
+}
+
+/// Neutralise an imported variables row's `updated_by` on INSERT, without ever
+/// writing it over a row this instance already has.
+///
+/// That column is the local admin-ownership marker
+/// ([`crate::platform_state::variables::is_pinned`]): non-empty means an
+/// admin HERE edited the row, which is what makes it outrank the process
+/// environment. It has to be protected from a bundle in BOTH directions, and
+/// blanking the value alone only covered one of them:
+///
+/// - A bundle must not CLAIM ownership here. An admin on the exporting
+///   instance is not an admin on this one, and a verbatim copy would let a seed
+///   bundle silently pin keys against this deployment's own `.env` while the
+///   boot log blamed an edit that never happened here. Blanking the value in
+///   the row handles this: a newly inserted row arrives seeder-owned, so the
+///   local environment can still seed it.
+/// - A bundle must not REVOKE ownership here either — the case the first
+///   version of this missed. On `Mode::Upsert` the bundle's columns are written
+///   over the destination's, so a blank would erase a marker a local admin had
+///   set and hand their key back to the local `.env`. That is why
+///   `updated_by` is dropped from the update column set in [`upsert_op`]
+///   rather than merely blanked: on a conflict the destination keeps its own.
+fn neutralise_imported_owner(row: &mut serde_json::Map<String, Value>) {
+    row.insert("updated_by".to_string(), serde_json::json!(""));
+}
+
+/// `row` as it is written into `table`: unchanged, except that a variables
+/// row — the table whose columns carry a security decision, and the one
+/// import writes without passing through `NewVariable::into_row` — has its
+/// `sensitive` flag raised and its admin-ownership marker neutralised.
+fn imported_row(
+    table: &str,
+    row: &serde_json::Map<String, Value>,
+) -> serde_json::Map<String, Value> {
+    let mut row = row.clone();
+    if table == variables::TABLE {
+        raise_imported_sensitive_flag(&mut row);
+        neutralise_imported_owner(&mut row);
+    }
+    row
+}
+
+/// The `db::batch` write that upserts one snapshot `row` into `table` on
+/// `conflict`.
+fn upsert_op(table: &str, conflict: &[&str], row: &serde_json::Map<String, Value>) -> BatchWrite {
+    let row = imported_row(table, row);
+    // Neither `id` nor the conflict columns are updated on a
+    // conflict. The conflict columns are equal by definition (that is
+    // what conflicted), and `id` must stay the DESTINATION's: an
+    // import that rewrote it would break every row already pointing
+    // at it — a `user_roles.role_id`, say — to graft on an id whose
+    // only merit is that another instance happened to mint it.
+    //
+    // `variables.updated_by` is excluded for a related reason: it is
+    // the DESTINATION's admin-ownership marker, so writing the
+    // bundle's over it on a conflict would revoke a local admin's
+    // claim and hand their key back to the local `.env`. Excluded
+    // rather than blanked — a blank is still a write — so a row this
+    // instance already has keeps whatever it had. See
+    // `neutralise_imported_owner`, which covers the insert direction.
+    let update_columns: Vec<String> = row
+        .keys()
+        .filter(|key| key.as_str() != "id" && !conflict.contains(&key.as_str()))
+        .filter(|key| !(table == variables::TABLE && key.as_str() == "updated_by"))
+        .cloned()
+        .collect();
+    let data: Vec<(String, Value)> = row.into_iter().collect();
+    let conflict: Vec<String> = conflict.iter().map(|c| (*c).to_string()).collect();
+    // Products alone: built by the repo module's own wholesale-upsert
+    // door, never on the raw table name — see the comment on
+    // `TABLE_ALLOWLIST`'s products entry. The door takes the conflict
+    // target the allowlist declared, exactly as the generic op below does,
+    // so there is one statement of it.
+    if table == PRODUCTS_COLLECTION {
+        return product_snapshot_upsert(data, conflict, update_columns);
+    }
+    BatchWrite::Upsert(UpsertRequest {
+        collection: table.to_string(),
+        data,
+        conflict_columns: conflict,
+        on_conflict: OnConflict::SetColumns(update_columns),
+    })
 }

@@ -2,31 +2,23 @@ import { expect, test, type Route } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-const pagesPath = fileURLToPath(
-  new URL(
-    "../../../impresspress-core/src/blocks/products/pages.rs",
-    import.meta.url,
-  ),
+const bundlesUrl = new URL(
+  "../../../impresspress-core/src/blocks/products/assets/",
+  import.meta.url,
 );
+
+/**
+ * A products browser bundle, read from the very file the server serves at
+ * `/b/static/products-*.js`. These used to be Rust string constants dug out
+ * of `pages.rs` with a regular expression; they are real files now, so the
+ * spec reads the file — the same way `products-storefront.spec.ts` has always
+ * read `storefront.js`.
+ */
+function bundle(name: string) {
+  return readFileSync(fileURLToPath(new URL(name, bundlesUrl)), "utf8");
+}
+
 const adminOrigin = "https://admin.example";
-
-function productManagerScript() {
-  const source = readFileSync(pagesPath, "utf8");
-  const match = source.match(
-    /const PRODUCT_MANAGER_JS: &str = r#"\n([\s\S]*?)\n"#;/,
-  );
-  if (!match) throw new Error("Could not extract PRODUCT_MANAGER_JS from pages.rs");
-  return match[1];
-}
-
-function productWizardScript() {
-  const source = readFileSync(pagesPath, "utf8");
-  const match = source.match(
-    /const PRODUCT_WIZARD_JS: &str = r#"\n([\s\S]*?)\n"#;/,
-  );
-  if (!match) throw new Error("Could not extract PRODUCT_WIZARD_JS from pages.rs");
-  return match[1];
-}
 
 function managerHtml(syncStatus: "failed" | "synced") {
   const label =
@@ -42,13 +34,12 @@ function managerHtml(syncStatus: "failed" | "synced") {
       >
         <h2>Quarterly care plan</h2>
         <p>Stripe sync: ${syncStatus}</p>
-        <button type="button" onclick="productManagerOfferAction(this,'sync')">
+        <button type="button" data-action="pm-offer-action" data-offer-op="sync">
           ${label}
         </button>
       </section>
     </main>
-    <script>${productManagerScript()}</script>
-    <script>initProductManager();</script>
+    <script>${bundle("products-manager.js")}</script>
   </body>
 </html>`;
 }
@@ -75,7 +66,7 @@ function configurableManagerHtml() {
         <input id="preview-quantity" data-preview-quantity type="number" min="1" step="1" value="2" required>
         <label for="preview-seats">Seats</label>
         <input id="preview-seats" data-offer-variable="preview" data-variable-key="seats" data-variable-kind="integer" type="number" min="1" step="1" value="3" required>
-        <button type="button" onclick="productManagerPreview(this)">Calculate preview</button>
+        <button type="button" data-action="pm-preview">Calculate preview</button>
         <div data-pricing-preview aria-live="polite"></div>
 
         <label for="preset-name">Preset name</label>
@@ -86,18 +77,17 @@ function configurableManagerHtml() {
         <input id="preset-seats" data-offer-variable="preset" data-variable-key="seats" data-variable-kind="integer" type="number" min="1" step="1" required>
         <label for="completion-url">After-completion URL (optional)</label>
         <input id="completion-url" data-link-completion-url type="url" value="https://shop.example/thanks">
-        <button type="button" data-create-link onclick="productManagerCreateLink(this)">Create or reuse Payment Link</button>
+        <button type="button" data-create-link data-action="pm-create-link">Create or reuse Payment Link</button>
         <div data-checkout-presets></div>
         <div data-payment-links></div>
 
         <div class="form-group">
           <textarea data-integration-snippet readonly>&lt;impresspress-product product-id="product_1" presentation="embedded"&gt;&lt;/impresspress-product&gt;</textarea>
-          <button type="button" onclick="productManagerCopyField(this)">Copy embedded snippet</button>
+          <button type="button" data-action="pm-copy-field">Copy embedded snippet</button>
         </div>
       </section>
     </main>
-    <script>${productManagerScript()}</script>
-    <script>initProductManager();</script>
+    <script>${bundle("products-manager.js")}</script>
   </body>
 </html>`;
 }
@@ -187,25 +177,24 @@ function visualDraftManagerHtml() {
   return `<!doctype html><html><head><meta charset="utf-8"></head><body>
     <p id="product-manager-error" role="alert" aria-live="assertive" hidden></p>
     <section data-offer-card data-offer-url="/b/products/api/admin/products/product_1/offers/offer_draft">
-      <button type="button" onclick="productManagerOpenVisualEditor(this)">Edit visually</button>
+      <button type="button" data-action="pm-open-visual-editor">Edit visually</button>
       <textarea data-offer-definition>${JSON.stringify(definition)}</textarea>
     </section>
     <section id="product-manager-visual-editor" hidden>
       <h2 id="manager-visual-title">Edit pricing draft</h2>
       <label for="manager-visual-offer-name">Offer name</label><input id="manager-visual-offer-name">
-      <label for="manager-visual-mode">Charge type</label><select id="manager-visual-mode" onchange="productManagerVisualModeChanged()"><option value="payment">Payment</option><option value="subscription">Subscription</option></select>
+      <label for="manager-visual-mode">Charge type</label><select id="manager-visual-mode" data-action="pm-visual-mode-changed"><option value="payment">Payment</option><option value="subscription">Subscription</option></select>
       <label for="manager-visual-currency">Currency</label><input id="manager-visual-currency">
       <div data-manager-recurring><label for="manager-visual-interval">Billing interval</label><select id="manager-visual-interval"><option value="month">Month</option><option value="year">Year</option></select></div>
       <div data-manager-recurring><label for="manager-visual-interval-count">Every</label><input id="manager-visual-interval-count" type="number"></div>
-      <button type="button" onclick="addWizardVariable()">Add input</button>
+      <button type="button" data-action="pw-add-variable">Add input</button>
       <div id="wizard-variables"></div>
-      <button type="button" onclick="addWizardComponent()">Add row</button>
+      <button type="button" data-action="pw-add-component">Add row</button>
       <div id="wizard-components"></div>
-      <button type="button" onclick="productManagerSaveVisualOffer(this)">Save visual changes</button>
+      <button type="button" data-action="pm-save-visual-offer">Save visual changes</button>
     </section>
-    <script>${productWizardScript()}</script>
-    <script>${productManagerScript()}</script>
-    <script>initProductManager();</script>
+    <script>${bundle("products-wizard.js")}</script>
+    <script>${bundle("products-manager.js")}</script>
   </body></html>`;
 }
 

@@ -100,6 +100,27 @@ impl BlockSettings {
             .collect()
     }
 
+    /// Flip one block's `enabled` flag in place, leaving every other column of
+    /// its [`BlockState`] alone and creating the entry when absent.
+    ///
+    /// The only mutator on this type, and it exists for exactly one caller:
+    /// the admin block toggle, which writes the `block_settings` row and then
+    /// updates the live snapshot the router reads through its
+    /// `Arc<dyn FeatureConfig>`. Without it the toggle only reached the table,
+    /// and on native — where nothing re-reads that table after `build()` —
+    /// the router kept gating on the boot-time snapshot until the process
+    /// restarted.
+    ///
+    /// Migration state is deliberately preserved: `migration_helper` owns
+    /// those columns, and an operator disabling a block must not look like a
+    /// block that has never run its migrations.
+    pub fn set_block_enabled(&mut self, full_name: &str, enabled: bool) {
+        self.blocks
+            .entry(full_name.to_string())
+            .or_default()
+            .enabled = enabled;
+    }
+
     /// Look up the full `BlockState` for a block by full name.
     /// Returns a default (enabled + empty migration state) when the block has
     /// no row in `block_settings` yet.
@@ -198,39 +219,6 @@ impl FeatureConfig for std::sync::RwLock<BlockSettings> {
     }
 }
 
-/// Canonical defaults for `impresspress__admin__block_settings.enabled`.
-/// Consumed by [`plan_seed_decisions`] on every cold start.
-///
-/// Adding a block here: bump the list, ship — every existing row gets the
-/// INSERT path (no row yet → write the new default at the current hash).
-///
-/// Changing an existing default: just edit the bool — the hash gate detects
-/// the change and re-seeds rows still at the old default. Admin-UI edits
-/// (marked [`USER_EDITED_SENTINEL`]) are preserved.
-///
-/// Excluded for now: `impresspress/llm` and `impresspress/vector`. The LLM
-/// block module is gated on `feature = "llm"` (wasm32-incompatible) so
-/// the router would dispatch into a void on wasm32 if either was enabled
-/// here. Restored when the LlmService trait refactor lands.
-///
-/// Also excluded: `impresspress/admin`. The admin row's `seed_defaults_hash`
-/// column is owned by [`crate::blocks::admin::settings::seed_defaults`]
-/// for the shared-vars-list payload hash (raw hex, no prefix). Two
-/// writers on the same column with different formats would cause an
-/// infinite re-seed loop on every cold start. The admin block is always
-/// enabled by design (FeatureConfig falls back to `true` when the row is
-/// absent), so omitting it from the seed has no behavioural effect.
-pub const ENABLED_DEFAULTS: &[(&str, bool)] = &[
-    ("wafer-run/auth", true),
-    ("impresspress/files", true),
-    ("impresspress/legalpages", true),
-    ("impresspress/tickets", false),
-    ("impresspress/messages", true),
-    ("impresspress/products", true),
-    ("impresspress/system", true),
-    ("impresspress/userportal", true),
-];
-
 /// Stored in `seed_defaults_hash` to mark a row that was last written by
 /// the admin UI's toggle. Such rows are never overwritten by the seed.
 pub const USER_EDITED_SENTINEL: &str = "user-edited";
@@ -258,8 +246,8 @@ pub struct ExistingRow {
 /// What the planner decided about a given block name.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SeedDecision {
-    /// Static block name from [`ENABLED_DEFAULTS`].
-    pub block_name: &'static str,
+    /// Block name, copied from the caller's defaults slice.
+    pub block_name: String,
     /// Value to write.
     pub enabled: bool,
     /// `seed_defaults_hash` value to write (always `"seed:<hex>"`).
@@ -277,12 +265,20 @@ pub enum SeedOp {
 }
 
 /// Compute the set of writes needed to bring `block_settings.enabled`
-/// rows in sync with [`ENABLED_DEFAULTS`].
+/// rows in sync with `defaults`.
 ///
-/// Pure function — no DB access. The caller supplies the already-loaded
-/// `existing` map (keyed by block_name → `ExistingRow`) and applies the
-/// returned decisions in whatever shape its persistence layer prefers
-/// (one upsert per decision, batched, etc.).
+/// Pure function — no DB access and no knowledge of the block registry. The
+/// caller supplies both sides: the already-loaded `existing` map (keyed by
+/// block_name → `ExistingRow`) and the `(block_name, default_enabled)` pairs
+/// to seed towards, which production derives from the blocks' own `BlockInfo`
+/// via [`crate::blocks::block_enabled_defaults`]. It then applies the returned
+/// decisions in whatever shape its persistence layer prefers (one upsert per
+/// decision, batched, etc.).
+///
+/// A row whose block is absent from `defaults` is left alone — no decision is
+/// emitted for it. That is how a block that is not `can_disable`, or is not
+/// compiled into this build, keeps whatever row it has (and, having none,
+/// falls back to enabled).
 ///
 /// Steady-state cost: empty `Vec` returned → caller issues zero writes.
 ///
@@ -294,14 +290,17 @@ pub enum SeedOp {
 ///   (already at the current seeded default).
 /// - Row present with any other `"seed:..."` hash → `SeedOp::Update`
 ///   (stale seed hash; default changed since the row was last seeded).
-pub fn plan_seed_decisions(existing: &HashMap<String, ExistingRow>) -> Vec<SeedDecision> {
+pub fn plan_seed_decisions(
+    existing: &HashMap<String, ExistingRow>,
+    defaults: &[(String, bool)],
+) -> Vec<SeedDecision> {
     let mut out = Vec::new();
-    for &(name, default) in ENABLED_DEFAULTS {
-        let want_hash = seed_hash_for(default);
+    for (name, default) in defaults {
+        let want_hash = seed_hash_for(*default);
         match existing.get(name) {
             None => out.push(SeedDecision {
-                block_name: name,
-                enabled: default,
+                block_name: name.clone(),
+                enabled: *default,
                 hash: want_hash,
                 op: SeedOp::Insert,
             }),
@@ -313,8 +312,8 @@ pub fn plan_seed_decisions(existing: &HashMap<String, ExistingRow>) -> Vec<SeedD
                     continue;
                 }
                 out.push(SeedDecision {
-                    block_name: name,
-                    enabled: default,
+                    block_name: name.clone(),
+                    enabled: *default,
                     hash: want_hash,
                     op: SeedOp::Update,
                 });
@@ -322,219 +321,6 @@ pub fn plan_seed_decisions(existing: &HashMap<String, ExistingRow>) -> Vec<SeedD
         }
     }
     out
-}
-
-type DatabaseError = wafer_core::interfaces::database::service::DatabaseError;
-type DatabaseService = dyn wafer_core::interfaces::database::service::DatabaseService;
-type Record = wafer_core::interfaces::database::service::Record;
-type RecordList = wafer_core::interfaces::database::service::RecordList;
-
-async fn read_block_settings_records(
-    db: &std::sync::Arc<DatabaseService>,
-) -> Result<RecordList, DatabaseError> {
-    // Built by `cache_key` rather than open-coded: this shape is what
-    // `read_key` recognizes as the cacheable full-table read, so a local
-    // literal here could drift out of cache coverage silently.
-    let opts = crate::cache_key::full_table_list_opts();
-    db.list(crate::admin_schema::BLOCK_SETTINGS_TABLE, &opts)
-        .await
-        .map_err(|e| {
-            // Not the missing-table case (that's `Ok(empty)`, handled inside
-            // `list` itself) — a genuine operational error. Do not fabricate
-            // all-enabled; propagate so the caller fails closed.
-            tracing::error!(
-                error = %e,
-                "block_settings list failed (operational error, not a missing table); \
-                 refusing to fabricate all-enabled defaults"
-            );
-            e
-        })
-}
-
-fn block_settings_from_records(records: &[Record]) -> BlockSettings {
-    let blocks: HashMap<String, BlockState> = records
-        .iter()
-        .filter_map(|r| {
-            let name = r.data.get("block_name")?.as_str()?.to_string();
-            let enabled = r.data.get("enabled")?.as_i64()? != 0;
-            let current_hash = r
-                .data
-                .get("current_hash")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let blessed_hash = r
-                .data
-                .get("blessed_hash")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            let seed_defaults_hash = r
-                .data
-                .get("seed_defaults_hash")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            Some((
-                name,
-                BlockState {
-                    enabled,
-                    migration: MigrationState {
-                        current_hash,
-                        blessed_hash,
-                    },
-                    seed_defaults_hash,
-                },
-            ))
-        })
-        .collect();
-
-    BlockSettings::from_blocks(blocks)
-}
-
-/// Read and parse `block_settings` without inserting or updating anything.
-///
-/// This is the ordinary Cloudflare request-path loader. Structural seeding is
-/// a deploy/boot mutation and must use [`load_and_seed_block_settings`] only
-/// after admin migration has created the canonical table. Keeping this path
-/// physically write-free prevents a cold runtime from invalidating itself via
-/// the KV config-generation bump.
-pub async fn load_block_settings(
-    db: &std::sync::Arc<DatabaseService>,
-) -> Result<BlockSettings, DatabaseError> {
-    let records = read_block_settings_records(db).await?;
-    Ok(block_settings_from_records(&records.records))
-}
-
-/// Read `block_settings` rows, run the hash-gated [`plan_seed_decisions`]
-/// planner, apply the resulting inserts/updates, and return the post-seed
-/// [`BlockSettings`].
-///
-/// This is the single implementation behind every target's block-settings
-/// load: the Cloudflare runner, the browser config loader, AND — for the first
-/// time — the native CLI, which previously read the table without ever running
-/// the #222 hash-gate, so `ENABLED_DEFAULTS` changes silently never propagated
-/// on native boots. Routing native through here closes that gap.
-///
-/// Written against [`DatabaseService`] so all three targets share it. Steady
-/// state: the planner returns an empty `Vec`, so zero writes are issued and the
-/// only cost is the initial list (+ no re-read).
-///
-/// # Error semantics
-///
-/// A missing `block_settings` table (fresh DB, or a cold Cloudflare isolate
-/// whose first request races admin's `Init`) is **not** an error condition
-/// here at all: [`DatabaseService::list`]'s shared `DbExec` implementation
-/// already guards on table existence and returns `Ok(RecordList::default())`
-/// for a table that doesn't exist yet (see `DbExec::list` in
-/// `wafer-core/src/interfaces/database/exec.rs`). That is the one and only
-/// place the "tolerant" cold-start case is handled.
-///
-/// Consequently, an `Err` reaching this function is **always** a genuine
-/// operational failure (backend outage, corruption, permissions) — never the
-/// missing-table case. Silently substituting [`BlockSettings::default`] here
-/// used to fabricate "every block enabled" out of a real error (CODE_REVIEW
-/// finding: "Feature settings fail open to all-blocks-enabled"). Instead this
-/// propagates the error so the caller can decide the right failure policy —
-/// every current caller treats it as fatal to the boot/build (fail closed:
-/// no runtime gets built/served with a fabricated all-enabled snapshot).
-pub async fn load_and_seed_block_settings(
-    db: &std::sync::Arc<DatabaseService>,
-) -> Result<BlockSettings, DatabaseError> {
-    let record_list = read_block_settings_records(db).await?;
-
-    // Existing-row map for the hash-gate planner.
-    let existing: HashMap<String, ExistingRow> = record_list
-        .records
-        .iter()
-        .filter_map(|r| {
-            let name = r.data.get("block_name")?.as_str()?.to_string();
-            let enabled = r.data.get("enabled")?.as_i64()? != 0;
-            let hash = r
-                .data
-                .get("seed_defaults_hash")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            Some((name, ExistingRow { enabled, hash }))
-        })
-        .collect();
-
-    // `block_name` → row `id`, so a `SeedOp::Update` can do a single-row
-    // `db.update` (which the KV wrapper invalidates) instead of `update_where`
-    // (which hard-errors on cached tables, so a changed `ENABLED_DEFAULTS` hash
-    // would never propagate to existing rows).
-    let id_by_block: HashMap<String, String> = record_list
-        .records
-        .iter()
-        .filter_map(|r| {
-            let name = r.data.get("block_name")?.as_str()?.to_string();
-            let id = r.data.get("id")?.as_str()?.to_string();
-            Some((name, id))
-        })
-        .collect();
-
-    let decisions = plan_seed_decisions(&existing);
-    let any_writes = !decisions.is_empty();
-    for d in &decisions {
-        apply_seed_decision(db, d, &id_by_block).await?;
-    }
-
-    // Re-read only when something changed (rare). Costs one extra read.
-    let final_records = if any_writes {
-        read_block_settings_records(db).await?.records
-    } else {
-        record_list.records
-    };
-
-    Ok(block_settings_from_records(&final_records))
-}
-
-/// Apply one [`SeedDecision`] via [`DatabaseService`]. Insert builds a fresh
-/// row; Update resolves the row id from `id_by_block` (always present for an
-/// Update, which is only planned for an existing row) and does a single-row
-/// `db.update`. Failures propagate so a deploy/boot cannot claim structural
-/// seeding succeeded while leaving missing or stale rows behind.
-async fn apply_seed_decision(
-    db: &std::sync::Arc<DatabaseService>,
-    d: &SeedDecision,
-    id_by_block: &HashMap<String, String>,
-) -> Result<(), DatabaseError> {
-    let enabled_val = serde_json::Value::Number(serde_json::Number::from(i64::from(d.enabled)));
-    let hash_val = serde_json::Value::String(d.hash.clone());
-    let now = chrono::Utc::now().to_rfc3339();
-    match d.op {
-        SeedOp::Insert => {
-            let id = format!("bs_{}", uuid::Uuid::new_v4());
-            let mut data: HashMap<String, serde_json::Value> = HashMap::new();
-            data.insert("id".into(), serde_json::Value::String(id));
-            data.insert(
-                "block_name".into(),
-                serde_json::Value::String(d.block_name.to_string()),
-            );
-            data.insert("enabled".into(), enabled_val);
-            data.insert("seed_defaults_hash".into(), hash_val);
-            data.insert("created_at".into(), serde_json::Value::String(now.clone()));
-            data.insert("updated_at".into(), serde_json::Value::String(now));
-            db.create(crate::admin_schema::BLOCK_SETTINGS_TABLE, data)
-                .await?;
-        }
-        SeedOp::Update => {
-            let Some(id) = id_by_block.get(d.block_name) else {
-                return Err(DatabaseError::Internal(format!(
-                    "block_settings seed update for {} has no row id",
-                    d.block_name
-                )));
-            };
-            let mut data: HashMap<String, serde_json::Value> = HashMap::new();
-            data.insert("enabled".into(), enabled_val);
-            data.insert("seed_defaults_hash".into(), hash_val);
-            data.insert("updated_at".into(), serde_json::Value::String(now));
-            db.update(crate::admin_schema::BLOCK_SETTINGS_TABLE, id, data)
-                .await?;
-        }
-    }
-    Ok(())
 }
 
 /// All features enabled (for testing).
@@ -547,45 +333,141 @@ impl FeatureConfig for AllEnabled {
 }
 
 #[cfg(test)]
+mod block_settings_tests {
+    use super::*;
+
+    /// Creating the entry when absent is the common case: most blocks hold no
+    /// `block_settings` row until someone toggles them, and the toggle has to
+    /// work the first time.
+    #[test]
+    fn set_block_enabled_creates_an_absent_entry() {
+        let mut settings = BlockSettings::default();
+        assert!(
+            settings.is_block_enabled("impresspress/files"),
+            "a block with no entry defaults to enabled",
+        );
+
+        settings.set_block_enabled("impresspress/files", false);
+        assert!(!settings.is_block_enabled("impresspress/files"));
+
+        settings.set_block_enabled("impresspress/files", true);
+        assert!(settings.is_block_enabled("impresspress/files"));
+    }
+
+    /// Migration state belongs to `migration_helper`, not to the toggle: an
+    /// operator disabling a block must not leave it looking like one that has
+    /// never run its migrations.
+    #[test]
+    fn set_block_enabled_preserves_every_other_column() {
+        let mut blocks = HashMap::new();
+        blocks.insert(
+            "impresspress/files".to_string(),
+            BlockState {
+                enabled: true,
+                migration: MigrationState {
+                    current_hash: "cur".to_string(),
+                    blessed_hash: "bless".to_string(),
+                },
+                seed_defaults_hash: "seed:abc".to_string(),
+            },
+        );
+        let mut settings = BlockSettings::from_blocks(blocks);
+
+        settings.set_block_enabled("impresspress/files", false);
+
+        let state = settings.state("impresspress/files");
+        assert!(!state.enabled);
+        assert_eq!(state.migration.current_hash, "cur");
+        assert_eq!(state.migration.blessed_hash, "bless");
+        assert_eq!(state.seed_defaults_hash, "seed:abc");
+    }
+
+    #[test]
+    fn set_block_enabled_touches_only_its_own_entry() {
+        let mut settings = BlockSettings::default();
+        settings.set_block_enabled("impresspress/files", false);
+        assert!(
+            settings.is_block_enabled("impresspress/tickets"),
+            "an unrelated block keeps its default",
+        );
+    }
+}
+
+#[cfg(test)]
 mod seed_plan_tests {
     use std::collections::HashMap;
 
     use super::*;
 
-    fn defaults_count() -> usize {
-        ENABLED_DEFAULTS.len()
+    /// The planner's inputs are a fixture, never the production block set.
+    /// Driving these lanes from the real registry is what let the
+    /// `legalpages`/`userportal` divergence sit unnoticed for as long as it
+    /// did: the tests asserted the planner agreed with whatever the registry
+    /// said, which is a tautology. Six entries, deliberately mixed
+    /// `true`/`false`, so the mixed-state test below has its five lanes with
+    /// one left over.
+    fn fixture() -> Vec<(String, bool)> {
+        [
+            ("org/alpha", true),
+            ("org/bravo", false),
+            ("org/charlie", true),
+            ("org/delta", false),
+            ("org/echo", true),
+            ("org/foxtrot", true),
+        ]
+        .into_iter()
+        .map(|(name, enabled)| (name.to_string(), enabled))
+        .collect()
+    }
+
+    /// Stage every fixture entry in `existing`, deriving the stored `enabled`
+    /// and `seed_defaults_hash` from that entry's default.
+    fn staged(
+        defaults: &[(String, bool)],
+        value: impl Fn(bool) -> bool,
+        hash: impl Fn(bool) -> String,
+    ) -> HashMap<String, ExistingRow> {
+        defaults
+            .iter()
+            .map(|(name, default)| {
+                (
+                    name.clone(),
+                    ExistingRow {
+                        enabled: value(*default),
+                        hash: hash(*default),
+                    },
+                )
+            })
+            .collect()
+    }
+
+    fn expected_default(defaults: &[(String, bool)], block_name: &str) -> bool {
+        defaults
+            .iter()
+            .find(|(name, _)| name == block_name)
+            .map(|(_, v)| *v)
+            .expect("decision block name must be in the defaults slice")
     }
 
     #[test]
     fn plan_seed_decisions_inserts_when_row_absent() {
+        let defaults = fixture();
         let existing: HashMap<String, ExistingRow> = HashMap::new();
-        let decisions = plan_seed_decisions(&existing);
-        assert_eq!(decisions.len(), defaults_count());
+        let decisions = plan_seed_decisions(&existing, &defaults);
+        assert_eq!(decisions.len(), defaults.len());
         for d in &decisions {
             assert_eq!(d.op, SeedOp::Insert);
-            let expected_default = ENABLED_DEFAULTS
-                .iter()
-                .find(|(name, _)| *name == d.block_name)
-                .map(|(_, v)| *v)
-                .expect("decision block name must be in ENABLED_DEFAULTS");
-            assert_eq!(d.enabled, expected_default);
-            assert_eq!(d.hash, seed_hash_for(expected_default));
+            let expected = expected_default(&defaults, &d.block_name);
+            assert_eq!(d.enabled, expected);
+            assert_eq!(d.hash, seed_hash_for(expected));
         }
     }
 
     #[test]
     fn plan_seed_decisions_skips_when_hash_matches_current() {
-        let mut existing = HashMap::new();
-        for (name, default) in ENABLED_DEFAULTS {
-            existing.insert(
-                (*name).to_string(),
-                ExistingRow {
-                    enabled: *default,
-                    hash: seed_hash_for(*default),
-                },
-            );
-        }
-        let decisions = plan_seed_decisions(&existing);
+        let defaults = fixture();
+        let existing = staged(&defaults, |d| d, seed_hash_for);
+        let decisions = plan_seed_decisions(&existing, &defaults);
         assert!(
             decisions.is_empty(),
             "no decisions expected at steady state, got: {decisions:?}",
@@ -594,44 +476,23 @@ mod seed_plan_tests {
 
     #[test]
     fn plan_seed_decisions_updates_when_hash_stale() {
-        let mut existing = HashMap::new();
-        for (name, default) in ENABLED_DEFAULTS {
-            let opposite = !*default;
-            existing.insert(
-                (*name).to_string(),
-                ExistingRow {
-                    enabled: opposite,
-                    hash: seed_hash_for(opposite),
-                },
-            );
-        }
-        let decisions = plan_seed_decisions(&existing);
-        assert_eq!(decisions.len(), defaults_count());
+        let defaults = fixture();
+        let existing = staged(&defaults, |d| !d, |d| seed_hash_for(!d));
+        let decisions = plan_seed_decisions(&existing, &defaults);
+        assert_eq!(decisions.len(), defaults.len());
         for d in &decisions {
             assert_eq!(d.op, SeedOp::Update);
-            let expected_default = ENABLED_DEFAULTS
-                .iter()
-                .find(|(name, _)| *name == d.block_name)
-                .map(|(_, v)| *v)
-                .expect("decision block name must be in ENABLED_DEFAULTS");
-            assert_eq!(d.enabled, expected_default);
-            assert_eq!(d.hash, seed_hash_for(expected_default));
+            let expected = expected_default(&defaults, &d.block_name);
+            assert_eq!(d.enabled, expected);
+            assert_eq!(d.hash, seed_hash_for(expected));
         }
     }
 
     #[test]
     fn plan_seed_decisions_skips_user_edited() {
-        let mut existing = HashMap::new();
-        for (name, default) in ENABLED_DEFAULTS {
-            existing.insert(
-                (*name).to_string(),
-                ExistingRow {
-                    enabled: !*default,
-                    hash: USER_EDITED_SENTINEL.to_string(),
-                },
-            );
-        }
-        let decisions = plan_seed_decisions(&existing);
+        let defaults = fixture();
+        let existing = staged(&defaults, |d| !d, |_| USER_EDITED_SENTINEL.to_string());
+        let decisions = plan_seed_decisions(&existing, &defaults);
         assert!(
             decisions.is_empty(),
             "user-edited rows must be preserved even when value drifts: {decisions:?}",
@@ -640,20 +501,35 @@ mod seed_plan_tests {
 
     #[test]
     fn plan_seed_decisions_skips_empty_hash_legacy() {
-        let mut existing = HashMap::new();
-        for (name, default) in ENABLED_DEFAULTS {
-            existing.insert(
-                (*name).to_string(),
-                ExistingRow {
-                    enabled: !*default,
-                    hash: String::new(),
-                },
-            );
-        }
-        let decisions = plan_seed_decisions(&existing);
+        let defaults = fixture();
+        let existing = staged(&defaults, |d| !d, |_| String::new());
+        let decisions = plan_seed_decisions(&existing, &defaults);
         assert!(
             decisions.is_empty(),
             "legacy empty-hash rows must be preserved: {decisions:?}",
+        );
+    }
+
+    /// A row for a block the caller did not list is not the planner's
+    /// business: no decision is emitted and the row is left alone. This is the
+    /// lane `impresspress/system` and `wafer-run/auth` fall into once the
+    /// defaults come from `can_disable` (spec 2.1.4) — an existing row of
+    /// theirs is preserved as-is, and having none they fall back to enabled.
+    #[test]
+    fn plan_seed_decisions_ignores_rows_outside_the_defaults() {
+        let defaults = fixture();
+        let mut existing = staged(&defaults, |d| d, seed_hash_for);
+        existing.insert(
+            "org/not-listed".to_string(),
+            ExistingRow {
+                enabled: false,
+                hash: seed_hash_for(true),
+            },
+        );
+        let decisions = plan_seed_decisions(&existing, &defaults);
+        assert!(
+            decisions.is_empty(),
+            "a row with no matching default must not be touched: {decisions:?}",
         );
     }
 
@@ -674,20 +550,13 @@ mod seed_plan_tests {
         // user-edited (preserve), some legacy empty hash (preserve). The
         // planner must produce exactly the right decisions, no extras and
         // no skips.
+        let defaults = fixture();
         let mut existing = HashMap::new();
 
-        // Pick five blocks from ENABLED_DEFAULTS to stage in different states.
-        // ENABLED_DEFAULTS has 7 entries; assign one to each lane and let the
-        // remaining 2 fall into the "absent → Insert" lane.
-        assert!(
-            ENABLED_DEFAULTS.len() >= 5,
-            "test assumes at least 5 entries in ENABLED_DEFAULTS"
-        );
-
         // Lane A: at-current → skip.
-        let (lane_a_name, lane_a_default) = ENABLED_DEFAULTS[0];
+        let (lane_a_name, lane_a_default) = defaults[0].clone();
         existing.insert(
-            lane_a_name.to_string(),
+            lane_a_name.clone(),
             ExistingRow {
                 enabled: lane_a_default,
                 hash: seed_hash_for(lane_a_default),
@@ -695,10 +564,10 @@ mod seed_plan_tests {
         );
 
         // Lane B: stale seed hash → Update.
-        let (lane_b_name, lane_b_default) = ENABLED_DEFAULTS[1];
+        let (lane_b_name, lane_b_default) = defaults[1].clone();
         let lane_b_old = !lane_b_default;
         existing.insert(
-            lane_b_name.to_string(),
+            lane_b_name.clone(),
             ExistingRow {
                 enabled: lane_b_old,
                 hash: seed_hash_for(lane_b_old),
@@ -706,9 +575,9 @@ mod seed_plan_tests {
         );
 
         // Lane C: user-edited → skip even if value drifts.
-        let (lane_c_name, lane_c_default) = ENABLED_DEFAULTS[2];
+        let (lane_c_name, lane_c_default) = defaults[2].clone();
         existing.insert(
-            lane_c_name.to_string(),
+            lane_c_name.clone(),
             ExistingRow {
                 enabled: !lane_c_default,
                 hash: USER_EDITED_SENTINEL.to_string(),
@@ -716,22 +585,22 @@ mod seed_plan_tests {
         );
 
         // Lane D: legacy empty hash → skip (preserve).
-        let (lane_d_name, lane_d_default) = ENABLED_DEFAULTS[3];
+        let (lane_d_name, lane_d_default) = defaults[3].clone();
         existing.insert(
-            lane_d_name.to_string(),
+            lane_d_name.clone(),
             ExistingRow {
                 enabled: !lane_d_default,
                 hash: String::new(),
             },
         );
 
-        // Lanes E and beyond: absent → Insert. ENABLED_DEFAULTS[4..] are all absent.
+        // Lanes E and beyond: absent → Insert.
 
-        let decisions = plan_seed_decisions(&existing);
+        let decisions = plan_seed_decisions(&existing, &defaults);
 
-        // Expected: 1 Update (lane B) + (ENABLED_DEFAULTS.len() - 4) Inserts
-        // (lanes E onward). Lanes A, C, D produce no decisions.
-        let expected_inserts = ENABLED_DEFAULTS.len() - 4;
+        // Expected: 1 Update (lane B) + (defaults.len() - 4) Inserts (lanes E
+        // onward). Lanes A, C, D produce no decisions.
+        let expected_inserts = defaults.len() - 4;
         let inserts: Vec<&SeedDecision> = decisions
             .iter()
             .filter(|d| d.op == SeedOp::Insert)
@@ -755,421 +624,11 @@ mod seed_plan_tests {
         assert_eq!(updates[0].hash, seed_hash_for(lane_b_default));
 
         // Confirm none of the skipped lanes (A, C, D) appear in any decision.
-        for skipped in &[lane_a_name, lane_c_name, lane_d_name] {
+        for skipped in [lane_a_name, lane_c_name, lane_d_name] {
             assert!(
-                decisions.iter().all(|d| d.block_name != *skipped),
+                decisions.iter().all(|d| d.block_name != skipped),
                 "{skipped} should not be in decisions: {decisions:?}",
             );
         }
-    }
-}
-
-/// End-to-end tests for [`load_and_seed_block_settings`] against a real
-/// in-memory SQLite [`DatabaseService`] — the path NATIVE now runs.
-///
-/// Before this package, native (`server_config::load_block_settings`) read the
-/// `block_settings` table with a plain `SELECT` and never invoked the #222
-/// hash-gate. An `ENABLED_DEFAULTS` change therefore propagated on Cloudflare
-/// and browser boots but silently NOT on native boots. These tests pin that
-/// the unified loader runs the gate, so a native boot now re-seeds stale rows.
-#[cfg(test)]
-mod load_and_seed_tests {
-    use std::sync::Arc;
-
-    use wafer_core::interfaces::database::service::DatabaseService;
-
-    use super::*;
-    use crate::admin_schema::BLOCK_SETTINGS_TABLE;
-
-    /// Open an in-memory SQLite service and create the canonical
-    /// `block_settings` table (test-fixture setup — an allowed raw-SQL
-    /// exception). Schema mirrors admin migration 001 + 003.
-    async fn db_with_block_settings_table() -> Arc<dyn DatabaseService> {
-        let svc: Arc<dyn DatabaseService> = Arc::new(
-            wafer_block_sqlite::service::SQLiteDatabaseService::open_in_memory()
-                .expect("open in-memory sqlite"),
-        );
-        svc.exec_raw(
-            &format!(
-                "CREATE TABLE {BLOCK_SETTINGS_TABLE} (
-                    id                 TEXT PRIMARY KEY,
-                    block_name         TEXT NOT NULL UNIQUE,
-                    enabled            INTEGER NOT NULL DEFAULT 1,
-                    current_hash       TEXT NOT NULL DEFAULT '',
-                    blessed_hash       TEXT NOT NULL DEFAULT '',
-                    seed_defaults_hash TEXT NOT NULL DEFAULT '',
-                    created_at         TEXT NOT NULL DEFAULT '',
-                    updated_at         TEXT NOT NULL DEFAULT ''
-                )"
-            ),
-            &[],
-        )
-        .await
-        .expect("create block_settings table");
-        svc
-    }
-
-    async fn read_row(db: &Arc<dyn DatabaseService>, block_name: &str) -> Option<(bool, String)> {
-        let rows = db
-            .query_raw(
-                &format!(
-                    "SELECT enabled, seed_defaults_hash FROM {BLOCK_SETTINGS_TABLE} \
-                     WHERE block_name = ?1"
-                ),
-                &[serde_json::Value::String(block_name.to_string())],
-            )
-            .await
-            .expect("read row");
-        rows.first().map(|r| {
-            let enabled = r.data.get("enabled").and_then(|v| v.as_i64()).unwrap_or(0) != 0;
-            let hash = r
-                .data
-                .get("seed_defaults_hash")
-                .and_then(|v| v.as_str())
-                .unwrap_or("")
-                .to_string();
-            (enabled, hash)
-        })
-    }
-
-    /// Fresh table → every `ENABLED_DEFAULTS` block is inserted at its current
-    /// seed hash (the native-fresh-boot case).
-    #[tokio::test]
-    async fn seeds_all_defaults_on_empty_table() {
-        let db = db_with_block_settings_table().await;
-        let settings = load_and_seed_block_settings(&db)
-            .await
-            .expect("load_and_seed_block_settings");
-        for (name, default) in ENABLED_DEFAULTS {
-            assert_eq!(
-                settings.is_block_enabled(name),
-                *default,
-                "{name} enablement should match its default",
-            );
-            let (_enabled, hash) = read_row(&db, name)
-                .await
-                .unwrap_or_else(|| panic!("{name} row should have been inserted"));
-            assert_eq!(
-                hash,
-                seed_hash_for(*default),
-                "{name} hash should be seeded"
-            );
-        }
-    }
-
-    /// THE NATIVE GAP: a row pinned at a STALE seed hash (an old default) must
-    /// be UPDATED to the current default + current hash when the loader runs.
-    /// This is precisely the propagation native used to skip.
-    #[tokio::test]
-    async fn re_seeds_stale_hash_row_the_native_path_used_to_skip() {
-        let db = db_with_block_settings_table().await;
-        let (block_name, current_default) = ENABLED_DEFAULTS[0];
-        let stale_default = !current_default;
-
-        // Insert a row as if a previous build had seeded the opposite default.
-        db.exec_raw(
-            &format!(
-                "INSERT INTO {BLOCK_SETTINGS_TABLE} \
-                 (id, block_name, enabled, seed_defaults_hash, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, '', '')"
-            ),
-            &[
-                serde_json::Value::String("bs_stale".into()),
-                serde_json::Value::String(block_name.to_string()),
-                serde_json::Value::Number(i64::from(stale_default).into()),
-                serde_json::Value::String(seed_hash_for(stale_default)),
-            ],
-        )
-        .await
-        .expect("insert stale row");
-
-        // Pre-condition: the row is at the stale value.
-        let (before_enabled, before_hash) = read_row(&db, block_name).await.unwrap();
-        assert_eq!(before_enabled, stale_default);
-        assert_eq!(before_hash, seed_hash_for(stale_default));
-
-        let settings = load_and_seed_block_settings(&db)
-            .await
-            .expect("load_and_seed_block_settings");
-
-        // Post-condition: the gate fired — row updated to the current default.
-        let (after_enabled, after_hash) = read_row(&db, block_name).await.unwrap();
-        assert_eq!(
-            after_enabled, current_default,
-            "stale row should have been re-seeded to the current default",
-        );
-        assert_eq!(after_hash, seed_hash_for(current_default));
-        assert_eq!(settings.is_block_enabled(block_name), current_default);
-    }
-
-    /// The Cloudflare request path is read-only: it returns the stored value
-    /// exactly as found and neither updates a stale seed hash nor inserts the
-    /// other default rows. Deploy init owns those mutations.
-    #[tokio::test]
-    async fn read_only_loader_never_applies_seed_plan() {
-        let db = db_with_block_settings_table().await;
-        let (block_name, current_default) = ENABLED_DEFAULTS[0];
-        let stale_default = !current_default;
-        let stale_hash = seed_hash_for(stale_default);
-
-        db.exec_raw(
-            &format!(
-                "INSERT INTO {BLOCK_SETTINGS_TABLE} \
-                 (id, block_name, enabled, seed_defaults_hash, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, '', '')"
-            ),
-            &[
-                serde_json::Value::String("bs_read_only".into()),
-                serde_json::Value::String(block_name.to_string()),
-                serde_json::Value::Number(i64::from(stale_default).into()),
-                serde_json::Value::String(stale_hash.clone()),
-            ],
-        )
-        .await
-        .expect("insert stale row");
-
-        let settings = load_block_settings(&db)
-            .await
-            .expect("read-only load_block_settings");
-
-        assert_eq!(settings.is_block_enabled(block_name), stale_default);
-        assert_eq!(
-            read_row(&db, block_name).await,
-            Some((stale_default, stale_hash))
-        );
-        assert_eq!(
-            db.count(BLOCK_SETTINGS_TABLE, &[])
-                .await
-                .expect("count rows"),
-            1,
-            "read-only load must not insert the rest of ENABLED_DEFAULTS"
-        );
-    }
-
-    /// A `user-edited` row must be preserved — admin-UI toggles win over the
-    /// seed even when the loader runs on every boot.
-    #[tokio::test]
-    async fn preserves_user_edited_row() {
-        let db = db_with_block_settings_table().await;
-        let (block_name, default) = ENABLED_DEFAULTS[0];
-        let user_choice = !default;
-
-        db.exec_raw(
-            &format!(
-                "INSERT INTO {BLOCK_SETTINGS_TABLE} \
-                 (id, block_name, enabled, seed_defaults_hash, created_at, updated_at) \
-                 VALUES (?1, ?2, ?3, ?4, '', '')"
-            ),
-            &[
-                serde_json::Value::String("bs_user".into()),
-                serde_json::Value::String(block_name.to_string()),
-                serde_json::Value::Number(i64::from(user_choice).into()),
-                serde_json::Value::String(USER_EDITED_SENTINEL.to_string()),
-            ],
-        )
-        .await
-        .expect("insert user-edited row");
-
-        let settings = load_and_seed_block_settings(&db)
-            .await
-            .expect("load_and_seed_block_settings");
-
-        let (after_enabled, after_hash) = read_row(&db, block_name).await.unwrap();
-        assert_eq!(after_enabled, user_choice, "user choice must be preserved");
-        assert_eq!(after_hash, USER_EDITED_SENTINEL);
-        assert_eq!(settings.is_block_enabled(block_name), user_choice);
-    }
-
-    /// Steady state: a table already at every current hash issues zero writes
-    /// and round-trips unchanged.
-    #[tokio::test]
-    async fn no_writes_at_steady_state() {
-        let db = db_with_block_settings_table().await;
-        // First pass seeds everything.
-        load_and_seed_block_settings(&db)
-            .await
-            .expect("load_and_seed_block_settings");
-        // Capture updated_at to detect any spurious write on the second pass.
-        let before = db
-            .query_raw(
-                &format!("SELECT block_name, updated_at FROM {BLOCK_SETTINGS_TABLE}"),
-                &[],
-            )
-            .await
-            .expect("snapshot before");
-        // Second pass should be a no-op (empty plan).
-        load_and_seed_block_settings(&db)
-            .await
-            .expect("load_and_seed_block_settings");
-        let after = db
-            .query_raw(
-                &format!("SELECT block_name, updated_at FROM {BLOCK_SETTINGS_TABLE}"),
-                &[],
-            )
-            .await
-            .expect("snapshot after");
-        assert_eq!(
-            before.len(),
-            after.len(),
-            "steady-state pass must not insert rows",
-        );
-    }
-}
-
-/// Regression coverage for the fail-open finding: a genuine operational read
-/// error must propagate as `Err`, never fabricate `BlockSettings::default()`
-/// (which reads as "every block enabled").
-#[cfg(test)]
-mod operational_error_tests {
-    use std::sync::Arc;
-
-    use wafer_block::db::{Filter, ListOptions};
-    use wafer_core::interfaces::database::service::{
-        AggregateSpec, Column, DatabaseError, DatabaseService, Record, RecordList, Table,
-        UpsertSpec,
-    };
-
-    use super::*;
-
-    /// A [`DatabaseService`] whose `list` always fails with a simulated
-    /// operational error (backend outage / corruption — NOT a missing
-    /// table, which `DbExec::list` already handles by returning
-    /// `Ok(RecordList::default())` before any error can surface). Every
-    /// other method is `unreachable!`: `load_and_seed_block_settings` must
-    /// short-circuit at the first `list()` call and never reach them.
-    struct AlwaysErrorsOnList;
-
-    #[async_trait::async_trait]
-    impl DatabaseService for AlwaysErrorsOnList {
-        async fn get(&self, _collection: &str, _id: &str) -> Result<Record, DatabaseError> {
-            unreachable!("must not read a record after a list failure")
-        }
-
-        async fn list(
-            &self,
-            _collection: &str,
-            _opts: &ListOptions,
-        ) -> Result<RecordList, DatabaseError> {
-            Err(DatabaseError::Internal(
-                "simulated block_settings outage (not a missing-table condition)".into(),
-            ))
-        }
-
-        async fn create(
-            &self,
-            _collection: &str,
-            _data: HashMap<String, serde_json::Value>,
-        ) -> Result<Record, DatabaseError> {
-            unreachable!("must not write after a list failure")
-        }
-
-        async fn update(
-            &self,
-            _collection: &str,
-            _id: &str,
-            _data: HashMap<String, serde_json::Value>,
-        ) -> Result<Record, DatabaseError> {
-            unreachable!("must not write after a list failure")
-        }
-
-        async fn delete(&self, _collection: &str, _id: &str) -> Result<(), DatabaseError> {
-            unreachable!()
-        }
-
-        async fn count(
-            &self,
-            _collection: &str,
-            _filters: &[Filter],
-        ) -> Result<i64, DatabaseError> {
-            unreachable!()
-        }
-
-        async fn sum(
-            &self,
-            _collection: &str,
-            _field: &str,
-            _filters: &[Filter],
-        ) -> Result<f64, DatabaseError> {
-            unreachable!()
-        }
-
-        async fn query_raw(
-            &self,
-            _query: &str,
-            _args: &[serde_json::Value],
-        ) -> Result<Vec<Record>, DatabaseError> {
-            unreachable!()
-        }
-
-        async fn exec_raw(
-            &self,
-            _query: &str,
-            _args: &[serde_json::Value],
-        ) -> Result<i64, DatabaseError> {
-            unreachable!()
-        }
-
-        async fn upsert(&self, _collection: &str, _spec: UpsertSpec) -> Result<i64, DatabaseError> {
-            unreachable!()
-        }
-
-        async fn aggregate(
-            &self,
-            _collection: &str,
-            _spec: AggregateSpec,
-        ) -> Result<Vec<Record>, DatabaseError> {
-            unreachable!()
-        }
-
-        async fn ensure_schema_table(&self, _table: &Table) -> Result<(), DatabaseError> {
-            unreachable!()
-        }
-
-        async fn schema_table_exists(&self, _name: &str) -> Result<bool, DatabaseError> {
-            unreachable!()
-        }
-
-        async fn schema_drop_table(&self, _name: &str) -> Result<(), DatabaseError> {
-            unreachable!()
-        }
-
-        async fn schema_add_column(
-            &self,
-            _table: &str,
-            _column: &Column,
-        ) -> Result<(), DatabaseError> {
-            unreachable!()
-        }
-    }
-
-    /// The core regression: a genuine read error must NOT be treated as "all
-    /// enabled". Before this fix, `load_and_seed_block_settings` caught the
-    /// error and returned `BlockSettings::default()`, whose
-    /// `is_block_enabled` reports `true` for every block name — silently
-    /// enabling every feature (including ones normally gated off) on a real
-    /// outage. It must now propagate `Err` instead.
-    #[tokio::test]
-    async fn genuine_read_error_propagates_instead_of_fabricating_all_enabled() {
-        let db: Arc<dyn DatabaseService> = Arc::new(AlwaysErrorsOnList);
-        let result = load_and_seed_block_settings(&db).await;
-
-        assert!(
-            result.is_err(),
-            "an operational read error must surface as Err, not a fabricated BlockSettings"
-        );
-
-        // Spell out the danger the old behavior risked: `BlockSettings::default()`
-        // (an empty map) reports every block enabled, including ones that would
-        // never legitimately default to on.
-        let fabricated_default = BlockSettings::default();
-        assert!(
-            fabricated_default.is_block_enabled("some/never-configured-block"),
-            "sanity check: BlockSettings::default() is the all-enabled trap this fix avoids"
-        );
-
-        assert!(
-            load_block_settings(&db).await.is_err(),
-            "the read-only request loader must also fail closed on an operational read error"
-        );
     }
 }

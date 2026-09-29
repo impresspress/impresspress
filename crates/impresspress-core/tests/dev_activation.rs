@@ -17,31 +17,21 @@ use impresspress_core::{
             generations::{self, GenerationCause, GenerationStatus, NewGeneration},
             runtime_state::{self, ActivationPhase, RuntimeState},
         },
-        test_support::FakeControl,
+        test_support::{
+            dev_get, dev_post, dev_status, dev_with_accounts, signed_in_as, FakeControl,
+        },
         workspace::FileEntry,
         WAFER_GUEST_VERSION,
     },
     test_support::{
-        admin_msg, anon_msg, auth_msg, output_http_header, output_http_status, output_json,
-        TestContext,
+        admin_msg, anon_msg, output_http_header, output_http_status, output_json, TestContext,
     },
 };
 use serde_json::json;
-use wafer_run::OutputStream;
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-/// `POST` a JSON body to a `/b/dev` route as an admin, through the router.
-async fn dev_post(ctx: &TestContext, path: &str, body: serde_json::Value) -> OutputStream {
-    ctx.dispatch_json(admin_msg("create", path), &body).await
-}
-
-/// `GET` a `/b/dev` route as an admin, through the router.
-async fn dev_get(ctx: &TestContext, path: &str) -> OutputStream {
-    ctx.dispatch(admin_msg("retrieve", path)).await
-}
 
 /// Write `content` at `path`, expecting the file to hold `expected`.
 async fn write_file(
@@ -72,10 +62,6 @@ fn sha_of(content: &str) -> String {
     blobs::sha256_hex(content.as_bytes())
 }
 
-async fn status_of(ctx: &TestContext) -> serde_json::Value {
-    output_json(dev_get(ctx, "/b/dev/api/status").await).await
-}
-
 // ---------------------------------------------------------------------------
 // A site write publishes
 // ---------------------------------------------------------------------------
@@ -102,7 +88,7 @@ async fn a_site_write_creates_and_activates_a_generation_without_rebuilding_the_
         Some(b"<h1>v1</h1>".as_slice())
     );
 
-    let status = status_of(&ctx).await;
+    let status = dev_status(&ctx).await;
     assert_eq!(status["active_generation"]["id"], w["generation"]["id"]);
     // Nothing is in flight once the request has answered.
     assert_eq!(status["activation"], serde_json::Value::Null);
@@ -149,7 +135,7 @@ async fn block_source_writes_do_not_create_generations() {
         "only a compile publishes a block: {l}"
     );
     assert_eq!(
-        status_of(&ctx).await["active_generation"],
+        dev_status(&ctx).await["active_generation"],
         serde_json::Value::Null
     );
 
@@ -165,6 +151,67 @@ async fn block_source_writes_do_not_create_generations() {
     )
     .await;
     assert_eq!(d["generation"], serde_json::Value::Null);
+}
+
+/// Validation asks whether every blob and artifact the manifest names is
+/// stored, over the WHOLE manifest, on every activation — every keystroke-save
+/// included. Asking by downloading would make each save transfer every blob of
+/// the site and every block's artifact (up to 4 MiB each), so an activation
+/// must read in full only what it publishes.
+///
+/// Counted at the object store, underneath the storage block: a buffered `get`
+/// is a full-body read, a `get_streaming` answers from the object's metadata
+/// and transfers only what its consumer reads.
+#[tokio::test]
+async fn a_site_write_reads_in_full_only_the_content_it_publishes() {
+    let control = FakeControl::new();
+    let ctx = TestContext::with_dev(control.clone()).await;
+    let shared = ctx.dev_shared();
+
+    // A live block and two site files: everything validation has to vouch for
+    // on the next save.
+    write_file(&ctx, "site/index.html", "<h1>v1</h1>", None).await;
+    write_file(&ctx, "site/style.css", "h1{}", None).await;
+    let intent = compile_of(&ctx, &["hello"]).await;
+    activation::request(&ctx, &shared, GenerationCause::BlockCompile, intent)
+        .await
+        .expect("the block activates");
+
+    let before = ctx.storage_reads().len();
+    write_file(
+        &ctx,
+        "site/index.html",
+        "<h1>v2</h1>",
+        Some(&sha_of("<h1>v1</h1>")),
+    )
+    .await;
+    let reads: Vec<String> = ctx.storage_reads()[before..].to_vec();
+
+    // The one blob a full read is owed: the changed page, which the publisher
+    // copies into the site folder. Nothing else — not the unchanged
+    // stylesheet, not the new page a second time.
+    let published = format!("get impresspress/dev/blobs/{}", sha_of("<h1>v2</h1>"));
+    let full_blob_reads: Vec<&String> = reads
+        .iter()
+        .filter(|read| read.starts_with("get impresspress/dev/blobs/"))
+        .collect();
+    assert_eq!(full_blob_reads, vec![&published], "all reads: {reads:#?}");
+    // And no artifact read of any kind: the builds ledger answers for them.
+    assert!(
+        !reads
+            .iter()
+            .any(|read| read.contains("impresspress/dev/artifacts/")),
+        "all reads: {reads:#?}",
+    );
+    // The presence checks did run, as probes: the unchanged stylesheet was
+    // asked about without being transferred.
+    assert!(
+        reads.contains(&format!(
+            "get_streaming impresspress/dev/blobs/{}",
+            sha_of("h1{}")
+        )),
+        "all reads: {reads:#?}",
+    );
 }
 
 // ---------------------------------------------------------------------------
@@ -186,15 +233,37 @@ async fn site_of(ctx: &TestContext, content: &str) -> SiteManifest {
     }
 }
 
-/// One block named `name`, with its own artifact stored so validation passes.
+/// One block named `name`, stored the way staging stores one — a build row,
+/// then the artifact — so validation passes.
+///
+/// The row is not decoration: activation answers "is this artifact stored?"
+/// from the builds ledger (`activation::missing_content`), and every path that
+/// stores an artifact in production writes one. A spec whose bytes were put
+/// with no row is a state only a test can build.
 async fn block_spec(ctx: &TestContext, name: &str) -> DynamicBlockSpec {
     // Distinct bytes per block, so two specs are distinguishable by artifact
     // as well as by name.
-    let artifact_sha256 = artifacts::put(ctx, format!("\0asm\x01{name}").as_bytes())
+    let bytes = format!("\0asm\x01{name}").into_bytes();
+    let registered = format!("site/{name}");
+    repo::builds::insert(
+        ctx,
+        &repo::builds::NewBuild {
+            block_name: registered.clone(),
+            source_manifest_sha256: "src".to_string(),
+            artifact_sha256: blobs::sha256_hex(&bytes),
+            block_info_json: "null".to_string(),
+            diagnostics_json: "[]".to_string(),
+            compiler_version: "rubrc@pinned".to_string(),
+            artifact_bytes: bytes.len() as u64,
+        },
+    )
+    .await
+    .expect("record the build");
+    let artifact_sha256 = artifacts::put(ctx, &bytes)
         .await
         .expect("store the artifact a manifest names");
     DynamicBlockSpec {
-        name: format!("site/{name}"),
+        name: registered,
         artifact_sha256,
         routes: vec![DynamicRoute {
             prefix: format!("/b/{name}/"),
@@ -217,7 +286,7 @@ async fn compile_of(ctx: &TestContext, names: &[&str]) -> ActivationIntent {
 
 /// The block names the active generation declares, sorted.
 async fn active_block_names(ctx: &TestContext) -> Vec<String> {
-    let status = status_of(ctx).await;
+    let status = dev_status(ctx).await;
     let mut names: Vec<String> = status["blocks"]
         .as_array()
         .expect("blocks")
@@ -286,6 +355,85 @@ async fn rollback_republishes_an_earlier_generation_as_a_new_one() {
     .await;
     assert_eq!(read["content"], "v1");
     assert_eq!(read["sha256"], json!(sha1));
+}
+
+/// A rollback commits and only then adopts its site into the workspace, so an
+/// adoption that fails arrives with the rollback already serving. Reported as
+/// a plain failure, the caller would go after a rollback that happened; the
+/// refusal has to say it is live and what repairs the workspace — and the
+/// repair it names has to work.
+#[tokio::test]
+async fn a_rollback_whose_workspace_update_fails_says_it_is_live_and_a_retry_repairs_it() {
+    let control = FakeControl::new();
+    let ctx = TestContext::with_dev(control.clone()).await;
+
+    let g1 = write_file(&ctx, "site/index.html", "v1", None).await;
+    let id1 = g1["generation"]["id"].as_str().expect("id").to_string();
+    write_file(&ctx, "site/index.html", "v2", Some(&sha_of("v1"))).await;
+
+    // The publish goes through; the save of `workspace.json` that adopts the
+    // rolled-back site does not.
+    ctx.fail_next_storage_put_to("impresspress/dev", "", "workspace.json", "disk is full");
+    let rollback_path = format!("/b/dev/api/generations/{id1}/rollback");
+    let refused = wafer_block::http_codec::collect_http_response(
+        dev_post(&ctx, &rollback_path, json!({})).await,
+    )
+    .await;
+    assert_eq!(refused.status, 500);
+    let body: serde_json::Value = serde_json::from_slice(&refused.body).expect("json refusal");
+    let message = body["message"].as_str().expect("message");
+    assert!(message.contains("the rollback is live"), "{message}");
+    assert!(message.contains("disk is full"), "{message}");
+    assert!(
+        message.contains("Retrying the same rollback repairs the workspace"),
+        "{message}"
+    );
+
+    // Which is true: the rolled-back site is what is served, and a
+    // generation carrying it is the active one.
+    assert_eq!(
+        served(&ctx, "index.html").await.as_deref(),
+        Some(&b"v1"[..])
+    );
+    let status = dev_status(&ctx).await;
+    let live = status["active_generation"]["id"]
+        .as_str()
+        .expect("an active generation")
+        .to_string();
+    assert!(
+        message.contains(&live),
+        "the message names {live}: {message}"
+    );
+    // And the workspace was left behind, still holding what the rollback
+    // replaced.
+    let read = output_json(
+        dev_post(
+            &ctx,
+            "/b/dev/api/files/read",
+            json!({"path": "site/index.html"}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(read["content"], "v2");
+
+    // The retry the message prescribes.
+    let retried = output_json(dev_post(&ctx, &rollback_path, json!({})).await).await;
+    assert_eq!(retried["generation"]["cause"], "rollback", "{retried}");
+    let read = output_json(
+        dev_post(
+            &ctx,
+            "/b/dev/api/files/read",
+            json!({"path": "site/index.html"}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(read["content"], "v1", "the retry adopted the site");
+    assert_eq!(
+        served(&ctx, "index.html").await.as_deref(),
+        Some(&b"v1"[..])
+    );
 }
 
 /// A rollback rewrites the workspace as well as publishing, and both have to
@@ -361,7 +509,7 @@ async fn a_failed_runtime_rebuild_leaves_the_previous_generation_active() {
     let control = FakeControl::new();
     let ctx = TestContext::with_dev(control.clone()).await;
     write_file(&ctx, "site/index.html", "v1", None).await;
-    let before = status_of(&ctx).await;
+    let before = dev_status(&ctx).await;
 
     control.fail_next_rebuild("wasmi: boom");
     // Task 8 stages a block; here drive the queue directly with a manifest
@@ -379,7 +527,7 @@ async fn a_failed_runtime_rebuild_leaves_the_previous_generation_active() {
         "{err:?}"
     );
 
-    let after = status_of(&ctx).await;
+    let after = dev_status(&ctx).await;
     assert_eq!(
         after["active_generation"]["id"],
         before["active_generation"]["id"]
@@ -424,7 +572,7 @@ async fn a_manifest_naming_content_that_is_not_stored_is_refused() {
     let l = output_json(dev_get(&ctx, "/b/dev/api/generations").await).await;
     assert_eq!(l["generations"][0]["status"], "failed");
     assert_eq!(
-        status_of(&ctx).await["active_generation"],
+        dev_status(&ctx).await["active_generation"],
         serde_json::Value::Null
     );
 }
@@ -646,7 +794,7 @@ async fn list_generations(ctx: &TestContext, limit: Option<u32>) -> serde_json::
     if let Some(limit) = limit {
         msg.set_meta("req.query.limit", limit.to_string());
     }
-    output_json(ctx.dispatch(msg).await).await
+    output_json(ctx.dispatch_resolved(msg).await).await
 }
 
 /// Write `site/index.html` `count` times from version `from`, chaining the
@@ -1022,19 +1170,33 @@ async fn the_ledger_publishes_each_generation_with_its_manifest_and_diff() {
 
 #[tokio::test]
 async fn the_generations_api_is_admin_only() {
-    let ctx = TestContext::with_dev(FakeControl::new()).await;
-    for msg in [
-        anon_msg("retrieve", "/b/dev/api/generations"),
-        auth_msg("retrieve", "/b/dev/api/generations", "u1"),
-        anon_msg("retrieve", "/b/dev/api/generations/g1"),
-        auth_msg("retrieve", "/b/dev/api/generations/g1", "u1"),
-        anon_msg("create", "/b/dev/api/generations/g1/rollback"),
-        auth_msg("create", "/b/dev/api/generations/g1/rollback", "u1"),
+    let ctx = dev_with_accounts(FakeControl::new()).await;
+    let member = signed_in_as(&ctx, "user").await;
+    // No identity is told to sign in; a member is refused the admin tier.
+    for (msg, status) in [
+        (anon_msg("retrieve", "/b/dev/api/generations"), 401),
+        (
+            member.bearer(anon_msg("retrieve", "/b/dev/api/generations")),
+            403,
+        ),
+        (anon_msg("retrieve", "/b/dev/api/generations/g1"), 401),
+        (
+            member.bearer(anon_msg("retrieve", "/b/dev/api/generations/g1")),
+            403,
+        ),
+        (
+            anon_msg("create", "/b/dev/api/generations/g1/rollback"),
+            401,
+        ),
+        (
+            member.bearer(anon_msg("create", "/b/dev/api/generations/g1/rollback")),
+            403,
+        ),
     ] {
         let path = msg.path().to_string();
         assert_eq!(
-            output_http_status(ctx.dispatch(msg).await).await,
-            403,
+            output_http_status(ctx.request(msg).await).await,
+            status,
             "{path}"
         );
     }
@@ -1070,6 +1232,98 @@ async fn every_generations_response_is_never_cached() {
             .await,
         ),
     ] {
+        assert_eq!(
+            output_http_header(out, "Cache-Control").await.as_deref(),
+            Some("no-store"),
+            "{label}"
+        );
+    }
+}
+
+/// The dev block's own handler for `msg`, run by a block the deployment
+/// grants nothing.
+///
+/// The dev block itself always reaches its ledger — the table is in its own
+/// namespace — so a refused read cannot be staged by routing to it: the
+/// runtime would run the handler as `impresspress/dev`. A block with no
+/// grant running the same handler is what makes `wrap::check_access` refuse.
+async fn as_ungranted_block(
+    ctx: &TestContext,
+    msg: wafer_run::Message,
+    body: serde_json::Value,
+) -> wafer_run::OutputStream {
+    let dev = ctx
+        .blocks
+        .lock()
+        .expect("blocks mutex")
+        .get(impresspress_core::blocks::dev::BLOCK_NAME)
+        .cloned()
+        .expect("the fixture registers the dev block");
+    dev.handle(
+        &ctx.clone().running_as("test/ungranted"),
+        msg,
+        wafer_run::InputStream::from_bytes(serde_json::to_vec(&body).expect("encode body")),
+    )
+    .await
+}
+
+/// The three ledger reads the two tests below refuse.
+async fn denied_ledger_reads(ctx: &TestContext) -> Vec<(&'static str, wafer_run::OutputStream)> {
+    vec![
+        (
+            "the listing",
+            as_ungranted_block(
+                ctx,
+                admin_msg("retrieve", "/b/dev/api/generations"),
+                json!({}),
+            )
+            .await,
+        ),
+        (
+            "one generation",
+            as_ungranted_block(
+                ctx,
+                admin_msg("retrieve", "/b/dev/api/generations/g1"),
+                json!({}),
+            )
+            .await,
+        ),
+        (
+            "a rollback",
+            as_ungranted_block(
+                ctx,
+                admin_msg("create", "/b/dev/api/generations/g1/rollback"),
+                json!({}),
+            )
+            .await,
+        ),
+    ]
+}
+
+/// A WRAP refusal reading the ledger is a **403**, not the 500 the
+/// hand-written `NotFound`/`err_internal` pair produced.
+///
+/// The ledger is `impresspress__dev__generations`, so a caller reaching it
+/// without a grant is refused by `wrap::check_access`. Both handlers
+/// answered `no_store_error(NotFound, …)` for a missing generation and
+/// `err_internal` for everything else, so a refused read looked like an
+/// outage.
+#[tokio::test]
+async fn a_denied_generations_read_is_403_not_500() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    for (label, out) in denied_ledger_reads(&ctx).await {
+        assert_eq!(output_http_status(out).await, 403, "{label}");
+    }
+}
+
+/// …and the refusal still carries the block-wide `Cache-Control: no-store`,
+/// which is why the conversion needed a no-store form of `crud::db_error`
+/// rather than the plain one. Design §12 admits exactly one exception, the
+/// sanitized 500 from `err_internal`; a 403 is not it.
+#[tokio::test]
+async fn a_denied_generations_read_is_still_never_cached() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    for (label, out) in denied_ledger_reads(&ctx).await {
         assert_eq!(
             output_http_header(out, "Cache-Control").await.as_deref(),
             Some("no-store"),
@@ -1124,7 +1378,7 @@ async fn a_publish_that_fails_after_the_swap_restores_the_previous_runtime_and_s
     );
 
     // The previous generation is still live, still serving its own content.
-    let status = status_of(&ctx).await;
+    let status = dev_status(&ctx).await;
     assert_eq!(status["active_generation"]["id"], json!(active));
     assert_eq!(status["activation"], serde_json::Value::Null);
     assert_eq!(

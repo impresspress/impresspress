@@ -31,7 +31,7 @@
 	gap: var(--space-2);
 	padding: var(--space-2) var(--space-4);
 	border: 1px solid transparent; border-radius: var(--radius-full);
-	font-family: inherit; font-size: var(--text-base); font-weight: 400; line-height: 1;
+	font-size: var(--text-base); font-weight: 400; line-height: 1;
 	cursor: pointer;
 	transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
 	text-decoration: none; white-space: nowrap;

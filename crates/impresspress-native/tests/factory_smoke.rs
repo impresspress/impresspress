@@ -20,23 +20,18 @@ fn local_storage_factory_returns_service() {
 }
 
 #[test]
-fn network_factory_returns_service() {
-    let _svc = impresspress_native::make_fetch_network_service()
-        .expect("network factory should succeed with default env");
-}
-
-#[test]
 fn crypto_factory_returns_service() {
     // ≥ 32 bytes — meets the HMAC-SHA256 minimum the underlying
     // Argon2JwtCryptoService enforces on construction.
     let secret = "smoke-test-secret-padded-to-min-32-bytes-aaaa".to_string();
-    let _svc =
-        impresspress_native::make_jwt_crypto_service(secret).expect("smoke secret is long enough");
+    let _svc = impresspress_native::make_jwt_crypto_service(secret, Default::default())
+        .expect("smoke secret is long enough");
 }
 
 #[test]
 fn crypto_factory_rejects_short_secret() {
-    match impresspress_native::make_jwt_crypto_service("too-short".to_string()) {
+    match impresspress_native::make_jwt_crypto_service("too-short".to_string(), Default::default())
+    {
         Ok(_) => panic!("short secret must be rejected"),
         Err(e) => {
             let msg = format!("{e}");

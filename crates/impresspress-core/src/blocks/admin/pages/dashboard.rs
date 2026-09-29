@@ -1,51 +1,60 @@
 use std::collections::HashMap;
 
-use maud::html;
-use wafer_block::{
-    db::{Filter, FilterOp, FilterTree, ListOptions, SortField},
-    wire::database as wire,
-};
-use wafer_core::clients::database as db;
+use maud::{html, Markup};
 use wafer_run::{context::Context, Message, OutputStream};
 
-use super::{admin_page, crumb};
+use super::{admin_page, crumb, status_code_badge_variant};
 use crate::{
-    blocks::{admin::REQUEST_LOGS_TABLE as REQUEST_LOGS, auth::USERS_TABLE as USERS},
+    blocks::auth::repo::users::{self, DailySignups},
+    platform_state::request_logs::{self, DailyCounts, TodayCounts},
     ui::{
-        components, icons,
+        components::{self, Badge},
+        icons,
         shell::Topbar,
-        templates::{dashboard_page, PageHeader, StatTile},
-        SiteConfig, UserInfo,
+        templates::dashboard_page,
     },
-    util::RecordExt,
 };
 
-/// Encode client-side [`Filter`]s as all-leaf wire [`FilterNode`](wire::FilterNode)s
-/// for a typed `db::aggregate` request. Mirrors `wafer-core`'s internal
-/// `to_wire_filters` conversion (not exported for block code to reuse).
-fn to_wire_filters(filters: &[Filter]) -> Vec<wire::FilterNode> {
-    filters
-        .iter()
-        .map(|f| {
-            let operator = match f.operator {
-                FilterOp::Equal => "eq",
-                FilterOp::NotEqual => "neq",
-                FilterOp::GreaterThan => "gt",
-                FilterOp::GreaterEqual => "gte",
-                FilterOp::LessThan => "lt",
-                FilterOp::LessEqual => "lte",
-                FilterOp::Like => "like",
-                FilterOp::In => "in",
-                FilterOp::IsNull => "is_null",
-                FilterOp::IsNotNull => "is_not_null",
-            };
-            wire::FilterNode::Leaf(wire::FilterDef {
-                field: f.field.clone(),
-                operator: operator.to_string(),
-                value: f.value.clone(),
-            })
-        })
-        .collect()
+/// What a stat tile shows when the aggregate behind it could not be read.
+///
+/// The dashboard is the page an operator opens *during* an outage, so a
+/// failed read marks its own tile rather than failing the whole page (the
+/// one exception to the group-1 rule). It must still be a marker and not a
+/// number: `0` is a claim, and "Total Users 0" during a database outage is
+/// the claim that the deployment has no users.
+const TILE_UNAVAILABLE: &str = "Unavailable";
+
+/// The same marker for the card- and chart-shaped panels, which have a body
+/// rather than a value.
+const CARD_UNAVAILABLE: &str = "Could not load";
+
+/// A tile's pre-formatted figure, or [`TILE_UNAVAILABLE`] when the aggregate
+/// behind it could not be read.
+fn tile_value(value: &Option<String>) -> &str {
+    value.as_deref().unwrap_or(TILE_UNAVAILABLE)
+}
+
+/// A chart card whose series could not be read: the same head, and the marker
+/// where the plot would be.
+///
+/// It cannot reuse `components::{line,bar}_chart_card` with an empty series —
+/// those render an axis and a flat line, which reads as a real measurement of
+/// zero rather than as an absent one.
+fn chart_unavailable_card(title: &str, subtitle: &str, view_href: &str) -> maud::Markup {
+    html! {
+        section .card {
+            header .card__head {
+                div {
+                    h2 .card__title { (title) }
+                    p .card__subtitle { (subtitle) }
+                }
+                a .btn .btn--ghost .btn--sm .card__actions href=(view_href) { "View" }
+            }
+            div .card__body {
+                p .text-muted .text-sm { (CARD_UNAVAILABLE) }
+            }
+        }
+    }
 }
 
 /// Trailing 30-day window as `(oldest_day, oldest_day_midnight_iso)`.
@@ -57,57 +66,9 @@ fn window_30d() -> (chrono::NaiveDate, String) {
     (start, format!("{start}T00:00:00"))
 }
 
-/// Run ONE grouped-by-day aggregate over the trailing 30-day window and return
-/// the per-day rows (one [`wire::Record`] per day that has data). `aggregates`
-/// may carry several columns — e.g. a plain `Count` alongside a conditional
-/// `CaseWhenSum` — so a single statement can back multiple daily series over
-/// the same table. Callers project each alias out with [`series_from_rows`],
-/// which zero-fills the days with no rows.
-async fn daily_grouped_30d(
-    ctx: &dyn Context,
-    table: &str,
-    start_iso: &str,
-    extra_filters: Vec<Filter>,
-    aggregates: Vec<wire::AggregateColumnDef>,
-) -> Vec<wire::Record> {
-    let mut filters = vec![Filter {
-        field: "created_at".into(),
-        operator: FilterOp::GreaterEqual,
-        value: serde_json::json!(start_iso),
-    }];
-    filters.extend(extra_filters);
-
-    let req = wire::AggregateRequest {
-        collection: table.to_string(),
-        select_columns: vec![],
-        aggregates,
-        filters: to_wire_filters(&filters),
-        group_by: vec![wire::GroupByDef::DateBucket {
-            field: "created_at".into(),
-        }],
-        sort: vec![],
-        limit: 0,
-    };
-    db::aggregate(ctx, req).await.unwrap_or_default()
-}
-
-/// Project one aggregate `alias` out of grouped daily `rows` into a zero-filled
-/// 30-entry series ordered oldest → newest (matching the chart's x-axis).
-/// A missing day, or a group whose conditional sum was `NULL`, reads as `0`.
-fn series_from_rows(
-    rows: &[wire::Record],
-    alias: &str,
-    start: chrono::NaiveDate,
-) -> Vec<(String, i64)> {
-    let by_day: HashMap<String, i64> = rows
-        .iter()
-        .filter_map(|r| {
-            let day = r.data.get("created_at").and_then(|v| v.as_str())?;
-            let cnt = r.data.get(alias).and_then(|v| v.as_i64()).unwrap_or(0);
-            Some((day.to_string(), cnt))
-        })
-        .collect();
-
+/// Zero-fill `by_day` into a 30-entry series ordered oldest → newest
+/// (matching the chart's x-axis). A missing day reads as `0`.
+fn zero_filled_30d(by_day: &HashMap<String, i64>, start: chrono::NaiveDate) -> Vec<(String, i64)> {
     (0..30)
         .map(|i| {
             let date = (start + chrono::Duration::days(i))
@@ -119,110 +80,24 @@ fn series_from_rows(
         .collect()
 }
 
-/// Header-tile USER counts in ONE statement: `(total_active, active_today)`.
-///
-/// Both counts share the `deleted_at IS NULL` predicate, so it becomes the
-/// query's `WHERE` and the "created today" restriction rides along as a
-/// conditional `CaseWhenSum` — replacing the two separate `db::count`
-/// round-trips with a single aggregate that returns the same two numbers.
-async fn user_counts(ctx: &dyn Context, today_start: &str) -> (i64, i64) {
-    let active = [Filter {
-        field: "deleted_at".into(),
-        operator: FilterOp::IsNull,
-        value: serde_json::Value::Null,
-    }];
-    let created_today = [Filter {
-        field: "created_at".into(),
-        operator: FilterOp::GreaterEqual,
-        value: serde_json::json!(today_start),
-    }];
-    let req = wire::AggregateRequest {
-        collection: USERS.to_string(),
-        select_columns: vec![],
-        aggregates: vec![
-            wire::AggregateColumnDef::Count {
-                alias: "total".into(),
-            },
-            wire::AggregateColumnDef::CaseWhenSum {
-                when: to_wire_filters(&created_today),
-                alias: "today".into(),
-            },
-        ],
-        filters: to_wire_filters(&active),
-        group_by: vec![],
-        sort: vec![],
-        limit: 0,
-    };
-    let rows = db::aggregate(ctx, req).await.unwrap_or_default();
-    let row = rows.first();
-    let read = |k: &str| {
-        row.and_then(|r| r.data.get(k))
-            .and_then(|v| v.as_i64())
-            .unwrap_or(0)
-    };
-    (read("total"), read("today"))
+/// Project the daily signup counts into a zero-filled 30-entry series.
+fn series_from_signups(rows: &[DailySignups], start: chrono::NaiveDate) -> Vec<(String, i64)> {
+    let by_day: HashMap<String, i64> = rows.iter().map(|r| (r.day.clone(), r.count)).collect();
+    zero_filled_30d(&by_day, start)
 }
 
-/// Header-tile REQUEST_LOGS metrics for today in ONE statement:
-/// `(requests, errors, avg_ms)`.
-///
-/// All three share the `created_at >= today_start` predicate, so it becomes the
-/// `WHERE`; the error tally rides along as a conditional `CaseWhenSum` and the
-/// latency as an `Avg` — replacing two `db::count`s plus a separate average
-/// aggregate with a single round-trip.
-async fn request_counts(ctx: &dyn Context, today_start: &str) -> (i64, i64, f64) {
-    let today = [Filter {
-        field: "created_at".into(),
-        operator: FilterOp::GreaterEqual,
-        value: serde_json::json!(today_start),
-    }];
-    let is_error = [Filter {
-        field: "status".into(),
-        operator: FilterOp::Equal,
-        value: serde_json::json!("ERROR"),
-    }];
-    let req = wire::AggregateRequest {
-        collection: REQUEST_LOGS.to_string(),
-        select_columns: vec![],
-        aggregates: vec![
-            wire::AggregateColumnDef::Count {
-                alias: "requests".into(),
-            },
-            wire::AggregateColumnDef::CaseWhenSum {
-                when: to_wire_filters(&is_error),
-                alias: "errors".into(),
-            },
-            wire::AggregateColumnDef::Avg {
-                field: "duration_ms".into(),
-                alias: "avg_val".into(),
-            },
-        ],
-        filters: to_wire_filters(&today),
-        group_by: vec![],
-        sort: vec![],
-        limit: 0,
-    };
-    let rows = db::aggregate(ctx, req).await.unwrap_or_default();
-    let row = rows.first();
-    let requests = row
-        .and_then(|r| r.data.get("requests"))
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    let errors = row
-        .and_then(|r| r.data.get("errors"))
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0);
-    let avg_ms = row
-        .and_then(|r| r.data.get("avg_val"))
-        .and_then(|v| v.as_f64())
-        .unwrap_or(0.0);
-    (requests, errors, avg_ms)
+/// Project one metric out of the request log's daily counts into a
+/// zero-filled 30-entry series.
+fn series_from_daily(
+    days: &[DailyCounts],
+    pick: fn(&DailyCounts) -> i64,
+    start: chrono::NaiveDate,
+) -> Vec<(String, i64)> {
+    let by_day: HashMap<String, i64> = days.iter().map(|d| (d.day.clone(), pick(d))).collect();
+    zero_filled_30d(&by_day, start)
 }
 
 pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let config = SiteConfig::load(ctx).await;
-    let user = UserInfo::from_message(msg);
-
     let today = chrono::Utc::now().format("%Y-%m-%d").to_string();
     let today_start = format!("{today}T00:00:00");
 
@@ -236,96 +111,23 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
     // aggregates, two recent-row lists, and two daily grouped aggregates.
     let (start_30d, start_iso) = window_30d();
 
-    let user_counts_fut = user_counts(ctx, &today_start);
-    let request_counts_fut = request_counts(ctx, &today_start);
+    let user_counts_fut = users::active_count_and_created_since(ctx, &today_start);
+    let request_counts_fut = request_logs::today_counts(ctx, &today_start);
 
-    let users_daily_fut = daily_grouped_30d(
-        ctx,
-        USERS,
-        &start_iso,
-        vec![Filter {
-            field: "deleted_at".into(),
-            operator: FilterOp::IsNull,
-            value: serde_json::Value::Null,
-        }],
-        vec![wire::AggregateColumnDef::Count {
-            alias: "cnt".into(),
-        }],
-    );
-    let requests_daily_fut = daily_grouped_30d(
-        ctx,
-        REQUEST_LOGS,
-        &start_iso,
-        vec![],
-        vec![
-            wire::AggregateColumnDef::Count {
-                alias: "requests".into(),
-            },
-            wire::AggregateColumnDef::CaseWhenSum {
-                when: to_wire_filters(&[Filter {
-                    field: "status".into(),
-                    operator: FilterOp::Equal,
-                    value: serde_json::json!("ERROR"),
-                }]),
-                alias: "errors".into(),
-            },
-        ],
-    );
+    let users_daily_fut = users::daily_signups(ctx, &start_iso);
+    let requests_daily_fut = request_logs::daily_counts(ctx, &start_iso);
 
-    let recent_users_opts = ListOptions {
-        columns: Some(vec!["id".into(), "email".into(), "created_at".into()]),
-        filters: vec![Filter {
-            field: "deleted_at".into(),
-            operator: FilterOp::IsNull,
-            value: serde_json::Value::Null,
-        }],
-        sort: vec![SortField {
-            field: "created_at".into(),
-            desc: true,
-        }],
-        limit: 5,
-        skip_count: true,
-        ..Default::default()
-    };
-    let recent_users_fut = db::list(ctx, USERS, &recent_users_opts);
+    let recent_users_fut = users::list_recent_active(ctx, 5);
 
-    let recent_errors_opts = ListOptions {
-        columns: Some(vec![
-            "status_code".into(),
-            "method".into(),
-            "path".into(),
-            "duration_ms".into(),
-            "created_at".into(),
-        ]),
-        filter_tree: Some(vec![FilterTree::Any(vec![
-            FilterTree::Leaf(Filter {
-                field: "status".into(),
-                operator: FilterOp::Equal,
-                value: serde_json::json!("ERROR"),
-            }),
-            FilterTree::Leaf(Filter {
-                field: "status_code".into(),
-                operator: FilterOp::GreaterEqual,
-                value: serde_json::json!(400),
-            }),
-        ])]),
-        sort: vec![SortField {
-            field: "created_at".into(),
-            desc: true,
-        }],
-        limit: 5,
-        skip_count: true,
-        ..Default::default()
-    };
-    let recent_errors_fut = db::list(ctx, REQUEST_LOGS, &recent_errors_opts);
+    let recent_errors_fut = request_logs::list_recent_errors(ctx, 5);
 
     let (
-        (user_count, new_users_today),
-        (requests_today, errors_today, avg_ms),
+        user_counts_r,
+        request_counts_r,
         recent_users_r,
         recent_errors_r,
-        users_daily_rows,
-        requests_daily_rows,
+        users_daily_r,
+        request_days_r,
     ) = futures::join!(
         user_counts_fut,
         request_counts_fut,
@@ -335,72 +137,126 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
         requests_daily_fut,
     );
 
-    let recent_users = recent_users_r.map(|rl| rl.records).unwrap_or_default();
-    let recent_errors = recent_errors_r.map(|rl| rl.records).unwrap_or_default();
+    // Each read is logged and marked where it renders, rather than being
+    // published as `0` and the empty state. Everything below reads `Option`:
+    // `None` is "could not be read", and it never reaches a figure, a table
+    // row, a chart or a sparkline.
+    let request_counts = match request_counts_r {
+        Ok(counts) => Some(counts),
+        Err(e) => {
+            tracing::error!(error = %e, "admin dashboard: today's request counts failed");
+            None
+        }
+    };
+    let user_counts = match user_counts_r {
+        Ok(counts) => Some(counts),
+        Err(e) => {
+            tracing::error!(error = %e, "admin dashboard: user counts failed");
+            None
+        }
+    };
+    let recent_users = match recent_users_r {
+        Ok(rows) => Some(rows),
+        Err(e) => {
+            tracing::error!(error = %e, "admin dashboard: recent users failed");
+            None
+        }
+    };
+    let recent_errors = match recent_errors_r {
+        Ok(rows) => Some(rows),
+        Err(e) => {
+            tracing::error!(error = %e, "admin dashboard: recent errors failed");
+            None
+        }
+    };
+    let users_daily_rows = match users_daily_r {
+        Ok(rows) => Some(rows),
+        Err(e) => {
+            tracing::error!(error = %e, "admin dashboard: daily signups failed");
+            None
+        }
+    };
+    let request_days = match request_days_r {
+        Ok(rows) => Some(rows),
+        Err(e) => {
+            tracing::error!(error = %e, "admin dashboard: daily request counts failed");
+            None
+        }
+    };
 
     // Two grouped statements back all three charts: the USERS series comes from
-    // its own daily aggregate; the REQUEST_LOGS "requests" and "errors" series
-    // are two aliases projected out of the *same* per-day rows.
-    let new_users_daily = series_from_rows(&users_daily_rows, "cnt", start_30d);
-    let requests_daily = series_from_rows(&requests_daily_rows, "requests", start_30d);
-    let errors_daily = series_from_rows(&requests_daily_rows, "errors", start_30d);
+    // its own daily aggregate; the request-log "requests" and "errors" series
+    // are two metrics projected out of the *same* per-day counts.
+    //
+    // An unreadable aggregate must NOT be zero-filled: the 30-day fill turns
+    // "we could not read this" into a flat line along the axis, which is a
+    // picture of "nothing happened".
+    let new_users_daily = users_daily_rows
+        .as_ref()
+        .map(|rows| series_from_signups(rows, start_30d));
+    let requests_daily = request_days
+        .as_ref()
+        .map(|days| series_from_daily(days, |d| d.requests, start_30d));
+    let errors_daily = request_days
+        .as_ref()
+        .map(|days| series_from_daily(days, |d| d.errors, start_30d));
 
-    let user_count_str = user_count.to_string();
-    let new_users_str = new_users_today.to_string();
-    let requests_str = requests_today.to_string();
-    let errors_str = errors_today.to_string();
-    let avg_ms_str = format!("{avg_ms:.0}ms");
+    let user_count_str = user_counts.map(|(total, _)| total.to_string());
+    let new_users_str = user_counts.map(|(_, today)| today.to_string());
+    let requests_str = request_counts
+        .as_ref()
+        .map(|c: &TodayCounts| c.requests.to_string());
+    let errors_str = request_counts
+        .as_ref()
+        .map(|c: &TodayCounts| c.errors.to_string());
+    let avg_ms_str = request_counts
+        .as_ref()
+        .map(|c: &TodayCounts| format!("{:.0}ms", c.avg_ms));
 
     // Sparklines reuse the daily series already fetched for the charts below —
     // no extra D1 statements. "Avg response" has no per-day series fetched, so
-    // its sparkline is `None` rather than reusing an unrelated metric.
-    let new_users_series: Vec<i64> = new_users_daily.iter().map(|(_, v)| *v).collect();
-    let requests_series: Vec<i64> = requests_daily.iter().map(|(_, v)| *v).collect();
-    let errors_series: Vec<i64> = errors_daily.iter().map(|(_, v)| *v).collect();
+    // its sparkline is `None` rather than reusing an unrelated metric — and so
+    // is any sparkline whose series could not be read.
+    let spark = |series: &Option<Vec<(String, i64)>>, color: &str| {
+        series.as_ref().map(|series| {
+            components::sparkline(&series.iter().map(|(_, v)| *v).collect::<Vec<_>>(), color)
+        })
+    };
+    let new_users_spark = spark(&new_users_daily, "var(--primary-color)");
+    let requests_spark = spark(&requests_daily, "var(--accent-warning)");
+    let errors_spark = spark(&errors_daily, "var(--accent-danger)");
 
     let stats = vec![
-        StatTile {
-            label: "Total Users",
-            value: &user_count_str,
-            icon: icons::users(),
-            spark: Some(components::sparkline(
-                &new_users_series,
-                "var(--primary-color)",
-            )),
-        },
-        StatTile {
-            label: "New Today",
-            value: &new_users_str,
-            icon: icons::user_plus(),
-            spark: Some(components::sparkline(
-                &new_users_series,
-                "var(--primary-color)",
-            )),
-        },
-        StatTile {
-            label: "Requests Today",
-            value: &requests_str,
-            icon: icons::file_text(),
-            spark: Some(components::sparkline(
-                &requests_series,
-                "var(--accent-warning)",
-            )),
-        },
-        StatTile {
-            label: "Errors Today",
-            value: &errors_str,
-            icon: icons::triangle_alert(),
-            spark: Some(components::sparkline(
-                &errors_series,
-                "var(--accent-danger)",
-            )),
-        },
-        StatTile {
-            label: "Avg Response",
-            value: &avg_ms_str,
-            icon: icons::activity(),
-            spark: None,
-        },
+        components::stat_card(
+            "Total Users",
+            tile_value(&user_count_str),
+            icons::users(),
+            new_users_spark.clone(),
+        ),
+        components::stat_card(
+            "New Today",
+            tile_value(&new_users_str),
+            icons::user_plus(),
+            new_users_spark,
+        ),
+        components::stat_card(
+            "Requests Today",
+            tile_value(&requests_str),
+            icons::file_text(),
+            requests_spark,
+        ),
+        components::stat_card(
+            "Errors Today",
+            tile_value(&errors_str),
+            icons::triangle_alert(),
+            errors_spark,
+        ),
+        components::stat_card(
+            "Avg Response",
+            tile_value(&avg_ms_str),
+            icons::activity(),
+            None,
+        ),
     ];
 
     let recent_users_card = html! {
@@ -410,23 +266,23 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
                 a .btn .btn--ghost .btn--sm href="/b/admin/users" { "View all" }
             }
             div .card__body {
+                @if let Some(recent_users) = &recent_users {
                 @if recent_users.is_empty() {
                     p .text-muted .text-sm { "No users yet" }
                 } @else {
-                    div .table-container {
-                        table .table {
-                            tbody {
-                                @for record in &recent_users {
-                                    @let email = record.str_field("email");
-                                    @let created = record.str_field("created_at");
-                                    tr {
-                                        td .text-sm { (email) }
-                                        td .text-muted .text-sm .text-right { (created.get(..10).unwrap_or(created)) }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    @let rows: Vec<components::TableRow> = recent_users.iter().map(|record| {
+                        let created = record.created_at.as_str();
+                        components::TableRow::new(vec![
+                            html! { (record.email) },
+                            // `.text-right` needs a block box to align against,
+                            // and the component owns the `<td>`.
+                            html! { div .text-muted .text-right { time datetime=(created) { (created.get(..10).unwrap_or(created)) } } },
+                        ])
+                    }).collect();
+                    (components::DataTable::new(&RECENT_USERS_COLUMNS).rows(rows).headless().render())
+                }
+                } @else {
+                    p .text-muted .text-sm { (CARD_UNAVAILABLE) }
                 }
             }
         }
@@ -436,59 +292,77 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
         section .card {
             header .card__head {
                 h2 .card__title { "Recent Errors" }
-                a .btn .btn--ghost .btn--sm .card__actions href="/b/admin/logs?status=ERROR" { "View all" }
+                a .btn .btn--ghost .btn--sm .card__actions href="/b/admin/logs?errors=1" { "View all" }
             }
             div .card__body {
+                @if let Some(recent_errors) = &recent_errors {
                 @if recent_errors.is_empty() {
                     p .text-muted .text-sm { "No errors recently" }
                 } @else {
-                    div .table-container {
-                        table .table {
-                            thead {
-                                tr {
-                                    th { "Status" }
-                                    th { "Method" }
-                                    th { "Path" }
-                                    th { "Time" }
-                                }
-                            }
-                            tbody {
-                                @for record in &recent_errors {
-                                    @let code = record.i64_field("status_code");
-                                    @let method = record.str_field("method");
-                                    @let path = record.str_field("path");
-                                    @let created = record.str_field("created_at");
-                                    tr {
-                                        td {
-                                            span .badge .(if code >= 500 { "badge-danger" } else { "badge-warning" }) { (code) }
-                                        }
-                                        td .text-sm .font-medium { (method.to_uppercase()) }
-                                        td .text-sm { (path) }
-                                        td .text-muted .text-sm { (created.get(..19).unwrap_or(created)) }
-                                    }
-                                }
-                            }
-                        }
-                    }
+                    @let rows: Vec<Vec<Markup>> = recent_errors.iter().map(|row| {
+                        let code = row.status_code;
+                        let created = row.created_at.as_str();
+                        vec![
+                            Badge::new(status_code_badge_variant(code)).render(html! { (code) }),
+                            html! { span .font-medium { (row.method.to_uppercase()) } },
+                            html! { (row.path) },
+                            html! { span .text-muted { (created.get(..19).unwrap_or(created)) } },
+                        ]
+                    }).collect();
+                    (components::data_table::<fn(usize) -> Option<String>>(
+                        &RECENT_ERRORS_COLUMNS,
+                        rows,
+                        None,
+                        html! {},
+                    ))
+                }
+                } @else {
+                    p .text-muted .text-sm { (CARD_UNAVAILABLE) }
                 }
             }
         }
     };
 
+    let new_users_chart = match &new_users_daily {
+        Some(series) => components::line_chart_card(
+            "New users",
+            "Last 30 days",
+            series,
+            "var(--primary-color)",
+            "/b/admin/users",
+        ),
+        None => chart_unavailable_card("New users", "Last 30 days", "/b/admin/users"),
+    };
+    let requests_chart = match &requests_daily {
+        Some(series) => components::bar_chart_card(
+            "Requests",
+            "Last 30 days",
+            series,
+            "var(--accent-warning)",
+            "/b/admin/logs",
+        ),
+        None => chart_unavailable_card("Requests", "Last 30 days", "/b/admin/logs"),
+    };
+    let errors_chart = match &errors_daily {
+        Some(series) => components::line_chart_card(
+            "Errors",
+            "Last 30 days",
+            series,
+            "var(--accent-danger)",
+            "/b/admin/logs?errors=1",
+        ),
+        None => chart_unavailable_card("Errors", "Last 30 days", "/b/admin/logs?errors=1"),
+    };
+
     let charts_section = html! {
         div .dashboard-charts {
-            (components::line_chart_card("New users", "Last 30 days", &new_users_daily, "var(--primary-color)", "/b/admin/users"))
-            (components::bar_chart_card("Requests", "Last 30 days", &requests_daily, "var(--accent-warning)", "/b/admin/logs"))
-            (components::line_chart_card("Errors", "Last 30 days", &errors_daily, "var(--accent-danger)", "/b/admin/logs?status=ERROR"))
+            (new_users_chart)
+            (requests_chart)
+            (errors_chart)
         }
     };
 
     let body = dashboard_page(
-        PageHeader {
-            title: "",
-            subtitle: None,
-            primary_action: None,
-        },
         stats,
         recent_users_card,
         recent_errors_card,
@@ -497,10 +371,9 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
     );
 
     admin_page(
+        ctx,
+        msg,
         "Dashboard",
-        &config,
-        "/b/admin/",
-        user.as_ref(),
         Topbar {
             crumbs: crumb("Dashboard"),
             primary_action: None,
@@ -508,44 +381,66 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
             show_palette: true,
         },
         body,
-        msg,
     )
+    .await
 }
+
+/// The dashboard cards' table columns. "Recent Users" renders headless — it
+/// reads as a two-column list, not a grid — but still declares its columns,
+/// because the `data-label` the component stamps on every `<td>` is what names
+/// the cells when the table collapses to cards on a narrow viewport.
+const RECENT_USERS_COLUMNS: [components::TableCol<'static>; 2] = [
+    components::TableCol {
+        label: "Email",
+        width: None,
+    },
+    components::TableCol {
+        label: "Created",
+        width: None,
+    },
+];
+
+const RECENT_ERRORS_COLUMNS: [components::TableCol<'static>; 4] = [
+    components::TableCol {
+        label: "Status",
+        width: None,
+    },
+    components::TableCol {
+        label: "Method",
+        width: None,
+    },
+    components::TableCol {
+        label: "Path",
+        width: None,
+    },
+    components::TableCol {
+        label: "Time",
+        width: None,
+    },
+];
 
 #[cfg(test)]
 mod tests {
-    //! Correctness: the consolidated aggregates return byte-for-byte the same
-    //! numbers the previous per-filter `db::count` / per-metric grouped queries
-    //! produced. Each consolidated helper is checked against the equivalent
-    //! separate `db::count` calls over the same seeded in-memory database, and
-    //! against hand-computed expectations for the fixed seed.
+    //! The dashboard's own arithmetic: the 30-day zero-fill that turns a
+    //! sparse per-day aggregate into the chart's x-axis. The aggregates
+    //! themselves are `auth::repo::users` and `platform_state::request_logs`
+    //! functions now, and are checked against separate `db::count` calls
+    //! beside their owners.
 
     use std::collections::HashMap;
 
-    use serde_json::json;
-    use wafer_block::db::{Filter, FilterOp};
-    use wafer_core::clients::database as db;
-
-    use super::{
-        daily_grouped_30d, request_counts, series_from_rows, user_counts, window_30d, wire,
-        REQUEST_LOGS, USERS,
-    };
-    use crate::test_support::TestContext;
+    use super::{series_from_signups, window_30d, zero_filled_30d};
+    use crate::blocks::auth::repo::users::DailySignups;
 
     #[test]
     fn dashboard_renders_stats_before_charts() {
         let m = crate::ui::templates::dashboard_page(
-            crate::ui::templates::PageHeader {
-                title: "Dashboard",
-                subtitle: None,
-                primary_action: None,
-            },
-            vec![crate::ui::templates::StatTile {
-                label: "TOTAL USERS",
-                value: "1",
-                icon: maud::html! { span .probe-icon {} },
-                spark: None,
-            }],
+            vec![crate::ui::components::stat_card(
+                "TOTAL USERS",
+                "1",
+                maud::html! { span .probe-icon {} },
+                None,
+            )],
             maud::html! { div .probe-primary {} },
             maud::html! {},
             None,
@@ -557,44 +452,7 @@ mod tests {
         assert!(stats < charts, "stat tiles must precede the charts row");
     }
 
-    async fn seed_user(ctx: &TestContext, id: &str, created_at: &str, deleted_at: Option<&str>) {
-        let mut data: HashMap<String, serde_json::Value> = HashMap::new();
-        data.insert("id".into(), json!(id));
-        data.insert("email".into(), json!(format!("{id}@example.test")));
-        data.insert("display_name".into(), json!(id));
-        data.insert("created_at".into(), json!(created_at));
-        if let Some(ts) = deleted_at {
-            data.insert("deleted_at".into(), json!(ts));
-        }
-        db::create(ctx, USERS, data)
-            .await
-            .unwrap_or_else(|e| panic!("seed user {id}: {e}"));
-    }
-
-    async fn seed_req(
-        ctx: &TestContext,
-        id: &str,
-        status: &str,
-        duration_ms: i64,
-        created_at: &str,
-    ) {
-        let mut data: HashMap<String, serde_json::Value> = HashMap::new();
-        data.insert("id".into(), json!(id));
-        data.insert("method".into(), json!("GET"));
-        data.insert("path".into(), json!("/x"));
-        data.insert("status".into(), json!(status));
-        data.insert(
-            "status_code".into(),
-            json!(if status == "ERROR" { 500 } else { 200 }),
-        );
-        data.insert("duration_ms".into(), json!(duration_ms));
-        data.insert("created_at".into(), json!(created_at));
-        db::create(ctx, REQUEST_LOGS, data)
-            .await
-            .unwrap_or_else(|e| panic!("seed request_log {id}: {e}"));
-    }
-
-    /// Value for `date` in a `(date, count)` series, or `-1` if the day is absent.
+    /// Value for `date` in a `(date, count)` series, or `-1` if absent.
     fn day_value(series: &[(String, i64)], date: &str) -> i64 {
         series
             .iter()
@@ -603,165 +461,188 @@ mod tests {
             .unwrap_or(-1)
     }
 
-    fn sum(series: &[(String, i64)]) -> i64 {
-        series.iter().map(|(_, c)| c).sum()
-    }
-
-    #[tokio::test]
-    async fn consolidated_aggregates_match_per_filter_queries() {
-        let ctx = TestContext::with_auth().await;
-
-        let today = chrono::Utc::now().date_naive();
-        // Noon timestamps so a stored `...T12:00:00` sorts after `today_start`
-        // (`...T00:00:00`) yet buckets to the same day under SQLite's `date()`.
-        let at = |ago: i64| {
-            (today - chrono::Duration::days(ago))
-                .format("%Y-%m-%dT12:00:00")
-                .to_string()
-        };
+    #[test]
+    fn signup_series_is_zero_filled_over_the_thirty_day_window() {
+        let (start_30d, _) = window_30d();
         let day = |ago: i64| {
-            (today - chrono::Duration::days(ago))
+            (chrono::Utc::now().date_naive() - chrono::Duration::days(ago))
                 .format("%Y-%m-%d")
                 .to_string()
         };
-        let today_start = format!("{}T00:00:00", today.format("%Y-%m-%d"));
-
-        // Users: 3 active today, 2 active 5d ago, 1 active 40d ago (outside the
-        // 30-day window), 2 deleted today (excluded by `deleted_at IS NULL`).
-        for i in 0..3 {
-            seed_user(&ctx, &format!("u_today_{i}"), &at(0), None).await;
-        }
-        for i in 0..2 {
-            seed_user(&ctx, &format!("u_5d_{i}"), &at(5), None).await;
-        }
-        seed_user(&ctx, "u_40d", &at(40), None).await;
-        for i in 0..2 {
-            seed_user(&ctx, &format!("u_del_{i}"), &at(0), Some(&at(0))).await;
-        }
-
-        // Requests: today 4 (durations 100/200/300/400, one ERROR); 10d ago 2
-        // (ok, 50/50); 40d ago 5 (outside the window).
-        seed_req(&ctx, "r_t0", "OK", 100, &at(0)).await;
-        seed_req(&ctx, "r_t1", "OK", 200, &at(0)).await;
-        seed_req(&ctx, "r_t2", "OK", 300, &at(0)).await;
-        seed_req(&ctx, "r_t3", "ERROR", 400, &at(0)).await;
-        seed_req(&ctx, "r_10d_0", "OK", 50, &at(10)).await;
-        seed_req(&ctx, "r_10d_1", "OK", 50, &at(10)).await;
-        for i in 0..5 {
-            seed_req(&ctx, &format!("r_40d_{i}"), "OK", 999, &at(40)).await;
-        }
-
-        // --- header tile counts: consolidated vs. separate per-filter counts ---
-        let active = [Filter {
-            field: "deleted_at".into(),
-            operator: FilterOp::IsNull,
-            value: serde_json::Value::Null,
-        }];
-        let active_today = [
-            Filter {
-                field: "deleted_at".into(),
-                operator: FilterOp::IsNull,
-                value: serde_json::Value::Null,
+        let rows = vec![
+            DailySignups {
+                day: day(0),
+                count: 3,
             },
-            Filter {
-                field: "created_at".into(),
-                operator: FilterOp::GreaterEqual,
-                value: json!(&today_start),
+            DailySignups {
+                day: day(5),
+                count: 2,
+            },
+            // Outside the window: dropped rather than folded into an edge day.
+            DailySignups {
+                day: day(40),
+                count: 9,
             },
         ];
-        let total_expected = db::count(&ctx, USERS, &active).await.unwrap();
-        let new_expected = db::count(&ctx, USERS, &active_today).await.unwrap();
-        let (total, new_today) = user_counts(&ctx, &today_start).await;
+        let series = series_from_signups(&rows, start_30d);
+        assert_eq!(series.len(), 30, "30-entry zero-filled series");
+        assert_eq!(day_value(&series, &day(0)), 3);
+        assert_eq!(day_value(&series, &day(5)), 2);
+        assert_eq!(day_value(&series, &day(1)), 0, "a quiet day reads as zero");
         assert_eq!(
-            (total, new_today),
-            (total_expected, new_expected),
-            "user_counts must match separate db::count calls"
+            series.iter().map(|(_, c)| c).sum::<i64>(),
+            5,
+            "the 40-days-ago row is outside the window"
         );
-        assert_eq!((total, new_today), (6, 3), "hand-computed user counts");
+    }
 
-        let req_today = [Filter {
-            field: "created_at".into(),
-            operator: FilterOp::GreaterEqual,
-            value: json!(&today_start),
-        }];
-        let err_today = [
-            Filter {
-                field: "status".into(),
-                operator: FilterOp::Equal,
-                value: json!("ERROR"),
-            },
-            Filter {
-                field: "created_at".into(),
-                operator: FilterOp::GreaterEqual,
-                value: json!(&today_start),
-            },
-        ];
-        let requests_expected = db::count(&ctx, REQUEST_LOGS, &req_today).await.unwrap();
-        let errors_expected = db::count(&ctx, REQUEST_LOGS, &err_today).await.unwrap();
-        let (requests, errors, avg_ms) = request_counts(&ctx, &today_start).await;
-        assert_eq!(requests, requests_expected, "requests count");
-        assert_eq!(errors, errors_expected, "errors count");
-        assert_eq!((requests, errors), (4, 1), "hand-computed request counts");
+    #[test]
+    fn zero_fill_starts_at_the_window_start_and_runs_forward() {
+        let start = chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap();
+        let series = zero_filled_30d(&HashMap::from([("2026-01-03".to_string(), 7)]), start);
+        assert_eq!(series[0].0, "2026-01-01");
+        assert_eq!(series[29].0, "2026-01-30");
+        assert_eq!(series[2], ("2026-01-03".to_string(), 7));
+    }
+}
+
+#[cfg(test)]
+mod outage_tests {
+    //! The dashboard is the one page in group 1 that must NOT fail whole.
+    //!
+    //! It aggregates six independent reads and it is the page an operator
+    //! opens *during* an outage, so a failed read marks its own tile and the
+    //! rest of the page still renders. What it must never do is what it did:
+    //! publish the failure as the number `0` and the empty state, so a
+    //! deployment in trouble rendered as a healthy, unused one — "Total Users
+    //! 0", "Errors Today 0", "No errors recently", and three flat charts
+    //! along the axis.
+
+    use super::*;
+    use crate::test_support::{admin_msg, output_html, output_http_status, TestContext};
+
+    #[tokio::test]
+    async fn every_failed_read_marks_its_own_tile_and_the_page_still_renders() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID)
+            .break_reads();
+        let msg = admin_msg("retrieve", "/b/admin/");
+
+        assert_eq!(
+            output_http_status(dashboard(&ctx, &msg).await).await,
+            200,
+            "the dashboard must survive an outage — it is what an operator opens during one"
+        );
+
+        let html = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
+
         assert!(
-            (avg_ms - 250.0).abs() < 1e-9,
-            "avg of today's durations = 250, got {avg_ms}"
+            !html.contains(r#"<div class="stat-value">0</div>"#),
+            "a failed read must not be published as the figure 0: {html}"
         );
-
-        // --- daily chart series ---
-        let (start_30d, start_iso) = window_30d();
-
-        let users_rows = daily_grouped_30d(
-            &ctx,
-            USERS,
-            &start_iso,
-            vec![Filter {
-                field: "deleted_at".into(),
-                operator: FilterOp::IsNull,
-                value: serde_json::Value::Null,
-            }],
-            vec![wire::AggregateColumnDef::Count {
-                alias: "cnt".into(),
-            }],
-        )
-        .await;
-        let new_users_daily = series_from_rows(&users_rows, "cnt", start_30d);
-        assert_eq!(new_users_daily.len(), 30, "30-entry zero-filled series");
-        assert_eq!(day_value(&new_users_daily, &day(0)), 3, "3 users today");
-        assert_eq!(day_value(&new_users_daily, &day(5)), 2, "2 users 5d ago");
-        assert_eq!(sum(&new_users_daily), 5, "40d-ago user + deleted excluded");
-
-        let req_rows = daily_grouped_30d(
-            &ctx,
-            REQUEST_LOGS,
-            &start_iso,
-            vec![],
-            vec![
-                wire::AggregateColumnDef::Count {
-                    alias: "requests".into(),
-                },
-                wire::AggregateColumnDef::CaseWhenSum {
-                    when: super::to_wire_filters(&[Filter {
-                        field: "status".into(),
-                        operator: FilterOp::Equal,
-                        value: json!("ERROR"),
-                    }]),
-                    alias: "errors".into(),
-                },
-            ],
-        )
-        .await;
-        // Both series come out of the SAME grouped rows — the whole point of the
-        // consolidation.
-        let requests_daily = series_from_rows(&req_rows, "requests", start_30d);
-        let errors_daily = series_from_rows(&req_rows, "errors", start_30d);
-        assert_eq!(day_value(&requests_daily, &day(0)), 4, "4 requests today");
         assert_eq!(
-            day_value(&requests_daily, &day(10)),
-            2,
-            "2 requests 10d ago"
+            html.matches(TILE_UNAVAILABLE).count(),
+            5,
+            "all five stat tiles are fed by the two failed aggregates"
         );
-        assert_eq!(sum(&requests_daily), 6, "40d-ago requests excluded");
-        assert_eq!(day_value(&errors_daily, &day(0)), 1, "1 error today");
-        assert_eq!(sum(&errors_daily), 1, "one error total in window");
+        assert!(
+            !html.contains("No errors recently"),
+            "an unreadable error log must not render as 'no errors recently': {html}"
+        );
+        assert!(
+            !html.contains("No users yet"),
+            "an unreadable user list must not render as 'no users yet': {html}"
+        );
+        assert_eq!(
+            html.matches(CARD_UNAVAILABLE).count(),
+            5,
+            "two recent-row cards and three chart cards each carry a marker"
+        );
+        assert!(
+            !html.contains("chart__plot") && !html.contains("charts-css"),
+            "a chart whose series could not be read must not be plotted at all — a \
+             zero-filled 30-day series draws a flat line along the axis, which is a \
+             picture of 'nothing happened': {html}"
+        );
+        assert!(
+            !html.contains("stat-spark"),
+            "a sparkline drawn from an unreadable series is the same lie in miniature: {html}"
+        );
+    }
+
+    /// The healthy render is untouched: real figures, both empty states, and
+    /// three drawn charts, with no marker anywhere.
+    #[tokio::test]
+    async fn a_healthy_dashboard_carries_no_marker() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        let html = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
+
+        assert!(
+            !html.contains(TILE_UNAVAILABLE) && !html.contains(CARD_UNAVAILABLE),
+            "a healthy dashboard carries no unavailable marker: {html}"
+        );
+        assert!(
+            html.contains("No users yet") && html.contains("No errors recently"),
+            "the genuine empty states still render on a healthy, unused deployment: {html}"
+        );
+        assert_eq!(
+            html.matches(r#"class="card__subtitle">Last 30 days<"#)
+                .count(),
+            3,
+            "all three chart cards render"
+        );
+        assert!(
+            html.contains("chart__plot") && html.contains("charts-css"),
+            "both the line charts and the bar chart are plotted: {html}"
+        );
+    }
+
+    /// A recent user's creation date is a per-run value in the visual-baseline
+    /// capture of this page, which masks dates by the `<time>` element alone.
+    #[tokio::test]
+    async fn the_recent_users_card_renders_the_created_date_as_a_time_element() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        ctx.seed_auth_user("u-1").await;
+        let html = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
+
+        assert!(
+            html.contains(r#"datetime="2026-01-01T00:00:00Z">2026-01-01</time>"#),
+            "the Recent Users date must be a <time>: {html}"
+        );
+    }
+
+    /// Two tiles carry figures the visual-baseline suite masks: "Avg
+    /// Response", a latency measured during the run that screenshots this
+    /// page, and "Requests Today", a count of every request the suite made
+    /// before the capture. Both are masked by label text
+    /// (`.stat-card:has-text("…") .stat-value`) rather than by an attribute,
+    /// because `components::stat_card` takes its value as a plain `&str` and
+    /// offers no markup slot to hang one on. That makes each label part of
+    /// the mask's contract: rename it and the mask silently stops matching,
+    /// and the tile is compared pixel by pixel again with nothing announcing
+    /// the change.
+    #[tokio::test]
+    async fn the_masked_tiles_keep_the_labels_the_visual_masks_key_on() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        let html = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
+
+        for tile in ["Avg Response", "Requests Today"] {
+            let label = format!(r#"<div class="stat-label">{tile}</div>"#);
+            let at = html.find(&label).unwrap_or_else(|| {
+                panic!("visual-baseline.spec.ts masks this tile by this exact label, which is gone: {label} in {html}")
+            });
+            let rest = &html[at + label.len()..];
+            assert!(
+                rest.starts_with(r#"<div class="stat-value">"#),
+                "the masked element is the `.stat-value` that follows the label: {rest:.120}"
+            );
+        }
     }
 }

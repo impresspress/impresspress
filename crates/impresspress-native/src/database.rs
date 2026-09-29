@@ -5,6 +5,15 @@
 //! - `make_sqlite_database_service(path)` — wraps `wafer-block-sqlite`
 //!   `SQLiteDatabaseService`.
 //! - `make_postgres_database_service(url)` — feature-gated on `postgres`.
+//!
+//! Both services come from wafer-run and classify a write that duplicates a
+//! primary or unique key as `DatabaseError::AlreadyExists` from the driver's
+//! own code (`SQLITE_CONSTRAINT_UNIQUE`/`_PRIMARYKEY`, SQLSTATE `23505`). That
+//! is part of the `DatabaseService` contract: `impresspress_core::blocks::crud`
+//! answers `AlreadyExists` as a 409 and never re-reads a key to find out what
+//! a refused write meant. wafer-run's `run_conformance` pins it for both;
+//! `a_duplicate_insert_is_already_exists` below pins it for the SQLite service
+//! as this crate opens it.
 
 use std::sync::Arc;
 
@@ -85,11 +94,153 @@ pub fn make_sqlite_database_service(path: &str) -> Result<Arc<dyn DatabaseServic
 ///
 /// # Errors
 ///
-/// Returns an error if the connection cannot be established.
+/// Returns an error if the connection cannot be established. The error names
+/// the target by [`postgres_target`] only — never the URL itself, which
+/// carries the password (`IMPRESSPRESS_DB_URL` reaches the boot log verbatim
+/// otherwise).
 #[cfg(feature = "postgres")]
 pub async fn make_postgres_database_service(url: &str) -> Result<Arc<dyn DatabaseService>> {
     let svc = wafer_block_postgres::service::PostgresDatabaseService::connect(url)
         .await
-        .with_context(|| format!("connect to Postgres at {url}"))?;
+        .with_context(|| format!("connect to Postgres at {}", postgres_target(url)))?;
     Ok(Arc::new(svc))
+}
+
+/// Describe a Postgres connection URL as `host[:port]/database` for error
+/// messages, dropping the user info and the query string (either can carry
+/// the password: `postgres://user:pw@host/db`, `...?password=pw`).
+///
+/// Anything this cannot split with certainty is described as an unparseable
+/// URL rather than echoed: a password holding an unescaped `/`, `?`, `#` or
+/// `@` moves the delimiters, so an `@` anywhere past the authority means the
+/// user info may not end where the parse thinks it does. An authority with a
+/// `:` but no `@` is refused too: `user:secret` (the `@host` forgotten) and
+/// `host:port` cannot be told apart when the secret is numeric.
+pub(crate) fn postgres_target(url: &str) -> String {
+    const UNPARSEABLE: &str = "<unparseable URL, not shown>";
+    let Some((_scheme, rest)) = url.split_once("://") else {
+        return UNPARSEABLE.to_string();
+    };
+    let authority_end = rest.find(['/', '?', '#']).unwrap_or(rest.len());
+    let (authority, tail) = rest.split_at(authority_end);
+    if tail.contains('@') {
+        return UNPARSEABLE.to_string();
+    }
+    let host = match authority.rsplit_once('@') {
+        Some((_, host)) => host,
+        None if authority.contains(':') => return UNPARSEABLE.to_string(),
+        None => authority,
+    };
+    let database = tail
+        .strip_prefix('/')
+        .map_or("", |p| p.split(['?', '#']).next().unwrap_or(""));
+    if host.is_empty() {
+        return UNPARSEABLE.to_string();
+    }
+    format!("{host}/{database}")
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use wafer_core::interfaces::database::service::DatabaseError;
+
+    use super::{make_sqlite_database_service, postgres_target};
+
+    /// **The `DatabaseService` contract on the SQLite service this crate
+    /// opens.** A create that repeats a primary key, or a `UNIQUE` column, is
+    /// `AlreadyExists` — the 409 `crud` answers — and not `Internal`, the
+    /// 500 a fault is.
+    #[tokio::test]
+    async fn a_duplicate_insert_is_already_exists() {
+        let dir = tempfile::tempdir().expect("temp dir");
+        let path = dir.path().join("dup.db");
+        let svc =
+            make_sqlite_database_service(path.to_str().expect("utf-8 path")).expect("open sqlite");
+        svc.exec_raw(
+            "CREATE TABLE dup_t (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE)",
+            &[],
+        )
+        .await
+        .expect("create table");
+        let row = |id: &str, name: &str| {
+            HashMap::from([
+                ("id".to_string(), serde_json::json!(id)),
+                ("name".to_string(), serde_json::json!(name)),
+            ])
+        };
+
+        svc.create("dup_t", row("a", "first"))
+            .await
+            .expect("the first row lands");
+        for (what, taken) in [
+            ("primary key", row("a", "second")),
+            ("unique column", row("b", "first")),
+        ] {
+            let err = svc.create("dup_t", taken).await.expect_err(what);
+            assert!(
+                matches!(err, DatabaseError::AlreadyExists(_)),
+                "{what}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn postgres_target_drops_user_info_and_query() {
+        assert_eq!(
+            postgres_target("postgres://app:hunter2@db.internal:5432/prod?sslmode=require"),
+            "db.internal:5432/prod"
+        );
+        assert_eq!(
+            postgres_target("postgresql://db.internal/prod?password=hunter2"),
+            "db.internal/prod"
+        );
+        assert_eq!(postgres_target("postgres://app@[::1]:5432"), "[::1]:5432/");
+        // No user info: a bare host is shown; a `host:port` is refused, the
+        // price of never echoing `user:secret` with its `@host` forgotten.
+        assert_eq!(
+            postgres_target("postgres://db.internal/prod"),
+            "db.internal/prod"
+        );
+        assert_eq!(
+            postgres_target("postgres://db.internal:5432/prod"),
+            "<unparseable URL, not shown>"
+        );
+    }
+
+    #[test]
+    fn postgres_target_never_echoes_a_url_it_cannot_split() {
+        for url in [
+            "postgres://app:hun/ter2@db/prod",
+            "postgres://app:hun?ter2@db/prod",
+            "postgres://app:hun#ter2@db/prod",
+            "postgres://app:hun@ter2@db/prod",
+            "host=db password=hunter2",
+            "postgres://",
+            "postgres://app:hunter2",
+            "postgres://app:hunter2/prod",
+        ] {
+            let shown = postgres_target(url);
+            assert!(
+                !shown.contains("hunter2") && !shown.contains("hun"),
+                "{url} -> {shown}"
+            );
+        }
+    }
+
+    /// The real factory, driven to a refused connection: the error chain the
+    /// boot path prints (`{e:#}`) must not carry the password.
+    #[cfg(feature = "postgres")]
+    #[tokio::test]
+    async fn connect_error_does_not_leak_the_password() {
+        let Err(e) =
+            super::make_postgres_database_service("postgres://u:hunter2@127.0.0.1:1/db").await
+        else {
+            panic!("nothing listens on port 1; the connect must fail");
+        };
+        let msg = format!("{e:#}");
+        assert!(!msg.contains("hunter2"), "{msg}");
+        assert!(msg.contains("127.0.0.1:1/db"), "{msg}");
+    }
 }

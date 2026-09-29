@@ -35,18 +35,88 @@ full = [
     "block-messages",
     "block-products",
     "block-userportal",
+    "block-signal",
 ]
 # Passthrough block features → forwarded to `impresspress-core`. The block
 # register sites in impresspress-core are `#[cfg(feature = "block-X")]`-gated
 # (`register_feature_blocks`), so enabling these here is what makes the
-# corresponding `impresspress/<name>` routes resolve. Keep in sync with the
-# `impresspress-web/Cargo.toml` block set.
+# corresponding `impresspress/<name>` routes resolve.
+#
+# This set is checked against `impresspress-core`'s and
+# `impresspress-web/Cargo.toml`'s by
+# `impresspress-core/tests/manifest_block_parity.rs`, which is where any
+# difference between the three is written down with its reason. It replaces
+# the "keep in sync" comment that used to sit here and drifted anyway.
 block-files = ["impresspress-core/block-files"]
 block-legalpages = ["impresspress-core/block-legalpages"]
 block-tickets = ["impresspress-core/block-tickets"]
 block-messages = ["impresspress-core/block-messages"]
 block-products = ["impresspress-core/block-products"]
 block-userportal = ["impresspress-core/block-userportal"]
+# Signalling for blockfarming's WebRTC online play — typed `db::*` client
+# only, no crypto/HTTP deps, so it costs nothing extra beyond the block
+# itself and is safe to include in `full`.
+block-signal = ["impresspress-core/block-signal"]
+# `block-llm` (the feature block, NOT the `llm` native provider backend) and
+# `block-vector`. Both are wasm32-clean: the block holds a
+# `NoopProviderAdmin`, and `llm`/`native-embedding` — the features that pull
+# `tokio`, `reqwest` and ONNX Runtime — stay off. Offered, and deliberately in
+# neither `default` nor `full`: on the measurement below a Worker that asks
+# for both pays for them, and one that does not pays nothing at all.
+#
+# ## What each one actually turns on
+#
+# Neither is one block. In `impresspress-core`, `block-llm` implies
+# `block-messages` and `block-vector` implies `block-llm`, so:
+#
+#   block-llm     ->  impresspress/llm + impresspress/messages
+#   block-vector  ->  impresspress/vector + both of the above
+#
+# Those implications are declarations, not conveniences: `llm.requires` names
+# `impresspress/messages` and every thread, entry and turn the chat UI touches
+# goes through `ctx.call_block("impresspress/messages", ..)`. But they are a
+# SURFACE change, not only byte accounting — a Worker that opts into the chat
+# interface also registers the `/b/messages` routes, which it never named.
+# Both rows below therefore include the implied blocks.
+#
+# `block-vector` additionally buys a 503 surface unless the consumer does more.
+# This adapter injects neither a vector service nor an embedding service, so a
+# Worker that only flips the feature registers `impresspress/vector` with no
+# backend and every route answers `503 Unavailable`. It is not inert by
+# construction — `run_with_config`'s registration hook takes
+# `ImpresspressBuilder::vector_service` and `::embedding_service` — but wiring
+# those is the consumer's job, and without it the feature buys routes that
+# cannot serve.
+#
+# ## Cost
+#
+# Measured against a real Worker — `examples/webmcp-demo`, which is a cdylib
+# whose `#[event(fetch)]` calls `impresspress_cloudflare::run`. (Building THIS
+# crate alone is not a measurement: it exports no Worker entry point, so the
+# linker discards every block and the .wasm is the same size whatever features
+# are on.) The demo declares no passthrough of its own, so the extra feature is
+# named through the dependency:
+#
+#   cargo build --release -p impresspress-webmcp-demo \
+#       --target wasm32-unknown-unknown --no-default-features \
+#       --features target-cloudflare[,impresspress-cloudflare/block-<name>]
+#
+#   as shipped (block-products only)   ~7.79 MB
+#   + block-llm (+ messages)           ~8.24 MB   (about +0.45 MB)
+#   + block-vector (+ both)            ~8.53 MB   (about +0.74 MB)
+#
+# Rounded on purpose: the exact byte counts move with every commit, and these
+# are cargo's own wasm, BEFORE `worker-build`'s wasm-opt and before the gzip
+# the platform's size limit is actually applied to. Neither step preserves
+# pre-optimisation ratios, so these are the relative cost of adding the blocks
+# to this build, not what a consumer pays against the limit. Re-measure rather
+# than scale them.
+#
+# Declaring a feature nobody enables costs nothing, and that was measured too,
+# not assumed: the demo Worker is byte-identical built against the manifest
+# with and without this stanza.
+block-llm = ["impresspress-core/block-llm"]
+block-vector = ["impresspress-core/block-vector"]
 
 # Not enabled by any preset above, and not part of `default-features = false`
 # on the `impresspress-core` dependency below. `run_with_config` (`lib.rs`)
@@ -76,16 +146,13 @@ wafer-sql-utils = { workspace = true }
 # Impresspress shared core. `default-features = false` strips the native
 # block set (sqlite/storage-local/llm/etc.); the wasm32-clean feature
 # blocks are pulled back in via this crate's own passthrough block
-# features (see `[features]` above), which default-enable the full set.
+# features (see `[features]` above), and NOTHING here enables one — the
+# default build registers only the always-on core blocks.
 # Without an enabled `block-X` every `impresspress/<name>` route returns
 # "block not found" — the linkme `register_static_block!` path doesn't
 # emit on wasm32, so `register_all_static_blocks` is the only
 # registration site and every entry there is `#[cfg(feature =
 # "block-X")]`-gated on impresspress-core.
-#
-# `block-llm` / `block-vector` are excluded for now — the LlmBlock
-# module is gated on `feature = "llm"`, which pulls in tokio/reqwest
-# and is wasm32-incompatible. Closes via the LlmService trait refactor.
 impresspress-core = { path = "../impresspress-core", default-features = false }
 
 # Cloudflare Workers SDK
@@ -97,9 +164,13 @@ js-sys = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
 
-# Crypto (wasm-compatible). JWT + argon2 policy delegates to
-# wafer-block-crypto's pure-Rust primitives — same engine as native.
+# Crypto (wasm-compatible). JWT policy delegates to wafer-block-crypto's
+# pure-Rust primitives — same engine as native. Passwords are hashed by the
+# password-hasher Worker; `impresspress-password` carries the call protocol.
+# Its `durable-object` feature stays OFF here: this Worker binds the class,
+# and a Worker that exports one gets no version preview URLs.
 wafer-block-crypto = { workspace = true }
+impresspress-password = { path = "../impresspress-password" }
 getrandom = { workspace = true, features = ["js"] }
 # uuid needs the "js" feature for wasm (uses js_sys random); inherit v4+v7 from workspace
 uuid = { workspace = true, features = ["js"] }

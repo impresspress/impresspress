@@ -2,6 +2,10 @@
 
 - **Date:** 2026-07-30
 - **Status:** Two deep-review passes complete enough for implementation planning; no implementation is included here.
+- **Amended 2026-09-14:** CFG-01's correctness half has since shipped and is marked resolved in
+  place — see the [CFG-01 resolution](#cfg-01-resolution-2026-09-14) and the note on reading a
+  resolved row under the priority matrix. No other finding has been re-audited against the
+  current tree, so treat every unmarked finding as dated 2026-07-30 rather than as verified.
 - **Primary target:** Cloudflare Workers Free plan, with browser and native implications recorded separately.
 - **Reviewed application commits:** `8151a3a` and `320d91d`
 - **Review scope:** runtime construction and caching, routing, HTTP adaptation, request-scoped
@@ -197,7 +201,7 @@ dynamic service dispatch, stream reconstruction, and SSR.
 | MIG-01 | Aggregate migration tracking replays destructive auth migration 004 | P0 | Refresh-token data loss | High |
 | DEPLOY-02 | Candidate preparation mutates shared D1 before verification/promotion | P1 | Deploy/data compatibility | High |
 | RT-01 | Cold contenders independently hydrate complete runtimes | P1 | Cold CPU, availability | High |
-| CFG-01 | Shared mutable site configuration appears absent from the CF config map | P1 | Correctness, warm dispatch | High static; needs CF reproduction |
+| CFG-01 **[RESOLVED — correctness only](#cfg-01-resolution-2026-09-14)** | Shared mutable site configuration appears absent from the CF config map | P1 | Correctness, warm dispatch | High static; needs CF reproduction |
 | GEN-01 | A committed config mutation can escape local and distributed invalidation | P1 | Authorization/config correctness | High |
 | RT-02 | Dirty runtime can be served or rehydrated on dynamic and prepared paths | P1 | Freshness correctness | High |
 | RT-03 | Hard wall-time lease can supersede a live builder | P2 | Duplicate CPU, availability | High |
@@ -241,6 +245,19 @@ immediately. P1 means address before treating burst behavior, configuration sema
 compatibility, or browser durability as reliable. P2 means likely high-value or high-risk work
 for the first optimization program. P3/P4 are important follow-ons or target-specific scaling
 work.
+
+**Reading a resolved row.** Findings shipped since 2026-07-30 keep their original row, priority
+and confidence exactly as first written — the matrix is a record of what the review believed,
+not a live issue tracker — and carry a **RESOLVED** marker linking to the finding's own
+section, where a dated *Resolution* block states what shipped and what did not. The original
+problem statement above such a block is preserved verbatim and may cite paths, line numbers and
+call shapes that the fix has since changed; the Resolution block, and the code doc-comments it
+points at, are the current truth. A marker can be partial and says so when it is — CFG-01's
+reads *RESOLVED — correctness only*, because its performance half is untouched. An unmarked row
+carries no claim either way: it means only that nobody has re-audited it against the current
+tree, not that it is still accurate. The same convention applies outside the matrix, where a
+settled item is struck through and answered in place rather than deleted — see investigation
+question 3 and the first review-closure prerequisite.
 
 ## Detailed findings
 
@@ -449,6 +466,13 @@ whether RT-01 occurs in production.
 
 ### CFG-01 — Shared mutable site configuration appears absent on Cloudflare
 
+> **RESOLVED 2026-09-14 — read the [Resolution](#cfg-01-resolution-2026-09-14) at the end of
+> this section before acting on anything in it.** The correctness defect was reproduced, was
+> worse than described here, and is fixed. Everything between this line and the Resolution is
+> the original 2026-07-30 text, kept unchanged; several of its path and line-number citations
+> no longer resolve. The warm-dispatch half of the finding — the generation-bound snapshot
+> under *Preferred direction* — did **not** ship and is still open.
+
 **Observed path**
 
 The Cloudflare runtime's synchronous `ConfigService` map contains:
@@ -526,6 +550,140 @@ round trips.
 - Worker override precedence.
 - No secret values in prepared plans, logs, cache keys, or shared snapshots.
 - A rendered page performs zero D1/KV calls solely for site chrome after runtime readiness.
+
+#### CFG-01 resolution (2026-09-14)
+
+**Verdict: the correctness half is fixed and shipped; the warm-dispatch half is not.**
+
+The finding was right that administrator-saved values could not reach a rendered page, and the
+reproduction found the defect to be worse than the static trace suggested. The observed path
+above understates it in two ways:
+
+- It reads as a Cloudflare-only gap. Native had its own version: the boot map was seeded once
+  from the `variables` table into an `EnvConfigService`, so an admin's
+  `PATCH /b/admin/api/settings/{key}` — which writes only that table — was invisible until the
+  process restarted.
+- On Cloudflare the failure was not merely that values "appear able to fall back to defaults".
+  `HashMapConfigService::set` is a no-op, so the admin settings forms behind
+  `ui::settings_form::save_settings` answered `200 Settings saved` and changed nothing at all.
+  A save that reports success and discards the write cannot be discovered by the person who
+  made it.
+
+**What shipped**
+
+The `variables` table is now the authoritative config store on every target, and the in-memory
+maps are caches of it rather than the store itself. The mechanism is a block, not another
+`ConfigService` implementation, because `ConfigService::get` is synchronous and cannot consult
+a database, whereas `Block::handle` is async and can — which is also why this respects the
+repo's no-sync-bridge rule.
+
+- `crates/impresspress-core/src/blocks/config.rs` — `VariablesConfigBlock` wraps wafer-core's
+  `ConfigBlock` and takes over `CONFIG_GET` and `CONFIG_SET`. `register_with` binds it under
+  `wafer-run/config`, the name every caller already used, from
+  `crates/impresspress-core/src/builder/registration.rs`. The `blocks/config.rs` module
+  doc-comment is the decision record for the ownership and the four-step read order: runtime-owned
+  keys always answer from the boot map, otherwise a non-empty `variables` row wins, otherwise
+  the boot map, otherwise `NotFound`. An empty row value deliberately falls through rather than
+  masking the boot map, because blank means "unset" everywhere in this repo.
+- `crates/impresspress-core/src/config_generation.rs` — the isolate-local config-write
+  generation counter that makes caching the table safe. Its module doc-comment
+  records why a config reader cannot cache for its own lifetime: a runtime build reads config
+  and then writes it within one pass, so a value seeded halfway through would stay invisible to
+  every block initialized after the cache was filled. `VariablesConfigBlock::snapshot` and
+  `D1ConfigSource::cached_snapshot` (`crates/impresspress-cloudflare/src/config_source.rs`)
+  invalidate against that one counter, so the two cannot disagree.
+- Credential masking has a single predicate: `crate::util::is_sensitive_key(key, flag)`, which
+  is `flag == 1 || config_vars::is_sensitive_for_storage(key)`. Its doc-comment in
+  `crates/impresspress-core/src/util.rs` enumerates the surfaces that ask it — the admin
+  Variables page and its edit modal (`blocks::admin::ops`), the settings JSON API
+  (`blocks::admin::settings`), the ConfigVar-driven form (`ui::settings_form`), the edge-cache
+  exclusion (`cache_key::row_is_sensitive`) and the export filter
+  (`blocks::dev::data_snapshot::variable_is_exportable`) — so no two can disagree about what
+  gets redacted. The stored `sensitive` column is a cache of that answer, never the only copy,
+  which is what keeps a row written before the funnel existed masked anyway.
+- The mask itself (`util::MASKED_VALUE`, `"********"`) is refused as a *value* on all four
+  write surfaces, so a read/modify/write JSON client cannot store eight asterisks over a live
+  secret. Three of them reach `util::is_masked_submission` — the JSON API and the Variables
+  edit modal both through `blocks::admin::ops::update_variable`, and `CONFIG_SET` itself, which
+  is what makes the claim hold by construction rather than by accident of who calls what, since
+  any block can reach that operation. The fourth, `ui::settings_form::save_settings`,
+  asks a deliberately different, flag-free question ("would this mask replace the value the
+  field currently holds?") because WRAP denies four of its five callers the admin `variables`
+  table and it therefore cannot supply the stored flag. The reason is recorded on
+  `is_masked_submission` rather than left to be rediscovered.
+- Environment-variable precedence was decided and is documented on
+  `platform_state::variables::seed_and_load` in
+  `crates/impresspress-core/src/platform_state/variables.rs`: the environment seeds only rows
+  no admin has edited, and once an admin has written a row through an admin surface that row
+  wins permanently while the export goes inert — announced by a WARN on every boot, because
+  rule 2 otherwise reintroduces the shape of the very defect being fixed. Rows predating edit
+  tracking are handled by a one-time *pin on conflict* upgrade transition, and the break-glass
+  is `variables::reset_to_environment` plus the Variables page's bulk release. The same
+  doc-comment states exactly what the transition does and does not promise, in the positive.
+- `crates/impresspress-cloudflare/src/config_service.rs` keeps `HashMapConfigService::set` as a
+  no-op, and now documents why it is silent about it: `ConfigService::set` returns `()`
+  upstream, so reporting the refusal is a producer change that lands on every other consumer of
+  wafer-core for one adapter's benefit. Logging on every call was considered and rejected —
+  nothing in the tree calls `set` on this service, so the line would be noise waiting for a
+  caller that does not exist. The durable write goes through the variables repo instead.
+- Related, and shipped alongside: the admin SQL explorer refuses any query naming a
+  credential-bearing table, `crates/impresspress-core/src/secret_tables.rs`. That module exists
+  because the explorer cannot join the masking funnel above — `query_raw` returns records keyed
+  by the column name the *query* chose, so a `(table, column)` mask is defeated by
+  `SELECT value AS v`. The `SECRET_TABLES` registry is the list, `variables` first among them;
+  read it rather than trusting a count quoted here, since it grows as columns are classified.
+
+**What did not ship, and is still open**
+
+The *Preferred direction* above is unimplemented. There is no `SharedSiteConfigSnapshot`, no
+typed snapshot in `ReadyRuntime`, and no synchronous site-config surface. `SiteConfig::load`
+(`crates/impresspress-core/src/ui/mod.rs`) still performs one sequential
+`wafer_core::clients::config::get_default` call per key — eight keys now, not the six recorded
+above, since `AUTH_HEADLINE` and `AUTH_TAGLINE` were added after this review. It is not a cheap
+clone.
+
+What changed underneath those calls is the cost of each: they no longer cause a query per key,
+because `VariablesConfigBlock::snapshot` reads the whole table once per config-write generation
+and answers from the memoized map. So the *Acceptance evidence* item "a rendered page performs
+zero D1/KV calls solely for site chrome after runtime readiness" is still not met — the count is
+bounded per generation rather than eliminated — and the matching guardrail under *Proposed
+budgets to validate during planning* ("Site chrome: no D1/KV query after runtime readiness")
+stands as written. Anyone picking this up should treat CFG-01's performance half as an
+open finding with its correctness prerequisite now settled.
+
+**Where the decision records live**
+
+In code doc-comments, not in `docs/`. The files named above carry the reasoning, the rejected
+alternatives and the load-bearing distinctions, and they are maintained by the same reviews that
+change the behaviour. This block is a pointer, deliberately: a prose copy of that reasoning in a
+dated review document is exactly what rotted into the wrong statement this block is correcting.
+Read the module doc-comments first and trust them over anything here.
+
+**Stale citations in the text above**
+
+Left in place as part of the original record, and listed here so a reader does not go hunting:
+
+- `crates/impresspress-cloudflare/src/lib.rs:1048-1142` — that file is now much shorter and no
+  longer assembles the config map; the request-time surfaces are built in
+  `runtime_build.rs`'s `request_config_surfaces` over `environment.rs`'s
+  `CfEnvironment::config_map`.
+- `crates/impresspress-core/src/ui/mod.rs:36-68` — `SiteConfig::load` has moved and grown from
+  six keys to eight.
+- `crates/impresspress-cloudflare/src/config_service.rs:5-27` — the `set` doc-comment described
+  above occupies the file's final third.
+- `crates/impresspress-cloudflare/src/config_source.rs:70-164` — the claim, not just the range.
+  `D1ConfigSource` no longer issues a per-block `WHERE block = ?` query at all. Its `snapshot`
+  reads the whole table once per config-write generation and groups the rows by the `block`
+  column in memory; `fetch_block_variables` is then a map lookup. The per-block query it
+  replaced ran once per registered block — 22 KV-cached reads on the production deployment,
+  every cold hydration, all 22 returning zero rows.
+
+Shipped over roughly seventeen pull requests on the `Jsuppers/impresspress` fork between
+2026-09-11 and 2026-09-14. The load-bearing ones, for anyone reconstructing the sequence: #63
+(the failing reproductions, landed first and deliberately failing), #64 (the config block —
+the substantive fix), #65 and #66 (runtime-owned keys are never served from, or written to, the
+table), #74 (the env-precedence contract), #76 and #78 (the sensitivity predicate and the mask
+guard), #79 (bulk release of keys pinned at upgrade) and #80 (the SQL-explorer refusal).
 
 ### ROUTE-01 — Endpoint matching is linear and allocation-heavy
 
@@ -1933,7 +2091,17 @@ review:
 1. What are p50/p95/p99 CPU and wall time for each representative Cloudflare route?
 2. How much of warm CPU is metadata construction/access, generic flow execution, routing, SSR,
    authentication, and response adaptation?
-3. Does an actual Cloudflare deployment reproduce CFG-01 for non-default shared D1 variables?
+3. ~~Does an actual Cloudflare deployment reproduce CFG-01 for non-default shared D1
+   variables?~~ **Answered 2026-09-11, and the answer was yes — worse than asked.** The
+   reproduction is PR #63's test set. Non-default shared rows never reached a rendered page,
+   and the write side failed too: `HashMapConfigService::set` is a no-op, so the admin settings
+   forms returned `200 Settings saved` and stored nothing. Native had a second, separate form of
+   the same defect — an admin's write landed in the table but the boot map was only seeded at
+   process start, so nothing saw it until a restart. Fixed; see the
+   [CFG-01 resolution](#cfg-01-resolution-2026-09-14), and
+   `crates/impresspress-core/src/blocks/config.rs`'s module doc-comment for the read order that
+   replaced it. What remains open under CFG-01 is the performance half only, which this question
+   never covered.
 4. Which block initializers still perform D1 reads during prepared hydration, and how long
    does each take?
 5. Which Worker SDK handles are safe to retain as immutable recipes or handles across events?
@@ -1953,7 +2121,10 @@ MIG-01, DEPLOY-02, GEN-01, BROWSER-03, and BROWSER-04 have enough static evidenc
 correctness implementation planning immediately. Performance sequencing is ready to become a
 measurement-backed implementation plan when:
 
-- CFG-01 has a Cloudflare reproduction result.
+- ~~CFG-01 has a Cloudflare reproduction result.~~ **Met 2026-09-11** (PR #63), and the
+  correctness defect it exposed was fixed on 2026-09-14 — see the
+  [CFG-01 resolution](#cfg-01-resolution-2026-09-14). CFG-01's warm-dispatch half is still open
+  and still needs the measurement the rest of this list describes.
 - A cold-burst harness demonstrates the current RT-01 behavior.
 - Warm request phase/allocation measurements rank META-01, FLOW-01, ROUTE-01, SSR-01, RESP-01,
   AUTH-01, and SVC-01 with evidence.

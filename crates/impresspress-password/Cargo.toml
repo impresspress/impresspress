@@ -1,0 +1,49 @@
+[package]
+name = "impresspress-password"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "Password hashing shared by impresspress targets: the password pepper settings, and the Cloudflare password-hasher Worker (its call protocol and Durable Object)"
+
+[lib]
+# `rlib` for the targets that link it (`impresspress`, `impresspress-cloudflare`);
+# `cdylib` is not declared here: the password-hasher Worker is a small wrapper
+# crate `impresspress build --target cloudflare` generates, which depends on
+# this one with `durable-object` on (see that feature below).
+crate-type = ["rlib"]
+
+[features]
+default = []
+# The Durable Object class the password-hasher Worker exports, and that
+# Worker's `fetch` entry point. Only the generated password-hasher crate
+# enables it: a Worker that merely BINDS the class (the main impresspress
+# Worker) must not export it, because Cloudflare generates no version preview
+# URLs for a Worker that implements a Durable Object, and the main Worker's
+# deploy funnel runs through those URLs. wasm32-only in practice.
+durable-object = ["dep:worker", "dep:wasm-bindgen"]
+
+[dependencies]
+wafer-block-crypto = { workspace = true }
+wafer-core = { workspace = true }
+serde = { workspace = true }
+serde_json = { workspace = true }
+worker = { workspace = true, optional = true }
+# `#[durable_object]` expands to `#[wasm_bindgen]` items naming this crate.
+wasm-bindgen = { workspace = true, optional = true }
+
+# On wasm32 the crypto primitives draw salts from `getrandom`, and `wafer-core`
+# links `uuid`; both need their JavaScript randomness source there, as in
+# `impresspress-cloudflare`.
+[target.'cfg(target_arch = "wasm32")'.dependencies]
+getrandom = { workspace = true, features = ["js"] }
+uuid = { workspace = true, features = ["js"] }
+
+
+# The `durable_object` module's tests run the class on wasm32, under
+# `wasm-bindgen-test-runner`, against a fake `Env`.
+[target.'cfg(target_arch = "wasm32")'.dev-dependencies]
+wasm-bindgen-test = "0.3"
+js-sys = { workspace = true }
+
+[lints]
+workspace = true

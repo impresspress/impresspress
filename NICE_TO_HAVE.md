@@ -6,10 +6,6 @@ Low-priority improvements identified during code review. None are blocking, but 
 
 - **KV caching for project resolution in dispatch worker** — Currently every request queries D1 to resolve the project subdomain. A Cloudflare KV cache with a short TTL (e.g. 60s) would reduce latency and D1 load for hot projects. Requires cache invalidation on project config changes.
 
-## Security
-
-- **Configurable Argon2 params for native deployments** — Current params (4 MiB memory, 2 iterations, 1 lane) are tuned for Cloudflare Workers' constrained environment. Native deployments should use higher cost params (e.g. 64 MiB, 3 iterations) for stronger password hashing. Could be driven by a `ARGON2_MEMORY_COST` env var.
-
 ## Testing
 
 - **Code coverage tracking with cargo-tarpaulin** — No coverage metrics are currently tracked. Integrating `cargo-tarpaulin` into CI would identify untested code paths and track coverage trends over time.

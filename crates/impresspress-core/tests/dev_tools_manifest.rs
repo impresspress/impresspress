@@ -22,7 +22,7 @@ async fn tools_json_publishes_every_selection_with_zero_refusals() {
         .with_dev_added(FakeControl::new())
         .await;
     let doc = output_json(
-        ctx.dispatch(admin_msg("retrieve", "/b/dev/api/tools.json"))
+        ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/tools.json"))
             .await,
     )
     .await;
@@ -78,7 +78,7 @@ async fn shop_create_offer_merges_its_path_and_body_schemas() {
         .with_dev_added(FakeControl::new())
         .await;
     let doc = output_json(
-        ctx.dispatch(admin_msg("retrieve", "/b/dev/api/tools.json"))
+        ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/tools.json"))
             .await,
     )
     .await;
@@ -132,7 +132,7 @@ async fn tools_json_matches_its_snapshot() {
         .with_dev_added(FakeControl::new())
         .await;
     let doc = output_json(
-        ctx.dispatch(admin_msg("retrieve", "/b/dev/api/tools.json"))
+        ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/tools.json"))
             .await,
     )
     .await;

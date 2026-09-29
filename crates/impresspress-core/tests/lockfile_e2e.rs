@@ -1,16 +1,21 @@
 //! E2E: synthetic wafer.lock + ~/.wafer/cache entry → Wafer loads the
-//! remote block at boot via Path B (lockfile loader, per
-//! docs/superpowers/specs/2026-04-24-wafer-runtime-remote-loading-design.md
-//! §End-to-end).
+//! remote block at boot via Path B (the lockfile loader).
 //!
 //! Uses `WaferBuilder::lockfile()` directly to avoid touching
 //! process-global env vars; no `#[serial]` annotation needed.
 //!
-//! The call_block dispatch assertion from the spec is deferred: driving a
-//! WASM handler requires a full Context + InputStream/OutputStream
-//! scaffolding that impresspress tests don't typically build. The registration
-//! check alone proves Path B works in impresspress's build.
-// TODO(spec §End-to-end): add call_block dispatch assertion once
+//! This asserts registration only. Actually dispatching to the loaded block
+//! would need a full Context plus InputStream/OutputStream scaffolding that
+//! impresspress tests don't build; the registration check alone proves Path B
+//! works in impresspress's build.
+//!
+//! Compiled only with the `wasm` feature: without it the runtime has no
+//! wasm loader, so the lockfile entry has nothing to load it with. CI's core
+//! job runs with `--features block-dev,wasm`.
+
+#![cfg(feature = "wasm")]
+
+// TODO: add a `call_block` dispatch assertion against the loaded block once
 //   impresspress gains a test-context helper that wraps Context.
 
 use std::fs;

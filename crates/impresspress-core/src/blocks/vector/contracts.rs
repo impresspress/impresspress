@@ -202,9 +202,7 @@ impl CreateIndexRequest {
             dimensions: non_empty("dimensions").and_then(|v| v.parse().ok()),
             metric: non_empty("metric")
                 .and_then(|v| serde_json::from_value(serde_json::Value::String(v)).ok()),
-            keyword_search: form
-                .get("keyword_search")
-                .is_some_and(|v| matches!(v.as_str(), "on" | "true" | "1" | "yes")),
+            keyword_search: crate::config_vars::form_bool(form, "keyword_search"),
         }
     }
 }

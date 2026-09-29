@@ -1,141 +1,102 @@
 use std::collections::HashMap;
 
-use wafer_block::db::{Filter, FilterOp, SortField};
-use wafer_core::clients::database as db;
-use wafer_run::{context::Context, ErrorCode, InputStream, Message, OutputStream};
+use wafer_run::{context::Context, InputStream, Message, OutputStream};
 
 use super::{
     contracts::{AdminUserListQuery, AdminUserListResponse, AdminUserView},
     ops,
 };
 use crate::{
-    blocks::auth::USERS_TABLE as COLLECTION,
-    http::{err_bad_request, err_internal, err_not_found, ok_json},
+    blocks::{
+        auth::repo::users::{self, ActiveUserQuery},
+        crud::{self, db_error, db_error_internal},
+    },
+    http::{err_bad_request, err_not_found, ok_json},
 };
 
-/// `path` is the normalized `/admin/users[...]` sub-path passed explicitly by
-/// the admin dispatcher (no `req.resource` rewrite). The leaf handlers read the
-/// user id from `req.param.id`, which this dispatcher binds from `path`.
-pub async fn handle(
-    ctx: &dyn Context,
-    msg: &Message,
-    path: &str,
-    input: InputStream,
-) -> OutputStream {
-    let action = msg.action();
-
-    match (action, path) {
-        ("retrieve", "/admin/users") => handle_list(ctx, msg).await,
-        ("retrieve", _) if path.starts_with("/admin/users/") => {
-            handle_get(ctx, msg, user_id_from(path)).await
-        }
-        ("update", _) if path.starts_with("/admin/users/") => {
-            handle_update(ctx, msg, user_id_from(path), input).await
-        }
-        ("delete", _) if path.starts_with("/admin/users/") => {
-            handle_delete(ctx, msg, user_id_from(path)).await
-        }
-        _ => err_not_found("not found"),
-    }
-}
-
-/// Extract the first `/`-bounded user-id segment after `/admin/users/`.
-fn user_id_from(path: &str) -> &str {
-    let rest = path.strip_prefix("/admin/users/").unwrap_or("");
-    match rest.find('/') {
-        Some(idx) => &rest[..idx],
-        None => rest,
-    }
-}
-
-async fn handle_list(ctx: &dyn Context, msg: &Message) -> OutputStream {
+/// `GET /b/admin/api/users`.
+pub(super) async fn handle_list(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let query = AdminUserListQuery::from_message(msg);
 
-    let mut filters = vec![Filter {
-        field: "deleted_at".to_string(),
-        operator: FilterOp::IsNull,
-        value: serde_json::Value::Null,
-    }];
-
-    if let Some(search) = &query.search {
-        filters.push(Filter {
-            field: "email".to_string(),
-            operator: FilterOp::Like,
-            value: serde_json::Value::String(format!("%{search}%")),
-        });
-    }
-
-    let sort = vec![SortField {
-        field: "created_at".to_string(),
-        desc: true,
-    }];
-
-    match db::paginated_list(
+    // The `deleted_at IS NULL` predicate, the sort and the search shape all
+    // live in `users::list_active_page`, shared with the SSR users tab.
+    match users::list_active_page(
         ctx,
-        COLLECTION,
-        i64::from(query.page),
-        i64::from(query.page_size),
-        filters,
-        sort,
+        &ActiveUserQuery {
+            page: i64::from(query.page),
+            page_size: query.page_size,
+            search: query.search.clone(),
+        },
     )
     .await
     {
-        Ok(result) => {
+        Ok(page) => {
             // Bulk-enrich with roles via a single `In`-filter query (was N+1:
             // one `list_all` per row), then project each row onto the closed
             // `AdminUserView` field list. The projection is what keeps
             // `verification_token` (and any column a future migration adds) off
             // the wire — the previous code echoed the whole row and removed one
             // field by name.
-            let user_ids: Vec<&str> = result.records.iter().map(|r| r.id.as_str()).collect();
-            let roles_by_user = ops::fetch_roles(ctx, &user_ids).await;
-            ok_json(&AdminUserListResponse::from_record_list(
-                &result,
-                &roles_by_user,
-            ))
+            let user_ids: Vec<&str> = page.rows.iter().map(|r| r.id.as_str()).collect();
+            match ops::fetch_roles(ctx, &user_ids).await {
+                Ok(roles_by_user) => {
+                    ok_json(&AdminUserListResponse::from_page(&page, &roles_by_user))
+                }
+                Err(e) => db_error_internal(e, "Could not load the users' roles"),
+            }
         }
-        Err(e) => err_internal("Database error", e),
+        // A `NotFound` from a paginated list names no user of the caller's —
+        // `db_error_internal`, not `db_error`.
+        Err(e) => db_error_internal(e, "Database error"),
     }
 }
 
-async fn handle_get(ctx: &dyn Context, _msg: &Message, id: &str) -> OutputStream {
-    if id.is_empty() {
-        return err_bad_request("Missing user ID");
-    }
+/// `GET /b/admin/api/users/{id}`. `{id}` is read only as the route table
+/// bound it.
+pub(super) async fn handle_get(ctx: &dyn Context, msg: &Message) -> OutputStream {
+    let id = match crud::path_id(msg, "User") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     get_user(ctx, id).await
 }
 
 async fn get_user(ctx: &dyn Context, id: &str) -> OutputStream {
-    match db::get(ctx, COLLECTION, id).await {
-        Ok(record) => {
+    match users::find_by_id(ctx, id).await {
+        Ok(Some(row)) => {
             // Get roles via the shared single-query helper.
-            let roles = ops::fetch_roles(ctx, &[id])
-                .await
-                .remove(id)
-                .unwrap_or_default();
+            let roles = match ops::fetch_roles(ctx, &[id]).await {
+                Ok(mut roles) => roles.remove(id).unwrap_or_default(),
+                Err(e) => return db_error_internal(e, "Could not load the user's roles"),
+            };
             // Same projection as the list endpoint. This path used to emit a
             // third shape — the raw `{id, data: {…}}` record with `roles`
             // grafted on beside `data` rather than inside it — so the two read
             // paths disagreed about where a user's roles lived and both echoed
             // `verification_token`.
-            ok_json(&AdminUserView::from_record(&record, roles))
+            ok_json(&AdminUserView::from_row(&row, roles))
         }
-        Err(e) if e.code == ErrorCode::NotFound => err_not_found("User not found"),
-        Err(e) => err_internal("Database error", e),
+        Ok(None) => err_not_found("User not found"),
+        Err(e) => db_error(e, "User not found", "Database error"),
     }
 }
 
-async fn handle_update(
+/// `PATCH /b/admin/api/users/{id}`. `{id}` is read only as the route table
+/// bound it.
+pub(super) async fn handle_update(
     ctx: &dyn Context,
     msg: &Message,
-    id: &str,
     input: InputStream,
 ) -> OutputStream {
-    if id.is_empty() {
-        return err_bad_request("Missing user ID");
-    }
+    let id = match crud::path_id(msg, "User") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
 
-    let raw = input.collect_to_bytes().await;
+    let raw = match input.collect_to_bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => return OutputStream::error(e),
+    };
     let body: HashMap<String, serde_json::Value> = match serde_json::from_slice(&raw) {
         Ok(b) => b,
         Err(e) => return err_bad_request(&format!("Invalid body: {e}")),
@@ -144,28 +105,37 @@ async fn handle_update(
     // The self-disable guard, safe-field whitelist, and audit-log write all
     // live in the shared ops layer so the SSR surface can't diverge.
     match ops::update_user_fields(ctx, msg, id, &body).await {
-        Ok(record) => {
-            // Same projection as GET (`get_user` / `handle_list`): the ops
-            // layer returns the raw `db::Record`, whose `password_hash.remove`
-            // is a no-op (no such column on this table — credentials live in
-            // `local_credentials`) and which otherwise still carries
-            // `verification_token` / `last_verification_sent` / `auth_version`.
-            // Echoing it here would leak the same columns the GET handlers
-            // used to, through a fourth response shape.
-            let roles = ops::fetch_roles(ctx, &[id])
-                .await
-                .remove(id)
-                .unwrap_or_default();
-            ok_json(&AdminUserView::from_record(&record, roles))
+        Ok(row) => {
+            // Same projection as GET (`get_user` / `handle_list`). The row
+            // type carries only the columns `auth::repo::users` decodes, so
+            // `verification_token` / `last_verification_sent` / `auth_version`
+            // are not reachable from here at all — they used to ride along in
+            // the raw record this handler echoed.
+            //
+            // The update has landed by now; a failed roles read still answers
+            // 500 rather than a view claiming the user holds no roles.
+            let roles = match ops::fetch_roles(ctx, &[id]).await {
+                Ok(mut roles) => roles.remove(id).unwrap_or_default(),
+                Err(e) => {
+                    return db_error_internal(
+                        e,
+                        "User updated, but their roles could not be loaded",
+                    )
+                }
+            };
+            ok_json(&AdminUserView::from_row(&row, roles))
         }
         Err(out) => out,
     }
 }
 
-async fn handle_delete(ctx: &dyn Context, msg: &Message, id: &str) -> OutputStream {
-    if id.is_empty() {
-        return err_bad_request("Missing user ID");
-    }
+/// `DELETE /b/admin/api/users/{id}`. `{id}` is read only as the route table
+/// bound it.
+pub(super) async fn handle_delete(ctx: &dyn Context, msg: &Message) -> OutputStream {
+    let id = match crud::path_id(msg, "User") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
 
     // Self-delete guard, soft-delete, and audit-log write live in the shared
     // ops layer (the JSON path previously logged nothing).
@@ -177,38 +147,48 @@ async fn handle_delete(ctx: &dyn Context, msg: &Message, id: &str) -> OutputStre
 
 #[cfg(test)]
 mod tests {
-    use wafer_core::clients::database as db;
 
     use super::*;
-    use crate::test_support::{admin_msg, output_json, TestContext};
+    use crate::{
+        blocks::admin::test_support::routed,
+        test_support::{admin_msg, output_http_status, output_json, TestContext},
+    };
 
     /// Seed one user row carrying every column the table has, including the
     /// two the API must never publish.
+    /// Seed a user carrying the three columns the untyped handler used to
+    /// echo (`verification_token`, `last_verification_sent`, `auth_version`),
+    /// so the field-set assertions below are not vacuous. `insert` dual-writes
+    /// `display_name` and the `name` alias, so both read "Ada".
     async fn seed_user(ctx: &dyn Context) -> String {
-        let mut data = crate::util::json_map(serde_json::json!({
-            "email": "admin@example.com",
-            "display_name": "Ada",
-            "name": "Ada Lovelace",
-            "avatar_url": serde_json::Value::Null,
-            "role": "user",
-            "email_verified": 1,
-            "disabled": 0,
-            "last_login_at": serde_json::Value::Null,
-            "deleted_at": serde_json::Value::Null,
-            // The two columns the untyped handler used to echo.
-            "verification_token": "3d1f0ac0deadbeef",
-            "last_verification_sent": "2026-08-01T00:00:00Z",
-            "auth_version": 7,
-        }));
-        crate::util::stamp_created(&mut data);
-        db::create(ctx, COLLECTION, data)
+        let user = users::insert(
+            ctx,
+            users::NewUser {
+                email: "admin@example.com".to_string(),
+                display_name: "Ada".to_string(),
+                avatar_url: None,
+                role: "user".to_string(),
+                email_verified: true,
+                verification_token_hash: Some("3d1f0ac0deadbeef".to_string()),
+            },
+        )
+        .await
+        .expect("seed user");
+        users::set_verification_token(ctx, &user.id, "3d1f0ac0deadbeef", "2026-08-01T00:00:00Z")
             .await
-            .expect("seed user")
-            .id
+            .expect("seed verification bookkeeping");
+        for _ in 0..7 {
+            users::bump_auth_version(ctx, &user.id)
+                .await
+                .expect("seed auth_version");
+        }
+        user.id
     }
 
     async fn users_ctx() -> TestContext {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         // Admin first: the migration runner records its state in
         // `block_settings`, which the admin schema creates.
         crate::blocks::admin::migrations::apply(&ctx)
@@ -218,6 +198,31 @@ mod tests {
             .await
             .expect("apply auth migrations");
         ctx
+    }
+
+    /// A user whose roles cannot be read is a 500, not `"roles": []`.
+    ///
+    /// `break_list_reads` keeps the single-row user read working and fails the
+    /// roles query, the shape a wobbling database gives this handler.
+    #[tokio::test]
+    async fn a_failed_roles_read_is_a_500_not_an_empty_roles_list() {
+        let ctx = users_ctx().await;
+        let id = seed_user(&ctx).await;
+        crate::platform_state::user_roles::assign(&ctx, &id, "admin", "")
+            .await
+            .expect("grant");
+        let failing = ctx.break_list_reads();
+
+        let msg = routed(admin_msg("retrieve", &format!("/b/admin/api/users/{id}")));
+        let out = wafer_run::Block::handle(
+            &crate::blocks::admin::AdminBlock::new(),
+            &failing,
+            msg,
+            InputStream::empty(),
+        )
+        .await;
+
+        assert_eq!(output_http_status(out).await, 500);
     }
 
     /// The field set the endpoint publishes is exactly the contract's, no more.
@@ -233,7 +238,8 @@ mod tests {
         seed_user(&ctx).await;
 
         let body =
-            output_json(handle_list(&ctx, &admin_msg("retrieve", "/admin/users")).await).await;
+            output_json(handle_list(&ctx, &admin_msg("retrieve", "/b/admin/api/users")).await)
+                .await;
 
         let row = body["records"][0]
             .as_object()
@@ -276,7 +282,8 @@ mod tests {
         seed_user(&ctx).await;
 
         let body =
-            output_json(handle_list(&ctx, &admin_msg("retrieve", "/admin/users")).await).await;
+            output_json(handle_list(&ctx, &admin_msg("retrieve", "/b/admin/api/users")).await)
+                .await;
         let raw = body.to_string();
 
         for leaked in ["verification_token", "3d1f0ac0deadbeef", "password_hash"] {
@@ -297,7 +304,8 @@ mod tests {
         seed_user(&ctx).await;
 
         let body =
-            output_json(handle_list(&ctx, &admin_msg("retrieve", "/admin/users")).await).await;
+            output_json(handle_list(&ctx, &admin_msg("retrieve", "/b/admin/api/users")).await)
+                .await;
 
         assert_eq!(
             body["records"][0]["email_verified"],
@@ -341,10 +349,8 @@ mod tests {
         let input = InputStream::from_bytes(
             serde_json::to_vec(&serde_json::json!({"name": "Ada Updated"})).unwrap(),
         );
-        let body = output_json(
-            handle_update(&ctx, &admin_msg("update", "/admin/users"), &id, input).await,
-        )
-        .await;
+        let msg = routed(admin_msg("update", &format!("/b/admin/api/users/{id}")));
+        let body = output_json(handle_update(&ctx, &msg, input).await).await;
 
         assert_eq!(body["id"], serde_json::json!(id));
         assert_eq!(body["name"], serde_json::json!("Ada Updated"));
@@ -359,5 +365,74 @@ mod tests {
                 "PUT /b/admin/api/users/{{id}} leaked `{leaked}`: {raw}"
             );
         }
+    }
+
+    /// A context that reached the admin block with NO WRAP grants, so every
+    /// typed database call it makes is refused by the same
+    /// `wrap::check_access` the runtime applies. The auth schema is applied
+    /// first, so the refusal is a denial and not a missing table.
+    async fn denied_users_ctx() -> TestContext {
+        users_ctx().await.running_as("test/ungranted")
+    }
+
+    /// The reason `RepoError` had to fold into `WaferError`.
+    ///
+    /// `auth::repo::users::find_by_id` used to answer with
+    /// `RepoError::Db(String)`, which had already thrown the wafer code away
+    /// — so by the time this handler saw the failure it could not tell a
+    /// WRAP refusal from a decode fault, and answered `500 Internal server
+    /// error (ref: …)` for both. An operator running a deployment whose
+    /// admin block is missing its `wafer_run__auth__users` grant read that
+    /// as an outage.
+    #[tokio::test]
+    async fn a_denied_user_read_is_403_not_500() {
+        let ctx = denied_users_ctx().await;
+        assert_eq!(
+            output_http_status(get_user(&ctx, "any-id").await).await,
+            403
+        );
+    }
+
+    /// The same denial through every other auth-repo-backed admin user
+    /// handler, so the fix is the repo layer's and not one handler's.
+    #[tokio::test]
+    async fn a_denied_user_list_is_403_not_500() {
+        let ctx = denied_users_ctx().await;
+        let out = handle_list(&ctx, &admin_msg("retrieve", "/b/admin/api/users")).await;
+        assert_eq!(output_http_status(out).await, 403);
+    }
+
+    #[tokio::test]
+    async fn a_denied_user_update_is_403_not_500() {
+        let ctx = denied_users_ctx().await;
+        let input = InputStream::from_bytes(
+            serde_json::to_vec(&serde_json::json!({"name": "Ada Updated"})).unwrap(),
+        );
+        let msg = routed(admin_msg("update", "/b/admin/api/users/any-id"));
+        assert_eq!(
+            output_http_status(handle_update(&ctx, &msg, input).await).await,
+            403
+        );
+    }
+
+    #[tokio::test]
+    async fn a_denied_user_delete_is_403_not_500() {
+        let ctx = denied_users_ctx().await;
+        let msg = routed(admin_msg("delete", "/b/admin/api/users/any-id"));
+        assert_eq!(
+            output_http_status(handle_delete(&ctx, &msg).await).await,
+            403
+        );
+    }
+
+    /// The granted path still answers as it did, so the 403 above is the
+    /// denial and not a blanket refusal.
+    #[tokio::test]
+    async fn a_granted_read_of_a_missing_user_is_still_404() {
+        let ctx = users_ctx().await;
+        assert_eq!(
+            output_http_status(get_user(&ctx, "no-such-user").await).await,
+            404
+        );
     }
 }

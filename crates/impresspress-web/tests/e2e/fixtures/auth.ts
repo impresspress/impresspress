@@ -1,4 +1,5 @@
-import type { Page } from '@playwright/test';
+import { expect, type APIRequestContext, type Page } from '@playwright/test';
+import { ADMIN_EMAIL, ADMIN_PASSWORD } from './global-setup';
 
 export const ADMIN_STATE_PATH = new URL('../../.auth/admin-state.json', import.meta.url).pathname;
 
@@ -33,4 +34,19 @@ export async function loginAsAdmin(page: Page): Promise<void> {
         `Got cookies: ${JSON.stringify(names)}`,
     );
   }
+}
+
+/**
+ * Bearer for the bootstrap admin, for a spec that seeds data over the API.
+ * Bearer auth is exempt from the CSRF origin policy; the `auth_token` cookie
+ * the storageState carries is not, so an API write from `request` needs this.
+ */
+export async function adminBearer(request: APIRequestContext): Promise<string> {
+  const res = await request.post('/b/auth/api/login', {
+    data: { email: ADMIN_EMAIL, password: ADMIN_PASSWORD },
+    headers: { 'Content-Type': 'application/json' },
+  });
+  expect(res.status(), await res.text()).toBe(200);
+  const { access_token } = (await res.json()) as { access_token: string };
+  return `Bearer ${access_token}`;
 }

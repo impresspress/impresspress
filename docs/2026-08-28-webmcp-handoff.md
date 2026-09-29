@@ -259,6 +259,14 @@ commands default to the LOCAL store — pass `--remote`. The Worker now live was
 built from this branch plus #77's files (adapter fix + `examples/webmcp-demo`);
 once #74, #75 and #77 are on `main`, redeploy from `main`.
 
+> **Correction (2026-09-14).** The deploy-traps paragraph above calls
+> `variables.block` the column "the lazy per-block loader filters on". That
+> stopped being true: `D1ConfigSource` reads the whole variables table in one
+> unfiltered query and groups by `block` in memory, issuing no
+> `WHERE block = ?`. The column still scopes a row to its block (it is what
+> the grouping keys on), so a row without it still reaches no block; only the
+> query strategy changed. The text is left as the 2026-08-28 record.
+
 Engineering that does **not** gate the submission but is still open: products'
 22 offer sites (recursive `Condition`); the `$defs` hoist (wafer-run). The
 `llm`/`vector` typing (**#79**), products' row endpoints (**#80**) and the

@@ -4,20 +4,20 @@
 use impresspress_core::blocks::auth::migrations;
 use wafer_core::clients::database as db;
 
-use crate::common::MigrationTestCtx;
+use crate::common::auth_fixture;
 
 const EXPECTED_RESERVED: &[&str] = &["impresspress", "wafer", "wafer-run"];
 
 #[tokio::test]
 async fn migration_002_seeds_three_reserved_orgs_idempotently() {
-    let ctx = MigrationTestCtx::new().await;
+    let ctx = auth_fixture(impresspress_core::blocks::auth::AUTH_BLOCK_ID).await;
     migrations::apply(&ctx).await.expect("first apply");
     migrations::apply(&ctx)
         .await
         .expect("second apply must succeed (idempotent)");
 
     let rows = db::query_raw(
-        &ctx,
+        &ctx.fixture(),
         "SELECT name FROM wafer_run__auth__orgs WHERE is_reserved = 1 ORDER BY name",
         &[],
     )

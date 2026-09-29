@@ -29,7 +29,10 @@ use serde::{Deserialize, Serialize};
 use wafer_core::clients::database::{Record, RecordList};
 use wafer_run::Message;
 
-use crate::util::RecordExt;
+use crate::{
+    blocks::auth::repo::users::{UserPage, UserRow},
+    util::RecordExt,
+};
 
 // ---------------------------------------------------------------------------
 // GET /b/admin/api/users
@@ -52,8 +55,10 @@ use crate::util::RecordExt;
 //
 // A password hash was never among them: credentials live in
 // `wafer_run__auth__local_credentials`, a different table this endpoint does
-// not read. The `record.data.remove("password_hash")` the old handler ran was
-// a no-op against a column that is not on this table.
+// not read. The two `record.data.remove("password_hash")` lines admin's
+// mutation layer used to run were no-ops against a column that is not on this
+// table, and are gone; the view is built from a typed `UserRow` now, which has
+// no field to strip.
 /// A user account as published by the admin API.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AdminUserView {
@@ -89,22 +94,24 @@ pub struct AdminUserView {
 }
 
 impl AdminUserView {
-    /// Project a `wafer_run__auth__users` row plus its resolved role names.
-    pub fn from_record(record: &Record, roles: Vec<String>) -> Self {
+    /// Project a decoded users row plus its resolved role names. The row
+    /// comes from `auth::repo::users`, the only place this table's columns
+    /// are read; this type is the closed list of what reaches the wire.
+    pub fn from_row(row: &UserRow, roles: Vec<String>) -> Self {
         Self {
-            id: record.id.clone(),
-            email: record.str_field("email").to_string(),
-            display_name: record.str_field("display_name").to_string(),
-            name: record.opt_str_field("name"),
-            avatar_url: record.opt_str_field("avatar_url"),
-            role: record.str_field("role").to_string(),
+            id: row.id.clone(),
+            email: row.email.clone(),
+            display_name: row.display_name.clone(),
+            name: row.name.clone(),
+            avatar_url: row.avatar_url.clone(),
+            role: row.role.clone(),
             roles,
-            email_verified: record.bool_field("email_verified"),
-            disabled: record.bool_field("disabled"),
-            last_login_at: record.opt_str_field("last_login_at"),
-            created_at: record.str_field("created_at").to_string(),
-            updated_at: record.str_field("updated_at").to_string(),
-            deleted_at: record.opt_str_field("deleted_at"),
+            email_verified: row.email_verified,
+            disabled: row.disabled,
+            last_login_at: row.last_login_at.clone(),
+            created_at: row.created_at.clone(),
+            updated_at: row.updated_at.clone(),
+            deleted_at: row.deleted_at.clone(),
         }
     }
 }
@@ -152,24 +159,21 @@ pub struct AdminUserListResponse {
 }
 
 impl AdminUserListResponse {
-    /// Project a `RecordList` of user rows plus the bulk-fetched
+    /// Project a page of user rows plus the bulk-fetched
     /// `user_id → [role]` map.
-    pub fn from_record_list(
-        list: &RecordList,
-        roles_by_user: &HashMap<String, Vec<String>>,
-    ) -> Self {
+    pub fn from_page(page: &UserPage, roles_by_user: &HashMap<String, Vec<String>>) -> Self {
         Self {
-            records: list
-                .records
+            records: page
+                .rows
                 .iter()
-                .map(|record| {
-                    let roles = roles_by_user.get(&record.id).cloned().unwrap_or_default();
-                    AdminUserView::from_record(record, roles)
+                .map(|row| {
+                    let roles = roles_by_user.get(&row.id).cloned().unwrap_or_default();
+                    AdminUserView::from_row(row, roles)
                 })
                 .collect(),
-            total_count: list.total_count,
-            page: list.page,
-            page_size: list.page_size,
+            total_count: page.total_count,
+            page: page.page,
+            page_size: page.page_size,
         }
     }
 }
@@ -271,6 +275,21 @@ pub struct UpdateRoleRequest {
     pub permissions: Option<Vec<String>>,
 }
 
+/// `PATCH /b/admin/api/iam/roles/{id}` response body: the role as it now is.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct AdminRoleUpdateResponse {
+    #[serde(flatten)]
+    pub role: AdminRoleView,
+    /// Present when the update was saved but a rename's grants did not all
+    /// follow it: says which still name the old role, and how to move them.
+    // A rename rewrites every `user_roles` row naming the old name, one
+    // write each; a failure part-way leaves the role renamed and some grants
+    // behind. That is still a 200 — the rename happened — and this is how
+    // a caller learns what is left (`iam::handle_update_role`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub warning: Option<String>,
+}
+
 /// `DELETE /b/admin/api/iam/roles/{id}` response body.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AdminRoleDeleteResponse {
@@ -285,18 +304,26 @@ pub struct AdminRoleDeleteResponse {
 // Masking, in full, so a reviewer does not have to reconstruct it from three
 // files. Before a value reaches the map, the handler asks
 // `crate::util::is_sensitive_key(key, row.sensitive)`, which is true when
-// either the row's `sensitive` column is `1` or the key ends in `_SECRET` /
-// `_KEY`; a true answer substitutes `crate::util::MASKED_VALUE` ("********")
-// for the stored value. The `sensitive` column is not hand-maintained — it is
-// seeded from each declared `ConfigVar`'s `InputType::Password`
-// (`settings::seed_defaults`), which is what covers password-shaped keys that
-// carry neither suffix. The masked string is a fixed width, so it reveals
+// either the row's `sensitive` column is `1` or the KEY is one this build
+// knows to hold a secret — it ends in `_SECRET`/`_KEY`, or a declared
+// `ConfigVar` for it is `InputType::Password` or `auto_generate`
+// (`config_vars::is_sensitive_for_storage`). A true answer substitutes
+// `crate::util::MASKED_VALUE` ("********") for the stored value. The
+// `sensitive` column is therefore a cache of that answer, not the only copy of
+// it: a row an older build stored unflagged for a password-shaped key carrying
+// neither suffix — `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_PASSWORD` — is
+// masked here before `platform_state::variables::repair_sensitive_flags` ever
+// gets to fix the column. The masked string is a fixed width, so it reveals
 // nothing about the real value's length either.
 //
-// The residual gap is an *ad hoc* variable, created through the admin UI with
-// a secret-ish name and the `sensitive` checkbox left clear: it matches neither
-// half of the rule and its value is published. That is a property of the
-// create form, not of this endpoint, and is unchanged by typing the response.
+// The residual gap is an *ad hoc* variable — one this build declares no
+// `ConfigVar` for — created through the admin UI with a secret-ish name and the
+// `sensitive` checkbox cleared: it matches neither half of the rule and its
+// value is published. Nothing here knows such a key holds a secret, which is
+// why the create path defaults it to sensitive
+// (`config_vars::is_sensitive_by_default_when_created`) and clearing the box is
+// a deliberate admin act. That is a property of the create form, not of this
+// endpoint, and is unchanged by typing the response.
 /// One configuration variable, as published by `GET /b/admin/api/settings`.
 ///
 /// `sensitive` is what makes the masking legible to a reader that is not a
@@ -315,7 +342,9 @@ pub struct AdminSettingView {
     /// as an array, one holding `on` reads back as a string.
     pub value: serde_json::Value,
     /// Whether `value` is masked. True when the row carries the sensitive
-    /// flag or the key ends in `_SECRET` or `_KEY`.
+    /// flag, or the key is one this build knows to hold a secret: it ends in
+    /// `_SECRET` or `_KEY`, or its declaration is a password-typed or
+    /// auto-generated variable.
     pub sensitive: bool,
 }
 
@@ -323,9 +352,10 @@ pub struct AdminSettingView {
 /// variable, sorted by key.
 ///
 /// **Sensitive values are never present.** A variable is treated as sensitive
-/// when it is flagged sensitive in the database or its key ends in `_SECRET` or
-/// `_KEY`, and its value is replaced with `"********"` before the response is
-/// built. Reading this endpoint cannot recover a secret, nor its length.
+/// when it is flagged sensitive in the database, or its key ends in `_SECRET`
+/// or `_KEY`, or its declaration is a password-typed or auto-generated
+/// variable; its value is then replaced with `"********"` before the response
+/// is built. Reading this endpoint cannot recover a secret, nor its length.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct AdminSettingsResponse {
@@ -441,6 +471,32 @@ impl AdminAuditLogListResponse {
 // ---------------------------------------------------------------------------
 // Shared query-param plumbing
 // ---------------------------------------------------------------------------
+
+/// One row of `GET /b/admin/api/extensions`: a registered block, projected
+/// off wafer-run's `BlockInfo`.
+///
+/// A closed field list for the same reason every view in this module is one
+/// — `BlockInfo` carries config keys, collection schemas, endpoint tables and
+/// capability grants that this endpoint has never published and must not
+/// start publishing because upstream grew a field.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AdminExtensionView {
+    /// Block name in the canonical `{org}/{block}` form.
+    pub name: String,
+    /// Semantic version of the block implementation.
+    pub version: String,
+    /// Interface identifier, e.g. `"http-handler@v1"`.
+    pub interface: String,
+    /// One-line summary of what the block does.
+    pub summary: String,
+    /// Whether the block is enabled.
+    ///
+    /// Read from the boot block-settings snapshot — the same source
+    /// `routing::route_to_block`'s feature gate consults — so `false` means
+    /// the router answers "endpoint not found" for every one of this block's
+    /// routes. A block with no stored row reports `true`.
+    pub enabled: bool,
+}
 
 /// Default page size for `GET /b/admin/api/users`.
 const DEFAULT_USER_PAGE_SIZE: u32 = 20;

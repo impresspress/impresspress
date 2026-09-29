@@ -20,6 +20,8 @@
  * opener (a common pattern for consumer-built bridge pages) — it just must
  * never be the only path, since the server doesn't require it.
  */
+import { ImpresspressError } from "./error";
+
 export interface PopupAuthSessionOptions<T> {
   /** URL to open the popup at. */
   url: string;
@@ -77,7 +79,8 @@ export class PopupAuthSession {
 
       if (!popup) {
         reject(
-          new Error(
+          new ImpresspressError(
+            "popup_blocked",
             "Failed to open authentication popup. Please check your popup blocker settings.",
           ),
         );
@@ -132,7 +135,7 @@ export class PopupAuthSession {
       };
 
       const handleAbort = () => {
-        finalize(() => reject(new Error("Authentication cancelled")));
+        finalize(() => reject(new ImpresspressError("aborted", "Authentication cancelled")));
       };
 
       window.addEventListener("message", handleMessage);
@@ -148,7 +151,9 @@ export class PopupAuthSession {
       handles.poll = setInterval(() => {
         if (settled || !popup.closed) return;
         if (!onClosed) {
-          finalize(() => reject(new Error("Authentication popup was closed")));
+          finalize(() =>
+            reject(new ImpresspressError("popup_closed", "Authentication popup was closed")),
+          );
           return;
         }
         Promise.resolve()
@@ -158,7 +163,9 @@ export class PopupAuthSession {
               if (result !== undefined) {
                 finalize(() => resolve(result as T));
               } else {
-                finalize(() => reject(new Error("Authentication popup was closed")));
+                finalize(() =>
+                  reject(new ImpresspressError("popup_closed", "Authentication popup was closed")),
+                );
               }
             },
             (err) => finalize(() => reject(err instanceof Error ? err : new Error(String(err)))),
@@ -166,7 +173,7 @@ export class PopupAuthSession {
       }, CLOSE_POLL_INTERVAL_MS);
 
       handles.timeout = setTimeout(() => {
-        finalize(() => reject(new Error("Authentication timeout")));
+        finalize(() => reject(new ImpresspressError("timeout", "Authentication timeout")));
       }, timeoutMs);
     });
   }

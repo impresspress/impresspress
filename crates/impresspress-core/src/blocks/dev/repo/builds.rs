@@ -16,7 +16,7 @@ use crate::util::RecordExt;
 pub const TABLE: &str = "impresspress__dev__builds";
 
 /// Upper bound on one `list_recent` page.
-const MAX_LIST_LIMIT: i64 = 200;
+const MAX_LIST_LIMIT: u32 = 200;
 
 /// Whether a staged artifact was accepted.
 #[derive(
@@ -224,7 +224,7 @@ pub async fn latest_valid_for_artifact(
             // duplicate-agent-tool rule reads the `BlockInfo` off whichever
             // row it lands on.
             sort: newest_first(),
-            limit: 1,
+            limit: Some(1),
             skip_count: true,
             ..Default::default()
         },
@@ -235,17 +235,19 @@ pub async fn latest_valid_for_artifact(
 
 /// The `limit` newest builds, newest first.
 ///
-/// `id` breaks a `created_at` tie, for the reason
+/// `id` breaks a `created_at` tie (the table's primary key, which the
+/// database appends to a sorted list over a table that has one), for the
+/// reason
 /// [`super::generations::list_recent`] states: the timestamp is
 /// millisecond-resolution on wasm32, and two rows sharing one would otherwise
 /// come back in whatever order the backend chose.
-pub async fn list_recent(ctx: &dyn Context, limit: i64) -> Result<Vec<BuildRow>, WaferError> {
+pub async fn list_recent(ctx: &dyn Context, limit: u32) -> Result<Vec<BuildRow>, WaferError> {
     let list = db::list(
         ctx,
         TABLE,
         &ListOptions {
             sort: newest_first(),
-            limit: limit.clamp(1, MAX_LIST_LIMIT),
+            limit: Some(limit.clamp(1, MAX_LIST_LIMIT)),
             skip_count: true,
             ..Default::default()
         },
@@ -277,7 +279,7 @@ pub async fn list_in_flight(ctx: &dyn Context) -> Result<Vec<BuildRow>, WaferErr
         &ListOptions {
             filters: vec![status_is(BuildStatus::Staged)],
             sort: newest_first(),
-            limit: MAX_LIST_LIMIT,
+            limit: Some(MAX_LIST_LIMIT),
             skip_count: true,
             ..Default::default()
         },
@@ -309,7 +311,7 @@ pub async fn is_in_flight_for_artifact(
                 },
                 status_is(BuildStatus::Staged),
             ],
-            limit: 1,
+            limit: Some(1),
             skip_count: true,
             ..Default::default()
         },
@@ -403,7 +405,7 @@ pub async fn artifact_index(ctx: &dyn Context) -> Result<BTreeMap<String, u64>, 
                     field: "artifact_sha256".into(),
                     desc: false,
                 }],
-                limit: MAX_LIST_LIMIT,
+                limit: Some(MAX_LIST_LIMIT),
                 offset,
                 skip_count: true,
                 ..Default::default()
@@ -417,8 +419,61 @@ pub async fn artifact_index(ctx: &dyn Context) -> Result<BTreeMap<String, u64>, 
                 record.u64_field("artifact_bytes"),
             );
         }
-        if count < MAX_LIST_LIMIT {
+        if count < i64::from(MAX_LIST_LIMIT) {
             return Ok(index);
+        }
+        offset += count;
+    }
+}
+
+/// A settled build row, as the collector needs it: which row, naming which
+/// artifact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SettledRow {
+    /// The row's id.
+    pub id: String,
+    /// The artifact it names.
+    pub artifact_sha256: String,
+}
+
+/// Every row that is not [`BuildStatus::Staged`], as `(id, artifact)`.
+///
+/// For the collector's stale-row pass (`super::super::gc`), which needs to
+/// know which rows promise an artifact is already stored. Only the two columns
+/// it reads are selected, and it pages until the table is exhausted: a row
+/// past a page boundary would be a stale row nothing ever drops.
+pub async fn list_settled(ctx: &dyn Context) -> Result<Vec<SettledRow>, WaferError> {
+    let mut rows = Vec::new();
+    let mut offset = 0i64;
+    loop {
+        let list = db::list(
+            ctx,
+            TABLE,
+            &ListOptions {
+                columns: Some(vec!["id".into(), "artifact_sha256".into()]),
+                filters: vec![Filter {
+                    field: "status".into(),
+                    operator: FilterOp::NotEqual,
+                    value: serde_json::json!(BuildStatus::Staged.as_str()),
+                }],
+                sort: vec![SortField {
+                    field: "id".into(),
+                    desc: false,
+                }],
+                limit: Some(MAX_LIST_LIMIT),
+                offset,
+                skip_count: true,
+                ..Default::default()
+            },
+        )
+        .await?;
+        let count = list.records.len() as i64;
+        rows.extend(list.records.iter().map(|record| SettledRow {
+            id: record.id.clone(),
+            artifact_sha256: record.str_field("artifact_sha256").to_string(),
+        }));
+        if count < i64::from(MAX_LIST_LIMIT) {
+            return Ok(rows);
         }
         offset += count;
     }
@@ -428,7 +483,7 @@ pub async fn artifact_index(ctx: &dyn Context) -> Result<BTreeMap<String, u64>, 
 ///
 /// Two callers, and both are undoing something: staging drops the row it
 /// inserted when the artifact it describes could not be stored, and the
-/// collector drops the rows of an artifact it has just deleted.
+/// collector drops settled rows whose artifact is no longer stored.
 pub async fn delete(ctx: &dyn Context, id: &str) -> Result<(), WaferError> {
     db::delete(ctx, TABLE, id).await
 }
@@ -464,19 +519,16 @@ pub async fn delete_for_artifact(
     .await
 }
 
-/// Newest first, with `id` breaking a `created_at` tie — the ordering every
-/// listing here uses, for the reason [`list_recent`] states.
+/// Newest first — the ordering every listing here uses. The database breaks
+/// a `created_at` tie on the primary key, `id`, descending — a sorted `list`
+/// ends its `ORDER BY` with the table's key, and this table has one
+/// (`id TEXT PRIMARY KEY`, `001_dev_schema.sqlite.sql`) — for the reason
+/// [`list_recent`] states.
 fn newest_first() -> Vec<SortField> {
-    vec![
-        SortField {
-            field: "created_at".into(),
-            desc: true,
-        },
-        SortField {
-            field: "id".into(),
-            desc: true,
-        },
-    ]
+    vec![SortField {
+        field: "created_at".into(),
+        desc: true,
+    }]
 }
 
 /// Decode a stored row. An unrecognized `status` is an error, never a default.

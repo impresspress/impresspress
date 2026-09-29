@@ -5,29 +5,49 @@
 //! never runs on that path.
 //!
 //! The heavy lifting is delegated to the shared `wafer-net-security`
-//! classifier ([`wafer_core::security::is_blocked_url`], re-exported from that
-//! crate): scheme, `localhost`, and every private/loopback/link-local/CGNAT
-//! IPv4/IPv6 literal (including the IPv6-embedded-v4 forms — NAT64, 6to4,
-//! IPv4-mapped, IPv4-compatible). This module only *adds* the one thing a
-//! URL/host classifier that special-cases `localhost` alone cannot know: the
-//! well-known cloud instance-metadata **DNS hostnames** (e.g.
-//! `metadata.google.internal`). It does NOT reimplement IP parsing.
+//! classifier ([`wafer_net_security::is_blocked_url`]): scheme, `localhost`,
+//! and every private/loopback/link-local/CGNAT IPv4/IPv6 literal (including
+//! the IPv6-embedded-v4 forms — NAT64, 6to4, IPv4-mapped, IPv4-compatible).
+//! It does NOT reimplement IP parsing.
+//!
+//! This module *adds* the two hostname rules that classifier cannot express,
+//! because it matches the bare string `localhost` and nothing else:
+//!
+//! - the well-known cloud instance-metadata **DNS hostnames** (e.g.
+//!   `metadata.google.internal`) — [`is_cloud_metadata_host`];
+//! - the whole RFC 6761 `localhost` **pseudo-domain** (`localhost.`,
+//!   `api.localhost`, `app.localhost:3000`), which real browsers resolve to
+//!   loopback — [`is_loopback_host`].
 //!
 //! ## Honest boundary (documented, not overstated)
 //!
-//! This is a *literal* URL/host precheck. It rejects a request whose URL
-//! textually names an internal target. It does **not** — and on a Worker
-//! **cannot** — defend against DNS rebinding: a public-looking hostname that
-//! resolves to a private IP at connect time passes this check, because the
-//! Workers `fetch` API exposes no resolve-before-connect hook. That residual
-//! case is Cloudflare's own subrequest-SSRF layer to catch. On the native
-//! side the `SsrfFilteringResolver` closes it (the IP that is validated is the
-//! IP that is dialed); this precheck is defense-in-depth on top of both.
+//! This is a *literal* URL/host precheck of **one** URL: the one it is handed.
+//! It rejects a request whose URL textually names an internal target. Two
+//! things follow from that, and both are the caller's to close:
+//!
+//! - **Redirects.** A fetch layer that follows a `3xx` reaches a second URL
+//!   this function never saw, so every hop must be checked: the native LLM
+//!   provider client revalidates each hop against this predicate (see
+//!   `blocks::llm::providers`); the Cloudflare network service never follows
+//!   one itself (`redirect: manual`) and hands the `3xx` to wafer-run's
+//!   network handler, which issues each hop as a new request — grant-checked,
+//!   and gated here again by that service; the browser's network service
+//!   refuses to follow at all (`redirect: error`, since a browser's `manual`
+//!   redirect is opaque). Passing the initial URL through here and then
+//!   following redirects is not a gate.
+//! - **DNS rebinding.** A public-looking hostname that resolves to a private IP
+//!   at connect time passes this check, and on a Worker or in a browser
+//!   **cannot** be caught here, because neither `fetch` API exposes a
+//!   resolve-before-connect hook. That residual case is Cloudflare's own
+//!   subrequest-SSRF layer, and the browser's network partitioning, to catch.
+//!   On the native side the `SsrfFilteringResolver` closes it (the IP that is
+//!   validated is the IP that is dialed); this precheck is defense-in-depth on
+//!   top of both.
 
 /// Well-known cloud instance-metadata service **DNS hostnames**.
 ///
 /// The IP-literal metadata endpoints are already rejected by
-/// [`wafer_core::security::is_blocked_url`] via its existing arms —
+/// [`wafer_net_security::is_blocked_url`] via its existing arms —
 /// AWS/Azure/OpenStack `169.254.169.254` and GCP `[fd00:ec2::254]` are
 /// link-local / unique-local, and Alibaba's `100.100.100.200` is CGNAT
 /// (`100.64.0.0/10`). What that classifier cannot know is the *name* form,
@@ -52,33 +72,84 @@ const CLOUD_METADATA_HOSTS: &[&str] = &["metadata.google.internal", "metadata"];
 
 /// True when `host` is a well-known cloud instance-metadata DNS hostname.
 ///
-/// `host` is compared case-insensitively and with a single trailing FQDN dot
+/// `host` is compared case-insensitively and with trailing FQDN dots
 /// (`metadata.google.internal.`) stripped, since either form resolves to the
-/// same metadata endpoint.
+/// same metadata endpoint. See [`strip_root_dots`] for why *every* trailing
+/// dot goes rather than one.
 pub fn is_cloud_metadata_host(host: &str) -> bool {
-    let host = host.strip_suffix('.').unwrap_or(host);
+    let host = strip_root_dots(host);
     CLOUD_METADATA_HOSTS
         .iter()
         .any(|blocked| host.eq_ignore_ascii_case(blocked))
+}
+
+/// Strip every trailing dot from a URL host.
+///
+/// One trailing dot is the ordinary FQDN root marker: `localhost.` and
+/// `metadata.google.internal.` resolve exactly like the undotted spellings, so
+/// a hostname denylist that did not strip it would be trivially evaded.
+///
+/// *Every* trailing dot rather than one, because `url::Url::parse` accepts
+/// `http://localhost../` and hands back the host `localhost..` verbatim — an
+/// empty final label, which is not a resolvable DNS name in any resolver this
+/// code has to survive, but which a one-dot strip leaves as `localhost.` with
+/// an empty last label and therefore waves through. A host string with a
+/// trailing dot run is never a legitimate public name, so removing the whole
+/// run cannot block anything real; leaving it is a spelling of an internal
+/// name that this precheck does not recognise. Fail closed.
+fn strip_root_dots(host: &str) -> &str {
+    host.trim_end_matches('.')
+}
+
+/// True when `host` names the RFC 6761 `localhost` pseudo-domain, which
+/// resolves to loopback.
+///
+/// The shared classifier matches the bare string `localhost` and nothing else.
+/// RFC 6761 §6.3 reserves `localhost` **and every name ending in
+/// `.localhost`**, and both Chrome and Firefox implement that: in a
+/// browser-hosted runtime `http://app.localhost:3000/` is a live dev-server
+/// target and `http://api.localhost:8080/admin` is an internal service, so
+/// waving either through is the same hole as waving `http://localhost/`
+/// through.
+///
+/// Compared case-insensitively and with trailing FQDN dots stripped
+/// ([`strip_root_dots`]), for the same reason [`is_cloud_metadata_host`] strips
+/// them: `localhost.` and `foo.localhost.` resolve exactly like the undotted
+/// spellings. A name that merely *contains* the label elsewhere
+/// (`localhost.example.com`) or ends in the same letters without the dot
+/// separator (`notlocalhost`) is an ordinary public name and is not matched.
+pub fn is_loopback_host(host: &str) -> bool {
+    let host = strip_root_dots(host);
+    // The rule is on the *last label*, which is exactly what RFC 6761 reserves:
+    // `localhost` itself and anything under it. Splitting on `.` rather than
+    // testing a `.localhost` suffix is what keeps `localhost.example.com` (last
+    // label `com`) and `notlocalhost` (one label, not equal) out of it.
+    host.rsplit('.')
+        .next()
+        .is_some_and(|last| last.eq_ignore_ascii_case("localhost"))
 }
 
 /// URL-level SSRF precheck: `true` when the URL should be refused before any
 /// outbound request is dispatched.
 ///
 /// Composes the shared literal-URL classifier
-/// ([`wafer_core::security::is_blocked_url`] — scheme / `localhost` / all
-/// private-IP literal forms) with the cloud-metadata hostname denylist above.
+/// ([`wafer_net_security::is_blocked_url`] — scheme / `localhost` / all
+/// private-IP literal forms) with the two hostname rules this module layers on
+/// top: the cloud-metadata denylist ([`is_cloud_metadata_host`]) and the
+/// `localhost` pseudo-domain ([`is_loopback_host`]).
 /// An unparseable URL is treated as blocked (the shared classifier already
 /// returns `true` for it). See the module docs for the DNS-rebinding boundary.
 pub fn is_ssrf_blocked_url(url: &str) -> bool {
-    if wafer_core::security::is_blocked_url(url) {
+    if wafer_net_security::is_blocked_url(url) {
         return true;
     }
-    // Only reached when the URL parsed and its host is NOT an IP literal or
-    // `localhost`; check the surviving domain against the metadata denylist.
+    // Only reached when the URL parsed and its host is NOT an IP literal or the
+    // exact string `localhost`; check the surviving domain against this
+    // module's two hostname rules.
     match url::Url::parse(url) {
         Ok(parsed) => {
-            matches!(parsed.host(), Some(url::Host::Domain(h)) if is_cloud_metadata_host(h))
+            matches!(parsed.host(), Some(url::Host::Domain(h))
+                if is_cloud_metadata_host(h) || is_loopback_host(h))
         }
         // Unreachable in practice (is_blocked_url already blocked unparseable
         // URLs), but fail closed rather than allowing on a parse discrepancy.
@@ -130,6 +201,50 @@ mod tests {
         assert!(is_cloud_metadata_host("METADATA."));
         // A longer host that merely starts with "metadata" is not the endpoint.
         assert!(!is_cloud_metadata_host("metadata.example.com"));
+        // Same trailing-dot-run rule as the loopback predicate: one strip left
+        // `metadata.google.internal..` unmatched.
+        assert!(is_cloud_metadata_host("metadata.google.internal.."));
+        assert!(is_cloud_metadata_host("metadata.."));
+        assert!(is_ssrf_blocked_url("http://metadata.google.internal../"));
+    }
+
+    #[test]
+    fn blocks_the_localhost_pseudo_domain() {
+        // RFC 6761 §6.3: `localhost` and *any* name ending in `.localhost` are
+        // reserved and resolve to loopback. Chrome and Firefox implement that,
+        // so in a browser-hosted runtime `http://app.localhost:3000/` is a live
+        // dev-server target and `http://api.localhost:8080/admin` is an
+        // internal service — both of which the upstream classifier, which
+        // matches the bare string `localhost` only, waves through.
+        assert!(is_ssrf_blocked_url("http://api.localhost:8080/admin"));
+        assert!(is_ssrf_blocked_url("http://foo.localhost/"));
+        assert!(is_ssrf_blocked_url("http://app.localhost:3000/"));
+        assert!(is_ssrf_blocked_url("http://deep.nested.localhost/x"));
+        // Case-insensitive.
+        assert!(is_ssrf_blocked_url("https://API.LocalHost/x"));
+        // A single trailing FQDN dot resolves the same way, and is stripped for
+        // the same reason `is_cloud_metadata_host` strips it.
+        assert!(is_ssrf_blocked_url("http://localhost./"));
+        assert!(is_ssrf_blocked_url("http://foo.localhost./"));
+        // `url::Url::parse` accepts a trailing dot RUN and hands back the host
+        // verbatim (`localhost..`), so one strip is not enough.
+        assert!(is_ssrf_blocked_url("http://localhost../"));
+        assert!(is_ssrf_blocked_url("http://foo.localhost.../"));
+        assert!(is_loopback_host("localhost.."));
+        assert!(is_loopback_host("api.localhost..."));
+
+        assert!(is_loopback_host("localhost"));
+        assert!(is_loopback_host("LOCALHOST."));
+        assert!(is_loopback_host("api.localhost"));
+        assert!(is_loopback_host("api.localhost."));
+
+        // Not the pseudo-domain: a public name that merely ends in the same
+        // letters, or carries it as a non-final label.
+        assert!(!is_loopback_host("notlocalhost"));
+        assert!(!is_loopback_host("mylocalhost.com"));
+        assert!(!is_loopback_host("localhost.example.com"));
+        assert!(!is_ssrf_blocked_url("https://localhost.example.com/"));
+        assert!(!is_ssrf_blocked_url("https://notlocalhost.io/"));
     }
 
     #[test]

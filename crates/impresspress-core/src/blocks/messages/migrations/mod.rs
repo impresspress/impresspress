@@ -13,8 +13,12 @@ const SQL_002_POSTGRES: &str = include_str!("002_owner_id.postgres.sql");
 /// pairs. Feeds the runtime `lifecycle_init` apply path.
 pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
     ("001_messages_schema", SQL_001_SQLITE),
-    ("002_owner_id", SQL_002_SQLITE),
+    (OWNER_ID, SQL_002_SQLITE),
 ];
+
+/// Basename of the `owner_id` column + backfill, named once so the migration
+/// list and the test that slices it cannot drift apart.
+pub(crate) const OWNER_ID: &str = "002_owner_id";
 
 /// Ordered PostgreSQL migration scripts, matching [`SQLITE_MIGRATIONS`] one
 /// for one. Selected at runtime by `apply_migrations` when the deployment's
@@ -90,14 +94,8 @@ mod tests {
         // entries. A dropped ALTER changes this count instead of being
         // masked by the header comment's prose.
         assert_eq!(count_alter_add_column(sql), 2);
-        // Backfill #1: contexts.owner_id from historical sender_id.
-        assert!(sql.contains("owner_id = sender_id"));
-        // Backfill #2: entries.owner_id from the parent context's
-        // owner_id, correlated on context_id. Deleting either backfill
-        // statement drops one of these substrings.
-        assert!(sql.contains("UPDATE impresspress__messages__entries"));
-        assert!(sql.contains("c.owner_id"));
-        assert!(sql.contains("context_id"));
+        // The two backfills are executed, not grepped, in
+        // `owner_id_backfill_tests`.
         assert!(sql.contains("idx_messages_contexts_owner_id"));
         assert!(sql.contains("idx_messages_entries_owner_id"));
     }
@@ -111,5 +109,144 @@ mod tests {
     #[cfg(feature = "postgres")]
     fn owner_id_migration_adds_column_and_index_postgres() {
         assert_owner_id_migration_adds_column_and_index(SQL_002_POSTGRES);
+    }
+}
+
+#[cfg(test)]
+mod owner_id_backfill_tests {
+    //! What `002_owner_id` does to a deployment that already holds
+    //! conversations — the only database its two backfill `UPDATE`s have
+    //! anything to do on. Every other fixture applies 001 and 002 together
+    //! against empty tables, where a backfill that assigned the wrong owner,
+    //! or none, passes unnoticed; on a real upgrade it would lock every user
+    //! out of their own history (`owner_id = ''` matches no caller) or, worse,
+    //! hand an entry to someone else.
+    //!
+    //! The repair is driven through `apply_migrations`, the path an operator
+    //! upgrading with `--run-migrations` takes, and the result is read back
+    //! through the block's own routes, whose owner check is what the column
+    //! exists for.
+
+    use std::{collections::HashMap, sync::Arc};
+
+    use serde_json::json;
+    use wafer_core::clients::database as db;
+
+    use super::{OWNER_ID, SQLITE_MIGRATIONS};
+    use crate::{
+        blocks::messages::{
+            service::{CONTEXTS_TABLE, ENTRIES_TABLE},
+            MessagesBlock,
+        },
+        migration_helper,
+        test_support::{auth_msg, output_http_status, TestContext},
+    };
+
+    const MESSAGES: &str = "impresspress/messages";
+    const AT: &str = "2026-01-01T00:00:00Z";
+
+    /// A pre-002 row: 001's NOT NULL columns and nothing 002 adds.
+    fn row(fields: serde_json::Value) -> HashMap<String, serde_json::Value> {
+        let mut data = crate::util::json_map(fields);
+        data.insert("created_at".to_string(), json!(AT));
+        data.insert("updated_at".to_string(), json!(AT));
+        data
+    }
+
+    async fn owner_of(ctx: &TestContext, table: &str, id: &str) -> String {
+        db::get(ctx, table, id)
+            .await
+            .unwrap_or_else(|e| panic!("read {table}/{id}: {e}"))
+            .data
+            .get("owner_id")
+            .and_then(|v| v.as_str())
+            .unwrap_or_else(|| panic!("{table}/{id} has no owner_id"))
+            .to_string()
+    }
+
+    async fn status_as(ctx: &TestContext, path: &str, user: &str) -> u16 {
+        output_http_status(
+            ctx.dispatch_resolved(auth_msg("retrieve", path, user))
+                .await,
+        )
+        .await
+    }
+
+    #[tokio::test]
+    async fn migration_002_gives_existing_rows_their_owner() {
+        let mut ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::messages::MessagesBlock::BLOCK_NAME);
+        let before: Vec<&str> = SQLITE_MIGRATIONS[..SQLITE_MIGRATIONS
+            .iter()
+            .position(|(name, _)| *name == OWNER_ID)
+            .expect("002 is wired into SQLITE_MIGRATIONS")]
+            .iter()
+            .map(|(_, sql)| *sql)
+            .collect();
+        migration_helper::apply_migrations(&ctx, MESSAGES, &before, &[])
+            .await
+            .expect("001 applies");
+
+        for (id, sender) in [("ctx-alice", "alice"), ("ctx-bob", "bob")] {
+            db::create(
+                &ctx,
+                CONTEXTS_TABLE,
+                row(json!({ "id": id, "type": "conversation", "sender_id": sender })),
+            )
+            .await
+            .expect("seed a pre-002 context");
+        }
+        // An entry's own `sender_id` is whoever spoke — here the assistant
+        // in alice's thread. Its owner is the thread's, not its sender.
+        for (id, context_id, sender) in [
+            ("ent-alice", "ctx-alice", "assistant"),
+            ("ent-bob", "ctx-bob", "bob"),
+            ("ent-orphan", "ctx-gone", "carol"),
+        ] {
+            db::create(
+                &ctx,
+                ENTRIES_TABLE,
+                row(json!({ "id": id, "context_id": context_id, "sender_id": sender })),
+            )
+            .await
+            .expect("seed a pre-002 entry");
+        }
+
+        ctx.set_config(migration_helper::RUN_MIGRATIONS_KEY, "1");
+        let all: Vec<&str> = SQLITE_MIGRATIONS.iter().map(|(_, sql)| *sql).collect();
+        migration_helper::apply_migrations(&ctx, MESSAGES, &all, &[])
+            .await
+            .expect("002 applies to a database holding conversations");
+
+        assert_eq!(owner_of(&ctx, CONTEXTS_TABLE, "ctx-alice").await, "alice");
+        assert_eq!(owner_of(&ctx, CONTEXTS_TABLE, "ctx-bob").await, "bob");
+        assert_eq!(
+            owner_of(&ctx, ENTRIES_TABLE, "ent-alice").await,
+            "alice",
+            "an entry inherits its thread's owner, not its own sender"
+        );
+        assert_eq!(owner_of(&ctx, ENTRIES_TABLE, "ent-bob").await, "bob");
+        assert_eq!(
+            owner_of(&ctx, ENTRIES_TABLE, "ent-orphan").await,
+            "",
+            "an entry with no thread has no owner to inherit and stays unowned"
+        );
+
+        ctx.register_block(MESSAGES, Arc::new(MessagesBlock::new()));
+        assert_eq!(
+            status_as(&ctx, "/b/messages/api/contexts/ctx-alice", "alice").await,
+            200,
+            "the upgraded thread is still its author's"
+        );
+        assert_eq!(
+            status_as(&ctx, "/b/messages/api/entries/ent-alice", "alice").await,
+            200
+        );
+        assert_eq!(
+            status_as(&ctx, "/b/messages/api/entries/ent-alice", "bob").await,
+            404,
+            "and nobody else's"
+        );
     }
 }

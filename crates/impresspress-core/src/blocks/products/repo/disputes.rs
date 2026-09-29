@@ -6,7 +6,10 @@ use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
 use wafer_core::clients::database::{self as db, Record};
 use wafer_run::{context::Context, ErrorCode, WaferError};
 
-use crate::util::RecordExt;
+use crate::{
+    blocks::products::contracts::DisputeStatus,
+    util::{enum_column, RecordExt},
+};
 
 pub(crate) const TABLE: &str = "impresspress__products__disputes";
 
@@ -17,7 +20,10 @@ pub(crate) struct DisputeSnapshot {
     pub provider_dispute_id: String,
     pub provider_charge_id: String,
     pub payment_intent_id: String,
-    pub status: String,
+    /// The network state the delivery reported. Parsed at the webhook
+    /// boundary, so an event carrying a status Stripe has added since this
+    /// type was written is refused there rather than stored.
+    pub status: DisputeStatus,
     pub amount_minor: i64,
     pub currency: String,
     pub reason: String,
@@ -26,22 +32,13 @@ pub(crate) struct DisputeSnapshot {
     pub event_created: i64,
 }
 
-fn supported_status(status: &str) -> bool {
-    matches!(
-        status,
-        "warning_needs_response"
-            | "warning_under_review"
-            | "warning_closed"
-            | "needs_response"
-            | "under_review"
-            | "won"
-            | "lost"
-            | "prevented"
-    )
-}
-
-fn is_closed(status: &str) -> bool {
-    matches!(status, "warning_closed" | "won" | "lost" | "prevented")
+/// The `status` column of a dispute row, as the enum that defines it.
+///
+/// The decode door for the two readers outside this module — the analytics
+/// aggregate and the admin projection — so the eight network states are
+/// spelled once, here, and not re-listed wherever a dispute is counted.
+pub(crate) fn status_of(record: &Record) -> Result<DisputeStatus, WaferError> {
+    enum_column(record, "status")
 }
 
 fn validate_snapshot(snapshot: &DisputeSnapshot) -> Result<(), WaferError> {
@@ -51,11 +48,10 @@ fn validate_snapshot(snapshot: &DisputeSnapshot) -> Result<(), WaferError> {
         || snapshot.amount_minor <= 0
         || snapshot.currency.is_empty()
         || snapshot.event_created < 0
-        || !supported_status(&snapshot.status)
     {
         return Err(WaferError::new(
             ErrorCode::InvalidArgument,
-            "dispute identity, supported status, positive amount, currency, and event timestamp are required",
+            "dispute identity, positive amount, currency, and event timestamp are required",
         ));
     }
     Ok(())
@@ -113,7 +109,7 @@ async fn update_existing(
     } else {
         &snapshot.provider_charge_id
     };
-    let closed_at = if is_closed(&snapshot.status) {
+    let closed_at = if snapshot.status.is_closed() {
         let current = existing.str_field("closed_at");
         serde_json::json!(if current.is_empty() { &now } else { current })
     } else {
@@ -135,7 +131,7 @@ async fn update_existing(
             },
         ],
         HashMap::from([
-            ("status".to_string(), serde_json::json!(&snapshot.status)),
+            ("status".to_string(), serde_json::json!(snapshot.status)),
             (
                 "provider_charge_id".to_string(),
                 serde_json::json!(provider_charge_id),
@@ -195,7 +191,7 @@ pub(crate) async fn reconcile(
             "payment_intent_id".to_string(),
             serde_json::json!(&snapshot.payment_intent_id),
         ),
-        ("status".to_string(), serde_json::json!(&snapshot.status)),
+        ("status".to_string(), serde_json::json!(snapshot.status)),
         (
             "amount_minor".to_string(),
             serde_json::json!(snapshot.amount_minor),
@@ -219,7 +215,7 @@ pub(crate) async fn reconcile(
         ),
         (
             "closed_at".to_string(),
-            if is_closed(&snapshot.status) {
+            if snapshot.status.is_closed() {
                 serde_json::json!(&now)
             } else {
                 serde_json::Value::Null
@@ -264,10 +260,25 @@ pub(crate) async fn list_for_purchase(
     .records)
 }
 
-pub(crate) async fn list_for_analytics(
+/// Dispute totals for the commerce analytics, one row per
+/// `(currency, status)` pair.
+///
+/// A `GROUP BY` in the database, not a row scan in Rust: the dispute ledger
+/// grows with every dispute the platform ever sees, so reading it row by row
+/// to add the amounts up would stop being right as soon as it outgrew a
+/// single unpaged read. The grouped statement stays exact at any table size
+/// and transfers one row per currency-and-state pair.
+///
+/// Each returned record carries `currency`, `status`, `disputes`
+/// (`COUNT(*)`), `amount` (`SUM(amount_minor)`) and `invalid_amounts` — the
+/// number of rows in the group whose `amount_minor` is not positive, which
+/// is the per-row integrity check the caller used to make while scanning.
+pub(crate) async fn analytics_totals(
     ctx: &dyn Context,
     seller_account_id: Option<&str>,
 ) -> Result<Vec<Record>, WaferError> {
+    use wafer_block::wire::database as wire;
+
     let filters = seller_account_id
         .filter(|value| !value.is_empty())
         .map(|value| {
@@ -278,5 +289,34 @@ pub(crate) async fn list_for_analytics(
             }]
         })
         .unwrap_or_default();
-    db::list_all(ctx, TABLE, filters).await
+    let req = wire::AggregateRequest {
+        collection: TABLE.to_string(),
+        select_columns: vec!["currency".into(), "status".into()],
+        aggregates: vec![
+            wire::AggregateColumnDef::Count {
+                alias: "disputes".into(),
+            },
+            wire::AggregateColumnDef::Sum {
+                field: "amount_minor".into(),
+                alias: "amount".into(),
+                cast_as: crate::util::bigint_cast(),
+            },
+            wire::AggregateColumnDef::CaseWhenSum {
+                when: crate::util::to_wire_filters(&[Filter {
+                    field: "amount_minor".to_string(),
+                    operator: FilterOp::LessEqual,
+                    value: serde_json::json!(0),
+                }]),
+                alias: "invalid_amounts".into(),
+            },
+        ],
+        filters: crate::util::to_wire_filters(&filters),
+        group_by: vec![
+            wire::GroupByDef::Column("currency".into()),
+            wire::GroupByDef::Column("status".into()),
+        ],
+        sort: vec![],
+        limit: 0,
+    };
+    db::aggregate(ctx, req).await
 }

@@ -9,7 +9,10 @@ use wafer_block::db::SortField;
 use wafer_core::clients::{database as db, vector as vclient};
 use wafer_run::{context::Context, ErrorCode, WaferError};
 
-use crate::util::RecordExt;
+use crate::{
+    db_read::{self, Bound},
+    util::RecordExt,
+};
 
 /// Per-row data fed to the vector index list table renderer.
 ///
@@ -21,7 +24,9 @@ pub struct IndexRow {
     pub name: String,
     pub model: String,
     pub dimensions: u32,
-    pub vector_count: u64,
+    /// `None` when there is no count to report: this runtime has no vector
+    /// backend, or the backend holds no index by this name.
+    pub vector_count: Option<u64>,
     pub keyword_search: bool,
 }
 
@@ -73,22 +78,28 @@ pub fn vector_backend_available(ctx: &dyn Context) -> bool {
         .any(|b| b.name == "wafer-run/vector")
 }
 
-/// Validate that an index name only contains characters that are safe
-/// to interpolate into SQL identifiers (alphanumeric + underscore).
+/// The longest suffix any backend appends to an index's prefixed name to
+/// form one of its tables: `_vectors` (the browser backend's
+/// `{name}_vectors`; the native sqlite-vec builders use `_vec`, `_meta` and
+/// `_fts`).
+const LONGEST_TABLE_SUFFIX: &str = "_vectors";
+
+/// The longest index name whose every table is still a plain identifier.
+pub const MAX_INDEX_NAME_LEN: usize =
+    wafer_block::db::MAX_IDENT_LEN - TABLE_PREFIX.len() - LONGEST_TABLE_SUFFIX.len();
+
+/// Validate a user-facing index name: 1 to [`MAX_INDEX_NAME_LEN`] bytes of
+/// `[a-z0-9_]`.
 ///
-/// Index names flow through [`prefixed_index_name`] into SQL via
-/// `format!` interpolation in several hot paths (e.g. the re-ingest
-/// cleanup query in `handle_ingest`). Relying on the driver to reject
-/// multi-statement input is not defense-in-depth; validating the name
-/// at the route boundary protects every downstream SQL consumer uniformly.
-///
-/// The allowed set must match what `wafer_sql_utils::ident::sanitize_ident`
-/// keeps. `sanitize_ident` strips everything non-alphanumeric except `_`,
-/// so allowing hyphens here would diverge the registry name from the
-/// actual SQL table name (e.g. `foo-bar` registered, but the SQL table
-/// is `foobar_meta`) and break any `format!`-built query that reuses the
-/// original name — like the re-ingest cleanup which would emit
-/// `impresspress__vector__foo-bar_meta` (invalid SQL).
+/// Every table an index owns is named `{TABLE_PREFIX}{name}{suffix}`, and the
+/// database layer admits only plain identifiers — lowercase `[a-z0-9_]`, at
+/// most `wafer_block::db::MAX_IDENT_LEN` bytes
+/// (`wafer_block::db::is_plain_ident`) — refusing anything else rather than
+/// rewriting it. So a name is valid exactly when its longest table name is a
+/// plain identifier, which is the check below: an uppercase or hyphenated
+/// name, or one long enough that PostgreSQL would truncate a table name, is
+/// refused here at the route boundary instead of failing inside the backend
+/// halfway through creating the index.
 ///
 /// Returns the name on success so callers can chain it at the use site.
 pub fn validate_index_name(name: &str) -> Result<&str, WaferError> {
@@ -99,10 +110,14 @@ pub fn validate_index_name(name: &str) -> Result<&str, WaferError> {
             meta: vec![],
         });
     }
-    if !name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_') {
+    let longest_table = format!("{TABLE_PREFIX}{name}{LONGEST_TABLE_SUFFIX}");
+    if !wafer_block::db::is_plain_ident(&longest_table) {
         return Err(WaferError {
             code: ErrorCode::InvalidArgument,
-            message: format!("invalid index name '{name}': only [A-Za-z0-9_] allowed"),
+            message: format!(
+                "invalid index name '{name}': only [a-z0-9_] allowed, at most \
+                 {MAX_INDEX_NAME_LEN} characters"
+            ),
             meta: vec![],
         });
     }
@@ -110,11 +125,17 @@ pub fn validate_index_name(name: &str) -> Result<&str, WaferError> {
 }
 
 /// Map one registry record into an `IndexRow`, asking the vector service
-/// for the live vector count. Returns `None` if the row has no
-/// `prefixed_name`. Shared between the list and detail loaders so the
-/// column-extraction quirks (TEXT-as-string round-trip from the SQLite
-/// service) live in exactly one place.
-async fn map_index_row(ctx: &dyn Context, rec: &db::Record) -> Option<IndexRow> {
+/// for the live vector count. `Ok(None)` if the row has no `prefixed_name`.
+/// Shared between the list and detail loaders so the column-extraction
+/// quirks (TEXT-as-string round-trip from the SQLite service) live in
+/// exactly one place.
+///
+/// A count the service refused is an error, carried back with its code: a
+/// refusal shown as "0 vectors" is a claim about the index nobody checked.
+async fn map_index_row(
+    ctx: &dyn Context,
+    rec: &db::Record,
+) -> Result<Option<IndexRow>, WaferError> {
     let storage_name = rec
         .data
         .get("prefixed_name")
@@ -122,7 +143,7 @@ async fn map_index_row(ctx: &dyn Context, rec: &db::Record) -> Option<IndexRow> 
         .unwrap_or("")
         .to_string();
     if storage_name.is_empty() {
-        return None;
+        return Ok(None);
     }
     let model = rec
         .data
@@ -138,18 +159,26 @@ async fn map_index_row(ctx: &dyn Context, rec: &db::Record) -> Option<IndexRow> 
 
     // Count through the vector service boundary — the same `vclient::count`
     // the API `stats()` route uses — instead of reaching around it with a
-    // `db::count` on the backend-private `{storage}_meta` table. An absent
-    // backend or a just-dropped index degrades to a count of 0, matching
-    // the stats route's own fallback.
-    let count = vclient::count(ctx, &storage_name).await.unwrap_or(0);
+    // `db::count` on the backend-private `{storage}_meta` table. No backend,
+    // or a backend holding no such index, has no count to report; any other
+    // failure is the caller's to answer.
+    let count = if vector_backend_available(ctx) {
+        match vclient::count(ctx, &storage_name).await {
+            Ok(n) => Some(n),
+            Err(e) if e.code == ErrorCode::NotFound => None,
+            Err(e) => return Err(e),
+        }
+    } else {
+        None
+    };
 
-    Some(IndexRow {
+    Ok(Some(IndexRow {
         name: storage_name,
         model,
         dimensions,
         vector_count: count,
         keyword_search,
-    })
+    }))
 }
 
 /// Read every registered vector index plus its current vector count
@@ -164,7 +193,7 @@ async fn map_index_row(ctx: &dyn Context, rec: &db::Record) -> Option<IndexRow> 
 /// error. Per-index counts come from `vclient::count`, which degrades
 /// to 0 in `map_index_row` when the backend is absent.
 pub async fn list_index_rows(ctx: &dyn Context) -> Result<Vec<IndexRow>, WaferError> {
-    let records = db::list_sorted(
+    let records = db_read::list_bounded_sorted(
         ctx,
         REGISTRY_TABLE,
         vec![],
@@ -172,12 +201,13 @@ pub async fn list_index_rows(ctx: &dyn Context) -> Result<Vec<IndexRow>, WaferEr
             field: "prefixed_name".to_string(),
             desc: false,
         }],
+        Bound::Curated("vector indexes are registered from the vector admin surface"),
     )
     .await?;
 
     let mut rows = Vec::with_capacity(records.len());
     for rec in records {
-        if let Some(row) = map_index_row(ctx, &rec).await {
+        if let Some(row) = map_index_row(ctx, &rec).await? {
             rows.push(row);
         }
     }
@@ -202,7 +232,7 @@ pub async fn get_index_row(
         Err(e) if e.code == ErrorCode::NotFound => return Ok(None),
         Err(e) => return Err(e),
     };
-    Ok(map_index_row(ctx, &rec).await)
+    map_index_row(ctx, &rec).await
 }
 
 #[cfg(test)]
@@ -245,8 +275,28 @@ mod tests_validate {
         assert!(validate_index_name("my.index").is_err());
         assert!(
             validate_index_name("index-42").is_err(),
-            "hyphens no longer allowed — sanitize_ident strips them, \
-             so the registry name and SQL table name would diverge"
+            "the database layer refuses a hyphenated table name"
         );
+    }
+
+    /// The database layer refuses uppercase table names, so an index whose
+    /// name has any would be accepted here and refused by the backend.
+    #[test]
+    fn rejects_uppercase() {
+        assert!(validate_index_name("Docs").is_err());
+        assert!(validate_index_name("DOCS").is_err());
+    }
+
+    /// The longest admitted name still gives plain identifiers for every
+    /// table any backend creates; one byte more does not.
+    #[test]
+    fn the_length_cap_keeps_every_table_name_a_plain_identifier() {
+        let longest = "a".repeat(MAX_INDEX_NAME_LEN);
+        assert!(validate_index_name(&longest).is_ok());
+        for suffix in ["_vec", "_meta", "_fts", "_vectors"] {
+            let table = format!("{}{suffix}", prefixed_index_name(&longest));
+            assert!(wafer_block::db::is_plain_ident(&table), "{table}");
+        }
+        assert!(validate_index_name(&"a".repeat(MAX_INDEX_NAME_LEN + 1)).is_err());
     }
 }

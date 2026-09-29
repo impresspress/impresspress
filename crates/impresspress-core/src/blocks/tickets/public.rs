@@ -14,7 +14,7 @@ use super::{
     repo, service, turnstile,
 };
 use crate::{
-    blocks::rate_limit::UserRateLimiter,
+    blocks::{crud, rate_limit::UserRateLimiter},
     http::ResponseBuilder,
     ui::{templates, SiteConfig},
 };
@@ -29,11 +29,48 @@ struct Submission {
     website: String,
 }
 
+/// What every public page reads before it renders: the site chrome, the
+/// validated back link and the support address.
+struct PublicChrome {
+    site: SiteConfig,
+    back_url: String,
+    support_email: String,
+}
+
+impl PublicChrome {
+    async fn load(ctx: &dyn Context) -> Result<Self, wafer_run::WaferError> {
+        Ok(Self {
+            site: SiteConfig::load(ctx).await?,
+            back_url: safe_back_url(&config_client::get_default(ctx, config::BACK_URL, "/").await?),
+            support_email: support_email(ctx).await?,
+        })
+    }
+}
+
+/// The answer to a public submission whose settings could not be read: the
+/// same 503 an unreadable ticket table gets, with the cause logged.
+fn settings_unavailable(error: &wafer_run::WaferError) -> OutputStream {
+    tracing::warn!(error = %error, "public ticket settings read failed");
+    public_error(503, "Public reporting is temporarily unavailable")
+}
+
 pub async fn form(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let readiness = SecurityReadiness::load(ctx).await;
-    let site = SiteConfig::load(ctx).await;
-    let back_url = safe_back_url(&config_client::get_default(ctx, config::BACK_URL, "/").await);
-    let support_email = support_email(ctx).await;
+    let (readiness, chrome) = match async {
+        Ok::<_, wafer_run::WaferError>((
+            SecurityReadiness::load(ctx).await?,
+            PublicChrome::load(ctx).await?,
+        ))
+    }
+    .await
+    {
+        Ok(loaded) => loaded,
+        Err(e) => return crud::db_error_page(msg, e, "public ticket form: settings read failed"),
+    };
+    let PublicChrome {
+        site,
+        back_url,
+        support_email,
+    } = chrome;
     let body = if readiness.ready {
         let types = match repo::list_types(ctx, true, 100, 0).await {
             Ok(rows) => rows.records,
@@ -47,9 +84,19 @@ pub async fn form(ctx: &dyn Context, msg: &Message) -> OutputStream {
                 );
             }
         };
-        let secret = config_client::get_default(ctx, config::IDENTITY_SECRET, "").await;
+        let keys = async {
+            Ok::<_, wafer_run::WaferError>((
+                config_client::get_default(ctx, config::IDENTITY_SECRET, "").await?,
+                config_client::get_default(ctx, config::TURNSTILE_SITE_KEY, "").await?,
+            ))
+        };
+        let (secret, site_key) = match keys.await {
+            Ok(keys) => keys,
+            Err(e) => {
+                return crud::db_error_page(msg, e, "public ticket form: key read failed");
+            }
+        };
         let form_token = abuse::issue_form_token(&secret, abuse::now_secs());
-        let site_key = config_client::get_default(ctx, config::TURNSTILE_SITE_KEY, "").await;
         let source_path = safe_prefill(msg.query("page"), super::models::validate_source_path);
         let subject_type = safe_prefill(msg.query("subject_type"), |value| {
             if value.len() <= 64
@@ -85,10 +132,17 @@ pub async fn form(ctx: &dyn Context, msg: &Message) -> OutputStream {
 }
 
 pub async fn submitted(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let site = SiteConfig::load(ctx).await;
-    let back_url = safe_back_url(&config_client::get_default(ctx, config::BACK_URL, "/").await);
+    let PublicChrome {
+        site,
+        back_url,
+        support_email,
+    } = match PublicChrome::load(ctx).await {
+        Ok(chrome) => chrome,
+        Err(e) => {
+            return crud::db_error_page(msg, e, "public ticket receipt: settings read failed")
+        }
+    };
     let reference = sanitize_reference(msg.query("reference"));
-    let support_email = support_email(ctx).await;
     let body = html! {
         div .public-page__head {
             h1 { "Thanks for letting us know" }
@@ -106,13 +160,27 @@ pub async fn submitted(ctx: &dyn Context, msg: &Message) -> OutputStream {
     public_page_response(&site, "Report received", &back_url, body)
 }
 
+/// The settings a submission is checked against, read together so one
+/// failed read answers once.
+struct SubmitSettings {
+    identity_secret: String,
+    form_ttl: u64,
+    identity_max: u32,
+    identity_window: u64,
+    global_max: u32,
+    global_window: u64,
+}
+
 pub async fn submit(
     limiter: &UserRateLimiter,
     ctx: &dyn Context,
     msg: &Message,
     input: InputStream,
 ) -> OutputStream {
-    let readiness = SecurityReadiness::load(ctx).await;
+    let readiness = match SecurityReadiness::load(ctx).await {
+        Ok(readiness) => readiness,
+        Err(e) => return settings_unavailable(&e),
+    };
     if !readiness.ready {
         return public_error(503, "Public reporting is temporarily unavailable");
     }
@@ -123,7 +191,10 @@ pub async fn submit(
     {
         return public_error(413, "Submission is too large");
     }
-    let raw = input.collect_to_bytes().await;
+    let raw = match input.collect_to_bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => return OutputStream::error(e),
+    };
     if raw.len() > MAX_BODY_BYTES {
         return public_error(413, "Submission is too large");
     }
@@ -138,10 +209,22 @@ pub async fn submit(
         return public_error(403, "Submission origin could not be verified");
     }
 
-    let identity_secret = config_client::get_default(ctx, config::IDENTITY_SECRET, "").await;
-    let form_ttl = config::u64_value(ctx, config::FORM_TTL, 7_200)
-        .await
-        .clamp(300, 86_400);
+    let settings = async {
+        Ok::<_, wafer_run::WaferError>(SubmitSettings {
+            identity_secret: config_client::get_default(ctx, config::IDENTITY_SECRET, "").await?,
+            form_ttl: config::u64_value(ctx, config::FORM_TTL, 7_200).await?,
+            identity_max: config::u32_value(ctx, config::IDENTITY_MAX, 3).await?,
+            identity_window: config::u64_value(ctx, config::IDENTITY_WINDOW, 3_600).await?,
+            global_max: config::u32_value(ctx, config::GLOBAL_MAX, 100).await?,
+            global_window: config::u64_value(ctx, config::GLOBAL_WINDOW, 3_600).await?,
+        })
+    };
+    let settings = match settings.await {
+        Ok(settings) => settings,
+        Err(e) => return settings_unavailable(&e),
+    };
+    let identity_secret = settings.identity_secret;
+    let form_ttl = settings.form_ttl.clamp(300, 86_400);
     if let Err(error) = abuse::verify_form_token(
         &identity_secret,
         &submission.form_token,
@@ -156,14 +239,8 @@ pub async fn submit(
 
     let now = abuse::now_secs();
     let identity = abuse::rotating_identity(&identity_secret, now, msg.remote_addr());
-    let identity_limit = abuse::limit(
-        config::u32_value(ctx, config::IDENTITY_MAX, 3).await,
-        config::u64_value(ctx, config::IDENTITY_WINDOW, 3_600).await,
-    );
-    let global_limit = abuse::limit(
-        config::u32_value(ctx, config::GLOBAL_MAX, 100).await,
-        config::u64_value(ctx, config::GLOBAL_WINDOW, 3_600).await,
-    );
+    let identity_limit = abuse::limit(settings.identity_max, settings.identity_window);
+    let global_limit = abuse::limit(settings.global_max, settings.global_window);
     let (Some(identity_limit), Some(global_limit)) = (identity_limit, global_limit) else {
         return public_error(503, "Submission limits are unavailable");
     };
@@ -405,9 +482,10 @@ fn unavailable_page(
 
 /// The operator-configured support address, or empty when none is set. Only
 /// a plausible single address is accepted so a misconfigured value can never
-/// inject markup or a foreign `mailto:` into the public page.
-async fn support_email(ctx: &dyn Context) -> String {
-    let value = config_client::get_default(ctx, config::SUPPORT_EMAIL, "").await;
+/// inject markup or a foreign `mailto:` into the public page. A failed read
+/// is returned.
+async fn support_email(ctx: &dyn Context) -> Result<String, wafer_run::WaferError> {
+    let value = config_client::get_default(ctx, config::SUPPORT_EMAIL, "").await?;
     let value = value.trim();
     let plausible = value.len() <= 254
         && value.matches('@').count() == 1
@@ -416,11 +494,11 @@ async fn support_email(ctx: &dyn Context) -> String {
         && value
             .bytes()
             .all(|b| b.is_ascii_alphanumeric() || matches!(b, b'@' | b'.' | b'-' | b'_' | b'+'));
-    if plausible {
+    Ok(if plausible {
         value.to_string()
     } else {
         String::new()
-    }
+    })
 }
 
 fn support_email_link(address: &str) -> Markup {
@@ -508,7 +586,7 @@ fn parse_submission(content_type: &str, raw: &[u8]) -> Result<Submission, String
             subject_id: form_value(&form, "subject_id"),
             evidence_url: form_value(&form, "evidence_url"),
             reporter_email: form_value(&form, "reporter_email"),
-            reporter_wants_reply: bool_form(&form, "reporter_wants_reply"),
+            reporter_wants_reply: crate::config_vars::form_bool(&form, "reporter_wants_reply"),
             priority: None,
         },
         form_token: required("form_token")?,
@@ -619,15 +697,6 @@ fn public_headers(builder: ResponseBuilder) -> ResponseBuilder {
 
 fn form_value(form: &HashMap<String, String>, key: &str) -> String {
     form.get(key).cloned().unwrap_or_default()
-}
-
-fn bool_form(form: &HashMap<String, String>, key: &str) -> bool {
-    form.get(key).is_some_and(|value| {
-        matches!(
-            value.trim().to_ascii_lowercase().as_str(),
-            "1" | "true" | "yes" | "on"
-        )
-    })
 }
 
 fn safe_back_url(value: &str) -> String {

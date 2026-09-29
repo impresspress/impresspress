@@ -2,6 +2,7 @@
 //! running in the page via the SW↔page postMessage bridge.
 
 use futures::{channel::mpsc, sink::SinkExt, stream::BoxStream};
+use impresspress_core::llm_wire::openai::{encode_chat_body, MaxTokensField, OpenAiSseDecoder};
 use tokio_util::sync::CancellationToken;
 use wafer_core::interfaces::llm::service::{
     ChatChunk, ChatRequest, LlmError, LlmService, ModelInfo, ModelStatus,
@@ -10,7 +11,6 @@ use wafer_core::interfaces::llm::service::{
 use crate::llm::{
     bridge::{self, StreamFrame},
     catalog::{default_catalog, ModelCatalog},
-    openai_codec::{encode_request_body, StreamingDecoder},
 };
 
 const WEBLLM_BACKEND: &str = "webllm";
@@ -60,9 +60,31 @@ impl LlmService for BrowserLlmService {
             )));
         }
 
-        let body_json = match encode_request_body(&req.messages, &req.tools) {
-            Ok(s) => s,
-            Err(e) => return one_shot_err(e),
+        // One OpenAI encoder for every target. WebLLM's `chat.completions.
+        // create` reads `messages` and `tools` and ignores the rest of the
+        // OpenAI request shape, so the extra fields this emits (`model`,
+        // `stream`, the sampling params) cost a few bytes on a postMessage and
+        // buy the browser the encoder's multimodal support, which the deleted
+        // copy refused outright.
+        //
+        // The budget is spelled `max_tokens` because that is the original
+        // OpenAI field and the bridge is not OpenAI's API. WebLLM reads
+        // neither spelling, so the choice costs nothing here and keeps the
+        // browser body identical to the OpenAI-compatible servers'.
+        let body_json = match encode_chat_body(&req, MaxTokensField::MaxTokens) {
+            Ok(bytes) => match String::from_utf8(bytes) {
+                Ok(s) => s,
+                Err(e) => {
+                    return one_shot_err(LlmError::BackendError(format!(
+                        "webllm: request body is not utf-8: {e}"
+                    )))
+                }
+            },
+            Err(e) => {
+                return one_shot_err(LlmError::BackendError(format!(
+                    "webllm: encode request: {e}"
+                )))
+            }
         };
 
         let (mut tx, rx) = mpsc::channel::<Result<ChatChunk, LlmError>>(16);
@@ -76,7 +98,7 @@ impl LlmService for BrowserLlmService {
                 }
             };
 
-            let mut decoder = StreamingDecoder::new();
+            let mut decoder = OpenAiSseDecoder::new();
             loop {
                 if cancel.is_cancelled() {
                     let _ = bridge::cancel_stream(&stream_id).await;
@@ -90,21 +112,35 @@ impl LlmService for BrowserLlmService {
                     }
                 };
                 match frame {
-                    StreamFrame::Chunk(s) => match decoder.feed(&s) {
-                        Ok(chunks) => {
-                            for chunk in chunks {
-                                if tx.send(Ok(chunk)).await.is_err() {
-                                    // consumer dropped
-                                    return;
-                                }
+                    // The bridge hands over one already-de-framed OpenAI chunk
+                    // JSON per message, so this is the decoder's frame-level
+                    // entry point rather than its SSE one. A malformed chunk is
+                    // logged and skipped (the shared policy for both providers)
+                    // instead of killing the turn — and "logged" is literal
+                    // here only because `logger::init_console_tracing` is
+                    // installed at startup; with no subscriber the skip was
+                    // silent, and a truncated answer looked like a complete
+                    // one.
+                    StreamFrame::Chunk(s) => {
+                        for chunk in decoder.push_frame(&s).chunks {
+                            if tx.send(Ok(chunk)).await.is_err() {
+                                // consumer dropped
+                                return;
                             }
                         }
-                        Err(e) => {
-                            let _ = tx.send(Err(e)).await;
-                            break;
+                    }
+                    // WebLLM signals the end out-of-band; that is this
+                    // transport's `[DONE]`, and it must close any tool call the
+                    // model left open (a no-op when a `finish_reason` already
+                    // closed them).
+                    StreamFrame::Done => {
+                        for chunk in decoder.finish() {
+                            if tx.send(Ok(chunk)).await.is_err() {
+                                return;
+                            }
                         }
-                    },
-                    StreamFrame::Done => break,
+                        break;
+                    }
                     StreamFrame::Error(msg) => {
                         let _ = tx
                             .send(Err(LlmError::BackendError(format!("webllm: {msg}"))))

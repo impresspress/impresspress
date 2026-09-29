@@ -1,271 +1,183 @@
 use std::collections::{BTreeMap, HashMap};
 
 use wafer_core::clients::database as db;
-use wafer_run::{
-    context::Context, ConfigVar, ErrorCode, InputStream, InputType, Message, OutputStream,
-};
+use wafer_run::{context::Context, ConfigVar, InputStream, Message, OutputStream};
 
 use super::{
     contracts::{AdminSettingView, AdminSettingsResponse},
     ops::{self, MASKED_VALUE},
 };
 use crate::{
-    http::{err_bad_request, err_internal, err_not_found, ok_json},
-    util::{json_map, RecordExt},
+    blocks::crud,
+    http::{err_bad_request, ok_json, require_row},
+    platform_state::{
+        block_settings::{self, BlockSettingsPatch},
+        variables::{self, NewVariable, VariablePatch},
+    },
 };
 
-/// Helpers for reading and writing the per-block `enabled` flag in
-/// [`BLOCK_SETTINGS_TABLE`]. Use these instead of inlining the select/upsert
-/// query in every callsite.
-pub mod block_settings {
-    use wafer_block::db::{Filter, FilterOp, ListOptions};
-    use wafer_core::clients::database as db;
-    use wafer_run::context::Context;
-
-    use super::BLOCK_SETTINGS_TABLE as TABLE;
-
-    /// Return whether `block_name` is enabled.
-    ///
-    /// Reads the `enabled` column from [`BLOCK_SETTINGS_TABLE`]. Defaults to
-    /// `true` when no row exists (all blocks are enabled by default).
-    pub async fn is_enabled(ctx: &dyn Context, block_name: &str) -> bool {
-        db::list(
-            ctx,
-            TABLE,
-            &ListOptions {
-                columns: Some(vec!["enabled".into()]),
-                filters: vec![Filter {
-                    field: "block_name".into(),
-                    operator: FilterOp::Equal,
-                    value: serde_json::json!(block_name),
-                }],
-                skip_count: true,
-                ..Default::default()
-            },
-        )
-        .await
-        .ok()
-        .and_then(|rows| {
-            rows.records
-                .first()
-                .and_then(|r| r.data.get("enabled").and_then(|v| v.as_i64()))
-        })
-        .map(|v| v != 0)
-        .unwrap_or(true)
-    }
-
-    /// Persist the `enabled` flag for `block_name` in [`BLOCK_SETTINGS_TABLE`].
-    ///
-    /// Uses an upsert keyed on `block_name`, so it works whether or not a row
-    /// already exists.
-    ///
-    /// Routes through the structured [`db::upsert_by_field`] (get-by-field →
-    /// `update` | `create`) rather than a raw SQL upsert. The structured path
-    /// hits `DatabaseService::{create,update}`, which the Cloudflare
-    /// `KvCachedD1DatabaseService` invalidates — so toggling a block clears
-    /// the cached `block_settings` read (both the per-block key and the
-    /// full-table all-rows key). Block code has no raw-SQL path at all (no
-    /// `db::execute`/`db::query`), but the invalidation dependency on
-    /// `create`/`update` is the reason `set_enabled` stays structured instead
-    /// of being collapsed into a single atomic statement: an atomic upsert
-    /// would leave the eager `load_block_settings` cache stale until its TTL.
-    /// `created_at` is intentionally omitted: it is preserved on update and
-    /// synthesized by the backend on insert.
-    pub async fn set_enabled(
-        ctx: &dyn Context,
-        block_name: &str,
-        enabled: bool,
-    ) -> Result<(), String> {
-        let enabled_int: i64 = if enabled { 1 } else { 0 };
-        let mut data = super::json_map(serde_json::json!({
-            "block_name": block_name,
-            "enabled": enabled_int,
-            // Admin-UI write — mark this row as user-owned so the boot-time
-            // seed never overwrites it.
-            "seed_defaults_hash": crate::features::USER_EDITED_SENTINEL,
-        }));
-        crate::util::stamp_updated(&mut data);
-
-        db::upsert_by_field(
-            ctx,
-            TABLE,
-            "block_name",
-            serde_json::json!(block_name),
-            data,
-        )
-        .await
-        .map(|_| ())
-        .map_err(|e| format!("block_settings::set_enabled failed: {e}"))
-    }
-}
-
-// Table-name constants live in the leaf `crate::admin_schema` module (the
-// single source of truth, mirroring `messages_schema`); re-exported here so
-// existing `settings::{BLOCK_SETTINGS_TABLE, VARIABLES_TABLE}` and the nested
-// `super::BLOCK_SETTINGS_TABLE` references keep resolving.
-pub use crate::admin_schema::{BLOCK_SETTINGS_TABLE, VARIABLES_TABLE};
-
-/// `path` is the normalized `/admin/settings[...]` sub-path, passed explicitly
-/// (no `req.resource` rewrite). Id-bearing leaves take the key from it.
-pub async fn handle(
-    ctx: &dyn Context,
-    msg: &Message,
-    path: &str,
-    input: InputStream,
-) -> OutputStream {
-    let action = msg.action();
-
-    match (action, path) {
-        ("retrieve", "/admin/settings/all") => handle_list_full(ctx).await,
-        ("retrieve", "/admin/settings") | ("retrieve", "/settings") => handle_list(ctx).await,
-        ("retrieve", _)
-            if path.starts_with("/admin/settings/") || path.starts_with("/settings/") =>
-        {
-            handle_get(ctx, path).await
-        }
-        ("update", _) if path.starts_with("/admin/settings/") => {
-            handle_set(ctx, msg, path, input).await
-        }
-        ("create", "/admin/settings") => handle_create(ctx, msg, input).await,
-        ("delete", _) if path.starts_with("/admin/settings/") => handle_delete(ctx, path).await,
-        _ => err_not_found("not found"),
-    }
-}
-
-async fn handle_list_full(ctx: &dyn Context) -> OutputStream {
-    match db::list_all(ctx, VARIABLES_TABLE, vec![]).await {
-        Ok(records) => {
-            let vars: Vec<_> = records
+/// `GET /b/admin/api/settings/all`.
+pub(super) async fn handle_list_full(ctx: &dyn Context) -> OutputStream {
+    match variables::list_all(ctx).await {
+        Ok(rows) => {
+            let vars: Vec<_> = rows
                 .iter()
-                .map(|record| {
-                    let key = record.str_field("key").to_string();
-                    let is_sensitive = ops::is_sensitive_key(&key, record.i64_field("sensitive"));
-                    let is_system = key.starts_with("WAFER_RUN_SHARED__");
+                .map(|row| {
+                    let is_sensitive = ops::is_sensitive_key(&row.key, i64::from(row.sensitive));
+                    let is_system = row.key.starts_with("WAFER_RUN_SHARED__");
                     // Mask sensitive values even in the "full" listing
                     let value = if is_sensitive {
                         MASKED_VALUE.to_string()
                     } else {
-                        record.str_field("value").to_string()
+                        row.value.clone()
                     };
                     serde_json::json!({
-                        "key": key,
-                        "name": record.str_field("name"),
-                        "description": record.str_field("description"),
+                        "key": row.key,
+                        "name": row.name,
+                        "description": row.description,
                         "value": value,
-                        "warning": record.str_field("warning"),
+                        "warning": row.warning,
                         "sensitive": is_sensitive,
                         "system": is_system,
-                        "updated_at": record.str_field("updated_at"),
+                        "updated_at": row.updated_at,
                     })
                 })
                 .collect();
             ok_json(&vars)
         }
-        Err(e) => err_internal("Database error", e),
+        Err(e) => crud::db_error_internal(e, "Database error"),
     }
 }
 
-async fn handle_list(ctx: &dyn Context) -> OutputStream {
-    match db::list_all(ctx, VARIABLES_TABLE, vec![]).await {
-        Ok(records) => {
+/// `GET /b/admin/api/settings`.
+pub(super) async fn handle_list(ctx: &dyn Context) -> OutputStream {
+    match variables::list_all(ctx).await {
+        Ok(rows) => {
             // Collected into a `BTreeMap` first, then flattened: the
             // response is a public contract, and a randomized key order made
             // two identical reads differ byte for byte.
             let mut by_key = BTreeMap::new();
-            for record in &records {
-                let key = record.str_field("key");
-                let sensitive = ops::is_sensitive_key(key, record.i64_field("sensitive"));
+            for row in &rows {
+                let sensitive = ops::is_sensitive_key(&row.key, i64::from(row.sensitive));
                 let value = if sensitive {
-                    serde_json::Value::String(MASKED_VALUE.to_string())
+                    MASKED_VALUE.to_string()
                 } else {
-                    record
-                        .data
-                        .get("value")
-                        .cloned()
-                        .unwrap_or(serde_json::Value::Null)
+                    row.value.clone()
                 };
-                if !key.is_empty() {
-                    by_key.insert(
-                        key.to_string(),
-                        AdminSettingView {
-                            key: key.to_string(),
-                            value,
-                            sensitive,
-                        },
-                    );
-                }
+                by_key.insert(
+                    row.key.clone(),
+                    AdminSettingView {
+                        key: row.key.clone(),
+                        value: serde_json::Value::String(value),
+                        sensitive,
+                    },
+                );
             }
             ok_json(&AdminSettingsResponse {
                 settings: by_key.into_values().collect(),
             })
         }
-        Err(e) => err_internal("Database error", e),
+        Err(e) => crud::db_error_internal(e, "Database error"),
     }
 }
 
-async fn handle_get(ctx: &dyn Context, path: &str) -> OutputStream {
-    let key = path
-        .strip_prefix("/admin/settings/")
-        .or_else(|| path.strip_prefix("/settings/"))
-        .unwrap_or("");
-    if key.is_empty() {
-        return err_bad_request("Missing setting key");
-    }
+/// `GET /b/admin/api/settings/{key}`. `{key}` is read only as the route
+/// table bound it.
+pub(super) async fn handle_get(ctx: &dyn Context, msg: &Message) -> OutputStream {
+    let key = match crud::path_var(msg, "key", "Missing setting key") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
 
-    match db::get_by_field(
-        ctx,
-        VARIABLES_TABLE,
-        "key",
-        serde_json::Value::String(key.to_string()),
-    )
-    .await
+    let mut row = match variables::get_by_key(ctx, key)
+        .await
+        .map_err(|e| crud::db_error(e, "Setting not found", "Database error"))
+        .and_then(|row| require_row(row, "Setting not found"))
     {
-        Ok(mut record) => {
-            // SEC-060: mask on the row flag OR the `_SECRET` / `_KEY` suffix —
-            // the single-key getter previously masked on the flag alone, so a
-            // `*_SECRET` key with the flag unset leaked its value here.
-            let is_sensitive = ops::is_sensitive_key(key, record.i64_field("sensitive"));
-            if is_sensitive {
-                record.data.insert(
-                    "value".to_string(),
-                    serde_json::Value::String(MASKED_VALUE.to_string()),
-                );
-            }
-            ok_json(&record)
-        }
-        Err(e) if e.code == ErrorCode::NotFound => err_not_found("Setting not found"),
-        Err(e) => err_internal("Database error", e),
+        Ok(row) => row,
+        Err(response) => return response,
+    };
+    // SEC-060: mask on the row flag OR what the KEY says — the `_SECRET` /
+    // `_KEY` suffix, or a declaration that calls the var a password. The
+    // single-key getter masked on the flag alone once, so a `*_SECRET` key with
+    // the flag unset leaked its value here; it then masked on flag-or-suffix,
+    // so an unrepaired `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_PASSWORD` row
+    // leaked instead.
+    if ops::is_sensitive_key(key, i64::from(row.sensitive)) {
+        row.value = MASKED_VALUE.to_string();
     }
+    // The row is echoed in the `{id, data}` record envelope this endpoint has
+    // always published; it is declared without a schema until it is typed.
+    ok_json(&db::Record {
+        id: row.id.clone(),
+        data: row.to_data(),
+    })
 }
 
-async fn handle_set(
+/// `PATCH /b/admin/api/settings/{key}`. `{key}` is read only as the route
+/// table bound it.
+///
+/// A real partial update: every field of the body is optional and an absent
+/// one leaves its column alone. `value` in particular, because a sensitive key
+/// reads back as `MASKED_VALUE` and [`ops::update_variable`] refuses to store
+/// that mask — leaving it out is how a caller says "keep the secret I cannot
+/// see", and the echoed record then carries no `value` field at all. When a
+/// value WAS supplied, the echo masks it the same way [`handle_get`] does.
+pub(super) async fn handle_set(
     ctx: &dyn Context,
     msg: &Message,
-    path: &str,
     input: InputStream,
 ) -> OutputStream {
-    let key = path.strip_prefix("/admin/settings/").unwrap_or("");
-    if key.is_empty() {
-        return err_bad_request("Missing setting key");
-    }
+    let key = match crud::path_var(msg, "key", "Missing setting key") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
 
     #[derive(serde::Deserialize)]
     struct Req {
-        value: serde_json::Value,
+        /// Optional: absent leaves the stored value alone.
+        ///
+        /// It was required, which made this a PATCH that could not patch. A
+        /// sensitive key reads back as `MASKED_VALUE` and `ops::update_variable`
+        /// refuses to store that mask, so with `value` required there was no
+        /// request at all that changed only the `sensitive` flag of a key whose
+        /// value the caller cannot see. Absent is how a caller says "not this
+        /// field", and it is the remedy the mask refusal names.
+        #[serde(default)]
+        value: Option<serde_json::Value>,
+        /// Optional: absent leaves the stored masking flag alone.
+        #[serde(default)]
+        sensitive: Option<bool>,
     }
-    let raw = input.collect_to_bytes().await;
+    let raw = match input.collect_to_bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => return OutputStream::error(e),
+    };
     let body: Req = match serde_json::from_slice(&raw) {
         Ok(b) => b,
         Err(e) => return err_bad_request(&format!("Invalid body: {e}")),
     };
 
+    // Both fields optional means a body carrying neither now parses, and
+    // `update_variable` upserts — so `PATCH {}` against an unstored key would
+    // create a blank row, and against a stored one would write an audit entry
+    // for a change nobody made. A request with nothing to change is a malformed
+    // request, not a no-op, and saying so keeps the field-is-absent spelling
+    // meaning exactly one thing.
+    if body.value.is_none() && body.sensitive.is_none() {
+        return err_bad_request(
+            "Nothing to update: send `value`, `sensitive`, or both. Leaving `value` out \
+             keeps the stored value.",
+        );
+    }
+
     // The `value` column is TEXT; a string value is stored verbatim, anything
     // else as its JSON form (the prior validation already read it via
     // `as_str().unwrap_or("")`, so non-string values were treated as empty).
-    let value = match &body.value {
+    let value = body.value.as_ref().map(|value| match value {
         serde_json::Value::String(s) => s.clone(),
         other => other.to_string(),
-    };
+    });
 
     // Guards (sensitive-empty + URL/SSRF), audit-log write, and upsert live in
     // the shared ops layer so the SSR variable surface can't diverge.
@@ -274,18 +186,55 @@ async fn handle_set(
         msg,
         key,
         ops::VariableUpdate {
-            value: Some(&value),
+            value: value.as_deref(),
             description: None,
+            sensitive: body.sensitive,
         },
     )
     .await
     {
-        Ok(record) => ok_json(&record),
+        // Echoed in the `{id, data}` record envelope this endpoint has
+        // always published; declared without a schema until it is typed.
+        //
+        // The stored value is never handed back to a request that did not send
+        // it: the echo is the row AS STORED, so without this a
+        // `PATCH {"sensitive": true}` would answer with the plaintext secret,
+        // turning the writer into the reader the masking exists to prevent.
+        //
+        // Two different situations, and they get two different answers, because
+        // masking is the wrong way to spell "this field was not returned".
+        //
+        // * The request supplied no value: the field is ABSENT from the record.
+        //   Substituting the mask here invented a value for rows nothing masks
+        //   — and a client replaying what it had just read then stored
+        //   `"********"` as a plain setting's value, with
+        //   `is_masked_submission` rightly declining to stop it, since for such
+        //   a row that string is ordinary. That is this endpoint's own hazard,
+        //   re-opened from the other side. Absent is what the request said and
+        //   what a JSON object has for "no value".
+        // * The request supplied a value for a key something masks: the mask,
+        //   as `handle_get` answers. Read off the POST-WRITE flag, which is
+        //   right here precisely because the value came in with the request —
+        //   the caller already knows it.
+        Ok(row) => {
+            let mut data = row.to_data();
+            if value.is_none() {
+                data.remove("value");
+            } else if ops::is_sensitive_key(&row.key, i64::from(row.sensitive)) {
+                data.insert("value".to_string(), serde_json::json!(MASKED_VALUE));
+            }
+            ok_json(&db::Record { id: row.id, data })
+        }
         Err(out) => out,
     }
 }
 
-async fn handle_create(ctx: &dyn Context, msg: &Message, input: InputStream) -> OutputStream {
+/// `POST /b/admin/api/settings`.
+pub(super) async fn handle_create(
+    ctx: &dyn Context,
+    msg: &Message,
+    input: InputStream,
+) -> OutputStream {
     #[derive(serde::Deserialize)]
     struct Req {
         key: String,
@@ -294,7 +243,10 @@ async fn handle_create(ctx: &dyn Context, msg: &Message, input: InputStream) -> 
         description: Option<String>,
         sensitive: Option<bool>,
     }
-    let raw = input.collect_to_bytes().await;
+    let raw = match input.collect_to_bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => return OutputStream::error(e),
+    };
     let body: Req = match serde_json::from_slice(&raw) {
         Ok(b) => b,
         Err(e) => return err_bad_request(&format!("Invalid body: {e}")),
@@ -316,35 +268,49 @@ async fn handle_create(ctx: &dyn Context, msg: &Message, input: InputStream) -> 
     )
     .await
     {
-        Ok(record) => ok_json(&record),
+        // Echoed in the `{id, data}` record envelope this endpoint has
+        // always published; declared without a schema until it is typed.
+        Ok(row) => ok_json(&db::Record {
+            id: row.id.clone(),
+            data: row.to_data(),
+        }),
         Err(out) => out,
     }
 }
 
-async fn handle_delete(ctx: &dyn Context, path: &str) -> OutputStream {
-    let key = path.strip_prefix("/admin/settings/").unwrap_or("");
-    if key.is_empty() {
-        return err_bad_request("Missing setting key");
-    }
+/// `DELETE /b/admin/api/settings/{key}`. `{key}` is read only as the route
+/// table bound it.
+pub(super) async fn handle_delete(ctx: &dyn Context, msg: &Message) -> OutputStream {
+    let key = match crud::path_var(msg, "key", "Missing setting key") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
 
-    if key.starts_with("WAFER_RUN_SHARED__") {
-        return err_bad_request(&format!("Cannot delete shared system variable: {key}"));
+    // The shared-key guard, the delete and the audit row all live in `ops`,
+    // shared with the Variables page's row control — so the two surfaces
+    // refuse the same keys and leave the same trail. This path wrote no audit
+    // row at all before: create and update were audited, delete was not.
+    if let Err(response) = ops::delete_variable(ctx, msg, key).await {
+        return response;
     }
+    ok_json(&serde_json::json!({"deleted": key}))
+}
 
-    match db::get_by_field(
-        ctx,
-        VARIABLES_TABLE,
-        "key",
-        serde_json::Value::String(key.to_string()),
-    )
-    .await
-    {
-        Ok(record) => match db::delete(ctx, VARIABLES_TABLE, &record.id).await {
-            Ok(_) => ok_json(&serde_json::json!({"deleted": key})),
-            Err(e) => err_internal("Database error", e),
-        },
-        Err(_) => err_not_found("Setting not found"),
+/// `POST /b/admin/api/settings/{key}/reset-to-environment`.
+///
+/// Releases the row's pin so the next boot seeds the key from the process
+/// environment again. The supported way out of a pinned key — see
+/// [`ops::reset_variable_to_environment`] for why neither delete nor an empty
+/// update is that way.
+pub(super) async fn handle_reset_to_environment(ctx: &dyn Context, msg: &Message) -> OutputStream {
+    let key = match crud::path_var(msg, "key", "Missing setting key") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    if let Err(response) = ops::reset_variable_to_environment(ctx, msg, key).await {
+        return response;
     }
+    ok_json(&serde_json::json!({"reset_to_environment": key}))
 }
 
 /// Full block name of the admin block — the `block_settings` row whose
@@ -356,20 +322,29 @@ const ADMIN_BLOCK_NAME: &str = "impresspress/admin";
 /// description, default, warning, sensitive flag) feeds the hash; sort by
 /// key so map ordering can't make two equivalent inputs hash differently.
 ///
-/// `var.auto_generate` / `var.optional` don't affect what `seed_defaults`
-/// writes — they're consumed by `seed_auto_generated` (CF runner) and the
-/// startup validator respectively — so they're intentionally omitted.
+/// `var.optional` does not affect what `seed_defaults` writes — it is consumed
+/// by the startup validator — so it is intentionally omitted.
+///
+/// `var.auto_generate` IS folded in, through the `sensitive` term:
+/// `config_vars::is_sensitive_var` unions it (an auto-generated secret is a
+/// secret, whatever its `input_type` says), so flipping `auto_generate` on a
+/// declared var moves this hash. That is deliberate — it changes the flag a
+/// fresh row is created with — and it is why the term is `is_sensitive_var(v)`
+/// rather than `input_type == Password`.
 fn seed_payload_hash(vars: &[ConfigVar]) -> String {
     use std::fmt::Write as _;
     let mut keys: Vec<&ConfigVar> = vars.iter().collect();
     keys.sort_by(|a, b| a.key.cmp(&b.key));
     let mut buf = String::with_capacity(vars.len() * 128);
     for v in keys {
-        let sensitive = if v.input_type == InputType::Password {
-            1
-        } else {
-            0
-        };
+        // The same rule the seed loop below writes with, so the hash and the
+        // write cannot disagree about what a var's flag should be — and so a
+        // build that changes a var's sensitivity invalidates the gate and
+        // re-seeds instead of leaving the stored flag stale. Read from the var
+        // in hand (`is_sensitive_var`), not looked up by key: this hash exists
+        // to notice a DECLARATION change, including a var that just became a
+        // password.
+        let sensitive = i32::from(crate::config_vars::is_sensitive_var(v));
         // Fixed shape per var: `key\x1fname\x1fdescription\x1fdefault\x1fwarning\x1fsensitive\x1e`.
         // ASCII unit-separator (0x1f) + record-separator (0x1e) bracket
         // each field so embedded newlines / colons in description text
@@ -405,25 +380,34 @@ pub async fn seed_defaults(ctx: &dyn Context) {
     }
 
     // Single bulk fetch of every existing variable, then in-memory diff
-    // per declared shared var. Replaces the per-var `get_by_field` loop
-    // that issued 2× D1 queries per shared var × cold isolate (~5k D1
-    // reads/day in prod — see 2026-05-14 config-snapshot spec). On a
-    // bulk failure we treat every key as missing, which falls into the
-    // create-with-INSERT-OR-IGNORE-equivalent path; consistent with the
-    // prior code's silent-on-error stance.
-    let existing: HashMap<String, _> = db::list_all(ctx, VARIABLES_TABLE, vec![])
-        .await
-        .unwrap_or_default()
-        .into_iter()
-        .map(|record| (record.str_field("key").to_string(), record))
-        .collect();
+    // per declared shared var, instead of a `get_by_field` per var — two D1
+    // queries per shared var per cold isolate otherwise. Without this read
+    // there is nothing to diff against: inserting every key blind would
+    // collide with each row it could not see. So a failed read ends the run
+    // here, unstamped, and the next boot tries again.
+    let existing: HashMap<String, _> = match variables::list_all(ctx).await {
+        Ok(rows) => rows.into_iter().map(|row| (row.key.clone(), row)).collect(),
+        Err(e) => {
+            tracing::warn!(
+                err = %e,
+                "seed_defaults: could not read the variables table; nothing seeded, and \
+                 the seed hash is left unstamped so the next boot runs it again"
+            );
+            return;
+        }
+    };
+
+    // Keys whose write failed. The hash gate below may only be stamped when
+    // this stays empty: the gate skips the whole function on every later
+    // boot, so stamping over a failed write would leave that row un-seeded,
+    // its metadata stale, or its dead asset URL unrepaired, until a release
+    // happens to change a declaration.
+    let mut failed: Vec<&str> = Vec::new();
 
     for var in &vars {
-        let sensitive: i32 = if var.input_type == InputType::Password {
-            1
-        } else {
-            0
-        };
+        // What the DECLARATION requires. Not what gets written unconditionally:
+        // see the existing-row branch, which may only raise.
+        let sensitive = crate::config_vars::is_sensitive_var(var);
         let name = if var.name.is_empty() {
             &var.key
         } else {
@@ -431,7 +415,7 @@ pub async fn seed_defaults(ctx: &dyn Context) {
         };
 
         match existing.get(&var.key) {
-            Some(record) => {
+            Some(row) => {
                 // A stored value pointing at our own `/b/static/` route for a
                 // file this build does not serve is a stale pointer *this
                 // function wrote*: built-in asset URLs carry a content hash
@@ -451,88 +435,122 @@ pub async fn seed_defaults(ctx: &dyn Context) {
                 // it no longer matches. Scoped to the built-in route by
                 // `is_stale_builtin_asset_url`, so a white-labelled URL is
                 // never touched.
-                let stale_builtin_asset =
-                    crate::ui::assets::is_stale_builtin_asset_url(record.str_field("value"));
+                let stale_builtin_asset = crate::ui::assets::is_stale_builtin_asset_url(&row.value);
 
                 // Only refresh metadata when at least one declared field
                 // actually differs. Without this guard every isolate cold-start
                 // re-writes every shared config var (~80 vars × cold-starts/day
                 // ≈ ~900 useless UPDATEs/day in prod).
-                let same_name = record.str_field("name") == name.as_str();
-                let same_desc = record.str_field("description") == var.description;
-                let same_warn = record.str_field("warning") == var.warning;
-                let same_sens = record.i64_field("sensitive") == sensitive as i64;
-                if same_name && same_desc && same_warn && same_sens && !stale_builtin_asset {
+                let same_name = row.name == *name;
+                let same_desc = row.description == var.description;
+                let same_warn = row.warning == var.warning;
+                // `sensitive` is deliberately NOT patched here, in either
+                // direction. This branch is behind the declared-vars hash gate
+                // above, which every settled deployment passes — so anything
+                // written here waits for a release that changes a declaration,
+                // and a security flag cannot be on that schedule.
+                // `platform_state::variables::repair_sensitive_flags` owns the
+                // reconciliation instead: same rule, un-gated, on all three
+                // targets. This loop keeps only the descriptive metadata, which
+                // is exactly what the gate is appropriate for.
+                if same_name && same_desc && same_warn && !stale_builtin_asset {
                     continue;
                 }
-                let mut fields = serde_json::json!({
-                    "name": name,
-                    "description": var.description,
-                    "warning": var.warning,
-                    "sensitive": sensitive,
-                });
+                let mut patch = VariablePatch {
+                    name: Some(name.clone()),
+                    description: Some(var.description.clone()),
+                    warning: Some(var.warning.clone()),
+                    ..Default::default()
+                };
                 if stale_builtin_asset {
                     tracing::warn!(
                         key = %var.key,
-                        stale = %record.str_field("value"),
+                        stale = %row.value,
                         repaired_to = %var.default,
                         "repaired a persisted URL for a built-in asset this build \
                          no longer serves; reset to the declared default"
                     );
-                    fields["value"] = serde_json::Value::String(var.default.clone());
+                    patch.value = Some(var.default.clone());
                 }
-                let data = json_map(fields);
-                let _ = db::upsert_by_field(
-                    ctx,
-                    VARIABLES_TABLE,
-                    "key",
-                    serde_json::Value::String(var.key.clone()),
-                    data,
-                )
-                .await;
+                if let Err(e) = variables::upsert_by_key(ctx, &var.key, patch).await {
+                    tracing::warn!(key = %var.key, err = %e, "seed_defaults: metadata refresh failed");
+                    failed.push(&var.key);
+                }
             }
             None => {
                 // Seed from process env when set (lets `.env` bootstrap a
                 // fresh deployment), otherwise fall back to the declared
                 // default. Empty env values are treated as unset so that
-                // `FOO=` doesn't accidentally clear a meaningful default.
+                // `FOO=` doesn't accidentally clear a meaningful default, and
+                // so is one that fails the key's declared value rule (named
+                // at ERROR, as `seed_and_load` does for the same export).
                 let seed_value = std::env::var(&var.key)
                     .ok()
                     .filter(|v| !v.is_empty())
+                    .filter(
+                        |v| match crate::config_vars::check_config_value(&var.key, v) {
+                            Ok(()) => true,
+                            Err(e) => {
+                                variables::log_refused_env_value(&var.key, v, &e);
+                                false
+                            }
+                        },
+                    )
                     .unwrap_or_else(|| var.default.clone());
                 if !seed_value.is_empty() {
-                    let data = json_map(serde_json::json!({
-                        "key": var.key,
-                        "name": name,
-                        "description": var.description,
-                        "value": seed_value,
-                        "warning": var.warning,
-                        "sensitive": sensitive,
-                        "created_at": crate::util::now_rfc3339()
-                    }));
-                    let _ = db::create(ctx, VARIABLES_TABLE, data).await;
+                    let inserted = variables::insert(
+                        ctx,
+                        NewVariable {
+                            key: var.key.clone(),
+                            value: seed_value,
+                            name: name.clone(),
+                            description: var.description.clone(),
+                            warning: var.warning.clone(),
+                            sensitive,
+                            updated_by: String::new(),
+                            block: variables::block_for_key(&var.key),
+                        },
+                    )
+                    .await;
+                    if let Err(e) = inserted {
+                        tracing::warn!(key = %var.key, err = %e, "seed_defaults: insert failed");
+                        failed.push(&var.key);
+                    }
                 }
             }
         }
     }
 
-    // Stamp the new hash on the admin block_settings row so the next cold
-    // start short-circuits before issuing `list_all`. Failures here are
-    // logged but non-fatal — the seed itself succeeded, and the worst case
-    // is that the next isolate re-runs the bulk `list_all` (the same cost
-    // we paid this run). Matches the "silent on error" stance of the
-    // per-var upsert/create calls above; the `block_settings` row may not
-    // exist yet (admin migrations create it on the same `Init` pass),
-    // which is why we use `upsert_block_settings_fields` rather than
-    // assuming a row.
-    let mut patch = std::collections::HashMap::new();
-    patch.insert(
-        "seed_defaults_hash".to_string(),
-        serde_json::Value::String(code_hash),
-    );
-    if let Err(e) =
-        crate::migration_helper::upsert_block_settings_fields(ctx, ADMIN_BLOCK_NAME, patch).await
-    {
+    if !failed.is_empty() {
+        tracing::warn!(
+            failed = ?failed,
+            "seed_defaults: some writes failed; the seed hash is left unstamped so the next \
+             boot runs the seed again"
+        );
+        return;
+    }
+
+    // Every read and write above succeeded: stamp the new hash on the admin
+    // block_settings row so the next cold start short-circuits before issuing
+    // `list_all`. The `block_settings` row may not exist yet (admin
+    // migrations create it on the same `Init` pass), which is why this is
+    // `upsert_fields` rather than an update. A failed stamp is only logged:
+    // it errs toward re-running, costing the next boot the same bulk read
+    // this one paid.
+    //
+    // An outage heals because a failed read or write never reaches this
+    // stamp: the read returns early above, a failed write returns at the
+    // `failed` check, and the gate stays open until a boot on which every
+    // read and write lands. The same holds for a write that fails
+    // PERMANENTLY — a row the database refuses on every attempt: the gate
+    // never closes, so every cold start pays the bulk `list_all` again,
+    // retries that write, and logs the "some writes failed" warning above,
+    // until the row is repaired.
+    let patch = BlockSettingsPatch {
+        seed_defaults_hash: Some(code_hash),
+        ..Default::default()
+    };
+    if let Err(e) = block_settings::upsert_fields(ctx, ADMIN_BLOCK_NAME, patch).await {
         tracing::warn!(
             err = %e,
             "seed_defaults: failed to stamp seed_defaults_hash; next cold start will re-run the bulk list_all"
@@ -542,49 +560,58 @@ pub async fn seed_defaults(ctx: &dyn Context) {
 
 #[cfg(test)]
 mod tests {
-    use wafer_block::db::{Filter, FilterOp};
+    use wafer_run::InputType;
 
     use super::*;
-    use crate::test_support::TestContext;
+    use crate::{
+        config_vars::{FAVICON_URL_KEY, LOGO_ICON_URL_KEY},
+        test_support::TestContext,
+    };
 
     /// Seed one `variables` row with an explicit `sensitive` flag.
-    async fn seed_var(ctx: &dyn Context, key: &str, value: &str, sensitive: i64) {
-        let mut data = json_map(serde_json::json!({
-            "key": key,
-            "name": key,
-            "description": "",
-            "value": value,
-            "warning": "",
-            "sensitive": sensitive,
-        }));
-        crate::util::stamp_created(&mut data);
-        db::create(ctx, VARIABLES_TABLE, data)
-            .await
-            .expect("seed variable");
+    async fn seed_var(ctx: &dyn Context, key: &str, value: &str, sensitive: bool) {
+        variables::insert(
+            ctx,
+            NewVariable {
+                key: key.to_string(),
+                value: value.to_string(),
+                name: key.to_string(),
+                description: String::new(),
+                warning: String::new(),
+                sensitive,
+                updated_by: String::new(),
+                block: variables::block_for_key(key),
+            },
+        )
+        .await
+        .expect("seed variable");
     }
 
     /// `GET /b/admin/api/settings` never publishes a secret value.
     ///
     /// The endpoint's OpenAPI description promises exactly this, and the
     /// promise rests on two independent halves of `is_sensitive_key`: the
-    /// row's `sensitive` flag, and the `_SECRET` / `_KEY` suffix convention.
-    /// A key needs only one of them. Nothing tested this before the endpoint
-    /// was documented, which is the worst order to do it in.
+    /// row's `sensitive` flag, and what the KEY says — the `_SECRET` / `_KEY`
+    /// suffix convention, or a declaration that calls the var a password. A
+    /// key needs only one of them. Nothing tested this before the endpoint was
+    /// documented, which is the worst order to do it in.
     #[tokio::test]
     async fn list_masks_every_sensitive_value() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         crate::blocks::admin::migrations::apply(&ctx)
             .await
             .expect("apply admin migrations");
 
         // Not sensitive: no flag, no suffix.
-        seed_var(&ctx, "SITE_NAME", "Acme", 0).await;
+        seed_var(&ctx, "SITE_NAME", "Acme", false).await;
         // Sensitive by suffix alone (SEC-060): the flag is clear.
-        seed_var(&ctx, "STRIPE_SECRET", "sk_live_realsecret", 0).await;
-        seed_var(&ctx, "MAILGUN_API_KEY", "key-realsecret", 0).await;
+        seed_var(&ctx, "STRIPE_SECRET", "sk_live_realsecret", false).await;
+        seed_var(&ctx, "MAILGUN_API_KEY", "key-realsecret", false).await;
         // Sensitive by flag alone: `InputType::Password` vars carry neither
         // suffix, and `seed_defaults` is what sets their flag.
-        seed_var(&ctx, "BOOTSTRAP_ADMIN_PASSWORD", "hunter2", 1).await;
+        seed_var(&ctx, "BOOTSTRAP_ADMIN_PASSWORD", "hunter2", true).await;
 
         let body = crate::test_support::output_json(handle_list(&ctx).await).await;
         let by_key: std::collections::HashMap<&str, &serde_json::Value> = body["settings"]
@@ -676,7 +703,9 @@ mod tests {
     /// deleted between starts.
     #[tokio::test]
     async fn second_call_with_matching_snapshot_hash_short_circuits() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
 
         // 1. Run admin migrations so the block_settings + variables tables
         //    exist (with the new seed_defaults_hash column).
@@ -686,7 +715,7 @@ mod tests {
 
         // 2. First seed run — populates variables + stamps the hash row.
         seed_defaults(&ctx).await;
-        let var_count_after_first = db::list_all(&ctx, VARIABLES_TABLE, vec![])
+        let var_count_after_first = variables::list_all(&ctx)
             .await
             .expect("list variables")
             .len();
@@ -696,23 +725,18 @@ mod tests {
         );
 
         // 3. Read the stamped hash from the block_settings row directly.
-        let admin_rows = db::list_all(
-            &ctx,
-            crate::blocks::admin::settings::BLOCK_SETTINGS_TABLE,
-            vec![Filter {
-                field: "block_name".into(),
-                operator: FilterOp::Equal,
-                value: serde_json::Value::String(ADMIN_BLOCK_NAME.to_string()),
-            }],
-        )
-        .await
-        .expect("list block_settings");
+        let admin_rows: Vec<_> = block_settings::list_all(&ctx)
+            .await
+            .expect("list block_settings")
+            .into_iter()
+            .filter(|row| row.block_name == ADMIN_BLOCK_NAME)
+            .collect();
         assert_eq!(
             admin_rows.len(),
             1,
             "admin block_settings row should be present after first seed_defaults"
         );
-        let stamped_hash = admin_rows[0].str_field("seed_defaults_hash").to_string();
+        let stamped_hash = admin_rows[0].seed_defaults_hash.clone();
         let code_hash = seed_payload_hash(&crate::config_vars::shared_config_vars());
         assert_eq!(
             stamped_hash, code_hash,
@@ -723,7 +747,9 @@ mod tests {
         //    in-memory DB — no variables, no block_settings row), but
         //    pre-populate the config snapshot with the stamped hash. This
         //    mirrors what the production loader does on the next boot.
-        let mut next_ctx = TestContext::new().await;
+        let mut next_ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         crate::blocks::admin::migrations::apply(&next_ctx)
             .await
             .expect("apply admin migrations on next ctx");
@@ -736,7 +762,7 @@ mod tests {
         // 5. seed_defaults should short-circuit before any list_all on
         //    variables — leaving the (empty) variables table untouched.
         seed_defaults(&next_ctx).await;
-        let var_count_after_second = db::list_all(&next_ctx, VARIABLES_TABLE, vec![])
+        let var_count_after_second = variables::list_all(&next_ctx)
             .await
             .expect("list variables on next ctx")
             .len();
@@ -752,7 +778,9 @@ mod tests {
     /// and re-stamps the row.
     #[tokio::test]
     async fn mismatched_snapshot_hash_re_runs_seed() {
-        let mut ctx = TestContext::new().await;
+        let mut ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         crate::blocks::admin::migrations::apply(&ctx)
             .await
             .expect("apply admin migrations");
@@ -768,7 +796,7 @@ mod tests {
         ctx.set_config(crate::features::BLOCK_SETTINGS_CONFIG_KEY, &snapshot);
 
         seed_defaults(&ctx).await;
-        let count = db::list_all(&ctx, VARIABLES_TABLE, vec![])
+        let count = variables::list_all(&ctx)
             .await
             .expect("list variables")
             .len();
@@ -778,82 +806,124 @@ mod tests {
         );
     }
 
-    /// `block_settings::is_enabled` defaults to `true` when no row exists.
-    #[tokio::test]
-    async fn block_settings_is_enabled_defaults_to_true_when_no_row() {
-        let ctx = TestContext::new().await;
-        crate::blocks::admin::migrations::apply(&ctx)
+    /// The `seed_defaults_hash` the admin `block_settings` row carries, or
+    /// empty when there is no row.
+    async fn stored_seed_hash(ctx: &dyn Context) -> String {
+        block_settings::list_all(ctx)
             .await
-            .expect("apply admin migrations");
-
-        let enabled = block_settings::is_enabled(&ctx, "impresspress/nonexistent").await;
-        assert!(
-            enabled,
-            "is_enabled should return true when no block_settings row exists"
-        );
+            .expect("list block_settings")
+            .into_iter()
+            .find(|row| row.block_name == ADMIN_BLOCK_NAME)
+            .map(|row| row.seed_defaults_hash)
+            .unwrap_or_default()
     }
 
-    /// `block_settings::set_enabled` stamps `seed_defaults_hash` with the
-    /// [`USER_EDITED_SENTINEL`] so the boot-time seed will never clobber an
-    /// admin-UI toggle. See `plan_seed_decisions` in `features.rs`.
+    /// The next boot as the production loader builds it: the config snapshot
+    /// carries whatever hash the database holds.
+    async fn snapshot_stored_hash(ctx: &mut TestContext) {
+        let snapshot = serde_json::json!({
+            ADMIN_BLOCK_NAME: { "enabled": true, "seed_defaults_hash": stored_seed_hash(ctx).await }
+        })
+        .to_string();
+        ctx.set_config(crate::features::BLOCK_SETTINGS_CONFIG_KEY, &snapshot);
+    }
+
+    /// One failed write mid-seed leaves the hash gate unstamped, so the next
+    /// boot runs the seed again and finishes it.
+    ///
+    /// The gate skips the whole function once the stamped hash matches the
+    /// declarations. Stamping it over a dropped write — which the seed did,
+    /// discarding every write result — left that row's metadata stale (or a
+    /// dead asset URL unrepaired) on every later boot, until a release
+    /// changed a declaration. The fixture stores one declared var under a
+    /// stale name, so its metadata refresh is the one `database.update` on
+    /// the table in the run; the injector fails exactly that write, while the
+    /// inserts for every other var go through.
+    ///
+    /// Names `variables::TABLE` only to aim the fault injector;
+    /// `tests/repo_door.rs` allowlists it as one.
     #[tokio::test]
-    async fn block_settings_set_enabled_marks_row_user_edited() {
-        let ctx = TestContext::new().await;
+    async fn a_failed_seed_write_leaves_the_gate_open_for_the_next_boot() {
+        use crate::test_support::FailingDbOpContext;
+
+        let mut ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         crate::blocks::admin::migrations::apply(&ctx)
             .await
             .expect("apply admin migrations");
+        let declared = crate::config_vars::shared_config_vars();
+        let stale = &declared[1];
+        assert!(!stale.name.is_empty() && stale.name != stale.key);
+        // Stored under its key as its name: the declared name differs.
+        seed_var(&ctx, &stale.key, &stale.default, false).await;
+        let last = declared
+            .iter()
+            .rev()
+            .find(|v| !v.default.is_empty())
+            .expect("a declared var with a default");
 
-        let name = "impresspress/some-block";
-        block_settings::set_enabled(&ctx, name, false)
-            .await
-            .expect("set_enabled false");
+        let failing =
+            FailingDbOpContext::new(ctx.clone(), vec![("database.update", variables::TABLE)]);
+        seed_defaults(&failing).await;
 
-        let rows = db::list_all(
-            &ctx,
-            BLOCK_SETTINGS_TABLE,
-            vec![Filter {
-                field: "block_name".into(),
-                operator: FilterOp::Equal,
-                value: serde_json::Value::String(name.to_string()),
-            }],
-        )
-        .await
-        .expect("list block_settings");
-        assert_eq!(rows.len(), 1, "exactly one block_settings row for {name}");
+        assert!(
+            variables::get_by_key(&ctx, &last.key)
+                .await
+                .expect("read")
+                .is_some(),
+            "precondition: the seed kept going past the failed write"
+        );
+        let code_hash = seed_payload_hash(&declared);
+        assert_ne!(
+            stored_seed_hash(&ctx).await,
+            code_hash,
+            "a seed with a failed write must not stamp the gate"
+        );
+
+        snapshot_stored_hash(&mut ctx).await;
+        seed_defaults(&ctx).await;
         assert_eq!(
-            rows[0].str_field("seed_defaults_hash"),
-            crate::features::USER_EDITED_SENTINEL,
-            "set_enabled must stamp seed_defaults_hash with the user-edited sentinel",
+            variables::get_by_key(&ctx, &stale.key)
+                .await
+                .expect("read")
+                .expect("row")
+                .name,
+            stale.name,
+            "the next boot re-runs the seed and refreshes the metadata"
+        );
+        assert_eq!(
+            stored_seed_hash(&ctx).await,
+            code_hash,
+            "a seed whose every write landed stamps the gate"
         );
     }
 
-    /// `block_settings::set_enabled` / `is_enabled` round-trip: write false,
-    /// read back false; write true, read back true.
+    /// A failed read of the variables table seeds nothing and stamps
+    /// nothing. There is nothing to diff against, and treating it as an
+    /// empty table stamped the gate over a seed that never happened.
+    ///
+    /// Names `variables::TABLE` only to aim the fault injector;
+    /// `tests/repo_door.rs` allowlists it as one.
     #[tokio::test]
-    async fn block_settings_set_enabled_round_trip() {
-        let ctx = TestContext::new().await;
+    async fn a_failed_variables_read_leaves_the_gate_open() {
+        use crate::test_support::FailingDbOpContext;
+
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         crate::blocks::admin::migrations::apply(&ctx)
             .await
             .expect("apply admin migrations");
 
-        let name = "impresspress/some-block";
+        let failing =
+            FailingDbOpContext::new(ctx.clone(), vec![("database.list", variables::TABLE)]);
+        seed_defaults(&failing).await;
 
-        // Disable then read back.
-        block_settings::set_enabled(&ctx, name, false)
-            .await
-            .expect("set_enabled false");
-        assert!(
-            !block_settings::is_enabled(&ctx, name).await,
-            "is_enabled should return false after set_enabled(false)"
-        );
-
-        // Re-enable then read back.
-        block_settings::set_enabled(&ctx, name, true)
-            .await
-            .expect("set_enabled true");
-        assert!(
-            block_settings::is_enabled(&ctx, name).await,
-            "is_enabled should return true after set_enabled(true)"
+        assert_ne!(
+            stored_seed_hash(&ctx).await,
+            seed_payload_hash(&crate::config_vars::shared_config_vars()),
+            "a seed that could not read the table must not stamp the gate"
         );
     }
 
@@ -864,27 +934,21 @@ mod tests {
     async fn handle_get_masks_secret_suffix_without_flag() {
         use crate::test_support::{admin_msg, output_json};
 
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         crate::blocks::admin::migrations::apply(&ctx)
             .await
             .expect("apply admin migrations");
 
         // Insert a *_SECRET row with the sensitive flag explicitly unset.
-        let mut data = json_map(serde_json::json!({
-            "key": "STRIPE_SECRET",
-            "value": "sk_live_supersecret",
-            "name": "Stripe secret",
-            "sensitive": 0,
-        }));
-        crate::util::stamp_created(&mut data);
-        db::create(&ctx, VARIABLES_TABLE, data)
-            .await
-            .expect("seed secret var");
+        seed_var(&ctx, "STRIPE_SECRET", "sk_live_supersecret", false).await;
 
-        let msg = admin_msg("retrieve", "/admin/settings/STRIPE_SECRET");
-        let path = msg.path().to_string();
-        let out = handle(&ctx, &msg, &path, InputStream::empty()).await;
-        let body = output_json(out).await;
+        let msg = crate::blocks::admin::test_support::routed(admin_msg(
+            "retrieve",
+            "/b/admin/api/settings/STRIPE_SECRET",
+        ));
+        let body = output_json(handle_get(&ctx, &msg).await).await;
         // `Record` serializes as `{ id, data: { value, ... } }`.
         assert_eq!(
             body.get("data")
@@ -895,21 +959,634 @@ mod tests {
         );
     }
 
+    /// A `Password`-typed declared var supplied through the process
+    /// environment must come back MASKED from the settings read path.
+    ///
+    /// The boot seeder derived the row's `sensitive` flag from the
+    /// `_SECRET`/`_KEY` suffix alone, so
+    /// `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_PASSWORD` — declared
+    /// `InputType::Password`, ending in neither suffix — landed with
+    /// `sensitive = 0`. `is_sensitive_key` was then a union of the stored flag
+    /// and the suffix alone, and this key satisfies neither, so `GET
+    /// /b/admin/api/settings/{key}` returned the bootstrap password in clear.
+    /// `seed_defaults` never repairs it: the declared-vars hash gate
+    /// short-circuits once stamped. Both halves are closed now and this test
+    /// pins the WRITE one — the reader's own declaration half is pinned by
+    /// `a_legacy_unflagged_declared_password_row_is_masked_by_every_read_path`,
+    /// which stages the row the writer can no longer produce.
+    ///
+    /// Drives the real write path (`seed_and_load`) into the real read paths,
+    /// not the stored integer, because the integer is only interesting for
+    /// what the reader does with it.
+    #[tokio::test]
+    async fn an_env_supplied_password_var_is_masked_by_the_settings_read_path() {
+        use crate::test_support::{admin_msg, output_json};
+
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        crate::blocks::admin::migrations::apply(&ctx)
+            .await
+            .expect("apply admin migrations");
+
+        let key = crate::blocks::auth::config::BOOTSTRAP_ADMIN_PASSWORD_KEY;
+        ctx.seed_env_vars(&[(key, "hunter2")]).await;
+
+        let msg = crate::blocks::admin::test_support::routed(admin_msg(
+            "retrieve",
+            &format!("/b/admin/api/settings/{key}"),
+        ));
+        let body = output_json(handle_get(&ctx, &msg).await).await;
+        assert_eq!(
+            body.get("data")
+                .and_then(|d| d.get("value"))
+                .and_then(|v| v.as_str()),
+            Some(MASKED_VALUE),
+            "an env-supplied bootstrap password must not be readable through the settings API"
+        );
+
+        // The listings publish it too, and both must agree.
+        for listing in [
+            output_json(handle_list(&ctx).await).await,
+            output_json(handle_list_full(&ctx).await).await,
+        ] {
+            let raw = listing.to_string();
+            assert!(
+                !raw.contains("hunter2"),
+                "a settings listing leaked the bootstrap password: {raw}"
+            );
+        }
+    }
+
+    /// A row an OLDER build stored UNFLAGGED for a declaration-only-sensitive
+    /// key must still be masked by every settings read path.
+    ///
+    /// `WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_PASSWORD` is declared
+    /// `InputType::Password` and spelled with neither `_SECRET` nor `_KEY`, so
+    /// the stored flag was the only thing the readers consulted — and on a
+    /// deployment that has not yet run `repair_sensitive_flags` (on Cloudflare,
+    /// one with no `/_deploy/init` since the upgrade) that flag is still `0`.
+    /// The edit modal already masks such a row off the DECLARATION
+    /// (`handle_edit_variable_form`'s `show_sensitive`); these three endpoints
+    /// published the password verbatim in the same window. The modal's source
+    /// and the read paths' have to be the same source.
+    ///
+    /// Stages the row in the variables TABLE, not the boot snapshot, and drives
+    /// the three real handlers.
+    #[tokio::test]
+    async fn a_legacy_unflagged_declared_password_row_is_masked_by_every_read_path() {
+        use crate::test_support::{admin_msg, output_json};
+
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        crate::blocks::admin::migrations::apply(&ctx)
+            .await
+            .expect("apply admin migrations");
+
+        let key = crate::blocks::auth::config::BOOTSTRAP_ADMIN_PASSWORD_KEY;
+        assert!(
+            !crate::config_vars::has_sensitive_suffix(key),
+            "the point of this test is a key the suffix rule cannot catch"
+        );
+        assert!(
+            crate::config_vars::is_sensitive_for_storage(key),
+            "and one the declaration does call sensitive"
+        );
+
+        // `variables::insert` would raise the flag on the way in — this is the
+        // row an older build left behind, so it goes in unflagged.
+        variables::seed_row_with_flag(&ctx, key, "hunter2", 0).await;
+
+        let msg = crate::blocks::admin::test_support::routed(admin_msg(
+            "retrieve",
+            &format!("/b/admin/api/settings/{key}"),
+        ));
+        let body = output_json(handle_get(&ctx, &msg).await).await;
+        assert_eq!(
+            body.get("data")
+                .and_then(|d| d.get("value"))
+                .and_then(|v| v.as_str()),
+            Some(MASKED_VALUE),
+            "an unrepaired bootstrap-password row must not be readable through the settings API"
+        );
+
+        for listing in [
+            output_json(handle_list(&ctx).await).await,
+            output_json(handle_list_full(&ctx).await).await,
+        ] {
+            let raw = listing.to_string();
+            assert!(
+                !raw.contains("hunter2"),
+                "a settings listing leaked an unrepaired bootstrap password: {raw}"
+            );
+        }
+    }
+
+    /// A client that reads a sensitive setting and writes what it read back
+    /// must not be able to replace the secret with the mask.
+    ///
+    /// `GET /b/admin/api/settings/{key}` answers `"********"` for a sensitive
+    /// key, and `PATCH` stored the request value verbatim — so the read/modify/
+    /// write loop every JSON client is built around (GET the settings, change
+    /// one, PATCH them back) overwrote every OTHER secret with eight asterisks.
+    /// The worst case is a LIVE `..._BOOTSTRAP_ADMIN_TOKEN`, which is what
+    /// provisions the first admin: destroying it strands the deployment with no
+    /// admin path, and on Cloudflare there is no process environment to re-seed
+    /// it from.
+    ///
+    /// Drives the two real handlers, GET into PATCH, with the row staged in the
+    /// `variables` table — a hand-built mask string would prove only that the
+    /// constant is refused, not that the round trip produces it.
+    #[tokio::test]
+    async fn patching_back_a_masked_value_cannot_overwrite_the_secret() {
+        use crate::test_support::{admin_msg, output_http_status, output_json};
+
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        crate::blocks::admin::migrations::apply(&ctx)
+            .await
+            .expect("apply admin migrations");
+
+        let key = crate::blocks::auth::config::BOOTSTRAP_ADMIN_TOKEN_KEY;
+        seed_var(&ctx, key, "live-bootstrap-token", true).await;
+
+        // What the client reads.
+        let get = crate::blocks::admin::test_support::routed(admin_msg(
+            "retrieve",
+            &format!("/b/admin/api/settings/{key}"),
+        ));
+        let read_back = output_json(handle_get(&ctx, &get).await).await["data"]["value"]
+            .as_str()
+            .expect("the getter publishes a value")
+            .to_string();
+        assert_eq!(
+            read_back, MASKED_VALUE,
+            "the read path masks it, which is what makes the write path reachable"
+        );
+
+        // ...and what it writes straight back.
+        let put = crate::blocks::admin::test_support::routed(admin_msg(
+            "update",
+            &format!("/b/admin/api/settings/{key}"),
+        ));
+        let body = serde_json::to_vec(&serde_json::json!({ "value": read_back }))
+            .expect("serialize request body");
+        let status =
+            output_http_status(handle_set(&ctx, &put, InputStream::from_bytes(body)).await).await;
+
+        assert_eq!(
+            variables::get_by_key(&ctx, key)
+                .await
+                .expect("read the row back")
+                .expect("the row is still there")
+                .value,
+            "live-bootstrap-token",
+            "a masked round trip must not overwrite the stored secret",
+        );
+        assert_eq!(
+            status, 400,
+            "and the client must be told, not given a 200 for a write that did not happen",
+        );
+    }
+
+    /// The admin API refuses a session lifetime past its bound, on create and
+    /// on update, and leaves what is stored alone.
+    ///
+    /// `100000000` days put the refresh expiry past the last date chrono can
+    /// represent, where the addition panicked and aborted the native server on
+    /// every login. Drives the two real handlers.
+    #[tokio::test]
+    async fn an_out_of_range_session_lifetime_is_refused_by_the_settings_api() {
+        use crate::test_support::{admin_msg, output_http_status};
+
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        crate::blocks::admin::migrations::apply(&ctx)
+            .await
+            .expect("apply admin migrations");
+        let key = crate::blocks::auth::config::SESSION_LIFETIME_DAYS_KEY;
+
+        let post = crate::blocks::admin::test_support::routed(admin_msg(
+            "create",
+            "/b/admin/api/settings",
+        ));
+        let body = serde_json::to_vec(&serde_json::json!({
+            "key": key,
+            "value": "100000000",
+            "sensitive": false,
+        }))
+        .expect("serialize request body");
+        let status =
+            output_http_status(handle_create(&ctx, &post, InputStream::from_bytes(body)).await)
+                .await;
+        assert_eq!(status, 400, "create must refuse an out-of-range lifetime");
+        assert!(
+            variables::get_by_key(&ctx, key)
+                .await
+                .expect("read back")
+                .is_none(),
+            "a refused create must not leave a row behind"
+        );
+
+        seed_var(&ctx, key, "7", false).await;
+        let put = crate::blocks::admin::test_support::routed(admin_msg(
+            "update",
+            &format!("/b/admin/api/settings/{key}"),
+        ));
+        for refused in ["100000000", "0", "3651"] {
+            let body = serde_json::to_vec(&serde_json::json!({ "value": refused }))
+                .expect("serialize request body");
+            let status =
+                output_http_status(handle_set(&ctx, &put, InputStream::from_bytes(body)).await)
+                    .await;
+            assert_eq!(status, 400, "update must refuse {refused:?}");
+        }
+        assert_eq!(
+            variables::get_by_key(&ctx, key)
+                .await
+                .expect("read back")
+                .expect("the row is still there")
+                .value,
+            "7",
+            "a refused update must leave the stored lifetime alone"
+        );
+
+        let body = serde_json::to_vec(&serde_json::json!({ "value": "30" }))
+            .expect("serialize request body");
+        let status =
+            output_http_status(handle_set(&ctx, &put, InputStream::from_bytes(body)).await).await;
+        assert_eq!(status, 200, "an in-range lifetime is accepted");
+    }
+
+    /// The remedy the refusal names has to exist: a `PATCH` that leaves `value`
+    /// out changes only the fields it carries.
+    ///
+    /// Without it the refusal would be a dead end for a sensitive key — the
+    /// only value a client can read is the mask, and the mask is now refused,
+    /// so there would be no way to change the `sensitive` flag (or, later, any
+    /// other column) without also knowing the secret.
+    #[tokio::test]
+    async fn patching_without_a_value_leaves_the_stored_value_alone() {
+        use crate::test_support::{admin_msg, output_http_status};
+
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        crate::blocks::admin::migrations::apply(&ctx)
+            .await
+            .expect("apply admin migrations");
+
+        // An ad hoc row: sensitive by the operator's flag alone, so the flag is
+        // a thing that can legitimately be turned off.
+        seed_var(&ctx, "MY_SERVICE_HANDLE", "acme-prod", true).await;
+
+        let put = crate::blocks::admin::test_support::routed(admin_msg(
+            "update",
+            "/b/admin/api/settings/MY_SERVICE_HANDLE",
+        ));
+        let body = serde_json::to_vec(&serde_json::json!({ "sensitive": false }))
+            .expect("serialize request body");
+        let status =
+            output_http_status(handle_set(&ctx, &put, InputStream::from_bytes(body)).await).await;
+        assert_eq!(status, 200, "a value-less PATCH is a valid partial update");
+
+        let row = variables::get_by_key(&ctx, "MY_SERVICE_HANDLE")
+            .await
+            .expect("read the row back")
+            .expect("the row is still there");
+        assert_eq!(row.value, "acme-prod", "the value column is untouched");
+        assert!(!row.sensitive, "and the field that was sent did change");
+    }
+
+    /// The echoed row never carries a value the request did not supply.
+    ///
+    /// The echo used to be masked on the POST-WRITE flag alone, and this exact
+    /// request lowers it: an ad hoc row is sensitive by its column only — the
+    /// key says nothing — so `PATCH {"sensitive": false}` cleared the flag,
+    /// `is_sensitive_key` then answered false, and the response body carried
+    /// the plaintext secret back in a request that supplied no value. Making
+    /// `value` optional is what created that read; before it, an unflag was
+    /// impossible without also overwriting the value it would expose.
+    #[tokio::test]
+    async fn a_value_less_patch_never_echoes_the_stored_value() {
+        use crate::test_support::{admin_msg, output_json};
+
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        crate::blocks::admin::migrations::apply(&ctx)
+            .await
+            .expect("apply admin migrations");
+        seed_var(&ctx, "MY_SERVICE_HANDLE", "acme-prod", true).await;
+
+        let put = crate::blocks::admin::test_support::routed(admin_msg(
+            "update",
+            "/b/admin/api/settings/MY_SERVICE_HANDLE",
+        ));
+        let body = serde_json::to_vec(&serde_json::json!({ "sensitive": false }))
+            .expect("serialize request body");
+        let echoed = output_json(handle_set(&ctx, &put, InputStream::from_bytes(body)).await).await;
+
+        assert_ne!(
+            echoed["data"]["value"],
+            serde_json::json!("acme-prod"),
+            "a request that supplied no value must not be answered with one: {echoed}",
+        );
+        assert!(
+            echoed["data"].get("value").is_none(),
+            "and the way it is not answered is ABSENCE, not a substituted mask — see \
+             `a_value_less_patch_on_a_plain_row_does_not_invent_a_mask` for what \
+             substituting one did to rows nothing masks: {echoed}",
+        );
+    }
+
+    /// A value-less PATCH on a row NOTHING masks must not answer with a mask.
+    ///
+    /// Substituting `MASKED_VALUE` was the wrong way to spell "this field was
+    /// not returned", and it re-opened this PR's own hazard from the other
+    /// side: the echo for a plain row said `"********"`, and a client that
+    /// replayed what it had just read stored that string as the value — with
+    /// `is_masked_submission` correctly declining to stop it, because for a row
+    /// nothing masks `"********"` is an ordinary value. The field is simply
+    /// absent from the record now, which is what "no value" means in a JSON
+    /// object and what the request itself said.
+    #[tokio::test]
+    async fn a_value_less_patch_on_a_plain_row_does_not_invent_a_mask() {
+        use crate::test_support::{admin_msg, output_json};
+
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        crate::blocks::admin::migrations::apply(&ctx)
+            .await
+            .expect("apply admin migrations");
+        seed_var(&ctx, "SITE_MOTTO", "move fast", false).await;
+
+        let msg = crate::blocks::admin::test_support::routed(admin_msg(
+            "update",
+            "/b/admin/api/settings/SITE_MOTTO",
+        ));
+        let body = serde_json::to_vec(&serde_json::json!({ "sensitive": false }))
+            .expect("serialize request body");
+        let echoed = output_json(handle_set(&ctx, &msg, InputStream::from_bytes(body)).await).await;
+        assert!(
+            echoed["data"].get("value").is_none(),
+            "a field the request did not supply must be absent, not masked: {echoed}"
+        );
+
+        // The read/modify/write client, replaying exactly the fields it was
+        // handed. With `value` absent there is nothing to replay.
+        let mut replay = serde_json::Map::new();
+        if let Some(value) = echoed["data"].get("value") {
+            replay.insert("value".to_string(), value.clone());
+        }
+        replay.insert("sensitive".to_string(), serde_json::json!(false));
+        let msg = crate::blocks::admin::test_support::routed(admin_msg(
+            "update",
+            "/b/admin/api/settings/SITE_MOTTO",
+        ));
+        let body =
+            serde_json::to_vec(&serde_json::Value::Object(replay)).expect("serialize request body");
+        let _ = crate::test_support::output_http_status(
+            handle_set(&ctx, &msg, InputStream::from_bytes(body)).await,
+        )
+        .await;
+
+        assert_eq!(
+            variables::get_by_key(&ctx, "SITE_MOTTO")
+                .await
+                .expect("read back")
+                .expect("row")
+                .value,
+            "move fast",
+            "replaying the echo must not destroy the value it stood for",
+        );
+    }
+
+    /// A `PATCH` that supplies no value must not CREATE the row it would then
+    /// have to leave empty.
+    ///
+    /// `update_variable` upserts, and the "Nothing to update" guard only closes
+    /// the both-fields-absent case — so `{"sensitive": true}` on a key with no
+    /// stored row skipped the `if let Some(value)` block entirely, which is
+    /// where the sensitive-empty guard lives, and created a row with `value:
+    /// ""`. Before `value` became optional the equivalent `{"value": ""}` was
+    /// refused by that guard, so optionality removed a check that had been
+    /// running only because the field was always present.
+    ///
+    /// The blank row is then permanent AND load-bearing: `seed_and_load` seeds
+    /// through `insert_if_absent`, which skips any key that already has a row,
+    /// and `delete_variable` refuses a declared `WAFER_RUN_SHARED__*` row. One
+    /// such request against the bootstrap token disables the environment path
+    /// for it forever — the lockout class this whole change exists to prevent.
+    #[tokio::test]
+    async fn a_value_less_patch_does_not_create_a_blank_row() {
+        use crate::test_support::{admin_msg, output_http_status};
+
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        crate::blocks::admin::migrations::apply(&ctx)
+            .await
+            .expect("apply admin migrations");
+
+        let key = crate::blocks::auth::config::BOOTSTRAP_ADMIN_TOKEN_KEY;
+        let put = crate::blocks::admin::test_support::routed(admin_msg(
+            "update",
+            &format!("/b/admin/api/settings/{key}"),
+        ));
+        let body = serde_json::to_vec(&serde_json::json!({ "sensitive": true }))
+            .expect("serialize request body");
+        let status =
+            output_http_status(handle_set(&ctx, &put, InputStream::from_bytes(body)).await).await;
+
+        assert!(
+            variables::get_by_key(&ctx, key)
+                .await
+                .expect("read back")
+                .is_none(),
+            "a PATCH with no value must not create a row the boot seeder can never fill",
+        );
+        assert_eq!(status, 400);
+    }
+
+    /// `POST` must not create a blank row for a key something masks either.
+    ///
+    /// The same row by the other route, and this one predates the change:
+    /// `ops::create_variable` has never had an empty-value guard, so
+    /// `POST {"key": "...BOOTSTRAP_ADMIN_TOKEN", "value": ""}` produced exactly
+    /// the permanent blank row above. Closed here because the guard belongs to
+    /// the write, not to one surface's request shape.
+    #[tokio::test]
+    async fn creating_a_masked_key_with_an_empty_value_is_refused() {
+        use crate::test_support::{admin_msg, output_http_status};
+
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        crate::blocks::admin::migrations::apply(&ctx)
+            .await
+            .expect("apply admin migrations");
+
+        let key = crate::blocks::auth::config::BOOTSTRAP_ADMIN_TOKEN_KEY;
+        let post = crate::blocks::admin::test_support::routed(admin_msg(
+            "create",
+            "/b/admin/api/settings",
+        ));
+        let body = serde_json::to_vec(&serde_json::json!({ "key": key, "value": "" }))
+            .expect("serialize request body");
+        let status =
+            output_http_status(handle_create(&ctx, &post, InputStream::from_bytes(body)).await)
+                .await;
+
+        assert!(
+            variables::get_by_key(&ctx, key)
+                .await
+                .expect("read back")
+                .is_none(),
+            "a create with an empty value must not store a masked key as blank",
+        );
+        assert_eq!(status, 400);
+
+        // A plain variable may still be created empty — the guard is about what
+        // is masked, not about emptiness.
+        let post = crate::blocks::admin::test_support::routed(admin_msg(
+            "create",
+            "/b/admin/api/settings",
+        ));
+        let body = serde_json::to_vec(&serde_json::json!({
+            "key": "SITE_NOTES", "value": "", "sensitive": false
+        }))
+        .expect("serialize request body");
+        assert_eq!(
+            output_http_status(handle_create(&ctx, &post, InputStream::from_bytes(body)).await)
+                .await,
+            200,
+        );
+    }
+
+    /// ...and it may be created empty while ASKING to be masked.
+    ///
+    /// This is the fixture that pins the guard to the KEY rather than to the
+    /// `sensitive` argument. The Add Variable modal renders its Sensitive box
+    /// `checked` by default (`pages/variables.rs`, and
+    /// `create_modal_posts_the_flag_explicitly_and_is_checked_by_default`
+    /// asserts it), so every empty variable an operator creates through the UI
+    /// arrives here asking to be masked. Gating the refusal on the argument
+    /// would 400 all of them — and the whole suite would still pass without
+    /// this case, since the allowed case above says `"sensitive": false`.
+    ///
+    /// Safe to allow because what makes a blank row a TRAP is the boot seeder
+    /// owning the key and `delete_variable` protecting it, and both follow from
+    /// the key's declaration or spelling. This row is neither: it is deletable,
+    /// and nothing will ever try to seed it.
+    #[tokio::test]
+    async fn creating_an_empty_ad_hoc_variable_marked_sensitive_is_allowed() {
+        use crate::test_support::{admin_msg, output_http_status};
+
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        crate::blocks::admin::migrations::apply(&ctx)
+            .await
+            .expect("apply admin migrations");
+
+        let post = crate::blocks::admin::test_support::routed(admin_msg(
+            "create",
+            "/b/admin/api/settings",
+        ));
+        let body = serde_json::to_vec(&serde_json::json!({
+            "key": "SITE_NOTES", "value": "", "sensitive": true
+        }))
+        .expect("serialize request body");
+        assert_eq!(
+            output_http_status(handle_create(&ctx, &post, InputStream::from_bytes(body)).await)
+                .await,
+            200,
+            "the Add Variable modal's default flow must not be refused",
+        );
+        assert!(variables::get_by_key(&ctx, "SITE_NOTES")
+            .await
+            .expect("read back")
+            .is_some());
+    }
+
+    /// Making both fields optional must not make an empty body a way to
+    /// conjure a blank row: `update_variable` upserts, so `PATCH {}` on an
+    /// unstored key would create one.
+    #[tokio::test]
+    async fn patching_with_no_fields_at_all_is_refused() {
+        use crate::test_support::{admin_msg, output_http_status};
+
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        crate::blocks::admin::migrations::apply(&ctx)
+            .await
+            .expect("apply admin migrations");
+
+        let put = crate::blocks::admin::test_support::routed(admin_msg(
+            "update",
+            "/b/admin/api/settings/NOT_STORED_YET",
+        ));
+        let status = output_http_status(
+            handle_set(&ctx, &put, InputStream::from_bytes(b"{}".to_vec())).await,
+        )
+        .await;
+        assert_eq!(status, 400);
+        assert!(
+            variables::get_by_key(&ctx, "NOT_STORED_YET")
+                .await
+                .expect("read back")
+                .is_none(),
+            "a field-less PATCH must not create a row",
+        );
+    }
+
+    /// The refusal is scoped to keys whose value the reader masks. A variable
+    /// that is not sensitive may hold the literal string — it is only a mask
+    /// where something masked it.
+    #[tokio::test]
+    async fn a_non_sensitive_variable_may_hold_the_mask_string() {
+        use crate::test_support::{admin_msg, output_http_status};
+
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        crate::blocks::admin::migrations::apply(&ctx)
+            .await
+            .expect("apply admin migrations");
+        seed_var(&ctx, "PASSWORD_PLACEHOLDER_TEXT", "type here", false).await;
+
+        let put = crate::blocks::admin::test_support::routed(admin_msg(
+            "update",
+            "/b/admin/api/settings/PASSWORD_PLACEHOLDER_TEXT",
+        ));
+        let body = serde_json::to_vec(&serde_json::json!({ "value": MASKED_VALUE }))
+            .expect("serialize request body");
+        assert_eq!(
+            output_http_status(handle_set(&ctx, &put, InputStream::from_bytes(body)).await).await,
+            200,
+        );
+        assert_eq!(
+            variables::get_by_key(&ctx, "PASSWORD_PLACEHOLDER_TEXT")
+                .await
+                .expect("read the row back")
+                .expect("the row is still there")
+                .value,
+            MASKED_VALUE,
+        );
+    }
+
     /// Read one variable row's `value` column.
     async fn stored_value(ctx: &dyn Context, key: &str) -> Option<String> {
-        db::list_all(
-            ctx,
-            VARIABLES_TABLE,
-            vec![Filter {
-                field: "key".into(),
-                operator: FilterOp::Equal,
-                value: serde_json::Value::String(key.to_string()),
-            }],
-        )
-        .await
-        .expect("list variables")
-        .first()
-        .map(|r| r.str_field("value").to_string())
+        variables::get_by_key(ctx, key)
+            .await
+            .expect("get variable")
+            .map(|row| row.value)
     }
 
     /// Releases before the pixel-art mark seeded `LOGO_URL` with the built-in
@@ -919,7 +1596,9 @@ mod tests {
     /// must clear it back to blank so the app-name fallback takes over.
     #[tokio::test]
     async fn seed_defaults_clears_the_removed_builtin_wordmark_url() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         crate::blocks::admin::migrations::apply(&ctx)
             .await
             .expect("apply admin migrations");
@@ -930,7 +1609,7 @@ mod tests {
             &ctx,
             crate::config_vars::LOGO_URL_KEY,
             "/b/static/impresspress-logo-long-1f4c8ab2.png",
-            0,
+            false,
         )
         .await;
 
@@ -957,7 +1636,9 @@ mod tests {
     /// repaired.
     #[tokio::test]
     async fn stale_wordmark_is_repaired_through_a_prior_releases_stamped_hash() {
-        let mut ctx = TestContext::new().await;
+        let mut ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         crate::blocks::admin::migrations::apply(&ctx)
             .await
             .expect("apply admin migrations");
@@ -985,7 +1666,7 @@ mod tests {
             &ctx,
             crate::config_vars::LOGO_URL_KEY,
             "/b/static/impresspress-logo-long-1f4c8ab2.png",
-            0,
+            false,
         )
         .await;
 
@@ -1004,7 +1685,9 @@ mod tests {
     /// operator's white-label logo is their data and must survive untouched.
     #[tokio::test]
     async fn seed_defaults_keeps_an_operator_configured_logo_url() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         crate::blocks::admin::migrations::apply(&ctx)
             .await
             .expect("apply admin migrations");
@@ -1013,7 +1696,7 @@ mod tests {
             &ctx,
             crate::config_vars::LOGO_URL_KEY,
             "https://acme.example/wordmark.png",
-            0,
+            false,
         )
         .await;
 
@@ -1037,7 +1720,9 @@ mod tests {
     /// than blank.
     #[tokio::test]
     async fn seed_defaults_repairs_stale_builtin_logo_and_favicon_urls() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         crate::blocks::admin::migrations::apply(&ctx)
             .await
             .expect("apply admin migrations");
@@ -1046,32 +1731,28 @@ mod tests {
         // the right route, a hash this build no longer serves.
         seed_var(
             &ctx,
-            "WAFER_RUN_SHARED__LOGO_ICON_URL",
+            LOGO_ICON_URL_KEY,
             "/b/static/impresspress-logo-5e884a3a.png",
-            0,
+            false,
         )
         .await;
         seed_var(
             &ctx,
-            "WAFER_RUN_SHARED__FAVICON_URL",
+            FAVICON_URL_KEY,
             "/b/static/favicon-2845a6ac.ico",
-            0,
+            false,
         )
         .await;
 
         seed_defaults(&ctx).await;
 
         assert_eq!(
-            stored_value(&ctx, "WAFER_RUN_SHARED__LOGO_ICON_URL")
-                .await
-                .as_deref(),
+            stored_value(&ctx, LOGO_ICON_URL_KEY).await.as_deref(),
             Some(crate::ui::assets::logo_icon_url().as_str()),
             "a stale built-in logo URL must be repaired to the current asset"
         );
         assert_eq!(
-            stored_value(&ctx, "WAFER_RUN_SHARED__FAVICON_URL")
-                .await
-                .as_deref(),
+            stored_value(&ctx, FAVICON_URL_KEY).await.as_deref(),
             Some(crate::ui::assets::favicon_url().as_str()),
             "a stale built-in favicon URL must be repaired to the current asset"
         );
@@ -1081,20 +1762,20 @@ mod tests {
     /// idempotent, and must not churn a write on every boot.
     #[tokio::test]
     async fn seed_defaults_leaves_a_current_builtin_logo_url_untouched() {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         crate::blocks::admin::migrations::apply(&ctx)
             .await
             .expect("apply admin migrations");
 
         let current = crate::ui::assets::logo_icon_url();
-        seed_var(&ctx, "WAFER_RUN_SHARED__LOGO_ICON_URL", &current, 0).await;
+        seed_var(&ctx, LOGO_ICON_URL_KEY, &current, false).await;
 
         seed_defaults(&ctx).await;
 
         assert_eq!(
-            stored_value(&ctx, "WAFER_RUN_SHARED__LOGO_ICON_URL")
-                .await
-                .as_deref(),
+            stored_value(&ctx, LOGO_ICON_URL_KEY).await.as_deref(),
             Some(current.as_str()),
         );
     }
@@ -1102,46 +1783,62 @@ mod tests {
 
 #[cfg(test)]
 mod create_tests {
-    use wafer_block::db::{Filter, FilterOp};
-    use wafer_core::clients::database as db;
     use wafer_run::InputStream;
 
     use super::*;
     use crate::test_support::{admin_msg, collect_or_panic, TestContext};
 
     async fn admin_ctx() -> TestContext {
-        let ctx = TestContext::new().await;
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         crate::blocks::admin::migrations::apply(&ctx)
             .await
             .expect("apply admin migrations");
         ctx
     }
 
-    async fn sensitive_flag(ctx: &dyn Context, key: &str) -> i64 {
-        let rows = db::list_all(
-            ctx,
-            VARIABLES_TABLE,
-            vec![Filter {
-                field: "key".to_string(),
-                operator: FilterOp::Equal,
-                value: serde_json::json!(key),
-            }],
-        )
-        .await
-        .expect("list variables");
-        rows.first()
+    async fn sensitive_flag(ctx: &dyn Context, key: &str) -> bool {
+        variables::get_by_key(ctx, key)
+            .await
+            .expect("get variable")
             .unwrap_or_else(|| panic!("{key} was not created"))
-            .i64_field("sensitive")
+            .sensitive
     }
 
     async fn create(ctx: &dyn Context, body: serde_json::Value) {
         let out = handle_create(
             ctx,
-            &admin_msg("create", "/admin/settings"),
+            &admin_msg("create", "/b/admin/api/settings"),
             InputStream::from_bytes(serde_json::to_vec(&body).unwrap()),
         )
         .await;
         collect_or_panic(out).await;
+    }
+
+    /// `POST /b/admin/api/settings` with a key that is already stored answers
+    /// **409**, not the 500 the 2026-09-10 live-server audit found. The
+    /// classification lives in `ops::create_variable`; this pins that the JSON
+    /// surface publishes it rather than reshaping it on the way out.
+    #[tokio::test]
+    async fn creating_an_existing_key_answers_conflict() {
+        let ctx = admin_ctx().await;
+        create(
+            &ctx,
+            serde_json::json!({"key": "SITE_MOTTO", "value": "one"}),
+        )
+        .await;
+
+        let out = handle_create(
+            &ctx,
+            &admin_msg("create", "/b/admin/api/settings"),
+            InputStream::from_bytes(
+                serde_json::to_vec(&serde_json::json!({"key": "SITE_MOTTO", "value": "two"}))
+                    .unwrap(),
+            ),
+        )
+        .await;
+        assert_eq!(crate::test_support::output_http_status(out).await, 409);
     }
 
     /// An ad hoc variable created without saying whether it is sensitive is
@@ -1157,7 +1854,7 @@ mod create_tests {
             serde_json::json!({"key": "SITE_MOTTO", "value": "move fast"}),
         )
         .await;
-        assert_eq!(sensitive_flag(&ctx, "SITE_MOTTO").await, 1);
+        assert!(sensitive_flag(&ctx, "SITE_MOTTO").await);
     }
 
     #[tokio::test]
@@ -1168,6 +1865,120 @@ mod create_tests {
             serde_json::json!({"key": "SITE_MOTTO", "value": "move fast", "sensitive": false}),
         )
         .await;
-        assert_eq!(sensitive_flag(&ctx, "SITE_MOTTO").await, 0);
+        assert!(!sensitive_flag(&ctx, "SITE_MOTTO").await);
+    }
+}
+
+#[cfg(test)]
+mod wrap_denial_tests {
+    use super::*;
+    use crate::test_support::{admin_msg, output_http_status, TestContext};
+
+    /// A block deployed without the grant its handler needs answers **403**,
+    /// not `500 Internal server error (ref: …)`.
+    ///
+    /// The three-arm `Ok(Some) / Ok(None) / Err` shape these handlers used
+    /// tested only for the missing row; a WRAP refusal fell through the `Err`
+    /// arm into `err_internal`, so a missing `ResourceGrant` in production was
+    /// indistinguishable from a corrupt row. `crud::db_error` is the arm that
+    /// was missing.
+    async fn denied_ctx() -> TestContext {
+        TestContext::with_admin().await.running_as("test/ungranted")
+    }
+
+    #[tokio::test]
+    async fn a_denied_settings_read_is_403() {
+        let ctx = denied_ctx().await;
+        let mut msg = admin_msg("retrieve", "/b/admin/api/settings/SOME_KEY");
+        msg.set_meta("req.param.key", "SOME_KEY");
+        assert_eq!(output_http_status(handle_get(&ctx, &msg).await).await, 403);
+    }
+
+    #[tokio::test]
+    async fn a_denied_settings_delete_is_403() {
+        let ctx = denied_ctx().await;
+        let mut msg = admin_msg("delete", "/b/admin/api/settings/SOME_KEY");
+        msg.set_meta("req.param.key", "SOME_KEY");
+        assert_eq!(
+            output_http_status(handle_delete(&ctx, &msg).await).await,
+            403
+        );
+    }
+}
+
+/// CFG-01 reproduction. Kept in its own module so the fixture it needs — a
+/// config service seeded from the table the way boot seeds it — cannot leak
+/// into the tests above, which deliberately seed their own values.
+#[cfg(test)]
+mod config_store_reproduction {
+    use super::*;
+    use crate::test_support::{unique_config_value, TestContext};
+
+    /// A setting changed through the documented admin API must reach the
+    /// config readers blocks actually use.
+    ///
+    /// `PATCH /b/admin/api/settings/{key}` persists through
+    /// `ops::update_variable` → `variables::upsert_by_key`, which writes the
+    /// `variables` table and stops there. Every block instead reads through
+    /// `wafer_core::clients::config::get_default`, served by an
+    /// `EnvConfigService` that `impresspress_server::build_native_runtime` seeds from that table exactly
+    /// once at boot. Nothing rejoins the two surfaces, so an admin who
+    /// changes the site's primary colour through the documented endpoint
+    /// keeps seeing the old one until the process restarts.
+    ///
+    /// Confirmed live on 2026-09-10: restarting a native server against the
+    /// same database made the page render the new colour.
+    #[tokio::test]
+    async fn patch_settings_reaches_config_readers_without_a_restart() {
+        const KEY: &str = crate::config_vars::PRIMARY_COLOR_KEY;
+
+        let mut ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        crate::blocks::admin::migrations::apply(&ctx)
+            .await
+            .expect("apply admin migrations");
+        // Boot once, the way the native server does, before any admin write.
+        ctx.boot_config_service().await;
+
+        let saved = unique_config_value();
+        let mut msg = crate::test_support::admin_msg("update", "/b/admin/api/settings");
+        msg.set_meta("req.param.key", KEY);
+        let body = serde_json::to_vec(&serde_json::json!({ "value": saved }))
+            .expect("serialize request body");
+        let status = crate::test_support::output_status(
+            handle_set(&ctx, &msg, InputStream::from_bytes(body)).await,
+        )
+        .await;
+        assert_eq!(
+            status, 200,
+            "the documented admin endpoint accepted the change"
+        );
+
+        // The durable half works: the row is there.
+        let row = variables::get_by_key(&ctx, KEY)
+            .await
+            .expect("read the variable back")
+            .expect("the admin write created a row");
+        assert_eq!(row.value, saved);
+
+        // The half that decides what a visitor sees. `ui/mod.rs:73` reads
+        // this key through the async client.
+        let seen = wafer_core::clients::config::get_default(&ctx, KEY, "unset")
+            .await
+            .expect("config read");
+        assert_eq!(
+            seen, saved,
+            "a saved admin setting must be visible to async config readers without a restart"
+        );
+
+        // Read surface 2 — the synchronous `ctx.config_get` snapshot, which
+        // `blocks/auth_ui/pages/mod.rs:62` uses for this exact key — is
+        // deliberately NOT asserted here. The config-store decision does not
+        // rejoin that snapshot; its step 3 moves those eleven branding reads
+        // onto the async client instead. Asserting `config_get` would pin a
+        // surface the plan abandons, and would fail forever however correct
+        // the fix. The requirement it stood for — the login page showing the
+        // saved colour — belongs to that migration, and is tracked with it.
     }
 }

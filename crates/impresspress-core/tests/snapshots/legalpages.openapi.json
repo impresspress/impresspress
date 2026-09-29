@@ -1,0 +1,57 @@
+{
+  "/b/legalpages/api/documents/{id}": {
+    "patch": {
+      "parameters": [
+        {
+          "in": "path",
+          "name": "id",
+          "required": true,
+          "schema": {
+            "description": "Document identifier, as returned by the list endpoint.",
+            "type": "string"
+          }
+        }
+      ],
+      "requestBody": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "additionalProperties": false,
+              "description": "Body of `PATCH /b/legalpages/api/documents/{id}`: a document's text.\n\n`title` and `content` are the only columns this endpoint can reach, and\nany other field is refused by name. A document's `status` and `version`\nchange only through a publish.",
+              "properties": {
+                "content": {
+                  "description": "New Markdown body. Omitted leaves the stored body.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                },
+                "title": {
+                  "description": "New document title. Omitted leaves the stored title.",
+                  "type": [
+                    "string",
+                    "null"
+                  ]
+                }
+              },
+              "title": "UpdateDocumentRequest",
+              "type": "object"
+            }
+          }
+        },
+        "required": true
+      },
+      "responses": {
+        "200": {
+          "description": "Successful response"
+        }
+      },
+      "security": [
+        {
+          "bearerAuth": []
+        }
+      ],
+      "summary": "Update document"
+    }
+  }
+}

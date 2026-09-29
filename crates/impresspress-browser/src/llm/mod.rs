@@ -1,11 +1,11 @@
 //! Browser LLM — `LlmService` impl driving WebLLM's MLCEngine via a
-//! SW↔page postMessage bridge. See `docs/superpowers/specs/2026-04-20-
-//! llm-service-extraction-design.md`.
+//! SW↔page postMessage bridge. `catalog` carries the model list, `bridge` is
+//! the Rust side of the postMessage glue, and `service` wires them together
+//! behind `wafer_core::interfaces::llm::service::LlmService`.
 
 #[cfg(target_arch = "wasm32")]
 pub mod bridge;
 pub mod catalog;
-pub mod openai_codec;
 #[cfg(target_arch = "wasm32")]
 pub mod service;
 

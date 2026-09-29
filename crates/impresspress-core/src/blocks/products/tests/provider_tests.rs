@@ -8,7 +8,7 @@ use wafer_core::interfaces::network::service::{NetworkError, NetworkService, Req
 use wafer_run::{Block, ErrorCode};
 
 use super::harness::*;
-use crate::blocks::products::repo;
+use crate::{blocks::products::repo, util::RecordExt};
 
 #[derive(Clone)]
 struct SequencedStripeNetwork {
@@ -226,7 +226,7 @@ fn admin_refund_msg(
     body: serde_json::Value,
 ) -> (wafer_run::Message, wafer_run::InputStream) {
     let (mut msg, input) = create_msg(
-        &format!("/admin/b/products/purchases/{purchase_id}/refund"),
+        &format!("/b/products/api/admin/purchases/{purchase_id}/refund"),
         "admin_1",
         body,
     );
@@ -237,8 +237,8 @@ fn admin_refund_msg(
 #[tokio::test]
 async fn admin_stripe_status_distinguishes_configuration_modes_without_secrets() {
     let ctx = ctx().await;
-    let (msg, input) = admin_get_msg("/admin/b/products/stripe/status");
-    let unconfigured = output_to_json(dispatch_admin(&ctx, msg, input).await).await;
+    let (msg, input) = admin_get_msg("/b/products/api/admin/stripe/status");
+    let unconfigured = output_to_json(dispatch(&ctx, msg, input).await).await;
     assert_eq!(unconfigured["state"], "not_configured");
     assert_eq!(unconfigured["configured"], false);
     assert!(unconfigured.get("secret_key").is_none());
@@ -262,8 +262,8 @@ async fn admin_stripe_status_distinguishes_configuration_modes_without_secrets()
         &mut ctx,
         vec![express_account("acct_platform", true, true, true)],
     );
-    let (msg, input) = admin_get_msg("/admin/b/products/stripe/status");
-    let connected = output_to_json(dispatch_admin(&ctx, msg, input).await).await;
+    let (msg, input) = admin_get_msg("/b/products/api/admin/stripe/status");
+    let connected = output_to_json(dispatch(&ctx, msg, input).await).await;
     assert_eq!(connected["state"], "connected_test");
     assert_eq!(connected["account_id"], "acct_platform");
     assert_eq!(connected["livemode"], false);
@@ -300,8 +300,8 @@ async fn admin_stripe_status_rejects_test_live_key_mismatch_before_network() {
         &mut ctx,
         vec![express_account("acct_unused", true, true, true)],
     );
-    let (msg, input) = admin_get_msg("/admin/b/products/stripe/status");
-    let body = output_to_json(dispatch_admin(&ctx, msg, input).await).await;
+    let (msg, input) = admin_get_msg("/b/products/api/admin/stripe/status");
+    let body = output_to_json(dispatch(&ctx, msg, input).await).await;
     assert_eq!(body["state"], "misconfigured");
     assert_eq!(body["livemode"], true);
     assert!(body["error"].as_str().unwrap().contains("different modes"));
@@ -326,8 +326,8 @@ async fn admin_stripe_status_safely_reports_malformed_response_and_timeout() {
         ])
         .await;
         let requests = register_broken_response(&mut ctx, response);
-        let (msg, input) = admin_get_msg("/admin/b/products/stripe/status");
-        let body = output_to_json(dispatch_admin(&ctx, msg, input).await).await;
+        let (msg, input) = admin_get_msg("/b/products/api/admin/stripe/status");
+        let body = output_to_json(dispatch(&ctx, msg, input).await).await;
         assert_eq!(body["state"], "misconfigured");
         assert!(body["error"].as_str().unwrap().contains(expected));
         assert!(!body.to_string().contains("private-invalid-json"));
@@ -360,14 +360,14 @@ async fn seller_onboarding_creates_one_owned_express_account_and_single_use_link
         ],
     );
     let (msg, input) = create_msg(
-        "/b/products/seller/onboarding",
+        "/b/products/api/seller/onboarding",
         "seller_new",
         serde_json::json!({
             "return_url": "https://shop.example/seller/stripe/return",
             "refresh_url": "https://shop.example/seller/stripe/refresh"
         }),
     );
-    let body = output_to_json(dispatch_user(&ctx, msg, input).await).await;
+    let body = output_to_json(dispatch(&ctx, msg, input).await).await;
     assert_eq!(body["url"], "https://connect.stripe.com/setup/test-link");
     assert_eq!(body["expires_at"], 1_900_000_000_i64);
     assert_eq!(body["account"]["user_id"], "seller_new");
@@ -422,20 +422,14 @@ async fn seller_onboarding_validates_origin_and_feature_gate_before_provider_cal
         vec![express_account("acct_unused", false, false, false)],
     );
     let (msg, input) = create_msg(
-        "/b/products/seller/onboarding",
+        "/b/products/api/seller/onboarding",
         "seller_bad_origin",
         serde_json::json!({
             "return_url": "https://attacker.example/complete",
             "refresh_url": "https://shop.example/refresh"
         }),
     );
-    assert!(
-        output_is_error(
-            dispatch_user(&ctx, msg, input).await,
-            ErrorCode::InvalidArgument
-        )
-        .await
-    );
+    assert!(output_is_error(dispatch(&ctx, msg, input).await, ErrorCode::InvalidArgument).await);
     assert!(requests.lock().unwrap().is_empty());
     assert!(
         repo::seller_accounts::get_for_user(&ctx, "seller_bad_origin")
@@ -445,10 +439,10 @@ async fn seller_onboarding_validates_origin_and_feature_gate_before_provider_cal
     );
 
     let ctx = ctx_with(&[("WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS", "false")]).await;
-    let (msg, input) = get_msg("/b/products/seller/account", "seller_disabled");
+    let (msg, input) = get_msg("/b/products/api/seller/account", "seller_disabled");
     assert!(
         output_is_error(
-            dispatch_user(&ctx, msg, input).await,
+            dispatch(&ctx, msg, input).await,
             ErrorCode::PermissionDenied
         )
         .await
@@ -493,11 +487,11 @@ async fn seller_dashboard_refreshes_only_the_callers_account_and_returns_express
         ],
     );
     let (msg, input) = create_msg(
-        "/b/products/seller/dashboard",
+        "/b/products/api/seller/dashboard",
         "seller_dashboard",
         serde_json::json!({}),
     );
-    let body = output_to_json(dispatch_user(&ctx, msg, input).await).await;
+    let body = output_to_json(dispatch(&ctx, msg, input).await).await;
     assert_eq!(
         body["url"],
         "https://connect.stripe.com/express/dashboard-link"
@@ -550,7 +544,7 @@ async fn buyer_billing_portal_uses_owned_order_customer_and_connected_account() 
             "order_id": "purchase_portal"
         }),
     );
-    let body = output_to_json(dispatch_user(&ctx, msg, input).await).await;
+    let body = output_to_json(dispatch(&ctx, msg, input).await).await;
     assert_eq!(
         body["url"],
         "https://billing.stripe.com/p/session/test_portal"
@@ -605,7 +599,7 @@ async fn buyer_billing_portal_rejects_cross_user_order_before_provider_call() {
     );
     assert!(
         output_is_error(
-            dispatch_user(&ctx, msg, input).await,
+            dispatch(&ctx, msg, input).await,
             ErrorCode::PermissionDenied
         )
         .await
@@ -652,13 +646,7 @@ async fn buyer_billing_portal_requires_order_when_customer_contexts_differ() {
         "buyer_multi",
         serde_json::json!({"return_url": "https://shop.example/account"}),
     );
-    assert!(
-        output_is_error(
-            dispatch_user(&ctx, msg, input).await,
-            ErrorCode::InvalidArgument
-        )
-        .await
-    );
+    assert!(output_is_error(dispatch(&ctx, msg, input).await, ErrorCode::InvalidArgument).await);
     assert!(requests.lock().unwrap().is_empty());
 }
 
@@ -687,13 +675,7 @@ async fn buyer_billing_portal_rejects_mode_mismatch_and_untrusted_return_origin(
             "order_id": "purchase_live"
         }),
     );
-    assert!(
-        output_is_error(
-            dispatch_user(&ctx, msg, input).await,
-            ErrorCode::InvalidArgument
-        )
-        .await
-    );
+    assert!(output_is_error(dispatch(&ctx, msg, input).await, ErrorCode::InvalidArgument).await);
 
     let (msg, input) = create_msg(
         "/b/products/billing-portal",
@@ -703,13 +685,7 @@ async fn buyer_billing_portal_rejects_mode_mismatch_and_untrusted_return_origin(
             "order_id": "purchase_live"
         }),
     );
-    assert!(
-        output_is_error(
-            dispatch_user(&ctx, msg, input).await,
-            ErrorCode::InvalidArgument
-        )
-        .await
-    );
+    assert!(output_is_error(dispatch(&ctx, msg, input).await, ErrorCode::InvalidArgument).await);
     assert!(requests.lock().unwrap().is_empty());
 }
 
@@ -748,7 +724,7 @@ async fn connected_account_partial_refund_is_provider_first_exact_and_idempotent
         "idempotency_key": "partial_refund_1"
     });
     let (msg, input) = admin_refund_msg("purchase_partial", request_body.clone());
-    let body = output_to_json(dispatch_admin(&ctx, msg, input).await).await;
+    let body = output_to_json(dispatch(&ctx, msg, input).await).await;
     assert_eq!(body["status"], "succeeded");
     assert_eq!(body["provider_refund_id"], "re_partial");
     assert_eq!(body["amount_minor"], 2500);
@@ -791,7 +767,7 @@ async fn connected_account_partial_refund_is_provider_first_exact_and_idempotent
     }
 
     let (msg, input) = admin_refund_msg("purchase_partial", request_body);
-    let replay = output_to_json(dispatch_admin(&ctx, msg, input).await).await;
+    let replay = output_to_json(dispatch(&ctx, msg, input).await).await;
     assert_eq!(replay["provider_refund_id"], "re_partial");
     assert_eq!(
         requests.lock().unwrap().len(),
@@ -828,7 +804,7 @@ async fn full_refund_after_partial_only_refunds_the_exact_remaining_amount() {
         })],
     );
     let (msg, input) = admin_refund_msg("purchase_remaining", serde_json::json!({}));
-    let body = output_to_json(dispatch_admin(&ctx, msg, input).await).await;
+    let body = output_to_json(dispatch(&ctx, msg, input).await).await;
     assert_eq!(body["status"], "succeeded");
     assert_eq!(body["amount_minor"], 7500);
     assert_eq!(body["refunded_total_minor"], 10_000);
@@ -873,7 +849,7 @@ async fn pending_refund_preserves_purchase_and_blocks_a_different_operation() {
         "purchase_pending_refund",
         serde_json::json!({"amount_minor": 1000, "idempotency_key": "operation_a"}),
     );
-    let body = output_to_json(dispatch_admin(&ctx, msg, input).await).await;
+    let body = output_to_json(dispatch(&ctx, msg, input).await).await;
     assert_eq!(body["status"], "pending");
     assert_eq!(body["refunded_total_minor"], 0);
     let purchase = repo::purchases::get(&ctx, "purchase_pending_refund")
@@ -886,13 +862,7 @@ async fn pending_refund_preserves_purchase_and_blocks_a_different_operation() {
         "purchase_pending_refund",
         serde_json::json!({"amount_minor": 500, "idempotency_key": "operation_b"}),
     );
-    assert!(
-        output_is_error(
-            dispatch_admin(&ctx, msg, input).await,
-            ErrorCode::InvalidArgument
-        )
-        .await
-    );
+    assert!(output_is_error(dispatch(&ctx, msg, input).await, ErrorCode::InvalidArgument).await);
     assert_eq!(requests.lock().unwrap().len(), 1);
 }
 
@@ -936,11 +906,11 @@ async fn provider_reconciliation_recovers_pending_refund_with_one_atomic_lease()
         "purchase_reconcile_refund",
         serde_json::json!({"amount_minor": 1250, "idempotency_key": "recovery"}),
     );
-    let pending = output_to_json(dispatch_admin(&ctx, msg, input).await).await;
+    let pending = output_to_json(dispatch(&ctx, msg, input).await).await;
     assert_eq!(pending["status"], "pending");
 
-    let (list, input) = admin_get_msg("/admin/b/products/provider-operations");
-    let listed = output_to_json(dispatch_admin(&ctx, list, input).await).await;
+    let (list, input) = admin_get_msg("/b/products/api/admin/provider-operations");
+    let listed = output_to_json(dispatch(&ctx, list, input).await).await;
     assert_eq!(listed["total_count"], 1);
     assert_eq!(listed["records"][0]["operation_type"], "refund.reconcile");
     assert_eq!(listed["records"][0]["status"], "pending");
@@ -958,10 +928,11 @@ async fn provider_reconciliation_recovers_pending_refund_with_one_atomic_lease()
     .await
     .unwrap();
     let first_claim = repo::provider_operations::claim_due(&ctx, 1).await.unwrap();
-    assert_eq!(first_claim.len(), 1);
+    assert_eq!(first_claim.claims.len(), 1);
     assert!(repo::provider_operations::claim_due(&ctx, 1)
         .await
         .unwrap()
+        .claims
         .is_empty());
     wafer_core::clients::database::update(
         &ctx,
@@ -978,11 +949,11 @@ async fn provider_reconciliation_recovers_pending_refund_with_one_atomic_lease()
     .unwrap();
 
     let (mut reconcile, input) = admin_create_msg(
-        "/admin/b/products/provider-operations/reconcile",
+        "/b/products/api/admin/provider-operations/reconcile",
         serde_json::json!({}),
     );
     reconcile.set_meta("req.query.limit", "1");
-    let result = output_to_json(dispatch_admin(&ctx, reconcile, input).await).await;
+    let result = output_to_json(dispatch(&ctx, reconcile, input).await).await;
     assert_eq!(result["claimed"], 1);
     assert_eq!(result["succeeded"], 1);
     assert_eq!(result["retry_scheduled"], 0);
@@ -1033,13 +1004,7 @@ async fn stripe_rejection_and_mode_mismatch_never_mark_purchase_refunded() {
         "purchase_rejected_refund",
         serde_json::json!({"idempotency_key": "rejected"}),
     );
-    assert!(
-        output_is_error(
-            dispatch_admin(&ctx, msg, input).await,
-            ErrorCode::InvalidArgument
-        )
-        .await
-    );
+    assert!(output_is_error(dispatch(&ctx, msg, input).await, ErrorCode::InvalidArgument).await);
     let purchase = repo::purchases::get(&ctx, "purchase_rejected_refund")
         .await
         .unwrap();
@@ -1060,13 +1025,7 @@ async fn stripe_rejection_and_mode_mismatch_never_mark_purchase_refunded() {
         "purchase_live_refund",
         serde_json::json!({"idempotency_key": "wrong_mode"}),
     );
-    assert!(
-        output_is_error(
-            dispatch_admin(&ctx, msg, input).await,
-            ErrorCode::InvalidArgument
-        )
-        .await
-    );
+    assert!(output_is_error(dispatch(&ctx, msg, input).await, ErrorCode::InvalidArgument).await);
     assert_eq!(
         requests.lock().unwrap().len(),
         1,
@@ -1125,7 +1084,7 @@ async fn ambiguous_stripe_refund_failure_stays_retryable_with_the_same_key() {
             serde_json::json!({"amount_minor": 1000, "idempotency_key": "ambiguous"}),
         );
         assert!(
-            output_is_error(dispatch_admin(&ctx, msg, input).await, ErrorCode::Internal).await,
+            output_is_error(dispatch(&ctx, msg, input).await, ErrorCode::Internal).await,
             "HTTP {status} must surface as a retryable internal error"
         );
 
@@ -1156,11 +1115,11 @@ async fn ambiguous_stripe_refund_failure_stays_retryable_with_the_same_key() {
         );
 
         let (mut reconcile, input) = admin_create_msg(
-            "/admin/b/products/provider-operations/reconcile",
+            "/b/products/api/admin/provider-operations/reconcile",
             serde_json::json!({}),
         );
         reconcile.set_meta("req.query.limit", "1");
-        let result = output_to_json(dispatch_admin(&ctx, reconcile, input).await).await;
+        let result = output_to_json(dispatch(&ctx, reconcile, input).await).await;
         assert_eq!(result["claimed"], 1);
         assert_eq!(result["succeeded"], 1);
 
@@ -1218,13 +1177,7 @@ async fn card_level_stripe_rejection_fails_the_refund_deterministically() {
         "purchase_declined_refund",
         serde_json::json!({"idempotency_key": "declined"}),
     );
-    assert!(
-        output_is_error(
-            dispatch_admin(&ctx, msg, input).await,
-            ErrorCode::InvalidArgument
-        )
-        .await
-    );
+    assert!(output_is_error(dispatch(&ctx, msg, input).await, ErrorCode::InvalidArgument).await);
     let ledger = repo::refunds::list_for_purchase(&ctx, "purchase_declined_refund")
         .await
         .unwrap();
@@ -1272,24 +1225,12 @@ async fn refund_validation_rejects_over_refund_and_unknown_fields_before_stripe(
         "purchase_validate_refund",
         serde_json::json!({"amount_minor": 501, "idempotency_key": "too_much"}),
     );
-    assert!(
-        output_is_error(
-            dispatch_admin(&ctx, msg, input).await,
-            ErrorCode::InvalidArgument
-        )
-        .await
-    );
+    assert!(output_is_error(dispatch(&ctx, msg, input).await, ErrorCode::InvalidArgument).await);
     let (msg, input) = admin_refund_msg(
         "purchase_validate_refund",
         serde_json::json!({"amount_minor": 100, "unexpected": true}),
     );
-    assert!(
-        output_is_error(
-            dispatch_admin(&ctx, msg, input).await,
-            ErrorCode::InvalidArgument
-        )
-        .await
-    );
+    assert!(output_is_error(dispatch(&ctx, msg, input).await, ErrorCode::InvalidArgument).await);
     assert!(requests.lock().unwrap().is_empty());
     assert!(
         repo::refunds::list_for_purchase(&ctx, "purchase_validate_refund")
@@ -1297,4 +1238,593 @@ async fn refund_validation_rejects_over_refund_and_unknown_fields_before_stripe(
             .unwrap()
             .is_empty()
     );
+}
+
+/// Re-read an operation row and hand back its `response_json` column as the
+/// value it encodes, whichever way the adapter decoded it.
+async fn operation_response_json(
+    ctx: &crate::test_support::TestContext,
+    id: &str,
+) -> serde_json::Value {
+    let operation = wafer_core::clients::database::get(ctx, repo::provider_operations::TABLE, id)
+        .await
+        .unwrap();
+    match operation.data.get("response_json") {
+        Some(serde_json::Value::String(raw)) => {
+            serde_json::from_str(raw).unwrap_or(serde_json::Value::Null)
+        }
+        Some(value) => value.clone(),
+        None => serde_json::Value::Null,
+    }
+}
+
+/// Put a settled operation back on the queue, the way a lost lease leaves it.
+async fn reset_operation_to_pending(ctx: &crate::test_support::TestContext, id: &str) {
+    wafer_core::clients::database::update(
+        ctx,
+        repo::provider_operations::TABLE,
+        id,
+        std::collections::HashMap::from([
+            ("status".to_string(), serde_json::json!("pending")),
+            ("processing_owner".to_string(), serde_json::json!("")),
+            ("processing_started_at".to_string(), serde_json::Value::Null),
+            ("next_attempt_at".to_string(), serde_json::Value::Null),
+            ("attempts".to_string(), serde_json::json!(0)),
+        ]),
+    )
+    .await
+    .unwrap();
+}
+
+/// `response_json` is this repo's own summary of a provider response — never
+/// a Stripe body; see the note on `provider_operations` in
+/// `impresspress_core::secret_tables` for why that distinction is load-
+/// bearing. It is a JSON-object column written as
+/// `serde_json::json!({..}).to_string()` and declared `TEXT NOT NULL DEFAULT
+/// '{}'`. Native SQLite and the browser re-parse a JSON-shaped TEXT column on
+/// read, so it arrives as a `Value::Object` — for which `str_field`, having no
+/// structured arm, answers `""`. Every reader that carries the summary from
+/// the refund ledger onto the provider-operation row therefore persisted an
+/// empty string, silently dropping the refund's provider outcome from a
+/// payments audit trail. Nothing reads it back, so nothing failed loudly.
+///
+/// Four call sites carry that summary from the refund ledger onto the
+/// provider-operation row. Three are exercised here, in the order a real
+/// refund meets them: the reconcile worker settling a pending refund
+/// (`stripe_provider::reconcile_refund_operation` → `mark_completed`), a
+/// second reconcile of an already-settled ledger row (its early return), and
+/// a retried delivery of the original refund request
+/// (`purchase::refund_purchase`'s `Succeeded` arm → `resolve_unleased`).
+///
+/// The fourth is `refund_purchase`'s `ProviderSucceeded` arm, which reads the
+/// same column through the same `resolve_unleased` and so shares the fix, but
+/// is reached only from a ledger state this test does not stage.
+#[tokio::test]
+async fn refund_reconciliation_keeps_the_provider_response_summary() {
+    let mut ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY",
+        "sk_test_refunds",
+    )])
+    .await;
+    seed_stripe_refund_order(
+        &ctx,
+        "purchase_audit_trail",
+        "completed",
+        5000,
+        0,
+        "",
+        false,
+    )
+    .await;
+    let requests = register_sequence(
+        &mut ctx,
+        vec![
+            serde_json::json!({
+                "id": "re_audit_trail",
+                "status": "pending",
+                "amount": 1250,
+                "payment_intent": "pi_purchase_audit_trail",
+                "livemode": false
+            }),
+            serde_json::json!({
+                "id": "re_audit_trail",
+                "status": "succeeded",
+                "amount": 1250,
+                "payment_intent": "pi_purchase_audit_trail",
+                "livemode": false
+            }),
+        ],
+    );
+
+    let (msg, input) = admin_refund_msg(
+        "purchase_audit_trail",
+        serde_json::json!({"amount_minor": 1250, "idempotency_key": "audit_trail"}),
+    );
+    let pending = output_to_json(dispatch(&ctx, msg, input).await).await;
+    assert_eq!(pending["status"], "pending");
+
+    let operation = wafer_core::clients::database::get_by_field(
+        &ctx,
+        repo::provider_operations::TABLE,
+        "aggregate_type",
+        serde_json::json!("refund"),
+    )
+    .await
+    .unwrap();
+
+    // 1. The reconcile worker settles the refund against Stripe and completes
+    //    the operation with the response it just recorded on the ledger.
+    reset_operation_to_pending(&ctx, &operation.id).await;
+    let (mut reconcile, input) = admin_create_msg(
+        "/b/products/api/admin/provider-operations/reconcile",
+        serde_json::json!({}),
+    );
+    reconcile.set_meta("req.query.limit", "1");
+    let reconciled = output_to_json(dispatch(&ctx, reconcile, input).await).await;
+    assert_eq!(reconciled["succeeded"], 1);
+    assert_eq!(
+        operation_response_json(&ctx, &operation.id).await,
+        serde_json::json!({
+            "id": "re_audit_trail",
+            "status": "succeeded",
+            "amount_minor": 1250,
+            "livemode": false,
+            "source": "provider_reconciliation"
+        }),
+        "the settled operation must keep the raw provider response"
+    );
+
+    // 2. A second reconcile of an already-settled ledger row takes the early
+    //    return and must republish the same payload, not blank it.
+    reset_operation_to_pending(&ctx, &operation.id).await;
+    let (mut reconcile, input) = admin_create_msg(
+        "/b/products/api/admin/provider-operations/reconcile",
+        serde_json::json!({}),
+    );
+    reconcile.set_meta("req.query.limit", "1");
+    let again = output_to_json(dispatch(&ctx, reconcile, input).await).await;
+    assert_eq!(again["succeeded"], 1);
+    assert_eq!(
+        operation_response_json(&ctx, &operation.id).await["id"],
+        "re_audit_trail",
+        "an already-settled refund must not lose its provider response"
+    );
+
+    // 3. A retried delivery of the original request resolves the operation
+    //    from the ledger row, and must carry the payload across too.
+    wafer_core::clients::database::update(
+        &ctx,
+        repo::provider_operations::TABLE,
+        &operation.id,
+        std::collections::HashMap::from([("response_json".to_string(), serde_json::json!("{}"))]),
+    )
+    .await
+    .unwrap();
+    let (msg, input) = admin_refund_msg(
+        "purchase_audit_trail",
+        serde_json::json!({"amount_minor": 1250, "idempotency_key": "audit_trail"}),
+    );
+    let retried = output_to_json(dispatch(&ctx, msg, input).await).await;
+    assert_eq!(retried["status"], "succeeded");
+    assert_eq!(
+        operation_response_json(&ctx, &operation.id).await["id"],
+        "re_audit_trail",
+        "a retried refund delivery must not blank the provider response"
+    );
+
+    // 4. The same retry against a ledger row Stripe has settled but this side
+    //    has not (`provider_succeeded`, what an interrupted reconcile leaves)
+    //    takes the other arm of `refund_purchase`, which carries the payload
+    //    across too.
+    let ledger = repo::refunds::get_by_idempotency_key(
+        &ctx,
+        "impresspress_refund_purchase_audit_trail_audit_trail",
+    )
+    .await
+    .unwrap()
+    .expect("the refund ledger row this test just drove to succeeded");
+    // No product path parks a row here for longer than one request —
+    // `refund_purchase` writes `provider_succeeded` and settles it a few lines
+    // later — so the state an interrupted reconcile leaves behind is staged
+    // directly. `record_provider_response` cannot do it once the reconcile has
+    // stamped `stripe_event_created`, which it has by now.
+    wafer_core::clients::database::update(
+        &ctx,
+        repo::refunds::TABLE,
+        &ledger.id,
+        std::collections::HashMap::from([(
+            "status".to_string(),
+            serde_json::json!("provider_succeeded"),
+        )]),
+    )
+    .await
+    .unwrap();
+    wafer_core::clients::database::update(
+        &ctx,
+        repo::provider_operations::TABLE,
+        &operation.id,
+        std::collections::HashMap::from([("response_json".to_string(), serde_json::json!("{}"))]),
+    )
+    .await
+    .unwrap();
+    let (msg, input) = admin_refund_msg(
+        "purchase_audit_trail",
+        serde_json::json!({"amount_minor": 1250, "idempotency_key": "audit_trail"}),
+    );
+    let settled = output_to_json(dispatch(&ctx, msg, input).await).await;
+    assert_eq!(settled["status"], "succeeded");
+    assert_eq!(
+        operation_response_json(&ctx, &operation.id).await["id"],
+        "re_audit_trail",
+        "settling a provider-succeeded refund must not blank the provider response"
+    );
+
+    // Stripe was asked exactly twice: the create and the one reconcile GET.
+    assert_eq!(requests.lock().unwrap().len(), 2);
+}
+
+// ============================================================
+// Error mapping — the refund orchestration in `purchase.rs`
+// ============================================================
+
+/// An admin refund of a Stripe order whose refund-ledger lookup answers
+/// `code`, and the status the request gets.
+///
+/// The lookup (`get_by_idempotency_key`, a `database.list` on the refunds
+/// table) runs after the purchase read, which is a `database.get` on the
+/// purchases table, so the refusal lands on the orchestration's own site.
+async fn refund_status_when_the_ledger_read_answers(code: ErrorCode) -> u16 {
+    let mut ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY",
+        "sk_test_refunds",
+    )])
+    .await;
+    seed_stripe_refund_order(
+        &ctx,
+        "purchase_ledger_refused",
+        "completed",
+        5000,
+        0,
+        "",
+        false,
+    )
+    .await;
+    let requests = register_sequence_with_status(&mut ctx, Vec::new());
+    let failing = crate::test_support::FailingDbOpContext::failing_with(
+        ctx.clone(),
+        vec![("database.list", repo::refunds::TABLE)],
+        wafer_run::WaferError::new(code, "refused by the database client"),
+    );
+    let (msg, input) = admin_refund_msg(
+        "purchase_ledger_refused",
+        serde_json::json!({"amount_minor": 1000, "idempotency_key": "refused"}),
+    );
+    let status =
+        crate::test_support::output_http_status(dispatch(&failing, msg, input).await).await;
+    assert!(
+        requests.lock().unwrap().is_empty(),
+        "a refused ledger read must stop the refund before Stripe is asked"
+    );
+    status
+}
+
+#[tokio::test]
+async fn refund_ledger_denial_is_403() {
+    assert_eq!(
+        refund_status_when_the_ledger_read_answers(ErrorCode::PermissionDenied).await,
+        403
+    );
+}
+
+#[tokio::test]
+async fn refund_ledger_quota_is_429() {
+    assert_eq!(
+        refund_status_when_the_ledger_read_answers(ErrorCode::ResourceExhausted).await,
+        429
+    );
+}
+
+/// Guard (passes before and after the database tails were classified): a
+/// Stripe rate limit on the refund call is Stripe's, so it stays the
+/// sanitized 500 rather than borrowing the 429 a database quota earns.
+#[tokio::test]
+async fn refund_stripe_rate_limit_stays_500() {
+    let mut ctx = ctx_with(&[(
+        "IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY",
+        "sk_test_refunds",
+    )])
+    .await;
+    seed_stripe_refund_order(
+        &ctx,
+        "purchase_stripe_rate_limited",
+        "completed",
+        5000,
+        0,
+        "",
+        false,
+    )
+    .await;
+    let requests = register_sequence_with_status(
+        &mut ctx,
+        vec![(429, serde_json::json!({"error": {"code": "rate_limit"}}))],
+    );
+    let (msg, input) = admin_refund_msg(
+        "purchase_stripe_rate_limited",
+        serde_json::json!({"amount_minor": 1000, "idempotency_key": "rate_limited"}),
+    );
+    assert_eq!(
+        crate::test_support::output_http_status(dispatch(&ctx, msg, input).await).await,
+        500
+    );
+    assert_eq!(requests.lock().unwrap().len(), 1);
+}
+
+/// Seed a provider operation that is due now. `created_at` is explicit so
+/// the claim pass meets the rows in a known order.
+async fn seed_due_operation(
+    ctx: &crate::test_support::TestContext,
+    id: &str,
+    operation_type: &str,
+    created_at: &str,
+    extra: &[(&str, serde_json::Value)],
+) {
+    let mut data = std::collections::HashMap::from([
+        (
+            "operation_type".to_string(),
+            serde_json::json!(operation_type),
+        ),
+        ("aggregate_type".to_string(), serde_json::json!("refund")),
+        (
+            "aggregate_id".to_string(),
+            serde_json::json!(format!("refund_{id}")),
+        ),
+        (
+            "idempotency_key".to_string(),
+            serde_json::json!(format!("key_{id}")),
+        ),
+        ("status".to_string(), serde_json::json!("pending")),
+        ("created_at".to_string(), serde_json::json!(created_at)),
+        ("updated_at".to_string(), serde_json::json!(created_at)),
+    ]);
+    for (field, value) in extra {
+        data.insert(field.to_string(), value.clone());
+    }
+    seed(ctx, repo::provider_operations::TABLE, id, data).await;
+}
+
+/// A `processing` row whose lease lapsed long ago, as a crashed worker leaves
+/// it.
+fn expired_lease(attempts: u64, last_error: &str) -> Vec<(&'static str, serde_json::Value)> {
+    vec![
+        ("status", serde_json::json!("processing")),
+        ("attempts", serde_json::json!(attempts)),
+        ("processing_owner", serde_json::json!("crashed-worker")),
+        (
+            "processing_started_at",
+            serde_json::json!((chrono::Utc::now() - chrono::Duration::seconds(3600)).to_rfc3339()),
+        ),
+        ("last_error", serde_json::json!(last_error)),
+    ]
+}
+
+async fn operation_row(
+    ctx: &dyn wafer_run::context::Context,
+    id: &str,
+) -> wafer_core::clients::database::Record {
+    wafer_core::clients::database::get(ctx, repo::provider_operations::TABLE, id)
+        .await
+        .unwrap()
+}
+
+async fn reconcile_due(ctx: &dyn wafer_run::context::Context) -> wafer_run::OutputStream {
+    let (reconcile, input) = admin_create_msg(
+        "/b/products/api/admin/provider-operations/reconcile",
+        serde_json::json!({}),
+    );
+    dispatch(ctx, reconcile, input).await
+}
+
+/// A failed outcome write for one operation is that operation's problem: the
+/// rest of the claimed batch still runs and records its outcome, and the
+/// response counts the one that could not be recorded instead of failing
+/// the whole request.
+///
+/// The first row's outcome is a terminal one (an unsupported operation type),
+/// written with `database.update`, which is the op made to fail. The second
+/// row's outcome is a retry (its refund row is missing), written with
+/// `database.update_where_count`, which keeps working.
+#[tokio::test]
+async fn one_operations_failed_outcome_write_does_not_abort_the_batch() {
+    let ctx = ctx().await;
+    seed_due_operation(
+        &ctx,
+        "op_first",
+        "unsupported.kind",
+        "2026-01-01T00:00:00Z",
+        &[],
+    )
+    .await;
+    seed_due_operation(
+        &ctx,
+        "op_second",
+        repo::provider_operations::REFUND_RECONCILE,
+        "2026-01-01T00:00:01Z",
+        &[],
+    )
+    .await;
+    let failing = crate::test_support::FailingDbOpContext::new(
+        ctx,
+        vec![("database.update", repo::provider_operations::TABLE)],
+    );
+
+    let result = output_to_json(reconcile_due(&failing).await).await;
+    assert_eq!(
+        result,
+        serde_json::json!({
+            "claimed": 2,
+            "succeeded": 0,
+            "retry_scheduled": 1,
+            "dead_letter": 0,
+            "unrecorded": 1,
+        })
+    );
+
+    let second = operation_row(&failing, "op_second").await;
+    assert_eq!(
+        second.data["status"], "failed",
+        "the row after the failed write must still get its outcome"
+    );
+    assert!(!second.str_field("last_error").is_empty());
+    assert!(!second.str_field("next_attempt_at").is_empty());
+    // The row whose write failed keeps its lease until the lease lapses.
+    assert_eq!(
+        operation_row(&failing, "op_first").await.data["status"],
+        "processing"
+    );
+}
+
+/// The claim pass has the same rule: a row whose dead-letter write fails is
+/// reported, and the rows already claimed in the same pass are still run
+/// rather than left leased with an attempt spent.
+#[tokio::test]
+async fn one_rows_failed_claim_write_does_not_strand_the_rows_already_claimed() {
+    let ctx = ctx().await;
+    seed_due_operation(
+        &ctx,
+        "op_claimed",
+        "unsupported.kind",
+        "2026-01-01T00:00:00Z",
+        &[],
+    )
+    .await;
+    seed_due_operation(
+        &ctx,
+        "op_exhausted",
+        repo::provider_operations::REFUND_RECONCILE,
+        "2026-01-01T00:00:01Z",
+        &expired_lease(repo::MAX_ATTEMPTS, ""),
+    )
+    .await;
+    // The first `update_where_count` is `op_claimed`'s claim; the second is
+    // `op_exhausted`'s dead-letter write, which fails.
+    let failing = crate::test_support::FailingDbOpContext::new(
+        ctx,
+        vec![(
+            "database.update_where_count",
+            repo::provider_operations::TABLE,
+        )],
+    )
+    .after_passing(1);
+
+    let result = output_to_json(reconcile_due(&failing).await).await;
+    assert_eq!(
+        result,
+        serde_json::json!({
+            "claimed": 1,
+            "succeeded": 0,
+            "retry_scheduled": 0,
+            "dead_letter": 1,
+            "unrecorded": 1,
+        })
+    );
+    assert_eq!(
+        operation_row(&failing, "op_claimed").await.data["status"],
+        "dead_letter",
+        "the claimed row must be run to its outcome"
+    );
+    assert_eq!(
+        operation_row(&failing, "op_exhausted").await.data["status"],
+        "processing"
+    );
+}
+
+/// An operation out of attempts is dead-lettered with the reason an operator
+/// needs, whichever path spends the last attempt: the claim pass finding a
+/// lapsed lease on the last attempt, or the last attempt failing.
+#[tokio::test]
+async fn an_operation_out_of_attempts_dead_letters_with_its_reason_and_is_counted() {
+    let ctx = ctx().await;
+    seed_due_operation(
+        &ctx,
+        "op_lapsed",
+        repo::provider_operations::REFUND_RECONCILE,
+        "2026-01-01T00:00:00Z",
+        &expired_lease(repo::MAX_ATTEMPTS, "Stripe timed out"),
+    )
+    .await;
+    seed_due_operation(
+        &ctx,
+        "op_last_try",
+        repo::provider_operations::REFUND_RECONCILE,
+        "2026-01-01T00:00:01Z",
+        &[("attempts", serde_json::json!(repo::MAX_ATTEMPTS - 1))],
+    )
+    .await;
+
+    let result = output_to_json(reconcile_due(&ctx).await).await;
+    assert_eq!(
+        result,
+        serde_json::json!({
+            "claimed": 1,
+            "succeeded": 0,
+            "retry_scheduled": 0,
+            "dead_letter": 2,
+            "unrecorded": 0,
+        })
+    );
+
+    let lapsed = operation_row(&ctx, "op_lapsed").await;
+    assert_eq!(lapsed.data["status"], "dead_letter");
+    let reason = lapsed.str_field("last_error");
+    assert!(
+        reason.contains("retry budget") && reason.contains("expired"),
+        "the reason must say the budget ran out on a lapsed lease: {reason:?}"
+    );
+    assert!(
+        reason.contains("Stripe timed out"),
+        "the earlier attempts' error must survive: {reason:?}"
+    );
+    assert!(!lapsed.str_field("terminal_at").is_empty());
+
+    let last_try = operation_row(&ctx, "op_last_try").await;
+    assert_eq!(last_try.data["status"], "dead_letter");
+    assert_eq!(last_try.data["attempts"], repo::MAX_ATTEMPTS);
+    assert!(!last_try.str_field("last_error").is_empty());
+}
+
+/// Taking a lease is the last database step of a claim: the claimed row is
+/// handed to the worker without being read back, so no failure can land
+/// between the lease and the work and strand the row leased with an attempt
+/// spent. Every read of the table is made to fail after the claim pass's
+/// candidate list.
+#[tokio::test]
+async fn a_claimed_operation_is_run_without_reading_it_back() {
+    let ctx = ctx().await;
+    seed_due_operation(
+        &ctx,
+        "op_no_readback",
+        "unsupported.kind",
+        "2026-01-01T00:00:00Z",
+        &[],
+    )
+    .await;
+    let failing = crate::test_support::FailingDbOpContext::new(
+        ctx.clone(),
+        vec![("database.get", repo::provider_operations::TABLE)],
+    );
+
+    let result = output_to_json(reconcile_due(&failing).await).await;
+    assert_eq!(
+        result,
+        serde_json::json!({
+            "claimed": 1,
+            "succeeded": 0,
+            "retry_scheduled": 0,
+            "dead_letter": 1,
+            "unrecorded": 0,
+        })
+    );
+    let row = operation_row(&ctx, "op_no_readback").await;
+    assert_eq!(row.data["status"], "dead_letter");
+    assert_eq!(row.data["attempts"], 1);
 }

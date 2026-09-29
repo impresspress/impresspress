@@ -6,10 +6,47 @@ use wafer_block::db::{Filter, FilterOp, ListOptions};
 use wafer_core::clients::database as db;
 use wafer_run::{context::Context, ErrorCode, WaferError};
 
-use crate::{blocks::products::contracts::SubscriptionView, util::RecordExt};
+use crate::{
+    blocks::products::contracts::{SubscriptionStatus, SubscriptionView},
+    util::{enum_column, RecordExt},
+};
 
 /// Platform-billing subscription table — one row per user.
 pub(crate) const SUBSCRIPTIONS_TABLE: &str = "impresspress__products__subscriptions";
+
+/// The metadata key marking a Stripe subscription item as an add-on. An item
+/// carrying it on neither its own metadata nor its price's is the base plan,
+/// and none of [`ADDON_TOTALS`] is read from it.
+///
+/// It sits beside the value keys because the two halves are one contract: this
+/// decides whether an item counts at all, and those say what it contributes.
+/// It is also what picks the object to read the values from, so the reader in
+/// `stripe.rs` tests for it on each in turn.
+pub(crate) const ADDON_ITEM_MARKER: &str = "addon_id";
+
+/// Each add-on total: the Stripe metadata key that carries it, and the column
+/// [`set_addon_totals`] writes it to.
+///
+/// The metadata keys are names the platform stamps on its own Stripe objects,
+/// not operator settings — they arrive inside every
+/// `customer.subscription.updated` payload, on the subscription item or on its
+/// price, whichever the platform stamped. Renaming one means rewriting those
+/// objects in Stripe, which no configuration value can do. Keeping the pair in
+/// one table is what makes the reader and the writer below agree on order.
+///
+/// Which object the platform stamps is not decidable here: nothing in this
+/// repository creates add-on subscription items any more. The one thing that
+/// did — `products/addons.rs`, deleted in `1f6489d8` because it depended on a
+/// plan table — posted `metadata[addon_id]` to `/v1/subscription_items`, so
+/// item-level is the convention this reader was written against, and the
+/// per-price form is the other shape it has always claimed to accept. Both are
+/// read, because the block cannot see which one the platform chose.
+pub(crate) const ADDON_TOTALS: [(&str, &str); 4] = [
+    ("extra_projects", "addon_projects"),
+    ("extra_requests", "addon_requests"),
+    ("extra_r2_bytes", "addon_r2_bytes"),
+    ("extra_d1_bytes", "addon_d1_bytes"),
+];
 
 fn platform_update_data(
     stripe_customer_id: &str,
@@ -28,7 +65,10 @@ fn platform_update_data(
             serde_json::json!(stripe_subscription_id),
         ),
         ("plan".to_string(), serde_json::json!(plan)),
-        ("status".to_string(), serde_json::json!("active")),
+        (
+            "status".to_string(),
+            serde_json::json!(SubscriptionStatus::Active),
+        ),
         ("grace_period_end".to_string(), serde_json::Value::Null),
         (
             "stripe_event_created".to_string(),
@@ -168,7 +208,7 @@ async fn get_by_stripe_sub(
                 operator: FilterOp::Equal,
                 value: serde_json::json!(stripe_subscription_id),
             }],
-            limit: 1,
+            limit: Some(1),
             skip_count: true,
             ..Default::default()
         },
@@ -181,7 +221,8 @@ async fn get_by_stripe_sub(
 /// subscription id. Unlike [`find_user_by_stripe_sub`], database failures
 /// surface as `Err` instead of collapsing into "not found", because the
 /// webhook uses this answer to decide between sealing an event as processed
-/// and scheduling a retry.
+/// and scheduling a retry. Every neighbouring lookup follows the same rule
+/// now; this one got there first.
 pub(crate) async fn platform_subscription_exists(
     ctx: &dyn Context,
     stripe_subscription_id: &str,
@@ -199,11 +240,18 @@ pub(crate) async fn platform_subscription_exists(
 /// cancellation emits `updated` and `deleted` with the same `created` second
 /// — the deletion stays authoritative regardless of delivery order). Writes
 /// compare-and-swap on the exact (timestamp, status) pair that was read.
+///
+/// A `status` of [`SubscriptionStatus::Unset`] means the event reported no
+/// status: the stored status is kept, and the transition rules judge the
+/// event as if it restated that status, so only the ordering rule can refuse
+/// it. The plan (when given) and the event timestamp are still applied —
+/// including over a terminal row, which such an event does not try to move
+/// away from and so is no longer refused by the terminal rule.
 /// Returns rows affected (0 = no matching row, or the event was refused).
 pub(crate) async fn update_status_plan(
     ctx: &dyn Context,
     stripe_subscription_id: &str,
-    status: &str,
+    status: SubscriptionStatus,
     plan: Option<&str>,
     event_created: i64,
 ) -> Result<i64, WaferError> {
@@ -212,18 +260,26 @@ pub(crate) async fn update_status_plan(
     };
     for _ in 0..3 {
         let current_created = current.i64_field("stripe_event_created");
-        let current_status = current.str_field("status").to_string();
+        let current_status: SubscriptionStatus = enum_column(&current, "status")?;
+        let incoming_status = if status == SubscriptionStatus::Unset {
+            current_status
+        } else {
+            status
+        };
         if !super::subscription_transition_allowed(
-            &current_status,
+            current_status,
             current_created,
-            status,
+            incoming_status,
             event_created,
         ) {
             return Ok(0);
         }
         let now = chrono::Utc::now().to_rfc3339();
         let mut data: HashMap<String, serde_json::Value> = HashMap::new();
-        data.insert("status".into(), serde_json::json!(status));
+        // An event without a status leaves the column as it is.
+        if status != SubscriptionStatus::Unset {
+            data.insert("status".into(), serde_json::json!(status));
+        }
         data.insert("updated_at".into(), serde_json::json!(&now));
         data.insert(
             "stripe_event_created".into(),
@@ -249,7 +305,7 @@ pub(crate) async fn update_status_plan(
                 Filter {
                     field: "status".into(),
                     operator: FilterOp::Equal,
-                    value: serde_json::json!(&current_status),
+                    value: serde_json::json!(current_status),
                 },
             ],
             data,
@@ -286,11 +342,11 @@ pub(crate) async fn mark_past_due(
     };
     for _ in 0..3 {
         let current_created = current.i64_field("stripe_event_created");
-        let current_status = current.str_field("status").to_string();
+        let current_status: SubscriptionStatus = enum_column(&current, "status")?;
         if !super::subscription_transition_allowed(
-            &current_status,
+            current_status,
             current_created,
-            "past_due",
+            SubscriptionStatus::PastDue,
             event_created,
         ) {
             return Ok(0);
@@ -299,7 +355,10 @@ pub(crate) async fn mark_past_due(
         let grace_end = (now + chrono::Duration::days(7)).to_rfc3339();
         let now = now.to_rfc3339();
         let mut data: HashMap<String, serde_json::Value> = HashMap::new();
-        data.insert("status".into(), serde_json::json!("past_due"));
+        data.insert(
+            "status".into(),
+            serde_json::json!(SubscriptionStatus::PastDue),
+        );
         data.insert("grace_period_end".into(), serde_json::json!(&grace_end));
         data.insert("updated_at".into(), serde_json::json!(&now));
         data.insert(
@@ -323,7 +382,7 @@ pub(crate) async fn mark_past_due(
                 Filter {
                     field: "status".into(),
                     operator: FilterOp::Equal,
-                    value: serde_json::json!(&current_status),
+                    value: serde_json::json!(current_status),
                 },
             ],
             data,
@@ -364,7 +423,7 @@ pub(crate) async fn recover_from_paid_invoice(
             Filter {
                 field: "status".into(),
                 operator: FilterOp::Equal,
-                value: serde_json::json!("past_due"),
+                value: serde_json::json!(SubscriptionStatus::PastDue),
             },
             Filter {
                 field: "stripe_event_created".into(),
@@ -373,7 +432,10 @@ pub(crate) async fn recover_from_paid_invoice(
             },
         ],
         HashMap::from([
-            ("status".into(), serde_json::json!("active")),
+            (
+                "status".into(),
+                serde_json::json!(SubscriptionStatus::Active),
+            ),
             ("grace_period_end".into(), serde_json::Value::Null),
             (
                 "stripe_event_created".into(),
@@ -394,11 +456,13 @@ pub(crate) async fn cancel_and_reset_addons(
 ) -> Result<i64, WaferError> {
     let now = chrono::Utc::now().to_rfc3339();
     let mut data: HashMap<String, serde_json::Value> = HashMap::new();
-    data.insert("status".into(), serde_json::json!("cancelled"));
-    data.insert("addon_projects".into(), serde_json::json!(0));
-    data.insert("addon_requests".into(), serde_json::json!(0));
-    data.insert("addon_r2_bytes".into(), serde_json::json!(0));
-    data.insert("addon_d1_bytes".into(), serde_json::json!(0));
+    data.insert(
+        "status".into(),
+        serde_json::json!(SubscriptionStatus::Canceled),
+    );
+    for (_, column) in ADDON_TOTALS {
+        data.insert(column.into(), serde_json::json!(0));
+    }
     data.insert("updated_at".into(), serde_json::json!(&now));
     data.insert(
         "stripe_event_created".into(),
@@ -424,50 +488,81 @@ pub(crate) async fn cancel_and_reset_addons(
     .await
 }
 
-/// Set the addon column totals for a user's active subscription. The caller
-/// (stripe.rs) parses Stripe subscription-item metadata into the four totals;
-/// this writes them. Returns rows affected.
+/// Set the add-on column totals on a user's subscription, in the order of
+/// [`ADDON_TOTALS`]. The caller (stripe.rs) sums Stripe subscription-item
+/// metadata into the totals; this writes them. Returns rows affected.
+///
+/// Two predicates guard the write, and a same-second cancellation — which
+/// emits `updated` and `deleted` with one `created` — wants both:
+///
+/// * **Not a terminal row.** [`SubscriptionStatus::is_terminal`] is "this row
+///   can never go live again", because Stripe issues a new subscription id for
+///   a resubscription. Writing quota onto one is writing it to an account that
+///   no longer has a subscription; in the `canceled` case it would also undo
+///   the zeroing [`cancel_and_reset_addons`] just did. Every non-terminal
+///   status is written, including `trialing` and `past_due`: these columns are
+///   a projection of what Stripe reports, and which of those states earns the
+///   quota is the reading platform's decision, not this block's. Filtering to
+///   `active` instead lost an add-on bought during a trial until the next
+///   `updated` delivery, and one bought while past due until whenever the item
+///   set next changed.
+/// * **Not older than the row.** `event_created` filters on
+///   `stripe_event_created`, the same ordering predicate every other write to
+///   this table carries: a failed delivery that Stripe retries after a newer
+///   one has landed must not put the older payload's totals back. It is a
+///   filter only — the column is deliberately not stamped here, because
+///   [`update_status_plan`] compare-and-swaps on the exact value it read and a
+///   second writer moving it would make that CAS miss.
 pub(crate) async fn set_addon_totals(
     ctx: &dyn Context,
     user_id: &str,
-    projects: i64,
-    requests: i64,
-    r2_bytes: i64,
-    d1_bytes: i64,
+    totals: [i64; ADDON_TOTALS.len()],
+    event_created: i64,
 ) -> Result<i64, WaferError> {
     let now = chrono::Utc::now().to_rfc3339();
     let mut data: HashMap<String, serde_json::Value> = HashMap::new();
-    data.insert("addon_projects".into(), serde_json::json!(projects));
-    data.insert("addon_requests".into(), serde_json::json!(requests));
-    data.insert("addon_r2_bytes".into(), serde_json::json!(r2_bytes));
-    data.insert("addon_d1_bytes".into(), serde_json::json!(d1_bytes));
+    for ((_, column), total) in ADDON_TOTALS.iter().zip(totals) {
+        data.insert((*column).into(), serde_json::json!(total));
+    }
     data.insert("updated_at".into(), serde_json::json!(now));
-    db::update_by_filters_count(
-        ctx,
-        SUBSCRIPTIONS_TABLE,
-        vec![
-            Filter {
-                field: "user_id".into(),
-                operator: FilterOp::Equal,
-                value: serde_json::json!(user_id),
-            },
-            Filter {
+    let mut filters = vec![
+        Filter {
+            field: "user_id".into(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!(user_id),
+        },
+        Filter {
+            field: "stripe_event_created".into(),
+            operator: FilterOp::LessEqual,
+            value: serde_json::json!(event_created),
+        },
+    ];
+    filters.extend(
+        SubscriptionStatus::ALL
+            .into_iter()
+            .filter(|status| status.is_terminal())
+            .map(|status| Filter {
                 field: "status".into(),
-                operator: FilterOp::Equal,
-                value: serde_json::json!("active"),
-            },
-        ],
-        data,
-    )
-    .await
+                operator: FilterOp::NotEqual,
+                value: serde_json::json!(status),
+            }),
+    );
+    db::update_by_filters_count(ctx, SUBSCRIPTIONS_TABLE, filters, data).await
 }
 
-/// Look up the user_id owning a Stripe subscription. Errors collapse to `None`
-/// (preserves the original `get_user_for_stripe_sub` behaviour).
+/// Look up the user_id owning a Stripe subscription. `Ok(None)` is "no row
+/// references this Stripe subscription".
+///
+/// Errors used to collapse into that same `None`, which the two webhook
+/// callers read as "this subscription is unowned": a database blip skipped
+/// the addon-total sync and the outbound `products.subscription.updated`
+/// while the delivery still reported success to Stripe, so nothing was
+/// retried and nothing was logged. Same rule as
+/// [`platform_subscription_exists`], right above.
 pub(crate) async fn find_user_by_stripe_sub(
     ctx: &dyn Context,
     stripe_subscription_id: &str,
-) -> Option<String> {
+) -> Result<Option<String>, WaferError> {
     let rows = db::list(
         ctx,
         SUBSCRIPTIONS_TABLE,
@@ -478,23 +573,30 @@ pub(crate) async fn find_user_by_stripe_sub(
                 operator: FilterOp::Equal,
                 value: serde_json::json!(stripe_subscription_id),
             }],
-            limit: 1,
+            limit: Some(1),
             skip_count: true,
             ..Default::default()
         },
     )
-    .await
-    .ok()?;
-    rows.records
-        .first()?
-        .data
-        .get("user_id")
-        .and_then(|v| v.as_str())
-        .map(String::from)
+    .await?;
+    Ok(rows
+        .records
+        .first()
+        .and_then(|record| record.data.get("user_id"))
+        .and_then(|value| value.as_str())
+        .map(String::from))
 }
 
 /// Whether the user has an `active` subscription whose `plan` equals `plan`.
-pub(crate) async fn active_plan_exists(ctx: &dyn Context, user_id: &str, plan: &str) -> bool {
+///
+/// `Ok(false)` is "no such subscription". A failed read is `Err`, because the
+/// answer gates a purchase: it used to end in `matches!(rows, Ok(..))`, so an
+/// outage told the buyer they did not own the product their checkout required.
+pub(crate) async fn active_plan_exists(
+    ctx: &dyn Context,
+    user_id: &str,
+    plan: &str,
+) -> Result<bool, WaferError> {
     let rows = db::list(
         ctx,
         SUBSCRIPTIONS_TABLE,
@@ -509,7 +611,7 @@ pub(crate) async fn active_plan_exists(ctx: &dyn Context, user_id: &str, plan: &
                 Filter {
                     field: "status".into(),
                     operator: FilterOp::Equal,
-                    value: serde_json::json!("active"),
+                    value: serde_json::json!(SubscriptionStatus::Active),
                 },
                 Filter {
                     field: "plan".into(),
@@ -517,13 +619,13 @@ pub(crate) async fn active_plan_exists(ctx: &dyn Context, user_id: &str, plan: &
                     value: serde_json::json!(plan),
                 },
             ],
-            limit: 1,
+            limit: Some(1),
             skip_count: true,
             ..Default::default()
         },
     )
-    .await;
-    matches!(rows, Ok(rows) if !rows.records.is_empty())
+    .await?;
+    Ok(!rows.records.is_empty())
 }
 
 /// Fetch a user's subscription row with addon columns coalesced to 0 for the
@@ -552,7 +654,7 @@ pub(crate) async fn subscription_for_user(
     )
     .await
     {
-        Ok(record) => Ok(Some(SubscriptionView::from_record(&record))),
+        Ok(record) => SubscriptionView::from_record(&record).map(Some),
         Err(e) if e.code == ErrorCode::NotFound => Ok(None),
         Err(e) => Err(e),
     }

@@ -21,8 +21,9 @@ extern "C" {
 
     /// Execute a SELECT SQL query. `params` as above.
     /// Returns a JS array of plain row objects — NOT a JSON string. Decode
-    /// with `db_codec::parse_rows`/`rows_from_js`
-    /// (`serde_wasm_bindgen::from_value`).
+    /// with `db_codec::rows_from_js` (`serde_wasm_bindgen::from_value`), then
+    /// turn each row into a `Record` with the shared
+    /// `wafer_core::interfaces::database::codec::record_from_json_row`.
     #[wasm_bindgen(catch, js_name = dbQueryRaw)]
     pub fn db_query_raw(sql: &str, params: JsValue) -> Result<JsValue, JsValue>;
 
@@ -51,6 +52,58 @@ extern "C" {
     /// `DOMException` if the folder or key doesn't exist.
     #[wasm_bindgen(catch, js_name = storageGet)]
     pub async fn storage_get(folder: &str, key: &str) -> Result<JsValue, JsValue>;
+
+    /// Streaming counterpart of [`storage_get`]: resolves
+    /// `{ stream_id: string, meta: { content_type, size } }`, the metadata
+    /// eagerly and the body as a registered byte reader to be drained with
+    /// [`reader_next_chunk`]. Rejects with a `NotFoundError` `DOMException`
+    /// like `storageGet`.
+    ///
+    /// A returned `stream_id` MUST be drained to `null` or released with
+    /// [`reader_cancel`] — an abandoned one holds an OPFS file handle for the
+    /// life of the Service Worker.
+    #[wasm_bindgen(catch, js_name = storageGetStream)]
+    pub async fn storage_get_stream(folder: &str, key: &str) -> Result<JsValue, JsValue>;
+
+    /// Open `folder/key` for a chunked write; resolves the writer id the
+    /// three calls below take. The object is not visible to `storageGet`
+    /// until [`storage_put_stream_finish`].
+    ///
+    /// The open writer holds an exclusive lock on the file, so every path out
+    /// of a started write must reach `finish` or
+    /// [`storage_put_stream_abort`].
+    #[wasm_bindgen(catch, js_name = storagePutStreamStart)]
+    pub async fn storage_put_stream_start(folder: &str, key: &str) -> Result<JsValue, JsValue>;
+
+    /// Append one chunk to a chunked write. Rejects on an unknown id rather
+    /// than dropping the bytes.
+    #[wasm_bindgen(catch, js_name = storagePutStreamChunk)]
+    pub async fn storage_put_stream_chunk(id: &str, chunk: &[u8]) -> Result<JsValue, JsValue>;
+
+    /// Close a chunked write and write its metadata sidecar, with the size
+    /// counted from the chunks that actually arrived.
+    #[wasm_bindgen(catch, js_name = storagePutStreamFinish)]
+    pub async fn storage_put_stream_finish(
+        id: &str,
+        content_type: &str,
+    ) -> Result<JsValue, JsValue>;
+
+    /// Abandon a chunked write, releasing the file lock. Idempotent and never
+    /// rejects, so an error path can call it without masking its own error.
+    #[wasm_bindgen(js_name = storagePutStreamAbort)]
+    pub async fn storage_put_stream_abort(id: &str);
+
+    /// Pull the next chunk of a registered byte stream (from
+    /// [`storage_get_stream`] or [`http_fetch_stream`]). Resolves `null` at
+    /// end of stream — the ONLY end signal — and rejects on an unknown id,
+    /// which is a bookkeeping bug rather than a finished stream.
+    #[wasm_bindgen(catch, js_name = readerNextChunk)]
+    pub async fn reader_next_chunk(id: &str) -> Result<JsValue, JsValue>;
+
+    /// Release a registered byte stream that will not be drained. Idempotent
+    /// and never rejects.
+    #[wasm_bindgen(js_name = readerCancel)]
+    pub async fn reader_cancel(id: &str);
 
     /// Delete file + metadata from OPFS. Rejects with a `NotFoundError`
     /// `DOMException` if the folder or key doesn't exist.
@@ -101,13 +154,45 @@ extern "C" {
     /// Execute an HTTP fetch request.
     /// `headers_json` is a JSON object of header key/value pairs.
     /// `body` is the request body bytes (pass empty slice for no body).
-    /// Returns a plain JS object `{ status, headers, body: Uint8Array }` —
-    /// NOT a JSON string. Decode directly with `serde_wasm_bindgen::from_value`.
+    /// `max_response_bytes` caps the response body: an advertised
+    /// `Content-Length` above it is refused before a byte is read, and the
+    /// running total is checked per chunk for a response that advertises
+    /// nothing. Passed in rather than hardcoded on the JS side so
+    /// `impresspress_core::streaming::MAX_NETWORK_RESPONSE_BYTES` stays the
+    /// single definition, shared with the Cloudflare adapter.
+    /// Returns a plain JS object
+    /// `{ status, headers: [[name, value], ...], body: Uint8Array }` —
+    /// NOT a JSON string, and headers are an array of PAIRS so a repeated
+    /// name (`Set-Cookie`) keeps every value. Decode directly with
+    /// `serde_wasm_bindgen::from_value`.
     /// Rejects on a transport-level failure (network error, CORS, invalid
-    /// URL, etc.) — the `fetch()` call itself throwing, not an HTTP error
-    /// status (those resolve normally with `status` set).
+    /// URL, over-cap body) — the `fetch()` call itself throwing, not an HTTP
+    /// error status (those resolve normally with `status` set).
     #[wasm_bindgen(catch, js_name = httpFetch)]
     pub async fn http_fetch(
+        method: &str,
+        url: &str,
+        headers_json: &str,
+        body: &[u8],
+        max_response_bytes: f64,
+    ) -> Result<JsValue, JsValue>;
+
+    /// Streaming counterpart of [`http_fetch`]: resolves
+    /// `{ status, headers: [[name, value], ...], stream_id: string | null }`
+    /// — the head eagerly, the body as a registered byte reader to be drained
+    /// with [`reader_next_chunk`]. `stream_id` is `null` for a bodyless
+    /// response (204, `HEAD`).
+    ///
+    /// Issued with the same `init` as `httpFetch` (`redirect: 'error'`
+    /// included; `bridge.js`'s `fetchInit` builds both). No byte cap
+    /// argument: on a streamed response the cap is a running total the Rust
+    /// consumer keeps, because it is the side that decides what to do with
+    /// the bytes already delivered.
+    ///
+    /// A returned `stream_id` MUST be drained to `null` or released with
+    /// [`reader_cancel`].
+    #[wasm_bindgen(catch, js_name = httpFetchStream)]
+    pub async fn http_fetch_stream(
         method: &str,
         url: &str,
         headers_json: &str,

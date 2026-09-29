@@ -1,11 +1,17 @@
 //! Per-provider OAuth wiring as static data + a generic driver.
 //!
 //! All three supported providers run the same flow — build an authorize URL,
-//! exchange the code for a token, fetch userinfo, and (for GitHub) fall back to
+//! exchange the code for a token, fetch userinfo, and (for GitHub) read
 //! `/user/emails` for a verified address. Only the *data* differs between them,
 //! so each provider is one [`OAuthProviderSpec`] row and the flow handlers in
 //! `start.rs` / `callback.rs` read these fields instead of matching on the
 //! provider name. Adding a provider is a single table row.
+//!
+//! The security-bearing field is [`OAuthProviderSpec::email_assertion`]: it
+//! records what, if anything, each provider promises about the address it
+//! returns. `callback.rs` will not join an OAuth identity to an existing local
+//! account, and will not mark a new account's address verified, unless the
+//! provider actually asserts that the account holder controls that mailbox.
 
 use crate::util::urlencode;
 
@@ -17,6 +23,34 @@ pub enum UserinfoAuth {
     Bearer,
     /// `Authorization: token <token>` — GitHub REST API.
     Token,
+}
+
+/// What a provider promises about the email address it hands back.
+///
+/// An OAuth login proves the caller controls an account *at the provider*. It
+/// proves control of the mailbox only when the provider says so, and providers
+/// differ on whether they say so at all. `callback.rs` reads this to decide two
+/// things:
+///
+/// * whether the identity may be merged into a pre-existing local account with
+///   the same address — without an assertion on both sides, anyone who can
+///   register `victim@example.com` at a lax provider inherits that account;
+/// * whether a newly created local account is `email_verified`, which is what
+///   `WAFER_RUN__AUTH__REQUIRE_VERIFICATION` gates every later login on.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum EmailAssertion {
+    /// The userinfo payload carries a boolean claim about the address in that
+    /// same payload; the field is the claim's name. `true` is an assertion of
+    /// verification, anything else (absent, `false`, non-boolean) is not.
+    Claim(&'static str),
+    /// The userinfo payload says nothing, but a separate endpoint lists the
+    /// account's addresses with a per-address `verified` flag. The field is
+    /// that endpoint's URL. Only an entry carrying `verified: true` is
+    /// accepted as verified.
+    AddressList(&'static str),
+    /// The provider asserts nothing about the address, so this deployment
+    /// treats it as unverified.
+    None,
 }
 
 /// Static OAuth wiring for one provider.
@@ -49,10 +83,9 @@ pub struct OAuthProviderSpec {
     pub uses_pkce: bool,
     /// Authorization-header scheme for the userinfo request.
     pub userinfo_auth: UserinfoAuth,
-    /// Optional fallback endpoint for a verified primary email when the
-    /// userinfo payload omits one (GitHub `/user/emails`). `None` for providers
-    /// that always return an email.
-    pub emails_url: Option<&'static str>,
+    /// What this provider promises about the address it returns, and where
+    /// that promise is read from. See [`EmailAssertion`].
+    pub email_assertion: EmailAssertion,
 }
 
 impl OAuthProviderSpec {
@@ -127,7 +160,10 @@ pub const OAUTH_PROVIDERS: &[OAuthProviderSpec] = &[
         scope: "openid%20email%20profile",
         uses_pkce: true,
         userinfo_auth: UserinfoAuth::Bearer,
-        emails_url: None,
+        // The v2 userinfo endpoint spells the OIDC `email_verified` claim
+        // `verified_email`. Google sets it for every address it issues a token
+        // for, including Workspace addresses an administrator provisioned.
+        email_assertion: EmailAssertion::Claim("verified_email"),
     },
     OAuthProviderSpec {
         name: "github",
@@ -137,17 +173,36 @@ pub const OAUTH_PROVIDERS: &[OAuthProviderSpec] = &[
         scope: "user:email",
         uses_pkce: false,
         userinfo_auth: UserinfoAuth::Token,
-        emails_url: Some("https://api.github.com/user/emails"),
+        // `/user` returns the public profile address, which GitHub does not
+        // promise is confirmed (and returns as null when the user keeps it
+        // private). `/user/emails` is the authoritative list and carries a
+        // `verified` flag per address; the `user:email` scope above is what
+        // grants access to it.
+        email_assertion: EmailAssertion::AddressList("https://api.github.com/user/emails"),
     },
     OAuthProviderSpec {
         name: "microsoft",
         authorize_url: "https://login.microsoftonline.com/common/oauth2/v2.0/authorize",
         token_url: "https://login.microsoftonline.com/common/oauth2/v2.0/token",
-        userinfo_url: "https://graph.microsoft.com/v1.0/me",
+        // The OIDC userinfo endpoint, not Graph `/v1.0/me`: `/me` answers with
+        // `mail` / `userPrincipalName` and no `email` at all, so every
+        // Microsoft sign-in ended at "No email returned by OAuth provider".
+        // `/oidc/userinfo` answers the OIDC claim names this flow reads
+        // (`sub`, `email`, `name`, `picture`) for the `openid email profile`
+        // scope already requested above.
+        userinfo_url: "https://graph.microsoft.com/oidc/userinfo",
         scope: "openid%20email%20profile",
         uses_pkce: true,
         userinfo_auth: UserinfoAuth::Bearer,
-        emails_url: None,
+        // Microsoft returns no `email_verified` claim, and the `email` it does
+        // return is the mutable `mail`/`otherMails` profile attribute: a
+        // tenant administrator can set it to an address nobody in the tenant
+        // controls (the "nOAuth" abuse), and a personal account can carry an
+        // unconfirmed alias. So a Microsoft sign-in proves control of the
+        // Microsoft account and nothing about the mailbox: it can create its
+        // own local account, but never adopt one that already exists, and the
+        // account it creates is not `email_verified`.
+        email_assertion: EmailAssertion::None,
     },
 ];
 
@@ -198,6 +253,17 @@ mod tests {
         );
     }
 
+    /// Graph `/v1.0/me` answers `mail` / `userPrincipalName`; the flow reads
+    /// `email`, so `/me` could never produce a sign-in. The OIDC userinfo
+    /// endpoint answers the claim names the flow actually reads.
+    #[test]
+    fn microsoft_uses_the_oidc_userinfo_endpoint() {
+        assert_eq!(
+            spec("microsoft").userinfo_url,
+            "https://graph.microsoft.com/oidc/userinfo"
+        );
+    }
+
     // --- token body: pinned against the pre-refactor literals (values are urlencoded) ---
 
     #[test]
@@ -233,15 +299,28 @@ mod tests {
         assert_eq!(spec("github").userinfo_auth_header("TOK"), "token TOK");
     }
 
-    // --- endpoints + emails fallback pinned ---
+    // --- endpoints pinned ---
 
     #[test]
-    fn endpoints_and_emails_fallback() {
+    fn endpoints_pinned() {
         let g = spec("github");
         assert_eq!(g.token_url, "https://github.com/login/oauth/access_token");
         assert_eq!(g.userinfo_url, "https://api.github.com/user");
-        assert_eq!(g.emails_url, Some("https://api.github.com/user/emails"));
-        assert_eq!(spec("google").emails_url, None);
-        assert_eq!(spec("microsoft").emails_url, None);
+    }
+
+    /// Each provider's promise about the address it returns, pinned. Changing
+    /// a row here changes who may adopt an existing account, so the table is
+    /// asserted rather than left to the reader.
+    #[test]
+    fn email_assertion_per_provider() {
+        assert_eq!(
+            spec("google").email_assertion,
+            EmailAssertion::Claim("verified_email"),
+        );
+        assert_eq!(
+            spec("github").email_assertion,
+            EmailAssertion::AddressList("https://api.github.com/user/emails"),
+        );
+        assert_eq!(spec("microsoft").email_assertion, EmailAssertion::None);
     }
 }

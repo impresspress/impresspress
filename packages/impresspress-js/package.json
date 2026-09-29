@@ -8,13 +8,23 @@
   "scripts": {
     "build": "tsup src/index.ts --format cjs,esm --dts --clean",
     "dev": "tsup src/index.ts --format cjs,esm --dts --watch",
-    "test": "vitest run",
+    "test": "npm run typecheck && vitest run",
+    "generate:types": "node scripts/generate-api-types.mjs",
+    "check:types-fresh": "node scripts/generate-api-types.mjs && git diff --exit-code -- src/generated/api.ts",
+    "api:coverage": "node scripts/api-coverage.mjs",
+    "typecheck": "tsc -p tsconfig.test.json --noEmit",
     "test:watch": "vitest",
     "test:pack-install": "bash scripts/smoke-pack-install.sh",
     "lint": "eslint 'src/**/*.ts'",
     "format": "prettier --write src"
   },
-  "keywords": ["impresspress", "sdk", "api", "client", "typescript"],
+  "keywords": [
+    "impresspress",
+    "sdk",
+    "api",
+    "client",
+    "typescript"
+  ],
   "author": "Impresspress Team",
   "license": "MIT",
   "devDependencies": {
@@ -23,6 +33,7 @@
     "@typescript-eslint/parser": "^6.0.0",
     "eslint": "^8.0.0",
     "jsdom": "^25.0.0",
+    "openapi-typescript": "7.13.0",
     "prettier": "^3.0.0",
     "tsup": "^8.0.0",
     "typescript": "^5.0.0",

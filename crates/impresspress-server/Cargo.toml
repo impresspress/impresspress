@@ -1,0 +1,34 @@
+[package]
+name = "impresspress-server"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+description = "The native impresspress server runtime: seeds platform state, builds and boots the runtime, serves HTTP"
+
+# Backend and storage features (sqlite / postgres / storage-local / s3, the
+# block-* set) are the consumer's choice: it enables them on
+# `impresspress-core` and `impresspress-native`, and they unify here.
+
+[dependencies]
+anyhow = "1"
+impresspress-core = { path = "../impresspress-core", default-features = false }
+impresspress-native = { path = "../impresspress-native" }
+# The password pepper settings, read from the process environment.
+impresspress-password = { path = "../impresspress-password" }
+
+wafer-run = { workspace = true, features = ["full"] }
+wafer-core = { workspace = true }
+# `wafer_async_trait` macro for the native `BootHooks` impl (the macro's
+# expansion references the `async-trait` crate directly).
+wafer-block = { workspace = true }
+async-trait = { workspace = true }
+
+tracing = { workspace = true }
+
+[lints]
+workspace = true
+
+[dev-dependencies]
+tempfile = "3"
+tokio = { workspace = true, features = ["full"] }
+reqwest = { workspace = true }

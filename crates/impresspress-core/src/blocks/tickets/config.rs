@@ -120,30 +120,44 @@ pub struct SecurityReadiness {
 }
 
 impl SecurityReadiness {
-    pub async fn load(ctx: &dyn Context) -> Self {
+    /// A failed config read is returned: readiness is what lets the public
+    /// form accept anonymous submissions, so it is never guessed.
+    pub async fn load(ctx: &dyn Context) -> Result<Self, wafer_run::WaferError> {
+        // The boot snapshot, deliberately, where the sidebar and the portal's
+        // feature list read `routing::gate_from_request` instead.
+        //
+        // This value can go stale against the router after an admin toggle,
+        // and that staleness is unobservable: every surface that reads a
+        // `SecurityReadiness` — the admin readiness panel, the public submit
+        // form — is itself a `/b/tickets` route, so a disabled tickets block
+        // means the router refuses the page before the flag can be rendered.
+        // The one caller that is not a route (`maintenance`, a scheduled
+        // sweep) has no routed message to read a gate from at all. Threading
+        // one through it to correct a discrepancy nothing can see would buy
+        // nothing.
         let block_enabled = ctx
             .config_get(crate::features::BLOCK_SETTINGS_CONFIG_KEY)
             .map(|value| {
                 crate::features::BlockSettings::state_for(value, "impresspress/tickets").enabled
             })
             .unwrap_or(true);
-        let public_enabled = bool_value(&config::get_default(ctx, PUBLIC_ENABLED, "false").await);
+        let public_enabled = crate::config_vars::get_bool(ctx, PUBLIC_ENABLED, false).await?;
         let site_key_configured = !config::get_default(ctx, TURNSTILE_SITE_KEY, "")
-            .await
+            .await?
             .trim()
             .is_empty();
         let turnstile_secret_configured = !config::get_default(ctx, TURNSTILE_SECRET_KEY, "")
-            .await
+            .await?
             .trim()
             .is_empty();
         let identity_secret_configured = !config::get_default(ctx, IDENTITY_SECRET, "")
-            .await
+            .await?
             .trim()
             .is_empty();
-        let identity_max = positive(ctx, IDENTITY_MAX, 3).await;
-        let identity_window = positive(ctx, IDENTITY_WINDOW, 3_600).await;
-        let global_max = positive(ctx, GLOBAL_MAX, 100).await;
-        let global_window = positive(ctx, GLOBAL_WINDOW, 3_600).await;
+        let identity_max = positive(ctx, IDENTITY_MAX, 3).await?;
+        let identity_window = positive(ctx, IDENTITY_WINDOW, 3_600).await?;
+        let global_max = positive(ctx, GLOBAL_MAX, 100).await?;
+        let global_window = positive(ctx, GLOBAL_WINDOW, 3_600).await?;
         let positive_limits = identity_max && identity_window && global_max && global_window;
         let has_public_type = repo::count_public_types(ctx)
             .await
@@ -166,7 +180,7 @@ impl SecurityReadiness {
             .filter(|(ok, _)| !ok)
             .map(|(_, reason)| reason.to_string())
             .collect::<Vec<_>>();
-        Self {
+        Ok(Self {
             ready: reasons.is_empty(),
             block_enabled,
             public_enabled,
@@ -176,33 +190,42 @@ impl SecurityReadiness {
             positive_limits,
             has_public_type,
             reasons,
-        }
+        })
     }
 }
 
-pub async fn u32_value(ctx: &dyn Context, key: &str, default: u32) -> u32 {
-    config::get_default(ctx, key, &default.to_string())
-        .await
+/// `key` as a `u32`: `default` when unset or unparseable, the read's error
+/// when it fails.
+pub async fn u32_value(
+    ctx: &dyn Context,
+    key: &str,
+    default: u32,
+) -> Result<u32, wafer_run::WaferError> {
+    Ok(config::get_default(ctx, key, &default.to_string())
+        .await?
         .parse()
-        .unwrap_or(default)
+        .unwrap_or(default))
 }
 
-pub async fn u64_value(ctx: &dyn Context, key: &str, default: u64) -> u64 {
-    config::get_default(ctx, key, &default.to_string())
-        .await
+/// `key` as a `u64`: `default` when unset or unparseable, the read's error
+/// when it fails.
+pub async fn u64_value(
+    ctx: &dyn Context,
+    key: &str,
+    default: u64,
+) -> Result<u64, wafer_run::WaferError> {
+    Ok(config::get_default(ctx, key, &default.to_string())
+        .await?
         .parse()
-        .unwrap_or(default)
+        .unwrap_or(default))
 }
 
-async fn positive(ctx: &dyn Context, key: &str, default: u64) -> bool {
-    u64_value(ctx, key, default).await > 0
-}
-
-fn bool_value(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+async fn positive(
+    ctx: &dyn Context,
+    key: &str,
+    default: u64,
+) -> Result<bool, wafer_run::WaferError> {
+    Ok(u64_value(ctx, key, default).await? > 0)
 }
 
 #[cfg(test)]

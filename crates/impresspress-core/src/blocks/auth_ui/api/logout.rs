@@ -8,13 +8,14 @@ use crate::{
             helpers::build_auth_cookie,
             repo::{
                 jwt_blocklist::{self, NewBlocklistEntry},
-                tokens,
+                sessions, tokens,
             },
         },
-        auth_ui::contracts::LogoutResponse,
+        auth_ui::contracts::MessageResponse,
+        crud,
     },
     crypto::{META_AUTH_EXP, META_AUTH_JTI},
-    http::{err_internal, ResponseBuilder},
+    http::ResponseBuilder,
 };
 
 pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
@@ -33,7 +34,23 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
                 error = %e,
                 "logout: refresh-token revocation failed"
             );
-            return err_internal("Logout could not fully revoke the session", e);
+            return crud::db_error_internal(e, "Logout could not fully revoke the session");
+        }
+
+        // [B12] Logout is an all-devices operation — the line above revokes
+        // every refresh family the user has — so every session row goes with
+        // them. Leaving the rows behind is what made `/b/userportal/sessions`
+        // list devices as signed in for weeks after the tokens that kept them
+        // alive had been revoked. Same fail-closed treatment as the
+        // revocation itself: a list that still shows a revoked device is a
+        // security-relevant lie, not a cosmetic one.
+        if let Err(e) = sessions::delete_all_for_user(ctx, user_id).await {
+            tracing::error!(
+                user_id = %user_id,
+                error = %e,
+                "logout: session-row deletion failed"
+            );
+            return crud::db_error_internal(e, "Logout could not fully revoke the session");
         }
 
         // SEC-042: the currently-presented access JWT stays structurally
@@ -53,7 +70,15 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
             // lifetime is extended past 24h, silently re-enabling a
             // logged-out token.
             let access_lifetime =
-                crate::blocks::auth::helpers::access_token_lifetime_secs(ctx).await;
+                match crate::blocks::auth::helpers::access_token_lifetime_secs(ctx).await {
+                    Ok(secs) => secs,
+                    Err(e) => {
+                        return crud::db_error_internal(
+                            e,
+                            "Logout could not read the access-token lifetime",
+                        )
+                    }
+                };
             let expires_at = exp_str
                 .parse::<i64>()
                 .ok()
@@ -82,17 +107,20 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     error = %e,
                     "logout: jwt blocklist insert failed"
                 );
-                return err_internal("Logout could not fully revoke the session", e);
+                return crud::db_error_internal(e, "Logout could not fully revoke the session");
             }
         }
     }
 
-    let cookie = build_auth_cookie("", 0, ctx).await;
+    let cookie = match build_auth_cookie("", 0, ctx).await {
+        Ok(cookie) => cookie,
+        Err(e) => return crud::db_error_internal(e, "Logout could not build the cookie"),
+    };
     ResponseBuilder::new()
         .set_cookie(&cookie)
         .status(303)
         .set_header("Location", "/b/auth/login")
-        .json(&LogoutResponse {
+        .json(&MessageResponse {
             message: "Logged out successfully".to_string(),
         })
 }
@@ -108,7 +136,9 @@ mod tests {
     async fn anonymous_logout_still_succeeds() {
         // No auth.user_id meta at all — nothing to revoke, must still
         // clear the cookie and redirect (existing behavior).
-        let ctx = TestContext::with_auth().await;
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
         let msg = crate::test_support::anon_msg("update", "/b/auth/api/logout");
         let out = handle(&ctx, &msg).await;
         assert_eq!(output_status(out).await, 303);
@@ -116,7 +146,9 @@ mod tests {
 
     #[tokio::test]
     async fn refresh_token_revocation_failure_does_not_report_success() {
-        let ctx = TestContext::with_auth().await;
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
         let failing = FailingDbOpContext::new(ctx, vec![("database.update_where", tokens::TABLE)]);
 
         let msg = auth_msg("update", "/b/auth/api/logout", "user-1");
@@ -130,7 +162,9 @@ mod tests {
 
     #[tokio::test]
     async fn jwt_blocklist_insert_failure_does_not_report_success() {
-        let ctx = TestContext::with_auth().await;
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
         let failing = FailingDbOpContext::new(ctx, vec![("database.create", jwt_blocklist::TABLE)]);
 
         let mut msg = auth_msg("update", "/b/auth/api/logout", "user-1");
@@ -147,9 +181,74 @@ mod tests {
         );
     }
 
+    /// [B12] The device list and the refresh tokens have to agree: logout
+    /// revokes every family, so it must remove every row too.
+    #[tokio::test]
+    async fn logout_deletes_the_users_session_rows() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
+        ctx.seed_auth_user("user-1").await;
+        ctx.seed_auth_user("user-2").await;
+        for (user_id, family) in [
+            ("user-1", "fam-a"),
+            ("user-1", "fam-b"),
+            ("user-2", "fam-c"),
+        ] {
+            sessions::insert(
+                &ctx,
+                sessions::NewSession {
+                    family: family.into(),
+                    user_id: user_id.into(),
+                    auth_method: "password".into(),
+                    expires_at: "2099-01-01T00:00:00Z".into(),
+                },
+            )
+            .await
+            .expect("seed session row");
+        }
+
+        let out = handle(&ctx, &auth_msg("update", "/b/auth/api/logout", "user-1")).await;
+        assert_eq!(output_status(out).await, 303);
+
+        assert!(
+            sessions::list_for_user(&ctx, "user-1")
+                .await
+                .unwrap()
+                .is_empty(),
+            "logout revokes every family, so it removes every device row"
+        );
+        assert_eq!(
+            sessions::list_for_user(&ctx, "user-2").await.unwrap().len(),
+            1,
+            "another user's devices are untouched"
+        );
+    }
+
+    /// A session-row deletion failure is not reported as a successful logout:
+    /// a device list that still shows a revoked device is a lie about who is
+    /// signed in.
+    #[tokio::test]
+    async fn session_row_deletion_failure_does_not_report_success() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
+        let failing =
+            FailingDbOpContext::new(ctx, vec![("database.delete_where_count", sessions::TABLE)]);
+
+        let out = handle(
+            &failing,
+            &auth_msg("update", "/b/auth/api/logout", "user-1"),
+        )
+        .await;
+        assert!(output_is_error(out, "Internal").await);
+    }
+
     #[tokio::test]
     async fn successful_revocation_still_redirects() {
-        let ctx = TestContext::with_auth().await;
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
         let mut msg = auth_msg("update", "/b/auth/api/logout", "user-1");
         msg.set_meta(META_AUTH_JTI, "jti-1");
         msg.set_meta(

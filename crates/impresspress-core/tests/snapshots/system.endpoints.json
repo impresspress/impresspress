@@ -1,0 +1,4 @@
+[
+  "GET /b/static/{filename} public",
+  "GET /health public"
+]

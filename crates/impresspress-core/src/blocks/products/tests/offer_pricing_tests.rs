@@ -19,7 +19,7 @@ use super::{
         repo::{self, offer_components, offers, variables},
         ProductsBlock,
     },
-    harness::{create_msg, ctx, dispatch_user, output_is_error, output_to_json, seed},
+    harness::{create_msg, ctx, dispatch, output_is_error, output_to_json, seed},
 };
 
 fn variable(key: &str, kind: VariableKind) -> VariableDefinition {
@@ -801,7 +801,7 @@ async fn public_preview_loads_server_owned_offer_rows() {
             "inputs": {"pages": 4}
         }),
     );
-    let body = output_to_json(dispatch_user(&ctx, msg, input).await).await;
+    let body = output_to_json(dispatch(&ctx, msg, input).await).await;
     assert_eq!(body["offer_id"], "offer_preview");
     assert_eq!(body["amounts"]["currency"], "NZD");
     assert_eq!(body["amounts"]["total_minor"], 200);
@@ -827,13 +827,7 @@ async fn public_preview_loads_server_owned_offer_rows() {
             "inputs": {"pages": 4}
         }),
     );
-    assert!(
-        output_is_error(
-            dispatch_user(&ctx, msg, input).await,
-            ErrorCode::InvalidArgument
-        )
-        .await
-    );
+    assert!(output_is_error(dispatch(&ctx, msg, input).await, ErrorCode::InvalidArgument).await);
 }
 
 #[tokio::test]
@@ -884,11 +878,7 @@ async fn public_preview_rejects_hidden_and_admin_only_inputs() {
             json!({"offer_id": "offer_preview", "quantity": 1, "inputs": inputs}),
         );
         assert!(
-            output_is_error(
-                dispatch_user(&ctx, msg, input).await,
-                ErrorCode::InvalidArgument
-            )
-            .await
+            output_is_error(dispatch(&ctx, msg, input).await, ErrorCode::InvalidArgument).await
         );
     }
 
@@ -898,7 +888,7 @@ async fn public_preview_rejects_hidden_and_admin_only_inputs() {
         "",
         json!({"offer_id": "offer_preview", "quantity": 1, "inputs": {"pages": 4}}),
     );
-    let body = output_to_json(dispatch_user(&ctx, msg, input).await).await;
+    let body = output_to_json(dispatch(&ctx, msg, input).await).await;
     assert_eq!(body["amounts"]["total_minor"], 100);
     assert_eq!(body["inputs"]["comp"], json!(false));
     assert_eq!(body["inputs"]["discount_tier"], json!("none"));
@@ -913,7 +903,7 @@ async fn public_preview_hides_offers_for_non_active_products() {
         "",
         json!({"offer_id": "offer_preview", "inputs": {"pages": 4}}),
     );
-    assert!(output_is_error(dispatch_user(&ctx, msg, input).await, ErrorCode::NotFound).await);
+    assert!(output_is_error(dispatch(&ctx, msg, input).await, ErrorCode::NotFound).await);
 }
 
 #[test]

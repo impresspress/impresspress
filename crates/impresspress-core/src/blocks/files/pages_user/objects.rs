@@ -6,20 +6,30 @@ use wafer_run::{context::Context, Message, OutputStream};
 
 use crate::{
     blocks::files::repo,
-    ui::{
-        self, icons,
-        shell::Crumb,
-        templates::{list_page, PageHeader},
-    },
-    util::{format_bytes, format_timestamp, url_path_encode, RecordExt},
+    ui::{self, components, icons, shell::Crumb, templates::list_page},
+    util::{format_bytes, url_path_encode},
 };
 
 /// Object as the user sees it (key, size, modified timestamp).
+///
+/// A render-side projection of [`repo::objects::ObjectRow`]; the browser
+/// renders the upload instant as "modified" and needs nothing else from the
+/// row.
 #[derive(Clone, Debug)]
 pub struct ObjectRow {
     pub key: String,
     pub size: i64,
     pub modified: String,
+}
+
+impl From<&repo::objects::ObjectRow> for ObjectRow {
+    fn from(row: &repo::objects::ObjectRow) -> Self {
+        Self {
+            key: row.key.clone(),
+            size: row.size,
+            modified: row.uploaded_at.clone(),
+        }
+    }
 }
 
 /// Result of grouping a flat object list by a current-prefix folder view.
@@ -133,12 +143,7 @@ pub fn render_objects_table(
                             a href=(download_href) { (filename) }
                         }
                         td data-label="Size" { (format_bytes(f.size)) }
-                        // Wrap the timestamp in <time> so the visual-baseline
-                        // mask `[data-relative-time], .relative-time, time`
-                        // catches it. The visible text is humanized to
-                        // minute precision; the `datetime` attr keeps the
-                        // full raw timestamp as the machine-readable form.
-                        td data-label="Modified" { time datetime=(f.modified) { (format_timestamp(&f.modified)) } }
+                        td data-label="Modified" { (components::timestamp(&f.modified)) }
                         td {
                             button .kebab-trigger
                                 type="button"
@@ -194,32 +199,17 @@ pub fn render_breadcrumbs(bucket: &str, current_prefix: &str) -> Markup {
     }
 }
 
-async fn list_objects_in_bucket(ctx: &dyn Context, bucket: &str) -> Vec<ObjectRow> {
-    match repo::objects::list_for_bucket(ctx, bucket, 1000).await {
-        Ok(rl) => rl
-            .records
-            .into_iter()
-            .map(|r| ObjectRow {
-                key: r
-                    .data
-                    .get("key")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-                size: r.i64_field("size"),
-                modified: r
-                    .data
-                    .get("uploaded_at")
-                    .and_then(|v| v.as_str())
-                    .unwrap_or_default()
-                    .to_string(),
-            })
-            .collect(),
-        Err(e) => {
-            tracing::warn!(error = %e, bucket = %bucket, "object list failed");
-            Vec::new()
-        }
-    }
+/// The bucket's objects, or the failure that stopped us reading them.
+///
+/// An empty vector means the bucket is empty; it must never also mean the
+/// listing failed, because the page renders the two identically ("No files
+/// yet") and the folder navigation below is synthesized from these keys.
+async fn list_objects_in_bucket(
+    ctx: &dyn Context,
+    bucket: &str,
+) -> Result<Vec<ObjectRow>, wafer_run::WaferError> {
+    let page = repo::objects::list_for_bucket(ctx, bucket, 1000).await?;
+    Ok(page.rows.iter().map(ObjectRow::from).collect())
 }
 
 /// GET `/b/storage/{bucket}/[{prefix}/]` — object listing with synthesized
@@ -237,11 +227,16 @@ pub async fn object_list_page(
     }
     // SSR portal is strictly owner-scoped (no admin bypass) — see the
     // `bucket_owned_by` doc comment for the admin-policy split vs the JSON API.
-    if !crate::blocks::files::storage::bucket_owned_by(ctx, &user_id, bucket).await {
-        return crate::ui::not_found_response(msg);
+    match crate::blocks::files::storage::bucket_owned_by(ctx, &user_id, bucket).await {
+        Ok(true) => {}
+        Ok(false) => return crate::ui::not_found_response(msg),
+        Err(e) => return crate::blocks::crud::db_error_page(msg, e, "object list page: ownership"),
     }
 
-    let all_objects = list_objects_in_bucket(ctx, bucket).await;
+    let all_objects = match list_objects_in_bucket(ctx, bucket).await {
+        Ok(rows) => rows,
+        Err(e) => return crate::blocks::crud::db_error_page(msg, e, "object list page"),
+    };
     let listing = group_objects_by_prefix(&all_objects, current_prefix);
 
     let title = if current_prefix.is_empty() {
@@ -261,11 +256,6 @@ pub async fn object_list_page(
     };
 
     let body = list_page(
-        PageHeader {
-            title: "",
-            subtitle: None,
-            primary_action: None,
-        },
         Some(render_breadcrumbs(bucket, current_prefix)),
         table_with_js,
         None,
@@ -304,6 +294,34 @@ pub async fn object_list_page(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The projection takes the three columns the browser renders and reads
+    /// no field itself — the "modified" column is the row's `uploaded_at`.
+    #[test]
+    fn projects_the_three_columns_the_browser_renders() {
+        let row = repo::objects::ObjectRow::from_record(&wafer_core::clients::database::Record {
+            id: "o1".to_string(),
+            data: [
+                ("key".to_string(), serde_json::json!("nested/a.png")),
+                ("size".to_string(), serde_json::json!("2048")),
+                (
+                    "status".to_string(),
+                    serde_json::json!(crate::blocks::files::contracts::ObjectStatus::Complete),
+                ),
+                (
+                    "uploaded_at".to_string(),
+                    serde_json::json!("2026-05-06T10:00:00Z"),
+                ),
+            ]
+            .into_iter()
+            .collect(),
+        })
+        .expect("the fixture row decodes");
+        let projected = ObjectRow::from(&row);
+        assert_eq!(projected.key, "nested/a.png");
+        assert_eq!(projected.size, 2048);
+        assert_eq!(projected.modified, "2026-05-06T10:00:00Z");
+    }
 
     #[test]
     fn group_objects_by_prefix_empty() {
@@ -448,7 +466,8 @@ mod tests {
 
     /// SIZE renders via `format_bytes` (not the raw byte count) and the
     /// MODIFIED cell's visible text is humanized while the `<time>` element's
-    /// `datetime` attribute keeps the full raw timestamp.
+    /// `datetime` attribute carries the instant as a valid HTML date-time
+    /// (UTC, milliseconds — HTML allows at most three fraction digits).
     #[test]
     fn render_objects_table_humanizes_size_and_modified() {
         let f1 = ObjectRow {
@@ -465,10 +484,10 @@ mod tests {
         // Size: humanized, not the bare number cell.
         assert!(html.contains(">105 B<"), "size not humanized: {html}");
 
-        // Modified: full raw timestamp preserved in the datetime attribute...
+        // Modified: the instant in the datetime attribute...
         assert!(
-            html.contains(r#"datetime="2026-07-11T19:13:45.123456789+00:00""#),
-            "datetime attr must keep the full timestamp: {html}"
+            html.contains(r#"datetime="2026-07-11T19:13:45.123Z""#),
+            "datetime attr must carry the instant to the millisecond: {html}"
         );
         // ...while the visible text is the humanized form, not the raw string.
         assert!(
@@ -640,7 +659,7 @@ mod integration_tests {
         // pins the documented policy split: the SSR portal routes through the
         // shared `storage::bucket_owned_by` predicate and deliberately does
         // NOT grant the admin bypass that the JSON API's
-        // `is_bucket_access_denied` does — so even an admin sees a 404 here.
+        // `require_bucket_access` does — so even an admin sees a 404 here.
         let ctx = TestContext::with_files().await;
         let mut row: HashMap<String, serde_json::Value> = HashMap::new();
         row.insert("name".into(), json!("secrets"));
@@ -756,6 +775,41 @@ mod integration_tests {
         assert!(
             body.contains("\\u003c/script\\u003e") || body.contains("\\u003c/script>"),
             "expected escaped </script> sequence in bootstrap: {body}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod outage_tests {
+    //! An object listing that FAILED is not an empty bucket.
+
+    use super::*;
+    use crate::{
+        blocks::files::repo,
+        test_support::{admin_msg, output_http_status, FailingDbOpContext, TestContext},
+    };
+
+    /// The ownership check reads the *buckets* table and must still pass, so
+    /// the fault is scoped to the objects listing: this is the "bucket found,
+    /// listing failed" shape, which used to render "No files yet".
+    #[tokio::test]
+    async fn a_failing_object_list_renders_the_error_page_not_an_empty_bucket() {
+        let ctx = TestContext::with_files().await;
+        super::super::test_helpers::seed_two_buckets(&ctx, "admin_1").await;
+        let failing =
+            FailingDbOpContext::new(ctx.clone(), vec![("database.list", repo::objects::TABLE)]);
+
+        let out = object_list_page(
+            &failing,
+            &admin_msg("retrieve", "/b/storage/photos/"),
+            "photos",
+            "",
+        )
+        .await;
+        assert_eq!(
+            output_http_status(out).await,
+            500,
+            "an unreadable object list must not render as an empty bucket"
         );
     }
 }

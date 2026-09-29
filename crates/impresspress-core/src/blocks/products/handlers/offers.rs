@@ -5,13 +5,16 @@ use wafer_run::{context::Context, ErrorCode, InputStream, Message, OutputStream,
 
 use super::seller_policy;
 use crate::{
-    blocks::products::{
-        contracts::{OfferDefinitionRequest, PricingPreviewRequest},
-        offer_pricing,
-        repo::{offers, products},
-        stripe,
+    blocks::{
+        crud,
+        products::{
+            contracts::{OfferDefinitionRequest, PricingPreviewRequest},
+            offer_pricing,
+            repo::{offers, products},
+            stripe,
+        },
     },
-    http::{err_bad_request, err_conflict, err_internal, err_not_found, err_unauthorized, ok_json},
+    http::{err_bad_request, err_conflict, err_not_found, err_unauthenticated, ok_json},
 };
 
 #[derive(Clone, Copy)]
@@ -52,12 +55,16 @@ pub(super) enum ProductState {
     LiveOrDeleted,
 }
 
+/// The `{product_id}` segment, read only as the route table bound it.
+/// Unguarded: [`verify_product`] is the door for the product, and every
+/// caller of this runs it first.
 pub(super) fn product_id(msg: &Message) -> &str {
     msg.var("product_id")
 }
 
-pub(super) fn offer_id(msg: &Message) -> &str {
-    msg.var("offer_id")
+/// The `{offer_id}` segment, or the 400 an unbound segment turns into.
+pub(super) fn offer_id(msg: &Message) -> Result<&str, OutputStream> {
+    crud::path_var(msg, "offer_id", "Missing offer ID")
 }
 
 pub(super) async fn verify_product(
@@ -66,25 +73,25 @@ pub(super) async fn verify_product(
     access: OfferAccess,
     state: ProductState,
 ) -> Result<Record, OutputStream> {
-    let product_id = product_id(msg);
-    if product_id.is_empty() {
-        return Err(err_bad_request("Missing product ID"));
-    }
+    let product_id = crud::path_var(msg, "product_id", "Missing product ID")?;
     let loaded = match state {
         ProductState::Live => products::get(ctx, product_id).await,
         ProductState::LiveOrDeleted => products::get_including_deleted(ctx, product_id).await,
     };
     let product = match loaded {
         Ok(product) => product,
-        Err(error) if error.code == ErrorCode::NotFound => {
-            return Err(err_not_found("Product not found"));
+        Err(error) => {
+            return Err(crud::db_error(
+                error,
+                "Product not found",
+                "Could not load product",
+            ))
         }
-        Err(error) => return Err(err_internal("Could not load product", error)),
     };
     if matches!(access, OfferAccess::Owner) {
         let user_id = msg.user_id();
         if user_id.is_empty() {
-            return Err(err_unauthorized("Not authenticated"));
+            return Err(err_unauthenticated("Not authenticated"));
         }
         // The shared rule, so the offer routes and the product CRUD routes
         // cannot disagree about who owns the same row again.
@@ -95,17 +102,29 @@ pub(super) async fn verify_product(
     Ok(product)
 }
 
+/// Map an offer-lifecycle failure onto a response.
+///
+/// The first three arms are the offer domain's own classifications, each
+/// carrying the message that says what to change. The tail is a database
+/// failure and goes through the one door, so a WRAP refusal on
+/// `impresspress__products__offers` is the 403 it is rather than the 500 it
+/// used to be, and a quota keeps its 429. `db_error_internal` rather than
+/// `db_error` because the `NotFound` arm above already claims the caller's
+/// 404.
 pub(super) fn domain_error(error: WaferError) -> OutputStream {
     match error.code {
         ErrorCode::NotFound => err_not_found("Offer not found"),
         ErrorCode::InvalidArgument => err_bad_request(&error.message),
         ErrorCode::FailedPrecondition | ErrorCode::Aborted => err_conflict(&error.message),
-        _ => err_internal("Offer operation failed", error),
+        _ => crud::db_error_internal(error, "Offer operation failed"),
     }
 }
 
 async fn definition(input: InputStream) -> Result<OfferDefinitionRequest, OutputStream> {
-    let raw = input.collect_to_bytes().await;
+    let raw = input
+        .collect_to_bytes()
+        .await
+        .map_err(OutputStream::error)?;
     serde_json::from_slice(&raw).map_err(|error| err_bad_request(&format!("Invalid body: {error}")))
 }
 
@@ -135,10 +154,11 @@ pub(super) async fn handle_get(
     if let Err(response) = verify_product(ctx, msg, access, ProductState::Live).await {
         return response;
     }
-    if offer_id(msg).is_empty() {
-        return err_bad_request("Missing offer ID");
-    }
-    match offers::get_for_product(ctx, product_id(msg), offer_id(msg)).await {
+    let offer_id = match offer_id(msg) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match offers::get_for_product(ctx, product_id(msg), offer_id).await {
         Ok(offer) => ok_json(&offer),
         Err(error) => domain_error(error),
     }
@@ -157,11 +177,14 @@ pub(super) async fn handle_preview(
     if let Err(response) = verify_product(ctx, msg, access, ProductState::Live).await {
         return response;
     }
-    let route_offer_id = offer_id(msg);
-    if route_offer_id.is_empty() {
-        return err_bad_request("Missing offer ID");
-    }
-    let raw = input.collect_to_bytes().await;
+    let route_offer_id = match offer_id(msg) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    let raw = match input.collect_to_bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => return OutputStream::error(e),
+    };
     let mut request: PricingPreviewRequest = match serde_json::from_slice(&raw) {
         Ok(request) => request,
         Err(error) => return err_bad_request(&format!("Invalid body: {error}")),
@@ -217,9 +240,10 @@ pub(super) async fn handle_update(
     if let Err(response) = verify_product(ctx, msg, access, ProductState::Live).await {
         return response;
     }
-    if offer_id(msg).is_empty() {
-        return err_bad_request("Missing offer ID");
-    }
+    let offer_id = match offer_id(msg) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     let definition = match definition(input).await {
         Ok(definition) => definition,
         Err(response) => return response,
@@ -229,7 +253,7 @@ pub(super) async fn handle_update(
             return response;
         }
     }
-    match offers::update_draft(ctx, product_id(msg), offer_id(msg), &definition).await {
+    match offers::update_draft(ctx, product_id(msg), offer_id, &definition).await {
         Ok(offer) => ok_json(&offer),
         Err(error) => domain_error(error),
     }
@@ -244,14 +268,15 @@ pub(super) async fn handle_publish(
         Ok(product) => product,
         Err(response) => return response,
     };
-    if offer_id(msg).is_empty() {
-        return err_bad_request("Missing offer ID");
-    }
+    let offer_id = match offer_id(msg) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     if matches!(access, OfferAccess::Owner) {
         if let Err(response) = seller_policy::validate_product_record(ctx, &product).await {
             return response;
         }
-        let offer = match offers::get_for_product(ctx, product_id(msg), offer_id(msg)).await {
+        let offer = match offers::get_for_product(ctx, product_id(msg), offer_id).await {
             Ok(offer) => offer,
             Err(error) => return domain_error(error),
         };
@@ -259,7 +284,7 @@ pub(super) async fn handle_publish(
             return response;
         }
     }
-    match offers::publish(ctx, product_id(msg), offer_id(msg)).await {
+    match offers::publish(ctx, product_id(msg), offer_id).await {
         Ok(offer) => ok_json(&offer),
         Err(error) => domain_error(error),
     }
@@ -273,10 +298,11 @@ pub(super) async fn handle_sync(
     if let Err(response) = verify_product(ctx, msg, access, ProductState::Live).await {
         return response;
     }
-    if offer_id(msg).is_empty() {
-        return err_bad_request("Missing offer ID");
-    }
-    match stripe::sync_offer_catalog(ctx, product_id(msg), offer_id(msg)).await {
+    let offer_id = match offer_id(msg) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match stripe::sync_offer_catalog(ctx, product_id(msg), offer_id).await {
         Ok(offer) => ok_json(&offer),
         Err(error) => domain_error(error),
     }
@@ -290,10 +316,11 @@ pub(super) async fn handle_duplicate(
     if let Err(response) = verify_product(ctx, msg, access, ProductState::Live).await {
         return response;
     }
-    if offer_id(msg).is_empty() {
-        return err_bad_request("Missing offer ID");
-    }
-    match offers::duplicate(ctx, product_id(msg), offer_id(msg), msg.user_id()).await {
+    let offer_id = match offer_id(msg) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match offers::duplicate(ctx, product_id(msg), offer_id, msg.user_id()).await {
         Ok(offer) => ok_json(&offer),
         Err(error) => domain_error(error),
     }
@@ -312,10 +339,11 @@ pub(super) async fn handle_archive(
     if let Err(response) = verify_product(ctx, msg, access, ProductState::LiveOrDeleted).await {
         return response;
     }
-    if offer_id(msg).is_empty() {
-        return err_bad_request("Missing offer ID");
-    }
-    match stripe::archive_offer_catalog(ctx, product_id(msg), offer_id(msg)).await {
+    let offer_id = match offer_id(msg) {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
+    match stripe::archive_offer_catalog(ctx, product_id(msg), offer_id).await {
         Ok(offer) => ok_json(&offer),
         Err(error) => domain_error(error),
     }

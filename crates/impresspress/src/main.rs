@@ -43,7 +43,7 @@ async fn run() -> anyhow::Result<()> {
     let ctx = ModeContext::scan(&cwd)?;
 
     // Flow functions take `repo_root` (= `ctx.cwd`) explicitly, and
-    // `cli::server::run` plumbs it into `load_dotenv` directly. We no
+    // `impresspress_server::run` plumbs it into `load_dotenv` directly. We no
     // longer mutate the process cwd here — process-global state shouldn't
     // change as a side effect of dispatch (and `set_current_dir` is racy
     // with anything else holding a cwd-relative path).

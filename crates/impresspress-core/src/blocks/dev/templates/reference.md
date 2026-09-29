@@ -44,6 +44,12 @@ follows from that:
 | Storage folder | `site/<name>` and below | `site/newsletter/uploads` |
 | Config keys | `SITE__<NAME>__*` | `SITE__NEWSLETTER__FROM_ADDRESS` |
 
+A hyphen in the name stays a hyphen in the block id, the routes and the
+storage folder, and is spelled `_` in collections and config keys:
+`blocks/my-shop` claims `site__my_shop__*` and `SITE__MY_SHOP__*`. A
+collection name is lowercase letters, digits and `_` only — the database uses
+it as written.
+
 Naming anything outside those is refused when the block is staged, with a
 diagnostic (`cap-collection`, `cap-folder`, `cap-config`,
 `endpoint-outside-routes`) naming the entry.
@@ -120,7 +126,7 @@ fn subscribe(request: &Request, ctx: &Ctx) -> Response { /* … */ }
 | `request.method`, `request.path` | Uppercased method, path without the query |
 | `request.param("id")` | A `{id}` captured by the route template |
 | `request.query("page")` | A decoded query parameter |
-| `request.header("accept")` | A request header; names are lowercase |
+| `request.header("accept")` | A request header; names are lowercase. `cookie` and `authorization` never arrive (see [Headers](#headers)) |
 | `request.json()` | The body as `json::Json` |
 | `request.body` | The raw body bytes |
 | `request.user_id`, `request.user_email`, `request.roles` | Who is calling; `None` when nobody is signed in |
@@ -133,6 +139,29 @@ Response::json(200, &json::Json::obj().set("ok", json::Json::Bool(true)))
 Response::text(404, "not found")
 Response::bytes(200, "image/png", pixels).header("Cache-Control", "no-store")
 ```
+
+### Headers
+
+The host decides which headers cross the block's boundary, in both
+directions, and a block cannot change that:
+
+- **In:** a block never sees the request's `Cookie`, `Authorization` or
+  `Proxy-Authorization` header. The admin's session cookie travels on every
+  same-origin request, `/b/<name>/` included, and it stops at the host. Who is
+  calling reaches the block as `request.user_id`, `request.user_email` and
+  `request.roles` instead.
+- **Out:** a block cannot set `Set-Cookie`, `Location`, `Refresh`,
+  `Clear-Site-Data`, any `Access-Control-*` (CORS) header,
+  `Strict-Transport-Security`, `X-Frame-Options` or
+  `Content-Security-Policy` (or its `-Report-Only` twin). The host drops them
+  from every answer the block gives, an error included. The site's own
+  middleware supplies the CORS and security headers.
+- Every other header (`Cache-Control`, `X-*`, …) passes through as the block
+  set it.
+
+The `headers.readable` / `headers.writable` capabilities that would lift these
+rules are refused at staging (`cap-headers`): a sandbox block serves an
+unauthenticated route, so it is never trusted with the session.
 
 Return an error `Response` for anything a caller can cause. A handler that
 panics **traps the instance** — the crate is built with `panic = "abort"`, so
@@ -291,7 +320,9 @@ let n = db::count(ctx, TABLE, &[Filter::new("email", "eq", Json::str(email))])?;
 Filter operators are `eq`, `neq`, `gt`, `gte`, `lt`, `lte`, `like`, `in`,
 `is_null` and `is_not_null`. Anything else is refused by the host.
 
-Always set a `limit` on a list a user can grow.
+Always set a `limit` on a list a user can grow. A list with no `limit`
+returns every matching row; `limit(0)` is refused, and so is an `offset`
+without a `limit`.
 
 ## Storage
 
@@ -358,6 +389,10 @@ match db::get(ctx, TABLE, id) {
 }
 ```
 
+A write that duplicates a primary or `unique()` key fails with
+`AlreadyExists`, so a unique column is its own duplicate check — insert, and
+answer `409` on that code, rather than counting first.
+
 A `PermissionDenied` almost always means the block did not claim the resource
 it just tried to reach. Fix the declaration in `block()`, not the call.
 
@@ -376,7 +411,7 @@ it just tried to reach. Fix the declaration in `block()`, not the call.
 | Cross-block calls | only `wafer-run/database`, `wafer-run/storage`, `wafer-run/config` |
 | Raw SQL / raw DDL | never granted |
 | Crypto, vector indexes | never granted |
-| Sensitive headers | never granted — a block never sees the session cookie |
+| Sensitive headers | never granted — see [Headers](#headers) |
 | Compiles at a time | one |
 
 The size settings in the scaffolded `[profile.release]` (`opt-level = "z"`,
@@ -419,6 +454,7 @@ The codes you are most likely to see:
 | `endpoint-outside-routes` | An endpoint path outside `/b/<name>/` |
 | `cap-collection` / `cap-folder` / `cap-config` | A claim outside your namespace |
 | `cap-ddl` / `cap-raw-sql` | Never granted; use `db::ensure_table` and the typed ops |
+| `cap-headers` | Never granted; see [Headers](#headers) |
 | `cap-callable` / `cap-requires-mismatch` | `requires` must name exactly the platform services you use |
 | `tool-name-duplicate` | Another block already publishes that agent tool name |
 | `route-collision` | Another block, or a built-in route, already serves that prefix |
@@ -426,7 +462,7 @@ The codes you are most likely to see:
 | `package-name` | `Cargo.toml`'s `[package] name` must be the block's directory name |
 | `nested-source` | A file in any subdirectory — the crate is `Cargo.toml` plus a flat `src/` |
 | `artifact-too-large` | Restore the `[profile.release]` size settings |
-| `wafer-guest-version` | Rescaffold: the block was built against an older `wafer_guest.rs` |
+| `wafer-guest-version` | The block was built against an older `wafer_guest.rs`: replace its `src/wafer_guest.rs` with `wafer_guest_module` from `GET /b/dev/api/reference`, then compile again |
 | `guest-load` / `guest-info` / `guest-init` / `guest-probe` | The module was loaded and something failed at that stage — the message is the host's |
 
 ## Template: `hello`

@@ -1,25 +1,29 @@
 //! Bridge-boundary parameter/row codec for the browser sql.js bridge edge.
 //!
-//! `params_to_js`/`rows_from_js`/`parse_rows`/`empty_params` sit right at the
-//! wasm-bindgen boundary (they build/consume `JsValue`s via
-//! `serde_wasm_bindgen`) and are `#[cfg(target_arch = "wasm32")]`-gated: their
-//! only callers (`database.rs`, `vector/service.rs`) are themselves wasm32-only
-//! modules, and a `JsValue` only behaves like a real JS value under
-//! `wasm32-unknown-unknown` anyway, so there is nothing for a host test to
-//! exercise. `coerce_param`/`build_records`/`first_scalar` stay pure
-//! `serde_json`, with no `JsValue` involved, so those compile on the host
-//! (this module is pulled in there under `cfg(test)` — see `lib.rs`) and keep
-//! ordinary host-run `#[test]`s below.
+//! Everything here is *bridge-local*: turning a `serde_json::Value` params
+//! slice into the `JsValue` array `bridge::db_exec_raw`/`bridge::db_query_raw`
+//! bind positionally, and turning the JS array those resolve back into plain
+//! `serde_json::Value` rows.
 //!
-//! Shared by both `database.rs` (the `DbExec` primitives backing the generic
-//! `DatabaseService`) and `vector/service.rs` (which drives `bridge::db_*`
-//! directly for its own hand-rolled vector-index SQL) — both cross the exact
-//! same sql.js bridge boundary and both used to hand-roll their own
-//! JSON-string encode/decode before this was centralized here.
+//! What is deliberately NOT here any more is the row → [`Record`] decode
+//! policy. That used to be a private `build_records`/`first_scalar` pair —
+//! the last of the three private copies of one policy (native SQLite, D1 and
+//! this one). It now lives once, upstream, in
+//! `wafer_core::interfaces::database::codec`, and `database.rs` calls it
+//! directly. Keeping a per-adapter copy is how the D1 backend ended up
+//! answering `Value::String` where the other two answered `Value::Object` for
+//! the same JSON-in-TEXT column.
+//!
+//! `params_to_js`/`rows_from_js`/`empty_params` sit right at the wasm-bindgen
+//! boundary (they build/consume `JsValue`s via `serde_wasm_bindgen`) and are
+//! `#[cfg(target_arch = "wasm32")]`-gated: their only callers (`database.rs`,
+//! `vector/service.rs`) are themselves wasm32-only modules, and a `JsValue`
+//! only behaves like a real JS value under `wasm32-unknown-unknown` anyway, so
+//! there is nothing for a host test to exercise. `coerce_param` stays pure
+//! `serde_json`, with no `JsValue` involved, so it compiles on the host (this
+//! module is pulled in there under `cfg(test)` — see `lib.rs`) and keeps its
+//! ordinary host-run `#[test]`s below.
 
-use std::collections::HashMap;
-
-use wafer_core::interfaces::database::service::Record;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsValue;
 
@@ -76,71 +80,15 @@ pub(crate) fn empty_params() -> JsValue {
 
 /// Decode the JS array of plain row objects `bridge::db_query_raw` resolves
 /// (NOT a JSON string) into `Vec<serde_json::Value>` — one JSON object per
-/// row, keyed by column name. Shared by `parse_rows` below (`database.rs`'s
-/// `Record`-shaped path) and `vector/service.rs`'s raw-row callers, which
-/// need the plain per-column value shape without `Record`'s id/data split.
+/// row, keyed by column name. This is the whole of the bridge's decode job:
+/// what a row object then *means* (`Record` id/data split, a JSON column's
+/// text parsed, single-column scalar extraction) is the shared codec's, not
+/// ours. Consumed by `database.rs` (which hands each row to
+/// `codec::record_from_json_row`) and by `vector/service.rs`'s raw-row
+/// callers, which want the plain per-column value shape.
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn rows_from_js(value: JsValue) -> Result<Vec<serde_json::Value>, String> {
     serde_wasm_bindgen::from_value(value).map_err(|e| format!("decode rows: {e}"))
-}
-
-/// Decode `bridge::db_query_raw`'s resolved value straight into
-/// `Vec<Record>`.
-#[cfg(target_arch = "wasm32")]
-pub(crate) fn parse_rows(value: JsValue) -> Result<Vec<Record>, String> {
-    build_records(rows_from_js(value)?)
-}
-
-/// Pure row-object → `Record` conversion. JSON-looking TEXT columns (sql.js
-/// stores JSON as TEXT) are re-parsed back into structured values. Split out
-/// from `parse_rows` so this logic — the only part of the decode path that
-/// isn't just "ask serde_wasm_bindgen to do it" — stays host-testable
-/// without a real `JsValue`.
-pub(crate) fn build_records(rows: Vec<serde_json::Value>) -> Result<Vec<Record>, String> {
-    let mut records = Vec::with_capacity(rows.len());
-    for row in rows {
-        let serde_json::Value::Object(obj) = row else {
-            return Err("expected row object".to_string());
-        };
-
-        let mut data: HashMap<String, serde_json::Value> = HashMap::new();
-        let mut id = String::new();
-
-        for (k, v) in obj {
-            let parsed = match &v {
-                serde_json::Value::String(s)
-                    if (s.starts_with('{') && s.ends_with('}'))
-                        || (s.starts_with('[') && s.ends_with(']')) =>
-                {
-                    serde_json::from_str(s).unwrap_or(v.clone())
-                }
-                other => other.clone(),
-            };
-
-            if k == "id" {
-                id = match &parsed {
-                    serde_json::Value::String(s) => s.clone(),
-                    serde_json::Value::Number(n) => n.to_string(),
-                    _ => String::new(),
-                };
-            }
-            data.insert(k, parsed);
-        }
-
-        records.push(Record { id, data });
-    }
-
-    Ok(records)
-}
-
-/// The first scalar value of a single-column aggregate row, regardless of its
-/// alias (the shared builders alias `COUNT`/`SUM` columns). A pure scalar
-/// query never names a column `id`, so the data map carries the value.
-pub(crate) fn first_scalar(records: Vec<Record>) -> Option<serde_json::Value> {
-    records
-        .into_iter()
-        .next()
-        .and_then(|r| r.data.into_iter().next().map(|(_, v)| v))
 }
 
 #[cfg(test)]
@@ -171,87 +119,6 @@ mod tests {
         assert_eq!(
             coerce_param(&serde_json::json!({"a": 1})),
             serde_json::Value::String("{\"a\":1}".to_string())
-        );
-    }
-
-    // ── build_records ─────────────────────────────────────────────────────────
-
-    fn rows_from_json(json: &str) -> Vec<serde_json::Value> {
-        serde_json::from_str(json).expect("valid JSON array fixture")
-    }
-
-    #[test]
-    fn build_records_extracts_id_and_data() {
-        let rows = rows_from_json(r#"[{"id":"abc","name":"Bob","age":3}]"#);
-        let recs = build_records(rows).unwrap();
-        assert_eq!(recs.len(), 1);
-        assert_eq!(recs[0].id, "abc");
-        assert_eq!(recs[0].data.get("id").unwrap(), &serde_json::json!("abc"));
-        assert_eq!(recs[0].data.get("name").unwrap(), &serde_json::json!("Bob"));
-        assert_eq!(recs[0].data.get("age").unwrap(), &serde_json::json!(3));
-    }
-
-    #[test]
-    fn build_records_reparses_json_text_columns() {
-        // sql.js stores JSON columns as TEXT; build_records restores structure.
-        let rows = rows_from_json(r#"[{"id":"1","meta":"{\"k\":\"v\"}","tags":"[1,2]"}]"#);
-        let recs = build_records(rows).unwrap();
-        assert_eq!(
-            recs[0].data.get("meta").unwrap(),
-            &serde_json::json!({"k":"v"})
-        );
-        assert_eq!(
-            recs[0].data.get("tags").unwrap(),
-            &serde_json::json!([1, 2])
-        );
-    }
-
-    #[test]
-    fn build_records_numeric_id_stringified() {
-        let recs = build_records(rows_from_json(r#"[{"id":7,"v":"x"}]"#)).unwrap();
-        assert_eq!(recs[0].id, "7");
-    }
-
-    #[test]
-    fn build_records_non_json_text_left_alone() {
-        // A plain string that doesn't look like JSON must stay a string.
-        let recs = build_records(rows_from_json(r#"[{"id":"1","note":"hello world"}]"#)).unwrap();
-        assert_eq!(
-            recs[0].data.get("note").unwrap(),
-            &serde_json::json!("hello world")
-        );
-    }
-
-    #[test]
-    fn build_records_empty_is_empty() {
-        assert!(build_records(rows_from_json("[]")).unwrap().is_empty());
-    }
-
-    #[test]
-    fn build_records_rejects_non_object_row() {
-        assert!(build_records(rows_from_json("[1,2]")).is_err());
-    }
-
-    // ── first_scalar ──────────────────────────────────────────────────────────
-
-    #[test]
-    fn first_scalar_takes_aliased_count_column() {
-        // `SELECT COUNT(*) AS cnt` → one row, one column named `cnt`.
-        let recs = build_records(rows_from_json(r#"[{"cnt":5}]"#)).unwrap();
-        assert_eq!(first_scalar(recs), Some(serde_json::json!(5)));
-    }
-
-    #[test]
-    fn first_scalar_takes_aliased_sum_column() {
-        let recs = build_records(rows_from_json(r#"[{"total":12.5}]"#)).unwrap();
-        assert_eq!(first_scalar(recs), Some(serde_json::json!(12.5)));
-    }
-
-    #[test]
-    fn first_scalar_empty_is_none() {
-        assert_eq!(
-            first_scalar(build_records(rows_from_json("[]")).unwrap()),
-            None
         );
     }
 }
@@ -318,11 +185,13 @@ mod planning {
         );
     }
 
-    /// Lazily added columns are always `TEXT` on SQLite (D1 + sql.js), matching
-    /// the historical lazy column-add type both backends hand-rolled.
+    /// Lazily added columns are always `TEXT` on SQLite (D1 + sql.js),
+    /// whatever the value a write carries.
     #[test]
     fn lazy_column_add_is_text_on_sqlite() {
-        let stmt = ddl::build_add_text_column("items", "newcol", SQLITE);
+        let stmt =
+            ddl::build_add_column_for_value("items", "newcol", &serde_json::json!(42), SQLITE)
+                .expect("a plain column name");
         assert_eq!(stmt.sql, r#"ALTER TABLE "items" ADD COLUMN "newcol" TEXT"#);
     }
 

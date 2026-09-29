@@ -13,6 +13,7 @@ use crate::{
         contracts::{CheckoutPreset, CheckoutPresetRequest, PricingPreviewRequest},
         offer_pricing,
     },
+    db_read::{self, Bound},
     util::RecordExt,
 };
 
@@ -191,7 +192,7 @@ pub(crate) async fn list_for_offer(
     ctx: &dyn Context,
     offer_id: &str,
 ) -> Result<Vec<CheckoutPreset>, WaferError> {
-    let mut rows = db::list_all(
+    let mut rows = db_read::list_bounded(
         ctx,
         TABLE,
         vec![Filter {
@@ -199,6 +200,7 @@ pub(crate) async fn list_for_offer(
             operator: FilterOp::Equal,
             value: Value::String(offer_id.to_string()),
         }],
+        Bound::OnePer("checkout preset on one offer"),
     )
     .await?;
     rows.sort_by(|left, right| {

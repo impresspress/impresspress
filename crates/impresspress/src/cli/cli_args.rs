@@ -55,7 +55,8 @@ pub enum Command {
     /// is packaged with the exact same Wasm into a second candidate. Only the
     /// second version is promoted after mutation-free plan/asset/health
     /// verification. There is no `--run-migrations` flag here (unlike
-    /// `serve`) — every deploy always runs the prepare funnel.
+    /// `serve`) — every deploy always runs the prepare funnel. A site's first
+    /// deploy also creates its Worker and sets its deploy secrets.
     Deploy {
         #[arg(long)]
         target: Option<Target>,
@@ -73,12 +74,13 @@ pub enum Command {
 /// Subactions of `impresspress deploy`.
 #[derive(Subcommand, Debug)]
 pub enum DeployAction {
-    /// Provision the one-time-per-environment worker secrets
+    /// Set the worker secrets the deploy funnel needs
     /// (`IMPRESSPRESS_DEPLOY_TOKEN` + the auth JWT secret) via
     /// `wrangler secret put`. Each value is taken from the same-named env var
-    /// if set, otherwise a fresh 32-byte hex token is generated. Requires a
-    /// generated `wrangler.toml` (run `impresspress build --target cloudflare`
-    /// first).
+    /// if set, otherwise a fresh 32-byte hex token is generated. A site's
+    /// first `impresspress deploy` sets both itself; this sets them again.
+    /// Requires a generated `wrangler.toml` (run `impresspress build --target
+    /// cloudflare` first).
     Secret,
 }
 

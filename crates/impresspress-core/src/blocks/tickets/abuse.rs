@@ -2,10 +2,10 @@
 
 use std::time::Duration;
 
-use sha2::{Digest, Sha256};
+use wafer_block_crypto::primitives;
 use wafer_run::context::Context;
 
-use crate::blocks::rate_limit::{RateLimit, UserRateLimiter};
+use crate::blocks::rate_limit::{ip_bucket, RateLimit, UserRateLimiter};
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum AbuseDecision {
@@ -34,55 +34,20 @@ pub async fn check_durable(
     key: &str,
     limit: RateLimit,
 ) -> AbuseDecision {
-    use wafer_block::{
-        db::{Filter, FilterOp},
-        wire::database::OnConflict,
-    };
-    use wafer_core::clients::database as db;
-
     let now = (js_sys::Date::now() / 1000.0) as i64;
     let window_secs = limit.window.as_secs() as i64;
     let window_cutoff = now - window_secs;
-    let table = crate::blocks::auth::RATE_LIMITS_TABLE;
     let id = crate::util::sha256_hex(format!("tickets-rl:{key}:{now}").as_bytes());
-    let upsert = db::upsert(
+    let count = crate::blocks::auth::repo::rate_limits::windowed_increment(
         ctx,
-        table,
-        vec![
-            ("id".to_string(), serde_json::json!(id)),
-            ("key".to_string(), serde_json::json!(key)),
-        ],
-        vec!["key".to_string()],
-        OnConflict::WindowedCounter {
-            count_field: "count".to_string(),
-            window_field: "window_start".to_string(),
-            now,
-            window_cutoff,
-            created_fields: vec!["created_at".to_string()],
-            updated_fields: vec!["updated_at".to_string()],
-        },
-    )
-    .await;
-    let rows = db::list_all(
-        ctx,
-        table,
-        vec![
-            Filter {
-                field: "key".into(),
-                operator: FilterOp::Equal,
-                value: serde_json::json!(key),
-            },
-            Filter {
-                field: "window_start".into(),
-                operator: FilterOp::GreaterEqual,
-                value: serde_json::json!(window_cutoff),
-            },
-        ],
+        &id,
+        key,
+        now,
+        window_cutoff,
     )
     .await;
     match crate::blocks::rate_limit::decide_rate_limit(
-        &upsert,
-        rows,
+        count,
         "<redacted-ticket-identity>",
         limit.max_requests,
         window_secs as u64,
@@ -108,8 +73,8 @@ pub fn limit(max_requests: u32, window_secs: u64) -> Option<RateLimit> {
 
 pub fn rotating_identity(secret: &str, now_secs: u64, remote_addr: &str) -> String {
     let day = now_secs / 86_400;
-    let canonical = canonical_ip(remote_addr);
-    hmac_hex(secret.as_bytes(), format!("{day}:{canonical}").as_bytes())
+    let client = ip_bucket(remote_addr);
+    hmac_hex(secret.as_bytes(), format!("{day}:{client}").as_bytes())
 }
 
 pub fn dedupe_hash(
@@ -166,7 +131,7 @@ pub fn verify_form_token(
     }
     let payload = format!("v1.{issued}.{nonce}");
     let expected = hmac_hex(secret.as_bytes(), payload.as_bytes());
-    if !constant_time_eq(expected.as_bytes(), signature.as_bytes()) {
+    if !primitives::constant_time_eq(expected.as_bytes(), signature.as_bytes()) {
         return Err("invalid form token");
     }
     Ok(())
@@ -192,40 +157,9 @@ fn normalize_text(value: &str) -> String {
         .to_lowercase()
 }
 
-/// RFC 2104 HMAC-SHA256 using the already-linked SHA-256 primitive.
+/// Lowercase-hex HMAC-SHA256 of `message` under `secret`.
 fn hmac_hex(secret: &[u8], message: &[u8]) -> String {
-    const BLOCK: usize = 64;
-    let mut key = [0_u8; BLOCK];
-    if secret.len() > BLOCK {
-        key[..32].copy_from_slice(&Sha256::digest(secret));
-    } else {
-        key[..secret.len()].copy_from_slice(secret);
-    }
-    let mut inner_pad = [0x36_u8; BLOCK];
-    let mut outer_pad = [0x5c_u8; BLOCK];
-    for index in 0..BLOCK {
-        inner_pad[index] ^= key[index];
-        outer_pad[index] ^= key[index];
-    }
-    let mut inner = Sha256::new();
-    inner.update(inner_pad);
-    inner.update(message);
-    let inner = inner.finalize();
-    let mut outer = Sha256::new();
-    outer.update(outer_pad);
-    outer.update(inner);
-    crate::util::hex_encode(&outer.finalize())
-}
-
-fn constant_time_eq(left: &[u8], right: &[u8]) -> bool {
-    if left.len() != right.len() {
-        return false;
-    }
-    let mut difference = 0_u8;
-    for (left, right) in left.iter().zip(right) {
-        difference |= left ^ right;
-    }
-    difference == 0
+    crate::util::hex_encode(&primitives::hmac_sha256(secret, message))
 }
 
 #[cfg(test)]
@@ -242,6 +176,22 @@ mod tests {
         assert!(!first.contains("203.0.113.9"));
         assert_eq!(canonical_ip("203.0.113.9:443"), "203.0.113.9");
         assert_eq!(canonical_ip("[2001:db8::1]:443"), "2001:db8::1");
+    }
+
+    /// The per-identity submission limit is keyed by this identity, so it
+    /// must name the client network: one IPv6 client rotating interface ids
+    /// within its /64 is one identity, the next /64 is another.
+    #[test]
+    fn rotating_identity_names_the_ipv6_64() {
+        let one = rotating_identity("secret", 86_400, "2001:db8:1:2::1");
+        let rotated = rotating_identity("secret", 86_400, "[2001:db8:1:2:dead:beef:0:3]:443");
+        let neighbour = rotating_identity("secret", 86_400, "2001:db8:1:3::1");
+        assert_eq!(one, rotated);
+        assert_ne!(one, neighbour);
+        assert_eq!(
+            rotating_identity("secret", 86_400, "::ffff:203.0.113.9"),
+            rotating_identity("secret", 86_400, "203.0.113.9")
+        );
     }
 
     #[test]
@@ -264,6 +214,58 @@ mod tests {
         );
         let b = dedupe_hash("secret", "identity", "type", "hello", "a report", "/page");
         assert_eq!(a, b);
+    }
+
+    /// RFC 2104 HMAC-SHA256 written out over `sha2`. Stored dedupe hashes and
+    /// outstanding form tokens were computed with this construction, so
+    /// `hmac_hex` must reproduce it byte for byte.
+    fn reference_hmac_hex(secret: &[u8], message: &[u8]) -> String {
+        use sha2::{Digest, Sha256};
+        const BLOCK: usize = 64;
+        let mut key = [0_u8; BLOCK];
+        if secret.len() > BLOCK {
+            key[..32].copy_from_slice(&Sha256::digest(secret));
+        } else {
+            key[..secret.len()].copy_from_slice(secret);
+        }
+        let mut inner_pad = [0x36_u8; BLOCK];
+        let mut outer_pad = [0x5c_u8; BLOCK];
+        for index in 0..BLOCK {
+            inner_pad[index] ^= key[index];
+            outer_pad[index] ^= key[index];
+        }
+        let mut inner = Sha256::new();
+        inner.update(inner_pad);
+        inner.update(message);
+        let inner = inner.finalize();
+        let mut outer = Sha256::new();
+        outer.update(outer_pad);
+        outer.update(inner);
+        crate::util::hex_encode(&outer.finalize())
+    }
+
+    /// Byte-identical to the reference over random keys and messages, with
+    /// key lengths straddling the 64-byte block (padded, exact, pre-hashed).
+    #[test]
+    fn hmac_matches_the_reference_construction_on_random_inputs() {
+        let mut bytes = [0_u8; 512];
+        for round in 0..2_000_usize {
+            getrandom::getrandom(&mut bytes).expect("os rng");
+            let key_len = match round % 4 {
+                0 => usize::from(bytes[0]) % 64,
+                1 => 64,
+                2 => 65 + usize::from(bytes[0]),
+                _ => usize::from(bytes[0]) + usize::from(bytes[1]),
+            };
+            let message_len = usize::from(bytes[2]) + usize::from(bytes[3]);
+            let key = &bytes[..key_len];
+            let message = &bytes[512 - message_len..];
+            assert_eq!(
+                hmac_hex(key, message),
+                reference_hmac_hex(key, message),
+                "key {key:02x?} message {message:02x?}"
+            );
+        }
     }
 
     #[test]

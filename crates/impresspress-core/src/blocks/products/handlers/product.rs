@@ -1,5 +1,5 @@
-//! Product CRUD: admin (`/admin/b/products/products`) and user-owned
-//! (`/b/products/products`, gated on `WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS`).
+//! Product CRUD: admin (`/b/products/api/admin/products`) and user-owned
+//! (`/b/products/api/products`, gated on `WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS`).
 //!
 //! Every response is a `contracts::ProductView` (or a list of them) built
 //! from the row; every write body is a typed request whose fields are the
@@ -11,23 +11,24 @@ use wafer_block::db::{Filter, FilterOp};
 use wafer_core::clients::{config, database as db};
 use wafer_run::{context::Context, ErrorCode, InputStream, Message, OutputStream};
 
-use super::{default_template_id, seller_policy, GROUPS_TABLE, PRODUCT_TEMPLATES_TABLE};
+use super::seller_policy;
 use crate::{
     blocks::{
         crud,
         products::{
+            config::{DEFAULT_CURRENCY, SELLER_MODERATION_REQUIRED},
             contracts::{
-                CreateProductRequest, ProductDuplicateResponse, ProductListQuery,
-                ProductListResponse, ProductStatus, ProductView, UpdateProductRequest,
+                check_product_slug, slug_from, ApprovalStatus, CreateProductRequest,
+                ProductDuplicateResponse, ProductListQuery, ProductListResponse, ProductStatus,
+                ProductView, UpdateProductRequest, PRODUCT_SLUG_MAX_LEN,
             },
             repo::{self, offers as offer_repo},
         },
     },
     http::{
-        err_bad_request, err_conflict, err_forbidden, err_internal, err_not_found,
-        err_unauthorized, ok_json,
+        err_bad_request, err_forbidden, err_internal, err_not_found, err_unauthenticated, ok_json,
     },
-    util::{field_as_string, now_rfc3339, path_param, stamp_created, stamp_updated, RecordExt},
+    util::{enum_column, field_as_string, now_rfc3339, stamp_created, stamp_updated, RecordExt},
 };
 
 // Columns the products table owns internally: the row's identity, ownership,
@@ -162,7 +163,22 @@ pub(in crate::blocks::products) fn write_error(
     match error.code {
         ErrorCode::NotFound => err_not_found("Product not found"),
         ErrorCode::InvalidArgument => err_bad_request(&error.message),
-        _ => err_internal(context, error),
+        _ => crud::db_error_internal(error, context),
+    }
+}
+
+/// One product row as the view every product endpoint publishes, or the 500
+/// a row outside the contract earns.
+///
+/// The single-row counterpart of [`ProductListResponse::from_record_list`]'s
+/// row-not-page degradation, and the opposite trade for the opposite reason:
+/// a page that drops one unreadable row still answers what the caller asked,
+/// but here the row IS the response, so a `status` or `approval_status` the
+/// contract does not define has to be said out loud.
+pub(in crate::blocks::products) fn product_json(record: &db::Record) -> OutputStream {
+    match ProductView::from_record(record) {
+        Ok(view) => ok_json(&view),
+        Err(error) => err_internal("Product row is outside the contract", error),
     }
 }
 
@@ -245,7 +261,10 @@ pub(super) async fn list_products(
     .await
     {
         Ok(list) => ok_json(&ProductListResponse::from_record_list(&list)),
-        Err(e) => err_internal("Database error", e),
+        // `list_page` is told its table by the block, not by the request, so a
+        // `NotFound` from it names no row of the caller's — a 500, not an
+        // empty page reported as a 404.
+        Err(e) => crud::db_error_internal(e, "Database error"),
     }
 }
 
@@ -290,11 +309,60 @@ async fn create_product_row(
 async fn read_write_body<T: serde::de::DeserializeOwned>(
     input: InputStream,
 ) -> Result<T, OutputStream> {
-    let raw = input.collect_to_bytes().await;
+    let raw = input
+        .collect_to_bytes()
+        .await
+        .map_err(OutputStream::error)?;
     let named: HashMap<String, serde_json::Value> =
         serde_json::from_slice(&raw).map_err(|e| err_bad_request(&format!("Invalid body: {e}")))?;
     reject_unsettable_fields(&named)?;
     serde_json::from_slice(&raw).map_err(|e| err_bad_request(&format!("Invalid body: {e}")))
+}
+
+/// The row a product write replaces, for [`refuse_new_invalid_slug`].
+enum SlugOwner<'a> {
+    /// A create: there is no stored slug.
+    New,
+    /// An update of this row, already read by the handler.
+    Row(&'a db::Record),
+    /// An update of the row with this id, read only if it is needed.
+    Id(&'a str),
+}
+
+/// Refuse a write that sets a slug outside the grammar
+/// ([`check_product_slug`]), with a 400 that states it.
+///
+/// An update that sends back the slug its row already holds sets nothing,
+/// so it is accepted whatever that slug is. A stored slug can break the
+/// grammar — the column accepted any text until the API enforced it, and a
+/// data-snapshot import restores rows as they were exported — and the edit
+/// form sends the slug with every save. Refusing it would make the product
+/// uneditable until it was renamed, and renaming changes its public address.
+/// The row is read only when the sent slug breaks the grammar.
+async fn refuse_new_invalid_slug(
+    ctx: &dyn Context,
+    slug: Option<&str>,
+    owner: SlugOwner<'_>,
+) -> Result<(), OutputStream> {
+    let Some(slug) = slug else {
+        return Ok(());
+    };
+    let Err(message) = check_product_slug(slug) else {
+        return Ok(());
+    };
+    let unchanged = match owner {
+        SlugOwner::New => false,
+        SlugOwner::Row(row) => row.str_field("slug") == slug,
+        SlugOwner::Id(id) => match repo::products::get(ctx, id).await {
+            Ok(row) => row.str_field("slug") == slug,
+            Err(e) => return Err(crud::db_error(e, "Product not found", "Database error")),
+        },
+    };
+    if unchanged {
+        Ok(())
+    } else {
+        Err(err_bad_request(&message))
+    }
 }
 
 /// Fetch a product and verify the caller may act on it ([`is_owned_by`]),
@@ -310,7 +378,7 @@ async fn verify_product_owner(
     user_id: &str,
 ) -> Result<wafer_core::clients::database::Record, OutputStream> {
     if user_id.is_empty() {
-        return Err(err_unauthorized("Not authenticated"));
+        return Err(err_unauthenticated("Not authenticated"));
     }
     match repo::products::get(ctx, id).await {
         Ok(record) => {
@@ -319,8 +387,7 @@ async fn verify_product_owner(
             }
             Ok(record)
         }
-        Err(e) if e.code == ErrorCode::NotFound => Err(err_not_found("Product not found")),
-        Err(e) => Err(err_internal("Database error", e)),
+        Err(e) => Err(crud::db_error(e, "Product not found", "Database error")),
     }
 }
 
@@ -351,7 +418,7 @@ async fn verify_deleted_product_owner(
     user_id: &str,
 ) -> Result<wafer_core::clients::database::Record, OutputStream> {
     if user_id.is_empty() {
-        return Err(err_unauthorized("Not authenticated"));
+        return Err(err_unauthenticated("Not authenticated"));
     }
     match repo::products::get_deleted(ctx, id).await {
         Ok(record) => {
@@ -360,12 +427,9 @@ async fn verify_deleted_product_owner(
             }
             Ok(record)
         }
-        Err(e) if e.code == ErrorCode::NotFound => Err(err_not_found("Product not found")),
-        Err(e) => Err(err_internal("Database error", e)),
+        Err(e) => Err(crud::db_error(e, "Product not found", "Database error")),
     }
 }
-
-const ADMIN_PRODUCT_PREFIX: &str = "/admin/b/products/products/";
 
 // --- Product CRUD (admin) ---
 
@@ -376,14 +440,13 @@ pub(super) async fn handle_list_products(ctx: &dyn Context, msg: &Message) -> Ou
 }
 
 pub(super) async fn handle_get_product(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let id = path_param(msg, "id", ADMIN_PRODUCT_PREFIX);
-    if id.is_empty() {
-        return err_bad_request("Missing product ID");
-    }
+    let id = match crud::path_id(msg, "Product") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     match repo::products::get(ctx, id).await {
-        Ok(record) => ok_json(&ProductView::from_record(&record)),
-        Err(e) if e.code == ErrorCode::NotFound => err_not_found("Product not found"),
-        Err(e) => err_internal("Database error", e),
+        Ok(record) => product_json(&record),
+        Err(e) => crud::db_error(e, "Product not found", "Database error"),
     }
 }
 
@@ -396,23 +459,35 @@ pub(super) async fn handle_create_product(
         Ok(request) => request,
         Err(response) => return response,
     };
+    if let Err(response) =
+        refuse_new_invalid_slug(ctx, request.slug.as_deref(), SlugOwner::New).await
+    {
+        return response;
+    }
     let mut data = request.into_columns();
     stamp_created(&mut data);
     // `or_insert`, and it always inserts: none of these five is a field of
     // `CreateProductRequest`, and `read_write_body` has already refused a
     // body that named one anyway.
     for (key, value) in [
-        ("status", serde_json::json!("draft")),
+        ("status", serde_json::json!(ProductStatus::Draft)),
         ("created_by", serde_json::json!(msg.user_id())),
         ("owner_kind", serde_json::json!("platform")),
         ("owner_id", serde_json::json!("")),
-        ("approval_status", serde_json::json!("approved")),
+        (
+            "approval_status",
+            serde_json::json!(ApprovalStatus::Approved),
+        ),
     ] {
         data.entry(key.to_string()).or_insert(value);
     }
+    let slug = written_slug(&data);
     match create_product_row(ctx, data).await {
-        Ok(record) => ok_json(&ProductView::from_record(&record)),
-        Err(e) => err_internal("Database error", e),
+        Ok(record) => product_json(&record),
+        // An insert names no row of the caller's, so its `NotFound` is a 500.
+        Err(e) => slug_write_error(e, slug.as_deref(), |e| {
+            crud::db_error_internal(e, "Database error")
+        }),
     }
 }
 
@@ -421,14 +496,19 @@ pub(super) async fn handle_update_product(
     msg: &Message,
     input: InputStream,
 ) -> OutputStream {
-    let id = path_param(msg, "id", ADMIN_PRODUCT_PREFIX);
-    if id.is_empty() {
-        return err_bad_request("Missing product ID");
-    }
+    let id = match crud::path_id(msg, "Product") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     let request: UpdateProductRequest = match read_write_body(input).await {
         Ok(request) => request,
         Err(response) => return response,
     };
+    if let Err(response) =
+        refuse_new_invalid_slug(ctx, request.slug.as_deref(), SlugOwner::Id(id)).await
+    {
+        return response;
+    }
     let mut data = request.into_columns();
     stamp_updated(&mut data);
     // A soft-deleted product must go through `restore` before it is editable
@@ -439,21 +519,21 @@ pub(super) async fn handle_update_product(
     // to the dead row and answers 200 — precisely the outcome this guard
     // exists to prevent. `NotFound` matches the response every other admin
     // product endpoint gives for a soft-deleted row.
+    let slug = written_slug(&data);
     match repo::products::update_live(ctx, id, data).await {
-        Ok(record) => ok_json(&ProductView::from_record(&record)),
-        Err(e) => write_error(e, "Database error"),
+        Ok(record) => product_json(&record),
+        Err(e) => slug_write_error(e, slug.as_deref(), |e| write_error(e, "Database error")),
     }
 }
 
 pub(super) async fn handle_delete_product(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let id = path_param(msg, "id", ADMIN_PRODUCT_PREFIX);
-    if id.is_empty() {
-        return err_bad_request("Missing product ID");
-    }
+    let id = match crud::path_id(msg, "Product") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     match repo::products::soft_delete(ctx, id).await {
         Ok(()) => ok_json(&crud::Deleted::done()),
-        Err(e) if e.code == ErrorCode::NotFound => err_not_found("Product not found"),
-        Err(e) => err_internal("Database error", e),
+        Err(e) => crud::db_error(e, "Product not found", "Database error"),
     }
 }
 
@@ -461,23 +541,21 @@ pub(super) async fn handle_delete_product(ctx: &dyn Context, msg: &Message) -> O
 /// without which a deleted product would be unreachable by any UI.
 ///
 /// `POST /b/products/api/admin/products/{id}/restore`, declared
-/// `AuthLevel::Admin` and dispatched from `ADMIN_ROUTES`, so the one wire
-/// path that reaches this handler is the one its declaration matches.
-/// It previously sat on `USER_ROUTES` (declared under `/b/products/api/`,
-/// dispatched from the user table). `ProductsBlock::handle` also enters
-/// `handle_user` with the RAW path, so the same handler answered at
+/// `AuthLevel::Admin` in `routes::ROUTES`, which is also the only thing
+/// `ProductsBlock::handle` dispatches on — so the one wire path that reaches
+/// this handler is the one its declaration matches. It previously sat on a
+/// separate user dispatch table that the block entered from two wire
+/// spellings, so the same handler also answered at
 /// `/b/products/products/{id}/restore` — a spelling matching no declaration
 /// at all, and so resolving to the `Authenticated` fallback. That was a live
 /// privilege escalation: any logged-in user could resurrect any soft-deleted
-/// product. An Admin-tier route must not live on the user dispatch table for
-/// exactly that reason, and
-/// `dispatch_tables_are_backed_by_declared_endpoints` now fails the build if
-/// one does.
+/// product. One table over the declared wire paths is what closed it;
+/// `routes::table_tests` pins that the former second spellings 404.
 pub(super) async fn handle_restore_product(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let id = msg.var("id");
-    if id.is_empty() {
-        return err_bad_request("Missing product ID");
-    }
+    let id = match crud::path_id(msg, "Product") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     restore_product(ctx, id).await
 }
 
@@ -498,12 +576,12 @@ async fn restore_product(ctx: &dyn Context, id: &str) -> OutputStream {
     // Soft delete FREES the product's slug — migration 005's unique index is
     // partial on `deleted_at IS NULL` — and nothing stops a product created
     // afterwards from claiming it. Restoring the original then violates that
-    // index's `(owner_kind, owner_id, slug)` key, which arrives here as a
-    // generic database failure and would go out as an opaque 500. The
-    // Deleted view's Restore button only reloads on success, so that 500 is
-    // invisible: the one door out of soft delete would appear to do nothing
-    // at all. Name the collision instead, so an admin can free the slug and
-    // retry.
+    // index's `(owner_kind, owner_id, slug)` key, which arrives here as
+    // `AlreadyExists`: the only unique key a restore's `UPDATE` can collide
+    // on, since it changes nothing but `deleted_at`. The Deleted view's
+    // Restore button only reloads on success, so a refusal that names nothing
+    // leaves the one door out of soft delete looking broken. Name the
+    // collision instead, so an admin can free the slug and retry.
     //
     // The write is what asks the question. This used to be a pre-check
     // *before* `restore`, which left the answer stale by exactly the gap
@@ -517,69 +595,64 @@ async fn restore_product(ctx: &dyn Context, id: &str) -> OutputStream {
     // What the probe reads afterwards CAN still move — see the
     // `SlugProbe::Clear` arm below for what is done about that.
     match repo::products::restore(ctx, id).await {
-        Ok(record) => ok_json(&ProductView::from_record(&record)),
-        // The filtered write matched zero rows: no such product, or one that
-        // was never deleted. Never a slug collision, so it does not go near
-        // the probe.
-        Err(e) if e.code == ErrorCode::NotFound => write_error(e, RESTORE_FAILED),
-        Err(e) => match restore_slug_conflict(ctx, id).await {
-            SlugProbe::Claimed(slug) => slug_taken(&slug),
-            // Nothing holds the slug, so nothing stands between this product
-            // and the catalog — try again rather than reporting a failure the
-            // database would no longer produce.
-            //
-            // The probe reads rows that go on changing after the write it is
-            // explaining, which is the one thing writing first does NOT fix:
-            // a claimant renamed or deleted in that gap leaves the probe with
-            // nothing to blame, and a clear probe reported as-is would send
-            // back the opaque 500 this whole branch exists to avoid — for a
-            // restore that would now succeed. A clear probe is therefore a
-            // reason to retry, not an answer.
-            //
-            // Exactly one retry, and its failure is CLASSIFIED rather than
-            // forwarded. The retry is itself a write, so the gap the probe
-            // closed reopens behind it: a claimant arriving between the clear
-            // probe and the retry violates the same index the first write
-            // did, and handing that second error to `write_error` gave back
-            // the very 500 this branch exists to avoid — on a request that is
-            // a slug conflict, whose slug the probe has right here. A retry
-            // LOOP is not the fix: a competing request is free to go on
-            // re-claiming the slug, and the answer worth giving (someone
-            // holds it; free it and restore again) is already known.
-            //
-            // One retry stays safe for the reason it always was: `restore`
-            // only clears `deleted_at` on the same already-deleted row, so
-            // repeating it creates no duplicate record and no ancillary
-            // state.
-            //
-            // (Retrying is the best available answer, not the ideal one. The
-            // ideal is for the write's own error to say "unique constraint
-            // violated" — then nothing needs re-reading. No `DatabaseService`
-            // backend maps constraint violations to `ErrorCode::AlreadyExists`
-            // today, and sniffing driver message text would be both magic and
-            // backend-specific, so that fix belongs in wafer-run.)
-            SlugProbe::Clear(slug) => match repo::products::restore(ctx, id).await {
-                Ok(record) => ok_json(&ProductView::from_record(&record)),
-                // The row stopped being a deleted product in the meantime —
-                // a concurrent restore landed first, or it was purged. That
-                // is not this caller's slug conflict, and the 404 every other
-                // product endpoint gives for a row it cannot act on is the
-                // honest answer. Same reasoning as the first write's
-                // `NotFound` arm above.
-                Err(again) if again.code == ErrorCode::NotFound => {
-                    write_error(again, RESTORE_FAILED)
-                }
-                // Refused twice with a clear probe in between: the slug was
-                // free when it was read and is not free now, which is a
-                // claimant that arrived in the gap. Report the conflict.
-                Err(_) => slug_taken(&slug),
-            },
-            // The probe could not run. "Could not tell" is not "clear" — a
-            // retry would be guessing — and it is not "conflict" either, so
-            // the write's own error is the one worth recording, against a
-            // correlation id the admin can quote.
-            SlugProbe::Unknown => write_error(e, RESTORE_FAILED),
-        },
+        Ok(record) => product_json(&record),
+        // The index refused the write. Anything else — the filtered write
+        // matching zero rows (no such product, or one never deleted), a fault
+        // — is not a slug collision and does not go near the probe.
+        Err(e) if e.code == ErrorCode::AlreadyExists => {
+            match restore_slug_conflict(ctx, id).await {
+                SlugProbe::Claimed(slug) => slug_taken(&slug),
+                // Nothing holds the slug, so nothing stands between this product
+                // and the catalog — try again rather than reporting a failure the
+                // database would no longer produce.
+                //
+                // The probe reads rows that go on changing after the write it is
+                // explaining, which is the one thing writing first does NOT fix:
+                // a claimant renamed or deleted in that gap leaves the probe with
+                // nothing to blame, and reporting the first write's refusal would
+                // turn away a restore that would now succeed. A clear probe is therefore a
+                // reason to retry, not an answer.
+                //
+                // Exactly one retry, and its failure is CLASSIFIED rather than
+                // forwarded. The retry is itself a write, so the gap the probe
+                // closed reopens behind it: a claimant arriving between the clear
+                // probe and the retry violates the same index the first write
+                // did, and handing that second error to `write_error` would answer
+                // a conflict that names no slug — on a request whose slug the
+                // probe has right here. A retry
+                // LOOP is not the fix: a competing request is free to go on
+                // re-claiming the slug, and the answer worth giving (someone
+                // holds it; free it and restore again) is already known.
+                //
+                // One retry stays safe for the reason it always was: `restore`
+                // only clears `deleted_at` on the same already-deleted row, so
+                // repeating it creates no duplicate record and no ancillary
+                // state.
+                //
+                // (The write's own error says the slug was taken when it ran, but
+                // not whether it still is. A clear probe is what says the restore
+                // would now go through.)
+                SlugProbe::Clear(slug) => match repo::products::restore(ctx, id).await {
+                    Ok(record) => product_json(&record),
+                    // Refused twice with a clear probe in between: the slug was
+                    // free when it was read and is not free now, which is a
+                    // claimant that arrived in the gap. Report the conflict.
+                    Err(again) if again.code == ErrorCode::AlreadyExists => slug_taken(&slug),
+                    // Anything else is the retry's own failure. A `NotFound` is
+                    // the row having stopped being a deleted product in the
+                    // meantime — a concurrent restore landed first, or it was
+                    // purged — which is not this caller's slug conflict, and the
+                    // 404 every other product endpoint gives for a row it cannot
+                    // act on is the honest answer.
+                    Err(again) => write_error(again, RESTORE_FAILED),
+                },
+                // The probe could not run. "Could not tell" is not "clear" — a
+                // retry would be guessing — so the write's own answer stands: the
+                // 409 its `AlreadyExists` is, without a slug to name.
+                SlugProbe::Unknown => write_error(e, RESTORE_FAILED),
+            }
+        }
+        Err(e) => write_error(e, RESTORE_FAILED),
     }
 }
 
@@ -595,10 +668,40 @@ const RESTORE_FAILED: &str = "Database error";
 /// advice is what makes the response actionable, which is the whole reason
 /// this is not a 500.
 fn slug_taken(slug: &str) -> OutputStream {
-    err_conflict(&format!(
-        "Another product already uses the slug \"{slug}\". Rename or delete that \
-         product, then restore this one."
-    ))
+    crud::TakenKey::new("product", "slug", slug)
+        .conflict_with("Rename or delete that product, then restore this one.")
+}
+
+/// The slug a product write sets, when the unique index can refuse it.
+///
+/// Migration 005's `impresspress__products__products_owner_slug_uniq` is the
+/// products table's one caller-chosen unique key — `(owner_kind, owner_id,
+/// slug)`, partial on `slug <> ''` and `deleted_at IS NULL` — and no
+/// create or update route lets a caller set the owner or `deleted_at`. So a
+/// write that sets a non-empty slug and is refused as a duplicate collided on
+/// that slug, and a write that sets none cannot collide at all.
+fn written_slug(data: &HashMap<String, serde_json::Value>) -> Option<String> {
+    data.get("slug")
+        .and_then(serde_json::Value::as_str)
+        .filter(|slug| !slug.is_empty())
+        .map(str::to_string)
+}
+
+/// What a product write that set `slug` answers when it failed: the named
+/// 409 for a duplicate (see [`written_slug`]), `otherwise` for the rest.
+fn slug_write_error(
+    error: wafer_run::WaferError,
+    slug: Option<&str>,
+    otherwise: impl FnOnce(wafer_run::WaferError) -> OutputStream,
+) -> OutputStream {
+    match slug {
+        Some(slug) => crud::taken_key_or(
+            error,
+            crud::TakenKey::new("product", "slug", slug),
+            otherwise,
+        ),
+        None => otherwise(error),
+    }
 }
 
 /// What [`restore_slug_conflict`] found. Three answers, not two: "no
@@ -668,9 +771,10 @@ async fn slug_is_claimed(
         eq_filter("owner_id", deleted.str_field("owner_id")),
         eq_filter("slug", slug),
     ];
-    // `list_all` appends the live-only filter, so a second soft-deleted row
-    // sharing the slug is correctly not a collision.
-    Ok(!repo::products::list_all(ctx, filters).await?.is_empty())
+    // `count` appends the live-only filter, so a second soft-deleted row
+    // sharing the slug is correctly not a collision. A count, not a row read:
+    // the question is only whether the key is taken.
+    Ok(repo::products::count(ctx, &filters).await? > 0)
 }
 
 fn eq_filter(field: &str, value: &str) -> Filter {
@@ -690,19 +794,28 @@ fn copied_name(source: &wafer_core::clients::database::Record) -> String {
     format!("{base} copy")
 }
 
+/// The copy's slug: the source's, brought into the grammar
+/// ([`slug_from`]) and cut short enough for the `-copy-` suffix, or
+/// `product` when nothing of it survives. Valid whatever the source holds,
+/// because the duplicate writes it without [`refuse_new_invalid_slug`].
 fn copied_slug(source: &wafer_core::clients::database::Record) -> String {
-    let base = source.str_field("slug");
-    let base = if base.is_empty() { "product" } else { base };
-    let base = base.chars().take(140).collect::<String>();
-    let suffix = uuid::Uuid::now_v7().to_string();
-    format!("{base}-copy-{}", &suffix[..8])
+    let suffix = uuid::Uuid::now_v7().simple().to_string();
+    let suffix = &suffix[suffix.len() - 8..];
+    let tail = format!("-copy-{suffix}");
+    let base = slug_from(source.str_field("slug"), PRODUCT_SLUG_MAX_LEN - tail.len());
+    let base = if base.is_empty() {
+        "product".to_string()
+    } else {
+        base
+    };
+    format!("{base}{tail}")
 }
 
 async fn duplicate_product(ctx: &dyn Context, msg: &Message, owner_only: bool) -> OutputStream {
-    let source_id = msg.var("id");
-    if source_id.is_empty() {
-        return err_bad_request("Missing product ID");
-    }
+    let source_id = match crud::path_id(msg, "Product") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     let source = if owner_only {
         match verify_product_owner(ctx, source_id, msg.user_id()).await {
             Ok(source) => source,
@@ -711,10 +824,9 @@ async fn duplicate_product(ctx: &dyn Context, msg: &Message, owner_only: bool) -
     } else {
         match repo::products::get(ctx, source_id).await {
             Ok(source) => source,
-            Err(error) if error.code == ErrorCode::NotFound => {
-                return err_not_found("Product not found");
+            Err(error) => {
+                return crud::db_error(error, "Product not found", "Could not load product")
             }
-            Err(error) => return err_internal("Could not load product", error),
         }
     };
     if owner_only {
@@ -758,7 +870,10 @@ async fn duplicate_product(ctx: &dyn Context, msg: &Message, owner_only: bool) -
         serde_json::Value::String(msg.user_id().to_string()),
     );
     if owner_only {
-        let moderation_required = seller_moderation_required(ctx).await;
+        let moderation_required = match seller_moderation_required(ctx).await {
+            Ok(required) => required,
+            Err(e) => return crud::db_error_internal(e, "Could not read the moderation policy"),
+        };
         data.insert(
             "owner_kind".to_string(),
             serde_json::Value::String("user".to_string()),
@@ -769,14 +884,11 @@ async fn duplicate_product(ctx: &dyn Context, msg: &Message, owner_only: bool) -
         );
         data.insert(
             "approval_status".to_string(),
-            serde_json::Value::String(
-                if moderation_required {
-                    "draft"
-                } else {
-                    "approved"
-                }
-                .to_string(),
-            ),
+            serde_json::json!(if moderation_required {
+                ApprovalStatus::Draft
+            } else {
+                ApprovalStatus::Approved
+            }),
         );
         if let Some(account_id) = source.data.get("seller_account_id") {
             data.insert("seller_account_id".to_string(), account_id.clone());
@@ -792,7 +904,7 @@ async fn duplicate_product(ctx: &dyn Context, msg: &Message, owner_only: bool) -
         );
         data.insert(
             "approval_status".to_string(),
-            serde_json::Value::String("approved".to_string()),
+            serde_json::json!(ApprovalStatus::Approved),
         );
     }
     stamp_created(&mut data);
@@ -800,7 +912,7 @@ async fn duplicate_product(ctx: &dyn Context, msg: &Message, owner_only: bool) -
     // the copy did not set.
     let created = match create_product_row(ctx, data).await {
         Ok(created) => created,
-        Err(error) => return err_internal("Could not duplicate product", error),
+        Err(error) => return crud::db_error_internal(error, "Could not duplicate product"),
     };
     let duplicated_offers = match offer_repo::duplicate_for_product(
         ctx,
@@ -822,11 +934,15 @@ async fn duplicate_product(ctx: &dyn Context, msg: &Message, owner_only: bool) -
             if let Err(cleanup_error) = repo::products::purge(ctx, &created.id).await {
                 tracing::error!(product_id = %created.id, error = %cleanup_error, "could not compensate duplicated product");
             }
-            return err_internal("Could not duplicate product pricing", error);
+            return crud::db_error_internal(error, "Could not duplicate product pricing");
         }
     };
+    let product = match ProductView::from_record(&created) {
+        Ok(product) => product,
+        Err(error) => return err_internal("Product row is outside the contract", error),
+    };
     ok_json(&ProductDuplicateResponse {
-        product: ProductView::from_record(&created),
+        product,
         offers: duplicated_offers,
     })
 }
@@ -837,20 +953,14 @@ pub(super) async fn handle_duplicate_product(ctx: &dyn Context, msg: &Message) -
 
 // --- User's own products ---
 
-async fn seller_moderation_required(ctx: &dyn Context) -> bool {
-    config::get_default(
-        ctx,
-        "IMPRESSPRESS__PRODUCTS__SELLER_MODERATION_REQUIRED",
-        "true",
-    )
-    .await
-        == "true"
+async fn seller_moderation_required(ctx: &dyn Context) -> Result<bool, wafer_run::WaferError> {
+    crate::config_vars::get_bool(ctx, SELLER_MODERATION_REQUIRED, true).await
 }
 
 pub(super) async fn handle_user_list_products(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let user_id = msg.user_id().to_string();
     if user_id.is_empty() {
-        return err_unauthorized("Not authenticated");
+        return err_unauthenticated("Not authenticated");
     }
 
     let query = ProductListQuery::from_message(msg);
@@ -864,12 +974,12 @@ pub(super) async fn handle_user_list_products(ctx: &dyn Context, msg: &Message) 
 }
 
 pub(super) async fn handle_user_get_product(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let id = path_param(msg, "id", "/b/products/products/");
-    if id.is_empty() {
-        return err_bad_request("Missing product ID");
-    }
+    let id = match crud::path_id(msg, "Product") {
+        Ok(value) => value,
+        Err(response) => return response,
+    };
     match verify_product_owner(ctx, id, msg.user_id()).await {
-        Ok(record) => ok_json(&ProductView::from_record(&record)),
+        Ok(record) => product_json(&record),
         Err(response) => response,
     }
 }
@@ -881,7 +991,7 @@ pub(super) async fn handle_user_create_product(
 ) -> OutputStream {
     let user_id = msg.user_id().to_string();
     if user_id.is_empty() {
-        return err_unauthorized("Not authenticated");
+        return err_unauthenticated("Not authenticated");
     }
 
     // The unsettable-field refusal happens inside `read_write_body`, and so
@@ -893,38 +1003,46 @@ pub(super) async fn handle_user_create_product(
         Ok(request) => request,
         Err(response) => return response,
     };
+    if let Err(response) =
+        refuse_new_invalid_slug(ctx, request.slug.as_deref(), SlugOwner::New).await
+    {
+        return response;
+    }
     if let Err(response) = seller_policy::ensure_product_capacity(ctx, &user_id).await {
         return response;
     }
 
     // Verify user owns the group (if provided)
     if let Some(group_id) = request.group_id.as_deref().filter(|id| !id.is_empty()) {
-        match db::get(ctx, GROUPS_TABLE, group_id).await {
+        match repo::groups::get(ctx, group_id).await {
             Ok(group) => {
                 if field_as_string(&group, "user_id") != user_id {
                     return err_bad_request("You don't own this group");
                 }
             }
-            Err(_) => return err_bad_request("Group not found"),
+            Err(error) if error.code == ErrorCode::NotFound => {
+                return err_bad_request("Group not found")
+            }
+            Err(error) => return crud::db_error_internal(error, "Could not load group"),
         }
     }
 
     let mut data = request.into_columns();
-    let moderation_required = seller_moderation_required(ctx).await;
+    let moderation_required = match seller_moderation_required(ctx).await {
+        Ok(required) => required,
+        Err(e) => return crud::db_error_internal(e, "Could not read the moderation policy"),
+    };
     data.insert(
         "status".to_string(),
-        serde_json::Value::String("draft".to_string()),
+        serde_json::json!(ProductStatus::Draft),
     );
     data.insert(
         "approval_status".to_string(),
-        serde_json::Value::String(
-            if moderation_required {
-                "draft"
-            } else {
-                "approved"
-            }
-            .to_string(),
-        ),
+        serde_json::json!(if moderation_required {
+            ApprovalStatus::Draft
+        } else {
+            ApprovalStatus::Approved
+        }),
     );
     data.insert(
         "owner_kind".to_string(),
@@ -939,12 +1057,11 @@ pub(super) async fn handle_user_create_product(
         .get("currency")
         .is_none_or(|value| value.as_str().is_some_and(str::is_empty))
     {
-        data.insert(
-            "currency".to_string(),
-            serde_json::json!(
-                config::get_default(ctx, "IMPRESSPRESS__PRODUCTS__DEFAULT_CURRENCY", "USD").await
-            ),
-        );
+        let currency = match config::get_default(ctx, DEFAULT_CURRENCY, "USD").await {
+            Ok(currency) => currency,
+            Err(e) => return crud::db_error_internal(e, "Could not read the default currency"),
+        };
+        data.insert("currency".to_string(), serde_json::json!(currency));
     }
     stamp_created(&mut data);
     // Default product_template_id to the seeded "default" template's real
@@ -955,20 +1072,33 @@ pub(super) async fn handle_user_create_product(
         .get("product_template_id")
         .is_none_or(|value| value.as_str().is_some_and(str::is_empty))
     {
-        if let Some(default_id) = default_template_id(ctx, PRODUCT_TEMPLATES_TABLE).await {
-            data.insert(
-                "product_template_id".to_string(),
-                serde_json::Value::String(default_id),
-            );
+        match repo::product_templates::default_id(ctx).await {
+            Ok(Some(default_id)) => {
+                data.insert(
+                    "product_template_id".to_string(),
+                    serde_json::Value::String(default_id),
+                );
+            }
+            // No default template seeded: proceed without one, as this create
+            // always has.
+            Ok(None) => {}
+            // Same reasoning as the group create: a failed read is not "there
+            // is no default template", and writing the product anyway leaves
+            // a template-less row behind that reads as a choice.
+            Err(error) => return crud::db_error_internal(error, "Could not load product template"),
         }
     }
     if let Err(response) = seller_policy::validate_product_fields(ctx, &data).await {
         return response;
     }
 
+    let slug = written_slug(&data);
     match create_product_row(ctx, data).await {
-        Ok(record) => ok_json(&ProductView::from_record(&record)),
-        Err(e) => err_internal("Database error", e),
+        Ok(record) => product_json(&record),
+        // An insert names no row of the caller's, so its `NotFound` is a 500.
+        Err(e) => slug_write_error(e, slug.as_deref(), |e| {
+            crud::db_error_internal(e, "Database error")
+        }),
     }
 }
 
@@ -977,10 +1107,10 @@ pub(super) async fn handle_user_update_product(
     msg: &Message,
     input: InputStream,
 ) -> OutputStream {
-    let id = msg.var("id").to_string();
-    if id.is_empty() {
-        return err_bad_request("Missing product ID");
-    }
+    let id = match crud::path_id(msg, "Product") {
+        Ok(value) => value.to_string(),
+        Err(response) => return response,
+    };
     let current = match verify_product_owner(ctx, &id, msg.user_id()).await {
         Ok(record) => record,
         Err(response) => return response,
@@ -990,6 +1120,11 @@ pub(super) async fn handle_user_update_product(
         Ok(request) => request,
         Err(response) => return response,
     };
+    if let Err(response) =
+        refuse_new_invalid_slug(ctx, request.slug.as_deref(), SlugOwner::Row(&current)).await
+    {
+        return response;
+    }
     // The ownership, moderation and provider columns the untyped path had to
     // strip here are not fields of `UpdateProductRequest`, so they cannot
     // arrive; `read_write_body` above is what REFUSES a body naming one
@@ -1012,18 +1147,34 @@ pub(super) async fn handle_user_update_product(
             {
                 return response;
             }
-            let approval = field_as_string(&current, "approval_status");
-            if approval == "suspended" {
+            let approval = match enum_column::<ApprovalStatus>(&current, "approval_status") {
+                Ok(approval) => approval,
+                Err(error) => {
+                    return err_internal("Product row is outside the contract", error);
+                }
+            };
+            if approval == ApprovalStatus::Suspended {
                 return err_forbidden("Suspended products cannot be published");
             }
-            if seller_moderation_required(ctx).await && approval != "approved" {
+            let moderation_required = match seller_moderation_required(ctx).await {
+                Ok(required) => required,
+                Err(e) => {
+                    return crud::db_error_internal(e, "Could not read the moderation policy")
+                }
+            };
+            if moderation_required && approval != ApprovalStatus::Approved {
+                // The two columns a seller submission moves, to two different
+                // values: `status` is the publication state a buyer sees and
+                // `approval_status` is the moderation state an administrator
+                // acts on. Review bug B11 read the pair as one vocabulary
+                // spelled twice; `tests::status_enum_tests` pins that it is not.
                 data.insert(
                     "status".to_string(),
-                    serde_json::Value::String("pending_review".to_string()),
+                    serde_json::json!(ProductStatus::PendingReview),
                 );
                 data.insert(
                     "approval_status".to_string(),
-                    serde_json::Value::String("pending".to_string()),
+                    serde_json::json!(ApprovalStatus::Pending),
                 );
                 data.insert(
                     "submitted_at".to_string(),
@@ -1032,11 +1183,11 @@ pub(super) async fn handle_user_update_product(
             } else {
                 data.insert(
                     "status".to_string(),
-                    serde_json::Value::String("active".to_string()),
+                    serde_json::json!(ProductStatus::Active),
                 );
                 data.insert(
                     "approval_status".to_string(),
-                    serde_json::Value::String("approved".to_string()),
+                    serde_json::json!(ApprovalStatus::Approved),
                 );
                 data.insert(
                     "published_at".to_string(),
@@ -1051,24 +1202,26 @@ pub(super) async fn handle_user_update_product(
     // ownership check above is a separate read, and the validation between it
     // and this write only widens the window a concurrent delete can land in.
     // The write itself has to be the thing that tests liveness.
+    let slug = written_slug(&data);
     match repo::products::update_live(ctx, &id, data).await {
-        Ok(record) => ok_json(&ProductView::from_record(&record)),
-        Err(error) => write_error(error, "Database error"),
+        Ok(record) => product_json(&record),
+        Err(error) => {
+            slug_write_error(error, slug.as_deref(), |e| write_error(e, "Database error"))
+        }
     }
 }
 
 pub(super) async fn handle_user_delete_product(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let id = path_param(msg, "id", "/b/products/products/").to_string();
-    if id.is_empty() {
-        return err_bad_request("Missing product ID");
-    }
+    let id = match crud::path_id(msg, "Product") {
+        Ok(value) => value.to_string(),
+        Err(response) => return response,
+    };
     if let Err(response) = verify_product_owner(ctx, &id, msg.user_id()).await {
         return response;
     }
     match repo::products::soft_delete(ctx, &id).await {
         Ok(()) => ok_json(&crud::Deleted::done()),
-        Err(e) if e.code == ErrorCode::NotFound => err_not_found("Product not found"),
-        Err(e) => err_internal("Database error", e),
+        Err(e) => crud::db_error(e, "Product not found", "Database error"),
     }
 }
 
@@ -1090,20 +1243,19 @@ pub(super) async fn handle_user_delete_product(ctx: &dyn Context, msg: &Message)
 /// `pages::product_manager`. A second rule here is how those three disagreed
 /// with each other once already.
 ///
-/// Unlike the admin route it lives on `USER_ROUTES`, so it answers at BOTH
-/// `/b/products/api/products/{id}/restore` and the raw
-/// `/b/products/products/{id}/restore` — `ProductsBlock::handle` enters
-/// `handle_user` from both. That is safe here precisely because the tier is
-/// the fallback tier: the undeclared spelling resolves to `Authenticated`
-/// too, so neither spelling is weaker than the declaration, and ownership —
-/// not the URL — is what refuses seller B. An `Admin` route could not live
-/// here for exactly that reason, which is what
-/// `dispatch_tables_are_backed_by_declared_endpoints` enforces.
+/// `POST /b/products/api/products/{id}/restore`, declared `Authenticated`
+/// in `routes::ROUTES` and served at that one spelling: the raw
+/// `/b/products/products/{id}/restore` the block used to answer as well is
+/// not a route (`routes::table_tests` and
+/// `the_former_alias_spelling_of_a_seller_route_is_not_found` pin that).
+/// The tier admits every logged-in caller, so ownership — the
+/// `verify_deleted_product_owner` check above, not the URL — is what refuses
+/// seller B.
 pub(super) async fn handle_user_restore_product(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let id = msg.var("id").to_string();
-    if id.is_empty() {
-        return err_bad_request("Missing product ID");
-    }
+    let id = match crud::path_id(msg, "Product") {
+        Ok(value) => value.to_string(),
+        Err(response) => return response,
+    };
     if let Err(response) = verify_deleted_product_owner(ctx, &id, msg.user_id()).await {
         return response;
     }

@@ -1,16 +1,17 @@
-//! Admin dashboard stats: `/admin/b/products/stats`.
+//! Admin dashboard stats: `/b/products/api/admin/stats`.
 
 use wafer_block::db::{Filter, FilterOp};
-use wafer_core::clients::database as db;
 use wafer_run::{context::Context, Message, OutputStream};
 
-use super::GROUPS_TABLE;
 use crate::{
-    blocks::products::{
-        contracts::{AdminStats, SellerStats},
-        repo,
+    blocks::{
+        crud,
+        products::{
+            contracts::{AdminStats, SellerStats},
+            repo,
+        },
     },
-    http::{err_internal, ok_json},
+    http::ok_json,
 };
 
 pub(super) async fn handle_stats(ctx: &dyn Context, _msg: &Message) -> OutputStream {
@@ -29,7 +30,7 @@ pub(super) async fn handle_stats(ctx: &dyn Context, _msg: &Message) -> OutputStr
         repo::products::count(ctx, &active_filter),
         repo::purchases::count_all(ctx),
         repo::purchases::commerce_analytics(ctx, None),
-        db::count(ctx, GROUPS_TABLE, &[]),
+        repo::groups::count(ctx, &[]),
     );
 
     // A repository failure on any of these must surface as an error, not be
@@ -39,23 +40,23 @@ pub(super) async fn handle_stats(ctx: &dyn Context, _msg: &Message) -> OutputStr
     // every one of the 5 counts/sums independently.
     let total_products = match total_products {
         Ok(n) => n,
-        Err(e) => return err_internal("Database error", e),
+        Err(e) => return crud::db_error_internal(e, "Database error"),
     };
     let active_products = match active_products {
         Ok(n) => n,
-        Err(e) => return err_internal("Database error", e),
+        Err(e) => return crud::db_error_internal(e, "Database error"),
     };
     let total_purchases = match total_purchases {
         Ok(n) => n,
-        Err(e) => return err_internal("Database error", e),
+        Err(e) => return crud::db_error_internal(e, "Database error"),
     };
     let analytics = match analytics {
         Ok(analytics) => analytics,
-        Err(e) => return err_internal("Database error", e),
+        Err(e) => return crud::db_error_internal(e, "Database error"),
     };
     let total_groups = match total_groups {
         Ok(n) => n,
-        Err(e) => return err_internal("Database error", e),
+        Err(e) => return crud::db_error_internal(e, "Database error"),
     };
 
     ok_json(&AdminStats {
@@ -77,7 +78,7 @@ pub(super) async fn handle_seller_stats(ctx: &dyn Context, msg: &Message) -> Out
                 recent_failures: Vec::new(),
             })
         }
-        Err(error) => return err_internal("Database error", error),
+        Err(error) => return crud::db_error_internal(error, "Database error"),
     };
     let (analytics, failures) = futures::join!(
         repo::purchases::commerce_analytics(ctx, Some(&account.id)),
@@ -89,6 +90,6 @@ pub(super) async fn handle_seller_stats(ctx: &dyn Context, msg: &Message) -> Out
             currency_analytics: analytics,
             recent_failures: failures,
         }),
-        (Err(error), _) | (_, Err(error)) => err_internal("Database error", error),
+        (Err(error), _) | (_, Err(error)) => crud::db_error_internal(error, "Database error"),
     }
 }

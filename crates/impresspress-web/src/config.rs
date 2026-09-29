@@ -1,7 +1,7 @@
 //! Browser-side variable + block-settings seeding.
 //!
-//! Thin wrappers over the shared `impresspress_core::boot` / `impresspress_core::features`
-//! seeders, driving the browser's `BrowserDatabaseService` instead of the JS
+//! Thin wrappers over the shared `impresspress_core::platform_state` /
+//! `impresspress_core::features` seeders, driving the browser's `BrowserDatabaseService` instead of the JS
 //! `bridge::db_exec_raw` / `db_query_raw` strings the prior implementation used
 //! (which hardcoded the `impresspress__admin__*` table names 17×). The seeding
 //! logic — env/auto-gen/JWT vars and the #222 block-settings hash-gate — now
@@ -15,13 +15,17 @@
 
 use std::{collections::HashMap, sync::Arc};
 
+use impresspress_core::{
+    blocks::auth::config::{BOOTSTRAP_ADMIN_EMAIL_KEY, BOOTSTRAP_ADMIN_PASSWORD_KEY},
+    config_vars::{EMBEDDED_SCRIPTS_KEY, HAS_LANDING_PAGE_KEY},
+};
 use wafer_core::interfaces::database::service::DatabaseService;
 
 use crate::SandboxMode;
 
 /// Seed the browser-only default variables, auto-generate declared secrets,
 /// and return the full variable map. Browser-equivalent of the native
-/// `seed_and_load_variables()` — there are no process env vars in the browser,
+/// `variables::seed_and_load()` — there are no process env vars in the browser,
 /// only the local defaults below plus auto-generated secrets.
 /// `mode` is the *resolved* verdict from [`SandboxMode::resolve`], never the
 /// raw `initialize({ dev })` request: on a build without `browser-devtools`
@@ -36,22 +40,33 @@ pub async fn seed_and_load_variables(
     db: &Arc<dyn DatabaseService>,
     mode: SandboxMode,
 ) -> Result<HashMap<String, String>, String> {
-    // Browser-only defaults. These are not declared `ConfigVar`s (so the
-    // auto-gen pass won't seed them) and there's no env to source them from —
-    // the browser build ships a self-contained local admin + WebLLM wiring.
+    // Browser-only defaults. All three keys ARE declared — the bootstrap pair
+    // by `auth::config::auth_config_vars`, `EMBEDDED_SCRIPTS` by
+    // `config_vars::shared_config_vars` — but every one of them declares an
+    // EMPTY default, so nothing else supplies a value: `admin::settings::
+    // seed_defaults` skips an empty declared default, `seed_auto_generated`
+    // seeds only `auto_generate` vars, and the browser has no process
+    // environment to source one from. It ships a self-contained local admin +
+    // WebLLM wiring instead, so it seeds those values here.
+    //
+    // A stated flag rather than the create default, and the declarations are
+    // why that is safe: `seed_if_absent` builds the `NewVariable` itself, and
+    // `into_row` raises the password's flag from its `InputType::Password`
+    // declaration whatever is passed.
+    //
     // `INSERT OR IGNORE`: a prior boot or admin-UI edit always wins.
-    impresspress_core::boot::seed_variable_if_absent(
+    impresspress_core::platform_state::variables::seed_if_absent(
         db,
-        "WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL",
+        BOOTSTRAP_ADMIN_EMAIL_KEY,
         "admin@example.com",
         "Admin Email",
         "Admin account email",
         false,
     )
     .await?;
-    impresspress_core::boot::seed_variable_if_absent(
+    impresspress_core::platform_state::variables::seed_if_absent(
         db,
-        "WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_PASSWORD",
+        BOOTSTRAP_ADMIN_PASSWORD_KEY,
         "admin123",
         "Admin Password",
         "Admin account password",
@@ -60,9 +75,9 @@ pub async fn seed_and_load_variables(
     .await?;
     // Inject the page-side WebLLM engine into every SSR-rendered page.
     // Native/server targets leave this var unset and skip the injection.
-    impresspress_core::boot::seed_variable_if_absent(
+    impresspress_core::platform_state::variables::seed_if_absent(
         db,
-        "WAFER_RUN_SHARED__EMBEDDED_SCRIPTS",
+        EMBEDDED_SCRIPTS_KEY,
         "/webllm-engine.js",
         "Embedded Scripts",
         "Module-type script URLs embedded in every page",
@@ -80,7 +95,7 @@ pub async fn seed_and_load_variables(
     // Not seeded, because this hook runs *after* the admin block's
     // `lifecycle(Init)`, which has already written every declared
     // `config_vars` default — and `WAFER_RUN_SHARED__HAS_LANDING_PAGE` is
-    // declared, defaulting to `"false"`. `seed_variable_if_absent` is
+    // declared, defaulting to `"false"`. `seed_if_absent` is
     // therefore a guaranteed no-op on this key, which is precisely the bug
     // Plan 1 Task 10's e2e caught: the sandbox published a site that `/` then
     // refused to serve.
@@ -100,11 +115,11 @@ pub async fn seed_and_load_variables(
     // the browser target the sandbox is the ONLY producer of a landing page
     // (no web flow publishes a site — see `cli/flows/{sealed,embed}_web.rs`,
     // unlike their native counterparts), so without it there is nothing at `/`
-    // to serve. `set_variable` writes nothing when the value already matches,
+    // to serve. `variables::set` writes nothing when the value already matches,
     // so the common case is a read.
-    impresspress_core::boot::set_variable(
+    impresspress_core::platform_state::variables::set(
         db,
-        "WAFER_RUN_SHARED__HAS_LANDING_PAGE",
+        HAS_LANDING_PAGE_KEY,
         if mode.runtime_present() {
             "true"
         } else {
@@ -113,17 +128,21 @@ pub async fn seed_and_load_variables(
         "Has Landing Page",
         "Serve a static landing page (wafer-run/web) at `/` instead of \
          redirecting anonymous visitors to the login page",
-        false,
+        // `Some(false)`, not `None`: this caller knows the key — a declared
+        // boolean naming whether `/` serves a page — so it speaks for it
+        // rather than taking the create default meant for a key nothing
+        // declares.
+        Some(false),
     )
     .await?;
 
     // Auto-generate declared secrets (incl. the auth JWT secret) and load the
     // full set back — the shared core path, over BrowserDatabaseService.
-    impresspress_core::boot::seed_and_load_variables(db, &[]).await
+    impresspress_core::platform_state::variables::seed_and_load(db, &[]).await
 }
 
 /// Load + hash-gate-seed block settings from the browser database. Delegates to
-/// the shared `impresspress_core::features::load_and_seed_block_settings` over
+/// the shared `impresspress_core::platform_state::block_settings::load_and_seed` over
 /// `BrowserDatabaseService`, so the browser runs the exact #222 hash-gate
 /// Cloudflare and native do.
 ///
@@ -134,7 +153,10 @@ pub async fn seed_and_load_variables(
 pub async fn load_block_settings(
     db: &Arc<dyn DatabaseService>,
 ) -> Result<impresspress_core::features::BlockSettings, String> {
-    impresspress_core::features::load_and_seed_block_settings(db)
-        .await
-        .map_err(|e| format!("load block settings: {e}"))
+    impresspress_core::platform_state::block_settings::load_and_seed(
+        db,
+        &impresspress_core::blocks::block_enabled_defaults(),
+    )
+    .await
+    .map_err(|e| format!("load block settings: {e}"))
 }

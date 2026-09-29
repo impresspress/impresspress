@@ -6,9 +6,7 @@ use std::time::Duration;
 #[cfg(not(target_arch = "wasm32"))]
 use std::time::Instant;
 
-#[cfg(target_arch = "wasm32")]
-use wafer_core::clients::database as db;
-use wafer_core::clients::{config, database::Record};
+use wafer_core::clients::config;
 use wafer_run::{context::Context, OutputStream, WaferError};
 
 /// Per-user rate limiter using fixed-window counters.
@@ -21,12 +19,61 @@ use wafer_run::{context::Context, OutputStream, WaferError};
 pub struct UserRateLimiter {
     #[cfg(not(target_arch = "wasm32"))]
     buckets: Mutex<HashMap<String, RateBucket>>,
+    /// Most buckets the native map holds; see [`evict_for_new_key`].
+    #[cfg(not(target_arch = "wasm32"))]
+    capacity: usize,
 }
+
+/// Default [`UserRateLimiter`] capacity on native.
+#[cfg(not(target_arch = "wasm32"))]
+const MAX_BUCKETS: usize = 50_000;
 
 #[cfg(not(target_arch = "wasm32"))]
 struct RateBucket {
     count: u32,
     window_start: Instant,
+    /// The limit this bucket was last charged under. Categories differ in
+    /// window and budget, so expiry and "throttled" are per bucket, never
+    /// judged by whichever category's request happens to trigger eviction.
+    limit: RateLimit,
+}
+
+#[cfg(not(target_arch = "wasm32"))]
+impl RateBucket {
+    fn expired(&self, now: Instant) -> bool {
+        now.duration_since(self.window_start) > self.limit.window
+    }
+
+    fn throttled(&self) -> bool {
+        self.count >= self.limit.max_requests
+    }
+}
+
+/// Make room for one new key in a map at `capacity`.
+///
+/// Expired buckets go first: they hold nothing. If that frees nothing, the
+/// map drops live buckets down to 90% of `capacity`, cheapest first: buckets
+/// still under their budget before throttled ones, lower counts before
+/// higher, older windows before newer. So a flood of fresh keys (one per /64
+/// of a /48 costs one request each) evicts its own one-request buckets, and a
+/// client that is being throttled keeps its counter; resetting every bucket
+/// at once would hand each throttled client a new budget.
+#[cfg(not(target_arch = "wasm32"))]
+fn evict_for_new_key(buckets: &mut HashMap<String, RateBucket>, capacity: usize, now: Instant) {
+    buckets.retain(|_, b| !b.expired(now));
+    if buckets.len() < capacity {
+        return;
+    }
+    let target = capacity - capacity / 10;
+    let excess = buckets.len() + 1 - target;
+    let mut victims: Vec<(bool, u32, Instant, String)> = buckets
+        .iter()
+        .map(|(key, b)| (b.throttled(), b.count, b.window_start, key.clone()))
+        .collect();
+    victims.sort_unstable();
+    for (_, _, _, key) in victims.into_iter().take(excess) {
+        buckets.remove(&key);
+    }
 }
 
 /// Rate limit configuration: max requests allowed within a time window.
@@ -50,6 +97,21 @@ impl RateLimit {
     pub const REFRESH: Self = Self {
         max_requests: 30,
         window: Duration::from_secs(60),
+    };
+    /// Transactional email one requester can cause to be SENT: 10 per hour
+    /// per IP. Distinct from [`Self::AUTH`], which bounds requests to the
+    /// auth routes; this bounds the outbound mail those requests spend.
+    ///
+    /// Charged at the send site (`auth_ui::api::send_template_email`), not
+    /// per route, so a caller who mistypes an address or asks about an
+    /// unregistered one — neither of which sends anything — keeps their
+    /// budget. Without it, one requester could still empty the email block's
+    /// deployment-wide ceiling simply by naming a new address each time: the
+    /// per-recipient bucket caps one address's share of that ceiling, not one
+    /// requester's.
+    pub const AUTH_EMAIL: Self = Self {
+        max_requests: 10,
+        window: Duration::from_secs(3600),
     };
     /// API reads: 300 requests per 60 seconds per user.
     pub const API_READ: Self = Self {
@@ -82,16 +144,28 @@ impl RateLimit {
         window: Duration::from_secs(60),
     };
 
+    /// The config key that overrides the limit for category `name`:
+    /// `WAFER_RUN_SHARED__RATE_LIMIT_{NAME}`.
+    pub fn override_key(name: &str) -> String {
+        format!("WAFER_RUN_SHARED__RATE_LIMIT_{}", name.to_uppercase())
+    }
+
     /// Read config override for this rate limit category.
     ///
-    /// Looks up `RATE_LIMIT_{name}` in config. Format: `requests/seconds` (e.g. `50/60`).
+    /// Looks up [`Self::override_key`] in config. Format: `requests/seconds` (e.g. `50/60`).
     /// Set to `0` to disable rate limiting for this category.
-    /// Returns `None` if disabled, otherwise the resolved limit.
-    pub async fn resolve(self, ctx: &dyn Context, name: &str) -> Option<Self> {
-        let key = format!("WAFER_RUN_SHARED__RATE_LIMIT_{}", name.to_uppercase());
+    /// Returns `None` if disabled, otherwise the resolved limit. A failed
+    /// read is returned: a limit nobody could read is neither the default nor
+    /// off.
+    pub async fn resolve(self, ctx: &dyn Context, name: &str) -> Result<Option<Self>, WaferError> {
+        let key = Self::override_key(name);
         let default = format!("{}/{}", self.max_requests, self.window.as_secs());
-        let value = config::get_default(ctx, &key, &default).await;
+        let value = config::get_default(ctx, &key, &default).await?;
+        Ok(self.parse_override(&value))
+    }
 
+    /// [`Self::resolve`] once the override is read.
+    fn parse_override(self, value: &str) -> Option<Self> {
         // "0" disables this category
         if value.trim() == "0" {
             return None;
@@ -135,6 +209,16 @@ impl UserRateLimiter {
         Self {
             #[cfg(not(target_arch = "wasm32"))]
             buckets: Mutex::new(HashMap::new()),
+            #[cfg(not(target_arch = "wasm32"))]
+            capacity: MAX_BUCKETS,
+        }
+    }
+
+    #[cfg(all(test, not(target_arch = "wasm32")))]
+    fn with_capacity(capacity: usize) -> Self {
+        Self {
+            buckets: Mutex::new(HashMap::new()),
+            capacity,
         }
     }
 
@@ -148,22 +232,19 @@ impl UserRateLimiter {
         let mut buckets = self.buckets.lock().unwrap_or_else(|e| e.into_inner());
         let now = Instant::now();
 
-        // Evict expired entries when map gets large
-        if buckets.len() > 5_000 {
-            buckets.retain(|_, b| now.duration_since(b.window_start) <= limit.window);
-        }
-        // Hard cap
-        if buckets.len() > 50_000 {
-            buckets.clear();
+        if !buckets.contains_key(key) && buckets.len() >= self.capacity {
+            evict_for_new_key(&mut buckets, self.capacity, now);
         }
 
         let bucket = buckets.entry(key.to_string()).or_insert(RateBucket {
             count: 0,
             window_start: now,
+            limit,
         });
+        bucket.limit = limit;
 
         // Reset window if expired
-        if now.duration_since(bucket.window_start) > limit.window {
+        if bucket.expired(now) {
             bucket.count = 0;
             bucket.window_start = now;
         }
@@ -187,69 +268,23 @@ impl UserRateLimiter {
     /// within the current window, or reset if the window has expired.
     #[cfg(target_arch = "wasm32")]
     pub async fn check(&self, ctx: &dyn Context, key: &str, limit: RateLimit) -> Result<u32, u64> {
-        use wafer_block::{
-            db::{Filter, FilterOp},
-            wire::database::OnConflict,
-        };
-
         // std::time::SystemTime::now() panics on wasm32-unknown-unknown
         // (no system clock). Use js_sys::Date::now() which returns ms since epoch.
         let now = (js_sys::Date::now() / 1000.0) as i64;
         let window_secs = limit.window.as_secs() as i64;
         let window_cutoff = now - window_secs;
 
-        // Atomic fixed-window upsert: increment count if window is current,
-        // reset count + window_start if expired. The server renders the
-        // dialect-portable SQL (CASE WHEN + CURRENT_TIMESTAMP) from the
-        // structured `OnConflict::WindowedCounter` request.
-        use crate::blocks::auth::RATE_LIMITS_TABLE as RATE_LIMITS;
         let id = crate::util::sha256_hex(format!("rl:{key}:{now}").as_bytes());
-        let upsert_result = db::upsert(
+        let count = crate::blocks::auth::repo::rate_limits::windowed_increment(
             ctx,
-            RATE_LIMITS,
-            vec![
-                ("id".to_string(), serde_json::json!(id)),
-                ("key".to_string(), serde_json::json!(key)),
-            ],
-            vec!["key".to_string()],
-            OnConflict::WindowedCounter {
-                count_field: "count".to_string(),
-                window_field: "window_start".to_string(),
-                now,
-                window_cutoff,
-                created_fields: vec!["created_at".to_string()],
-                updated_fields: vec!["updated_at".to_string()],
-            },
-        )
-        .await;
-
-        // Read back the current count for this window via the typed client
-        // (replaces a hand-rolled `db::query_raw` of `build_select_columns`).
-        let rows_result = db::list_all(
-            ctx,
-            RATE_LIMITS,
-            vec![
-                Filter {
-                    field: "key".into(),
-                    operator: FilterOp::Equal,
-                    value: serde_json::json!(key),
-                },
-                Filter {
-                    field: "window_start".into(),
-                    operator: FilterOp::GreaterEqual,
-                    value: serde_json::json!(window_cutoff),
-                },
-            ],
-        )
-        .await;
-
-        match decide_rate_limit(
-            &upsert_result,
-            rows_result,
+            &id,
             key,
-            limit.max_requests,
-            window_secs as u64,
-        ) {
+            now,
+            window_cutoff,
+        )
+        .await;
+
+        match decide_rate_limit(count, key, limit.max_requests, window_secs as u64) {
             BackendCheckOutcome::Allowed(remaining) => Ok(remaining),
             BackendCheckOutcome::Limited(retry_after) => Err(retry_after),
             // Availability is preserved (the request is still allowed), but
@@ -279,7 +314,7 @@ pub enum BackendCheckOutcome {
     Allowed(u32),
     /// Over the limit. Caller should return `Err(retry_after_secs)`.
     Limited(u64),
-    /// The upsert or the read-back against the D1 backend failed.
+    /// The counter's upsert against the D1 backend failed.
     /// Availability is preserved — the request is still allowed — but this
     /// is a distinct, logged decision, never an unlabeled `count = 0` allow.
     /// Regression target for the 2026-07-10 incident where a missing
@@ -289,49 +324,32 @@ pub enum BackendCheckOutcome {
 }
 
 /// Decide the outcome of a D1-backed fixed-window rate-limit check from the
-/// raw upsert/read-back results, without touching the backend itself.
+/// counter `auth::repo::rate_limits::windowed_increment` reported, without
+/// touching the backend itself.
 ///
-/// A failure on either the write (`upsert_result`) or the read
-/// (`rows_result`) fails open for availability, but loudly: it emits a
+/// A failure of that call — the upsert, or an answer without the counter
+/// row — fails open for availability, but loudly: it emits a
 /// `tracing::warn!` and returns [`BackendCheckOutcome::FailedOpen`] instead
-/// of silently deriving `count = 0` from an empty/absent row set.
+/// of silently deriving `count = 0` from an absent row.
 pub fn decide_rate_limit(
-    upsert_result: &Result<i64, WaferError>,
-    rows_result: Result<Vec<Record>, WaferError>,
+    count: Result<i64, WaferError>,
     key: &str,
     max_requests: u32,
     retry_after_secs: u64,
 ) -> BackendCheckOutcome {
-    if let Err(e) = upsert_result {
-        tracing::warn!(
-            error = %e,
-            key = %key,
-            "rate-limit backend upsert failed — failing open (allowing request, count unknown)"
-        );
-        return BackendCheckOutcome::FailedOpen {
-            reason: e.to_string(),
-        };
-    }
-
-    let rows = match rows_result {
-        Ok(rows) => rows,
+    let count = match count {
+        Ok(count) => count as u32,
         Err(e) => {
             tracing::warn!(
                 error = %e,
                 key = %key,
-                "rate-limit backend read-back failed — failing open (allowing request, count unknown)"
+                "rate-limit backend failed — failing open (allowing request, count unknown)"
             );
             return BackendCheckOutcome::FailedOpen {
                 reason: e.to_string(),
             };
         }
     };
-
-    let count = rows
-        .first()
-        .and_then(|r| r.data.get("count"))
-        .and_then(|v| v.as_i64())
-        .unwrap_or(0) as u32;
 
     if count > max_requests {
         BackendCheckOutcome::Limited(retry_after_secs)
@@ -357,21 +375,28 @@ impl RateLimitHeaders {
 }
 
 /// Return a 429 Too Many Requests response with a `Retry-After` header.
+///
+/// The one refusal in this repo that hand-builds its `WaferError`, because it
+/// has to attach `Retry-After` as response meta. That is why it carried the
+/// `"[rate_limit_exceeded] "` message prefix long after `errors.rs`'s doc
+/// comment declared the prefix gone: without a detail code, the prefix was
+/// this response's only machine-readable identity, and the SDK reads
+/// `body.code` (`packages/impresspress-js/src/http-client.ts`). It now sets
+/// the detail code the same way [`super::errors::error_response`] does, so
+/// the message is human-only and the code travels as `error.code` meta.
 pub fn rate_limited_response(retry_after: u64) -> OutputStream {
     use super::errors::ErrorCode;
-    let wafer_code = super::errors::impresspress_error_code_to_wafer(ErrorCode::RateLimitExceeded);
-    let full_message = format!(
-        "[{}] Too many requests — try again later",
-        ErrorCode::RateLimitExceeded.as_str()
-    );
-    OutputStream::error(wafer_run::WaferError {
-        code: wafer_code,
-        message: full_message,
-        meta: vec![wafer_run::MetaEntry {
-            key: "resp.header.Retry-After".to_string(),
-            value: retry_after.to_string(),
-        }],
-    })
+    let code = ErrorCode::RateLimitExceeded;
+    let mut error = wafer_run::WaferError::new(
+        super::errors::impresspress_error_code_to_wafer(code),
+        code.default_message(),
+    )
+    .with_detail_code(code.as_str());
+    error.meta.push(wafer_run::MetaEntry {
+        key: "resp.header.Retry-After".to_string(),
+        value: retry_after.to_string(),
+    });
+    OutputStream::error(error)
 }
 
 /// Outcome of a rate-limit check.
@@ -380,7 +405,8 @@ pub enum RateLimitOutcome {
     Allowed(RateLimitHeaders),
     /// Disabled — no rate limiting applied for this category.
     Disabled,
-    /// Rate-limited — caller should return this `OutputStream` immediately.
+    /// Rate-limited, or the limit could not be read — caller should return
+    /// this `OutputStream` immediately.
     Limited(OutputStream),
 }
 
@@ -393,8 +419,15 @@ pub async fn check_rate_limit(
     category: &str,
     default: RateLimit,
 ) -> RateLimitOutcome {
-    let Some(limit) = default.resolve(ctx, category).await else {
-        return RateLimitOutcome::Disabled;
+    let limit = match default.resolve(ctx, category).await {
+        Ok(Some(limit)) => limit,
+        Ok(None) => return RateLimitOutcome::Disabled,
+        Err(e) => {
+            return RateLimitOutcome::Limited(super::crud::db_error_internal(
+                e,
+                "Could not read the rate limit",
+            ))
+        }
     };
     let key = UserRateLimiter::key(identity, category);
     match limiter.check(ctx, &key, limit).await {
@@ -406,26 +439,13 @@ pub async fn check_rate_limit(
     }
 }
 
-/// Convenience wrapper: check per-user rate limit using the request's user_id.
+/// Check the per-user read/write rate limit using the request's user_id.
 ///
-/// Automatically determines read vs write category from the message action.
-/// Returns `RateLimitOutcome::Disabled` for unauthenticated requests (empty user_id).
-///
-/// `upload_action` lets callers (e.g. the files block) map their "create"
-/// action onto the `upload` category instead of `api_write` — pass `None` for
-/// the default read/write split.
-pub async fn check_user_rate_limit(
-    limiter: &UserRateLimiter,
-    ctx: &dyn wafer_run::context::Context,
-    msg: &wafer_run::Message,
-) -> RateLimitOutcome {
-    check_user_rate_limit_with(limiter, ctx, msg, None).await
-}
-
-/// As [`check_user_rate_limit`], but with an optional category override for the
-/// `create` action. `upload_action = Some((RateLimit::UPLOAD, "upload"))` makes
-/// `create` requests count against the upload bucket; `None` uses the default
-/// read (`retrieve`) vs write (everything else) split.
+/// Determines the category from the message action: `retrieve` spends
+/// `api_read`, everything else `api_write`, unless `create_override` names
+/// another bucket for the `create` action (`Some((RateLimit::UPLOAD,
+/// "upload"))` makes uploads count against their own bucket). Returns
+/// `RateLimitOutcome::Disabled` for unauthenticated requests (empty user_id).
 pub async fn check_user_rate_limit_with(
     limiter: &UserRateLimiter,
     ctx: &dyn wafer_run::context::Context,
@@ -445,20 +465,61 @@ pub async fn check_user_rate_limit_with(
     check_rate_limit(limiter, ctx, &user_id, category, default).await
 }
 
-/// The identity an IP-keyed rate-limit bucket uses for a request: the remote
-/// address, or `"unknown"` when the platform didn't populate one (so anonymous
-/// callers behind a missing `remote_addr` still share one bucket rather than
-/// bypassing the limit entirely).
+/// The bucket identity a request with no client IP falls back to.
+///
+/// Every such request shares this one bucket — fail-closed, so a platform
+/// that stops populating `remote_addr` cannot turn an IP-keyed limit off.
+/// The cost is that the limit then applies to the whole deployment at once,
+/// which is why a caller whose refusal was charged against this identity
+/// should say so rather than report an ordinary per-IP refusal (see
+/// `auth_ui::api::send_template_email`).
+pub const UNKNOWN_IP: &str = "unknown";
+
+/// The identity an IP-keyed rate-limit bucket uses for a request: the client
+/// network [`ip_bucket`] derives from the remote address.
 pub fn ip_identity(msg: &wafer_run::Message) -> String {
-    let ip = msg.remote_addr();
-    if ip.is_empty() {
-        "unknown".to_string()
-    } else {
-        ip.to_string()
+    ip_bucket(msg.remote_addr())
+}
+
+/// The prefix length one IPv6 client is charged under.
+///
+/// A /64 is the smallest network an ISP assigns one subscriber, and a host
+/// picks any of its 2^64 interface ids itself (SLAAC privacy addresses rotate
+/// them routinely), so a bucket per /128 is a bucket per request to anyone
+/// who chooses so.
+const IPV6_CLIENT_PREFIX: u32 = 64;
+
+/// The client network a remote address is rate-limited as, in the one
+/// spelling every IP-keyed bucket uses: an IPv4 address as itself, an IPv6
+/// address as its /64 (`2001:db8:1:2::/64`), and an IPv4-mapped IPv6 address
+/// (`::ffff:a.b.c.d`, what a dual-stack socket reports for an IPv4 peer) as
+/// the IPv4 address it carries. A `host:port` form is accepted and the port
+/// dropped. An empty or unparseable address is [`UNKNOWN_IP`].
+pub fn ip_bucket(remote_addr: &str) -> String {
+    use std::net::{IpAddr, Ipv6Addr, SocketAddr};
+
+    let value = remote_addr.trim();
+    let Some(ip) = value
+        .parse::<IpAddr>()
+        .ok()
+        .or_else(|| value.parse::<SocketAddr>().ok().map(|addr| addr.ip()))
+    else {
+        return UNKNOWN_IP.to_string();
+    };
+    match ip {
+        IpAddr::V4(v4) => v4.to_string(),
+        IpAddr::V6(v6) => match v6.to_ipv4_mapped() {
+            Some(v4) => v4.to_string(),
+            None => {
+                let mask = u128::MAX << (128 - IPV6_CLIENT_PREFIX);
+                let network = Ipv6Addr::from(u128::from(v6) & mask);
+                format!("{network}/{IPV6_CLIENT_PREFIX}")
+            }
+        },
     }
 }
 
-/// Whether a route-limit rule keys its bucket by client IP or by user id.
+/// Whether a route's rate-limit bucket is keyed by client IP or by user id.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LimitKey {
     /// Key the bucket by [`ip_identity`] — for unauthenticated endpoints.
@@ -468,46 +529,37 @@ pub enum LimitKey {
     User,
 }
 
-/// One declarative rate-limit rule: a `(action, path)` predicate plus the
-/// bucket key, category name, and default limit to apply when it matches.
-pub struct RouteLimit {
-    /// Predicate over `(action, normalized_path)`. The first rule whose
-    /// predicate returns `true` wins.
-    pub matches: fn(&str, &str) -> bool,
-    /// Whether to key the bucket by IP or user id.
-    pub key: LimitKey,
-    /// Rate-limit category name (drives the `RATE_LIMIT_{CATEGORY}` override).
-    pub category: &'static str,
-    /// Default limit when no config override is present.
-    pub limit: RateLimit,
-}
-
-/// Walk a declarative table of [`RouteLimit`] rules and apply the first one
-/// that matches `(action, path)`. Returns `Some(outcome)` when a rule matched
-/// (the caller returns the `Limited` stream or attaches the `Allowed` headers);
-/// `None` when no rule matched (the request is not rate-limited at this layer).
+/// Spend the `(key, category, limit)` bucket a block's route table assigned
+/// to this request. `Some(response)` is the 429 to return; `None` means
+/// proceed: the bucket is disabled by config, a user-keyed bucket has no user
+/// to charge, or the request is under the limit.
 ///
-/// `User`-keyed rules are skipped for requests with an empty user_id.
-pub async fn check_route_limits(
+/// `RateLimitOutcome::Allowed(headers)` is discarded for every caller:
+/// injecting `X-RateLimit-*` response headers needs a streaming-middleware
+/// shape we don't have yet. Tracked as a single follow-up, not a per-route
+/// TODO.
+pub async fn apply_route_limit(
     limiter: &UserRateLimiter,
     ctx: &dyn wafer_run::context::Context,
     msg: &wafer_run::Message,
-    action: &str,
-    path: &str,
-    rules: &[RouteLimit],
-) -> Option<RateLimitOutcome> {
-    let rule = rules.iter().find(|r| (r.matches)(action, path))?;
-    let identity = match rule.key {
+    key: LimitKey,
+    category: &str,
+    limit: RateLimit,
+) -> Option<OutputStream> {
+    let identity = match key {
         LimitKey::Ip => ip_identity(msg),
         LimitKey::User => {
-            let uid = msg.user_id();
-            if uid.is_empty() {
+            let user_id = msg.user_id();
+            if user_id.is_empty() {
                 return None;
             }
-            uid.to_string()
+            user_id.to_string()
         }
     };
-    Some(check_rate_limit(limiter, ctx, &identity, rule.category, rule.limit).await)
+    match check_rate_limit(limiter, ctx, &identity, category, limit).await {
+        RateLimitOutcome::Limited(response) => Some(response),
+        RateLimitOutcome::Allowed(_) | RateLimitOutcome::Disabled => None,
+    }
 }
 
 #[cfg(test)]
@@ -523,11 +575,29 @@ mod tests {
     impl Context for TestCtx {
         async fn call_block(
             &self,
-            _block_name: &str,
+            block_name: &str,
             _msg: Message,
             _input: InputStream,
         ) -> OutputStream {
+            // No override is configured: the config block answers an unset
+            // key with `NotFound`, which the limit reads as its default.
+            if block_name == "wafer-run/config" {
+                return OutputStream::error(WaferError::new(
+                    wafer_run::ErrorCode::NotFound,
+                    "config key not set",
+                ));
+            }
             OutputStream::respond(vec![])
+        }
+        /// Admits nothing, as the fail-closed `check_resource_access` default
+        /// this context keeps does.
+        fn resource_access_admitted(
+            &self,
+            _resource: &str,
+            _resource_type: wafer_run::ResourceType,
+            _access: wafer_block::ResourceAccess,
+        ) -> bool {
+            false
         }
         fn is_cancelled(&self) -> bool {
             false
@@ -538,6 +608,73 @@ mod tests {
         fn clone_arc(&self) -> std::sync::Arc<dyn Context> {
             std::sync::Arc::new(self.clone())
         }
+    }
+
+    /// Filling the map with fresh keys (a /48 holder has 65,536 /64s) must
+    /// not reset a client that is being throttled, and the map stays bounded.
+    #[tokio::test]
+    async fn filling_the_map_keeps_a_throttled_bucket() {
+        let ctx = TestCtx;
+        let limiter = UserRateLimiter::with_capacity(10);
+        let limit = RateLimit {
+            max_requests: 2,
+            window: Duration::from_secs(60),
+        };
+        for _ in 0..2 {
+            assert!(limiter.check(&ctx, "victim:auth", limit).await.is_ok());
+        }
+        assert!(limiter.check(&ctx, "victim:auth", limit).await.is_err());
+
+        for i in 0..100 {
+            let key = format!("2001:db8:0:{i:x}::/64:auth");
+            assert!(limiter.check(&ctx, &key, limit).await.is_ok());
+        }
+        assert!(
+            limiter.check(&ctx, "victim:auth", limit).await.is_err(),
+            "a flood of new keys reset a throttled client's counter"
+        );
+        let len = limiter
+            .buckets
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .len();
+        assert!(len <= 10, "the map grew past its capacity: {len}");
+    }
+
+    /// An expired bucket is evicted before any live one, whatever category
+    /// triggered the eviction: here a short-window request makes room while
+    /// a long-window throttled bucket keeps its count.
+    #[tokio::test]
+    async fn eviction_judges_expiry_by_each_buckets_own_window() {
+        let ctx = TestCtx;
+        let limiter = UserRateLimiter::with_capacity(2);
+        let hourly = RateLimit {
+            max_requests: 1,
+            window: Duration::from_secs(3600),
+        };
+        let brief = RateLimit {
+            max_requests: 5,
+            window: Duration::from_millis(50),
+        };
+        assert!(limiter
+            .check(&ctx, "mailer:auth_email", hourly)
+            .await
+            .is_ok());
+        assert!(limiter
+            .check(&ctx, "mailer:auth_email", hourly)
+            .await
+            .is_err());
+        assert!(limiter.check(&ctx, "old:signal", brief).await.is_ok());
+        tokio::time::sleep(Duration::from_millis(80)).await;
+        assert!(limiter.check(&ctx, "new:signal", brief).await.is_ok());
+        {
+            let buckets = limiter.buckets.lock().unwrap_or_else(|e| e.into_inner());
+            assert!(!buckets.contains_key("old:signal"));
+        }
+        assert!(limiter
+            .check(&ctx, "mailer:auth_email", hourly)
+            .await
+            .is_err());
     }
 
     #[tokio::test]
@@ -665,86 +802,163 @@ mod tests {
     fn ip_identity_falls_back_to_unknown() {
         assert_eq!(ip_identity(&msg_with("create", "", "1.2.3.4")), "1.2.3.4");
         assert_eq!(ip_identity(&msg_with("create", "", "")), "unknown");
+        assert_eq!(ip_identity(&msg_with("create", "", "not-an-ip")), "unknown");
     }
 
-    const TEST_ROUTES: &[RouteLimit] = &[
-        RouteLimit {
-            matches: |a, p| a == "create" && p == "/auth/api/login",
-            key: LimitKey::Ip,
-            category: "auth",
-            limit: RateLimit {
-                max_requests: 2,
-                window: Duration::from_secs(60),
-            },
-        },
-        RouteLimit {
-            matches: |a, _| a == "update",
-            key: LimitKey::User,
-            category: "auth_write",
-            limit: RateLimit {
-                max_requests: 2,
-                window: Duration::from_secs(60),
-            },
-        },
-    ];
+    #[test]
+    fn ip_bucket_spells_each_client_network_once() {
+        // One /64, any interface id, any spelling: one bucket.
+        assert_eq!(ip_bucket("2001:db8:1:2::1"), "2001:db8:1:2::/64");
+        assert_eq!(
+            ip_bucket("2001:0db8:0001:0002:ffff:ffff:ffff:ffff"),
+            "2001:db8:1:2::/64"
+        );
+        assert_eq!(ip_bucket("[2001:db8:1:2::9]:443"), "2001:db8:1:2::/64");
+        // The neighbouring /64 is another subscriber.
+        assert_eq!(ip_bucket("2001:db8:1:3::1"), "2001:db8:1:3::/64");
+        // IPv4, bare or with a port, and IPv4-mapped IPv6 are the IPv4 /32.
+        assert_eq!(ip_bucket("203.0.113.9"), "203.0.113.9");
+        assert_eq!(ip_bucket("203.0.113.9:8080"), "203.0.113.9");
+        assert_eq!(ip_bucket("::ffff:203.0.113.9"), "203.0.113.9");
+        assert_eq!(ip_bucket("[::ffff:203.0.113.9]:8080"), "203.0.113.9");
+        assert_eq!(ip_bucket(" "), UNKNOWN_IP);
+    }
+
+    /// Drives the real route limiter: a client rotating interface ids
+    /// within its /64 spends one budget, and a client in the next /64 has
+    /// its own.
+    #[tokio::test]
+    async fn apply_route_limit_charges_an_ipv6_client_per_64() {
+        let ctx = TestCtx;
+        let limiter = UserRateLimiter::new();
+        for suffix in ["1", "2"] {
+            let msg = msg_with("create", "", &format!("2001:db8:1:2::{suffix}"));
+            assert!(
+                apply_route_limit(&limiter, &ctx, &msg, LimitKey::Ip, "auth", TWO_PER_MINUTE)
+                    .await
+                    .is_none()
+            );
+        }
+        let rotated = msg_with("create", "", "2001:db8:1:2:dead:beef:0:3");
+        assert!(
+            apply_route_limit(
+                &limiter,
+                &ctx,
+                &rotated,
+                LimitKey::Ip,
+                "auth",
+                TWO_PER_MINUTE
+            )
+            .await
+            .is_some(),
+            "a third address in the same /64 must hit the /64's limit"
+        );
+        let neighbour = msg_with("create", "", "2001:db8:1:3::1");
+        assert!(
+            apply_route_limit(
+                &limiter,
+                &ctx,
+                &neighbour,
+                LimitKey::Ip,
+                "auth",
+                TWO_PER_MINUTE
+            )
+            .await
+            .is_none(),
+            "a different /64 has its own bucket"
+        );
+    }
+
+    /// A dual-stack listener reports an IPv4 peer as `::ffff:a.b.c.d`; that
+    /// peer must spend the same budget as when it arrives as plain IPv4.
+    #[tokio::test]
+    async fn apply_route_limit_charges_ipv4_mapped_as_ipv4() {
+        let ctx = TestCtx;
+        let limiter = UserRateLimiter::new();
+        for remote in ["198.51.100.7", "::ffff:198.51.100.7"] {
+            let msg = msg_with("create", "", remote);
+            assert!(
+                apply_route_limit(&limiter, &ctx, &msg, LimitKey::Ip, "auth", TWO_PER_MINUTE)
+                    .await
+                    .is_none()
+            );
+        }
+        let again = msg_with("create", "", "198.51.100.7");
+        assert!(
+            apply_route_limit(&limiter, &ctx, &again, LimitKey::Ip, "auth", TWO_PER_MINUTE)
+                .await
+                .is_some()
+        );
+    }
+
+    const TWO_PER_MINUTE: RateLimit = RateLimit {
+        max_requests: 2,
+        window: Duration::from_secs(60),
+    };
 
     #[tokio::test]
-    async fn check_route_limits_matches_ip_rule_and_limits() {
+    async fn apply_route_limit_limits_an_ip_bucket() {
         let ctx = TestCtx;
         let limiter = UserRateLimiter::new();
         let msg = msg_with("create", "", "9.9.9.9");
-        // First two allowed, third limited.
+        // First two proceed, the third is the 429.
         for _ in 0..2 {
-            assert!(matches!(
-                check_route_limits(
-                    &limiter,
-                    &ctx,
-                    &msg,
-                    "create",
-                    "/auth/api/login",
-                    TEST_ROUTES
-                )
-                .await,
-                Some(RateLimitOutcome::Allowed(_))
-            ));
+            assert!(
+                apply_route_limit(&limiter, &ctx, &msg, LimitKey::Ip, "auth", TWO_PER_MINUTE)
+                    .await
+                    .is_none()
+            );
         }
-        assert!(matches!(
-            check_route_limits(
-                &limiter,
-                &ctx,
-                &msg,
-                "create",
-                "/auth/api/login",
-                TEST_ROUTES
-            )
-            .await,
-            Some(RateLimitOutcome::Limited(_))
-        ));
+        assert!(
+            apply_route_limit(&limiter, &ctx, &msg, LimitKey::Ip, "auth", TWO_PER_MINUTE)
+                .await
+                .is_some()
+        );
     }
 
+    /// A user-keyed bucket has nothing to charge for an anonymous caller, so
+    /// the request proceeds and spends nothing; a caller with a user is
+    /// charged.
     #[tokio::test]
-    async fn check_route_limits_skips_user_rule_when_anonymous_and_no_match() {
+    async fn apply_route_limit_skips_a_user_bucket_for_an_anonymous_caller() {
         let ctx = TestCtx;
         let limiter = UserRateLimiter::new();
-        // User-keyed rule but empty user_id → None (skipped).
         let anon = msg_with("update", "", "");
-        assert!(
-            check_route_limits(&limiter, &ctx, &anon, "update", "/auth/api/me", TEST_ROUTES)
-                .await
-                .is_none()
-        );
-        // No rule matches this (action, path) → None.
-        let other = msg_with("retrieve", "u1", "");
-        assert!(check_route_limits(
+        for _ in 0..3 {
+            assert!(apply_route_limit(
+                &limiter,
+                &ctx,
+                &anon,
+                LimitKey::User,
+                "auth_write",
+                TWO_PER_MINUTE
+            )
+            .await
+            .is_none());
+        }
+        let user = msg_with("update", "u1", "");
+        for _ in 0..2 {
+            assert!(apply_route_limit(
+                &limiter,
+                &ctx,
+                &user,
+                LimitKey::User,
+                "auth_write",
+                TWO_PER_MINUTE
+            )
+            .await
+            .is_none());
+        }
+        assert!(apply_route_limit(
             &limiter,
             &ctx,
-            &other,
-            "retrieve",
-            "/auth/whatever",
-            TEST_ROUTES
+            &user,
+            LimitKey::User,
+            "auth_write",
+            TWO_PER_MINUTE
         )
         .await
-        .is_none());
+        .is_some());
     }
 
     // -- decide_rate_limit (wasm32 D1-backend decision logic) --------------
@@ -762,76 +976,64 @@ mod tests {
         }
     }
 
-    fn count_row(count: i64) -> Record {
-        let mut data = std::collections::HashMap::new();
-        data.insert("count".to_string(), serde_json::json!(count));
-        Record {
-            id: "row1".to_string(),
-            data,
-        }
-    }
-
     #[test]
-    fn rate_limit_decision_is_explicit_when_upsert_fails() {
+    fn rate_limit_decision_is_explicit_when_the_backend_fails() {
         // Regression for the CF incident where a missing `rate_limits` table
-        // left limiting silently inert for weeks. A backend write failure
-        // must be a logged, explicit fail-open — not an unlabeled count=0
-        // allow.
-        let outcome = decide_rate_limit(&Err(wafer_error("D1 down")), Ok(vec![]), "k", 5, 60);
-        assert!(matches!(outcome, BackendCheckOutcome::FailedOpen { .. }));
-    }
-
-    #[test]
-    fn rate_limit_decision_is_explicit_when_read_back_fails() {
-        // Same regression, but for the read-back half of the check: the
-        // upsert can succeed while the follow-up `list_all` still fails.
-        let outcome = decide_rate_limit(&Ok(1), Err(wafer_error("D1 down")), "k", 5, 60);
-        assert!(matches!(outcome, BackendCheckOutcome::FailedOpen { .. }));
+        // left limiting silently inert for weeks. A backend failure — the
+        // upsert, or an answer without the counter row — must be a logged,
+        // explicit fail-open, not an unlabeled count=0 allow.
+        let upsert = decide_rate_limit(
+            Err(wafer_error("rate_limits windowed upsert: D1 down")),
+            "k",
+            5,
+            60,
+        );
+        assert!(matches!(upsert, BackendCheckOutcome::FailedOpen { .. }));
+        let no_row = decide_rate_limit(
+            Err(wafer_error(
+                "rate_limits windowed upsert answered no counter row: None",
+            )),
+            "k",
+            5,
+            60,
+        );
+        assert!(matches!(no_row, BackendCheckOutcome::FailedOpen { .. }));
     }
 
     #[test]
     fn rate_limit_decision_allows_under_limit() {
-        let outcome = decide_rate_limit(&Ok(1), Ok(vec![count_row(2)]), "k", 5, 60);
+        let outcome = decide_rate_limit(Ok(2), "k", 5, 60);
         assert_eq!(outcome, BackendCheckOutcome::Allowed(3));
     }
 
     #[test]
     fn rate_limit_decision_limits_over_limit() {
-        let outcome = decide_rate_limit(&Ok(1), Ok(vec![count_row(6)]), "k", 5, 60);
+        let outcome = decide_rate_limit(Ok(6), "k", 5, 60);
         assert_eq!(outcome, BackendCheckOutcome::Limited(60));
     }
 
     #[test]
-    fn rate_limit_decision_treats_empty_rows_as_zero_count_not_failure() {
-        // No row yet for this window (first request) is a legitimate empty
-        // result, not a backend failure — must stay a normal `Allowed`, not
-        // `FailedOpen`.
-        let outcome = decide_rate_limit(&Ok(1), Ok(vec![]), "k", 5, 60);
-        assert_eq!(outcome, BackendCheckOutcome::Allowed(5));
-    }
-
-    #[test]
     fn rate_limit_counts_when_upsert_succeeds() {
-        // Regression for the adapter fail-open bug this PR fixes: before the
-        // D1 / KV-cached-D1 / browser `DatabaseService::upsert` forwarders
-        // existed (added alongside this test), every wasm rate-limit check's
-        // `upsert_result` was `Err("... not implemented by this database
-        // backend")`, so `decide_rate_limit` always took the `FailedOpen`
-        // branch below — the limiter silently allowed every request at full
-        // quota, on every backend, forever. Method *presence* is now
+        // Regression for the adapter fail-open bug: before the D1 /
+        // KV-cached-D1 / browser `DatabaseService::upsert` forwarders existed
+        // (added alongside this test), every wasm rate-limit check's upsert
+        // was `Err("... not implemented by this database backend")`, so
+        // `decide_rate_limit` always took the `FailedOpen` branch below — the
+        // limiter silently allowed every request at full quota, on every
+        // backend, forever. Method *presence* is now
         // compile-enforced (`upsert`/`aggregate` are required `DatabaseService`
         // trait methods; the adapters would not build without the forwarders),
-        // so a real deployment's `upsert_result` is `Ok(_)`. This test locks in
-        // that once `upsert` actually succeeds, the decision is a real
+        // so a real deployment's counter read is `Ok(_)`. This test locks in
+        // that once the counter actually lands, the decision is a real
         // count-based `Allowed`/`Limited` — never the fail-open branch.
 
         // Under the limit: counts, allows-by-remaining (not fail-open).
-        let under = decide_rate_limit(&Ok(1), Ok(vec![count_row(2)]), "k", 5, 60);
+        let under = decide_rate_limit(Ok(2), "k", 5, 60);
         assert!(!matches!(under, BackendCheckOutcome::FailedOpen { .. }));
         assert_eq!(under, BackendCheckOutcome::Allowed(3));
 
         // Over the limit: counts, denies (not fail-open).
-        let over = decide_rate_limit(&Ok(1), Ok(vec![count_row(6)]), "k", 5, 60);
+        let over = decide_rate_limit(Ok(6), "k", 5, 60);
         assert!(!matches!(over, BackendCheckOutcome::FailedOpen { .. }));
         assert_eq!(over, BackendCheckOutcome::Limited(60));
     }
@@ -868,3 +1070,47 @@ mod tests {
 // decision logic in `decide_rate_limit` above, which `rate_limit_counts_when_
 // upsert_succeeds` now covers for the success path (mirroring the existing
 // `rate_limit_decision_is_explicit_when_upsert_fails` for the failure path).
+
+#[cfg(test)]
+mod rate_limited_response_tests {
+    use super::*;
+
+    /// The `"[code] message"` prefix `errors.rs`'s doc comment calls gone
+    /// survived here, because this response hand-builds its `WaferError` to
+    /// attach `Retry-After` and so carried no `error.code` detail meta — the
+    /// prefix was its only machine-readable code. It now carries the detail
+    /// code every other refusal in this repo carries, and the message is
+    /// human-only.
+    #[tokio::test]
+    async fn the_429_carries_a_detail_code_and_no_bracket_prefix() {
+        let out = rate_limited_response(42);
+        match out.collect_buffered().await {
+            Err(wafer_run::TerminalNotResponse::Error(e)) => {
+                assert_eq!(
+                    e.detail_code(),
+                    Some(super::super::errors::ErrorCode::RateLimitExceeded.as_str())
+                );
+                assert!(
+                    !e.message.starts_with('['),
+                    "message must not carry the old bracket-code prefix, got {:?}",
+                    e.message
+                );
+                assert_eq!(wafer_block::http_codec::resolve_error_status(&e), 429);
+            }
+            other => panic!("expected an error terminal, got {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn the_429_still_carries_retry_after() {
+        let headers = wafer_block::http_codec::collect_http_response(rate_limited_response(42))
+            .await
+            .headers;
+        assert!(
+            headers
+                .iter()
+                .any(|(k, v)| k.eq_ignore_ascii_case("Retry-After") && v == "42"),
+            "Retry-After must survive, got {headers:?}"
+        );
+    }
+}

@@ -286,7 +286,16 @@ fn remove_previously_hashed(pkg_dir: &Path) -> Result<()> {
         let name = entry.file_name();
         let name = name.to_string_lossy();
         if is_hashed_artifact(&name) {
-            let _ = std::fs::remove_file(entry.path());
+            // Best-effort, but not silent. A stale hashed artifact that
+            // survives is served alongside the new one and never expires
+            // (these filenames are immutable-cached), so an operator wants to
+            // know which file did not go.
+            if let Err(error) = std::fs::remove_file(entry.path()) {
+                eprintln!(
+                    "warning: could not remove stale bundle artifact {}: {error}",
+                    entry.path().display()
+                );
+            }
         }
     }
     Ok(())
@@ -417,6 +426,15 @@ fn render_if_exists(
         return Ok(());
     }
     template::render_to_file(&src, &pkg_dir.join(out_name), vars)?;
-    std::fs::remove_file(&src).ok();
+    // The rendered output is written; failing to delete the template it came
+    // from leaves an unrendered `{{VAR}}` file in the published bundle. Not
+    // fatal — the rendered file is the one anything loads — but it must not
+    // vanish from the build log.
+    if let Err(error) = std::fs::remove_file(&src) {
+        eprintln!(
+            "warning: rendered {out_name} but could not remove its template {}: {error}",
+            src.display()
+        );
+    }
     Ok(())
 }

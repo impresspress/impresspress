@@ -22,7 +22,7 @@ pub use crypto::make_jwt_crypto_service;
 #[cfg(feature = "postgres")]
 pub use database::make_postgres_database_service;
 pub use database::{make_database_service, make_sqlite_database_service};
-pub use env::{collect_app_env_vars, load_dotenv, InfraConfig};
+pub use env::{collect_app_env_vars, load_dotenv, InfraConfig, ListenerEnv};
 pub use hooks::register_observability_hooks;
 pub use log_init::init_tracing;
 pub use logger::make_tracing_logger;

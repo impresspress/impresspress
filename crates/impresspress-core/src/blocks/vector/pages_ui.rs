@@ -5,21 +5,19 @@
 
 use maud::{html, Markup};
 use wafer_core::clients::vector as vclient;
-use wafer_run::{context::Context, Message, OutputStream};
+use wafer_run::{context::Context, Message, OutputStream, WaferError};
 
 use super::service::{display_index_name, vector_backend_available, IndexRow};
 use crate::ui::{
     self,
     shell::Crumb,
-    templates::{detail_page, list_page, DetailHero, DetailMeta, PageHeader},
+    templates::{detail_page, list_page, DetailHero, DetailMeta},
 };
 
 /// htmx-friendly success render for `POST /b/vector/api/indexes` — re-loads
 /// the index list so the modal swap shows the new row.
-pub async fn render_index_list_fragment(ctx: &dyn Context) -> Result<Markup, String> {
-    let rows = super::service::list_index_rows(ctx)
-        .await
-        .map_err(|e| e.to_string())?;
+pub async fn render_index_list_fragment(ctx: &dyn Context) -> Result<Markup, WaferError> {
+    let rows = super::service::list_index_rows(ctx).await?;
     Ok(html! {
         div #vector-index-list { (render_index_list_table(&rows)) }
         (render_create_index_modal())
@@ -27,8 +25,9 @@ pub async fn render_index_list_fragment(ctx: &dyn Context) -> Result<Markup, Str
 }
 
 /// Modal markup for creating a vector index. Always shipped pre-rendered
-/// next to the index list; opening it is a `openModal('create-vector-index')`
-/// onclick on the topbar action button.
+/// next to the index list; the topbar action button opens it by declaring
+/// `data-action="modal-open" data-modal-target="create-vector-index"`, which
+/// the delegated listener in `ui/assets/chrome.js` reads.
 pub fn render_create_index_modal() -> Markup {
     crate::ui::components::modal(
         "create-vector-index",
@@ -50,7 +49,7 @@ pub fn render_create_index_modal() -> Markup {
                     }
                 }
                 div .form-actions {
-                    button .btn .btn--secondary type="button" onclick="closeModal('create-vector-index')" { "Cancel" }
+                    button .btn .btn--secondary type="button" data-action="modal-close" data-modal-target="create-vector-index" { "Cancel" }
                     button .btn .btn--primary type="submit" { "Create" }
                 }
             }
@@ -83,7 +82,7 @@ pub fn render_index_list_table(rows: &[IndexRow]) -> Markup {
                         td data-label="Name" { (display) }
                         td data-label="Model" { (r.model) }
                         td data-label="Dimensions" { (r.dimensions) }
-                        td data-label="Vectors" { (r.vector_count) }
+                        td data-label="Vectors" { (vector_count_text(r.vector_count)) }
                         td data-label="Keyword search" {
                             @if r.keyword_search {
                                 span .badge.badge-success { "Yes" }
@@ -98,6 +97,12 @@ pub fn render_index_list_table(rows: &[IndexRow]) -> Markup {
     }
 }
 
+/// A vector count as the tables show it: the number, or `—` when there is
+/// none to report (no vector backend, or no such index in it).
+fn vector_count_text(count: Option<u64>) -> String {
+    count.map_or_else(|| "—".to_string(), |n| n.to_string())
+}
+
 /// Render the body sections for an index detail page: a Stats section
 /// (counts/model/dimensions/keyword toggle) and a Schema section showing
 /// the underlying storage table name plus introspected columns. Pure
@@ -110,7 +115,7 @@ pub fn render_index_detail_sections(
         section .section {
             h3 { "Stats" }
             dl .kv-list {
-                dt { "Vector count" } dd { (row.vector_count) }
+                dt { "Vector count" } dd { (vector_count_text(row.vector_count)) }
                 dt { "Dimensions" }   dd { (row.dimensions) }
                 dt { "Model" }        dd { (row.model) }
                 dt { "Keyword search" }
@@ -152,17 +157,18 @@ pub fn render_index_detail_sections(
 ///
 /// Reads the per-index metadata registry (`impresspress__vector__registry`)
 /// and decorates each row with a live vector count from the underlying
-/// `_meta` table. A failure to load the registry (e.g. fresh DB where the
-/// table doesn't exist yet) falls through to the empty state — the
-/// `wafer-block-sqlite` service returns an empty list rather than erroring
-/// for unknown collections, so this only logs when something more serious
-/// happens.
+/// `_meta` table. "No vector indexes yet" is what a deployment with none
+/// renders, so a registry that could not be read fails the page instead of
+/// borrowing that sentence.
 pub async fn index_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let rows = match super::service::list_index_rows(ctx).await {
         Ok(rs) => rs,
         Err(e) => {
-            tracing::warn!(error = %e, "vector index list failed");
-            Vec::new()
+            return crate::blocks::crud::db_error_page(
+                msg,
+                e,
+                "vector index list page: registry read failed",
+            )
         }
     };
 
@@ -175,11 +181,6 @@ pub async fn index_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let backend_available = vector_backend_available(ctx);
 
     let body = list_page(
-        PageHeader {
-            title: "",
-            subtitle: None,
-            primary_action: None,
-        },
         None,
         html! {
             @if !backend_available {
@@ -208,7 +209,8 @@ pub async fn index_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
             crate::ui::components::CtrlSize::Sm,
             "+ Create index",
             maud::PreEscaped(
-                r#"type="button" onclick="openModal('create-vector-index')""#.to_string(),
+                r#"type="button" data-action="modal-open" data-modal-target="create-vector-index""#
+                    .to_string(),
             ),
         ))
     } else {
@@ -238,8 +240,9 @@ pub async fn index_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
 /// storage name, and looks up the registry row + meta-table count via
 /// `service::get_index_row`. Schema columns are introspected from the
 /// `_meta` table — empty on a fresh DB, in which case the helper omits
-/// the schema table. Any 404 path (invalid name, missing row) goes to
-/// `ui::not_found_response`.
+/// the schema table. An invalid name or a missing row goes to
+/// `ui::not_found_response`; a registry read that failed is not a missing
+/// row and answers through `crud::db_error_page`.
 pub async fn index_detail_page(ctx: &dyn Context, msg: &Message, name: &str) -> OutputStream {
     if super::service::validate_index_name(name).is_err() {
         return ui::not_found_response(msg);
@@ -250,23 +253,36 @@ pub async fn index_detail_page(ctx: &dyn Context, msg: &Message, name: &str) -> 
         Ok(Some(r)) => r,
         Ok(None) => return ui::not_found_response(msg),
         Err(e) => {
-            tracing::warn!(error = %e, "vector index lookup failed");
-            return ui::not_found_response(msg);
+            return crate::blocks::crud::db_error_page(
+                msg,
+                e,
+                "vector index detail page: registry read failed",
+            )
         }
     };
 
     // Real column state of the meta table via the typed `vector.describe_index`
-    // op (WRAP-authorized on the index). Lenient like before: any error — or a
-    // missing index (`exists: false`) — renders an empty schema section.
-    let schema_cols: Vec<(String, String)> = vclient::describe_index(ctx, &storage_name)
-        .await
-        .map(|d| {
-            d.columns
+    // op (WRAP-authorized on the index). A missing index (`exists: false`) or
+    // a runtime with no vector backend has no columns to show; a refused
+    // describe is answered, not drawn as an empty schema.
+    let schema_cols: Vec<(String, String)> = if vector_backend_available(ctx) {
+        match vclient::describe_index(ctx, &storage_name).await {
+            Ok(d) => d
+                .columns
                 .into_iter()
                 .map(|c| (c.name, c.sql_type))
-                .collect()
-        })
-        .unwrap_or_default();
+                .collect(),
+            Err(e) => {
+                return crate::blocks::crud::db_error_page(
+                    msg,
+                    e,
+                    "vector index detail page: describe_index failed",
+                )
+            }
+        }
+    } else {
+        Vec::new()
+    };
 
     let display = display_index_name(&row.name);
     let subtitle = format!(
@@ -325,7 +341,7 @@ mod tests {
             name: name.into(),
             model: model.into(),
             dimensions: dims,
-            vector_count: count,
+            vector_count: Some(count),
             keyword_search: kw,
         }
     }
@@ -367,7 +383,7 @@ mod tests {
             name: "impresspress__vector__docs".into(),
             model: "fastembed".into(),
             dimensions: 384,
-            vector_count: 42,
+            vector_count: Some(42),
             keyword_search: true,
         };
         let schema_cols = vec![
@@ -393,7 +409,7 @@ mod tests {
             name: "x".into(),
             model: "fastembed".into(),
             dimensions: 16,
-            vector_count: 0,
+            vector_count: Some(0),
             keyword_search: false,
         };
         let html = join(&render_index_detail_sections(&row, &[]));
@@ -425,7 +441,21 @@ mod integration_tests {
     /// upstream by wafer-run's sqlite behavior tests and handler
     /// authorization suites. This fake keeps the page-rendering assertions
     /// meaningful: the rendered count still traces back to the seeded row.
-    struct FakeVectorBlock;
+    ///
+    /// It counts on the database service itself, as a vector backend reads
+    /// its own store — not through `wafer-run/database`, where the read would
+    /// be authorized as `wafer-run/vector`, which owns no such table.
+    struct FakeVectorBlock {
+        store: Arc<dyn wafer_core::interfaces::database::service::DatabaseService>,
+    }
+
+    impl FakeVectorBlock {
+        fn over(ctx: &TestContext) -> Arc<Self> {
+            Arc::new(Self {
+                store: ctx.database_service(),
+            })
+        }
+    }
 
     #[wafer_block::wafer_async_trait]
     impl Block for FakeVectorBlock {
@@ -435,16 +465,21 @@ mod integration_tests {
 
         async fn handle(
             &self,
-            ctx: &dyn Context,
+            _ctx: &dyn Context,
             msg: Message,
             input: InputStream,
         ) -> OutputStream {
             match msg.kind.as_str() {
                 "vector.count" => {
-                    let body = input.collect_to_bytes().await;
+                    let body = match input.collect_to_bytes().await {
+                        Ok(bytes) => bytes,
+                        Err(e) => return OutputStream::error(e),
+                    };
                     let req: wafer_block::wire::vector::CountRequest =
                         wafer_block::codec::decode(&body).expect("decode count request");
-                    let count = db::count(ctx, &format!("{}_meta", req.index), &[])
+                    let count = self
+                        .store
+                        .count(&format!("{}_meta", req.index), &[])
                         .await
                         .expect("count fixture _meta table") as u64;
                     let resp = wafer_block::wire::vector::CountResponse { count };
@@ -492,6 +527,9 @@ mod integration_tests {
     /// Seed one row in the vector registry plus the matching `_meta` table
     /// so the listing has both a registry entry and a vector count to show.
     async fn seed_docs_index(ctx: &TestContext) {
+        // Staged from the fixture's own frame: the `_meta` table is the
+        // vector backend's, which creates it through raw DDL.
+        let ctx = &ctx.fixture();
         // Registry row.
         let mut registry_row: HashMap<String, serde_json::Value> = HashMap::new();
         registry_row.insert("prefixed_name".into(), json!("impresspress__vector__docs"));
@@ -528,7 +566,8 @@ mod integration_tests {
         // Counts now flow through the vector service (`vclient::count`),
         // so the list page needs the backend block registered to see a
         // non-zero count.
-        ctx.register_block("wafer-run/vector", Arc::new(FakeVectorBlock));
+        let fake = FakeVectorBlock::over(&ctx);
+        ctx.register_block("wafer-run/vector", fake);
         seed_docs_index(&ctx).await;
 
         let msg = admin_msg("retrieve", "/b/vector/");
@@ -552,11 +591,10 @@ mod integration_tests {
     }
 
     #[tokio::test]
-    async fn index_list_page_count_degrades_to_zero_without_backend() {
-        // No `wafer-run/vector` block registered: `vclient::count` fails
-        // with NotFound and `map_index_row` must degrade the count to 0
-        // (same fallback the API stats route uses) instead of erroring
-        // the whole listing.
+    async fn index_list_page_has_no_count_without_backend() {
+        // No `wafer-run/vector` block registered: there is no count to
+        // report, so the cell says so (`—`) instead of claiming 0 vectors
+        // or erroring the whole listing.
         let ctx = TestContext::with_vector().await;
         seed_docs_index(&ctx).await;
 
@@ -566,8 +604,8 @@ mod integration_tests {
 
         assert!(body.contains(">docs<"), "seeded row missing: {body}");
         assert!(
-            body.contains(r#"data-label="Vectors">0<"#),
-            "vector count cell should degrade to 0, got: {body}"
+            body.contains(r#"data-label="Vectors">—<"#),
+            "vector count cell should say there is no count, got: {body}"
         );
     }
 
@@ -625,7 +663,8 @@ mod integration_tests {
     #[tokio::test]
     async fn index_detail_page_happy_path() {
         let mut ctx = TestContext::with_vector().await;
-        ctx.register_block("wafer-run/vector", Arc::new(FakeVectorBlock));
+        let fake = FakeVectorBlock::over(&ctx);
+        ctx.register_block("wafer-run/vector", fake);
         seed_docs_index(&ctx).await;
 
         let msg = admin_msg("retrieve", "/b/vector/docs/");

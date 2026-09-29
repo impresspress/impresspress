@@ -7,6 +7,18 @@
 //! them. That is also why they are served from `/b/dev/static/*` at the
 //! block's own `Admin` tier instead of the public, content-hashed
 //! `/b/static/*` bundle.
+//!
+//! Only the first half of that generalises, and two blocks deliberately took
+//! only the first half: `blocks::llm::assets` and `blocks::files::assets`
+//! (named in prose, not as intra-doc links, because neither module exists on
+//! a build without its own `block-*` feature) declare their own files the way
+//! this module does, but keep serving them from the shared, content-hashed
+//! `/b/static/*` manifest. Their assets are public page assets rather than
+//! `Admin`-tier ones, and the manifest is what lets an `embed-assets`-off
+//! build stream them from object storage instead of compiling them in. So
+//! "assets live with their block" is the rule; "and the block serves them
+//! itself" is this module's own consequence of being `Admin`-gated, not part
+//! of it. Both of those module headers say the same thing from their side.
 
 use std::sync::{LazyLock, OnceLock};
 

@@ -1,18 +1,11 @@
 use std::collections::HashMap;
 
 use futures::StreamExt;
+use impresspress_core::streaming::MAX_NETWORK_RESPONSE_BYTES;
 use wafer_block::{common::ErrorCode, OutputStream, WaferError};
 use wafer_core::interfaces::network::service::{
     NetworkError, NetworkService, Request, Response, ResponseHead,
 };
-
-/// Response-body cap for the streaming fetch path, in bytes. Mirrors the
-/// native `wafer-block-network` SEC-020 default
-/// (`HttpNetworkService::DEFAULT_MAX_RESPONSE_BYTES`, 50 MiB) so a hostile or
-/// runaway upstream cannot stream unbounded into the isolate. A fixed constant
-/// rather than a config read: the unit-shaped `WorkerFetchService` has no
-/// config plumbing, and this is a security floor, not an operator knob.
-pub const DEFAULT_MAX_RESPONSE_BYTES: usize = 50 * 1024 * 1024;
 
 /// NetworkService using CF Worker's fetch API.
 pub struct WorkerFetchService;
@@ -41,13 +34,22 @@ impl WorkerFetchService {
     /// sandbox. Applied in this shared helper so the buffered `do_request` and
     /// the streaming `do_request_streaming` can never drift on the gate.
     ///
+    /// The gate sees the URL the caller asked for and nothing else, so a
+    /// followed `3xx` would reach a second URL it never inspected. That half is
+    /// closed in [`request_init`], which issues every subrequest with
+    /// `RequestRedirect::Manual` rather than the Fetch API's default `follow`:
+    /// the `3xx` comes back to wafer-run's network handler, which issues the
+    /// next hop as a new request through this method, gate and grant check
+    /// included.
+    ///
     /// Honest boundary: a Worker cannot resolve DNS before `fetch`, so this
     /// precheck is necessarily URL/host-literal-based. It does NOT defend
     /// against DNS rebinding — a public-looking hostname that resolves to a
     /// private IP at connect time still reaches `fetch`; that residual case is
     /// Cloudflare's own subrequest-SSRF layer to catch (the native path closes
     /// it with a resolve-before-connect resolver, which the Workers `fetch`
-    /// API gives no hook for).
+    /// API gives no hook for). With every hop's URL gated, DNS rebinding is
+    /// the sole residual.
     ///
     /// [`do_request`]: NetworkService::do_request
     /// [`do_request_streaming`]: NetworkService::do_request_streaming
@@ -59,26 +61,7 @@ impl WorkerFetchService {
             )));
         }
 
-        let method = match req.method.to_uppercase().as_str() {
-            "GET" => worker::Method::Get,
-            "POST" => worker::Method::Post,
-            "PUT" => worker::Method::Put,
-            "PATCH" => worker::Method::Patch,
-            "DELETE" => worker::Method::Delete,
-            "HEAD" => worker::Method::Head,
-            other => {
-                return Err(NetworkError::RequestError(format!(
-                    "unsupported HTTP method: {other}"
-                )));
-            }
-        };
-
-        let mut init = worker::RequestInit::new();
-        init.with_method(method);
-        if let Some(ref body) = req.body {
-            let uint8arr = js_sys::Uint8Array::from(&body[..]);
-            init.with_body(Some(uint8arr.into()));
-        }
+        let init = request_init(req)?;
 
         let mut worker_req = worker::Request::new_with_init(&req.url, &init)
             .map_err(|e| NetworkError::RequestError(format!("fetch init error: {e}")))?;
@@ -99,6 +82,49 @@ impl WorkerFetchService {
             .await
             .map_err(|e| NetworkError::RequestError(format!("fetch error: {e}")))
     }
+}
+
+/// Build the `RequestInit` for one outbound subrequest: method, body, and the
+/// redirect mode.
+///
+/// Split out of [`WorkerFetchService::send`] so the redirect mode is
+/// assertable without a live `fetch` — a security property that is otherwise
+/// invisible until it is missing.
+///
+/// **Redirects are returned, never followed here.** The SSRF gate in `send`
+/// inspects the URL it is handed and nothing else, and the Fetch API's
+/// default is `redirect: follow`, so a `302 Location: http://169.254.169.254/…`
+/// from a public-looking host would reach an address that gate never saw and
+/// hand its body back to the block. `RequestRedirect::Manual` makes Workers
+/// return the real `3xx`, with its `Location` readable, to wafer-run's network
+/// handler. That handler follows redirects hop by hop: each hop is checked
+/// against the calling block's network grant and issued as a new request
+/// through `send`, so the SSRF gate sees every URL the Worker fetches. A
+/// legitimate redirect therefore works, and one to an internal address is
+/// refused before it is contacted.
+fn request_init(req: &Request) -> Result<worker::RequestInit, NetworkError> {
+    let method = match req.method.to_uppercase().as_str() {
+        "GET" => worker::Method::Get,
+        "POST" => worker::Method::Post,
+        "PUT" => worker::Method::Put,
+        "PATCH" => worker::Method::Patch,
+        "DELETE" => worker::Method::Delete,
+        "HEAD" => worker::Method::Head,
+        other => {
+            return Err(NetworkError::RequestError(format!(
+                "unsupported HTTP method: {other}"
+            )));
+        }
+    };
+
+    let mut init = worker::RequestInit::new();
+    init.with_method(method);
+    init.with_redirect(worker::RequestRedirect::Manual);
+    if let Some(ref body) = req.body {
+        let uint8arr = js_sys::Uint8Array::from(&body[..]);
+        init.with_body(Some(uint8arr.into()));
+    }
+    Ok(init)
 }
 
 /// Flatten a Worker response's headers into the wire-facing
@@ -146,7 +172,7 @@ impl NetworkService for WorkerFetchService {
     /// paired cancellation token. A response with no body (e.g. `HEAD`, 204)
     /// yields an empty (`Complete`-only) body stream.
     ///
-    /// SEC-020 response cap ([`DEFAULT_MAX_RESPONSE_BYTES`]) is enforced on this
+    /// SEC-020 response cap ([`MAX_NETWORK_RESPONSE_BYTES`]) is enforced on this
     /// new streaming capability the same way the native backend does: an
     /// over-large advertised `Content-Length` is rejected before any bytes
     /// stream, and the running byte total is checked per chunk (the only guard
@@ -166,7 +192,7 @@ impl NetworkService for WorkerFetchService {
         // Reject up front when the advertised length already exceeds the cap,
         // before streaming any bytes. `Headers::get` is case-insensitive.
         // Read before `resp.stream()` takes its mutable borrow.
-        let cap = DEFAULT_MAX_RESPONSE_BYTES;
+        let cap = MAX_NETWORK_RESPONSE_BYTES;
         if let Ok(Some(len)) = resp.headers().get("content-length") {
             if let Ok(advertised) = len.parse::<usize>() {
                 if advertised > cap {
@@ -234,5 +260,83 @@ impl NetworkService for WorkerFetchService {
         };
 
         Ok((head, body_stream))
+    }
+}
+
+// `worker::Fetch` is the Workers runtime's own `fetch`, so the tests below
+// never let a request get that far: they either inspect the `RequestInit` the
+// service builds, or assert on the SSRF gate, which returns before `fetch` is
+// touched.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod tests {
+    use wafer_core::interfaces::network::service::{NetworkError, NetworkService, Request};
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::{request_init, WorkerFetchService};
+
+    fn request(method: &str, url: &str, body: Option<Vec<u8>>) -> Request {
+        Request {
+            method: method.to_string(),
+            url: url.to_string(),
+            headers: std::collections::HashMap::new(),
+            body,
+        }
+    }
+
+    /// Every subrequest, with a body or without, is issued with
+    /// `redirect: manual`: the Fetch API's default (`follow`) would fetch a
+    /// `3xx` target no gate inspected, and `error` would fail a legitimate
+    /// redirect that wafer-run's network handler can follow hop by hop, each
+    /// hop back through `send`'s SSRF gate and the caller's grant.
+    #[wasm_bindgen_test]
+    fn every_subrequest_returns_redirects_to_the_handler() {
+        for req in [
+            request("GET", "https://example.com/x", None),
+            request("POST", "https://example.com/x", Some(b"{}".to_vec())),
+            request("HEAD", "https://example.com/x", None),
+        ] {
+            let init = request_init(&req).expect("init");
+            assert_eq!(
+                Into::<&str>::into(init.redirect),
+                "manual",
+                "{} {} must hand a redirect back, not follow or fail it",
+                req.method,
+                req.url
+            );
+        }
+    }
+
+    #[wasm_bindgen_test]
+    fn an_unsupported_method_is_still_refused() {
+        let err = request_init(&request("TRACE", "https://example.com/", None))
+            .expect_err("TRACE is not supported");
+        assert!(
+            matches!(&err, NetworkError::RequestError(m) if m.contains("unsupported HTTP method")),
+            "{err:?}"
+        );
+    }
+
+    /// The `localhost` pseudo-domain resolves to loopback, so it is refused
+    /// before `fetch` like any other internal target. Reaching `fetch` at all
+    /// would fail this test, since these never leave the isolate.
+    #[wasm_bindgen_test]
+    async fn the_ssrf_gate_refuses_internal_targets_including_the_localhost_pseudo_domain() {
+        for url in [
+            "http://api.localhost:8080/admin",
+            "http://localhost./",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://metadata.google.internal/computeMetadata/v1/",
+        ] {
+            match WorkerFetchService
+                .do_request(&request("GET", url, None))
+                .await
+            {
+                Err(NetworkError::RequestError(msg)) => assert!(
+                    msg.starts_with("SSRF: refusing request to internal/blocked address:"),
+                    "{url} was not refused by the SSRF gate: {msg}"
+                ),
+                other => panic!("expected an SSRF refusal for {url}, got {other:?}"),
+            }
+        }
     }
 }

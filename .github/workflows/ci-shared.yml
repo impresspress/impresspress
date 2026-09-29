@@ -1,0 +1,1818 @@
+name: CI shared
+
+# The one body of both continuous-integration gates.
+#
+# `ci.yml` (pull requests) and `ci-main.yml` (merges to `main`) call this file,
+# so there is exactly one copy of every job below and parity between the two
+# gates is structural rather than checked. Until this file existed the two
+# workflows carried the same seventeen jobs twice and the merge copy had
+# silently fallen five jobs and seven steps behind — including the
+# capability-grant security audit, which ran on pull requests only.
+#
+# The ONLY difference between the two callers is the `pull-request` input.
+# Three jobs skip themselves when a pull request did not touch their inputs,
+# and the `git diff` that decides it reads
+# `github.event.pull_request.base.sha`, which does not exist on a `push`. On
+# the merge side that gate step does not run, its `skip` output is therefore
+# empty, and every step guarded by `steps.<gate>.outputs.skip != 'true'` runs —
+# which is the behaviour the merge gate has always had.
+#
+# The input is read SIX times, in those same three jobs and nowhere else:
+#   * three `if: inputs.pull-request` on the gate steps, as above;
+#   * three `fetch-depth: ${{ inputs.pull-request && '0' || '1' }}` on those
+#     jobs' checkouts. Clone depth is a second, independent difference between
+#     the two callers: the gate's `git diff` needs the base commit, so the
+#     pull-request side clones in full, and the merge side clones SHALLOW.
+#     Both reproduce what each side did before this file existed. The quotes
+#     are load-bearing — a GitHub expression treats the number `0` as false,
+#     so an unquoted `&& 0 || 1` always yields `1` and the gate would diff
+#     against a commit the checkout does not have.
+# Every job runs the same list of steps for both callers; nothing else varies.
+#
+# `build-wasm` is not here; it is `build-wasm.yml`, which both callers run
+# before calling this file. See that file for why it is separate. Every job
+# below that needs the wasm downloads the `impresspress-web-pkg` artifact it
+# publishes, and is ordered after it by the caller's `needs:`.
+#
+# Editing this file changes BOTH gates at once. Two consequences:
+#   * A comment that describes "this workflow" has to be true on a pull request
+#     and on a merge. Language like "at PR time" or "path-filtered" was true
+#     of only one of the two copies four separate times while they were being
+#     equalised, and none of it fails a build.
+#   * A change to this file runs no workflow unless it is in the callers'
+#     `paths:` filters. It is in both. Do not remove it from either.
+
+on:
+  workflow_call:
+    inputs:
+      pull-request:
+        description: >-
+          True when the calling workflow's trigger is `pull_request`. Read six
+          times, all inside the three gated jobs: the three change-gate steps'
+          `if:`, and the `fetch-depth:` of the three checkouts those gates diff
+          against — full clone on the pull-request side, shallow on the merge
+          side.
+        required: true
+        type: boolean
+
+# Read-only token. No job below writes to the repository; the two that use
+# `github.token` only read a public release asset from another repository. The
+# only secret either caller holds, `CODECOV_TOKEN`, belongs to a job that stays
+# in `ci-main.yml`, so this workflow is passed no secrets at all.
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  check:
+    name: Format & Lint
+    # Ordered after `build-wasm.yml` by the caller, so the `impresspress-web-pkg`
+    # artifact this job downloads is already published.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Lint — no full-page html! outside ui/
+        run: bash scripts/grep-guard-html.sh
+
+      - name: Lint — cited doc paths resolve, comments describe behaviour
+        run: bash scripts/check-doc-pointers.sh
+
+      - name: Lint — WRAP-grant coverage on cross-block db::* callsites
+        run: bash scripts/audit-wrap-grants.sh
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+
+      - name: Install nightly rustfmt
+        run: rustup toolchain install nightly --component rustfmt
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: check
+
+      - name: Check formatting
+        run: cargo +nightly fmt --all -- --check
+
+      # clippy compiles impresspress, whose build.rs `include_bytes!`s the
+      # impresspress-web wasm. Download the prebuilt pkg/ so build.rs finds it.
+      - name: Download impresspress-web pkg/
+        uses: actions/download-artifact@v4
+        with:
+          name: impresspress-web-pkg
+          path: crates/impresspress-web/pkg
+
+      # `-D warnings`, because without it this step only *printed* findings and
+      # passed. The two crate-scoped clippy steps (`Clippy (block-dev)` below
+      # and `Clippy (browser-devtools, wasm32)` in the `e2e-dev-sandbox` job)
+      # were the only enforcing ones, and no `RUSTFLAGS` supplies the flag
+      # anywhere in `.github/workflows/`, so every warning in every other crate
+      # printed and passed.
+      #
+      # `--all-targets` for the same reason the wasm32 steps below carry it: a
+      # bare `cargo clippy` builds lib and bins only, so every
+      # `#[cfg(test)] mod tests` body and every file under `tests/` was
+      # compiled by nobody with lints on. Adding `-D warnings` without it would
+      # have closed half the gap and read as if it closed all of it.
+      #
+      # Six findings had accumulated behind the two flags, all fixed alongside
+      # this line: `needless_range_loop` and `too_many_arguments` in
+      # `cli/helpers/cloudflare/`, `question_mark` x2 in `cli/mode.rs`, and —
+      # reachable only via `--all-targets` — `redundant_clone` x2 and
+      # `needless_collect` x2 in test code. `redundant_clone` is one of the six
+      # lints `[workspace.lints.clippy]` explicitly opts into, so two opted-in
+      # findings had been sitting in a blind spot this step is named for.
+      #
+      # Still NOT covered, deliberately: the `--no-default-features --features
+      # sqlite` shape below stays a `cargo check`. This step lints the default
+      # feature set only.
+      #
+      # The two exclusions stay: `impresspress-cloudflare` is wasm32-only by
+      # construction (its R2/D1 services wrap `!Send` `JsFuture`s that cannot
+      # satisfy wafer-core's `Send`-bounded host traits, which is also why the
+      # workspace manifest keeps it out of `default-members`), and
+      # `impresspress-web` is a browser cdylib over `web-sys`. Each is linted
+      # for wasm32 by its own step instead — `impresspress-cloudflare` in the
+      # `cloudflare` job, `impresspress-web` in `e2e-dev-sandbox`.
+      - name: Run clippy
+        run: cargo clippy --locked --workspace --exclude impresspress-web --exclude impresspress-cloudflare --all-targets -- -D warnings
+
+      # `impresspress`'s CLI (`deploy cloudflare`) silently stopped compiling
+      # under `--no-default-features --features sqlite` (no `embed-assets`):
+      # a call site invoked an embed-assets-gated function unconditionally.
+      # No other job here builds this combination, so nothing caught it.
+      # Compile-check both crates under it so a repeat is caught in CI.
+      - name: Check impresspress + impresspress-core (no default features)
+        run: |
+          cargo check --locked -p impresspress --no-default-features --features sqlite
+          cargo check --locked -p impresspress-core --no-default-features --features sqlite
+
+      # The vector block WITHOUT the `llm` cargo feature — the configuration
+      # `blocks::vector::ingestion::add_context` exists to serve, and the one
+      # every other lane hides. `llm` is in `impresspress-core`'s `default`, so
+      # the ordinary test job only ever runs that code with the native provider
+      # backend compiled in; `add_context` was `cfg(feature = "llm")`-gated
+      # with a silent no-op twin for exactly this build, which is every wasm32
+      # build. Nothing in the body needs the feature — it reaches the llm block
+      # through `ctx.call_block` — so this must keep passing.
+      #
+      # `-D warnings` arrives as `RUSTFLAGS` rather than as a `cargo clippy
+      # -- -D warnings` step because clippy would have to reach the *lib test*
+      # target, and every cargo flag that builds it (`--tests`, `--all-targets`)
+      # also builds the `tests/` integration targets, which assume the default
+      # block set and do not compile here. `RUSTFLAGS` reaches the same lib test
+      # target the run already compiles. It matters: this is the one lane that
+      # compiles this feature shape, so it is also the one lane where a stale
+      # `#[cfg]` or a helper left behind by a gated test is visible at all.
+      - name: Test the vector block without the llm backend (no default features)
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo test --locked -p impresspress-core --no-default-features --features block-vector,test-support --lib blocks::vector
+
+      # `block-fastembed` is in no default feature set (it pulls ONNX Runtime),
+      # so no other lane compiles `blocks::fastembed` or runs its tests. Those
+      # tests drive the block through its loader seam
+      # (`FastembedBlock::with_loader`), so no model is downloaded: what they
+      # pin is how the load is scheduled — off the executor, exactly once,
+      # retried after a failure.
+      - name: Test the fastembed block (no default features)
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo test --locked -p impresspress-core --no-default-features --features block-fastembed,test-support --lib blocks::fastembed
+
+      # `native-embedding` is in no default feature set either, so no other
+      # lane compiles `builder::boot::register_vector_block` or runs the test
+      # that pins it: the native vector store registers from its database
+      # file alone, loading no embedding model.
+      - name: Test the native vector store registration (native-embedding)
+        env:
+          RUSTFLAGS: -D warnings
+        run: cargo test --locked -p impresspress-core --no-default-features --features native-embedding,test-support --lib builder::boot
+
+      # The workspace clippy above lints the default feature set, which leaves
+      # `blocks::fastembed` out. Lint the crate with it compiled in; the
+      # `tests/` targets assume the default block set, hence the defaults stay on.
+      - name: Clippy (block-fastembed)
+        run: cargo clippy --locked -p impresspress-core --features block-fastembed,test-support --all-targets -- -D warnings
+
+      # `block-dev` is deliberately absent from `default` (the dev sandbox's
+      # control plane must not exist in a normal bundle), so the workspace
+      # clippy above compiles none of it — not the block, and not the ~4 200
+      # lines of `#![cfg(feature = "block-dev")]` integration tests that pin
+      # its rules. `--all-targets` is what reaches those, and `test-support`
+      # is what lets them link `FakeControl`.
+      - name: Clippy (block-dev)
+        run: cargo clippy --locked -p impresspress-core --features block-dev,test-support --all-targets -- -D warnings
+
+  test:
+    name: Tests
+    # Ordered after `build-wasm.yml` by the caller, so the `impresspress-web-pkg`
+    # artifact this job downloads is already published.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: test
+
+      # The impresspress crate's build.rs `include_bytes!`s the impresspress-web wasm;
+      # without it `cargo test --workspace` fails before any test runs.
+      - name: Download impresspress-web pkg/
+        uses: actions/download-artifact@v4
+        with:
+          name: impresspress-web-pkg
+          path: crates/impresspress-web/pkg
+
+      # Auth tests (tests/auth, tests/auth_http) run against in-memory
+      # SQLite only. A dual-backend matrix (sqlite + postgres) for the
+      # `wafer_run__auth__*` tables is deferred until a postgres-backed
+      # test context lands in wafer-block-postgres — Plan A did not wire
+      # one, and the auth tests' `TestContext` is SQLite-backed too, so
+      # the deferral still stands. In particular the partial unique
+      # index `orgs(verified_via, verified_ref) WHERE NOT is_reserved`
+      # introduced by migration 002 needs a postgres variant before it
+      # can be exercised in a real dual-backend CI matrix — extending
+      # the harness is the right root-cause fix rather than bolting a
+      # separate job on here.
+      - name: Run tests
+        run: cargo test --locked --workspace --exclude impresspress-web --exclude impresspress-cloudflare
+
+      # `tests/wafer_guest_golden.rs` builds both block templates with plain
+      # `cargo build --target wasm32-wasip1 --offline` and runs the resulting
+      # modules under wasmi. Without the target installed it would skip, so
+      # install it here and set IMPRESSPRESS_GUEST_GOLDEN below, which turns
+      # that skip into a failure.
+      - name: Install the wasm32-wasip1 target
+        run: rustup target add wasm32-wasip1
+
+      # The other half of the `block-dev` gap: `--workspace` above skips every
+      # `dev_*.rs` integration test, because all five are `#![cfg]`-gated on a
+      # feature nothing turns on. `wasm` is load-bearing rather than
+      # incidental — `tests/lockfile_e2e.rs` needs wafer-run built with wasmi,
+      # `tests/wafer_guest_golden.rs` runs the compiled templates through it,
+      # and `-p impresspress-core --features block-dev` alone leaves it red.
+      - name: Run the block-dev suite
+        env:
+          IMPRESSPRESS_GUEST_GOLDEN: "1"
+        run: cargo test --locked -p impresspress-core --features block-dev,wasm
+
+      # `dev.js` is a TAIL composed into an IIFE with nothing on `window`
+      # (see the file's own header comment), so its internal logic has no
+      # exported function the Rust suite above can call directly —
+      # `test/harness.mjs` reads the same source `dev_js()` composes and
+      # wraps it itself to reach the internal state. Pins the I1 fix (an
+      # abort mid-flight must not drive the poll count negative or leave
+      # `setInterval` running forever) and the M3 fix (a 409 with no
+      # `current_sha256` is a quota refusal, not a hash conflict).
+      - name: Run dev.js unit tests (node --test)
+        run: node --test crates/impresspress-core/src/blocks/dev/assets/test/*.test.mjs
+
+      # `webmcp.js` is the same shape (a tail composed by
+      # `ui/assets.rs::compose_webmcp_script`) and its own harness composes it
+      # the same way. What these pin is WHEN it fetches the manifest: before
+      # the service worker controls the page that fetch misses the wasm
+      # router, and behind SPA fallback the network answers `index.html` with
+      # 200 — a silent zero-tool page. `e2e-smoke` covers the same property
+      # end to end, but only in the one browser arrangement it can stage;
+      # these cover the arrangements it cannot (a native server with no
+      # registration at all, a claim that never comes).
+      - name: Run webmcp.js unit tests (node --test)
+        run: node --test crates/impresspress-core/src/ui/assets/test/*.test.mjs
+
+  # Every `#[cfg(feature = "postgres")]` assertion in the repo — the seven
+  # migration tests that check each block's `*.postgres.sql` twin is the one
+  # its Rust list actually references — was dead code in CI: nothing anywhere
+  # ran `cargo test` with that feature on. `postgres-migrations` below does not
+  # cover them; it globs the `.sql` files through `psql`, which proves the SQL
+  # parses and runs but says nothing about whether any Rust constant points at
+  # it. A migration wired into `SQLITE_MIGRATIONS` and forgotten in
+  # `POSTGRES_MIGRATIONS` compiled clean and failed no test.
+  #
+  # The `postgres` feature is a pure cfg flag on impresspress-core
+  # (`postgres = []`), and on impresspress-native it only pulls
+  # `wafer-block-postgres` in as a dependency. The migration assertions in the
+  # main test run are all against embedded SQL text; its one connection
+  # attempt is impresspress-native's `connect_error_does_not_leak_the_password`,
+  # which dials a closed port (1, not the service's) and needs the connect to
+  # fail.
+  #
+  # The service container is for the replay step below, which needs a real
+  # server and this job's postgres-feature build of the migration runner.
+  #
+  # impresspress-native is built alongside impresspress-core because it holds
+  # the only non-test postgres-gated Rust (`make_postgres_database_service`),
+  # which nothing else in CI compiles. Neither crate has a build.rs, so this
+  # job needs no `build-wasm` artifact and does not depend on that job.
+  test-postgres:
+    name: Tests (postgres feature)
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: impresspress_migration_replay
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d impresspress_migration_replay"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: test-postgres
+
+      # `package/feature` spelling because `--features` needs it whenever more
+      # than one package is selected.
+      - name: Run tests with the postgres feature
+        run: cargo test --locked -p impresspress-core -p impresspress-native --features impresspress-core/postgres,impresspress-native/postgres
+
+      # A block re-runs its WHOLE migration set whenever its joined SQL's hash
+      # moves, so every block's `.postgres.sql` set must apply to an empty
+      # database and then apply again over what it built. The test globs the
+      # sets off disk per block (no hand-kept list) and runs them through
+      # `apply_ddl_via_service`, the runner that shares its statement loop
+      # with the gated boot path. It is `#[ignore]`d in the run above because
+      # it needs this server; it refuses a database that is not empty.
+      - name: Every block's PostgreSQL migrations apply fresh, then replay
+        env:
+          IMPRESSPRESS_TEST_POSTGRES_URL: postgres://postgres:postgres@127.0.0.1:5432/impresspress_migration_replay
+        run: cargo test --locked -p impresspress-native --features impresspress-core/postgres,impresspress-native/postgres --test postgres_migration_replay -- --ignored --nocapture
+
+  cloudflare:
+    name: Cloudflare wasm32 check
+    # Ordered after `build-wasm.yml` by the caller, so the `impresspress-web-pkg`
+    # artifact this job downloads is already published.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+          # Named explicitly because this job now runs clippy, the same way
+          # the `check` job names it. `e2e-dev-sandbox` gets away without it
+          # only because the runner image happens to ship clippy with its
+          # preinstalled stable; that is the image's choice, not a guarantee
+          # this workflow should rest a gate on.
+          components: clippy
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: cloudflare
+
+      # build.rs prereq for any impresspress crate pulled into the cloudflare build.
+      - name: Download impresspress-web pkg/
+        uses: actions/download-artifact@v4
+        with:
+          name: impresspress-web-pkg
+          path: crates/impresspress-web/pkg
+
+      # impresspress-cloudflare is wasm-only (cdylib targeting CF Workers).
+      # Excluded from host `cargo test`/`clippy` because its R2/D1 services
+      # wrap `!Send` JsFutures that violate wafer-core's Send-bound traits
+      # on host — which is why this, and not the `check` job, is the only
+      # place the crate is linted at all. `clippy` rather than `check`: the
+      # crate opts into `[workspace.lints.clippy]` like every other member, and
+      # under `cargo check` those opt-ins bought it nothing.
+      #
+      # `--all-targets` so `#[cfg(test)]` code (e.g. static_asset_target_tests,
+      # including the path-traversal guard on asset serving) is compiled and
+      # linted -- a plain check/clippy skips test code entirely, so without this
+      # a test-only compile error or lint would go undetected here. Actually
+      # *executing* wasm32 tests is the `cloudflare-wasm-test` job's business,
+      # which this does not attempt.
+      #
+      # Deliberately NOT `--no-deps`: impresspress-core is a workspace member,
+      # so leaving it in scope lints core under `cfg(target_arch = "wasm32")`
+      # for the feature set a Worker actually builds. (The `browser-devtools`
+      # clippy step in `e2e-dev-sandbox` covers core's wasm32 code under the
+      # browser's feature set; between them nothing in core's wasm32 half is
+      # compiled without lints.)
+      #
+      # Both shapes, because they are different code: `default = []` is the
+      # lean Worker with no optional block, `full` is the whole block set and
+      # what a block-carrying consumer actually deploys.
+      - name: Clippy impresspress-cloudflare (wasm32)
+        run: |
+          cargo clippy --locked -p impresspress-cloudflare --target wasm32-unknown-unknown --all-targets -- -D warnings
+          cargo clippy --locked -p impresspress-cloudflare --features full --target wasm32-unknown-unknown --all-targets -- -D warnings
+
+      # The password-hasher Worker's Durable Object class. Behind a feature no
+      # workspace member enables (the main Worker must not export the class),
+      # so without this step it is compiled only by a real deploy.
+      - name: Clippy impresspress-password's Durable Object (wasm32)
+        run: cargo clippy --locked -p impresspress-password --features durable-object --target wasm32-unknown-unknown --all-targets -- -D warnings
+
+      # The webmcp demo Worker, in the shape the deploy CLI builds it
+      # (`--no-default-features --features target-cloudflare`). Its Worker
+      # code is behind that feature and the crate is wasm32-only, so no other
+      # step compiles it.
+      - name: Clippy the webmcp demo Worker (wasm32)
+        run: cargo clippy --locked -p impresspress-webmcp-demo --target wasm32-unknown-unknown --no-default-features --features target-cloudflare --all-targets -- -D warnings
+
+      # Compile-time DatabaseService conformance assertions (wafer-run #319
+      # shared suite) for the D1 + KV-cached adapters. Off-by-default feature so
+      # the ~1.3k-line suite never enters the production Worker wasm; this step
+      # enforces that both adapters still satisfy the suite's trait surface.
+      - name: Check impresspress-cloudflare conformance wiring (wasm32)
+        run: cargo check --locked -p impresspress-cloudflare --features conformance-check --target wasm32-unknown-unknown
+
+      # `block-llm` / `block-vector` are offered on this target but are in
+      # neither `default` nor `full`, so no other step compiles them — and a
+      # block feature nobody builds is the exact thing that rotted before: the
+      # manifest carried a comment claiming both were wasm32-incompatible long
+      # after the LlmService refactor made them clean. `block-vector` implies
+      # `block-llm`, so the second command covers the first; both are listed
+      # because either can break on its own if that implication ever changes.
+      #
+      # `--tests` because a bare check compiles no `#[cfg(test)]` code at all,
+      # so without it this step would build the library under these two
+      # features and leave every wasm test in the crate untouched under them.
+      # (The clippy step above reaches test code via `--all-targets`, but only
+      # under `default` and `full`.) The `cloudflare-wasm-test` job enables
+      # neither feature (and on the pull-request side its diff gate can skip it
+      # outright), so this is the only place they meet test code.
+      - name: Check impresspress-cloudflare optional blocks (wasm32)
+        run: |
+          cargo check --locked --tests -p impresspress-cloudflare --features block-llm --target wasm32-unknown-unknown
+          cargo check --locked --tests -p impresspress-cloudflare --features block-vector --target wasm32-unknown-unknown
+
+      # Browser-target crates are also wasm-only consumers of wafer-run, and
+      # nothing else in CI builds them for wasm32 — a set_asset_loader
+      # signature break sat silently red on main for 5 days before the
+      # impresspress #253 review caught it.
+      - name: Check impresspress-browser + minimal-browser (wasm32)
+        run: cargo check --locked -p impresspress-browser -p minimal-browser --target wasm32-unknown-unknown
+
+      # Lint the browser adapter's wasm32-only test modules, and with them
+      # compile its shared DatabaseService conformance assertion (wafer-run
+      # #319). Both live in `#[cfg(all(test, target_arch = "wasm32"))]`
+      # modules, so `--tests` is required to pull the wasm32 dev-dep
+      # `conformance` feature and typecheck them — the plain check above (no
+      # `--tests`) does not compile them.
+      #
+      # `clippy -D warnings` rather than `check`: this crate's test modules are
+      # RUN by the `browser-wasm-test` job below (`wasm-pack test --node`) and
+      # were LINTED by nothing. The host clippy job cannot reach them — the
+      # crate is wasm32-only — and the `cloudflare` job's own clippy step
+      # selects `-p impresspress-cloudflare`, so `--all-targets` there covers
+      # that crate's test code and not this one's. Same `--all-targets`
+      # reasoning as that step, narrowed to `--tests` because this crate has no
+      # other extra target. Unconditional on purpose. On
+      # the pull-request side the dedicated `browser-wasm-test` job runs only
+      # when its diff gate sees a change under crates/impresspress-browser/,
+      # crates/impresspress-core/, `Cargo.toml` or `Cargo.lock`, so a change
+      # outside that list reaches this trait-surface assertion only here; on the
+      # merge side the gate step does not run (it reads a pull-request-only
+      # value) and the job is ungated, making this step redundant but free.
+      # Either way the assertion does not depend on that path list staying
+      # correct. Note a wafer-run pin bump specifically DOES reach that job, via
+      # `Cargo.lock` — see the gate's own comment further down this file; this
+      # step is the cheap unconditional typecheck, not the pin-bump backstop.
+      - name: Clippy impresspress-browser tests + conformance wiring (wasm32)
+        run: cargo clippy --locked --tests -p impresspress-browser --target wasm32-unknown-unknown -- -D warnings
+
+  # impresspress-browser's `#[wasm_bindgen_test]`s (storage.rs, bridge.rs,
+  # network.rs — the wasm32-only-gated modules) previously only got
+  # `cargo check --target wasm32-unknown-unknown`'d by the `cloudflare` job
+  # above — compiled, never executed. They're pure JsValue-shape unit tests
+  # (build/decode plain JS objects via js-sys — no OPFS, no real fetch, no
+  # DOM) so they run headlessly under Node via `wasm-pack test --node`; no
+  # browser install needed. Independent of the impresspress-web wasm build
+  # (build.rs's include_bytes! prereq only matters for the `impresspress`
+  # crate), so this job doesn't need `build-wasm`'s artifact.
+  # impresspress-cloudflare's `#[wasm_bindgen_test]`s (runtime_cache.rs's
+  # probe/backoff/plan-trust policy and kv_cached_db.rs's row-cache
+  # write-suppression) were compiled by nothing and run by nothing: the crate
+  # is excluded from the host `cargo test` above, and the wasm `cargo check`
+  # skipped `#[cfg(test)]` entirely. That is how the KV error-as-miss defect
+  # (2026-08-30/31 read exhaustion -> multi-thousand write bursts) reached
+  # production with a green pipeline.
+  #
+  # `wasm-pack test --node` does NOT work here — the crate is a cdylib and
+  # wasm-pack collects 0 tests from it — so this drives the same
+  # wasm-bindgen-test-runner directly through cargo. The runner is part of
+  # wasm-bindgen-cli and its version must match the `wasm-bindgen` crate
+  # (0.2.122, pinned in Cargo.lock) or it refuses to run the module.
+  # These are pure-logic tests (in-memory KV/DB doubles, no worker::Env, no
+  # real fetch), so Node is enough; no browser install needed.
+  cloudflare-wasm-test:
+    name: Cloudflare WASM tests (impresspress-cloudflare)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history only where the change gate below runs: it diffs
+          # against the pull request's base commit, which a shallow clone does
+          # not contain. Quoted because GitHub expressions treat the number 0
+          # as false, so an unquoted `&& 0 ||` ternary always yields the right
+          # branch.
+          fetch-depth: ${{ inputs.pull-request && '0' || '1' }}
+
+      # `Cargo.toml` / `Cargo.lock` are in the filter because the workspace
+      # manifest pins the wafer-run rev this crate's services are written
+      # against: a pin bump changes what these tests compile and run without
+      # touching a file under `crates/impresspress-cloudflare/`, and skipping
+      # them there is exactly the coverage hole this job exists to close.
+      # `crates/impresspress-core/` is in it for the same reason at closer
+      # range: this crate depends on core by path, and these tests assert on
+      # core's code directly (the SSRF gate, the shared response cap), so a
+      # change confined to core is a change to what this job checks.
+      - name: Check for impresspress-cloudflare changes
+        id: cloudflare-changes
+        # Pull requests only: the diff below reads
+        # `github.event.pull_request.base.sha`, which no `push` event carries.
+        # When this step does not run its `skip` output is empty, so every
+        # `skip != 'true'` guard below passes and the job runs in full — the
+        # unconditional behaviour the merge gate has always had.
+        if: inputs.pull-request
+        run: |
+          CHANGED=$(git diff --name-only ${{ github.event.pull_request.base.sha }}..HEAD -- crates/impresspress-cloudflare/ crates/impresspress-core/ crates/impresspress-password/ Cargo.toml Cargo.lock)
+          if [ -z "$CHANGED" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Rust
+        if: steps.cloudflare-changes.outputs.skip != 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Rust cache
+        if: steps.cloudflare-changes.outputs.skip != 'true'
+        uses: Swatinem/rust-cache@v2
+
+      - name: Install wasm-bindgen-test-runner
+        if: steps.cloudflare-changes.outputs.skip != 'true'
+        run: cargo install wasm-bindgen-cli --version 0.2.122 --locked
+
+      - name: Run impresspress-cloudflare wasm tests (Node)
+        if: steps.cloudflare-changes.outputs.skip != 'true'
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+        run: cargo test --locked -p impresspress-cloudflare --target wasm32-unknown-unknown --lib
+
+      # The default feature set enables no `can_disable` block at all, so
+      # `blocks::block_enabled_defaults()` is EMPTY there and any test about
+      # structural block-settings seeding passes without exercising a single
+      # write (`boot_hook_tests::the_request_path_hook_writes_nothing_to_the_
+      # database` is the one that matters: with a seeding hook wired back onto
+      # the request path it stays green in the lean build and fails here).
+      # `full` is also the shape a block-carrying consumer deploys.
+      - name: Run impresspress-cloudflare wasm tests, full block set (Node)
+        if: steps.cloudflare-changes.outputs.skip != 'true'
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+        run: cargo test --locked -p impresspress-cloudflare --features full --target wasm32-unknown-unknown --lib
+
+      # The password-hasher Worker's Durable Object class, constructed from a
+      # fake `Env` and asked through its `fetch`, as the runtime does.
+      - name: Run impresspress-password Durable Object wasm tests (Node)
+        if: steps.cloudflare-changes.outputs.skip != 'true'
+        env:
+          CARGO_TARGET_WASM32_UNKNOWN_UNKNOWN_RUNNER: wasm-bindgen-test-runner
+        run: cargo test --locked -p impresspress-password --features durable-object --target wasm32-unknown-unknown --lib
+
+  browser-wasm-test:
+    name: Browser WASM tests (impresspress-browser)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history only where the change gate below runs: it diffs
+          # against the pull request's base commit, which a shallow clone does
+          # not contain. Quoted because GitHub expressions treat the number 0
+          # as false, so an unquoted `&& 0 ||` ternary always yields the right
+          # branch.
+          fetch-depth: ${{ inputs.pull-request && '0' || '1' }}
+
+      # Gate like the `sdk` job below: skip the (slower, wasm-target) build
+      # entirely on a pull request that doesn't touch impresspress-browser. A
+      # merge runs it unconditionally, so this list only ever narrows the
+      # pull-request side. `Cargo.toml` /
+      # `Cargo.lock` join the filter for the same reason as the cloudflare job
+      # above: a wafer-run pin bump moves this crate's dependencies without
+      # touching a file under `crates/impresspress-browser/`.
+      # `crates/impresspress-bundle/assets/vendor/` joins it because the wasm
+      # tests run the sql.js build vendored there.
+      # `crates/impresspress-core/` joins it because the browser depends on core
+      # by path — the streaming decision, the SSRF gate and the OpenAI wire
+      # codec all live there now, so a change confined to core is a change to
+      # this crate's behaviour with no file of its own touched.
+      - name: Check for impresspress-browser changes
+        id: browser-changes
+        # Pull requests only: the diff below reads
+        # `github.event.pull_request.base.sha`, which no `push` event carries.
+        # When this step does not run its `skip` output is empty, so every
+        # `skip != 'true'` guard below passes and the job runs in full — the
+        # unconditional behaviour the merge gate has always had.
+        if: inputs.pull-request
+        run: |
+          CHANGED=$(git diff --name-only ${{ github.event.pull_request.base.sha }}..HEAD -- crates/impresspress-browser/ crates/impresspress-core/ crates/impresspress-bundle/assets/vendor/ Cargo.toml Cargo.lock)
+          if [ -z "$CHANGED" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Install Rust
+        if: steps.browser-changes.outputs.skip != 'true'
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Rust cache
+        if: steps.browser-changes.outputs.skip != 'true'
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: browser-wasm-test
+
+      - name: Install wasm-pack
+        if: steps.browser-changes.outputs.skip != 'true'
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
+        with:
+          version: 'v0.15.0'
+
+      # Pinned rather than left to the runner image's default because the
+      # `node --test` step below passes a GLOB, and glob expansion by the test
+      # runner itself only exists from Node 21. On an older default the pattern
+      # would be taken as a literal path and the step would fail; on a default
+      # that silently moves, the wasm suite below would change Node version
+      # under it too. 22 is the version the rest of these workflows pin.
+      - name: Setup Node
+        if: steps.browser-changes.outputs.skip != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # The pure-JS unit tests for `js/bridge.js`: the OPFS storage-key helpers
+      # and the `httpFetch` request shape, whose `redirect: 'error'` is half of
+      # the outbound-request SSRF gate and cannot be asserted from Rust (the
+      # Rust side is a wasm-bindgen extern import). Globbed rather than named
+      # file by file so a new `*.test.mjs` is picked up without a CI edit.
+      - name: Run bridge.js unit tests (node --test)
+        if: steps.browser-changes.outputs.skip != 'true'
+        run: node --import ./crates/impresspress-browser/js/test/node-hooks.mjs --test 'crates/impresspress-browser/js/test/*.test.mjs'
+
+      # `--import ./js/test/node-hooks.mjs` is what makes this step able to
+      # pass at all. `js/bridge.js` is a wasm-bindgen snippet module with a
+      # top-level `import initSqlJs from '/vendor/sql-wasm-esm.js'` — an
+      # absolute site-root path a Service Worker resolves and plain Node cannot,
+      # so without the hook the generated test module fails to load with
+      # ERR_MODULE_NOT_FOUND and the job FAILS before a single wasm test in the
+      # crate runs — it is not a silent skip. The hook (the same one the
+      # `node --test` step above passes via `--import`) resolves that one
+      # specifier to the vendored sql.js build — which the sql.js tests in
+      # `src/database.rs` run against — and passes everything else through.
+      # NODE_OPTIONS rather than an argument because wasm-bindgen-test-runner
+      # builds the `node` command line itself; the path is relative to
+      # `crates/impresspress-browser`, which is where `wasm-pack` runs `cargo
+      # test` from.
+      - name: Run impresspress-browser wasm tests (Node)
+        if: steps.browser-changes.outputs.skip != 'true'
+        env:
+          NODE_OPTIONS: --import ./js/test/node-hooks.mjs
+        run: wasm-pack test --node crates/impresspress-browser
+
+  # E2E is split into a single build stage plus two independent test stages so
+  # the browser-WASM smoke tests (port 8080) and the native-server visual
+  # baselines (port 8093) run in parallel instead of end-to-end in one job.
+  e2e-build:
+    name: E2E build (CLI + web assets)
+    # Ordered after `build-wasm.yml` by the caller, so the `impresspress-web-pkg`
+    # artifact this job downloads is already published.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: wasm32-unknown-unknown
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: e2e
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
+        with:
+          # Pin explicitly. With no version the action resolves "latest" via
+          # the GitHub API and falls back to its ancient hardcoded default
+          # (v0.9.1) whenever that lookup flakes/rate-limits — and v0.9.1
+          # cannot parse workspace-inherited manifest fields like
+          # `license.workspace = true`, failing with "invalid type: map,
+          # expected a string for key `package.license`". Matches gizza-ai's
+          # pin (PR #75).
+          version: 'v0.15.0'
+
+      # build.rs prereq: the impresspress build.rs `include_bytes!`s this wasm.
+      # Download the shared artifact instead of rebuilding it here.
+      - name: Download impresspress-web pkg/
+        uses: actions/download-artifact@v4
+        with:
+          name: impresspress-web-pkg
+          path: crates/impresspress-web/pkg
+
+      # Debug build (not `--release`): the visual-baseline server serves
+      # server-rendered HTML and the smoke flow is browser-WASM, so the native
+      # binary's runtime speed is irrelevant — a debug compile is far cheaper.
+      # `--root out` lands the binary at out/bin/impresspress for artifact upload.
+      - name: Install impresspress CLI (debug)
+        run: cargo install --path crates/impresspress --locked --debug --root "$GITHUB_WORKSPACE/out"
+
+      - name: Put impresspress on PATH
+        run: echo "$GITHUB_WORKSPACE/out/bin" >> "$GITHUB_PATH"
+
+      # Embed × web flow (Cargo.toml + impresspress.toml present): the unified
+      # CLI runs wasm-pack, then `impresspress_bundle::bundle::run` to drop
+      # sw.js / loader.js / index.html / hashed assets into pkg/. This produces
+      # the served bundle for the smoke tests, overwriting the prereq pkg/.
+      - name: Build impresspress-web (framework assets + hashed pkg/)
+        working-directory: crates/impresspress-web
+        run: impresspress build --target web --release
+
+      - name: Upload bundled web dist
+        uses: actions/upload-artifact@v4
+        with:
+          name: impresspress-web-dist
+          path: crates/impresspress-web/pkg/
+          retention-days: 1
+
+      - name: Upload impresspress binary
+        uses: actions/upload-artifact@v4
+        with:
+          name: impresspress-bin
+          path: out/bin/impresspress
+          retention-days: 1
+
+  e2e-smoke:
+    name: E2E smoke (browser WASM)
+    needs: e2e-build
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download bundled web dist
+        uses: actions/download-artifact@v4
+        with:
+          name: impresspress-web-dist
+          path: crates/impresspress-web/pkg
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('crates/impresspress-web/package-lock.json') }}
+
+      - name: Install Playwright
+        working-directory: crates/impresspress-web
+        run: |
+          npm ci
+          npx playwright install chromium --with-deps
+
+      - name: Serve pkg/ in background (smoke tests)
+        working-directory: crates/impresspress-web
+        run: |
+          python3 -m http.server 8080 -d pkg &
+          echo $! > /tmp/http-pid
+          # Wait for server to accept connections
+          for _ in $(seq 1 30); do
+            if curl -sf http://localhost:8080/sw.js > /dev/null; then
+              break
+            fi
+            sleep 1
+          done
+
+      - name: Run smoke tests (browser WASM, port 8080)
+        working-directory: crates/impresspress-web
+        run: npx playwright test --config=tests/playwright.config.ts tests/e2e/smoke.spec.ts
+
+      - name: Stop server
+        if: always()
+        run: |
+          if [ -f /tmp/http-pid ]; then
+            kill "$(cat /tmp/http-pid)" 2>/dev/null || true
+          fi
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-smoke
+          path: crates/impresspress-web/playwright-report/
+          retention-days: 7
+
+  # The only job that compiles, boots and exercises the browser development
+  # sandbox. `impresspress-web/src/dev_runtime.rs` — wasmi `inspect`/`probe`,
+  # the runtime rebuild, `replace_wafer`, boot convergence, seed-on-boot —
+  # exists only inside a service worker, so no host test can run a line of it;
+  # this job is where it runs. It is also the only place the `browser-devtools`
+  # feature set is compiled at all — `block-dev` itself is covered by the
+  # `Clippy (block-dev)` and `Run the block-dev suite` steps above, which lint
+  # and run `impresspress-core`'s half on the host.
+  e2e-dev-sandbox:
+    name: E2E dev sandbox (browser WASM + wasmi guest)
+    # Ordered after `build-wasm.yml` by the caller, so the `impresspress-web-pkg`
+    # artifact this job downloads is already published.
+    runs-on: ubuntu-latest
+    # The e2e itself is a few minutes. The ceiling is for the case where
+    # neither the release asset nor the cache is there and this job composes
+    # the toolchain: the same reasoning as `e2e-dev-compile`, which carried a
+    # budget while this one — running the identical step — did not.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # wasm32-unknown-unknown builds the `browser-devtools` bundle;
+          # wasm32-wasip1 builds the proof guest the e2e stages over HTTP.
+          targets: wasm32-unknown-unknown, wasm32-wasip1
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: e2e-dev
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
+        with:
+          # Pinned for the same reason as `build-wasm` — see the note there.
+          version: 'v0.15.0'
+
+      # build.rs prereq: the impresspress crate `include_bytes!`s pkg/. What the
+      # tests actually serve is built from `pkg-dev/` (the feature-on wasm),
+      # substituted through IMPRESSPRESS_WEB_WASM / IMPRESSPRESS_WEB_JS by the
+      # sealed web flow — but the CLI does not compile without pkg/ present.
+      - name: Download impresspress-web pkg/
+        uses: actions/download-artifact@v4
+        with:
+          name: impresspress-web-pkg
+          path: crates/impresspress-web/pkg
+
+      # The only `--features browser-devtools` gate in CI.
+      #
+      # It used to carry `--no-deps` because the un-scoped command was red on
+      # six pre-existing impresspress-core warnings. Five were
+      # `arc_with_non_send_sync` on `Arc`s wafer-run's own API dictates, now
+      # stated once as a `cfg_attr(target_arch = "wasm32", ...)` allow in each
+      # affected crate's `lib.rs`; the sixth was a real wasm32-only defect in
+      # `blocks/dev/zip.rs` (a `usize` archive-size ceiling that equals
+      # `usize::MAX` on a 32-bit target, so it never refused anything there).
+      # With both addressed there is nothing left to scope out, and dropping
+      # the flag is what makes this the gate on impresspress-core's
+      # `browser-devtools` code under wasm32 — which nothing else compiles.
+      - name: Clippy (browser-devtools, wasm32)
+        run: cargo clippy --locked -p impresspress-web --target wasm32-unknown-unknown --features browser-devtools -- -D warnings
+
+      # Debug build, as `e2e-build` does: the CLI only assembles static files
+      # here, so its runtime speed is irrelevant and a debug compile is cheaper.
+      - name: Install impresspress CLI (debug)
+        run: cargo install --path crates/impresspress --locked --debug --root "$GITHUB_WORKSPACE/out"
+
+      - name: Put impresspress on PATH
+        run: echo "$GITHUB_WORKSPACE/out/bin" >> "$GITHUB_PATH"
+
+      - name: Build the proof guest (wasm32-wasip1)
+        run: cargo build --locked --release --target wasm32-wasip1 --manifest-path experiments/browser-service-worker-blocks/guest/Cargo.toml
+
+      # Ahead of `build.sh`, and 22 rather than the 20 this job installed after
+      # it: `build-compiler.sh` refuses anything older, and `build.sh --check`
+      # runs `verify-compiler-assets.mjs` through node as well.
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # This job needs the packaged compiler even though nothing in it compiles
+      # Rust in the browser: `impresspress.toml` overlays `compiler/dist/` into
+      # every dev-sandbox bundle, so `build.sh` builds it when it is missing —
+      # which is the ~55 minute, 12.6 GB composition that would OOM this runner.
+      # `dev-compiler.spec.ts` and `dev-compile-tool.spec.ts` both read the
+      # manifest it produces, too. Same key as `e2e-dev-compile`, which `needs`
+      # this job so the two never compose in parallel and race to upload one
+      # entry; see that job for why there are no `restore-keys` and what
+      # `--fast` costs. Skipped entirely when the release asset was fetched:
+      # that tree is the same for every job and needs no cache.
+      # The optimized tree the developer published for this pin, and the only
+      # source of one: composing it costs ~35 minutes and 12.6 GB of RSS, which
+      # this runner does not have. `continue-on-error` because a branch that
+      # has moved `PIN.json` has no asset yet, and this job only needs to know
+      # whether the compiler still WORKS — the cache and the `--fast`
+      # composition below are what make such a branch testable. The DEPLOY
+      # workflow runs the same script without a fallback.
+      - name: Fetch the published compiler dist
+        id: compiler-fetch
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: examples/dev-sandbox/compiler/fetch-dist.sh
+
+      - name: Cache the packaged compiler
+        id: compiler-dist
+        if: steps.compiler-fetch.outcome != 'success'
+        uses: actions/cache@v4
+        with:
+          path: examples/dev-sandbox/compiler/dist
+          key: compiler-dist-${{ hashFiles('examples/dev-sandbox/compiler/PIN.json', 'examples/dev-sandbox/compiler/src/**', 'examples/dev-sandbox/compiler/scripts/**', 'examples/dev-sandbox/compiler/package.json', 'examples/dev-sandbox/compiler/package-lock.json', 'examples/dev-sandbox/compiler/tsconfig.json', 'examples/dev-sandbox/compiler/vite.config.ts', 'examples/dev-sandbox/compiler/build-compiler.sh') }}
+
+      - name: Allow a --fast compiler tree in this job only
+        run: echo "IMPRESSPRESS_COMPILER_ALLOW_FAST=1" >> "$GITHUB_ENV"
+
+      - name: Build the packaged compiler (no asset and no cache, unoptimized)
+        if: steps.compiler-fetch.outcome != 'success' && steps.compiler-dist.outputs.cache-hit != 'true'
+        run: examples/dev-sandbox/compiler/build-compiler.sh --fast
+
+      # `--check` fails fast on a seed/manifest.json that has drifted from
+      # seed/site/** — the same check `build.sh`'s normal path runs before it
+      # builds anything, surfaced as its own step so a stale manifest is
+      # reported without paying for a wasm-pack build first.
+      - name: Check the dev-sandbox seed manifest
+        run: examples/dev-sandbox/build.sh --check
+
+      # One script, shared with local runs: wasm-pack with `browser-devtools`,
+      # then the sealed web flow with `[dev] enabled = true` and the welcome
+      # seed overlaid onto `dist/seed/`. Its last stdout line is the dist path.
+      - name: Build the dev-sandbox bundle
+        run: |
+          DIST="$(examples/dev-sandbox/build.sh | tail -1)"
+          echo "DEV_DIST=$DIST" >> "$GITHUB_ENV"
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('crates/impresspress-web/package-lock.json') }}
+
+      - name: Install Playwright
+        working-directory: crates/impresspress-web
+        run: |
+          npm ci
+          npx playwright install chromium --with-deps
+
+      - name: Serve the dev bundle in background (port 8082)
+        run: |
+          python3 -m http.server 8082 -d "$DEV_DIST" &
+          echo $! > /tmp/dev-http-pid
+          # Wait for the server to accept connections, then prove both halves
+          # of the bundle are actually there: the worker, and the seed the
+          # first boot imports.
+          for _ in $(seq 1 30); do
+            if curl -sf http://localhost:8082/sw.js > /dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl -sf http://localhost:8082/seed/manifest.json > /dev/null
+
+      # Teed to a file (not just printed) so the timing-baseline step below can
+      # grep the `console.log(...elapsed...)` lines dev-foundations.spec.ts
+      # and dev-workspace.spec.ts print. `set -o pipefail` is not optional:
+      # GitHub runs `run:` steps as `bash -e {0}` unless the step names a
+      # `shell:`, so without it the step exits with `tee`'s status and a
+      # failing spec passes the job.
+      - name: Run dev sandbox e2e (browser WASM, port 8082)
+        working-directory: crates/impresspress-web
+        env:
+          TEST_PORT: 8082
+          PROOF_GUEST_WASM: ${{ github.workspace }}/experiments/browser-service-worker-blocks/guest/target/wasm32-wasip1/release/browser_compiled_wafer_block.wasm
+        # `dev-compiler.spec.ts` is here rather than in `e2e-dev-compile`
+        # because it needs the packaged worker only to prove it STARTS under
+        # the isolation headers — it compiles nothing, so it costs ~35 s and
+        # belongs with the other fake-worker specs.
+        run: |
+          set -o pipefail
+          npx playwright test --config=tests/playwright.config.ts tests/e2e/dev-foundations.spec.ts tests/e2e/dev-workspace.spec.ts tests/e2e/dev-compiler.spec.ts tests/e2e/dev-compile-tool.spec.ts 2>&1 \
+            | tee /tmp/dev-sandbox-e2e.log
+
+      - name: Stop server
+        if: always()
+        run: |
+          if [ -f /tmp/dev-http-pid ]; then
+            kill "$(cat /tmp/dev-http-pid)" 2>/dev/null || true
+          fi
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-dev-sandbox
+          path: crates/impresspress-web/playwright-report/
+          retention-days: 7
+
+      # `pkg/` (downloaded above) and `pkg-dev/` (built by build.sh, above)
+      # both already exist at this point, so this only measures — it never
+      # rebuilds. Fails the job on a size-threshold breach; see measure.sh's
+      # header for what's gated and why.
+      - name: Measure dev-sandbox bundle sizes
+        run: examples/dev-sandbox/measure.sh >> "$GITHUB_STEP_SUMMARY"
+
+      # Baseline only — no thresholds (see measure.sh's header for the sizes
+      # that DO gate). `always()` so this still records whatever timing lines
+      # made it into the log even if the e2e run or the size gate above
+      # failed.
+      - name: Record dev-sandbox timing baseline
+        if: always()
+        run: |
+          {
+            echo
+            echo '## Dev-sandbox timing baseline (no thresholds)'
+            echo
+            echo '```'
+            grep -E ': [0-9]+ ms$' /tmp/dev-sandbox-e2e.log || echo 'no timing lines captured'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  e2e-dev-compile:
+    name: E2E dev sandbox (Rubrc compiles a block in the browser)
+    # The same wasm this repo's other browser jobs run against — the sandbox
+    # bundle is built from `pkg/` the way `e2e-dev-sandbox` builds it.
+    #
+    # `e2e-dev-sandbox` as well, and this dependency IS on its result — which
+    # is what `needs` means, and what it has to mean here. The two jobs share
+    # one compiler cache key, so on a cold cache they would otherwise compose
+    # the toolchain twice in parallel and one of the two uploads would lose
+    # the race with a warning; serialised, the first seeds the entry and this
+    # one restores it. Letting this job run after a FAILED `e2e-dev-sandbox`
+    # would not preserve that: `actions/cache` saves in a post step declared
+    # `post-if: success()`, so a job that fails at its e2e step writes no
+    # entry at all, and this one would compose from scratch — in series,
+    # behind a job that has already reported the sandbox is broken.
+    #
+    # The cost is a skipped compile check when the sandbox e2e is red. It is
+    # only paid on a cold cache: once the release asset for the pin is
+    # published, neither job composes and this is pure ordering. If the lost
+    # signal ever matters more than the double compose, the answer is a
+    # separate cache key per job, not dropping the `needs`.
+    # Ordered after `build-wasm.yml` by the caller, so the `impresspress-web-pkg`
+    # artifact this job downloads is already published.
+    needs: e2e-dev-sandbox
+    runs-on: ubuntu-latest
+    # The two e2es are ~5-10 minutes between them (three real compiles and
+    # four cold boots). The ceiling is for the cache miss below: composing the
+    # toolchain is the slow phase, and a job that gets killed at the default 6
+    # hours after spending an hour composing has cached nothing.
+    timeout-minutes: 120
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          # wasm32-unknown-unknown builds the `browser-devtools` bundle;
+          # wasm32-wasip1 is what `build-compiler.sh` composes against.
+          targets: wasm32-unknown-unknown, wasm32-wasip1
+
+      - name: Rust cache
+        uses: Swatinem/rust-cache@v2
+        with:
+          prefix-key: e2e-dev
+
+      - name: Install wasm-pack
+        uses: jetli/wasm-pack-action@0d096b08b4e5a7de8c28de67e11e945404e9eefa  # v0.4.0
+        with:
+          # Pinned for the same reason as `build-wasm` — see the note there.
+          version: 'v0.15.0'
+
+      # build.rs prereq: the impresspress crate `include_bytes!`s pkg/. What the
+      # tests actually serve is built from `pkg-dev/` (the feature-on wasm),
+      # substituted through IMPRESSPRESS_WEB_WASM / IMPRESSPRESS_WEB_JS by the
+      # sealed web flow — but the CLI does not compile without pkg/ present.
+      - name: Download impresspress-web pkg/
+        uses: actions/download-artifact@v4
+        with:
+          name: impresspress-web-pkg
+          path: crates/impresspress-web/pkg
+
+      # Debug build, as `e2e-dev-sandbox` does: the CLI only assembles static
+      # files here, so its runtime speed is irrelevant.
+      - name: Install impresspress CLI (debug)
+        run: cargo install --path crates/impresspress --locked --debug --root "$GITHUB_WORKSPACE/out"
+
+      - name: Put impresspress on PATH
+        run: echo "$GITHUB_WORKSPACE/out/bin" >> "$GITHUB_PATH"
+
+      # 22, not the 20 the other browser jobs use: `build-compiler.sh` refuses
+      # anything older, and it fetches `bun` through its own `npm ci` rather
+      # than through a setup action.
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      # `compiler/dist/` is ~72 MB of packaged toolchain and is fully
+      # determined by the inputs in this key: the pin (rubrc's commit, the
+      # composer, Binaryen, the sysroot), the worker sources bundled against
+      # it, the packaging scripts, `build-compiler.sh` itself, and everything
+      # that decides what vite emits and what it is called — `vite.config.ts`,
+      # `tsconfig.json`, `package.json` and the lockfile that pins vite and
+      # bun. A key missing any of those restores a stale tree that both e2e
+      # jobs then test while reporting green. No `restore-keys`: a near-miss
+      # restore would be a tree built from a different pin, and the only
+      # honest thing to do with it is rebuild.
+      # The optimized tree the developer published for this pin, and the only
+      # source of one: composing it costs ~35 minutes and 12.6 GB of RSS, which
+      # this runner does not have. `continue-on-error` because a branch that
+      # has moved `PIN.json` has no asset yet, and this job only needs to know
+      # whether the compiler still WORKS — the cache and the `--fast`
+      # composition below are what make such a branch testable. The DEPLOY
+      # workflow runs the same script without a fallback.
+      - name: Fetch the published compiler dist
+        id: compiler-fetch
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: examples/dev-sandbox/compiler/fetch-dist.sh
+
+      - name: Cache the packaged compiler
+        id: compiler-dist
+        if: steps.compiler-fetch.outcome != 'success'
+        uses: actions/cache@v4
+        with:
+          path: examples/dev-sandbox/compiler/dist
+          key: compiler-dist-${{ hashFiles('examples/dev-sandbox/compiler/PIN.json', 'examples/dev-sandbox/compiler/src/**', 'examples/dev-sandbox/compiler/scripts/**', 'examples/dev-sandbox/compiler/package.json', 'examples/dev-sandbox/compiler/package-lock.json', 'examples/dev-sandbox/compiler/tsconfig.json', 'examples/dev-sandbox/compiler/vite.config.ts', 'examples/dev-sandbox/compiler/build-compiler.sh') }}
+
+      # This job — and ONLY this job — may run against a component composed
+      # without `wasm-opt`. `verify-compiler-assets.mjs` refuses a `--fast`
+      # tree unless this is set, which is what keeps such a tree out of a
+      # deploy: the deploy workflow never sets it and builds (or restores) the
+      # optimized tree a developer produced. Exported for the whole job because
+      # both `build.sh --check` and `build.sh` run the verifier.
+      - name: Allow a --fast compiler tree in this job only
+        run: echo "IMPRESSPRESS_COMPILER_ALLOW_FAST=1" >> "$GITHUB_ENV"
+
+      # Only on a cache miss, and with `--fast`, which swaps rubrc's
+      # `vfs:build:prod` for `vfs:build:prod:no-opt`: minutes instead of the
+      # ~35 that `wasm-opt -Oz` costs, at the price of a much larger component
+      # to download in the browser. That matters here only as minutes of test
+      # time. **The memory this path needs has not been measured** — the 12.6
+      # GB peak in `compiler/README.md` is the OPTIMIZED composition's, which
+      # would OOM a 7 GB runner; skipping `wasm-opt` is what is expected to
+      # avoid it, not something observed. If this step is ever OOM-killed, the
+      # answer is a larger runner, not a smaller component.
+      #
+      # `build-compiler.sh` installs what it needs itself (bun through
+      # `npm ci`, the sha256-checked `wasi_virt_layer-cli` and Binaryen
+      # releases, `wasm32-wasip1-threads` on both toolchains and a nightly with
+      # `rust-src`), so there is nothing to add here beyond node and rustup.
+      - name: Build the packaged compiler (no asset and no cache, unoptimized)
+        if: steps.compiler-fetch.outcome != 'success' && steps.compiler-dist.outputs.cache-hit != 'true'
+        run: examples/dev-sandbox/compiler/build-compiler.sh --fast
+
+      # Both halves of `--check`: the seed manifest, and the compiler tree —
+      # every file against `compiler/dist/manifest.json`'s hashes, and nothing
+      # over Cloudflare's asset limit. On a cache hit this is what proves the
+      # restored tree is intact rather than assuming it.
+      - name: Check the seed manifest and the compiler tree
+        run: examples/dev-sandbox/build.sh --check
+
+      # `compiler_is_current` matches PIN.json against the tree above, so this
+      # does not rebuild the compiler; it builds the wasm and assembles the
+      # bundle, with `compiler/dist/` overlaid at `/__impresspress_dev/compiler/`.
+      - name: Build the dev-sandbox bundle
+        run: |
+          DIST="$(examples/dev-sandbox/build.sh | tail -1)"
+          echo "DEV_DIST=$DIST" >> "$GITHUB_ENV"
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('crates/impresspress-web/package-lock.json') }}
+
+      - name: Install Playwright
+        working-directory: crates/impresspress-web
+        run: |
+          npm ci
+          npx playwright install chromium --with-deps
+
+      # A plain static host is enough: the service worker adds the COOP/COEP
+      # the compiler worker needs, and the compiler assets are ordinary files
+      # on the bypass list.
+      - name: Serve the dev bundle in background (port 8083)
+        run: |
+          python3 -m http.server 8083 -d "$DEV_DIST" &
+          echo $! > /tmp/dev-compile-http-pid
+          for _ in $(seq 1 30); do
+            if curl -sf http://localhost:8083/sw.js > /dev/null; then
+              break
+            fi
+            sleep 1
+          done
+          curl -sf http://localhost:8083/seed/manifest.json > /dev/null
+          curl -sf http://localhost:8083/__impresspress_dev/compiler/manifest.json > /dev/null
+
+      - name: Run the in-browser compile e2e (port 8083)
+        working-directory: crates/impresspress-web
+        env:
+          TEST_PORT: 8083
+        run: |
+          set -o pipefail
+          npx playwright test --config=tests/playwright.config.ts tests/e2e/dev-compile.spec.ts 2>&1 \
+            | tee /tmp/dev-compile.log
+
+      # The spec prints its measurements as `dev-compile:` lines precisely so
+      # they can be lifted out of the log: toolchain start-up, the build, and
+      # the size of the module the browser produced. `always()` because a
+      # failure that still reached the compile is exactly when the numbers are
+      # worth reading.
+      - name: Report the compile timings
+        if: always()
+        run: |
+          {
+            echo '### Rubrc, in the browser'
+            echo
+            echo '```'
+            grep 'dev-compile:' /tmp/dev-compile.log \
+              || echo '(no dev-compile: lines — the run did not reach the compile)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # The definition of done (design §21), as one test: the seven-step
+      # scenario of §16, on the bundle already being served. It belongs in THIS
+      # job rather than `e2e-dev-sandbox` for the same reason the spec above
+      # does — its second step compiles a Rust block with the real toolchain —
+      # and it runs AFTER that spec on purpose: the two share this server and
+      # this browser install, and a compiler already known to be broken would
+      # make the scenario's failure say nothing the step above has not said
+      # already. Each spec boots its own fresh origin, so neither can leave
+      # state for the other.
+      - name: Run the full scenario e2e (port 8083)
+        working-directory: crates/impresspress-web
+        env:
+          TEST_PORT: 8083
+        run: |
+          set -o pipefail
+          npx playwright test --config=tests/playwright.config.ts tests/e2e/dev-scenario.spec.ts 2>&1 \
+            | tee /tmp/dev-scenario.log
+
+      # One `dev-scenario:` line per step, printed as that step finishes — so
+      # the last line in the summary is also how far the scenario got.
+      - name: Report the scenario timings
+        if: always()
+        run: |
+          {
+            echo '### The seven-step scenario'
+            echo
+            echo '```'
+            grep 'dev-scenario:' /tmp/dev-scenario.log \
+              || echo '(no dev-scenario: lines — the run did not reach the scenario)'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Stop server
+        if: always()
+        run: |
+          if [ -f /tmp/dev-compile-http-pid ]; then
+            kill "$(cat /tmp/dev-compile-http-pid)" 2>/dev/null || true
+          fi
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-dev-compile
+          path: crates/impresspress-web/playwright-report/
+          retention-days: 7
+
+  e2e-visual:
+    name: E2E visual baselines (native server)
+    needs: e2e-build
+    # Pinned, not `ubuntu-latest`: this job compares screenshots against
+    # baselines rendered by `regen-visual-baselines.yml`. Playwright's
+    # Chromium brings its own rasterizer, but the fonts it draws with (and
+    # fontconfig, which picks them) are the Ubuntu release's packages, which
+    # `playwright install --with-deps` installs through apt. `ubuntu-latest`
+    # moves to a new Ubuntu release without a commit here, and with it every
+    # glyph under the committed PNGs; the pin makes that move a deliberate
+    # edit here and in that workflow, followed by a regen. It does not freeze
+    # package updates within the release. The labels must match.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Download impresspress binary
+        uses: actions/download-artifact@v4
+        with:
+          name: impresspress-bin
+          path: out/bin
+
+      - name: Put impresspress on PATH
+        run: |
+          chmod +x "$GITHUB_WORKSPACE/out/bin/impresspress"
+          echo "$GITHUB_WORKSPACE/out/bin" >> "$GITHUB_PATH"
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: playwright-${{ runner.os }}-${{ hashFiles('crates/impresspress-web/package-lock.json') }}
+
+      - name: Install Playwright
+        working-directory: crates/impresspress-web
+        run: |
+          npm ci
+          npx playwright install chromium --with-deps
+
+      - name: Start native impresspress server in background (visual-baseline tests)
+        run: |
+          # Run from /tmp so impresspress auto-detects "sealed" mode (no
+          # ancestor Cargo.toml). Running from inside the repo triggers
+          # embed_native flow which `cargo build`s the whole workspace
+          # before the server starts, busting the wait loop.
+          cd /tmp
+          IMPRESSPRESS_LISTEN="127.0.0.1:8093" \
+          IMPRESSPRESS_DB_PATH="/tmp/impresspress-visual-baseline.db" \
+          WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL="admin@example.com" \
+          WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_PASSWORD="admin123" \
+          IMPRESSPRESS_BLOCK_ENABLED="impresspress/userportal,impresspress/vector" \
+            impresspress > /tmp/impresspress-baseline.log 2>&1 &
+          echo $! > /tmp/impresspress-pid
+          # Wait for native server to accept connections (60s; sealed-mode
+          # boot is fast — SQLite seed + WAFER init only).
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8093/b/auth/login -o /dev/null; then
+              echo "server ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          # Fail fast if server never came up (don't hand a dead port to playwright).
+          if ! curl -sf http://127.0.0.1:8093/b/auth/login -o /dev/null; then
+            echo "::error::native impresspress did not start within 60s"
+            tail -50 /tmp/impresspress-baseline.log
+            exit 1
+          fi
+
+      # Playwright runs the files it is given in PATH order, not argument
+      # order. webmcp.spec.ts runs AFTER the visual baselines only because `w`
+      # sorts after `v`, and it must: it seeds a product into the same
+      # database, and a product that exists before the admin pages are
+      # screenshotted would show up in them.
+      #
+      # delegated-actions.spec.ts sorts first, which is harmless because it
+      # writes nothing — it filters a list, opens and closes a modal, toggles
+      # a password field, and hops between two products admin tabs, all of
+      # which are the browser-side half of the `data-action` rule that
+      # `ui::tests::pages_carry_no_event_handler_attributes` enforces on the
+      # markup. Neither that test nor a screenshot can see a listener that
+      # stopped firing — or one that started firing twice. The tab-hop case is
+      # the only one that issues a mutating request, and it intercepts it in
+      # the browser and refuses it, so the shared database is untouched.
+      - name: Run visual-baseline and WebMCP end-to-end tests (native server, port 8093)
+        working-directory: crates/impresspress-web
+        env:
+          TEST_PORT: 8093
+        # The file list lives in the `e2e:visual` package script because
+        # `regen-visual-baselines.yml` must run exactly this set: the specs
+        # share one server and one database, and what an earlier spec writes
+        # shows up in a later screenshot. See that workflow's header.
+        run: npm run e2e:visual
+
+      # A step of its own, not one more file on the line above: Playwright
+      # orders the files it is given by path, not by argument order, so on
+      # that line this spec would run BEFORE visual-baseline.spec.ts. It
+      # writes — an LLM provider, messages contexts and entries, a
+      # deleted-then-restored product — because what it proves is that a
+      # control's after-success effect (reload, reset, drop the empty line,
+      # scroll) runs under the CSP this server really sends, and those effects
+      # only follow a real write. Those rows would show up in the screenshots.
+      - name: Run htmx after-success effects end-to-end tests (native server, port 8093)
+        working-directory: crates/impresspress-web
+        env:
+          TEST_PORT: 8093
+        run: npx playwright test --config=tests/playwright.visual-baseline.config.ts tests/e2e/htmx-success-effects.spec.ts
+
+      - name: Stop server
+        if: always()
+        run: |
+          if [ -f /tmp/impresspress-pid ]; then
+            kill "$(cat /tmp/impresspress-pid)" 2>/dev/null || true
+          fi
+
+      - name: Upload Playwright report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-visual
+          path: crates/impresspress-web/playwright-report/
+          retention-days: 7
+
+  products-browser:
+    name: Products browser lifecycles
+    # Pinned, not `ubuntu-latest`: this job compares screenshots against
+    # baselines rendered by `regen-visual-baselines.yml`. Playwright's
+    # Chromium brings its own rasterizer, but the fonts it draws with (and
+    # fontconfig, which picks them) are the Ubuntu release's packages, which
+    # `playwright install --with-deps` installs through apt. `ubuntu-latest`
+    # moves to a new Ubuntu release without a commit here, and with it every
+    # glyph under the committed PNGs; the pin makes that move a deliberate
+    # edit here and in that workflow, followed by a regen. It does not freeze
+    # package updates within the release. The labels must match.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: crates/impresspress-web/package-lock.json
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: products-playwright-${{ runner.os }}-${{ hashFiles('crates/impresspress-web/package-lock.json') }}
+
+      - name: Install browser-test dependencies and Chromium
+        working-directory: crates/impresspress-web
+        run: |
+          npm ci
+          npx playwright install chromium --with-deps
+
+      - name: Run Products admin, buyer, seller, Stripe, and lifecycle flows
+        working-directory: crates/impresspress-web
+        run: npx playwright test --config=tests/playwright.config.ts tests/e2e/products-*.spec.ts
+
+      - name: Upload Products browser report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-products
+          path: |
+            crates/impresspress-web/playwright-report/
+            crates/impresspress-web/test-results/
+          retention-days: 7
+
+  product-examples:
+    name: Products static examples (Playwright)
+    # Pinned, not `ubuntu-latest`: this job compares screenshots against
+    # baselines rendered by `regen-visual-baselines.yml`. Playwright's
+    # Chromium brings its own rasterizer, but the fonts it draws with (and
+    # fontconfig, which picks them) are the Ubuntu release's packages, which
+    # `playwright install --with-deps` installs through apt. `ubuntu-latest`
+    # moves to a new Ubuntu release without a commit here, and with it every
+    # glyph under the committed PNGs; the pin makes that move a deliberate
+    # edit here and in that workflow, followed by a regen. It does not freeze
+    # package updates within the release. The labels must match.
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: examples/package-lock.json
+
+      - name: Cache Playwright browsers
+        uses: actions/cache@v4
+        with:
+          path: ~/.cache/ms-playwright
+          key: product-examples-playwright-${{ runner.os }}-${{ hashFiles('examples/package-lock.json') }}
+
+      - name: Install example dependencies and Chromium
+        working-directory: examples
+        run: |
+          npm ci
+          npx playwright install chromium --with-deps
+
+      - name: Run ten-site commerce suite
+        working-directory: examples
+        env:
+          PRODUCT_EXAMPLES_PORT: 4178
+        run: npm run test:products
+
+      - name: Upload product-example report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report-product-examples
+          path: |
+            examples/playwright-report-products/
+            examples/test-results/
+          retention-days: 7
+
+  postgres-migrations:
+    name: PostgreSQL migrations
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: impresspress_products_test
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres -d impresspress_products_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      PGHOST: 127.0.0.1
+      PGPORT: 5432
+      PGUSER: postgres
+      PGPASSWORD: postgres
+      PGDATABASE: impresspress_products_test
+    steps:
+      - uses: actions/checkout@v4
+
+      # Every block that ships a `.postgres.sql` belongs in this loop. A
+      # dialect file nothing executes is a typo waiting to brick a Postgres
+      # deployment for good: the error aborts the batch, `apply_if_blessed`
+      # never stamps the hash, and every later boot re-runs and re-fails.
+      #
+      # The block set is a GLOB and must stay one. A hand-written list of
+      # block names makes the sentence above a claim rather than a fact: a
+      # block missing from it is silently unexecuted, and so is every dialect
+      # file it ever adds. Sorted order gives each block its own files in
+      # migration order, which is the ordering that matters — the only
+      # cross-table `REFERENCES` in any dialect file are within one block.
+      - name: Apply all PostgreSQL migrations in order
+        run: |
+          for migration in crates/impresspress-core/src/blocks/*/migrations/*.postgres.sql; do
+            echo "applying ${migration}"
+            psql --set ON_ERROR_STOP=1 --file "${migration}"
+          done
+
+      - name: Verify commerce schema and deterministic templates
+        run: |
+          test "$(psql --tuples-only --no-align --command "SELECT count(*) FROM information_schema.tables WHERE table_schema = 'public' AND table_name LIKE 'impresspress__products__%'")" -ge 20
+          test "$(psql --tuples-only --no-align --command "SELECT count(*) FROM impresspress__products__product_templates WHERE id IN ('simple_product','simple_subscription','configurable_product','configurable_subscription')")" -eq 4
+          test "$(psql --tuples-only --no-align --command "SELECT count(*) FROM information_schema.columns WHERE table_name = 'impresspress__products__purchases' AND column_name IN ('shipping_cents','subscription_event_created','provider_payment_status','payment_intent_event_created')")" -eq 4
+          test "$(psql --tuples-only --no-align --command "SELECT count(*) FROM information_schema.columns WHERE (table_name, column_name) IN (('impresspress__products__refunds','stripe_event_created'),('impresspress__products__seller_accounts','stripe_event_created'),('impresspress__products__provider_operations','processing_owner'))")" -eq 3
+
+      # The commerce analytics reads six sums through `db::aggregate`: five
+      # money columns, every one of them BIGINT here, plus line-item quantity.
+      # PostgreSQL's `sum(bigint)` is NUMERIC, which `wafer-block-postgres`
+      # decodes through BigDecimal into f64 — so an uncast sum reaches block
+      # code as a JSON float, and `crate::util::aggregate_i64` refuses a float.
+      # Every sum the analytics reads therefore asks for `CAST(... AS BIGINT)`.
+      #
+      # `money_figures_read_as_integers_where_an_uncast_sum_is_a_float` drives
+      # the real analytics against a context that floats every uncast sum and
+      # leaves a BIGINT-cast one an integer. This step pins the PREMISE that
+      # test encodes, on a real server: these are the money columns, they are
+      # BIGINT, and their uncast sum is NUMERIC. If PostgreSQL or the schema
+      # ever stopped making it so, the test would still pass while describing
+      # something that no longer happens. That a BIGINT-cast sum decodes as an
+      # integer end to end is proven upstream, by wafer-run's PostgreSQL
+      # Conformance job (`check_aggregate_money`, wafer-run#336).
+      - name: Money sums really are NUMERIC on PostgreSQL
+        run: |
+          test "$(psql --tuples-only --no-align --command "SELECT count(*) FROM information_schema.columns WHERE (table_name, column_name) IN (('impresspress__products__purchases','total_cents'),('impresspress__products__purchases','refunded_total_cents'),('impresspress__products__purchases','platform_fee_cents'),('impresspress__products__line_items','total_minor'),('impresspress__products__disputes','amount_minor')) AND data_type = 'bigint'")" -eq 5
+          test "$(psql --tuples-only --no-align --command "SELECT pg_typeof(sum(total_cents))::text FROM impresspress__products__purchases")" = "numeric"
+          test "$(psql --tuples-only --no-align --command "SELECT pg_typeof(sum(amount_minor))::text FROM impresspress__products__disputes")" = "numeric"
+          test "$(psql --tuples-only --no-align --command "SELECT pg_typeof(count(*))::text FROM impresspress__products__purchases")" = "bigint"
+
+      # 020 repairs historical `deleted_at = ''` rows. Those rows sit OUTSIDE
+      # 005's partial unique slug index (`slug <> '' AND deleted_at IS NULL`),
+      # so while one existed another product was free to take its slug —
+      # and the repair pulls it back into the index against that slug. A
+      # unique violation there aborts the whole migration (only a duplicate
+      # ADD COLUMN is tolerated), leaving the hash unstamped so every later
+      # boot re-runs and re-fails; on Cloudflare that is a 500 per request.
+      # `slug_collision_cannot_fail_020` pins the guard on SQLite — this pins
+      # the same behaviour on real PostgreSQL. 020 already ran above against
+      # an empty table and is re-runnable.
+      - name: Migration 020 tolerates a slug collision
+        run: |
+          psql --set ON_ERROR_STOP=1 --command "INSERT INTO impresspress__products__products (id, name, slug, deleted_at, created_at, updated_at) VALUES ('blank_jacket', 'bj', 'jacket', '', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'), ('live_jacket', 'lj', 'jacket', NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'), ('blank_hat_a', 'ba', 'hat', '', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'), ('blank_hat_b', 'bb', 'hat', '', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'), ('blank_scarf', 'bs', 'scarf', '', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'), ('blank_noslug', 'bn', '', '', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'), ('live_noslug', 'ln', '', NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+          psql --set ON_ERROR_STOP=1 --file crates/impresspress-core/src/blocks/products/migrations/020_normalize_blank_deleted_at.postgres.sql
+          test "$(psql --tuples-only --no-align --command "SELECT string_agg(id, ',' ORDER BY id) FROM impresspress__products__products WHERE deleted_at IS NULL")" = "blank_noslug,blank_scarf,live_jacket,live_noslug"
+          test "$(psql --tuples-only --no-align --command "SELECT string_agg(id, ',' ORDER BY id) FROM impresspress__products__products WHERE deleted_at = ''")" = "blank_hat_a,blank_hat_b,blank_jacket"
+
+      # 022 rewrites the platform subscription's British `cancelled` to
+      # Stripe's `canceled`, the only spelling `SubscriptionStatus` decodes.
+      # `a_stored_cancelled_subscription_is_rewritten_to_canceled_by_022` pins
+      # it on SQLite; this pins it on real PostgreSQL, twice over, because the
+      # block replays its whole migration set whenever the combined hash moves.
+      - name: Migration 022 canonicalises the subscription status spelling
+        run: |
+          psql --set ON_ERROR_STOP=1 --command "INSERT INTO impresspress__products__subscriptions (id, user_id, status, created_at, updated_at) VALUES ('sub_british', 'user_british', 'cancelled', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'), ('sub_stripe', 'user_stripe', 'canceled', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'), ('sub_active', 'user_active', 'active', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+          for pass in 1 2; do
+            psql --set ON_ERROR_STOP=1 --file crates/impresspress-core/src/blocks/products/migrations/022_canonical_subscription_status.postgres.sql
+          done
+          test "$(psql --tuples-only --no-align --command "SELECT string_agg(id || '=' || status, ',' ORDER BY id) FROM impresspress__products__subscriptions")" = "sub_active=active,sub_british=canceled,sub_stripe=canceled"
+
+      # Admin 004 collapses repeated `(user_id, role)` grants onto the earliest
+      # row and then makes the pair unique. It already ran above against an
+      # empty table, so the index exists; it is dropped here to plant what an
+      # upgrading deployment holds — two grants of `admin` to one user, one
+      # pair tied on `created_at` so the `id` tie-break decides — and the file
+      # is run again. `blocks/admin/migrations` pins the same on SQLite.
+      - name: Migration admin/004 collapses duplicate role grants
+        run: |
+          psql --set ON_ERROR_STOP=1 --command "DROP INDEX impresspress__admin__user_roles_user_role_uniq"
+          psql --set ON_ERROR_STOP=1 --command "INSERT INTO impresspress__admin__user_roles (id, user_id, role, assigned_by, created_at, updated_at) VALUES ('ur_b_first', 'alice', 'admin', '', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'), ('ur_a_second', 'alice', 'admin', '', '2026-02-01T00:00:00Z', '2026-02-01T00:00:00Z'), ('ur_tie_b', 'bob', 'editor', '', '2026-03-01T00:00:00Z', '2026-03-01T00:00:00Z'), ('ur_tie_a', 'bob', 'editor', '', '2026-03-01T00:00:00Z', '2026-03-01T00:00:00Z'), ('ur_other', 'bob', 'admin', '', '2026-04-01T00:00:00Z', '2026-04-01T00:00:00Z')"
+          psql --set ON_ERROR_STOP=1 --file crates/impresspress-core/src/blocks/admin/migrations/004_user_roles_unique.postgres.sql
+          test "$(psql --tuples-only --no-align --command "SELECT string_agg(id, ',' ORDER BY id) FROM impresspress__admin__user_roles")" = "ur_b_first,ur_other,ur_tie_a"
+          # `if`, not `!`: bash's `-e` ignores a negated command's status.
+          if psql --set ON_ERROR_STOP=1 --command "INSERT INTO impresspress__admin__user_roles (id, user_id, role, assigned_by, created_at, updated_at) VALUES ('ur_again', 'alice', 'admin', '', '2026-05-01T00:00:00Z', '2026-05-01T00:00:00Z')"; then
+            echo "the unique index did not refuse a repeated grant"
+            exit 1
+          fi
+
+      # Files 003 gives every legacy (JWT-shaped, unexpiring) share row the
+      # lifetime its token used to impose: 365 days for one minted before
+      # SEC-055 shortened the TTL, 30 days after, and the migration's own
+      # instant when `created_at` cannot be read. Getting either arm wrong
+      # silently revokes links that still work or revives links that are
+      # dead — neither of which a schema-shape check would catch, so the
+      # rows are asserted. `blocks/files/migrations` pins the same on
+      # SQLite. 003 already ran above against an empty table and is
+      # re-runnable.
+      - name: Migration files/003 dates legacy share links by era
+        run: |
+          psql --set ON_ERROR_STOP=1 --command "INSERT INTO impresspress__files__cloud_shares (id, token, bucket, key, created_by, expires_at, created_at, updated_at) VALUES ('old', 'eyJhbGci.eyJ0eXAi.sig1', 'photos', 'a.png', 'alice', NULL, '2026-04-20T10:00:00Z', '2026-04-20T10:00:00Z'), ('recent', 'eyJhbGci.eyJ0eXAi.sig2', 'photos', 'b.png', 'alice', NULL, '2026-06-01T00:00:00Z', '2026-06-01T00:00:00Z'), ('precise', 'eyJhbGci.eyJ0eXAi.sig3', 'photos', 'c.png', 'alice', '', '2026-09-08T12:34:56.123456789+00:00', '2026-09-08T12:34:56.123456789+00:00'), ('opaque', '9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08', 'photos', 'd.png', 'alice', NULL, '2026-04-20T10:00:00Z', '2026-04-20T10:00:00Z'), ('chosen', 'eyJhbGci.eyJ0eXAi.sig5', 'photos', 'e.png', 'alice', '2027-06-01T00:00:00Z', '2026-04-20T10:00:00Z', '2026-04-20T10:00:00Z'), ('garbled', 'eyJhbGci.eyJ0eXAi.sig6', 'photos', 'f.png', 'alice', NULL, 'not a timestamp', 'not a timestamp'), ('boundary_in', 'eyJhbGci.eyJ0eXAi.sig7', 'photos', 'g.png', 'alice', NULL, '2026-05-14T05:43:03.5+00:00', '2026-05-14T05:43:03.5+00:00'), ('boundary_before', 'eyJhbGci.eyJ0eXAi.sig8', 'photos', 'h.png', 'alice', NULL, '2026-05-14T05:43:02.999+00:00', '2026-05-14T05:43:02.999+00:00')"
+          psql --set ON_ERROR_STOP=1 --file crates/impresspress-core/src/blocks/files/migrations/003_legacy_share_token_expiry.postgres.sql
+          test "$(psql --tuples-only --no-align --command "SELECT expires_at FROM impresspress__files__cloud_shares WHERE id = 'old'")" = "2027-04-20T10:00:00Z"
+          test "$(psql --tuples-only --no-align --command "SELECT expires_at FROM impresspress__files__cloud_shares WHERE id = 'recent'")" = "2026-07-01T00:00:00Z"
+          test "$(psql --tuples-only --no-align --command "SELECT expires_at FROM impresspress__files__cloud_shares WHERE id = 'precise'")" = "2026-10-08T12:34:56Z"
+          test "$(psql --tuples-only --no-align --command "SELECT expires_at FROM impresspress__files__cloud_shares WHERE id = 'chosen'")" = "2027-06-01T00:00:00Z"
+          test "$(psql --tuples-only --no-align --command "SELECT count(*) FROM impresspress__files__cloud_shares WHERE id = 'opaque' AND expires_at IS NULL")" -eq 1
+          test "$(psql --tuples-only --no-align --command "SELECT count(*) FROM impresspress__files__cloud_shares WHERE id = 'garbled' AND expires_at IS NOT NULL AND expires_at <= to_char(now() AT TIME ZONE 'UTC', 'YYYY-MM-DD\"T\"HH24:MI:SS\"Z\"')")" -eq 1
+          # The boundary second, asserted identically by
+          # `the_boundary_second_falls_on_the_thirty_day_arm` on SQLite: a row
+          # inside it takes the 30-day arm on BOTH backends, the second before
+          # it takes the 365-day arm on both. This is the one comparison the
+          # repair turns on, and the two dialects spell it differently.
+          test "$(psql --tuples-only --no-align --command "SELECT expires_at FROM impresspress__files__cloud_shares WHERE id = 'boundary_in'")" = "2026-06-13T05:43:03Z"
+          test "$(psql --tuples-only --no-align --command "SELECT expires_at FROM impresspress__files__cloud_shares WHERE id = 'boundary_before'")" = "2027-05-14T05:43:02Z"
+
+      # Files 004 adds `objects.claim_id` and 005 `objects.blob_key`. Shipping
+      # either changes the hash of the files block's joined SQL, so an
+      # upgrading deployment re-runs EVERY files migration over its live rows.
+      # This replays the whole set over what the steps above left (the dated
+      # share links included) plus stored objects (one naming its blob, one
+      # from before 004 and 005) and a reservation in flight, and requires
+      # every row of every files table to come back byte-identical — no link
+      # re-dated, no bucket or object deleted, no claim or blob key cleared.
+      # `replay_tests` in `blocks/files/migrations` pins the same on SQLite.
+      - name: Files migrations replay over live rows without changing them
+        run: |
+          test "$(psql --tuples-only --no-align --command "SELECT count(*) FROM information_schema.columns WHERE table_name = 'impresspress__files__objects' AND column_name = 'claim_id'")" -eq 1
+          test "$(psql --tuples-only --no-align --command "SELECT count(*) FROM information_schema.columns WHERE table_name = 'impresspress__files__objects' AND column_name = 'blob_key'")" -eq 1
+          psql --set ON_ERROR_STOP=1 --command "INSERT INTO impresspress__files__buckets (id, name, public, created_by, created_at, updated_at) VALUES ('b_photos', 'photos', FALSE, 'alice', '2026-04-20T10:00:00Z', '2026-04-20T10:00:00Z')"
+          psql --set ON_ERROR_STOP=1 --command "INSERT INTO impresspress__files__objects (id, bucket, key, size, content_type, status, uploaded_by, uploaded_at, claim_id, blob_key, created_at, updated_at) VALUES ('o_stored', 'photos', 'a.png', 8, 'image/png', 'complete', 'alice', '2026-09-01T00:00:00Z', 'claim-stored', 'claim-stored~a.png', '2026-09-01T00:00:00Z', '2026-09-01T00:00:00Z'), ('o_legacy', 'photos', 'b.png', 4, 'image/png', 'complete', 'alice', '2026-01-01T00:00:00Z', NULL, NULL, '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z'), ('o_flight', 'photos', 'c.png', 2, 'image/png', 'pending', 'alice', '2026-09-24T00:00:00Z', 'claim-flight', 'claim-flight~c.png', '2026-09-24T00:00:00Z', '2026-09-24T00:00:00Z')"
+          snapshot() {
+            for table in buckets objects views cloud_shares cloud_access_logs cloud_quotas; do
+              psql --tuples-only --no-align --set ON_ERROR_STOP=1 --command "SELECT coalesce(md5(string_agg(t::text, '|' ORDER BY t.id)), 'empty') FROM impresspress__files__${table} t"
+            done
+          }
+          before="$(snapshot)"
+          for migration in crates/impresspress-core/src/blocks/files/migrations/*.postgres.sql; do
+            echo "replaying ${migration}"
+            psql --set ON_ERROR_STOP=1 --file "${migration}"
+          done
+          after="$(snapshot)"
+          echo "before: ${before}"
+          echo "after:  ${after}"
+          test "${before}" = "${after}"
+
+      # Auth 015 respells readable UTC API-key expiries and revokes the keys
+      # whose expiry `repo::parse_iso` cannot read. The line between the two
+      # is drawn by hand in each dialect, so each dialect is run against the
+      # same cases: `015_api_key_expiry_canonical.cases.tsv`, which
+      # `api_key_expiry_tests` holds to `parse_iso` itself and to the SQLite
+      # dialect. Every row is seeded, the file is run twice (auth migrations
+      # re-run as a set, so the cases must hold after both passes), and any row
+      # whose expiry or revocation differs from its case is printed before
+      # the count fails the step. 015 already ran above against an empty
+      # table.
+      - name: Migration auth/015 agrees with the reader, row for row
+        env:
+          PGCLIENTENCODING: UTF8
+          CASES: crates/impresspress-core/src/blocks/auth/migrations/015_api_key_expiry_canonical.cases.tsv
+          MIGRATION: crates/impresspress-core/src/blocks/auth/migrations/015_api_key_expiry_canonical.postgres.sql
+        run: |
+          psql --set ON_ERROR_STOP=1 --command "CREATE TABLE auth_015_cases (stored TEXT PRIMARY KEY, after TEXT NOT NULL, outcome TEXT NOT NULL CHECK (outcome IN ('active', 'revoked')))"
+          grep -v '^#' "${CASES}" | psql --set ON_ERROR_STOP=1 --command "\copy auth_015_cases FROM pstdin"
+          test "$(psql --tuples-only --no-align --command "SELECT count(*) FROM auth_015_cases")" -eq "$(grep -vc '^#' "${CASES}")"
+          psql --set ON_ERROR_STOP=1 --command "INSERT INTO wafer_run__auth__users (id, email, display_name, created_at, updated_at) VALUES ('owner_015', 'owner-015@example.com', 'owner', '2026-01-01T00:00:00Z', '2026-01-01T00:00:00Z')"
+          psql --set ON_ERROR_STOP=1 --command "INSERT INTO wafer_run__auth__api_keys (id, user_id, name, key_hash, key_prefix, created_at, expires_at) SELECT stored, 'owner_015', stored, stored, 'sb_legacy', '2026-01-01T00:00:00Z', stored FROM auth_015_cases"
+          for pass in first second; do
+            echo "015, ${pass} pass"
+            psql --set ON_ERROR_STOP=1 --file "${MIGRATION}"
+            psql --set ON_ERROR_STOP=1 --command "SELECT c.stored, c.after, c.outcome, k.expires_at, k.revoked_at FROM auth_015_cases c JOIN wafer_run__auth__api_keys k ON k.id = c.stored WHERE k.expires_at IS DISTINCT FROM c.after OR (coalesce(k.revoked_at, '') <> '') <> (c.outcome = 'revoked')"
+            test "$(psql --tuples-only --no-align --command "SELECT count(*) FROM auth_015_cases c JOIN wafer_run__auth__api_keys k ON k.id = c.stored WHERE k.expires_at IS NOT DISTINCT FROM c.after AND (coalesce(k.revoked_at, '') <> '') = (c.outcome = 'revoked')")" -eq "$(grep -vc '^#' "${CASES}")"
+          done
+
+  # The job lives in `audit.yml` because it also runs weekly on its own
+  # schedule; see that file.
+  audit:
+    uses: ./.github/workflows/audit.yml
+
+  sdk:
+    name: TypeScript SDK
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # Full history only where the change gate below runs: it diffs
+          # against the pull request's base commit, which a shallow clone does
+          # not contain. Quoted because GitHub expressions treat the number 0
+          # as false, so an unquoted `&& 0 ||` ternary always yields the right
+          # branch.
+          fetch-depth: ${{ inputs.pull-request && '0' || '1' }}
+
+      - name: Check for SDK changes
+        id: sdk-changes
+        # Pull requests only: the diff below reads
+        # `github.event.pull_request.base.sha`, which no `push` event carries.
+        # When this step does not run its `skip` output is empty, so every
+        # `skip != 'true'` guard below passes and the job runs in full — the
+        # unconditional behaviour the merge gate has always had.
+        #
+        # The committed OpenAPI snapshots are in the filter because they are an
+        # INPUT to this job: `check:types-fresh` regenerates
+        # `src/generated/api.ts` from them. A Rust-only change that reshapes a
+        # described response body touches no file under `packages/` and would
+        # otherwise skip the one job that notices.
+        if: inputs.pull-request
+        run: |
+          CHANGED=$(git diff --name-only ${{ github.event.pull_request.base.sha }}..HEAD -- packages/impresspress-js/ crates/impresspress-core/tests/snapshots/)
+          if [ -z "$CHANGED" ]; then
+            echo "skip=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "skip=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Setup Node
+        if: steps.sdk-changes.outputs.skip != 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install and build SDK
+        if: steps.sdk-changes.outputs.skip != 'true'
+        working-directory: packages/impresspress-js
+        run: |
+          npm ci
+          npm run build
+          npm run lint
+
+      # The type-freshness gate. `src/generated/api.ts` is generated from the
+      # committed per-block OpenAPI snapshots; regenerating it here and
+      # diffing is what makes a reshaped response body a red build in this
+      # package rather than a silent contract change. Its reach is only as
+      # wide as the snapshots describe, which is why
+      # `endpoints_the_sdk_calls_publish_a_response_schema` (Rust) requires a
+      # response schema on every endpoint this package calls, and
+      # `test/api-coverage.test.ts` re-derives that set from the SDK source.
+      - name: Check generated API types are fresh
+        if: steps.sdk-changes.outputs.skip != 'true'
+        working-directory: packages/impresspress-js
+        run: npm run check:types-fresh
+
+      - name: Test SDK
+        if: steps.sdk-changes.outputs.skip != 'true'
+        working-directory: packages/impresspress-js
+        run: npm test
+
+      - name: Smoke-test clean pack/install
+        if: steps.sdk-changes.outputs.skip != 'true'
+        working-directory: packages/impresspress-js
+        run: npm run test:pack-install

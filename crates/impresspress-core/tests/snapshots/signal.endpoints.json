@@ -1,0 +1,7 @@
+[
+  "GET /b/signal/config public",
+  "GET /b/signal/rooms/{code}/answer public",
+  "GET /b/signal/rooms/{code}/offer public",
+  "POST /b/signal/rooms/{code}/answer public",
+  "POST /b/signal/rooms/{code}/offer public"
+]

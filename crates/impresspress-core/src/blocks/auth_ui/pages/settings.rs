@@ -5,8 +5,9 @@ use maud::html;
 use wafer_run::{context::Context, InputStream, Message, OutputStream};
 
 use crate::{
-    blocks::auth::config as auth_config,
+    blocks::{auth::config as auth_config, crud},
     config_vars,
+    config_vars::{ALLOW_SIGNUP_KEY, ENABLE_OAUTH_KEY, POST_LOGIN_REDIRECT_KEY},
     ui::{
         self, components, icons,
         settings_form::{self, SettingsSection},
@@ -28,15 +29,15 @@ fn sections() -> Sections {
     let identity = auth_config::auth_identity_config_vars();
     let oauth_creds = super::super::config_vars();
 
-    let mut oauth = vec![config_vars::shared_var("WAFER_RUN_SHARED__ENABLE_OAUTH")];
+    let mut oauth = vec![config_vars::shared_var(ENABLE_OAUTH_KEY)];
     oauth.extend(oauth_creds);
 
     Sections {
         registration: vec![
-            config_vars::shared_var("WAFER_RUN_SHARED__ALLOW_SIGNUP"),
+            config_vars::shared_var(ALLOW_SIGNUP_KEY),
             config_vars::var_in(&identity, auth_config::REQUIRE_VERIFICATION_KEY),
             config_vars::var_in(&identity, auth_config::ALLOWED_EMAIL_DOMAINS_KEY),
-            config_vars::shared_var("WAFER_RUN_SHARED__POST_LOGIN_REDIRECT"),
+            config_vars::shared_var(POST_LOGIN_REDIRECT_KEY),
         ],
         admin: vec![
             config_vars::shared_var(auth_config::BOOTSTRAP_ADMIN_EMAIL_KEY),
@@ -63,9 +64,18 @@ pub async fn handle_get(ctx: &dyn Context, msg: &Message) -> OutputStream {
         SettingsSection::new("Admin", icons::shield(), &s.admin),
         SettingsSection::new("OAuth Providers", icons::globe(), &s.oauth),
     ];
+    let form =
+        match settings_form::settings_form(ctx, "/b/auth/admin/settings", &form_sections, html! {})
+            .await
+        {
+            Ok(form) => form,
+            Err(e) => {
+                return crud::db_error_page(msg, e, "auth settings: current values read failed")
+            }
+        };
     let content = html! {
         (components::page_header("Authentication Settings", Some("Configure registration, OAuth providers, and security"), None))
-        (settings_form::settings_form(ctx, "/b/auth/admin/settings", &form_sections, html! {}).await)
+        (form)
     };
     ui::shell_page(
         ctx,
@@ -76,6 +86,6 @@ pub async fn handle_get(ctx: &dyn Context, msg: &Message) -> OutputStream {
     .await
 }
 
-pub async fn handle_post(ctx: &dyn Context, input: InputStream) -> OutputStream {
-    settings_form::save_settings(ctx, input, &sections().all(), "auth-ui").await
+pub async fn handle_post(ctx: &dyn Context, msg: &Message, input: InputStream) -> OutputStream {
+    settings_form::save_settings(ctx, msg, input, &sections().all(), "auth-ui").await
 }

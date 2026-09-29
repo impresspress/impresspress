@@ -14,18 +14,27 @@ use wafer_core::clients::{
 use wafer_run::{context::Context, InputStream, Message, OutputStream, WaferError};
 
 use super::{
+    config::{
+        platform_country, seller_fee_bps, CountryCode, AUTOMATIC_TAX, CHECKOUT_ALLOWED_ORIGINS,
+        STRIPE_API_VERSION, STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, WEBHOOK_SECRET, WEBHOOK_URL,
+    },
     contracts::{
-        AmountRule, CheckoutPresentation, CheckoutRequest, CheckoutResponse, ManagedOffer,
-        ManagedPaymentLink, Offer, OfferMode, OfferStatus, OrderStatus, PaymentLinkCreateRequest,
-        PricingPreviewRequest, ReconciliationStatus, WebhookAck, WebhookEventList,
+        self, AmountRule, CheckoutPresentation, CheckoutRequest, CheckoutResponse, EventStatus,
+        ManagedOffer, ManagedPaymentLink, Offer, OfferMode, OfferStatus, OrderStatus,
+        PaymentLinkCreateRequest, PricingPreviewRequest, ProviderPaymentStatus,
+        ReconciliationStatus, StripeEventType, SubscriptionStatus, WebhookAck, WebhookEventList,
         WebhookEventSummary,
     },
-    money, offer_pricing, repo, stripe_client, stripe_provider, stripe_secret_operations_allowed,
+    money, offer_pricing, repo,
+    stripe_client::{self, StripeClient},
+    stripe_provider, stripe_secret_operations_allowed,
 };
 use crate::{
+    blocks::crud,
+    config_vars::FRONTEND_URL_KEY,
     http::{
         err_bad_request, err_forbidden, err_internal, err_internal_no_cause, err_not_found,
-        err_unauthorized, ok_json,
+        err_unauthorized, err_unavailable, ok_json,
     },
     util::{hex_encode, sha256_hex, RecordExt},
 };
@@ -40,14 +49,7 @@ use crate::{
 /// alias since every call site below already spells `STRIPE_EVENTS_TABLE`.
 const STRIPE_EVENTS_TABLE: &str = repo::stripe_events::TABLE;
 
-/// `status` column values on [`STRIPE_EVENTS_TABLE`].
-const EVENT_STATUS_PENDING: &str = "pending";
-const EVENT_STATUS_PROCESSING: &str = "processing";
-const EVENT_STATUS_FAILED: &str = "failed";
-const EVENT_STATUS_PROCESSED: &str = "processed";
-const EVENT_STATUS_DEAD_LETTER: &str = "dead_letter";
 const EVENT_LEASE_SECONDS: i64 = 300;
-const EVENT_MAX_ATTEMPTS: u64 = 8;
 
 /// Stable GA version used when an administrator has not selected another.
 const DEFAULT_STRIPE_API_VERSION: &str = "2026-02-25.clover";
@@ -67,6 +69,7 @@ enum EventRecordState {
     /// already completed. A true duplicate; the caller must skip.
     AlreadyProcessed,
     /// The bounded retry budget was exhausted and requires operator review.
+    /// The row is `dead_letter` (with its `last_error`) when this is returned.
     DeadLetter,
 }
 
@@ -74,11 +77,6 @@ fn event_timestamp(record: &Record, field: &str) -> Option<chrono::DateTime<chro
     chrono::DateTime::parse_from_rfc3339(record.str_field(field))
         .ok()
         .map(|value| value.with_timezone(&chrono::Utc))
-}
-
-fn event_retry_delay_seconds(attempts: u64) -> i64 {
-    let exponent = attempts.saturating_sub(1).min(7) as u32;
-    (30_i64.saturating_mul(2_i64.pow(exponent))).min(3600)
 }
 
 /// Insert and claim a fresh event atomically, or atomically acquire a failed,
@@ -106,7 +104,7 @@ async fn record_event(
             ("event_type".to_string(), serde_json::json!(event_type)),
             (
                 "status".to_string(),
-                serde_json::json!(EVENT_STATUS_PROCESSING),
+                serde_json::json!(EventStatus::Processing),
             ),
             (
                 "stripe_account_id".to_string(),
@@ -142,11 +140,11 @@ async fn record_event(
             "Stripe event id was reused with a different signed payload",
         ));
     }
-    let status = existing.str_field("status");
+    let status = event_status(&existing)?;
     match status {
-        EVENT_STATUS_PROCESSED => return Ok(EventRecordState::AlreadyProcessed),
-        EVENT_STATUS_DEAD_LETTER => return Ok(EventRecordState::DeadLetter),
-        EVENT_STATUS_PROCESSING => {
+        EventStatus::Processed => return Ok(EventRecordState::AlreadyProcessed),
+        EventStatus::DeadLetter => return Ok(EventRecordState::DeadLetter),
+        EventStatus::Processing => {
             let lease_is_live =
                 event_timestamp(&existing, "processing_started_at").is_some_and(|started| {
                     now_value.signed_duration_since(started).num_seconds() < EVENT_LEASE_SECONDS
@@ -155,23 +153,70 @@ async fn record_event(
                 return Ok(EventRecordState::InFlight);
             }
         }
-        EVENT_STATUS_FAILED => {
+        EventStatus::Failed => {
             if event_timestamp(&existing, "next_retry_at").is_some_and(|next| next > now_value) {
                 return Ok(EventRecordState::RetryScheduled);
             }
         }
-        EVENT_STATUS_PENDING => {}
-        _ => {}
+        EventStatus::Pending => {}
     }
 
+    // The CAS both writes below take: the row must still be in the state
+    // this delivery just read, under the owner it just read.
+    let unchanged = vec![
+        Filter {
+            field: "id".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!(event_id),
+        },
+        Filter {
+            field: "status".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!(status),
+        },
+        Filter {
+            field: "processing_owner".to_string(),
+            operator: FilterOp::Equal,
+            value: serde_json::json!(existing.str_field("processing_owner")),
+        },
+    ];
     let attempts = existing.u64_field("attempts").saturating_add(1);
-    if attempts > EVENT_MAX_ATTEMPTS {
-        return Ok(EventRecordState::DeadLetter);
+    if attempts > repo::MAX_ATTEMPTS {
+        // Out of budget without a recorded outcome — the last attempt's
+        // lease expired. The row is moved to `dead_letter` here, before the
+        // caller acknowledges: Stripe stops redelivering an acknowledged
+        // event, and only a `failed`/`dead_letter` row can be replayed, so a
+        // row left `processing` would be unrecoverable.
+        let reason = exhausted_event_reason(status, &existing);
+        let dead_lettered = db::update_by_filters_count(
+            ctx,
+            STRIPE_EVENTS_TABLE,
+            unchanged,
+            HashMap::from([
+                (
+                    "status".to_string(),
+                    serde_json::json!(EventStatus::DeadLetter),
+                ),
+                ("processing_owner".to_string(), serde_json::json!("")),
+                ("processing_started_at".to_string(), serde_json::Value::Null),
+                ("next_retry_at".to_string(), serde_json::Value::Null),
+                ("last_error".to_string(), serde_json::json!(reason)),
+                ("terminal_at".to_string(), serde_json::json!(&now)),
+            ]),
+        )
+        .await?;
+        return Ok(if dead_lettered == 1 {
+            EventRecordState::DeadLetter
+        } else {
+            // Another delivery moved the row first; its state stands and
+            // this delivery is retried against it.
+            EventRecordState::InFlight
+        });
     }
     let mut data = HashMap::new();
     data.insert(
         "status".to_string(),
-        serde_json::json!(EVENT_STATUS_PROCESSING),
+        serde_json::json!(EventStatus::Processing),
     );
     data.insert("attempts".to_string(), serde_json::json!(attempts));
     data.insert("processing_owner".to_string(), serde_json::json!(&owner));
@@ -190,34 +235,36 @@ async fn record_event(
         serde_json::json!(stripe_account_id),
     );
     data.insert("livemode".to_string(), serde_json::json!(livemode));
-    let claimed = db::update_by_filters_count(
-        ctx,
-        STRIPE_EVENTS_TABLE,
-        vec![
-            Filter {
-                field: "id".to_string(),
-                operator: FilterOp::Equal,
-                value: serde_json::json!(event_id),
-            },
-            Filter {
-                field: "status".to_string(),
-                operator: FilterOp::Equal,
-                value: serde_json::json!(status),
-            },
-            Filter {
-                field: "processing_owner".to_string(),
-                operator: FilterOp::Equal,
-                value: serde_json::json!(existing.str_field("processing_owner")),
-            },
-        ],
-        data,
-    )
-    .await?;
+    let claimed = db::update_by_filters_count(ctx, STRIPE_EVENTS_TABLE, unchanged, data).await?;
     if claimed == 1 {
         Ok(EventRecordState::Claimed { owner, attempts })
     } else {
         Ok(EventRecordState::InFlight)
     }
+}
+
+/// `last_error` for an event that ran out of attempts without its last
+/// attempt recording an outcome. The previous recorded error, if any, is kept
+/// after it so the operator still sees why the earlier attempts failed.
+fn exhausted_event_reason(status: EventStatus, existing: &Record) -> String {
+    let attempts = existing.u64_field("attempts");
+    let mut reason = match status {
+        EventStatus::Processing => format!(
+            "retry budget of {} attempts exhausted: the processing lease of attempt {attempts} \
+             expired without recording an outcome",
+            repo::MAX_ATTEMPTS
+        ),
+        _ => format!(
+            "retry budget of {} attempts exhausted after {attempts} attempts",
+            repo::MAX_ATTEMPTS
+        ),
+    };
+    let previous = existing.str_field("last_error");
+    if !previous.is_empty() {
+        reason.push_str("; last recorded error: ");
+        reason.push_str(previous);
+    }
+    reason.chars().take(1000).collect()
 }
 
 async fn mark_event_processed(
@@ -229,7 +276,7 @@ async fn mark_event_processed(
     let mut data: HashMap<String, serde_json::Value> = HashMap::new();
     data.insert(
         "status".to_string(),
-        serde_json::json!(EVENT_STATUS_PROCESSED),
+        serde_json::json!(EventStatus::Processed),
     );
     data.insert("processing_owner".to_string(), serde_json::json!(""));
     data.insert("processing_started_at".to_string(), serde_json::Value::Null);
@@ -249,7 +296,7 @@ async fn mark_event_processed(
             Filter {
                 field: "status".to_string(),
                 operator: FilterOp::Equal,
-                value: serde_json::json!(EVENT_STATUS_PROCESSING),
+                value: serde_json::json!(EventStatus::Processing),
             },
             Filter {
                 field: "processing_owner".to_string(),
@@ -278,14 +325,14 @@ async fn mark_event_failed(
     error: &str,
 ) -> Result<(), WaferError> {
     let now = chrono::Utc::now();
-    let dead_letter = attempts >= EVENT_MAX_ATTEMPTS;
+    let dead_letter = attempts >= repo::MAX_ATTEMPTS;
     let mut data = HashMap::new();
     data.insert(
         "status".to_string(),
         serde_json::json!(if dead_letter {
-            EVENT_STATUS_DEAD_LETTER
+            EventStatus::DeadLetter
         } else {
-            EVENT_STATUS_FAILED
+            EventStatus::Failed
         }),
     );
     data.insert("processing_owner".to_string(), serde_json::json!(""));
@@ -304,7 +351,7 @@ async fn mark_event_failed(
         data.insert(
             "next_retry_at".to_string(),
             serde_json::json!((now
-                + chrono::Duration::seconds(event_retry_delay_seconds(attempts)))
+                + chrono::Duration::seconds(repo::retry_delay_seconds(attempts)))
             .to_rfc3339()),
         );
     }
@@ -320,7 +367,7 @@ async fn mark_event_failed(
             Filter {
                 field: "status".to_string(),
                 operator: FilterOp::Equal,
-                value: serde_json::json!(EVENT_STATUS_PROCESSING),
+                value: serde_json::json!(EventStatus::Processing),
             },
             Filter {
                 field: "processing_owner".to_string(),
@@ -350,11 +397,19 @@ fn optional_record_string(record: &Record, field: &str) -> Option<String> {
         .map(str::to_string)
 }
 
-fn webhook_event_summary(record: Record) -> WebhookEventSummary {
-    WebhookEventSummary {
+/// The `status` column of a stripe-events row, as the enum that defines
+/// it. The five `const &str` this replaces were used both as written
+/// values and as match patterns against the raw column, so a stored value
+/// outside the set fell through every arm silently.
+fn event_status(record: &Record) -> Result<EventStatus, WaferError> {
+    crate::util::enum_column(record, "status")
+}
+
+fn webhook_event_summary(record: Record) -> Result<WebhookEventSummary, WaferError> {
+    Ok(WebhookEventSummary {
         id: record.id.clone(),
         event_type: record.str_field("event_type").to_string(),
-        status: record.str_field("status").to_string(),
+        status: event_status(&record)?,
         stripe_account_id: record.str_field("stripe_account_id").to_string(),
         livemode: record.bool_field("livemode"),
         attempts: record.u64_field("attempts"),
@@ -365,12 +420,12 @@ fn webhook_event_summary(record: Record) -> WebhookEventSummary {
         terminal_at: optional_record_string(&record, "terminal_at"),
         created_at: record.str_field("created_at").to_string(),
         updated_at: record.str_field("updated_at").to_string(),
-    }
+    })
 }
 
 pub(crate) async fn list_webhook_events(
     ctx: &dyn Context,
-    status: Option<&str>,
+    status: Option<EventStatus>,
     page: i64,
     page_size: i64,
 ) -> Result<WebhookEventList, WaferError> {
@@ -395,12 +450,16 @@ pub(crate) async fn list_webhook_events(
         }],
     )
     .await?;
+    // Loudly, not row-by-row: this is the operator's webhook queue, and a row
+    // whose `status` is outside the set is exactly the row an operator opened
+    // the page to find. Omitting it would hide the fault from the one view
+    // that exists to show it.
     Ok(WebhookEventList {
         records: result
             .records
             .into_iter()
             .map(webhook_event_summary)
-            .collect(),
+            .collect::<Result<Vec<_>, _>>()?,
         total_count: result.total_count,
         page: result.page,
         page_size: result.page_size,
@@ -415,14 +474,13 @@ pub(crate) async fn replay_webhook_event(
     ctx: &dyn Context,
     event_id: &str,
 ) -> Result<OutputStream, WaferError> {
-    if !stripe_secret_operations_allowed(ctx).await {
+    if !stripe_secret_operations_allowed(ctx) {
         return Err(WaferError::new(
             wafer_run::ErrorCode::FailedPrecondition,
             "Stripe webhook replay is disabled in the browser runtime",
         ));
     }
-    let secret =
-        config::get_default(ctx, "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET", "").await;
+    let secret = config::get_default(ctx, STRIPE_WEBHOOK_SECRET, "").await?;
     if secret.is_empty() {
         return Err(WaferError::new(
             wafer_run::ErrorCode::FailedPrecondition,
@@ -430,9 +488,10 @@ pub(crate) async fn replay_webhook_event(
         ));
     }
     let event = db::get(ctx, STRIPE_EVENTS_TABLE, event_id).await?;
+    let previous_status = event_status(&event)?;
     if !matches!(
-        event.str_field("status"),
-        EVENT_STATUS_FAILED | EVENT_STATUS_DEAD_LETTER
+        previous_status,
+        EventStatus::Failed | EventStatus::DeadLetter
     ) {
         return Err(WaferError::new(
             wafer_run::ErrorCode::FailedPrecondition,
@@ -467,7 +526,6 @@ pub(crate) async fn replay_webhook_event(
         ));
     }
 
-    let previous_status = event.str_field("status").to_string();
     let reset = db::update_by_filters_count(
         ctx,
         STRIPE_EVENTS_TABLE,
@@ -480,13 +538,13 @@ pub(crate) async fn replay_webhook_event(
             Filter {
                 field: "status".to_string(),
                 operator: FilterOp::Equal,
-                value: serde_json::json!(&previous_status),
+                value: serde_json::json!(previous_status),
             },
         ],
         HashMap::from([
             (
                 "status".to_string(),
-                serde_json::json!(EVENT_STATUS_PENDING),
+                serde_json::json!(EventStatus::Pending),
             ),
             ("attempts".to_string(), serde_json::json!(0)),
             ("processing_owner".to_string(), serde_json::json!("")),
@@ -524,42 +582,60 @@ pub(crate) async fn replay_webhook_event(
 }
 
 pub async fn handle_checkout(ctx: &dyn Context, msg: &Message, input: InputStream) -> OutputStream {
-    if !stripe_secret_operations_allowed(ctx).await {
+    let settings = async {
+        Ok::<_, WaferError>((
+            stripe_secret_operations_allowed(ctx),
+            config::get_optional(ctx, STRIPE_SECRET_KEY).await?,
+            config::get_default(ctx, STRIPE_API_VERSION, DEFAULT_STRIPE_API_VERSION).await?,
+        ))
+    };
+    let (secret_operations_allowed, stripe_key, stripe_api_version) = match settings.await {
+        Ok(settings) => settings,
+        Err(e) => return crud::db_error_internal(e, "Could not read the Stripe settings"),
+    };
+    if !secret_operations_allowed {
         return err_forbidden(
             "Stripe secret-key checkout is disabled in the browser runtime; use a trusted remote commerce API or a pre-created Payment Link",
         );
     }
-    let Ok(stripe_key) = config::get(ctx, "IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY").await else {
-        return err_internal_no_cause("Stripe is not configured");
-    };
-    if stripe_key.trim().is_empty() {
-        return err_internal_no_cause("Stripe is not configured");
+    if stripe_key.is_none_or(|key| key.trim().is_empty()) {
+        return err_unavailable("Stripe is not configured");
     }
-    let stripe_api_version = config::get_default(
-        ctx,
-        "IMPRESSPRESS__PRODUCTS__STRIPE_API_VERSION",
-        DEFAULT_STRIPE_API_VERSION,
-    )
-    .await;
     if !is_stable_stripe_api_version(&stripe_api_version) {
         return err_internal_no_cause(
             "Stripe API version must be a stable YYYY-MM-DD.release value",
         );
     }
 
-    let raw = input.collect_to_bytes().await;
+    let raw = match input.collect_to_bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => return OutputStream::error(e),
+    };
     let request: CheckoutRequest = match serde_json::from_slice(&raw) {
         Ok(request) => request,
         Err(error) => return err_bad_request(&format!("Invalid body: {error}")),
     };
-    handle_offer_checkout(ctx, msg, request, &stripe_key, &stripe_api_version).await
+    // Every guard above has already run, so the only way loading the client
+    // can fail here is a key that is neither `sk_test_` nor `sk_live_`.
+    let Ok(client) = StripeClient::load(ctx).await else {
+        return err_internal_no_cause(
+            "Stripe secret key is malformed; expected an sk_test_ or sk_live_ key",
+        );
+    };
+    handle_offer_checkout(ctx, msg, request, &client).await
 }
 
-fn configured_bool(value: &str) -> bool {
-    matches!(
-        value.trim().to_ascii_lowercase().as_str(),
-        "1" | "true" | "yes" | "on"
-    )
+/// Whether Stripe automatic tax is on by default for new offers.
+///
+/// One reader for `IMPRESSPRESS__PRODUCTS__AUTOMATIC_TAX`: the checkout and
+/// Payment-Link money paths read it here, and so does the product wizard
+/// (`pages::product_wizard`), which used to compare the raw value against
+/// `"true"` — so `=1` turned tax on at checkout while the wizard drew the
+/// toggle off.
+pub(in crate::blocks::products) async fn automatic_tax_enabled(
+    ctx: &dyn Context,
+) -> Result<bool, WaferError> {
+    crate::config_vars::get_bool(ctx, AUTOMATIC_TAX, false).await
 }
 
 async fn issue_receipt_token(ctx: &dyn Context) -> Result<(String, String, String), WaferError> {
@@ -620,16 +696,33 @@ fn synced_component_price<'a>(
     })
 }
 
-fn shipping_countries(offer: &Offer, fallback_country: &str) -> Vec<String> {
-    if offer.checkout.allowed_shipping_countries.is_empty() {
-        vec![fallback_country.to_ascii_uppercase()]
-    } else {
-        offer
+/// The country list Stripe collects a shipping address for: the offer's own
+/// list, or the platform's country when the offer names none.
+///
+/// [B23] There is no third answer. `allowed_countries` is a required member
+/// of Stripe's `shipping_address_collection`, so a caller that cannot name a
+/// country cannot silently omit the key — that would leave `collect_shipping
+/// _address` on an offer that then collects no address at all. It used to
+/// substitute `"US"`, which shipped a New Zealand storefront to the United
+/// States and said nothing.
+fn shipping_countries(
+    offer: &Offer,
+    platform_country: Option<&CountryCode>,
+) -> Result<Vec<String>, String> {
+    if !offer.checkout.allowed_shipping_countries.is_empty() {
+        return Ok(offer
             .checkout
             .allowed_shipping_countries
             .iter()
             .map(|country| country.trim().to_ascii_uppercase())
-            .collect()
+            .collect());
+    }
+    match platform_country {
+        Some(country) => Ok(vec![country.as_str().to_string()]),
+        None => Err(
+            "this offer collects a shipping address but names no allowed countries; list them on the offer or set IMPRESSPRESS__PRODUCTS__PLATFORM_COUNTRY"
+                .to_string(),
+        ),
     }
 }
 
@@ -655,12 +748,12 @@ fn shipping_amount_is_allowed(offer: &Offer, amount_minor: i64) -> bool {
 fn push_shipping_address_collection(
     pairs: &mut Vec<(String, String)>,
     offer: &Offer,
-    fallback_country: &str,
-) {
+    platform_country: Option<&CountryCode>,
+) -> Result<(), String> {
     if !offer.checkout.collect_shipping_address {
-        return;
+        return Ok(());
     }
-    for (index, country) in shipping_countries(offer, fallback_country)
+    for (index, country) in shipping_countries(offer, platform_country)?
         .into_iter()
         .enumerate()
     {
@@ -670,6 +763,7 @@ fn push_shipping_address_collection(
             country,
         );
     }
+    Ok(())
 }
 
 fn push_checkout_shipping_options(
@@ -748,18 +842,11 @@ fn payment_link_shipping_supported(offer: &Offer) -> Result<(), String> {
     Ok(())
 }
 
-async fn platform_country(ctx: &dyn Context) -> String {
-    let configured =
-        config::get_default(ctx, "IMPRESSPRESS__PRODUCTS__PLATFORM_COUNTRY", "US").await;
-    let country = configured.trim();
-    if country.len() == 2 && country.bytes().all(|byte| byte.is_ascii_alphabetic()) {
-        country.to_ascii_uppercase()
-    } else {
-        "US".to_string()
-    }
-}
-
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the Stripe form is assembled from independently-sourced values — \
+              offer, pricing preview, URLs, tax and fee settings"
+)]
 fn build_offer_checkout_form(
     offer: &Offer,
     preview: &crate::blocks::products::contracts::PricingPreview,
@@ -769,10 +856,10 @@ fn build_offer_checkout_form(
     success_url: &str,
     cancel_url: &str,
     automatic_tax: bool,
-    country: &str,
+    platform_country: Option<&CountryCode>,
     fee_minor: i64,
     fee_basis_points: u16,
-) -> Result<String, String> {
+) -> Result<Vec<(String, String)>, String> {
     let mut pairs = Vec::new();
     push_form(&mut pairs, "payment_method_types[]", "card");
     push_form(&mut pairs, "mode", wire_enum(&offer.mode)?);
@@ -833,7 +920,7 @@ fn build_offer_checkout_form(
     if offer.checkout.collect_billing_address {
         push_form(&mut pairs, "billing_address_collection", "required");
     }
-    push_shipping_address_collection(&mut pairs, offer, country);
+    push_shipping_address_collection(&mut pairs, offer, platform_country)?;
     push_checkout_shipping_options(
         &mut pairs,
         offer,
@@ -946,15 +1033,59 @@ fn build_offer_checkout_form(
     if item_index == 0 {
         return Err("checkout has no included line items".to_string());
     }
-    Ok(encode_form(pairs))
+    Ok(pairs)
+}
+
+/// Mark a claimed checkout order failed after the provider call could not be
+/// completed, so it can never be claimed for another checkout.
+///
+/// The caller still returns the *original* failure — that is what a
+/// compensation is, and reporting the rollback's error instead would hide the
+/// reason the checkout stopped. What it must not do is drop it: an order this
+/// could not mark stays `checkout_started` and claimed forever, and without
+/// its id in the log there is nothing to search for. All four checkout
+/// failure paths route through here so the reason and the id are recorded the
+/// same way at each of them.
+async fn record_checkout_failure(ctx: &dyn Context, order_id: &str, reason: &str) {
+    if let Err(error) = repo::purchases::mark_checkout_failed(ctx, order_id, reason).await {
+        tracing::error!(
+            order_id = %order_id,
+            reason = %reason,
+            error = %error,
+            "could not mark a failed checkout order; it stays claimed"
+        );
+    }
+}
+
+/// The Payment Link half of [`record_checkout_failure`]: the same
+/// compensation, on the managed-link row, with the same reason for logging a
+/// rollback that could not be written.
+///
+/// A definite refusal (`FailedPrecondition`, see `stripe_client::classify`)
+/// retires the row so a retry is a new request under a new key; any other
+/// failure leaves the outcome at Stripe unknown, so the row stays active and
+/// a retry re-sends the same request under the same key.
+async fn record_payment_link_failure(ctx: &dyn Context, link_id: &str, failure: &WaferError) {
+    let recorded = if failure.code == wafer_run::ErrorCode::FailedPrecondition {
+        repo::payment_links::mark_rejected(ctx, link_id, &failure.message).await
+    } else {
+        repo::payment_links::mark_error(ctx, link_id, &failure.message).await
+    };
+    if let Err(error) = recorded {
+        tracing::error!(
+            link_id = %link_id,
+            reason = %failure.message,
+            error = %error,
+            "could not mark a failed payment link; it stays pending"
+        );
+    }
 }
 
 async fn handle_offer_checkout(
     ctx: &dyn Context,
     msg: &Message,
     request: CheckoutRequest,
-    stripe_key: &str,
-    stripe_api_version: &str,
+    client: &StripeClient,
 ) -> OutputStream {
     if let Some(email) = request.buyer_email.as_deref() {
         if email.len() > 254 || email.chars().any(char::is_control) {
@@ -963,10 +1094,7 @@ async fn handle_offer_checkout(
     }
     let offer = match repo::offers::get_public(ctx, &request.offer_id).await {
         Ok(offer) => offer,
-        Err(error) if error.code == wafer_run::ErrorCode::NotFound => {
-            return err_not_found("Offer not found");
-        }
-        Err(error) => return err_internal("Could not load offer", error),
+        Err(error) => return crud::db_error(error, "Offer not found", "Could not load offer"),
     };
     let product = match repo::products::get(ctx, &offer.product_id).await {
         Ok(product) => product,
@@ -976,37 +1104,31 @@ async fn handle_offer_checkout(
         // a server fault. Mapping it to `err_internal` showed a storefront
         // buyer a 500 for the very state the neighbouring refusal calls
         // "Offer not found".
-        Err(error) if error.code == wafer_run::ErrorCode::NotFound => {
-            return err_not_found("Offer not found");
+        Err(error) => {
+            return crud::db_error(error, "Offer not found", "Could not load offer product")
         }
-        Err(error) => return err_internal("Could not load offer product", error),
     };
 
     let owner_is_user = product.str_field("owner_kind") == "user";
     let (seller_account_id, stripe_account_id, fee_basis_points) = if owner_is_user {
-        let user_selling =
-            config::get_default(ctx, "WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS", "false").await;
-        if !configured_bool(&user_selling) {
-            return err_not_found("Offer not found");
+        match super::handlers::user_products_enabled(ctx).await {
+            Ok(true) => {}
+            Ok(false) => return err_not_found("Offer not found"),
+            Err(e) => return crud::db_error_internal(e, "Could not read the seller switch"),
         }
         let owner_id = product.str_field("owner_id");
-        let Ok(seller) = repo::seller_accounts::ready_for_user(ctx, owner_id).await else {
-            return err_bad_request("This seller's Stripe account is not ready to accept charges");
+        let seller = match repo::seller_accounts::ready_for_user(ctx, owner_id).await {
+            Ok(seller) => seller,
+            Err(error) if error.code == wafer_run::ErrorCode::FailedPrecondition => {
+                return err_bad_request(
+                    "This seller's Stripe account is not ready to accept charges",
+                )
+            }
+            Err(error) => return crud::db_error_internal(error, "Could not load seller account"),
         };
-        let configured_fee = config::get_default(
-            ctx,
-            "IMPRESSPRESS__PRODUCTS__SELLER_APPLICATION_FEE_BPS",
-            "0",
-        )
-        .await
-        .parse::<u16>()
-        .ok()
-        .filter(|value| *value <= 10_000)
-        .unwrap_or(0);
-        let fee = if seller.fee_basis_points == 0 {
-            configured_fee
-        } else {
-            seller.fee_basis_points
+        let fee = match seller_fee_bps(ctx).await {
+            Ok(fee) => fee,
+            Err(error) => return err_internal("Platform application fee is misconfigured", error),
         };
         (seller.id, seller.stripe_account_id, fee)
     } else {
@@ -1023,10 +1145,13 @@ async fn handle_offer_checkout(
                 // the preset was saved, so they may pin hidden or admin-only
                 // variables the buyer could never supply directly.
                 Ok(preset) => (preset.inputs, offer_pricing::InputScope::Management),
-                Err(error) if error.code == wafer_run::ErrorCode::NotFound => {
-                    return err_not_found("Checkout preset not found");
+                Err(error) => {
+                    return crud::db_error(
+                        error,
+                        "Checkout preset not found",
+                        "Could not load checkout preset",
+                    )
                 }
-                Err(error) => return err_internal("Could not load checkout preset", error),
             }
         }
         None => (request.inputs.clone(), offer_pricing::InputScope::Public),
@@ -1047,20 +1172,40 @@ async fn handle_offer_checkout(
     preview.amounts.platform_fee_minor = fee_minor;
 
     let requires = product.str_field("requires");
-    if !requires.is_empty()
-        && (msg.user_id().is_empty() || !user_owns_product(ctx, msg.user_id(), requires).await)
-    {
-        return err_bad_request(
-            "You must sign in and own the required product before purchasing this item.",
-        );
+    if !requires.is_empty() {
+        let owns = if msg.user_id().is_empty() {
+            // An anonymous caller cannot own anything, and asking the
+            // database would only be a chance to fail for the wrong reason.
+            false
+        } else {
+            match user_owns_product(ctx, msg.user_id(), requires).await {
+                Ok(owns) => owns,
+                // "We could not check" is not "you do not own it": that
+                // refusal names the buyer as the problem and no retry clears
+                // it, while a 500 says what actually happened and makes the
+                // storefront retryable.
+                Err(error) => {
+                    return crud::db_error_internal(error, "Could not verify product ownership")
+                }
+            }
+        };
+        if !owns {
+            return err_bad_request(
+                "You must sign in and own the required product before purchasing this item.",
+            );
+        }
     }
 
-    let base_url = config::get_default(
-        ctx,
-        "WAFER_RUN_SHARED__FRONTEND_URL",
-        "http://localhost:5173",
-    )
-    .await;
+    let origins = async {
+        Ok::<_, WaferError>((
+            config::get_default(ctx, FRONTEND_URL_KEY, "http://localhost:5173").await?,
+            config::get_default(ctx, CHECKOUT_ALLOWED_ORIGINS, "").await?,
+        ))
+    };
+    let (base_url, allowed_origins) = match origins.await {
+        Ok(origins) => origins,
+        Err(e) => return crud::db_error_internal(e, "Could not read the checkout origins"),
+    };
     let success_url = request.success_url.clone().unwrap_or_else(|| {
         format!("{base_url}/checkout/success?session_id={{CHECKOUT_SESSION_ID}}")
     });
@@ -1068,8 +1213,6 @@ async fn handle_offer_checkout(
         .cancel_url
         .clone()
         .unwrap_or_else(|| format!("{base_url}/checkout/cancel"));
-    let allowed_origins =
-        config::get_default(ctx, "IMPRESSPRESS__PRODUCTS__CHECKOUT_ALLOWED_ORIGINS", "").await;
     if !is_allowed_checkout_url(&success_url, &base_url, &allowed_origins)
         || !is_allowed_checkout_url(&cancel_url, &base_url, &allowed_origins)
     {
@@ -1082,11 +1225,7 @@ async fn handle_offer_checkout(
         Ok(snapshot) => snapshot,
         Err(error) => return err_internal("Could not snapshot checkout inputs", error),
     };
-    let Some(expected_livemode) = stripe_client::secret_livemode(stripe_key) else {
-        return err_internal_no_cause(
-            "Stripe secret key is malformed; expected an sk_test_ or sk_live_ key",
-        );
-    };
+    let expected_livemode = client.livemode;
     let (receipt_token, receipt_token_hash, receipt_token_expires_at) =
         match issue_receipt_token(ctx).await {
             Ok(receipt) => receipt,
@@ -1149,21 +1288,32 @@ async fn handle_offer_checkout(
     .await
     {
         Ok(order) => order,
-        Err(error) => return err_internal("Could not create checkout order", error),
+        Err(error) => return crud::db_error_internal(error, "Could not create checkout order"),
     };
 
     let rows = match repo::purchases::claim_for_checkout(ctx, &order.id).await {
         Ok(rows) => rows,
-        Err(error) => return err_internal("Could not claim checkout order", error),
+        Err(error) => return crud::db_error_internal(error, "Could not claim checkout order"),
     };
     if rows != 1 {
         return err_internal_no_cause("Checkout order could not be claimed");
     }
 
-    let automatic_tax_config =
-        config::get_default(ctx, "IMPRESSPRESS__PRODUCTS__AUTOMATIC_TAX", "false").await;
-    let automatic_tax = offer.checkout.automatic_tax || configured_bool(&automatic_tax_config);
-    let country = platform_country(ctx).await;
+    let automatic_tax = offer.checkout.automatic_tax
+        || match automatic_tax_enabled(ctx).await {
+            Ok(enabled) => enabled,
+            Err(error) => {
+                record_checkout_failure(ctx, &order.id, &error.message).await;
+                return crud::db_error_internal(error, "Could not read the automatic tax setting");
+            }
+        };
+    let country = match platform_country(ctx).await {
+        Ok(country) => country,
+        Err(error) => {
+            record_checkout_failure(ctx, &order.id, &error.message).await;
+            return err_internal("Platform country is misconfigured", error);
+        }
+    };
     let stripe_body = match build_offer_checkout_form(
         &offer,
         &preview,
@@ -1173,78 +1323,32 @@ async fn handle_offer_checkout(
         &success_url,
         &cancel_url,
         automatic_tax,
-        &country.to_ascii_uppercase(),
+        country.as_ref(),
         fee_minor,
         fee_basis_points,
     ) {
         Ok(body) => body,
         Err(error) => {
-            let _ = repo::purchases::mark_checkout_failed(ctx, &order.id, &error).await;
+            record_checkout_failure(ctx, &order.id, &error).await;
             return err_bad_request(&error);
         }
     };
 
-    let mut headers = stripe_request_headers(
-        stripe_key,
-        stripe_api_version,
-        Some(&format!("impresspress_offer_checkout_{}", order.id)),
-    );
-    if !stripe_account_id.is_empty() {
-        headers.insert("Stripe-Account".to_string(), stripe_account_id);
-    }
-    let stripe_api_url = config::get_default(
-        ctx,
-        "IMPRESSPRESS__PRODUCTS__STRIPE_API_URL",
-        "https://api.stripe.com",
-    )
-    .await;
-    let endpoint = format!("{stripe_api_url}/v1/checkout/sessions");
-    let response = match stripe_client::send_raw(
-        ctx,
-        "POST",
-        &endpoint,
-        &headers,
-        Some(stripe_body.as_bytes()),
-    )
-    .await
-    {
-        Ok(response) => response,
-        Err(error) => {
-            let _ = repo::purchases::mark_checkout_failed(
-                ctx,
-                &order.id,
-                "Stripe Checkout Session request failed",
-            )
-            .await;
-            return err_internal("Stripe API error", error);
-        }
-    };
-    if response.status_code >= 400 {
-        let body = String::from_utf8_lossy(&response.body);
-        tracing::error!(
-            status = response.status_code,
-            body = %body,
-            purchase_id = %order.id,
-            "Stripe offer Checkout Session creation failed"
-        );
-        let _ = repo::purchases::mark_checkout_failed(
+    let session = match client
+        .request_json(
             ctx,
-            &order.id,
-            "Stripe rejected the Checkout Session",
+            "POST",
+            "/v1/checkout/sessions",
+            Some(&stripe_account_id),
+            Some(&format!("impresspress_offer_checkout_{}", order.id)),
+            Some(stripe_body),
         )
-        .await;
-        return err_internal_no_cause("Stripe API error");
-    }
-    let session: serde_json::Value = match serde_json::from_slice(&response.body) {
+        .await
+    {
         Ok(session) => session,
-        Err(_) => {
-            let _ = repo::purchases::mark_checkout_failed(
-                ctx,
-                &order.id,
-                "Stripe response could not be decoded",
-            )
-            .await;
-            return err_internal_no_cause("Failed to parse Stripe response");
+        Err(error) => {
+            record_checkout_failure(ctx, &order.id, &error.message).await;
+            return err_internal("Stripe API error", error);
         }
     };
     let session_id = session
@@ -1266,7 +1370,7 @@ async fn handle_offer_checkout(
             CheckoutPresentation::PaymentLink => false,
         };
     if !response_is_usable {
-        let _ = repo::purchases::mark_checkout_failed(
+        record_checkout_failure(
             ctx,
             &order.id,
             "Stripe response was missing required Checkout Session fields",
@@ -1292,7 +1396,7 @@ async fn handle_offer_checkout(
         // The provider session now exists and its metadata points to this
         // retained checkout_started order. Do not revert the claim or create a
         // second charge path; the webhook/reconciliation worker can finish it.
-        return err_internal("Could not save Stripe checkout session", error);
+        return crud::db_error_internal(error, "Could not save Stripe checkout session");
     }
     ok_json(&CheckoutResponse {
         order_id: order.id,
@@ -1313,108 +1417,35 @@ async fn payment_link_seller_context(
     if product.str_field("owner_kind") != "user" {
         return Ok((String::new(), String::new(), 0));
     }
-    let user_selling =
-        config::get_default(ctx, "WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS", "false").await;
-    if !configured_bool(&user_selling) {
+    if !super::handlers::user_products_enabled(ctx).await? {
         return Err(WaferError::new(
             wafer_run::ErrorCode::FailedPrecondition,
             "user product selling is disabled",
         ));
     }
     let seller = repo::seller_accounts::ready_for_user(ctx, product.str_field("owner_id")).await?;
-    let configured_fee = config::get_default(
-        ctx,
-        "IMPRESSPRESS__PRODUCTS__SELLER_APPLICATION_FEE_BPS",
-        "0",
-    )
-    .await
-    .parse::<u16>()
-    .ok()
-    .filter(|value| *value <= 10_000)
-    .unwrap_or(0);
-    let fee = if seller.fee_basis_points == 0 {
-        configured_fee
-    } else {
-        seller.fee_basis_points
-    };
+    let fee = seller_fee_bps(ctx).await?;
     Ok((seller.id, seller.stripe_account_id, fee))
 }
 
-async fn stripe_catalog_post(
-    ctx: &dyn Context,
-    endpoint: &str,
-    headers: &HashMap<String, String>,
-    form: Vec<(String, String)>,
-) -> Result<serde_json::Value, WaferError> {
-    let body = encode_form(form);
-    let response = stripe_client::send_raw(ctx, "POST", endpoint, headers, Some(body.as_bytes()))
-        .await
-        .map_err(|error| {
-            WaferError::new(
-                wafer_run::ErrorCode::Internal,
-                format!("Stripe catalog request could not be completed: {error}"),
-            )
-        })?;
-    if response.status_code >= 400 {
-        let decoded: serde_json::Value = serde_json::from_slice(&response.body).unwrap_or_default();
-        let code = decoded
-            .pointer("/error/code")
-            .or_else(|| decoded.pointer("/error/type"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("provider_error");
-        return Err(WaferError::new(
-            wafer_run::ErrorCode::FailedPrecondition,
-            format!(
-                "Stripe rejected catalog synchronization (HTTP {}, code {code})",
-                response.status_code
-            ),
-        ));
-    }
-    serde_json::from_slice(&response.body).map_err(|_| {
-        WaferError::new(
-            wafer_run::ErrorCode::Internal,
-            "Stripe catalog response could not be decoded",
-        )
-    })
-}
-
+/// Read a catalog object, treating "not there" as a fact.
+///
+/// [B21] The classification is [`StripeClient`]'s — this wrapper only adds
+/// the second way Stripe says an object is gone: a `deleted: true` body on a
+/// 200. It used to own a copy of the whole decision and got it wrong for
+/// every retryable status.
 async fn stripe_catalog_get(
     ctx: &dyn Context,
-    endpoint: &str,
-    headers: &HashMap<String, String>,
+    client: &StripeClient,
+    path: &str,
+    stripe_account_id: &str,
 ) -> Result<Option<serde_json::Value>, WaferError> {
-    let response = stripe_client::send_raw(ctx, "GET", endpoint, headers, None)
-        .await
-        .map_err(|error| {
-            WaferError::new(
-                wafer_run::ErrorCode::Internal,
-                format!("Stripe catalog reconciliation could not be completed: {error}"),
-            )
-        })?;
-    if response.status_code == 404 {
+    let Some(decoded) = client
+        .request_json_optional(ctx, "GET", path, Some(stripe_account_id))
+        .await?
+    else {
         return Ok(None);
-    }
-    if response.status_code >= 400 {
-        let decoded: serde_json::Value = serde_json::from_slice(&response.body).unwrap_or_default();
-        let code = decoded
-            .pointer("/error/code")
-            .or_else(|| decoded.pointer("/error/type"))
-            .and_then(serde_json::Value::as_str)
-            .unwrap_or("provider_error");
-        return Err(WaferError::new(
-            wafer_run::ErrorCode::FailedPrecondition,
-            format!(
-                "Stripe rejected catalog reconciliation (HTTP {}, code {code})",
-                response.status_code
-            ),
-        ));
-    }
-    let decoded: serde_json::Value = serde_json::from_slice(&response.body).map_err(|_| {
-        WaferError::new(
-            wafer_run::ErrorCode::Internal,
-            "Stripe catalog reconciliation response could not be decoded",
-        )
-    })?;
+    };
     if decoded
         .get("deleted")
         .and_then(serde_json::Value::as_bool)
@@ -1424,19 +1455,6 @@ async fn stripe_catalog_get(
     } else {
         Ok(Some(decoded))
     }
-}
-
-fn stripe_catalog_headers(
-    stripe_key: &str,
-    api_version: &str,
-    stripe_account_id: &str,
-    idempotency_key: Option<&str>,
-) -> HashMap<String, String> {
-    let mut headers = stripe_request_headers(stripe_key, api_version, idempotency_key);
-    if !stripe_account_id.is_empty() {
-        headers.insert("Stripe-Account".to_string(), stripe_account_id.to_string());
-    }
-    headers
 }
 
 fn stripe_product_form(product: &Record) -> Vec<(String, String)> {
@@ -1569,31 +1587,8 @@ async fn sync_offer_catalog_inner(
             format!("offer is not valid for Stripe synchronization: {error}"),
         )
     })?;
-    let stripe_key = config::get(ctx, "IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY").await?;
-    let livemode = stripe_client::secret_livemode(&stripe_key).ok_or_else(|| {
-        WaferError::new(
-            wafer_run::ErrorCode::FailedPrecondition,
-            "Stripe secret key must be a test or live secret key",
-        )
-    })?;
-    let api_version = config::get_default(
-        ctx,
-        "IMPRESSPRESS__PRODUCTS__STRIPE_API_VERSION",
-        DEFAULT_STRIPE_API_VERSION,
-    )
-    .await;
-    if !is_stable_stripe_api_version(&api_version) {
-        return Err(WaferError::new(
-            wafer_run::ErrorCode::FailedPrecondition,
-            "Stripe API version must be a stable named release",
-        ));
-    }
-    let api_url = config::get_default(
-        ctx,
-        "IMPRESSPRESS__PRODUCTS__STRIPE_API_URL",
-        "https://api.stripe.com",
-    )
-    .await;
+    let client = StripeClient::load(ctx).await?;
+    let livemode = client.livemode;
     let (_, stripe_account_id, _) = payment_link_seller_context(ctx, product).await?;
 
     let mut stripe_product_id = product.str_field("stripe_product_id").to_string();
@@ -1609,12 +1604,8 @@ async fn sync_offer_catalog_inner(
                 "stored Stripe Product id is invalid",
             ));
         }
-        let headers = stripe_catalog_headers(&stripe_key, &api_version, &stripe_account_id, None);
-        let endpoint = format!(
-            "{}/v1/products/{stripe_product_id}",
-            api_url.trim_end_matches('/')
-        );
-        match stripe_catalog_get(ctx, &endpoint, &headers).await? {
+        let path = format!("/v1/products/{stripe_product_id}");
+        match stripe_catalog_get(ctx, &client, &path, &stripe_account_id).await? {
             Some(response) => {
                 let remote_id = response
                     .get("id")
@@ -1636,13 +1627,16 @@ async fn sync_offer_catalog_inner(
                     product.id,
                     &form_hash[..16]
                 );
-                let headers = stripe_catalog_headers(
-                    &stripe_key,
-                    &api_version,
-                    &stripe_account_id,
-                    Some(&idempotency_key),
-                );
-                let updated = stripe_catalog_post(ctx, &endpoint, &headers, form).await?;
+                let updated = client
+                    .request_json(
+                        ctx,
+                        "POST",
+                        &path,
+                        Some(&stripe_account_id),
+                        Some(&idempotency_key),
+                        Some(form),
+                    )
+                    .await?;
                 stripe_product_id =
                     validate_stripe_product(&updated, Some(&stripe_product_id), livemode)?;
             }
@@ -1663,19 +1657,16 @@ async fn sync_offer_catalog_inner(
                 &stale_hash[..16]
             )
         };
-        let headers = stripe_catalog_headers(
-            &stripe_key,
-            &api_version,
-            &stripe_account_id,
-            Some(&idempotency_key),
-        );
-        let response = stripe_catalog_post(
-            ctx,
-            &format!("{}/v1/products", api_url.trim_end_matches('/')),
-            &headers,
-            stripe_product_form(product),
-        )
-        .await?;
+        let response = client
+            .request_json(
+                ctx,
+                "POST",
+                "/v1/products",
+                Some(&stripe_account_id),
+                Some(&idempotency_key),
+                Some(stripe_product_form(product)),
+            )
+            .await?;
         stripe_product_id = validate_stripe_product(&response, None, livemode)?;
         // The unfiltered write on purpose: the Stripe Product above already
         // exists. Refusing to record its id because the local product was
@@ -1712,10 +1703,8 @@ async fn sync_offer_catalog_inner(
                     "stored Stripe Price id is invalid",
                 ));
             }
-            let headers =
-                stripe_catalog_headers(&stripe_key, &api_version, &stripe_account_id, None);
-            let endpoint = format!("{}/v1/prices/{price_id}", api_url.trim_end_matches('/'));
-            match stripe_catalog_get(ctx, &endpoint, &headers).await? {
+            let path = format!("/v1/prices/{price_id}");
+            match stripe_catalog_get(ctx, &client, &path, &stripe_account_id).await? {
                 Some(response) => {
                     let active = response.get("active").and_then(serde_json::Value::as_bool);
                     if active == Some(false) {
@@ -1724,19 +1713,16 @@ async fn sync_offer_catalog_inner(
                             component.id,
                             &sha256_hex(price_id.as_bytes())[..16]
                         );
-                        let headers = stripe_catalog_headers(
-                            &stripe_key,
-                            &api_version,
-                            &stripe_account_id,
-                            Some(&idempotency_key),
-                        );
-                        let reactivated = stripe_catalog_post(
-                            ctx,
-                            &endpoint,
-                            &headers,
-                            vec![("active".to_string(), "true".to_string())],
-                        )
-                        .await?;
+                        let reactivated = client
+                            .request_json(
+                                ctx,
+                                "POST",
+                                &path,
+                                Some(&stripe_account_id),
+                                Some(&idempotency_key),
+                                Some(vec![("active".to_string(), "true".to_string())]),
+                            )
+                            .await?;
                         price_id = validate_stripe_price(
                             &reactivated,
                             Some(&price_id),
@@ -1775,12 +1761,6 @@ async fn sync_offer_catalog_inner(
                     &sha256_hex(stale_price_id.as_bytes())[..16]
                 )
             };
-            let headers = stripe_catalog_headers(
-                &stripe_key,
-                &api_version,
-                &stripe_account_id,
-                Some(&idempotency_key),
-            );
             let mut form = vec![
                 (
                     "currency".to_string(),
@@ -1834,13 +1814,16 @@ async fn sync_offer_catalog_inner(
                     ),
                 ]);
             }
-            let response = stripe_catalog_post(
-                ctx,
-                &format!("{}/v1/prices", api_url.trim_end_matches('/')),
-                &headers,
-                form,
-            )
-            .await?;
+            let response = client
+                .request_json(
+                    ctx,
+                    "POST",
+                    "/v1/prices",
+                    Some(&stripe_account_id),
+                    Some(&idempotency_key),
+                    Some(form),
+                )
+                .await?;
             price_id = validate_stripe_price(
                 &response,
                 None,
@@ -1867,7 +1850,7 @@ pub(crate) async fn sync_offer_catalog(
     product_id: &str,
     offer_id: &str,
 ) -> Result<ManagedOffer, WaferError> {
-    if !stripe_secret_operations_allowed(ctx).await {
+    if !stripe_secret_operations_allowed(ctx) {
         return Err(WaferError::new(
             wafer_run::ErrorCode::FailedPrecondition,
             "Stripe catalog synchronization is disabled in the browser runtime",
@@ -1945,12 +1928,12 @@ pub(crate) async fn archive_offer_catalog(
         return repo::offers::archive(ctx, product_id, offer_id).await;
     }
     for link in active_links {
-        deactivate_payment_link(ctx, offer_id, &link.id).await?;
+        retire_payment_link_for_archival(ctx, offer_id, &link.id).await?;
     }
     if synced_components.is_empty() {
         return repo::offers::archive(ctx, product_id, offer_id).await;
     }
-    if !stripe_secret_operations_allowed(ctx).await {
+    if !stripe_secret_operations_allowed(ctx) {
         return Err(WaferError::new(
             wafer_run::ErrorCode::FailedPrecondition,
             "Stripe catalog archival is disabled in the browser runtime",
@@ -1965,31 +1948,8 @@ pub(crate) async fn archive_offer_catalog(
     // address) and `stripe_product_id`; nothing about a deleted product
     // reaches a caller, since this path only ever deactivates.
     let product = repo::products::get_including_deleted(ctx, product_id).await?;
-    let stripe_key = config::get(ctx, "IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY").await?;
-    let livemode = stripe_client::secret_livemode(&stripe_key).ok_or_else(|| {
-        WaferError::new(
-            wafer_run::ErrorCode::FailedPrecondition,
-            "Stripe secret key must be configured before synced offers can be archived",
-        )
-    })?;
-    let api_version = config::get_default(
-        ctx,
-        "IMPRESSPRESS__PRODUCTS__STRIPE_API_VERSION",
-        DEFAULT_STRIPE_API_VERSION,
-    )
-    .await;
-    if !is_stable_stripe_api_version(&api_version) {
-        return Err(WaferError::new(
-            wafer_run::ErrorCode::FailedPrecondition,
-            "Stripe API version must be a stable named release",
-        ));
-    }
-    let api_url = config::get_default(
-        ctx,
-        "IMPRESSPRESS__PRODUCTS__STRIPE_API_URL",
-        "https://api.stripe.com",
-    )
-    .await;
+    let client = StripeClient::load(ctx).await?;
+    let livemode = client.livemode;
     let stripe_account_id = catalog_account_for_archive(ctx, &product).await?;
     let stripe_product_id = if product.str_field("stripe_product_id").is_empty() {
         managed.offer.stripe_product_id.as_str()
@@ -2004,13 +1964,9 @@ pub(crate) async fn archive_offer_catalog(
     }
 
     for (component, unit_amount_minor) in synced_components {
-        let endpoint = format!(
-            "{}/v1/prices/{}",
-            api_url.trim_end_matches('/'),
-            component.stripe_price_id
-        );
-        let headers = stripe_catalog_headers(&stripe_key, &api_version, &stripe_account_id, None);
-        let Some(remote) = stripe_catalog_get(ctx, &endpoint, &headers).await? else {
+        let path = format!("/v1/prices/{}", component.stripe_price_id);
+        let Some(remote) = stripe_catalog_get(ctx, &client, &path, &stripe_account_id).await?
+        else {
             continue;
         };
         let active = remote
@@ -2039,19 +1995,16 @@ pub(crate) async fn archive_offer_catalog(
             component.id,
             &sha256_hex(component.stripe_price_id.as_bytes())[..16]
         );
-        let headers = stripe_catalog_headers(
-            &stripe_key,
-            &api_version,
-            &stripe_account_id,
-            Some(&idempotency_key),
-        );
-        let archived = stripe_catalog_post(
-            ctx,
-            &endpoint,
-            &headers,
-            vec![("active".to_string(), "false".to_string())],
-        )
-        .await?;
+        let archived = client
+            .request_json(
+                ctx,
+                "POST",
+                &path,
+                Some(&stripe_account_id),
+                Some(&idempotency_key),
+                Some(vec![("active".to_string(), "false".to_string())]),
+            )
+            .await?;
         validate_stripe_price(
             &archived,
             Some(&component.stripe_price_id),
@@ -2065,19 +2018,22 @@ pub(crate) async fn archive_offer_catalog(
     repo::offers::archive(ctx, product_id, offer_id).await
 }
 
-#[allow(clippy::too_many_arguments)]
+#[expect(
+    clippy::too_many_arguments,
+    reason = "the Stripe form is assembled from independently-sourced values — \
+              offer, pricing preview, completion URL, tax and fee settings"
+)]
 fn payment_link_form(
     offer: &Offer,
     preview: &crate::blocks::products::contracts::PricingPreview,
     product_name: &str,
-    local_link_id: &str,
     preset_id: &str,
     after_completion_url: Option<&str>,
     automatic_tax: bool,
-    country: &str,
+    platform_country: Option<&CountryCode>,
     fee_minor: i64,
     fee_basis_points: u16,
-) -> Result<String, String> {
+) -> Result<Vec<(String, String)>, String> {
     let included: Vec<_> = preview
         .components
         .iter()
@@ -2087,11 +2043,6 @@ fn payment_link_form(
         return Err("Payment Links require between 1 and 20 included line items".to_string());
     }
     let mut pairs = Vec::new();
-    push_form(
-        &mut pairs,
-        "metadata[impresspress_payment_link_id]",
-        local_link_id,
-    );
     push_form(&mut pairs, "metadata[offer_id]", &offer.id);
     push_form(&mut pairs, "metadata[offer_version]", offer.version);
     if !preset_id.is_empty() {
@@ -2113,7 +2064,7 @@ fn payment_link_form(
     if offer.checkout.collect_billing_address {
         push_form(&mut pairs, "billing_address_collection", "required");
     }
-    push_shipping_address_collection(&mut pairs, offer, country);
+    push_shipping_address_collection(&mut pairs, offer, platform_country)?;
     payment_link_shipping_supported(offer)?;
     for (index, option) in offer.checkout.shipping_options.iter().enumerate() {
         push_form(
@@ -2209,7 +2160,7 @@ fn payment_link_form(
             component.quantity,
         );
     }
-    Ok(encode_form(pairs))
+    Ok(pairs)
 }
 
 /// Create or reuse a shareable Payment Link for an immutable active offer and
@@ -2221,37 +2172,14 @@ pub(crate) async fn create_payment_link(
     offer_id: &str,
     request: &PaymentLinkCreateRequest,
 ) -> Result<ManagedPaymentLink, WaferError> {
-    if !stripe_secret_operations_allowed(ctx).await {
+    if !stripe_secret_operations_allowed(ctx) {
         return Err(WaferError::new(
             wafer_run::ErrorCode::FailedPrecondition,
             "Stripe Payment Link creation is disabled in the browser runtime",
         ));
     }
-    let stripe_key = config::get(ctx, "IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY").await?;
-    if stripe_key.trim().is_empty() {
-        return Err(WaferError::new(
-            wafer_run::ErrorCode::FailedPrecondition,
-            "Stripe is not configured",
-        ));
-    }
-    let livemode = stripe_client::secret_livemode(&stripe_key).ok_or_else(|| {
-        WaferError::new(
-            wafer_run::ErrorCode::FailedPrecondition,
-            "Stripe secret key is malformed; expected an sk_test_ or sk_live_ key",
-        )
-    })?;
-    let api_version = config::get_default(
-        ctx,
-        "IMPRESSPRESS__PRODUCTS__STRIPE_API_VERSION",
-        DEFAULT_STRIPE_API_VERSION,
-    )
-    .await;
-    if !is_stable_stripe_api_version(&api_version) {
-        return Err(WaferError::new(
-            wafer_run::ErrorCode::FailedPrecondition,
-            "Stripe API version must be stable",
-        ));
-    }
+    let client = StripeClient::load(ctx).await?;
+    let livemode = client.livemode;
     let managed = repo::offers::get_for_product(ctx, &product.id, offer_id).await?;
     if managed.status != OfferStatus::Active {
         return Err(WaferError::new(
@@ -2288,14 +2216,8 @@ pub(crate) async fn create_payment_link(
         .map_err(|error| WaferError::new(wafer_run::ErrorCode::InvalidArgument, error))?;
     let after_completion_url = request.after_completion_url.as_deref();
     if let Some(url) = after_completion_url {
-        let base_url = config::get_default(
-            ctx,
-            "WAFER_RUN_SHARED__FRONTEND_URL",
-            "http://localhost:5173",
-        )
-        .await;
-        let allowed =
-            config::get_default(ctx, "IMPRESSPRESS__PRODUCTS__CHECKOUT_ALLOWED_ORIGINS", "").await;
+        let base_url = config::get_default(ctx, FRONTEND_URL_KEY, "http://localhost:5173").await?;
+        let allowed = config::get_default(ctx, CHECKOUT_ALLOWED_ORIGINS, "").await?;
         if !is_allowed_checkout_url(url, &base_url, &allowed) {
             return Err(WaferError::new(
                 wafer_run::ErrorCode::InvalidArgument,
@@ -2318,103 +2240,93 @@ pub(crate) async fn create_payment_link(
         )
     })?;
     let configuration_hash = wafer_block::hash::sha256_hex(canonical.as_bytes());
-    if let Some(existing) =
-        repo::payment_links::find_reusable(ctx, offer_id, &preset_id, &configuration_hash).await?
-    {
-        return Ok(existing);
-    }
+    let configured =
+        repo::payment_links::find_for_configuration(ctx, offer_id, &preset_id, &configuration_hash)
+            .await?;
+    let unfinished = match configured {
+        Some(repo::payment_links::ConfiguredLink::Synced(existing)) => return Ok(existing),
+        Some(repo::payment_links::ConfiguredLink::Unfinished(id)) => Some(id),
+        None => None,
+    };
 
     let (seller_account_id, stripe_account_id, fee_basis_points) =
         payment_link_seller_context(ctx, product).await?;
     let fee_minor = application_fee(preview.amounts.total_minor, fee_basis_points)
         .map_err(|error| WaferError::new(wafer_run::ErrorCode::InvalidArgument, error))?;
-    let pending = repo::payment_links::create_pending(
-        ctx,
-        offer_id,
-        &preset_id,
-        &seller_account_id,
-        &stripe_account_id,
-        livemode,
-        &configuration_hash,
-        &preview,
-        fee_basis_points,
-    )
-    .await?;
-    let automatic_tax_config =
-        config::get_default(ctx, "IMPRESSPRESS__PRODUCTS__AUTOMATIC_TAX", "false").await;
-    let country = platform_country(ctx).await;
-    let body = payment_link_form(
+    // Everything the Stripe request carries except the row id is settled
+    // before any row is written, so a configuration that can never produce a
+    // valid request (a malformed platform country, an out-of-range line-item
+    // count) leaves nothing behind to retry.
+    let country = platform_country(ctx).await?;
+    let mut body = payment_link_form(
         &offer,
         &preview,
         product.str_field("name"),
-        &pending.managed.id,
         &preset_id,
         after_completion_url,
-        offer.checkout.automatic_tax || configured_bool(&automatic_tax_config),
-        &country.to_ascii_uppercase(),
+        offer.checkout.automatic_tax || automatic_tax_enabled(ctx).await?,
+        country.as_ref(),
         fee_minor,
         fee_basis_points,
     )
     .map_err(|error| WaferError::new(wafer_run::ErrorCode::InvalidArgument, error))?;
-    let mut headers = stripe_request_headers(
-        &stripe_key,
-        &api_version,
-        Some(&format!("impresspress_payment_link_{}", pending.managed.id)),
+    let link_id = match &unfinished {
+        Some(id) => id.clone(),
+        None => {
+            repo::payment_links::pending_id(ctx, offer_id, &preset_id, &configuration_hash).await?
+        }
+    };
+    // The row id travels in the request's metadata, so the request is
+    // complete before the attempt is recorded — and the row can record the
+    // exact bytes its idempotency key covers.
+    push_form(
+        &mut body,
+        "metadata[impresspress_payment_link_id]",
+        &link_id,
     );
-    if !stripe_account_id.is_empty() {
-        headers.insert("Stripe-Account".to_string(), stripe_account_id);
+    let idempotency_key = payment_link_idempotency_key(&stripe_account_id, &body);
+    let attempt = repo::payment_links::Attempt {
+        seller_account_id: &seller_account_id,
+        stripe_account_id: &stripe_account_id,
+        pricing_snapshot: &preview,
+        fee_basis_points,
+        request: &body,
+    };
+    let pending = match unfinished {
+        Some(_) => repo::payment_links::restart_pending(ctx, &link_id, &attempt).await?,
+        None => {
+            repo::payment_links::create_pending(
+                ctx,
+                &link_id,
+                offer_id,
+                &preset_id,
+                livemode,
+                &configuration_hash,
+                &attempt,
+            )
+            .await?
+        }
+    };
+    if pending.managed.sync_status == "synced" {
+        return Ok(pending.managed);
     }
-    let api_url = config::get_default(
-        ctx,
-        "IMPRESSPRESS__PRODUCTS__STRIPE_API_URL",
-        "https://api.stripe.com",
-    )
-    .await;
-    let endpoint = format!("{api_url}/v1/payment_links");
-    let response = match stripe_client::send_raw(
-        ctx,
-        "POST",
-        &endpoint,
-        &headers,
-        Some(body.as_bytes()),
-    )
-    .await
+    let response = match client
+        .request_json(
+            ctx,
+            "POST",
+            "/v1/payment_links",
+            Some(&stripe_account_id),
+            Some(&idempotency_key),
+            Some(body),
+        )
+        .await
     {
         Ok(response) => response,
         Err(error) => {
-            let _ = repo::payment_links::mark_error(
-                ctx,
-                &pending.managed.id,
-                "Stripe Payment Link request failed",
-            )
-            .await;
+            record_payment_link_failure(ctx, &pending.managed.id, &error).await;
             return Err(error);
         }
     };
-    if response.status_code >= 400 {
-        tracing::error!(
-            status = response.status_code,
-            body = %String::from_utf8_lossy(&response.body),
-            payment_link_id = %pending.managed.id,
-            "Stripe Payment Link creation failed"
-        );
-        let _ = repo::payment_links::mark_error(
-            ctx,
-            &pending.managed.id,
-            "Stripe rejected the Payment Link",
-        )
-        .await;
-        return Err(WaferError::new(
-            wafer_run::ErrorCode::Internal,
-            "Stripe rejected the Payment Link",
-        ));
-    }
-    let response: serde_json::Value = serde_json::from_slice(&response.body).map_err(|_| {
-        WaferError::new(
-            wafer_run::ErrorCode::Internal,
-            "Stripe Payment Link response could not be decoded",
-        )
-    })?;
     let stripe_id = response
         .get("id")
         .and_then(|value| value.as_str())
@@ -2424,22 +2336,139 @@ pub(crate) async fn create_payment_link(
         .and_then(|value| value.as_str())
         .unwrap_or("");
     if stripe_id.is_empty() || url.is_empty() {
-        let _ = repo::payment_links::mark_error(
-            ctx,
-            &pending.managed.id,
-            "Stripe Payment Link response was incomplete",
-        )
-        .await;
-        return Err(WaferError::new(
+        let error = WaferError::new(
             wafer_run::ErrorCode::Internal,
             "Stripe Payment Link response was incomplete",
-        ));
+        );
+        record_payment_link_failure(ctx, &pending.managed.id, &error).await;
+        return Err(error);
     }
-    Ok(
-        repo::payment_links::mark_synced(ctx, &pending.managed.id, stripe_id, url)
-            .await?
-            .managed,
+    // Stripe now holds a live link. If this write fails the row stays
+    // `syncing`; a retry re-drives the same row with the same request, so
+    // while Stripe retains the key it answers with this same link for the
+    // retry to record — and a deactivation of the row reaches it the same
+    // way. A retry whose request changed in between (see
+    // `payment_link_idempotency_key`) cannot reach it; the log line names the
+    // link so it can be reconciled.
+    match repo::payment_links::mark_synced(ctx, &pending.managed.id, stripe_id, url).await {
+        Ok(Some(stored)) => Ok(stored.managed),
+        Ok(None) => {
+            // The row was retired between this request and its result — an
+            // owner deactivating it, or a refusal recorded by a twin. No row
+            // points at this link, so it must not stay buyable. Record the id
+            // on the retired row first: that is what makes the takedown a
+            // retryable operation rather than this one call, which can fail
+            // and leave a live link nothing names.
+            if let Err(error) =
+                repo::payment_links::record_stripe_link(ctx, &pending.managed.id, stripe_id).await
+            {
+                tracing::error!(
+                    link_id = %pending.managed.id,
+                    stripe_payment_link_id = %stripe_id,
+                    error = %error,
+                    "Stripe created a Payment Link for a retired row that could not be \
+                     recorded; it must be deactivated at Stripe"
+                );
+            }
+            enqueue_payment_link_takedown(ctx, &pending.managed.id, &stripe_account_id).await;
+            Err(WaferError::new(
+                wafer_run::ErrorCode::Aborted,
+                "the Payment Link was retired while Stripe created it; retry",
+            ))
+        }
+        Err(error) => {
+            tracing::error!(
+                link_id = %pending.managed.id,
+                stripe_payment_link_id = %stripe_id,
+                error = %error,
+                "Stripe created a Payment Link that could not be recorded locally"
+            );
+            Err(error)
+        }
+    }
+}
+
+/// Take a Payment Link down at Stripe. The key is the durable local row id,
+/// so a repeat of the same deactivation is the same request.
+async fn deactivate_stripe_payment_link(
+    ctx: &dyn Context,
+    client: &StripeClient,
+    stripe_account_id: &str,
+    stripe_payment_link_id: &str,
+    link_id: &str,
+) -> Result<(), WaferError> {
+    client
+        .request_json(
+            ctx,
+            "POST",
+            &format!(
+                "/v1/payment_links/{}",
+                crate::util::url_path_encode(stripe_payment_link_id)
+            ),
+            Some(stripe_account_id),
+            Some(&payment_link_deactivate_key(link_id)),
+            Some(vec![("active".to_string(), "false".to_string())]),
+        )
+        .await?;
+    Ok(())
+}
+
+/// The Stripe idempotency key for one Payment Link request: a digest of the
+/// Stripe account and the complete request body.
+///
+/// Stripe refuses a reused key whose parameters differ, so the key covers
+/// every parameter sent — including the local row id in the metadata, which
+/// is itself derived from the configuration and its generation (see
+/// `repo::payment_links::pending_id`). One key therefore always carries one
+/// request. A retry of an unfinished row with nothing changed sends the same
+/// bytes under the same key, and while Stripe retains the key (at least 24
+/// hours) it reaches the object the first attempt created, or replays that
+/// attempt's saved result — which is also how
+/// `resolve_unrecorded_payment_link` learns a link id the row never
+/// recorded. Anything that changes the request — the fee, the
+/// automatic-tax setting, the product name, the platform country, a
+/// component's synced Price, the account, a new generation after a
+/// deactivation or a refusal — is a new key and a new Stripe object.
+fn payment_link_idempotency_key(stripe_account_id: &str, form: &[(String, String)]) -> String {
+    let request = format!("{stripe_account_id}\n{}", encode_form(form.to_vec()));
+    format!(
+        "impresspress_payment_link_{}",
+        sha256_hex(request.as_bytes())
     )
+}
+
+/// Take a Payment Link down for an offer being archived, and retire its row
+/// even when Stripe will not answer.
+///
+/// Archival is the off switch, and seller suspension runs it over every offer
+/// a seller owns as a fraud control. A Stripe outage is exactly when that has
+/// to complete, so a provider failure hands the link to the durable takedown
+/// queue and the sweep carries on; the row retires either way, so nothing
+/// local goes on selling it. The direct deactivation route propagates
+/// instead — there a caller is watching and can repeat the action.
+async fn retire_payment_link_for_archival(
+    ctx: &dyn Context,
+    offer_id: &str,
+    link_id: &str,
+) -> Result<(), WaferError> {
+    let Err(error) = deactivate_payment_link(ctx, offer_id, link_id).await else {
+        return Ok(());
+    };
+    if !stripe_secret_operations_allowed(ctx) {
+        // Queuing buys nothing in a runtime that cannot reach Stripe at all,
+        // and the refusal is the honest answer to "archive this".
+        return Err(error);
+    }
+    let stored = repo::payment_links::get(ctx, link_id).await?;
+    tracing::warn!(
+        link_id = %link_id,
+        stripe_payment_link_id = %stored.stripe_payment_link_id,
+        error = %error,
+        "archiving an offer could not take its Payment Link down at Stripe; queued for retry"
+    );
+    queue_payment_link_takedown(ctx, link_id, &stored.stripe_account_id).await;
+    repo::payment_links::deactivate_local(ctx, offer_id, link_id).await?;
+    Ok(())
 }
 
 pub(crate) async fn deactivate_payment_link(
@@ -2451,52 +2480,281 @@ pub(crate) async fn deactivate_payment_link(
     if !stored.managed.active {
         return Ok(stored.managed);
     }
-    if stored.stripe_payment_link_id.is_empty() {
+    if stored.stripe_payment_link_id.is_empty() && stored.stripe_request.is_empty() {
+        // The request is written before it is sent, so a row that records
+        // none has nothing at Stripe to take down. A row older than the
+        // `stripe_request` column reads the same way and deactivates
+        // locally.
         return repo::payment_links::deactivate_local(ctx, offer_id, link_id).await;
     }
-    if !stripe_secret_operations_allowed(ctx).await {
+    if !stripe_secret_operations_allowed(ctx) {
         return Err(WaferError::new(
             wafer_run::ErrorCode::FailedPrecondition,
             "Stripe Payment Link deactivation is disabled in the browser runtime",
         ));
     }
-    let stripe_key = config::get(ctx, "IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY").await?;
-    let api_version = config::get_default(
-        ctx,
-        "IMPRESSPRESS__PRODUCTS__STRIPE_API_VERSION",
-        DEFAULT_STRIPE_API_VERSION,
-    )
-    .await;
-    let mut headers = stripe_request_headers(
-        &stripe_key,
-        &api_version,
-        Some(&format!("impresspress_deactivate_payment_link_{link_id}")),
-    );
-    if !stored.stripe_account_id.is_empty() {
-        headers.insert(
-            "Stripe-Account".to_string(),
-            stored.stripe_account_id.clone(),
-        );
+    if !stored.stripe_payment_link_id.is_empty() {
+        // The row names the link, so this is one request whose failure the
+        // caller can act on by repeating it: the row stays active until
+        // Stripe has answered.
+        let client = StripeClient::load(ctx).await?;
+        deactivate_stripe_payment_link(
+            ctx,
+            &client,
+            &stored.stripe_account_id,
+            &stored.stripe_payment_link_id,
+            link_id,
+        )
+        .await?;
+        return repo::payment_links::deactivate_local(ctx, offer_id, link_id).await;
     }
-    let api_url = config::get_default(
+    // A link may exist at Stripe that no row names. Resolving it can take
+    // more than this request has — Stripe may be down, and past the key
+    // retention only an operator can find it — so the takedown becomes a
+    // durable operation and the row retires either way. Blocking the retire
+    // on it would make one stuck link enough to block archiving an offer or
+    // suspending a seller, which is a fraud control.
+    enqueue_payment_link_takedown(ctx, &stored.managed.id, &stored.stripe_account_id).await;
+    repo::payment_links::deactivate_local(ctx, offer_id, link_id).await
+}
+
+/// Record the durable takedown of `link_id`'s Stripe link without attempting
+/// it. `false` when nothing durable holds it, which is only ever a database
+/// failure.
+///
+/// Queuing is not doing: nothing drains the provider-operation queue on its
+/// own, so a takedown recorded here runs when an administrator reconciles
+/// provider operations (or a scheduler calls that endpoint), and the link can
+/// go on taking money until then.
+async fn queue_payment_link_takedown(
+    ctx: &dyn Context,
+    link_id: &str,
+    stripe_account_id: &str,
+) -> bool {
+    if let Err(error) = repo::provider_operations::ensure(
         ctx,
-        "IMPRESSPRESS__PRODUCTS__STRIPE_API_URL",
-        "https://api.stripe.com",
+        repo::provider_operations::PAYMENT_LINK_DEACTIVATE,
+        "payment_link",
+        link_id,
+        stripe_account_id,
+        &payment_link_deactivate_key(link_id),
+        "{\"version\":1}",
     )
-    .await;
-    let endpoint = format!(
-        "{api_url}/v1/payment_links/{}",
-        crate::util::url_path_encode(&stored.stripe_payment_link_id)
-    );
-    let response =
-        stripe_client::send_raw(ctx, "POST", &endpoint, &headers, Some(b"active=false")).await?;
-    if response.status_code >= 400 {
+    .await
+    {
+        // Nothing durable holds the takedown now, so say so at the level an
+        // operator reads: the row id is the link's handle in Stripe metadata.
+        tracing::error!(
+            link_id = %link_id,
+            error = %error,
+            "could not enqueue the takedown of a Payment Link whose id no row records"
+        );
+        return false;
+    }
+    true
+}
+
+/// Queue the durable takedown of `link_id`'s Stripe link and try to settle it
+/// now. A failure here is never the caller's to handle: the queued operation
+/// is the retry, and the administrator's provider-operation queue is where an
+/// unsettled one surfaces.
+async fn enqueue_payment_link_takedown(ctx: &dyn Context, link_id: &str, stripe_account_id: &str) {
+    if !queue_payment_link_takedown(ctx, link_id, stripe_account_id).await {
+        return;
+    }
+    match take_down_payment_link(ctx, link_id).await {
+        Ok(PaymentLinkTakedown::Settled) => {
+            if let Err(error) = repo::provider_operations::complete_for_aggregate(
+                ctx,
+                repo::provider_operations::PAYMENT_LINK_DEACTIVATE,
+                link_id,
+                "{}",
+            )
+            .await
+            {
+                // The link is down; only the bookkeeping failed, so the
+                // operation stays pending and the worker settles it again.
+                tracing::warn!(
+                    link_id = %link_id,
+                    error = %error,
+                    "could not complete a Payment Link takedown operation that succeeded"
+                );
+            }
+        }
+        Ok(PaymentLinkTakedown::Unresolvable(reason)) => {
+            if let Err(error) = repo::provider_operations::resolve_for_aggregate(
+                ctx,
+                repo::provider_operations::PAYMENT_LINK_DEACTIVATE,
+                link_id,
+                false,
+                "{}",
+                &reason,
+            )
+            .await
+            {
+                tracing::error!(
+                    link_id = %link_id,
+                    error = %error,
+                    "could not dead-letter an unresolvable Payment Link takedown"
+                );
+            }
+        }
+        Err(error) => {
+            // Transient as far as anything here can tell, and the operation
+            // is due. Nothing drains the queue on its own, though: it runs at
+            // the next administrator reconcile, and this link keeps taking
+            // money until it does.
+            tracing::warn!(
+                link_id = %link_id,
+                error = %error,
+                "a Payment Link takedown is due in the provider-operation queue; it runs at \
+                 the next administrator reconcile"
+            );
+        }
+    }
+}
+
+/// The idempotency key every attempt at taking one row's Payment Link down
+/// shares — inline, queued or replayed. Stripe therefore sees one request
+/// however many times this runs.
+fn payment_link_deactivate_key(link_id: &str) -> String {
+    format!("impresspress_deactivate_payment_link_{link_id}")
+}
+
+/// What one attempt at taking a Payment Link down achieved.
+pub(crate) enum PaymentLinkTakedown {
+    /// The link is inactive at Stripe, or the row provably never had one.
+    Settled,
+    /// Nothing local can name the link any more, so no retry will do better.
+    /// Carries what an operator has to do instead.
+    Unresolvable(String),
+}
+
+/// Take down the Stripe Payment Link of row `link_id`, whatever the row
+/// records. Drives both the deactivation route and the reconciliation
+/// worker, so a link takes the same path down however the takedown was
+/// reached.
+///
+/// An `Err` is worth retrying; [`PaymentLinkTakedown::Unresolvable`] is not.
+pub(crate) async fn take_down_payment_link(
+    ctx: &dyn Context,
+    link_id: &str,
+) -> Result<PaymentLinkTakedown, WaferError> {
+    if !stripe_secret_operations_allowed(ctx) {
         return Err(WaferError::new(
-            wafer_run::ErrorCode::Internal,
-            "Stripe rejected Payment Link deactivation",
+            wafer_run::ErrorCode::FailedPrecondition,
+            "Stripe Payment Link deactivation is disabled in the browser runtime",
         ));
     }
-    repo::payment_links::deactivate_local(ctx, offer_id, link_id).await
+    let stored = repo::payment_links::get(ctx, link_id).await?;
+    if stored.stripe_payment_link_id.is_empty() && stored.stripe_request.is_empty() {
+        return Ok(PaymentLinkTakedown::Settled);
+    }
+    let client = StripeClient::load(ctx).await?;
+    let stripe_payment_link_id = if stored.stripe_payment_link_id.is_empty() {
+        match resolve_unrecorded_payment_link(ctx, &client, &stored).await? {
+            Resolved::Link(stripe_id) => {
+                // Persist before the takedown, so a failure from here on
+                // leaves a link the row names and any later attempt — this
+                // operation's retry, or an owner repeating the action —
+                // takes the short path above instead of resolving again.
+                repo::payment_links::record_stripe_link(ctx, link_id, &stripe_id).await?;
+                stripe_id
+            }
+            Resolved::Unresolvable(reason) => return Ok(PaymentLinkTakedown::Unresolvable(reason)),
+        }
+    } else {
+        stored.stripe_payment_link_id.clone()
+    };
+    deactivate_stripe_payment_link(
+        ctx,
+        &client,
+        &stored.stripe_account_id,
+        &stripe_payment_link_id,
+        link_id,
+    )
+    .await?;
+    Ok(PaymentLinkTakedown::Settled)
+}
+
+/// How long Stripe keeps an idempotency key's saved result. Stripe documents
+/// "at least 24 hours"; the shorter end of that promise is the only one a
+/// re-send may rely on.
+const STRIPE_IDEMPOTENCY_KEY_RETENTION_HOURS: i64 = 24;
+
+/// What is known about the Stripe link of a row that never recorded one.
+enum Resolved {
+    Link(String),
+    /// No request can name it any more; only an operator can.
+    Unresolvable(String),
+}
+
+/// Learn the Stripe link id of a row whose attempt never recorded one, by
+/// re-sending that attempt's own request under its own idempotency key.
+///
+/// Two outcomes, and the caller cannot tell them apart: if Stripe still holds
+/// the key it replays the saved result, which names the link that attempt
+/// created; if the attempt never reached the idempotency layer — a 429 from
+/// the rate limiter, a connection that died before Stripe saw it — the key is
+/// unseen and the re-send EXECUTES, minting a link. Either way the answer
+/// names a live link for this row that the caller then takes down, and one
+/// row never ends up with two live links.
+///
+/// Past the retention window the saved result is gone while the original link
+/// (if there ever was one) is not, so a re-send would mint a second live link
+/// and still not name the first. That is [`Resolved::Unresolvable`]: the row
+/// id is the link's `metadata[impresspress_payment_link_id]` at Stripe, which
+/// is the handle an operator searches on.
+async fn resolve_unrecorded_payment_link(
+    ctx: &dyn Context,
+    client: &StripeClient,
+    stored: &repo::payment_links::StoredPaymentLink,
+) -> Result<Resolved, WaferError> {
+    let sent_at = chrono::DateTime::parse_from_rfc3339(&stored.stripe_request_at)
+        .map(|value| value.with_timezone(&chrono::Utc))
+        .map_err(|error| {
+            WaferError::new(
+                wafer_run::ErrorCode::Internal,
+                format!("Payment Link request timestamp is unreadable: {error}"),
+            )
+        })?;
+    if chrono::Utc::now() - sent_at
+        > chrono::Duration::hours(STRIPE_IDEMPOTENCY_KEY_RETENTION_HOURS)
+    {
+        return Ok(Resolved::Unresolvable(format!(
+            "The Stripe request of Payment Link {} is older than Stripe's \
+             {STRIPE_IDEMPOTENCY_KEY_RETENTION_HOURS} hour idempotency-key retention, so \
+             re-sending it would create a second live link instead of naming the first. In \
+             the Stripe Dashboard, search Payment Links for \
+             metadata[impresspress_payment_link_id]={} and deactivate what you find; this \
+             row is already retired locally.",
+            stored.managed.id, stored.managed.id
+        )));
+    }
+    let response = client
+        .request_json(
+            ctx,
+            "POST",
+            "/v1/payment_links",
+            Some(&stored.stripe_account_id),
+            Some(&payment_link_idempotency_key(
+                &stored.stripe_account_id,
+                &stored.stripe_request,
+            )),
+            Some(stored.stripe_request.clone()),
+        )
+        .await?;
+    let stripe_id = response
+        .get("id")
+        .and_then(|value| value.as_str())
+        .unwrap_or("");
+    if stripe_id.is_empty() {
+        return Err(WaferError::new(
+            wafer_run::ErrorCode::Internal,
+            "Stripe Payment Link response was incomplete",
+        ));
+    }
+    Ok(Resolved::Link(stripe_id.to_string()))
 }
 
 async fn reconcile_payment_link_session(
@@ -2548,9 +2806,12 @@ async fn reconcile_payment_link_session(
         .and_then(|value| value.as_str())
         .unwrap_or("");
     let stored = repo::payment_links::get_for_offer(ctx, offer_id, local_link_id).await?;
+    // `FailedPrecondition`, not `PermissionDenied`: the event and the stored
+    // link disagree about their own identity, which is not a WRAP refusal and
+    // must not be answered as one by `crud::db_error_internal`.
     if stored.stripe_account_id != event_account {
         return Err(WaferError::new(
-            wafer_run::ErrorCode::PermissionDenied,
+            wafer_run::ErrorCode::FailedPrecondition,
             "Payment Link webhook account does not match the configured seller",
         ));
     }
@@ -3016,14 +3277,22 @@ fn bounded_provider_diagnostic(value: Option<&serde_json::Value>, limit: usize) 
 }
 
 pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream) -> OutputStream {
-    if !stripe_secret_operations_allowed(ctx).await {
+    let settings = async {
+        Ok::<_, WaferError>((
+            stripe_secret_operations_allowed(ctx),
+            config::get_default(ctx, STRIPE_WEBHOOK_SECRET, "").await?,
+        ))
+    };
+    let (secret_operations_allowed, webhook_secret) = match settings.await {
+        Ok(settings) => settings,
+        Err(e) => return crud::db_error_internal(e, "Could not read the Stripe webhook settings"),
+    };
+    if !secret_operations_allowed {
         return err_forbidden("Stripe webhooks are disabled in the browser runtime");
     }
     // Verify Stripe webhook signature - REQUIRED
-    let webhook_secret =
-        config::get_default(ctx, "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET", "").await;
     if webhook_secret.is_empty() {
-        return err_internal_no_cause(
+        return err_unavailable(
             "STRIPE_WEBHOOK_SECRET not configured — webhook processing disabled for security",
         );
     }
@@ -3031,7 +3300,10 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
     if sig_header.is_empty() {
         return err_unauthorized("Missing Stripe-Signature header");
     }
-    let raw_body = input.collect_to_bytes().await;
+    let raw_body = match input.collect_to_bytes().await {
+        Ok(bytes) => bytes,
+        Err(e) => return OutputStream::error(e),
+    };
     if !verify_stripe_signature(&raw_body, &sig_header, &webhook_secret) {
         return err_unauthorized("Invalid webhook signature");
     }
@@ -3127,7 +3399,7 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                 );
                 return ok_json(&WebhookAck::dead_letter());
             }
-            Err(e) => return err_internal("Failed to record webhook event", e),
+            Err(e) => return crud::db_error_internal(e, "Failed to record webhook event"),
         }
     } else {
         tracing::warn!(
@@ -3153,8 +3425,12 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
         }};
     }
 
-    match event_type {
-        "account.updated" => {
+    // Dispatch on the type, not on its spelling. Every arm below is a
+    // variant, so a type added to `StripeEventType` — which is also what the
+    // Stripe setup page advertises — does not compile until it is routed
+    // here, and the two lists cannot describe different sets of events.
+    match StripeEventType::from_wire(event_type) {
+        Some(StripeEventType::AccountUpdated) => {
             let account_id = data_object
                 .get("id")
                 .and_then(|value| value.as_str())
@@ -3176,12 +3452,12 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                     .await
             {
                 fail_webhook!(
-                    err_internal("Failed to synchronize connected account", error),
+                    crud::db_error_internal(error, "Failed to synchronize connected account"),
                     "connected-account synchronization failed"
                 );
             }
         }
-        "checkout.session.completed"
+        Some(StripeEventType::CheckoutSessionCompleted)
             if data_object
                 .get("payment_status")
                 .and_then(serde_json::Value::as_str)
@@ -3196,7 +3472,10 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                 "Checkout Session is awaiting asynchronous payment confirmation"
             );
         }
-        "checkout.session.completed" | "checkout.session.async_payment_succeeded" => {
+        Some(
+            StripeEventType::CheckoutSessionCompleted
+            | StripeEventType::CheckoutSessionAsyncPaymentSucceeded,
+        ) => {
             // Handle product purchase completion
             let purchase_id = data_object
                 .pointer("/metadata/purchase_id")
@@ -3215,7 +3494,7 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                 {
                     Ok(rows) => rows,
                     Err(error) => fail_webhook!(
-                        err_internal("Failed to reconcile checkout purchase", error),
+                        crud::db_error_internal(error, "Failed to reconcile checkout purchase"),
                         "checkout session did not match its immutable order"
                     ),
                 };
@@ -3241,9 +3520,9 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                                 ),
                             },
                             Err(error) => fail_webhook!(
-                                err_internal(
-                                    "Failed to load purchase for subscription snapshot",
-                                    error
+                                crud::db_error_internal(
+                                    error,
+                                    "Failed to load purchase for subscription snapshot"
                                 ),
                                 "subscription snapshot purchase lookup failed"
                             ),
@@ -3257,7 +3536,10 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                         .await
                         {
                             fail_webhook!(
-                                err_internal("Failed to snapshot subscription items", error),
+                                crud::db_error_internal(
+                                    error,
+                                    "Failed to snapshot subscription items"
+                                ),
                                 "subscription item snapshot failed"
                             );
                         }
@@ -3277,7 +3559,7 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                 .await
                 {
                     fail_webhook!(
-                        err_internal("Failed to reconcile Payment Link order", error),
+                        crud::db_error_internal(error, "Failed to reconcile Payment Link order"),
                         "Payment Link reconciliation failed"
                     );
                 }
@@ -3313,7 +3595,7 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                 .await
                 {
                     fail_webhook!(
-                        err_internal("Failed to create platform subscription", error),
+                        crud::db_error_internal(error, "Failed to create platform subscription"),
                         "platform subscription upsert failed"
                     );
                 }
@@ -3329,7 +3611,7 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
             }
         }
 
-        "checkout.session.async_payment_failed" => {
+        Some(StripeEventType::CheckoutSessionAsyncPaymentFailed) => {
             let purchase_id = data_object
                 .pointer("/metadata/purchase_id")
                 .and_then(serde_json::Value::as_str)
@@ -3346,7 +3628,10 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                 {
                     Ok(rows) => rows,
                     Err(error) => fail_webhook!(
-                        err_internal("Failed to reconcile checkout payment failure", error),
+                        crud::db_error_internal(
+                            error,
+                            "Failed to reconcile checkout payment failure"
+                        ),
                         "checkout failure did not match its immutable order"
                     ),
                 };
@@ -3367,24 +3652,34 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
             }
         }
 
-        "payment_intent.succeeded"
-        | "payment_intent.payment_failed"
-        | "payment_intent.processing"
-        | "payment_intent.requires_action"
-        | "payment_intent.canceled" => {
+        Some(
+            kind @ (StripeEventType::PaymentIntentSucceeded
+            | StripeEventType::PaymentIntentPaymentFailed
+            | StripeEventType::PaymentIntentProcessing
+            | StripeEventType::PaymentIntentRequiresAction
+            | StripeEventType::PaymentIntentCanceled),
+        ) => {
             let payment_intent_id = stripe_resource_id(data_object.get("id"));
             let object_status = data_object
                 .get("status")
                 .and_then(serde_json::Value::as_str)
                 .unwrap_or("");
-            let status = match event_type {
-                "payment_intent.succeeded" if object_status == "succeeded" => "succeeded",
-                "payment_intent.payment_failed" => "payment_failed",
-                "payment_intent.processing" if object_status == "processing" => "processing",
-                "payment_intent.requires_action" if object_status == "requires_action" => {
-                    "requires_action"
+            let status = match kind {
+                StripeEventType::PaymentIntentSucceeded if object_status == "succeeded" => {
+                    ProviderPaymentStatus::Succeeded
                 }
-                "payment_intent.canceled" if object_status == "canceled" => "canceled",
+                StripeEventType::PaymentIntentPaymentFailed => ProviderPaymentStatus::PaymentFailed,
+                StripeEventType::PaymentIntentProcessing if object_status == "processing" => {
+                    ProviderPaymentStatus::Processing
+                }
+                StripeEventType::PaymentIntentRequiresAction
+                    if object_status == "requires_action" =>
+                {
+                    ProviderPaymentStatus::RequiresAction
+                }
+                StripeEventType::PaymentIntentCanceled if object_status == "canceled" => {
+                    ProviderPaymentStatus::Canceled
+                }
                 _ => fail_webhook!(
                     err_internal_no_cause(
                         "PaymentIntent event type does not match its object status",
@@ -3433,7 +3728,7 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                 payment_intent_id,
                 stripe_account_id: event_account.to_string(),
                 livemode: event_livemode,
-                status: status.to_string(),
+                status,
                 amount_minor: data_object
                     .get("amount")
                     .and_then(serde_json::Value::as_i64)
@@ -3454,13 +3749,13 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                     "PaymentIntent event has no matching typed payment-mode order"
                 ),
                 Err(error) => fail_webhook!(
-                    err_internal("Failed to reconcile PaymentIntent", error),
+                    crud::db_error_internal(error, "Failed to reconcile PaymentIntent"),
                     "PaymentIntent reconciliation failed"
                 ),
             }
         }
 
-        "customer.subscription.updated" => {
+        Some(StripeEventType::CustomerSubscriptionUpdated) => {
             let stripe_sub_id = data_object.get("id").and_then(|v| v.as_str()).unwrap_or("");
             let status = data_object
                 .get("status")
@@ -3471,7 +3766,26 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                 .or_else(|| data_object.pointer("/items/data/0/price/metadata/plan"))
                 .and_then(|v| v.as_str());
             let mut commerce_matched = false;
-            if !stripe_sub_id.is_empty() && !status.is_empty() {
+            // Refused here rather than mapped to a default, for the same
+            // reason the dispute branch below refuses an unknown network
+            // state: a delivery whose `status` this build does not know is a
+            // fact about the subscription that would otherwise be dropped on
+            // the floor. A 500 makes Stripe redeliver, so nothing is lost and
+            // the gap is visible. An absent or empty `status` decodes to
+            // `Unset`, which is not a value the subscription is in: the
+            // commerce sync below is skipped entirely, and the platform
+            // projection keeps its stored status while the plan and the
+            // event timestamp the payload does carry still apply
+            // (`repo::subscriptions::update_status_plan`).
+            let Ok(status) = serde_json::from_value::<SubscriptionStatus>(
+                serde_json::Value::String(status.to_string()),
+            ) else {
+                fail_webhook!(
+                    err_internal_no_cause("Subscription status is outside the supported set"),
+                    "subscription status was unsupported"
+                );
+            };
+            if !stripe_sub_id.is_empty() && status != SubscriptionStatus::Unset {
                 let current_period_end = subscription_period_end(&data_object);
                 let canceled_at = stripe_timestamp(data_object.get("canceled_at"));
                 match repo::purchases::sync_commerce_subscription(
@@ -3491,7 +3805,10 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                     Ok(Some(_)) => commerce_matched = true,
                     Ok(None) => {}
                     Err(error) => fail_webhook!(
-                        err_internal("Failed to synchronize commerce subscription", error),
+                        crud::db_error_internal(
+                            error,
+                            "Failed to synchronize commerce subscription"
+                        ),
                         "commerce subscription synchronization failed"
                     ),
                 }
@@ -3504,7 +3821,10 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                         fail_webhook!(err_internal_no_cause(&message), &message);
                     }
                     Err(error) => fail_webhook!(
-                        err_internal("Failed to resolve Stripe subscription ownership", error),
+                        crud::db_error_internal(
+                            error,
+                            "Failed to resolve Stripe subscription ownership"
+                        ),
                         "subscription ownership lookup failed"
                     ),
                 }
@@ -3519,19 +3839,41 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
             .await
             {
                 fail_webhook!(
-                    err_internal("Failed to synchronize platform subscription", error),
+                    crud::db_error_internal(error, "Failed to synchronize platform subscription"),
                     "platform subscription status/plan synchronization failed"
                 );
             }
 
-            // Sync addon totals from Stripe subscription items metadata.
-            // Each addon subscription item has metadata fields: extra_projects,
-            // extra_requests, extra_r2_bytes, extra_d1_bytes (set when creating
-            // the subscription item via Stripe API).
-            let user_id = repo::subscriptions::find_user_by_stripe_sub(ctx, stripe_sub_id).await;
+            // Sync add-on totals from the metadata of the subscription's
+            // items. `repo::subscriptions::ADDON_TOTALS` names the metadata
+            // keys the platform stamps on its add-on objects.
+            let user_id = match repo::subscriptions::find_user_by_stripe_sub(ctx, stripe_sub_id)
+                .await
+            {
+                Ok(user_id) => user_id,
+                // The two things this answer gates — the addon-total sync and
+                // the outbound `products.subscription.updated` — were both
+                // skipped silently when the read failed, and the delivery
+                // still told Stripe it had succeeded, so nothing retried them.
+                Err(error) => fail_webhook!(
+                    crud::db_error_internal(error, "Failed to resolve Stripe subscription owner"),
+                    "subscription owner lookup failed"
+                ),
+            };
             if let Some(ref uid) = user_id {
                 if let Some(items) = data_object.get("items") {
-                    sync_addon_totals_from_items(ctx, uid, items).await;
+                    // A failed sync used to be logged and nothing else, so the
+                    // delivery still sealed the event as processed and Stripe
+                    // had nothing to retry: the subscriber kept paying for
+                    // add-ons their row never recorded.
+                    if let Err(error) =
+                        sync_addon_totals_from_items(ctx, uid, items, event_created).await
+                    {
+                        fail_webhook!(
+                            crud::db_error_internal(error, "Failed to synchronize add-on totals"),
+                            "add-on total synchronization failed"
+                        );
+                    }
                 }
             }
 
@@ -3548,7 +3890,7 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
             }
         }
 
-        "invoice.paid" | "invoice.payment_succeeded" => {
+        Some(StripeEventType::InvoicePaid | StripeEventType::InvoicePaymentSucceeded) => {
             let stripe_sub_id = invoice_subscription_id(&data_object);
             if !stripe_sub_id.is_empty() {
                 let commerce_matched = match repo::purchases::sync_commerce_subscription(
@@ -3556,18 +3898,18 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                     &stripe_sub_id,
                     event_account,
                     event_livemode,
-                    "active",
+                    SubscriptionStatus::Active,
                     None,
                     None,
                     None,
-                    Some("past_due"),
+                    Some(SubscriptionStatus::PastDue),
                     event_created,
                 )
                 .await
                 {
                     Ok(purchase) => purchase.is_some(),
                     Err(error) => fail_webhook!(
-                        err_internal("Failed to recover commerce subscription", error),
+                        crud::db_error_internal(error, "Failed to recover commerce subscription"),
                         "commerce subscription recovery write failed"
                     ),
                 };
@@ -3581,7 +3923,10 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                             fail_webhook!(err_internal_no_cause(&message), &message);
                         }
                         Err(error) => fail_webhook!(
-                            err_internal("Failed to resolve Stripe subscription ownership", error),
+                            crud::db_error_internal(
+                                error,
+                                "Failed to resolve Stripe subscription ownership"
+                            ),
                             "subscription ownership lookup failed"
                         ),
                     }
@@ -3594,14 +3939,14 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                 .await
                 {
                     fail_webhook!(
-                        err_internal("Failed to recover subscription", error),
+                        crud::db_error_internal(error, "Failed to recover subscription"),
                         "platform subscription recovery write failed"
                     );
                 }
             }
         }
 
-        "invoice.payment_failed" => {
+        Some(StripeEventType::InvoicePaymentFailed) => {
             let stripe_sub_id = invoice_subscription_id(&data_object);
             if !stripe_sub_id.is_empty() {
                 // The past-due write is derived from the invoice, not an
@@ -3612,7 +3957,7 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                     &stripe_sub_id,
                     event_account,
                     event_livemode,
-                    "past_due",
+                    SubscriptionStatus::PastDue,
                     None,
                     None,
                     None,
@@ -3623,7 +3968,10 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                 {
                     Ok(purchase) => purchase.is_some(),
                     Err(error) => fail_webhook!(
-                        err_internal("Failed to mark commerce subscription past due", error),
+                        crud::db_error_internal(
+                            error,
+                            "Failed to mark commerce subscription past due"
+                        ),
                         "commerce subscription past-due write failed"
                     ),
                 };
@@ -3637,7 +3985,10 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                             fail_webhook!(err_internal_no_cause(&message), &message);
                         }
                         Err(error) => fail_webhook!(
-                            err_internal("Failed to resolve Stripe subscription ownership", error),
+                            crud::db_error_internal(
+                                error,
+                                "Failed to resolve Stripe subscription ownership"
+                            ),
                             "subscription ownership lookup failed"
                         ),
                     }
@@ -3652,16 +4003,29 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                         "marking subscription past_due failed"
                     );
                     fail_webhook!(
-                        err_internal("Failed to mark subscription past_due", e),
+                        crud::db_error_internal(e, "Failed to mark subscription past_due"),
                         "platform subscription past-due write failed"
                     );
                 }
             }
         }
 
-        "customer.subscription.deleted" => {
+        Some(StripeEventType::CustomerSubscriptionDeleted) => {
             let stripe_sub_id = data_object.get("id").and_then(|v| v.as_str()).unwrap_or("");
-            let user_id = repo::subscriptions::find_user_by_stripe_sub(ctx, stripe_sub_id).await;
+            // Read before the cancellation writes, as it always was — the row
+            // this names is about to have its addons zeroed. A failed read is
+            // the whole delivery's failure: the outbound
+            // `products.subscription.deleted` is the only thing that tells
+            // the platform a paid user has lapsed.
+            let user_id = match repo::subscriptions::find_user_by_stripe_sub(ctx, stripe_sub_id)
+                .await
+            {
+                Ok(user_id) => user_id,
+                Err(error) => fail_webhook!(
+                    crud::db_error_internal(error, "Failed to resolve Stripe subscription owner"),
+                    "subscription owner lookup failed"
+                ),
+            };
 
             if !stripe_sub_id.is_empty() {
                 let canceled_at = stripe_timestamp(data_object.get("canceled_at"));
@@ -3670,7 +4034,7 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                     stripe_sub_id,
                     event_account,
                     event_livemode,
-                    "canceled",
+                    SubscriptionStatus::Canceled,
                     None,
                     Some(false),
                     canceled_at.as_deref(),
@@ -3681,7 +4045,7 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                 {
                     Ok(purchase) => purchase.is_some(),
                     Err(error) => fail_webhook!(
-                        err_internal("Failed to cancel commerce subscription", error),
+                        crud::db_error_internal(error, "Failed to cancel commerce subscription"),
                         "commerce subscription cancellation failed"
                     ),
                 };
@@ -3695,7 +4059,10 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                             fail_webhook!(err_internal_no_cause(&message), &message);
                         }
                         Err(error) => fail_webhook!(
-                            err_internal("Failed to resolve Stripe subscription ownership", error),
+                            crud::db_error_internal(
+                                error,
+                                "Failed to resolve Stripe subscription ownership"
+                            ),
                             "subscription ownership lookup failed"
                         ),
                     }
@@ -3715,7 +4082,7 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                     "subscription cancellation failed"
                 );
                 fail_webhook!(
-                    err_internal("Failed to cancel subscription", e),
+                    crud::db_error_internal(e, "Failed to cancel subscription"),
                     "platform subscription cancellation failed"
                 );
             }
@@ -3732,7 +4099,11 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
             }
         }
 
-        "charge.dispute.created" | "charge.dispute.updated" | "charge.dispute.closed" => {
+        Some(
+            StripeEventType::ChargeDisputeCreated
+            | StripeEventType::ChargeDisputeUpdated
+            | StripeEventType::ChargeDisputeClosed,
+        ) => {
             let provider_dispute_id = stripe_resource_id(data_object.get("id"));
             let payment_intent_id = stripe_resource_id(data_object.get("payment_intent"));
             if provider_dispute_id.is_empty() || payment_intent_id.is_empty() {
@@ -3754,16 +4125,16 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                         );
                         if let Some((owner, _)) = event_lease.as_ref() {
                             if let Err(error) = mark_event_processed(ctx, event_id, owner).await {
-                                return err_internal(
-                                    "Failed to complete webhook processing lease",
+                                return crud::db_error_internal(
                                     error,
+                                    "Failed to complete webhook processing lease",
                                 );
                             }
                         }
                         return ok_json(&WebhookAck::received());
                     }
                     Err(error) => fail_webhook!(
-                        err_internal("Failed to load disputed purchase", error),
+                        crud::db_error_internal(error, "Failed to load disputed purchase"),
                         "disputed purchase lookup failed"
                     ),
                 };
@@ -3814,11 +4185,20 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                     "dispute currency mismatch"
                 );
             }
-            let status = data_object
-                .get("status")
-                .and_then(serde_json::Value::as_str)
-                .unwrap_or("")
-                .to_string();
+            // The network state, as the enum that defines the set. The
+            // repo used to hold a `supported_status` list and refuse an
+            // unrecognised value from inside `reconcile`; the refusal
+            // happens here now, one step earlier and with the same
+            // outcome — a 500 that makes Stripe redeliver, so a dispute
+            // state this build does not know is never stored.
+            let Ok(status) = serde_json::from_value::<contracts::DisputeStatus>(
+                data_object.get("status").cloned().unwrap_or_default(),
+            ) else {
+                fail_webhook!(
+                    err_internal_no_cause("Dispute status is outside the supported set"),
+                    "dispute status was unsupported"
+                );
+            };
             let snapshot = repo::disputes::DisputeSnapshot {
                 purchase_id: purchase.id.clone(),
                 seller_account_id: purchase.str_field("seller_account_id").to_string(),
@@ -3840,13 +4220,17 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
             };
             if let Err(error) = repo::disputes::reconcile(ctx, &snapshot).await {
                 fail_webhook!(
-                    err_internal("Failed to reconcile Stripe dispute", error),
+                    crud::db_error_internal(error, "Failed to reconcile Stripe dispute"),
                     "dispute ledger reconciliation failed"
                 );
             }
         }
 
-        "refund.created" | "refund.updated" | "refund.failed" => {
+        Some(
+            kind @ (StripeEventType::RefundCreated
+            | StripeEventType::RefundUpdated
+            | StripeEventType::RefundFailed),
+        ) => {
             let provider_refund_id = data_object
                 .get("id")
                 .and_then(|value| value.as_str())
@@ -3856,7 +4240,7 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                     match repo::refunds::get_by_provider_refund_id(ctx, provider_refund_id).await {
                         Ok(ledger) => ledger,
                         Err(error) => fail_webhook!(
-                            err_internal("Failed to load refund ledger", error),
+                            crud::db_error_internal(error, "Failed to load refund ledger"),
                             "refund ledger lookup failed"
                         ),
                     };
@@ -3908,7 +4292,7 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                     let provider_status = data_object
                         .get("status")
                         .and_then(|value| value.as_str())
-                        .unwrap_or(if event_type == "refund.failed" {
+                        .unwrap_or(if kind == StripeEventType::RefundFailed {
                             "failed"
                         } else {
                             "pending"
@@ -3956,7 +4340,7 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                     {
                         Ok(ordered) => ordered,
                         Err(error) => fail_webhook!(
-                            err_internal("Failed to update refund ledger", error),
+                            crud::db_error_internal(error, "Failed to update refund ledger"),
                             "refund provider response write failed"
                         ),
                     };
@@ -3972,13 +4356,16 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                         .await
                         {
                             fail_webhook!(
-                                err_internal("Failed to reconcile refund purchase", error),
+                                crud::db_error_internal(
+                                    error,
+                                    "Failed to reconcile refund purchase"
+                                ),
                                 "refund purchase reconciliation failed"
                             );
                         }
                         if let Err(error) = repo::refunds::mark_succeeded(ctx, &ledger.id).await {
                             fail_webhook!(
-                                err_internal("Failed to complete refund ledger", error),
+                                crud::db_error_internal(error, "Failed to complete refund ledger"),
                                 "refund ledger completion failed"
                             );
                         }
@@ -3991,7 +4378,10 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                         .await
                         {
                             fail_webhook!(
-                                err_internal("Failed to complete provider operation", error),
+                                crud::db_error_internal(
+                                    error,
+                                    "Failed to complete provider operation"
+                                ),
                                 "refund provider operation completion failed"
                             );
                         }
@@ -4007,7 +4397,10 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                         .await
                         {
                             fail_webhook!(
-                                err_internal("Failed to resolve provider operation", error),
+                                crud::db_error_internal(
+                                    error,
+                                    "Failed to resolve provider operation"
+                                ),
                                 "refund provider operation failure write failed"
                             );
                         }
@@ -4016,7 +4409,7 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
             }
         }
 
-        "charge.refunded" => {
+        Some(StripeEventType::ChargeRefunded) => {
             let payment_intent = data_object
                 .get("payment_intent")
                 .and_then(|v| v.as_str())
@@ -4040,7 +4433,7 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                             None
                         }
                         Err(error) => fail_webhook!(
-                            err_internal("Failed to load refunded purchase", error),
+                            crud::db_error_internal(error, "Failed to load refunded purchase"),
                             "refunded purchase lookup failed"
                         ),
                     };
@@ -4111,7 +4504,10 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                     {
                         tracing::error!("Failed to reconcile refunded charge: {error}");
                         fail_webhook!(
-                            err_internal("Failed to update purchase refund total", error),
+                            crud::db_error_internal(
+                                error,
+                                "Failed to update purchase refund total"
+                            ),
                             "refunded charge purchase update failed"
                         );
                     }
@@ -4119,8 +4515,12 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
             }
         }
 
-        _ => {
-            // Ignore unhandled event types
+        None => {
+            // A destination can be subscribed to more event types than this
+            // block handles, so an unrecognised type is ordinary traffic:
+            // ignore it, seal the lease below and acknowledge the delivery.
+            // Answering anything else would make Stripe retry a type no
+            // handler will ever want.
         }
     }
 
@@ -4134,7 +4534,7 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
                 error = %error,
                 "failed to mark Stripe webhook event processed"
             );
-            return err_internal("Failed to complete webhook processing lease", error);
+            return crud::db_error_internal(error, "Failed to complete webhook processing lease");
         }
     }
 
@@ -4144,9 +4544,22 @@ pub async fn handle_webhook(ctx: &dyn Context, msg: &Message, input: InputStream
 /// Fire a webhook for product/billing events.
 /// Best-effort — if PRODUCTS_WEBHOOK_URL is not configured, this is a no-op.
 /// The webhook is signed with HMAC-SHA256 using PRODUCTS_WEBHOOK_SECRET.
+/// A settings read that fails is logged and nothing is sent, like every other
+/// failure here: the event it reports has already been processed.
 async fn fire_products_webhook(ctx: &dyn Context, event: &str, data: &serde_json::Value) {
-    let url = config::get_default(ctx, "IMPRESSPRESS__PRODUCTS__WEBHOOK_URL", "").await;
-    let secret = config::get_default(ctx, "IMPRESSPRESS__PRODUCTS__WEBHOOK_SECRET", "").await;
+    let settings = async {
+        Ok::<_, WaferError>((
+            config::get_default(ctx, WEBHOOK_URL, "").await?,
+            config::get_default(ctx, WEBHOOK_SECRET, "").await?,
+        ))
+    };
+    let (url, secret) = match settings.await {
+        Ok(settings) => settings,
+        Err(e) => {
+            tracing::warn!(event = %event, error = %e, "products webhook not sent: settings read failed");
+            return;
+        }
+    };
     if url.is_empty() {
         return;
     }
@@ -4198,22 +4611,29 @@ async fn fire_products_webhook(ctx: &dyn Context, event: &str, data: &serde_json
     }
 }
 
-/// Verify Stripe webhook signature using HMAC-SHA256.
-/// Stripe sends `t=timestamp,v1=signature` in the Stripe-Signature header.
+/// Verify a Stripe webhook signature: HMAC-SHA256 over `timestamp.payload`.
+///
+/// `Stripe-Signature` carries a `t=` timestamp and one `v1=` signature *per
+/// signing secret currently active on the endpoint*. Rolling a secret leaves
+/// the retired one live for up to 24 hours, and every delivery in that window
+/// is signed with both, so the header holds two `v1` values of which only one
+/// matches the secret this deployment holds. The delivery is accepted when any
+/// `v1` matches; reading a single value rejected every delivery for the whole
+/// roll window whenever the retired secret's signature came second.
 fn verify_stripe_signature(payload: &[u8], sig_header: &str, secret: &str) -> bool {
+    let candidates = || {
+        sig_header
+            .split(',')
+            .filter_map(|part| part.trim().strip_prefix("v1="))
+    };
     let mut timestamp = "";
-    let mut expected_sig = "";
-
     for part in sig_header.split(',') {
-        let part = part.trim();
-        if let Some(t) = part.strip_prefix("t=") {
+        if let Some(t) = part.trim().strip_prefix("t=") {
             timestamp = t;
-        } else if let Some(v) = part.strip_prefix("v1=") {
-            expected_sig = v;
         }
     }
 
-    if timestamp.is_empty() || expected_sig.is_empty() {
+    if timestamp.is_empty() || candidates().all(str::is_empty) {
         return false;
     }
 
@@ -4240,8 +4660,12 @@ fn verify_stripe_signature(payload: &[u8], sig_header: &str, secret: &str) -> bo
     let computed = primitives::hmac_sha256(secret.as_bytes(), &signed_payload);
     let computed_hex = hex_encode(&computed);
 
-    // Constant-time comparison
-    primitives::constant_time_eq(computed_hex.as_bytes(), expected_sig.as_bytes())
+    // Constant-time comparison against each offered signature. Which of them
+    // matches is not a secret — the header is attacker-supplied — so stopping
+    // at the first match leaks nothing about `secret`.
+    candidates().any(|candidate| {
+        primitives::constant_time_eq(computed_hex.as_bytes(), candidate.as_bytes())
+    })
 }
 
 /// Strict origin match: scheme + host + port must agree between `url` and
@@ -4298,60 +4722,88 @@ pub(crate) fn is_stable_stripe_api_version(value: &str) -> bool {
         && release != "preview"
 }
 
-fn stripe_request_headers(
-    secret_key: &str,
-    api_version: &str,
-    idempotency_key: Option<&str>,
-) -> HashMap<String, String> {
-    stripe_client::request_headers(secret_key, api_version, None, idempotency_key)
-}
-
 /// Check if a user owns a product — either via an active subscription that
 /// references it, or a completed purchase containing it as a line item.
-async fn user_owns_product(ctx: &dyn Context, user_id: &str, product_id: &str) -> bool {
+///
+/// All three reads propagate. This answer gates a purchase, and every one of
+/// them used to collapse a failure into `false` (the middle one literally as
+/// `Err(_) => false`), so a database outage told a buyer "you must sign in
+/// and own the required product" for a product they had already bought — a
+/// refusal that looks like their fault and that no retry can clear.
+async fn user_owns_product(
+    ctx: &dyn Context,
+    user_id: &str,
+    product_id: &str,
+) -> Result<bool, WaferError> {
     // Active subscription whose plan references the product.
-    if repo::subscriptions::active_plan_exists(ctx, user_id, product_id).await {
-        return true;
+    if repo::subscriptions::active_plan_exists(ctx, user_id, product_id).await? {
+        return Ok(true);
     }
     // Completed purchase containing this product as a line item.
     let purchase_ids: Vec<serde_json::Value> =
-        match repo::purchases::completed_purchase_ids(ctx, user_id).await {
-            Ok(rows) => rows
-                .into_iter()
-                .filter_map(|r| r.data.get("id").and_then(|v| v.as_str()).map(String::from))
-                .map(serde_json::Value::String)
-                .collect(),
-            Err(_) => return false,
-        };
+        repo::purchases::completed_purchase_ids(ctx, user_id)
+            .await?
+            .into_iter()
+            .filter_map(|r| r.data.get("id").and_then(|v| v.as_str()).map(String::from))
+            .map(serde_json::Value::String)
+            .collect();
     repo::purchases::line_item_exists_for_product(ctx, purchase_ids, product_id).await
 }
 
-/// Sync addon column totals from Stripe subscription items.
+/// Sum the add-on totals a Stripe subscription's items report and write them
+/// to the subscriber's row.
 ///
-/// Reads addon values from item metadata (set by the platform when creating
-/// subscription items). This keeps the products block plan-agnostic — it
-/// doesn't need to know what addon packs exist, just what Stripe reports.
-async fn sync_addon_totals_from_items(ctx: &dyn Context, user_id: &str, items: &serde_json::Value) {
-    let mut total_projects: i64 = 0;
-    let mut total_requests: i64 = 0;
-    let mut total_r2: i64 = 0;
-    let mut total_d1: i64 = 0;
+/// The per-unit amounts are read from the metadata the platform stamps on its
+/// add-on objects. [`repo::subscriptions::ADDON_ITEM_MARKER`] is what makes an
+/// item an add-on at all, and [`repo::subscriptions::ADDON_TOTALS`] owns the
+/// metadata key for each total and the column it feeds. The block never needs a
+/// list of the add-on packs that exist — only the totals Stripe reports.
+///
+/// The marker decides which object to read, not just whether to read one:
+/// Stripe always serialises a subscription item's own `metadata`, as `{}` when
+/// it is unset, so testing the item object for presence rather than for the
+/// marker meant the price was never consulted and a price-stamped add-on
+/// counted as zero. Whichever object carries the marker supplies the amounts
+/// too — the objects are not merged.
+///
+/// The totals are quotas, so a quantity or an amount that is negative, or a
+/// product or sum too large to represent, is refused rather than written: each
+/// would otherwise hand the subscriber less capacity than none. That and a
+/// failed write are both errors, and the caller answers Stripe with one so the
+/// delivery is retried.
+async fn sync_addon_totals_from_items(
+    ctx: &dyn Context,
+    user_id: &str,
+    items: &serde_json::Value,
+    event_created: i64,
+) -> Result<(), WaferError> {
+    let mut totals = [0i64; repo::subscriptions::ADDON_TOTALS.len()];
+    let refuse = |detail: String| {
+        WaferError::new(
+            wafer_run::ErrorCode::InvalidArgument,
+            format!("Stripe subscription item metadata {detail}"),
+        )
+    };
 
     if let Some(data) = items.get("data").and_then(|v| v.as_array()) {
         for item in data {
+            let marked = |meta: &serde_json::Value| {
+                meta.get(repo::subscriptions::ADDON_ITEM_MARKER).is_some()
+            };
             let meta = item
                 .get("metadata")
-                .or_else(|| item.pointer("/price/metadata"));
+                .filter(|meta| marked(meta))
+                .or_else(|| item.pointer("/price/metadata").filter(|meta| marked(meta)));
+            // The base plan item carries the marker on neither object and
+            // contributes nothing to the totals.
             let Some(meta) = meta else {
                 continue;
             };
 
-            // Skip non-addon items (the base plan item won't have addon_id)
-            if meta.get("addon_id").is_none() {
-                continue;
-            }
-
             let qty = item.get("quantity").and_then(|v| v.as_i64()).unwrap_or(1);
+            if qty < 0 {
+                return Err(refuse(format!("reports a negative quantity ({qty})")));
+            }
             let parse = |key: &str| -> i64 {
                 meta.get(key)
                     .and_then(|v| {
@@ -4361,30 +4813,31 @@ async fn sync_addon_totals_from_items(ctx: &dyn Context, user_id: &str, items: &
                     })
                     .unwrap_or(0)
             };
-            total_projects += parse("extra_projects") * qty;
-            total_requests += parse("extra_requests") * qty;
-            total_r2 += parse("extra_r2_bytes") * qty;
-            total_d1 += parse("extra_d1_bytes") * qty;
+            for (total, (metadata_key, _)) in
+                totals.iter_mut().zip(repo::subscriptions::ADDON_TOTALS)
+            {
+                let per_unit = parse(metadata_key);
+                if per_unit < 0 {
+                    return Err(refuse(format!(
+                        "reports a negative {metadata_key} ({per_unit})"
+                    )));
+                }
+                *total = per_unit
+                    .checked_mul(qty)
+                    .and_then(|line| total.checked_add(line))
+                    .ok_or_else(|| refuse(format!("overflows the {metadata_key} add-on total")))?;
+            }
         }
     }
 
-    if let Err(e) = repo::subscriptions::set_addon_totals(
-        ctx,
-        user_id,
-        total_projects,
-        total_requests,
-        total_r2,
-        total_d1,
-    )
-    .await
-    {
-        tracing::error!(error = %e, user_id = %user_id, "syncing addon totals failed");
-    }
+    repo::subscriptions::set_addon_totals(ctx, user_id, totals, event_created).await?;
+    Ok(())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blocks::products::config::STRIPE_WEBHOOK_SECRET;
 
     // constant_time_eq / hmac_sha256 behavior is tested in
     // `wafer_block_crypto::primitives` — only the Stripe-specific signature
@@ -4428,6 +4881,52 @@ mod tests {
 
         let sig_header = format!("t={timestamp},v1={computed_hex}");
         assert!(verify_stripe_signature(payload, &sig_header, secret));
+    }
+
+    /// Rolling a webhook secret leaves the retired one live for up to 24
+    /// hours, and Stripe signs every delivery in that window with both: the
+    /// header carries one `v1` per active secret, in an order the endpoint
+    /// does not choose. Reading a single value accepted the delivery only
+    /// when the held secret's signature happened to come last.
+    #[test]
+    fn test_verify_stripe_signature_accepts_either_secret_during_a_roll() {
+        let held = "whsec_current";
+        let retired = "whsec_retired";
+        let payload = b"{\"type\":\"customer.subscription.updated\"}";
+        let timestamp = chrono::Utc::now().timestamp() as u64;
+        let sign = |secret: &str| {
+            hex_encode(&primitives::hmac_sha256(
+                secret.as_bytes(),
+                &build_signed_payload(timestamp, payload),
+            ))
+        };
+        let held_sig = sign(held);
+        let retired_sig = sign(retired);
+
+        assert!(
+            verify_stripe_signature(
+                payload,
+                &format!("t={timestamp},v1={retired_sig},v1={held_sig}"),
+                held
+            ),
+            "the held secret's signature last must verify"
+        );
+        assert!(
+            verify_stripe_signature(
+                payload,
+                &format!("t={timestamp},v1={held_sig},v1={retired_sig}"),
+                held
+            ),
+            "the held secret's signature first must verify just the same"
+        );
+        assert!(
+            !verify_stripe_signature(
+                payload,
+                &format!("t={timestamp},v1={retired_sig},v1={retired_sig}"),
+                held
+            ),
+            "a header carrying no signature from the held secret must not verify"
+        );
     }
 
     #[test]
@@ -4540,14 +5039,6 @@ mod tests {
     }
 
     #[test]
-    fn stripe_headers_pin_version_and_idempotency() {
-        let headers = stripe_request_headers("sk_test_x", "2026-02-25.clover", Some("checkout_1"));
-        assert_eq!(headers["Authorization"], "Bearer sk_test_x");
-        assert_eq!(headers["Stripe-Version"], "2026-02-25.clover");
-        assert_eq!(headers["Idempotency-Key"], "checkout_1");
-    }
-
-    #[test]
     fn subscription_checkout_form_uses_inline_recurring_prices_and_exact_fee_percent() {
         let offer: Offer = serde_json::from_value(serde_json::json!({
             "id": "offer_subscription",
@@ -4588,20 +5079,22 @@ mod tests {
             "presentation": "hosted"
         }))
         .unwrap();
-        let form = build_offer_checkout_form(
-            &offer,
-            &preview,
-            "Monthly service",
-            "order_subscription",
-            &request,
-            "https://shop.example/success",
-            "https://shop.example/cancel",
-            false,
-            "NZ",
-            110,
-            275,
-        )
-        .unwrap();
+        let form = encode_form(
+            build_offer_checkout_form(
+                &offer,
+                &preview,
+                "Monthly service",
+                "order_subscription",
+                &request,
+                "https://shop.example/success",
+                "https://shop.example/cancel",
+                false,
+                CountryCode::parse("NZ").as_ref(),
+                110,
+                275,
+            )
+            .unwrap(),
+        );
         assert!(form.contains("mode=subscription"));
         assert!(form.contains("[recurring][interval]=month"));
         assert!(form.contains("[recurring][interval_count]=1"));
@@ -4672,20 +5165,22 @@ mod tests {
             "presentation": "hosted"
         }))
         .unwrap();
-        let checkout = build_offer_checkout_form(
-            &offer,
-            &preview,
-            "Shipped product",
-            "order_shipping",
-            &request,
-            "https://shop.example/success",
-            "https://shop.example/cancel",
-            false,
-            "US",
-            0,
-            0,
-        )
-        .unwrap();
+        let checkout = encode_form(
+            build_offer_checkout_form(
+                &offer,
+                &preview,
+                "Shipped product",
+                "order_shipping",
+                &request,
+                "https://shop.example/success",
+                "https://shop.example/cancel",
+                false,
+                CountryCode::parse("US").as_ref(),
+                0,
+                0,
+            )
+            .unwrap(),
+        );
         assert!(checkout.contains("shipping_address_collection[allowed_countries][0]=NZ"));
         assert!(checkout.contains("shipping_address_collection[allowed_countries][1]=AU"));
         assert!(checkout
@@ -4708,11 +5203,10 @@ mod tests {
             &offer,
             &preview,
             "Shipped product",
-            "link_shipping",
             "",
             None,
             false,
-            "US",
+            CountryCode::parse("US").as_ref(),
             0,
             0,
         )
@@ -4720,19 +5214,20 @@ mod tests {
         assert!(error.contains("Stripe shipping rate ID"));
 
         offer.checkout.shipping_options[0].stripe_shipping_rate_id = "shr_standard_123".into();
-        let payment_link = payment_link_form(
-            &offer,
-            &preview,
-            "Shipped product",
-            "link_shipping",
-            "",
-            None,
-            false,
-            "US",
-            0,
-            0,
-        )
-        .unwrap();
+        let payment_link = encode_form(
+            payment_link_form(
+                &offer,
+                &preview,
+                "Shipped product",
+                "",
+                None,
+                false,
+                CountryCode::parse("US").as_ref(),
+                0,
+                0,
+            )
+            .unwrap(),
+        );
         assert!(payment_link.contains("shipping_options[0][shipping_rate]=shr_standard_123"));
         assert!(payment_link.contains("shipping_options[1][shipping_rate]=shr_express_123"));
         assert!(!payment_link.contains("shipping_rate_data"));
@@ -4776,7 +5271,7 @@ mod tests {
     async fn handle_webhook_is_idempotent_on_replayed_event_id() {
         let mut ctx = TestContext::with_products().await;
         let secret = "whsec_test_idempotency";
-        ctx.set_config("IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET", secret);
+        ctx.set_config(STRIPE_WEBHOOK_SECRET, secret);
 
         // `charge.refunded` with no matching purchase: the event-type match
         // arm runs (purchase lookup misses, so no further side effect) — this
@@ -4826,7 +5321,7 @@ mod tests {
     async fn handle_webhook_processes_distinct_event_ids_independently() {
         let mut ctx = TestContext::with_products().await;
         let secret = "whsec_test_idempotency_2";
-        ctx.set_config("IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET", secret);
+        ctx.set_config(STRIPE_WEBHOOK_SECRET, secret);
 
         for id in ["evt_distinct_1", "evt_distinct_2"] {
             let body = serde_json::json!({
@@ -4852,7 +5347,7 @@ mod tests {
     async fn handle_webhook_processes_event_with_no_id_without_erroring() {
         let mut ctx = TestContext::with_products().await;
         let secret = "whsec_test_idempotency_3";
-        ctx.set_config("IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET", secret);
+        ctx.set_config(STRIPE_WEBHOOK_SECRET, secret);
 
         let body = serde_json::json!({ "type": "charge.refunded", "data": {} });
         let (msg, input) = signed_webhook_request(&body, secret);
@@ -4871,7 +5366,7 @@ mod tests {
     async fn seed_stripe_event_row(
         ctx: &crate::test_support::TestContext,
         event_id: &str,
-        status: &str,
+        status: EventStatus,
     ) {
         let mut row = HashMap::new();
         row.insert("id".to_string(), serde_json::json!(event_id));
@@ -4899,9 +5394,9 @@ mod tests {
     async fn handle_webhook_reprocesses_a_previously_pending_event() {
         let mut ctx = TestContext::with_products().await;
         let secret = "whsec_test_pending_retry";
-        ctx.set_config("IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET", secret);
+        ctx.set_config(STRIPE_WEBHOOK_SECRET, secret);
 
-        seed_stripe_event_row(&ctx, "evt_pending_retry", EVENT_STATUS_PENDING).await;
+        seed_stripe_event_row(&ctx, "evt_pending_retry", EventStatus::Pending).await;
 
         let body = serde_json::json!({
             "id": "evt_pending_retry",
@@ -4924,7 +5419,7 @@ mod tests {
             .expect("row exists after processing");
         assert_eq!(
             row.data.get("status").and_then(|v| v.as_str()),
-            Some(EVENT_STATUS_PROCESSED),
+            Some(crate::util::wire_str(&EventStatus::Processed).as_str()),
             "row must be sealed processed once side effects succeed"
         );
 
@@ -4944,9 +5439,9 @@ mod tests {
     async fn handle_webhook_skips_an_already_processed_event() {
         let mut ctx = TestContext::with_products().await;
         let secret = "whsec_test_already_processed";
-        ctx.set_config("IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET", secret);
+        ctx.set_config(STRIPE_WEBHOOK_SECRET, secret);
 
-        seed_stripe_event_row(&ctx, "evt_already_processed", EVENT_STATUS_PROCESSED).await;
+        seed_stripe_event_row(&ctx, "evt_already_processed", EventStatus::Processed).await;
 
         let body = serde_json::json!({
             "id": "evt_already_processed",
@@ -5029,7 +5524,7 @@ mod tests {
         );
         row.insert(
             "status".to_string(),
-            serde_json::json!(EVENT_STATUS_PROCESSING),
+            serde_json::json!(EventStatus::Processing),
         );
         row.insert("attempts".to_string(), serde_json::json!(2));
         row.insert(
@@ -5105,7 +5600,10 @@ mod tests {
         let row = db::get(&ctx, STRIPE_EVENTS_TABLE, "evt_failure")
             .await
             .expect("failed event row");
-        assert_eq!(row.str_field("status"), EVENT_STATUS_FAILED);
+        assert_eq!(
+            row.str_field("status"),
+            crate::util::wire_str(&EventStatus::Failed)
+        );
         assert_eq!(row.str_field("last_error"), "transient database error");
         assert!(!row.str_field("next_retry_at").is_empty());
         assert_eq!(
@@ -5148,7 +5646,7 @@ mod tests {
             &ctx,
             "evt_failure",
             &retry_owner,
-            EVENT_MAX_ATTEMPTS,
+            repo::MAX_ATTEMPTS,
             "permanent failure",
         )
         .await
@@ -5156,7 +5654,10 @@ mod tests {
         let row = db::get(&ctx, STRIPE_EVENTS_TABLE, "evt_failure")
             .await
             .expect("dead-letter row");
-        assert_eq!(row.str_field("status"), EVENT_STATUS_DEAD_LETTER);
+        assert_eq!(
+            row.str_field("status"),
+            crate::util::wire_str(&EventStatus::DeadLetter)
+        );
         assert!(!row.str_field("terminal_at").is_empty());
     }
 
@@ -5211,7 +5712,7 @@ mod tests {
                 ),
                 (
                     "status".to_string(),
-                    serde_json::json!(EVENT_STATUS_DEAD_LETTER),
+                    serde_json::json!(EventStatus::DeadLetter),
                 ),
                 ("attempts".to_string(), serde_json::json!(8)),
                 (
@@ -5239,7 +5740,7 @@ mod tests {
         .await
         .expect("seed dead-letter event");
 
-        let list = list_webhook_events(&ctx, Some(EVENT_STATUS_DEAD_LETTER), 1, 20)
+        let list = list_webhook_events(&ctx, Some(EventStatus::DeadLetter), 1, 20)
             .await
             .expect("list dead-letter events");
         assert_eq!(list.total_count, 1);
@@ -5256,10 +5757,7 @@ mod tests {
     #[tokio::test]
     async fn dead_letter_replay_checks_integrity_and_uses_normal_webhook_processing() {
         let mut ctx = TestContext::with_products().await;
-        ctx.set_config(
-            "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET",
-            "whsec_manual_replay",
-        );
+        ctx.set_config(STRIPE_WEBHOOK_SECRET, "whsec_manual_replay");
         let payload = r#"{"id":"evt_manual_replay","type":"charge.refunded","livemode":false,"data":{"object":{"payment_intent":"pi_missing","livemode":false}}}"#;
         db::create(
             &ctx,
@@ -5272,7 +5770,7 @@ mod tests {
                 ),
                 (
                     "status".to_string(),
-                    serde_json::json!(EVENT_STATUS_DEAD_LETTER),
+                    serde_json::json!(EventStatus::DeadLetter),
                 ),
                 ("attempts".to_string(), serde_json::json!(8)),
                 (
@@ -5311,7 +5809,10 @@ mod tests {
         let replayed = db::get(&ctx, STRIPE_EVENTS_TABLE, "evt_manual_replay")
             .await
             .expect("replayed event row");
-        assert_eq!(replayed.str_field("status"), EVENT_STATUS_PROCESSED);
+        assert_eq!(
+            replayed.str_field("status"),
+            crate::util::wire_str(&EventStatus::Processed)
+        );
         assert_eq!(replayed.u64_field("attempts"), 1);
         assert!(!replayed.str_field("processed_at").is_empty());
 
@@ -5325,7 +5826,7 @@ mod tests {
                     "event_type".to_string(),
                     serde_json::json!("charge.refunded"),
                 ),
-                ("status".to_string(), serde_json::json!(EVENT_STATUS_FAILED)),
+                ("status".to_string(), serde_json::json!(EventStatus::Failed)),
                 (
                     "payload_base64".to_string(),
                     serde_json::json!(Base64::encode_string(tampered_payload.as_bytes())),

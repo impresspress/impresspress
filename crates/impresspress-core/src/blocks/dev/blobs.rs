@@ -14,7 +14,7 @@ use wafer_core::clients::storage;
 use wafer_run::{context::Context, ErrorCode, WaferError};
 
 /// Storage folder the blobs live in, relative to the block's own namespace —
-/// `wafer-run/storage` rewrites it to `impresspress/dev/blobs` (see
+/// `wafer-run/storage` resolves it to `impresspress/dev/blobs` (see
 /// [`crate::blocks::storage`]).
 pub const FOLDER: &str = "blobs";
 
@@ -81,10 +81,10 @@ pub async fn get(ctx: &dyn Context, sha: &str) -> Result<Vec<u8>, WaferError> {
 
 /// Whether a blob is stored under `sha`.
 ///
-/// A keyed `get` rather than a prefix `list`, for two reasons that both
-/// matter on the sandbox's own target:
+/// A keyed read rather than a prefix `list`, for two reasons that both matter
+/// on the sandbox's own target:
 ///
-/// * `get` of an absent key is `NotFound` on every backend; what `list` does
+/// * a read of an absent key is `NotFound` on every backend; what `list` does
 ///   with a folder nothing has written yet is not part of the
 ///   `StorageService` contract, and the backends genuinely differ —
 ///   `wafer-block-local-storage` answers an empty listing, the OPFS backend
@@ -94,11 +94,16 @@ pub async fn get(ctx: &dyn Context, sha: &str) -> Result<Vec<u8>, WaferError> {
 ///   and filters in JS), so a prefix probe would make every write walk every
 ///   blob.
 ///
-/// The body it reads back is wasted only when the blob is already there —
-/// exactly the case where it saves rewriting the same bytes.
+/// And a *streaming* read, dropped unread: the object's metadata arrives
+/// ahead of its body, so the answer costs an open and at most the few chunks
+/// the backend's reader pulls before it sees the consumer has gone — not the
+/// whole blob, which the buffered `storage::get` would transfer to answer a yes
+/// or no (up to [`super::paths::MAX_FILE_BYTES`] per call, on the write path).
+/// Dropping the stream is how the body is declined: the OPFS backend the
+/// sandbox runs on releases its reader when the consumer goes away.
 pub async fn exists(ctx: &dyn Context, sha: &str) -> Result<bool, WaferError> {
-    match storage::get(ctx, FOLDER, sha).await {
-        Ok(_) => Ok(true),
+    match storage::get_stream(ctx, FOLDER, sha).await {
+        Ok(_unread) => Ok(true),
         Err(e) if e.code == ErrorCode::NotFound => Ok(false),
         Err(e) => Err(e),
     }
@@ -201,12 +206,10 @@ mod tests {
     async fn a_foreign_namespace_is_refused_even_when_the_object_is_there() {
         let ctx = TestContext::with_dev(FakeControl::new()).await;
 
-        // Act as `impresspress/files`: a shallow clone of the fixture with a
-        // different WRAP identity, sharing the same storage block and the
-        // same backing store.
-        let files_block =
-            ctx.clone()
-                .with_wrap("impresspress/files", Vec::new(), "impresspress/admin");
+        // Act as `impresspress/files`: a shallow clone of the fixture running
+        // as another block, sharing the same storage block and the same
+        // backing store.
+        let files_block = ctx.clone().running_as("impresspress/files");
         storage::put(
             &files_block,
             "uploads",

@@ -1,0 +1,58 @@
+name: Security Audit
+
+# RustSec advisory check of Cargo.lock, plus the expiry check on the
+# exceptions in `.cargo/audit.toml`.
+#
+# Runs in two ways:
+#   * called by `ci-shared.yml`, so it is one job of both the pull-request gate
+#     and the merge gate;
+#   * weekly on its own schedule (and on demand), because advisories are
+#     published against crates already in the lockfile, and an exception's
+#     expiry date passes with no commit at all. A lockfile no pull request
+#     touches would otherwise never be re-checked.
+#
+# GitHub runs `schedule:` only from the default branch, and a fork has
+# scheduled workflows disabled until they are enabled in its Actions tab.
+
+on:
+  workflow_call:
+  schedule:
+    - cron: '41 5 * * 1'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  audit:
+    name: Security Audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      # Ignore entries in .cargo/audit.toml carry `expiry=YYYY-MM-DD`
+      # markers so temporary exceptions get re-triaged instead of living
+      # there forever. Fails the job if any marker's date has passed.
+      - name: Check for expired cargo-audit exceptions
+        run: bash scripts/check-audit-expiry.sh
+
+      - name: Install Rust
+        run: rustup toolchain install stable --profile minimal
+
+      # A pinned cargo-audit release; install-action checks the prebuilt
+      # binary against the checksum in its own (SHA-pinned) manifest.
+      - name: Install cargo-audit
+        uses: taiki-e/install-action@7623a79cdfecb99d681017af368ca353d9f49bb5 # v2.87.19
+        with:
+          tool: cargo-audit@0.22.2
+
+      # Blocking: a new, un-reviewed advisory fails the run. Known-acceptable
+      # exceptions (with owner + expiry) live in .cargo/audit.toml — see
+      # that file for the review/renewal process.
+      - name: Run audit
+        run: cargo audit

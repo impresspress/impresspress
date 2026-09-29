@@ -131,6 +131,51 @@ fn resolve_preserves_configured_deploy_smoke_paths_and_trailing_slashes() {
     );
 }
 
+/// The sweep is opt-in: a consumer that exported no `scheduled` handler — and
+/// the CLI scaffolds none — must not be given a daily failed invocation by a
+/// configuration default it never set.
+#[test]
+fn resolve_defaults_crons_to_no_schedule_and_takes_an_explicit_list() {
+    let cfg = parse_str(FULL_TOML).resolve(fake_env(&[])).unwrap();
+    assert!(cfg.crons.is_empty());
+
+    let configured = FULL_TOML.replace(
+        "compatibility_date = \"2026-05-01\"",
+        "compatibility_date = \"2026-05-01\"\ncrons = [\"0 */6 * * *\"]",
+    );
+    let cfg = parse_str(&configured).resolve(fake_env(&[])).unwrap();
+    assert_eq!(cfg.crons, vec!["0 */6 * * *"]);
+
+    // Empty is a real answer, not a mistake: this deployment runs no cron.
+    let disabled = FULL_TOML.replace(
+        "compatibility_date = \"2026-05-01\"",
+        "compatibility_date = \"2026-05-01\"\ncrons = []",
+    );
+    let cfg = parse_str(&disabled).resolve(fake_env(&[])).unwrap();
+    assert!(cfg.crons.is_empty());
+}
+
+/// `wrangler deploy` rejects a malformed cron at the very end of a two-stage
+/// deployment, after the candidate has been uploaded. Reject it before
+/// anything is built.
+#[test]
+fn resolve_rejects_a_cron_expression_that_is_not_five_fields() {
+    for invalid in ["17 3 * *", "17 3 * * * *", "@daily", ""] {
+        let configured = FULL_TOML.replace(
+            "compatibility_date = \"2026-05-01\"",
+            &format!(
+                "compatibility_date = \"2026-05-01\"\ncrons = [{}]",
+                serde_json::to_string(invalid).unwrap()
+            ),
+        );
+        let err = parse_str(&configured).resolve(fake_env(&[])).unwrap_err();
+        assert!(
+            err.to_string().contains("five-field cron expression"),
+            "{invalid:?} should be refused: {err}"
+        );
+    }
+}
+
 #[test]
 fn resolve_rejects_empty_deploy_smoke_path_list() {
     let configured = FULL_TOML.replace(
@@ -337,4 +382,131 @@ fn release_assets_exclude_globs_are_compiled_and_kept() {
     assert_eq!(cfg.r2.release_assets_exclude.len(), 1);
     assert!(cfg.r2.release_assets_exclude[0].matches("content/guides/a.state.json"));
     assert!(!cfg.r2.release_assets_exclude[0].matches("content/legal/terms.md"));
+}
+
+/// `[cloudflare].d1_queries_per_invocation` is the Worker's D1 query limit:
+/// unset is the default 1000, a stated number up to 1000 is taken as it
+/// is, and 0 — at or below the audit-row reservation, which the Worker would
+/// refuse on every request — or anything above D1's documented maximum of
+/// 1000 is refused here instead.
+#[test]
+fn resolve_d1_queries_per_invocation_defaults_to_1000_and_refuses_out_of_range() {
+    let cfg = parse_str(FULL_TOML).resolve(fake_env(&[])).unwrap();
+    assert_eq!(cfg.d1_queries_per_invocation, 1000);
+
+    let lowered = FULL_TOML.replace(
+        "compatibility_date = \"2026-05-01\"\n",
+        "compatibility_date = \"2026-05-01\"\nd1_queries_per_invocation = 50\n",
+    );
+    let cfg = parse_str(&lowered).resolve(fake_env(&[])).unwrap();
+    assert_eq!(cfg.d1_queries_per_invocation, 50);
+
+    let zero = FULL_TOML.replace(
+        "compatibility_date = \"2026-05-01\"\n",
+        "compatibility_date = \"2026-05-01\"\nd1_queries_per_invocation = 0\n",
+    );
+    let err = parse_str(&zero)
+        .resolve(fake_env(&[]))
+        .expect_err("0 is not a D1 query limit")
+        .to_string();
+    assert!(
+        err.contains("cloudflare.d1_queries_per_invocation")
+            && err.contains("IMPRESSPRESS_D1_QUERIES_PER_INVOCATION"),
+        "{err}"
+    );
+
+    let over = FULL_TOML.replace(
+        "compatibility_date = \"2026-05-01\"\n",
+        "compatibility_date = \"2026-05-01\"\nd1_queries_per_invocation = 1001\n",
+    );
+    let err = parse_str(&over)
+        .resolve(fake_env(&[]))
+        .expect_err("D1 runs at most 1000 queries per invocation")
+        .to_string();
+    assert!(
+        err.contains(&format!(
+            "from {} to 1000",
+            impresspress_core::config_vars::D1_QUERIES_PER_INVOCATION_MIN
+        )),
+        "{err}"
+    );
+
+    let max = FULL_TOML.replace(
+        "compatibility_date = \"2026-05-01\"\n",
+        "compatibility_date = \"2026-05-01\"\nd1_queries_per_invocation = 1000\n",
+    );
+    assert_eq!(
+        parse_str(&max)
+            .resolve(fake_env(&[]))
+            .unwrap()
+            .d1_queries_per_invocation,
+        1000
+    );
+}
+
+/// `[cloudflare.password_hasher]` is optional: the hasher is named after the
+/// main Worker, spread across the default shard count, and requires no pepper.
+#[test]
+fn the_password_hasher_defaults_follow_the_main_worker() {
+    let cfg = parse_str(FULL_TOML).resolve(fake_env(&[])).unwrap();
+    assert_eq!(cfg.password_hasher.worker_name, "x-password-hasher");
+    assert_eq!(
+        cfg.password_hasher.shards,
+        impresspress_password::protocol::DEFAULT_SHARDS
+    );
+    assert!(!cfg.password_hasher.pepper_required);
+
+    // Named after the main Worker as resolved, env overlay included.
+    let cfg = parse_str(FULL_TOML)
+        .resolve(fake_env(&[(
+            "IMPRESSPRESS_CLOUDFLARE_WORKER_NAME",
+            "site-env",
+        )]))
+        .unwrap();
+    assert_eq!(cfg.password_hasher.worker_name, "site-env-password-hasher");
+}
+
+#[test]
+fn the_password_hasher_section_is_read_and_validated() {
+    let with = |section: &str| format!("{FULL_TOML}\n[cloudflare.password_hasher]\n{section}\n");
+    let cfg = parse_str(&with(
+        "worker_name = \"hasher\"\nshards = 3\npepper_required = true",
+    ))
+    .resolve(fake_env(&[]))
+    .unwrap();
+    assert_eq!(cfg.password_hasher.worker_name, "hasher");
+    assert_eq!(cfg.password_hasher.shards, 3);
+    assert!(cfg.password_hasher.pepper_required);
+
+    for (section, needle) in [
+        ("shards = 0", "IMPRESSPRESS_PASSWORD_HASHER_SHARDS"),
+        ("shards = 65", "IMPRESSPRESS_PASSWORD_HASHER_SHARDS"),
+        ("worker_name = \"x\"", "must differ"),
+        ("worker_name = \"Upper\"", "lowercase"),
+        ("worker_name = \"-dash\"", "lowercase"),
+    ] {
+        let err = format!(
+            "{:#}",
+            parse_str(&with(section))
+                .resolve(fake_env(&[]))
+                .expect_err(section)
+        );
+        assert!(err.contains(needle), "{section}: {err}");
+    }
+
+    // A default name that runs past Cloudflare's 63 characters is refused,
+    // pointing at the setting that fixes it.
+    let long = "a".repeat(50);
+    let err = format!(
+        "{:#}",
+        parse_str(&FULL_TOML.replace("worker_name = \"x\"", &format!("worker_name = \"{long}\"")))
+            .resolve(fake_env(&[]))
+            .expect_err("too long")
+    );
+    assert!(err.contains("password_hasher.worker_name"), "{err}");
+
+    // A misspelt key is an error, not a silently ignored setting.
+    let tmp = tempdir().unwrap();
+    fs::write(tmp.path().join("impresspress.toml"), with("shard = 3")).unwrap();
+    assert!(parse(tmp.path()).is_err());
 }

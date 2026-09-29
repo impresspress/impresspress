@@ -115,7 +115,7 @@ test.describe("Blog: Storage", () => {
 test.describe("Blog: Admin", () => {
   test("admin endpoints require auth", async ({ request }) => {
     const res = await request.get("/b/admin/api/users");
-    expect(res.status()).toBe(403);
+    expect(res.status()).toBe(401);
   });
 
   test("GET /b/admin/api/users accessible with token", async ({ request }) => {

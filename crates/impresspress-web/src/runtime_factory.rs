@@ -13,7 +13,7 @@
 //! loaded config alive across a swap: the crypto service and `ConfigService`
 //! the new runtime gets are the same allocations the old one held.
 
-use std::{collections::HashMap, sync::Arc};
+use std::sync::Arc;
 
 #[cfg(feature = "browser-devtools")]
 use impresspress_core::blocks::dev::{DevShared, DynamicBlockSpec};
@@ -289,28 +289,18 @@ impl RuntimeFactory {
 
     /// Build + boot one runtime. `dynamic` is empty on cold start.
     ///
-    /// Returns the booted `Wafer` and the storage block the caller needs for
-    /// later WRAP-grant republication; the caller decides whether this runtime
+    /// Returns the booted `Wafer`; the caller decides whether this runtime
     /// becomes the live one (`store_wafer`) or replaces one (`replace_wafer`).
-    pub async fn build(
-        &self,
-        dynamic: &[DynamicBlock],
-    ) -> Result<
-        (
-            wafer_run::Wafer,
-            Arc<impresspress_core::blocks::storage::ImpresspressStorageBlock>,
-        ),
-        JsValue,
-    > {
+    pub async fn build(&self, dynamic: &[DynamicBlock]) -> Result<wafer_run::Wafer, JsValue> {
         #[cfg(not(feature = "browser-devtools"))]
         let _ = dynamic;
 
         // ── Phase 1 ─────────────────────────────────────────────────────────
-        // Build with EMPTY config + EMPTY block_settings + EMPTY ConfigSource.
-        // None of these can be filled from OPFS yet: the
+        // Build with the block_settings already in OPFS, and an EMPTY
+        // ConfigSource. Nothing may be SEEDED yet: the
         // `impresspress__admin__variables` / `impresspress__admin__block_settings`
-        // tables only exist after admin's lazy `lifecycle(Init)` runs its
-        // migrations — and admin can't run until the wafer is built and sealed.
+        // tables are created by admin's lazy `lifecycle(Init)`, and admin can't
+        // run until the wafer is built and sealed.
         //
         // The schema-drift class of bug (#210/#211) came from this crate trying
         // to short-cut that chicken-and-egg with `CREATE TABLE IF NOT EXISTS`
@@ -323,12 +313,37 @@ impl RuntimeFactory {
         // do: defer seeding until *after* `init_block(admin)`. Admin's
         // migration is the single source of schema truth; this crate just reads
         // back what it created.
-
-        // Empty initial BlockSettings — every block defaults to enabled. The
-        // boot hook rewrites this through the handle below once the real
-        // settings are loaded.
-        let initial_block_settings =
-            impresspress_core::features::BlockSettings::from_map(HashMap::new());
+        //
+        // READING what an earlier boot created is another matter, and it has
+        // to happen here, as Cloudflare's builds do: every block's Init —
+        // admin's first — decides whether to run its migrations from the
+        // migration state in block_settings, which it reads off the config
+        // snapshot (`migration_helper::apply_if_blessed`). Built with an empty
+        // snapshot, admin found no state on every boot and re-ran all of its
+        // migrations over a database it had already migrated. `load` never
+        // writes, and on a fresh profile — no table yet — it answers the empty
+        // settings this build used to start from. The boot hook still seeds,
+        // and republishes whatever that changes, after admin's Init.
+        //
+        // And the browser consents to its own migrations, as the native CLI
+        // does with `--run-migrations`: loading a new bundle IS deploying it.
+        // There is no operator step, no `/_deploy/init`, and no other place a
+        // browser install could ever bless a changed migration, so without the
+        // consent a database created by an older bundle would log "schema
+        // drift" and keep its old schema for good. With it, the gate still
+        // skips a block whose recorded hash matches the code, so a migration
+        // runs once per change, not once per boot.
+        let db = impresspress_browser::make_database_service();
+        let initial_block_settings = impresspress_core::platform_state::block_settings::load(&db)
+            .await
+            .map_err(|e| JsValue::from_str(&format!("load block settings: {e}")))?;
+        let mut initial_config = builder::RuntimeConfig::new();
+        initial_config
+            .both(
+                impresspress_core::features::BLOCK_SETTINGS_CONFIG_KEY,
+                initial_block_settings.to_config_json(),
+            )
+            .both(impresspress_core::migration_helper::RUN_MIGRATIONS_KEY, "1");
         // The factory's own `SharedConfigSource`, EMPTY at this point and
         // filled by the boot hook below once admin's migration has created the
         // variables table.
@@ -357,14 +372,51 @@ impl RuntimeFactory {
         // The `mut` on this and on `builder` only bites under
         // `browser-devtools`; without the feature there is no sandbox branch
         // to widen either of them.
-        #[cfg_attr(not(feature = "browser-devtools"), allow(unused_mut))]
+        #[cfg_attr(
+            not(feature = "browser-devtools"),
+            expect(
+                unused_mut,
+                reason = "only the sandbox branch widens it, and that branch is \
+                          `feature = \"browser-devtools\"`-gated"
+            )
+        )]
         let mut security_headers = serde_json::json!({ "csp": self.csp() });
 
-        #[cfg_attr(not(feature = "browser-devtools"), allow(unused_mut))]
-        let mut builder = ImpresspressBuilder::new()
-            .database(impresspress_browser::make_database_service())
-            .storage(impresspress_browser::make_storage_service())
-            .config(self.config_svc.clone())
+        // Both config surfaces, holding only the block settings read above and
+        // the migration consent.
+        // The browser cannot know a single VARIABLE at build time: the
+        // `variables` table does not exist until admin's migration runs, so
+        // every value arrives through `BrowserBootHooks::seed_after_admin_init`,
+        // which publishes it onto both surfaces at once via
+        // `RuntimeConfig::republish`.
+        // Going through `install` even with nothing to install is what keeps
+        // the async `ConfigService` and the synchronous snapshot in one
+        // owner's hands — the builder has no other way to receive a
+        // `ConfigService`.
+        //
+        // `fill_config_service` rather than a closure that ignores its
+        // argument: this handle is filled by `set`, so the map must be written
+        // through it. Discarding the map was correct only for as long as the
+        // `RuntimeConfig` above stayed empty — the first `both()` added here
+        // would otherwise reach the snapshot and be dropped from the async
+        // surface, silently.
+        let config_svc = self.config_svc.clone();
+        let (with_config, ()) = initial_config.install(
+            ImpresspressBuilder::new()
+                .database(impresspress_browser::make_database_service())
+                .storage(impresspress_browser::make_storage_service()),
+            |map| (builder::fill_config_service(config_svc, map), ()),
+        );
+
+        #[cfg_attr(
+            not(feature = "browser-devtools"),
+            expect(
+                unused_mut,
+                reason = "only the sandbox branch extends it, and that branch is \
+                          `feature = \"browser-devtools\"`-gated"
+            )
+        )]
+        let mut builder = with_config
             .crypto(crypto_svc)
             .network(impresspress_browser::make_network_service())
             .logger(impresspress_browser::make_console_logger())
@@ -400,18 +452,10 @@ impl RuntimeFactory {
             // *the* gate ("the router — not any check inside any handler").
             // An unrouted block has no HTTP surface at all.
             //
-            // `arc_with_non_send_sync`: `DevShared` holds an
-            // `Arc<dyn RuntimeControl>`, whose `MaybeSend + MaybeSync` bound is
-            // unbounded on wasm32 so the browser control can hold the live
-            // `Rc<Wafer>`. `extra_block` takes an `Arc<dyn Block>` regardless,
-            // and wasm32 is single-threaded — the same allowance the rest of
-            // the block registration path carries.
-            //
             // Which constructor is the mode itself: both register the block,
             // but only the workspace one routes `/b/dev` below, and only it
             // may therefore declare that surface in its `BlockInfo` — see
             // `DevBlock::runtime_only`.
-            #[allow(clippy::arc_with_non_send_sync)]
             let dev_block: Arc<dyn wafer_run::Block> = Arc::new(if self.mode.workspace() {
                 dev::DevBlock::with_workspace(dev.clone())
             } else {
@@ -473,6 +517,11 @@ impl RuntimeFactory {
                 // The `/b/dev` page previews the live site in a same-origin
                 // iframe. An exported site frames nothing.
                 security_headers["frame_ancestors"] = serde_json::json!("self");
+                // The compiler worker spawns blob-URL subordinate workers. The
+                // operator `csp` cannot grant `blob:` in `worker-src` — the
+                // block refuses it there — so the embedder asks the block
+                // itself, which adds exactly that source and nothing else.
+                security_headers["allow_blob_workers"] = serde_json::json!(true);
                 // `/b/dev` is cross-origin isolated (COOP + COEP) for the
                 // compiler's `SharedArrayBuffer`, and a COEP document can only
                 // embed nested documents that carry a compatible COEP themselves
@@ -503,14 +552,14 @@ impl RuntimeFactory {
         // the crypto service that signs with it.
         let jwt_secret_handle = builder.jwt_secret_handle();
 
-        let (mut wafer, storage_block) = builder
+        let mut wafer = builder
             .build()
             .map_err(|e| JsValue::from_str(&e.to_string()))?;
         wafer.set_asset_loader(&impresspress_browser::make_sw_asset_loader());
 
         // ── Phase 2 ─────────────────────────────────────────────────────────
-        // Run the shared boot funnel: seal → init_block(admin) →
-        // seed_after_admin_init → init_all_blocks → post_start.
+        // Run the shared boot funnel: grants → seal → init_block(admin) →
+        // seed_after_admin_init → the remaining blocks.
         //
         // admin's `lifecycle(Init)` runs FIRST so its migrations create the
         // canonical `impresspress__admin__variables` + `block_settings` tables
@@ -520,7 +569,7 @@ impl RuntimeFactory {
         // `BrowserBootHooks`), all over `BrowserDatabaseService` rather than
         // the old bridge raw-SQL strings.
         let hooks = crate::BrowserBootHooks {
-            db: impresspress_browser::make_database_service(),
+            db: db.clone(),
             config_svc: self.config_svc.clone(),
             config_source: self.config_source.clone(),
             block_settings_handle,
@@ -528,11 +577,24 @@ impl RuntimeFactory {
             crypto: self.crypto.clone(),
             mode: self.mode,
         };
-        builder::boot(&mut wafer, &storage_block, &hooks)
-            .await
-            .map_err(|e| JsValue::from_str(&format!("boot: {e}")))?;
+        builder::boot(
+            &mut wafer,
+            &hooks,
+            // The admin permissions page is served in the browser too, so the
+            // rows it writes are this runtime's deployment-owned grants. The
+            // browser used to be the one target that never read them — not by
+            // decision, but because the grant call was a separate statement
+            // every caller had to remember. On a fresh profile the table does
+            // not exist yet and `load` degrades to no grants.
+            builder::GrantSource::Database(&db),
+            // A browser runtime is long-lived and inspectable (and rebuilt on
+            // demand), so one broken block must not wedge the whole page.
+            builder::InitPolicy::Tolerant,
+        )
+        .await
+        .map_err(|e| JsValue::from_str(&format!("boot: {e}")))?;
 
-        Ok((wafer, storage_block))
+        Ok(wafer)
     }
 
     /// The `Content-Security-Policy` every response is served under.
@@ -548,10 +610,10 @@ impl RuntimeFactory {
     fn csp(&self) -> String {
         let mut csp = crate::IMPRESSPRESS_CSP.to_string();
         if self.mode.workspace() {
-            // The compiler worker (a same-origin module worker that spawns
-            // blob-URL subordinate workers) and the live-site preview iframe
-            // on `/b/dev`.
-            csp.push_str("; worker-src 'self' blob:; frame-src 'self'");
+            // The compiler worker (a same-origin module worker; its blob-URL
+            // subordinate workers come from `allow_blob_workers`) and the
+            // live-site preview iframe on `/b/dev`.
+            csp.push_str("; worker-src 'self'; frame-src 'self'");
         }
         csp
     }

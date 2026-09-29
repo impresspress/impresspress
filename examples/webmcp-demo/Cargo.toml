@@ -17,11 +17,16 @@ crate-type = ["cdylib", "rlib"]
 [features]
 default = []
 # The deploy CLI builds with `--no-default-features --features target-cloudflare`.
-target-cloudflare = ["dep:impresspress-cloudflare", "dep:worker", "dep:wasm-bindgen"]
+target-cloudflare = ["dep:impresspress-cloudflare", "dep:impresspress-core", "dep:worker", "dep:wasm-bindgen"]
 
 [dependencies]
 # `block-products` is what carries the six WebMCP storefront tools; the
 # always-on core (auth, auth-ui, admin, email, system) needs no feature.
 impresspress-cloudflare = { path = "../../crates/impresspress-cloudflare", optional = true, default-features = false, features = ["block-products"] }
+# For the bootstrap-admin config keys `src/lib.rs` forwards; adds no feature.
+impresspress-core = { path = "../../crates/impresspress-core", optional = true, default-features = false }
 worker = { workspace = true, optional = true }
 wasm-bindgen = { version = "0.2", optional = true }
+
+[lints]
+workspace = true

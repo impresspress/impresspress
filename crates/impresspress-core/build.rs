@@ -35,54 +35,104 @@ const CSS_ORDER: &[&str] = &[
     "styles/layouts/auth-split.css",
 ];
 
-/// Single-file assets: (relative path under src/ui, logical key, content type).
+/// Single-file assets: (path relative to `src/`, logical key, content type).
+///
+/// Paths are rooted at `src/`, not at `src/ui`, because an asset lives with
+/// whoever owns it: the shared chrome's under `ui/assets/`, a block's under
+/// `blocks/<block>/assets/`. The manifest is still one list, and still
+/// unconditional — every file on disk gets a hash and a content-addressed
+/// filename whatever the Cargo feature set is, because `/b/static/{filename}`
+/// must resolve identically for an R2/CDN deployment that publishes from one
+/// build and serves from another. Only the *bytes* are feature-gated, and
+/// those are declared by the owning module (see `ui::assets::bytes` and
+/// `blocks::static_asset_bytes`).
 const FILE_ASSETS: &[(&str, &str, &str)] = &[
     (
-        "assets/htmx.min.js",
+        "ui/assets/htmx.min.js",
         "htmx.min.js",
         "application/javascript; charset=utf-8",
     ),
     (
-        "assets/marked.min.js",
+        "ui/assets/chrome.js",
+        "chrome.js",
+        "application/javascript; charset=utf-8",
+    ),
+    (
+        "blocks/llm/assets/marked.min.js",
         "marked.min.js",
         "application/javascript; charset=utf-8",
     ),
     (
-        "assets/purify.min.js",
+        "blocks/llm/assets/purify.min.js",
         "purify.min.js",
         "application/javascript; charset=utf-8",
     ),
     (
-        "assets/llm-chat.js",
+        "blocks/llm/assets/llm-chat.js",
         "llm-chat.js",
         "application/javascript; charset=utf-8",
     ),
     (
-        "assets/files-browser.js",
+        "blocks/files/assets/files-browser.js",
         "files-browser.js",
         "application/javascript; charset=utf-8",
     ),
     (
-        "assets/fonts/itim-latin.woff2",
+        "blocks/products/assets/products-wizard.js",
+        "products-wizard.js",
+        "application/javascript; charset=utf-8",
+    ),
+    (
+        "blocks/products/assets/products-manager.js",
+        "products-manager.js",
+        "application/javascript; charset=utf-8",
+    ),
+    (
+        "blocks/products/assets/products-catalog-admin.js",
+        "products-catalog-admin.js",
+        "application/javascript; charset=utf-8",
+    ),
+    (
+        "blocks/products/assets/products-seller-admin.js",
+        "products-seller-admin.js",
+        "application/javascript; charset=utf-8",
+    ),
+    (
+        "blocks/products/assets/products-stripe-setup.js",
+        "products-stripe-setup.js",
+        "application/javascript; charset=utf-8",
+    ),
+    (
+        "blocks/products/assets/products-commerce-portal.js",
+        "products-commerce-portal.js",
+        "application/javascript; charset=utf-8",
+    ),
+    (
+        "blocks/products/assets/products-order-detail.js",
+        "products-order-detail.js",
+        "application/javascript; charset=utf-8",
+    ),
+    (
+        "ui/assets/fonts/itim-latin.woff2",
         "itim-latin.woff2",
         "font/woff2",
     ),
     (
-        "assets/fonts/itim-latin-ext.woff2",
+        "ui/assets/fonts/itim-latin-ext.woff2",
         "itim-latin-ext.woff2",
         "font/woff2",
     ),
     (
-        "assets/impresspress-logo.png",
+        "ui/assets/impresspress-logo.png",
         "impresspress-logo.png",
         "image/png",
     ),
     (
-        "assets/impresspress-logo-2x.png",
+        "ui/assets/impresspress-logo-2x.png",
         "impresspress-logo-2x.png",
         "image/png",
     ),
-    ("assets/favicon.ico", "favicon.ico", "image/x-icon"),
+    ("ui/assets/favicon.ico", "favicon.ico", "image/x-icon"),
 ];
 
 /// The WebMCP script is COMPOSED, not served raw.
@@ -97,8 +147,8 @@ const FILE_ASSETS: &[(&str, &str, &str)] = &[
 /// served. Hashing at runtime cannot work at all without `embed-assets` --
 /// the bytes are not in the binary, so there is nothing left to hash, yet the
 /// content-hashed URL still has to resolve.
-const WEBMCP_CORE: &str = "assets/webmcp-core.js";
-const WEBMCP_TAIL: &str = "assets/webmcp.js";
+const WEBMCP_CORE: &str = "ui/assets/webmcp-core.js";
+const WEBMCP_TAIL: &str = "ui/assets/webmcp.js";
 
 /// Wrap the shared core and a tail in one IIFE.
 ///
@@ -127,14 +177,15 @@ fn hashed_name(logical: &str, hash: &str) -> String {
 }
 
 fn main() {
-    let ui = PathBuf::from("src/ui");
+    let src_root = PathBuf::from("src");
+    let ui = src_root.join("ui");
     let out = PathBuf::from(env::var("OUT_DIR").expect("OUT_DIR"));
     let mut entries: Vec<(String, String, String, String, usize)> = Vec::new();
 
     // --- single files -----------------------------------------------------
     let mut font_names = Vec::new();
     for (rel, logical, ct) in FILE_ASSETS {
-        let path = ui.join(rel);
+        let path = src_root.join(rel);
         println!("cargo:rerun-if-changed={}", path.display());
         let bytes =
             fs::read(&path).unwrap_or_else(|e| panic!("missing asset {}: {e}", path.display()));
@@ -147,8 +198,8 @@ fn main() {
     }
 
     // --- composed WebMCP script ------------------------------------------
-    let core_path = ui.join(WEBMCP_CORE);
-    let tail_path = ui.join(WEBMCP_TAIL);
+    let core_path = src_root.join(WEBMCP_CORE);
+    let tail_path = src_root.join(WEBMCP_TAIL);
     println!("cargo:rerun-if-changed={}", core_path.display());
     println!("cargo:rerun-if-changed={}", tail_path.display());
     let core = fs::read_to_string(&core_path)

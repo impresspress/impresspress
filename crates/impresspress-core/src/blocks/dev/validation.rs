@@ -105,11 +105,13 @@ pub const ENDPOINT_OUTSIDE_ROUTES: &str = "endpoint-outside-routes";
 pub const ENDPOINTS_EMPTY: &str = "endpoints-empty";
 /// An agent tool name is already claimed.
 pub const TOOL_NAME_DUPLICATE: &str = "tool-name-duplicate";
-/// A declared collection is outside `site__{name}__*`.
+/// A declared collection is outside `site__{name}__*` (a hyphen in `name`
+/// spelled `_`), or is not a plain `[a-z0-9_]` identifier.
 pub const CAP_COLLECTION: &str = "cap-collection";
 /// A declared storage folder is outside `site/{name}`.
 pub const CAP_FOLDER: &str = "cap-folder";
-/// A declared config key is outside `SITE__{NAME}__*`.
+/// A declared config key is outside `SITE__{NAME}__*` (a hyphen in `name`
+/// spelled `_`).
 pub const CAP_CONFIG: &str = "cap-config";
 /// The guest declared `raw_sql`.
 pub const CAP_RAW_SQL: &str = "cap-raw-sql";
@@ -247,15 +249,18 @@ impl Diagnostic {
     /// `BlockInfo` that does not parse — says nothing about the cause.
     ///
     /// Refused before the artifact is stored or executed: the version is
-    /// knowable without running anything, and the fix ("rescaffold, then
-    /// recompile") does not depend on what the module would have reported.
+    /// knowable without running anything, and the fix (replace the module,
+    /// then recompile) does not depend on what the module would have
+    /// reported.
     pub fn stale_guest_module(reported: u32, current: u32) -> Self {
         Self::error(
             WAFER_GUEST_VERSION_CODE,
             format!(
                 "the artifact was compiled against wafer_guest.rs version {reported}; this \
-                 sandbox writes and speaks version {current}. Re-create the block with \
-                 `dev_create_block` (it rewrites src/wafer_guest.rs) and compile again."
+                 sandbox writes and speaks version {current}. Replace the block's \
+                 src/wafer_guest.rs with the current module (`wafer_guest_module` in \
+                 GET /b/dev/api/reference) and compile again; the block's own files are \
+                 unchanged."
             ),
         )
     }
@@ -796,9 +801,15 @@ fn check_capabilities(
         masked: _masked,
     } = headers;
 
-    let collection_prefix = format!("site__{name}__");
     let folder = format!("site/{name}");
-    let config_prefix = format!("SITE__{}__", name.to_uppercase());
+    // The runtime's own spelling of the block's resource namespace, never a
+    // restatement of it: `site/my-shop` owns `site__my_shop__*` collections
+    // and `SITE__MY_SHOP__*` config keys. A hyphen cannot appear there — the
+    // database strips it from a table name before building SQL, so
+    // `site__my-shop__notes` would be authorized as `site/my-shop`'s and then
+    // read and written as `site__myshop__notes`, the table of guest `myshop`.
+    let collection_prefix = collection_prefix(name);
+    let config_prefix = collection_prefix.to_uppercase();
 
     check_allowlist(
         collections,
@@ -808,6 +819,23 @@ fn check_capabilities(
         |entry| entry.starts_with(&collection_prefix),
         found,
     );
+    // Inside the namespace is not enough: the name reaching SQL must be the
+    // name that was authorized, byte for byte, and only a plain identifier
+    // survives the database's identifier handling unchanged.
+    if let Allowlist::Only(entries) = collections {
+        for entry in entries
+            .iter()
+            .filter(|entry| !is_plain_collection_name(entry))
+        {
+            found.push(Diagnostic::error(
+                CAP_COLLECTION,
+                format!(
+                    "the collection {entry:?} is not a plain identifier; a collection name is \
+                     lowercase letters, digits and `_` only"
+                ),
+            ));
+        }
+    }
     check_allowlist(
         storage_folders,
         CAP_FOLDER,
@@ -951,6 +979,22 @@ fn check_allowlist(
             }
         }
     }
+}
+
+/// The collection prefix guest `name` owns: `site__{name}__`, a hyphen in
+/// `name` spelled `_` — [`wrap::resource_prefix`] of the block id, which is
+/// the prefix WRAP's own-namespace rule maps back to `site/{name}`.
+pub fn collection_prefix(name: &str) -> String {
+    wrap::resource_prefix(&format!("site/{name}"))
+}
+
+/// Whether `entry` is a collection name the database uses as written:
+/// non-empty, ASCII lowercase letters, digits and `_`.
+fn is_plain_collection_name(entry: &str) -> bool {
+    !entry.is_empty()
+        && entry
+            .bytes()
+            .all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')
 }
 
 /// Refuse a `callable_blocks` set that does not equal `requires`.
@@ -1211,6 +1255,73 @@ mod tests {
         assert!(spec.capabilities.schema);
         assert!(spec.capabilities.allows_collection("site__hello__notes"));
         assert!(spec.capabilities.allows_storage_folder("site/hello/a.json"));
+    }
+
+    /// A hyphenated guest's namespace is the runtime's spelling of it:
+    /// `site/my-shop` owns `site__my_shop__*` and `SITE__MY_SHOP__*`, which
+    /// WRAP maps back to `site/my-shop` and the database uses as written.
+    #[test]
+    fn a_hyphenated_guest_claims_the_underscore_spelled_namespace() {
+        let mut declared = info("site/my-shop");
+        declared.requires = vec!["wafer-run/database".to_string()];
+        declared.capabilities = Some(BlockCapabilities {
+            collections: Allowlist::Only(BTreeSet::from(["site__my_shop__notes".to_string()])),
+            schema: true,
+            config: Allowlist::Only(BTreeSet::from(["SITE__MY_SHOP__GREETING".to_string()])),
+            callable_blocks: Allowlist::Only(BTreeSet::from(["wafer-run/database".to_string()])),
+            ..BlockCapabilities::none()
+        });
+        let spec = run("my-shop", &declared).expect("the underscore spelling is the guest's own");
+        assert!(spec.capabilities.allows_collection("site__my_shop__notes"));
+        assert_eq!(
+            wrap::resource_owner("site__my_shop__notes").as_deref(),
+            Some("site/my-shop"),
+        );
+        assert_eq!(
+            wrap::resource_owner("SITE__MY_SHOP__GREETING").as_deref(),
+            Some("site/my-shop"),
+        );
+    }
+
+    /// The hyphenated spelling is refused for both: as a collection it is
+    /// read and written as `site__myshop__*` — another guest's tables — and
+    /// as a config key it is not the prefix the runtime derives for the id.
+    /// So is a twin guest's namespace.
+    #[test]
+    fn a_hyphenated_guest_cannot_claim_the_hyphen_or_the_twin_spelling() {
+        for (collection, config) in [
+            ("site__my-shop__notes", "SITE__MY-SHOP__GREETING"),
+            ("site__myshop__notes", "SITE__MYSHOP__GREETING"),
+        ] {
+            let mut declared = info("site/my-shop");
+            declared.capabilities = Some(BlockCapabilities {
+                collections: Allowlist::Only(BTreeSet::from([collection.to_string()])),
+                config: Allowlist::Only(BTreeSet::from([config.to_string()])),
+                ..BlockCapabilities::none()
+            });
+            let result = run("my-shop", &declared);
+            let found = codes(&result);
+            assert!(found.contains(&CAP_COLLECTION), "{collection}: {found:?}");
+            assert!(found.contains(&CAP_CONFIG), "{config}: {found:?}");
+        }
+    }
+
+    /// Inside the namespace but not a plain identifier: the suffix would be
+    /// stripped on the way to SQL, so the table used is not the one claimed.
+    #[test]
+    fn a_collection_that_is_not_a_plain_identifier_is_refused() {
+        for collection in ["site__hello__my-notes", "site__hello__Notes"] {
+            let mut declared = info("site/hello");
+            declared.capabilities = Some(BlockCapabilities {
+                collections: Allowlist::Only(BTreeSet::from([collection.to_string()])),
+                ..BlockCapabilities::none()
+            });
+            let result = run("hello", &declared);
+            assert!(
+                codes(&result).contains(&CAP_COLLECTION),
+                "{collection}: {result:?}"
+            );
+        }
     }
 
     #[test]

@@ -2,22 +2,23 @@ import { expect, test, type Page, type Route } from "@playwright/test";
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
-const pagesPath = fileURLToPath(
-  new URL(
-    "../../../impresspress-core/src/blocks/products/pages.rs",
-    import.meta.url,
-  ),
+const bundlesUrl = new URL(
+  "../../../impresspress-core/src/blocks/products/assets/",
+  import.meta.url,
 );
-const adminOrigin = "https://admin.example";
 
-function stripeSetupScript() {
-  const source = readFileSync(pagesPath, "utf8");
-  const match = source.match(
-    /fn stripe_setup_js\(\) -> &'static str \{\s*r#"\n([\s\S]*?)\n"#\s*\}/,
-  );
-  if (!match) throw new Error("Could not extract stripe_setup_js from pages.rs");
-  return match[1];
+/**
+ * A products browser bundle, read from the very file the server serves at
+ * `/b/static/products-*.js`. These used to be Rust string constants dug out
+ * of `pages.rs` with a regular expression; they are real files now, so the
+ * spec reads the file — the same way `products-storefront.spec.ts` has always
+ * read `storefront.js`.
+ */
+function bundle(name: string) {
+  return readFileSync(fileURLToPath(new URL(name, bundlesUrl)), "utf8");
 }
+
+const adminOrigin = "https://admin.example";
 
 function webhookEvent(
   overrides: Partial<Record<string, unknown>> = {},
@@ -69,32 +70,32 @@ async function json(route: Route, body: unknown, status = 200) {
 
 async function openWebhookOperations(page: Page) {
   await page.goto(`${adminOrigin}/b/products/admin/stripe`);
-  await page.addScriptTag({ content: stripeSetupScript() });
+  await page.addScriptTag({ content: bundle("products-stripe-setup.js") });
 }
 
 const operationsHtml = `<!doctype html>
 <html>
   <body>
-    <button id="stripe-test-button" type="button" onclick="testStripeConnection()">Test connection</button>
+    <button id="stripe-test-button" type="button" data-action="ps-test-connection">Test connection</button>
     <span id="stripe-state"></span>
     <p id="stripe-error"></p>
     <section aria-label="Webhook delivery health">
       <label for="stripe-webhook-filter">Status</label>
-      <select id="stripe-webhook-filter" onchange="loadStripeWebhookEvents()">
+      <select id="stripe-webhook-filter" data-action="ps-load-webhooks">
         <option value="dead_letter" selected>Needs manual review</option>
         <option value="failed">Waiting to retry</option>
         <option value="processing">Processing</option>
         <option value="processed">Processed</option>
         <option value="">All events</option>
       </select>
-      <button type="button" onclick="loadStripeWebhookEvents()">Refresh</button>
+      <button type="button" data-action="ps-load-webhooks">Refresh</button>
       <p id="stripe-webhook-summary" aria-live="polite"></p>
       <p id="stripe-webhook-error" role="alert" aria-live="assertive" hidden></p>
       <div id="stripe-webhook-events" aria-live="polite">Loading webhook events…</div>
     </section>
     <section aria-label="Provider reconciliation">
       <label for="stripe-provider-filter">Status</label>
-      <select id="stripe-provider-filter" onchange="loadStripeProviderOperations()">
+      <select id="stripe-provider-filter" data-action="ps-load-provider-ops">
         <option value="dead_letter" selected>Needs manual review</option>
         <option value="failed">Waiting to retry</option>
         <option value="pending">Pending</option>
@@ -102,8 +103,8 @@ const operationsHtml = `<!doctype html>
         <option value="succeeded">Succeeded</option>
         <option value="">All operations</option>
       </select>
-      <button id="stripe-provider-reconcile" type="button" onclick="reconcileStripeProviderOperations(this)">Reconcile due operations</button>
-      <button type="button" onclick="loadStripeProviderOperations()">Refresh</button>
+      <button id="stripe-provider-reconcile" type="button" data-action="ps-reconcile">Reconcile due operations</button>
+      <button type="button" data-action="ps-load-provider-ops">Refresh</button>
       <p id="stripe-provider-summary" aria-live="polite"></p>
       <p id="stripe-provider-reconcile-result" role="status" aria-live="polite"></p>
       <p id="stripe-provider-error" role="alert" aria-live="assertive" hidden></p>
@@ -398,7 +399,13 @@ test.describe("products admin webhook recovery", () => {
         url.pathname === "/b/products/api/admin/provider-operations/reconcile"
       ) {
         reconciled = true;
-        return json(route, { claimed: 1, succeeded: 1, retry_scheduled: 0, dead_letter: 0 });
+        return json(route, {
+          claimed: 1,
+          succeeded: 1,
+          retry_scheduled: 0,
+          dead_letter: 0,
+          unrecorded: 1,
+        });
       }
       return json(route, { message: "Unexpected route" }, 404);
     });
@@ -414,7 +421,8 @@ test.describe("products admin webhook recovery", () => {
 
     await operations.getByRole("button", { name: "Reconcile due operations" }).click();
     await expect(operations.getByRole("status")).toHaveText(
-      "Claimed 1; completed 1; retry scheduled 0; manual review 0.",
+      "Claimed 1; completed 1; retry scheduled 0; manual review 0. " +
+        "1 could not be recorded and will be retried; see the server log.",
     );
     await expect(operations).toContainText("No matching provider operations.");
     await expect(operations.getByRole("button", { name: "Reconcile due operations" })).toBeEnabled();
@@ -424,5 +432,81 @@ test.describe("products admin webhook recovery", () => {
         url: `${adminOrigin}/b/products/api/admin/provider-operations/reconcile?limit=50`,
       },
     ]);
+  });
+
+  /**
+   * The two filter dropdowns deliberately carry the SAME verbs as their Refresh
+   * buttons, and the click delegate resolves `closest('[data-action]')` — which
+   * matches the `<select>` itself. So a click that merely opened the dropdown
+   * used to fire a load with the value the user was on their way to changing,
+   * and choosing an option fired a second one. Two loads in flight, both
+   * replacing the list wholesale, and nothing deciding which of them wins.
+   *
+   * The click branch now acts only on the buttons, and each loader takes a
+   * ticket so a superseded response is dropped instead of painted. This case
+   * asserts both halves: opening the dropdown issues nothing, and a first load
+   * that is still in flight when the user changes the filter does not repaint
+   * the list it lost the race for.
+   */
+  test("a filter dropdown loads on change only, and an overtaken response never paints", async ({
+    page,
+  }) => {
+    const webhookQueries: string[] = [];
+    let firstWebhookLoad = true;
+
+    await page.route(`${adminOrigin}/**`, async (route) => {
+      const request = route.request();
+      const url = new URL(request.url());
+      if (request.resourceType() === "document") {
+        return route.fulfill({
+          status: 200,
+          contentType: "text/html",
+          body: operationsHtml,
+        });
+      }
+      if (url.pathname === "/b/products/api/admin/webhook-events") {
+        const status = url.searchParams.get("status") ?? "";
+        webhookQueries.push(status);
+        // The page's own first load, on the default `dead_letter` filter,
+        // answers slowly — so it lands AFTER the load the user's change
+        // starts. Without the ticket it would repaint with the filter the
+        // user has already left.
+        if (firstWebhookLoad) {
+          firstWebhookLoad = false;
+          await new Promise((resolve) => setTimeout(resolve, 1200));
+        }
+        return json(route, {
+          records: [webhookEvent({ id: `evt_${status || "all"}` })],
+          total_count: status === "dead_letter" ? 11 : 22,
+          page: 1,
+          page_size: 50,
+        });
+      }
+      if (url.pathname === "/b/products/api/admin/provider-operations") {
+        return json(route, { records: [], total_count: 0, page: 1, page_size: 50 });
+      }
+      return json(route, { message: "unexpected request" }, 404);
+    });
+
+    await openWebhookOperations(page);
+
+    // Opening the dropdown is a click on an element carrying the verb.
+    await page.locator("#stripe-webhook-filter").click();
+    await page.waitForTimeout(250);
+    expect(webhookQueries).toEqual(["dead_letter"]);
+
+    // Choosing an option is the one event that loads.
+    await page.selectOption("#stripe-webhook-filter", "failed");
+    await expect(page.locator("#stripe-webhook-summary")).toHaveText(
+      "22 events match this filter.",
+    );
+    expect(webhookQueries).toEqual(["dead_letter", "failed"]);
+
+    // The overtaken first load lands here. It must change nothing.
+    await page.waitForTimeout(1500);
+    await expect(page.locator("#stripe-webhook-summary")).toHaveText(
+      "22 events match this filter.",
+    );
+    expect(webhookQueries).toEqual(["dead_letter", "failed"]);
   });
 });

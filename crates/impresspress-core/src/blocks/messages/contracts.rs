@@ -26,6 +26,73 @@
 
 use serde::{Deserialize, Serialize};
 
+/// What an entry *is*: the `kind` column of `impresspress__messages__entries`.
+///
+/// The four values the block has always documented (`contracts.rs`'s old
+/// `"Entry kind: message, artifact, notification, status."`, the composer's
+/// four `<option>`s and the `?kind=` filter's description), now spelled
+/// once. The column is `TEXT NOT NULL DEFAULT 'message'`
+/// (`migrations/001_messages_schema.sqlite.sql`), which is why
+/// [`EntryKind::message`] is the serde default too: an omitted `kind`
+/// stored `"message"` before this type existed and stores it still.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryKind {
+    Message,
+    Artifact,
+    Notification,
+    Status,
+}
+
+impl EntryKind {
+    /// The `kind` an entry gets when the request body omits one — the same
+    /// value the column's own `DEFAULT` clause supplies.
+    pub const fn message() -> Self {
+        Self::Message
+    }
+}
+
+/// Who produced an entry: the `role` column of
+/// `impresspress__messages__entries`.
+///
+/// **This type is B20.** The block documented four spellings of three roles
+/// — its composer offered `agent`, `blocks::llm` wrote `assistant` — and
+/// nothing reconciled them, so `llm::routes::chat::role_from_str` mapped
+/// every value it did not recognise (`agent` included) onto
+/// `ChatRole::User`. An agent's own turn was replayed to the model as the
+/// user's next instruction. There is now one type, `blocks::llm` matches it
+/// exhaustively, and a variant added here cannot silently become a user
+/// turn: the match stops compiling instead.
+///
+/// `assistant` is the canonical spelling because it is what `blocks::llm`
+/// has been storing and what `wafer_core::clients::llm::ChatRole` already
+/// names. `agent` survives as a deserialisation alias, so both the rows
+/// already in the table and any client still sending it keep working — they
+/// are simply read, and re-published, as `assistant`. No stored row is
+/// rewritten.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(rename_all = "snake_case")]
+pub enum EntryRole {
+    User,
+    #[serde(alias = "agent")]
+    Assistant,
+    System,
+}
+
+impl EntryRole {
+    /// The `role` an entry gets when the request body omits one.
+    ///
+    /// The column's `DEFAULT` is `''`, and an empty role is invisible to the
+    /// model: `llm::routes::chat::history_to_messages` drops every entry
+    /// whose role does not parse. So the block's own default silently
+    /// excluded the entry from the conversation it was posted into. An
+    /// omitted role now stores `user`, which is what a body carrying only
+    /// `content` has always meant.
+    pub const fn user() -> Self {
+        Self::User
+    }
+}
+
 /// `POST /b/messages/api/contexts` request body.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct CreateContextRequest {
@@ -56,12 +123,13 @@ pub struct UpdateContextRequest {
 /// `POST /b/messages/api/contexts/{id}/entries` request body.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct AddEntryRequest {
-    /// Entry kind: message, artifact, notification, status.
-    #[serde(default = "default_entry_kind")]
-    pub kind: String,
-    /// Sender role: user, agent, system.
-    #[serde(default)]
-    pub role: String,
+    /// What this entry is.
+    #[serde(default = "EntryKind::message")]
+    pub kind: EntryKind,
+    /// Who produced it. `agent` is accepted as an alias of `assistant` and
+    /// is stored as `assistant`.
+    #[serde(default = "EntryRole::user")]
+    pub role: EntryRole,
     #[serde(default)]
     pub sender_id: String,
     #[serde(default)]
@@ -77,10 +145,6 @@ pub struct AddEntryRequest {
     #[serde(default = "default_content_type")]
     pub content_type: Option<String>,
     pub metadata: Option<serde_json::Value>,
-}
-
-fn default_entry_kind() -> String {
-    "message".to_string()
 }
 
 fn default_content_type() -> Option<String> {

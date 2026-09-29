@@ -11,6 +11,10 @@ use crate::cli::{
 };
 
 pub async fn build(repo_root: &Path, release: bool) -> Result<()> {
+    // A malformed `impresspress.toml` fails the build here, before `dist/` is
+    // wiped; only an absent file means "every knob at its default".
+    let cfg = config::find_and_load(repo_root)?;
+
     // 1. Discover and build user blocks (if any).
     blocks::build_all(repo_root).await?;
 
@@ -42,7 +46,6 @@ pub async fn build(repo_root: &Path, release: bool) -> Result<()> {
     // 4. Run the bundler — content-hash assets + render templates.
     //    This calls impresspress_bundle::bundle::run, which writes the
     //    static shell (index.html, sw.js, loader.js) into dist/.
-    let cfg = config::find_and_load(repo_root).ok();
     let app = match cfg.as_ref() {
         Some((c, _)) => impresspress_bundle::bundle::AppConfig {
             app_name: Some(c.app.name.clone()),

@@ -19,7 +19,7 @@
 
 /// The canonical support module, compiled for the host.
 ///
-/// It carries its own `#![allow(dead_code)]` — a template uses only part of
+/// It carries its own `#![expect(dead_code)]` — a template uses only part of
 /// the API — so this declaration must not add a second one.
 #[path = "../src/blocks/dev/templates/wafer_guest.rs"]
 mod wafer_guest;
@@ -32,12 +32,20 @@ mod wafer_guest;
 /// template's own symlinked copy when it is compiled as a block crate's root.
 /// One line, two contexts, no cfg on the import.
 #[path = "../src/blocks/dev/templates/hello/src/lib.rs"]
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "a template exports a whole guest ABI; this test reads only the \
+              part it compares"
+)]
 mod hello_template;
 
 /// The `table` template's `src/lib.rs`. See [`hello_template`].
 #[path = "../src/blocks/dev/templates/table/src/lib.rs"]
-#[allow(dead_code)]
+#[expect(
+    dead_code,
+    reason = "a template exports a whole guest ABI; this test reads only the \
+              part it compares"
+)]
 mod table_template;
 
 use wafer_guest::json::Json;
@@ -56,7 +64,9 @@ fn rendered_block_info_parses_and_matches_the_typed_builder() {
 
     assert_eq!(parsed.name, "site/newsletter");
     assert_eq!(parsed.interface, "http-handler@v1");
-    parsed.validate().expect("a valid BlockInfo");
+    parsed
+        .validate("site/newsletter")
+        .expect("a valid BlockInfo");
 
     let subscribe = parsed
         .endpoints
@@ -113,7 +123,7 @@ fn a_block_that_claims_nothing_is_fully_sandboxed() {
     let parsed: wafer_block::BlockInfo = serde_json::from_str(&rendered)
         .unwrap_or_else(|e| panic!("BlockInfo JSON ({e}): {rendered}"));
     assert_eq!(parsed.name, "site/hello");
-    parsed.validate().expect("a valid BlockInfo");
+    parsed.validate("site/hello").expect("a valid BlockInfo");
     assert!(parsed.requires.is_empty());
 
     let caps = parsed.capabilities.as_ref().expect("capabilities");

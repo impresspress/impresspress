@@ -1,0 +1,67 @@
+# Files that carry history-narrating comments today, one line per file:
+#
+#     <count><TAB><path>
+#
+# The count is of comment LINES: a line is counted once however many of the
+# shapes it carries. This is a ratchet, enforced by
+# `scripts/check-doc-pointers.sh`. A file that is not listed here must carry
+# none, so a new file cannot narrate its way in. A listed file may not exceed
+# its count, and when the count drops the number here must drop with it — so
+# every line can only shrink. Delete the line when the file is clean.
+#
+# Nothing is granted a permanent exemption: each line is a comment that has
+# not been rewritten yet. Rewrite them when you touch the file. Say what the
+# code does; the history is in `git log`.
+1	crates/impresspress-cloudflare/src/crypto_service.rs
+1	crates/impresspress-cloudflare/src/runtime_cache.rs
+1	crates/impresspress-core/Cargo.toml
+1	crates/impresspress-core/src/blocks/admin/migrations/mod.rs
+5	crates/impresspress-core/src/blocks/admin/mod.rs
+1	crates/impresspress-core/src/blocks/admin/pages/blocks.rs
+1	crates/impresspress-core/src/blocks/admin/pages/settings.rs
+2	crates/impresspress-core/src/blocks/admin/settings.rs
+1	crates/impresspress-core/src/blocks/auth/mod.rs
+1	crates/impresspress-core/src/blocks/auth/service.rs
+1	crates/impresspress-core/src/blocks/auth_ui/api/api_keys.rs
+1	crates/impresspress-core/src/blocks/auth_ui/mod.rs
+1	crates/impresspress-core/src/blocks/auth_ui/oauth/callback.rs
+1	crates/impresspress-core/src/blocks/auth_ui/oauth/mod.rs
+1	crates/impresspress-core/src/blocks/auth_ui/pages/mod.rs
+1	crates/impresspress-core/src/blocks/dev/data_snapshot.rs
+1	crates/impresspress-core/src/blocks/files/cloud.rs
+7	crates/impresspress-core/src/blocks/files/mod.rs
+1	crates/impresspress-core/src/blocks/files/storage/admin.rs
+2	crates/impresspress-core/src/blocks/legalpages/pages.rs
+1	crates/impresspress-core/src/blocks/legalpages/service.rs
+2	crates/impresspress-core/src/blocks/llm/pages.rs
+1	crates/impresspress-core/src/blocks/llm/routes/chat.rs
+2	crates/impresspress-core/src/blocks/products/contracts.rs
+1	crates/impresspress-core/src/blocks/products/routes.rs
+1	crates/impresspress-core/src/blocks/products/tests/handler_tests.rs
+1	crates/impresspress-core/src/blocks/products/tests/status_enum_tests.rs
+1	crates/impresspress-core/src/blocks/products/tests/stripe_event_type_tests.rs
+1	crates/impresspress-core/src/blocks/products/tests/stripe_tests.rs
+1	crates/impresspress-core/src/blocks/rate_limit.rs
+1	crates/impresspress-core/src/blocks/userportal/pages/security.rs
+1	crates/impresspress-core/src/blocks/userportal/pages/sessions.rs
+1	crates/impresspress-core/src/builder/registration.rs
+1	crates/impresspress-core/src/migration_helper.rs
+1	crates/impresspress-core/src/pipeline.rs
+2	crates/impresspress-core/src/platform_state/variables.rs
+1	crates/impresspress-core/src/routing.rs
+1	crates/impresspress-core/src/ui/assets.rs
+1	crates/impresspress-core/src/ui/components/table.rs
+1	crates/impresspress-core/src/ui/styles/layouts/page.css
+2	crates/impresspress-core/src/util.rs
+1	crates/impresspress-core/tests/auth/bootstrap_run.rs
+2	crates/impresspress-core/tests/block_enabled_defaults.rs
+1	crates/impresspress-core/tests/dev_data_snapshot.rs
+7	crates/impresspress-core/tests/error_door.rs
+1	crates/impresspress-core/tests/openapi_snapshot.rs
+1	crates/impresspress-core/tests/repo_door.rs
+2	crates/impresspress-core/tests/wafer_pin_surface.rs
+1	.github/workflows/build-wasm.yml
+1	.github/workflows/ci-shared.yml
+1	packages/impresspress-js/scripts/api-coverage.mjs
+1	packages/impresspress-js/test/api-coverage.test.ts
+2	scripts/audit-wrap-grants.sh

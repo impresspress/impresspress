@@ -10,7 +10,7 @@
               "description": "Request of `POST /b/dev/api/blocks`.",
               "properties": {
                 "name": {
-                  "description": "The block's short name, e.g. `newsletter`. It becomes the directory\n`blocks/<name>/`, the crate name, the block id `site/<name>`, the\nroute prefix `/b/<name>/` and the collection prefix `site__<name>__`.\n2 to 32 characters: a lowercase letter followed by lowercase letters,\ndigits and hyphens, with no doubled hyphen and no trailing hyphen.",
+                  "description": "The block's short name, e.g. `newsletter`. It becomes the directory\n`blocks/<name>/`, the crate name, the block id `site/<name>`, the\nroute prefix `/b/<name>/` and the collection prefix `site__<name>__`\n(a hyphen spelled `_` there). 2 to 32 characters: a lowercase letter\nfollowed by lowercase letters, digits and hyphens, with no doubled\nhyphen and no trailing hyphen.",
                   "type": "string"
                 },
                 "template": {
@@ -441,7 +441,7 @@
                 },
                 "wafer_guest_version": {
                   "default": null,
-                  "description": "The `WAFER_GUEST_VERSION` of the `src/wafer_guest.rs` the artifact was\ncompiled against, read out of that file by whoever ran the compile.\n\nA value that is not the sandbox's own is refused with a\n`wafer-guest-version` diagnostic: the vendored module IS the ABI, so a\nblock built against an older copy is talking a contract this runtime\nno longer speaks. Rescaffold the block (`dev_create_block` rewrites\nthe module) and compile again.\n\nOmit it only if the compiler genuinely could not read the file. It is\nthen recorded as `0` — \"unknown\" — and nothing is checked.",
+                  "description": "The `WAFER_GUEST_VERSION` of the `src/wafer_guest.rs` the artifact was\ncompiled against, read out of that file by whoever ran the compile.\n\nA value that is not the sandbox's own is refused with a\n`wafer-guest-version` diagnostic: the vendored module IS the ABI, so a\nblock built against an older copy is talking a contract this runtime\nno longer speaks. Replace the block's `src/wafer_guest.rs` with the\ncurrent module (`GET /b/dev/api/reference`, `wafer_guest_module`) and\ncompile again.\n\nOmit it only if the compiler genuinely could not read the file. It is\nthen recorded as `0` — \"unknown\" — and nothing is checked.",
                   "format": "uint32",
                   "minimum": 0,
                   "type": [
@@ -2223,6 +2223,10 @@
                     "description": "The authoring guide, as Markdown: the API, the host services, the\nnamespace rules, the limits, the diagnostic codes, and both templates\nin full.",
                     "type": "string"
                   },
+                  "wafer_guest_module": {
+                    "description": "The current `src/wafer_guest.rs`, verbatim: what a block built against\nan older copy writes over its own before compiling again.",
+                    "type": "string"
+                  },
                   "wafer_guest_version": {
                     "description": "The `WAFER_GUEST_VERSION` of the support module this reference\ndocuments and `POST /b/dev/api/blocks` writes.",
                     "format": "uint32",
@@ -2232,7 +2236,8 @@
                 },
                 "required": [
                   "wafer_guest_version",
-                  "markdown"
+                  "markdown",
+                  "wafer_guest_module"
                 ],
                 "title": "ReferenceResponse",
                 "type": "object"

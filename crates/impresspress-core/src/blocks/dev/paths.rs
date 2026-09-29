@@ -197,10 +197,12 @@ pub const BLOCK_NAME_RULE: &str = "it must match `^[a-z][a-z0-9-]{1,31}$` — 2 
 /// diagnostic the agent can act on instead of a registration failure inside
 /// a runtime rebuild.
 ///
-/// The block's *resources* keep the `__`-separated spelling with the
-/// hyphenated name inside — `site__my-shop__notes`, which
-/// `wrap::resource_owner` maps back to `site/my-shop`, the block's own id.
-/// That is the direction WRAP's own-namespace check actually uses.
+/// The block's *resources* use that same prefix — `site__my_shop__notes`,
+/// `SITE__MY_SHOP__GREETING` — which `wrap::resource_owner` maps back to
+/// `site/my-shop`, the block's own id. The hyphenated spelling
+/// (`site__my-shop__notes`) is not a second name for them: the database
+/// strips the hyphen from a table name before building SQL, so it would be
+/// authorized as `site/my-shop`'s and then used as `site__myshop__notes`.
 pub fn block_name_is_valid(name: &str) -> bool {
     let mut chars = name.chars();
     let Some(first) = chars.next() else {
@@ -461,22 +463,27 @@ mod tests {
         }
     }
 
-    /// A hyphenated block name still owns its `__`-spelled resources.
+    /// A hyphenated block name owns its underscore-spelled resources.
     ///
     /// This is the invariant the `cap-collection` / `cap-config` namespaces
     /// rest on: WRAP's own-namespace check calls `resource_owner` on the
-    /// resource and compares it to the caller's block id. Pinned against the
+    /// resource and compares it to the caller's block id, and the prefix the
+    /// sandbox requires is `resource_prefix` of that id. Pinned against the
     /// pinned wafer-block, because a change to either mapping would silently
     /// turn every declared collection into a cross-block reach.
     #[test]
     fn a_hyphenated_block_owns_its_underscore_spelled_resources() {
         assert!(block_name_is_valid("my-shop"));
         assert_eq!(
-            wafer_block::wrap::resource_owner("site__my-shop__notes"),
+            wafer_block::wrap::resource_prefix("site/my-shop"),
+            "site__my_shop__",
+        );
+        assert_eq!(
+            wafer_block::wrap::resource_owner("site__my_shop__notes"),
             Some("site/my-shop".to_string()),
         );
         assert_eq!(
-            wafer_block::wrap::resource_owner("SITE__MY-SHOP__GREETING"),
+            wafer_block::wrap::resource_owner("SITE__MY_SHOP__GREETING"),
             Some("site/my-shop".to_string()),
         );
         // And a single-word name, the common case.

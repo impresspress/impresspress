@@ -1,70 +1,71 @@
-//! Sessions repo — insert / find / touch / delete_expired against
-//! in-memory SQLite after applying migration 001.
+//! Sessions repo against in-memory SQLite after applying the auth
+//! migrations — the family-keyed shape migration 012 installs (B12).
 
-use impresspress_core::blocks::auth::{
-    migrations,
-    repo::{sessions, users},
+use impresspress_core::{
+    blocks::auth::{migrations, repo::sessions},
+    test_support::seed_user,
 };
 
-use crate::common::MigrationTestCtx;
+use crate::common::auth_fixture;
 
 #[tokio::test]
 async fn insert_find_touch_delete_expired() {
-    let ctx = MigrationTestCtx::new().await;
+    let ctx = auth_fixture(impresspress_core::blocks::auth::AUTH_BLOCK_ID).await;
     migrations::apply(&ctx).await.expect("migration apply");
+    let uid = seed_user("s@example.com")
+        .display_name("S")
+        .insert(&ctx)
+        .await
+        .id;
 
-    let u = users::insert(
-        &ctx,
-        users::NewUser {
-            email: "s@example.com".into(),
-            display_name: "S".into(),
-            avatar_url: None,
-            role: "user".into(),
-        },
-    )
-    .await
-    .expect("seed user");
-
-    let hash = [7u8; 32];
     sessions::insert(
         &ctx,
         sessions::NewSession {
-            token_hash: hash.to_vec(),
-            user_id: u.id.clone(),
+            family: "fam-live".into(),
+            user_id: uid.clone(),
+            auth_method: "password".into(),
             expires_at: "9999-01-01T00:00:00Z".into(),
         },
     )
     .await
     .expect("insert live session");
 
-    let found = sessions::find_by_token_hash(&ctx, &hash)
+    let found = sessions::find_for_user(&ctx, &uid, "fam-live")
         .await
         .expect("find live session")
         .expect("session present");
-    assert_eq!(found.user_id, u.id);
-    assert_eq!(found.token_hash, hash.to_vec());
+    assert_eq!(found.user_id, uid);
+    assert_eq!(found.family, "fam-live");
+    assert_eq!(found.auth_method, "password");
     assert_eq!(found.expires_at, "9999-01-01T00:00:00Z");
     let original_last_used = found.last_used_at.clone();
+    let original_created = found.created_at.clone();
 
-    sessions::touch_last_used(&ctx, &hash)
-        .await
-        .expect("touch last_used");
-    // Touch updates the row; we don't assert a strict inequality because the
-    // test may complete inside a single ISO-second tick. Re-reading is the
-    // contract we care about — the row is still findable after the update.
-    let after_touch = sessions::find_by_token_hash(&ctx, &hash)
+    assert_eq!(
+        sessions::touch(&ctx, "fam-live", "2100-01-01T00:00:00Z")
+            .await
+            .expect("touch the family"),
+        1
+    );
+    // The test may complete inside a single ISO-second tick, so `last_used_at`
+    // is asserted as non-decreasing rather than strictly greater. What the
+    // touch must do exactly is carry the new expiry and leave `created_at`
+    // alone — a rotation is not a new sign-in.
+    let after_touch = sessions::find_for_user(&ctx, &uid, "fam-live")
         .await
         .expect("find after touch")
         .expect("still present");
     assert!(after_touch.last_used_at >= original_last_used);
+    assert_eq!(after_touch.created_at, original_created);
+    assert_eq!(after_touch.expires_at, "2100-01-01T00:00:00Z");
 
     // Insert an expired session and verify delete_expired removes only it.
-    let expired_hash = [9u8; 32];
     sessions::insert(
         &ctx,
         sessions::NewSession {
-            token_hash: expired_hash.to_vec(),
-            user_id: u.id.clone(),
+            family: "fam-dead".into(),
+            user_id: uid.clone(),
+            auth_method: "password".into(),
             expires_at: "1970-01-02T00:00:00Z".into(),
         },
     )
@@ -75,24 +76,41 @@ async fn insert_find_touch_delete_expired() {
         .await
         .expect("delete expired");
     assert_eq!(removed, 1, "only the expired session should be removed");
-    assert!(sessions::find_by_token_hash(&ctx, &expired_hash)
+    let remaining = sessions::list_for_user(&ctx, &uid)
         .await
-        .expect("lookup expired")
-        .is_none());
-    assert!(sessions::find_by_token_hash(&ctx, &hash)
-        .await
-        .expect("lookup live")
-        .is_some());
+        .expect("list remaining");
+    assert_eq!(remaining.len(), 1);
+    assert_eq!(remaining[0].family, "fam-live");
 }
 
 #[tokio::test]
-async fn find_by_token_hash_missing_returns_none() {
-    let ctx = MigrationTestCtx::new().await;
+async fn find_for_user_missing_family_returns_none() {
+    let ctx = auth_fixture(impresspress_core::blocks::auth::AUTH_BLOCK_ID).await;
     migrations::apply(&ctx).await.expect("migration apply");
+    let uid = seed_user("missing@example.com")
+        .display_name("S")
+        .insert(&ctx)
+        .await
+        .id;
 
-    let none_hash = [0u8; 32];
-    let hit = sessions::find_by_token_hash(&ctx, &none_hash)
+    let hit = sessions::find_for_user(&ctx, &uid, "fam-nope")
         .await
         .expect("lookup");
     assert!(hit.is_none());
+}
+
+/// `touch` reporting zero is the signal issuance uses to insert a row
+/// instead, which is what makes a device re-appear on the list after its row
+/// was swept or dropped by migration 012.
+#[tokio::test]
+async fn touch_on_an_unknown_family_reports_zero_rather_than_erroring() {
+    let ctx = auth_fixture(impresspress_core::blocks::auth::AUTH_BLOCK_ID).await;
+    migrations::apply(&ctx).await.expect("migration apply");
+
+    assert_eq!(
+        sessions::touch(&ctx, "fam-never-existed", "2100-01-01T00:00:00Z")
+            .await
+            .expect("touch must not error on a missing row"),
+        0
+    );
 }

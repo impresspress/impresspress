@@ -8,11 +8,14 @@
 use std::collections::HashMap;
 
 use serde_json::{json, Value};
-use wafer_block::db::{Filter, FilterOp};
+use wafer_block::{
+    db::{Filter, FilterOp},
+    wire::database::BatchWrite,
+};
 use wafer_core::clients::database as db;
-use wafer_run::context::Context;
+use wafer_run::{context::Context, WaferError};
 
-use super::{map_bool, map_opt_str, map_str, now_iso, RepoError};
+use super::{db_failed, internal_error, map_bool, map_opt_str, map_str, now_iso};
 
 pub const TABLE: &str = "wafer_run__auth__local_credentials";
 
@@ -24,12 +27,11 @@ pub struct LocalCredentialRow {
     pub created_at: String,
 }
 
-fn row_from_map(m: &HashMap<String, Value>) -> Result<LocalCredentialRow, RepoError> {
+fn row_from_map(m: &HashMap<String, Value>) -> Result<LocalCredentialRow, WaferError> {
     Ok(LocalCredentialRow {
-        user_id: map_opt_str(m, "user_id")
-            .ok_or_else(|| RepoError::Db("missing user_id".into()))?,
+        user_id: map_opt_str(m, "user_id").ok_or_else(|| internal_error("missing user_id"))?,
         password_hash: map_opt_str(m, "password_hash")
-            .ok_or_else(|| RepoError::Db("missing password_hash".into()))?,
+            .ok_or_else(|| internal_error("missing password_hash"))?,
         must_reset: map_bool(m, "must_reset"),
         created_at: map_str(m, "created_at"),
     })
@@ -37,25 +39,37 @@ fn row_from_map(m: &HashMap<String, Value>) -> Result<LocalCredentialRow, RepoEr
 
 /// Insert a local-credentials row for `user_id`. Fails if a row already
 /// exists for that user (PK collision).
+///
+/// For an account that already exists. A new account gets its row in the
+/// same write as the account (`users::insert_with_password`).
 pub async fn insert(
     ctx: &dyn Context,
     user_id: &str,
     password_hash: &str,
     must_reset: bool,
-) -> Result<(), RepoError> {
-    let id = uuid::Uuid::now_v7().to_string();
-    let now = now_iso();
+) -> Result<(), WaferError> {
+    db::create(ctx, TABLE, new_row(user_id, password_hash, must_reset))
+        .await
+        .map_err(|e| db_failed("local_credentials insert", e))?;
+    Ok(())
+}
+
+/// [`insert`] as one write of a batch.
+pub fn create_op(user_id: &str, password_hash: &str, must_reset: bool) -> BatchWrite {
+    BatchWrite::Create {
+        collection: TABLE.to_string(),
+        data: new_row(user_id, password_hash, must_reset),
+    }
+}
+
+fn new_row(user_id: &str, password_hash: &str, must_reset: bool) -> HashMap<String, Value> {
     let mut data: HashMap<String, Value> = HashMap::new();
-    data.insert("id".into(), json!(id));
+    data.insert("id".into(), json!(uuid::Uuid::now_v7().to_string()));
     data.insert("user_id".into(), json!(user_id));
     data.insert("password_hash".into(), json!(password_hash));
     data.insert("must_reset".into(), json!(must_reset));
-    data.insert("created_at".into(), json!(now));
-
-    db::create(ctx, TABLE, data)
-        .await
-        .map_err(|e| RepoError::Db(format!("local_credentials insert: {e}")))?;
-    Ok(())
+    data.insert("created_at".into(), json!(now_iso()));
+    data
 }
 
 /// Update the `password_hash` for `user_id`.
@@ -66,7 +80,7 @@ pub async fn update_password(
     ctx: &dyn Context,
     user_id: &str,
     new_hash: &str,
-) -> Result<(), RepoError> {
+) -> Result<(), WaferError> {
     use wafer_block::ErrorCode;
     let filters = vec![Filter {
         field: "user_id".into(),
@@ -79,23 +93,38 @@ pub async fn update_password(
             data.insert("password_hash".into(), json!(new_hash));
             db::update_by_filters(ctx, TABLE, filters, data)
                 .await
-                .map_err(|e| RepoError::Db(format!("local_credentials update_password: {e}")))?;
+                .map_err(|e| db_failed("local_credentials update_password", e))?;
             Ok(())
         }
         Err(e) if e.code == ErrorCode::NotFound => insert(ctx, user_id, new_hash, false).await,
-        Err(e) => Err(RepoError::Db(format!("local_credentials lookup: {e}"))),
+        Err(e) => Err(db_failed("local_credentials lookup", e)),
     }
+}
+
+/// Whether `user_id` has a password at all — the question "can this account
+/// sign in without its OAuth links", asked by
+/// `userportal::pages::security::handle_unlink` before it removes one.
+///
+/// A count, not a row read. The caller needs one bool and has no business
+/// holding an Argon2id digest to compute it; WRAP grants are per table, so
+/// this is the only place the surface can be narrowed, and narrowing it here
+/// means the hash never leaves the database.
+pub async fn has_password(ctx: &dyn Context, user_id: &str) -> Result<bool, WaferError> {
+    let n = db::count_by_field(ctx, TABLE, "user_id", json!(user_id))
+        .await
+        .map_err(|e| db_failed("local_credentials has_password", e))?;
+    Ok(n > 0)
 }
 
 pub async fn find_by_user_id(
     ctx: &dyn Context,
     user_id: &str,
-) -> Result<Option<LocalCredentialRow>, RepoError> {
+) -> Result<Option<LocalCredentialRow>, WaferError> {
     use wafer_block::ErrorCode;
     match db::get_by_field(ctx, TABLE, "user_id", json!(user_id)).await {
         Ok(rec) => Ok(Some(row_from_map(&rec.data)?)),
         Err(e) if e.code == ErrorCode::NotFound => Ok(None),
-        Err(e) => Err(RepoError::Db(format!("local_credentials select: {e}"))),
+        Err(e) => Err(db_failed("local_credentials select", e)),
     }
 }
 
@@ -105,31 +134,18 @@ mod typed_client_tests {
     use crate::test_support::TestContext;
 
     async fn seed_user(ctx: &TestContext, user_id: &str) {
-        wafer_core::clients::database::exec_raw(
-            ctx,
-            "INSERT INTO wafer_run__auth__users \
-             (id, email, display_name, role, created_at, updated_at) \
-             VALUES (?, ?, ?, ?, ?, ?)",
-            &[
-                json!(user_id),
-                json!(format!("{user_id}@example.com")),
-                json!(user_id),
-                json!("user"),
-                json!("2026-01-01T00:00:00Z"),
-                json!("2026-01-01T00:00:00Z"),
-            ],
-        )
-        .await
-        .unwrap();
+        ctx.seed_auth_user(user_id).await;
     }
 
     #[tokio::test]
     async fn insert_then_find_round_trip_under_wrap() {
         // Seed user before enabling WRAP so the exec_raw fixture INSERT is not
         // subject to the WRAP check (same pattern as sessions.rs seed helpers).
-        let ctx = TestContext::with_auth().await;
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth::AUTH_BLOCK_ID);
         seed_user(&ctx, "user-a").await;
-        let ctx = ctx.with_wrap("wafer-run/auth", vec![], "impresspress/admin");
+        let ctx = ctx.running_as("wafer-run/auth");
         insert(&ctx, "user-a", "$argon2id$dummy", false)
             .await
             .unwrap();
@@ -139,13 +155,34 @@ mod typed_client_tests {
         assert!(!got.must_reset);
     }
 
+    /// The unlink guard's question, answered without materialising the row:
+    /// `handle_unlink` needs one bool and must not be handed an Argon2id
+    /// digest to compute it.
+    #[tokio::test]
+    async fn has_password_is_true_only_once_a_credential_exists() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth::AUTH_BLOCK_ID);
+        seed_user(&ctx, "user-a").await;
+        let ctx = ctx.running_as("wafer-run/auth");
+
+        assert!(
+            !has_password(&ctx, "user-a").await.unwrap(),
+            "an OAuth-only account has no password"
+        );
+        insert(&ctx, "user-a", "$argon2id$dummy", false)
+            .await
+            .unwrap();
+        assert!(has_password(&ctx, "user-a").await.unwrap());
+        assert!(
+            !has_password(&ctx, "ghost").await.unwrap(),
+            "an unknown user has no password either"
+        );
+    }
+
     #[tokio::test]
     async fn find_by_unknown_user_returns_none() {
-        let ctx = TestContext::with_auth().await.with_wrap(
-            "wafer-run/auth",
-            vec![],
-            "impresspress/admin",
-        );
+        let ctx = TestContext::with_auth().await.running_as("wafer-run/auth");
         assert!(find_by_user_id(&ctx, "ghost").await.unwrap().is_none());
     }
 

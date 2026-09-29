@@ -1,26 +1,22 @@
 //! Users repo — exercise insert / find_by_email / find_by_id against
 //! in-memory SQLite after applying migration 001.
 
-use impresspress_core::blocks::auth::{migrations, repo::users};
+use impresspress_core::{
+    blocks::auth::{migrations, repo::users},
+    test_support::seed_user,
+};
 
-use crate::common::MigrationTestCtx;
+use crate::common::auth_fixture;
 
 #[tokio::test]
 async fn insert_then_find_by_email_and_id() {
-    let ctx = MigrationTestCtx::new().await;
+    let ctx = auth_fixture(impresspress_core::blocks::auth::AUTH_BLOCK_ID).await;
     migrations::apply(&ctx).await.expect("migration apply");
 
-    let inserted = users::insert(
-        &ctx,
-        users::NewUser {
-            email: "a@example.com".into(),
-            display_name: "A".into(),
-            avatar_url: None,
-            role: "user".into(),
-        },
-    )
-    .await
-    .expect("insert user");
+    let inserted = seed_user("a@example.com")
+        .display_name("A")
+        .insert(&ctx)
+        .await;
     assert_eq!(inserted.email, "a@example.com");
     assert_eq!(inserted.role, "user");
     assert!(inserted.avatar_url.is_none());
@@ -52,20 +48,15 @@ async fn insert_then_find_by_email_and_id() {
 
 #[tokio::test]
 async fn insert_with_avatar_roundtrips() {
-    let ctx = MigrationTestCtx::new().await;
+    let ctx = auth_fixture(impresspress_core::blocks::auth::AUTH_BLOCK_ID).await;
     migrations::apply(&ctx).await.expect("migration apply");
 
-    let inserted = users::insert(
-        &ctx,
-        users::NewUser {
-            email: "b@example.com".into(),
-            display_name: "B".into(),
-            avatar_url: Some("https://example.com/a.png".into()),
-            role: "admin".into(),
-        },
-    )
-    .await
-    .expect("insert");
+    let inserted = seed_user("b@example.com")
+        .display_name("B")
+        .avatar_url("https://example.com/a.png")
+        .role("admin")
+        .insert(&ctx)
+        .await;
 
     let fetched = users::find_by_id(&ctx, &inserted.id)
         .await

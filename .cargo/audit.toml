@@ -1,7 +1,9 @@
 # cargo-audit exception policy
 #
-# CI runs `cargo audit` as a BLOCKING check (ci.yml / ci-main.yml — no more
-# `continue-on-error`). A new advisory that isn't listed below fails CI.
+# CI runs `cargo audit` as a BLOCKING check (the `audit` job in
+# `.github/workflows/audit.yml`, which both gates call through
+# `ci-shared.yml` and which also runs weekly on its own schedule). A new
+# advisory that isn't listed below fails CI.
 #
 # Every entry in `ignore` must carry an owner + expiry so it gets
 # re-triaged instead of living here forever: run `cargo audit --no-fetch`

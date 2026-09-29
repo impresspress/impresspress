@@ -1,11 +1,7 @@
-/* Page Header */
-.page-header {
-	background: white;
-	border-bottom: 1px solid var(--border-color);
-	padding: var(--space-4) var(--space-8);
-}
-
-
+/* Page Header — `components::page_header`. The `.page-header` block that
+ * stood here belonged to `templates::render_header`, a second renderer that
+ * every one of its call sites invoked with an empty title, so it painted
+ * nothing on any page. */
 .page-title {
 	font-size: 1.5rem; font-weight: 600;
 	color: var(--text-primary); margin-bottom: var(--space-2);
@@ -23,12 +19,6 @@
 	padding: var(--space-6); margin-bottom: var(--space-6);
 }
 
-.card-header {
-	display: flex; align-items: center; justify-content: space-between;
-	margin-bottom: var(--space-4); padding-bottom: var(--space-4);
-	border-bottom: 1px solid var(--border-color);
-}
-
 .card-title {
 	font-size: 1rem; font-weight: 600; color: var(--text-primary);
 }
@@ -36,7 +26,7 @@
 /* ===== Card =====
    NOTE: this rule intentionally does not restate `padding`. The plain-card
    rule above owns it, and plain cards (`div .card { ...content... }`, still
-   the pattern in variables/permissions/files/messages/tickets) need it.
+   the pattern in llm/files/messages/tickets) need it.
 
    But a card built from `.card__head`/`.card__body` gets its padding from
    those children, and was ALSO inheriting the plain rule's 24px on top:
@@ -800,6 +790,14 @@
 
 /* ===== Portal buttons admin (blocks/userportal/pages/admin_buttons.rs) ===== */
 .admin-buttons-form-grid { grid-template-columns: 1fr 1fr 1fr auto auto; }
+
+/* ===== Variables admin (blocks/admin/pages/variables.rs) =====
+ * `.var-cell` stacks what one table cell says about a variable: the key (or
+ * the value), then the smaller lines that explain it. */
+.var-cell { display: flex; flex-direction: column; align-items: flex-start; gap: 2px; }
+.var-cell__key { font-size: 13px; font-weight: 500; }
+.var-cell__name { font-size: var(--text-xs); color: var(--text-secondary); }
+.var-cell__note { font-size: var(--text-xs); color: var(--text-muted); }
 
 /* ===== Variables admin warnings (blocks/admin/pages/variables.rs) =====
  * #92400e / #fef3c7 have no matching design token; carried over unchanged

@@ -1,19 +1,29 @@
 //! SSR pages for the products block (admin + user views).
 
-use std::collections::HashMap;
-
 use maud::{html, Markup};
-use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
-use wafer_core::clients::database as db;
+use wafer_block::db::{Filter, FilterOp, SortField};
 use wafer_run::{context::Context, InputStream, Message, OutputStream};
 
 use super::{
-    contracts::{
-        AmountRule, CommerceAnalytics, ManagedOffer, OfferStatus, SellerAccount,
-        SellerFailureSummary, StripeConnectionState, StripeConnectionStatus, VariableDefinition,
-        VariableKind,
+    assets,
+    config::{
+        AUTOMATIC_TAX, CHECKOUT_ALLOWED_ORIGINS, DEFAULT_CURRENCY, PLATFORM_COUNTRY,
+        SELLER_ALLOWED_CATEGORIES, SELLER_ALLOWED_CURRENCIES, SELLER_ALLOWED_TEMPLATES,
+        SELLER_APPLICATION_FEE_BPS, SELLER_MAX_PRODUCTS, SELLER_MODERATION_REQUIRED,
+        STRIPE_API_URL, STRIPE_API_VERSION, STRIPE_PUBLISHABLE_KEY, STRIPE_SECRET_KEY,
+        STRIPE_WEBHOOK_SECRET, WEBHOOK_SECRET, WEBHOOK_URL,
     },
-    money, repo, stripe_provider, GROUPS_TABLE, PURCHASES_TABLE,
+    contracts::{
+        AmountRule, ApprovalStatus, CommerceAnalytics, ManagedOffer, OfferStatus, OfferSyncStatus,
+        ProductStatus, SellerAccount, SellerFailureSummary, SellerStatus, StripeConnectionState,
+        StripeConnectionStatus, StripeEventType, VariableDefinition, VariableKind,
+        PRODUCT_SLUG_MAX_LEN, PRODUCT_SLUG_PATTERN,
+    },
+    money, repo, stripe_provider,
+};
+use crate::{
+    blocks::crud,
+    config_vars::{ALLOW_USER_PRODUCTS_KEY, FRONTEND_URL_KEY},
 };
 
 fn display_money(amount_minor: i64, currency: &str) -> String {
@@ -117,7 +127,7 @@ fn seller_failures_section(failures: &[SellerFailureSummary]) -> Markup {
 use crate::{
     config_vars,
     ui::{self, components, icons, settings_form, settings_form::SettingsSection},
-    util::RecordExt,
+    util::{self, RecordExt},
 };
 
 fn admin_tabs(active: &str) -> Markup {
@@ -211,25 +221,28 @@ pub async fn overview(ctx: &dyn Context, msg: &Message) -> OutputStream {
     // misleading, not just cosmetically wrong.
     let products_count = match repo::products::count(ctx, &[]).await {
         Ok(n) => n,
-        Err(e) => return crate::http::err_internal("Database error", e),
+        Err(e) => return crud::db_error_internal(e, "Database error"),
     };
-    let groups_count = match db::count(ctx, GROUPS_TABLE, &[]).await {
+    let groups_count = match repo::groups::count(ctx, &[]).await {
         Ok(n) => n,
-        Err(e) => return crate::http::err_internal("Database error", e),
+        Err(e) => return crud::db_error_internal(e, "Database error"),
     };
     let purchases_count = match repo::purchases::count_all(ctx).await {
         Ok(n) => n,
-        Err(e) => return crate::http::err_internal("Database error", e),
+        Err(e) => return crud::db_error_internal(e, "Database error"),
     };
-    let offers_count = match db::count(ctx, repo::offers::TABLE, &[]).await {
+    let offers_count = match repo::offers::count(ctx, &[]).await {
         Ok(n) => n,
-        Err(e) => return crate::http::err_internal("Database error", e),
+        Err(e) => return crud::db_error_internal(e, "Database error"),
     };
     let analytics = match repo::purchases::commerce_analytics(ctx, None).await {
         Ok(analytics) => analytics,
-        Err(error) => return crate::http::err_internal("Database error", error),
+        Err(error) => return crud::db_error_internal(error, "Database error"),
     };
-    let user_products_enabled = super::handlers::user_products_enabled(ctx).await;
+    let user_products_enabled = match super::handlers::user_products_enabled(ctx).await {
+        Ok(value) => value,
+        Err(e) => return crud::db_error_page(msg, e, "products page: seller switch read failed"),
+    };
 
     let content = html! {
         (admin_tabs("overview"))
@@ -287,7 +300,7 @@ pub async fn overview(ctx: &dyn Context, msg: &Message) -> OutputStream {
 ///
 ///   - `WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS` off: a live 403 on
 ///     `/b/products/api/products` (the user-owned-product route,
-///     `handlers::dispatch::UserRoute::requires_user_products`) was previously the
+///     `routes::user_products_refusal`) was previously the
 ///     only signal a new admin got that self-serve selling is disabled —
 ///     name the var and link to Settings, where it's the first toggle in
 ///     the Features section. The admin JSON create route
@@ -368,6 +381,12 @@ pub async fn manage_products(ctx: &dyn Context, msg: &Message) -> OutputStream {
     } else {
         repo::products::list_page(ctx, page as i64, page_size as i64, filters, Some(sort)).await
     };
+    let list = match result {
+        Ok(list) => list,
+        Err(e) => {
+            return crud::db_error_page(msg, e, "products admin list page: product read failed")
+        }
+    };
 
     let new_product_button = html! {
         a .btn .btn--primary .btn--sm href="/b/products/admin/new" { "+ New Product" }
@@ -410,95 +429,91 @@ pub async fn manage_products(ctx: &dyn Context, msg: &Message) -> OutputStream {
         }
 
         div #products-content {
-            @match &result {
-                Ok(list) => {
-                    @if deleted_view {
-                        @let cols = [
-                            components::TableCol { label: "Name", width: None },
-                            components::TableCol { label: "Owner", width: None },
-                            components::TableCol { label: "Currency", width: None },
-                            components::TableCol { label: "Deleted", width: None },
-                            components::TableCol { label: "", width: None },
-                        ];
-                        @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|record| {
-                            let deleted_at = record.str_field("deleted_at");
-                            let seller_owned = record.str_field("owner_kind") == "user";
-                            // Percent-encoded, like every `encodeURIComponent`
-                            // call in this file's browser-side URLs. A
-                            // product id is not guaranteed URL-safe: the
-                            // database layer synthesizes a UUID only when the
-                            // body omits `id`, and the admin create endpoint
-                            // forwarded the body verbatim until this branch
-                            // began refusing it — so an id holding `/`, `?` or
-                            // `#` exists wherever a seeding client ever chose
-                            // its own keys. Unencoded, such an id splits the
-                            // path and the Restore button posts somewhere
-                            // that matches no route, on the only door out of
-                            // soft delete. maud escapes HTML, not URLs.
-                            let encoded_id = crate::util::url_path_encode(&record.id);
-                            let restore_url =
-                                format!("/b/products/api/admin/products/{encoded_id}/restore");
-                            // Restore is the DANGEROUS half of what an admin
-                            // can do here: it puts an active, approved product
-                            // straight back into the public catalog. Soft
-                            // delete takes nothing down in Stripe, so the row
-                            // also needs the other half — a way to shut the
-                            // product's Prices and Payment Links down without
-                            // relisting it. That is what
-                            // `ProductState::LiveOrDeleted` exists for, and
-                            // until this link nothing reached it.
-                            let close_url =
-                                format!("/b/products/admin/products/{encoded_id}/close");
-                            vec![
-                                html! { div { span .font-medium { (record.str_field("name")) } br; span .text-muted .text-sm { "Restore to edit pricing and checkout again" } } },
-                                html! { span .text-muted .text-sm { @if seller_owned { "Seller" } @else { "Your store" } } },
-                                html! { span .font-medium { (record.str_field("currency")) } },
-                                html! { span .text-muted .text-sm { (deleted_at.get(..10).unwrap_or("—")) } },
-                                html! {
-                                    div .products-actions {
-                                        a .btn .btn--secondary .btn--sm href=(close_url) { "Close Stripe surface" }
-                                        button .btn .btn--secondary .btn--sm type="button"
-                                            hx-post=(restore_url)
-                                            hx-swap="none"
-                                            hx-on--after-request=(reload_or_toast("Restore failed"))
-                                        { "Restore" }
-                                    }
-                                },
-                            ]
-                        }).collect();
-                        (components::data_table(&cols, rows, None::<fn(usize) -> Option<String>>, html! {
-                            (components::empty_state(icons::trash(), "No deleted products", "Products stay here after deletion until you restore them.", None))
-                        }))
-                    } @else {
-                        @let row_hrefs: Vec<String> = list.records.iter().map(|record| format!("/b/products/admin/products/{}", crate::util::url_path_encode(&record.id))).collect();
-                        @let cols = [
-                            components::TableCol { label: "Name", width: None },
-                            components::TableCol { label: "Availability", width: None },
-                            components::TableCol { label: "Owner", width: None },
-                            components::TableCol { label: "Currency", width: None },
-                            components::TableCol { label: "Updated", width: None },
-                        ];
-                        @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|record| {
-                            let updated = record.str_field("updated_at");
-                            let seller_owned = record.str_field("owner_kind") == "user";
-                            vec![
-                                html! { div { span .font-medium { (record.str_field("name")) } br; span .text-muted .text-sm { "Open to edit pricing and checkout" } } },
-                                html! { div .products-status-stack { (components::status_badge(record.str_field("status"))) @if seller_owned { (components::status_badge(record.str_field("approval_status"))) } } },
-                                html! { span .text-muted .text-sm { @if seller_owned { "Seller" } @else { "Your store" } } },
-                                html! { span .font-medium { (record.str_field("currency")) } },
-                                html! { span .text-muted .text-sm { (updated.get(..10).unwrap_or("—")) } },
-                            ]
-                        }).collect();
-                        (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), html! {
-                            (components::empty_state(icons::package(), "No products found", "Try a different search, or create your first product.", Some(html! {
-                                a .btn .btn--primary .btn--sm href="/b/products/admin/new" { "+ Create product" }
-                            })))
-                        }))
-                    }
-                    (components::pagination(list.page as u32, list.page_size as u32, list.total_count as u32, base_href))
+                @if deleted_view {
+                    @let cols = [
+                        components::TableCol { label: "Name", width: None },
+                        components::TableCol { label: "Owner", width: None },
+                        components::TableCol { label: "Currency", width: None },
+                        components::TableCol { label: "Deleted", width: None },
+                        components::TableCol { label: "", width: None },
+                    ];
+                    @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|record| {
+                        let deleted_at = record.str_field("deleted_at");
+                        let seller_owned = record.str_field("owner_kind") == "user";
+                        // Percent-encoded, like every `encodeURIComponent`
+                        // call in this file's browser-side URLs. A
+                        // product id is not guaranteed URL-safe: the
+                        // database layer synthesizes a UUID only when the
+                        // body omits `id`, and the admin create endpoint
+                        // forwarded the body verbatim until this branch
+                        // began refusing it — so an id holding `/`, `?` or
+                        // `#` exists wherever a seeding client ever chose
+                        // its own keys. Unencoded, such an id splits the
+                        // path and the Restore button posts somewhere
+                        // that matches no route, on the only door out of
+                        // soft delete. maud escapes HTML, not URLs.
+                        let encoded_id = crate::util::url_path_encode(&record.id);
+                        let restore_url =
+                            format!("/b/products/api/admin/products/{encoded_id}/restore");
+                        // Restore is the DANGEROUS half of what an admin
+                        // can do here: it puts an active, approved product
+                        // straight back into the public catalog. Soft
+                        // delete takes nothing down in Stripe, so the row
+                        // also needs the other half — a way to shut the
+                        // product's Prices and Payment Links down without
+                        // relisting it. That is what
+                        // `ProductState::LiveOrDeleted` exists for, and
+                        // until this link nothing reached it.
+                        let close_url =
+                            format!("/b/products/admin/products/{encoded_id}/close");
+                        vec![
+                            html! { div { span .font-medium { (record.str_field("name")) } br; span .text-muted .text-sm { "Restore to edit pricing and checkout again" } } },
+                            html! { span .text-muted .text-sm { @if seller_owned { "Seller" } @else { "Your store" } } },
+                            html! { span .font-medium { (record.str_field("currency")) } },
+                            html! { span .text-muted .text-sm { (deleted_at.get(..10).unwrap_or("—")) } },
+                            html! {
+                                div .products-actions {
+                                    a .btn .btn--secondary .btn--sm href=(close_url) { "Close Stripe surface" }
+                                    button .btn .btn--secondary .btn--sm type="button"
+                                        hx-post=(restore_url)
+                                        hx-swap="none"
+                                        data-error-label="Could not restore this product"
+                                        data-reload-on-success
+                                    { "Restore" }
+                                }
+                            },
+                        ]
+                    }).collect();
+                    (components::data_table(&cols, rows, None::<fn(usize) -> Option<String>>, html! {
+                        (components::empty_state(icons::trash(), "No deleted products", "Products stay here after deletion until you restore them.", None))
+                    }))
+                } @else {
+                    @let row_hrefs: Vec<String> = list.records.iter().map(|record| format!("/b/products/admin/products/{}", crate::util::url_path_encode(&record.id))).collect();
+                    @let cols = [
+                        components::TableCol { label: "Name", width: None },
+                        components::TableCol { label: "Availability", width: None },
+                        components::TableCol { label: "Owner", width: None },
+                        components::TableCol { label: "Currency", width: None },
+                        components::TableCol { label: "Updated", width: None },
+                    ];
+                    @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|record| {
+                        let updated = record.str_field("updated_at");
+                        let seller_owned = record.str_field("owner_kind") == "user";
+                        vec![
+                            html! { div { span .font-medium { (record.str_field("name")) } br; span .text-muted .text-sm { "Open to edit pricing and checkout" } } },
+                            html! { div .products-status-stack { (components::status_badge(record.str_field("status"))) @if seller_owned { (components::status_badge(record.str_field("approval_status"))) } } },
+                            html! { span .text-muted .text-sm { @if seller_owned { "Seller" } @else { "Your store" } } },
+                            html! { span .font-medium { (record.str_field("currency")) } },
+                            html! { span .text-muted .text-sm { (updated.get(..10).unwrap_or("—")) } },
+                        ]
+                    }).collect();
+                    (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), html! {
+                        (components::empty_state(icons::package(), "No products found", "Try a different search, or create your first product.", Some(html! {
+                            a .btn .btn--primary .btn--sm href="/b/products/admin/new" { "+ Create product" }
+                        })))
+                    }))
                 }
-                Err(e) => { div .login-error { "Error: " (e.message) } }
-            }
+                @if let Some(per_page) = std::num::NonZeroU32::new(page_size as u32) { (components::pagination(list.page as u32, per_page, list.total_count as u32, base_href)) }
         }
     };
 
@@ -509,21 +524,6 @@ pub async fn manage_products(ctx: &dyn Context, msg: &Message) -> OutputStream {
         content,
     )
     .await
-}
-
-/// The `hx-on--after-request` body shared by every one-shot action button on
-/// these pages: reload on success, and on failure raise the message the API
-/// sent on the shared `showToast` channel `ui::assets::toast_js` listens on.
-///
-/// Without the failure half a refused action renders as nothing happening at
-/// all — no reload, no message — which is the worst outcome on a page whose
-/// buttons are the only way to undo a delete or shut a money surface down.
-fn reload_or_toast(failure_label: &str) -> String {
-    format!(
-        "if(event.detail.successful){{location.reload()}}else{{var m='{failure_label}';\
-         try{{m=JSON.parse(event.detail.xhr.responseText).message||m}}catch(err){{}}\
-         document.body.dispatchEvent(new CustomEvent('showToast',{{detail:{{type:'error',message:m}}}}))}}"
-    )
 }
 
 /// Close-only manager for a soft-deleted product: archive its offers,
@@ -573,10 +573,13 @@ pub async fn deleted_product_close(
 ) -> OutputStream {
     let product = match repo::products::get_deleted(ctx, product_id).await {
         Ok(product) => product,
-        Err(error) if error.code == wafer_run::ErrorCode::NotFound => {
-            return crate::http::err_not_found("Product not found");
+        Err(error) => {
+            return crate::blocks::crud::db_error(
+                error,
+                "Product not found",
+                "Could not load product",
+            )
         }
-        Err(error) => return crate::http::err_internal("Could not load product", error),
     };
     if !admin && !super::handlers::is_owned_by(&product, msg.user_id()) {
         // The shared ownership rule, the same one `product_manager` and every
@@ -587,7 +590,7 @@ pub async fn deleted_product_close(
     }
     let offers = match repo::offers::list_for_product(ctx, product_id).await {
         Ok(offers) => offers,
-        Err(error) => return crate::http::err_internal("Could not load product pricing", error),
+        Err(error) => return crud::db_error_internal(error, "Could not load product pricing"),
     };
     // One listing per offer rather than a join: `list_links` is the same read
     // the API exposes, and there are as many of them as the offer list the
@@ -596,7 +599,7 @@ pub async fn deleted_product_close(
     for offer in &offers {
         match repo::payment_links::list_for_offer(ctx, &offer.offer.id).await {
             Ok(list) => links.push(list),
-            Err(error) => return crate::http::err_internal("Could not load payment links", error),
+            Err(error) => return crud::db_error_internal(error, "Could not load payment links"),
         }
     }
 
@@ -611,7 +614,13 @@ pub async fn deleted_product_close(
     } else {
         "/b/products/my-products?view=deleted"
     };
-    let seller_enabled = !admin && super::handlers::user_products_enabled(ctx).await;
+    let seller_enabled = !admin
+        && match super::handlers::user_products_enabled(ctx).await {
+            Ok(value) => value,
+            Err(e) => {
+                return crud::db_error_page(msg, e, "products page: seller switch read failed")
+            }
+        };
     let deleted_at = product.str_field("deleted_at");
     let content = html! {
         @if admin {
@@ -645,14 +654,15 @@ pub async fn deleted_product_close(
                 header .card__head {
                     div .products-status-stack {
                         h2 .card__title .m-0 { (offer.offer.name) }
-                        (components::status_badge(offer_status_label(offer.status)))
+                        (components::status_badge(&commerce_wire(&offer.status)))
                     }
                     div .products-actions {
                         @if offer.status != OfferStatus::Archived {
                             button .btn .btn--secondary .btn--sm type="button"
                                 hx-delete=(offer_url)
                                 hx-swap="none"
-                                hx-on--after-request=(reload_or_toast("Could not archive this offer"))
+                                data-error-label="Could not archive this offer"
+                                data-reload-on-success
                             { "Archive offer" }
                         }
                     }
@@ -674,7 +684,8 @@ pub async fn deleted_product_close(
                                             button .btn .btn--secondary .btn--sm type="button"
                                                 hx-delete=(link_url)
                                                 hx-swap="none"
-                                                hx-on--after-request=(reload_or_toast("Could not deactivate this payment link"))
+                                                data-error-label="Could not deactivate this payment link"
+                                                data-reload-on-success
                                             { "Deactivate" }
                                         }
                                     }
@@ -695,59 +706,47 @@ pub async fn deleted_product_close(
     ui::shell_page(ctx, msg, shell, content).await
 }
 
-/// The wire spelling of an [`OfferStatus`], for the status badge.
-fn offer_status_label(status: OfferStatus) -> &'static str {
-    match status {
-        OfferStatus::Draft => "draft",
-        OfferStatus::Active => "active",
-        OfferStatus::Archived => "archived",
-    }
-}
-
 // ---------------------------------------------------------------------------
 // Admin: seller governance and moderation
 // ---------------------------------------------------------------------------
 
 pub async fn admin_sellers(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let seller_records = match db::list_all(ctx, repo::seller_accounts::TABLE, vec![]).await {
-        Ok(records) => records,
-        Err(error) => return crate::http::err_internal("Could not list sellers", error),
-    };
-    let sellers = match seller_records
-        .iter()
-        .map(repo::seller_accounts::to_contract)
-        .collect::<Result<Vec<_>, _>>()
-    {
+    let sellers = match repo::seller_accounts::list_rows(ctx).await {
         Ok(sellers) => sellers,
-        Err(error) => return crate::http::err_internal("Could not read seller status", error),
+        Err(error) => return crud::db_error_internal(error, "Could not list sellers"),
     };
-    let seller_products = match repo::products::list_all(
-        ctx,
-        vec![Filter {
-            field: "owner_kind".into(),
-            operator: FilterOp::Equal,
-            value: serde_json::json!("user"),
-        }],
-    )
-    .await
-    {
-        Ok(products) => products,
-        Err(error) => return crate::http::err_internal("Could not list seller products", error),
+    let seller_total = if sellers.truncated {
+        match repo::seller_accounts::count_all(ctx).await {
+            Ok(total) => total,
+            Err(error) => return crud::db_error_internal(error, "Could not count sellers"),
+        }
+    } else {
+        sellers.rows.len() as i64
     };
-    let mut product_counts = HashMap::<String, usize>::new();
-    for product in &seller_products {
-        *product_counts
-            .entry(product.str_field("owner_id").to_string())
-            .or_default() += 1;
-    }
-    let pending: Vec<_> = seller_products
-        .iter()
-        .filter(|product| {
-            product.str_field("status") == "pending_review"
-                && product.str_field("approval_status") == "pending"
-        })
-        .collect();
-    let selling_enabled = super::handlers::user_products_enabled(ctx).await;
+    // A GROUP BY, not a scan: the listing count beside each seller is derived
+    // from every seller product on the platform, and that table grows without
+    // bound.
+    let product_counts = match repo::products::live_counts_by_owner(ctx, "user").await {
+        Ok(counts) => counts,
+        Err(error) => return crud::db_error_internal(error, "Could not count seller products"),
+    };
+    // The queue's predicate goes into the query for the same reason. The
+    // total comes from a COUNT so the heading states how many listings are
+    // waiting even when the table below shows only the first of them.
+    let pending_total = match repo::products::count_pending_review(ctx).await {
+        Ok(total) => total,
+        Err(error) => {
+            return crud::db_error_internal(error, "Could not count the moderation queue")
+        }
+    };
+    let pending = match repo::products::list_pending_review(ctx).await {
+        Ok(pending) => pending,
+        Err(error) => return crud::db_error_internal(error, "Could not list seller products"),
+    };
+    let selling_enabled = match super::handlers::user_products_enabled(ctx).await {
+        Ok(value) => value,
+        Err(e) => return crud::db_error_page(msg, e, "products page: seller switch read failed"),
+    };
 
     let content = html! {
         (admin_tabs("sellers"))
@@ -765,19 +764,25 @@ pub async fn admin_sellers(ctx: &dyn Context, msg: &Message) -> OutputStream {
         }
         section .products-section {
             div .products-section__head {
-                div { h2 { "Moderation queue" } p .text-muted .text-sm { (pending.len()) " listing(s) waiting for a decision." } }
+                div {
+                    h2 { "Moderation queue" }
+                    p .text-muted .text-sm {
+                        (pending_total) " listing(s) waiting for a decision."
+                        @if pending.truncated { " Showing the first " (pending.rows.len()) "." }
+                    }
+                }
             }
-            @if pending.is_empty() {
+            @if pending.rows.is_empty() {
                 (components::empty_state(icons::info(), "Queue clear", "No seller listings are waiting for review.", None))
             } @else {
-                @let row_hrefs: Vec<String> = pending.iter().map(|product| format!("/b/products/admin/products/{}", crate::util::url_path_encode(&product.id))).collect();
+                @let row_hrefs: Vec<String> = pending.rows.iter().map(|product| format!("/b/products/admin/products/{}", crate::util::url_path_encode(&product.id))).collect();
                 @let cols = [
                     components::TableCol { label: "Product", width: None },
                     components::TableCol { label: "Seller", width: None },
                     components::TableCol { label: "Submitted", width: None },
                     components::TableCol { label: "Status", width: None },
                 ];
-                @let rows: Vec<Vec<Markup>> = pending.iter().map(|product| vec![
+                @let rows: Vec<Vec<Markup>> = pending.rows.iter().map(|product| vec![
                     html! { span .font-medium { (product.str_field("name")) } },
                     html! { span .text-muted .text-sm { (product.str_field("owner_id")) } },
                     html! { span .text-muted .text-sm { (product.str_field("submitted_at").get(..10).unwrap_or("—")) } },
@@ -788,12 +793,18 @@ pub async fn admin_sellers(ctx: &dyn Context, msg: &Message) -> OutputStream {
         }
         section .products-section {
             div .products-section__head {
-                div { h2 { "Seller accounts" } p .text-muted .text-sm { "Open a seller to review payment readiness and their products." } }
+                div {
+                    h2 { "Seller accounts" }
+                    p .text-muted .text-sm {
+                        "Open a seller to review payment readiness and their products."
+                        @if sellers.truncated { " Showing the first " (sellers.rows.len()) " of " (seller_total) "." }
+                    }
+                }
             }
-            @if sellers.is_empty() {
+            @if sellers.rows.is_empty() {
                 (components::empty_state(icons::link(), "No sellers yet", "Seller accounts appear here after a user starts Stripe onboarding.", None))
             } @else {
-                @let row_hrefs: Vec<String> = sellers.iter().map(|seller| format!("/b/products/admin/sellers/{}", seller.id)).collect();
+                @let row_hrefs: Vec<String> = sellers.rows.iter().map(|seller| format!("/b/products/admin/sellers/{}", seller.id)).collect();
                 @let cols = [
                     components::TableCol { label: "Seller", width: None },
                     components::TableCol { label: "Selling", width: None },
@@ -802,9 +813,9 @@ pub async fn admin_sellers(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     components::TableCol { label: "Listings", width: None },
                     components::TableCol { label: "Needs action", width: None },
                 ];
-                @let rows: Vec<Vec<Markup>> = sellers.iter().map(|seller| vec![
+                @let rows: Vec<Vec<Markup>> = sellers.rows.iter().map(|seller| vec![
                     html! { span .font-medium { (&seller.user_id) } },
-                    components::status_badge(&seller.status),
+                    components::status_badge(&commerce_wire(&seller.status)),
                     components::status_badge(if seller.capabilities.charges_enabled { "enabled" } else { "disabled" }),
                     components::status_badge(if seller.capabilities.payouts_enabled { "enabled" } else { "disabled" }),
                     html! { (product_counts.get(&seller.user_id).copied().unwrap_or_default()) },
@@ -828,49 +839,37 @@ pub async fn admin_seller_detail(
     msg: &Message,
     seller_id: &str,
 ) -> OutputStream {
-    let record = match db::get(ctx, repo::seller_accounts::TABLE, seller_id).await {
-        Ok(record) => record,
-        Err(error) if error.code == wafer_run::ErrorCode::NotFound => {
-            return crate::http::err_not_found("Seller not found");
-        }
-        Err(error) => return crate::http::err_internal("Could not load seller", error),
+    // Not `platform_fee`: this page carries the suspend control, and a typo
+    // in the fee setting must not take the fraud control down with it. An
+    // unreadable fee is shown as exactly that, never as a number.
+    let fee = super::config::seller_fee_bps(ctx).await.map_err(|error| {
+        tracing::warn!(error = %error, "platform application fee setting cannot be read");
+    });
+    let seller = match repo::seller_accounts::get_row(ctx, seller_id).await {
+        Ok(Some(seller)) => seller,
+        Ok(None) => return crate::http::err_not_found("Seller not found"),
+        Err(error) => return crud::db_error_internal(error, "Could not load seller"),
     };
-    let seller = match repo::seller_accounts::to_contract(&record) {
-        Ok(seller) => seller,
-        Err(error) => return crate::http::err_internal("Could not read seller status", error),
-    };
-    let products = match repo::products::list_all(
-        ctx,
-        vec![Filter {
-            field: "owner_id".into(),
-            operator: FilterOp::Equal,
-            value: serde_json::json!(&seller.user_id),
-        }],
-    )
-    .await
-    {
+    let products = match repo::products::list_owned_by(ctx, &seller.user_id).await {
         Ok(products) => products,
-        Err(error) => return crate::http::err_internal("Could not list seller products", error),
+        Err(error) => return crud::db_error_internal(error, "Could not list seller products"),
     };
-    let action = if seller.status == "suspended" {
-        "reactivate"
-    } else {
-        "suspend"
-    };
-    let action_label = if seller.status == "suspended" {
+    let suspended = seller.status == SellerStatus::Suspended;
+    let action = if suspended { "reactivate" } else { "suspend" };
+    let action_label = if suspended {
         "Reactivate seller"
     } else {
         "Suspend seller"
     };
-    let action_class = if seller.status == "suspended" {
+    let action_class = if suspended {
         "btn--primary"
     } else {
         "btn--secondary"
     };
-    let config = serde_json::json!({
+    let config = ui::script_json(&serde_json::json!({
         "action_url": format!("/b/products/api/admin/sellers/{seller_id}/{action}"),
         "action": action,
-    });
+    }));
     let content = html! {
         (admin_tabs("sellers"))
         (components::page_header(
@@ -886,8 +885,8 @@ pub async fn admin_seller_detail(
                     p .text-muted .text-sm .text-subtitle { "Stripe verification and selling access" }
                 }
                 div .flex .gap-2 .items-center .flex-wrap {
-                    (components::status_badge(&seller.status))
-                    button .btn .(action_class) .btn--sm type="button" data-seller-action=(action) onclick="adminSellerSetState(this)" { (action_label) }
+                    (components::status_badge(&commerce_wire(&seller.status)))
+                    button .btn .(action_class) .btn--sm type="button" data-seller-action=(action) data-action="psa-set-state" { (action_label) }
                 }
             }
             div .card__body {
@@ -895,7 +894,7 @@ pub async fn admin_seller_detail(
                     (components::stat_card("Payments", if seller.capabilities.charges_enabled { "Enabled" } else { "Disabled" }, icons::dollar_sign(), None))
                     (components::stat_card("Payouts", if seller.capabilities.payouts_enabled { "Enabled" } else { "Disabled" }, icons::arrow_up_right(), None))
                     (components::stat_card("Verification", if seller.capabilities.details_submitted { "Complete" } else { "Incomplete" }, icons::info(), None))
-                    (components::stat_card("Platform fee", &format!("{:.2}%", seller.fee_basis_points as f64 / 100.0), icons::dollar_sign(), None))
+                    (components::stat_card("Platform fee", &fee.map_or_else(|()| "Misconfigured".to_string(), |fee| fee_percent(fee.into())), icons::dollar_sign(), None))
                 }
                 details .products-plain-details {
                     summary { "Technical account details" }
@@ -916,17 +915,20 @@ pub async fn admin_seller_detail(
         }
         section .products-section {
             h2 { "Owned products" }
-            @if products.is_empty() {
+            @if products.truncated {
+                p .text-muted .text-sm { "Showing the first " (products.rows.len()) " of this seller's live products." }
+            }
+            @if products.rows.is_empty() {
                 (components::empty_state(icons::package(), "No products", "This seller has not created any products.", None))
             } @else {
-                @let row_hrefs: Vec<String> = products.iter().map(|product| format!("/b/products/admin/products/{}", crate::util::url_path_encode(&product.id))).collect();
+                @let row_hrefs: Vec<String> = products.rows.iter().map(|product| format!("/b/products/admin/products/{}", crate::util::url_path_encode(&product.id))).collect();
                 @let cols = [
                     components::TableCol { label: "Product", width: None },
                     components::TableCol { label: "Status", width: None },
                     components::TableCol { label: "Approval", width: None },
                     components::TableCol { label: "Updated", width: None },
                 ];
-                @let rows: Vec<Vec<Markup>> = products.iter().map(|product| vec![
+                @let rows: Vec<Vec<Markup>> = products.rows.iter().map(|product| vec![
                     html! { span .font-medium { (product.str_field("name")) } },
                     components::status_badge(product.str_field("status")),
                     components::status_badge(product.str_field("approval_status")),
@@ -935,7 +937,8 @@ pub async fn admin_seller_detail(
                 (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), html! {}))
             }
         }
-        script { (maud::PreEscaped(format!("window.__sellerAdminConfig={config};\n{SELLER_ADMIN_JS}"))) }
+        script { (maud::PreEscaped(format!("window.__sellerAdminConfig={config};"))) }
+        script src=(assets::seller_admin_js_url()) {}
     };
     ui::shell_page(
         ctx,
@@ -946,21 +949,18 @@ pub async fn admin_seller_detail(
     .await
 }
 
-const SELLER_ADMIN_JS: &str = r#"
-async function adminSellerSetState(button){if(window.__sellerAdminConfig.action==='suspend'&&!window.confirm('Suspend this seller? Active offers and Payment Links will be archived in Stripe before local access is revoked.'))return;button.disabled=true;var original=button.textContent;button.textContent='Working…';var target=document.getElementById('seller-admin-error');target.hidden=true;try{var response=await fetch(window.__sellerAdminConfig.action_url,{method:'POST',credentials:'same-origin',headers:{Accept:'application/json','Content-Type':'application/json'},body:'{}'}),text=await response.text(),payload={};if(text){try{payload=JSON.parse(text)}catch(_error){payload={message:text}}}if(!response.ok)throw new Error(payload.message||payload.error||('Request failed ('+response.status+')'));window.location.reload()}catch(error){target.textContent=error.message;target.hidden=false;button.disabled=false;button.textContent=original}}
-"#;
-
 // ---------------------------------------------------------------------------
 // Shared admin/seller product wizard
 // ---------------------------------------------------------------------------
 
 pub async fn product_wizard(ctx: &dyn Context, msg: &Message, admin: bool) -> OutputStream {
-    let configured_currency = wafer_core::clients::config::get_default(
-        ctx,
-        "IMPRESSPRESS__PRODUCTS__DEFAULT_CURRENCY",
-        "USD",
-    )
-    .await;
+    let configured_currency =
+        match wafer_core::clients::config::get_default(ctx, DEFAULT_CURRENCY, "USD").await {
+            Ok(currency) => currency,
+            Err(e) => {
+                return crud::db_error_page(msg, e, "product wizard: default currency read failed")
+            }
+        };
     let mut default_currency = super::money::normalize_currency(&configured_currency)
         .unwrap_or_else(|_| "USD".to_string());
     let template_definitions = [
@@ -988,7 +988,12 @@ pub async fn product_wizard(ctx: &dyn Context, msg: &Message, admin: bool) -> Ou
     let seller_templates = if admin {
         std::collections::HashSet::new()
     } else {
-        super::handlers::seller_policy::allowed_templates(ctx).await
+        match super::handlers::seller_policy::allowed_templates(ctx).await {
+            Ok(templates) => templates,
+            Err(e) => {
+                return crud::db_error_page(msg, e, "product wizard: seller policy read failed")
+            }
+        }
     };
     let template_definitions: Vec<_> = template_definitions
         .into_iter()
@@ -1001,37 +1006,29 @@ pub async fn product_wizard(ctx: &dyn Context, msg: &Message, admin: bool) -> Ou
     let mut seller_currencies = if admin {
         Vec::new()
     } else {
-        super::handlers::seller_policy::allowed_currencies(ctx)
-            .await
-            .into_iter()
-            .collect::<Vec<_>>()
+        match super::handlers::seller_policy::allowed_currencies(ctx).await {
+            Ok(currencies) => currencies.into_iter().collect::<Vec<_>>(),
+            Err(e) => {
+                return crud::db_error_page(msg, e, "product wizard: seller policy read failed")
+            }
+        }
     };
     seller_currencies.sort();
     if !seller_currencies.is_empty() && !seller_currencies.contains(&default_currency) {
         default_currency = seller_currencies[0].clone();
     }
-    let automatic_tax = wafer_core::clients::config::get_default(
-        ctx,
-        "IMPRESSPRESS__PRODUCTS__AUTOMATIC_TAX",
-        "false",
-    )
-    .await
-        == "true";
-    let configured_country = wafer_core::clients::config::get_default(
-        ctx,
-        "IMPRESSPRESS__PRODUCTS__PLATFORM_COUNTRY",
-        "US",
-    )
-    .await;
-    let configured_country = configured_country.trim();
-    let platform_country = if configured_country.len() == 2
-        && configured_country
-            .bytes()
-            .all(|byte| byte.is_ascii_alphabetic())
-    {
-        configured_country.to_ascii_uppercase()
-    } else {
-        "US".to_string()
+    let automatic_tax = match super::stripe::automatic_tax_enabled(ctx).await {
+        Ok(enabled) => enabled,
+        Err(e) => return crud::db_error_page(msg, e, "product wizard: automatic tax read failed"),
+    };
+    // Blank when no platform country is configured: the field's placeholder
+    // then asks for the list, which is the honest prompt. It used to prefill
+    // `US` on a deployment that had never said it was in the US.
+    let platform_country = match super::config::platform_country(ctx).await {
+        Ok(country) => country
+            .map(|code| code.as_str().to_string())
+            .unwrap_or_default(),
+        Err(error) => return crate::http::err_internal("Platform country is misconfigured", error),
     };
     let back_href = if admin {
         "/b/products/admin/manage"
@@ -1057,7 +1054,7 @@ pub async fn product_wizard(ctx: &dyn Context, msg: &Message, admin: bool) -> Ou
                 }
             }
         }
-        form #product-wizard-form novalidate onsubmit="return false" {
+        form #product-wizard-form novalidate {
             p #product-wizard-error .text-sm role="alert" aria-live="assertive" hidden .text-danger .mt-0 {}
 
             section .card data-wizard-step="1" {
@@ -1073,7 +1070,7 @@ pub async fn product_wizard(ctx: &dyn Context, msg: &Message, admin: bool) -> Ou
                         div .product-template-grid {
                             @for (value, title, description) in &template_definitions {
                                 label .product-template-card {
-                                    input type="radio" name="product_template" value=(value) checked[*value == initial_template] onchange="productWizardTemplateChanged()";
+                                    input type="radio" name="product_template" value=(value) checked[*value == initial_template] data-action="pw-template-changed";
                                     strong { (title) }
                                     span .text-muted .text-sm { (description) }
                                 }
@@ -1103,7 +1100,7 @@ pub async fn product_wizard(ctx: &dyn Context, msg: &Message, admin: bool) -> Ou
                             div .products-form-grid {
                                 div .form-group {
                                     label .form-label for="wizard-slug" { "Web address" }
-                                    input #wizard-slug .form-input type="text" maxlength="160" pattern="[a-z0-9]+(?:-[a-z0-9]+)*" placeholder="Generated from the product name";
+                                    input #wizard-slug .form-input type="text" maxlength=(PRODUCT_SLUG_MAX_LEN) pattern=(PRODUCT_SLUG_PATTERN) placeholder="Generated from the product name";
                                     p .text-muted .text-sm { "Leave blank to create this automatically." }
                                 }
                                 div .form-group {
@@ -1196,7 +1193,7 @@ pub async fn product_wizard(ctx: &dyn Context, msg: &Message, admin: bool) -> Ou
                                     h4 .m-0 { "Customer fields" }
                                     p .text-muted .text-sm { "Collect dates, quantities, choices, toggles, and notes from the customer." }
                                 }
-                                button .btn .btn--secondary .btn--sm type="button" onclick="addWizardVariable()" { "+ Add input" }
+                                button .btn .btn--secondary .btn--sm type="button" data-action="pw-add-variable" { "+ Add input" }
                             }
                             div #wizard-variables {}
                         }
@@ -1206,7 +1203,7 @@ pub async fn product_wizard(ctx: &dyn Context, msg: &Message, admin: bool) -> Ou
                                     h4 .m-0 { "Itemized price rows" }
                                     p .text-muted .text-sm { "Build the total from clear rows such as base booking, nights, guests, and add-ons." }
                                 }
-                                button .btn .btn--secondary .btn--sm type="button" onclick="addWizardComponent()" { "+ Add row" }
+                                button .btn .btn--secondary .btn--sm type="button" data-action="pw-add-component" { "+ Add row" }
                             }
                             div #wizard-components {}
                         }
@@ -1230,7 +1227,7 @@ pub async fn product_wizard(ctx: &dyn Context, msg: &Message, admin: bool) -> Ou
                             ("wizard-terms", "Terms consent", "Require customers to accept your terms before paying.", false),
                         ] {
                             label .products-choice {
-                                input id=(id) type="checkbox" checked[checked] onchange="productWizardShippingChanged()";
+                                input id=(id) type="checkbox" checked[checked] data-action="pw-shipping-changed";
                                 span { strong { (label) } small .text-muted { (help) } }
                             }
                         }
@@ -1278,17 +1275,18 @@ pub async fn product_wizard(ctx: &dyn Context, msg: &Message, admin: bool) -> Ou
             }
 
             div .product-wizard-actions {
-                button #wizard-previous .btn .btn--secondary .btn--md type="button" onclick="productWizardPrevious()" hidden { "Back" }
+                button #wizard-previous .btn .btn--secondary .btn--md type="button" data-action="pw-previous" hidden { "Back" }
                 div .product-wizard-actions__buttons {
-                    button #wizard-next .btn .btn--primary .btn--md type="button" onclick="productWizardNext()" disabled[template_definitions.is_empty()] { "Continue" }
-                    button #wizard-save-draft .btn .btn--secondary .btn--md type="button" onclick="submitProductWizard('draft')" hidden { "Save draft" }
-                    button #wizard-publish .btn .btn--primary .btn--md type="button" onclick="submitProductWizard('publish')" hidden {
+                    button #wizard-next .btn .btn--primary .btn--md type="button" data-action="pw-next" disabled[template_definitions.is_empty()] { "Continue" }
+                    button #wizard-save-draft .btn .btn--secondary .btn--md type="button" data-action="pw-submit" data-wizard-intent="draft" hidden { "Save draft" }
+                    button #wizard-publish .btn .btn--primary .btn--md type="button" data-action="pw-submit" data-wizard-intent="publish" hidden {
                         @if admin { "Create and publish" } @else { "Submit for publication" }
                     }
                 }
             }
         }
         script { (maud::PreEscaped(product_wizard_bootstrap(admin))) }
+        script src=(assets::wizard_js_url()) {}
     };
     ui::shell_page(
         ctx,
@@ -1308,417 +1306,13 @@ pub async fn product_wizard(ctx: &dyn Context, msg: &Message, admin: bool) -> Ou
 }
 
 fn product_wizard_bootstrap(admin: bool) -> String {
-    let config = serde_json::json!({
+    let config = ui::script_json(&serde_json::json!({
         "admin": admin,
         "product_collection": if admin { "/b/products/api/admin/products" } else { "/b/products/api/products" },
         "return_url": if admin { "/b/products/admin/manage" } else { "/b/products/my-products" },
-    });
-    format!("window.__productWizardConfig={config};\n{PRODUCT_WIZARD_JS}\ninitProductWizard();")
+    }));
+    format!("window.__productWizardConfig={config};")
 }
-
-const PRODUCT_WIZARD_JS: &str = r#"
-var productWizardStep=1;
-var productWizardVariableIndex=0;
-var productWizardComponentIndex=0;
-
-function wizardById(id){return document.getElementById(id)}
-function productWizardTemplate(){
-  var selected=document.querySelector('input[name="product_template"]:checked');
-  return selected?selected.value:'simple_product';
-}
-function productWizardIsSubscription(){return productWizardTemplate().indexOf('subscription')!==-1}
-function productWizardIsConfigurable(){return productWizardTemplate().indexOf('configurable')===0}
-function productWizardShowError(message,focus){
-  var error=wizardById('product-wizard-error');
-  error.textContent=message;error.hidden=false;
-  if(focus&&typeof focus.focus==='function')focus.focus();
-  error.scrollIntoView({block:'center'});
-}
-function productWizardClearError(){var error=wizardById('product-wizard-error');error.textContent='';error.hidden=true}
-function productWizardSlug(value){
-  return value.toLowerCase().normalize('NFKD').replace(/[\u0300-\u036f]/g,'').replace(/[^a-z0-9]+/g,'-').replace(/^-+|-+$/g,'').slice(0,160);
-}
-function productWizardTemplateChanged(){
-  var subscription=productWizardIsSubscription();
-  var configurable=productWizardIsConfigurable();
-  document.querySelectorAll('[data-subscription-field]').forEach(function(el){el.hidden=!subscription});
-  document.querySelectorAll('[data-simple-pricing]').forEach(function(el){el.hidden=configurable});
-  wizardById('wizard-advanced-pricing').hidden=!configurable;
-  if(configurable&&wizardById('wizard-variables').children.length===0){
-    addWizardVariable({key:'quantity',label:'Quantity',kind:'integer',required:true,minimum:'1',maximum:'100',step:'1'});
-    addWizardComponent({key:'base',label:'Base price',amount_type:'fixed',amount:'0.00',required:true});
-    addWizardComponent({key:'quantity',label:'Quantity',amount_type:'per_unit',amount:'0.00',input:'quantity',required:true});
-  }
-}
-function productWizardShowStep(step,scrollToStep){
-  productWizardStep=Math.max(1,Math.min(5,step));
-  document.querySelectorAll('[data-wizard-step]').forEach(function(el){el.hidden=Number(el.dataset.wizardStep)!==productWizardStep});
-  document.querySelectorAll('[data-wizard-indicator]').forEach(function(el){
-    var current=Number(el.dataset.wizardIndicator);
-    el.className='badge '+(current===productWizardStep?'badge-primary':current<productWizardStep?'badge-success':'badge-secondary');
-    var check=el.querySelector('.wizard-step-check');
-    if(check)check.hidden=current>=productWizardStep;
-  });
-  wizardById('wizard-previous').hidden=productWizardStep===1;
-  wizardById('wizard-next').hidden=productWizardStep===5;
-  wizardById('wizard-save-draft').hidden=productWizardStep!==5;
-  wizardById('wizard-publish').hidden=productWizardStep!==5;
-  if(productWizardStep===5)renderProductWizardReview();
-  productWizardClearError();
-  var current=document.querySelector('[data-wizard-step="'+productWizardStep+'"]');
-  if(current&&scrollToStep!==false)current.scrollIntoView({block:'start'});
-}
-function productWizardValidateStep(step){
-  if(step===2){
-    var name=wizardById('wizard-name');
-    if(!name.value.trim()){productWizardShowError('Product name is required.',name);return false}
-    var slug=wizardById('wizard-slug');
-    if(slug.value.trim()&&!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(slug.value.trim())){
-      productWizardShowError('URL slug may contain lowercase letters, numbers, and single hyphens.',slug);return false
-    }
-    var image=wizardById('wizard-image');
-    if(image.value&&!image.checkValidity()){productWizardShowError('Image URL must be a valid absolute URL.',image);return false}
-  }
-  if(step===3){
-    try{buildProductWizardOffer()}catch(error){productWizardShowError(error.message);return false}
-  }
-  return true;
-}
-function productWizardNext(){if(productWizardValidateStep(productWizardStep))productWizardShowStep(productWizardStep+1)}
-function productWizardPrevious(){productWizardShowStep(productWizardStep-1)}
-
-function addWizardVariable(seed){
-  seed=seed||{};var index=productWizardVariableIndex++;
-  var row=document.createElement('section');row.className='card mt-3';row.dataset.variableRow='';
-  row.innerHTML=`<div class="card__body">
-    <div class="flex justify-between gap-3 items-center"><strong>Customer input</strong><button class="btn btn--secondary btn--sm" type="button" data-remove-row>Remove</button></div>
-    <div class="grid grid-auto-150 gap-3 mt-3">
-      <div class="form-group"><label class="form-label required" for="wizard-variable-key-${index}">Key</label><input class="form-input" id="wizard-variable-key-${index}" data-variable-key required placeholder="quantity"></div>
-      <div class="form-group"><label class="form-label required" for="wizard-variable-label-${index}">Label</label><input class="form-input" id="wizard-variable-label-${index}" data-variable-label required placeholder="Quantity"></div>
-      <div class="form-group"><label class="form-label" for="wizard-variable-kind-${index}">Type</label><select class="form-select" id="wizard-variable-kind-${index}" data-variable-kind><option value="integer">Whole number</option><option value="number">Decimal number</option><option value="date">Date</option><option value="date_time">Date and time</option><option value="boolean">Yes / no</option><option value="select">Choice</option><option value="multi_select">Multiple choices</option><option value="text">Text</option></select></div>
-      <div class="form-group" data-variable-min-wrap><label class="form-label" for="wizard-variable-min-${index}">Minimum</label><input class="form-input" id="wizard-variable-min-${index}" data-variable-min inputmode="decimal"></div>
-      <div class="form-group" data-variable-max-wrap><label class="form-label" for="wizard-variable-max-${index}">Maximum</label><input class="form-input" id="wizard-variable-max-${index}" data-variable-max inputmode="decimal"></div>
-      <div class="form-group" data-variable-step-wrap><label class="form-label" for="wizard-variable-step-${index}">Step</label><input class="form-input" id="wizard-variable-step-${index}" data-variable-step inputmode="decimal"></div>
-      <div class="form-group" data-variable-options-wrap><label class="form-label" for="wizard-variable-options-${index}">Choices</label><input class="form-input" id="wizard-variable-options-${index}" data-variable-options placeholder="small, medium, large"></div>
-      <div class="form-group"><label class="form-label" for="wizard-variable-visibility-${index}">Visibility</label><select class="form-select" id="wizard-variable-visibility-${index}" data-variable-visibility><option value="public">Customer</option><option value="hidden">Hidden</option><option value="admin_only">Admin only</option></select></div>
-      <div class="form-group"><label class="form-label" for="wizard-variable-default-${index}">Default value</label><input class="form-input" id="wizard-variable-default-${index}" data-variable-default placeholder="Optional"></div>
-      <div class="form-group" data-variable-length-wrap><label class="form-label" for="wizard-variable-length-${index}">Maximum text length</label><input class="form-input" id="wizard-variable-length-${index}" data-variable-length type="number" min="1" max="10000"></div>
-    </div><label class="flex gap-2"><input type="checkbox" data-variable-required> Required</label>
-    <div class="form-group"><label class="form-label" for="wizard-variable-help-${index}">Help text</label><input class="form-input" id="wizard-variable-help-${index}" data-variable-help maxlength="500" placeholder="Shown beside this input"></div>
-  </div>`;
-  row.querySelector('[data-remove-row]').onclick=function(){row.remove()};
-  row.querySelector('[data-variable-key]').value=seed.key||'';
-  row.querySelector('[data-variable-label]').value=seed.label||'';
-  row.querySelector('[data-variable-kind]').value=seed.kind||'integer';
-  row.querySelector('[data-variable-min]').value=seed.minimum||'';
-  row.querySelector('[data-variable-max]').value=seed.maximum||'';
-  row.querySelector('[data-variable-step]').value=seed.step||'';
-  row.querySelector('[data-variable-options]').value=(seed.allowed_values||[]).join(', ');
-  row.querySelector('[data-variable-visibility]').value=seed.visibility||'public';
-  row.querySelector('[data-variable-default]').value=seed.default_value===undefined||seed.default_value===null?'':Array.isArray(seed.default_value)?seed.default_value.join(', '):String(seed.default_value);
-  row.querySelector('[data-variable-length]').value=seed.maximum_length||'';
-  row.querySelector('[data-variable-help]').value=seed.help_text||'';
-  row.querySelector('[data-variable-required]').checked=seed.required!==false;
-  row.querySelector('[data-variable-kind]').onchange=function(){wizardVariableKindChanged(row)};
-  wizardVariableKindChanged(row);
-  wizardById('wizard-variables').appendChild(row);
-}
-
-function wizardVariableKindChanged(row){
-  var kind=row.querySelector('[data-variable-kind]').value,numeric=kind==='integer'||kind==='number',dated=kind==='date'||kind==='date_time',choices=kind==='select'||kind==='multi_select';
-  var minimum=row.querySelector('[data-variable-min]'),maximum=row.querySelector('[data-variable-max]'),defaultInput=row.querySelector('[data-variable-default]');
-  row.querySelector('[data-variable-min-wrap]').hidden=!(numeric||dated);row.querySelector('[data-variable-max-wrap]').hidden=!(numeric||dated);row.querySelector('[data-variable-step-wrap]').hidden=!numeric;row.querySelector('[data-variable-options-wrap]').hidden=!choices;row.querySelector('[data-variable-length-wrap]').hidden=kind!=='text';
-  minimum.type=kind==='date'?'date':kind==='date_time'?'datetime-local':'text';maximum.type=minimum.type;defaultInput.type=minimum.type;
-  minimum.inputMode=numeric?'decimal':'';maximum.inputMode=numeric?'decimal':'';
-}
-
-function addWizardComponent(seed){
-  seed=seed||{};var index=productWizardComponentIndex++;
-  var row=document.createElement('section');row.className='card mt-3';row.dataset.componentRow='';
-  row.innerHTML=`<div class="card__body">
-    <div class="flex justify-between gap-3 items-center"><strong>Price row</strong><button class="btn btn--secondary btn--sm" type="button" data-remove-row>Remove</button></div>
-    <div class="grid grid-auto-150 gap-3 mt-3">
-      <div class="form-group"><label class="form-label required" for="wizard-component-key-${index}">Key</label><input class="form-input" id="wizard-component-key-${index}" data-component-key required placeholder="base"></div>
-      <div class="form-group"><label class="form-label required" for="wizard-component-label-${index}">Label</label><input class="form-input" id="wizard-component-label-${index}" data-component-label required placeholder="Base price"></div>
-      <div class="form-group"><label class="form-label" for="wizard-component-description-${index}">Description</label><input class="form-input" id="wizard-component-description-${index}" data-component-description maxlength="500"></div>
-      <div class="form-group"><label class="form-label" for="wizard-component-type-${index}">Calculation</label><select class="form-select" id="wizard-component-type-${index}" data-component-type><option value="fixed">Fixed amount</option><option value="per_unit">Amount × input</option><option value="flat_plus_per_unit">Base + amount × input</option><option value="lookup">Price selected by input</option><option value="graduated">Graduated tiers</option><option value="volume">Volume tiers</option><option value="package">Packages / blocks</option></select></div>
-      <div class="form-group"><label class="form-label required" for="wizard-component-amount-${index}">Amount / unit rate</label><input class="form-input" id="wizard-component-amount-${index}" data-component-amount inputmode="decimal" value="0.00" required></div>
-      <div class="form-group"><label class="form-label" for="wizard-component-input-${index}">Pricing input key</label><input class="form-input" id="wizard-component-input-${index}" data-component-input placeholder="quantity"></div>
-      <div class="form-group"><label class="form-label" for="wizard-condition-${index}">Condition</label><select class="form-select" id="wizard-condition-${index}" data-component-condition><option value="always">Always include</option><option value="equals">Input equals value</option><option value="not_equals">Input does not equal value</option><option value="greater_than">Input is greater than value</option><option value="greater_than_or_equal">Input is at least value</option><option value="less_than">Input is less than value</option><option value="less_than_or_equal">Input is at most value</option><option value="contains">Input contains value</option><option value="in">Input is one of these values</option><option value="present">Input is present</option><option value="advanced_preserved" hidden>Advanced condition (preserved)</option></select></div>
-      <div class="form-group"><label class="form-label" for="wizard-condition-input-${index}">Condition input</label><input class="form-input" id="wizard-condition-input-${index}" data-condition-input></div>
-      <div class="form-group"><label class="form-label" for="wizard-condition-value-${index}">Condition value</label><input class="form-input" id="wizard-condition-value-${index}" data-condition-value></div>
-    </div>
-    <details class="my-3"><summary>Advanced calculation details</summary>
-      <div class="grid grid-auto-180 gap-3 mt-3">
-        <div class="form-group"><label class="form-label" for="wizard-component-base-${index}">Base amount</label><input class="form-input" id="wizard-component-base-${index}" data-component-base inputmode="decimal" value="0.00"><p class="text-muted text-sm">Used by base + per-unit pricing.</p></div>
-        <div class="form-group"><label class="form-label" for="wizard-component-package-size-${index}">Units per package</label><input class="form-input" id="wizard-component-package-size-${index}" data-component-package-size type="number" min="1" value="1"><p class="text-muted text-sm">Used by package pricing.</p></div>
-        <div class="form-group"><label class="form-label" for="wizard-component-rounding-${index}">Partial packages</label><select class="form-select" id="wizard-component-rounding-${index}" data-component-rounding><option value="up">Round up and charge a package</option><option value="exact">Require an exact multiple</option></select></div>
-      </div>
-      <div class="form-group"><label class="form-label" for="wizard-component-details-${index}">Lookup prices or tiers</label><textarea class="form-textarea" id="wizard-component-details-${index}" data-component-details rows="4" placeholder="Lookup: small = 10.00&#10;Tier: 10 | 1.00 | 0.00&#10;Final tier: * | 0.80 | 0.00"></textarea><p class="text-muted text-sm">Lookup rows use <code>choice = amount</code>. Tier rows use <code>upper bound | unit amount | flat amount</code>; use <code>*</code> for the final open tier.</p></div>
-    </details>
-    <label class="flex gap-2"><input type="checkbox" data-component-required> Required row</label>
-  </div>`;
-  row.querySelector('[data-remove-row]').onclick=function(){row.remove()};
-  row.querySelector('[data-component-key]').value=seed.key||'';
-  row.querySelector('[data-component-label]').value=seed.label||'';
-  row.querySelector('[data-component-description]').value=seed.description||'';
-  row.querySelector('[data-component-type]').value=seed.amount_type||'fixed';
-  row.querySelector('[data-component-amount]').value=seed.amount||'0.00';
-  row.querySelector('[data-component-input]').value=seed.input||'';
-  row.querySelector('[data-component-base]').value=seed.base_amount||'0.00';
-  row.querySelector('[data-component-package-size]').value=seed.units_per_package||'1';
-  row.querySelector('[data-component-rounding]').value=seed.rounding||'up';
-  row.querySelector('[data-component-details]').value=seed.details||'';
-  row.querySelector('[data-component-condition]').value=seed.condition||'always';
-  if(seed.preserved_condition){row.dataset.preservedCondition=JSON.stringify(seed.preserved_condition);row.querySelector('[data-component-condition]').querySelector('[value="advanced_preserved"]').hidden=false;row.querySelector('[data-component-condition]').value='advanced_preserved'}
-  if(seed.preserved_quantity)row.dataset.preservedQuantity=JSON.stringify(seed.preserved_quantity);
-  if(seed.preserved_metadata)row.dataset.preservedMetadata=JSON.stringify(seed.preserved_metadata);
-  row.querySelector('[data-condition-input]').value=seed.condition_input||'';
-  row.querySelector('[data-condition-value]').value=seed.condition_value||'';
-  row.querySelector('[data-component-required]').checked=seed.required!==false;
-  wizardById('wizard-components').appendChild(row);
-}
-
-function wizardCurrencyExponent(currency){
-  var zero=['BIF','CLP','DJF','GNF','JPY','KMF','KRW','MGA','PYG','RWF','UGX','VND','VUV','XAF','XOF','XPF'];
-  var three=['BHD','JOD','KWD','OMR','TND'];
-  return zero.indexOf(currency)!==-1?0:three.indexOf(currency)!==-1?3:2;
-}
-function wizardMoneyToMinor(raw,currency){
-  raw=String(raw).trim();currency=String(currency).trim().toUpperCase();
-  if(!/^[A-Z]{3}$/.test(currency))throw new Error('Currency must be a three-letter ISO code.');
-  if(!/^\+?(?:\d+(?:\.\d*)?|\.\d+)$/.test(raw))throw new Error('Amounts must be non-negative plain decimal numbers.');
-  raw=raw.replace(/^\+/,'');var parts=raw.split('.');var whole=parts[0]||'0';var fraction=parts[1]||'';var exponent=wizardCurrencyExponent(currency);
-  if(fraction.length>exponent&&/[^0]/.test(fraction.slice(exponent)))throw new Error('Amount has more than '+exponent+' decimal places for '+currency+'.');
-  fraction=fraction.slice(0,exponent).padEnd(exponent,'0');
-  var multiplier=BigInt(10)**BigInt(exponent);var minor=BigInt(whole)*multiplier+BigInt(fraction||'0');
-  if(minor>BigInt(Number.MAX_SAFE_INTEGER))throw new Error('Amount is too large.');
-  return Number(minor);
-}
-function wizardMinorToDisplay(minor,currency){
-  var exponent=wizardCurrencyExponent(currency),raw=String(minor).padStart(exponent+1,'0');
-  return exponent===0?raw:raw.slice(0,-exponent)+'.'+raw.slice(-exponent);
-}
-function collectWizardVariables(){
-  var variables=[],keys=new Set();
-  document.querySelectorAll('[data-variable-row]').forEach(function(row,index){
-    var key=row.querySelector('[data-variable-key]').value.trim();var label=row.querySelector('[data-variable-label]').value.trim();var kind=row.querySelector('[data-variable-kind]').value;
-    if(!/^[A-Za-z][A-Za-z0-9_]*$/.test(key))throw new Error('Each customer input needs a unique key using letters, numbers, and underscores.');
-    if(keys.has(key))throw new Error('Customer input keys must be unique: '+key);keys.add(key);
-    if(!label)throw new Error('Each customer input needs a label.');
-    var variable={key:key,kind:kind,label:label,required:row.querySelector('[data-variable-required]').checked,visibility:row.querySelector('[data-variable-visibility]').value,sort_order:index};
-    var minimum=row.querySelector('[data-variable-min]').value.trim(),maximum=row.querySelector('[data-variable-max]').value.trim(),step=row.querySelector('[data-variable-step]').value.trim();
-    if((kind==='integer'||kind==='number'||kind==='date'||kind==='date_time')&&minimum)variable.minimum=minimum;
-    if((kind==='integer'||kind==='number'||kind==='date'||kind==='date_time')&&maximum)variable.maximum=maximum;
-    if((kind==='integer'||kind==='number')&&step)variable.step=step;
-    if(kind==='select'||kind==='multi_select'){
-      variable.allowed_values=row.querySelector('[data-variable-options]').value.split(',').map(function(v){return v.trim()}).filter(Boolean);
-      if(variable.allowed_values.length===0)throw new Error('Choice input '+key+' needs at least one allowed value.');
-    }
-    var help=row.querySelector('[data-variable-help]').value.trim(),defaultRaw=row.querySelector('[data-variable-default]').value.trim(),maximumLength=Number(row.querySelector('[data-variable-length]').value||0);
-    if(help)variable.help_text=help;
-    if(maximumLength){if(!Number.isSafeInteger(maximumLength)||maximumLength<1||maximumLength>10000)throw new Error('Maximum text length on '+key+' must be between 1 and 10000.');variable.maximum_length=maximumLength}
-    if(defaultRaw!==''){
-      if(kind==='multi_select')variable.default_value=defaultRaw.split(',').map(function(value){return value.trim()}).filter(Boolean);
-      else variable.default_value=wizardConditionValue(defaultRaw,variable);
-    }
-    variables.push(variable);
-  });
-  return variables;
-}
-function wizardConditionValue(raw,variable){
-  if(!variable)return raw;
-  if(variable.kind==='boolean'){
-    if(raw!=='true'&&raw!=='false')throw new Error('Boolean conditions must use true or false.');return raw==='true';
-  }
-  if(variable.kind==='integer'){
-    if(!/^-?\d+$/.test(raw))throw new Error('Integer condition values must be whole numbers.');return Number(raw);
-  }
-  if(variable.kind==='number'){
-    if(!/^-?(?:\d+(?:\.\d*)?|\.\d+)$/.test(raw))throw new Error('Number condition values must be decimal numbers.');return raw;
-  }
-  if(variable.kind==='date'&&!/^\d{4}-\d{2}-\d{2}$/.test(raw))throw new Error('Date values must use YYYY-MM-DD.');
-  if(variable.kind==='date_time'&&!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}$/.test(raw))throw new Error('Date and time values must use YYYY-MM-DDTHH:MM.');
-  return raw;
-}
-function wizardPricingLines(raw){return String(raw).split(/\r?\n/).map(function(line){return line.trim()}).filter(Boolean)}
-function wizardParseLookup(raw,currency,key){
-  var prices={};wizardPricingLines(raw).forEach(function(line){
-    var split=line.indexOf('=');if(split<1)throw new Error('Lookup row '+key+' must use choice = amount.');
-    var choice=line.slice(0,split).trim(),value=line.slice(split+1).trim();
-    if(!choice||Object.prototype.hasOwnProperty.call(prices,choice))throw new Error('Lookup choices on '+key+' must be non-empty and unique.');
-    prices[choice]=wizardMoneyToMinor(value,currency);
-  });
-  if(Object.keys(prices).length===0)throw new Error('Lookup row '+key+' needs at least one choice and amount.');return prices;
-}
-function wizardParseTiers(raw,currency,key){
-  var tiers=wizardPricingLines(raw).map(function(line,index,lines){
-    var parts=line.split('|').map(function(part){return part.trim()});
-    if(parts.length<2||parts.length>3)throw new Error('Tier row '+key+' must use upper bound | unit amount | optional flat amount.');
-    var open=parts[0]==='*',upTo=open?undefined:Number(parts[0]);
-    if(!open&&(!Number.isSafeInteger(upTo)||upTo<1))throw new Error('Tier bounds on '+key+' must be positive whole numbers.');
-    if(open&&index!==lines.length-1)throw new Error('Only the final tier on '+key+' may use *.');
-    if(!open&&index===lines.length-1)throw new Error('The final tier on '+key+' must use *.');
-    var tier={unit_amount_minor:wizardMoneyToMinor(parts[1],currency),flat_amount_minor:wizardMoneyToMinor(parts[2]||'0',currency)};
-    if(!open)tier.up_to=upTo;return tier;
-  });
-  if(tiers.length===0)throw new Error('Tiered row '+key+' needs at least one tier.');
-  for(var i=1;i<tiers.length;i++){if(tiers[i-1].up_to!==undefined&&tiers[i].up_to!==undefined&&tiers[i].up_to<=tiers[i-1].up_to)throw new Error('Tier bounds on '+key+' must increase.')}
-  return tiers;
-}
-function productWizardShippingChanged(){
-  var settings=wizardById('wizard-shipping-settings'),shipping=wizardById('wizard-shipping-address');
-  if(settings&&shipping)settings.hidden=!shipping.checked;
-}
-function wizardParseShippingCountries(raw){
-  var seen=new Set(),countries=String(raw).split(',').map(function(value){return value.trim().toUpperCase()}).filter(Boolean);
-  if(countries.length===0)throw new Error('Add at least one allowed shipping country.');
-  if(countries.length>50)throw new Error('At most 50 shipping countries may be configured.');
-  countries.forEach(function(country){if(!/^[A-Z]{2}$/.test(country))throw new Error('Shipping countries must use two-letter codes.');if(seen.has(country))throw new Error('Shipping countries must be unique.');seen.add(country)});
-  return countries;
-}
-function wizardParseShippingOptions(raw,currency,taxBehavior){
-  var units=new Set(['hour','day','business_day','week','month']);
-  var options=wizardPricingLines(raw).map(function(line){
-    var parts=line.split('|').map(function(part){return part.trim()});
-    if(parts.length<2||parts.length>6)throw new Error('Shipping options must use name | amount | minimum | maximum | unit | optional Stripe rate ID.');
-    while(parts.length<6)parts.push('');
-    var name=parts[0],minimum=parts[2]===''?undefined:Number(parts[2]),maximum=parts[3]===''?undefined:Number(parts[3]),unit=parts[4],stripeId=parts[5];
-    if(!name||name.length>100)throw new Error('Shipping option names must contain between 1 and 100 characters.');
-    if(minimum!==undefined&&(!Number.isSafeInteger(minimum)||minimum<1))throw new Error('Shipping estimate minimums must be positive whole numbers.');
-    if(maximum!==undefined&&(!Number.isSafeInteger(maximum)||maximum<1))throw new Error('Shipping estimate maximums must be positive whole numbers.');
-    if(minimum!==undefined&&maximum!==undefined&&minimum>maximum)throw new Error('Shipping estimate minimums must not exceed maximums.');
-    if((minimum!==undefined||maximum!==undefined)&&!units.has(unit))throw new Error('Shipping estimates need a valid time unit.');
-    if(minimum===undefined&&maximum===undefined&&unit!=='')throw new Error('A shipping time unit needs a minimum or maximum estimate.');
-    if(stripeId&&!/^shr_[A-Za-z0-9_]+$/.test(stripeId))throw new Error('Stripe shipping rate IDs must start with shr_.');
-    var option={display_name:name,amount_minor:wizardMoneyToMinor(parts[1],currency),tax_behavior:taxBehavior,stripe_shipping_rate_id:stripeId};
-    if(minimum!==undefined||maximum!==undefined){option.delivery_estimate={minimum:minimum,maximum:maximum,unit:unit}}
-    return option;
-  });
-  if(options.length>5)throw new Error('Stripe Checkout supports at most five shipping options.');
-  return options;
-}
-function collectWizardComponents(variables,currency,subscription,interval,intervalCount){
-  var components=[],keys=new Set(),byKey={};variables.forEach(function(v){byKey[v.key]=v});
-  document.querySelectorAll('[data-component-row]').forEach(function(row,index){
-    var key=row.querySelector('[data-component-key]').value.trim(),label=row.querySelector('[data-component-label]').value.trim();
-    if(!/^[A-Za-z][A-Za-z0-9_]*$/.test(key)||keys.has(key))throw new Error('Each price row needs a unique key using letters, numbers, and underscores.');keys.add(key);
-    if(!label)throw new Error('Each price row needs a label.');
-    var type=row.querySelector('[data-component-type]').value,input=row.querySelector('[data-component-input]').value.trim(),amount;
-    var numeric=type==='per_unit'||type==='flat_plus_per_unit'||type==='graduated'||type==='volume'||type==='package';
-    if(type!=='fixed'&&!byKey[input])throw new Error('Price row '+key+' must reference an existing input.');
-    if(numeric&&byKey[input].kind!=='integer'&&byKey[input].kind!=='number')throw new Error('Price row '+key+' must reference a number input.');
-    if(type==='fixed')amount={type:'fixed',unit_amount_minor:wizardMoneyToMinor(row.querySelector('[data-component-amount]').value,currency)};
-    else if(type==='per_unit')amount={type:'per_unit',input:input,unit_amount_minor:wizardMoneyToMinor(row.querySelector('[data-component-amount]').value,currency)};
-    else if(type==='flat_plus_per_unit')amount={type:'flat_plus_per_unit',base_amount_minor:wizardMoneyToMinor(row.querySelector('[data-component-base]').value,currency),input:input,unit_amount_minor:wizardMoneyToMinor(row.querySelector('[data-component-amount]').value,currency)};
-    else if(type==='lookup'){
-      if(byKey[input].kind!=='select'&&byKey[input].kind!=='text')throw new Error('Lookup row '+key+' must reference a choice or text input.');
-      amount={type:'lookup',input:input,prices:wizardParseLookup(row.querySelector('[data-component-details]').value,currency,key)};
-    }else if(type==='graduated'||type==='volume')amount={type:type,input:input,tiers:wizardParseTiers(row.querySelector('[data-component-details]').value,currency,key)};
-    else if(type==='package'){
-      var packageSize=Number(row.querySelector('[data-component-package-size]').value);
-      if(!Number.isSafeInteger(packageSize)||packageSize<1)throw new Error('Package size on '+key+' must be a positive whole number.');
-      amount={type:'package',input:input,units_per_package:packageSize,package_amount_minor:wizardMoneyToMinor(row.querySelector('[data-component-amount]').value,currency),rounding:row.querySelector('[data-component-rounding]').value};
-    }else throw new Error('Price row '+key+' uses an unknown calculation.');
-    var conditionType=row.querySelector('[data-component-condition]').value,conditionInput=row.querySelector('[data-condition-input]').value.trim(),rawCondition=row.querySelector('[data-condition-value]').value.trim();var condition={op:'always'};
-    if(conditionType==='advanced_preserved'){
-      try{condition=JSON.parse(row.dataset.preservedCondition)}catch(_error){throw new Error('Advanced condition on '+key+' could not be preserved.')}
-    }else if(conditionType!=='always'){
-      if(!byKey[conditionInput])throw new Error('Condition on '+key+' must reference an existing input.');
-      if(conditionType==='present')condition={op:'present',input:conditionInput};
-      else if(conditionType==='in'){
-        var conditionValues=rawCondition.split(',').map(function(value){return value.trim()}).filter(Boolean);
-        if(conditionValues.length===0)throw new Error('Condition on '+key+' needs at least one comparison value.');
-        condition={op:'in',input:conditionInput,values:conditionValues.map(function(value){return wizardConditionValue(value,byKey[conditionInput])})};
-      }else{
-        if(rawCondition==='')throw new Error('Condition on '+key+' needs a comparison value.');
-        condition={op:conditionType,input:conditionInput,value:wizardConditionValue(rawCondition,byKey[conditionInput])};
-      }
-    }
-    var quantity={type:'fixed',value:1},metadata={};
-    if(row.dataset.preservedQuantity){try{quantity=JSON.parse(row.dataset.preservedQuantity)}catch(_error){throw new Error('Advanced quantity rule on '+key+' could not be preserved.')}}
-    if(row.dataset.preservedMetadata){try{metadata=JSON.parse(row.dataset.preservedMetadata)}catch(_error){throw new Error('Metadata on '+key+' could not be preserved.')}}
-    var component={key:key,label:label,description:row.querySelector('[data-component-description]').value.trim(),sort_order:index,required:row.querySelector('[data-component-required]').checked,amount:amount,quantity:quantity,condition:condition,metadata:metadata};
-    if(subscription)component.recurrence={interval:interval,interval_count:intervalCount};
-    components.push(component);
-  });
-  if(components.length===0)throw new Error('Add at least one itemized price row.');return components;
-}
-function buildProductWizardOffer(){
-  var template=productWizardTemplate(),subscription=productWizardIsSubscription(),configurable=productWizardIsConfigurable();
-  var currency=wizardById('wizard-currency').value.trim().toUpperCase();
-  if(!/^[A-Z]{3}$/.test(currency))throw new Error('Currency must be a three-letter ISO code.');
-  var interval=wizardById('wizard-interval').value,intervalCount=Number(wizardById('wizard-interval-count').value||1);
-  if(subscription&&(!Number.isInteger(intervalCount)||intervalCount<1||intervalCount>36))throw new Error('Billing interval count must be between 1 and 36.');
-  var variables=[],components=[];
-  if(configurable){variables=collectWizardVariables();components=collectWizardComponents(variables,currency,subscription,interval,intervalCount)}
-  else{
-    var amount=wizardMoneyToMinor(wizardById('wizard-price').value,currency);
-    var component={key:'price',label:wizardById('wizard-name').value.trim()||'Price',sort_order:0,required:true,amount:{type:'fixed',unit_amount_minor:amount},quantity:{type:'fixed',value:1},condition:{op:'always'}};
-    if(subscription)component.recurrence={interval:interval,interval_count:intervalCount};components=[component];
-  }
-  var tiered=components.some(function(component){return component.amount.type==='graduated'||component.amount.type==='volume'});
-  var taxBehavior=wizardById('wizard-tax-behavior').value,collectShipping=wizardById('wizard-shipping-address').checked;
-  var shippingCountries=collectShipping?wizardParseShippingCountries(wizardById('wizard-shipping-countries').value):[];
-  var shippingOptions=collectShipping?wizardParseShippingOptions(wizardById('wizard-shipping-options').value,currency,taxBehavior):[];
-  var minimumRaw=wizardById('wizard-minimum-total').value.trim(),maximumRaw=wizardById('wizard-maximum-total').value.trim();
-  var minimumTotal=minimumRaw?wizardMoneyToMinor(minimumRaw,currency):null,maximumTotal=maximumRaw?wizardMoneyToMinor(maximumRaw,currency):null;
-  if(maximumTotal!==null&&maximumTotal<=0)throw new Error('Maximum item total must be greater than zero.');
-  if(minimumTotal!==null&&maximumTotal!==null&&minimumTotal>maximumTotal)throw new Error('Minimum item total must not exceed maximum item total.');
-  var checkout={allow_promotion_codes:wizardById('wizard-promotions').checked,automatic_tax:wizardById('wizard-automatic-tax').checked,collect_billing_address:wizardById('wizard-billing-address').checked,collect_shipping_address:collectShipping,allowed_shipping_countries:shippingCountries,shipping_options:shippingOptions,create_customer:wizardById('wizard-create-customer').checked,require_terms_consent:wizardById('wizard-terms').checked,trial_days:subscription?Number(wizardById('wizard-trial-days').value||0):0};
-  if(minimumTotal!==null)checkout.minimum_total_minor=minimumTotal;if(maximumTotal!==null)checkout.maximum_total_minor=maximumTotal;
-  return {name:wizardById('wizard-name').value.trim()||'New offer',mode:subscription?'subscription':'payment',currency:currency,pricing_model:configurable?'components':'fixed',recurring_interval:subscription?interval:null,interval_count:subscription?intervalCount:1,usage_type:'licensed',billing_scheme:tiered?'tiered':'per_unit',tax_behavior:taxBehavior,variables:variables,components:components,checkout:checkout};
-}
-function buildProductWizardPayload(){
-  var name=wizardById('wizard-name').value.trim();if(!name)throw new Error('Product name is required.');
-  var slug=wizardById('wizard-slug').value.trim()||productWizardSlug(name);if(!slug)throw new Error('Product name must contain at least one letter or number.');
-  var offer=buildProductWizardOffer();var tags=wizardById('wizard-tags').value.split(',').map(function(v){return v.trim()}).filter(Boolean);
-  var product={name:name,slug:slug,description:wizardById('wizard-description').value.trim(),image_url:wizardById('wizard-image').value.trim(),tags:tags,currency:offer.currency,fulfillment_kind:wizardById('wizard-fulfillment').value,product_template_id:productWizardTemplate(),metadata:{impresspress_template:productWizardTemplate()}};
-  return {product:product,offer:offer};
-}
-function renderProductWizardReview(){
-  var target=wizardById('wizard-review');target.replaceChildren();
-  try{
-    var built=buildProductWizardPayload(),offer=built.offer;
-    var title=document.createElement('h4');title.textContent=built.product.name;target.appendChild(title);
-    var summary=document.createElement('p');summary.className='text-muted text-sm';summary.textContent=(offer.mode==='subscription'?'Subscription':'One-time payment')+' · '+offer.currency+' · '+(offer.pricing_model==='fixed'?'Fixed price':'Configurable rows');target.appendChild(summary);
-    var list=document.createElement('ul');
-    offer.components.forEach(function(component){var item=document.createElement('li'),rule=component.amount,description='';
-      if(rule.type==='fixed')description=wizardMinorToDisplay(rule.unit_amount_minor,offer.currency)+' '+offer.currency;
-      else if(rule.type==='per_unit')description=wizardMinorToDisplay(rule.unit_amount_minor,offer.currency)+' '+offer.currency+' per '+rule.input;
-      else if(rule.type==='flat_plus_per_unit')description=wizardMinorToDisplay(rule.base_amount_minor,offer.currency)+' + '+wizardMinorToDisplay(rule.unit_amount_minor,offer.currency)+' '+offer.currency+' per '+rule.input;
-      else if(rule.type==='lookup')description=Object.keys(rule.prices).length+' lookup price(s) selected by '+rule.input;
-      else if(rule.type==='graduated'||rule.type==='volume')description=rule.tiers.length+' '+rule.type+' tier(s) based on '+rule.input;
-      else if(rule.type==='package')description=wizardMinorToDisplay(rule.package_amount_minor,offer.currency)+' '+offer.currency+' per '+rule.units_per_package+' '+rule.input;
-      item.textContent=component.label+': '+description+(component.condition.op!=='always'?' when '+component.condition.input+' '+component.condition.op.replace(/_/g,' ')+' '+String(component.condition.value||component.condition.values||''):'');list.appendChild(item)});
-    target.appendChild(list);
-    var options=document.createElement('p');options.className='text-muted text-sm';options.textContent=offer.variables.length+' customer input(s), '+offer.components.length+' price row(s)'+(offer.checkout.minimum_total_minor!==undefined?', minimum '+wizardMinorToDisplay(offer.checkout.minimum_total_minor,offer.currency)+' '+offer.currency:'')+(offer.checkout.maximum_total_minor!==undefined?', maximum '+wizardMinorToDisplay(offer.checkout.maximum_total_minor,offer.currency)+' '+offer.currency:'')+(offer.checkout.automatic_tax?', automatic tax':'')+(offer.checkout.allow_promotion_codes?', promotion codes':'');target.appendChild(options);
-  }catch(error){productWizardShowError(error.message)}
-}
-async function productWizardRequest(path,method,body){
-  var response=await fetch(path,{method:method,credentials:'same-origin',headers:{'Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)});var data={};try{data=await response.json()}catch(_){}
-  if(!response.ok)throw new Error(data.message||data.error||'The server rejected the product configuration.');return data;
-}
-async function submitProductWizard(intent){
-  productWizardClearError();var buttons=[wizardById('wizard-save-draft'),wizardById('wizard-publish')];var productId='';
-  try{
-    var built=buildProductWizardPayload();buttons.forEach(function(button){button.disabled=true});
-    var config=window.__productWizardConfig;var created=await productWizardRequest(config.product_collection,'POST',built.product);productId=created.id;
-    if(!productId)throw new Error('Product creation returned no product ID.');
-    var offerCollection=config.product_collection+'/'+encodeURIComponent(productId)+'/offers';var managed=await productWizardRequest(offerCollection,'POST',built.offer);var offerId=managed.offer&&managed.offer.id;
-    if(!offerId)throw new Error('Pricing creation returned no offer ID.');
-    if(intent==='publish'){
-      await productWizardRequest(offerCollection+'/'+encodeURIComponent(offerId)+'/publish','POST',{});
-      await productWizardRequest(config.product_collection+'/'+encodeURIComponent(productId),'PATCH',{status:'active'});
-    }
-    window.location.assign(config.return_url+'?created='+encodeURIComponent(productId)+(intent==='publish'?'&published=1':''));
-  }catch(error){
-    productWizardShowError((productId?'Product draft '+productId+' was created, but setup did not finish. ':'')+(error.message||'Product setup failed.'));
-    buttons.forEach(function(button){button.disabled=false});
-  }
-}
-function initProductWizard(){productWizardTemplateChanged();productWizardShippingChanged();productWizardShowStep(1,false)}
-"#;
 
 // ---------------------------------------------------------------------------
 // Shared admin/seller product lifecycle manager
@@ -1935,29 +1529,29 @@ fn render_managed_offer(managed: &ManagedOffer, product_api_url: &str) -> Markup
                         @if let Some(interval) = offer.recurring_interval {
                             " · every " (offer.interval_count) " " (commerce_wire(&interval))
                         }
-                        @if managed.sync_status == "failed" { " · Stripe needs attention" }
-                        @else if managed.sync_status == "synced" { " · Synced with Stripe" }
+                        @if managed.sync_status == OfferSyncStatus::Failed { " · Stripe needs attention" }
+                        @else if managed.sync_status == OfferSyncStatus::Synced { " · Synced with Stripe" }
                     }
                 }
                 div .products-actions {
                     @if managed.status == OfferStatus::Draft {
-                        button .btn .btn--primary .btn--sm type="button" onclick="productManagerOpenVisualEditor(this)" { "Edit visually" }
-                        button .btn .btn--primary .btn--sm type="button" onclick="productManagerOfferAction(this,'publish')" { "Publish" }
+                        button .btn .btn--primary .btn--sm type="button" data-action="pm-open-visual-editor" { "Edit visually" }
+                        button .btn .btn--primary .btn--sm type="button" data-action="pm-offer-action" data-offer-op="publish" { "Publish" }
                     }
                     @if managed.status == OfferStatus::Active {
-                        button .btn .btn--secondary .btn--sm type="button" onclick="productManagerOfferAction(this,'sync')" {
-                            @if managed.sync_status == "failed" {
+                        button .btn .btn--secondary .btn--sm type="button" data-action="pm-offer-action" data-offer-op="sync" {
+                            @if managed.sync_status == OfferSyncStatus::Failed {
                                 "Retry Stripe sync"
-                            } @else if managed.sync_status == "synced" {
+                            } @else if managed.sync_status == OfferSyncStatus::Synced {
                                 "Reconcile Stripe"
                             } @else {
                                 "Sync to Stripe"
                             }
                         }
                     }
-                    button .btn .btn--secondary .btn--sm type="button" onclick="productManagerOfferAction(this,'duplicate')" { "Duplicate to draft" }
+                    button .btn .btn--secondary .btn--sm type="button" data-action="pm-offer-action" data-offer-op="duplicate" { "Duplicate to draft" }
                     @if managed.status != OfferStatus::Archived {
-                        button .btn .btn--secondary .btn--sm type="button" onclick="productManagerOfferAction(this,'archive')" { "Archive" }
+                        button .btn .btn--secondary .btn--sm type="button" data-action="pm-offer-action" data-offer-op="archive" { "Archive" }
                     }
                 }
             }
@@ -1975,7 +1569,7 @@ fn render_managed_offer(managed: &ManagedOffer, product_api_url: &str) -> Markup
                                     h4 { "Test checkout price" }
                                     p .text-muted .text-sm { "Enter a typical order to confirm the amount customers will see." }
                                 }
-                                button .btn .btn--secondary .btn--sm type="button" onclick="productManagerPreview(this)" { "Calculate preview" }
+                                button .btn .btn--secondary .btn--sm type="button" data-action="pm-preview" { "Calculate preview" }
                             }
                             div data-preview-inputs .products-form-grid .products-form-grid--compact {
                                 div .form-group {
@@ -2026,7 +1620,7 @@ fn render_managed_offer(managed: &ManagedOffer, product_api_url: &str) -> Markup
                         summary .summary-strong { "Advanced draft definition" }
                         p .text-muted .text-sm { "Edit the complete typed offer JSON. Published offers are immutable; duplicate one to create an editable draft." }
                         textarea .form-textarea data-offer-definition rows="18" spellcheck="false" { (definition) }
-                        button .btn .btn--primary .btn--sm type="button" .mt-3 onclick="productManagerSaveOffer(this)" { "Save draft definition" }
+                        button .btn .btn--primary .btn--sm type="button" .mt-3 data-action="pm-save-offer" { "Save draft definition" }
                     }
                 }
                 @if managed.status == OfferStatus::Active {
@@ -2055,9 +1649,9 @@ fn render_managed_offer(managed: &ManagedOffer, product_api_url: &str) -> Markup
                             input .form-input data-link-completion-url type="url" placeholder="https://example.com/thank-you";
                         }
                         div .flex .gap-2 .flex-wrap {
-                            button .btn .btn--primary .btn--sm type="button" data-create-link onclick="productManagerCreateLink(this)" { "+ Create or reuse Payment Link" }
+                            button .btn .btn--primary .btn--sm type="button" data-create-link data-action="pm-create-link" { "+ Create or reuse Payment Link" }
                             @if !offer.variables.is_empty() {
-                                button .btn .btn--secondary .btn--sm type="button" onclick="productManagerNewPreset(this)" { "New preset" }
+                                button .btn .btn--secondary .btn--sm type="button" data-action="pm-new-preset" { "New preset" }
                             }
                         }
                         @if !offer.variables.is_empty() {
@@ -2072,12 +1666,12 @@ fn render_managed_offer(managed: &ManagedOffer, product_api_url: &str) -> Markup
                         div .form-group {
                             label .form-label { "Hosted Checkout widget" }
                             textarea .form-textarea data-integration-snippet readonly rows="4" spellcheck="false" { (hosted_snippet) }
-                            button .btn .btn--secondary .btn--sm type="button" .mt-2 onclick="productManagerCopyField(this)" { "Copy hosted snippet" }
+                            button .btn .btn--secondary .btn--sm type="button" .mt-2 data-action="pm-copy-field" { "Copy hosted snippet" }
                         }
                         div .form-group {
                             label .form-label { "Embedded Checkout widget" }
                             textarea .form-textarea data-integration-snippet readonly rows="4" spellcheck="false" { (embedded_snippet) }
-                            button .btn .btn--secondary .btn--sm type="button" .mt-2 onclick="productManagerCopyField(this)" { "Copy embedded snippet" }
+                            button .btn .btn--secondary .btn--sm type="button" .mt-2 data-action="pm-copy-field" { "Copy embedded snippet" }
                         }
                     }
                 }
@@ -2096,10 +1690,13 @@ pub async fn product_manager(
     // so the hand-written `deleted_at` check this used to need is gone too.
     let product = match repo::products::get(ctx, product_id).await {
         Ok(product) => product,
-        Err(error) if error.code == wafer_run::ErrorCode::NotFound => {
-            return crate::http::err_not_found("Product not found");
+        Err(error) => {
+            return crate::blocks::crud::db_error(
+                error,
+                "Product not found",
+                "Could not load product",
+            )
         }
-        Err(error) => return crate::http::err_internal("Could not load product", error),
     };
     if !admin && !super::handlers::is_owned_by(&product, msg.user_id()) {
         // The shared rule again — this page and the API that backs its
@@ -2108,9 +1705,15 @@ pub async fn product_manager(
     }
     let offers = match repo::offers::list_for_product(ctx, product_id).await {
         Ok(offers) => offers,
-        Err(error) => return crate::http::err_internal("Could not load product pricing", error),
+        Err(error) => return crud::db_error_internal(error, "Could not load product pricing"),
     };
-    let seller_enabled = !admin && super::handlers::user_products_enabled(ctx).await;
+    let seller_enabled = !admin
+        && match super::handlers::user_products_enabled(ctx).await {
+            Ok(value) => value,
+            Err(e) => {
+                return crud::db_error_page(msg, e, "products page: seller switch read failed")
+            }
+        };
     let product_api_url = if admin {
         format!("/b/products/api/admin/products/{product_id}")
     } else {
@@ -2126,12 +1729,21 @@ pub async fn product_manager(
     } else {
         "/b/products/my-products/"
     };
-    let page_config = serde_json::json!({
+    let page_config = ui::script_json(&serde_json::json!({
         "product_url": product_api_url,
         "detail_base_url": detail_base_url,
-    });
+    }));
     let status = product.str_field("status");
     let approval = product.str_field("approval_status");
+    // As above: the stored spelling compared against the variant's own. The
+    // badge below still renders the raw column, so a value outside the
+    // contract shows up on the page instead of replacing it with a 500.
+    let pending_review = status == commerce_wire(&ProductStatus::PendingReview);
+    let publishable = status != commerce_wire(&ProductStatus::Active) && !pending_review;
+    let archived = status == commerce_wire(&ProductStatus::Archived);
+    let live = status == commerce_wire(&ProductStatus::Active)
+        && approval == commerce_wire(&ApprovalStatus::Approved);
+    let awaiting_moderation = pending_review && approval == commerce_wire(&ApprovalStatus::Pending);
     let content = html! {
         @if admin { (admin_tabs("products")) } @else { (portal_tabs("products", seller_enabled)) }
         (components::page_header(
@@ -2148,36 +1760,40 @@ pub async fn product_manager(
                         (components::status_badge(status))
                         @if product.str_field("owner_kind") == "user" { span .badge .badge-secondary { "Review: " (approval) } }
                     }
-                    @if !admin && status == "pending_review" {
+                    @if !admin && pending_review {
                         p .text-muted .text-sm .text-subtitle { "This product is awaiting administrator review and is not public yet." }
                     }
                 }
                 div .products-actions {
-                    @if admin && product.str_field("owner_kind") == "user" && status == "pending_review" && approval == "pending" {
-                        button .btn .btn--primary .btn--sm type="button" data-moderation-action="approve" onclick="productManagerModerate(this,'approve')" { "Approve listing" }
-                        button .btn .btn--secondary .btn--sm type="button" data-moderation-action="reject" onclick="productManagerModerate(this,'reject')" { "Return to seller" }
+                    @if admin && product.str_field("owner_kind") == "user" && awaiting_moderation {
+                        button .btn .btn--primary .btn--sm type="button" data-moderation-action="approve" data-action="pm-moderate" { "Approve listing" }
+                        button .btn .btn--secondary .btn--sm type="button" data-moderation-action="reject" data-action="pm-moderate" { "Return to seller" }
                     }
-                    button .btn .btn--secondary .btn--sm type="button" onclick="productManagerDuplicate(this)" { "Duplicate product" }
-                    @if status != "active" && status != "pending_review" {
-                        button .btn .btn--primary .btn--sm type="button" onclick="productManagerSetStatus('active',this)" { @if admin { "Publish product" } @else { "Submit for publication" } }
+                    button .btn .btn--secondary .btn--sm type="button" data-action="pm-duplicate" { "Duplicate product" }
+                    @if publishable {
+                        button .btn .btn--primary .btn--sm type="button" data-action="pm-set-status" data-product-status="active" { @if admin { "Publish product" } @else { "Submit for publication" } }
                     }
-                    @if status != "archived" {
-                        button .btn .btn--secondary .btn--sm type="button" onclick="productManagerSetStatus('archived',this)" { "Archive product" }
+                    @if !archived {
+                        button .btn .btn--secondary .btn--sm type="button" data-action="pm-set-status" data-product-status="archived" { "Archive product" }
                     }
-                    @if status == "active" && approval == "approved" {
+                    @if live {
                         a .btn .btn--secondary .btn--sm href=(format!("/b/products/catalog/{product_id}")) target="_blank" rel="noopener" { "View storefront" }
                     }
                 }
             }
             div .card__body {
-                form #product-manager-form onsubmit="productManagerSaveProduct(event)" {
+                form #product-manager-form {
                     div .form-group { label .form-label .required for="manager-product-name" { "Product name" } input #manager-product-name .form-input type="text" maxlength="160" required value=(product.str_field("name")); }
                     div .form-group { label .form-label for="manager-product-description" { "Customer-facing description" } textarea #manager-product-description .form-textarea maxlength="4000" { (product.str_field("description")) } }
                     details .products-advanced {
                         summary { "More product details (optional)" }
                         div .products-advanced__body {
                             div .products-form-grid {
-                                div .form-group { label .form-label for="manager-product-slug" { "Web address" } input #manager-product-slug .form-input type="text" maxlength="160" value=(product.str_field("slug")); }
+                                // No `pattern`: a stored slug may break the grammar, and a
+                                // `pattern` would block every save of such a product, even one
+                                // that leaves the slug alone. The server refuses a changed slug
+                                // outside the grammar; `maxlength` binds only what is typed.
+                                div .form-group { label .form-label for="manager-product-slug" { "Web address" } input #manager-product-slug .form-input type="text" maxlength=(PRODUCT_SLUG_MAX_LEN) value=(product.str_field("slug")); }
                                 div .form-group { label .form-label for="manager-product-image" { "Image URL" } input #manager-product-image .form-input type="url" value=(product.str_field("image_url")); }
                                 div .form-group {
                                     label .form-label for="manager-product-fulfillment" { "How it is delivered" }
@@ -2200,7 +1816,7 @@ pub async fn product_manager(
                     h3 #manager-visual-title .card__title { "Edit pricing draft" }
                     p .text-muted .text-sm .text-subtitle { "Manage customer inputs, itemized price rows, conditions, and recurring terms without editing JSON." }
                 }
-                button .btn .btn--secondary .btn--sm type="button" onclick="productManagerCloseVisualEditor()" { "Close editor" }
+                button .btn .btn--secondary .btn--sm type="button" data-action="pm-close-visual-editor" { "Close editor" }
             }
             div .card__body {
                 div .grid .grid-auto-180 .gap-4 {
@@ -2210,7 +1826,7 @@ pub async fn product_manager(
                     }
                     div .form-group {
                         label .form-label for="manager-visual-mode" { "Charge type" }
-                        select #manager-visual-mode .form-select onchange="productManagerVisualModeChanged()" { option value="payment" { "One-time payment" } option value="subscription" { "Subscription" } }
+                        select #manager-visual-mode .form-select data-action="pm-visual-mode-changed" { option value="payment" { "One-time payment" } option value="subscription" { "Subscription" } }
                     }
                     div .form-group {
                         label .form-label .required for="manager-visual-currency" { "Currency" }
@@ -2228,21 +1844,21 @@ pub async fn product_manager(
                 section .mt-4 {
                     div .flex .items-center .justify-between .gap-4 .flex-wrap {
                         div { h4 .m-0 { "Customer fields" } p .text-muted .text-sm { "Typed quantities, choices, flags, and text used by price rows." } }
-                        button .btn .btn--secondary .btn--sm type="button" onclick="addWizardVariable()" { "+ Add input" }
+                        button .btn .btn--secondary .btn--sm type="button" data-action="pw-add-variable" { "+ Add input" }
                     }
                     div #wizard-variables {}
                 }
                 section .products-section {
                     div .flex .items-center .justify-between .gap-4 .flex-wrap {
                         div { h4 .m-0 { "Itemized price rows" } p .text-muted .text-sm { "Fixed, per-unit, lookup, tiered, package, and conditional rows are supported." } }
-                        button .btn .btn--secondary .btn--sm type="button" onclick="addWizardComponent()" { "+ Add row" }
+                        button .btn .btn--secondary .btn--sm type="button" data-action="pw-add-component" { "+ Add row" }
                     }
                     div #wizard-components {}
                 }
                 p .text-muted .text-sm { "Checkout collection, shipping, tax, and fulfillment settings remain unchanged. Advanced nested conditions and quantity rules are preserved when saved." }
                 div .flex .gap-2 .mt-4 .flex-wrap {
-                    button .btn .btn--primary .btn--sm type="button" onclick="productManagerSaveVisualOffer(this)" { "Save visual changes" }
-                    button .btn .btn--secondary .btn--sm type="button" onclick="productManagerCloseVisualEditor()" { "Cancel" }
+                    button .btn .btn--primary .btn--sm type="button" data-action="pm-save-visual-offer" { "Save visual changes" }
+                    button .btn .btn--secondary .btn--sm type="button" data-action="pm-close-visual-editor" { "Cancel" }
                 }
             }
         }
@@ -2258,7 +1874,9 @@ pub async fn product_manager(
                 @for offer in &offers { (render_managed_offer(offer, &product_api_url)) }
             }
         }
-        script { (maud::PreEscaped(format!("window.__productManagerConfig={page_config};\n{PRODUCT_WIZARD_JS}\n{PRODUCT_MANAGER_JS}\ninitProductManager();"))) }
+        script { (maud::PreEscaped(format!("window.__productManagerConfig={page_config};"))) }
+        script src=(assets::wizard_js_url()) {}
+        script src=(assets::manager_js_url()) {}
     };
     ui::shell_page(
         ctx,
@@ -2277,78 +1895,21 @@ pub async fn product_manager(
     .await
 }
 
-const PRODUCT_MANAGER_JS: &str = r#"
-function productManagerError(message){var target=document.getElementById('product-manager-error');target.textContent=message||'Something went wrong.';target.hidden=false;target.scrollIntoView({block:'nearest'});}
-function productManagerClearError(){var target=document.getElementById('product-manager-error');target.hidden=true;target.textContent='';}
-async function productManagerRequest(url,method,body){var options={method:method,credentials:'same-origin',headers:{Accept:'application/json'}};if(body!==undefined){options.headers['Content-Type']='application/json';options.body=JSON.stringify(body)}var response=await fetch(url,options),text=await response.text(),payload={};if(text){try{payload=JSON.parse(text)}catch(_error){payload={message:text}}}if(!response.ok)throw new Error(payload.message||payload.error||('Request failed ('+response.status+')'));return payload;}
-function productManagerButton(button,busy){if(!button)return;button.disabled=busy;if(busy){button.dataset.originalText=button.textContent;button.textContent='Working…'}else if(button.dataset.originalText){button.textContent=button.dataset.originalText;delete button.dataset.originalText}}
-var productManagerVisualCard=null;
-var productManagerVisualDefinition=null;
-function productManagerVisualModeChanged(){var recurring=document.getElementById('manager-visual-mode').value==='subscription';document.querySelectorAll('[data-manager-recurring]').forEach(function(field){field.hidden=!recurring})}
-function productManagerComponentSeed(component,currency){var amount=component.amount||{},seed={key:component.key,label:component.label,description:component.description||'',amount_type:amount.type||'fixed',required:component.required!==false,amount:'0.00',input:amount.input||'',base_amount:'0.00',units_per_package:amount.units_per_package||1,rounding:amount.rounding||'up',details:'',preserved_quantity:component.quantity||{type:'fixed',value:1},preserved_metadata:component.metadata||{}};if(amount.type==='fixed')seed.amount=wizardMinorToDisplay(amount.unit_amount_minor||0,currency);else if(amount.type==='per_unit'||amount.type==='flat_plus_per_unit')seed.amount=wizardMinorToDisplay(amount.unit_amount_minor||0,currency);else if(amount.type==='package')seed.amount=wizardMinorToDisplay(amount.package_amount_minor||0,currency);if(amount.type==='flat_plus_per_unit')seed.base_amount=wizardMinorToDisplay(amount.base_amount_minor||0,currency);if(amount.type==='lookup')seed.details=Object.keys(amount.prices||{}).map(function(key){return key+' = '+wizardMinorToDisplay(amount.prices[key],currency)}).join('\n');if(amount.type==='graduated'||amount.type==='volume')seed.details=(amount.tiers||[]).map(function(tier){return (tier.up_to===undefined||tier.up_to===null?'*':tier.up_to)+' | '+wizardMinorToDisplay(tier.unit_amount_minor||0,currency)+' | '+wizardMinorToDisplay(tier.flat_amount_minor||0,currency)}).join('\n');var condition=component.condition||{op:'always'},simple=['always','present','equals','not_equals','greater_than','greater_than_or_equal','less_than','less_than_or_equal','contains','in'];if(simple.indexOf(condition.op)!==-1){seed.condition=condition.op;seed.condition_input=condition.input||'';seed.condition_value=condition.op==='in'?(condition.values||[]).join(', '):condition.value===undefined?'':String(condition.value)}else seed.preserved_condition=condition;return seed}
-function productManagerOpenVisualEditor(button){var card=productManagerCard(button),source=card.querySelector('[data-offer-definition]'),definition;productManagerClearError();try{definition=JSON.parse(source.value)}catch(error){productManagerError('Draft definition is not valid JSON: '+error.message);return}productManagerVisualCard=card;productManagerVisualDefinition=definition;var currency=String(definition.currency||'USD').toUpperCase();document.getElementById('manager-visual-title').textContent='Edit '+(definition.name||'pricing draft');document.getElementById('manager-visual-offer-name').value=definition.name||'';document.getElementById('manager-visual-mode').value=definition.mode||'payment';document.getElementById('manager-visual-currency').value=currency;document.getElementById('manager-visual-interval').value=definition.recurring_interval||'month';document.getElementById('manager-visual-interval-count').value=definition.interval_count||1;document.getElementById('wizard-variables').replaceChildren();document.getElementById('wizard-components').replaceChildren();(definition.variables||[]).forEach(addWizardVariable);(definition.components||[]).forEach(function(component){addWizardComponent(productManagerComponentSeed(component,currency))});productManagerVisualModeChanged();var editor=document.getElementById('product-manager-visual-editor');editor.hidden=false;editor.scrollIntoView({block:'start'});document.getElementById('manager-visual-offer-name').focus()}
-function productManagerCloseVisualEditor(){var editor=document.getElementById('product-manager-visual-editor');if(editor)editor.hidden=true;productManagerVisualCard=null;productManagerVisualDefinition=null;productManagerClearError()}
-async function productManagerSaveVisualOffer(button){if(!productManagerVisualCard||!productManagerVisualDefinition){productManagerError('Choose a draft offer to edit first.');return}productManagerClearError();var nameField=document.getElementById('manager-visual-offer-name'),currencyField=document.getElementById('manager-visual-currency'),mode=document.getElementById('manager-visual-mode').value,currency=currencyField.value.trim().toUpperCase(),interval=document.getElementById('manager-visual-interval').value,intervalCount=Number(document.getElementById('manager-visual-interval-count').value||1),definition=JSON.parse(JSON.stringify(productManagerVisualDefinition));try{if(!nameField.value.trim())throw Object.assign(new Error('Offer name is required.'),{focus:nameField});if(!/^[A-Z]{3}$/.test(currency))throw Object.assign(new Error('Currency must be a three-letter ISO code.'),{focus:currencyField});if(mode==='subscription'&&(!Number.isSafeInteger(intervalCount)||intervalCount<1||intervalCount>36))throw Object.assign(new Error('Billing interval count must be between 1 and 36.'),{focus:document.getElementById('manager-visual-interval-count')});var variables=collectWizardVariables(),components=collectWizardComponents(variables,currency,mode==='subscription',interval,intervalCount);definition.name=nameField.value.trim();definition.mode=mode;definition.currency=currency;definition.recurring_interval=mode==='subscription'?interval:null;definition.interval_count=mode==='subscription'?intervalCount:1;definition.variables=variables;definition.components=components;definition.pricing_model=variables.length||components.length!==1||components[0].amount.type!=='fixed'?'components':'fixed';definition.billing_scheme=components.some(function(component){return component.amount.type==='graduated'||component.amount.type==='volume'})?'tiered':'per_unit'}catch(error){productManagerError(error.message);if(error.focus)error.focus.focus();return}productManagerButton(button,true);try{await productManagerRequest(productManagerVisualCard.dataset.offerUrl,'PATCH',definition);var source=productManagerVisualCard.querySelector('[data-offer-definition]');if(source)source.value=JSON.stringify(definition,null,2);window.location.reload()}catch(error){productManagerError(error.message);productManagerButton(button,false)}}
-async function productManagerSaveProduct(event){event.preventDefault();productManagerClearError();var button=event.currentTarget.querySelector('button[type="submit"]');productManagerButton(button,true);try{await productManagerRequest(window.__productManagerConfig.product_url,'PATCH',{name:document.getElementById('manager-product-name').value.trim(),slug:document.getElementById('manager-product-slug').value.trim(),description:document.getElementById('manager-product-description').value.trim(),image_url:document.getElementById('manager-product-image').value.trim(),fulfillment_kind:document.getElementById('manager-product-fulfillment').value});window.location.reload()}catch(error){productManagerError(error.message);productManagerButton(button,false)}}
-async function productManagerSetStatus(status,button){if(status==='archived'&&!window.confirm('Archive this product? Public checkout will no longer be available.'))return;productManagerClearError();productManagerButton(button,true);try{await productManagerRequest(window.__productManagerConfig.product_url,'PATCH',{status:status});window.location.reload()}catch(error){productManagerError(error.message);productManagerButton(button,false)}}
-async function productManagerDuplicate(button){productManagerClearError();productManagerButton(button,true);try{var result=await productManagerRequest(window.__productManagerConfig.product_url+'/duplicate','POST',{}),id=result.product&&result.product.id;if(!id)throw new Error('Product duplication returned no product ID');window.location.assign(window.__productManagerConfig.detail_base_url+encodeURIComponent(id))}catch(error){productManagerError(error.message);productManagerButton(button,false)}}
-async function productManagerModerate(button,decision){if(decision==='reject'&&!window.confirm('Return this listing to the seller as a draft?'))return;productManagerClearError();productManagerButton(button,true);try{await productManagerRequest(window.__productManagerConfig.product_url+'/'+decision,'POST',{});window.location.reload()}catch(error){productManagerError(error.message);productManagerButton(button,false)}}
-function productManagerCard(button){return button.closest('[data-offer-card]')}
-function productManagerCardError(card,message,focus){var target=card&&card.querySelector('[data-offer-error]');if(!target){productManagerError(message);return}target.textContent=message||'Something went wrong.';target.hidden=false;if(focus&&typeof focus.focus==='function')focus.focus();target.scrollIntoView({block:'nearest'});}
-function productManagerClearCardError(card){var target=card&&card.querySelector('[data-offer-error]');if(target){target.textContent='';target.hidden=true}card&&card.querySelectorAll('[aria-invalid="true"]').forEach(function(input){input.removeAttribute('aria-invalid')})}
-function productManagerInputs(card,purpose){var inputs={};card.querySelectorAll('[data-offer-variable="'+purpose+'"]').forEach(function(input){var key=input.dataset.variableKey,kind=input.dataset.variableKind,value;if(!key)return;if(!input.checkValidity()){input.setAttribute('aria-invalid','true');throw Object.assign(new Error((input.labels&&input.labels[0]?input.labels[0].textContent:key)+' is invalid.'),{focus:input})}if(kind==='boolean')value=input.checked;else if(kind==='multi_select')value=Array.from(input.selectedOptions,function(option){return option.value});else if(kind==='integer'){if(input.value==='')return;value=Number(input.value);if(!Number.isSafeInteger(value))throw Object.assign(new Error(key+' must be a whole number.'),{focus:input})}else if(kind==='number'){if(input.value==='')return;value=Number(input.value);if(!Number.isFinite(value))throw Object.assign(new Error(key+' must be a number.'),{focus:input})}else{if(input.value==='')return;value=input.value}inputs[key]=value});return inputs}
-function productManagerCurrencyExponent(currency){return ['BIF','CLP','DJF','GNF','JPY','KMF','KRW','MGA','PYG','RWF','UGX','VND','VUV','XAF','XOF','XPF'].indexOf(currency)!==-1?0:['BHD','JOD','KWD','OMR','TND'].indexOf(currency)!==-1?3:2}
-function productManagerMoney(minor,currency){currency=String(currency||'USD').toUpperCase();var places=productManagerCurrencyExponent(currency),value;try{value=BigInt(String(minor))}catch(_error){return currency+' —'}var negative=value<0n;if(negative)value=-value;var divisor=10n**BigInt(places),whole=value/divisor,fraction=value%divisor;return (negative?'-':'')+(places?whole+'.'+fraction.toString().padStart(places,'0'):whole.toString())+' '+currency}
-function productManagerRenderPreview(card,preview){var target=card.querySelector('[data-pricing-preview]');target.replaceChildren();var list=document.createElement('div');(preview.components||[]).forEach(function(component){var row=document.createElement('div');row.className='product-preview-row';var label=document.createElement('span');label.textContent=component.label+(component.included?'':' — not included');var amount=document.createElement('strong');amount.textContent=component.included?productManagerMoney(component.total_amount_minor,preview.amounts.currency):component.reason;row.append(label,amount);list.appendChild(row)});target.appendChild(list);var total=document.createElement('div');total.className='product-preview-total';var totalLabel=document.createElement('strong');totalLabel.textContent='Item total';var totalValue=document.createElement('strong');totalValue.textContent=productManagerMoney(preview.amounts.total_minor,preview.amounts.currency);total.append(totalLabel,totalValue);target.appendChild(total)}
-async function productManagerPreview(button){var card=productManagerCard(button),quantityInput=card.querySelector('[data-preview-quantity]');productManagerClearCardError(card);productManagerButton(button,true);try{if(!quantityInput.checkValidity())throw Object.assign(new Error('Checkout quantity must be a positive whole number.'),{focus:quantityInput});var quantity=Number(quantityInput.value);if(!Number.isSafeInteger(quantity)||quantity<1)throw Object.assign(new Error('Checkout quantity must be a positive whole number.'),{focus:quantityInput});var preview=await productManagerRequest(card.dataset.previewUrl,'POST',{offer_id:card.dataset.offerId,quantity:quantity,inputs:productManagerInputs(card,'preview')});productManagerRenderPreview(card,preview)}catch(error){productManagerCardError(card,error.message,error.focus)}finally{productManagerButton(button,false)}}
-async function productManagerOfferAction(button,action){var card=productManagerCard(button);if(action==='archive'&&!window.confirm('Archive this immutable offer? Existing order snapshots remain unchanged.'))return;productManagerClearError();productManagerButton(button,true);try{var method=action==='archive'?'DELETE':'POST',url=card.dataset.offerUrl+(action==='archive'?'':'/'+action);await productManagerRequest(url,method,action==='archive'?undefined:{});window.location.reload()}catch(error){productManagerError(error.message);productManagerButton(button,false)}}
-async function productManagerSaveOffer(button){var card=productManagerCard(button),definition;productManagerClearError();try{definition=JSON.parse(card.querySelector('[data-offer-definition]').value)}catch(error){productManagerError('Offer definition is not valid JSON: '+error.message);return}productManagerButton(button,true);try{await productManagerRequest(card.dataset.offerUrl,'PATCH',definition);window.location.reload()}catch(error){productManagerError(error.message);productManagerButton(button,false)}}
-function productManagerSetPresetInputs(card,inputs){inputs=inputs||{};card.querySelectorAll('[data-offer-variable="preset"]').forEach(function(input){var value=inputs[input.dataset.variableKey],kind=input.dataset.variableKind;if(kind==='boolean')input.checked=value===true;else if(kind==='multi_select')Array.from(input.options).forEach(function(option){option.selected=Array.isArray(value)&&value.indexOf(option.value)!==-1});else input.value=value===undefined||value===null?'':String(value)})}
-function productManagerNewPreset(button){var card=productManagerCard(button);delete card.dataset.editPresetId;var name=card.querySelector('[data-preset-name]'),slug=card.querySelector('[data-preset-slug]'),action=card.querySelector('[data-create-link]');if(name)name.value=name.defaultValue;if(slug)slug.value='';card.querySelectorAll('[data-offer-variable="preset"]').forEach(function(input){if(input.type==='checkbox')input.checked=input.defaultChecked;else if(input.tagName==='SELECT')Array.from(input.options).forEach(function(option){option.selected=option.defaultSelected});else input.value=input.defaultValue});if(action)action.textContent='+ Create or reuse Payment Link';productManagerClearCardError(card)}
-function productManagerEditPreset(card,preset){card.dataset.editPresetId=preset.id;var name=card.querySelector('[data-preset-name]'),slug=card.querySelector('[data-preset-slug]'),action=card.querySelector('[data-create-link]');if(name)name.value=preset.name||'';if(slug)slug.value=preset.slug||'';productManagerSetPresetInputs(card,preset.inputs);if(action)action.textContent='Update preset and create/reuse link';var first=name||card.querySelector('[data-offer-variable="preset"]');if(first)first.focus()}
-async function productManagerArchivePreset(card,preset){if(!window.confirm('Archive preset '+preset.name+'? Existing Payment Links keep their immutable configuration.'))return;try{await productManagerRequest(card.dataset.presetsUrl+'/'+encodeURIComponent(preset.id),'DELETE');if(card.dataset.editPresetId===preset.id)productManagerNewPreset(card.querySelector('[data-create-link]'));await productManagerLoadPresets(card)}catch(error){productManagerCardError(card,error.message)}}
-async function productManagerLoadPresets(card){var target=card.querySelector('[data-checkout-presets]');if(!target)return;target.textContent='Loading presets…';try{var payload=await productManagerRequest(card.dataset.presetsUrl,'GET'),presets=payload.presets||[];target.replaceChildren();if(!presets.length){target.textContent='No saved presets yet.';return}presets.forEach(function(preset){var row=document.createElement('div');row.className='product-preset-row';var status=document.createElement('span');status.className='badge '+(preset.active?'badge-success':'badge-secondary');status.textContent=preset.active?'Active':'Archived';var name=document.createElement('strong');name.textContent=preset.name;var values=document.createElement('span');values.className='text-muted text-sm';values.textContent=JSON.stringify(preset.inputs||{});row.append(status,name,values);if(preset.active){var edit=document.createElement('button');edit.type='button';edit.className='btn btn--secondary btn--sm';edit.textContent='Edit preset';edit.onclick=function(){productManagerEditPreset(card,preset)};var archive=document.createElement('button');archive.type='button';archive.className='btn btn--secondary btn--sm';archive.textContent='Archive preset';archive.onclick=function(){productManagerArchivePreset(card,preset)};row.append(edit,archive)}target.appendChild(row)})}catch(error){target.textContent='Could not load presets: '+error.message}}
-async function productManagerCreateLink(button){var card=productManagerCard(button),payload={};productManagerClearCardError(card);productManagerButton(button,true);try{var nameField=card.querySelector('[data-preset-name]');if(nameField){var name=nameField.value.trim();if(!name)throw Object.assign(new Error('Preset name is required.'),{focus:nameField});var slugField=card.querySelector('[data-preset-slug]'),slug=slugField?slugField.value.trim():'';if(slugField&&!slugField.checkValidity())throw Object.assign(new Error('Preset slug may contain lowercase letters, numbers, and single hyphens.'),{focus:slugField});var visual=card.querySelector('[data-offer-variable="preset"]'),inputs;if(visual)inputs=productManagerInputs(card,'preset');else{var values=card.querySelector('[data-preset-values]');try{inputs=JSON.parse(values.value)}catch(error){throw Object.assign(new Error('Preset values are not valid JSON: '+error.message),{focus:values})}}var editing=card.dataset.editPresetId,preset=await productManagerRequest(card.dataset.presetsUrl+(editing?'/'+encodeURIComponent(editing):''),editing?'PATCH':'POST',{name:name,slug:slug,inputs:inputs});if(!preset.id)throw new Error('Preset operation returned no ID');payload.preset_id=preset.id}var completion=card.querySelector('[data-link-completion-url]');if(completion&&completion.value.trim()){if(!completion.checkValidity())throw Object.assign(new Error('After-completion URL must be a valid absolute URL.'),{focus:completion});payload.after_completion_url=completion.value.trim()}await productManagerRequest(card.dataset.linksUrl,'POST',payload);await Promise.all([productManagerLoadPresets(card),productManagerLoadLinks(card)])}catch(error){productManagerCardError(card,error.message,error.focus)}finally{productManagerButton(button,false)}}
-async function productManagerDeactivateLink(card,id){if(!window.confirm('Deactivate this Stripe Payment Link?'))return;try{await productManagerRequest(card.dataset.linksUrl+'/'+encodeURIComponent(id),'DELETE');await productManagerLoadLinks(card)}catch(error){productManagerError(error.message)}}
-async function productManagerCopy(url,button){try{await navigator.clipboard.writeText(url);button.textContent='Copied';window.setTimeout(function(){button.textContent='Copy'},1200)}catch(_error){productManagerError('Copy failed. Open the link and copy it from the address bar.')}}
-async function productManagerCopyField(button){var field=button.closest('.form-group').querySelector('[data-integration-snippet]');if(field)await productManagerCopy(field.value,button)}
-async function productManagerRetryLink(card,link,button){productManagerClearCardError(card);productManagerButton(button,true);try{await productManagerRequest(card.dataset.linksUrl,'POST',link.preset_id?{preset_id:link.preset_id}:{});await productManagerLoadLinks(card)}catch(error){productManagerCardError(card,error.message)}finally{productManagerButton(button,false)}}
-async function productManagerLoadLinks(card){var target=card.querySelector('[data-payment-links]');if(!target)return;target.textContent='Loading Payment Links…';try{var payload=await productManagerRequest(card.dataset.linksUrl,'GET'),links=payload.payment_links||[];target.replaceChildren();if(!links.length){target.textContent='No Payment Links yet.';return}links.forEach(function(link){var row=document.createElement('div');row.className='product-payment-link-row';var failed=link.sync_status==='failed',status=document.createElement('span');status.className='badge '+(failed?'badge-danger':link.active?'badge-success':'badge-secondary');status.textContent=failed?'Sync failed':link.active?'Active':'Inactive';row.appendChild(status);if(link.url){var anchor=document.createElement('a');anchor.href=link.url;anchor.target='_blank';anchor.rel='noopener';anchor.textContent='Open hosted payment page';row.appendChild(anchor)}else{var pending=document.createElement('span');pending.className='text-muted text-sm';pending.textContent='Stripe link pending';row.appendChild(pending)}if(failed){var retry=document.createElement('button');retry.type='button';retry.className='btn btn--secondary btn--sm';retry.textContent='Retry link sync';retry.onclick=function(){productManagerRetryLink(card,link,retry)};row.appendChild(retry);if(link.sync_error){var error=document.createElement('span');error.className='text-muted text-sm';error.textContent=link.sync_error;row.appendChild(error)}}if(link.active&&link.url){var copy=document.createElement('button');copy.type='button';copy.className='btn btn--secondary btn--sm';copy.textContent='Copy';copy.onclick=function(){productManagerCopy(link.url,copy)};row.appendChild(copy);var deactivate=document.createElement('button');deactivate.type='button';deactivate.className='btn btn--secondary btn--sm';deactivate.textContent='Deactivate';deactivate.onclick=function(){productManagerDeactivateLink(card,link.id)};row.appendChild(deactivate)}target.appendChild(row)})}catch(error){target.textContent='Could not load Payment Links: '+error.message}}
-function initProductManager(){document.querySelectorAll('[data-offer-card]').forEach(function(card){productManagerLoadLinks(card);productManagerLoadPresets(card)})}
-"#;
-
-const PRODUCT_CATALOG_ADMIN_JS: &str = r#"
-function productCatalogById(id){return document.getElementById(id)}
-function productCatalogError(message,focus){var target=productCatalogById('catalog-admin-error');target.textContent=message||'Something went wrong.';target.hidden=false;if(focus&&typeof focus.focus==='function')focus.focus();target.scrollIntoView({block:'nearest'})}
-function productCatalogClearError(){var target=productCatalogById('catalog-admin-error');if(target){target.textContent='';target.hidden=true}}
-function productCatalogBusy(button,busy){if(!button)return;button.disabled=busy;if(busy){button.dataset.originalText=button.textContent;button.textContent='Saving…'}else if(button.dataset.originalText){button.textContent=button.dataset.originalText;delete button.dataset.originalText}}
-async function productCatalogRequest(url,method,body){var response=await fetch(url,{method:method,credentials:'same-origin',headers:{Accept:'application/json','Content-Type':'application/json'},body:body===undefined?undefined:JSON.stringify(body)}),text=await response.text(),payload={};if(text){try{payload=JSON.parse(text)}catch(_error){payload={message:text}}}if(!response.ok)throw new Error(payload.message||payload.error||('Request failed ('+response.status+')'));return payload}
-function productCatalogClose(){var editor=productCatalogById('group-editor');if(editor)editor.hidden=true;productCatalogClearError()}
-function productCatalogNew(){productCatalogClearError();var editor=productCatalogById('group-editor');editor.hidden=false;productCatalogById('group-editor-id').value='';productCatalogById('group-editor-name').value='';productCatalogById('group-editor-description').value='';productCatalogById('group-editor-status').value='active';productCatalogById('group-editor-title').textContent='New group';editor.scrollIntoView({block:'start'});productCatalogById('group-editor-name').focus()}
-function productCatalogEditGroup(button){productCatalogNew();productCatalogById('group-editor-title').textContent='Edit group';productCatalogById('group-editor-id').value=button.dataset.recordId;productCatalogById('group-editor-name').value=button.dataset.recordName||'';productCatalogById('group-editor-description').value=button.dataset.recordDescription||'';productCatalogById('group-editor-status').value=button.dataset.recordStatus||'active'}
-async function productCatalogSaveGroup(event){event.preventDefault();productCatalogClearError();var form=event.currentTarget,name=productCatalogById('group-editor-name'),button=form.querySelector('button[type="submit"]');if(!form.checkValidity()){productCatalogError('Enter a group name before saving.',name);return}productCatalogBusy(button,true);try{var id=productCatalogById('group-editor-id').value,url='/b/products/api/admin/groups'+(id?'/'+encodeURIComponent(id):'');await productCatalogRequest(url,id?'PATCH':'POST',{name:name.value.trim(),description:productCatalogById('group-editor-description').value.trim(),status:productCatalogById('group-editor-status').value});window.location.reload()}catch(error){productCatalogError(error.message);productCatalogBusy(button,false)}}
-async function productCatalogDelete(button){if(!window.confirm('Delete group '+(button.dataset.recordName||'')+'? Products already using it may prevent deletion.'))return;productCatalogClearError();button.disabled=true;try{await productCatalogRequest('/b/products/api/admin/groups/'+encodeURIComponent(button.dataset.recordId),'DELETE');window.location.reload()}catch(error){productCatalogError(error.message);button.disabled=false}}
-"#;
-
 // ---------------------------------------------------------------------------
 // Admin: Groups
 // ---------------------------------------------------------------------------
 
 pub async fn groups(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let opts = ListOptions {
-        sort: vec![SortField {
-            field: "name".into(),
-            desc: false,
-        }],
-        limit: 100,
-        ..Default::default()
+    let result = repo::groups::list_by_name(ctx, vec![], 100).await;
+    let list = match result {
+        Ok(list) => list,
+        Err(e) => return crud::db_error_page(msg, e, "products groups page: group read failed"),
     };
-    let result = db::list(ctx, GROUPS_TABLE, &opts).await;
 
     let content = html! {
         (admin_tabs("groups"))
         (components::page_header("Groups", Some("Keep related products together so your catalog is easier to browse"), Some(html! {
-            button .btn .btn--primary .btn--sm type="button" onclick="productCatalogNew('group')" { "+ New group" }
+            button .btn .btn--primary .btn--sm type="button" data-action="pc-new" { "+ New group" }
         })))
 
         p #catalog-admin-error .login-error role="alert" aria-live="assertive" hidden {}
@@ -2357,7 +1918,7 @@ pub async fn groups(ctx: &dyn Context, msg: &Message) -> OutputStream {
                 div { h3 #group-editor-title .card__title { "New group" } p .text-muted .text-sm .text-subtitle { "Give the group a clear name customers will recognize." } }
             }
             div .card__body {
-                form onsubmit="productCatalogSaveGroup(event)" {
+                form data-action="pc-save-group" {
                     input #group-editor-id type="hidden";
                     div .products-form-grid {
                         div .form-group {
@@ -2375,40 +1936,35 @@ pub async fn groups(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     }
                     div .products-actions {
                         button .btn .btn--primary .btn--sm type="submit" { "Save group" }
-                        button .btn .btn--secondary .btn--sm type="button" onclick="productCatalogClose('group')" { "Cancel" }
+                        button .btn .btn--secondary .btn--sm type="button" data-action="pc-close" { "Cancel" }
                     }
                 }
             }
         }
 
         div #groups-content {
-            @match &result {
-                Ok(list) => {
-                    @let cols = [
-                        components::TableCol { label: "Name", width: None },
-                        components::TableCol { label: "Description", width: None },
-                        components::TableCol { label: "Status", width: None },
-                        components::TableCol { label: "Created", width: None },
-                        components::TableCol { label: "Actions", width: None },
-                    ];
-                    @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|r| vec![
-                        html! { span .font-medium { (r.str_field("name")) } },
-                        html! { span .text-muted .text-sm { (r.str_field("description")) } },
-                        components::status_badge(r.str_field("status")),
-                        html! { span .text-muted .text-sm { (r.str_field("created_at").get(..10).unwrap_or("")) } },
-                        html! { div .flex .gap-2 .flex-wrap {
-                            button .btn .btn--secondary .btn--sm type="button" data-record-id=(r.id) data-record-name=(r.str_field("name")) data-record-description=(r.str_field("description")) data-record-status=(r.str_field("status")) onclick="productCatalogEditGroup(this)" { "Edit" }
-                            button .btn .btn--secondary .btn--sm type="button" data-record-id=(r.id) data-record-name=(r.str_field("name")) onclick="productCatalogDelete(this,'group')" { "Delete" }
-                        } },
-                    ]).collect();
-                    (components::data_table(&cols, rows, None::<fn(usize) -> Option<String>>, html! {
-                        (components::empty_state(icons::folder(), "No groups yet", "Groups are optional. Add one when you want to organize related products.", Some(html! { button .btn .btn--primary .btn--sm type="button" onclick="productCatalogNew('group')" { "+ Create group" } })))
-                    }))
-                }
-                Err(e) => { div .login-error { "Error: " (e.message) } }
-            }
+                @let cols = [
+                    components::TableCol { label: "Name", width: None },
+                    components::TableCol { label: "Description", width: None },
+                    components::TableCol { label: "Status", width: None },
+                    components::TableCol { label: "Created", width: None },
+                    components::TableCol { label: "Actions", width: None },
+                ];
+                @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|r| vec![
+                    html! { span .font-medium { (r.str_field("name")) } },
+                    html! { span .text-muted .text-sm { (r.str_field("description")) } },
+                    components::status_badge(r.str_field("status")),
+                    html! { span .text-muted .text-sm { (r.str_field("created_at").get(..10).unwrap_or("")) } },
+                    html! { div .flex .gap-2 .flex-wrap {
+                        button .btn .btn--secondary .btn--sm type="button" data-record-id=(r.id) data-record-name=(r.str_field("name")) data-record-description=(r.str_field("description")) data-record-status=(r.str_field("status")) data-action="pc-edit-group" { "Edit" }
+                        button .btn .btn--secondary .btn--sm type="button" data-record-id=(r.id) data-record-name=(r.str_field("name")) data-action="pc-delete" { "Delete" }
+                    } },
+                ]).collect();
+                (components::data_table(&cols, rows, None::<fn(usize) -> Option<String>>, html! {
+                    (components::empty_state(icons::folder(), "No groups yet", "Groups are optional. Add one when you want to organize related products.", Some(html! { button .btn .btn--primary .btn--sm type="button" data-action="pc-new" { "+ Create group" } })))
+                }))
         }
-        script { (maud::PreEscaped(PRODUCT_CATALOG_ADMIN_JS)) }
+        script src=(assets::catalog_admin_js_url()) {}
     };
 
     ui::shell_page(
@@ -2438,6 +1994,10 @@ pub async fn purchases(ctx: &dyn Context, msg: &Message) -> OutputStream {
     }
 
     let result = repo::purchases::list_paginated(ctx, filters, page as i64, page_size as i64).await;
+    let list = match result {
+        Ok(list) => list,
+        Err(e) => return crud::db_error_page(msg, e, "products purchases page: order read failed"),
+    };
 
     let content = html! {
         (admin_tabs("orders"))
@@ -2458,32 +2018,27 @@ pub async fn purchases(ctx: &dyn Context, msg: &Message) -> OutputStream {
         }
 
         div #purchases-content {
-            @match &result {
-                Ok(list) => {
-                    @let row_hrefs: Vec<String> = list.records.iter().map(|record| format!("/b/products/admin/purchases/{}", record.id)).collect();
-                    @let cols = [
-                        components::TableCol { label: "Order", width: None },
-                        components::TableCol { label: "Customer", width: None },
-                        components::TableCol { label: "Status", width: None },
-                        components::TableCol { label: "Total", width: None },
-                        components::TableCol { label: "Placed", width: None },
-                    ];
-                    @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|r| {
-                        let amount = display_money(r.i64_field("total_cents"), r.str_field("currency"));
-                        let buyer = if !r.str_field("buyer_email").is_empty() { r.str_field("buyer_email") } else if !r.str_field("buyer_user_id").is_empty() { r.str_field("buyer_user_id") } else { r.str_field("user_id") };
-                        vec![
-                            html! { code .text-sm { (r.id.get(..8).unwrap_or(&r.id)) } },
-                            html! { span .text-sm { (if buyer.is_empty() { "Guest" } else { buyer }) } },
-                            components::status_badge(r.str_field("status")),
-                            html! { span .font-medium { (amount) } },
-                            html! { span .text-muted .text-sm { (r.str_field("created_at").get(..10).unwrap_or("—")) } },
-                        ]
-                    }).collect();
-                    (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), html! { (components::empty_state(icons::shopping_cart(), "No orders yet", "Customer orders will appear here after checkout starts.", None)) }))
-                    (components::pagination(list.page as u32, list.page_size as u32, list.total_count as u32, "/b/products/admin/purchases"))
-                }
-                Err(e) => { div .login-error { "Error: " (e.message) } }
-            }
+                @let row_hrefs: Vec<String> = list.records.iter().map(|record| format!("/b/products/admin/purchases/{}", record.id)).collect();
+                @let cols = [
+                    components::TableCol { label: "Order", width: None },
+                    components::TableCol { label: "Customer", width: None },
+                    components::TableCol { label: "Status", width: None },
+                    components::TableCol { label: "Total", width: None },
+                    components::TableCol { label: "Placed", width: None },
+                ];
+                @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|r| {
+                    let amount = display_money(r.i64_field("total_cents"), r.str_field("currency"));
+                    let buyer = if !r.str_field("buyer_email").is_empty() { r.str_field("buyer_email") } else if !r.str_field("buyer_user_id").is_empty() { r.str_field("buyer_user_id") } else { r.str_field("user_id") };
+                    vec![
+                        html! { code .text-sm { (r.id.get(..8).unwrap_or(&r.id)) } },
+                        html! { span .text-sm { (if buyer.is_empty() { "Guest" } else { buyer }) } },
+                        components::status_badge(r.str_field("status")),
+                        html! { span .font-medium { (amount) } },
+                        html! { span .text-muted .text-sm { (r.str_field("created_at").get(..10).unwrap_or("—")) } },
+                    ]
+                }).collect();
+                (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), html! { (components::empty_state(icons::shopping_cart(), "No orders yet", "Customer orders will appear here after checkout starts.", None)) }))
+                @if let Some(per_page) = std::num::NonZeroU32::new(page_size as u32) { (components::pagination(list.page as u32, per_page, list.total_count as u32, "/b/products/admin/purchases")) }
         }
     };
 
@@ -2568,7 +2123,7 @@ fn stripe_connection_card(status: &StripeConnectionStatus) -> Markup {
                     }
                 }
                 div .flex .gap-3 .flex-wrap .mt-5 {
-                    button #stripe-test-button .btn .btn--secondary .btn--md type="button" onclick="testStripeConnection()" {
+                    button #stripe-test-button .btn .btn--secondary .btn--md type="button" data-action="ps-test-connection" {
                         "Test connection"
                     }
                     a .btn .btn--primary .btn--md href="/b/products/admin/settings" { "Configure Stripe" }
@@ -2578,168 +2133,11 @@ fn stripe_connection_card(status: &StripeConnectionStatus) -> Markup {
     }
 }
 
-fn stripe_setup_js() -> &'static str {
-    r#"
-async function testStripeConnection(){
-  var button=document.getElementById('stripe-test-button');
-  var state=document.getElementById('stripe-state');
-  var error=document.getElementById('stripe-error');
-  button.disabled=true;button.textContent='Testing…';error.textContent='';
-  try{
-    var response=await fetch('/b/products/api/admin/stripe/status',{credentials:'same-origin'});
-    var data=await response.json();
-    if(!response.ok)throw new Error(data.message||'Stripe connection test failed.');
-    var labels={not_configured:'Not configured',connected_test:'Connected — test mode',connected_live:'Connected — live mode',misconfigured:'Connection problem'};
-    state.textContent=labels[data.state]||data.state||'Unknown';
-    state.className='badge '+(data.state==='connected_live'?'badge-success':data.state==='connected_test'?'badge-info':data.state==='misconfigured'?'badge-danger':'badge-warning');
-    error.textContent=data.error||'Connection test completed.';
-  }catch(err){error.textContent=err.message||'Stripe connection test failed.'}
-  finally{button.disabled=false;button.textContent='Test connection'}
-}
-function stripeWebhookElement(tag,text,className){
-  var element=document.createElement(tag);
-  if(text!==undefined)element.textContent=text;
-  if(className)element.className=className;
-  return element;
-}
-function stripeWebhookDate(value){
-  if(!value)return '—';
-  var date=new Date(value);
-  return Number.isNaN(date.getTime())?value:date.toLocaleString();
-}
-function stripeWebhookStatus(status){
-  return (status||'unknown').replace(/_/g,' ');
-}
-function renderStripeWebhookEvents(data){
-  var target=document.getElementById('stripe-webhook-events');
-  var summary=document.getElementById('stripe-webhook-summary');
-  var records=Array.isArray(data.records)?data.records:[];
-  target.replaceChildren();
-  summary.textContent=(data.total_count||0)+' event'+(data.total_count===1?'':'s')+' match this filter.';
-  if(!records.length){
-    target.appendChild(stripeWebhookElement('p','No matching webhook events.','text-muted text-sm'));
-    return;
-  }
-  var table=stripeWebhookElement('table',undefined,'data-table');
-  var head=document.createElement('thead'),headRow=document.createElement('tr');
-  ['Event','Status','Mode / attempts','Last result','Action'].forEach(function(label){headRow.appendChild(stripeWebhookElement('th',label))});
-  head.appendChild(headRow);table.appendChild(head);
-  var body=document.createElement('tbody');
-  records.forEach(function(event){
-    var row=document.createElement('tr');
-    var eventCell=document.createElement('td');
-    eventCell.dataset.label='Event';
-    eventCell.appendChild(stripeWebhookElement('strong',event.event_type||'Unknown event'));
-    eventCell.appendChild(document.createElement('br'));
-    eventCell.appendChild(stripeWebhookElement('code',event.id));
-    if(event.stripe_account_id){eventCell.appendChild(document.createElement('br'));eventCell.appendChild(stripeWebhookElement('span',event.stripe_account_id,'text-muted text-sm'))}
-    row.appendChild(eventCell);
-    var statusCell=document.createElement('td');statusCell.dataset.label='Status';
-    var badgeClass=event.status==='processed'?'badge-success':event.status==='dead_letter'?'badge-danger':event.status==='failed'?'badge-warning':'badge-info';
-    statusCell.appendChild(stripeWebhookElement('span',stripeWebhookStatus(event.status),'badge '+badgeClass));row.appendChild(statusCell);
-    var attempts=document.createElement('td');attempts.dataset.label='Mode / attempts';attempts.textContent=(event.livemode?'Live':'Test')+' · '+event.attempts;row.appendChild(attempts);
-    var result=document.createElement('td');result.dataset.label='Last result';
-    result.appendChild(stripeWebhookElement('span',event.last_error||'No processing error recorded.',event.last_error?'':'text-muted'));
-    result.appendChild(document.createElement('br'));
-    result.appendChild(stripeWebhookElement('span',event.next_retry_at?'Retry '+stripeWebhookDate(event.next_retry_at):stripeWebhookDate(event.updated_at),'text-muted text-sm'));
-    row.appendChild(result);
-    var action=document.createElement('td');action.dataset.label='Action';
-    if(event.status==='failed'||event.status==='dead_letter'){
-      var replay=stripeWebhookElement('button','Replay','btn btn--secondary btn--sm');replay.type='button';
-      replay.setAttribute('aria-label','Replay webhook '+event.id);
-      replay.onclick=function(){replayStripeWebhookEvent(event.id,replay)};action.appendChild(replay);
-    }else{action.appendChild(stripeWebhookElement('span','—','text-muted'))}
-    row.appendChild(action);body.appendChild(row);
-  });
-  table.appendChild(body);target.appendChild(table);
-}
-async function loadStripeWebhookEvents(){
-  var target=document.getElementById('stripe-webhook-events');
-  var error=document.getElementById('stripe-webhook-error');
-  var status=document.getElementById('stripe-webhook-filter').value;
-  error.hidden=true;error.textContent='';target.textContent='Loading webhook events…';
-  try{
-    var query='?page=1&page_size=50'+(status?'&status='+encodeURIComponent(status):'');
-    var response=await fetch('/b/products/api/admin/webhook-events'+query,{credentials:'same-origin'});
-    var data={};try{data=await response.json()}catch(_){}
-    if(!response.ok)throw new Error(data.message||'Could not load webhook events.');
-    renderStripeWebhookEvents(data);
-  }catch(err){target.replaceChildren();error.textContent=err.message||'Could not load webhook events.';error.hidden=false}
-}
-async function replayStripeWebhookEvent(id,button){
-  if(!window.confirm('Replay this Stripe webhook through the normal validation pipeline?'))return;
-  var error=document.getElementById('stripe-webhook-error');
-  button.disabled=true;button.textContent='Replaying…';error.hidden=true;
-  try{
-    var response=await fetch('/b/products/api/admin/webhook-events/'+encodeURIComponent(id)+'/replay',{method:'POST',credentials:'same-origin'});
-    var data={};try{data=await response.json()}catch(_){}
-    if(!response.ok)throw new Error(data.message||'Could not replay the webhook event.');
-    await loadStripeWebhookEvents();
-  }catch(err){error.textContent=err.message||'Could not replay the webhook event.';error.hidden=false;button.disabled=false;button.textContent='Replay'}
-}
-function renderStripeProviderOperations(data){
-  var target=document.getElementById('stripe-provider-operations-list');
-  var summary=document.getElementById('stripe-provider-summary');
-  var records=Array.isArray(data.records)?data.records:[];
-  target.replaceChildren();
-  summary.textContent=(data.total_count||0)+' operation'+(data.total_count===1?'':'s')+' match this filter.';
-  if(!records.length){target.appendChild(stripeWebhookElement('p','No matching provider operations.','text-muted text-sm'));return}
-  var table=stripeWebhookElement('table',undefined,'data-table');
-  var head=document.createElement('thead'),headRow=document.createElement('tr');
-  ['Operation','Status','Attempts','Last result'].forEach(function(label){headRow.appendChild(stripeWebhookElement('th',label))});
-  head.appendChild(headRow);table.appendChild(head);var body=document.createElement('tbody');
-  records.forEach(function(operation){
-    var row=document.createElement('tr');
-    var identity=document.createElement('td');identity.dataset.label='Operation';
-    identity.appendChild(stripeWebhookElement('strong',operation.operation_type||'Provider operation'));
-    identity.appendChild(document.createElement('br'));identity.appendChild(stripeWebhookElement('code',operation.aggregate_id||operation.id));
-    if(operation.stripe_account_id){identity.appendChild(document.createElement('br'));identity.appendChild(stripeWebhookElement('span',operation.stripe_account_id,'text-muted text-sm'))}
-    row.appendChild(identity);
-    var state=document.createElement('td');state.dataset.label='Status';
-    var badgeClass=operation.status==='succeeded'?'badge-success':operation.status==='dead_letter'?'badge-danger':operation.status==='failed'?'badge-warning':'badge-info';
-    state.appendChild(stripeWebhookElement('span',stripeWebhookStatus(operation.status),'badge '+badgeClass));row.appendChild(state);
-    var attempts=document.createElement('td');attempts.dataset.label='Attempts';attempts.textContent=String(operation.attempts||0);row.appendChild(attempts);
-    var result=document.createElement('td');result.dataset.label='Last result';
-    result.appendChild(stripeWebhookElement('span',operation.last_error||'No reconciliation error recorded.',operation.last_error?'':'text-muted'));
-    result.appendChild(document.createElement('br'));
-    result.appendChild(stripeWebhookElement('span',operation.next_attempt_at?'Retry '+stripeWebhookDate(operation.next_attempt_at):stripeWebhookDate(operation.updated_at),'text-muted text-sm'));
-    row.appendChild(result);body.appendChild(row);
-  });
-  table.appendChild(body);target.appendChild(table);
-}
-async function loadStripeProviderOperations(){
-  var target=document.getElementById('stripe-provider-operations-list');
-  var error=document.getElementById('stripe-provider-error');
-  var status=document.getElementById('stripe-provider-filter').value;
-  error.hidden=true;error.textContent='';target.textContent='Loading provider operations…';
-  try{
-    var query='?page=1&page_size=50'+(status?'&status='+encodeURIComponent(status):'');
-    var response=await fetch('/b/products/api/admin/provider-operations'+query,{credentials:'same-origin'});
-    var data={};try{data=await response.json()}catch(_){}
-    if(!response.ok)throw new Error(data.message||'Could not load provider operations.');
-    renderStripeProviderOperations(data);
-  }catch(err){target.replaceChildren();error.textContent=err.message||'Could not load provider operations.';error.hidden=false}
-}
-async function reconcileStripeProviderOperations(button){
-  var error=document.getElementById('stripe-provider-error');
-  var result=document.getElementById('stripe-provider-reconcile-result');
-  button.disabled=true;button.textContent='Reconciling…';error.hidden=true;result.textContent='';
-  try{
-    var response=await fetch('/b/products/api/admin/provider-operations/reconcile?limit=50',{method:'POST',credentials:'same-origin'});
-    var data={};try{data=await response.json()}catch(_){}
-    if(!response.ok)throw new Error(data.message||'Could not reconcile provider operations.');
-    result.textContent='Claimed '+data.claimed+'; completed '+data.succeeded+'; retry scheduled '+data.retry_scheduled+'; manual review '+data.dead_letter+'.';
-    await loadStripeProviderOperations();
-  }catch(err){error.textContent=err.message||'Could not reconcile provider operations.';error.hidden=false}
-  finally{button.disabled=false;button.textContent='Reconcile due operations'}
-}
-loadStripeWebhookEvents();
-loadStripeProviderOperations();
-"#
-}
-
 pub async fn stripe_setup(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let status = stripe_provider::connection_status(ctx).await;
+    let status = match stripe_provider::connection_status(ctx).await {
+        Ok(status) => status,
+        Err(e) => return crud::db_error_page(msg, e, "stripe setup page: settings read failed"),
+    };
     let connected = matches!(
         status.state,
         StripeConnectionState::ConnectedTest | StripeConnectionState::ConnectedLive
@@ -2782,20 +2180,16 @@ pub async fn stripe_setup(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     code .products-code-block { "/b/products/webhooks" }
                     details .products-plain-details {
                         summary { "Show required Stripe event types" }
-                    ul .text-sm {
-                        li { code { "account.updated" } }
-                        li { code { "checkout.session.completed" } }
-                        li { code { "checkout.session.async_payment_succeeded" } }
-                        li { code { "checkout.session.async_payment_failed" } }
-                        li { code { "payment_intent.succeeded" } ", " code { "payment_intent.payment_failed" } ", " code { "payment_intent.processing" } ", " code { "payment_intent.requires_action" } ", " code { "payment_intent.canceled" } }
-                        li { code { "customer.subscription.updated" } }
-                        li { code { "customer.subscription.deleted" } }
-                        li { code { "invoice.paid" } ", " code { "invoice.payment_succeeded" } }
-                        li { code { "invoice.payment_failed" } }
-                        li { code { "charge.dispute.created" } ", " code { "charge.dispute.updated" } ", " code { "charge.dispute.closed" } }
-                        li { code { "refund.created" } ", " code { "refund.updated" } ", " code { "refund.failed" } }
-                        li { code { "charge.refunded" } }
-                    }
+                        // The set `handle_webhook` dispatches on, not a
+                        // second copy of it: a type the block starts
+                        // handling is advertised here without anyone
+                        // remembering to add it, and one it stops handling
+                        // stops being advertised.
+                        ul .text-sm {
+                            @for event_type in StripeEventType::ALL {
+                                li { code { (util::wire_str(event_type)) } }
+                            }
+                        }
                     }
                     p .text-muted .text-sm {
                         "Use the signing secret Stripe assigns to this destination in Products Settings. Keep test and live destinations separate."
@@ -2816,7 +2210,7 @@ pub async fn stripe_setup(ctx: &dyn Context, msg: &Message) -> OutputStream {
                 div .flex .gap-2 .items-end .flex-wrap {
                     label .text-sm for="stripe-webhook-filter" {
                         "Status"
-                        select #stripe-webhook-filter onchange="loadStripeWebhookEvents()" .d-block .mt-1 {
+                        select #stripe-webhook-filter data-action="ps-load-webhooks" .d-block .mt-1 {
                             option value="dead_letter" selected { "Needs manual review" }
                             option value="failed" { "Waiting to retry" }
                             option value="processing" { "Processing" }
@@ -2824,7 +2218,7 @@ pub async fn stripe_setup(ctx: &dyn Context, msg: &Message) -> OutputStream {
                             option value="" { "All events" }
                         }
                     }
-                    button .btn .btn--secondary .btn--sm type="button" onclick="loadStripeWebhookEvents()" { "Refresh" }
+                    button .btn .btn--secondary .btn--sm type="button" data-action="ps-load-webhooks" { "Refresh" }
                 }
             }
             div .card__body {
@@ -2848,7 +2242,7 @@ pub async fn stripe_setup(ctx: &dyn Context, msg: &Message) -> OutputStream {
                 div .flex .gap-2 .items-end .flex-wrap {
                     label .text-sm for="stripe-provider-filter" {
                         "Status"
-                        select #stripe-provider-filter onchange="loadStripeProviderOperations()" .d-block .mt-1 {
+                        select #stripe-provider-filter data-action="ps-load-provider-ops" .d-block .mt-1 {
                             option value="dead_letter" selected { "Needs manual review" }
                             option value="failed" { "Waiting to retry" }
                             option value="pending" { "Pending" }
@@ -2857,8 +2251,8 @@ pub async fn stripe_setup(ctx: &dyn Context, msg: &Message) -> OutputStream {
                             option value="" { "All operations" }
                         }
                     }
-                    button #stripe-provider-reconcile .btn .btn--primary .btn--sm type="button" onclick="reconcileStripeProviderOperations(this)" { "Reconcile due operations" }
-                    button .btn .btn--secondary .btn--sm type="button" onclick="loadStripeProviderOperations()" { "Refresh" }
+                    button #stripe-provider-reconcile .btn .btn--primary .btn--sm type="button" data-action="ps-reconcile" { "Reconcile due operations" }
+                    button .btn .btn--secondary .btn--sm type="button" data-action="ps-load-provider-ops" { "Refresh" }
                 }
             }
             div .card__body {
@@ -2870,7 +2264,7 @@ pub async fn stripe_setup(ctx: &dyn Context, msg: &Message) -> OutputStream {
             }
         }
         }
-        script { (maud::PreEscaped(stripe_setup_js())) }
+        script src=(assets::stripe_setup_js_url()) {}
     };
     ui::shell_page(
         ctx,
@@ -2889,6 +2283,20 @@ fn fee_percent(basis_points: u32) -> String {
     format!("{}.{:02}%", basis_points / 100, basis_points % 100)
 }
 
+/// The platform application fee the seller's own pages show: the fee new
+/// Checkout Sessions and Payment Links carry, read from the one place they
+/// read it.
+///
+/// Rendered, so it must not be invented: a fee the platform cannot read
+/// would otherwise print as "0.00%" on the page an operator opens to check
+/// exactly that number. The admin seller detail page reads the setting
+/// itself, because it must render without it.
+async fn platform_fee(ctx: &dyn Context) -> Result<u16, OutputStream> {
+    super::config::seller_fee_bps(ctx).await.map_err(|error| {
+        crate::http::err_internal("Platform application fee is misconfigured", error)
+    })
+}
+
 fn friendly_requirement(requirement: &str) -> String {
     requirement
         .replace('.', " › ")
@@ -2898,14 +2306,14 @@ fn friendly_requirement(requirement: &str) -> String {
         .join(" ")
 }
 
-fn seller_status_card(account: Option<&SellerAccount>, fee_basis_points: u32) -> Markup {
+fn seller_status_card(account: Option<&SellerAccount>, fee_basis_points: u16) -> Markup {
     let ready = account.is_some_and(|account| {
         account.capabilities.details_submitted
             && account.capabilities.charges_enabled
             && account.capabilities.payouts_enabled
-            && account.status != "suspended"
+            && account.status != SellerStatus::Suspended
     });
-    let suspended = account.is_some_and(|account| account.status == "suspended");
+    let suspended = account.is_some_and(|account| account.status == SellerStatus::Suspended);
     let has_account = account.is_some_and(|account| !account.stripe_account_id.is_empty());
     html! {
         section .card {
@@ -2932,7 +2340,7 @@ fn seller_status_card(account: Option<&SellerAccount>, fee_basis_points: u32) ->
                     }
                     div {
                         p .text-muted .text-sm .m-0 { "Platform fee" }
-                        strong { (fee_percent(account.map_or(fee_basis_points, |a| a.fee_basis_points))) }
+                        strong { (fee_percent(fee_basis_points.into())) }
                     }
                     div {
                         p .text-muted .text-sm .m-0 { "Mode" }
@@ -2959,12 +2367,12 @@ fn seller_status_card(account: Option<&SellerAccount>, fee_basis_points: u32) ->
                 }
                 div .flex .gap-3 .flex-wrap .mt-5 {
                     @if !suspended && !ready {
-                        button .btn .btn--primary .btn--md type="button" onclick="startSellerOnboarding()" {
+                        button .btn .btn--primary .btn--md type="button" data-action="pp-seller-onboarding" {
                             @if has_account { "Continue Stripe setup" } @else { "Connect Stripe to sell" }
                         }
                     }
                     @if !suspended && has_account {
-                        button .btn .btn--secondary .btn--md type="button" onclick="openSellerDashboard()" {
+                        button .btn .btn--secondary .btn--md type="button" data-action="pp-seller-dashboard" {
                             "Open Stripe dashboard"
                         }
                     }
@@ -2975,55 +2383,22 @@ fn seller_status_card(account: Option<&SellerAccount>, fee_basis_points: u32) ->
     }
 }
 
-fn commerce_portal_js() -> &'static str {
-    r#"
-function commercePortalError(message){
-  var el=document.getElementById('commerce-portal-error');
-  if(el){el.textContent=message||'Something went wrong. Please try again.';el.hidden=false}
-}
-async function commercePortalRedirect(path,body){
-  var response=await fetch(path,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json'},body:JSON.stringify(body||{})});
-  var data={};try{data=await response.json()}catch(_){}
-  if(!response.ok)throw new Error(data.message||'The request could not be completed.');
-  if(!data.url||!/^https:\/\//.test(data.url))throw new Error('The payment provider returned an invalid redirect.');
-  window.location.assign(data.url);
-}
-async function startSellerOnboarding(){
-  try{
-    var target=window.location.origin+'/b/products/';
-    await commercePortalRedirect('/b/products/api/seller/onboarding',{return_url:target+'?stripe=returned',refresh_url:target+'?stripe=refresh'});
-  }catch(error){commercePortalError(error.message)}
-}
-async function openSellerDashboard(){
-  try{await commercePortalRedirect('/b/products/api/seller/dashboard',{})}
-  catch(error){commercePortalError(error.message)}
-}
-async function manageBuyerBilling(){
-  try{await commercePortalRedirect('/b/products/billing-portal',{return_url:window.location.origin+'/b/products/'})}
-  catch(error){commercePortalError(error.message)}
-}
-"#
-}
-
 pub async fn portal_home(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let user_id = msg.user_id().to_string();
-    let seller_enabled = super::handlers::user_products_enabled(ctx).await;
-    let purchases_count = match db::count(
-        ctx,
-        PURCHASES_TABLE,
-        &[Filter {
-            field: "user_id".to_string(),
-            operator: FilterOp::Equal,
-            value: serde_json::json!(&user_id),
-        }],
-    )
-    .await
-    {
+    let seller_enabled = match super::handlers::user_products_enabled(ctx).await {
+        Ok(value) => value,
+        Err(e) => return crud::db_error_page(msg, e, "products page: seller switch read failed"),
+    };
+    let purchases_count = match repo::purchases::count_for_user(ctx, &user_id).await {
         Ok(count) => count,
-        Err(error) => return crate::http::err_internal("Database error", error),
+        Err(error) => return crud::db_error_internal(error, "Database error"),
     };
 
     let (product_count, seller_account, fee_basis_points) = if seller_enabled {
+        let fee = match platform_fee(ctx).await {
+            Ok(fee) => fee,
+            Err(response) => return response,
+        };
         // The soft-delete filter used to be hand-written above;
         // `repo::products::count` now appends it.
         let count = match repo::products::count(
@@ -3037,26 +2412,16 @@ pub async fn portal_home(ctx: &dyn Context, msg: &Message) -> OutputStream {
         .await
         {
             Ok(count) => count,
-            Err(error) => return crate::http::err_internal("Database error", error),
+            Err(error) => return crud::db_error_internal(error, "Database error"),
         };
         let account = match repo::seller_accounts::get_for_user(ctx, &user_id).await {
-            Ok(Some(record)) => match repo::seller_accounts::to_contract(&record) {
+            Ok(Some(record)) => match repo::seller_accounts::to_contract(&record, fee) {
                 Ok(account) => Some(account),
                 Err(error) => return crate::http::err_internal("Seller account error", error),
             },
             Ok(None) => None,
-            Err(error) => return crate::http::err_internal("Database error", error),
+            Err(error) => return crud::db_error_internal(error, "Database error"),
         };
-        let fee = wafer_core::clients::config::get_default(
-            ctx,
-            "IMPRESSPRESS__PRODUCTS__SELLER_APPLICATION_FEE_BPS",
-            "0",
-        )
-        .await
-        .parse::<u32>()
-        .ok()
-        .filter(|fee| *fee <= 10_000)
-        .unwrap_or(0);
         (count, account, fee)
     } else {
         (0, None, 0)
@@ -3094,7 +2459,7 @@ pub async fn portal_home(ctx: &dyn Context, msg: &Message) -> OutputStream {
             }
             div .card__body .flex .gap-3 .flex-wrap {
                 a .btn .btn--primary .btn--md href="/b/products/my-purchases" { "View purchases" }
-                button .btn .btn--secondary .btn--md type="button" onclick="manageBuyerBilling()" { "Manage billing" }
+                button .btn .btn--secondary .btn--md type="button" data-action="pp-buyer-billing" { "Manage billing" }
             }
         }
         @if seller_enabled {
@@ -3102,7 +2467,7 @@ pub async fn portal_home(ctx: &dyn Context, msg: &Message) -> OutputStream {
                 (seller_status_card(seller_account.as_ref(), fee_basis_points))
             }
         }
-        script { (maud::PreEscaped(commerce_portal_js())) }
+        script src=(assets::commerce_portal_js_url()) {}
     };
     ui::shell_page(
         ctx,
@@ -3128,12 +2493,16 @@ fn seller_page_links(active: &str) -> Markup {
 }
 
 pub async fn seller_dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
+    let fee_basis_points = match platform_fee(ctx).await {
+        Ok(fee) => fee,
+        Err(response) => return response,
+    };
     let account_record = match repo::seller_accounts::get_for_user(ctx, msg.user_id()).await {
         Ok(account) => account,
-        Err(error) => return crate::http::err_internal("Database error", error),
+        Err(error) => return crud::db_error_internal(error, "Database error"),
     };
     let account = match account_record.as_ref() {
-        Some(record) => match repo::seller_accounts::to_contract(record) {
+        Some(record) => match repo::seller_accounts::to_contract(record, fee_basis_points) {
             Ok(account) => Some(account),
             Err(error) => return crate::http::err_internal("Seller account error", error),
         },
@@ -3142,28 +2511,21 @@ pub async fn seller_dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream 
     let analytics = match account_record.as_ref() {
         Some(record) => match repo::purchases::commerce_analytics(ctx, Some(&record.id)).await {
             Ok(analytics) => analytics,
-            Err(error) => return crate::http::err_internal("Database error", error),
+            Err(error) => return crud::db_error_internal(error, "Database error"),
         },
         None => Vec::new(),
     };
     let failures = match account_record.as_ref() {
         Some(record) => match repo::purchases::recent_seller_failures(ctx, &record.id, 5).await {
             Ok(failures) => failures,
-            Err(error) => return crate::http::err_internal("Database error", error),
+            Err(error) => return crud::db_error_internal(error, "Database error"),
         },
         None => Vec::new(),
     };
-    let fee_basis_points = wafer_core::clients::config::get_default(
-        ctx,
-        "IMPRESSPRESS__PRODUCTS__SELLER_APPLICATION_FEE_BPS",
-        "0",
-    )
-    .await
-    .parse::<u32>()
-    .ok()
-    .filter(|fee| *fee <= 10_000)
-    .unwrap_or(0);
-    let seller_enabled = super::handlers::user_products_enabled(ctx).await;
+    let seller_enabled = match super::handlers::user_products_enabled(ctx).await {
+        Ok(value) => value,
+        Err(e) => return crud::db_error_page(msg, e, "products page: seller switch read failed"),
+    };
     let content = html! {
         (portal_tabs("selling", seller_enabled))
         (seller_page_links("dashboard"))
@@ -3172,7 +2534,7 @@ pub async fn seller_dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream 
         (seller_status_card(account.as_ref(), fee_basis_points))
         (analytics_section(&analytics, "Your sales by currency", true))
         (seller_failures_section(&failures))
-        script { (maud::PreEscaped(commerce_portal_js())) }
+        script src=(assets::commerce_portal_js_url()) {}
     };
     ui::shell_page(
         ctx,
@@ -3184,7 +2546,10 @@ pub async fn seller_dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream 
 }
 
 pub async fn seller_orders(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let seller_enabled = super::handlers::user_products_enabled(ctx).await;
+    let seller_enabled = match super::handlers::user_products_enabled(ctx).await {
+        Ok(value) => value,
+        Err(e) => return crud::db_error_page(msg, e, "products page: seller switch read failed"),
+    };
     let account = match repo::seller_accounts::get_for_user(ctx, msg.user_id()).await {
         Ok(Some(account)) => account,
         Ok(None) => {
@@ -3202,7 +2567,7 @@ pub async fn seller_orders(ctx: &dyn Context, msg: &Message) -> OutputStream {
             )
             .await;
         }
-        Err(error) => return crate::http::err_internal("Database error", error),
+        Err(error) => return crud::db_error_internal(error, "Database error"),
     };
     let (page, page_size, _) = msg.pagination_params(20);
     let status_filter = msg.query("status").to_string();
@@ -3219,6 +2584,12 @@ pub async fn seller_orders(ctx: &dyn Context, msg: &Message) -> OutputStream {
         });
     }
     let result = repo::purchases::list_paginated(ctx, filters, page as i64, page_size as i64).await;
+    let list = match result {
+        Ok(list) => list,
+        Err(e) => {
+            return crud::db_error_page(msg, e, "products seller orders page: order read failed")
+        }
+    };
     let content = html! {
         (portal_tabs("selling", seller_enabled))
         (seller_page_links("orders"))
@@ -3229,28 +2600,23 @@ pub async fn seller_orders(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     href={"/b/products/selling/orders?status=" (*status)} { (status.replace('_', " ")) }
             }
         }
-        @match &result {
-            Ok(list) => {
-                @let row_hrefs: Vec<String> = list.records.iter().map(|record| format!("/b/products/selling/orders/{}", record.id)).collect();
-                @let cols = [
-                    components::TableCol { label: "Buyer", width: None },
-                    components::TableCol { label: "Status", width: None },
-                    components::TableCol { label: "Total", width: None },
-                    components::TableCol { label: "Subscription", width: None },
-                    components::TableCol { label: "Date", width: None },
-                ];
-                @let rows: Vec<Vec<Markup>> = list.records.iter().map(|order| vec![
-                    html! { span .text-sm { (if order.str_field("buyer_email").is_empty() { order.str_field("buyer_user_id") } else { order.str_field("buyer_email") }) } },
-                    components::status_badge(order.str_field("status")),
-                    html! { span .font-medium { (display_money(order.i64_field("total_cents"), order.str_field("currency"))) } },
-                    html! { @if order.str_field("stripe_subscription_id").is_empty() { span .text-muted { "—" } } @else { (components::status_badge(order.str_field("subscription_status"))) } },
-                    html! { span .text-muted .text-sm { (order.str_field("created_at").get(..10).unwrap_or("")) } },
-                ]).collect();
-                (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), html! { p .text-muted { "No seller orders yet" } }))
-                (components::pagination(list.page as u32, list.page_size as u32, list.total_count as u32, "/b/products/selling/orders"))
-            }
-            Err(error) => { div .login-error { "Error: " (error.message) } }
-        }
+            @let row_hrefs: Vec<String> = list.records.iter().map(|record| format!("/b/products/selling/orders/{}", record.id)).collect();
+            @let cols = [
+                components::TableCol { label: "Buyer", width: None },
+                components::TableCol { label: "Status", width: None },
+                components::TableCol { label: "Total", width: None },
+                components::TableCol { label: "Subscription", width: None },
+                components::TableCol { label: "Date", width: None },
+            ];
+            @let rows: Vec<Vec<Markup>> = list.records.iter().map(|order| vec![
+                html! { span .text-sm { (if order.str_field("buyer_email").is_empty() { order.str_field("buyer_user_id") } else { order.str_field("buyer_email") }) } },
+                components::status_badge(order.str_field("status")),
+                html! { span .font-medium { (display_money(order.i64_field("total_cents"), order.str_field("currency"))) } },
+                html! { @if order.str_field("stripe_subscription_id").is_empty() { span .text-muted { "—" } } @else { (components::status_badge(order.str_field("subscription_status"))) } },
+                html! { span .text-muted .text-sm { (order.str_field("created_at").get(..10).unwrap_or("")) } },
+            ]).collect();
+            (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), html! { p .text-muted { "No seller orders yet" } }))
+            @if let Some(per_page) = std::num::NonZeroU32::new(page_size as u32) { (components::pagination(list.page as u32, per_page, list.total_count as u32, "/b/products/selling/orders")) }
     };
     ui::shell_page(
         ctx,
@@ -3292,13 +2658,6 @@ pub async fn seller_order_detail(
     order_detail(ctx, msg, purchase_id, OrderPageAccess::Seller).await
 }
 
-const ORDER_DETAIL_JS: &str = r#"
-function orderDetailError(message){var target=document.getElementById('order-detail-error');if(target){target.textContent=message||'Something went wrong.';target.hidden=false;target.scrollIntoView({block:'nearest'})}}
-function parseOrderRefundMinor(value,exponent){value=value.trim();if(!value)return null;if(!/^[+]?(?:\d+(?:\.\d*)?|\.\d+)$/.test(value))throw new Error('Enter a plain positive amount.');value=value.replace(/^\+/,'');var parts=value.split('.'),whole=parts[0]||'0',fraction=parts[1]||'';if(fraction.length>exponent&&/[1-9]/.test(fraction.slice(exponent)))throw new Error('The amount has too many decimal places for this currency.');fraction=fraction.slice(0,exponent).padEnd(exponent,'0');var minor=BigInt(whole)*(10n**BigInt(exponent))+BigInt(fraction||'0');if(minor<=0n)throw new Error('Refund amount must be positive.');if(minor>BigInt(Number.MAX_SAFE_INTEGER))throw new Error('This amount is too large for the browser refund form.');return Number(minor)}
-async function submitOrderRefund(button){var config=window.__orderDetailConfig,target=document.getElementById('order-detail-error');if(target)target.hidden=true;button.disabled=true;button.textContent='Refunding…';try{var amount=parseOrderRefundMinor(document.getElementById('order-refund-amount').value,config.currency_exponent),note=document.getElementById('order-refund-note').value.trim(),body={note:note,idempotency_key:'ui_'+config.refunded_total+'_'+(amount===null?'full':amount)};if(amount!==null)body.amount_minor=amount;var response=await fetch(config.refund_url,{method:'POST',credentials:'same-origin',headers:{'Content-Type':'application/json','Accept':'application/json'},body:JSON.stringify(body)}),payload={};try{payload=await response.json()}catch(_error){}if(!response.ok)throw new Error(payload.message||payload.error||'Refund failed.');window.location.reload()}catch(error){orderDetailError(error.message);button.disabled=false;button.textContent='Create refund'}}
-async function manageOrderBilling(){var config=window.__orderDetailConfig;try{await commercePortalRedirect('/b/products/billing-portal',{return_url:window.location.href,order_id:config.order_id})}catch(error){orderDetailError(error.message)}}
-"#;
-
 async fn order_detail(
     ctx: &dyn Context,
     msg: &Message,
@@ -3307,10 +2666,9 @@ async fn order_detail(
 ) -> OutputStream {
     let purchase = match repo::purchases::get(ctx, purchase_id).await {
         Ok(purchase) => purchase,
-        Err(error) if error.code == wafer_run::ErrorCode::NotFound => {
-            return crate::http::err_not_found("Purchase not found")
+        Err(error) => {
+            return crate::blocks::crud::db_error(error, "Purchase not found", "Database error")
         }
-        Err(error) => return crate::http::err_internal("Database error", error),
     };
     match access {
         OrderPageAccess::Admin => {}
@@ -3328,7 +2686,7 @@ async fn order_detail(
             let account = match repo::seller_accounts::get_for_user(ctx, msg.user_id()).await {
                 Ok(Some(account)) => account,
                 Ok(None) => return crate::http::err_forbidden("Seller setup is required"),
-                Err(error) => return crate::http::err_internal("Database error", error),
+                Err(error) => return crud::db_error_internal(error, "Database error"),
             };
             if purchase.str_field("seller_account_id") != account.id {
                 return crate::http::err_forbidden("Access denied");
@@ -3337,15 +2695,15 @@ async fn order_detail(
     }
     let line_items = match repo::purchases::list_line_items(ctx, purchase_id).await {
         Ok(items) => items,
-        Err(error) => return crate::http::err_internal("Could not load order items", error),
+        Err(error) => return crud::db_error_internal(error, "Could not load order items"),
     };
     let refunds = match repo::refunds::list_for_purchase(ctx, purchase_id).await {
         Ok(refunds) => refunds,
-        Err(error) => return crate::http::err_internal("Could not load refunds", error),
+        Err(error) => return crud::db_error_internal(error, "Could not load refunds"),
     };
     let disputes = match repo::disputes::list_for_purchase(ctx, purchase_id).await {
         Ok(disputes) => disputes,
-        Err(error) => return crate::http::err_internal("Could not load disputes", error),
+        Err(error) => return crud::db_error_internal(error, "Could not load disputes"),
     };
     let currency = purchase.str_field("currency");
     let refunded_total = purchase.i64_field("refunded_total_cents");
@@ -3363,12 +2721,12 @@ async fn order_detail(
         OrderPageAccess::Buyer => None,
     };
     let currency_exponent = money::currency_exponent(currency).unwrap_or(2);
-    let page_config = serde_json::json!({
+    let page_config = ui::script_json(&serde_json::json!({
         "order_id": purchase_id,
         "refund_url": refund_url.clone(),
         "refunded_total": refunded_total,
         "currency_exponent": currency_exponent,
-    });
+    }));
     let (back_url, back_label, tabs) = match access {
         OrderPageAccess::Admin => (
             "/b/products/admin/purchases",
@@ -3380,7 +2738,12 @@ async fn order_detail(
             "Back to my purchases",
             portal_tabs(
                 "purchases",
-                super::handlers::user_products_enabled(ctx).await,
+                match super::handlers::user_products_enabled(ctx).await {
+                    Ok(enabled) => enabled,
+                    Err(e) => {
+                        return crud::db_error_page(msg, e, "order page: seller switch read failed")
+                    }
+                },
             ),
         ),
         OrderPageAccess::Seller => (
@@ -3461,13 +2824,20 @@ async fn order_detail(
                         components::TableCol { label: "Total", width: None },
                         components::TableCol { label: "Configuration", width: None },
                     ];
-                    @let rows: Vec<Vec<Markup>> = line_items.iter().map(|item| vec![
-                        html! { strong { (item.str_field("product_name")) } },
-                        html! { (item.i64_field("quantity")) },
-                        html! { (display_money(item.i64_field("unit_amount_minor"), currency)) },
-                        html! { strong { (display_money(item.i64_field("total_minor"), currency)) } },
-                        html! { @if item.str_field("input_snapshot").is_empty() || item.str_field("input_snapshot") == "{}" { span .text-muted { "—" } } @else { details { summary { "View" } code .text-sm { (item.str_field("input_snapshot")) } } } },
-                    ]).collect();
+                    @let rows: Vec<Vec<Markup>> = line_items.iter().map(|item| {
+                        // `input_snapshot` is a JSON-object column, so it
+                        // arrives structured on the backends that re-parse
+                        // JSON-shaped text and as the raw string on the ones
+                        // that do not. `json_text_field` renders both.
+                        let snapshot = item.json_text_field("input_snapshot");
+                        vec![
+                            html! { strong { (item.str_field("product_name")) } },
+                            html! { (item.i64_field("quantity")) },
+                            html! { (display_money(item.i64_field("unit_amount_minor"), currency)) },
+                            html! { strong { (display_money(item.i64_field("total_minor"), currency)) } },
+                            html! { @if snapshot.is_empty() || snapshot == "{}" { span .text-muted { "—" } } @else { details { summary { "View" } code .text-sm { (snapshot) } } } },
+                        ]
+                    }).collect();
                     (components::data_table(&cols, rows, None::<fn(usize) -> Option<String>>, html! {}))
                 }
             }
@@ -3525,7 +2895,7 @@ async fn order_detail(
                     p .text-sm { strong { "Cancels at period end: " } (if purchase.bool_field("subscription_cancel_at_period_end") { "Yes" } else { "No" }) }
                     @if !purchase.str_field("subscription_canceled_at").is_empty() { p .text-sm { strong { "Canceled: " } (purchase.str_field("subscription_canceled_at")) } }
                     @if matches!(access, OrderPageAccess::Buyer) && !purchase.str_field("stripe_customer_id").is_empty() {
-                        button .btn .btn--primary .btn--md type="button" onclick="manageOrderBilling()" { "Manage subscription and billing" }
+                        button .btn .btn--primary .btn--md type="button" data-action="pp-order-billing" { "Manage subscription and billing" }
                     }
                 }
             }
@@ -3590,11 +2960,13 @@ async fn order_detail(
                         div .form-group { label .form-label for="order-refund-amount" { "Amount (" (currency) ")" } input #order-refund-amount .form-input type="text" inputmode="decimal" placeholder="Full remaining amount" {} }
                         div .form-group { label .form-label for="order-refund-note" { "Private note" } textarea #order-refund-note .form-textarea maxlength="500" {} }
                     }
-                    button .btn .btn--danger .btn--md type="button" onclick="submitOrderRefund(this)" { "Create refund" }
+                    button .btn .btn--danger .btn--md type="button" data-action="po-submit-refund" { "Create refund" }
                 }
             }
         }
-        script { (maud::PreEscaped(format!("window.__orderDetailConfig={};\n{}\n{}", page_config, commerce_portal_js(), ORDER_DETAIL_JS))) }
+        script { (maud::PreEscaped(format!("window.__orderDetailConfig={page_config};"))) }
+        script src=(assets::commerce_portal_js_url()) {}
+        script src=(assets::order_detail_js_url()) {}
     };
     ui::shell_page(
         ctx,
@@ -3619,7 +2991,10 @@ async fn order_detail(
 
 pub async fn my_products(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let user_id = msg.user_id().to_string();
-    let seller_enabled = super::handlers::user_products_enabled(ctx).await;
+    let seller_enabled = match super::handlers::user_products_enabled(ctx).await {
+        Ok(value) => value,
+        Err(e) => return crud::db_error_page(msg, e, "products page: seller switch read failed"),
+    };
     let (page, page_size, _) = msg.pagination_params(20);
 
     // `?view=deleted` is the seller's mirror of the admin Deleted tab, and
@@ -3663,6 +3038,12 @@ pub async fn my_products(ctx: &dyn Context, msg: &Message) -> OutputStream {
     } else {
         repo::products::list_page(ctx, page as i64, page_size as i64, filters, Some(sort)).await
     };
+    let list = match result {
+        Ok(list) => list,
+        Err(e) => {
+            return crud::db_error_page(msg, e, "products my-products page: product read failed")
+        }
+    };
 
     let view_tabs = html! {
         div .products-tabs {
@@ -3700,70 +3081,66 @@ pub async fn my_products(ctx: &dyn Context, msg: &Message) -> OutputStream {
         (view_tabs)
 
         div #my-products-content {
-            @match &result {
-                Ok(list) => {
-                    @if deleted_view {
-                        @let cols = [
-                            components::TableCol { label: "Name", width: None },
-                            components::TableCol { label: "Currency", width: None },
-                            components::TableCol { label: "Deleted", width: None },
-                            components::TableCol { label: "", width: None },
-                        ];
-                        @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|record| {
-                            // Percent-encoded for the same reason the admin
-                            // Deleted view encodes: a product id is not
-                            // guaranteed URL-safe, and maud escapes HTML, not
-                            // URLs. Unencoded, an id holding `/`, `?` or `#`
-                            // splits the path and both buttons below aim at
-                            // nothing.
-                            let encoded_id = crate::util::url_path_encode(&record.id);
-                            let restore_url = format!("/b/products/api/products/{encoded_id}/restore");
-                            // Restore is the DANGEROUS half: it returns an
-                            // active, approved product to the public catalog
-                            // at once. Soft delete takes nothing down in
-                            // Stripe, so the row needs the other half too — a
-                            // way to shut this product's Prices and Payment
-                            // Links off WITHOUT relisting it.
-                            let close_url = format!("/b/products/my-products/{encoded_id}/close");
-                            vec![
-                                html! { div { span .font-medium { (record.str_field("name")) } br; span .text-muted .text-sm { "Restore to edit pricing and checkout again" } } },
-                                html! { span .font-medium { (record.str_field("currency")) } },
-                                html! { span .text-muted .text-sm { (record.str_field("deleted_at").get(..10).unwrap_or("—")) } },
-                                html! {
-                                    div .products-actions {
-                                        a .btn .btn--secondary .btn--sm href=(close_url) { "Close Stripe surface" }
-                                        button .btn .btn--secondary .btn--sm type="button"
-                                            hx-post=(restore_url)
-                                            hx-swap="none"
-                                            hx-on--after-request=(reload_or_toast("Restore failed"))
-                                        { "Restore" }
-                                    }
-                                },
-                            ]
-                        }).collect();
-                        (components::data_table(&cols, rows, None::<fn(usize) -> Option<String>>, html! {
-                            (components::empty_state(icons::trash(), "No deleted products", "Products stay here after deletion until you restore them.", None))
-                        }))
-                    } @else {
-                        @let row_hrefs: Vec<String> = list.records.iter().map(|record| format!("/b/products/my-products/{}", crate::util::url_path_encode(&record.id))).collect();
-                        @let cols = [
-                            components::TableCol { label: "Name", width: None },
-                            components::TableCol { label: "Status", width: None },
-                            components::TableCol { label: "Currency", width: None },
-                            components::TableCol { label: "Created", width: None },
-                        ];
-                        @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|r| vec![
-                            html! { span .font-medium { (r.str_field("name")) } },
-                            components::status_badge(r.str_field("status")),
-                            html! { span .font-medium { (r.str_field("currency")) } },
-                            html! { span .text-muted .text-sm { (r.str_field("created_at").get(..10).unwrap_or("")) } },
-                        ]).collect();
-                        (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), html! { p .text-muted { "No products yet" } }))
-                    }
-                    (components::pagination(list.page as u32, list.page_size as u32, list.total_count as u32, base_href))
+                @if deleted_view {
+                    @let cols = [
+                        components::TableCol { label: "Name", width: None },
+                        components::TableCol { label: "Currency", width: None },
+                        components::TableCol { label: "Deleted", width: None },
+                        components::TableCol { label: "", width: None },
+                    ];
+                    @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|record| {
+                        // Percent-encoded for the same reason the admin
+                        // Deleted view encodes: a product id is not
+                        // guaranteed URL-safe, and maud escapes HTML, not
+                        // URLs. Unencoded, an id holding `/`, `?` or `#`
+                        // splits the path and both buttons below aim at
+                        // nothing.
+                        let encoded_id = crate::util::url_path_encode(&record.id);
+                        let restore_url = format!("/b/products/api/products/{encoded_id}/restore");
+                        // Restore is the DANGEROUS half: it returns an
+                        // active, approved product to the public catalog
+                        // at once. Soft delete takes nothing down in
+                        // Stripe, so the row needs the other half too — a
+                        // way to shut this product's Prices and Payment
+                        // Links off WITHOUT relisting it.
+                        let close_url = format!("/b/products/my-products/{encoded_id}/close");
+                        vec![
+                            html! { div { span .font-medium { (record.str_field("name")) } br; span .text-muted .text-sm { "Restore to edit pricing and checkout again" } } },
+                            html! { span .font-medium { (record.str_field("currency")) } },
+                            html! { span .text-muted .text-sm { (record.str_field("deleted_at").get(..10).unwrap_or("—")) } },
+                            html! {
+                                div .products-actions {
+                                    a .btn .btn--secondary .btn--sm href=(close_url) { "Close Stripe surface" }
+                                    button .btn .btn--secondary .btn--sm type="button"
+                                        hx-post=(restore_url)
+                                        hx-swap="none"
+                                        data-error-label="Could not restore this product"
+                                        data-reload-on-success
+                                    { "Restore" }
+                                }
+                            },
+                        ]
+                    }).collect();
+                    (components::data_table(&cols, rows, None::<fn(usize) -> Option<String>>, html! {
+                        (components::empty_state(icons::trash(), "No deleted products", "Products stay here after deletion until you restore them.", None))
+                    }))
+                } @else {
+                    @let row_hrefs: Vec<String> = list.records.iter().map(|record| format!("/b/products/my-products/{}", crate::util::url_path_encode(&record.id))).collect();
+                    @let cols = [
+                        components::TableCol { label: "Name", width: None },
+                        components::TableCol { label: "Status", width: None },
+                        components::TableCol { label: "Currency", width: None },
+                        components::TableCol { label: "Created", width: None },
+                    ];
+                    @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|r| vec![
+                        html! { span .font-medium { (r.str_field("name")) } },
+                        components::status_badge(r.str_field("status")),
+                        html! { span .font-medium { (r.str_field("currency")) } },
+                        html! { span .text-muted .text-sm { (r.str_field("created_at").get(..10).unwrap_or("")) } },
+                    ]).collect();
+                    (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), html! { p .text-muted { "No products yet" } }))
                 }
-                Err(e) => { div .login-error { "Error: " (e.message) } }
-            }
+                @if let Some(per_page) = std::num::NonZeroU32::new(page_size as u32) { (components::pagination(list.page as u32, per_page, list.total_count as u32, base_href)) }
         }
     };
 
@@ -3782,7 +3159,10 @@ pub async fn my_products(ctx: &dyn Context, msg: &Message) -> OutputStream {
 
 pub async fn my_purchases(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let user_id = msg.user_id().to_string();
-    let seller_enabled = super::handlers::user_products_enabled(ctx).await;
+    let seller_enabled = match super::handlers::user_products_enabled(ctx).await {
+        Ok(value) => value,
+        Err(e) => return crud::db_error_page(msg, e, "products page: seller switch read failed"),
+    };
     let (page, page_size, _) = msg.pagination_params(20);
 
     let filters = vec![Filter {
@@ -3791,35 +3171,36 @@ pub async fn my_purchases(ctx: &dyn Context, msg: &Message) -> OutputStream {
         value: serde_json::Value::String(user_id),
     }];
     let result = repo::purchases::list_paginated(ctx, filters, page as i64, page_size as i64).await;
+    let list = match result {
+        Ok(list) => list,
+        Err(e) => {
+            return crud::db_error_page(msg, e, "products my-purchases page: order read failed")
+        }
+    };
 
     let content = html! {
         (portal_tabs("purchases", seller_enabled))
         (components::page_header("My Purchases", Some("Receipts, payment status, and subscription details"), None))
 
         div #my-purchases-content {
-            @match &result {
-                Ok(list) => {
-                    @let row_hrefs: Vec<String> = list.records.iter().map(|record| format!("/b/products/my-purchases/{}", record.id)).collect();
-                    @let cols = [
-                        components::TableCol { label: "Status", width: None },
-                        components::TableCol { label: "Total", width: None },
-                        components::TableCol { label: "Provider", width: None },
-                        components::TableCol { label: "Date", width: None },
-                    ];
-                    @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|r| {
-                        let amount = display_money(r.i64_field("total_cents"), r.str_field("currency"));
-                        vec![
-                            components::status_badge(r.str_field("status")),
-                            html! { span .font-medium { (amount) } },
-                            html! { span .text-muted .text-sm { (r.str_field("provider")) } },
-                            html! { span .text-muted .text-sm { (r.str_field("created_at").get(..10).unwrap_or("")) } },
-                        ]
-                    }).collect();
-                    (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), html! { p .text-muted { "No purchases yet" } }))
-                    (components::pagination(list.page as u32, list.page_size as u32, list.total_count as u32, "/b/products/my-purchases"))
-                }
-                Err(e) => { div .login-error { "Error: " (e.message) } }
-            }
+                @let row_hrefs: Vec<String> = list.records.iter().map(|record| format!("/b/products/my-purchases/{}", record.id)).collect();
+                @let cols = [
+                    components::TableCol { label: "Status", width: None },
+                    components::TableCol { label: "Total", width: None },
+                    components::TableCol { label: "Provider", width: None },
+                    components::TableCol { label: "Date", width: None },
+                ];
+                @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|r| {
+                    let amount = display_money(r.i64_field("total_cents"), r.str_field("currency"));
+                    vec![
+                        components::status_badge(r.str_field("status")),
+                        html! { span .font-medium { (amount) } },
+                        html! { span .text-muted .text-sm { (r.str_field("provider")) } },
+                        html! { span .text-muted .text-sm { (r.str_field("created_at").get(..10).unwrap_or("")) } },
+                    ]
+                }).collect();
+                (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), html! { p .text-muted { "No purchases yet" } }))
+                @if let Some(per_page) = std::num::NonZeroU32::new(page_size as u32) { (components::pagination(list.page as u32, per_page, list.total_count as u32, "/b/products/my-purchases")) }
         }
     };
 
@@ -3840,60 +3221,48 @@ pub async fn my_purchases(ctx: &dyn Context, msg: &Message) -> OutputStream {
 /// their on-page order. Pulled from the declared [`ConfigVar`] metadata — the
 /// block-owned ones from `super::config_vars()`, the shared ones from
 /// `config_vars::shared_var()` — so nothing is re-declared in a parallel tuple.
-async fn settings_vars(ctx: &dyn Context) -> SettingsVars {
+/// A failed runtime read is returned: the list decides whether secret keys
+/// may be edited here.
+async fn settings_vars(ctx: &dyn Context) -> Result<SettingsVars, wafer_run::WaferError> {
     let own = super::config_vars();
-    let trusted_server = super::stripe_secret_operations_allowed(ctx).await;
-    let mut stripe = vec![config_vars::var_in(
-        &own,
-        "IMPRESSPRESS__PRODUCTS__STRIPE_PUBLISHABLE_KEY",
-    )];
-    let mut stripe_advanced = vec![config_vars::var_in(
-        &own,
-        "IMPRESSPRESS__PRODUCTS__STRIPE_API_VERSION",
-    )];
-    let mut webhooks = vec![config_vars::shared_var("WAFER_RUN_SHARED__FRONTEND_URL")];
+    let trusted_server = super::stripe_secret_operations_allowed(ctx);
+    let mut stripe = vec![config_vars::var_in(&own, STRIPE_PUBLISHABLE_KEY)];
+    let mut stripe_advanced = vec![config_vars::var_in(&own, STRIPE_API_VERSION)];
+    let mut webhooks = vec![config_vars::shared_var(FRONTEND_URL_KEY)];
     if trusted_server {
         stripe.splice(
             0..0,
             [
-                config_vars::var_in(&own, "IMPRESSPRESS__PRODUCTS__STRIPE_SECRET_KEY"),
-                config_vars::var_in(&own, "IMPRESSPRESS__PRODUCTS__STRIPE_WEBHOOK_SECRET"),
+                config_vars::var_in(&own, STRIPE_SECRET_KEY),
+                config_vars::var_in(&own, STRIPE_WEBHOOK_SECRET),
             ],
         );
-        stripe_advanced.insert(
-            0,
-            config_vars::var_in(&own, "IMPRESSPRESS__PRODUCTS__STRIPE_API_URL"),
-        );
+        stripe_advanced.insert(0, config_vars::var_in(&own, STRIPE_API_URL));
         webhooks.extend([
-            config_vars::var_in(&own, "IMPRESSPRESS__PRODUCTS__WEBHOOK_URL"),
-            config_vars::var_in(&own, "IMPRESSPRESS__PRODUCTS__WEBHOOK_SECRET"),
+            config_vars::var_in(&own, WEBHOOK_URL),
+            config_vars::var_in(&own, WEBHOOK_SECRET),
         ]);
     }
-    SettingsVars {
-        features: vec![config_vars::shared_var(
-            "WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS",
-        )],
+    Ok(SettingsVars {
+        features: vec![config_vars::shared_var(ALLOW_USER_PRODUCTS_KEY)],
         stripe,
         stripe_advanced,
         checkout: vec![
-            config_vars::var_in(&own, "IMPRESSPRESS__PRODUCTS__DEFAULT_CURRENCY"),
-            config_vars::var_in(&own, "IMPRESSPRESS__PRODUCTS__PLATFORM_COUNTRY"),
-            config_vars::var_in(&own, "IMPRESSPRESS__PRODUCTS__AUTOMATIC_TAX"),
+            config_vars::var_in(&own, DEFAULT_CURRENCY),
+            config_vars::var_in(&own, PLATFORM_COUNTRY),
+            config_vars::var_in(&own, AUTOMATIC_TAX),
         ],
-        checkout_advanced: vec![config_vars::var_in(
-            &own,
-            "IMPRESSPRESS__PRODUCTS__CHECKOUT_ALLOWED_ORIGINS",
-        )],
+        checkout_advanced: vec![config_vars::var_in(&own, CHECKOUT_ALLOWED_ORIGINS)],
         sellers: vec![
-            config_vars::var_in(&own, "IMPRESSPRESS__PRODUCTS__SELLER_APPLICATION_FEE_BPS"),
-            config_vars::var_in(&own, "IMPRESSPRESS__PRODUCTS__SELLER_MODERATION_REQUIRED"),
-            config_vars::var_in(&own, "IMPRESSPRESS__PRODUCTS__SELLER_ALLOWED_TEMPLATES"),
-            config_vars::var_in(&own, "IMPRESSPRESS__PRODUCTS__SELLER_ALLOWED_CURRENCIES"),
-            config_vars::var_in(&own, "IMPRESSPRESS__PRODUCTS__SELLER_ALLOWED_CATEGORIES"),
-            config_vars::var_in(&own, "IMPRESSPRESS__PRODUCTS__SELLER_MAX_PRODUCTS"),
+            config_vars::var_in(&own, SELLER_APPLICATION_FEE_BPS),
+            config_vars::var_in(&own, SELLER_MODERATION_REQUIRED),
+            config_vars::var_in(&own, SELLER_ALLOWED_TEMPLATES),
+            config_vars::var_in(&own, SELLER_ALLOWED_CURRENCIES),
+            config_vars::var_in(&own, SELLER_ALLOWED_CATEGORIES),
+            config_vars::var_in(&own, SELLER_MAX_PRODUCTS),
         ],
         webhooks,
-    }
+    })
 }
 
 struct SettingsVars {
@@ -3921,8 +3290,18 @@ impl SettingsVars {
 }
 
 pub async fn settings(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let trusted_server = super::stripe_secret_operations_allowed(ctx).await;
-    let vars = settings_vars(ctx).await;
+    let settings = async {
+        Ok::<_, wafer_run::WaferError>((
+            super::stripe_secret_operations_allowed(ctx),
+            settings_vars(ctx).await?,
+        ))
+    };
+    let (trusted_server, vars) = match settings.await {
+        Ok(settings) => settings,
+        Err(e) => {
+            return crud::db_error_page(msg, e, "products settings page: runtime read failed")
+        }
+    };
     let sections = [
         SettingsSection::new("Stripe credentials", icons::dollar_sign(), &vars.stripe)
             .description(
@@ -3946,6 +3325,15 @@ pub async fn settings(ctx: &dyn Context, msg: &Message) -> OutputStream {
             .description("Send signed billing events to another system you control.")
             .collapsible(),
     ];
+    let form =
+        match settings_form::settings_form(ctx, "/b/products/admin/settings", &sections, html! {})
+            .await
+        {
+            Ok(form) => form,
+            Err(e) => {
+                return crud::db_error_page(msg, e, "products settings: current values read failed")
+            }
+        };
     let content = html! {
         (admin_tabs("settings"))
         (components::page_header("Settings", Some("Set up payments and choose sensible defaults for new products"), None))
@@ -3968,7 +3356,7 @@ pub async fn settings(ctx: &dyn Context, msg: &Message) -> OutputStream {
                 }
             }
         }
-        (settings_form::settings_form(ctx, "/b/products/admin/settings", &sections, html! {}).await)
+        (form)
     };
     ui::shell_page(
         ctx,
@@ -3979,6 +3367,14 @@ pub async fn settings(ctx: &dyn Context, msg: &Message) -> OutputStream {
     .await
 }
 
-pub async fn handle_save_settings(ctx: &dyn Context, input: InputStream) -> OutputStream {
-    settings_form::save_settings(ctx, input, &settings_vars(ctx).await.all(), "products").await
+pub async fn handle_save_settings(
+    ctx: &dyn Context,
+    msg: &Message,
+    input: InputStream,
+) -> OutputStream {
+    let vars = match settings_vars(ctx).await {
+        Ok(vars) => vars,
+        Err(e) => return crud::db_error_internal(e, "Could not read the products runtime"),
+    };
+    settings_form::save_settings(ctx, msg, input, &vars.all(), "products").await
 }

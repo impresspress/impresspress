@@ -111,25 +111,18 @@ fn subscribe(request: &Request, ctx: &Ctx) -> Response {
         return refuse(400, "`email` is not an email address");
     }
 
-    // Look for the address before inserting, rather than leaning on the
-    // column's UNIQUE constraint: a constraint violation reaches a block as
-    // an opaque `Internal` error, and the caller has to be told which of the
-    // two it hit.
-    match db::count(
-        ctx,
-        SUBSCRIBERS,
-        &[Filter::new("email", "eq", json::Json::str(email))],
-    ) {
-        Ok(0) => {}
-        Ok(_) => return refuse(409, "that address is already subscribed"),
-        Err(error) => return unavailable(error),
-    }
-
+    // The column's UNIQUE constraint is the duplicate check: an address that
+    // is already stored is refused by the insert itself, and the host names
+    // that refusal `AlreadyExists`. Looking first instead would leave a gap
+    // two simultaneous signups for one address can both pass.
     let row = json::Json::obj()
         .set("id", json::Json::str(&subscriber_id(email)))
         .set("email", json::Json::str(email));
     match db::create(ctx, SUBSCRIBERS, row) {
         Ok(_) => Response::json(200, &json::Json::obj().set("ok", json::Json::Bool(true))),
+        Err(error) if error.code == "AlreadyExists" => {
+            refuse(409, "that address is already subscribed")
+        }
         Err(error) => unavailable(error),
     }
 }

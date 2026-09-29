@@ -3,7 +3,7 @@ use std::collections::HashMap;
 use wafer_run::ErrorCode;
 
 use super::harness::*;
-use crate::blocks::products::purchase;
+use crate::blocks::products::{contracts::RefundStatus, purchase};
 
 // ============================================================
 // Order history and refunds
@@ -66,7 +66,7 @@ async fn get_purchase_own() {
     .await;
 
     let (msg, _input) = get_msg("/b/products/purchases/pur_own", "user_1");
-    let out = purchase::handle_get(&ctx, &msg).await;
+    let out = purchase::handle_get(&ctx, &routed(msg)).await;
     let body = output_to_json(out).await;
     assert_eq!(body["purchase"]["id"], "pur_own");
     assert_eq!(
@@ -167,7 +167,7 @@ async fn each_order_tier_publishes_only_its_own_fields() {
     }
 
     let (msg, _input) = get_msg("/b/products/purchases/pur_tiers", "user_1");
-    let detail = output_to_json(purchase::handle_get(&ctx, &msg).await).await;
+    let detail = output_to_json(purchase::handle_get(&ctx, &routed(msg)).await).await;
     // Pin the parent before asserting what is missing from it. `Value::Null`
     // answers `None` to every `get`, so an absence loop over a `purchase` key
     // that had stopped existing — because the response was renamed, flattened
@@ -188,7 +188,7 @@ async fn each_order_tier_publishes_only_its_own_fields() {
 
     // The admin tier is the one that legitimately sees the whole row.
     let (msg, _input) = get_msg("/b/products/api/admin/purchases/pur_tiers", "admin_1");
-    let admin = output_to_json(purchase::handle_get_admin(&ctx, &msg).await).await;
+    let admin = output_to_json(purchase::handle_get_admin(&ctx, &routed(msg)).await).await;
     for field in PLATFORM_ONLY {
         assert!(
             admin["purchase"].get(field).is_some(),
@@ -315,7 +315,7 @@ async fn order_endpoints_publish_typed_views_and_withhold_the_receipt_digest() {
     .await;
 
     let (msg, _input) = get_msg("/b/products/purchases/pur_typed", "user_1");
-    let body = output_to_json(purchase::handle_get(&ctx, &msg).await).await;
+    let body = output_to_json(purchase::handle_get(&ctx, &routed(msg)).await).await;
     let detail: BuyerOrderDetailResponse =
         serde_json::from_value(body.clone()).expect("BuyerOrderDetailResponse");
     assert_eq!(serde_json::to_value(&detail).unwrap(), body);
@@ -341,7 +341,8 @@ async fn order_endpoints_publish_typed_views_and_withhold_the_receipt_digest() {
     );
     assert_eq!(detail.refunds[0].amount_minor, 1000);
     assert_eq!(
-        detail.refunds[0].status, "succeeded",
+        detail.refunds[0].status,
+        RefundStatus::Succeeded,
         "the buyer sees whether their refund landed"
     );
     assert_eq!(detail.disputes[0].provider_dispute_id, "dp_provider_typed");
@@ -380,7 +381,7 @@ async fn order_endpoints_publish_typed_views_and_withhold_the_receipt_digest() {
     // whole record, where the buyer's is a projection of it. What must hold
     // is that they describe the same order and that everything the buyer sees
     // the admin also sees.
-    let (mut msg, _input) = get_msg("/admin/b/products/purchases", "admin_1");
+    let (mut msg, _input) = get_msg("/b/products/api/admin/purchases", "admin_1");
     msg.set_meta("auth.user_roles", "admin");
     let admin_list = output_to_json(purchase::handle_list_admin(&ctx, &msg).await).await;
     let admin_row = &admin_list["records"][0];
@@ -411,7 +412,7 @@ async fn get_purchase_denied_for_other_user() {
 
     // user_2 tries to access user_1's purchase
     let (msg, _input) = get_msg("/b/products/purchases/pur_priv", "user_2");
-    let out = purchase::handle_get(&ctx, &msg).await;
+    let out = purchase::handle_get(&ctx, &routed(msg)).await;
     assert!(output_is_error(out, ErrorCode::PermissionDenied).await);
 }
 
@@ -420,7 +421,7 @@ async fn get_purchase_not_found() {
     let ctx = ctx().await;
 
     let (msg, _input) = get_msg("/b/products/purchases/nonexistent", "user_1");
-    let out = purchase::handle_get(&ctx, &msg).await;
+    let out = purchase::handle_get(&ctx, &routed(msg)).await;
     assert!(output_is_error(out, ErrorCode::NotFound).await);
 }
 
@@ -435,7 +436,7 @@ async fn get_purchase_admin_can_view_any() {
 
     let (mut msg, _input) = get_msg("/b/products/purchases/pur_any", "admin_1");
     msg.set_meta("auth.user_roles", "admin");
-    let out = purchase::handle_get(&ctx, &msg).await;
+    let out = purchase::handle_get(&ctx, &routed(msg)).await;
     let body = output_to_json(out).await;
     assert!(body["purchase"]["id"].as_str().is_some());
 }
@@ -455,13 +456,13 @@ async fn refund_completed_purchase() {
     seed(&ctx, "impresspress__products__purchases", "pur_refund", pd).await;
 
     let (mut msg, input) = create_msg(
-        "/admin/b/products/purchases/pur_refund/refund",
+        "/b/products/api/admin/purchases/pur_refund/refund",
         "admin_1",
         serde_json::json!({"reason": "Customer requested"}),
     );
     msg.set_meta("auth.user_roles", "admin");
 
-    let out = purchase::handle_refund(&ctx, &msg, input).await;
+    let out = purchase::handle_refund(&ctx, &routed(msg), input).await;
     let body = output_to_json(out).await;
     assert_eq!(body["status"], "succeeded");
     assert_eq!(body["amount_minor"], 5000);
@@ -495,12 +496,12 @@ async fn manual_partial_refund_retry_is_idempotent() {
         "idempotency_key": "manual_retry_1",
     });
     let (mut msg, input) = create_msg(
-        "/admin/b/products/purchases/pur_manual_retry/refund",
+        "/b/products/api/admin/purchases/pur_manual_retry/refund",
         "admin_1",
         request.clone(),
     );
     msg.set_meta("auth.user_roles", "admin");
-    let body = output_to_json(purchase::handle_refund(&ctx, &msg, input).await).await;
+    let body = output_to_json(purchase::handle_refund(&ctx, &routed(msg), input).await).await;
     assert_eq!(body["status"], "succeeded");
     assert_eq!(body["amount_minor"], 2000);
     assert_eq!(body["refunded_total_minor"], 2000);
@@ -508,8 +509,8 @@ async fn manual_partial_refund_retry_is_idempotent() {
     // the ledger row itself records the refund as `succeeded` on both state
     // columns, which is what `RefundView.provider_status` documents.
     assert_eq!(body["provider_status"], "manual");
-    let (msg, _input) = admin_get_msg("/admin/b/products/purchases/pur_manual_retry");
-    let detail = output_to_json(purchase::handle_get(&ctx, &msg).await).await;
+    let (msg, _input) = admin_get_msg("/b/products/api/admin/purchases/pur_manual_retry");
+    let detail = output_to_json(purchase::handle_get(&ctx, &routed(msg)).await).await;
     assert_eq!(detail["refunds"].as_array().map(Vec::len), Some(1));
     assert_eq!(detail["refunds"][0]["status"], "succeeded");
     assert_eq!(
@@ -520,12 +521,12 @@ async fn manual_partial_refund_retry_is_idempotent() {
     // A retried delivery of the same request (same idempotency key, e.g.
     // after a timeout) must return the recorded outcome, not deduct again.
     let (mut msg, input) = create_msg(
-        "/admin/b/products/purchases/pur_manual_retry/refund",
+        "/b/products/api/admin/purchases/pur_manual_retry/refund",
         "admin_1",
         request,
     );
     msg.set_meta("auth.user_roles", "admin");
-    let body = output_to_json(purchase::handle_refund(&ctx, &msg, input).await).await;
+    let body = output_to_json(purchase::handle_refund(&ctx, &routed(msg), input).await).await;
     assert_eq!(body["status"], "succeeded");
     assert_eq!(body["amount_minor"], 2000);
     assert_eq!(body["refunded_total_minor"], 2000);
@@ -560,22 +561,22 @@ async fn manual_refund_key_reuse_with_different_amount_fails() {
     .await;
 
     let (mut msg, input) = create_msg(
-        "/admin/b/products/purchases/pur_manual_reuse/refund",
+        "/b/products/api/admin/purchases/pur_manual_reuse/refund",
         "admin_1",
         serde_json::json!({"amount_minor": 2000, "idempotency_key": "manual_reuse_1"}),
     );
     msg.set_meta("auth.user_roles", "admin");
-    let body = output_to_json(purchase::handle_refund(&ctx, &msg, input).await).await;
+    let body = output_to_json(purchase::handle_refund(&ctx, &routed(msg), input).await).await;
     assert_eq!(body["status"], "succeeded");
 
     // The same key with a different amount is a client bug, not a retry.
     let (mut msg, input) = create_msg(
-        "/admin/b/products/purchases/pur_manual_reuse/refund",
+        "/b/products/api/admin/purchases/pur_manual_reuse/refund",
         "admin_1",
         serde_json::json!({"amount_minor": 1000, "idempotency_key": "manual_reuse_1"}),
     );
     msg.set_meta("auth.user_roles", "admin");
-    let out = purchase::handle_refund(&ctx, &msg, input).await;
+    let out = purchase::handle_refund(&ctx, &routed(msg), input).await;
     assert!(output_is_error(out, ErrorCode::InvalidArgument).await);
 }
 
@@ -589,13 +590,13 @@ async fn refund_non_completed_fails() {
     seed(&ctx, "impresspress__products__purchases", "pur_pending", pd).await;
 
     let (mut msg, input) = create_msg(
-        "/admin/b/products/purchases/pur_pending/refund",
+        "/b/products/api/admin/purchases/pur_pending/refund",
         "admin_1",
         serde_json::json!({}),
     );
     msg.set_meta("auth.user_roles", "admin");
 
-    let out = purchase::handle_refund(&ctx, &msg, input).await;
+    let out = purchase::handle_refund(&ctx, &routed(msg), input).await;
     assert!(output_is_error(out, ErrorCode::InvalidArgument).await);
 }
 
@@ -609,13 +610,13 @@ async fn refund_already_refunded_fails() {
     seed(&ctx, "impresspress__products__purchases", "pur_already", pd).await;
 
     let (mut msg, input) = create_msg(
-        "/admin/b/products/purchases/pur_already/refund",
+        "/b/products/api/admin/purchases/pur_already/refund",
         "admin_1",
         serde_json::json!({}),
     );
     msg.set_meta("auth.user_roles", "admin");
 
-    let out = purchase::handle_refund(&ctx, &msg, input).await;
+    let out = purchase::handle_refund(&ctx, &routed(msg), input).await;
     assert!(output_is_error(out, ErrorCode::InvalidArgument).await);
 }
 
@@ -624,13 +625,13 @@ async fn refund_purchase_not_found() {
     let ctx = ctx().await;
 
     let (mut msg, input) = create_msg(
-        "/admin/b/products/purchases/nonexistent/refund",
+        "/b/products/api/admin/purchases/nonexistent/refund",
         "admin_1",
         serde_json::json!({}),
     );
     msg.set_meta("auth.user_roles", "admin");
 
-    let out = purchase::handle_refund(&ctx, &msg, input).await;
+    let out = purchase::handle_refund(&ctx, &routed(msg), input).await;
     assert!(output_is_error(out, ErrorCode::NotFound).await);
 }
 
@@ -651,13 +652,13 @@ async fn refund_without_reason() {
     .await;
 
     let (mut msg, input) = create_msg(
-        "/admin/b/products/purchases/pur_noreason/refund",
+        "/b/products/api/admin/purchases/pur_noreason/refund",
         "admin_1",
         serde_json::json!({}),
     );
     msg.set_meta("auth.user_roles", "admin");
 
-    let out = purchase::handle_refund(&ctx, &msg, input).await;
+    let out = purchase::handle_refund(&ctx, &routed(msg), input).await;
     let body = output_to_json(out).await;
     assert_eq!(body["status"], "succeeded");
     assert_eq!(body["refunded_total_minor"], 1200);
@@ -688,13 +689,13 @@ async fn refund_rejects_malformed_json_body() {
     msg.set_meta("req.action", "create");
     msg.set_meta(
         "req.resource",
-        "/admin/b/products/purchases/pur_malformed/refund",
+        "/b/products/api/admin/purchases/pur_malformed/refund",
     );
     msg.set_meta("auth.user_id", "admin_1");
     msg.set_meta("auth.user_roles", "admin");
     let input = wafer_run::InputStream::from_bytes(b"{not valid json".to_vec());
 
-    let out = purchase::handle_refund(&ctx, &msg, input).await;
+    let out = purchase::handle_refund(&ctx, &routed(msg), input).await;
     assert!(
         output_is_error(out, ErrorCode::InvalidArgument).await,
         "malformed refund body must be rejected as a bad request"
@@ -728,13 +729,13 @@ async fn refund_repository_failure_surfaces_as_internal_error() {
     let ctx = ctx.break_writes();
 
     let (mut msg, input) = create_msg(
-        "/admin/b/products/purchases/pur_outage/refund",
+        "/b/products/api/admin/purchases/pur_outage/refund",
         "admin_1",
         serde_json::json!({"reason": "Customer requested"}),
     );
     msg.set_meta("auth.user_roles", "admin");
 
-    let out = purchase::handle_refund(&ctx, &msg, input).await;
+    let out = purchase::handle_refund(&ctx, &routed(msg), input).await;
     assert!(
         output_is_error(out, ErrorCode::Internal).await,
         "a genuine repository failure must surface as Internal, not the \
@@ -756,7 +757,7 @@ async fn purchase_list_via_user_handler() {
     seed(&ctx, "impresspress__products__purchases", "pur_route", pd).await;
 
     let (msg, input) = get_msg("/b/products/purchases", "user_1");
-    let out = dispatch_user(&ctx, msg, input).await;
+    let out = dispatch(&ctx, msg, input).await;
     let body = output_to_json(out).await;
     assert_eq!(body["records"].as_array().unwrap().len(), 1);
 }
@@ -790,7 +791,11 @@ async fn order_rows_outside_the_state_contract_never_reach_the_wire() {
 
     let (msg, _input) = get_msg("/b/products/purchases/pur_bad_reconciliation", "user_1");
     assert!(
-        output_is_error(purchase::handle_get(&ctx, &msg).await, ErrorCode::Internal).await,
+        output_is_error(
+            purchase::handle_get(&ctx, &routed(msg)).await,
+            ErrorCode::Internal
+        )
+        .await,
         "a 200 would publish `half_done`, which the contract does not define"
     );
     // A conforming order for the same buyer: without one, "the list is not
@@ -847,7 +852,70 @@ async fn order_rows_outside_the_state_contract_never_reach_the_wire() {
     .await;
     let (msg, _input) = get_msg("/b/products/purchases/pur_bad_status", "user_2");
     assert!(
-        output_is_error(purchase::handle_get(&ctx, &msg).await, ErrorCode::Internal).await,
+        output_is_error(
+            purchase::handle_get(&ctx, &routed(msg)).await,
+            ErrorCode::Internal
+        )
+        .await,
         "a 200 would publish `shipped`, which is not an order state"
+    );
+}
+
+/// One order, one identity, one amount.
+///
+/// `PurchaseView` — the admin projection, the only one of the three that
+/// published either — carried `user_id` beside `buyer_user_id` and
+/// `amount_cents` beside `total_cents`. Each pair is two columns holding one
+/// value, written together by one writer and never compared, so a row where
+/// they drift ships two answers to one question. The duplicate half of each
+/// pair is also the half nothing else reads: `amount_cents` had exactly one
+/// reader in the tree — this projection — on a field whose own published
+/// description said to prefer `total_cents`, and `user_id`'s description
+/// claimed it is empty for guest orders while the writer mirrors `""` into
+/// both. Ownership is decided on `buyer_user_id`; that is what is published.
+///
+/// The columns are untouched: this is the publication half, and it needs no
+/// migration because every order view is hand-projected.
+#[tokio::test]
+async fn an_order_publishes_one_identity_and_one_amount() {
+    let ctx = ctx().await;
+    seed(
+        &ctx,
+        "impresspress__products__purchases",
+        "pur_drift",
+        HashMap::from([
+            // The two pairs, deliberately disagreeing: no writer produces
+            // this, which is the point — nothing in the tree would notice.
+            ("user_id".to_string(), serde_json::json!("user_legacy")),
+            ("buyer_user_id".to_string(), serde_json::json!("user_1")),
+            ("amount_cents".to_string(), serde_json::json!(111)),
+            ("total_cents".to_string(), serde_json::json!(5000)),
+            ("status".to_string(), serde_json::json!("completed")),
+            (
+                "reconciliation_status".to_string(),
+                serde_json::json!("reconciled"),
+            ),
+        ]),
+    )
+    .await;
+
+    let (msg, _input) = get_msg("/b/products/api/admin/purchases/pur_drift", "admin_1");
+    let admin = output_to_json(purchase::handle_get_admin(&ctx, &routed(msg)).await).await;
+    let purchase = &admin["purchase"];
+    assert!(
+        purchase.is_object(),
+        "the admin detail must carry a `purchase` object, or the absence \
+         assertions below assert nothing: {admin}"
+    );
+
+    assert_eq!(purchase["buyer_user_id"], "user_1");
+    assert_eq!(purchase["total_cents"], 5000);
+    assert!(
+        purchase.get("user_id").is_none(),
+        "an order publishes one buyer identity, and it is `buyer_user_id`: {purchase}"
+    );
+    assert!(
+        purchase.get("amount_cents").is_none(),
+        "an order publishes one amount, and it is `total_cents`: {purchase}"
     );
 }

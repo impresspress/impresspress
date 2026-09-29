@@ -41,13 +41,13 @@
 //! `null`. Response types only — never apply it to an input.
 
 use serde::{Deserialize, Serialize};
-use wafer_core::clients::{
-    database::Record,
-    llm::{ModelCapabilities, ModelInfo, ModelState, ModelStatus},
-};
+use wafer_core::clients::llm::{ModelCapabilities, ModelInfo, ModelState, ModelStatus};
 
-use super::providers::config::{ProviderConfig, ProviderProtocol};
-use crate::util::RecordExt;
+use super::{
+    providers::config::{ProviderConfig, ProviderProtocol},
+    repo::settings::ThreadSettingRow,
+};
+use crate::llm_wire::openai::MaxTokensField;
 
 // ---------------------------------------------------------------------------
 // POST /b/llm/api/chat, POST /b/llm/api/chat/stream
@@ -68,6 +68,22 @@ pub struct ChatRequest {
     pub provider: Option<String>,
     /// Model id within the provider. Same precedence as `provider`.
     pub model: Option<String>,
+    /// Largest reply, in output tokens, this turn may generate. Omitted, the
+    /// deployment's `IMPRESSPRESS__LLM__DEFAULT_MAX_TOKENS` applies — every
+    /// request reaches the provider with a budget, because
+    /// Anthropic-protocol providers refuse one that carries none.
+    ///
+    /// Must be at least 1: zero asks for no answer at all and is answered
+    /// `400` here rather than by the provider. There is no upper bound on
+    /// this side, deliberately — the real ceiling is the model's, it differs
+    /// per model and per provider, and the provider is the only party that
+    /// knows it. A value the model will not accept comes back as that
+    /// provider's own error rather than one invented here. (The configured
+    /// default is treated differently: a value that is not a positive integer
+    /// falls back with a warning, because an operator's typo must not break
+    /// every chat on the deployment at once.)
+    #[schemars(range(min = 1))]
+    pub max_tokens: Option<u32>,
 }
 
 /// `POST /b/llm/api/chat` response body.
@@ -76,14 +92,24 @@ pub struct ChatResponse {
     /// The assistant's reply: every text delta the model produced,
     /// concatenated.
     pub content: String,
-    /// Id of the assistant entry persisted in the messages block. Empty when
-    /// persistence failed; the reply is still returned.
+    /// Id of the assistant entry persisted in the messages block. Always
+    /// populated: a reply the store refused is answered with a 500, not a
+    /// body (see `routes::chat::handle_chat`).
     pub message_id: String,
     /// The model the request was served by, after per-thread and default
     /// resolution.
     pub model: String,
-    /// `true` when the reply exceeded the 1 MiB buffering cap; `content`
-    /// then stops at the cap.
+    /// `true` when `content` is a prefix of the answer rather than the whole
+    /// of it. Two ceilings can do that, and the flag does not distinguish
+    /// them because a caller's response to either is the same — ask again,
+    /// or ask for less:
+    ///
+    /// * the model stopped at its output-token budget (the request's own
+    ///   `max_tokens`, or `IMPRESSPRESS__LLM__DEFAULT_MAX_TOKENS`), which it
+    ///   reports as a `length` finish reason;
+    /// * the reply exceeded the 1 MiB buffering cap of this endpoint, in
+    ///   which case the text ends at the last delta that fitted and nothing
+    ///   after it is appended, so it is never spliced across a gap.
     pub truncated: bool,
 }
 
@@ -111,6 +137,9 @@ pub struct ProviderView {
     /// key, or `null` for a provider that runs unauthenticated. The key
     /// itself is never published.
     pub key_var: Option<String>,
+    /// Which field carries the output-token budget in this provider's chat
+    /// bodies, or `null` to send the one its `protocol` implies.
+    pub max_tokens_field: Option<MaxTokensField>,
     /// Explicit model list. Empty means the models are discovered from the
     /// provider's `/v1/models`.
     pub models: Vec<String>,
@@ -127,6 +156,7 @@ impl ProviderView {
             protocol: cfg.protocol,
             endpoint: cfg.endpoint.clone(),
             key_var: cfg.key_var.clone(),
+            max_tokens_field: cfg.max_tokens_field,
             models: cfg.models.clone(),
             enabled: cfg.enabled,
         }
@@ -159,10 +189,17 @@ pub struct CreateProviderRequest {
     /// Name of the admin configuration variable holding the API key. Omit,
     /// or send an empty string, for a provider that needs no key.
     pub key_var: Option<String>,
+    /// Which field carries the output-token budget in this provider's chat
+    /// bodies. Omit to send the one `protocol` implies, which is what all but
+    /// a handful of endpoints want. Refused on the `anthropic` protocol,
+    /// whose wire format has only one such field.
+    pub max_tokens_field: Option<MaxTokensField>,
     /// Explicit model list. Omitted or empty means the models are discovered
     /// from the provider's `/v1/models`.
     pub models: Option<Vec<String>>,
-    /// Whether chat requests may route to this provider. Defaults to `true`.
+    /// Whether chat requests may route to this provider. Defaults to `true`
+    /// when the JSON body omits it; an unticked checkbox on the form path is
+    /// `false`, because that is the only thing an absent checkbox can mean.
     pub enabled: Option<bool>,
 }
 
@@ -170,8 +207,10 @@ pub struct CreateProviderRequest {
 // for the same reason: an inline `api_key` on the patch must be refused by
 // name, not dropped.
 /// `PATCH /b/llm/api/providers/{id}` request body. Every field is optional
-/// and only the ones present are applied. An empty `key_var` clears the
-/// variable; an empty `name` or `endpoint` is ignored.
+/// and only the ones present are applied. The two fields a provider can hold
+/// as `null` — `key_var` and `max_tokens_field` — are cleared by sending
+/// `null` (`key_var` also by an empty string); an empty `name` or `endpoint`
+/// is ignored.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct UpdateProviderRequest {
@@ -179,9 +218,52 @@ pub struct UpdateProviderRequest {
     pub protocol: Option<ProviderProtocol>,
     /// Re-validated on every change: must resolve to a public address.
     pub endpoint: Option<String>,
-    pub key_var: Option<String>,
+    // `key_var` and `max_tokens_field` are the two fields on this body where a
+    // present `null` differs from an absent key, because they are the two the
+    // provider itself can hold as `null` and so the two an admin has to be
+    // able to clear. Both take the same `present_as_some` treatment rather
+    // than one convention each: the schema stays that of the value being
+    // patched (`string | null`, `MaxTokensField | null`) and the extra
+    // `Option` is how Rust holds "was it sent at all", not a second level of
+    // nesting on the wire. The remaining fields are not nullable on a
+    // provider, so for them `null` and absent mean the same thing.
+    //
+    // `skip_serializing_if` keeps the derived `Serialize` telling the same
+    // story: an absent field stays absent rather than going back out as the
+    // `null` that means "clear it".
+    /// Name of the admin configuration variable holding the API key, or
+    /// `null` (or `""`) to leave the provider unauthenticated.
+    #[serde(
+        default,
+        deserialize_with = "present_as_some",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "Option<String>")]
+    pub key_var: Option<Option<String>>,
+    /// Which field carries the output-token budget, or `null` to go back to
+    /// the one `protocol` implies.
+    #[serde(
+        default,
+        deserialize_with = "present_as_some",
+        skip_serializing_if = "Option::is_none"
+    )]
+    #[schemars(with = "Option<MaxTokensField>")]
+    pub max_tokens_field: Option<Option<MaxTokensField>>,
     pub models: Option<Vec<String>>,
     pub enabled: Option<bool>,
+}
+
+/// Deserialize a *present* field into `Some(..)`, `null` included.
+///
+/// `Option<Option<T>>` under plain `#[serde(default)]` collapses an absent key
+/// and an explicit `null` into the same `None`, so a patch type built that way
+/// can set a value but never clear one.
+fn present_as_some<'de, D, T>(deserializer: D) -> Result<Option<T>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+    T: Deserialize<'de>,
+{
+    T::deserialize(deserializer).map(Some)
 }
 
 /// `DELETE /b/llm/api/providers/{id}` response body.
@@ -384,16 +466,18 @@ pub struct ThreadOverrideView {
     pub updated_at: String,
 }
 
-impl ThreadOverrideView {
-    /// Project an `impresspress__llm__settings` row.
-    pub fn from_record(record: &Record) -> Self {
+impl From<&ThreadSettingRow> for ThreadOverrideView {
+    /// Publish a stored override. The row type is the only thing that reads
+    /// the table's columns, so the view is a field-for-field projection with
+    /// nothing to decode.
+    fn from(row: &ThreadSettingRow) -> Self {
         Self {
-            id: record.id.clone(),
-            thread_id: record.str_field("thread_id").to_string(),
-            provider_block: record.str_field("provider_block").to_string(),
-            model: record.str_field("model").to_string(),
-            created_at: record.str_field("created_at").to_string(),
-            updated_at: record.str_field("updated_at").to_string(),
+            id: row.id.clone(),
+            thread_id: row.thread_id.clone(),
+            provider_block: row.provider_block.clone(),
+            model: row.model.clone(),
+            created_at: row.created_at.clone(),
+            updated_at: row.updated_at.clone(),
         }
     }
 }
@@ -417,9 +501,17 @@ pub struct ConfigAcknowledgement {
     pub updated: bool,
 }
 
+/// `DELETE /b/llm/api/config/{id}` response body.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct ConfigDeleteResponse {
+    /// Always `true`: a delete that did not happen is an error response.
+    pub deleted: bool,
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::blocks::llm::EXAMPLE_KEY_VAR;
 
     /// The projection is what keeps the resolved key off the wire: a config
     /// holding one still serializes without it.
@@ -431,7 +523,7 @@ mod tests {
             "https://api.openai.com/v1",
         )
         .with_api_key("sk-resolved-plaintext")
-        .with_key_var("IMPRESSPRESS__LLM__OPENAI_KEY")
+        .with_key_var(EXAMPLE_KEY_VAR)
         .with_models(vec!["gpt-4o".into()]);
 
         let value = serde_json::to_value(ProviderView::from_config("row-1", &cfg)).expect("json");
@@ -445,7 +537,16 @@ mod tests {
         keys.sort_unstable();
         assert_eq!(
             keys,
-            ["enabled", "endpoint", "id", "key_var", "models", "name", "protocol"]
+            [
+                "enabled",
+                "endpoint",
+                "id",
+                "key_var",
+                "max_tokens_field",
+                "models",
+                "name",
+                "protocol"
+            ]
         );
         assert!(
             !value.to_string().contains("sk-resolved-plaintext"),
@@ -453,7 +554,7 @@ mod tests {
         );
         assert_eq!(value["id"], "row-1");
         assert_eq!(value["protocol"], "open_ai");
-        assert_eq!(value["key_var"], "IMPRESSPRESS__LLM__OPENAI_KEY");
+        assert_eq!(value["key_var"], EXAMPLE_KEY_VAR);
         assert_eq!(value["models"], serde_json::json!(["gpt-4o"]));
         assert_eq!(value["enabled"], true);
     }
@@ -494,20 +595,18 @@ mod tests {
 
     #[test]
     fn config_update_response_is_the_override_or_the_acknowledgement() {
-        let record = Record {
+        let row = ThreadSettingRow {
             id: "row-1".into(),
-            data: crate::util::json_map(serde_json::json!({
-                "thread_id": "t1",
-                "provider_block": "openai-main",
-                "model": "gpt-4o",
-                "created_at": "2026-08-28T00:00:00Z",
-                "updated_at": "2026-08-28T00:00:00Z",
-            })),
+            thread_id: "t1".into(),
+            provider_block: "openai-main".into(),
+            model: "gpt-4o".into(),
+            created_at: "2026-08-28T00:00:00Z".into(),
+            updated_at: "2026-08-28T00:00:00Z".into(),
         };
         assert_eq!(
-            serde_json::to_value(ConfigUpdateResponse::Override(
-                ThreadOverrideView::from_record(&record)
-            ))
+            serde_json::to_value(ConfigUpdateResponse::Override(ThreadOverrideView::from(
+                &row
+            )))
             .expect("json"),
             serde_json::json!({
                 "id": "row-1",

@@ -32,7 +32,8 @@ pub async fn start_chat_stream(body_json: &str) -> Result<String, LlmError> {
 /// One frame pulled from the page-side chat stream. Chat emits `Chunk`
 /// (OpenAI chunk JSON) frames and terminates with `Done` or `Error`.
 pub enum StreamFrame {
-    /// OpenAI chunk JSON string. Pass to `openai_codec::StreamingDecoder::feed`.
+    /// OpenAI chunk JSON string. Pass to
+    /// `impresspress_core::llm_wire::openai::OpenAiSseDecoder::push_frame`.
     Chunk(String),
     Done,
     Error(String),

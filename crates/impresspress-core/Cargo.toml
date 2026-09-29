@@ -29,6 +29,7 @@ default = [
     "block-tickets",
     "block-userportal",
     "block-products",
+    "block-signal",
     "embed-assets",
 ]
 sqlite = []
@@ -40,7 +41,7 @@ embed-assets = []
 postgres = []
 # Exposes `impresspress_core::test_support::TestContext` (the shared in-memory
 # SQLite + block harness) as part of the public API so the `tests/`
-# integration crates can reuse it instead of hand-rolling a `MigrationTestCtx`.
+# integration crates can reuse it instead of hand-rolling a context of their own.
 # Pulls `wafer-block-sqlite` in as a regular (non-optional) dep — TestContext
 # wires the production `DatabaseBlock` over `SQLiteDatabaseService`. Enabled
 # via the self dev-dependency below; never enabled in production builds.
@@ -64,11 +65,10 @@ wasm = ["wafer-run/wasm"]
 # `impresspress/llm` block dispatch; turning off `block-llm` while leaving
 # `llm` on would still drag the block module in.
 #
-# `block-messages` is intentionally NOT implied: PR #191 hoisted the
-# messages table/column constants used by `blocks::llm::pages` into
-# `impresspress-core::messages_schema`, so the llm UI no longer depends on
-# the messages block module being compiled in. Enabling `llm` without
-# `block-messages` now compiles cleanly.
+# `block-messages` arrives through `block-llm` below: the llm block declares
+# `requires(["impresspress/messages", ..])` and reads and writes every thread
+# and entry through `ctx.call_block("impresspress/messages", ..)`, so a build
+# without the messages block registered answers every chat turn with a 404.
 llm = [
     "dep:tokio",
     "dep:tokio-stream",
@@ -76,16 +76,15 @@ llm = [
     "reqwest/stream",
     "block-llm",
 ]
-# Native ONNX-backed embedding block (impresspress/fastembed) + SQLite
-# vector service. Pulls in wafer-block-fastembed (ONNX Runtime) and
-# enables the `vectors` feature of wafer-block-sqlite (sqlite-vec).
-# Required to register the `impresspress/vector` feature block.
+# Native ONNX-backed embedding block (impresspress/fastembed) + the SQLite
+# vector store behind `wafer-run/vector`. Enables the `vectors` feature of
+# wafer-block-sqlite (sqlite-vec) for the store; the embedding model is the
+# fastembed block's alone, so the store is registered without loading it.
 #
 # Implies `block-fastembed` and `block-vector` — the native-embedding
 # path registers both blocks; leaving them off while turning this on
 # would compile-fail.
 native-embedding = [
-    "dep:wafer-block-fastembed",
     "dep:wafer-block-sqlite",
     "dep:rusqlite",
     "block-fastembed",
@@ -108,11 +107,20 @@ native-embedding = [
 block-files = []
 block-messages = []
 block-vector = ["block-llm"]
-block-llm = []
+# `block-llm` implies `block-messages`: `llm.requires` names
+# `impresspress/messages`, and every thread the chat UI lists, every entry it
+# renders and every turn it persists goes through
+# `ctx.call_block("impresspress/messages", ..)`. Without the messages block
+# registered, `dispatch_call` answers `NotFound` and the chat page is empty
+# with no error anywhere. Cargo now says what the block always declared.
+block-llm = ["block-messages"]
 block-legalpages = ["dep:pulldown-cmark"]
 block-tickets = []
 block-userportal = []
 block-products = []
+# WebRTC signalling rooms for blockfarming's online play (`impresspress/signal`).
+# No sub-dependencies of its own: typed `db::*` client, no crypto, no HTTP client.
+block-signal = []
 # Browser development sandbox control plane (`impresspress/dev`).
 #
 # Deliberately OFF in `default`: the block is the sandbox's own control
@@ -159,12 +167,15 @@ schemars = { version = "1", features = ["chrono04"] }
 # + `derive`/`sea-query-derive` for the whole graph — defeating wafer-sql-utils'
 # `default-features = false` trim (wafer-run #317). Removed.
 wafer-sql-utils = { workspace = true }
-# Native ONNX embeddings (optional — gated behind `native-embedding`).
+# SSRF predicates (`is_blocked_url`, `is_blocked_ipv4`/`_ipv6`) shared with
+# wafer-run's network block, used by `ssrf.rs` and `util.rs`.
+wafer-net-security = { workspace = true }
+# Native ONNX embeddings (optional — gated behind `block-fastembed`, which
+# `native-embedding` implies).
 wafer-block-fastembed = { workspace = true, optional = true }
-# SQLite vector service (optional — gated behind `native-embedding`).
-# Both deps required together: vector service needs a sqlite-vec-enabled
-# connection, embedding service is the only way to fulfil the
-# `wafer-run/vector` block's EmbeddingService slot.
+# SQLite vector service (optional — gated behind `native-embedding`): the
+# `SqliteVecService` behind `wafer-run/vector` needs a sqlite-vec-enabled
+# `rusqlite` connection, so both deps come in together.
 wafer-block-sqlite = { workspace = true, optional = true, features = ["vectors"] }
 rusqlite = { workspace = true, optional = true }
 # CRC-32 for `blocks::dev::zip`'s stored-entry writer (gated behind
@@ -250,9 +261,26 @@ sha2 = { workspace = true }
 # harness) instead of re-implementing it. A self dev-dep is the standard way
 # to feature-gate a test-only public module without leaking it into the
 # production lib build.
-impresspress-core = { path = ".", features = ["test-support"] }
-tokio = { workspace = true, features = ["macros", "rt", "time", "net"] }
+#
+# `default-features = false` because a dev-dependency's features are unified
+# into the package's own build whenever a test target is compiled. Spelled
+# without it, this line re-enables `default` — and so `llm` — in every
+# `cargo test --no-default-features` run, including the CI lane whose whole
+# purpose is to compile the vector block with the llm backend absent. The
+# features a run asks for on the command line still apply; this only stops the
+# dev-dep from adding `default` back on top of them.
+impresspress-core = { path = ".", default-features = false, features = [
+    "test-support",
+] }
+# `net` + `io-util` let the LLM provider tests answer a chat request from a
+# real socket (partial SSE body, then close or hang), which is the only way to
+# exercise the streaming client's truncation and read-timeout handling.
+tokio = { workspace = true, features = ["macros", "rt", "time", "net", "io-util"] }
 tempfile = "3"
+# Test-fixture setup only: `blocks::vector::legacy_names` builds an index in
+# the shape the pre-lowercase code wrote, which the vector service now refuses
+# to create, straight onto the SQLite file its `SqliteVecService` opens.
+rusqlite = { workspace = true }
 # Dev-dep so integration tests can drive the SQLite database service even
 # when the `native-embedding` feature (which makes wafer-block-sqlite a
 # regular optional dep) is off.
@@ -277,6 +305,19 @@ walkdir = "2"
 # (`default-features = false` — the writer needs no compression backend, so
 # the reader shouldn't pull one in either).
 zip = { version = "2", default-features = false }
+# `tests/manifest_block_parity.rs` reads this crate's, impresspress-web's and
+# impresspress-cloudflare's `Cargo.toml` and compares their `block-*` sets. It
+# parses them rather than grepping: a hand-rolled line matcher on a manifest is
+# the sort of approximate second implementation that goes stale exactly like
+# the "keep in sync" comments that test replaces.
+toml = "1"
+# `tests/repo_door.rs` resolves each file's `use` trees (aliases, `self as`,
+# globs, imports through an alias) to decide which door constant a bare or
+# aliased path names. Parsing is the same choice as `toml` above: a text
+# matcher over `use` lines misses shapes rustfmt produces and matches inside
+# comments.
+syn = { version = "2", default-features = false, features = ["full", "parsing", "visit"] }
+proc-macro2 = { version = "1", default-features = false }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
 getrandom = { version = "0.2", features = ["js"] }

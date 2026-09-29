@@ -126,19 +126,19 @@ test.describe("SaaS: Auth", () => {
 // Products (subscription plans)
 // ---------------------------------------------------------------------------
 test.describe("SaaS: Products", () => {
-  test("GET /b/products/api/catalog returns plan list", async ({ request }) => {
+  test("GET /b/products/catalog returns plan list", async ({ request }) => {
     const { token } = await signup(request);
-    const res = await request.get("/b/products/api/catalog", {
+    const res = await request.get("/b/products/catalog", {
       headers: { Authorization: `Bearer ${token}` },
     });
     expect(res.ok()).toBeTruthy();
   });
 
-  test("GET /b/products/api/purchases returns user purchases", async ({
+  test("GET /b/products/purchases returns user purchases", async ({
     request,
   }) => {
     const { token } = await signup(request);
-    const res = await request.get("/b/products/api/purchases", {
+    const res = await request.get("/b/products/purchases", {
       headers: { Authorization: `Bearer ${token}` },
     });
     expect(res.ok()).toBeTruthy();
@@ -151,7 +151,7 @@ test.describe("SaaS: Products", () => {
 test.describe("SaaS: Admin", () => {
   test("admin endpoints require auth", async ({ request }) => {
     const res = await request.get("/b/admin/api/users");
-    expect(res.status()).toBe(403);
+    expect(res.status()).toBe(401);
   });
 
   test("GET /b/admin/api/settings accessible with token", async ({

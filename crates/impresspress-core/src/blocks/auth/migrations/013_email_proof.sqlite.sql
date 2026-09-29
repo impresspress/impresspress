@@ -1,0 +1,35 @@
+-- Who proved the address on a users row, as distinct from whether the login
+-- policy currently demands one.
+--
+-- `email_verified` is a policy flag, not evidence. `auth_ui::api::signup`
+-- writes `email_verified = !REQUIRE_VERIFICATION`, so on a deployment with
+-- verification off — the default — every password signup is marked verified
+-- having proved nothing and with no mail ever sent. Anything that treats that
+-- column as proof of mailbox control is therefore trivially forgeable by
+-- signing up: that is how an attacker who registers `victim@example.com`
+-- comes to own the row an OAuth sign-in for that address would join.
+--
+-- `email_verified_by` records the act instead of the policy. It is written in
+-- exactly two places, both of which have just watched someone prove control:
+-- `users::record_email_proof`, called by `auth_ui::api::verify` when a mailed
+-- token is redeemed, and by `auth_ui::oauth::callback` when a provider that
+-- asserts verification (`spec::EmailAssertion`) returns the address. Its value
+-- names the proof — `email_token`, or `oauth.<provider>`.
+--
+-- Deliberately NOT backfilled. A row that predates this column may have been
+-- verified by a real mailed link or may be a default-on-signup row; the two
+-- are indistinguishable now, and guessing in favour of the account means
+-- guessing in favour of a squatter.
+--
+-- Such an account signs in with its password exactly as before; what it cannot
+-- do until someone proves the address is be joined by an OAuth identity. Two
+-- routes record the proof without operator intervention, and both are ordinary
+-- user actions: `POST /b/auth/api/resend-verification` followed by the link
+-- (the resend and the redemption both key on this column, so a flag-verified
+-- row is still offered one), or a password reset, whose link is mailbox proof
+-- of the same strength. Operators get this spelled out in RELEASE.md.
+--
+-- Nullable with no default, like every other ALTER-added column here: SQLite
+-- has no `ADD COLUMN IF NOT EXISTS`, and a re-run raises "duplicate column
+-- name", which `migration_helper` tolerates as an idempotent no-op.
+ALTER TABLE wafer_run__auth__users ADD COLUMN email_verified_by TEXT;

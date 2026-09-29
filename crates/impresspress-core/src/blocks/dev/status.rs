@@ -9,15 +9,15 @@ use wafer_run::{context::Context, OutputStream, WaferError};
 
 use super::{
     contracts::{ActivationView, ActiveBlockView, StatusResponse},
-    gc, generation, no_store, repo, seed, DevShared, WAFER_GUEST_VERSION,
+    gc, generation, no_store, no_store_db_error_internal, repo, seed, DevShared,
+    WAFER_GUEST_VERSION,
 };
-use crate::http::err_internal;
 
 /// Answer the status endpoint.
 pub async fn handle(ctx: &dyn Context, shared: &DevShared) -> OutputStream {
     match build(ctx, shared).await {
         Ok(response) => no_store().json(&response),
-        Err(e) => err_internal("dev sandbox status", e),
+        Err(e) => no_store_db_error_internal(e, "dev sandbox status"),
     }
 }
 
@@ -57,7 +57,7 @@ async fn build(ctx: &dyn Context, shared: &DevShared) -> Result<StatusResponse, 
         // from a walk of the stores (`gc::storage_usage` says why). The page
         // polls this while a tool call is outstanding, so the figures move as
         // the collector works rather than only after the panel is reopened.
-        storage: gc::storage_usage(ctx).await?,
+        storage: gc::storage_usage(ctx, shared).await?,
         wafer_guest_version: WAFER_GUEST_VERSION,
         // One indexed read of a `UNIQUE` column, on the same poll — cheap in
         // the way a store listing is not, and the difference between an empty

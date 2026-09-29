@@ -116,7 +116,9 @@ get it approximately right, and the failure would surface as a trap inside
 the interpreter rather than as a compile error. The other two files come out
 already carrying the block's name everywhere it has to appear at once: the
 crate name, the block id `site/<name>`, the route prefix `/b/<name>/`, the
-collection prefix `site__<name>__` and the config prefix `SITE__<NAME>__`.
+collection prefix `site__<name>__` and the config prefix `SITE__<NAME>__`
+(a hyphen in the name is `_` in those two prefixes, as the runtime spells a
+block's resources: `my-shop` owns `site__my_shop__*` and `SITE__MY_SHOP__*`).
 
 Scaffolding only stages source, the same as any other write under `blocks/`;
 nothing serves until the block is compiled. If anything already exists under
