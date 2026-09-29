@@ -16,9 +16,7 @@ on:
       - 'Cargo.lock'
       # `check-audit-expiry.sh` runs in the `audit` job of `audit.yml`, so a
       # change confined to it (or to any other script the shared body grows)
-      # must run this workflow. `ci.yml` has always listed this; `ci-main.yml`
-      # did not until the parity pull request, which is the one entry the two
-      # filters used to disagree on.
+      # must run this workflow.
       - 'scripts/**'
       - '.github/workflows/ci-main.yml'
       # The workflows this one calls, directly or through `ci-shared.yml`.
@@ -80,14 +78,17 @@ jobs:
   build-wasm:
     uses: ./.github/workflows/build-wasm.yml
 
-  # See `ci.yml` for what this `needs:` replaced. `cross-compile` and
-  # `coverage` below depend on `build-wasm` and not on this call, so they still
-  # start as soon as the wasm exists rather than waiting for the shared suite.
+  # See `ci.yml` for why this call carries `needs: build-wasm` and runs
+  # `if: !cancelled()`. `cross-compile` and `coverage` below depend on
+  # `build-wasm` and not on this call, so they start as soon as the wasm
+  # exists rather than waiting for the shared suite.
   ci:
     needs: build-wasm
+    if: ${{ !cancelled() }}
     uses: ./.github/workflows/ci-shared.yml
     with:
       pull-request: false
+      build-wasm-result: ${{ needs.build-wasm.result }}
 
   # The two merge-only jobs. They stay here, and stay merge-only: a merge gate
   # that checks MORE than the pull-request gate hides nothing, which is the
