@@ -281,23 +281,26 @@ There is no API for "build this crate". The VFS is laid out like an export
 archive — a block at `/blocks/<crate>/`, the guest SDK it depends on by path
 (`../../wafer_guest`) at `/wafer_guest/` — and a compile is
 
-1. each file written under `/blocks/<crate>/` through the VFS's write-file
+1. `rm -rf /blocks/<crate>/src /blocks/<crate>/Cargo.toml`, so the crate on
+   disk is exactly this compile's files (below),
+2. each file written under `/blocks/<crate>/` through the VFS's write-file
    event (`input_string` with session `0xEEEEEEEE`, a JSON `{path, content}`),
-2. `cargo clean -p <crate>` (same `--release`, `--manifest-path`,
+3. `cargo clean -p <crate>` (same `--release`, `--manifest-path`,
    `--target-dir` and `--target`), which removes that one package's
    artifacts so cargo rebuilds it, and leaves `/wafer_guest`'s build alone —
    because cargo's mtime comparison cannot be trusted in this VFS (below),
-3. `rm -f /target/wasm32-wasip1/release/<crate>.wasm` — the path step 5
+4. `rm -f /target/wasm32-wasip1/release/<crate>.wasm` — the path step 6
    reads — so that a build that fails leaves nothing there (below),
-4. `cargo build --release --manifest-path /blocks/<crate>/Cargo.toml
+5. `cargo build --release --manifest-path /blocks/<crate>/Cargo.toml
    --target-dir /target --target wasm32-wasip1 --message-format=json` typed
    into session 0 one code point at a time, and a wait for the shell's
    `<cwd> $ ` prompt to come back — the only completion signal there is,
-5. `download /target/wasm32-wasip1/release/<crate>.wasm`, which streams the
+6. `download /target/wasm32-wasip1/release/<crate>.wasm`, which streams the
    file back out through the host bridge as chunks.
 
 **The warm-up.** `init` with a `guest` writes `/wafer_guest/**` and the
-warm-up block, runs the same `cargo clean -p` and `rm` over the warm-up,
+warm-up block into a VFS that has neither yet, runs the same `cargo clean -p`
+and `rm -f` over the warm-up,
 runs the same `cargo build`, and checks with `download` that the module is
 there before it posts `ready`. That compiles `wafer_guest` into `/target`,
 and every build in the session shares that one `--target-dir`, so a later
@@ -305,10 +308,22 @@ and every build in the session shares that one `--target-dir`, so a later
 package, and cargo keeps the guest's build (its `Fresh wafer_guest` line).
 That is the whole speed-up —
 the guest is most of what a block compiles, and it is compiled once per
-worker instead of once per compile. Nothing is deleted between compiles; a
-file an earlier compile left in `/blocks/<crate>/src/` is harmless, because
-rustc only compiles what `lib.rs` reaches through `mod`, and every file the
-block still has is rewritten.
+worker instead of once per compile.
+
+**A compile's sources replace the last one's.** Writing a file does not
+remove the ones beside it, and `/blocks/<crate>/` outlives a compile, so
+without step 1 a file an earlier compile wrote and this one does not have
+would still be there. That is not harmless: an author who deletes
+`src/util.rs` but keeps `mod util;` would get a green build from a file the
+workspace no longer has, and an export that does not build on a host. The
+`rm -rf` takes the block's `src/` and `Cargo.toml` and nothing else —
+`/target` (the guest's build) and `/wafer_guest` stay. Rubrc's shell `rm`
+takes `-r` and several paths, prints nothing when it succeeds, and the
+write-file event recreates `src/` afterwards (confirmed 2026-09-30, below).
+The probe's orphaned-module steps (`hello` with `src/extra.rs` and
+`mod extra;`, then the same `lib.rs` without that file) are the regression
+test: with the `rm -rf` taken out the second build came back `success: true`
+with a 115 327-byte module.
 
 **Cargo's freshness check is not trusted.** The VFS's write-file event does
 not move a file's mtime, and the VFS's timestamps are nanosecond-scale
@@ -481,6 +496,7 @@ compile.
 | `compile` of `newsletter` (the `table` template, its scaffolded profile) | **5 728 ms**, artifact 133 784 bytes, whole wafer ABI |
 | `compile` of a self-contained `hello` (the SDK as a module, no dependencies) | 20 408 ms, artifact 111 133 bytes, whole wafer ABI |
 | `compile` of `probe_fresh` (no dependencies), then again with only `src/lib.rs` edited | 1 664 ms / 1 636 ms; answers 1, then 2 |
+| `compile` of `hello` with `src/extra.rs` and `mod extra;`, then without the file | 2 295 ms, artifact 115 327 bytes; then `success: false`, no artifact, `src/lib.rs:45:1 file not found for module \`extra\`` (E0583) |
 | `compile` of `hello` with a syntax error | 988 ms, `success: false`, no artifact, `src/lib.rs:46:18` |
 | `compile` of `hello` with a truncated `Cargo.toml` (`[package` …) | 39 ms, `success: false`, no artifact, `blocks/hello/Cargo.toml:1:9 unclosed table` |
 | `compile` of `hello` with a path dependency that is not there | 733 ms, `success: false`, no artifact, `artifact-missing` plus cargo's "failed to get `wafer_guest` as a dependency" in `stderr` |
@@ -525,6 +541,12 @@ compile.
 6. **The warm-up is the new cost of `ready`.** About 27 s of the 35 s is the
    warm-up build, paid once per worker. A cancelled compile spends the
    worker, so the fresh worker pays it again.
+7. **A file the block no longer has is not compiled.** Before the worker
+   cleared the block's sources, a leftover `src/extra.rs` kept a build with
+   `mod extra;` green after the file was gone (`success: true`, 115 327
+   bytes, with the `rm -rf` taken out for one run). With it, that build
+   fails in rustc with `file not found for module \`extra\``. Confirmed, and
+   guarded by the probe.
 
 
 ## Not confirmed
@@ -543,7 +565,7 @@ Everything above was measured. These were not, and should not be assumed:
 * **No page reload was measured.** The "warm" figure is a second worker in the
   same page, which is the same IndexedDB but not the same code path a returning
   visitor takes.
-* **Eleven compiles per worker, not more.** Nothing here says what a worker does
+* **Thirteen compiles per worker, not more.** Nothing here says what a worker does
   after twenty, or how the VFS's memory behaves over a long session.
 * **The Cloudflare edge is untested.** Everything ran against
   `scripts/serve-probe.mjs`, which sets the same two headers the deployment

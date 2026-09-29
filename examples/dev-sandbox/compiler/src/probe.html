@@ -14,8 +14,9 @@
   Starts the packaged Rubrc toolchain with the guest SDK crate, which it builds
   once, then compiles the <code>hello</code> and <code>table</code> block
   templates against that build, a self-contained block in the shape blocks had
-  before the guest was a crate, and a deliberately broken copy of
-  <code>hello</code>; then checks that a guest which does not build fails
+  before the guest was a crate, a deliberately broken copy of
+  <code>hello</code>, and a copy that names a module whose file an earlier
+  compile had and this one does not; then checks that a guest which does not build fails
   <code>init</code>. Results are also left on <code>window.__PROBE__</code> for
   <code>scripts/run-probe.mjs</code>.
 </p>
@@ -347,6 +348,49 @@ fn probe_deliberate_error() -> i32 {
     step(
       secondFresh.answer.success && secondFresh.got === 2,
       `only src/lib.rs edited, crate rebuilt: probe_value() = ${secondFresh.got} (expected 2)`,
+    );
+    show();
+
+    // A source file the block no longer has. `hello` with a second module,
+    // then the same `lib.rs` — `mod extra;` still in it — without that file.
+    // The second build must fail in rustc: if the first build's
+    // `src/extra.rs` were still in the VFS, it would compile from a file the
+    // workspace no longer has. This is the step that fails if the worker
+    // stops clearing the block's sources before writing a compile's.
+    const withExtraModule = {
+      ...hello,
+      files: {
+        ...hello.files,
+        "src/lib.rs": `${hello.files["src/lib.rs"]}\nmod extra;\n`,
+        "src/extra.rs": "pub fn probe_extra() -> i32 {\n    1\n}\n",
+      },
+    };
+    await compileBlock(channel, "hello_extra", withExtraModule, "hello with src/extra.rs and `mod extra;`");
+    const { "src/extra.rs": _removed, ...withoutExtraFile } = withExtraModule.files;
+    const orphanStarted = performance.now();
+    const orphan = await channel.send({
+      type: "compile",
+      id: "compile-orphan-module",
+      crateName: hello.crateName,
+      files: withoutExtraFile,
+      target: "wasm32-wasip1",
+      release: true,
+    });
+    results.measurements.orphan_module = {
+      compile_ms: Math.round(performance.now() - orphanStarted),
+      success: orphan.success,
+      artifact_bytes: orphan.artifact?.byteLength ?? null,
+      diagnostics: orphan.diagnostics,
+      stdout_tail: (orphan.stdout ?? "").slice(-2000),
+      stderr_tail: (orphan.stderr ?? "").slice(-2000),
+    };
+    const orphanDiagnostic = (orphan.diagnostics ?? []).find((d) => d.severity === "error");
+    step(
+      !orphan.success &&
+        orphan.artifact === undefined &&
+        /file not found for module `extra`/.test(orphanDiagnostic?.message ?? ""),
+      `src/extra.rs removed, \`mod extra;\` kept: success=${orphan.success}, ` +
+        `artifact=${orphan.artifact?.byteLength ?? "none"}, first diagnostic=${JSON.stringify(orphanDiagnostic ?? null)}`,
     );
     show();
 

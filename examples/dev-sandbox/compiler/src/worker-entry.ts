@@ -183,11 +183,9 @@ const writeFile = (path: string, content: string) => {
 /**
  * Write a crate under `root`.
  *
- * Nothing is deleted first, so a file an earlier compile wrote under
- * `/blocks/<crate>/src/` and this one no longer has stays on disk. That is
- * harmless: rustc compiles only the files reached from `lib.rs` through
- * `mod`, and every file the block still has is rewritten here — a leftover
- * is a file nothing names.
+ * This only writes: whatever was under `root` before stays unless a file
+ * here replaces it. A compile of a block therefore runs `clearBlock` first,
+ * so the crate on disk is exactly the files this compile was handed.
  */
 const writeCrate = (root: string, files: Record<string, string>) => {
   for (const [path, content] of Object.entries(files)) {
@@ -248,6 +246,26 @@ const buildCommand = (crateName: string, target: string, release: boolean) =>
 /** Where cargo leaves a block's module, and what `download` reads. */
 const artifactPath = (crateName: string, target: string, release: boolean) =>
   `/target/${target}/${release ? "release" : "debug"}/${crateName.replace(/-/g, "_")}.wasm`;
+
+/**
+ * Remove the block's sources from the VFS before writing this compile's.
+ *
+ * `/blocks/<crate>/` outlives a compile, and writing a file does not remove
+ * the ones beside it. A file an earlier compile wrote and this one does not
+ * have would still be on disk — and not harmlessly: an author who deletes
+ * `src/util.rs` but keeps `mod util;` would get a green build from a file the
+ * workspace no longer has, and an export that does not build on a host. So
+ * the crate's `src/` and `Cargo.toml` go first, and rustc sees exactly the
+ * files this compile was handed. `/target` (the guest's build, reused by
+ * every block) and `/wafer_guest` are not touched. `-f` because the first
+ * compile of a block has nothing to remove.
+ */
+const clearBlock = async (crateName: string) =>
+  runCommand(
+    `rm -rf /blocks/${crateName}/src /blocks/${crateName}/Cargo.toml`,
+    COMPILE_TIMEOUT_MS,
+    `rm -rf for ${crateName}'s sources`,
+  );
 
 /**
  * Remove the block's previous module before building it again.
@@ -672,6 +690,7 @@ const compile = async (message: Extract<PageMessage, { type: "compile" }>) => {
   let shellLog = "";
   const builtPath = artifactPath(message.crateName, message.target, message.release);
 
+  shellLog += await clearBlock(message.crateName);
   writeCrate(`/blocks/${message.crateName}`, message.files);
   shellLog += await cleanBlock(message.crateName, message.target, message.release);
   shellLog += await removeArtifact(message.crateName, message.target, message.release);
