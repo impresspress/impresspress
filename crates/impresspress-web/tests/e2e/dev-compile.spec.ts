@@ -99,19 +99,17 @@ const BROKEN = 'let email = email.trim()';
 /**
  * Records what the page sent to `POST /b/dev/api/builds/stage`.
  *
- * Two numbers this test reports have no other source. The artifact's size is
- * never published — `dev_compile_block` reports `elapsed_ms` and diagnostics,
- * and the staged module is content-addressed, not measured — and the moment
- * the compile stopped being the compiler's problem and became the sandbox's is
- * what separates toolchain start-up from the build itself. Both are read off
- * the request the page makes anyway; the wrapper only observes and forwards.
+ * The artifact's size has no other source: `dev_compile_block` reports
+ * `elapsed_ms` and diagnostics, and the staged module is content-addressed,
+ * not measured. It is read off the request the page makes anyway; the wrapper
+ * only observes and forwards.
  *
  * `try`/`catch` around the whole observation because a probe that threw would
  * take the page's own `fetch` down with it.
  */
 const STAGE_PROBE = `
   (function () {
-    var probe = { stagedAt: null, artifactBytes: null, stages: 0 };
+    var probe = { artifactBytes: null, stages: 0 };
     window.__devStageProbe = probe;
     var realFetch = window.fetch;
     window.fetch = function (input, init) {
@@ -120,7 +118,6 @@ const STAGE_PROBE = `
         if (url.indexOf('/b/dev/api/builds/stage') !== -1 && init && typeof init.body === 'string') {
           var body = JSON.parse(init.body);
           if (typeof body.artifact_base64 === 'string') {
-            probe.stagedAt = Date.now();
             probe.artifactBytes = atob(body.artifact_base64).length;
             probe.stages += 1;
           }
@@ -240,6 +237,9 @@ test('an agent scaffolds, compiles and uses a Rust block end to end', async ({ p
   const created = structured<CreateBlock>(
     await execute(page, 'dev_create_block', { name: BLOCK, template: 'table' }),
   );
+  // The first block in the workspace is what starts the toolchain
+  // (`warmCompiler` in `dev.js`), so start-up is timed from here.
+  const warmStarted = Date.now();
   expect(created.files.map((f) => f.path)).toEqual([
     `blocks/${BLOCK}/Cargo.toml`,
     `blocks/${BLOCK}/src/lib.rs`,
@@ -249,6 +249,14 @@ test('an agent scaffolds, compiles and uses a Rust block end to end', async ({ p
   expect((await listSubscribers(page)).status).toBe(404);
 
   // --- 3. Compile, in the browser -----------------------------------------
+  //
+  // Only once the toolchain has said it is up, so `first_compile_ms` below is
+  // a compile against a started toolchain — what a visitor who scaffolds and
+  // then edits for a few seconds actually waits for — and `ready_ms` is
+  // start-up on its own. The budget is the download plus the start on a slow
+  // runner.
+  await expect(page.locator('#dev-log')).toContainText('compiler: ready', { timeout: 6 * 60 * 1000 });
+  const readyMs = Date.now() - warmStarted;
   const compileStarted = Date.now();
   const compiled = structured<Compile>(await execute(page, 'dev_compile_block', { name: BLOCK }));
   const firstCompileMs = Date.now() - compileStarted;
@@ -280,23 +288,19 @@ test('an agent scaffolds, compiles and uses a Rust block end to end', async ({ p
 
   // The numbers CI greps into its job summary.
   //
-  // `compile_ms` is the worker's own figure for the build (cargo's clock plus
-  // the shell round trip); `artifact_bytes` is the module the page staged.
-  // There is no `ready` timestamp on this path — `ensureCompiler` runs INSIDE
-  // the compile call and the page only logs the toolchain's stages, never
-  // times them — so `ready_ms` here is derived: the gap between the tool call
-  // starting and the staging request going out, less the build. It is
-  // therefore start-up plus the three `dev_read_file` round trips of the
-  // source snapshot and the base64 of the artifact, which are milliseconds
-  // against seconds. `first_compile_ms` is the whole call, measured, and is
-  // the honest number if the derivation is ever doubted.
+  // `ready_ms` is toolchain start-up — download included on a cold cache —
+  // measured from the scaffold that started it to the page's
+  // `compiler: ready` log line (polled, so it can read late by the poll
+  // interval, never early). `compile_ms` is the worker's own figure for the
+  // build (cargo's clock plus the shell round trip); `artifact_bytes` is the
+  // module the page staged. `first_compile_ms` is the whole first
+  // `dev_compile_block` call against the already started toolchain.
   const probe = await page.evaluate(
     () =>
-      (window as unknown as { __devStageProbe: { stagedAt: number; artifactBytes: number; stages: number } })
+      (window as unknown as { __devStageProbe: { artifactBytes: number; stages: number } })
         .__devStageProbe,
   );
   expect(probe.stages).toBe(1);
-  const readyMs = probe.stagedAt - compileStarted - compiled.elapsed_ms;
   console.log(
     `dev-compile: ready_ms=${readyMs} compile_ms=${compiled.elapsed_ms} ` +
       `artifact_bytes=${probe.artifactBytes} first_compile_ms=${firstCompileMs}`,

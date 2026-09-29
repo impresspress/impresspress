@@ -390,6 +390,7 @@ return {
   refusalMessage,
   describeCompiler,
   snapshotBlock,
+  renderBlockChoices,
   compileBlock,
   exportSite,
   updateExportButton,
