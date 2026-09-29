@@ -110,11 +110,13 @@
 //!   `500`. A blob the manifest names but the store does not have is that
 //!   `500`, never a `404`: the path exists and its content has gone.
 
+use std::sync::Arc;
+
 use base64ct::{Base64, Encoding};
 use wafer_run::{context::Context, ErrorCode, InputStream, Message, OutputStream};
 
 use super::{
-    activation::{self, ActivationIntent},
+    activation::{self, ActivationIntent, Maintenance},
     blobs,
     contracts::{
         FileConflict, FileDeleteRequest, FileDeleteResponse, FileEncoding, FileListQuery,
@@ -205,7 +207,7 @@ pub async fn handle_read(
 /// `POST /b/dev/api/files/write` — create or replace one file.
 pub async fn handle_write(
     ctx: &dyn Context,
-    shared: &DevShared,
+    shared: &Arc<DevShared>,
     input: InputStream,
 ) -> OutputStream {
     let request: FileWriteRequest = match read_body(input).await {
@@ -327,7 +329,7 @@ pub async fn handle_write(
 /// `POST /b/dev/api/files/delete` — drop one file from the manifest.
 pub async fn handle_delete(
     ctx: &dyn Context,
-    shared: &DevShared,
+    shared: &Arc<DevShared>,
     input: InputStream,
 ) -> OutputStream {
     let request: FileDeleteRequest = match read_body(input).await {
@@ -386,23 +388,32 @@ pub async fn handle_delete(
 /// out of the runtime.
 async fn publish_if_site(
     ctx: &dyn Context,
-    shared: &DevShared,
+    shared: &Arc<DevShared>,
     area: &WorkspaceArea,
     cause: GenerationCause,
 ) -> Result<Option<GenerationSummary>, OutputStream> {
     if !matches!(area, WorkspaceArea::Site) {
         return Ok(None);
     }
-    match activation::request(ctx, shared, cause, ActivationIntent::SiteOnly).await {
+    match activation::request(
+        ctx,
+        shared,
+        cause,
+        ActivationIntent::SiteOnly,
+        Maintenance::Deferred,
+    )
+    .await
+    {
         Ok(outcome) => Ok(Some(outcome.generation)),
         Err(e) => Err(e.into_response()),
     }
 }
 
 /// Reclaim the blob a delete may have orphaned, when the delete published
-/// nothing.
+/// nothing — after the reply, as an activation's own collection is.
 ///
-/// A `site/` delete activates, and the activation prunes and collects. A
+/// A `site/` delete activates, and the activation schedules the prune and the
+/// collection. A
 /// `blocks/` delete does not activate at all (design §7.2: block source only
 /// reaches the runtime through a compile), and a block source is named by the
 /// workspace and by nothing else — no generation carries a crate, only the
@@ -421,14 +432,15 @@ async fn publish_if_site(
 /// collector takes that lock itself, and it reads the workspace it is about to
 /// collect against rather than the one this handler was holding.
 ///
-/// Failures are logged, not returned — `maintain`'s own contract: the file
-/// *is* deleted, and reporting the delete as failed because the reclaim did
-/// would be untrue. The next activation collects instead.
-async fn collect_if_unpublished(ctx: &dyn Context, shared: &DevShared, area: &WorkspaceArea) {
+/// Failures are logged, not returned — `maintain`'s own contract, and after
+/// the reply there is nothing left to return them in: the file *is* deleted,
+/// and reporting the delete as failed because the reclaim did would be
+/// untrue. The next activation collects instead.
+async fn collect_if_unpublished(ctx: &dyn Context, shared: &Arc<DevShared>, area: &WorkspaceArea) {
     if matches!(area, WorkspaceArea::Site) {
         return;
     }
-    activation::maintain(ctx, shared).await;
+    activation::schedule_maintenance(ctx, shared, Maintenance::Deferred).await;
 }
 
 // ---------------------------------------------------------------------------

@@ -31,7 +31,10 @@ mod parity_tests;
 pub mod source_scan;
 
 use std::{
+    cell::RefCell,
     collections::{BTreeMap, HashMap},
+    future::Future,
+    rc::Rc,
     sync::{Arc, Mutex},
 };
 
@@ -141,6 +144,20 @@ pub struct TestContext {
     /// rather than only through HTTP.
     #[cfg(feature = "block-dev")]
     dev_shared: Option<Arc<crate::blocks::dev::DevShared>>,
+    /// Whether [`Self::dispatch_resolved_with_input`] and
+    /// [`Self::request_with_input`] run each request the way the browser's
+    /// service worker and the Cloudflare Worker do: inside its own
+    /// [`crate::after_response`] scope, with [`crate::deferred`] in
+    /// [`crate::deferred::DeferMode::Queued`], so what the request leaves for
+    /// after its reply — its audit row and its deferred tasks — waits until
+    /// the test runs it with [`Self::drain_deferred`].
+    ///
+    /// Set by [`Self::with_dev_added_and_shell`]: the dev sandbox's retention
+    /// and collection run after the reply, and a test asserting what they
+    /// reclaimed has to be able to say when they have run. Off elsewhere, so
+    /// every other fixture keeps the native host's behaviour (the audit row
+    /// inline, deferred tasks spawned).
+    defers_after_response: bool,
     /// Drop guard only — never read. Keeps the on-disk database file alive
     /// for exactly as long as some handle to it exists and deletes it
     /// afterwards; `None` for the in-memory constructors, which have no file.
@@ -151,6 +168,19 @@ pub struct TestContext {
     /// worker threads) is already closed by the time the file is unlinked,
     /// which is what lets SQLite clean up its own `-wal`/`-shm` sidecars.
     _db_file: Option<Arc<TempDbFile>>,
+}
+
+thread_local! {
+    /// The after-response work of every request [`TestContext::as_one_request`]
+    /// ran on this thread and [`TestContext::drain_deferred`] has not run yet.
+    ///
+    /// Per thread, not per fixture, because the work is: an
+    /// [`crate::after_response::AfterResponse`] holds `!Send` futures, which a
+    /// `Send + Sync` context cannot carry, and [`crate::after_response`] keeps
+    /// the request being polled on the thread too. Each test runs on its own
+    /// thread.
+    static AFTER_RESPONSE: RefCell<Vec<Rc<crate::after_response::AfterResponse>>> =
+        const { RefCell::new(Vec::new()) };
 }
 
 /// A temporary on-disk SQLite database that deletes itself — and the WAL /
@@ -262,6 +292,7 @@ impl TestContext {
             storage: None,
             #[cfg(feature = "block-dev")]
             dev_shared: None,
+            defers_after_response: false,
             _db_file: db_file,
         };
         // Every target's builder registers a config block, so an unset key
@@ -830,6 +861,10 @@ impl TestContext {
         // through `call_block`, and production refuses any target the block
         // did not declare before it looks at a single grant.
         self.add_deployment_grants(dev::wrap_grants());
+        // Retention and collection run after a request's reply, as they do
+        // in the browser; see `defers_after_response`.
+        crate::deferred::set_mode(crate::deferred::DeferMode::Queued);
+        self.defers_after_response = true;
         self.running_as(dev::BLOCK_NAME)
     }
 
@@ -1013,14 +1048,14 @@ impl TestContext {
         // Routed from the router's frame, not the fixture's block identity —
         // see [`Self::as_router`].
         let router = self.as_router();
-        crate::routing::route_to_block(
+        self.as_one_request(crate::routing::route_to_block(
             &router,
             msg,
             input,
             &crate::features::AllEnabled,
             &self.block_infos,
             &self.extra_routes,
-        )
+        ))
         .await
     }
 
@@ -1091,7 +1126,55 @@ impl TestContext {
             self.block_infos.clone(),
             self.extra_routes.clone(),
         );
-        router.handle(&self.as_router(), msg, input).await
+        self.as_one_request(router.handle(&self.as_router(), msg, input))
+            .await
+    }
+
+    /// Run `dispatch` as one request: in its own after-response scope when
+    /// this fixture defers after-response work ([`Self::drain_deferred`]),
+    /// directly otherwise.
+    async fn as_one_request<F: Future>(&self, dispatch: F) -> F::Output {
+        if !self.defers_after_response {
+            return dispatch.await;
+        }
+        let after = crate::after_response::AfterResponse::new();
+        let output = crate::after_response::scope(Rc::clone(&after), dispatch).await;
+        AFTER_RESPONSE.with(|pending| pending.borrow_mut().push(after));
+        output
+    }
+
+    /// Run the work the requests dispatched since the last drain left for
+    /// after their replies — each request's audit row, then its deferred
+    /// tasks, one request at a time in the order they were dispatched.
+    ///
+    /// The browser's service worker runs one request's after-response work in
+    /// the event-loop task after its reply ([`crate::after_response`]); this
+    /// is that step, at the moment the test chooses. Running every request's
+    /// work, not only the last one's, is what the browser does too: each
+    /// request's `event.waitUntil` keeps its own work alive until it has run,
+    /// so a burst of writes with no drain between them models replies whose
+    /// after-work has not run yet — not work that is lost.
+    ///
+    /// Only on a fixture that defers after-response work (a dev fixture; see
+    /// `defers_after_response`); elsewhere there is nothing queued and this
+    /// returns at once.
+    pub async fn drain_deferred(&self) {
+        let pending = AFTER_RESPONSE.with(|pending| std::mem::take(&mut *pending.borrow_mut()));
+        for after in pending {
+            if let Some(row) = after.take_audit_row() {
+                if let Err(failure) =
+                    crate::after_response::persist_audit_row(&*self.db_service, row).await
+                {
+                    panic!(
+                        "writing the audit row into {} failed: {}",
+                        failure.table, failure.error
+                    );
+                }
+            }
+            for task in after.take_tasks() {
+                task.await;
+            }
+        }
     }
 
     /// [`Self::request_with_input`] with `body` serialized as the JSON

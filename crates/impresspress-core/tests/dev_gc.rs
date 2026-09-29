@@ -224,6 +224,8 @@ async fn gc_deletes_blobs_no_retained_generation_or_workspace_references() {
         first_blob.get_or_insert(written.clone());
         sha = Some(written);
     }
+    // Retention and collection run after each write's reply.
+    ctx.drain_deferred().await;
 
     let first_blob = first_blob.expect("25 writes stored a first blob");
     let last_blob = sha.expect("25 writes stored a last blob");
@@ -282,6 +284,7 @@ async fn gc_never_deletes_a_blob_the_workspace_still_names_even_if_no_generation
     for i in 0..24 {
         sha = Some(write_file(&ctx, "site/page.html", &format!("v{i}"), sha.as_deref()).await);
     }
+    ctx.drain_deferred().await;
 
     assert!(
         blobs::exists(&ctx, &src_sha).await.expect("exists"),
@@ -294,11 +297,11 @@ async fn gc_never_deletes_a_blob_the_workspace_still_names_even_if_no_generation
         "twenty retained site versions plus the block source: {storage}",
     );
 
-    // And it goes the moment nothing names it — on the delete itself, not on
-    // some later unrelated site write. A `blocks/` delete publishes nothing
-    // (design §7.2), so without the collector running here the blob would stay
-    // charged against the workspace's quota until the agent happened to edit
-    // the site.
+    // And it goes as soon as nothing names it — after the delete itself, not
+    // on some later unrelated site write. A `blocks/` delete publishes nothing
+    // (design §7.2), so without the delete scheduling the collector the blob
+    // would stay charged against the workspace's quota until the agent
+    // happened to edit the site.
     let deleted = dev_post(
         &ctx,
         "/b/dev/api/files/delete",
@@ -306,6 +309,7 @@ async fn gc_never_deletes_a_blob_the_workspace_still_names_even_if_no_generation
     )
     .await;
     output_json(deleted).await;
+    ctx.drain_deferred().await;
     assert!(
         !blobs::exists(&ctx, &src_sha).await.expect("exists"),
         "the delete that orphaned it is what reclaims it",
@@ -341,6 +345,7 @@ async fn dev_status_reports_the_stores_as_the_collector_shrinks_them() {
     for i in 0..5 {
         sha = Some(write_file(&ctx, "site/index.html", &format!("v{i}"), sha.as_deref()).await);
     }
+    ctx.drain_deferred().await;
     let inside = storage_of(&ctx).await;
     assert_eq!(inside["blobs"], 5, "nothing has fallen out of the window");
     assert_eq!(inside["blobs_bytes"], 5 * 2);
@@ -350,6 +355,7 @@ async fn dev_status_reports_the_stores_as_the_collector_shrinks_them() {
     for i in 5..25 {
         sha = Some(write_file(&ctx, "site/index.html", &format!("v{i}"), sha.as_deref()).await);
     }
+    ctx.drain_deferred().await;
     let collected = storage_of(&ctx).await;
     assert_eq!(collected["blobs"], 20);
     assert_eq!(collected["retained_generations"], 20);
@@ -624,6 +630,7 @@ async fn gc_deletes_the_artifact_and_the_build_row_of_a_block_no_generation_name
             site: None,
             blocks: vec![spec],
         },
+        activation::Maintenance::Inline,
     )
     .await
     .expect("the block activates");
@@ -640,6 +647,7 @@ async fn gc_deletes_the_artifact_and_the_build_row_of_a_block_no_generation_name
             site: None,
             blocks: vec![replacement],
         },
+        activation::Maintenance::Inline,
     )
     .await
     .expect("the replacement activates");
@@ -653,6 +661,7 @@ async fn gc_deletes_the_artifact_and_the_build_row_of_a_block_no_generation_name
     for i in 0..21 {
         sha = Some(write_file(&ctx, "site/index.html", &format!("v{i}"), sha.as_deref()).await);
     }
+    ctx.drain_deferred().await;
 
     assert!(
         !artifacts::exists(&ctx, &superseded).await.expect("exists"),
@@ -698,6 +707,7 @@ async fn a_staged_build_protects_its_artifact_through_a_burst_of_site_writes() {
     for i in 0..21 {
         sha = Some(write_file(&ctx, "site/index.html", &format!("v{i}"), sha.as_deref()).await);
     }
+    ctx.drain_deferred().await;
     assert!(
         artifacts::exists(&ctx, &artifact).await.expect("exists"),
         "a slow compile is still a compile: its row says the bytes are on their way",
@@ -714,6 +724,7 @@ async fn a_staged_build_protects_its_artifact_through_a_burst_of_site_writes() {
         .await
         .expect("refuse");
     write_file(&ctx, "site/index.html", "v21", sha.as_deref()).await;
+    ctx.drain_deferred().await;
     assert!(
         !artifacts::exists(&ctx, &artifact).await.expect("exists"),
         "nothing is on its way to a generation any more",
@@ -831,6 +842,7 @@ async fn retention_keeps_the_serving_generation_and_its_blobs_under_a_run_of_fai
                 site: None,
                 blocks: vec![spec],
             },
+            activation::Maintenance::Inline,
         )
         .await
         .expect_err("a refused rebuild refuses the activation");
@@ -890,6 +902,7 @@ async fn a_blob_only_the_active_generation_names_survives_collection() {
             site: Some(site),
             blocks: Vec::new(),
         },
+        activation::Maintenance::Inline,
     )
     .await
     .expect("the manifest activates");
@@ -970,6 +983,7 @@ async fn an_orphaned_staged_generation_is_retired_at_boot_and_its_blobs_collecte
     for i in 0..21 {
         sha = Some(write_file(&ctx, "site/index.html", &format!("v{i}"), sha.as_deref()).await);
     }
+    ctx.drain_deferred().await;
     assert_eq!(
         generations::get(&ctx, &orphan).await.expect("get").status,
         GenerationStatus::Staged,
@@ -996,8 +1010,9 @@ async fn an_orphaned_staged_generation_is_retired_at_boot_and_its_blobs_collecte
     );
 
     // Now it is ordinary history, so the next activation prunes it and the
-    // collector reclaims what only it named.
+    // collector reclaims what only it named, after the write's reply.
     write_file(&ctx, "site/index.html", "v21", sha.as_deref()).await;
+    ctx.drain_deferred().await;
     assert_eq!(
         generations::get(&ctx, &orphan)
             .await
@@ -1196,6 +1211,7 @@ async fn boot_accepts_the_staged_build_of_a_live_block_and_closes_the_rest() {
             site: None,
             blocks: vec![spec],
         },
+        activation::Maintenance::Inline,
     )
     .await
     .expect("the block activates");

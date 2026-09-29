@@ -432,10 +432,18 @@ async function pruneEmptyDirs(folderHandle, dirs) {
  * @param {string} prefix
  * @param {number} limit
  * @param {number} offset
- * @returns {{keys: string[], total: number}} A plain JS object — NOT a JSON
- *   string. `total` is the full count of matching entries BEFORE slicing to
- *   the requested page (previously this returned only the page, and the
- *   caller reported the page length as the total).
+ * @returns {{keys: string[], sizes: number[], total: number}} A plain JS
+ *   object — NOT a JSON string. `sizes[i]` is the byte size of `keys[i]`.
+ *   `total` is the full count of matching entries BEFORE slicing to the
+ *   requested page (previously this returned only the page, and the caller
+ *   reported the page length as the total).
+ *
+ *   Each size is read off the object's own file (`getFile().size`, which
+ *   reads the file's metadata, not its bytes), for the requested page only.
+ *   Not off the metadata sidecar: that would be a second file handle, a read
+ *   of its bytes and a JSON parse per object, and after a streaming overwrite
+ *   whose sidecar write failed it can describe the previous body
+ *   (`storage.rs::put_streaming`), where the file itself cannot.
  *
  *   OPFS's directory iterator (`FileSystemDirectoryHandle.entries()`) has no
  *   native pagination, count, or cursor/skip-ahead API — it's
@@ -450,23 +458,24 @@ export async function storageList(folder, prefix, limit, offset) {
     const storageRoot = await getStorageRoot();
     const folderHandle = await getFolderHandle(storageRoot, folder, false);
 
-    const keys = [];
+    const found = [];
     async function walk(handle, dirs) {
         for await (const [name, entry] of handle.entries()) {
             if (entry.kind === 'directory') {
                 await walk(entry, [...dirs, name]);
             } else if (!isMetaName(name)) {
                 const key = joinKey(dirs, name);
-                if (!prefix || key.startsWith(prefix)) keys.push(key);
+                if (!prefix || key.startsWith(prefix)) found.push({ key, entry });
             }
         }
     }
     await walk(folderHandle, []);
 
-    keys.sort();
-    const total = keys.length;
-    const page = keys.slice(offset, limit > 0 ? offset + limit : undefined);
-    return { keys: page, total };
+    found.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    const total = found.length;
+    const page = found.slice(offset, limit > 0 ? offset + limit : undefined);
+    const sizes = await Promise.all(page.map(async ({ entry }) => (await entry.getFile()).size));
+    return { keys: page.map(({ key }) => key), sizes, total };
 }
 
 /**

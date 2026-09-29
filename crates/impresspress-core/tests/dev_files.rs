@@ -1141,6 +1141,7 @@ async fn an_activation_composes_its_site_from_the_manifest_a_racing_write_has_no
         &shared,
         GenerationCause::SiteWrite,
         ActivationIntent::SiteOnly,
+        activation::Maintenance::Inline,
     );
     let racer = async {
         once_parked(&hold).await;

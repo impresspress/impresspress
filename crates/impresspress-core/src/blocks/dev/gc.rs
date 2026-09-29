@@ -78,10 +78,14 @@
 //!
 //! # When it runs
 //!
-//! At the end of every successful activation, after retention has pruned
-//! (`super::activation`), and after a `blocks/` file delete, which changes what
-//! the workspace names without publishing anything. Those are the two moments
-//! content stops being reachable.
+//! After every successful activation, once retention has pruned, and after a
+//! `blocks/` file delete, which changes what the workspace names without
+//! publishing anything. Those are the two moments content stops being
+//! reachable. For a request, both run after its reply
+//! (`super::activation::Maintenance::Deferred`), outside the activation queue
+//! and possibly while the next activation is running — which is safe because
+//! of the ordering invariant above and because retention keeps every
+//! in-flight generation. At boot they run before convergence returns.
 
 use std::collections::BTreeSet;
 
@@ -177,10 +181,11 @@ pub async fn collect_interleaved(
     // The workspace lock, before the blob listing and held until the blob
     // half is done (see "The counters are read off the listing" above).
     //
-    // Deadlock-free for the reason `activation::adopt_site` documents:
-    // `files.rs` releases the lock before it asks for an activation, so
-    // nothing holding it is ever waiting on the queue this runs under, and
-    // nothing below takes another lock while holding it.
+    // Deadlock-free: nothing below takes another lock while holding it, and
+    // when this runs under the activation queue (inline, at boot) the reason
+    // `activation::adopt_site` documents holds — `files.rs` releases the lock
+    // before it asks for an activation, so nothing holding it is ever
+    // waiting on that queue. After a reply it runs under no queue lease.
     let serialized = shared.workspace.lock().await;
     let blob_objects = list_all(ctx, blobs::FOLDER).await?;
 

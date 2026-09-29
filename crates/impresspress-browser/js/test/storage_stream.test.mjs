@@ -344,3 +344,23 @@ test('abandoning a read releases the OPFS reader', async () => {
     await readerCancel(started.stream_id);
     await assert.rejects(() => readerNextChunk(started.stream_id), /unknown stream id/);
 });
+
+test('a listing reports each object size, for the requested page', async () => {
+    await storagePut('blobs', 'b/two', new Uint8Array(12), 'application/octet-stream');
+    await storagePut('blobs', 'a/one', new Uint8Array(3), 'application/octet-stream');
+    const id = await storagePutStreamStart('blobs', 'c/three');
+    await storagePutStreamChunk(id, new Uint8Array(4));
+    await storagePutStreamChunk(id, new Uint8Array(3));
+    await storagePutStreamFinish(id, 'application/octet-stream');
+
+    assert.deepEqual(await storageList('blobs', '', 0, 0), {
+        keys: ['a/one', 'b/two', 'c/three'],
+        sizes: [3, 12, 7],
+        total: 3,
+    });
+    assert.deepEqual(
+        await storageList('blobs', '', 1, 1),
+        { keys: ['b/two'], sizes: [12], total: 3 },
+        'a page carries the sizes of its own keys',
+    );
+});

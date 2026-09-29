@@ -173,9 +173,15 @@ async fn a_site_write_reads_in_full_only_the_content_it_publishes() {
     write_file(&ctx, "site/index.html", "<h1>v1</h1>", None).await;
     write_file(&ctx, "site/style.css", "h1{}", None).await;
     let intent = compile_of(&ctx, &["hello"]).await;
-    activation::request(&ctx, &shared, GenerationCause::BlockCompile, intent)
-        .await
-        .expect("the block activates");
+    activation::request(
+        &ctx,
+        &shared,
+        GenerationCause::BlockCompile,
+        intent,
+        activation::Maintenance::Inline,
+    )
+    .await
+    .expect("the block activates");
 
     let before = ctx.storage_reads().len();
     write_file(
@@ -462,6 +468,7 @@ async fn a_site_write_racing_a_rollback_leaves_the_workspace_and_the_site_agreei
         &shared,
         GenerationCause::BlockCompile,
         compile_of(&ctx, &["hello"]).await,
+        activation::Maintenance::Inline,
     )
     .await
     .expect("the block activates");
@@ -519,6 +526,7 @@ async fn a_failed_runtime_rebuild_leaves_the_previous_generation_active() {
         &ctx.dev_shared(),
         GenerationCause::BlockCompile,
         compile_of(&ctx, &["hello"]).await,
+        activation::Maintenance::Inline,
     )
     .await
     .expect_err("a refused rebuild must refuse the activation");
@@ -562,6 +570,7 @@ async fn a_manifest_naming_content_that_is_not_stored_is_refused() {
             site: Some(site),
             blocks: Vec::new(),
         },
+        activation::Maintenance::Inline,
     )
     .await
     .expect_err("a manifest naming content that is not stored cannot activate");
@@ -724,6 +733,7 @@ async fn boot_reports_the_active_block_set_when_nothing_is_owed() {
         &ctx.dev_shared(),
         GenerationCause::BlockCompile,
         compile_of(&ctx, &["hello"]).await,
+        activation::Maintenance::Inline,
     )
     .await
     .expect("activate a generation with a block");
@@ -834,8 +844,10 @@ async fn only_the_last_twenty_generations_are_retained() {
         "a replaced generation is superseded by the activation that replaced it",
     );
 
-    // 24 writes: the four oldest fall out of the window and are deleted.
+    // 24 writes: the four oldest fall out of the window and are deleted —
+    // after the replies, once the after-response work has run.
     write_repeatedly(&ctx, 14, 10, sha).await;
+    ctx.drain_deferred().await;
     assert_eq!(
         status_of_generation(&ctx, &oldest).await,
         None,
@@ -870,6 +882,53 @@ async fn only_the_last_twenty_generations_are_retained() {
     );
 }
 
+/// A site write answers once its generation is live and durable; retention
+/// and collection run after the reply (design §2.3). So right after the
+/// 21st write's response the generation that has just fallen out of the
+/// window is still in the ledger, and it goes when the work the request left
+/// behind runs.
+///
+/// Fails if `maintain` runs inline on the request path: the prune would have
+/// deleted the row before the response came back.
+#[tokio::test]
+async fn a_site_write_replies_before_the_collector_runs() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+
+    // Twenty writes, each drained, so the window is exactly full and nothing
+    // is waiting to run.
+    let mut sha = None;
+    for i in 0..20 {
+        sha = write_repeatedly(&ctx, 1, i, sha).await;
+        ctx.drain_deferred().await;
+    }
+    let listed = list_generations(&ctx, Some(100)).await;
+    let generations = listed["generations"].as_array().expect("generations");
+    assert_eq!(
+        generations.len(),
+        20,
+        "the window is full, nothing pruned yet"
+    );
+    let oldest = generations[19]["id"]
+        .as_str()
+        .expect("the oldest id")
+        .to_string();
+
+    // The 21st write pushes `oldest` out of the window.
+    write_repeatedly(&ctx, 1, 20, sha).await;
+    assert_eq!(
+        status_of_generation(&ctx, &oldest).await.as_deref(),
+        Some("superseded"),
+        "the reply came before retention ran, so the prunable row is still there",
+    );
+
+    ctx.drain_deferred().await;
+    assert_eq!(
+        status_of_generation(&ctx, &oldest).await,
+        None,
+        "the after-response work pruned it",
+    );
+}
+
 /// A generation that never activated is a recovery target, not an old row: the
 /// journal may name it and boot convergence re-runs it (design §7.3), so
 /// retention keeps it however far down the ledger it falls.
@@ -878,8 +937,10 @@ async fn a_staged_generation_survives_past_the_retention_window() {
     let ctx = TestContext::with_dev(FakeControl::new()).await;
     let staged = stage_only(&ctx).await;
 
-    // 24 activations on top of it, so it is well outside the newest twenty.
+    // 24 activations on top of it, so it is well outside the newest twenty,
+    // and the retention they left for after their replies.
     write_repeatedly(&ctx, 24, 0, None).await;
+    ctx.drain_deferred().await;
 
     assert_eq!(
         status_of_generation(&ctx, &staged).await.as_deref(),
@@ -904,6 +965,7 @@ async fn a_staged_generation_survives_past_the_retention_window() {
 async fn the_oldest_retained_generation_reads_back_without_its_parent() {
     let ctx = TestContext::with_dev(FakeControl::new()).await;
     write_repeatedly(&ctx, 24, 0, None).await;
+    ctx.drain_deferred().await;
 
     let listed = list_generations(&ctx, Some(100)).await;
     let oldest = &listed["generations"][19];
@@ -949,7 +1011,13 @@ async fn site_writes_that_arrive_during_an_activation_coalesce_and_both_publish(
     // — which is exactly the interleaving this test is not about.
     let release = control.gate_next_rebuild();
     let (driver, first, second, ()) = tokio::join!(
-        activation::request(&ctx, &shared, GenerationCause::BlockCompile, compile),
+        activation::request(
+            &ctx,
+            &shared,
+            GenerationCause::BlockCompile,
+            compile,
+            activation::Maintenance::Inline
+        ),
         write_file(&ctx, "site/a.css", "a{}", None),
         write_file(&ctx, "site/b.css", "b{}", None),
         async {
@@ -1000,6 +1068,7 @@ async fn a_site_write_during_a_block_activation_keeps_the_block_set() {
         &shared,
         GenerationCause::BlockCompile,
         compile_of(&ctx, &["hello"]).await,
+        activation::Maintenance::Inline,
     )
     .await
     .expect("activate the first block");
@@ -1009,7 +1078,13 @@ async fn a_site_write_during_a_block_activation_keeps_the_block_set() {
     let v1 = sha_of("v1");
     let release = control.gate_next_rebuild();
     let (compile, write, ()) = tokio::join!(
-        activation::request(&ctx, &shared, GenerationCause::BlockCompile, second),
+        activation::request(
+            &ctx,
+            &shared,
+            GenerationCause::BlockCompile,
+            second,
+            activation::Maintenance::Inline
+        ),
         write_file(&ctx, "site/index.html", "v2", Some(&v1)),
         async {
             let _ = release.send(());
@@ -1058,6 +1133,7 @@ async fn a_cancelled_driver_releases_the_queue_and_fails_its_waiters() {
         &shared,
         GenerationCause::BlockCompile,
         compile,
+        activation::Maintenance::Inline,
     ));
     assert!(
         driver.as_mut().poll(&mut cx).is_pending(),
@@ -1069,6 +1145,7 @@ async fn a_cancelled_driver_releases_the_queue_and_fails_its_waiters() {
         &shared,
         GenerationCause::SiteWrite,
         ActivationIntent::SiteOnly,
+        activation::Maintenance::Inline,
     ));
     assert!(
         waiter.as_mut().poll(&mut cx).is_pending(),
@@ -1355,6 +1432,7 @@ async fn a_publish_that_fails_after_the_swap_restores_the_previous_runtime_and_s
         &ctx.dev_shared(),
         GenerationCause::BlockCompile,
         intent,
+        activation::Maintenance::Inline,
     )
     .await
     .expect_err("a publish that fails must fail the activation");
@@ -1406,6 +1484,7 @@ async fn a_failed_publish_restores_the_retained_runtime_instead_of_rebuilding_it
         &ctx.dev_shared(),
         GenerationCause::BlockCompile,
         first,
+        activation::Maintenance::Inline,
     )
     .await
     .expect("the first activation goes live");
@@ -1426,6 +1505,7 @@ async fn a_failed_publish_restores_the_retained_runtime_instead_of_rebuilding_it
         &ctx.dev_shared(),
         GenerationCause::BlockCompile,
         intent,
+        activation::Maintenance::Inline,
     )
     .await
     .expect_err("a publish that fails must fail the activation");
@@ -1469,6 +1549,7 @@ async fn a_restore_that_fails_is_reported_alongside_the_publish_failure() {
         &ctx.dev_shared(),
         GenerationCause::BlockCompile,
         intent,
+        activation::Maintenance::Inline,
     )
     .await
     .expect_err("a publish that fails must fail the activation");

@@ -64,8 +64,8 @@ all (20 ms → the ~8 ms floor), `GET /` likewise.
 
 `maintain` (retention prune + blob GC) leaves the activation's critical path: it runs in
 the same after-response queue, after the write's reply, still once per successful
-activation. The browser storage listing reports real object sizes (from the sidecar the
-bridge already writes), so GC stops resetting `blob_bytes`, stops re-saving
+activation. The browser storage listing reports real object sizes (each object file's own
+`getFile().size`, not the sidecar), so GC stops resetting `blob_bytes`, stops re-saving
 `workspace.json`, and the quota works.
 
 ### 2.4 Validate the diff, not the site

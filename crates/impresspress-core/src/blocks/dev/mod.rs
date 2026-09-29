@@ -498,6 +498,21 @@ pub struct DevShared {
     /// must never wait behind a compile, and `ActivationIntent::SiteOnly`
     /// composes its block half at dequeue precisely so it does not have to.
     pub compile: futures::lock::Mutex<()>,
+    /// Serializes [`activation::maintain`] — retention's prune and the
+    /// collector — against itself.
+    ///
+    /// Scheduled after a request's reply, maintenance runs outside the
+    /// activation queue, so two of them can overlap: the tasks one request
+    /// left behind run together, and the next request's can start before
+    /// they finish. Two prunes would delete the same rows and two
+    /// collections the same objects, and the slower one would fail on what
+    /// the faster one had already removed. One at a time, each pass reads
+    /// what the previous one left.
+    ///
+    /// Taken first and held for the whole pass; the collector takes
+    /// [`Self::workspace`] inside it, and nothing takes this while holding
+    /// that, or while waiting on the activation queue.
+    pub maintenance: futures::lock::Mutex<()>,
 }
 
 impl DevShared {
@@ -517,6 +532,7 @@ impl DevShared {
             activation: activation::ActivationQueue::new(),
             workspace: futures::lock::Mutex::new(()),
             compile: futures::lock::Mutex::new(()),
+            maintenance: futures::lock::Mutex::new(()),
         })
     }
 }
