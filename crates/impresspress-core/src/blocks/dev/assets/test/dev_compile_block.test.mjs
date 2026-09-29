@@ -520,6 +520,77 @@ test('the compiler is constructed with the guest the API hands out, and the stag
   assert.equal(seen.staged.wafer_guest_version, 2);
 });
 
+test('a guest crate the API would not serve is an isError, and the next compile fetches it again', async () => {
+  let guestHits = 0;
+  let constructed = 0;
+  class Stub {
+    constructor() {
+      constructed += 1;
+    }
+
+    async initialize() {
+      return 'rustc 1.90.0-nightly (fake)';
+    }
+
+    async compile() {
+      return BUILT;
+    }
+  }
+  const { tools } = instantiate({
+    hasModelContext: true,
+    compilerManifest: MANIFEST,
+    workspace: HELLO,
+    compiler: Stub,
+    guest() {
+      guestHits += 1;
+      return guestHits === 1
+        ? { status: 500, body: { error: 'internal', message: 'boom' } }
+        : {
+            body: {
+              version: 1,
+              files: {
+                'Cargo.toml': '[package]\nname = "wafer_guest"\n',
+                'src/lib.rs': 'pub const WAFER_GUEST_VERSION: u32 = 1;\n'
+              },
+              warmup: { crate_name: 'hello', files: { 'Cargo.toml': CARGO_TOML, 'src/lib.rs': LIB_RS } }
+            }
+          };
+    },
+    status: { active_generation: null, runtime_generation: 0, blocks: [], activation: null },
+    stage: () => ({
+      build_id: 'bld_1',
+      success: true,
+      diagnostics: [],
+      generation: { id: 'gen_2', cause: 'block_compile', status: 'active' },
+      progress: []
+    })
+  });
+  await settle();
+
+  const first = await tools.get('dev_compile_block').execute({ name: 'hello' });
+  // Not a verdict on the block: the session could not be started at all, and
+  // the message says which request failed rather than reading as the
+  // build's own failure.
+  assert.equal(first.isError, true);
+  assert.equal(first.structuredContent, undefined);
+  const prefix = 'dev_compile_block: ';
+  assert.ok(first.content[0].text.startsWith(prefix), first.content[0].text);
+  const message = first.content[0].text.slice(prefix.length);
+  assert.ok(message.startsWith('fetching the guest crate: '), message);
+  assert.match(message, /HTTP 500/);
+  assert.equal(guestHits, 1);
+  // No session was built from a guest the page does not have.
+  assert.equal(constructed, 0);
+
+  // A failed fetch is not remembered: the next compile asks again, and this
+  // time the session starts.
+  const second = await tools.get('dev_compile_block').execute({ name: 'hello' });
+  assert.equal(second.isError, undefined);
+  assert.equal(second.structuredContent.success, true);
+  assert.equal(guestHits, 2);
+  assert.equal(constructed, 1);
+});
+
 test('the status is not polled while the worker compiles, only while the sandbox activates', async () => {
   // A compiler that stops in the middle of `compile`, which is where the real
   // one spends ~40 seconds. Everything asserted below is asserted THERE.

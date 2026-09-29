@@ -342,10 +342,13 @@ code nobody wrote. Two things stop that:
   reads, and "File not found" is answered `success: false` with an
   `artifact-missing` diagnostic and cargo's own output in `stderr` (and, for
   the warm-up, with `init` failing). The probe's missing-path-dependency
-  compile and its no-diagnostic broken guest are the regression tests: with
-  the `rm` taken out, the first came back `success: true` with the previous
-  `hello.wasm` — with `cargo clean -p` in place too, since a manifest cargo
-  cannot resolve fails the clean as well as the build.
+  compile is the regression test: with the `rm` taken out it came back
+  `success: true` with the previous `hello.wasm` — with `cargo clean -p` in
+  place too, since a manifest cargo cannot resolve fails the clean as well
+  as the build. The probe's no-diagnostic broken guest proves less: it runs
+  on a fresh worker, where there is no earlier module to hand back, so it
+  shows only that a guest failing without a diagnostic does not report
+  `ready`.
 * **An error diagnostic fails the build**, whatever `build-finished` says,
   so the answer carries rustc's diagnostics rather than only "artifact
   missing". The probe's syntax-error build is the test.

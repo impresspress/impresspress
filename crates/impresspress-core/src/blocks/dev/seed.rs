@@ -355,27 +355,29 @@ async fn import_bundle(
         // The same gate `blocks_api::handle_stage` applies to a compile, for
         // the same reason and at the same point: before the module is fetched,
         // stored or executed. A block built against a different
-        // `wafer_guest.rs` speaks a contract this runtime no longer
-        // guarantees, and loading it turns a one-line "replace the module and
-        // recompile" into a trap inside wasmi — on the one boot that can least
+        // `wafer_guest` crate version speaks a contract this runtime does not
+        // guarantee, and loading it turns a one-line "recompile and export
+        // again" into a trap inside wasmi — on the one boot that can least
         // explain it. `validate_static` cannot produce this verdict
         // (`BlockInfo` carries no such field, spec amendment 8), so the
         // manifest is its only source; that is a reason to compare the number
         // the manifest carries, not a reason to take it on trust.
         //
-        // Zero is "no version reported", exactly as it is on the staging path:
-        // a compile whose request carried no `wafer_guest_version` — a
-        // compiler that could not read the file — is recorded as `0` and
-        // nothing is checked. The generation manifest keeps that `0` and an
-        // export carries it forward, so a bundle whose block was built that
-        // way must still import. (Not a compatibility allowance for older
-        // bundles: `DynamicBlockSpec.wafer_guest_version` has no
-        // `serde(default)`, so a manifest predating the field fails to
-        // deserialize long before this line.)
+        // The version the manifest carries is the one the page reported at
+        // staging, read from its compiler session's guest crate. Zero is "no
+        // version reported", exactly as it is on the staging path: a compile
+        // whose request carried no `wafer_guest_version` — a compiler session
+        // with no guest crate — is recorded as `0` and nothing is checked.
+        // The generation manifest keeps that `0` and an export carries it
+        // forward, so a bundle whose block was built that way must still
+        // import. (Not a compatibility allowance for older bundles:
+        // `DynamicBlockSpec.wafer_guest_version` has no `serde(default)`, so a
+        // manifest predating the field fails to deserialize long before this
+        // line.)
         if spec.wafer_guest_version != 0 && spec.wafer_guest_version != super::WAFER_GUEST_VERSION {
             return Err(refusal(
                 &spec.name,
-                &[validation::Diagnostic::stale_guest_module(
+                &[validation::Diagnostic::stale_guest_seed(
                     spec.wafer_guest_version,
                     super::WAFER_GUEST_VERSION,
                 )],

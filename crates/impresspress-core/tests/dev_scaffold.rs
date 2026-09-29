@@ -403,7 +403,7 @@ async fn staging_records_the_module_version_it_was_built_against() {
     assert_eq!(rebuilt[0][0].wafer_guest_version, WAFER_GUEST_VERSION);
 }
 
-/// A compiler that could not read the file reports nothing, and nothing is
+/// A compiler session with no guest crate reports nothing, and nothing is
 /// checked — the spec records `0`, "unknown".
 #[tokio::test]
 async fn an_unreported_module_version_is_recorded_as_unknown() {

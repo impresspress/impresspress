@@ -241,7 +241,10 @@ impl Diagnostic {
     }
 
     /// The refusal a block built against a different guest crate version
-    /// produces.
+    /// produces on the STAGING path (`blocks_api::handle_stage`), where a
+    /// compiler session and a workspace page exist. A seed bundle's block is
+    /// refused by [`Self::stale_guest_seed`] instead: same code, a remedy
+    /// that applies where there is no session to reload.
     ///
     /// The `wafer_guest` crate IS the ABI: it renders the `BlockInfo` the
     /// validator reads, decodes the request frame and writes the response
@@ -268,6 +271,27 @@ impl Diagnostic {
                  different bundle than the one now serving: reload the workspace page (a fresh \
                  session builds against the current crate) and compile again; the block's \
                  own files are unchanged."
+            ),
+        )
+    }
+
+    /// The refusal a SEED BUNDLE's block built against a different guest
+    /// crate version produces (`seed::import`).
+    ///
+    /// Same code as [`Self::stale_guest_module`] — the fault is the same, a
+    /// module speaking a contract this runtime does not guarantee — but not
+    /// the same remedy. An import has no compiler session and no workspace
+    /// page to reload: the artifact was built wherever the bundle was
+    /// exported, so the fix is to recompile the block in a sandbox running
+    /// this version and export the bundle again. The caller names the block;
+    /// this message does not repeat it.
+    pub fn stale_guest_seed(reported: u32, current: u32) -> Self {
+        Self::error(
+            WAFER_GUEST_VERSION_CODE,
+            format!(
+                "the block was compiled against wafer_guest version {reported}; this sandbox \
+                 speaks version {current}. Recompile the block in a sandbox running this \
+                 version and export again."
             ),
         )
     }
@@ -1439,6 +1463,29 @@ mod tests {
         assert_eq!(diagnostic.code.as_deref(), Some("guest-init"));
         assert_eq!(diagnostic.message, "trap: oops");
         assert_eq!(diagnostic.severity, Severity::Error);
+    }
+
+    /// The two guest-version refusals are one fault with two remedies: the
+    /// staging path has a compiler session to restart, a seed import has only
+    /// the bundle it was handed.
+    #[test]
+    fn the_guest_version_refusals_share_a_code_and_differ_in_remedy() {
+        let staging = Diagnostic::stale_guest_module(99, 2);
+        let seed = Diagnostic::stale_guest_seed(99, 2);
+        assert_eq!(staging.code.as_deref(), Some(WAFER_GUEST_VERSION_CODE));
+        assert_eq!(seed.code, staging.code);
+        assert!(staging.message.contains("reload"), "{}", staging.message);
+        assert!(
+            !staging.message.contains("export again"),
+            "{}",
+            staging.message
+        );
+        assert!(seed.message.contains("export again"), "{}", seed.message);
+        assert!(!seed.message.contains("reload"), "{}", seed.message);
+        for message in [&staging.message, &seed.message] {
+            assert!(message.contains("version 99"), "{message}");
+            assert!(message.contains("version 2"), "{message}");
+        }
     }
 
     #[test]

@@ -67,7 +67,8 @@ const TEST_WORKER_URL = '/__impresspress_dev/compiler/test/worker.js';
  * An `init` message carries its id and the guest crate the API served, neither
  * of which is a switch, so a fake that has to behave differently DURING
  * start-up can only be told which way through the URL it was started from —
- * and the manifest's `entry` is where the page gets that URL. Hence a manifest per init behaviour rather than a worker per behaviour.
+ * and the manifest's `entry` is where the page gets that URL. Hence a
+ * manifest per init behaviour rather than a worker per behaviour.
  */
 const SILENT_MANIFEST_URL = '/__impresspress_dev/compiler/test/manifest-silent.json';
 const DRIP_MANIFEST_URL = '/__impresspress_dev/compiler/test/manifest-drip.json';

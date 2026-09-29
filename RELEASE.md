@@ -729,8 +729,9 @@ and so does importing a seed bundle that carries one.
 
 **What to do.** For each block: replace `blocks/<name>/src/wafer_guest.rs` with
 the current module — `GET /b/dev/api/reference` returns it as
-`wafer_guest_module`, and a newly scaffolded block has it — then compile and
-stage again. The block's own files are unchanged. Re-export any seed bundle
+`wafer_guest_module`, and a newly scaffolded block has it (superseded by the
+entry above: the module is now a crate the sandbox serves, and a block depends
+on it by path) — then compile and stage again. The block's own files are unchanged. Re-export any seed bundle
 afterwards.
 
 ### Native: proxy and connection settings for the HTTP listener

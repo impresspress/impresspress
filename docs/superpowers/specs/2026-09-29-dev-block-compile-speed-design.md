@@ -143,9 +143,9 @@ is `cargo clean` before every build, which with a dependency would cost the
 each build, cargo's own way to rebuild one package: it removes the block's
 artifacts and leaves the guest's build in `/target` alone (measured
 2026-09-30: an edit to a dependency-free crate is rebuilt, and hello costs
-~0.4 s more). `touch` was tried first and does not work — the VFS's
-timestamps are counters, so a touched dependency-free crate still came back
-`Fresh`. The root-cause fix is real file timestamps in Rubrc's VFS, upstream,
+~0.4 s more). `touch` was tried first and does not work: a touched
+dependency-free crate still came back `Fresh`. The VFS's timestamps behave
+as counters, and what `touch` sets was not inspected. The root-cause fix is real file timestamps in Rubrc's VFS, upstream,
 for the next pin bump, and the worker comment says so.
 
 **Staging.** `POST /b/dev/api/builds/stage` keeps its `wafer_guest_version`

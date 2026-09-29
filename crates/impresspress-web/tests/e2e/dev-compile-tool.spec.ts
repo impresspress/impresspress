@@ -214,33 +214,38 @@ type Compile = {
  */
 async function buildOnHost(page: Page, files: string[]) {
   const root = mkdtempSync(path.join(tmpdir(), 'dev-compile-'));
-  const guest = await page.evaluate(() =>
-    fetch('/b/dev/api/guest').then((r) => r.json() as Promise<{ files: Record<string, string> }>),
-  );
-  for (const [rel, content] of Object.entries(guest.files)) {
-    const target = path.join(root, 'wafer_guest', rel);
-    mkdirSync(path.dirname(target), { recursive: true });
-    writeFileSync(target, content);
+  // Removed however the build ends: a failed fetch, read or cargo run must
+  // not leave a temp crate and its target dir behind.
+  try {
+    const guest = await page.evaluate(() =>
+      fetch('/b/dev/api/guest').then((r) => r.json() as Promise<{ files: Record<string, string> }>),
+    );
+    for (const [rel, content] of Object.entries(guest.files)) {
+      const target = path.join(root, 'wafer_guest', rel);
+      mkdirSync(path.dirname(target), { recursive: true });
+      writeFileSync(target, content);
+    }
+    const crate = path.join(root, 'blocks', BLOCK);
+    for (const entryPath of files) {
+      const file = structured<FileRead>(await execute(page, 'dev_read_file', { path: entryPath }));
+      expect(file.encoding).toBe('utf8');
+      const target = path.join(crate, entryPath.slice(`blocks/${BLOCK}/`.length));
+      mkdirSync(path.dirname(target), { recursive: true });
+      writeFileSync(target, file.content);
+    }
+    const targetDir = path.join(root, 'target');
+    execFileSync(
+      'cargo',
+      ['build', '--release', '--target', 'wasm32-wasip1', '--offline', '--target-dir', targetDir],
+      { cwd: crate, stdio: 'inherit' },
+    );
+    copyFileSync(
+      path.join(targetDir, 'wasm32-wasip1', 'release', `${BLOCK}.wasm`),
+      path.join(TOOL_COMPILER_DIR, `${BLOCK}.wasm`),
+    );
+  } finally {
+    rmSync(root, { recursive: true, force: true });
   }
-  const crate = path.join(root, 'blocks', BLOCK);
-  for (const entryPath of files) {
-    const file = structured<FileRead>(await execute(page, 'dev_read_file', { path: entryPath }));
-    expect(file.encoding).toBe('utf8');
-    const target = path.join(crate, entryPath.slice(`blocks/${BLOCK}/`.length));
-    mkdirSync(path.dirname(target), { recursive: true });
-    writeFileSync(target, file.content);
-  }
-  const targetDir = path.join(root, 'target');
-  execFileSync(
-    'cargo',
-    ['build', '--release', '--target', 'wasm32-wasip1', '--offline', '--target-dir', targetDir],
-    { cwd: crate, stdio: 'inherit' },
-  );
-  copyFileSync(
-    path.join(targetDir, 'wasm32-wasip1', 'release', `${BLOCK}.wasm`),
-    path.join(TOOL_COMPILER_DIR, `${BLOCK}.wasm`),
-  );
-  rmSync(root, { recursive: true, force: true });
 }
 
 /**

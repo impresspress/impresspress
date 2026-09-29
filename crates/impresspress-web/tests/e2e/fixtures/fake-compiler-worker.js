@@ -49,7 +49,8 @@
 // The two that happen during INIT cannot travel that way — an `init` message
 // carries its id and, optionally, the guest crate the API served, neither of
 // which is a switch — so they are query parameters on the worker's own URL,
-// which the manifest's `entry` supplies and `self.location` reads back. They exist for the start-up silence watchdog:
+// which the manifest's `entry` supplies and `self.location` reads back. They
+// exist for the start-up silence watchdog:
 //
 //   ?silent-init=1     post one `progress` and then never speak again
 //   ?drip-init=<ms>    post a `progress` every <ms> for six ticks, then `ready`
@@ -204,8 +205,10 @@ const finishInit = (id, guest) => {
 
 const init = (id, guest) => {
   state = 'initializing';
-  // Two progress messages then `ready` — three with a guest. The real worker
-  // sends more `initializing` (it loads the sysroot, writes the guest crate);
+  // On the plain path, two progress messages then `ready` — three with a
+  // guest; `drip-init` adds its ticks between the first and the rest, and
+  // `silent-init` stops after the first. The real worker sends more
+  // `initializing` (it loads the sysroot, writes the guest crate);
   // the adapter passes through whatever arrives, so the count is the fake's
   // business, not the page's.
   postProgress(id, 'download', { loaded: 0, total: 75124002 });
