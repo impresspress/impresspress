@@ -20,9 +20,15 @@
  * What the guest is, is a terminal: rubrc composes rustc, cargo, llvm and a
  * shell into one component, and the only way in is to type at session 0 and
  * read what comes back. So `compile` writes the crate's files through the
- * VFS's write-file event, types a cargo line, waits for the prompt to come
- * back, and asks the shell to `download` the artifact — which is delivered
- * back through the same host bridge as chunks.
+ * VFS's write-file event, `touch`es them, types a cargo line, waits for the
+ * prompt to come back, and asks the shell to `download` the artifact — which
+ * is delivered back through the same host bridge as chunks.
+ *
+ * The VFS is laid out like an export archive: a block lives at
+ * `/blocks/<crate>/`, the guest SDK it depends on by path at `/wafer_guest/`,
+ * and every build of the session shares one `--target-dir /target`. `init`
+ * builds the guest into `/target` once (the warm-up), so a `compile` rebuilds
+ * only the block.
  */
 
 /// <reference lib="webworker" />
@@ -174,6 +180,25 @@ const writeFile = (path: string, content: string) => {
 };
 
 /**
+ * Write a crate under `root` and return the absolute paths written.
+ *
+ * Nothing is deleted first, so a file an earlier compile wrote under
+ * `/blocks/<crate>/src/` and this one no longer has stays on disk. That is
+ * harmless: rustc compiles only the files reached from `lib.rs` through
+ * `mod`, and every file the block still has is rewritten here — a leftover
+ * is a file nothing names.
+ */
+const writeCrate = (root: string, files: Record<string, string>): string[] => {
+  const written: string[] = [];
+  for (const [path, content] of Object.entries(files)) {
+    const absolute = `${root}/${path.replace(/^\/+/, "")}`;
+    writeFile(absolute, content);
+    written.push(absolute);
+  }
+  return written;
+};
+
+/**
  * Type a line at session 0 and hand back what it printed.
  *
  * The prompt is the only completion signal the shell offers, so the transcript
@@ -190,6 +215,25 @@ const runCommand = async (line: string, timeoutMs: number, what: string): Promis
   const body = text.slice(text.indexOf("\n") + 1);
   return body.slice(0, body.lastIndexOf("\n") + 1);
 };
+
+/**
+ * Make cargo see the files just written.
+ *
+ * The VFS's write-file event replaces a file's contents without moving its
+ * mtime, so cargo — which compares source mtimes against the fingerprint of
+ * the last build — would call an edited crate fresh and hand back the
+ * previous artifact. `touch` moves the mtime, which is the one thing cargo
+ * needs, and touches nothing else: a dependency that was not rewritten
+ * (`/wafer_guest`) keeps its build. This is a workaround for the VFS, not a
+ * property of cargo; the root-cause fix is upstream in rubrc's write-file
+ * handler and belongs to the next pin bump.
+ */
+const touchAll = async (paths: string[], what: string): Promise<string> =>
+  runCommand(`touch ${paths.join(" ")}`, COMPILE_TIMEOUT_MS, `touch for ${what}`);
+
+const buildCommand = (crateName: string, target: string, release: boolean) =>
+  `cargo build${release ? " --release" : ""} --manifest-path /blocks/${crateName}/Cargo.toml ` +
+  `--target-dir /target --target ${target} --message-format=json`;
 
 // ------------------------------------------------------------ the WASI farm
 
@@ -228,15 +272,15 @@ const toMap = (entries: [string, Inode][]) => new Map<string, Inode>(entries);
 /**
  * The filesystem the guest starts from.
  *
- * `/sysroot` is filled by `load_sysroot`, and the crate's own files arrive
- * through the write-file event, so this is only the skeleton: an empty cargo
- * config (cargo insists on one) and the two directories the rest hangs off.
+ * `/sysroot` is filled by `load_sysroot`, and the crates arrive through the
+ * write-file event, which creates `/wafer_guest` and `/blocks/<crate>` as it
+ * goes, so this is only the skeleton: an empty cargo config (cargo insists on
+ * one) and the directory the sysroot is loaded into.
  */
 const rootDir = new PreopenDirectory(
   "/",
   toMap([
     ["sysroot", new Directory([])],
-    ["src", new Directory([])],
     [".cargo", new Directory(toMap([["config.toml", new File(new Uint8Array())]]))],
   ]),
 );
@@ -284,8 +328,8 @@ const loadSysrootQueue = async (triple: string) => {
 
 let farm: WASIFarm;
 
-// No registry. A block's `Cargo.toml` has an empty `[dependencies]` table (see
-// the templates), so an outbound request from the toolchain is a block doing
+// No registry. A block's only dependency is the guest SDK, by path (see the
+// templates), so an outbound request from the toolchain is a block doing
 // something it cannot do, not a fetch to proxy: refusing it keeps the sandbox
 // offline by construction rather than by policy. Rubrc's own page points this
 // at a crates.io proxy worker instead.
@@ -497,7 +541,8 @@ const postProgress = (
   post({ type: "progress", id, stage, ...extra });
 };
 
-const init = async (id: string) => {
+const init = async (message: Extract<PageMessage, { type: "init" }>) => {
+  const id = message.id;
   state = "initializing";
   currentId = id;
   postProgress(id, "download", { loaded: 0, total: 0 });
@@ -511,6 +556,30 @@ const init = async (id: string) => {
   await runCommand(`load_sysroot ${SYSROOT_TRIPLE}`, SYSROOT_TIMEOUT_MS, "load_sysroot");
 
   rustcVersion = (await runCommand("rustc --version", SYSROOT_TIMEOUT_MS, "rustc --version")).trim();
+
+  if (message.guest) {
+    postProgress(id, "initializing", { detail: "writing the guest crate" });
+    const written = [
+      ...writeCrate("/wafer_guest", message.guest.files),
+      ...writeCrate(`/blocks/${message.guest.warmup.crateName}`, message.guest.warmup.files),
+    ];
+    await touchAll(written, "the warm-up");
+    postProgress(id, "initializing", { detail: "building wafer_guest once for this session" });
+    const output = await runCommand(
+      buildCommand(message.guest.warmup.crateName, SYSROOT_TRIPLE, true),
+      COMPILE_TIMEOUT_MS,
+      "the warm-up build",
+    );
+    const { diagnostics, buildFinished } = parseBuild(output);
+    const firstError = diagnostics.find((d) => d.severity === "error");
+    if (buildFinished === false || firstError) {
+      throw new Error(
+        `the guest crate does not build on this toolchain` +
+          (firstError ? `: ${firstError.file}:${firstError.line}: ${firstError.message}` : ""),
+      );
+    }
+  }
+
   state = "ready";
   post({ type: "ready", id, rustcVersion });
 };
@@ -523,33 +592,29 @@ const compile = async (message: Extract<PageMessage, { type: "compile" }>) => {
   stderrText = "";
   downloadChunks = [];
   downloadName = "";
-  /** Shell output that is not the build's own: `cargo clean`, `download`. */
+  /** Shell output that is not the build's own: `touch`, `download`. */
   let shellLog = "";
 
-  for (const [path, content] of Object.entries(message.files)) {
-    writeFile(path.startsWith("/") ? path : `/${path}`, content);
-  }
-
-  // Cargo decides what to rebuild from file mtimes, and the VFS's write-file
-  // event replaces a file's contents without moving its mtime — so a second
-  // compile of an edited crate comes back `"fresh": true` with the FIRST
-  // build's artifact, which is the worst possible failure here: a green build
-  // of code nobody wrote. `cargo clean` is what makes each compile mean what
-  // it says. It costs nothing to speak of: a block has no dependencies (the
-  // toolchain has no registry), so there is no dependency graph to keep warm
-  // — the only thing being rebuilt is the block itself, which has to be
-  // rebuilt anyway.
-  shellLog += await runCommand("cargo clean", COMPILE_TIMEOUT_MS, "cargo clean");
-
-  const profile = message.release ? " --release" : "";
+  const written = writeCrate(`/blocks/${message.crateName}`, message.files);
+  shellLog += await touchAll(written, message.crateName);
   const output = await runCommand(
-    `cargo build${profile} --target ${message.target} --message-format=json`,
+    buildCommand(message.crateName, message.target, message.release),
     COMPILE_TIMEOUT_MS,
     "cargo build",
   );
   const { diagnostics, rendered, plain, buildFinished } = parseBuild(output);
   const errored = diagnostics.some((d) => d.severity === "error");
-  const built = buildFinished ?? !errored;
+  // An error diagnostic fails the build whatever cargo concludes, because
+  // cargo's verdict is not reliable here. A syntax error in the block comes
+  // back from this toolchain with rustc's error rendered and then cargo's
+  // `Finished` and `"build-finished", "success": true` — rustc's failure does
+  // not reach cargo as a non-zero status — and with `/target` kept across
+  // compiles cargo then uplifts the PREVIOUS build's artifact, so trusting
+  // `build-finished` would ship code nobody wrote. Cleaning `/target` before
+  // every build used to hide this (there was no previous artifact to find).
+  // Like the mtime, the root-cause fix is upstream in rubrc and belongs to
+  // the next pin bump.
+  const built = buildFinished !== false && !errored;
 
   let artifact: ArrayBuffer | undefined;
   if (built) {
@@ -607,7 +672,7 @@ const compile = async (message: Extract<PageMessage, { type: "compile" }>) => {
   // so the split is by content. `stderr` is what a human would have seen from
   // the build — rustc's own rendering of each diagnostic, then cargo's status
   // output, then anything the guest wrote to fd 2 outside the shell's stream.
-  // `stdout` is the rest of the session: `cargo clean` and `download`. Cargo's
+  // `stdout` is the rest of the session: `touch` and `download`. Cargo's
   // `--message-format=json` protocol lines appear in neither; they are what
   // `diagnostics` is made of.
   const humanBuildOutput = [...rendered, plain.join("\n").trim()]
@@ -664,7 +729,7 @@ globalThis.addEventListener("message", (event: MessageEvent) => {
         post({ type: "error", id: message.id, message: `init in state ${state}` });
         return;
       }
-      init(message.id).catch((error) => {
+      init(message).catch((error) => {
         state = "broken";
         post({ type: "error", id: message.id, message: String(error) });
       });

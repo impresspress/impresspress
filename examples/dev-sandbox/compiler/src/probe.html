@@ -11,9 +11,12 @@
 
 <h1>dev-sandbox compiler probe</h1>
 <p>
-  Compiles the <code>hello</code> block template with the packaged Rubrc
-  toolchain, then compiles a deliberately broken copy of it. Results are also
-  left on <code>window.__PROBE__</code> for
+  Starts the packaged Rubrc toolchain with the guest SDK crate, which it builds
+  once, then compiles the <code>hello</code> and <code>table</code> block
+  templates against that build, a self-contained block in the shape blocks had
+  before the guest was a crate, and a deliberately broken copy of
+  <code>hello</code>; then checks that a guest which does not build fails
+  <code>init</code>. Results are also left on <code>window.__PROBE__</code> for
   <code>scripts/run-probe.mjs</code>.
 </p>
 <div id="log"></div>
@@ -87,6 +90,12 @@
     }
   };
 
+  // The first compile after the warm-up rebuilds only the block. Measured at
+  // ~3 s on a 24-core box; the old path, which rebuilt the guest inside every
+  // block, took ~20 s. The bound sits between the two so a regression to the
+  // old path fails here rather than only reading slower.
+  const HELLO_COMPILE_BUDGET_MS = 15000;
+
   const talk = (worker) => {
     const pending = new Map();
     const progress = [];
@@ -132,6 +141,56 @@
     step(true, `manifest ${manifest.version}: ${manifest.assets.length} files, ${(manifest.total_bytes / 1024 / 1024).toFixed(1)} MiB`);
     show();
 
+    /**
+     * Compile `crate` on `channel`, record it under `key`, and check the
+     * artifact is a block: it instantiates and exports the whole wafer ABI.
+     */
+    const compileBlock = async (channel, key, crate, label) => {
+      const started = performance.now();
+      const answer = await channel.send({
+        type: "compile",
+        id: `compile-${key}`,
+        crateName: crate.crateName,
+        files: crate.files,
+        target: "wasm32-wasip1",
+        release: true,
+      });
+      const ms = Math.round(performance.now() - started);
+      results.measurements[key] = {
+        compile_ms: ms,
+        success: answer.success,
+        elapsedMs: answer.elapsedMs,
+        artifact_bytes: answer.artifact?.byteLength ?? 0,
+        diagnostics: answer.diagnostics,
+        stdout_tail: (answer.stdout ?? "").slice(-2000),
+        stderr_tail: (answer.stderr ?? "").slice(-2000),
+      };
+      step(answer.success, `${label} compiled in ${ms} ms, artifact ${answer.artifact?.byteLength ?? 0} bytes`);
+      if (answer.artifact) {
+        try {
+          const exports = await instantiates(answer.artifact);
+          const missing = REQUIRED_EXPORTS.filter((name) => !exports.includes(name));
+          results.measurements[key].instantiate = { ok: missing.length === 0, exports, missing };
+          step(
+            missing.length === 0,
+            missing.length === 0
+              ? `${label} instantiates and exports the wafer ABI (${REQUIRED_EXPORTS.length}/${REQUIRED_EXPORTS.length})`
+              : `${label} is missing wafer ABI exports: ${missing.join(", ")}`,
+          );
+        } catch (error) {
+          results.measurements[key].instantiate = { ok: false, error: String(error) };
+          step(false, `${label} does not instantiate: ${error}`);
+        }
+      }
+      show();
+      return { answer, ms };
+    };
+
+    const fetchJson = async (url) => (await fetch(url)).json();
+    const guest = await fetchJson("./guest.json");
+    results.measurements.guest_version = guest.version;
+    const initGuest = { files: guest.files, warmup: { crateName: guest.warmup.crateName, files: guest.warmup.files } };
+
     const worker = new Worker(`./${manifest.version}/worker.js`, { type: "module" });
     worker.addEventListener("error", (event) => {
       step(false, `worker error: ${event.message}`);
@@ -139,56 +198,40 @@
     });
     const channel = talk(worker);
 
+    // `ready` now includes the warm-up: the guest is built into `/target`
+    // before the worker says it is ready.
     const initStarted = performance.now();
-    const ready = await channel.send({ type: "init", id: "init-1" });
+    const ready = await channel.send({ type: "init", id: "init-1", guest: initGuest });
     results.measurements.ready_ms = Math.round(performance.now() - initStarted);
     results.measurements.ready = ready;
     results.measurements.download_progress = channel.progress
       .filter((p) => p.stage === "download")
       .slice(-1)[0] ?? null;
-    step(ready.type === "ready", `ready in ${results.measurements.ready_ms} ms: ${ready.rustcVersion ?? ready.message}`);
+    results.measurements.init_steps = channel.progress
+      .filter((p) => p.stage === "initializing")
+      .map((p) => p.detail);
+    step(
+      ready.type === "ready",
+      `ready (with the guest warm-up) in ${results.measurements.ready_ms} ms: ${ready.rustcVersion ?? ready.message}`,
+    );
     show();
 
-    const template = await (await fetch("./template/hello.json")).json();
-
-    const compileStarted = performance.now();
-    const good = await channel.send({
-      type: "compile",
-      id: "compile-1",
-      crateName: template.crateName,
-      files: template.files,
-      target: "wasm32-wasip1",
-      release: true,
-    });
-    results.measurements.compile_ms = Math.round(performance.now() - compileStarted);
-    results.measurements.compile = {
-      success: good.success,
-      elapsedMs: good.elapsedMs,
-      artifact_bytes: good.artifact?.byteLength ?? 0,
-      diagnostics: good.diagnostics,
-      stdout_tail: (good.stdout ?? "").slice(-2000),
-      stderr_tail: (good.stderr ?? "").slice(-2000),
-    };
-    step(good.success, `compiled in ${results.measurements.compile_ms} ms, artifact ${good.artifact?.byteLength ?? 0} bytes`);
+    const hello = await fetchJson("./template/hello.json");
+    const helloCompile = await compileBlock(channel, "hello", hello, "hello");
+    step(
+      helloCompile.answer.success && helloCompile.ms < HELLO_COMPILE_BUDGET_MS,
+      `hello rebuilt only the block: ${helloCompile.ms} ms < ${HELLO_COMPILE_BUDGET_MS} ms`,
+    );
     show();
 
-    if (good.artifact) {
-      try {
-        const exports = await instantiates(good.artifact);
-        const missing = REQUIRED_EXPORTS.filter((name) => !exports.includes(name));
-        results.measurements.instantiate = { ok: missing.length === 0, exports, missing };
-        step(
-          missing.length === 0,
-          missing.length === 0
-            ? `artifact instantiates and exports the wafer ABI (${REQUIRED_EXPORTS.length}/${REQUIRED_EXPORTS.length})`
-            : `artifact is missing wafer ABI exports: ${missing.join(", ")}`,
-        );
-      } catch (error) {
-        results.measurements.instantiate = { ok: false, error: String(error) };
-        step(false, `artifact does not instantiate: ${error}`);
-      }
-    }
-    show();
+    // The scaffolded `table` template (package `newsletter`), with its real
+    // profile: the heaviest template a user starts from.
+    await compileBlock(channel, "newsletter", await fetchJson("./template/table.json"), "newsletter (table template)");
+
+    // A block from before the guest was a crate: self-contained, no
+    // dependencies, the SDK a module inside it. A seed archive exported then
+    // still has to build — it just builds the SDK itself, every time.
+    await compileBlock(channel, "legacy_hello", await fetchJson("./template/legacy-hello.json"), "legacy self-contained hello");
 
     // A cancel with nothing in flight must be refused, not obeyed: it used to
     // brick the worker. The error build that follows is the proof that it did
@@ -201,10 +244,12 @@
     );
     show();
 
-    // The same crate with a statement that is missing its semicolon.
+    // The same crate with a statement that is missing its semicolon. It is
+    // also the proof that `touch` works: `/blocks/hello` was built a moment
+    // ago, and a cargo that missed the edit would call it fresh and succeed.
     const brokenFiles = {
-      ...template.files,
-      "src/lib.rs": `${template.files["src/lib.rs"]}
+      ...hello.files,
+      "src/lib.rs": `${hello.files["src/lib.rs"]}
 fn probe_deliberate_error() -> i32 {
     let value = 1
     value
@@ -214,8 +259,8 @@ fn probe_deliberate_error() -> i32 {
     const errorStarted = performance.now();
     const bad = await channel.send({
       type: "compile",
-      id: "compile-2",
-      crateName: template.crateName,
+      id: "compile-error",
+      crateName: hello.crateName,
       files: brokenFiles,
       target: "wasm32-wasip1",
       release: true,
@@ -235,16 +280,40 @@ fn probe_deliberate_error() -> i32 {
       `error build: success=${bad.success}, first diagnostic=${JSON.stringify(diagnostic ?? null)}`,
     );
     show();
-
-    // A second worker in the same page: the component is in IndexedDB now, so
-    // this is the warm start every visit after the first one gets.
     worker.terminate();
+
+    // A guest that does not build must fail `init`, not produce a worker that
+    // says `ready` and then fails every compile with an error in a file the
+    // user never wrote.
+    const brokenGuestWorker = new Worker(`./${manifest.version}/worker.js`, { type: "module" });
+    const brokenGuestChannel = talk(brokenGuestWorker);
+    const brokenGuestStarted = performance.now();
+    const brokenGuest = await brokenGuestChannel.send({
+      type: "init",
+      id: "init-broken-guest",
+      guest: { ...initGuest, files: { ...initGuest.files, "src/lib.rs": "fn { broken" } },
+    });
+    results.measurements.broken_guest_ms = Math.round(performance.now() - brokenGuestStarted);
+    results.measurements.broken_guest = brokenGuest;
+    step(
+      brokenGuest.type === "error" && /guest crate does not build/.test(brokenGuest.message ?? ""),
+      `init with a broken guest: ${brokenGuest.type} ${brokenGuest.message ?? ""}`,
+    );
+    brokenGuestWorker.terminate();
+    show();
+
+    // Another worker in the same page: the component is in IndexedDB now, so
+    // this is the warm start every visit after the first one gets — warm-up
+    // build included, because the page always sends the guest.
     const warmWorker = new Worker(`./${manifest.version}/worker.js`, { type: "module" });
     const warmChannel = talk(warmWorker);
     const warmStarted = performance.now();
-    const warmReady = await warmChannel.send({ type: "init", id: "init-2" });
+    const warmReady = await warmChannel.send({ type: "init", id: "init-warm", guest: initGuest });
     results.measurements.warm_ready_ms = Math.round(performance.now() - warmStarted);
-    step(warmReady.type === "ready", `warm ready in ${results.measurements.warm_ready_ms} ms (IndexedDB cache)`);
+    step(
+      warmReady.type === "ready",
+      `warm ready in ${results.measurements.warm_ready_ms} ms (IndexedDB cache, with the guest warm-up)`,
+    );
     warmWorker.terminate();
 
     results.done = true;

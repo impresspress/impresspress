@@ -1,6 +1,6 @@
 {
   "schema_version": 1,
-  "version": "807ace9e",
+  "version": "807ace9e.2",
   "target": "wasm32-wasip1",
   "license": "MIT OR Apache-2.0",
   "licenses": {

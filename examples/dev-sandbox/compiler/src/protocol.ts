@@ -32,15 +32,29 @@
  * worker that answers slowly is not misbehaving — it is compiling.
  */
 
-/** `init` starts the toolchain: download, instantiate, load the sysroot. */
-export type InitMessage = { type: "init"; id: string };
+/** The guest SDK crate and a block to build it with, handed over at `init`. */
+export type GuestCrate = {
+  /** `Cargo.toml`, `src/lib.rs` — crate-relative, written under `/wafer_guest/`. */
+  files: Record<string, string>;
+  /** Built once after the sysroot loads, so `/target` holds the guest before the first real compile. */
+  warmup: { crateName: string; files: Record<string, string> };
+};
+
+/**
+ * `init` starts the toolchain: download, instantiate, load the sysroot — and,
+ * when `guest` is given, build it once. `ready` is posted after that build,
+ * so the first `compile` finds the guest already in `/target`. Without
+ * `guest` the worker is ready as soon as the sysroot is loaded and builds
+ * whatever crate it is handed, self-contained or not.
+ */
+export type InitMessage = { type: "init"; id: string; guest?: GuestCrate };
 
 /** `compile` writes `files` into the VFS and runs cargo over them. */
 export type CompileMessage = {
   type: "compile";
   id: string;
   crateName: string;
-  /** Paths relative to the crate root, e.g. `Cargo.toml`, `src/lib.rs`. */
+  /** Paths relative to the crate root, written under `/blocks/<crateName>/`. */
   files: Record<string, string>;
   target: string;
   release: boolean;
@@ -106,8 +120,8 @@ export type ResultMessage = {
   /** Transferred, not copied — the adapter owns the buffer after this. */
   artifact?: ArrayBuffer;
   /**
-   * The session's other output, ANSI stripped: `cargo clean` and the
-   * `download` that reads the artifact out of the VFS.
+   * The session's other output, ANSI stripped: `touch` and the `download`
+   * that reads the artifact out of the VFS.
    *
    * The guest's streams reach the worker already merged into one terminal
    * transcript, so these two fields are split by content rather than by file

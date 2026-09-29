@@ -561,9 +561,9 @@ test('the workspace discovers the packaged compiler on a cross-origin-isolated d
   expect(manifest.schema_version).toBe(1);
   expect(manifest.entry).toBe(`/__impresspress_dev/compiler/${manifest.version}/worker.js`);
 
-  // What the page did with it. The version is the pinned rubrc sha every
-  // compiler URL carries, so a page showing the wrong one is a page that would
-  // start the wrong worker.
+  // What the page did with it. The version is the pinned rubrc sha plus a
+  // packaging revision (`807ace9e.2`), and every compiler URL carries it, so a
+  // page showing the wrong one is a page that would start the wrong worker.
   await expect(page.locator('#dev-compiler-version')).toHaveText(
     new RegExp(`^Compiler v${manifest.version} · \\d+\\.\\d MiB$`),
   );
