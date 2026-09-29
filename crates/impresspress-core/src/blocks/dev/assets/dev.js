@@ -820,14 +820,23 @@ function refusalMessage(body, fallback) {
   return (body && typeof body.message === 'string' && body.message) || fallback;
 }
 
-var save = withProgress(async function () {
+// Save, Delete and New file each decide whether there is anything to do
+// BEFORE entering `withProgress`, never inside it: a call that asked nothing
+// of the sandbox is not a mutating call, and inside the wrapper its
+// `undefined` would read as "published no generation" and reload the
+// preview for a no-op.
+function save() {
   // `text.disabled` is the second half of the guard, not a UI detail: a
   // disabled box holds a placeholder rather than the file's content (see
   // `setEditorEnabled`), and the button being disabled too is not something
   // this function may assume — a caller could reach it another way.
   if (!current || text.disabled) {
-    return;
+    return Promise.resolve();
   }
+  return writeOpenFile();
+}
+
+var writeOpenFile = withProgress(async function () {
   var response = await api.post('/b/dev/api/files/write', {
     path: current.path,
     content: text.value,
@@ -866,10 +875,14 @@ var save = withProgress(async function () {
   return written;
 });
 
-var remove = withProgress(async function () {
+function remove() {
   if (!current || !window.confirm('Delete ' + current.path + '?')) {
-    return;
+    return Promise.resolve();
   }
+  return deleteOpenFile();
+}
+
+var deleteOpenFile = withProgress(async function () {
   var path = current.path;
   var response = await api.post('/b/dev/api/files/delete', {
     path: path,
@@ -903,11 +916,15 @@ var remove = withProgress(async function () {
   return deleted;
 });
 
-var create = withProgress(async function () {
+function create() {
   var path = window.prompt('New file path (site/... or blocks/<name>/...)');
   if (!path) {
-    return;
+    return Promise.resolve();
   }
+  return createFile(path);
+}
+
+var createFile = withProgress(async function (path) {
   // `expected_sha256: null` is "I expect nothing here" — writing over an
   // existing file by accident is a 409, not a silent overwrite.
   var response = await api.post('/b/dev/api/files/write', {

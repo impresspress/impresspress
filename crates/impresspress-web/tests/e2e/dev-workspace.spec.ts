@@ -656,16 +656,31 @@ test('the editor refuses to save a binary file over itself', async ({ page }) =>
   // Half two: `save()`'s own early return, which `page.rs` pins as a source
   // assertion precisely because "a caller could reach it another way". Here
   // that caller is the DOM: re-enable ONLY the button, leaving the textarea
-  // disabled, and click it for real. Emptying the file list first is the
-  // tripwire — `withProgress` reloads it in its `finally` whichever branch
-  // `save()` took, so a repopulated list means the handler really ran and
-  // this is not a click that quietly went nowhere.
+  // disabled, and click it for real. The early return does nothing visible —
+  // it is checked before `withProgress`, so there is no catch-up to observe
+  // (a no-op must not reload the preview) — so the tripwire is the click
+  // itself: a listener added after `dev.js`'s runs after it on the same
+  // dispatch, so a counted click means `save()` really ran and this is not a
+  // click that quietly went nowhere. The write requests are counted too.
+  const writes: string[] = [];
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname === '/b/dev/api/files/write') {
+      writes.push(request.url());
+    }
+  });
   await page.evaluate(() => {
-    document.getElementById('dev-file-list')!.replaceChildren();
-    (document.getElementById('dev-save') as HTMLButtonElement).disabled = false;
+    const button = document.getElementById('dev-save') as HTMLButtonElement;
+    (window as unknown as { __saveClicks: number }).__saveClicks = 0;
+    button.addEventListener('click', () => {
+      (window as unknown as { __saveClicks: number }).__saveClicks += 1;
+    });
+    button.disabled = false;
   });
   await page.locator('#dev-save').click();
-  await expect(page.locator('#dev-file-list a')).not.toHaveCount(0);
+  expect(
+    await page.evaluate(() => (window as unknown as { __saveClicks: number }).__saveClicks),
+  ).toBe(1);
+  expect(writes).toEqual([]);
 
   // Nothing moved: same bytes, same hash, same ledger.
   const after = structured<FileRead>(await execute(page, 'dev_read_file', {

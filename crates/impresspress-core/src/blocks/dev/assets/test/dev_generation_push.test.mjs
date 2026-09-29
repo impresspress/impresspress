@@ -31,8 +31,8 @@ const link = (href) => {
  * An instance whose preview frame counts its reloads and holds `links`, at
  * `location` (the site is served from `/`, so that is the page on show).
  */
-const withPreview = ({ links = [], location = 'http://sandbox.test/', status } = {}) => {
-  const instance = instantiate(status === undefined ? {} : { status });
+const withPreview = ({ links = [], location = 'http://sandbox.test/', ...options } = {}) => {
+  const instance = instantiate(options);
   const frame = {
     reloads: 0,
     contentWindow: {
@@ -275,4 +275,29 @@ test('a status answered mid-activation that lands after the push does not undo i
   assert.equal(steps.getAttribute('data-phase'), 'active');
   assert.doesNotMatch(elements.get('dev-log').textContent, /live generation: gen_8/);
   handle.abort.abort();
+});
+
+test('a Save, Delete or New file that does nothing neither reloads the preview nor polls', async () => {
+  // Nothing was asked of the sandbox, so nothing changed: no generation will
+  // be pushed and no data write owes a reload. Counting these as calls that
+  // "published no generation" reloaded the preview for a no-op.
+  const { handle, frame, fetchCalls } = withPreview({
+    workspace: [{ path: 'site/index.html', sha256: 'aa', content: '<h1>hi</h1>' }],
+    confirm: () => false,
+    prompt: () => null
+  });
+  await settle();
+
+  // Save with no file open.
+  await handle.save();
+  await handle.openFile('site/index.html');
+  const before = fetchCalls.length;
+  // A cancelled Delete confirm, and a cancelled New-file prompt.
+  await handle.remove();
+  await handle.create();
+
+  assert.equal(frame.reloads, 0);
+  assert.equal(handle.isPolling, false);
+  assert.equal(handle.outstanding, 0);
+  assert.equal(fetchCalls.length, before, 'not even the file tree is re-read');
 });

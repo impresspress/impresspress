@@ -51,6 +51,10 @@ const tail = fs.readFileSync(path.join(here, '..', 'dev.js'), 'utf8');
  * @param {Promise<void>|null} [options.exportGate]  when set, the archive
  *   request parks on this promise, so a test can observe the page WHILE an
  *   export is in flight.
+ * @param {() => boolean} [options.confirm]  the human's answer to Delete's
+ *   `window.confirm()`. Throws when not given.
+ * @param {() => string|null} [options.prompt]  the human's answer to New
+ *   file's `window.prompt()`. Throws when not given.
  * @param {object|(() => object)} [options.status]  what `/b/dev/api/status`
  *   answers with — a `StatusResponse`. A function, for a test whose subject
  *   is what the page does when the answer CHANGES: the page polls it, and
@@ -102,7 +106,16 @@ export function instantiate({
   statusGate = null,
   exportManifest = null,
   exportZip = { status: 200, body: 'PK\u0003\u0004zip' },
-  exportGate = null
+  exportGate = null,
+  // The human's answers to Delete's `confirm()` and New file's `prompt()`.
+  // Throwing by default: a test that reaches a dialog it did not answer is
+  // testing something it did not mean to.
+  confirm = () => {
+    throw new Error('this harness instance was not given an answer to confirm()');
+  },
+  prompt = () => {
+    throw new Error('this harness instance was not given an answer to prompt()');
+  }
 } = {}) {
   // Everything `exportSite` handed the browser: one entry per download it
   // started, with the anchor's `download` name and the object URL it built.
@@ -238,7 +251,9 @@ export function instantiate({
     window: {
       addEventListener(type, listener) {
         windowListeners.push({ type, listener });
-      }
+      },
+      confirm,
+      prompt
     },
     navigator: { serviceWorker },
     fetch(...args) {
@@ -408,7 +423,11 @@ return {
   get exportInFlight() { return exportInFlight },
   get statusInFlight() { return statusInFlight },
   get compilerManifest() { return compilerManifest },
-  refreshAfterChange
+  refreshAfterChange,
+  openFile,
+  save,
+  remove,
+  create
 };`
   );
   const handle = factory(...Object.values(sandbox));
