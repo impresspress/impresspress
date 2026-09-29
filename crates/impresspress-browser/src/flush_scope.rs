@@ -3,8 +3,10 @@
 //! The browser database persists by exporting the whole sql.js database to
 //! OPFS (`bridge.js` `dbFlush`), which costs the same whether one row or nine
 //! changed. A request that activates a generation makes about nine
-//! mutations; this scope lets them share one export. The request path opens
-//! it around a request with [`run`]; `database::with_flush_mapped` asks
+//! mutations; this scope lets them share one export. The request path
+//! ([`crate::runtime::dispatch_request`]) opens it around a request with
+//! [`run`], and again around the work the request leaves for after its
+//! reply; `database::with_flush_mapped` asks
 //! [`note_mutation`] whether a scope is current and, if so, records that a
 //! flush is owed instead of exporting; [`run`] exports once when the scoped
 //! future has finished — BEFORE it hands the future's output back, so a

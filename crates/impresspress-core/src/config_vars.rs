@@ -93,7 +93,10 @@ pub fn parse_d1_queries_per_invocation(raw: &str) -> Result<u64, String> {
 /// Each target threads it onto both config surfaces at boot — the native CLI
 /// from the process environment, the Cloudflare worker from a `wrangler.toml`
 /// var through `CfEnvironment`. Absent means `all`, which is the behaviour
-/// every existing deployment already has.
+/// every existing deployment already has — except a browser build, whose
+/// runtime factory (`impresspress-web`'s `runtime_factory.rs`) sets `errors`:
+/// its database is exported whole on every flush, so a row per request
+/// would grow every later flush without bound.
 ///
 /// # Why this exists
 ///

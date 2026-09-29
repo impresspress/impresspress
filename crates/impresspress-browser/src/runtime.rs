@@ -8,6 +8,7 @@
 
 use std::{cell::RefCell, rc::Rc};
 
+use impresspress_core::after_response::{self, AfterResponse};
 use wasm_bindgen::prelude::*;
 
 use crate::convert;
@@ -90,25 +91,138 @@ pub fn restore_wafer(previous: Rc<wafer_run::Wafer>) {
 
 /// Convert a browser `Request` into a WAFER `Message`, dispatch through
 /// the currently active `Wafer`'s `site-main` flow, and return a browser
-/// `Response`. Returns a 503-shaped `Response` if called before
-/// `store_wafer`; internal errors return a 500-shaped `Response`. A request
-/// body over `impresspress_core::streaming::MAX_REQUEST_BODY_BYTES` is marked
-/// by `convert::request_to_message` and answered 413 by the flow, like any
+/// `Response` together with a promise for the work the request left to run
+/// after it. Answers 503 if called before `store_wafer`; internal errors
+/// answer 500. A request body over
+/// `impresspress_core::streaming::MAX_REQUEST_BODY_BYTES` is marked by
+/// `convert::request_to_message` and answered 413 by the flow, like any
 /// other refusal.
 ///
 /// The `Rc` is cloned synchronously (before the first `.await`), so a
 /// `replace_wafer` that lands mid-dispatch does not affect this call — it
 /// keeps running against the runtime it started on.
-pub async fn dispatch_request(request: web_sys::Request) -> Result<web_sys::Response, JsValue> {
+///
+/// ## Durability and the work after the reply
+///
+/// The request runs as one [`flush_scope`](crate::flush_scope): its
+/// mutations share one database export, and that export has been written
+/// before this function returns — so a response that reports a change done
+/// means the change is durable. When that export fails the response is a
+/// 500, whatever the flow answered: the change is in memory only and the
+/// reply must not claim otherwise.
+///
+/// The request also runs inside its own
+/// [`AfterResponse`](impresspress_core::after_response::AfterResponse)
+/// scope (the one Cloudflare's entry opens), so its `request_logs` audit row
+/// and the tasks its handlers [`defer`](impresspress_core::deferred::defer)
+/// are queued on it instead of being written or spawned on the response
+/// path. The returned promise runs that work — the audit row first, then
+/// the tasks together — in a flush scope of its own, so it too exports at
+/// most once. It starts on the next task of the event loop, once the
+/// response has been handed back, and its failures are logged: there is no
+/// response left to carry them. The service worker must pass the promise to
+/// `event.waitUntil`: nothing else keeps the worker alive until it settles,
+/// and a worker stopped before then loses the audit row and the deferred
+/// tasks — never the request's own changes, which were written above.
+///
+/// Both scopes are re-entered on every poll, so requests interleaved on the
+/// service worker's one thread each flush their own mutations at their own
+/// end and each queue their own after-response work.
+pub async fn dispatch_request(
+    request: web_sys::Request,
+) -> Result<(web_sys::Response, js_sys::Promise), JsValue> {
     let Some(wafer) = current_wafer() else {
-        return build_error_response(
+        let response = build_error_response(
             503,
             "impresspress-browser: runtime not initialized — call store_wafer() first",
-        );
+        )?;
+        return Ok((response, js_sys::Promise::resolve(&JsValue::UNDEFINED)));
     };
-    let (msg, input) = convert::request_to_message(&request).await?;
-    let output = wafer.run("site-main", msg, input).await;
-    convert::output_to_response(output).await
+    let after = AfterResponse::new();
+    let (result, flush) =
+        crate::flush_scope::run(after_response::scope(Rc::clone(&after), async move {
+            let (msg, input) = convert::request_to_message(&request).await?;
+            let output = wafer.run("site-main", msg, input).await;
+            convert::output_to_response(output).await
+        }))
+        .await;
+    let work = after_response_work(&after);
+    if let Err(error) = flush {
+        tracing::error!(%error, "the request's changes were not written to OPFS");
+        let response = build_error_response(
+            500,
+            "impresspress-browser: the change could not be saved to browser storage",
+        )?;
+        return Ok((response, work));
+    }
+    Ok((result?, work))
+}
+
+/// [`dispatch_request`]'s answer as the object a service worker's fetch
+/// handler reads: `{ response, after }`. The handler returns `response` to
+/// `respondWith` and passes `after` to `event.waitUntil` — see
+/// [`dispatch_request`] for why the second is not optional. The shape a
+/// consumer's `#[wasm_bindgen] handle_request` export resolves to.
+pub async fn dispatch_fetch(request: web_sys::Request) -> Result<JsValue, JsValue> {
+    let (response, after) = dispatch_request(request).await?;
+    let answer = js_sys::Object::new();
+    js_sys::Reflect::set(&answer, &JsValue::from_str("response"), &response)?;
+    js_sys::Reflect::set(&answer, &JsValue::from_str("after"), &after)?;
+    Ok(answer.into())
+}
+
+/// The promise for the work `after` holds: its audit row, then its deferred
+/// tasks together, in one flush scope. See [`dispatch_request`].
+///
+/// There is no statement reservation to release between the two, as
+/// Cloudflare's `after_response_work` does: the browser database has no
+/// per-request statement limit, so nothing was held back for the row.
+fn after_response_work(after: &AfterResponse) -> js_sys::Promise {
+    let audit_row = after.take_audit_row();
+    let tasks = after.take_tasks();
+    wasm_bindgen_futures::future_to_promise(async move {
+        if audit_row.is_none() && tasks.is_empty() {
+            return Ok(JsValue::UNDEFINED);
+        }
+        next_task().await;
+        let ((), flush) = crate::flush_scope::run(async move {
+            if let Some(row) = audit_row {
+                let db = crate::make_database_service();
+                if let Err(failure) = after_response::persist_audit_row(db.as_ref(), row).await {
+                    tracing::warn!(
+                        table = failure.table,
+                        error = %failure.error,
+                        "request audit row not written"
+                    );
+                }
+            }
+            futures::future::join_all(tasks).await;
+        })
+        .await;
+        if let Err(error) = flush {
+            tracing::warn!(%error, "after-response work was not written to OPFS");
+        }
+        Ok(JsValue::UNDEFINED)
+    })
+}
+
+#[wasm_bindgen]
+extern "C" {
+    #[wasm_bindgen(js_name = setTimeout)]
+    fn set_timeout(callback: &js_sys::Function, delay_ms: i32) -> JsValue;
+}
+
+/// Resolve on the event loop's next task. Everything a response goes through
+/// on its way out of the service worker — this crate's future resolving,
+/// `handle_request`'s promise, `respondWith` taking the response — happens
+/// in microtasks, so work that waits for the next task cannot put its
+/// synchronous sql.js statements and database export ahead of the reply.
+async fn next_task() {
+    let tick = js_sys::Promise::new(&mut |resolve, _reject| {
+        set_timeout(&resolve, 0);
+    });
+    // `setTimeout` never rejects the promise it resolves.
+    let _ = wasm_bindgen_futures::JsFuture::from(tick).await;
 }
 
 fn build_error_response(status: u16, body: &str) -> Result<web_sys::Response, JsValue> {
@@ -208,5 +322,244 @@ mod tests {
             forwarded.is_empty(),
             "an oversized body must not reach a block"
         );
+    }
+
+    // ─── dispatch_request: the request's flush, then the work after it ─────
+
+    /// A request through the real `site-main` pipeline
+    /// (`impresspress_core::handle_request`, via the router block the
+    /// browser runtime registers) to one test block, which writes a row on
+    /// `/b/a2test/write` and fails with a 500 on `/b/a2test/fail`. The
+    /// pipeline queues the request's audit row on the scope
+    /// `dispatch_request` opens, exactly as for any browser request.
+    mod after_response_order {
+        use std::{collections::HashMap, sync::Arc};
+
+        use impresspress_core::routing::{ExtraRoute, RouteAccess};
+        use wafer_core::interfaces::database::service::DatabaseService;
+        use wafer_run::{
+            context::Context, Block, BlockInfo, InputStream, LifecycleEvent, Message, OutputStream,
+            WaferError,
+        };
+
+        use super::*;
+        use crate::database::{
+            test_support::{fresh_db, opfs_writes},
+            BrowserDatabaseService,
+        };
+
+        const WRITES: &str = "a2_writes";
+        const LOGS: &str = impresspress_core::platform_state::request_logs::TABLE;
+        const BLOCK: &str = "a2test/mutator";
+
+        struct Mutator;
+
+        #[wafer_block::wafer_async_trait]
+        impl Block for Mutator {
+            fn info(&self) -> BlockInfo {
+                BlockInfo::new(
+                    BLOCK,
+                    "0.0.1",
+                    "http-handler@v1",
+                    "writes a row per request",
+                )
+            }
+
+            async fn handle(
+                &self,
+                _ctx: &dyn Context,
+                msg: Message,
+                _input: InputStream,
+            ) -> OutputStream {
+                if msg.path().ends_with("/fail") {
+                    return impresspress_core::http::err_internal_no_cause("a2test: failing");
+                }
+                // Two mutations, so a request that is not one flush scope
+                // shows as two exports.
+                for n in 0..2 {
+                    let row = HashMap::from([(
+                        "id".to_string(),
+                        serde_json::json!(format!("{}#{n}", msg.path())),
+                    )]);
+                    if let Err(e) = BrowserDatabaseService.create(WRITES, row).await {
+                        return impresspress_core::http::err_internal("a2test: write", e);
+                    }
+                }
+                impresspress_core::http::ok_json(&serde_json::json!({ "ok": true }))
+            }
+
+            async fn lifecycle(
+                &self,
+                _ctx: &dyn Context,
+                _event: LifecycleEvent,
+            ) -> Result<(), WaferError> {
+                Ok(())
+            }
+        }
+
+        /// Let every queued microtask run: a JS promise resolved now is
+        /// awaited, which settles only after the microtasks queued before it.
+        async fn drain_microtasks() {
+            for _ in 0..8 {
+                wasm_bindgen_futures::JsFuture::from(js_sys::Promise::resolve(&JsValue::UNDEFINED))
+                    .await
+                    .expect("a resolved promise");
+            }
+        }
+
+        /// A fresh database holding the test table and `request_logs`, and a
+        /// runtime whose `site-main` flow is the pipeline, with request-log
+        /// policy `policy`.
+        async fn install(policy: &str) -> BrowserDatabaseService {
+            let db = fresh_db().await;
+            db.exec_raw(&format!("CREATE TABLE {WRITES} (id TEXT PRIMARY KEY)"), &[])
+                .await
+                .expect("create writes table");
+            db.exec_raw(
+                &format!(
+                    "CREATE TABLE {LOGS} (id TEXT PRIMARY KEY, method TEXT, path TEXT, \
+                     status TEXT, status_code INTEGER, duration_ms INTEGER, \
+                     error_message TEXT, client_ip TEXT, user_id TEXT, \
+                     created_at TEXT, updated_at TEXT)"
+                ),
+                &[],
+            )
+            .await
+            .expect("create request_logs");
+
+            let cfg: Arc<dyn wafer_run::ConfigSource> =
+                Arc::new(wafer_run::StaticConfigSource::default());
+            let mut wafer = wafer_run::Wafer::new(cfg).expect("wafer");
+            let mutator: Arc<dyn Block> = Arc::new(Mutator);
+            let infos = vec![mutator.info()];
+            wafer
+                .register_block(BLOCK, mutator)
+                .expect("register mutator");
+            #[expect(
+                clippy::arc_with_non_send_sync,
+                reason = "`register_block` takes an `Arc<dyn Block>`; on this \
+                          single-threaded target the router's `Arc` makes no \
+                          cross-thread claim"
+            )]
+            let router: Arc<dyn Block> = Arc::new(
+                impresspress_core::blocks::router::ImpresspressRouterBlock::with_extra_routes(
+                    Arc::new(std::sync::RwLock::new(String::new())),
+                    Arc::new(impresspress_core::features::AllEnabled),
+                    infos,
+                    vec![ExtraRoute::new("/b/a2test/", BLOCK, RouteAccess::Public)],
+                ),
+            );
+            wafer
+                .register_block(impresspress_core::blocks::router::ROUTER_BLOCK_ID, router)
+                .expect("register router");
+            wafer
+                .add_flow_json(
+                    r#"{ "id": "site-main", "name": "Site Main", "version": "0.1.0",
+                         "description": "test",
+                         "steps": [ { "id": "router", "block": "impresspress/router" } ],
+                         "config": { "on_error": "stop" } }"#,
+                )
+                .expect("site-main");
+            wafer.set_config_snapshot(HashMap::from([(
+                impresspress_core::config_vars::REQUEST_LOG_CONFIG_KEY.to_string(),
+                policy.to_string(),
+            )]));
+            wafer.seal().await.expect("seal");
+            reset();
+            store_wafer(wafer).expect("store");
+            db
+        }
+
+        fn post(path: &str) -> web_sys::Request {
+            let init = web_sys::RequestInit::new();
+            init.set_method("POST");
+            web_sys::Request::new_with_str_and_init(
+                &format!("https://dev.impresspress.org{path}"),
+                &init,
+            )
+            .expect("build request")
+        }
+
+        async fn logged(db: &BrowserDatabaseService) -> i64 {
+            db.count(LOGS, &[]).await.expect("count request_logs")
+        }
+
+        async fn written(db: &BrowserDatabaseService) -> i64 {
+            db.count(WRITES, &[]).await.expect("count writes")
+        }
+
+        /// **The order a reply promises**: a request that mutates twice is
+        /// answered after exactly one export, which already holds its
+        /// changes, and before its audit row exists — even once every
+        /// microtask queued behind the reply has run, which is how the reply
+        /// travels to `respondWith`. The audit row is written by the `after`
+        /// promise, in an export of its own. Fails if the request is not one
+        /// flush scope (two exports), if its flush is left to run after the
+        /// reply (none), if the audit row is written on the response path, or
+        /// if the after-response work starts before the reply has left.
+        #[wasm_bindgen_test]
+        async fn the_reply_is_durable_and_the_audit_row_comes_after_it() {
+            let db = install("all").await;
+            let before = opfs_writes();
+
+            let (response, after) = dispatch_request(post("/b/a2test/write"))
+                .await
+                .expect("dispatch");
+
+            assert_eq!(response.status(), 200);
+            assert_eq!(opfs_writes() - before, 1, "one export, before the reply");
+            assert_eq!(logged(&db).await, 0, "no audit row on the response path");
+            drain_microtasks().await;
+            assert_eq!(
+                logged(&db).await,
+                0,
+                "the after-response work waits for the next task"
+            );
+
+            wasm_bindgen_futures::JsFuture::from(after)
+                .await
+                .expect("after-response work");
+            assert_eq!(logged(&db).await, 1, "the audit row, after the reply");
+            assert_eq!(
+                opfs_writes() - before,
+                2,
+                "the after-response work exports once, on its own"
+            );
+
+            crate::db_init().await.expect("reopen from OPFS");
+            assert_eq!(written(&db).await, 2, "the request's rows are on disk");
+            assert_eq!(logged(&db).await, 1, "and so is the audit row");
+        }
+
+        /// Under the browser default `errors`, a 200 leaves no row and costs
+        /// no export after the reply; a 500 is logged.
+        #[wasm_bindgen_test]
+        async fn under_errors_only_a_server_error_is_logged() {
+            let db = install("errors").await;
+            let before = opfs_writes();
+
+            let (ok, after) = dispatch_request(post("/b/a2test/write"))
+                .await
+                .expect("dispatch");
+            wasm_bindgen_futures::JsFuture::from(after)
+                .await
+                .expect("after-response work");
+            assert_eq!(ok.status(), 200);
+            assert_eq!(logged(&db).await, 0, "a 200 is not logged under errors");
+            assert_eq!(
+                opfs_writes() - before,
+                1,
+                "and nothing is exported after it"
+            );
+
+            let (failed, after) = dispatch_request(post("/b/a2test/fail"))
+                .await
+                .expect("dispatch");
+            assert_eq!(failed.status(), 500);
+            wasm_bindgen_futures::JsFuture::from(after)
+                .await
+                .expect("after-response work");
+            assert_eq!(logged(&db).await, 1, "a 500 is logged");
+        }
     }
 }

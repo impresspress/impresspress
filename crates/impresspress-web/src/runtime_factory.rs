@@ -343,7 +343,19 @@ impl RuntimeFactory {
                 impresspress_core::features::BLOCK_SETTINGS_CONFIG_KEY,
                 initial_block_settings.to_config_json(),
             )
-            .both(impresspress_core::migration_helper::RUN_MIGRATIONS_KEY, "1");
+            .both(impresspress_core::migration_helper::RUN_MIGRATIONS_KEY, "1")
+            // A browser build is one person's local instance, and its database
+            // persists by exporting the WHOLE file on every flush: a
+            // `request_logs` row for every request would grow every later
+            // flush without bound, and each logged request would cost an
+            // export of its own after its reply. Server errors are what the
+            // log is for here. Infrastructure
+            // config (`IMPRESSPRESS_*`, never stored in the database), so no
+            // admin setting reaches it.
+            .both(
+                impresspress_core::config_vars::REQUEST_LOG_CONFIG_KEY,
+                "errors",
+            );
         // The factory's own `SharedConfigSource`, EMPTY at this point and
         // filled by the boot hook below once admin's migration has created the
         // variables table.
@@ -382,8 +394,8 @@ impl RuntimeFactory {
         )]
         let mut security_headers = serde_json::json!({ "csp": self.csp() });
 
-        // Both config surfaces, holding only the block settings read above and
-        // the migration consent.
+        // Both config surfaces, holding only the block settings read above,
+        // the migration consent and the request-log policy.
         // The browser cannot know a single VARIABLE at build time: the
         // `variables` table does not exist until admin's migration runs, so
         // every value arrives through `BrowserBootHooks::seed_after_admin_init`,
