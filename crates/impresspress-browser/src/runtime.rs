@@ -108,8 +108,16 @@ pub fn restore_wafer(previous: Rc<wafer_run::Wafer>) {
 /// mutations share one database export, and that export has been written
 /// before this function returns — so a response that reports a change done
 /// means the change is durable. When that export fails the response is a
-/// 500, whatever the flow answered: the change is in memory only and the
-/// reply must not claim otherwise.
+/// 500, whatever the flow answered, because the reply must not claim a
+/// durability it does not have. The change is not undone, though: it is
+/// already live in the in-memory database, every later read sees it, and the
+/// next export that succeeds persists it — possibly this request's own
+/// after-response flush. A caller that retries on the 500 therefore repeats a
+/// change that did happen (a retried `dev_write_file` creates another
+/// generation). The failure is reported only as this `tracing::error` in the
+/// console: the request's audit row was queued with the flow's own status,
+/// so under the browser's default `errors` policy no `request_logs` row
+/// records it at all, and under `all` the row carries that status, not 500.
 ///
 /// The request also runs inside its own
 /// [`AfterResponse`](impresspress_core::after_response::AfterResponse)
@@ -148,10 +156,15 @@ pub async fn dispatch_request(
         .await;
     let work = after_response_work(&after);
     if let Err(error) = flush {
-        tracing::error!(%error, "the request's changes were not written to OPFS");
+        tracing::error!(
+            %error,
+            "the request's changes were not written to OPFS; they stay live in memory \
+             and the next successful export persists them"
+        );
         let response = build_error_response(
             500,
-            "impresspress-browser: the change could not be saved to browser storage",
+            "impresspress-browser: the change is live but could not be saved to browser \
+             storage yet; the next successful save persists it, so retrying repeats it",
         )?;
         return Ok((response, work));
     }
@@ -344,7 +357,7 @@ mod tests {
 
         use super::*;
         use crate::database::{
-            test_support::{fresh_db, opfs_writes},
+            test_support::{fail_next_opfs_write, fresh_db, opfs_writes},
             BrowserDatabaseService,
         };
 
@@ -529,6 +542,40 @@ mod tests {
             crate::db_init().await.expect("reopen from OPFS");
             assert_eq!(written(&db).await, 2, "the request's rows are on disk");
             assert_eq!(logged(&db).await, 1, "and so is the audit row");
+        }
+
+        /// **A reply never claims durability it does not have**: a mutating
+        /// request whose one flush fails answers 500 in place of the flow's
+        /// 200, and its after-response work still runs — its export persists
+        /// the request's rows, which stayed live in memory. Fails if the
+        /// flush result is ignored (the 200 goes out), or if a failed flush
+        /// drops the after-response work.
+        #[wasm_bindgen_test]
+        async fn a_failed_request_flush_answers_500_and_the_next_flush_persists_it() {
+            let db = install("all").await;
+            let before = opfs_writes();
+
+            fail_next_opfs_write();
+            let (response, after) = dispatch_request(post("/b/a2test/write"))
+                .await
+                .expect("dispatch");
+
+            assert_eq!(response.status(), 500, "the flow's 200 is replaced");
+            assert_eq!(opfs_writes(), before, "the request's export failed");
+            assert_eq!(written(&db).await, 2, "the change is live in memory");
+
+            wasm_bindgen_futures::JsFuture::from(after)
+                .await
+                .expect("after-response work");
+            assert_eq!(opfs_writes() - before, 1, "the after-response flush wrote");
+
+            crate::db_init().await.expect("reopen from OPFS");
+            assert_eq!(
+                written(&db).await,
+                2,
+                "the next successful flush persisted the request's rows"
+            );
+            assert_eq!(logged(&db).await, 1, "and the audit row");
         }
 
         /// Under the browser default `errors`, a 200 leaves no row and costs

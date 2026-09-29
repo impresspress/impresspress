@@ -134,7 +134,16 @@ export function dbQueryRaw(sql, params) {
  * sql.js's `export()` closes the connection and opens a new one, which rolls
  * back a transaction still open on it. The Rust side ends any such
  * transaction itself before calling this (`end_open_transaction` in
- * `database.rs`), so that rollback is reported rather than silent.
+ * `database.rs`), so that rollback is reported rather than silent. With
+ * calls serialized (below), `export()` runs at least a microtask after the
+ * call, and behind a running flush only once that flush's whole OPFS write
+ * has finished, so other code runs on the connection in between. A complete
+ * transaction there is still safe: the Rust side runs `BEGIN`, its
+ * statements and `COMMIT` synchronously (`in_transaction` in
+ * `database.rs`, no `await` in between), so no export can land inside
+ * one. Only a stray `BEGIN` left open through `query_raw` across an
+ * `await` could be rolled back, silently, by an export that lands in that
+ * window.
  *
  * Calls are serialized: each one exports only after every earlier call has
  * finished writing (or failed). The service worker handles several requests

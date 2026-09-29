@@ -337,25 +337,7 @@ impl RuntimeFactory {
         let initial_block_settings = impresspress_core::platform_state::block_settings::load(&db)
             .await
             .map_err(|e| JsValue::from_str(&format!("load block settings: {e}")))?;
-        let mut initial_config = builder::RuntimeConfig::new();
-        initial_config
-            .both(
-                impresspress_core::features::BLOCK_SETTINGS_CONFIG_KEY,
-                initial_block_settings.to_config_json(),
-            )
-            .both(impresspress_core::migration_helper::RUN_MIGRATIONS_KEY, "1")
-            // A browser build is one person's local instance, and its database
-            // persists by exporting the WHOLE file on every flush: a
-            // `request_logs` row for every request would grow every later
-            // flush without bound, and each logged request would cost an
-            // export of its own after its reply. Server errors are what the
-            // log is for here. Infrastructure
-            // config (`IMPRESSPRESS_*`, never stored in the database), so no
-            // admin setting reaches it.
-            .both(
-                impresspress_core::config_vars::REQUEST_LOG_CONFIG_KEY,
-                "errors",
-            );
+        let initial_config = infrastructure_config(initial_block_settings.to_config_json());
         // The factory's own `SharedConfigSource`, EMPTY at this point and
         // filled by the boot hook below once admin's migration has created the
         // variables table.
@@ -628,5 +610,48 @@ impl RuntimeFactory {
             csp.push_str("; worker-src 'self'; frame-src 'self'");
         }
         csp
+    }
+}
+
+/// The config both surfaces start every browser build from: the block settings
+/// read back from the database (`block_settings_json`), the migration consent
+/// and the request-log policy. See the comments in [`RuntimeFactory::build`]
+/// for the first two.
+fn infrastructure_config(block_settings_json: String) -> builder::RuntimeConfig {
+    let mut config = builder::RuntimeConfig::new();
+    config
+        .both(
+            impresspress_core::features::BLOCK_SETTINGS_CONFIG_KEY,
+            block_settings_json,
+        )
+        .both(impresspress_core::migration_helper::RUN_MIGRATIONS_KEY, "1")
+        // A browser build is one person's local instance, and its database
+        // persists by exporting the WHOLE file on every flush: a
+        // `request_logs` row for every request would grow every later flush
+        // without bound, and each logged request would cost an export of its
+        // own after its reply. Server errors are what the log is for here.
+        // Infrastructure config (`IMPRESSPRESS_*`, never stored in the
+        // database), so no admin setting reaches it.
+        .both(
+            impresspress_core::config_vars::REQUEST_LOG_CONFIG_KEY,
+            "errors",
+        );
+    config
+}
+
+#[cfg(all(test, target_arch = "wasm32"))]
+mod tests {
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::*;
+
+    /// Browser builds log server errors only, on both config surfaces — the
+    /// pipeline reads the policy off the synchronous snapshot.
+    #[wasm_bindgen_test]
+    fn a_browser_build_logs_server_errors_only() {
+        let config = infrastructure_config(String::new());
+        let key = impresspress_core::config_vars::REQUEST_LOG_CONFIG_KEY;
+        assert_eq!(config.service_get(key), Some("errors"));
+        assert!(config.snapshot_contains(key));
     }
 }

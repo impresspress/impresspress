@@ -1002,10 +1002,13 @@ pub(crate) mod test_support {
 
     #[wasm_bindgen(inline_js = r#"
 let writes = 0;
+let failNextWrite = false;
 export function opfsWrites() { return writes; }
+export function failNextOpfsWrite() { failNextWrite = true; }
 export function installMemoryOpfs() {
     const files = new Map();
     writes = 0;
+    failNextWrite = false;
     const handle = (name) => ({
         async getFile() {
             const data = files.get(name);
@@ -1015,7 +1018,14 @@ export function installMemoryOpfs() {
             let data = new Uint8Array(0);
             return {
                 async write(chunk) { data = chunk; },
-                async close() { files.set(name, data); writes += 1; },
+                async close() {
+                    if (failNextWrite) {
+                        failNextWrite = false;
+                        throw new DOMException('quota exceeded', 'QuotaExceededError');
+                    }
+                    files.set(name, data);
+                    writes += 1;
+                },
             };
         },
     });
@@ -1046,6 +1056,12 @@ export function installMemoryOpfs() {
         /// one per `dbFlush`.
         #[wasm_bindgen(js_name = opfsWrites)]
         pub(crate) fn opfs_writes() -> u32;
+
+        /// Make the next write to the OPFS installed last fail at its
+        /// `close()` — where a real quota error surfaces — leaving the file
+        /// as it was and the write uncounted. One-shot.
+        #[wasm_bindgen(js_name = failNextOpfsWrite)]
+        pub(crate) fn fail_next_opfs_write();
     }
 
     /// A fresh in-memory OPFS and a fresh, empty sql.js database on it.
