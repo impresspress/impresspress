@@ -135,8 +135,28 @@ export function dbQueryRaw(sql, params) {
  * back a transaction still open on it. The Rust side ends any such
  * transaction itself before calling this (`end_open_transaction` in
  * `database.rs`), so that rollback is reported rather than silent.
+ *
+ * Calls are serialized: each one exports only after every earlier call has
+ * finished writing (or failed). The service worker handles several requests
+ * at once and each flushes at its own end, so two calls can overlap; each
+ * would open its own `createWritable()` swap file, and the last `close()` to
+ * land would win — an earlier export finishing after a later one would put
+ * an older snapshot back on disk. Queued behind the running one, a call
+ * exports when its turn comes, so the export it writes holds every mutation
+ * made before the call, and its promise settles only once that export is
+ * written. A failed call rejects its own caller and does not stop the next.
  */
-export async function dbFlush() {
+export function dbFlush() {
+    const flush = _flushTail.then(exportToOpfs);
+    _flushTail = flush.catch(() => {});
+    return flush;
+}
+
+/** The last `dbFlush` queued, settled or not; see `dbFlush`. */
+let _flushTail = Promise.resolve();
+
+/** One export of the whole database, written to OPFS. Run only by `dbFlush`. */
+async function exportToOpfs() {
     if (!_db) return;
     const data = _db.export();
     // `export()` reopened the connection; set the new one up before anything
