@@ -319,6 +319,7 @@ async fn export_zip_contains_shell_seed_sources_and_data_with_dev_off() {
         "seed/site/index.html",
         "seed/blocks/hello.wasm",
         "seed/blocks/hello/src/lib.rs",
+        // Task 4 adds the archive's guest crate entries (seed/wafer_guest/**); until then the archive carries no SDK.
         "seed/data.json",
     ] {
         assert!(

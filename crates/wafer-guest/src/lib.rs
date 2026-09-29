@@ -204,9 +204,12 @@ pub mod abi {
     /// `__wafer_handle`: decode the frame, route it, render the result.
     ///
     /// # Safety
-    /// `ptr`/`len` name memory the host wrote through `__wafer_alloc`; the
-    /// host guarantees that, and this is the only reader.
-    pub fn handle(block: &super::Block, ptr: i32, len: i32) -> i64 {
+    /// `ptr`/`len` must name `len` initialized bytes the host wrote into
+    /// memory it obtained from `__wafer_alloc`, alive for the whole call. The
+    /// host guarantees that for the export [`export!`] stamps, and that
+    /// export is the only caller; block code must not call this itself.
+    pub unsafe fn handle(block: &super::Block, ptr: i32, len: i32) -> i64 {
+        // SAFETY: the caller upholds this function's contract (see above).
         let frame = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
         let response = match Request::from_frame(frame) {
             Ok(request) => dispatch(block, &request),
@@ -222,7 +225,14 @@ pub mod abi {
     /// serde's external tagging of a `Result`. An `Err` here fails the whole
     /// activation, which is the point: a block whose `init` could not create
     /// its tables must not start serving.
-    pub fn lifecycle(init: fn(&Ctx) -> Result<(), String>, ptr: i32, len: i32) -> i64 {
+    ///
+    /// # Safety
+    /// `ptr`/`len` must name `len` initialized bytes the host wrote into
+    /// memory it obtained from `__wafer_alloc`, alive for the whole call. The
+    /// host guarantees that for the export [`export!`] stamps, and that
+    /// export is the only caller; block code must not call this itself.
+    pub unsafe fn lifecycle(init: fn(&Ctx) -> Result<(), String>, ptr: i32, len: i32) -> i64 {
+        // SAFETY: the caller upholds this function's contract (see above).
         let event = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
         let is_init = json::Json::parse(&String::from_utf8_lossy(event))
             .ok()
@@ -281,13 +291,17 @@ macro_rules! export {
         #[cfg(target_arch = "wasm32")]
         #[no_mangle]
         pub extern "C" fn __wafer_handle(ptr: i32, len: i32) -> i64 {
-            $crate::abi::handle(&$block(), ptr, len)
+            // SAFETY: the host calls this export with a frame it wrote
+            // through `__wafer_alloc`, which is `abi::handle`'s contract.
+            unsafe { $crate::abi::handle(&$block(), ptr, len) }
         }
 
         #[cfg(target_arch = "wasm32")]
         #[no_mangle]
         pub extern "C" fn __wafer_lifecycle(ptr: i32, len: i32) -> i64 {
-            $crate::abi::lifecycle($init, ptr, len)
+            // SAFETY: the host calls this export with an event it wrote
+            // through `__wafer_alloc`, which is `abi::lifecycle`'s contract.
+            unsafe { $crate::abi::lifecycle($init, ptr, len) }
         }
     };
 }
