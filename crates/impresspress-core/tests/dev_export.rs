@@ -319,7 +319,8 @@ async fn export_zip_contains_shell_seed_sources_and_data_with_dev_off() {
         "seed/site/index.html",
         "seed/blocks/hello.wasm",
         "seed/blocks/hello/src/lib.rs",
-        // Task 4 adds the archive's guest crate entries (seed/wafer_guest/**); until then the archive carries no SDK.
+        "seed/wafer_guest/Cargo.toml",
+        "seed/wafer_guest/src/lib.rs",
         "seed/data.json",
     ] {
         assert!(
@@ -328,6 +329,43 @@ async fn export_zip_contains_shell_seed_sources_and_data_with_dev_off() {
             sorted(&entries)
         );
     }
+    // The crate is beside the blocks, where `path = "../../wafer_guest"` finds
+    // it from `seed/blocks/<name>/`, and it is not a seed entry: an import must
+    // not mistake it for a block.
+    assert_eq!(
+        entries["seed/wafer_guest/src/lib.rs"],
+        impresspress_core::blocks::dev::scaffold::GUEST_LIB_RS.as_bytes()
+    );
+    assert_eq!(
+        entries["seed/wafer_guest/Cargo.toml"],
+        impresspress_core::blocks::dev::scaffold::GUEST_CARGO_TOML.as_bytes()
+    );
+    // Checked on the paths the seed manifest lists, not on its text: every
+    // block spec carries a `wafer_guest_version` field, so the string
+    // `wafer_guest` is in any manifest that has a block.
+    let seed_manifest: SeedManifest =
+        serde_json::from_slice(&entries["seed/manifest.json"]).expect("seed manifest");
+    assert_eq!(
+        seed_manifest.blocks.len(),
+        1,
+        "the guest crate is not a block"
+    );
+    let listed: Vec<&str> = seed_manifest
+        .site
+        .iter()
+        .map(|file| file.path.as_str())
+        .chain(
+            seed_manifest
+                .blocks
+                .iter()
+                .flat_map(|block| block.sources.iter().map(|file| file.path.as_str())),
+        )
+        .chain(seed_manifest.data.iter().map(|file| file.path.as_str()))
+        .collect();
+    assert!(
+        !listed.iter().any(|path| path.contains("wafer_guest")),
+        "the guest crate is not a seed entry: {listed:?}"
+    );
 
     // Development mode is OFF, and the ONE line that says so is the one the
     // bundler renders (`impresspress-bundle`'s `sw.js.tmpl`): the isolation
@@ -804,6 +842,45 @@ async fn export_manifest_previews_the_archive_without_building_it() {
         .is_empty());
 }
 
+/// The guest crate is there for the blocks' sake, so a generation with no
+/// block exports without it — an archive of a static site carries no Rust.
+#[tokio::test]
+async fn a_generation_with_no_block_exports_no_guest_crate() {
+    let ctx = TestContext::with_dev_added_and_shell(
+        TestContext::with_admin().await,
+        FakeControl::new(),
+        std::sync::Arc::new(FakeShell::new()),
+    )
+    .await;
+    dev_post(
+        &ctx,
+        "/b/dev/api/files/write",
+        json!({"path": "site/index.html", "content": "x", "expected_sha256": null}),
+    )
+    .await;
+
+    let entries = entries(
+        output_body(
+            ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export"))
+                .await,
+        )
+        .await,
+    );
+    // The export itself happened: the site is in it.
+    assert!(
+        entries.contains_key("seed/site/index.html"),
+        "{:?}",
+        sorted(&entries)
+    );
+    assert!(
+        !entries
+            .keys()
+            .any(|path| path.starts_with("seed/wafer_guest/")),
+        "{:?}",
+        sorted(&entries)
+    );
+}
+
 /// The manifest is not a second derivation of what an export contains — it is
 /// a summary of the same assembled entry list, so every path and size it
 /// publishes is in the archive with exactly that size.
@@ -831,6 +908,14 @@ async fn the_manifest_describes_the_archive_entry_for_entry() {
     let mut listed: Vec<String> = manifest.files.iter().map(|f| f.path.clone()).collect();
     listed.sort();
     assert_eq!(listed, sorted(&entries));
+    // The guest crate is an archive entry like a block's source, so the
+    // preview lists it too.
+    for guest in ["seed/wafer_guest/Cargo.toml", "seed/wafer_guest/src/lib.rs"] {
+        assert!(
+            listed.iter().any(|path| path == guest),
+            "{guest} in {listed:?}"
+        );
+    }
     for file in &manifest.files {
         // The README is the one entry whose size can move between two calls
         // (it carries the wall-clock date), so it is compared for presence
@@ -952,6 +1037,10 @@ async fn an_exported_seed_imports_into_a_fresh_instance() {
 
     let manifest: SeedManifest =
         serde_json::from_slice(&archive["seed/manifest.json"]).expect("a seed manifest");
+    // The archive carries the guest crate beside the blocks, and the import
+    // below is of that same archive: an entry the seed manifest does not list
+    // is one the importer never reads.
+    assert!(archive.contains_key("seed/wafer_guest/src/lib.rs"));
     // The importer fetches by URL under `/seed/`; the archive holds the same
     // paths without the leading slash. That correspondence IS the format.
     let fetch = ArchiveFetch { archive };

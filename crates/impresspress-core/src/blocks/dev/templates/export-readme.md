@@ -51,6 +51,18 @@ imports `seed/`, so it takes a few seconds; every load after that is instant.
 
 {{BLOCK_SOURCES}}
 
+    seed/wafer_guest/**
+        The guest SDK crate every block depends on by path
+        (`wafer_guest = { path = "../../wafer_guest" }` in each block's
+        `Cargo.toml`), present whenever there is at least one block. It is
+        source for rebuilding blocks, not something the runtime imports, so
+        `seed/manifest.json` does not list it. To rebuild a block with a Rust
+        toolchain on your own machine, run
+        `cargo build --release --target wasm32-wasip1` inside
+        `seed/blocks/<name>/`; the SDK is the only dependency, so no crate
+        registry is needed. The rule for `seed/manifest.json` above still
+        holds for anything you put back under `seed/`.
+
     seed/data.json
         A snapshot of the data the sandbox held: products, offers and their
         components, product groups, types and presets, non-sensitive site
