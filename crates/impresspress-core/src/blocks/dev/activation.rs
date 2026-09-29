@@ -84,8 +84,9 @@ pub struct ActivationOutcome {
 
 /// One phase of an activation, with how long it took.
 ///
-/// Published in every mutating tool result (design §7.5), so the caller that
-/// asked for a change sees where its time went. The activation push (design
+/// Published in the result of every call that activates a generation — file
+/// writes and deletes, staging, block removal, rollback (design §7.5) — so the
+/// caller that asked for a change sees where its time went. The activation push (design
 /// §2.6) says only which generation went live; the timings travel here.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -914,9 +915,10 @@ async fn activate_staged(
     )
     .await
     .map_err(storage_error)?;
-    // Committed: the generation is live and journalled, so every open page
-    // may now be told (design §2.6). Before `maintain`, which the page has no
-    // reason to wait for. The paths are spelled as the workspace spells them
+    // Committed: the generation is live — committed in memory, and made
+    // durable when the request's flush runs — so every open page may now be
+    // told (design §2.6). Before `maintain`, which the page has no reason to
+    // wait for. The paths are spelled as the workspace spells them
     // (`site/…`), the one form every `/b/dev` surface uses for a site file.
     shared.control.announce_active(&GenerationAnnouncement {
         id: row.id.clone(),

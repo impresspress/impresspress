@@ -116,11 +116,12 @@ use base64ct::{Base64, Encoding};
 use wafer_run::{context::Context, ErrorCode, InputStream, Message, OutputStream};
 
 use super::{
-    activation::{self, ActivationIntent, ActivationOutcome, Maintenance},
+    activation::{self, ActivationIntent, ActivationOutcome, Maintenance, ProgressStep},
     blobs,
     contracts::{
         FileConflict, FileDeleteRequest, FileDeleteResponse, FileEncoding, FileListQuery,
         FileListResponse, FileReadRequest, FileReadResponse, FileWriteRequest, FileWriteResponse,
+        GenerationSummary,
     },
     no_store, no_store_db_error_internal, no_store_error, no_store_error_status,
     paths::{self, WorkspaceArea},
@@ -317,10 +318,7 @@ pub async fn handle_write(
         Ok(outcome) => outcome,
         Err(refusal) => return refusal,
     };
-    let (generation, progress) = match outcome {
-        Some(outcome) => (Some(outcome.generation), outcome.progress),
-        None => (None, Vec::new()),
-    };
+    let (generation, progress) = split_outcome(outcome);
     no_store().json(&FileWriteResponse {
         path: entry.path,
         sha256: entry.sha256,
@@ -363,14 +361,16 @@ pub async fn handle_delete(
             return no_store_db_error_internal(e, "dev workspace save");
         }
     }
-    let generation = match publish_if_site(ctx, shared, &area, GenerationCause::SiteDelete).await {
-        Ok(outcome) => outcome.map(|outcome| outcome.generation),
+    let outcome = match publish_if_site(ctx, shared, &area, GenerationCause::SiteDelete).await {
+        Ok(outcome) => outcome,
         Err(refusal) => return refusal,
     };
     collect_if_unpublished(ctx, shared, &area).await;
+    let (generation, progress) = split_outcome(outcome);
     no_store().json(&FileDeleteResponse {
         path: request.path,
         generation,
+        progress,
     })
 }
 
@@ -409,6 +409,18 @@ async fn publish_if_site(
     .await
     .map(Some)
     .map_err(|e| e.into_response())
+}
+
+/// The two halves of a publish a write or delete response carries: the
+/// generation, and the phases its activation passed through — or nothing and
+/// no phases, when the change was not one the site serves.
+fn split_outcome(
+    outcome: Option<ActivationOutcome>,
+) -> (Option<GenerationSummary>, Vec<ProgressStep>) {
+    match outcome {
+        Some(outcome) => (Some(outcome.generation), outcome.progress),
+        None => (None, Vec::new()),
+    }
 }
 
 /// Reclaim the blob a delete may have orphaned, when the delete published

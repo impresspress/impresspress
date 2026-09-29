@@ -363,6 +363,9 @@ pub struct FileDeleteResponse {
     /// The generation this delete published, when it published one. A delete
     /// under `site/` publishes; a delete under `blocks/` does not.
     pub generation: Option<GenerationSummary>,
+    /// One entry per phase the delete's activation passed through, with how
+    /// long it took. The last is `active`. Empty when nothing was published.
+    pub progress: Vec<ProgressStep>,
 }
 
 /// Body of the `409` a write or delete answers when `expected_sha256` does not

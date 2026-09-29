@@ -194,6 +194,14 @@ async fn deleting_a_site_file_removes_it_from_the_served_folder() {
     .await;
     assert_eq!(d["generation"]["cause"], "site_delete");
     assert_eq!(d["generation"]["site_files"], 0);
+    // A delete activates as a write does, and reports the same phases.
+    let phases: Vec<&str> = d["progress"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a site delete carries its progress: {d}"))
+        .iter()
+        .map(|step| step["phase"].as_str().expect("phase"))
+        .collect();
+    assert_eq!(phases, ["validating", "publishing", "active"]);
     assert!(
         served(&ctx, "a.css").await.is_none(),
         "the published site must not keep a file the generation dropped"
@@ -231,6 +239,7 @@ async fn block_source_writes_do_not_create_generations() {
     )
     .await;
     assert_eq!(d["generation"], serde_json::Value::Null);
+    assert_eq!(d["progress"], json!([]));
 }
 
 /// Validation asks whether the blobs and artifacts the manifest names are

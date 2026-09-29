@@ -202,18 +202,20 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
   expect(wrote.generation?.status).toBe('active');
   expect(wrote.sha256).not.toBe(seeded.sha256);
 
-  // The progress channel (design §4.3): `dev.js` wraps every mutating tool in
-  // `withProgress`, which polls `/b/dev/api/status` for the duration of the
-  // call and logs each new live generation. Seeing the id this write returned
-  // in the panel is the proof the human watching the page learns what the
-  // agent did — and that the poll really ran, since nothing else writes that
-  // line.
+  // The activation push (design §2.6): when the generation commits, the
+  // service worker posts `{ type: 'dev-generation', id, … }` to every window,
+  // and `dev.js`'s `onGenerationActive` logs the new live generation (the
+  // status poll `withProgress` runs during the call logs the same line if it
+  // sees the generation first; the page writes it once either way). Seeing
+  // the id this write returned in the panel is the proof the human watching
+  // the page learns what the agent did.
   await expect(page.locator('#dev-log')).toContainText(
     `live generation: ${wrote.generation?.id}`,
   );
 
-  // …and the preview iframe is showing it. `withProgress`'s catch-up reloads
-  // the frame after the last outstanding call, so this needs no nudge.
+  // …and the preview iframe is showing it. The same push reloads the frame —
+  // the write published a generation, so `withProgress`'s catch-up leaves the
+  // preview to the push — and this needs no nudge.
   await expect(page.frameLocator('#dev-preview-frame').locator('h1')).toHaveText(SHOP_HEADING, {
     timeout: 60_000,
   });
@@ -250,9 +252,10 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
   expect(live.status).toBe('active');
   console.log(`product → offer → publish → active: ${Date.now() - productStart} ms`);
 
-  // The agent can see its own work: `shop_update_product` is a mutating tool,
-  // so `withProgress` reloaded the preview, and the page the agent wrote
-  // three steps ago now lists the product it just activated.
+  // The agent can see its own work: `shop_update_product` is a mutating tool
+  // that publishes no generation, so no push comes for it and `withProgress`'s
+  // catch-up reloads the preview itself — and the page the agent wrote three
+  // steps ago now lists the product it just activated.
   await expect(
     page.frameLocator('#dev-preview-frame').locator('.shop-product-name'),
   ).toHaveText(SHOP_PRODUCT.name, { timeout: 60_000 });
@@ -629,8 +632,9 @@ test('the editor refuses to save a binary file over itself', async ({ page }) =>
   );
 
   // Open it from the file pane, the way the human would. `dev_write_file` is
-  // a mutating tool, so `withProgress`'s catch-up has already reloaded the
-  // list; the click auto-waits for the entry regardless.
+  // a mutating tool, so `withProgress`'s catch-up has already re-read the
+  // file list before the call returned; the click auto-waits for the entry
+  // regardless.
   await page.locator(`#dev-file-list a[data-path="${PIXEL_PNG_PATH}"]`).click();
   await expect(page.locator('#dev-editor-title')).toHaveText(PIXEL_PNG_PATH);
 

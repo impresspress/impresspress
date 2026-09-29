@@ -316,14 +316,41 @@ function refreshSiteTools() {
   return Promise.resolve();
 }
 
-// Wrap a tool's `execute` so the panel is live for the duration of the call
-// and the file tree catches up with what the call changed. The catch-up is in
-// a `finally`: a refused write still moved the workspace's mtime nowhere, but
-// a PARTIALLY applied one (a site write that published and then failed to
-// activate) leaves the page showing a workspace that no longer exists. The
-// preview is not this wrapper's business: it follows the service worker's
-// push (`onGenerationActive`), which also covers generations another tab or
-// agent made.
+// Whether a mutating call that has finished owes the preview a reload the
+// service worker will not push. Set by any call out of the room, spent by the
+// last one — see `withProgress`.
+var previewOwed = false;
+
+// The generation a wrapped call published, or `null` when it published none.
+//
+// `withProgress` wraps two kinds of call, and each is read in its own shape:
+// an agent tool's `execute`, whose result is a WebMCP tool result carrying
+// the endpoint's response body as `structuredContent`; and this page's own
+// requests — Save, Delete, New file, the compile's staging call — which
+// return the response body itself. A refusal (`isError`, no
+// `structuredContent`), a `blocks/` write, a data write (`shop_*`) or a throw
+// published nothing.
+function publishedGeneration(result) {
+  if (!result) {
+    return null;
+  }
+  var body = result.structuredContent !== undefined ? result.structuredContent : result;
+  return (body && body.generation) || null;
+}
+
+// Wrap a mutating call so the panel is live for its duration and the page
+// catches up with what it changed. The catch-up is in a `finally`: a refused
+// write still moved the workspace's mtime nowhere, but a PARTIALLY applied
+// one (a site write that published and then failed to activate) leaves the
+// page showing a workspace that no longer exists.
+//
+// The preview follows one rule. A call that published a GENERATION is
+// announced by the service worker (`onGenerationActive`), which reloads every
+// tab's preview — this one included — so the catch-up leaves it alone; a
+// second reload here would be the same generation twice. A call that
+// published none — a `shop_*` data write above all, whose rows the framed
+// site reads over `/b/products/*` — is announced by nobody, so the page
+// reloads its preview for it itself.
 function withProgress(execute) {
   return async function (args) {
     // Once the session is gone (`abort.signal.aborted`), the abort handler
@@ -337,9 +364,16 @@ function withProgress(execute) {
     }
     outstanding += 1;
     startPolling();
+    var result;
     try {
-      return await execute(args);
+      result = await execute(args);
+      return result;
     } finally {
+      // Before the count drops, so the last call out sees every sibling's
+      // debt: two overlapping calls, one a data write, still reload once.
+      if (publishedGeneration(result) === null) {
+        previewOwed = true;
+      }
       // Clamp rather than trust the increment/decrement to stay paired: the
       // abort handler can reset `outstanding` to 0 out from under a call
       // that is still in flight (it was never given `abort.signal`, so it
@@ -353,21 +387,25 @@ function withProgress(execute) {
       // already stopped polling, and the endpoints below would just refuse.
       if (outstanding === 0 && !abort.signal.aborted) {
         stopPolling();
-        await refreshAfterChange();
+        var reload = previewOwed;
+        previewOwed = false;
+        await refreshAfterChange(reload);
       }
     }
   };
 }
 
-// The file tree only. No status read and no preview reload: the service
-// worker pushes every generation the moment it commits
-// (`activation.rs::activate_staged` announces it before the reply is sent),
-// and `onGenerationActive` reloads the preview from that push whether it lands
-// before or after this call's reply. Awaiting a status read and reloading
-// here was the delay the push removes — and a second reload of the same
-// generation.
-async function refreshAfterChange() {
+// The file tree, and the preview only when `reloadPreviewToo` — the calls
+// being caught up with published no generation, so no push is coming for
+// them (`withProgress` owns that rule). No status read: a generation's
+// preview reload comes from the service worker's push
+// (`activation.rs::activate_staged` announces each one as it commits), and
+// awaiting a status read before reloading was the delay the push removes.
+async function refreshAfterChange(reloadPreviewToo) {
   try {
+    if (reloadPreviewToo) {
+      reloadPreview();
+    }
     await loadFiles();
   } catch (error) {
     // Never let the catch-up replace the tool's own result: the agent asked
@@ -405,8 +443,14 @@ function onGenerationActive(message) {
   completed = { generation: message.id, phase: 'active' };
   drawLadder(completed.phase, true);
 
+  // Only a SITE generation can be restyled in place. A compile that
+  // coalesced a stylesheet write, or a rollback whose site differs only in
+  // CSS, may still have changed the blocks the page calls — and those need
+  // the reload whatever the paths say.
   var paths = message.changed_paths;
+  var siteOnly = message.cause === 'site_write' || message.cause === 'site_delete';
   var cssOnly =
+    siteOnly &&
     paths.length > 0 &&
     paths.every(function (path) {
       return /\.css$/.test(path);
@@ -420,7 +464,7 @@ function onGenerationActive(message) {
   // tool set. `observe` is what notices the new `runtime_generation` and
   // refreshes those registrations — so one status read, after the preview
   // has already been told to reload rather than before it.
-  if (message.cause !== 'site_write' && message.cause !== 'site_delete' && !abort.signal.aborted) {
+  if (!siteOnly && !abort.signal.aborted) {
     api.get('/b/dev/api/status').then(json).then(observe).catch(logError);
   }
 }
@@ -485,8 +529,11 @@ if (typeof navigator !== 'undefined' && navigator.serviceWorker) {
 // ---- tools ----------------------------------------------------------------
 
 // Which tools change the site, and therefore want the progress panel live
-// and the panes refreshed afterwards. Everything else is a read, and a read
-// must NOT reload the preview: an agent listing the catalog between two
+// and the page caught up afterwards: the file tree always, and the preview
+// when the call published no generation (a `shop_` data write) — a call that
+// published one has its preview reloaded by the service worker's push
+// instead (`withProgress` states the rule). Everything else is a read, and a
+// read must NOT reload the preview: an agent listing the catalog between two
 // writes would otherwise flicker the iframe and re-fetch the file tree for
 // nothing.
 //
@@ -815,6 +862,8 @@ var save = withProgress(async function () {
   if (written.generation) {
     renderProgress(written.generation.id, written.progress);
   }
+  // `withProgress` reads the generation off it (`publishedGeneration`).
+  return written;
 });
 
 var remove = withProgress(async function () {
@@ -841,12 +890,17 @@ var remove = withProgress(async function () {
     }
     return;
   }
-  await json(response);
+  var deleted = await json(response);
   current = null;
   title.textContent = 'Editor';
   text.value = '';
   setEditorEnabled(true);
   log('deleted ' + path);
+  if (deleted.generation) {
+    renderProgress(deleted.generation.id, deleted.progress);
+  }
+  // `withProgress` reads the generation off it (`publishedGeneration`).
+  return deleted;
 });
 
 var create = withProgress(async function () {
@@ -878,9 +932,11 @@ var create = withProgress(async function () {
     }
     return;
   }
-  await json(response);
+  var created = await json(response);
   await openFile(path);
   log('created ' + path);
+  // `withProgress` reads the generation off it (`publishedGeneration`).
+  return created;
 });
 
 document.getElementById('dev-save').addEventListener('click', function () {

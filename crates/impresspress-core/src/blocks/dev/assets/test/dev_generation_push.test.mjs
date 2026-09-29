@@ -130,6 +130,22 @@ test('a generation that changed no site file reloads the preview', async () => {
   assert.equal(frame.reloads, 1);
 });
 
+test('a block-set generation reloads even when the only paths it changed are stylesheets', async () => {
+  // A compile that coalesced a stylesheet write, or a rollback whose site
+  // differs only in CSS: the blocks the page calls changed too, and a restyle
+  // would leave the preview talking to the previous ones.
+  const site = link('/site.css');
+  const { push, frame } = withPreview({ links: [site] });
+  await settle();
+
+  push(generation('gen_13', ['site/site.css'], 'block_compile'));
+  assert.equal(frame.reloads, 1);
+  assert.equal(site.getAttribute('href'), '/site.css', 'nothing was swapped');
+
+  push(generation('gen_14', ['site/site.css'], 'rollback'));
+  assert.equal(frame.reloads, 2);
+});
+
 test('a CSS-only generation the preview does not link directly reloads it instead', async () => {
   // `@import`ed, or simply not on the page on show: swapping zero links
   // would leave the previous generation's styles standing.
@@ -164,20 +180,77 @@ test('messages that are not generation pushes are ignored', async () => {
   assert.equal(frame.reloads, 0);
 });
 
-test('the catch-up after a mutating call reads no status and does not reload the preview', async () => {
-  const { handle, frame, fetchCalls } = withPreview();
+test('the catch-up after a call that published a generation reads no status and leaves the preview to the push', async () => {
+  const { handle, push, frame, fetchCalls } = withPreview();
   await settle();
   const before = statusCalls(fetchCalls);
 
-  await handle.refreshAfterChange();
-  // Through the wrapper too: the last call out runs the catch-up.
-  await handle.withProgress(async () => 'written')();
+  // An agent tool's result: the response body rides in `structuredContent`.
+  await handle.withProgress(async () => ({
+    content: [],
+    structuredContent: { path: 'site/index.html', generation: { id: 'gen_10' } }
+  }))();
+  // This page's own request (Save, Delete, staging): the body itself.
+  await handle.withProgress(async () => ({ path: 'site/a.css', generation: { id: 'gen_11' } }))();
   assert.equal(statusCalls(fetchCalls), before);
-  assert.equal(frame.reloads, 0, 'the push reloads the preview; the catch-up must not reload it again');
+  assert.equal(frame.reloads, 0, 'the push reloads the preview; the catch-up must not reload it too');
   assert.ok(
     fetchCalls.some(([url]) => String(url).startsWith('/b/dev/api/files')),
     'the file tree is still refreshed'
   );
+
+  // …and the push does reload it, once.
+  push(generation('gen_11'));
+  assert.equal(frame.reloads, 1);
+});
+
+test('a mutating call that published no generation reloads the preview itself, once', async () => {
+  // A `shop_*` data write: rows the framed site reads, and no generation, so
+  // no push will ever come for it.
+  const { handle, frame, fetchCalls } = withPreview();
+  await settle();
+  const before = statusCalls(fetchCalls);
+
+  await handle.withProgress(async () => ({
+    content: [],
+    structuredContent: { id: 'prod_1', status: 'active' }
+  }))();
+  assert.equal(frame.reloads, 1);
+  assert.equal(statusCalls(fetchCalls), before, 'and it reads no status to do it');
+
+  // A refusal published nothing either — and neither did a call that threw.
+  await handle.withProgress(async () => ({ isError: true, content: [] }))();
+  await assert.rejects(
+    handle.withProgress(async () => {
+      throw new Error('the request never reached the sandbox');
+    })()
+  );
+  assert.equal(frame.reloads, 3);
+});
+
+test('overlapping calls reload the preview once, when the last one leaves, if any of them owes it', async () => {
+  const { handle, frame } = withPreview();
+  await settle();
+  let releaseData, releaseSite;
+  const data = handle.withProgress(
+    () => new Promise((r) => (releaseData = () => r({ structuredContent: { id: 'prod_1' } })))
+  )();
+  const site = handle.withProgress(
+    () =>
+      new Promise(
+        (r) => (releaseSite = () => r({ structuredContent: { generation: { id: 'gen_12' } } }))
+      )
+  )();
+  await settle();
+
+  // The data write finishes first; the site write is still in flight, so
+  // nothing reloads yet — but the debt is remembered.
+  releaseData();
+  await data;
+  assert.equal(frame.reloads, 0);
+  releaseSite();
+  await site;
+  assert.equal(frame.reloads, 1);
 });
 
 test('a status answered mid-activation that lands after the push does not undo it', async () => {

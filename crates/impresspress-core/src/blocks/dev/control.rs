@@ -319,8 +319,10 @@ pub trait RuntimeControl: wafer_run::MaybeSend + wafer_run::MaybeSync {
 
     /// Tell every open page that `generation` is now live (design §2.6).
     ///
-    /// Called once per activation, after it has committed — the generation
-    /// is active and journalled by then, whoever caused it. It is how a tab
+    /// Called once per activation, after it has committed, whoever caused
+    /// it: the generation's ledger row and the journal say it is active —
+    /// committed in memory, and made durable when the request's flush runs,
+    /// which is after this call and before the reply. It is how a tab
     /// learns of a generation another tab (or an agent driving one) made, and
     /// how the page's own preview learns it may reload without first reading
     /// the status back.
