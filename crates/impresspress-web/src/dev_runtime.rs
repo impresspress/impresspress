@@ -558,10 +558,9 @@ impl RuntimeControl for BrowserRuntimeControl {
         self.generation.get()
     }
 
-    /// Post `{ type: 'dev-generation', id, cause, changed_paths }` to every
-    /// window this worker controls — the `/b/dev` page in every tab, and
-    /// whatever else is open on the origin, which ignores a type it does not
-    /// know.
+    /// Post the `dev-generation` message to every window this worker
+    /// controls — the `/b/dev` page in every tab, and whatever else is open
+    /// on the origin, which ignores a type it does not know.
     ///
     /// Spawned rather than awaited: `matchAll` is a promise, and the trait
     /// method is fire-and-forget because the activation has already
@@ -586,9 +585,8 @@ impl RuntimeControl for BrowserRuntimeControl {
     }
 }
 
-/// The message [`BrowserRuntimeControl::announce_active`] posts, built field
-/// by field so its shape is the one the page reads (`dev.js`'s
-/// `onGenerationActive`): `cause` in the API's own snake_case spelling.
+/// The `dev-generation` message [`BrowserRuntimeControl::announce_active`]
+/// posts, whose shape [`GenerationAnnouncement`]'s doc states.
 fn announcement_message(generation: &GenerationAnnouncement) -> Result<JsValue, JsValue> {
     let message = js_sys::Object::new();
     let changed_paths: js_sys::Array = generation

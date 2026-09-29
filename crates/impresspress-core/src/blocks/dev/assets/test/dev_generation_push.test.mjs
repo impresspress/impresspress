@@ -130,6 +130,17 @@ test('a generation that changed no site file reloads the preview', async () => {
   assert.equal(frame.reloads, 1);
 });
 
+test('a cross-origin stylesheet with a matching path is left alone, and the preview reloads', async () => {
+  // Same pathname as the changed file, another origin: not the site's file.
+  const cdn = link('https://cdn.example/site.css');
+  const { push, frame } = withPreview({ links: [cdn] });
+  await settle();
+
+  push(generation('gen_15', ['site/site.css']));
+  assert.equal(cdn.getAttribute('href'), 'https://cdn.example/site.css');
+  assert.equal(frame.reloads, 1, 'no same-origin match, so the swap falls back to a reload');
+});
+
 test('a block-set generation reloads even when the only paths it changed are stylesheets', async () => {
   // A compile that coalesced a stylesheet write, or a rollback whose site
   // differs only in CSS: the blocks the page calls changed too, and a restyle

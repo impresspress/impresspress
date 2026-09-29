@@ -422,14 +422,13 @@ async function refreshAfterChange(reloadPreviewToo) {
 // per generation, however many times it is told.
 var shownGeneration = null;
 
-// One `{ type: 'dev-generation', id, cause, changed_paths }` push from the
-// service worker (`dev_runtime.rs::announce_active`): generation `id` is live.
+// One `dev-generation` push from the service worker, whose shape
+// `control.rs`'s `GenerationAnnouncement` states: generation `id` is live.
 // Sent to every tab on the origin for every activation, whoever caused it —
 // so this is what keeps a preview current when another tab, or an agent
 // driving one, changes the site.
 //
-// `changed_paths` are workspace paths (`site/…`) the publish wrote or
-// removed. When every one is a stylesheet the page's markup and scripts are
+// When every changed path is a stylesheet the page's markup and scripts are
 // unchanged, and swapping the stylesheets in place keeps the preview's
 // scroll position and state where a reload would throw both away.
 function onGenerationActive(message) {
@@ -478,14 +477,22 @@ function onGenerationActive(message) {
 // changed stylesheets directly (it `@import`s them, or is not a page at all),
 // and the caller reloads instead — a swap that restyled nothing would leave
 // the preview showing the previous generation.
+//
+// Only a same-origin link can be one of the site's files: a stylesheet from
+// another origin whose pathname happens to match is someone else's file, and
+// rewriting it to `pathname?g=` would point it at this origin instead.
 function swapStylesheets(paths, generationId) {
   var frame = document.getElementById('dev-preview-frame');
   var swapped = 0;
   try {
     var base = frame.contentWindow.location.href;
+    var origin = new URL(base).origin;
     var links = frame.contentDocument.querySelectorAll('link[rel="stylesheet"]');
     for (var i = 0; i < links.length; i += 1) {
       var url = new URL(links[i].getAttribute('href'), base);
+      if (url.origin !== origin) {
+        continue;
+      }
       // The site is served from `/` (`page.rs`'s frame), so the workspace
       // path of `/css/site.css` is `site/css/site.css`.
       if (paths.indexOf('site' + decodeURIComponent(url.pathname)) !== -1) {
@@ -1461,9 +1468,10 @@ async function runCompile(name) {
   // publishes a generation with a NEW id, which `renderStatus` already sees
   // is not the one `completed` describes.
   //
-  // And the ladder on screen is redrawn here, not left to the next poll:
-  // `drawLadder` runs only from `observe`, and the status is no longer polled
-  // while the worker compiles (the panel opens at the staging call below), so
+  // And the ladder on screen is redrawn here, not left to something else:
+  // nothing else redraws it until the staging call's own result or push
+  // arrives (`renderProgress`, `onGenerationActive`) or a status is read,
+  // and the status is not polled while the worker compiles (the panel opens at the staging call below), so
   // forgetting `completed` without repainting would leave the PREVIOUS
   // compile's four green steps standing over this one for its whole eighty
   // seconds — the exact lie this line exists to end. `idle` is the phase

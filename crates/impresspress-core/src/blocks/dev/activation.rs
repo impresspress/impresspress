@@ -915,9 +915,9 @@ async fn activate_staged(
     )
     .await
     .map_err(storage_error)?;
-    // Committed: the generation is live — committed in memory, and made
-    // durable when the request's flush runs — so every open page may now be
-    // told (design §2.6). Before `maintain`, which the page has no reason to
+    // Committed: the generation's ledger row and journal are written and say
+    // it is live, so every open page may now be told (design §2.6); the
+    // reply follows the announcement. Before `maintain`, which the page has no reason to
     // wait for. The paths are spelled as the workspace spells them
     // (`site/…`), the one form every `/b/dev` surface uses for a site file.
     shared.control.announce_active(&GenerationAnnouncement {

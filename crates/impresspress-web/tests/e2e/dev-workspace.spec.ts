@@ -650,6 +650,28 @@ test('the editor refuses to save a binary file over itself', async ({ page }) =>
   // `PAGE_TOOLS.length` is what it needs, not what it happens to satisfy.
   await waitForTool(page, 'dev_export');
 
+  // Every `/b/dev/api/files/write` the page sends, whoever sends it: the
+  // tool calls below go through the same endpoint, so the assertions compare
+  // counts before and after a click rather than expecting zero.
+  const writes: string[] = [];
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname === '/b/dev/api/files/write') {
+      writes.push(request.url());
+    }
+  });
+
+  // The positive control: on a TEXT file, a click on `#dev-save` sends
+  // exactly one write. This is what proves the button is wired to `save()`,
+  // so that the binary file's "no write" below is `save()` refusing and not a
+  // click that reaches nothing.
+  await page.locator('#dev-file-list a[data-path="site/index.html"]').click();
+  await expect(page.locator('#dev-editor-title')).toHaveText('site/index.html');
+  await expect(page.locator('#dev-editor-text')).toBeEnabled();
+  const beforeControl = writes.length;
+  await page.locator('#dev-save').click();
+  await expect(page.locator('#dev-log')).toContainText('saved site/index.html');
+  expect(writes.length - beforeControl).toBe(1);
+
   // A `.png` is binary whatever its bytes: `paths::content_type_for` maps the
   // extension to `image/png`, `may_be_text` says no, and so `dev_read_file`
   // answers `base64` for it — which is exactly the case the editor cannot
@@ -696,16 +718,10 @@ test('the editor refuses to save a binary file over itself', async ({ page }) =>
   // that caller is the DOM: re-enable ONLY the button, leaving the textarea
   // disabled, and click it for real. The early return does nothing visible —
   // it is checked before `withProgress`, so there is no catch-up to observe
-  // (a no-op must not reload the preview) — so the tripwire is the click
-  // itself: a listener added after `dev.js`'s runs after it on the same
-  // dispatch, so a counted click means `save()` really ran and this is not a
-  // click that quietly went nowhere. The write requests are counted too.
-  const writes: string[] = [];
-  page.on('request', (request) => {
-    if (new URL(request.url()).pathname === '/b/dev/api/files/write') {
-      writes.push(request.url());
-    }
-  });
+  // (a no-op must not reload the preview). The click counter below proves
+  // only that the click was dispatched to an ENABLED button (a disabled one
+  // would swallow it); that the button runs `save()` is the positive control
+  // above. Together: `save()` ran, and sent nothing.
   await page.evaluate(() => {
     const button = document.getElementById('dev-save') as HTMLButtonElement;
     (window as unknown as { __saveClicks: number }).__saveClicks = 0;
@@ -714,16 +730,19 @@ test('the editor refuses to save a binary file over itself', async ({ page }) =>
     });
     button.disabled = false;
   });
+  const beforeClick = writes.length;
   await page.locator('#dev-save').click();
   expect(
     await page.evaluate(() => (window as unknown as { __saveClicks: number }).__saveClicks),
   ).toBe(1);
-  expect(writes).toEqual([]);
 
   // Nothing moved: same bytes, same hash, same ledger.
   const after = structured<FileRead>(await execute(page, 'dev_read_file', {
     path: PIXEL_PNG_PATH,
   }));
+  // Checked after a full round trip through the service worker, so a write
+  // the click had sent would already have been seen.
+  expect(writes.length - beforeClick, 'the refused save sent a write').toBe(0);
   expect(after.encoding).toBe('base64');
   expect(after.content).toBe(PIXEL_PNG_BASE64);
   expect(after.sha256).toBe(written.sha256);

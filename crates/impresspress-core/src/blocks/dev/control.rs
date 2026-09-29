@@ -320,9 +320,9 @@ pub trait RuntimeControl: wafer_run::MaybeSend + wafer_run::MaybeSync {
     /// Tell every open page that `generation` is now live (design §2.6).
     ///
     /// Called once per activation, after it has committed, whoever caused
-    /// it: the generation's ledger row and the journal say it is active —
-    /// committed in memory, and made durable when the request's flush runs,
-    /// which is after this call and before the reply. It is how a tab
+    /// it: its ledger row and journal are written and say it is active, and
+    /// the reply to the request that caused it follows the announcement. It
+    /// is how a tab
     /// learns of a generation another tab (or an agent driving one) made, and
     /// how the page's own preview learns it may reload without first reading
     /// the status back.
@@ -337,11 +337,28 @@ pub trait RuntimeControl: wafer_run::MaybeSend + wafer_run::MaybeSync {
 
 /// What [`RuntimeControl::announce_active`] tells the page about a
 /// generation that has just gone live.
+///
+/// # The `dev-generation` message
+///
+/// This is the canonical statement of the wire shape; the browser's
+/// `dev_runtime.rs::announcement_message` builds it and `dev.js`'s
+/// `onGenerationActive` reads it. Every window on the origin receives, via
+/// `postMessage`, a plain object with exactly four fields:
+///
+/// - `type`: the string `"dev-generation"`, which is how a window tells this
+///   message from anything else the service worker posts;
+/// - `id`: [`Self::id`];
+/// - `cause`: [`Self::cause`] in [`GenerationCause::as_str`]'s snake_case
+///   spelling (`site_write`, `site_delete`, `block_compile`, `block_remove`,
+///   `rollback`, `seed`), the same spelling the `/b/dev` API uses;
+/// - `changed_paths`: [`Self::changed_paths`], an array of strings.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct GenerationAnnouncement {
     /// The generation that is now active.
     pub id: String,
-    /// What created it.
+    /// What created it. Only `site_write` and `site_delete` leave the block
+    /// set as it was; any other cause may have changed the blocks the site
+    /// calls.
     pub cause: GenerationCause,
     /// Every workspace path (`site/…`) the activation wrote to or removed
     /// from the published site, in the order the publisher touched them.
