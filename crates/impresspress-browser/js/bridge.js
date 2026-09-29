@@ -111,19 +111,25 @@ export function dbQueryRaw(sql, params) {
  * Export the sql.js DB to a Uint8Array and write it to OPFS at
  * `impresspress.db`.
  *
- * Durability contract: the Rust side (`BrowserDatabaseService::with_flush`
- * in `database.rs`) calls this exactly ONCE per logical `DatabaseService`
- * mutation (`create`/`update`/`delete`/`upsert`/`exec_raw`/schema changes),
- * not once per SQL statement — a logical mutation that issues several
- * statements (e.g. a lazy column-add ALTER before the INSERT) is one flush,
- * not N. The flush happens even when the logical operation's own result is
- * an error, since an earlier statement inside it may already have mutated
- * the in-memory sql.js DB. There is no background/debounced/timer-based
- * flush — every `DatabaseService` call that returns has already attempted
- * exactly one flush, so the only crash-loss window is "mid-flush" (the tab
- * or Service Worker is killed while `dbFlush` itself is exporting/writing),
- * which is an inherent OPFS/browser-crash risk independent of this
- * batching, not a window this change introduces.
+ * Durability contract (`with_flush_mapped` in `database.rs`; the scope's
+ * half in `src/flush_scope.rs`): outside a flush scope, the Rust side calls
+ * this exactly ONCE per logical `DatabaseService` mutation
+ * (`create`/`update`/`delete`/`upsert`/`exec_raw`/schema changes), not once
+ * per SQL statement — a logical mutation that issues several statements
+ * (e.g. a lazy column-add ALTER before the INSERT) is one flush, not N.
+ * Inside a flush scope (one request), a mutation calls nothing: it records
+ * that the scope owes a flush, and the scope calls this exactly ONCE when
+ * its work is done, before the request's reply is returned; a scope that
+ * mutated nothing does not call it. Either way the flush happens even when
+ * a logical operation's own result is an error, since an earlier statement
+ * inside it may already have mutated the in-memory sql.js DB. There is no
+ * background/debounced/timer-based flush — a `DatabaseService` call made
+ * outside a scope has attempted its flush by the time it returns, and a
+ * scope has attempted its one flush by the time it hands its output back,
+ * so the only crash-loss windows are "mid-flush" (the tab or Service
+ * Worker is killed while `dbFlush` itself is exporting/writing) and, inside
+ * a scope, between a mutation and the scope's end — before any reply that
+ * could report the mutation done has been sent.
  *
  * sql.js's `export()` closes the connection and opens a new one, which rolls
  * back a transaction still open on it. The Rust side ends any such

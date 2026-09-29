@@ -278,6 +278,9 @@ where
 
 /// Which of an operation's outcome and its flush's outcome the caller is told
 /// about. Pure, so it is testable without a bridge (`flush_precedence`).
+/// Inside a [`crate::flush_scope`] the second argument is not a flush but the
+/// per-write transaction check ([`settle_transaction`]), with the same
+/// precedence; the scope's one flush is reported by the scope.
 ///
 /// - `op` succeeds, flush succeeds → `Ok`. The common case: durable.
 /// - `op` succeeds, flush fails → the flush error. The mutation is sitting in
@@ -308,7 +311,9 @@ unsafe impl Sync for BrowserDatabaseService {}
 
 impl BrowserDatabaseService {
     /// Run a mutating `op`, then flush the sql.js DB to OPFS exactly once —
-    /// this is the coalescing point described in the module doc comment.
+    /// or, inside a [`crate::flush_scope`], record that the scope owes that
+    /// flush, which it performs once at its own end. This is the coalescing
+    /// point described in the module doc comment.
     /// [`with_flush_mapped`] owns the contract; this is it at
     /// `E = DatabaseError`.
     async fn with_flush<T>(

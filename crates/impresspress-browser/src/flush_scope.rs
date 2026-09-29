@@ -252,11 +252,13 @@ mod tests {
     ///    inside its scope, until B has finished; B completes and flushes.
     /// 3. A completes and flushes.
     ///
-    /// A scope that is current from when its request starts until it ends,
-    /// rather than on each poll, fails here: A's mutation in round 2 lands
-    /// on B's flag, B flushes it, and A — the request that made it — flushes
-    /// zero times. A scope that does not restore the previous flag after a
-    /// poll fails the last assertion.
+    /// A scope that is made current once, when its request starts, and
+    /// cleared when it ends, rather than on each poll, fails here: B's `run`
+    /// first runs while A's flag is still current, so it joins A's scope as
+    /// if nested, and B — a separate request — never flushes at its own end
+    /// (A sees no export before it completes). A scope that installs its
+    /// flag per poll but does not restore the previous one after the poll
+    /// fails the same way, since A's flag is left current when B starts.
     #[wasm_bindgen_test]
     async fn interleaved_scopes_each_flush_once() {
         let db = fresh().await;
