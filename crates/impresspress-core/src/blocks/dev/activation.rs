@@ -691,7 +691,10 @@ async fn activate(
     // are rare, so they deliberately trust nothing and probe every blob they
     // name, the ones the active site shares included: defence in depth
     // against a store that lost content behind the ledger's back, bought
-    // where it costs nothing that matters.
+    // where it costs nothing that matters. In the browser a probe of a blob
+    // the storage read cache holds is answered from the worker's memory, not
+    // OPFS; under the single-writer premise (see `impresspress-browser`'s
+    // `storage_cache`) that is the same answer OPFS would give.
     let present_site = match cause {
         GenerationCause::SiteWrite
         | GenerationCause::SiteDelete

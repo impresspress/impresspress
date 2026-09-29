@@ -345,12 +345,17 @@ async fn stream_to_opfs(
     Ok(())
 }
 
-/// A cached object's `ObjectInfo` as an uncached read reports it: `get` and
-/// `get_streaming` stamp `last_modified` with the time of the read (they do not
-/// read the OPFS file's own timestamp), so a hit does the same and the two are
-/// indistinguishable.
-fn fresh_info(info: ObjectInfo) -> ObjectInfo {
+/// A cached object's `ObjectInfo` as an uncached read of `key` reports it, so
+/// a hit and a miss are indistinguishable:
+///
+/// - `key` is the caller's, not the one the entry was cached under. Two names
+///   can reach one entry (`("a", "b/c")` and `("a/b", "c")` are one OPFS
+///   file, see `storage_cache`), and a miss reports the key it was asked for.
+/// - `last_modified` is the time of the read: `get` and `get_streaming` do not
+///   read the OPFS file's own timestamp.
+fn fresh_info(key: &str, info: ObjectInfo) -> ObjectInfo {
     ObjectInfo {
+        key: key.to_string(),
         last_modified: Utc::now(),
         ..info
     }
@@ -373,8 +378,9 @@ impl StorageService for BrowserStorageService {
             .await
             .map(|_| ());
         match written {
-            // What `get` reports for these bytes: `storagePut`'s sidecar
-            // records exactly this content type and length.
+            // What `get` reports for these bytes: their length (`storageGet`
+            // takes it from the bytes it reads) and the content type
+            // `storagePut`'s sidecar records.
             Ok(()) => with_cache(|cache| {
                 let info = ObjectInfo {
                     key: key.to_string(),
@@ -397,7 +403,7 @@ impl StorageService for BrowserStorageService {
     /// from OPFS and cached if it fits.
     async fn get(&self, folder: &str, key: &str) -> Result<(Vec<u8>, ObjectInfo), StorageError> {
         if let Some(hit) = with_cache(|cache| cache.get(folder, key)) {
-            return Ok((hit.data.to_vec(), fresh_info(hit.info)));
+            return Ok((hit.data.to_vec(), fresh_info(key, hit.info)));
         }
         let ticket = with_cache(|cache| cache.ticket());
 
@@ -457,7 +463,7 @@ impl StorageService for BrowserStorageService {
         if let Some(hit) = with_cache(|cache| cache.get(folder, key)) {
             return Ok((
                 OutputStream::respond(hit.data.to_vec()),
-                fresh_info(hit.info),
+                fresh_info(key, hit.info),
             ));
         }
 
@@ -1390,6 +1396,27 @@ export function installMemoryStorageOpfs() {
         assert_eq!(hit.key, miss.key);
         assert_eq!(hit.size, miss.size);
         assert_eq!(hit.content_type, miss.content_type);
+    }
+
+    /// `("a", "b/c")` and `("a/b", "c")` are one OPFS file and one cache
+    /// entry; a hit through either name reports the key it was asked for, as
+    /// a miss would.
+    #[wasm_bindgen_test]
+    async fn a_hit_through_another_name_reports_the_callers_key() {
+        let svc = fresh_storage();
+        svc.put("a", "b/c", b"bytes", "text/plain")
+            .await
+            .expect("put");
+        let before = opfs_reads();
+
+        let (data, info) = svc.get("a/b", "c").await.expect("get");
+        let (stream, streamed) = svc.get_streaming("a/b", "c").await.expect("get_streaming");
+
+        assert_eq!(opfs_reads(), before, "both reads are cache hits");
+        assert_eq!(data, b"bytes");
+        assert_eq!(body(stream).await, b"bytes");
+        assert_eq!(info.key, "c");
+        assert_eq!(streamed.key, "c");
     }
 
     #[wasm_bindgen_test]

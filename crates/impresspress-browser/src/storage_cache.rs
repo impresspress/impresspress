@@ -5,7 +5,12 @@
 //! OPFS `storage` directory — the page never opens it, and `loader.js`'s wipe
 //! runs only after the workers are unregistered — and every write the worker
 //! makes goes through `BrowserStorageService`, which reports each one here
-//! (`put`, `put_streaming`, `delete`, `delete_folder`). There is one cache per
+//! (`put`, `put_streaming`, `delete`, `delete_folder`). Unregistering does not
+//! terminate a worker that is already running, so the wipe alone does not
+//! guarantee no worker (and no cache) outlives it: that rests on the recovery
+//! flow navigating the page away right after the wipe, which leaves the old
+//! worker with no client to serve, and the next page load starting a fresh
+//! worker with an empty cache. There is one cache per
 //! worker (see `storage::READ_CACHE`), not one per service instance, because
 //! the runtime builds a fresh service for every runtime it builds while the
 //! OPFS they all write is the same.
@@ -16,10 +21,15 @@
 //! buffered `get` per request) — each of which was otherwise an OPFS directory
 //! walk, a file read and a metadata-sidecar read.
 //!
-//! **Bounds.** At most [`BUDGET_BYTES`] of object bytes in total, least
-//! recently used evicted first, and no object over [`MAX_ENTRY_BYTES`] is held
-//! at all, so a site larger than the budget degrades to reading OPFS exactly
-//! as it did before the cache, never worse.
+//! **Bounds.** The cache's memory stays within about [`BUDGET_BYTES`], least
+//! recently used evicted first: each entry is charged its object bytes, the
+//! strings it holds (the path twice, the `ObjectInfo`'s key and content type)
+//! and [`ENTRY_OVERHEAD_BYTES`] for its fixed bookkeeping, so many tiny objects
+//! are bounded as surely as a few large ones. The charge is an estimate of the
+//! heap the entry holds, not an allocator measurement, so the bound is
+//! approximate. No object over [`MAX_ENTRY_BYTES`] is held at all, so a site
+//! larger than the budget degrades to reading OPFS exactly as it did before
+//! the cache, never worse.
 //!
 //! **Keys are object paths.** OPFS stores `(folder "a", key "b/c")` and
 //! `(folder "a/b", key "c")` as the same file, so the cache keys an object by
@@ -42,11 +52,25 @@ use std::{
 
 use wafer_core::interfaces::storage::service::ObjectInfo;
 
-/// Total object bytes the cache holds before it evicts.
+/// The memory, approximately, the cache holds before it evicts: the sum of
+/// every entry's [`charge`], not only its object bytes.
 pub(crate) const BUDGET_BYTES: usize = 16 * 1024 * 1024;
 
 /// Largest object the cache holds; anything bigger is always read from OPFS.
 pub(crate) const MAX_ENTRY_BYTES: usize = 1024 * 1024;
+
+/// An entry's fixed memory beyond its bytes and strings: the map slot with its
+/// `ObjectInfo`, up to two recency records in `order` (see [`ReadCache::compact`]),
+/// the `Rc` header, and an allocator header for each of its five heap
+/// allocations. That is under 200 bytes on wasm32, rounded up.
+pub(crate) const ENTRY_OVERHEAD_BYTES: usize = 256;
+
+/// What an entry costs against the budget: its object bytes, its path (held
+/// twice, as the map key and in its recency record), its `ObjectInfo`'s
+/// strings and [`ENTRY_OVERHEAD_BYTES`].
+fn charge(path: &str, data: &[u8], info: &ObjectInfo) -> usize {
+    data.len() + 2 * path.len() + info.key.len() + info.content_type.len() + ENTRY_OVERHEAD_BYTES
+}
 
 /// One cached object: its bytes, shared rather than copied until a caller
 /// needs a `Vec`, and the `ObjectInfo` a read of it reports.
@@ -64,6 +88,8 @@ struct Slot {
     cached: Cached,
     /// The recency stamp of this entry's live record in `order`.
     stamp: u64,
+    /// What this entry was charged against the budget when inserted.
+    charge: usize,
 }
 
 pub(crate) struct ReadCache {
@@ -74,7 +100,8 @@ pub(crate) struct ReadCache {
     /// are skipped by eviction and dropped by [`Self::compact`], which keeps
     /// this at most twice the number of entries.
     order: VecDeque<(String, u64)>,
-    bytes: usize,
+    /// The sum of every entry's [`charge`].
+    charged: usize,
     budget: usize,
     max_entry: usize,
     next_stamp: u64,
@@ -96,7 +123,7 @@ impl ReadCache {
         Self {
             entries: HashMap::new(),
             order: VecDeque::new(),
-            bytes: 0,
+            charged: 0,
             budget,
             max_entry,
             next_stamp: 0,
@@ -177,18 +204,20 @@ impl ReadCache {
     }
 
     /// Hold `data` as `folder/key`, replacing any previous entry, then evict
-    /// least recently used entries until the total is within the budget. An
-    /// object over the per-entry cap is not held (and is not copied).
+    /// least recently used entries until the total [`charge`] is within the
+    /// budget. An object over the per-entry cap, or whose charge alone exceeds
+    /// the budget, is not held (and is not copied).
     pub(crate) fn insert(&mut self, folder: &str, key: &str, data: &[u8], info: &ObjectInfo) {
-        if data.len() > self.max_entry || data.len() > self.budget {
-            self.remove(folder, key);
+        let path = object_path(folder, key);
+        let charge = charge(&path, data, info);
+        if data.len() > self.max_entry || charge > self.budget {
+            self.remove_path(&path);
             return;
         }
-        let path = object_path(folder, key);
         self.remove_path(&path);
         let stamp = self.next_stamp;
         self.next_stamp += 1;
-        self.bytes += data.len();
+        self.charged += charge;
         self.entries.insert(
             path.clone(),
             Slot {
@@ -197,10 +226,11 @@ impl ReadCache {
                     info: info.clone(),
                 },
                 stamp,
+                charge,
             },
         );
         self.order.push_back((path, stamp));
-        while self.bytes > self.budget {
+        while self.charged > self.budget {
             self.evict_one();
         }
         self.compact();
@@ -228,7 +258,7 @@ impl ReadCache {
     /// [`Self::compact`].
     fn remove_path(&mut self, path: &str) {
         if let Some(slot) = self.entries.remove(path) {
-            self.bytes -= slot.cached.data.len();
+            self.charged -= slot.charge;
         }
         self.compact();
     }
@@ -241,7 +271,7 @@ impl ReadCache {
                 .is_some_and(|slot| slot.stamp == stamp);
             if live {
                 if let Some(slot) = self.entries.remove(&path) {
-                    self.bytes -= slot.cached.data.len();
+                    self.charged -= slot.charge;
                 }
                 return;
             }
@@ -267,8 +297,13 @@ impl ReadCache {
     }
 
     #[cfg(test)]
-    fn bytes(&self) -> usize {
-        self.bytes
+    fn charged(&self) -> usize {
+        self.charged
+    }
+
+    #[cfg(test)]
+    fn len(&self) -> usize {
+        self.entries.len()
     }
 }
 
@@ -295,6 +330,11 @@ mod tests {
         cache.get(folder, key).is_some()
     }
 
+    /// What [`put`] charges `folder/key` holding `len` bytes.
+    fn cost(folder: &str, key: &str, len: usize) -> usize {
+        charge(&object_path(folder, key), &vec![7u8; len], &info(key, len))
+    }
+
     #[test]
     fn a_hit_returns_the_bytes_and_info_inserted() {
         let mut cache = ReadCache::new();
@@ -308,7 +348,9 @@ mod tests {
 
     #[test]
     fn inserting_past_the_budget_evicts_the_least_recently_used() {
-        let mut cache = ReadCache::with_bounds(30, 20);
+        // Room for exactly three of these equal-cost entries.
+        let unit = cost("f", "a", 10);
+        let mut cache = ReadCache::with_bounds(3 * unit, 20);
         put(&mut cache, "f", "a", 10);
         put(&mut cache, "f", "b", 10);
         put(&mut cache, "f", "c", 10);
@@ -320,27 +362,59 @@ mod tests {
         assert!(held(&mut cache, "f", "a"), "the MRU entry must stay");
         assert!(held(&mut cache, "f", "c"));
         assert!(held(&mut cache, "f", "d"));
-        assert_eq!(cache.bytes(), 30);
+        assert_eq!(cache.charged(), 3 * unit);
     }
 
     #[test]
     fn one_insert_evicts_as_many_entries_as_the_budget_needs() {
-        let mut cache = ReadCache::with_bounds(30, 30);
+        let unit = cost("f", "a", 10);
+        let mut cache = ReadCache::with_bounds(3 * unit, 3 * unit);
         put(&mut cache, "f", "a", 10);
         put(&mut cache, "f", "b", 10);
         put(&mut cache, "f", "c", 10);
-        put(&mut cache, "f", "big", 25);
+        // Costs more than two entries, so all three must go to fit it.
+        let big = 2 * unit;
+        assert!(cost("f", "big", big) > 2 * unit && cost("f", "big", big) <= 3 * unit);
+        put(&mut cache, "f", "big", big);
 
         assert!(!held(&mut cache, "f", "a"));
         assert!(!held(&mut cache, "f", "b"));
         assert!(!held(&mut cache, "f", "c"));
         assert!(held(&mut cache, "f", "big"));
-        assert_eq!(cache.bytes(), 25);
+        assert_eq!(cache.charged(), cost("f", "big", big));
+    }
+
+    /// The budget bounds memory, not only object bytes: an empty object still
+    /// costs its path, its `ObjectInfo` and its bookkeeping.
+    #[test]
+    fn many_tiny_objects_are_bounded_by_their_bookkeeping() {
+        let mut cache = ReadCache::with_bounds(10 * ENTRY_OVERHEAD_BYTES, 10);
+        for i in 0..1_000 {
+            put(&mut cache, "f", &format!("k{i:03}"), 0);
+        }
+        assert!(cache.len() < 10, "{} empty objects held", cache.len());
+        assert!(cache.charged() <= 10 * ENTRY_OVERHEAD_BYTES);
+        assert!(held(&mut cache, "f", "k999"), "the newest entry stays");
+    }
+
+    #[test]
+    fn an_entry_is_charged_its_bytes_strings_and_overhead() {
+        let path = "folder/key.html";
+        let info = ObjectInfo {
+            key: "key.html".to_string(),
+            size: 4,
+            content_type: "text/html".to_string(),
+            last_modified: Utc::now(),
+        };
+        assert_eq!(
+            charge(path, b"body", &info),
+            4 + 2 * path.len() + "key.html".len() + "text/html".len() + ENTRY_OVERHEAD_BYTES
+        );
     }
 
     #[test]
     fn an_object_over_the_entry_cap_is_not_held() {
-        let mut cache = ReadCache::with_bounds(100, 10);
+        let mut cache = ReadCache::with_bounds(BUDGET_BYTES, 10);
         put(&mut cache, "f", "small", 10);
         put(&mut cache, "f", "big", 11);
         assert!(!held(&mut cache, "f", "big"));
@@ -348,19 +422,20 @@ mod tests {
             held(&mut cache, "f", "small"),
             "a skipped insert evicts nothing"
         );
-        assert_eq!(cache.bytes(), 10);
+        assert_eq!(cache.charged(), cost("f", "small", 10));
     }
 
     #[test]
     fn an_over_size_rewrite_forgets_the_old_bytes() {
-        let mut cache = ReadCache::with_bounds(100, 10);
+        let mut cache = ReadCache::with_bounds(BUDGET_BYTES, 10);
         put(&mut cache, "f", "k", 5);
+        assert!(held(&mut cache, "f", "k"));
         put(&mut cache, "f", "k", 11);
         assert!(
             !held(&mut cache, "f", "k"),
             "the previous bytes are stale now"
         );
-        assert_eq!(cache.bytes(), 0);
+        assert_eq!(cache.charged(), 0);
     }
 
     #[test]
@@ -376,10 +451,10 @@ mod tests {
 
     #[test]
     fn replacing_an_entry_accounts_its_bytes_once() {
-        let mut cache = ReadCache::with_bounds(100, 100);
+        let mut cache = ReadCache::new();
         put(&mut cache, "f", "k", 40);
         put(&mut cache, "f", "k", 30);
-        assert_eq!(cache.bytes(), 30);
+        assert_eq!(cache.charged(), cost("f", "k", 30));
         assert_eq!(cache.get("f", "k").map(|c| c.data.len()), Some(30));
     }
 
@@ -391,7 +466,7 @@ mod tests {
         cache.remove("f", "a");
         assert!(!held(&mut cache, "f", "a"));
         assert!(held(&mut cache, "f", "b"));
-        assert_eq!(cache.bytes(), 3);
+        assert_eq!(cache.charged(), cost("f", "b", 3));
     }
 
     #[test]
@@ -413,7 +488,10 @@ mod tests {
             "a sibling sharing a prefix stays"
         );
         assert!(held(&mut cache, "sit", "e"));
-        assert_eq!(cache.bytes(), 6);
+        assert_eq!(
+            cache.charged(),
+            cost("site2", "index.html", 3) + cost("sit", "e", 3)
+        );
     }
 
     /// OPFS stores `("a", "b/c")` and `("a/b", "c")` as one file, so a write
