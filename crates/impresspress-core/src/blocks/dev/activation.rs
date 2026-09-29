@@ -705,9 +705,11 @@ async fn activate(
     let outcome = activate_staged(
         ctx,
         shared,
-        &row,
-        &manifest,
-        previous.as_ref(),
+        Staged {
+            row: &row,
+            manifest: &manifest,
+            previous: previous.as_ref(),
+        },
         present_site,
         &state,
         maintenance,
@@ -780,6 +782,19 @@ async fn adopt_site(
     workspace::save(ctx, &ws).await
 }
 
+/// A generation row that has been staged, with what it would succeed.
+///
+/// The three always travel together: [`activate_staged`] validates and
+/// publishes `manifest`, records the outcome on `row`, and restores
+/// `previous` if publishing fails. Both callers build the triple from the same
+/// two reads (`activate` after staging, [`converge_on_boot`] from the journal).
+struct Staged<'a> {
+    row: &'a GenerationRow,
+    manifest: &'a GenerationManifest,
+    /// The active generation this one succeeds, `None` for the first ever.
+    previous: Option<&'a (GenerationRow, GenerationManifest)>,
+}
+
 /// Drive an already-staged generation to live.
 ///
 /// Split from [`activate`] because boot recovery converges on a row that
@@ -791,13 +806,16 @@ async fn adopt_site(
 async fn activate_staged(
     ctx: &dyn Context,
     shared: &Arc<super::DevShared>,
-    row: &GenerationRow,
-    manifest: &GenerationManifest,
-    previous: Option<&(GenerationRow, GenerationManifest)>,
+    staged: Staged<'_>,
     present_site: Option<&SiteManifest>,
     state: &RuntimeState,
     maintenance: Maintenance,
 ) -> Result<ActivationOutcome, ActivationError> {
+    let Staged {
+        row,
+        manifest,
+        previous,
+    } = staged;
     let id = row.id.as_str();
     let previous_manifest = previous.map(|(_, manifest)| manifest);
     let mut progress = Progress::start();
@@ -1199,9 +1217,11 @@ pub async fn converge_on_boot(
                 if activate_staged(
                     ctx,
                     shared,
-                    &row,
-                    &manifest,
-                    previous.as_ref(),
+                    Staged {
+                        row: &row,
+                        manifest: &manifest,
+                        previous: previous.as_ref(),
+                    },
                     None,
                     &state,
                     Maintenance::Inline,
