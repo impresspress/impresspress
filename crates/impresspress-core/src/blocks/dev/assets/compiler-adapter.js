@@ -21,12 +21,15 @@
 // including the site the preview iframe renders — could then reach.
 //
 // It imports nothing. `webmcp-core.js`'s `buildRequest`/`toolOptions` are
-// about calling HTTP tools over `fetch`; a worker session has no HTTP in it.
+// about calling HTTP tools over `fetch`; a worker session has no HTTP in it —
+// which is also why the guest crate is handed in by the caller rather than
+// fetched here.
 //
 // # The shape of a session (compiler/README.md is the long version)
 //
-//     new BrowserRustCompiler(manifest)   // from /__impresspress_dev/compiler/manifest.json
-//     await c.initialize(onProgress)      // 'download' … 'initializing' … ready (~7 s)
+//     new BrowserRustCompiler(manifest, { guest })   // manifest.json + GET /b/dev/api/guest
+//     await c.initialize(onProgress)      // 'download' … 'initializing' … ready
+//                                         // (~7 s, plus ~30 s building the guest crate once)
 //     await c.compile({ crateName, files, onProgress })   // 'compiling' … result
 //     await c.cancel()                    // the in-flight compile resolves cancelled
 //     await c.dispose()
@@ -137,7 +140,8 @@ const INIT_SILENCE_TIMEOUT_MS = 360000;
  *   stderr: string,
  *   diagnostics: Diagnostic[],
  *   elapsedMs: number,
- *   compilerVersion: string | null
+ *   compilerVersion: string | null,
+ *   guestVersion: number | null
  * }} CompileResult
  */
 
@@ -211,6 +215,16 @@ function malformedDiagnostic(diagnostic) {
   return null;
 }
 
+/** Whether `files` is a crate's files as the worker writes them: path → text. */
+function isFileMap(files) {
+  return (
+    !!files &&
+    typeof files === 'object' &&
+    !Array.isArray(files) &&
+    Object.values(files).every((contents) => typeof contents === 'string')
+  );
+}
+
 /** Lowercase hex SHA-256 of a buffer, the form `builds/stage` records. */
 async function sha256Hex(buffer) {
   const digest = await crypto.subtle.digest('SHA-256', buffer);
@@ -271,12 +285,30 @@ export class BrowserRustCompiler {
   #initSilenceMs;
 
   /**
+   * The guest SDK crate every session is started with, as
+   * `GET /b/dev/api/guest` answered — or `null` for a session that builds
+   * self-contained crates only.
+   */
+  #guest;
+
+  /**
    * @param {{ version: string, entry: string, target: string }} manifest
    *   `/__impresspress_dev/compiler/manifest.json`, parsed.
-   * @param {{ initSilenceMs?: number }} [options]
+   * @param {{ initSilenceMs?: number, guest?: {
+   *   version: number,
+   *   files: Record<string, string>,
+   *   warmup: { crate_name: string, files: Record<string, string> }
+   * } }} [options]
    *   `initSilenceMs` overrides [`INIT_SILENCE_TIMEOUT_MS`]. It exists so the
    *   end-to-end test can drive the start-up watchdog in seconds instead of
    *   minutes; the page passes nothing and gets the documented default.
+   *
+   *   `guest` is `GET /b/dev/api/guest`'s answer, unchanged. Every worker
+   *   this instance starts is handed it at `init` and builds it once before
+   *   it reports `ready`, so the blocks that depend on it find it already
+   *   compiled; its `version` is what every `CompileResult` reports, because
+   *   it is the guest those builds were linked against. Without it the
+   *   worker builds only crates that need nothing but the sysroot.
    */
   constructor(manifest, options = {}) {
     if (!manifest || typeof manifest !== 'object') {
@@ -311,8 +343,46 @@ export class BrowserRustCompiler {
     ) {
       throw new TypeError('BrowserRustCompiler: initSilenceMs must be a positive number');
     }
+    // Checked here rather than left to the worker: a malformed guest would
+    // otherwise surface as a failed warm-up build half a minute into
+    // `initialize`, with a cargo error about a crate the page never wrote.
+    const guest = options.guest;
+    if (guest !== undefined) {
+      if (!guest || typeof guest !== 'object') {
+        throw new TypeError(
+          'BrowserRustCompiler: guest must be the object GET /b/dev/api/guest answers'
+        );
+      }
+      if (!Number.isInteger(guest.version) || guest.version < 0) {
+        throw new TypeError('BrowserRustCompiler: guest.version must be a non-negative integer');
+      }
+      if (!isFileMap(guest.files)) {
+        throw new TypeError(
+          'BrowserRustCompiler: guest.files must be an object of path → contents'
+        );
+      }
+      if (!guest.warmup || typeof guest.warmup !== 'object') {
+        throw new TypeError('BrowserRustCompiler: guest.warmup must be an object');
+      }
+      if (typeof guest.warmup.crate_name !== 'string' || guest.warmup.crate_name === '') {
+        throw new TypeError(
+          'BrowserRustCompiler: guest.warmup.crate_name must be a non-empty string'
+        );
+      }
+      if (!isFileMap(guest.warmup.files)) {
+        throw new TypeError(
+          'BrowserRustCompiler: guest.warmup.files must be an object of path → contents'
+        );
+      }
+    }
     this.#manifest = manifest;
     this.#initSilenceMs = options.initSilenceMs ?? INIT_SILENCE_TIMEOUT_MS;
+    this.#guest = guest ?? null;
+  }
+
+  /** The version of the guest every worker this instance starts is built with. */
+  #guestVersion() {
+    return this.#guest ? this.#guest.version : null;
   }
 
   /** The pinned compiler bundle's version — the rubrc sha the URLs carry. */
@@ -442,9 +512,18 @@ export class BrowserRustCompiler {
     // every `progress` message, so a worker that is still talking has as long
     // as it needs, and one that has stopped talking altogether is eventually
     // let go of. See `INIT_SILENCE_TIMEOUT_MS`.
+    const init = { type: 'init', id };
+    if (this.#guest) {
+      // The protocol's spelling (`crateName`) for the API's (`crate_name`);
+      // this is the one place the two meet.
+      init.guest = {
+        files: this.#guest.files,
+        warmup: { crateName: this.#guest.warmup.crate_name, files: this.#guest.warmup.files }
+      };
+    }
     const ready = await this.#request(
       id,
-      { type: 'init', id },
+      init,
       {
         expects: 'ready',
         onProgress,
@@ -751,7 +830,8 @@ export class BrowserRustCompiler {
       stderr: message.stderr,
       diagnostics: message.diagnostics,
       elapsedMs: message.elapsedMs,
-      compilerVersion: this.#rustcVersion
+      compilerVersion: this.#rustcVersion,
+      guestVersion: this.#guestVersion()
     });
   }
 
@@ -837,7 +917,8 @@ export class BrowserRustCompiler {
         stderr: reason,
         diagnostics: [],
         elapsedMs: Date.now() - stranded.startedAt,
-        compilerVersion: this.#rustcVersion
+        compilerVersion: this.#rustcVersion,
+        guestVersion: this.#guestVersion()
       });
     }
     this.#destroy(new Error('the compiler worker was replaced: ' + reason));

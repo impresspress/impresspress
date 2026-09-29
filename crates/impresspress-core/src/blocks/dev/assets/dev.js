@@ -797,6 +797,12 @@ var compilerVersionEl = document.getElementById('dev-compiler-version');
 // carries the pinned toolchain's version.
 var compilerManifest = null;
 
+// `GET /b/dev/api/guest`'s answer — the guest SDK crate the compiler session
+// is started from — or `null` until the first compile asks for it. Fetched
+// once per page: the session is built from it, and a page that re-fetched it
+// mid-session would report a version its worker did not build.
+var guestCrate = null;
+
 // MiB, not MB, and `1048576` rather than a round million: `total_bytes` is a
 // byte count, and every other figure published about this toolchain — the
 // build script's own summary, the README's, the 24 MiB per-file asset limit
@@ -1014,7 +1020,10 @@ async function ensureCompiler(onProgress) {
     throw new Error('No compiler in this build.');
   }
   if (!compiler) {
-    compiler = new BrowserRustCompiler(compilerManifest);
+    if (!guestCrate) {
+      guestCrate = await json(await api.get('/b/dev/api/guest'));
+    }
+    compiler = new BrowserRustCompiler(compilerManifest, { guest: guestCrate });
   }
   // Idempotent, and the only place the toolchain's start-up is paid for: a
   // later compile joins whatever worker this one leaves behind.
@@ -1145,7 +1154,6 @@ async function snapshotBlock(name) {
   }
   var files = {};
   var diagnostics = [];
-  var guestVersion = null;
   // The source manifest, one `<crate-relative path>\0<sha256>\n` line per
   // file, sorted. NUL rather than a space because a path may contain
   // anything but that, so no two different snapshots can produce one string;
@@ -1234,23 +1242,11 @@ async function snapshotBlock(name) {
         });
       }
     }
-    // The vendored module IS the ABI, so the version the block was compiled
-    // against is read out of the copy that was compiled — not out of the
-    // sandbox's own constant, which would report agreement it cannot see. A
-    // block whose module has been edited past recognition simply reports
-    // nothing, and staging records `0` — "unknown" — rather than a guess.
-    if (rel === 'src/wafer_guest.rs') {
-      var found = /WAFER_GUEST_VERSION: u32 = (\d+)/.exec(file.content);
-      if (found) {
-        guestVersion = Number(found[1]);
-      }
-    }
   }
   manifest.sort();
   return {
     files: files,
     diagnostics: diagnostics,
-    guestVersion: guestVersion,
     sourceSha: await sha256Hex(manifest.join(''))
   };
 }
@@ -1417,7 +1413,7 @@ async function runCompile(name) {
         source_manifest_sha256: snapshot.sourceSha,
         compiler_version: compilerVersion,
         diagnostics: diagnostics,
-        wafer_guest_version: snapshot.guestVersion
+        wafer_guest_version: built.guestVersion
       })
     );
   })();
@@ -1448,8 +1444,8 @@ function registerCompileTool() {
   registerPageTool({
     name: 'dev_compile_block',
     description:
-      'Compile blocks/<name>/ with the in-browser Rust toolchain (wasm32-wasip1, no \
-dependencies — the whole SDK is the vendored src/wafer_guest.rs). On success the block is \
+      'Compile blocks/<name>/ with the in-browser Rust toolchain (wasm32-wasip1; the only \
+dependency is the wafer_guest SDK crate, built once per session). On success the block is \
 validated and activated immediately and its routes are live at /b/<name>/; on failure the result \
 carries structured compiler or validator diagnostics and the previous generation keeps serving. \
 Only one compile runs at a time.',

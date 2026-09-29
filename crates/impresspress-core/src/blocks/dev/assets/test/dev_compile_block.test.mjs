@@ -44,56 +44,26 @@ const file = (path, content, extra = {}) => ({
 
 const CARGO_TOML = '[package]\nname = "hello"\n';
 const LIB_RS = 'pub fn block() -> Block { Block::new("site/hello", "Says hello") }\n';
-const WAFER_GUEST = 'pub const WAFER_GUEST_VERSION: u32 = 1;\n';
 
 const HELLO = [
   file('blocks/hello/Cargo.toml', CARGO_TOML),
-  file('blocks/hello/src/lib.rs', LIB_RS),
-  file('blocks/hello/src/wafer_guest.rs', WAFER_GUEST)
+  file('blocks/hello/src/lib.rs', LIB_RS)
 ];
 
-test('snapshotBlock reads the block crate-relative, with the guest version out of the block itself', async () => {
+test('snapshotBlock reads the block crate-relative, and nothing about the guest out of it', async () => {
   const { handle } = instantiate({ workspace: HELLO });
   const snapshot = await handle.snapshotBlock('hello');
 
   // The worker's VFS is keyed on paths relative to the crate root: it writes
   // `Cargo.toml`, not `blocks/hello/Cargo.toml`. A snapshot that kept the
   // workspace prefix would produce a crate cargo cannot see.
-  assert.deepEqual(Object.keys(snapshot.files).sort(), [
-    'Cargo.toml',
-    'src/lib.rs',
-    'src/wafer_guest.rs'
-  ]);
+  assert.deepEqual(Object.keys(snapshot.files).sort(), ['Cargo.toml', 'src/lib.rs']);
   assert.equal(snapshot.files['src/lib.rs'], LIB_RS);
   assert.deepEqual(snapshot.diagnostics, []);
-  // Read out of the BLOCK's copy of the vendored module — which is what
-  // `POST /b/dev/api/builds/stage` checks against the sandbox's own — and not
-  // assumed from anywhere on the page.
-  assert.equal(snapshot.guestVersion, 1);
-});
-
-test('snapshotBlock reports the guest version the block actually carries, not the current one', async () => {
-  const { handle } = instantiate({
-    workspace: [
-      HELLO[0],
-      HELLO[1],
-      file('blocks/hello/src/wafer_guest.rs', 'pub const WAFER_GUEST_VERSION: u32 = 7;\n')
-    ]
-  });
-  // A stale copy is exactly what the version check exists to catch, so the
-  // page has to report it faithfully — a snapshot that answered `1` here
-  // would stage a block built against an ABI this runtime no longer speaks.
-  assert.equal((await handle.snapshotBlock('hello')).guestVersion, 7);
-});
-
-test('snapshotBlock reports a module it cannot find a version in as unknown', async () => {
-  const { handle } = instantiate({
-    workspace: [HELLO[0], HELLO[1], file('blocks/hello/src/wafer_guest.rs', '// edited away\n')]
-  });
-  // `null` becomes an omitted `wafer_guest_version`, which staging records as
-  // `0` — "the compiler could not read one" — rather than a guess that would
-  // pass a check it never actually made.
-  assert.equal((await handle.snapshotBlock('hello')).guestVersion, null);
+  // The block depends on the guest crate by path and carries no copy of it,
+  // so there is no version to read out of it: the one the page reports is
+  // the one the compiler session was built from (see the staging tests).
+  assert.equal('guestVersion' in snapshot, false);
 });
 
 test('snapshotBlock refuses a binary file under blocks/ with a binary-source diagnostic', async () => {
@@ -163,11 +133,7 @@ test('a subdirectory that is not under src/ is refused by the same rule', async 
   assert.ok(!('tests/smoke.rs' in snapshot.files));
   assert.ok(!('assets/logo.svg' in snapshot.files));
   // The flat crate itself is untouched by the widened rule.
-  assert.deepEqual(Object.keys(snapshot.files).sort(), [
-    'Cargo.toml',
-    'src/lib.rs',
-    'src/wafer_guest.rs'
-  ]);
+  assert.deepEqual(Object.keys(snapshot.files).sort(), ['Cargo.toml', 'src/lib.rs']);
   assert.ok(
     !fetchCalls.some(
       (call) =>
@@ -181,8 +147,7 @@ test('snapshotBlock refuses a Cargo.toml whose package is not the block', async 
   const { handle } = instantiate({
     workspace: [
       file('blocks/hello/Cargo.toml', '[package]\nname = "renamed"\n'),
-      HELLO[1],
-      HELLO[2]
+      HELLO[1]
     ]
   });
   const snapshot = await handle.snapshotBlock('hello');
@@ -204,8 +169,7 @@ test('a `[lib] name` that renames the artifact is refused too', async () => {
         'blocks/hello/Cargo.toml',
         '[package]\nname = "hello"\n\n[lib]\ncrate-type = ["cdylib"]\nname = "other"\n'
       ),
-      HELLO[1],
-      HELLO[2]
+      HELLO[1]
     ]
   });
   // `[lib] name` is what cargo names a cdylib after, so it breaks the artifact
@@ -225,8 +189,7 @@ test('a name in a table that is neither [package] nor [lib] is not read as one',
         '[package]\nname = "hello"\n\n[lib]\ncrate-type = ["cdylib"]\n\n' +
           '[[bench]]\nname = "not-the-crate"\n'
       ),
-      HELLO[1],
-      HELLO[2]
+      HELLO[1]
     ]
   });
   assert.deepEqual((await handle.snapshotBlock('hello')).diagnostics, []);
@@ -236,8 +199,7 @@ test('a hyphenated block matches the underscored artifact cargo writes', async (
   const { handle } = instantiate({
     workspace: [
       file('blocks/my-shop/Cargo.toml', '[package]\nname = "my-shop"\n'),
-      file('blocks/my-shop/src/lib.rs', LIB_RS),
-      file('blocks/my-shop/src/wafer_guest.rs', WAFER_GUEST)
+      file('blocks/my-shop/src/lib.rs', LIB_RS)
     ]
   });
   // cargo writes `my_shop.wasm` for a package called `my-shop`, and the worker
@@ -256,8 +218,7 @@ test('the source manifest digest is over sorted `path\\0sha256\\n` lines, crate-
   const expected = digest(
     [
       `Cargo.toml\0${digest(CARGO_TOML)}\n`,
-      `src/lib.rs\0${digest(LIB_RS)}\n`,
-      `src/wafer_guest.rs\0${digest(WAFER_GUEST)}\n`
+      `src/lib.rs\0${digest(LIB_RS)}\n`
     ].join('')
   );
   assert.equal(snapshot.sourceSha, expected);
@@ -266,7 +227,7 @@ test('the source manifest digest is over sorted `path\\0sha256\\n` lines, crate-
 test('the source manifest digest changes when a source byte does', async () => {
   const { handle: before } = instantiate({ workspace: HELLO });
   const { handle: after } = instantiate({
-    workspace: [HELLO[0], file('blocks/hello/src/lib.rs', `${LIB_RS}// a comment\n`), HELLO[2]]
+    workspace: [HELLO[0], file('blocks/hello/src/lib.rs', `${LIB_RS}// a comment\n`)]
   });
   assert.notEqual(
     (await before.snapshotBlock('hello')).sourceSha,
@@ -349,7 +310,8 @@ const BUILT = {
   stderr: '',
   diagnostics: [],
   elapsedMs: 38000,
-  compilerVersion: 'rustc 1.90.0-nightly (fake)'
+  compilerVersion: 'rustc 1.90.0-nightly (fake)',
+  guestVersion: 1
 };
 
 test('a crate that does not compile is a result, and the diagnostics keep rustc shape', async () => {
@@ -505,6 +467,57 @@ test('a successful compile stages the artifact and merges what staging answered'
     elements.get('dev-progress-steps').children.map((step) => step.getAttribute('data-state')),
     ['done', 'done', 'done', 'done']
   );
+});
+
+test('the compiler is constructed with the guest the API hands out, and the staging request carries its version', async () => {
+  const seen = { guest: null, staged: null };
+  // `GuestResponse` as `GET /b/dev/api/guest` answers it — the API's own
+  // spelling (`crate_name`), which the adapter, not the page, translates.
+  const guest = {
+    version: 2,
+    files: {
+      'Cargo.toml': '[package]\nname = "wafer_guest"\n',
+      'src/lib.rs': 'pub const WAFER_GUEST_VERSION: u32 = 2;\n'
+    },
+    warmup: { crate_name: 'hello', files: { 'Cargo.toml': CARGO_TOML, 'src/lib.rs': LIB_RS } }
+  };
+  class Stub {
+    constructor(manifest, options) {
+      seen.guest = options.guest;
+    }
+
+    async initialize() {
+      return 'rustc 1.90.0-nightly (fake)';
+    }
+
+    async compile() {
+      return { ...BUILT, guestVersion: 2 };
+    }
+  }
+  const { handle } = instantiate({
+    compilerManifest: MANIFEST,
+    workspace: HELLO,
+    compiler: Stub,
+    guest,
+    status: { active_generation: null, runtime_generation: 0, blocks: [], activation: null },
+    stage(request) {
+      seen.staged = request;
+      return {
+        build_id: 'bld_1',
+        success: true,
+        diagnostics: [],
+        generation: { id: 'gen_2', cause: 'block_compile', status: 'active' },
+        progress: []
+      };
+    }
+  });
+  await settle();
+
+  await handle.compileBlock('hello');
+  assert.deepEqual(seen.guest, guest);
+  // The version of the guest the session was BUILT from, as the compile
+  // reported it — a `2` the harness's default guest (`1`) could not produce.
+  assert.equal(seen.staged.wafer_guest_version, 2);
 });
 
 test('the status is not polled while the worker compiles, only while the sandbox activates', async () => {
