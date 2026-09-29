@@ -190,17 +190,58 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
   expect(seeded.encoding).toBe('utf8');
   expect(seeded.content).toContain(WELCOME_PHRASE);
 
+  // The site-write loop is timed three ways, each from the write's start
+  // (design §2.7): the tool's round trip, until `GET /index.html` serves the
+  // new bytes, and until the preview iframe shows them. One
+  // `dev-workspace:` line carries all three; CI's summary lifts it out.
   const writeStart = Date.now();
   const wrote = structured<FileWrite>(await execute(page, 'dev_write_file', {
     path: 'site/index.html',
     content: shopPage(),
     expected_sha256: seeded.sha256,
   }));
+  const siteWriteMs = Date.now() - writeStart;
   // A `site/**` write publishes immediately — there is no separate deploy.
   expect(wrote.generation, JSON.stringify(wrote)).not.toBeNull();
   expect(wrote.generation?.cause).toBe('site_write');
   expect(wrote.generation?.status).toBe('active');
   expect(wrote.sha256).not.toBe(seeded.sha256);
+
+  // A reply means the generation is active, so the served page should
+  // already be the new one; polled rather than fetched once so a regression
+  // that serves the old bytes for a while shows up as a number, not a hang.
+  // Polled from the page, through its service worker, every 20 ms.
+  const served = await page.evaluate(async (heading) => {
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      const body = await (await fetch('/index.html', { cache: 'no-store' })).text();
+      if (body.includes(heading)) {
+        return true;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return false;
+  }, SHOP_HEADING);
+  const servedMs = Date.now() - writeStart;
+  expect(served, 'GET /index.html never served the written page').toBe(true);
+
+  // Until the preview iframe shows it, polled in the page every 20 ms too:
+  // `expect(…).toHaveText`'s own back-off (100, 250, 500, 1000 ms) would
+  // round a sub-100 ms reload up to whichever retry caught it. The frame is
+  // same-origin, so its document is readable from the page. The assertions
+  // below still say what it must show.
+  await page.waitForFunction(
+    (heading) => {
+      const frame = document.getElementById('dev-preview-frame') as HTMLIFrameElement | null;
+      return frame?.contentDocument?.querySelector('h1')?.textContent?.trim() === heading;
+    },
+    SHOP_HEADING,
+    { polling: 20, timeout: 60_000 },
+  );
+  const previewMs = Date.now() - writeStart;
+  console.log(
+    `dev-workspace: site_write_ms=${siteWriteMs} served_ms=${servedMs} preview_ms=${previewMs}`,
+  );
 
   // The activation push (design §2.6): when the generation commits, the
   // service worker posts `{ type: 'dev-generation', id, … }` to every window,
@@ -216,10 +257,7 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
   // …and the preview iframe is showing it. The same push reloads the frame —
   // the write published a generation, so `withProgress`'s catch-up leaves the
   // preview to the push — and this needs no nudge.
-  await expect(page.frameLocator('#dev-preview-frame').locator('h1')).toHaveText(SHOP_HEADING, {
-    timeout: 60_000,
-  });
-  console.log(`site write → published → preview shows it: ${Date.now() - writeStart} ms`);
+  await expect(page.frameLocator('#dev-preview-frame').locator('h1')).toHaveText(SHOP_HEADING);
 
   // --- 4. Stock the shop -------------------------------------------------
   const productStart = Date.now();
