@@ -498,7 +498,7 @@ pub struct DevShared {
     /// must never wait behind a compile, and `ActivationIntent::SiteOnly`
     /// composes its block half at dequeue precisely so it does not have to.
     pub compile: futures::lock::Mutex<()>,
-    /// Serializes [`activation::maintain`] — retention's prune and the
+    /// Serializes `activation::maintain` — retention's prune and the
     /// collector — against itself.
     ///
     /// Scheduled after a request's reply, maintenance runs outside the

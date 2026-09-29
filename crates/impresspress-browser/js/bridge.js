@@ -445,6 +445,13 @@ async function pruneEmptyDirs(folderHandle, dirs) {
  *   whose sidecar write failed it can describe the previous body
  *   (`storage.rs::put_streaming`), where the file itself cannot.
  *
+ *   An object deleted between the walk and its size read is dropped from the
+ *   page: it is not there any more, which is what a listing taken a moment
+ *   later would say. Rejecting instead would surface as `NotFoundError`,
+ *   which `storage.rs` reads as "the folder is missing" — and the dev
+ *   sandbox's collector as an empty folder. `total` still counts it; it
+ *   describes the walk the page was cut from.
+ *
  *   OPFS's directory iterator (`FileSystemDirectoryHandle.entries()`) has no
  *   native pagination, count, or cursor/skip-ahead API — it's
  *   iterate-everything-or-nothing, and there is no separate persisted index
@@ -474,8 +481,22 @@ export async function storageList(folder, prefix, limit, offset) {
     found.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
     const total = found.length;
     const page = found.slice(offset, limit > 0 ? offset + limit : undefined);
-    const sizes = await Promise.all(page.map(async ({ entry }) => (await entry.getFile()).size));
-    return { keys: page.map(({ key }) => key), sizes, total };
+    const sized = await Promise.all(
+        page.map(async ({ key, entry }) => {
+            try {
+                return { key, size: (await entry.getFile()).size };
+            } catch (e) {
+                if (e && e.name === 'NotFoundError') return null;
+                throw e;
+            }
+        }),
+    );
+    const present = sized.filter((object) => object !== null);
+    return {
+        keys: present.map(({ key }) => key),
+        sizes: present.map(({ size }) => size),
+        total,
+    };
 }
 
 /**

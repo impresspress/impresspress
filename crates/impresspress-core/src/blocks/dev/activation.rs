@@ -10,15 +10,16 @@
 //! at a time, and the rest wait.
 //!
 //! What an activation leaves behind — retention's prune and the collector
-//! ([`maintain`]) — is not part of it. Once the commit is written the
+//! (`maintain`) — is not part of it. Once the commit is written the
 //! generation is live, and the caller's [`Maintenance`] says when the
 //! cleanup runs: after the request's reply for a request
 //! ([`Maintenance::Deferred`]), before returning for boot, which has no
 //! reply to wait for ([`Maintenance::Inline`]). Deferred, it runs outside
-//! the queue and may interleave with the next activation, which the
-//! collector is built for: it already runs outside the queue after a
-//! `blocks/` delete (see [`super::gc`]'s ordering invariant). Two passes do
-//! not interleave with each other (`DevShared::maintenance`).
+//! the queue and may interleave with the next activation. That is sound
+//! because an activation composes its manifest and inserts its staged row
+//! inside one hold of the workspace lock the collector also takes
+//! (`workspace_site`; [`super::gc`], "When it runs"). Two passes do not
+//! interleave with each other (`DevShared::maintenance`).
 //!
 //! Requests that arrive during an activation **coalesce** (design §7.3): the
 //! queue keeps only the latest desired manifest, and every waiter resolves
@@ -47,7 +48,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use futures::channel::oneshot;
+use futures::{channel::oneshot, lock::MutexGuard};
 use serde::{Deserialize, Serialize};
 use wafer_run::{context::Context, ErrorCode, OutputStream, WaferError};
 
@@ -189,6 +190,9 @@ impl std::fmt::Display for ActivationError {
     }
 }
 
+/// A held `DevShared::workspace` lock.
+type WorkspaceGuard<'a> = MutexGuard<'a, ()>;
+
 /// Persistence failures all arrive the same way.
 fn storage_error(e: WaferError) -> ActivationError {
     ActivationError::Storage(e.message)
@@ -199,7 +203,7 @@ fn storage_error(e: WaferError) -> ActivationError {
 // ---------------------------------------------------------------------------
 
 /// When the retention and collection an activation leaves behind
-/// ([`maintain`]) run. Chosen once, by whoever asks for the activation,
+/// (`maintain`) run. Chosen once, by whoever asks for the activation,
 /// because only the caller knows whether a reply is waiting on it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Maintenance {
@@ -313,9 +317,12 @@ impl ActivationIntent {
 
 /// Resolve `intent` into the manifest to stage, against the state that is
 /// current now.
+///
+/// `held` is the caller's `DevShared::workspace` guard, which it keeps until
+/// the manifest's staged row is inserted — see [`workspace_site`].
 async fn compose(
     ctx: &dyn Context,
-    shared: &super::DevShared,
+    held: &WorkspaceGuard<'_>,
     intent: ActivationIntent,
     previous: Option<&(GenerationRow, GenerationManifest)>,
 ) -> Result<GenerationManifest, ActivationError> {
@@ -323,12 +330,12 @@ async fn compose(
         || previous.map_or_else(Vec::new, |(_row, manifest)| manifest.blocks.clone());
     Ok(match intent {
         ActivationIntent::SiteOnly => {
-            GenerationManifest::staged(workspace_site(ctx, shared).await?, active_blocks())
+            GenerationManifest::staged(workspace_site(ctx, held).await?, active_blocks())
         }
         ActivationIntent::BlockSet { site, blocks } => {
             let site = match site {
                 Some(site) => site,
-                None => workspace_site(ctx, shared).await?,
+                None => workspace_site(ctx, held).await?,
             };
             GenerationManifest::staged(site, blocks)
         }
@@ -356,8 +363,24 @@ async fn compose(
 /// than a miss. The write whose content was already saved then answers a
 /// sanitized `500`.
 ///
-/// So it takes the same mutex as the mutators. The section is one small JSON
-/// read; nothing else is inside it.
+/// So it reads under the same mutex as the mutators: `held` is
+/// `DevShared::workspace`'s guard, taken by [`activate`].
+///
+/// # Why the guard outlives this read
+///
+/// [`activate`] keeps it until the manifest composed from this read has its
+/// staged row in the ledger. Retention and collection run after a request's
+/// reply, outside the queue, so a collection can start while an activation
+/// is between composing and inserting. The collector takes this lock, then
+/// lists the blobs, then reads the retained rows and the workspace. Released
+/// in that gap, a write could replace a path's blob in the workspace and the
+/// collector could run before the row naming the old blob existed: it would
+/// find the old blob named by nothing and delete it, and the activation
+/// would then refuse its own manifest as naming missing content. Held
+/// through the insert, one of two things is true of every collection: it
+/// took the lock after the insert, so the row is among the roots it reads;
+/// or it finished before the read, so this manifest names only blobs that
+/// collection kept or that were stored after its listing.
 ///
 /// # Deadlock
 ///
@@ -372,24 +395,23 @@ async fn compose(
 ///    `DevShared::compile` instead; the seed importer holds neither. So no
 ///    task can be waiting on this queue while holding the mutex this takes.
 /// 2. **It does not nest with [`adopt_site`].** Both acquisitions live in
-///    [`activate`], but they are sequential, not nested: this guard's scope
-///    ends when this function returns, which is inside `compose`, and
-///    `adopt_site` runs only after `activate_staged` has finished.
+///    [`activate`], but they are sequential, not nested: this guard is
+///    dropped once the staged row is inserted, and `adopt_site` runs only
+///    after `activate_staged` has finished.
 /// 3. **The one lock ordering in the block still has no reverse edge.**
 ///    `compile` is taken above this (`blocks_api`, `generations_api`) and this
 ///    lock is taken below it; nothing anywhere takes `compile` while holding
 ///    `workspace`, so `compile → workspace` is the only order that exists.
-/// 4. **The guard is never held across an `await` on anything but storage.**
-///    `workspace::load` is one object read; there is no activation request, no
-///    runtime rebuild and no ledger write inside the section.
+/// 4. **The guard spans one object read and one database insert.**
+///    `workspace::load` and `repo::generations::insert`; no other lock is
+///    taken inside it, and there is no activation request and no runtime
+///    rebuild. The collector, the only other holder that reads the ledger,
+///    takes this lock first and nothing else while holding it.
 async fn workspace_site(
     ctx: &dyn Context,
-    shared: &super::DevShared,
+    _held: &WorkspaceGuard<'_>,
 ) -> Result<SiteManifest, ActivationError> {
-    let ws = {
-        let _serialized = shared.workspace.lock().await;
-        workspace::load(ctx).await.map_err(storage_error)?
-    };
+    let ws = workspace::load(ctx).await.map_err(storage_error)?;
     Ok(SiteManifest {
         files: workspace::site_manifest(&ws),
     })
@@ -629,7 +651,10 @@ async fn activate(
         .await
         .map_err(storage_error)?;
     let previous = load_previous(ctx, &state).await?;
-    let mut manifest = compose(ctx, shared, intent, previous.as_ref()).await?;
+    // Held from the workspace read through the staged row's insert, for every
+    // intent: see `workspace_site`.
+    let composing = shared.workspace.lock().await;
+    let mut manifest = compose(ctx, &composing, intent, previous.as_ref()).await?;
 
     // The id is minted here, not by the repo, because the manifest has to
     // carry it before it is hashed (design §11.3) — and the parent is
@@ -653,6 +678,7 @@ async fn activate(
     )
     .await
     .map_err(storage_error)?;
+    drop(composing);
 
     let outcome = activate_staged(
         ctx,
@@ -703,9 +729,9 @@ async fn adopt_site(
     // Deadlock-free because the lock is *only* ever held around a
     // read-modify-write of `workspace.json`: `files.rs` drops it before it
     // asks for an activation, so nothing holding it is ever waiting on this
-    // queue. The other acquisition inside the queue — `workspace_site`, in
-    // `compose` — is sequential with this one rather than nested: its guard's
-    // scope ends before `compose` returns, and this runs after
+    // queue. The other acquisition inside the queue — `activate`'s, around
+    // `compose` and the staged row's insert — is sequential with this one
+    // rather than nested: it is dropped after the insert, and this runs after
     // `activate_staged`. `workspace_site` carries the full argument.
     let _serialized = shared.workspace.lock().await;
     let mut ws = workspace::load(ctx).await?;

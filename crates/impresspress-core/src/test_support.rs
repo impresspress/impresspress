@@ -1572,6 +1572,29 @@ impl TestContext {
         self.wrap_database_service(|inner| Arc::new(FailingReadsDb { inner, fail_get }))
     }
 
+    /// Park the first `create` into `table` from here on, and hand back the
+    /// handle that releases it.
+    ///
+    /// The database counterpart of [`Self::hold_next_storage_get`], with the
+    /// same bounded park ([`HeldGet`] — named for the storage seam it was
+    /// written for; the park and both obligatory accessors are the same).
+    /// For a gap no storage read falls in: the one between an activation's
+    /// workspace read and the insert of the staged row composed from it has
+    /// only a database write at its end.
+    pub fn hold_next_database_create(self, table: &str) -> (Self, Arc<HeldGet>) {
+        let hold = Arc::new(HeldGet::default());
+        let parked = hold.clone();
+        let table = table.to_string();
+        let ctx = self.wrap_database_service(move |inner| {
+            Arc::new(HoldingCreateDb {
+                inner,
+                table,
+                hold: Mutex::new(Some(parked)),
+            })
+        });
+        (ctx, hold)
+    }
+
     /// Record the writes every database call from here on makes — see
     /// [`WriteLog`] — while forwarding each to the real database. The log
     /// is how a test proves a code path writes a table in one call rather
@@ -1603,6 +1626,79 @@ impl TestContext {
     /// production deployment (Cloudflare/D1) would.
     pub fn set_strict_schema(&self, enabled: bool) {
         self.db_service.set_strict_schema(enabled);
+    }
+}
+
+/// The decorator behind [`TestContext::hold_next_database_create`]: parks the
+/// first `create` into `table` on `hold`, then forwards it and every other
+/// call to `inner` unchanged.
+struct HoldingCreateDb {
+    inner: Arc<dyn wafer_core::interfaces::database::service::DatabaseService>,
+    table: String,
+    /// Taken by the `create` it parks: one-shot.
+    hold: Mutex<Option<Arc<HeldGet>>>,
+}
+
+impl HoldingCreateDb {
+    fn inner_service(&self) -> &dyn wafer_core::interfaces::database::service::DatabaseService {
+        self.inner.as_ref()
+    }
+}
+
+wafer_core::forward_database_service! {
+    impl DatabaseService for HoldingCreateDb {
+        forward_to inner_service();
+
+        ops {
+            get: forward,
+            list: forward,
+            create: custom,
+            create_many: forward,
+            update: forward,
+            delete: forward,
+            count: forward,
+            sum: forward,
+            query_raw: forward,
+            exec_raw: forward,
+            delete_where: forward,
+            delete_where_count: forward,
+            take_where: forward,
+            update_where: forward,
+            update_where_count: forward,
+            increment_field_where: forward,
+            upsert: forward,
+            aggregate: forward,
+            batch: forward,
+            insert_guarded: forward,
+            update_guarded: forward,
+            ensure_schema_table: forward,
+            ensure_schema_tables: forward,
+            schema_table_exists: forward,
+            schema_columns: forward,
+            schema_drop_table: forward,
+            schema_add_column: forward,
+            set_strict_schema: forward,
+            statement_budget: forward,
+        }
+
+        async fn create(
+            &self,
+            collection: &str,
+            data: HashMap<String, serde_json::Value>,
+        ) -> Result<
+            wafer_core::interfaces::database::service::Record,
+            wafer_core::interfaces::database::service::DatabaseError,
+        > {
+            let hold = if collection == self.table {
+                self.hold.lock().expect("hold").take()
+            } else {
+                None
+            };
+            if let Some(hold) = hold {
+                hold.park().await;
+            }
+            self.inner.create(collection, data).await
+        }
     }
 }
 

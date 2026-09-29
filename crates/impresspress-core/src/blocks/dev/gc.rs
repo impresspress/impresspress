@@ -83,9 +83,16 @@
 //! publishing anything. Those are the two moments content stops being
 //! reachable. For a request, both run after its reply
 //! (`super::activation::Maintenance::Deferred`), outside the activation queue
-//! and possibly while the next activation is running — which is safe because
-//! of the ordering invariant above and because retention keeps every
-//! in-flight generation. At boot they run before convergence returns.
+//! and possibly while the next activation is running. What makes that safe
+//! is the workspace lock, not the queue. An activation composes its manifest
+//! from `workspace.json` and inserts the manifest's staged row inside one
+//! hold of that lock (`super::activation`'s `workspace_site`), and the
+//! collector takes it before its blob listing. So a collection either
+//! starts after the insert, and the staged row — in flight, so retained — is
+//! among the roots it reads; or it ends before the compose, which then reads
+//! a workspace naming only blobs the collection kept or stored after its
+//! listing. A manifest that names content without a row does not exist
+//! while the collector looks. At boot they run before convergence returns.
 
 use std::collections::BTreeSet;
 

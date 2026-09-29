@@ -269,6 +269,76 @@ async fn gc_deletes_blobs_no_retained_generation_or_workspace_references() {
     );
 }
 
+/// A collection that runs while an activation is between composing its
+/// manifest from the workspace and inserting the manifest's staged row.
+///
+/// Collections run after a request's reply, outside the activation queue, so
+/// this gap is reachable: the write below composes a manifest naming blob Y
+/// and parks on its row's insert; meanwhile the same path is overwritten with
+/// Z (so the workspace no longer names Y) and the collector runs. Had the
+/// activation released the workspace lock after its read, the collector would
+/// see Y named by no row and no workspace entry, delete it, and the write
+/// would then refuse its own manifest with a 422. The activation holds the
+/// lock through the insert, so the overwrite and the collection wait for the
+/// row, which then protects Y.
+#[tokio::test]
+async fn a_collection_during_an_activation_keeps_the_blob_its_manifest_names() {
+    let (ctx, hold) = TestContext::with_dev(FakeControl::new())
+        .await
+        .hold_next_database_create(generations::TABLE);
+    let shared = ctx.dev_shared();
+    let y = "<h1>Y</h1>";
+    let y_sha = blobs::sha256_hex(y.as_bytes());
+
+    let write = dev_post(
+        &ctx,
+        "/b/dev/api/files/write",
+        json!({"path": "site/index.html", "content": y, "expected_sha256": null}),
+    );
+    let racer = async {
+        while !hold.was_reached() {
+            tokio::task::yield_now().await;
+        }
+        // A second write of the same path, as `files::handle_write` makes it:
+        // store the blob, then save the entry, under the workspace lock.
+        {
+            let _serialized = shared.workspace.lock().await;
+            let z = b"<h1>Z</h1>";
+            let (z_sha, stored) = blobs::put(&ctx, z).await.expect("store Z");
+            let mut ws = workspace::load(&ctx).await.expect("load workspace");
+            if stored == blobs::Stored::New {
+                ws.record_blob_stored(z.len() as u64);
+            }
+            ws.insert("site/index.html", z_sha, z.len() as u64);
+            workspace::save(&ctx, &ws).await.expect("save workspace");
+        }
+        gc::collect(&ctx, &shared).await.expect("collect");
+        hold.release();
+    };
+    let (written, ()) = tokio::join!(write, racer);
+
+    assert!(
+        hold.was_reached(),
+        "the insert never parked, so nothing raced it"
+    );
+    let written = wafer_block::http_codec::collect_http_response(written).await;
+    let body: serde_json::Value = serde_json::from_slice(&written.body).unwrap_or_default();
+    assert_eq!(
+        (written.status, &body["generation"]["status"]),
+        (200, &json!("active")),
+        "the write's own manifest was not refused: {body}",
+    );
+    assert!(
+        hold.budget_expired(),
+        "the overwrite and the collection ran while the activation was between its \
+         workspace read and its row: the lock was not held across the gap",
+    );
+    assert!(
+        blobs::exists(&ctx, &y_sha).await.expect("exists"),
+        "the staged row named Y before the collector read its roots",
+    );
+}
+
 /// A block's sources live in the workspace and in no generation at all — a
 /// generation carries the compiled artifact, not the crate it came from. A
 /// collector that only read the ledger would delete a block's source tree the
