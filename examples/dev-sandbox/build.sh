@@ -17,8 +17,10 @@
 # are done here rather than left to the caller.
 #
 # Usage:
-#   examples/dev-sandbox/build.sh            # build dist/
-#   examples/dev-sandbox/build.sh --check     # verify what is already built
+#   examples/dev-sandbox/build.sh                  # build dist/ from seeds/blank
+#   examples/dev-sandbox/build.sh --seed bootstrap  # build dist/ from seeds/bootstrap
+#   examples/dev-sandbox/build.sh --seed bootstrap --out ../dist-bootstrap
+#   examples/dev-sandbox/build.sh --check           # verify every seed and the compiler tree
 #
 # `IMPRESSPRESS=/path/to/impresspress` overrides which CLI binary assembles
 # the bundle. Default is whatever is on `PATH`, which is the trap this
@@ -29,8 +31,8 @@
 # one with `cargo install --path crates/impresspress --locked` (add
 # `--root ./out` to keep it out of `~/.cargo/bin`) and point this at it.
 #
-# `--check` verifies every `seed/site/**` file against the hash and size
-# `seed/manifest.json` declares for it — and, when `compiler/dist/` has been
+# `--check` verifies every `seeds/<name>/manifest.json` against its `site/**`
+# (seeds/check-seeds.py) — and, when `compiler/dist/` has been
 # built, that its files match `compiler/dist/manifest.json` and none of them
 # is over Cloudflare's asset limit — exiting non-zero on drift, WITHOUT
 # building anything — this is what CI runs to catch a seed file edited
@@ -67,46 +69,31 @@ case "$IMPRESSPRESS_BIN" in
   *) IMPRESSPRESS_BIN="$(cd "$(dirname "$IMPRESSPRESS_BIN")" && pwd)/$(basename "$IMPRESSPRESS_BIN")" ;;
 esac
 
-# The seed fixture's manifest declares a hash and a size for every site file,
-# and `seed::import` refuses the whole bundle if either disagrees with the
-# bytes it actually fetches. Checking it here turns "the seed silently did
-# not import" into a build failure that names the file.
+# Every seed under seeds/, not only the one being built: a manifest that has
+# drifted from its files is what `seed::import` refuses at boot, and the
+# check is cheap. The rules live in seeds/check-seeds.py.
 check_seed() {
-  log "verifying seed/site/** against seed/manifest.json"
-  python3 - "$HERE" <<'PY'
-import hashlib, json, sys, pathlib
+  log "verifying seeds/*/manifest.json against seeds/*/site/**"
+  python3 "$HERE/seeds/check-seeds.py"
+}
 
-root = pathlib.Path(sys.argv[1], "seed")
-manifest = json.loads((root / "manifest.json").read_text())
-declared = {entry["path"] for entry in manifest["site"]}
-for entry in manifest["site"]:
-    path = root / "site" / entry["path"]
-    if not path.is_file():
-        raise SystemExit(f"{path}: seed/manifest.json declares it but the file is missing")
-    data = path.read_bytes()
-    actual = hashlib.sha256(data).hexdigest()
-    if actual != entry["sha256"] or len(data) != entry["size"]:
-        raise SystemExit(
-            f"{path}: is {len(data)} bytes / {actual}, but seed/manifest.json "
-            f"declares {entry['size']} bytes / {entry['sha256']}"
-        )
-
-# The reverse direction: seed::import only ever imports what the manifest
-# lists, so a file added under seed/site/ and never added to
-# seed/manifest.json passes the forward check above and then silently never
-# ships — the fresh origin that seeds from this bundle just never gets it.
-# Walk the actual files and fail on anything the manifest does not declare.
-site_dir = root / "site"
-actual_files = {p.relative_to(site_dir).as_posix() for p in site_dir.rglob("*") if p.is_file()}
-undeclared = actual_files - declared
-if undeclared:
-    raise SystemExit(
-        "seed/site/** has file(s) seed/manifest.json does not declare, so they would "
-        "never be imported: " + ", ".join(sorted(undeclared))
-    )
-
-print("seed/manifest.json matches seed/site/**", file=sys.stderr)
-PY
+# Copy the chosen seed into seed/, the directory impresspress.toml overlays
+# onto dist/seed/. `[[assets.overlay]]` takes no parameters and the CLI has
+# no environment substitution for it, so choosing a seed means staging it
+# under the one name the overlay knows. Only what the manifest describes is
+# staged: seeds/<name>/ may carry source files (a vendor pin, say) that are
+# not bundle content.
+stage_seed() {
+  local src="$HERE/seeds/$SEED"
+  if [ ! -d "$src" ]; then
+    echo "build.sh: no seed named '$SEED' under $HERE/seeds/ — available: $(ls "$HERE/seeds" | grep -v '\.py$' | tr '\n' ' ')" >&2
+    exit 1
+  fi
+  log "staging seeds/$SEED into seed/"
+  rm -rf "$HERE/seed"
+  mkdir -p "$HERE/seed"
+  cp "$src/manifest.json" "$HERE/seed/manifest.json"
+  cp -R "$src/site" "$HERE/seed/site"
 }
 
 # The browser toolchain (`compiler/`) is 365 MiB of composed wasm and takes
@@ -153,13 +140,28 @@ check_compiler() {
   node "$HERE/compiler/scripts/verify-compiler-assets.mjs"
 }
 
-if [ "${1:-}" = "--check" ]; then
+SEED="blank"
+OUT=""
+CHECK_ONLY=0
+while [ $# -gt 0 ]; do
+  case "$1" in
+    --check) CHECK_ONLY=1 ;;
+    --seed) SEED="${2:-}"; shift ;;
+    --out) OUT="${2:-}"; shift ;;
+    *) echo "build.sh: unknown argument '$1' (usage: build.sh [--check] [--seed NAME] [--out DIR])" >&2; exit 1 ;;
+  esac
+  shift
+done
+[ -n "$SEED" ] || { echo "build.sh: --seed needs a name" >&2; exit 1; }
+
+if [ "$CHECK_ONLY" = 1 ]; then
   check_seed
   check_compiler
   exit 0
 fi
 
 check_seed
+stage_seed
 
 # 0. The browser toolchain, overlaid onto the bundle at
 #    `/__impresspress_dev/compiler/` (see `impresspress.toml`).
@@ -228,5 +230,18 @@ grep -q 'const DEV_ENABLED = true;' "$DIST/sw.js" || {
   exit 1
 }
 
-log "dist ready: $(du -sh "$DIST" | cut -f1)"
+# `--out DIR` moves the finished bundle out of dist/, so a second seed can be
+# built into dist/ afterwards (CI builds the bootstrap seed, moves it aside,
+# then builds blank). A DIR that exists is replaced — it is a build output.
+if [ -n "$OUT" ]; then
+  case "$OUT" in /*) ;; *) OUT="$(pwd)/$OUT" ;; esac
+  if [ "$OUT" = "$DIST" ]; then
+    echo "build.sh: --out must not be the default dist/ directory" >&2
+    exit 1
+  fi
+  rm -rf "$OUT"
+  mv "$DIST" "$OUT"
+  DIST="$OUT"
+fi
+log "dist ready ($SEED seed): $(du -sh "$DIST" | cut -f1)"
 echo "$DIST"

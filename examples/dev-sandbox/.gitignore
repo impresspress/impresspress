@@ -1,0 +1,5 @@
+# The seed being built, staged by build.sh from seeds/<name>/. Source lives
+# under seeds/; this directory is a build output.
+seed/
+# Bytecode the seed scripts leave behind when they import seedlib.
+seeds/__pycache__/
