@@ -3,10 +3,12 @@
 The bundle behind `dev.impresspress.org`: a browser-local WebMCP development
 sandbox. `impresspress.toml` sets `[dev] enabled = true`, which turns on the
 `impresspress/dev` block (`/b/dev`) and the service worker's seed-on-boot
-import (`impresspress-core::blocks::dev::seed`). `seed/` is the welcome
-starter site every fresh origin boots with — `seed/manifest.json` plus
-`seed/site/{index.html,styles.css}` — overlaid onto `dist/seed/` wholesale by
-`[[assets.overlay]]`.
+import (`impresspress-core::blocks::dev::seed`). `seeds/blank/` is the
+welcome starter site every fresh origin boots with — a generated
+`manifest.json` plus `site/{index.html,styles.css}`. `build.sh --seed NAME`
+stages `seeds/NAME/` into the gitignored `seed/`, which `[[assets.overlay]]`
+copies onto `dist/seed/` wholesale; `seeds/write-manifest.py NAME` regenerates
+a manifest after editing a seed's files.
 
 Every visitor who opens the deployed URL gets their **own** instance: a
 service worker and an OPFS database created fresh in their browser on first
@@ -38,9 +40,10 @@ This is the one recipe CI's `e2e-dev-sandbox` job and local e2e runs both use
 (`crates/impresspress-web/tests/e2e/dev-foundations.spec.ts` and
 `dev-workspace.spec.ts`). It:
 
-1. Verifies `seed/manifest.json` against `seed/site/**` — see `--check`
-   below. Runs first so a stale manifest fails fast rather than paying for a
-   wasm build before finding out the bundle cannot seed itself.
+1. Verifies every `seeds/*/manifest.json` against its `site/**`
+   (`seeds/check-seeds.py`) — see `--check` below. Runs first so a stale
+   manifest fails fast rather than paying for a wasm build before finding out
+   the bundle cannot seed itself.
 2. Builds `impresspress-web` to wasm with `--features browser-devtools` into
    `crates/impresspress-web/pkg-dev` (this is what puts the `/b/dev`
    control-plane code in the binary at all — `[dev] enabled` alone only wires
@@ -50,11 +53,17 @@ This is the one recipe CI's `e2e-dev-sandbox` job and local e2e runs both use
 
 Last line of stdout is the absolute path to `dist/`.
 
+`build.sh --seed bootstrap --out ../dist-bootstrap` builds another seed and
+moves the bundle to that directory (relative to where you run the script; it
+must be outside `examples/dev-sandbox/`), so `dist/` stays free for the next
+one.
+
 `examples/dev-sandbox/build.sh --check` runs step 1 only — verifies every
-`seed/site/**` file's sha256 and size against `seed/manifest.json` and exits
-non-zero on drift, without building anything. Run this after editing the seed
-site; a manifest that has drifted from the files it describes is exactly what
-`seed::import` refuses at runtime (a fresh origin would fail to boot).
+seed's manifest against its files and exits non-zero on drift, without
+building anything. Run `seeds/write-manifest.py <name>` after editing a seed's
+files, then this; a manifest that has drifted from the files it describes is
+exactly what `seed::import` refuses at runtime (a fresh origin would fail to
+boot).
 `build.sh`'s normal path runs the same check first, so a stale manifest fails
 the build fast rather than shipping a bundle that cannot seed itself.
 
@@ -133,8 +142,8 @@ not from a seeded row.
 
 **`seed/**` is served by the static host as plain files, with no auth in
 front of it** — that is what lets a fresh service worker fetch it before
-anything else has booted. If a `data.json` is ever added to *this*
-directory's seed, it will carry password hashes in a file anyone can `curl`.
+anything else has booted. If a `data.json` is ever added to a seed
+under `seeds/`, it will carry password hashes in a file anyone can `curl`.
 Do not add one, or point one at a real account, without deciding how the
 hash it carries is meant to be safe to publish (a disposable/rotated one,
 most likely) — "static file next to the site" is not a place to put a real
