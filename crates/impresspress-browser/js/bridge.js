@@ -358,7 +358,7 @@ export async function storageGet(folder, key) {
     // parses but is missing a field would otherwise hand Rust an object it
     // cannot decode (`GetMeta` has no optional fields), and on the streaming
     // path that decode failure used to strand a registered reader.
-    let meta = { content_type: 'application/octet-stream', size: data.length };
+    let meta = { content_type: 'application/octet-stream' };
     try {
         const metaHandle = await parent.getFileHandle(metaName(leaf));
         const metaFile = await metaHandle.getFile();
@@ -367,6 +367,11 @@ export async function storageGet(folder, key) {
     } catch (_e) {
         // No metadata file — use defaults
     }
+    // The sidecar's `size` was written at upload time and can be stale (an
+    // overwrite whose sidecar write failed keeps the previous one); the bytes
+    // just read are the authority, exactly as `storageGetStream` takes
+    // `file.size`.
+    meta.size = data.length;
 
     return { data, meta };
 }

@@ -153,11 +153,13 @@ async fn block_source_writes_do_not_create_generations() {
     assert_eq!(d["generation"], serde_json::Value::Null);
 }
 
-/// Validation asks whether every blob and artifact the manifest names is
-/// stored, over the WHOLE manifest, on every activation — every keystroke-save
-/// included. Asking by downloading would make each save transfer every blob of
-/// the site and every block's artifact (up to 4 MiB each), so an activation
-/// must read in full only what it publishes.
+/// Validation asks whether the blobs and artifacts the manifest names are
+/// stored on every activation — every keystroke-save included. Asking by
+/// downloading would make each save transfer every blob of the site and every
+/// block's artifact (up to 4 MiB each), so an activation must read in full
+/// only what it publishes. And a site write probes only the blobs it adds: the
+/// generation it follows was validated when it activated, and the collector
+/// keeps every blob a retained generation names.
 ///
 /// Counted at the object store, underneath the storage block: a buffered `get`
 /// is a full-body read, a `get_streaming` answers from the object's metadata
@@ -209,15 +211,105 @@ async fn a_site_write_reads_in_full_only_the_content_it_publishes() {
             .any(|read| read.contains("impresspress/dev/artifacts/")),
         "all reads: {reads:#?}",
     );
-    // The presence checks did run, as probes: the unchanged stylesheet was
-    // asked about without being transferred.
+    // The presence check ran, as a probe, for the one blob the write added —
+    // and not for the unchanged stylesheet, which the generation before this
+    // one already vouched for.
     assert!(
         reads.contains(&format!(
             "get_streaming impresspress/dev/blobs/{}",
-            sha_of("h1{}")
+            sha_of("<h1>v2</h1>")
         )),
         "all reads: {reads:#?}",
     );
+    assert!(
+        !reads.iter().any(|read| read.ends_with(&sha_of("h1{}"))),
+        "all reads: {reads:#?}",
+    );
+}
+
+/// A site write trusts only the generation it follows, and it still probes
+/// what it adds: a manifest naming a new blob that is not stored is refused,
+/// with the missing content named, although every other blob it names is one
+/// the active generation already vouched for.
+#[tokio::test]
+async fn a_site_write_whose_new_blob_is_missing_is_refused() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    let shared = ctx.dev_shared();
+    let g1 = write_file(&ctx, "site/index.html", "v1", None).await;
+
+    // The active site plus one new stylesheet whose blob was written and then
+    // removed behind the activation's back.
+    let mut site = site_of(&ctx, "v1").await;
+    let (gone, _stored) = blobs::put(&ctx, b"h1{}").await.expect("store the blob");
+    blobs::delete(&ctx, &gone).await.expect("remove the blob");
+    site.files.push(FileEntry {
+        path: "style.css".to_string(),
+        sha256: gone.clone(),
+        size: 4,
+        content_type: "text/css; charset=utf-8".to_string(),
+    });
+
+    let err = activation::request(
+        &ctx,
+        &shared,
+        GenerationCause::SiteWrite,
+        ActivationIntent::BlockSet {
+            site: Some(site),
+            blocks: Vec::new(),
+        },
+        activation::Maintenance::Inline,
+    )
+    .await
+    .expect_err("a new blob that is not stored cannot activate");
+    assert_eq!(err.status(), 422, "{err:?}");
+    assert!(
+        matches!(&err, ActivationError::Validation(missing)
+            if missing.len() == 1 && missing[0].contains(&gone)),
+        "{err:?}"
+    );
+    assert_eq!(
+        dev_status(&ctx).await["active_generation"]["id"],
+        g1["generation"]["id"]
+    );
+}
+
+/// A rollback trusts nothing: every blob the generation it republishes names
+/// is probed — including the ones the generation it replaces also names,
+/// which the collector could not have removed. Rollbacks are rare, so they
+/// deliberately skip the shortcut an everyday edit takes (defence in depth).
+#[tokio::test]
+async fn a_rollback_probes_every_blob_it_republishes() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+
+    // The target holds v1 and the stylesheet; the generation it replaces
+    // holds v2 and the same stylesheet.
+    let g1 = write_file(&ctx, "site/index.html", "v1", None).await;
+    let sha1 = g1["sha256"].as_str().expect("sha256").to_string();
+    let target = write_file(&ctx, "site/style.css", "h1{}", None).await["generation"]["id"]
+        .as_str()
+        .expect("id")
+        .to_string();
+    write_file(&ctx, "site/index.html", "v2", Some(&sha1)).await;
+
+    let before = ctx.storage_reads().len();
+    let out = dev_post(
+        &ctx,
+        &format!("/b/dev/api/generations/{target}/rollback"),
+        json!({}),
+    )
+    .await;
+    assert_eq!(output_http_status(out).await, 200);
+    let reads: Vec<String> = ctx.storage_reads()[before..].to_vec();
+
+    for content in ["v1", "h1{}"] {
+        assert!(
+            reads.contains(&format!(
+                "get_streaming impresspress/dev/blobs/{}",
+                sha_of(content)
+            )),
+            "{content:?} was not probed; all reads: {reads:#?}",
+        );
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -630,9 +722,15 @@ async fn rolling_back_to_a_generation_whose_content_is_gone_is_a_422() {
 /// Stage a generation the way a crashed activation would have left one: the
 /// row exists, its blobs are stored, and the journal points at it mid-publish.
 async fn insert_staged_generation(ctx: &TestContext, content: &str) -> String {
+    let site = site_of(ctx, content).await;
+    insert_staged_site(ctx, site).await
+}
+
+/// [`insert_staged_generation`] for a whole site manifest.
+async fn insert_staged_site(ctx: &TestContext, site: SiteManifest) -> String {
     let state = runtime_state::read(ctx).await.expect("read journal");
     let id = repo::new_id();
-    let mut manifest = GenerationManifest::staged(site_of(ctx, content).await, Vec::new());
+    let mut manifest = GenerationManifest::staged(site, Vec::new());
     manifest.identify(id.clone(), state.active_generation_id.clone());
 
     generations::insert(
@@ -687,6 +785,43 @@ async fn boot_converges_an_interrupted_activation() {
         served(&ctx, "index.html").await.as_deref(),
         Some(&b"v2"[..])
     );
+}
+
+/// Boot convergence trusts nothing, by the same policy as a rollback: every
+/// blob the generation it converges on names is probed — including the ones
+/// the active generation also names, which a crash cannot have removed.
+#[tokio::test]
+async fn boot_convergence_probes_every_blob_it_publishes() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    write_file(&ctx, "site/style.css", "h1{}", None).await;
+
+    // The interrupted generation adds a page and keeps the active stylesheet.
+    let mut site = site_of(&ctx, "v2").await;
+    site.files.push(FileEntry {
+        path: "style.css".to_string(),
+        sha256: sha_of("h1{}"),
+        size: 4,
+        content_type: "text/css; charset=utf-8".to_string(),
+    });
+    let staged = insert_staged_site(&ctx, site).await;
+
+    let before = ctx.storage_reads().len();
+    activation::converge_on_boot(&ctx, &ctx.dev_shared())
+        .await
+        .expect("converge");
+    let reads: Vec<String> = ctx.storage_reads()[before..].to_vec();
+
+    let state = runtime_state::read(&ctx).await.expect("read journal");
+    assert_eq!(state.active_generation_id.as_deref(), Some(staged.as_str()));
+    for content in ["v2", "h1{}"] {
+        assert!(
+            reads.contains(&format!(
+                "get_streaming impresspress/dev/blobs/{}",
+                sha_of(content)
+            )),
+            "{content:?} was not probed; all reads: {reads:#?}",
+        );
+    }
 }
 
 /// Convergence that cannot succeed must still leave a coherent instance: the
