@@ -80,6 +80,16 @@ async fn write_then_list_then_read_round_trips_with_hashes() {
     // silently exercising an unpublished write.
     assert_eq!(w["generation"]["cause"], "site_write");
     assert_eq!(w["generation"]["status"], "active");
+    // It carries that activation's phase timings too (design §2.6), so the
+    // page's ladder and the e2e can show where a write's time went. A site
+    // write rebuilds no runtime, so it has no `building_runtime` phase.
+    let phases: Vec<&str> = w["progress"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a site write carries its progress: {w}"))
+        .iter()
+        .map(|step| step["phase"].as_str().expect("phase"))
+        .collect();
+    assert_eq!(phases, ["validating", "publishing", "active"]);
     let sha = w["sha256"].as_str().expect("sha256").to_string();
     assert_eq!(sha.len(), 64);
 
@@ -400,12 +410,15 @@ async fn delete_with_matching_hash_removes_the_entry_and_keeps_the_blob_for_hist
     )
     .await;
     assert_eq!(output_status(out).await, 200);
+    // Let the retention and collection the delete's activation scheduled for
+    // after its reply run, so the survival below is the collector's verdict.
+    ctx.drain_deferred().await;
 
     let l = output_json(ctx.dispatch_resolved(list_msg(None)).await).await;
     assert!(l["files"].as_array().expect("files array").is_empty());
 
     // The blob outlives the manifest entry: an earlier generation still
-    // names it, and Plan 4's GC — not the delete handler — reclaims it.
+    // names it, so the collector that has just run kept it.
     assert_eq!(
         blobs::get(&ctx, &sha).await.expect("blob survives delete"),
         b"a{}".to_vec()
@@ -708,6 +721,10 @@ async fn overwriting_one_path_accumulates_stored_blob_bytes() {
             .expect("sha256")
             .to_string();
     }
+    // The collections the writes scheduled for after their replies have run:
+    // the counters below are what they reset them to from the store, not
+    // only what the writes charged.
+    ctx.drain_deferred().await;
 
     let ws = workspace::load(&ctx).await.expect("load workspace");
     assert_eq!(ws.files.len(), 1, "one path is reachable");
@@ -1141,6 +1158,7 @@ async fn an_activation_composes_its_site_from_the_manifest_a_racing_write_has_no
         &shared,
         GenerationCause::SiteWrite,
         ActivationIntent::SiteOnly,
+        activation::Maintenance::Inline,
     );
     let racer = async {
         once_parked(&hold).await;

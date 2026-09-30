@@ -33,6 +33,12 @@ mod db_codec;
 #[cfg(any(target_arch = "wasm32", test))]
 mod storage_cursor;
 
+// The storage service's bounded read cache — pure bookkeeping, split out of the
+// wasm32-only `storage` module (same rationale as `storage_cursor`) so its
+// eviction and invalidation rules unit-test on the host.
+#[cfg(any(target_arch = "wasm32", test))]
+mod storage_cache;
+
 // wasm32-only — use wasm-bindgen, web-sys, js-sys.
 #[cfg(target_arch = "wasm32")]
 pub mod asset_loader;
@@ -44,6 +50,8 @@ pub mod convert;
 pub mod crypto;
 #[cfg(target_arch = "wasm32")]
 pub mod database;
+#[cfg(target_arch = "wasm32")]
+pub mod flush_scope;
 #[cfg(target_arch = "wasm32")]
 pub mod logger;
 #[cfg(target_arch = "wasm32")]
@@ -65,7 +73,8 @@ pub use logger::{init_console_tracing, make_console_logger};
 pub use network::make_network_service;
 #[cfg(target_arch = "wasm32")]
 pub use runtime::{
-    current_wafer, dispatch_request, is_initialized, replace_wafer, restore_wafer, store_wafer,
+    current_wafer, dispatch_fetch, dispatch_request, is_initialized, replace_wafer, restore_wafer,
+    store_wafer,
 };
 #[cfg(target_arch = "wasm32")]
 pub use storage::make_storage_service;
@@ -88,5 +97,7 @@ pub async fn db_init() -> Result<(), wasm_bindgen::JsValue> {
     // Whatever the schema cache knew described the database this replaced.
     database::forget_schema();
     opened?;
+    // The database in memory is now the one on disk.
+    flush_scope::loaded_from_disk();
     Ok(())
 }

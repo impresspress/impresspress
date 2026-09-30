@@ -16,10 +16,12 @@
 //! the activation queue, under the same lease as the publish
 //! (`activation::activate`), so no site write can dequeue between the two.
 
+use std::sync::Arc;
+
 use wafer_run::{context::Context, ErrorCode, Message, OutputStream, WaferError};
 
 use super::{
-    activation::{self, ActivationIntent},
+    activation::{self, ActivationIntent, Maintenance},
     contracts::{
         ActivationResponse, GenerationDetail, GenerationListQuery, GenerationListResponse,
     },
@@ -98,7 +100,11 @@ async fn detail(ctx: &dyn Context, id: &str) -> Result<GenerationDetail, WaferEr
 
 /// `POST /b/dev/api/generations/{id}/rollback` — republish an earlier
 /// generation as a new one.
-pub async fn handle_rollback(ctx: &dyn Context, shared: &DevShared, msg: &Message) -> OutputStream {
+pub async fn handle_rollback(
+    ctx: &dyn Context,
+    shared: &Arc<DevShared>,
+    msg: &Message,
+) -> OutputStream {
     let Some(id) = generation_id(msg) else {
         return no_store_error(ErrorCode::InvalidArgument, "the path names no generation");
     };
@@ -133,7 +139,15 @@ pub async fn handle_rollback(ctx: &dyn Context, shared: &DevShared, msg: &Messag
     // part of applying the `Rollback` intent, so that it and the publish land
     // under one lease. See `activation::activate`.
     let _compiling = shared.compile.lock().await;
-    let outcome = match activation::request(ctx, shared, GenerationCause::Rollback, intent).await {
+    let outcome = match activation::request(
+        ctx,
+        shared,
+        GenerationCause::Rollback,
+        intent,
+        Maintenance::Deferred,
+    )
+    .await
+    {
         Ok(outcome) => outcome,
         Err(e) => return e.into_response(),
     };

@@ -8,19 +8,42 @@ use wafer_core::interfaces::storage::service::{
 use wafer_run::{ErrorCode, WaferError};
 use wasm_bindgen::JsCast;
 
-use crate::bridge;
 // Pure, host-testable opaque list-cursor codec (envelope shared with the
 // local-storage backend); see `storage_cursor` for the format contract.
 use crate::storage_cursor as cursor;
+use crate::{bridge, storage_cache::ReadCache};
 
+/// The browser `StorageService`: objects live in OPFS under `storage/`, and
+/// recently read or written ones are also held in [`READ_CACHE`].
 pub struct BrowserStorageService;
 
-// SAFETY: `BrowserStorageService` is a unit struct with no shared state.
+// SAFETY: `BrowserStorageService` is a unit struct with no state of its own
+// (the read cache is a thread-local, reached only through `with_cache`).
 // wasm32-unknown-unknown has no threads, so the `Send`/`Sync` bounds
 // required by `Arc<dyn StorageService>` are satisfied trivially — no
 // cross-thread aliasing or data races are possible.
 unsafe impl Send for BrowserStorageService {}
 unsafe impl Sync for BrowserStorageService {}
+
+thread_local! {
+    /// The worker's one read cache (see `storage_cache`'s module doc for why
+    /// it cannot go stale, what it serves and its bounds).
+    ///
+    /// Per worker, not per `BrowserStorageService`: every runtime the worker
+    /// builds gets a fresh service from [`make_storage_service`] (the dev
+    /// sandbox rebuilds its runtime on every activation, and reads artifacts
+    /// through a service of its own), and a retained runtime can be swapped
+    /// back in. They all write the same OPFS, so a cache per instance would
+    /// miss the others' writes and serve bytes they replaced.
+    ///
+    /// Every method below touches it only between awaits, so no `RefCell`
+    /// borrow is ever held across one.
+    static READ_CACHE: std::cell::RefCell<ReadCache> = std::cell::RefCell::new(ReadCache::new());
+}
+
+fn with_cache<R>(f: impl FnOnce(&mut ReadCache) -> R) -> R {
+    READ_CACHE.with(|cache| f(&mut cache.borrow_mut()))
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -264,15 +287,78 @@ pub(crate) async fn release_reader_in(value: &wasm_bindgen::JsValue) {
     }
 }
 
-/// `storageList`'s resolved shape: the requested page of keys plus the
-/// TRUE total of matching entries (before slicing to the page). `total`
-/// drives both the offset-mode has-more check and cursor-mode continuation
-/// (`start + page.len() < total`); see [`BrowserStorageService::list`] and
-/// the [`cursor`] module.
+/// `storageList`'s resolved shape: the requested page of keys, each key's
+/// byte size at the same index, plus the TRUE total of matching entries
+/// (before slicing to the page). `total` drives both the offset-mode
+/// has-more check and cursor-mode continuation (`start + page.len() <
+/// total`); see [`BrowserStorageService::list`] and the [`cursor`] module.
 #[derive(Deserialize)]
 struct ListResponse {
     keys: Vec<String>,
+    sizes: Vec<i64>,
     total: i64,
+}
+
+/// `put_streaming`'s OPFS write, which the trait method brackets with cache
+/// invalidation; see that method for what an interrupted write leaves behind.
+async fn stream_to_opfs(
+    folder: &str,
+    key: &str,
+    data: InputStream,
+    content_type: &str,
+) -> Result<(), StorageError> {
+    use futures::StreamExt;
+
+    let id = bridge::storage_put_stream_start(folder, key)
+        .await
+        .map_err(map_rejection)?;
+    // No abort here, deliberately: the writer id IS the only handle to the
+    // open writable, so a resolved value that is not a string leaves
+    // nothing to abort with. `storagePutStreamStart` resolves a string by
+    // construction and `js/test/storage_stream.test.mjs` pins that, which
+    // is where the invariant belongs — this arm exists so a bridge that
+    // broke it fails loudly instead of writing to a `JsValue::UNDEFINED`
+    // id.
+    let id = id.as_string().ok_or_else(|| {
+        StorageError::Internal("storagePutStreamStart did not resolve a writer id".to_string())
+    })?;
+
+    let mut data = Box::pin(data);
+    while let Some(chunk) = data.next().await {
+        let chunk = match chunk {
+            Ok(chunk) => chunk,
+            Err(e) => {
+                bridge::storage_put_stream_abort(&id).await;
+                return Err(StorageError::Body(e));
+            }
+        };
+        if let Err(e) = bridge::storage_put_stream_chunk(&id, &chunk).await {
+            bridge::storage_put_stream_abort(&id).await;
+            return Err(map_rejection(e));
+        }
+    }
+
+    if let Err(e) = bridge::storage_put_stream_finish(&id, content_type).await {
+        bridge::storage_put_stream_abort(&id).await;
+        return Err(map_rejection(e));
+    }
+    Ok(())
+}
+
+/// A cached object's `ObjectInfo` as an uncached read of `key` reports it, so
+/// a hit and a miss are indistinguishable:
+///
+/// - `key` is the caller's, not the one the entry was cached under. Two names
+///   can reach one entry (`("a", "b/c")` and `("a/b", "c")` are one OPFS
+///   file, see `storage_cache`), and a miss reports the key it was asked for.
+/// - `last_modified` is the time of the read: `get` and `get_streaming` do not
+///   read the OPFS file's own timestamp.
+fn fresh_info(key: &str, info: ObjectInfo) -> ObjectInfo {
+    ObjectInfo {
+        key: key.to_string(),
+        last_modified: Utc::now(),
+        ..info
+    }
 }
 
 // ─── StorageService impl ──────────────────────────────────────────────────────
@@ -287,12 +373,40 @@ impl StorageService for BrowserStorageService {
         data: &[u8],
         content_type: &str,
     ) -> Result<(), StorageError> {
-        await_bridge(bridge::storage_put(folder, key, data, content_type))
+        let ticket = with_cache(|cache| cache.invalidate(folder, key));
+        let written = await_bridge(bridge::storage_put(folder, key, data, content_type))
             .await
-            .map(|_| ())
+            .map(|_| ());
+        match written {
+            // What `get` reports for these bytes: their length (`storageGet`
+            // takes it from the bytes it reads) and the content type
+            // `storagePut`'s sidecar records.
+            Ok(()) => with_cache(|cache| {
+                let info = ObjectInfo {
+                    key: key.to_string(),
+                    size: data.len() as i64,
+                    content_type: content_type.to_string(),
+                    last_modified: Utc::now(),
+                };
+                cache.insert_written(ticket, folder, key, data, &info);
+            }),
+            // A failure can land between the body and the sidecar write, so
+            // OPFS may hold anything; the next read goes to it.
+            Err(_) => {
+                with_cache(|cache| cache.invalidate(folder, key));
+            }
+        }
+        written
     }
 
+    /// Served from [`READ_CACHE`] when it holds the object; otherwise read
+    /// from OPFS and cached if it fits.
     async fn get(&self, folder: &str, key: &str) -> Result<(Vec<u8>, ObjectInfo), StorageError> {
+        if let Some(hit) = with_cache(|cache| cache.get(folder, key)) {
+            return Ok((hit.data.to_vec(), fresh_info(key, hit.info)));
+        }
+        let ticket = with_cache(|cache| cache.ticket());
+
         // `storageGet` resolves a plain JS object `{ data: Uint8Array, meta }`
         // (see `bridge::storage_get`'s doc comment) — not a string, so this
         // bypasses `await_bridge`/`jsvalue_to_string` and maps the rejection
@@ -313,6 +427,7 @@ impl StorageService for BrowserStorageService {
             last_modified: Utc::now(),
         };
 
+        with_cache(|cache| cache.insert_read(ticket, folder, key, &resp.data, &info));
         Ok((resp.data, info))
     }
 
@@ -334,11 +449,24 @@ impl StorageService for BrowserStorageService {
     ///
     /// A read failure surfaces as an `Error` terminal after whatever already
     /// streamed; a dropped consumer releases the OPFS reader.
+    ///
+    /// An object [`READ_CACHE`] holds is answered from it as the one-chunk
+    /// stream the buffered path would give — it is at most
+    /// `storage_cache::MAX_ENTRY_BYTES`, so there is nothing to stream it
+    /// for. A miss streams from OPFS and is not cached: the caller streams
+    /// precisely so the object need not be held whole.
     async fn get_streaming(
         &self,
         folder: &str,
         key: &str,
     ) -> Result<(OutputStream, ObjectInfo), StorageError> {
+        if let Some(hit) = with_cache(|cache| cache.get(folder, key)) {
+            return Ok((
+                OutputStream::respond(hit.data.to_vec()),
+                fresh_info(key, hit.info),
+            ));
+        }
+
         let val = bridge::storage_get_stream(folder, key)
             .await
             .map_err(map_rejection)?;
@@ -407,6 +535,10 @@ impl StorageService for BrowserStorageService {
     ///   previous sidecar, so the content type can be stale until the object is
     ///   rewritten. `get`/`get_streaming` both take the object's real length
     ///   from the file rather than the sidecar, so the size cannot disagree.
+    ///
+    /// The key is dropped from [`READ_CACHE`] when the write starts and again
+    /// when it ends, whatever the outcome; the body is never held whole here,
+    /// so there is nothing to cache, and the next read goes to OPFS.
     async fn put_streaming(
         &self,
         folder: &str,
@@ -414,48 +546,22 @@ impl StorageService for BrowserStorageService {
         data: InputStream,
         content_type: &str,
     ) -> Result<(), StorageError> {
-        use futures::StreamExt;
-
-        let id = bridge::storage_put_stream_start(folder, key)
-            .await
-            .map_err(map_rejection)?;
-        // No abort here, deliberately: the writer id IS the only handle to the
-        // open writable, so a resolved value that is not a string leaves
-        // nothing to abort with. `storagePutStreamStart` resolves a string by
-        // construction and `js/test/storage_stream.test.mjs` pins that, which
-        // is where the invariant belongs — this arm exists so a bridge that
-        // broke it fails loudly instead of writing to a `JsValue::UNDEFINED`
-        // id.
-        let id = id.as_string().ok_or_else(|| {
-            StorageError::Internal("storagePutStreamStart did not resolve a writer id".to_string())
-        })?;
-
-        let mut data = Box::pin(data);
-        while let Some(chunk) = data.next().await {
-            let chunk = match chunk {
-                Ok(chunk) => chunk,
-                Err(e) => {
-                    bridge::storage_put_stream_abort(&id).await;
-                    return Err(StorageError::Body(e));
-                }
-            };
-            if let Err(e) = bridge::storage_put_stream_chunk(&id, &chunk).await {
-                bridge::storage_put_stream_abort(&id).await;
-                return Err(map_rejection(e));
-            }
-        }
-
-        if let Err(e) = bridge::storage_put_stream_finish(&id, content_type).await {
-            bridge::storage_put_stream_abort(&id).await;
-            return Err(map_rejection(e));
-        }
-        Ok(())
+        with_cache(|cache| cache.invalidate(folder, key));
+        let written = stream_to_opfs(folder, key, data, content_type).await;
+        with_cache(|cache| cache.invalidate(folder, key));
+        written
     }
 
+    /// Drops the key from [`READ_CACHE`] when the delete starts and again
+    /// when it ends: a read that overlapped it may have fetched the bytes
+    /// being deleted, and must not cache them.
     async fn delete(&self, folder: &str, key: &str) -> Result<(), StorageError> {
-        await_bridge(bridge::storage_delete(folder, key))
+        with_cache(|cache| cache.invalidate(folder, key));
+        let deleted = await_bridge(bridge::storage_delete(folder, key))
             .await
-            .map(|_| ())
+            .map(|_| ());
+        with_cache(|cache| cache.invalidate(folder, key));
+        deleted
     }
 
     async fn list(&self, folder: &str, opts: &ListOptions) -> Result<ObjectList, StorageError> {
@@ -472,11 +578,12 @@ impl StorageService for BrowserStorageService {
 
         let limit = if opts.limit > 0 { opts.limit as u32 } else { 0 };
 
-        // `storageList` resolves `{ keys: string[], total: number }` — not a
-        // string — with `total` the full matching-entry count (not the page
-        // length; see `bridge::storage_list`'s doc comment). The JS bridge
-        // sorts keys before slicing, matching the local-storage backend, so
-        // offset/cursor paging is stable across calls.
+        // `storageList` resolves `{ keys: string[], sizes: number[], total:
+        // number }` — not a string — with `total` the full matching-entry
+        // count (not the page length; see `bridge::storage_list`'s doc
+        // comment). The JS bridge sorts keys before slicing, matching the
+        // local-storage backend, so offset/cursor paging is stable across
+        // calls.
         let val = bridge::storage_list(folder, &opts.prefix, limit, cursor::clamp_offset(start))
             .await
             .map_err(map_rejection)?;
@@ -495,16 +602,26 @@ impl StorageService for BrowserStorageService {
             resp.total.max(0) as u64,
         );
 
-        // ObjectInfo fields beyond `key` are not available from the list
-        // call; we use placeholder values (size=0, empty content_type,
-        // current time).
+        if resp.sizes.len() != resp.keys.len() {
+            return Err(StorageError::Internal(format!(
+                "storage list response has {} keys and {} sizes",
+                resp.keys.len(),
+                resp.sizes.len()
+            )));
+        }
+        // The content type lives in each object's sidecar and the listing
+        // does not read it, and OPFS keeps no modification time the bridge
+        // reads: those two are placeholders (empty, and now). The size is
+        // real — the dev sandbox's collector sets the workspace's blob quota
+        // counters from it.
         let now = Utc::now();
         let objects = resp
             .keys
             .into_iter()
-            .map(|k| ObjectInfo {
-                key: k,
-                size: 0,
+            .zip(resp.sizes)
+            .map(|(key, size)| ObjectInfo {
+                key,
+                size,
                 content_type: String::new(),
                 last_modified: now,
             })
@@ -524,10 +641,16 @@ impl StorageService for BrowserStorageService {
             .map(|_| ())
     }
 
+    /// Drops every object under `name` (sub-folders included) from
+    /// [`READ_CACHE`] when the delete starts and again when it ends, for the
+    /// reason [`delete`](Self::delete) gives.
     async fn delete_folder(&self, name: &str) -> Result<(), StorageError> {
-        await_bridge(bridge::storage_delete_folder(name))
+        with_cache(|cache| cache.invalidate_folder(name));
+        let deleted = await_bridge(bridge::storage_delete_folder(name))
             .await
-            .map(|_| ())
+            .map(|_| ());
+        with_cache(|cache| cache.invalidate_folder(name));
+        deleted
     }
 
     async fn list_folders(&self) -> Result<Vec<FolderInfo>, StorageError> {
@@ -561,15 +684,12 @@ pub fn make_storage_service(
     std::sync::Arc::new(BrowserStorageService)
 }
 
-// `bridge::storage_*` are `#[wasm_bindgen(module = "/js/bridge.js")]` externs,
-// so `BrowserStorageService`'s trait methods (which call them through
-// `await_bridge`) can't be exercised outside a real Service Worker/page
-// context — the module path doesn't resolve under `wasm-pack test`. What CAN
-// be verified in isolation — and is exactly what this task's `catch` fix
-// makes reachable for the first time (a rejection used to panic before ever
-// reaching this mapping) — is `map_rejection`: does an OPFS `NotFoundError`
-// DOMException map to `StorageError::NotFound`, and does every other
-// rejection carry its message through as `StorageError::Internal`.
+// The bridge-edge helpers in isolation: `map_rejection` (does an OPFS
+// `NotFoundError` DOMException map to `StorageError::NotFound`, and does every
+// other rejection carry its message through as `StorageError::Internal`) and
+// the decode of `storageGet`/`storageList`'s resolved shapes. The service's
+// trait methods themselves run against real bridge.js and an in-memory OPFS in
+// `cached_service` below.
 #[cfg(all(test, target_arch = "wasm32"))]
 mod tests {
     use js_sys::{Object, Reflect};
@@ -716,12 +836,15 @@ mod tests {
         use js_sys::Array;
 
         let js_keys = Array::new();
-        for k in keys {
+        let js_sizes = Array::new();
+        for (i, k) in keys.iter().enumerate() {
             js_keys.push(&JsValue::from_str(k));
+            js_sizes.push(&JsValue::from_f64(i as f64));
         }
 
         let obj = Object::new();
         Reflect::set(&obj, &JsValue::from_str("keys"), &js_keys).unwrap();
+        Reflect::set(&obj, &JsValue::from_str("sizes"), &js_sizes).unwrap();
         Reflect::set(
             &obj,
             &JsValue::from_str("total"),
@@ -758,6 +881,144 @@ mod tests {
 
         assert!(decoded.keys.is_empty());
         assert_eq!(decoded.total, 0);
+    }
+}
+
+/// `list` against the real `bridge.js` listing, over an in-memory OPFS with
+/// directories: what a listing says about an object is what `put` wrote.
+///
+/// The dev sandbox's collector sets the workspace's blob quota counters from
+/// these sizes (`impresspress_core::blocks::dev::gc`). A listing that
+/// reported zero for every object reset the counters to zero after nearly
+/// every write, so the 64 MiB quota never bit in the browser.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod listing {
+    use wafer_core::interfaces::storage::service::{ListOptions, StorageService};
+    use wasm_bindgen::prelude::wasm_bindgen;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::BrowserStorageService;
+
+    #[wasm_bindgen(inline_js = r#"
+export function installMemoryOpfsWithDirs() {
+    const notFound = (name) => new DOMException(`no such entry: ${name}`, 'NotFoundError');
+    const makeFile = () => {
+        let bytes = new Uint8Array(0);
+        return {
+            kind: 'file',
+            async getFile() { return new Blob([bytes]); },
+            async createWritable() {
+                const parts = [];
+                return {
+                    async write(chunk) {
+                        parts.push(typeof chunk === 'string'
+                            ? new TextEncoder().encode(chunk)
+                            : new Uint8Array(chunk));
+                    },
+                    async close() {
+                        const out = new Uint8Array(parts.reduce((n, p) => n + p.byteLength, 0));
+                        let at = 0;
+                        for (const p of parts) { out.set(p, at); at += p.byteLength; }
+                        bytes = out;
+                    },
+                };
+            },
+        };
+    };
+    const makeDir = () => {
+        const dirs = new Map();
+        const files = new Map();
+        return {
+            kind: 'directory',
+            async getDirectoryHandle(name, opts = {}) {
+                if (!dirs.has(name)) {
+                    if (!opts.create) throw notFound(name);
+                    dirs.set(name, makeDir());
+                }
+                return dirs.get(name);
+            },
+            async getFileHandle(name, opts = {}) {
+                if (!files.has(name)) {
+                    if (!opts.create) throw notFound(name);
+                    files.set(name, makeFile());
+                }
+                return files.get(name);
+            },
+            async removeEntry(name) {
+                if (!files.delete(name) && !dirs.delete(name)) throw notFound(name);
+            },
+            async *entries() {
+                for (const entry of dirs) yield entry;
+                for (const entry of files) yield entry;
+            },
+        };
+    };
+    const root = makeDir();
+    Object.defineProperty(globalThis.navigator, 'storage', {
+        configurable: true,
+        value: { async getDirectory() { return root; } },
+    });
+}
+"#)]
+    extern "C" {
+        /// A fresh in-memory OPFS with nested directories, answering the
+        /// handle calls `bridge.js`'s storage functions make.
+        #[wasm_bindgen(js_name = installMemoryOpfsWithDirs)]
+        fn install_memory_opfs_with_dirs();
+    }
+
+    #[wasm_bindgen_test]
+    async fn list_reports_the_byte_size_put_wrote() {
+        install_memory_opfs_with_dirs();
+        let store = BrowserStorageService;
+        store
+            .put("blobs", "aa/one", &[7u8; 5], "application/octet-stream")
+            .await
+            .expect("put one");
+        store
+            .put("blobs", "bb/two", &[7u8; 1234], "application/octet-stream")
+            .await
+            .expect("put two");
+        store
+            .put("blobs", "empty", &[], "application/octet-stream")
+            .await
+            .expect("put empty");
+
+        let listed = store
+            .list("blobs", &ListOptions::default())
+            .await
+            .expect("list");
+        let sizes: Vec<(String, i64)> = listed
+            .objects
+            .into_iter()
+            .map(|object| (object.key, object.size))
+            .collect();
+        assert_eq!(
+            sizes,
+            vec![
+                ("aa/one".to_string(), 5),
+                ("bb/two".to_string(), 1234),
+                ("empty".to_string(), 0),
+            ],
+            "each object's size is the byte count put wrote, sidecars not listed",
+        );
+
+        // A page carries the sizes of its own keys, not of the first keys.
+        let page = store
+            .list(
+                "blobs",
+                &ListOptions {
+                    prefix: String::new(),
+                    limit: 1,
+                    offset: 1,
+                    cursor: None,
+                },
+            )
+            .await
+            .expect("list a page");
+        assert_eq!(page.objects.len(), 1);
+        assert_eq!(page.objects[0].key, "bb/two");
+        assert_eq!(page.objects[0].size, 1234);
     }
 }
 
@@ -940,5 +1201,341 @@ mod drain_loop {
         drain_into(source, None, "test read", sink, cancel).await;
 
         assert_eq!(released.get(), 1);
+    }
+}
+
+/// **The read cache in front of real `bridge.js`.** Each test drives
+/// `BrowserStorageService` through bridge.js's real storage functions against
+/// an in-memory OPFS that counts file reads, so "served from the cache" is
+/// measured as "no OPFS file was read", not inferred from the bytes.
+///
+/// Under `wasm-pack test --node`, `js/test/node-hooks.mjs` is what lets
+/// bridge.js load at all (see its header). The fake is a directory tree —
+/// the flat one `database.rs` installs for its single database file cannot
+/// hold nested storage folders and keys — with the surface bridge.js's
+/// storage functions use: create-on-demand directory and file handles,
+/// `removeEntry` (recursive or refusing a non-empty directory, as OPFS does),
+/// `entries()`, and files whose `getFile()` answers a real `Blob`.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod cached_service {
+    use wafer_block::{InputStream, OutputStream};
+    use wafer_core::interfaces::storage::service::{StorageError, StorageService};
+    use wasm_bindgen::prelude::wasm_bindgen;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::{BrowserStorageService, READ_CACHE};
+    use crate::storage_cache::{ReadCache, MAX_ENTRY_BYTES};
+
+    #[wasm_bindgen(inline_js = r#"
+let reads = 0;
+export function opfsReads() { return reads; }
+function notFound(name) {
+    return new DOMException(`no such entry: ${name}`, 'NotFoundError');
+}
+function makeFile() {
+    let bytes = new Uint8Array(0);
+    return {
+        kind: 'file',
+        async getFile() { reads += 1; return new Blob([bytes]); },
+        async createWritable() {
+            const parts = [];
+            return {
+                async write(chunk) {
+                    parts.push(typeof chunk === 'string'
+                        ? new TextEncoder().encode(chunk)
+                        : new Uint8Array(chunk));
+                },
+                async close() {
+                    const out = new Uint8Array(parts.reduce((n, p) => n + p.byteLength, 0));
+                    let at = 0;
+                    for (const p of parts) { out.set(p, at); at += p.byteLength; }
+                    bytes = out;
+                },
+                async abort() {},
+            };
+        },
+    };
+}
+function makeDir() {
+    const entries = new Map();
+    return {
+        kind: 'directory',
+        async getDirectoryHandle(name, opts = {}) {
+            if (!entries.has(name)) {
+                if (!opts.create) throw notFound(name);
+                entries.set(name, makeDir());
+            }
+            const entry = entries.get(name);
+            if (entry.kind !== 'directory') throw new DOMException(name, 'TypeMismatchError');
+            return entry;
+        },
+        async getFileHandle(name, opts = {}) {
+            if (!entries.has(name)) {
+                if (!opts.create) throw notFound(name);
+                entries.set(name, makeFile());
+            }
+            const entry = entries.get(name);
+            if (entry.kind !== 'file') throw new DOMException(name, 'TypeMismatchError');
+            return entry;
+        },
+        async removeEntry(name, opts = {}) {
+            const entry = entries.get(name);
+            if (!entry) throw notFound(name);
+            if (entry.kind === 'directory' && !opts.recursive && !(await entry.isEmpty())) {
+                throw new DOMException(name, 'InvalidModificationError');
+            }
+            entries.delete(name);
+        },
+        async isEmpty() { return entries.size === 0; },
+        async *entries() { yield* entries; },
+    };
+}
+export function installMemoryStorageOpfs() {
+    reads = 0;
+    const root = makeDir();
+    Object.defineProperty(globalThis.navigator, 'storage', {
+        configurable: true,
+        value: { async getDirectory() { return root; } },
+    });
+}
+"#)]
+    extern "C" {
+        /// A fresh, empty in-memory OPFS directory tree behind
+        /// `navigator.storage.getDirectory()`.
+        #[wasm_bindgen(js_name = installMemoryStorageOpfs)]
+        fn install_memory_storage_opfs();
+
+        /// How many OPFS files (objects and metadata sidecars) have been read
+        /// since the last install.
+        #[wasm_bindgen(js_name = opfsReads)]
+        fn opfs_reads() -> u32;
+    }
+
+    const FOLDER: &str = "wafer-run/web/site";
+
+    /// An empty OPFS and an empty read cache: the cache is per worker, so a
+    /// previous test's entries would otherwise answer for this test's keys.
+    fn fresh_storage() -> BrowserStorageService {
+        install_memory_storage_opfs();
+        forget_cache();
+        BrowserStorageService
+    }
+
+    fn forget_cache() {
+        READ_CACHE.with(|cache| *cache.borrow_mut() = ReadCache::new());
+    }
+
+    async fn body(stream: OutputStream) -> Vec<u8> {
+        stream
+            .collect_buffered()
+            .await
+            .expect("a clean stream")
+            .body
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_get_after_a_put_reads_nothing_from_opfs() {
+        let svc = fresh_storage();
+        svc.put(FOLDER, "index.html", b"<h1>hi</h1>", "text/html")
+            .await
+            .expect("put");
+        let before = opfs_reads();
+
+        let (data, info) = svc.get(FOLDER, "index.html").await.expect("get");
+
+        assert_eq!(data, b"<h1>hi</h1>");
+        assert_eq!(info.content_type, "text/html");
+        assert_eq!(info.size, 11);
+        assert_eq!(
+            opfs_reads(),
+            before,
+            "a put's own bytes are served from memory"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_streamed_get_after_a_put_is_served_from_the_cache() {
+        let svc = fresh_storage();
+        svc.put(FOLDER, "app.css", b"body{color:red}", "text/css")
+            .await
+            .expect("put");
+        let before = opfs_reads();
+
+        let (stream, info) = svc
+            .get_streaming(FOLDER, "app.css")
+            .await
+            .expect("get_streaming");
+
+        assert_eq!(body(stream).await, b"body{color:red}");
+        assert_eq!(info.content_type, "text/css");
+        assert_eq!(info.size, 15);
+        assert_eq!(opfs_reads(), before);
+    }
+
+    /// What a put caches is what OPFS answers for the same bytes, so a hit
+    /// and a miss are indistinguishable to the caller.
+    #[wasm_bindgen_test]
+    async fn a_hit_reports_what_opfs_reports() {
+        let svc = fresh_storage();
+        svc.put(
+            FOLDER,
+            "blog/post.html",
+            b"post",
+            "text/html; charset=utf-8",
+        )
+        .await
+        .expect("put");
+        let (hit_data, hit) = svc.get(FOLDER, "blog/post.html").await.expect("hit");
+
+        forget_cache();
+        let before = opfs_reads();
+        let (miss_data, miss) = svc.get(FOLDER, "blog/post.html").await.expect("miss");
+
+        assert!(opfs_reads() > before, "the second read must reach OPFS");
+        assert_eq!(hit_data, miss_data);
+        assert_eq!(hit.key, miss.key);
+        assert_eq!(hit.size, miss.size);
+        assert_eq!(hit.content_type, miss.content_type);
+    }
+
+    /// `("a", "b/c")` and `("a/b", "c")` are one OPFS file and one cache
+    /// entry; a hit through either name reports the key it was asked for, as
+    /// a miss would.
+    #[wasm_bindgen_test]
+    async fn a_hit_through_another_name_reports_the_callers_key() {
+        let svc = fresh_storage();
+        svc.put("a", "b/c", b"bytes", "text/plain")
+            .await
+            .expect("put");
+        let before = opfs_reads();
+
+        let (data, info) = svc.get("a/b", "c").await.expect("get");
+        let (stream, streamed) = svc.get_streaming("a/b", "c").await.expect("get_streaming");
+
+        assert_eq!(opfs_reads(), before, "both reads are cache hits");
+        assert_eq!(data, b"bytes");
+        assert_eq!(body(stream).await, b"bytes");
+        assert_eq!(info.key, "c");
+        assert_eq!(streamed.key, "c");
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_read_is_cached_after_its_first_opfs_read() {
+        let svc = fresh_storage();
+        svc.put_streaming(
+            FOLDER,
+            "workspace.json",
+            InputStream::from_bytes(b"{}".to_vec()),
+            "application/json",
+        )
+        .await
+        .expect("put_streaming");
+
+        let before = opfs_reads();
+        let (first, _) = svc.get(FOLDER, "workspace.json").await.expect("first get");
+        let after_first = opfs_reads();
+        let (second, _) = svc.get(FOLDER, "workspace.json").await.expect("second get");
+
+        assert!(after_first > before, "a streamed put caches nothing");
+        assert_eq!(
+            opfs_reads(),
+            after_first,
+            "the first read's bytes are cached"
+        );
+        assert_eq!(first, second);
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_streamed_put_forgets_the_cached_bytes() {
+        let svc = fresh_storage();
+        svc.put(FOLDER, "k", b"old", "text/plain")
+            .await
+            .expect("put");
+        svc.put_streaming(
+            FOLDER,
+            "k",
+            InputStream::from_bytes(b"new".to_vec()),
+            "text/plain",
+        )
+        .await
+        .expect("put_streaming");
+
+        let (data, _) = svc.get(FOLDER, "k").await.expect("get");
+        assert_eq!(data, b"new");
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_get_after_a_delete_goes_to_opfs() {
+        let svc = fresh_storage();
+        svc.put(FOLDER, "k", b"bytes", "text/plain")
+            .await
+            .expect("put");
+        svc.get(FOLDER, "k").await.expect("cached");
+
+        svc.delete(FOLDER, "k").await.expect("delete");
+
+        // OPFS answers NotFound at the handle lookup, before reading a file;
+        // a cache that still held the object would have answered instead.
+        let err = svc.get(FOLDER, "k").await.expect_err("deleted");
+        assert!(matches!(err, StorageError::NotFound), "{err:?}");
+        let streamed = svc.get_streaming(FOLDER, "k").await.map(|_| ());
+        assert!(
+            matches!(streamed, Err(StorageError::NotFound)),
+            "{streamed:?}"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn a_folder_delete_forgets_keys_in_nested_sub_folders() {
+        let svc = fresh_storage();
+        svc.put("site", "blog/post.html", b"post", "text/html")
+            .await
+            .expect("put nested key");
+        svc.put("site/assets", "css/app.css", b"css", "text/css")
+            .await
+            .expect("put in a sub-folder");
+        svc.put("site2", "index.html", b"other", "text/html")
+            .await
+            .expect("put in a sibling folder");
+
+        svc.delete_folder("site").await.expect("delete_folder");
+
+        for (folder, key) in [("site", "blog/post.html"), ("site/assets", "css/app.css")] {
+            let err = svc.get(folder, key).await.expect_err(key);
+            assert!(
+                matches!(err, StorageError::NotFound),
+                "{folder}/{key}: {err:?}"
+            );
+        }
+        let before = opfs_reads();
+        let (data, _) = svc
+            .get("site2", "index.html")
+            .await
+            .expect("sibling survives");
+        assert_eq!(data, b"other");
+        assert_eq!(
+            opfs_reads(),
+            before,
+            "a sibling folder's entries stay cached"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn an_object_over_the_entry_cap_is_read_from_opfs_every_time() {
+        let svc = fresh_storage();
+        let big = vec![b'x'; MAX_ENTRY_BYTES + 1];
+        svc.put(FOLDER, "big.bin", &big, "application/octet-stream")
+            .await
+            .expect("put");
+
+        let before = opfs_reads();
+        let (first, _) = svc.get(FOLDER, "big.bin").await.expect("first get");
+        let after_first = opfs_reads();
+        let (second, _) = svc.get(FOLDER, "big.bin").await.expect("second get");
+
+        assert!(after_first > before, "an over-size put is not cached");
+        assert!(opfs_reads() > after_first, "nor is an over-size read");
+        assert_eq!(first.len(), big.len());
+        assert_eq!(second.len(), big.len());
     }
 }

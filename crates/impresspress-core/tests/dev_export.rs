@@ -975,6 +975,7 @@ async fn an_exported_seed_imports_into_a_fresh_instance() {
         ActivationIntent::Seed {
             manifest: generation,
         },
+        activation::Maintenance::Inline,
     )
     .await
     .expect("activate the imported generation");

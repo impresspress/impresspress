@@ -153,12 +153,12 @@ function drawLadder(phase, finished) {
 // The journal only describes an activation while it is in flight: the moment
 // the swap is recorded the row rests at `idle` (`repo/runtime_state.rs`), so
 // `/b/dev/api/status` stops mentioning the phases it passed through. A
-// compile that took forty seconds would therefore leave a BLANK ladder a
-// third of a second later, because `withProgress` runs a catch-up poll the
-// instant the call returns. The one account of those phases that survives is
-// the `progress` the staging response carries, so `renderProgress` records it
-// here against the generation it published, and `renderStatus` keeps showing
-// it for as long as that generation is the live one.
+// compile that took forty seconds would therefore leave a BLANK ladder at the
+// next status read. Two accounts of a finished activation survive it: the
+// `progress` a mutating response carries (`renderProgress`) and the service
+// worker's push that the generation went live (`onGenerationActive`). Either
+// records it here against the generation it published, and `renderStatus`
+// keeps showing it for as long as that generation is the live one.
 var completed = null;
 
 // Draw the ladder from an activation's own after-the-fact account of itself,
@@ -177,6 +177,15 @@ function renderProgress(generationId, progress) {
 
 function renderStatus(status) {
   var activation = status.activation;
+  // A status read the worker answered while an activation was still in
+  // flight can land AFTER the push that says the same activation went live:
+  // the two travel on different channels, and nothing orders them. Such an
+  // answer describes the past — drawing it would stand a half-finished
+  // ladder, and a "live generation" line naming the previous generation,
+  // over the generation this page already knows is serving.
+  if (activation && completed !== null && activation.generation_id === completed.generation) {
+    return;
+  }
   var phase = activation ? activation.phase : 'idle';
   var activeId = status.active_generation ? status.active_generation.id : null;
   // Nothing in flight, and the generation the last activation published is
@@ -203,6 +212,13 @@ function renderStatus(status) {
     log(activation.detail);
     lastDetail = activation.detail;
   }
+  noteLiveGeneration(activeId);
+}
+
+// Record which generation is serving, logging the change. Both the status and
+// the activation push report it, so the line is written once per change
+// whichever of them reports it first.
+function noteLiveGeneration(activeId) {
   if (activeId !== lastActiveGeneration) {
     log('live generation: ' + (activeId || 'none'));
     lastActiveGeneration = activeId;
@@ -237,8 +253,10 @@ var outstanding = 0;
 // nothing, since each response is a complete picture rather than a delta.
 var statusInFlight = false;
 
-// ~300 ms while a mutating call is outstanding (design §7.5). There is no
-// push channel: the block answers `no-store` precisely so this poll always
+// ~300 ms while a mutating call is outstanding (design §7.5), for the phases
+// an activation passes through while it runs. The service worker pushes only
+// the END of an activation (`onGenerationActive`); the phases in between are
+// read here, and the block answers `no-store` precisely so this poll always
 // sees the journal as it stands.
 function startPolling() {
   if (polling !== null) {
@@ -298,11 +316,41 @@ function refreshSiteTools() {
   return Promise.resolve();
 }
 
-// Wrap a tool's `execute` so the panel is live for the duration of the call
-// and the page catches up with what the call changed. The catch-up is in a
-// `finally`: a refused write still moved the workspace's mtime nowhere, but
-// a PARTIALLY applied one (a site write that published and then failed to
-// activate) leaves the page showing a workspace that no longer exists.
+// Whether a mutating call that has finished owes the preview a reload the
+// service worker will not push. Set by any call out of the room, spent by the
+// last one — see `withProgress`.
+var previewOwed = false;
+
+// The generation a wrapped call published, or `null` when it published none.
+//
+// `withProgress` wraps two kinds of call, and each is read in its own shape:
+// an agent tool's `execute`, whose result is a WebMCP tool result carrying
+// the endpoint's response body as `structuredContent`; and this page's own
+// requests — Save, Delete, New file, the compile's staging call — which
+// return the response body itself. A refusal (`isError`, no
+// `structuredContent`), a `blocks/` write, a data write (`shop_*`) or a throw
+// published nothing.
+function publishedGeneration(result) {
+  if (!result) {
+    return null;
+  }
+  var body = result.structuredContent !== undefined ? result.structuredContent : result;
+  return (body && body.generation) || null;
+}
+
+// Wrap a mutating call so the panel is live for its duration and the page
+// catches up with what it changed. The catch-up is in a `finally`: a refused
+// write still moved the workspace's mtime nowhere, but a PARTIALLY applied
+// one (a site write that published and then failed to activate) leaves the
+// page showing a workspace that no longer exists.
+//
+// The preview follows one rule. A call that published a GENERATION is
+// announced by the service worker (`onGenerationActive`), which reloads every
+// tab's preview — this one included — so the catch-up leaves it alone; a
+// second reload here would be the same generation twice. A call that
+// published none — a `shop_*` data write above all, whose rows the framed
+// site reads over `/b/products/*` — is announced by nobody, so the page
+// reloads its preview for it itself.
 function withProgress(execute) {
   return async function (args) {
     // Once the session is gone (`abort.signal.aborted`), the abort handler
@@ -316,9 +364,16 @@ function withProgress(execute) {
     }
     outstanding += 1;
     startPolling();
+    var result;
     try {
-      return await execute(args);
+      result = await execute(args);
+      return result;
     } finally {
+      // Before the count drops, so the last call out sees every sibling's
+      // debt: two overlapping calls, one a data write, still reload once.
+      if (publishedGeneration(result) === null) {
+        previewOwed = true;
+      }
       // Clamp rather than trust the increment/decrement to stay paired: the
       // abort handler can reset `outstanding` to 0 out from under a call
       // that is still in flight (it was never given `abort.signal`, so it
@@ -332,16 +387,25 @@ function withProgress(execute) {
       // already stopped polling, and the endpoints below would just refuse.
       if (outstanding === 0 && !abort.signal.aborted) {
         stopPolling();
-        await refreshAfterChange();
+        var reload = previewOwed;
+        previewOwed = false;
+        await refreshAfterChange(reload);
       }
     }
   };
 }
 
-async function refreshAfterChange() {
+// The file tree, and the preview only when `reloadPreviewToo` — the calls
+// being caught up with published no generation, so no push is coming for
+// them (`withProgress` owns that rule). No status read: a generation's
+// preview reload comes from the service worker's push
+// (`activation.rs::activate_staged` announces each one as it commits), and
+// awaiting a status read before reloading was the delay the push removes.
+async function refreshAfterChange(reloadPreviewToo) {
   try {
-    observe(await json(await api.get('/b/dev/api/status')));
-    reloadPreview();
+    if (reloadPreviewToo) {
+      reloadPreview();
+    }
     await loadFiles();
   } catch (error) {
     // Never let the catch-up replace the tool's own result: the agent asked
@@ -349,6 +413,99 @@ async function refreshAfterChange() {
     // page's problem, not the answer to that call.
     logError(error);
   }
+}
+
+// ---- the live preview -----------------------------------------------------
+
+// The generation the preview was last (re)loaded or restyled for, or `null`
+// before the first push. What makes a push idempotent: the page reacts once
+// per generation, however many times it is told.
+var shownGeneration = null;
+
+// One `dev-generation` push from the service worker, whose shape
+// `control.rs`'s `GenerationAnnouncement` states: generation `id` is live.
+// Sent to every tab on the origin for every activation, whoever caused it —
+// so this is what keeps a preview current when another tab, or an agent
+// driving one, changes the site.
+//
+// When every changed path is a stylesheet the page's markup and scripts are
+// unchanged, and swapping the stylesheets in place keeps the preview's
+// scroll position and state where a reload would throw both away.
+function onGenerationActive(message) {
+  if (message.id === shownGeneration) {
+    return;
+  }
+  shownGeneration = message.id;
+  noteLiveGeneration(message.id);
+  // The push is the end of that activation, so the ladder reads `active` —
+  // and keeps reading it, through `renderStatus`, while it stays live.
+  completed = { generation: message.id, phase: 'active' };
+  drawLadder(completed.phase, true);
+
+  // Only a SITE generation can be restyled in place. A compile that
+  // coalesced a stylesheet write, or a rollback whose site differs only in
+  // CSS, may still have changed the blocks the page calls — and those need
+  // the reload whatever the paths say.
+  var paths = message.changed_paths;
+  var siteOnly = message.cause === 'site_write' || message.cause === 'site_delete';
+  var cssOnly =
+    siteOnly &&
+    paths.length > 0 &&
+    paths.every(function (path) {
+      return /\.css$/.test(path);
+    });
+  if (!cssOnly || swapStylesheets(paths, message.id) === 0) {
+    reloadPreview();
+  }
+
+  // Only a generation that may have changed the BLOCK set can have rebuilt
+  // the runtime, and a rebuilt runtime brings a different deployment-wide
+  // tool set. `observe` is what notices the new `runtime_generation` and
+  // refreshes those registrations — so one status read, after the preview
+  // has already been told to reload rather than before it.
+  if (!siteOnly && !abort.signal.aborted) {
+    api.get('/b/dev/api/status').then(json).then(observe).catch(logError);
+  }
+}
+
+// Point every `<link rel="stylesheet">` in the preview whose file is one of
+// `paths` at the new generation's copy, and return how many were pointed.
+//
+// The `?g=` query is a cache key, not a parameter: the published folder
+// serves the same path with new bytes, and a link whose `href` did not change
+// would not be re-fetched. Zero means the preview references none of the
+// changed stylesheets directly (it `@import`s them, or is not a page at all),
+// and the caller reloads instead — a swap that restyled nothing would leave
+// the preview showing the previous generation.
+//
+// Only a same-origin link can be one of the site's files: a stylesheet from
+// another origin whose pathname happens to match is someone else's file, and
+// rewriting it to `pathname?g=` would point it at this origin instead.
+function swapStylesheets(paths, generationId) {
+  var frame = document.getElementById('dev-preview-frame');
+  var swapped = 0;
+  try {
+    var base = frame.contentWindow.location.href;
+    var origin = new URL(base).origin;
+    var links = frame.contentDocument.querySelectorAll('link[rel="stylesheet"]');
+    for (var i = 0; i < links.length; i += 1) {
+      var url = new URL(links[i].getAttribute('href'), base);
+      if (url.origin !== origin) {
+        continue;
+      }
+      // The site is served from `/` (`page.rs`'s frame), so the workspace
+      // path of `/css/site.css` is `site/css/site.css`.
+      if (paths.indexOf('site' + decodeURIComponent(url.pathname)) !== -1) {
+        links[i].setAttribute('href', url.pathname + '?g=' + encodeURIComponent(generationId));
+        swapped += 1;
+      }
+    }
+  } catch (error) {
+    // A frame mid-navigation has no document to reach into; the reload the
+    // caller falls back to is the right answer for it anyway.
+    return 0;
+  }
+  return swapped;
 }
 
 function reloadPreview() {
@@ -363,11 +520,27 @@ function reloadPreview() {
   }
 }
 
+// A page opened without a controlling service worker (or a test harness with
+// no `navigator`) simply never hears a push; everything else on it works.
+if (typeof navigator !== 'undefined' && navigator.serviceWorker) {
+  navigator.serviceWorker.addEventListener('message', function (event) {
+    var data = event.data;
+    // Every window on the origin hears every message the worker posts
+    // (`sw.js`'s self-destruct notice among them); this page acts on its own.
+    if (data && data.type === 'dev-generation') {
+      onGenerationActive(data);
+    }
+  });
+}
+
 // ---- tools ----------------------------------------------------------------
 
 // Which tools change the site, and therefore want the progress panel live
-// and the panes refreshed afterwards. Everything else is a read, and a read
-// must NOT reload the preview: an agent listing the catalog between two
+// and the page caught up afterwards: the file tree always, and the preview
+// when the call published no generation (a `shop_` data write) — a call that
+// published one has its preview reloaded by the service worker's push
+// instead (`withProgress` states the rule). Everything else is a read, and a
+// read must NOT reload the preview: an agent listing the catalog between two
 // writes would otherwise flicker the iframe and re-fetch the file tree for
 // nothing.
 //
@@ -654,14 +827,23 @@ function refusalMessage(body, fallback) {
   return (body && typeof body.message === 'string' && body.message) || fallback;
 }
 
-var save = withProgress(async function () {
+// Save, Delete and New file each decide whether there is anything to do
+// BEFORE entering `withProgress`, never inside it: a call that asked nothing
+// of the sandbox is not a mutating call, and inside the wrapper its
+// `undefined` would read as "published no generation" and reload the
+// preview for a no-op.
+function save() {
   // `text.disabled` is the second half of the guard, not a UI detail: a
   // disabled box holds a placeholder rather than the file's content (see
   // `setEditorEnabled`), and the button being disabled too is not something
   // this function may assume — a caller could reach it another way.
   if (!current || text.disabled) {
-    return;
+    return Promise.resolve();
   }
+  return writeOpenFile();
+}
+
+var writeOpenFile = withProgress(async function () {
   var response = await api.post('/b/dev/api/files/write', {
     path: current.path,
     content: text.value,
@@ -693,12 +875,21 @@ var save = withProgress(async function () {
       written.path +
       (written.generation ? ' — generation ' + written.generation.id : ' (staged, not published)')
   );
+  if (written.generation) {
+    renderProgress(written.generation.id, written.progress);
+  }
+  // `withProgress` reads the generation off it (`publishedGeneration`).
+  return written;
 });
 
-var remove = withProgress(async function () {
+function remove() {
   if (!current || !window.confirm('Delete ' + current.path + '?')) {
-    return;
+    return Promise.resolve();
   }
+  return deleteOpenFile();
+}
+
+var deleteOpenFile = withProgress(async function () {
   var path = current.path;
   var response = await api.post('/b/dev/api/files/delete', {
     path: path,
@@ -719,19 +910,28 @@ var remove = withProgress(async function () {
     }
     return;
   }
-  await json(response);
+  var deleted = await json(response);
   current = null;
   title.textContent = 'Editor';
   text.value = '';
   setEditorEnabled(true);
   log('deleted ' + path);
+  if (deleted.generation) {
+    renderProgress(deleted.generation.id, deleted.progress);
+  }
+  // `withProgress` reads the generation off it (`publishedGeneration`).
+  return deleted;
 });
 
-var create = withProgress(async function () {
+function create() {
   var path = window.prompt('New file path (site/... or blocks/<name>/...)');
   if (!path) {
-    return;
+    return Promise.resolve();
   }
+  return createFile(path);
+}
+
+var createFile = withProgress(async function (path) {
   // `expected_sha256: null` is "I expect nothing here" — writing over an
   // existing file by accident is a 409, not a silent overwrite.
   var response = await api.post('/b/dev/api/files/write', {
@@ -756,9 +956,11 @@ var create = withProgress(async function () {
     }
     return;
   }
-  await json(response);
+  var created = await json(response);
   await openFile(path);
   log('created ' + path);
+  // `withProgress` reads the generation off it (`publishedGeneration`).
+  return created;
 });
 
 document.getElementById('dev-save').addEventListener('click', function () {
@@ -831,6 +1033,7 @@ async function discoverCompiler() {
   compilerVersionEl.textContent = describeCompiler(compilerManifest);
   updateCompileButton();
   log('compiler ' + compilerManifest.version + ' available');
+  warmCompiler();
 }
 
 // ---- compiling a block ----------------------------------------------------
@@ -935,6 +1138,7 @@ function renderBlockChoices(files) {
   }
   blockNames = names;
   updateCompileButton();
+  warmCompiler();
 }
 
 /** Lowercase hex SHA-256 of a string, the form the build row records. */
@@ -1018,6 +1222,44 @@ async function ensureCompiler(onProgress) {
   // later compile joins whatever worker this one leaves behind.
   await compiler.initialize(onProgress);
   return compiler;
+}
+
+// Whether the toolchain has been asked to start ahead of a compile.
+//
+// One-shot on purpose. `ensureCompiler` is idempotent while a start is in
+// flight or has succeeded, but the adapter clears its latch when a start
+// FAILS, and a warm-up re-armed by every listing refresh would retry a broken
+// toolchain after every write. The compile path keeps its own retry — a
+// failed warm-up costs the first compile its start-up and nothing else.
+var compilerWarmStarted = false;
+
+// Start the toolchain before anyone asks for a build.
+//
+// Two facts have to hold and they arrive in either order: a compiler in this
+// build (`discoverCompiler`) and a block to compile (`renderBlockChoices`).
+// Both call this, and whichever lands second starts the worker. A workspace
+// with no block never starts it: a visitor editing site files pays neither
+// the download nor the memory. Design: spec 2026-09-29 dev-block-compile-speed §2.2.
+//
+// The progress goes through `appendProgress`, the same sink a compile uses,
+// and only the FIRST `initialize` caller sees the download — so a compile
+// that joins this start-up mid-flight still has it in the log. The ready line
+// names the bundle version rather than rustc's: `ensureCompiler` hands back
+// the session, not what `initialize` resolved with, and the compile result
+// already records rustc's own version.
+function warmCompiler() {
+  if (compilerWarmStarted || !compilerManifest || blockNames.length === 0) {
+    return;
+  }
+  compilerWarmStarted = true;
+  log('compiler: starting ahead of the first compile');
+  ensureCompiler(appendProgress)
+    .then(function () {
+      log('compiler: ready (' + compilerManifest.version + ')');
+    })
+    .catch(function (error) {
+      log('compiler: start-up failed (' + error.message + '); the first compile will retry');
+    });
 }
 
 // One compiler diagnostic, as the sandbox's own wire type.
@@ -1266,9 +1508,10 @@ async function runCompile(name) {
   // publishes a generation with a NEW id, which `renderStatus` already sees
   // is not the one `completed` describes.
   //
-  // And the ladder on screen is redrawn here, not left to the next poll:
-  // `drawLadder` runs only from `observe`, and the status is no longer polled
-  // while the worker compiles (the panel opens at the staging call below), so
+  // And the ladder on screen is redrawn here, not left to something else:
+  // nothing else redraws it until the staging call's own result or push
+  // arrives (`renderProgress`, `onGenerationActive`) or a status is read,
+  // and the status is not polled while the worker compiles (the panel opens at the staging call below), so
   // forgetting `completed` without repainting would leave the PREVIOUS
   // compile's four green steps standing over this one for its whole eighty
   // seconds — the exact lie this line exists to end. `idle` is the phase

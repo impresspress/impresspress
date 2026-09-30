@@ -73,11 +73,16 @@ pub const ENTRYPOINT: &str = "index.html";
 /// Publish `next`, given the manifest that is currently published.
 ///
 /// `prev` is `None` for the first publish, which therefore writes everything.
+///
+/// Returns every path it wrote or removed, in the order it touched them — the
+/// site-relative spelling the published folder uses (`index.html`, not
+/// `site/index.html`). That is what an activation announces to the page
+/// (design §2.6), and an unchanged file is absent from it by construction.
 pub async fn publish_site(
     ctx: &dyn Context,
     prev: Option<&SiteManifest>,
     next: &SiteManifest,
-) -> Result<(), WaferError> {
+) -> Result<Vec<String>, WaferError> {
     let prev_by_path = by_path(prev.map(|m| m.files.as_slice()).unwrap_or_default());
     let next_by_path = by_path(&next.files);
 
@@ -87,9 +92,12 @@ pub async fn publish_site(
         .copied()
         .partition(|path| collides_with_any(path, &next_by_path));
 
+    let mut touched = Vec::new();
+
     // 1. Deletions that stand in the way of a write below.
     for path in &colliding {
         remove(ctx, path).await?;
+        touched.push(path.to_string());
     }
 
     // 2. Every changed non-entrypoint file.
@@ -98,20 +106,23 @@ pub async fn publish_site(
             continue;
         }
         write(ctx, entry).await?;
+        touched.push(path.to_string());
     }
 
     // 3. The remaining files the new manifest no longer holds.
     for path in &rest {
         remove(ctx, path).await?;
+        touched.push(path.to_string());
     }
 
     // 4. The entrypoint, last.
     if let Some(entry) = next_by_path.get(ENTRYPOINT) {
         if !is_unchanged(&prev_by_path, ENTRYPOINT, entry) {
             write(ctx, entry).await?;
+            touched.push(ENTRYPOINT.to_string());
         }
     }
-    Ok(())
+    Ok(touched)
 }
 
 /// Whether `removed` shares a name with any path the new manifest holds — one
@@ -232,7 +243,9 @@ mod tests {
                 entry(&ctx, "z.css", b"z{}").await,
             ],
         };
-        publish_site(&ctx, None, &next).await.expect("publish");
+        let touched = publish_site(&ctx, None, &next).await.expect("publish");
+        // What it reports touching is what it touched, in the same order.
+        assert_eq!(touched, ["a.css", "z.css", "index.html"]);
         assert_eq!(
             site_ops(&ctx),
             vec![
@@ -258,10 +271,12 @@ mod tests {
         let next = SiteManifest {
             files: vec![entry(&ctx, "index.html", b"two").await],
         };
-        publish_site(&ctx, Some(&prev), &next)
+        let touched = publish_site(&ctx, Some(&prev), &next)
             .await
             .expect("republish");
 
+        // A removed path is reported as well as a written one.
+        assert_eq!(touched, ["gone.css", "index.html"]);
         assert_eq!(
             site_ops(&ctx)[2..],
             [
@@ -297,13 +312,14 @@ mod tests {
                 entry(&ctx, "a.css", b"a{}").await,
             ],
         };
-        publish_site(&ctx, Some(&prev), &next)
+        let touched = publish_site(&ctx, Some(&prev), &next)
             .await
             .expect("republish");
         assert_eq!(
             site_ops(&ctx)[before..],
             ["put wafer-run/web/site/index.html"]
         );
+        assert_eq!(touched, ["index.html"], "an unchanged file is not reported");
     }
 
     /// A path that was a directory in the previous generation and is a file in

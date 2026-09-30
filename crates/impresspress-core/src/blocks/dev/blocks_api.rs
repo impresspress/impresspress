@@ -48,14 +48,14 @@
 //! block half at dequeue, from whatever is active then, so an edit never
 //! waits behind a compile and a compile never loses an edit.
 
-use std::collections::BTreeSet;
+use std::{collections::BTreeSet, sync::Arc};
 
 use base64ct::{Base64, Encoding};
 use wafer_block::BlockInfo;
 use wafer_run::{context::Context, ErrorCode, InputStream, Message, OutputStream, WaferError};
 
 use super::{
-    activation::{self, ActivationIntent},
+    activation::{self, ActivationIntent, Maintenance},
     artifacts,
     blobs::sha256_hex,
     contracts::{ActivationResponse, StageBuildRequest, StageBuildResponse},
@@ -78,7 +78,7 @@ use crate::blocks::crud;
 /// `POST /b/dev/api/builds/stage` — validate a compiled guest and activate it.
 pub async fn handle_stage(
     ctx: &dyn Context,
-    shared: &DevShared,
+    shared: &Arc<DevShared>,
     input: InputStream,
 ) -> OutputStream {
     let request: StageBuildRequest = match read_body(input).await {
@@ -154,7 +154,7 @@ pub async fn handle_stage(
 /// otherwise only the shape of the refusals that are *results*.
 async fn stage(
     ctx: &dyn Context,
-    shared: &DevShared,
+    shared: &Arc<DevShared>,
     request: &StageBuildRequest,
     artifact: &[u8],
 ) -> Result<OutputStream, WaferError> {
@@ -284,7 +284,7 @@ async fn stage(
     // (`super::gc`), and it is on its way until the activation has minted one.
     // Accepting it here instead would leave the artifact rootless for the
     // whole time the request sits in the activation queue — which is exactly
-    // when the activation ahead of it runs the collector.
+    // when the collections the activations ahead of it scheduled run.
     let block_info_json = serde_json::to_string(&info).map_err(encoding_error)?;
     repo::builds::set_status(
         ctx,
@@ -302,6 +302,7 @@ async fn stage(
         shared,
         GenerationCause::BlockCompile,
         ActivationIntent::BlockSet { site: None, blocks },
+        Maintenance::Deferred,
     )
     .await;
 
@@ -456,7 +457,11 @@ fn together(compiler: &[Diagnostic], found: Vec<Diagnostic>) -> Vec<Diagnostic> 
 /// serving, and an agent that removed a block to fix it needs the code it was
 /// fixing. The artifact stays stored too — an earlier generation still names
 /// it, and rolling back to that generation has to work.
-pub async fn handle_remove(ctx: &dyn Context, shared: &DevShared, msg: &Message) -> OutputStream {
+pub async fn handle_remove(
+    ctx: &dyn Context,
+    shared: &Arc<DevShared>,
+    msg: &Message,
+) -> OutputStream {
     let name = msg.var("name").to_string();
     if !paths::block_name_is_valid(&name) {
         return no_store_error(
@@ -472,7 +477,7 @@ pub async fn handle_remove(ctx: &dyn Context, shared: &DevShared, msg: &Message)
 
 async fn remove(
     ctx: &dyn Context,
-    shared: &DevShared,
+    shared: &Arc<DevShared>,
     name: &str,
 ) -> Result<OutputStream, WaferError> {
     let registered = format!("site/{name}");
@@ -504,6 +509,7 @@ async fn remove(
         shared,
         GenerationCause::BlockRemove,
         ActivationIntent::BlockSet { site: None, blocks },
+        Maintenance::Deferred,
     )
     .await
     {

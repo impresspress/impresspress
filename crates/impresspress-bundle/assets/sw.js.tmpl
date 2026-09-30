@@ -236,7 +236,7 @@ self.addEventListener('fetch', (event) => {
         }
         return;
     }
-    event.respondWith(handleFetch(event.request));
+    event.respondWith(handleFetch(event));
 });
 
 /**
@@ -273,7 +273,8 @@ async function passthrough(request) {
     });
 }
 
-async function handleFetch(request) {
+async function handleFetch(event) {
+    const request = event.request;
     if (poisoned) {
         // wasm is dead — let the network serve this. The page should already
         // be in the middle of a re-navigation triggered by selfDestruct().
@@ -281,7 +282,19 @@ async function handleFetch(request) {
     }
     try {
         await ensureInitialized();
-        return await handle_request(request);
+        // `after` is the work the request left to run once its response is
+        // out: its request-log row and whatever its handlers deferred. The
+        // response does not wait for it, and nothing but `waitUntil` keeps
+        // this worker alive until it has run — the browser may stop an idle
+        // worker as soon as the response is delivered. Registered while the
+        // `respondWith` promise is still pending, which is when `waitUntil`
+        // may still be called. `handle_request` resolves only once every
+        // database change completed before the request ended, whichever
+        // request made it, is written (the epoch rule in impresspress-browser's
+        // `flush_scope.rs`); only this work is at stake.
+        const { response, after } = await handle_request(request);
+        event.waitUntil(after);
+        return response;
     } catch (error) {
         console.error('[__APP_NAME__] Error handling request:', error);
         // wasm-bindgen surfaces a `RuntimeError` for an `unreachable` trap;

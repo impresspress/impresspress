@@ -149,11 +149,16 @@ async function expectPageScreenshot(page: Page, name: string, mask?: ReturnType<
 // What the admin captures mask: values that differ from one run to the next,
 // or with what ran before the capture.
 //
-// - Dates and timestamps, which the pages render as `<time>` — among them the
-//   dashboard charts' first/last-day labels, which move daily because the
-//   window ends today (`ui/components/chart.rs`), and every "Created" date
-//   the suite captures (users, the dashboard's Recent Users, both bucket
-//   lists).
+// - Dates and timestamps, which the pages render as `<time>` — among them
+//   every "Created" date the suite captures (users, the dashboard's Recent
+//   Users, both bucket lists).
+// - The dashboard charts' first/last-day labels, which move daily because the
+//   window ends today (`ui/components/chart.rs`). The whole
+//   `.charts-css__range` row is masked, not its two `<time>` spans: a span is
+//   as wide as its text, so "Aug 31" and "Sep 1" would paint different mask
+//   boxes, while the row is as wide as the chart and the mask box stays put.
+//   Masking the spans let a baseline captured with a two-digit first day
+//   fail from the 1st to the 9th of the next month (seen 2026-09-30).
 // - The storage-admin buckets table's Owner cell: the first 8 hex digits of
 //   the bootstrap admin's freshly generated UUIDv7. It is reached through the
 //   `tr[data-bucket]` rows `blocks/files/pages_admin.rs` renders, and the cell
@@ -189,6 +194,7 @@ async function expectPageScreenshot(page: Page, name: string, mask?: ReturnType<
 function volatileMasks(page: Page) {
   return [
     page.locator('[data-relative-time], .relative-time, time'),
+    page.locator('.charts-css__range'),
     page.locator('tr[data-bucket] td[data-label="Owner"]'),
     page.locator('td:has([data-volatile-metric]), .stat-card:has-text("Avg Response") .stat-value'),
     page.locator('.stat-card:has-text("Requests Today") .stat-value'),

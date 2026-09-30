@@ -414,9 +414,11 @@ it just tried to reach. Fix the declaration in `block()`, not the call.
 | Sensitive headers | never granted — see [Headers](#headers) |
 | Compiles at a time | one |
 
-The size settings in the scaffolded `[profile.release]` (`opt-level = "z"`,
-`lto`, `codegen-units = 1`, `panic = "abort"`, `strip`) are what keep a block
-well inside the 4 MiB limit. Do not remove them.
+The scaffolded `[profile.release]` (`opt-level = "z"`, `lto = false`,
+`codegen-units = 1`, `panic = "abort"`, `strip = true`) is what keeps a block
+well inside the 4 MiB limit while compiling quickly. LTO is off on purpose:
+it roughly doubles the compile time to save about 20 KB of artifact. Do not
+remove these settings.
 
 A block needing something on the "never granted" list is not a block: put
 that work in a page, which talks to other origins over HTTP like any web

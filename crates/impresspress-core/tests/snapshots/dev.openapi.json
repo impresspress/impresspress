@@ -254,7 +254,7 @@
                     "description": "One entry per phase the activation passed through, with how long it\ntook. The last is always `active`.",
                     "items": {
                       "additionalProperties": false,
-                      "description": "One phase of an activation, with how long it took.\n\nPublished in every mutating tool result (design §7.5) so the page can show\nwhere the time went without a push channel.",
+                      "description": "One phase of an activation, with how long it took.\n\nPublished in the result of every call that activates a generation — file\nwrites and deletes, staging, block removal, rollback (design §7.5) — so the\ncaller that asked for a change sees where its time went. The activation push (design\n§2.6) says only which generation went live; the timings travel here.",
                       "properties": {
                         "detail": {
                           "description": "Human-readable detail for the progress panel.",
@@ -686,7 +686,7 @@
                     "description": "One entry per phase the activation passed through, with how long it\ntook. Empty when nothing was activated.",
                     "items": {
                       "additionalProperties": false,
-                      "description": "One phase of an activation, with how long it took.\n\nPublished in every mutating tool result (design §7.5) so the page can show\nwhere the time went without a push channel.",
+                      "description": "One phase of an activation, with how long it took.\n\nPublished in the result of every call that activates a generation — file\nwrites and deletes, staging, block removal, rollback (design §7.5) — so the\ncaller that asked for a change sees where its time went. The activation push (design\n§2.6) says only which generation went live; the timings travel here.",
                       "properties": {
                         "detail": {
                           "description": "Human-readable detail for the progress panel.",
@@ -1112,11 +1112,73 @@
                   "path": {
                     "description": "Workspace-relative path that was removed.",
                     "type": "string"
+                  },
+                  "progress": {
+                    "description": "One entry per phase the delete's activation passed through, with how\nlong it took. The last is `active`. Empty when nothing was published.",
+                    "items": {
+                      "additionalProperties": false,
+                      "description": "One phase of an activation, with how long it took.\n\nPublished in the result of every call that activates a generation — file\nwrites and deletes, staging, block removal, rollback (design §7.5) — so the\ncaller that asked for a change sees where its time went. The activation push (design\n§2.6) says only which generation went live; the timings travel here.",
+                      "properties": {
+                        "detail": {
+                          "description": "Human-readable detail for the progress panel.",
+                          "type": "string"
+                        },
+                        "ms": {
+                          "description": "Milliseconds spent in it.",
+                          "format": "uint64",
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "phase": {
+                          "description": "The phase this step covers.",
+                          "oneOf": [
+                            {
+                              "const": "idle",
+                              "description": "Nothing in flight.",
+                              "type": "string"
+                            },
+                            {
+                              "const": "validating",
+                              "description": "Hashes, manifests and guests are being checked.",
+                              "type": "string"
+                            },
+                            {
+                              "const": "building_runtime",
+                              "description": "A candidate runtime is being constructed from the block set.",
+                              "type": "string"
+                            },
+                            {
+                              "const": "publishing",
+                              "description": "The site files are being written into `wafer-run/web/site`.",
+                              "type": "string"
+                            },
+                            {
+                              "const": "active",
+                              "description": "The generation is live.",
+                              "type": "string"
+                            },
+                            {
+                              "const": "failed",
+                              "description": "The activation was abandoned; the previous generation is still live.",
+                              "type": "string"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "phase",
+                        "ms",
+                        "detail"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
                   }
                 },
                 "required": [
                   "path",
-                  "generation"
+                  "generation",
+                  "progress"
                 ],
                 "title": "FileDeleteResponse",
                 "type": "object"
@@ -1410,6 +1472,67 @@
                     "description": "Workspace-relative path that was written.",
                     "type": "string"
                   },
+                  "progress": {
+                    "description": "One entry per phase the write's activation passed through, with how\nlong it took. The last is `active`. Empty when nothing was published.",
+                    "items": {
+                      "additionalProperties": false,
+                      "description": "One phase of an activation, with how long it took.\n\nPublished in the result of every call that activates a generation — file\nwrites and deletes, staging, block removal, rollback (design §7.5) — so the\ncaller that asked for a change sees where its time went. The activation push (design\n§2.6) says only which generation went live; the timings travel here.",
+                      "properties": {
+                        "detail": {
+                          "description": "Human-readable detail for the progress panel.",
+                          "type": "string"
+                        },
+                        "ms": {
+                          "description": "Milliseconds spent in it.",
+                          "format": "uint64",
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "phase": {
+                          "description": "The phase this step covers.",
+                          "oneOf": [
+                            {
+                              "const": "idle",
+                              "description": "Nothing in flight.",
+                              "type": "string"
+                            },
+                            {
+                              "const": "validating",
+                              "description": "Hashes, manifests and guests are being checked.",
+                              "type": "string"
+                            },
+                            {
+                              "const": "building_runtime",
+                              "description": "A candidate runtime is being constructed from the block set.",
+                              "type": "string"
+                            },
+                            {
+                              "const": "publishing",
+                              "description": "The site files are being written into `wafer-run/web/site`.",
+                              "type": "string"
+                            },
+                            {
+                              "const": "active",
+                              "description": "The generation is live.",
+                              "type": "string"
+                            },
+                            {
+                              "const": "failed",
+                              "description": "The activation was abandoned; the previous generation is still live.",
+                              "type": "string"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "phase",
+                        "ms",
+                        "detail"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
                   "sha256": {
                     "description": "SHA-256 of the stored content, hex-encoded. Pass it as the next\nwrite's `expected_sha256`.",
                     "type": "string"
@@ -1425,7 +1548,8 @@
                   "path",
                   "sha256",
                   "size",
-                  "generation"
+                  "generation",
+                  "progress"
                 ],
                 "title": "FileWriteResponse",
                 "type": "object"
@@ -2130,7 +2254,7 @@
                     "description": "One entry per phase the activation passed through, with how long it\ntook. The last is always `active`.",
                     "items": {
                       "additionalProperties": false,
-                      "description": "One phase of an activation, with how long it took.\n\nPublished in every mutating tool result (design §7.5) so the page can show\nwhere the time went without a push channel.",
+                      "description": "One phase of an activation, with how long it took.\n\nPublished in the result of every call that activates a generation — file\nwrites and deletes, staging, block removal, rollback (design §7.5) — so the\ncaller that asked for a change sees where its time went. The activation push (design\n§2.6) says only which generation went live; the timings travel here.",
                       "properties": {
                         "detail": {
                           "description": "Human-readable detail for the progress panel.",
