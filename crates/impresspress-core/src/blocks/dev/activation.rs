@@ -917,9 +917,11 @@ async fn activate_staged(
     .map_err(storage_error)?;
     // Committed: the generation's ledger row and journal are written and say
     // it is live, so every open page may now be told (design §2.6); the
-    // reply follows the announcement. Before `maintain`, which the page has no reason to
-    // wait for. The paths are spelled as the workspace spells them
-    // (`site/…`), the one form every `/b/dev` surface uses for a site file.
+    // reply follows the announcement. Maintenance is scheduled after the
+    // announcement and, for a request, runs after the reply, so the page has
+    // nothing of it to wait for. The paths are spelled as the workspace
+    // spells them (`site/…`), the one form every `/b/dev` surface uses for a
+    // site file.
     shared.control.announce_active(&GenerationAnnouncement {
         id: row.id.clone(),
         cause: row.cause,
