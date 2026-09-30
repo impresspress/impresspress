@@ -100,10 +100,11 @@ pub async fn retained(ctx: &dyn Context) -> Result<Vec<GenerationRow>, WaferErro
 /// Delete every generation outside the retained set, returning the rows that
 /// went, newest first.
 ///
-/// Runs at the end of every successful activation — the only moment a
-/// generation stops being the newest of anything. Idempotent: a second pass
-/// over a ledger already inside the window deletes nothing and returns an
-/// empty list.
+/// Runs after every successful activation — the only moment a generation
+/// stops being the newest of anything — for a request, after its reply
+/// (`super::activation::Maintenance`). Idempotent: a second pass over a
+/// ledger already inside the window deletes nothing and returns an empty
+/// list.
 ///
 /// The boundary is the oldest row the window keeps, and the pass deletes
 /// strictly below it. Paged rather than listed whole: every row a page holds

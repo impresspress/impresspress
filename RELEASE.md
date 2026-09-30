@@ -20,6 +20,25 @@ bundle that changes them. So whenever a release's code half assumes a data
 repair the migration half performs, it has to be called out here — on native
 the two ship together but only one of them runs by default.
 
+### Browser builds: request log defaults to errors only
+
+**What changes.** A browser build (a bundle's service worker, the dev
+sandbox, an exported site) now keeps `request_logs` rows for server errors
+(5xx) only — `IMPRESSPRESS_REQUEST_LOG=errors` — where it used to keep a row
+for every request. The row a request does keep is written after its response
+has gone out, as on Cloudflare, rather than on the way to it.
+
+**Why.** The browser database persists by exporting the whole file to OPFS on
+every flush. A row for every request grew that file, and so every later flush,
+without bound, and each row cost an export of its own. A browser install is
+one person's local instance: the error rows are what its log is for.
+
+**Overriding it.** There is nothing to set in the browser. The policy is
+infrastructure config written by the browser runtime factory
+(`crates/impresspress-web/src/runtime_factory.rs`), not a variable: no admin
+setting reaches it, and the rows an older bundle wrote stay until they are
+deleted.
+
 ### Refresh tokens end at every `auth_version` bump
 
 **What changes.** A refresh token now carries the account's `auth_version`

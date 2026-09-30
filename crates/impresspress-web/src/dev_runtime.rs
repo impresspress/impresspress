@@ -51,7 +51,7 @@ use std::{
 };
 
 use impresspress_core::blocks::dev::{
-    activation::{self, ActivationIntent},
+    activation::{self, ActivationIntent, Maintenance},
     artifacts,
     control::{DynamicBlockSpec, RuntimeControl, ShellSource, ValidationFailure, ValidationStage},
     repo::generations::GenerationCause,
@@ -1014,6 +1014,9 @@ async fn seed_on_boot(ctx: &dyn Context, shared: &Arc<DevShared>) -> Result<(), 
         ActivationIntent::Seed {
             manifest: generation,
         },
+        // Boot runs outside any request: there is no reply to defer the
+        // cleanup behind, and a task deferred here would be dropped.
+        Maintenance::Inline,
     )
     .await
     {

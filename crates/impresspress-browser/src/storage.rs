@@ -264,14 +264,15 @@ pub(crate) async fn release_reader_in(value: &wasm_bindgen::JsValue) {
     }
 }
 
-/// `storageList`'s resolved shape: the requested page of keys plus the
-/// TRUE total of matching entries (before slicing to the page). `total`
-/// drives both the offset-mode has-more check and cursor-mode continuation
-/// (`start + page.len() < total`); see [`BrowserStorageService::list`] and
-/// the [`cursor`] module.
+/// `storageList`'s resolved shape: the requested page of keys, each key's
+/// byte size at the same index, plus the TRUE total of matching entries
+/// (before slicing to the page). `total` drives both the offset-mode
+/// has-more check and cursor-mode continuation (`start + page.len() <
+/// total`); see [`BrowserStorageService::list`] and the [`cursor`] module.
 #[derive(Deserialize)]
 struct ListResponse {
     keys: Vec<String>,
+    sizes: Vec<i64>,
     total: i64,
 }
 
@@ -472,11 +473,12 @@ impl StorageService for BrowserStorageService {
 
         let limit = if opts.limit > 0 { opts.limit as u32 } else { 0 };
 
-        // `storageList` resolves `{ keys: string[], total: number }` — not a
-        // string — with `total` the full matching-entry count (not the page
-        // length; see `bridge::storage_list`'s doc comment). The JS bridge
-        // sorts keys before slicing, matching the local-storage backend, so
-        // offset/cursor paging is stable across calls.
+        // `storageList` resolves `{ keys: string[], sizes: number[], total:
+        // number }` — not a string — with `total` the full matching-entry
+        // count (not the page length; see `bridge::storage_list`'s doc
+        // comment). The JS bridge sorts keys before slicing, matching the
+        // local-storage backend, so offset/cursor paging is stable across
+        // calls.
         let val = bridge::storage_list(folder, &opts.prefix, limit, cursor::clamp_offset(start))
             .await
             .map_err(map_rejection)?;
@@ -495,16 +497,26 @@ impl StorageService for BrowserStorageService {
             resp.total.max(0) as u64,
         );
 
-        // ObjectInfo fields beyond `key` are not available from the list
-        // call; we use placeholder values (size=0, empty content_type,
-        // current time).
+        if resp.sizes.len() != resp.keys.len() {
+            return Err(StorageError::Internal(format!(
+                "storage list response has {} keys and {} sizes",
+                resp.keys.len(),
+                resp.sizes.len()
+            )));
+        }
+        // The content type lives in each object's sidecar and the listing
+        // does not read it, and OPFS keeps no modification time the bridge
+        // reads: those two are placeholders (empty, and now). The size is
+        // real — the dev sandbox's collector sets the workspace's blob quota
+        // counters from it.
         let now = Utc::now();
         let objects = resp
             .keys
             .into_iter()
-            .map(|k| ObjectInfo {
-                key: k,
-                size: 0,
+            .zip(resp.sizes)
+            .map(|(key, size)| ObjectInfo {
+                key,
+                size,
                 content_type: String::new(),
                 last_modified: now,
             })
@@ -716,12 +728,15 @@ mod tests {
         use js_sys::Array;
 
         let js_keys = Array::new();
-        for k in keys {
+        let js_sizes = Array::new();
+        for (i, k) in keys.iter().enumerate() {
             js_keys.push(&JsValue::from_str(k));
+            js_sizes.push(&JsValue::from_f64(i as f64));
         }
 
         let obj = Object::new();
         Reflect::set(&obj, &JsValue::from_str("keys"), &js_keys).unwrap();
+        Reflect::set(&obj, &JsValue::from_str("sizes"), &js_sizes).unwrap();
         Reflect::set(
             &obj,
             &JsValue::from_str("total"),
@@ -758,6 +773,144 @@ mod tests {
 
         assert!(decoded.keys.is_empty());
         assert_eq!(decoded.total, 0);
+    }
+}
+
+/// `list` against the real `bridge.js` listing, over an in-memory OPFS with
+/// directories: what a listing says about an object is what `put` wrote.
+///
+/// The dev sandbox's collector sets the workspace's blob quota counters from
+/// these sizes (`impresspress_core::blocks::dev::gc`). A listing that
+/// reported zero for every object reset the counters to zero after nearly
+/// every write, so the 64 MiB quota never bit in the browser.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod listing {
+    use wafer_core::interfaces::storage::service::{ListOptions, StorageService};
+    use wasm_bindgen::prelude::wasm_bindgen;
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::BrowserStorageService;
+
+    #[wasm_bindgen(inline_js = r#"
+export function installMemoryOpfsWithDirs() {
+    const notFound = (name) => new DOMException(`no such entry: ${name}`, 'NotFoundError');
+    const makeFile = () => {
+        let bytes = new Uint8Array(0);
+        return {
+            kind: 'file',
+            async getFile() { return new Blob([bytes]); },
+            async createWritable() {
+                const parts = [];
+                return {
+                    async write(chunk) {
+                        parts.push(typeof chunk === 'string'
+                            ? new TextEncoder().encode(chunk)
+                            : new Uint8Array(chunk));
+                    },
+                    async close() {
+                        const out = new Uint8Array(parts.reduce((n, p) => n + p.byteLength, 0));
+                        let at = 0;
+                        for (const p of parts) { out.set(p, at); at += p.byteLength; }
+                        bytes = out;
+                    },
+                };
+            },
+        };
+    };
+    const makeDir = () => {
+        const dirs = new Map();
+        const files = new Map();
+        return {
+            kind: 'directory',
+            async getDirectoryHandle(name, opts = {}) {
+                if (!dirs.has(name)) {
+                    if (!opts.create) throw notFound(name);
+                    dirs.set(name, makeDir());
+                }
+                return dirs.get(name);
+            },
+            async getFileHandle(name, opts = {}) {
+                if (!files.has(name)) {
+                    if (!opts.create) throw notFound(name);
+                    files.set(name, makeFile());
+                }
+                return files.get(name);
+            },
+            async removeEntry(name) {
+                if (!files.delete(name) && !dirs.delete(name)) throw notFound(name);
+            },
+            async *entries() {
+                for (const entry of dirs) yield entry;
+                for (const entry of files) yield entry;
+            },
+        };
+    };
+    const root = makeDir();
+    Object.defineProperty(globalThis.navigator, 'storage', {
+        configurable: true,
+        value: { async getDirectory() { return root; } },
+    });
+}
+"#)]
+    extern "C" {
+        /// A fresh in-memory OPFS with nested directories, answering the
+        /// handle calls `bridge.js`'s storage functions make.
+        #[wasm_bindgen(js_name = installMemoryOpfsWithDirs)]
+        fn install_memory_opfs_with_dirs();
+    }
+
+    #[wasm_bindgen_test]
+    async fn list_reports_the_byte_size_put_wrote() {
+        install_memory_opfs_with_dirs();
+        let store = BrowserStorageService;
+        store
+            .put("blobs", "aa/one", &[7u8; 5], "application/octet-stream")
+            .await
+            .expect("put one");
+        store
+            .put("blobs", "bb/two", &[7u8; 1234], "application/octet-stream")
+            .await
+            .expect("put two");
+        store
+            .put("blobs", "empty", &[], "application/octet-stream")
+            .await
+            .expect("put empty");
+
+        let listed = store
+            .list("blobs", &ListOptions::default())
+            .await
+            .expect("list");
+        let sizes: Vec<(String, i64)> = listed
+            .objects
+            .into_iter()
+            .map(|object| (object.key, object.size))
+            .collect();
+        assert_eq!(
+            sizes,
+            vec![
+                ("aa/one".to_string(), 5),
+                ("bb/two".to_string(), 1234),
+                ("empty".to_string(), 0),
+            ],
+            "each object's size is the byte count put wrote, sidecars not listed",
+        );
+
+        // A page carries the sizes of its own keys, not of the first keys.
+        let page = store
+            .list(
+                "blobs",
+                &ListOptions {
+                    prefix: String::new(),
+                    limit: 1,
+                    offset: 1,
+                    cursor: None,
+                },
+            )
+            .await
+            .expect("list a page");
+        assert_eq!(page.objects.len(), 1);
+        assert_eq!(page.objects[0].key, "bb/two");
+        assert_eq!(page.objects[0].size, 1234);
     }
 }
 
