@@ -172,7 +172,8 @@ field, still imports.
 }
 ```
 
-- `template` matches `^[a-z][a-z0-9-]{0,31}$`.
+- `template` follows the block-name rule (`paths::block_name_is_valid`,
+  `^[a-z][a-z0-9-]{1,31}$`): one rule for both kinds of name.
 - `guide` is a `SeedFile` relative to `/seed/`, fetched and verified like
   `data.json` (hash, size, content type), capped at 256 KiB. Its content
   type is fixed to `text/markdown; charset=utf-8`; the guide is not a
@@ -242,11 +243,12 @@ A new single-row table `impresspress__dev__seed_info` (migration
 `003_seed_info`, sqlite and postgres) with `singleton_id`, `template`,
 `suggested_prompt`, `guide_markdown` and `imported_at`. Module
 `repo/seed_info.rs` owns `pub const TABLE`, following `repo/runtime_state.rs`.
-`seed::import` writes the row inside `import_bundle`, after the guide has
-been fetched and verified and before generation 0 is activated, so a bundle
-whose guide fails verification is refused as a whole, like any other file.
-The row exists only on an instance whose seed carried a `sandbox` block;
-nothing reads it on an exported bundle.
+The migration seeds the singleton with every column `NULL`, the way
+`runtime_state` is seeded idle; `seed_info::read` answers `None` until an
+import fills it. `seed::import` verifies the guide before a single site byte
+is stored — a bundle whose `sandbox` block fails any check is refused as a
+whole and stores nothing — and writes the row last, beside the workspace it
+describes. Nothing reads it on an exported bundle.
 
 ### 6.2 `dev_read_reference`
 
@@ -434,8 +436,10 @@ e2e (Playwright, in both CI jobs):
   `application/javascript; charset=utf-8`; the welcome page has a
   Bootstrap-classed navbar; `dev_read_reference` returns a `site_markdown`
   naming Bootstrap 5.3.8; `dev_status.template` is `"bootstrap"`;
-  `dev_write_files` with three files yields exactly one new generation; the
-  guide's storefront attributes exist in `storefront.js` (§7.3).
+  both guides' storefront attributes exist in `storefront.js` (§7.3).
+- `dev-workspace.spec.ts` gains a `dev_write_files` call of two files after
+  its single write and asserts exactly one new generation (PR D, so it does
+  not depend on the bootstrap seed landing first).
 
 Build: `build.sh --check` covers both seeds in CI (an existing step), and a
 re-run of `vendor.py bootstrap` produces no diff.
