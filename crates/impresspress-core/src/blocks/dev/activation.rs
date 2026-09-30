@@ -55,7 +55,7 @@ use wafer_run::{context::Context, ErrorCode, OutputStream, WaferError};
 use super::{
     blobs,
     contracts::{GenerationSummary, SiteManifest},
-    control::DynamicBlockSpec,
+    control::{DynamicBlockSpec, GenerationAnnouncement},
     gc,
     generation::{self, GenerationManifest},
     no_store_error_status,
@@ -84,8 +84,10 @@ pub struct ActivationOutcome {
 
 /// One phase of an activation, with how long it took.
 ///
-/// Published in every mutating tool result (design §7.5) so the page can show
-/// where the time went without a push channel.
+/// Published in the result of every call that activates a generation — file
+/// writes and deletes, staging, block removal, rollback (design §7.5) — so the
+/// caller that asked for a change sees where its time went. The activation push (design
+/// §2.6) says only which generation went live; the timings travel here.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProgressStep {
@@ -862,12 +864,17 @@ async fn activate_staged(
     // --- Publish the site -------------------------------------------------
     journal(ctx, state, Some(id), ActivationPhase::Publishing).await?;
     let diff = generation::diff(previous_manifest, manifest);
-    if let Err(e) = publish_site(ctx, previous_manifest.map(|m| &m.site), &manifest.site).await {
-        let error =
-            ActivationError::Storage(restore(ctx, shared, manifest, previous, rebuilt, e).await);
-        abandon(ctx, id, state, &error.to_string()).await?;
-        return Err(error);
-    }
+    let published =
+        match publish_site(ctx, previous_manifest.map(|m| &m.site), &manifest.site).await {
+            Ok(published) => published,
+            Err(e) => {
+                let error = ActivationError::Storage(
+                    restore(ctx, shared, manifest, previous, rebuilt, e).await,
+                );
+                abandon(ctx, id, state, &error.to_string()).await?;
+                return Err(error);
+            }
+        };
     progress.record(
         ActivationPhase::Publishing,
         format!(
@@ -908,6 +915,21 @@ async fn activate_staged(
     )
     .await
     .map_err(storage_error)?;
+    // Committed: the generation's ledger row and journal are written and say
+    // it is live, so every open page may now be told (design §2.6); the
+    // reply follows the announcement. Maintenance is scheduled after the
+    // announcement and, for a request, runs after the reply, so the page has
+    // nothing of it to wait for. The paths are spelled as the workspace
+    // spells them (`site/…`), the one form every `/b/dev` surface uses for a
+    // site file.
+    shared.control.announce_active(&GenerationAnnouncement {
+        id: row.id.clone(),
+        cause: row.cause,
+        changed_paths: published
+            .iter()
+            .map(|path| format!("{}{path}", workspace::SITE_PREFIX))
+            .collect(),
+    });
     schedule_maintenance(ctx, shared, maintenance).await;
     progress.record(ActivationPhase::Active, format!("generation {}", row.id));
 
@@ -1473,6 +1495,7 @@ async fn restore_active_site(
     };
     publish_site(ctx, published, &manifest.site)
         .await
+        .map(drop)
         .map_err(|e| e.message)
 }
 

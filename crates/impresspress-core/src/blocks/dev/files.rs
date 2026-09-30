@@ -116,7 +116,7 @@ use base64ct::{Base64, Encoding};
 use wafer_run::{context::Context, ErrorCode, InputStream, Message, OutputStream};
 
 use super::{
-    activation::{self, ActivationIntent, Maintenance},
+    activation::{self, ActivationIntent, ActivationOutcome, Maintenance, ProgressStep},
     blobs,
     contracts::{
         FileConflict, FileDeleteRequest, FileDeleteResponse, FileEncoding, FileListQuery,
@@ -314,15 +314,17 @@ pub async fn handle_write(
     // back, so the generation is composed from persisted state. An activation
     // that published content the workspace had lost would be unreproducible
     // from the workspace it claims to project.
-    let generation = match publish_if_site(ctx, shared, &area, GenerationCause::SiteWrite).await {
-        Ok(generation) => generation,
+    let outcome = match publish_if_site(ctx, shared, &area, GenerationCause::SiteWrite).await {
+        Ok(outcome) => outcome,
         Err(refusal) => return refusal,
     };
+    let (generation, progress) = split_outcome(outcome);
     no_store().json(&FileWriteResponse {
         path: entry.path,
         sha256: entry.sha256,
         size: entry.size,
         generation,
+        progress,
     })
 }
 
@@ -359,14 +361,16 @@ pub async fn handle_delete(
             return no_store_db_error_internal(e, "dev workspace save");
         }
     }
-    let generation = match publish_if_site(ctx, shared, &area, GenerationCause::SiteDelete).await {
-        Ok(generation) => generation,
+    let outcome = match publish_if_site(ctx, shared, &area, GenerationCause::SiteDelete).await {
+        Ok(outcome) => outcome,
         Err(refusal) => return refusal,
     };
     collect_if_unpublished(ctx, shared, &area).await;
+    let (generation, progress) = split_outcome(outcome);
     no_store().json(&FileDeleteResponse {
         path: request.path,
         generation,
+        progress,
     })
 }
 
@@ -391,11 +395,11 @@ async fn publish_if_site(
     shared: &Arc<DevShared>,
     area: &WorkspaceArea,
     cause: GenerationCause,
-) -> Result<Option<GenerationSummary>, OutputStream> {
+) -> Result<Option<ActivationOutcome>, OutputStream> {
     if !matches!(area, WorkspaceArea::Site) {
         return Ok(None);
     }
-    match activation::request(
+    activation::request(
         ctx,
         shared,
         cause,
@@ -403,9 +407,19 @@ async fn publish_if_site(
         Maintenance::Deferred,
     )
     .await
-    {
-        Ok(outcome) => Ok(Some(outcome.generation)),
-        Err(e) => Err(e.into_response()),
+    .map(Some)
+    .map_err(|e| e.into_response())
+}
+
+/// The two halves of a publish a write or delete response carries: the
+/// generation, and the phases its activation passed through — or nothing and
+/// no phases, when the change was not one the site serves.
+fn split_outcome(
+    outcome: Option<ActivationOutcome>,
+) -> (Option<GenerationSummary>, Vec<ProgressStep>) {
+    match outcome {
+        Some(outcome) => (Some(outcome.generation), outcome.progress),
+        None => (None, Vec::new()),
     }
 }
 

@@ -80,6 +80,16 @@ async fn write_then_list_then_read_round_trips_with_hashes() {
     // silently exercising an unpublished write.
     assert_eq!(w["generation"]["cause"], "site_write");
     assert_eq!(w["generation"]["status"], "active");
+    // It carries that activation's phase timings too (design §2.6), so the
+    // page's ladder and the e2e can show where a write's time went. A site
+    // write rebuilds no runtime, so it has no `building_runtime` phase.
+    let phases: Vec<&str> = w["progress"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a site write carries its progress: {w}"))
+        .iter()
+        .map(|step| step["phase"].as_str().expect("phase"))
+        .collect();
+    assert_eq!(phases, ["validating", "publishing", "active"]);
     let sha = w["sha256"].as_str().expect("sha256").to_string();
     assert_eq!(sha.len(), 64);
 

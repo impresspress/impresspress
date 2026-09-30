@@ -56,6 +56,10 @@ const tail = fs.readFileSync(path.join(here, '..', 'dev.js'), 'utf8');
  * @param {Promise<void>|null} [options.exportGate]  when set, the archive
  *   request parks on this promise, so a test can observe the page WHILE an
  *   export is in flight.
+ * @param {() => boolean} [options.confirm]  the human's answer to Delete's
+ *   `window.confirm()`. Throws when not given.
+ * @param {() => string|null} [options.prompt]  the human's answer to New
+ *   file's `window.prompt()`. Throws when not given.
  * @param {object|(() => object)} [options.status]  what `/b/dev/api/status`
  *   answers with — a `StatusResponse`. A function, for a test whose subject
  *   is what the page does when the answer CHANGES: the page polls it, and
@@ -108,7 +112,16 @@ export function instantiate({
   statusGate = null,
   exportManifest = null,
   exportZip = { status: 200, body: 'PK\u0003\u0004zip' },
-  exportGate = null
+  exportGate = null,
+  // The human's answers to Delete's `confirm()` and New file's `prompt()`.
+  // Throwing by default: a test that reaches a dialog it did not answer is
+  // testing something it did not mean to.
+  confirm = () => {
+    throw new Error('this harness instance was not given an answer to confirm()');
+  },
+  prompt = () => {
+    throw new Error('this harness instance was not given an answer to prompt()');
+  }
 } = {}) {
   // Everything `exportSite` handed the browser: one entry per download it
   // started, with the anchor's `download` name and the object URL it built.
@@ -125,6 +138,12 @@ export function instantiate({
   // real handler — `pagehide`'s `event.persisted` branch is a decision the
   // handler owns, and there is no other way to reach it.
   const windowListeners = [];
+  // `navigator.serviceWorker`, as far as the tail uses it: the target the
+  // worker's `postMessage`s arrive on. A real `EventTarget`, so a test
+  // delivers a push the way a browser does — `dispatchEvent(new
+  // MessageEvent('message', { data }))` — and the tail's own listener, with
+  // its own filtering, is what handles it.
+  const serviceWorker = new EventTarget();
   // Enough of an element for the tail to build a list out of: the tail's only
   // DOM verbs are `innerHTML = ''` to empty a container and `appendChild` to
   // refill it, so `children` plus an `innerHTML` setter that clears it is a
@@ -238,8 +257,11 @@ export function instantiate({
     window: {
       addEventListener(type, listener) {
         windowListeners.push({ type, listener });
-      }
+      },
+      confirm,
+      prompt
     },
+    navigator: { serviceWorker },
     fetch(...args) {
       fetchCalls.push(args);
       // The tail makes two kinds of request on load and they cannot share one
@@ -335,12 +357,17 @@ export function instantiate({
     },
     // The tail's own name for the class `assets.rs` imports into the module.
     BrowserRustCompiler: compiler,
-    // The download half of `exportSite`. A counter rather than a real object
-    // URL: the page's only contract with it is "what `createObjectURL`
-    // returned is what `revokeObjectURL` is later given".
-    URL: {
-      createObjectURL: (blob) => `blob:fake/${blob.size}`,
-      revokeObjectURL: (url) => revoked.push(url)
+    // The real `URL` — the preview's stylesheet swap resolves `href`s with
+    // it — plus the download half of `exportSite`. A counter rather than a
+    // real object URL: the page's only contract with it is "what
+    // `createObjectURL` returned is what `revokeObjectURL` is later given".
+    URL: class extends URL {
+      static createObjectURL(blob) {
+        return `blob:fake/${blob.size}`;
+      }
+      static revokeObjectURL(url) {
+        revoked.push(url);
+      }
     },
     // Both timer functions are UNREF'd. Node keeps the process alive while a
     // timer is pending, and the tail schedules two long ones on purpose: the
@@ -399,7 +426,12 @@ return {
   updateExportButton,
   get exportInFlight() { return exportInFlight },
   get statusInFlight() { return statusInFlight },
-  get compilerManifest() { return compilerManifest }
+  get compilerManifest() { return compilerManifest },
+  refreshAfterChange,
+  openFile,
+  save,
+  remove,
+  create
 };`
   );
   const handle = factory(...Object.values(sandbox));
@@ -416,5 +448,17 @@ return {
       fn();
     }
   };
-  return { handle, fetchCalls, fireWindow, fireInterval, elements, tools, downloads, revoked };
+  // Deliver one message from the service worker, as a browser would.
+  const push = (data) => serviceWorker.dispatchEvent(new MessageEvent('message', { data }));
+  return {
+    handle,
+    fetchCalls,
+    fireWindow,
+    fireInterval,
+    push,
+    elements,
+    tools,
+    downloads,
+    revoked
+  };
 }

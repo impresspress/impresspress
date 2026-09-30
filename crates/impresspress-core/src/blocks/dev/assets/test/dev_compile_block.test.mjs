@@ -515,7 +515,7 @@ test('the status is not polled while the worker compiles, only while the sandbox
     release = resolve;
   });
   let statusReads = 0;
-  const { handle, tools, elements } = instantiate({
+  const { handle, tools, elements, push } = instantiate({
     hasModelContext: true,
     compilerManifest: MANIFEST,
     workspace: HELLO,
@@ -558,9 +558,20 @@ test('the status is not polled while the worker compiles, only while the sandbox
   // Back, because staging is over and there is a toolchain and a block again.
   assert.equal(elements.get('dev-compile').disabled, false);
   assert.equal(elements.get('dev-compile').title, '');
-  // Staging DID open the window — the ladder the panel shows comes from the
-  // catch-up that closing it runs.
-  assert.ok(statusReads > readsBeforeCompile);
+  // Closing the window reads nothing back: the page learns the generation
+  // went live from the service worker's push, not from a catch-up read.
+  assert.equal(statusReads, readsBeforeCompile);
+  let reloads = 0;
+  elements.set('dev-preview-frame', {
+    contentWindow: { location: { href: 'http://sandbox.test/', reload: () => (reloads += 1) } }
+  });
+  push({ type: 'dev-generation', id: 'gen_2', cause: 'block_compile', changed_paths: [] });
+  await settle();
+  assert.equal(reloads, 1, 'the push reloads the preview');
+  assert.match(elements.get('dev-log').textContent, /live generation: gen_2/);
+  // A compile rebuilds the runtime, so the push is followed by ONE status
+  // read — after the reload — for `observe` to refresh the site's tools.
+  assert.equal(statusReads, readsBeforeCompile + 1);
 });
 
 test('a second compile is refused while one is running, not queued behind it', async () => {

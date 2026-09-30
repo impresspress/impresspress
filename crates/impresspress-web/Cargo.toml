@@ -23,11 +23,18 @@ dynamic-wasm-blocks = ["wafer-run/wasmi"]
 # fetches `/seed/manifest.json` from the worker's own global (`web_sys::window()`
 # is `None` there). Pulled in by the feature rather than unconditionally, so a
 # feature-off build compiles exactly the web-sys surface it did before.
+# `Clients` + `Client` + `ClientQueryOptions` + `ClientType`: an activation
+# posts the generation that went live to every window the worker controls
+# (`dev_runtime`'s `announce_active`, design §2.6) — same reason, same gate.
 browser-devtools = [
     "dynamic-wasm-blocks",
     "impresspress-core/block-dev",
     "web-sys/ServiceWorkerGlobalScope",
     "web-sys/WorkerGlobalScope",
+    "web-sys/Clients",
+    "web-sys/Client",
+    "web-sys/ClientQueryOptions",
+    "web-sys/ClientType",
 ]
 
 [dependencies]
