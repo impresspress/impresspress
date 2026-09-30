@@ -135,8 +135,10 @@ cannot drift from them. Read it before writing Rust.
 ### Compiling one
 
 The Compile button — or the `dev_compile_block` tool — compiles
-`blocks/<name>/` in the browser. First use downloads about 72 MiB of
-compiler assets; after that, a cold start takes about 10 seconds and a
+`blocks/<name>/` in the browser. The toolchain (about 72 MiB, downloaded
+on first visit) downloads and starts as soon as the workspace has a block —
+on page load, or when the first block is scaffolded — so a compile normally
+does not wait for it; a workspace with no block never loads the compiler. A
 compile takes about 20 seconds for the `hello` template and about 30 for the
 `table` template. A failed compile returns diagnostics (file, line, column,
 message) without touching the live site; a successful one is validated,

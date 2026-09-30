@@ -831,6 +831,7 @@ async function discoverCompiler() {
   compilerVersionEl.textContent = describeCompiler(compilerManifest);
   updateCompileButton();
   log('compiler ' + compilerManifest.version + ' available');
+  warmCompiler();
 }
 
 // ---- compiling a block ----------------------------------------------------
@@ -935,6 +936,7 @@ function renderBlockChoices(files) {
   }
   blockNames = names;
   updateCompileButton();
+  warmCompiler();
 }
 
 /** Lowercase hex SHA-256 of a string, the form the build row records. */
@@ -1018,6 +1020,44 @@ async function ensureCompiler(onProgress) {
   // later compile joins whatever worker this one leaves behind.
   await compiler.initialize(onProgress);
   return compiler;
+}
+
+// Whether the toolchain has been asked to start ahead of a compile.
+//
+// One-shot on purpose. `ensureCompiler` is idempotent while a start is in
+// flight or has succeeded, but the adapter clears its latch when a start
+// FAILS, and a warm-up re-armed by every listing refresh would retry a broken
+// toolchain after every write. The compile path keeps its own retry — a
+// failed warm-up costs the first compile its start-up and nothing else.
+var compilerWarmStarted = false;
+
+// Start the toolchain before anyone asks for a build.
+//
+// Two facts have to hold and they arrive in either order: a compiler in this
+// build (`discoverCompiler`) and a block to compile (`renderBlockChoices`).
+// Both call this, and whichever lands second starts the worker. A workspace
+// with no block never starts it: a visitor editing site files pays neither
+// the download nor the memory. Design: spec 2026-09-29 dev-block-compile-speed §2.2.
+//
+// The progress goes through `appendProgress`, the same sink a compile uses,
+// and only the FIRST `initialize` caller sees the download — so a compile
+// that joins this start-up mid-flight still has it in the log. The ready line
+// names the bundle version rather than rustc's: `ensureCompiler` hands back
+// the session, not what `initialize` resolved with, and the compile result
+// already records rustc's own version.
+function warmCompiler() {
+  if (compilerWarmStarted || !compilerManifest || blockNames.length === 0) {
+    return;
+  }
+  compilerWarmStarted = true;
+  log('compiler: starting ahead of the first compile');
+  ensureCompiler(appendProgress)
+    .then(function () {
+      log('compiler: ready (' + compilerManifest.version + ')');
+    })
+    .catch(function (error) {
+      log('compiler: start-up failed (' + error.message + '); the first compile will retry');
+    });
 }
 
 // One compiler diagnostic, as the sandbox's own wire type.

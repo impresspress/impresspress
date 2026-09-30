@@ -108,3 +108,127 @@ test('a toolchain with nothing to compile leaves the button disabled, and says w
   assert.equal(elements.get('dev-compile').disabled, true);
   assert.match(elements.get('dev-compile').title, /No block to compile/);
 });
+
+// ---- starting the toolchain ahead of the first compile --------------------
+//
+// `warmCompiler`: the page starts the toolchain as soon as it knows BOTH that
+// this build carries one and that the workspace has a block, so a compile
+// does not pay the start-up. Spec 2026-09-29 dev-block-compile-speed §2.2.
+
+/** One workspace file, in the shape the harness's listing serves. */
+const file = (path, content) => ({ path, sha256: 'b'.repeat(64), content });
+
+const HELLO = () => file('blocks/hello/Cargo.toml', '[package]\nname = "hello"\n');
+
+/** A `BrowserRustCompiler` stub that counts start-ups. */
+function countingCompiler() {
+  const calls = { initialize: 0 };
+  class Stub {
+    constructor(manifest) {
+      this.manifest = manifest;
+    }
+    async initialize() {
+      calls.initialize += 1;
+      return 'rustc 1.90.0-nightly (fake)';
+    }
+    async compile() {
+      throw new Error('not compiled in this test');
+    }
+  }
+  return { Stub, calls };
+}
+
+test('the toolchain starts on load when the workspace already has a block', async () => {
+  const { Stub, calls } = countingCompiler();
+  const { elements } = instantiate({ compilerManifest: MANIFEST, workspace: [HELLO()], compiler: Stub });
+  await settle();
+
+  assert.equal(calls.initialize, 1);
+  // The line the e2e times start-up by.
+  assert.match(elements.get('dev-log').textContent, /compiler: ready \(807ace9e\)/);
+});
+
+test('the toolchain starts when the manifest arrives after the block listing', async () => {
+  // The other order of the load-time race: `loadFiles` has already reported a
+  // block, and only the manifest's arrival can start the toolchain.
+  const { Stub, calls } = countingCompiler();
+  let release;
+  const manifestGate = new Promise((resolve) => {
+    release = resolve;
+  });
+  const { handle } = instantiate({
+    compilerManifest: MANIFEST,
+    manifestGate,
+    workspace: [HELLO()],
+    compiler: Stub
+  });
+  await settle();
+  // The listing has landed and the manifest has not.
+  assert.equal(handle.compilerManifest, null);
+  assert.equal(calls.initialize, 0);
+
+  release();
+  await settle();
+
+  assert.equal(calls.initialize, 1);
+});
+
+test('a workspace with no block never starts the toolchain', async () => {
+  const { Stub, calls } = countingCompiler();
+  instantiate({
+    compilerManifest: MANIFEST,
+    workspace: [file('site/index.html', '<h1>hi</h1>')],
+    compiler: Stub
+  });
+  await settle();
+
+  assert.equal(calls.initialize, 0);
+});
+
+test('without a compiler in the build nothing starts, blocks or not', async () => {
+  const { Stub, calls } = countingCompiler();
+  instantiate({ compilerManifest: null, workspace: [HELLO()], compiler: Stub });
+  await settle();
+
+  assert.equal(calls.initialize, 0);
+});
+
+test('the toolchain starts when the first block is scaffolded, and only once', async () => {
+  const { Stub, calls } = countingCompiler();
+  const { handle } = instantiate({ compilerManifest: MANIFEST, workspace: [], compiler: Stub });
+  await settle();
+  assert.equal(calls.initialize, 0);
+
+  // The listing refresh every mutating call performs, now with a block in it.
+  handle.renderBlockChoices([HELLO()]);
+  handle.renderBlockChoices([HELLO()]);
+  await settle();
+
+  assert.equal(calls.initialize, 1);
+});
+
+test('a failed start-up is not retried by the next listing refresh', async () => {
+  let starts = 0;
+  class Broken {
+    async initialize() {
+      starts += 1;
+      throw new Error('worker would not start');
+    }
+  }
+  const { handle, elements } = instantiate({
+    compilerManifest: MANIFEST,
+    workspace: [HELLO()],
+    compiler: Broken
+  });
+  await settle();
+  handle.renderBlockChoices([HELLO()]);
+  await settle();
+
+  // One attempt: the compile path keeps its own retry, and a warm-up re-armed
+  // by every refresh would hammer a broken toolchain after every write.
+  assert.equal(starts, 1);
+  assert.match(
+    elements.get('dev-log').textContent,
+    /compiler: start-up failed \(worker would not start\); the first compile will retry/
+  );
+});

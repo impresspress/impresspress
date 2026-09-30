@@ -27,6 +27,11 @@ const tail = fs.readFileSync(path.join(here, '..', 'dev.js'), 'utf8');
  *   `/__impresspress_dev/compiler/manifest.json` answers with: an object for a
  *   bundle that shipped the browser toolchain, `null` for one that did not
  *   (the host 404s, which is a normal build — see `discoverCompiler`).
+ * @param {Promise<void>|null} [options.manifestGate]  when set, the manifest
+ *   request parks on this promise. On the real page the file listing and the
+ *   manifest race, and without a gate the manifest always wins here — so this
+ *   is the only way to see the page learn about a block BEFORE it learns it
+ *   has a compiler.
  * @param {Array<{path: string, sha256: string, content: string,
  *                encoding?: string, size?: number, content_type?: string}>}
  *   [options.workspace]  the files `/b/dev/api/files` lists and
@@ -71,6 +76,7 @@ const unref = (timer) => {
 export function instantiate({
   hasModelContext = false,
   compilerManifest = null,
+  manifestGate = null,
   workspace = [],
   compiler = class {
     constructor() {
@@ -243,14 +249,11 @@ export function instantiate({
       // with `response.json()` whose absence (404) is a normal build.
       const url = String(args[0]);
       if (url === '/__impresspress_dev/compiler/manifest.json') {
-        if (compilerManifest === null) {
-          return Promise.resolve({ ok: false, status: 404 });
-        }
-        return Promise.resolve({
-          ok: true,
-          status: 200,
-          json: async () => compilerManifest
-        });
+        const response =
+          compilerManifest === null
+            ? { ok: false, status: 404 }
+            : { ok: true, status: 200, json: async () => compilerManifest };
+        return manifestGate ? manifestGate.then(() => response) : Promise.resolve(response);
       }
       // The two file endpoints, answered from `workspace` — enough of the
       // real `files.rs` for `loadFiles` and `snapshotBlock` to run against:
@@ -390,6 +393,7 @@ return {
   refusalMessage,
   describeCompiler,
   snapshotBlock,
+  renderBlockChoices,
   compileBlock,
   exportSite,
   updateExportButton,
