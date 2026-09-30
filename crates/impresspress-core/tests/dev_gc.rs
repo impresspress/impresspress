@@ -224,6 +224,8 @@ async fn gc_deletes_blobs_no_retained_generation_or_workspace_references() {
         first_blob.get_or_insert(written.clone());
         sha = Some(written);
     }
+    // Retention and collection run after each write's reply.
+    ctx.drain_deferred().await;
 
     let first_blob = first_blob.expect("25 writes stored a first blob");
     let last_blob = sha.expect("25 writes stored a last blob");
@@ -267,6 +269,76 @@ async fn gc_deletes_blobs_no_retained_generation_or_workspace_references() {
     );
 }
 
+/// A collection that runs while an activation is between composing its
+/// manifest from the workspace and inserting the manifest's staged row.
+///
+/// Collections run after a request's reply, outside the activation queue, so
+/// this gap is reachable: the write below composes a manifest naming blob Y
+/// and parks on its row's insert; meanwhile the same path is overwritten with
+/// Z (so the workspace no longer names Y) and the collector runs. Had the
+/// activation released the workspace lock after its read, the collector would
+/// see Y named by no row and no workspace entry, delete it, and the write
+/// would then refuse its own manifest with a 422. The activation holds the
+/// lock through the insert, so the overwrite and the collection wait for the
+/// row, which then protects Y.
+#[tokio::test]
+async fn a_collection_during_an_activation_keeps_the_blob_its_manifest_names() {
+    let (ctx, hold) = TestContext::with_dev(FakeControl::new())
+        .await
+        .hold_next_database_create(generations::TABLE);
+    let shared = ctx.dev_shared();
+    let y = "<h1>Y</h1>";
+    let y_sha = blobs::sha256_hex(y.as_bytes());
+
+    let write = dev_post(
+        &ctx,
+        "/b/dev/api/files/write",
+        json!({"path": "site/index.html", "content": y, "expected_sha256": null}),
+    );
+    let racer = async {
+        while !hold.was_reached() {
+            tokio::task::yield_now().await;
+        }
+        // A second write of the same path, as `files::handle_write` makes it:
+        // store the blob, then save the entry, under the workspace lock.
+        {
+            let _serialized = shared.workspace.lock().await;
+            let z = b"<h1>Z</h1>";
+            let (z_sha, stored) = blobs::put(&ctx, z).await.expect("store Z");
+            let mut ws = workspace::load(&ctx).await.expect("load workspace");
+            if stored == blobs::Stored::New {
+                ws.record_blob_stored(z.len() as u64);
+            }
+            ws.insert("site/index.html", z_sha, z.len() as u64);
+            workspace::save(&ctx, &ws).await.expect("save workspace");
+        }
+        gc::collect(&ctx, &shared).await.expect("collect");
+        hold.release();
+    };
+    let (written, ()) = tokio::join!(write, racer);
+
+    assert!(
+        hold.was_reached(),
+        "the insert never parked, so nothing raced it"
+    );
+    let written = wafer_block::http_codec::collect_http_response(written).await;
+    let body: serde_json::Value = serde_json::from_slice(&written.body).unwrap_or_default();
+    assert_eq!(
+        (written.status, &body["generation"]["status"]),
+        (200, &json!("active")),
+        "the write's own manifest was not refused: {body}",
+    );
+    assert!(
+        hold.budget_expired(),
+        "the overwrite and the collection ran while the activation was between its \
+         workspace read and its row: the lock was not held across the gap",
+    );
+    assert!(
+        blobs::exists(&ctx, &y_sha).await.expect("exists"),
+        "the staged row named Y before the collector read its roots",
+    );
+}
+
 /// A block's sources live in the workspace and in no generation at all — a
 /// generation carries the compiled artifact, not the crate it came from. A
 /// collector that only read the ledger would delete a block's source tree the
@@ -282,6 +354,7 @@ async fn gc_never_deletes_a_blob_the_workspace_still_names_even_if_no_generation
     for i in 0..24 {
         sha = Some(write_file(&ctx, "site/page.html", &format!("v{i}"), sha.as_deref()).await);
     }
+    ctx.drain_deferred().await;
 
     assert!(
         blobs::exists(&ctx, &src_sha).await.expect("exists"),
@@ -294,11 +367,11 @@ async fn gc_never_deletes_a_blob_the_workspace_still_names_even_if_no_generation
         "twenty retained site versions plus the block source: {storage}",
     );
 
-    // And it goes the moment nothing names it — on the delete itself, not on
-    // some later unrelated site write. A `blocks/` delete publishes nothing
-    // (design §7.2), so without the collector running here the blob would stay
-    // charged against the workspace's quota until the agent happened to edit
-    // the site.
+    // And it goes as soon as nothing names it — after the delete itself, not
+    // on some later unrelated site write. A `blocks/` delete publishes nothing
+    // (design §7.2), so without the delete scheduling the collector the blob
+    // would stay charged against the workspace's quota until the agent
+    // happened to edit the site.
     let deleted = dev_post(
         &ctx,
         "/b/dev/api/files/delete",
@@ -306,6 +379,7 @@ async fn gc_never_deletes_a_blob_the_workspace_still_names_even_if_no_generation
     )
     .await;
     output_json(deleted).await;
+    ctx.drain_deferred().await;
     assert!(
         !blobs::exists(&ctx, &src_sha).await.expect("exists"),
         "the delete that orphaned it is what reclaims it",
@@ -341,6 +415,7 @@ async fn dev_status_reports_the_stores_as_the_collector_shrinks_them() {
     for i in 0..5 {
         sha = Some(write_file(&ctx, "site/index.html", &format!("v{i}"), sha.as_deref()).await);
     }
+    ctx.drain_deferred().await;
     let inside = storage_of(&ctx).await;
     assert_eq!(inside["blobs"], 5, "nothing has fallen out of the window");
     assert_eq!(inside["blobs_bytes"], 5 * 2);
@@ -350,6 +425,7 @@ async fn dev_status_reports_the_stores_as_the_collector_shrinks_them() {
     for i in 5..25 {
         sha = Some(write_file(&ctx, "site/index.html", &format!("v{i}"), sha.as_deref()).await);
     }
+    ctx.drain_deferred().await;
     let collected = storage_of(&ctx).await;
     assert_eq!(collected["blobs"], 20);
     assert_eq!(collected["retained_generations"], 20);
@@ -624,6 +700,7 @@ async fn gc_deletes_the_artifact_and_the_build_row_of_a_block_no_generation_name
             site: None,
             blocks: vec![spec],
         },
+        activation::Maintenance::Inline,
     )
     .await
     .expect("the block activates");
@@ -640,6 +717,7 @@ async fn gc_deletes_the_artifact_and_the_build_row_of_a_block_no_generation_name
             site: None,
             blocks: vec![replacement],
         },
+        activation::Maintenance::Inline,
     )
     .await
     .expect("the replacement activates");
@@ -653,6 +731,7 @@ async fn gc_deletes_the_artifact_and_the_build_row_of_a_block_no_generation_name
     for i in 0..21 {
         sha = Some(write_file(&ctx, "site/index.html", &format!("v{i}"), sha.as_deref()).await);
     }
+    ctx.drain_deferred().await;
 
     assert!(
         !artifacts::exists(&ctx, &superseded).await.expect("exists"),
@@ -698,6 +777,7 @@ async fn a_staged_build_protects_its_artifact_through_a_burst_of_site_writes() {
     for i in 0..21 {
         sha = Some(write_file(&ctx, "site/index.html", &format!("v{i}"), sha.as_deref()).await);
     }
+    ctx.drain_deferred().await;
     assert!(
         artifacts::exists(&ctx, &artifact).await.expect("exists"),
         "a slow compile is still a compile: its row says the bytes are on their way",
@@ -714,6 +794,7 @@ async fn a_staged_build_protects_its_artifact_through_a_burst_of_site_writes() {
         .await
         .expect("refuse");
     write_file(&ctx, "site/index.html", "v21", sha.as_deref()).await;
+    ctx.drain_deferred().await;
     assert!(
         !artifacts::exists(&ctx, &artifact).await.expect("exists"),
         "nothing is on its way to a generation any more",
@@ -831,6 +912,7 @@ async fn retention_keeps_the_serving_generation_and_its_blobs_under_a_run_of_fai
                 site: None,
                 blocks: vec![spec],
             },
+            activation::Maintenance::Inline,
         )
         .await
         .expect_err("a refused rebuild refuses the activation");
@@ -890,6 +972,7 @@ async fn a_blob_only_the_active_generation_names_survives_collection() {
             site: Some(site),
             blocks: Vec::new(),
         },
+        activation::Maintenance::Inline,
     )
     .await
     .expect("the manifest activates");
@@ -970,6 +1053,7 @@ async fn an_orphaned_staged_generation_is_retired_at_boot_and_its_blobs_collecte
     for i in 0..21 {
         sha = Some(write_file(&ctx, "site/index.html", &format!("v{i}"), sha.as_deref()).await);
     }
+    ctx.drain_deferred().await;
     assert_eq!(
         generations::get(&ctx, &orphan).await.expect("get").status,
         GenerationStatus::Staged,
@@ -996,8 +1080,9 @@ async fn an_orphaned_staged_generation_is_retired_at_boot_and_its_blobs_collecte
     );
 
     // Now it is ordinary history, so the next activation prunes it and the
-    // collector reclaims what only it named.
+    // collector reclaims what only it named, after the write's reply.
     write_file(&ctx, "site/index.html", "v21", sha.as_deref()).await;
+    ctx.drain_deferred().await;
     assert_eq!(
         generations::get(&ctx, &orphan)
             .await
@@ -1196,6 +1281,7 @@ async fn boot_accepts_the_staged_build_of_a_live_block_and_closes_the_rest() {
             site: None,
             blocks: vec![spec],
         },
+        activation::Maintenance::Inline,
     )
     .await
     .expect("the block activates");

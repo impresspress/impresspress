@@ -198,6 +198,7 @@ async fn the_imported_generation_activates_as_generation_zero() {
         ActivationIntent::Seed {
             manifest: generation,
         },
+        activation::Maintenance::Inline,
     )
     .await
     .expect("activate the seed");
@@ -249,6 +250,7 @@ async fn a_second_import_on_a_non_fresh_instance_is_a_no_op() {
         &ctx.dev_shared(),
         GenerationCause::SiteWrite,
         ActivationIntent::SiteOnly,
+        activation::Maintenance::Inline,
     )
     .await
     .expect("publish");

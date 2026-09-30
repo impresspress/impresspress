@@ -362,9 +362,38 @@ fn a_non_dev_bundle_leaves_bypassed_responses_to_the_network() {
     // The early return is still the last statement of the bypass branch.
     assert!(
         sw.contains(
-            "        }\n        return;\n    }\n    event.respondWith(handleFetch(event.request));"
+            "        }\n        return;\n    }\n    event.respondWith(handleFetch(event));"
         ),
         "the bypass branch must still end in the plain early return; sw.js = {sw}"
+    );
+}
+
+/// `handle_request` resolves to `{ response, after }`, and `after` — the
+/// request's audit row and deferred tasks, run once the response is out — is
+/// kept alive with `event.waitUntil`. Without it the browser may stop the
+/// worker as soon as the response is delivered, and that work is lost; no
+/// end-to-end test can see the loss, because a worker under test is rarely
+/// stopped that fast. `waitUntil` needs the fetch event, so `handleFetch`
+/// takes the event rather than the request.
+#[test]
+fn the_fetch_handler_keeps_the_worker_alive_for_after_response_work() {
+    let tmp = production_pkg_copy();
+
+    run(tmp.path(), tmp.path(), AppConfig::default()).expect("bundler ok");
+
+    let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
+    assert!(
+        sw.contains("event.respondWith(handleFetch(event));")
+            && sw.contains("async function handleFetch(event) {"),
+        "handleFetch must receive the fetch event; sw.js = {sw}"
+    );
+    assert!(
+        sw.contains(
+            "        const { response, after } = await handle_request(request);\n        \
+             event.waitUntil(after);\n        return response;"
+        ),
+        "the after-response promise must be handed to waitUntil before the response \
+         is returned; sw.js = {sw}"
     );
 }
 

@@ -9,6 +9,18 @@
 //! result would be a site assembled from two generations. So exactly one runs
 //! at a time, and the rest wait.
 //!
+//! What an activation leaves behind — retention's prune and the collector
+//! (`maintain`) — is not part of it. Once the commit is written the
+//! generation is live, and the caller's [`Maintenance`] says when the
+//! cleanup runs: after the request's reply for a request
+//! ([`Maintenance::Deferred`]), before returning for boot, which has no
+//! reply to wait for ([`Maintenance::Inline`]). Deferred, it runs outside
+//! the queue and may interleave with the next activation. That is sound
+//! because an activation composes its manifest and inserts its staged row
+//! inside one hold of the workspace lock the collector also takes
+//! (`workspace_site`; [`super::gc`], "When it runs"). Two passes do not
+//! interleave with each other (`DevShared::maintenance`).
+//!
 //! Requests that arrive during an activation **coalesce** (design §7.3): the
 //! queue keeps only the latest desired manifest, and every waiter resolves
 //! with the generation that ends up carrying its change. An agent that writes
@@ -31,9 +43,12 @@
 //! returned futures `Send` on native, and what keeps a single-threaded browser
 //! runtime from deadlocking on its own queue.
 
-use std::{collections::BTreeSet, sync::Mutex};
+use std::{
+    collections::BTreeSet,
+    sync::{Arc, Mutex},
+};
 
-use futures::channel::oneshot;
+use futures::{channel::oneshot, lock::MutexGuard};
 use serde::{Deserialize, Serialize};
 use wafer_run::{context::Context, ErrorCode, OutputStream, WaferError};
 
@@ -175,9 +190,58 @@ impl std::fmt::Display for ActivationError {
     }
 }
 
+/// A held `DevShared::workspace` lock.
+type WorkspaceGuard<'a> = MutexGuard<'a, ()>;
+
 /// Persistence failures all arrive the same way.
 fn storage_error(e: WaferError) -> ActivationError {
     ActivationError::Storage(e.message)
+}
+
+// ---------------------------------------------------------------------------
+// Maintenance
+// ---------------------------------------------------------------------------
+
+/// When the retention and collection an activation leaves behind
+/// (`maintain`) run. Chosen once, by whoever asks for the activation,
+/// because only the caller knows whether a reply is waiting on it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Maintenance {
+    /// After the current request's reply, through [`crate::deferred`]. For
+    /// every activation a request asks for: the generation is live before
+    /// the reply, and durable before it on every platform that makes a reply
+    /// wait for the request's writes — in the browser, by the flush scope's
+    /// epoch rule, even for a waiter whose generation was written from
+    /// another request's poll — and two directory walks and a manifest
+    /// parse per retained generation are not something the caller needs to
+    /// wait for.
+    Deferred,
+    /// Before the activation returns. For the host's boot (seed import and
+    /// [`converge_on_boot`]), which runs outside any request: in the browser
+    /// a task deferred there has no request to wait for and is dropped, and
+    /// boot is not waiting on a reply anyway.
+    Inline,
+}
+
+/// Run [`maintain`] as `maintenance` says.
+///
+/// Deferred, the task owns what it uses — the context through
+/// [`Context::clone_arc`], as the auth handlers' deferred tasks do, and the
+/// shared state through its `Arc` — because it outlives the request that
+/// scheduled it.
+pub(super) async fn schedule_maintenance(
+    ctx: &dyn Context,
+    shared: &Arc<super::DevShared>,
+    maintenance: Maintenance,
+) {
+    match maintenance {
+        Maintenance::Inline => maintain(ctx, shared).await,
+        Maintenance::Deferred => {
+            let ctx = ctx.clone_arc();
+            let shared = Arc::clone(shared);
+            crate::deferred::defer(async move { maintain(&*ctx, &shared).await });
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -256,9 +320,12 @@ impl ActivationIntent {
 
 /// Resolve `intent` into the manifest to stage, against the state that is
 /// current now.
+///
+/// `held` is the caller's `DevShared::workspace` guard, which it keeps until
+/// the manifest's staged row is inserted — see [`workspace_site`].
 async fn compose(
     ctx: &dyn Context,
-    shared: &super::DevShared,
+    held: &WorkspaceGuard<'_>,
     intent: ActivationIntent,
     previous: Option<&(GenerationRow, GenerationManifest)>,
 ) -> Result<GenerationManifest, ActivationError> {
@@ -266,12 +333,12 @@ async fn compose(
         || previous.map_or_else(Vec::new, |(_row, manifest)| manifest.blocks.clone());
     Ok(match intent {
         ActivationIntent::SiteOnly => {
-            GenerationManifest::staged(workspace_site(ctx, shared).await?, active_blocks())
+            GenerationManifest::staged(workspace_site(ctx, held).await?, active_blocks())
         }
         ActivationIntent::BlockSet { site, blocks } => {
             let site = match site {
                 Some(site) => site,
-                None => workspace_site(ctx, shared).await?,
+                None => workspace_site(ctx, held).await?,
             };
             GenerationManifest::staged(site, blocks)
         }
@@ -299,8 +366,24 @@ async fn compose(
 /// than a miss. The write whose content was already saved then answers a
 /// sanitized `500`.
 ///
-/// So it takes the same mutex as the mutators. The section is one small JSON
-/// read; nothing else is inside it.
+/// So it reads under the same mutex as the mutators: `held` is
+/// `DevShared::workspace`'s guard, taken by [`activate`].
+///
+/// # Why the guard outlives this read
+///
+/// [`activate`] keeps it until the manifest composed from this read has its
+/// staged row in the ledger. Retention and collection run after a request's
+/// reply, outside the queue, so a collection can start while an activation
+/// is between composing and inserting. The collector takes this lock, then
+/// lists the blobs, then reads the retained rows and the workspace. Released
+/// in that gap, a write could replace a path's blob in the workspace and the
+/// collector could run before the row naming the old blob existed: it would
+/// find the old blob named by nothing and delete it, and the activation
+/// would then refuse its own manifest as naming missing content. Held
+/// through the insert, one of two things is true of every collection: it
+/// took the lock after the insert, so the row is among the roots it reads;
+/// or it finished before the read, so this manifest names only blobs that
+/// collection kept or that were stored after its listing.
 ///
 /// # Deadlock
 ///
@@ -315,24 +398,23 @@ async fn compose(
 ///    `DevShared::compile` instead; the seed importer holds neither. So no
 ///    task can be waiting on this queue while holding the mutex this takes.
 /// 2. **It does not nest with [`adopt_site`].** Both acquisitions live in
-///    [`activate`], but they are sequential, not nested: this guard's scope
-///    ends when this function returns, which is inside `compose`, and
-///    `adopt_site` runs only after `activate_staged` has finished.
+///    [`activate`], but they are sequential, not nested: this guard is
+///    dropped once the staged row is inserted, and `adopt_site` runs only
+///    after `activate_staged` has finished.
 /// 3. **The one lock ordering in the block still has no reverse edge.**
 ///    `compile` is taken above this (`blocks_api`, `generations_api`) and this
 ///    lock is taken below it; nothing anywhere takes `compile` while holding
 ///    `workspace`, so `compile → workspace` is the only order that exists.
-/// 4. **The guard is never held across an `await` on anything but storage.**
-///    `workspace::load` is one object read; there is no activation request, no
-///    runtime rebuild and no ledger write inside the section.
+/// 4. **The guard spans one object read and one database insert.**
+///    `workspace::load` and `repo::generations::insert`; no other lock is
+///    taken inside it, and there is no activation request and no runtime
+///    rebuild. The collector, the only other holder that reads the ledger,
+///    takes this lock first and nothing else while holding it.
 async fn workspace_site(
     ctx: &dyn Context,
-    shared: &super::DevShared,
+    _held: &WorkspaceGuard<'_>,
 ) -> Result<SiteManifest, ActivationError> {
-    let ws = {
-        let _serialized = shared.workspace.lock().await;
-        workspace::load(ctx).await.map_err(storage_error)?
-    };
+    let ws = workspace::load(ctx).await.map_err(storage_error)?;
     Ok(SiteManifest {
         files: workspace::site_manifest(&ws),
     })
@@ -505,11 +587,17 @@ impl ActivationQueue {
 
 /// Make `intent` true as a new generation, waiting for it (or for the
 /// generation that supersedes it) to go live.
+///
+/// `maintenance` applies to every activation this call ends up driving,
+/// including the ones it runs for waiters that coalesced behind it: the
+/// driver is the task they run on, so its caller's answer is the one that
+/// holds.
 pub async fn request(
     ctx: &dyn Context,
-    shared: &super::DevShared,
+    shared: &Arc<super::DevShared>,
     cause: GenerationCause,
     intent: ActivationIntent,
+    maintenance: Maintenance,
 ) -> Result<ActivationOutcome, ActivationError> {
     match shared.activation.admit(cause, intent) {
         // A dropped sender means the driver went away without releasing the
@@ -520,11 +608,12 @@ pub async fn request(
             .await
             .unwrap_or_else(|_| Err(ActivationError::Runtime(ABANDONED.to_string()))),
         Admission::Drive(mut lease, cause, intent) => {
-            let mine = activate(ctx, shared, cause, intent).await;
+            let mine = activate(ctx, shared, cause, intent, maintenance).await;
             // Drain: whoever queued up while this ran gets their outcome from
             // here, because they have no task of their own to run it on.
             while let Some(pending) = lease.next() {
-                let outcome = activate(ctx, shared, pending.cause, pending.intent).await;
+                let outcome =
+                    activate(ctx, shared, pending.cause, pending.intent, maintenance).await;
                 for waiter in pending.waiters {
                     // A caller that went away is not an error; the activation
                     // it asked for still happened.
@@ -544,9 +633,10 @@ pub async fn request(
 /// the state its caller saw.
 async fn activate(
     ctx: &dyn Context,
-    shared: &super::DevShared,
+    shared: &Arc<super::DevShared>,
     cause: GenerationCause,
     intent: ActivationIntent,
+    maintenance: Maintenance,
 ) -> Result<ActivationOutcome, ActivationError> {
     // A rollback replaces the workspace's `site/` half as well as publishing
     // it, and the two have to happen under the same queue lease. The workspace
@@ -564,7 +654,10 @@ async fn activate(
         .await
         .map_err(storage_error)?;
     let previous = load_previous(ctx, &state).await?;
-    let mut manifest = compose(ctx, shared, intent, previous.as_ref()).await?;
+    // Held from the workspace read through the staged row's insert, for every
+    // intent: see `workspace_site`.
+    let composing = shared.workspace.lock().await;
+    let mut manifest = compose(ctx, &composing, intent, previous.as_ref()).await?;
 
     // The id is minted here, not by the repo, because the manifest has to
     // carry it before it is hashed (design §11.3) — and the parent is
@@ -588,8 +681,18 @@ async fn activate(
     )
     .await
     .map_err(storage_error)?;
+    drop(composing);
 
-    let outcome = activate_staged(ctx, shared, &row, &manifest, previous.as_ref(), &state).await?;
+    let outcome = activate_staged(
+        ctx,
+        shared,
+        &row,
+        &manifest,
+        previous.as_ref(),
+        &state,
+        maintenance,
+    )
+    .await?;
     // Only on success: a rollback that never went live must not leave the
     // workspace pointing at content the published site does not have. The
     // reverse order would rewrite the workspace on every refused rollback —
@@ -629,9 +732,9 @@ async fn adopt_site(
     // Deadlock-free because the lock is *only* ever held around a
     // read-modify-write of `workspace.json`: `files.rs` drops it before it
     // asks for an activation, so nothing holding it is ever waiting on this
-    // queue. The other acquisition inside the queue — `workspace_site`, in
-    // `compose` — is sequential with this one rather than nested: its guard's
-    // scope ends before `compose` returns, and this runs after
+    // queue. The other acquisition inside the queue — `activate`'s, around
+    // `compose` and the staged row's insert — is sequential with this one
+    // rather than nested: it is dropped after the insert, and this runs after
     // `activate_staged`. `workspace_site` carries the full argument.
     let _serialized = shared.workspace.lock().await;
     let mut ws = workspace::load(ctx).await?;
@@ -664,11 +767,12 @@ async fn adopt_site(
 /// and break the append-only history's parent chain.
 async fn activate_staged(
     ctx: &dyn Context,
-    shared: &super::DevShared,
+    shared: &Arc<super::DevShared>,
     row: &GenerationRow,
     manifest: &GenerationManifest,
     previous: Option<&(GenerationRow, GenerationManifest)>,
     state: &RuntimeState,
+    maintenance: Maintenance,
 ) -> Result<ActivationOutcome, ActivationError> {
     let id = row.id.as_str();
     let previous_manifest = previous.map(|(_, manifest)| manifest);
@@ -760,7 +864,7 @@ async fn activate_staged(
     )
     .await
     .map_err(storage_error)?;
-    maintain(ctx, shared).await;
+    schedule_maintenance(ctx, shared, maintenance).await;
     progress.record(ActivationPhase::Active, format!("generation {}", row.id));
 
     // Re-read rather than patch the local row: the summary the caller is
@@ -778,18 +882,20 @@ async fn activate_staged(
 /// Retire the generations that have fallen out of the retention window, and
 /// reclaim what that made unreachable.
 ///
-/// Runs after the commit, and reports nothing back. That is the point: by this
-/// line the generation is live and journalled, and returning a failure here
-/// would tell the caller its write did not land when it did. What a failure
-/// costs is storage the *next* activation collects instead — so it is logged
-/// at `error!` rather than swallowed, and nothing depends on it having run.
+/// Scheduled after the commit ([`schedule_maintenance`]) — for a request,
+/// after its reply; at boot, before convergence returns — and reports
+/// nothing back. That is the point: by then the generation is live and
+/// journalled, and a failure here must not tell the caller its write did not
+/// land when it did. What a failure costs is storage the *next* activation
+/// collects instead — so it is logged at `error!` rather than swallowed, and
+/// nothing depends on it having run.
 ///
 /// Pruning first, collection second, and never the other way round: the
 /// collector's reachability is read off the rows retention keeps, so a
 /// collection that ran before the prune would still be protecting the
 /// generations the prune is about to delete and would reclaim nothing.
 ///
-/// Also the whole of what a `blocks/` delete does afterwards
+/// Also the whole of what a `blocks/` delete schedules after its reply
 /// ([`super::files`]'s `collect_if_unpublished`), which publishes nothing and
 /// so never reaches this function through an activation. It is the same pair
 /// of steps in the same order for the same reason — a collection there that
@@ -798,6 +904,8 @@ async fn activate_staged(
 /// so it is one function, called from both, rather than a second collection
 /// site that has to remember the rule.
 pub(super) async fn maintain(ctx: &dyn Context, shared: &super::DevShared) {
+    // One pass at a time: see `DevShared::maintenance`.
+    let _serialized = shared.maintenance.lock().await;
     let pruned = match retention::prune(ctx).await {
         Ok(pruned) => pruned,
         Err(e) => {
@@ -1014,7 +1122,7 @@ async fn missing_content(
 /// swap.
 pub async fn converge_on_boot(
     ctx: &dyn Context,
-    shared: &super::DevShared,
+    shared: &Arc<super::DevShared>,
 ) -> Result<Vec<DynamicBlockSpec>, String> {
     let state = repo::runtime_state::read(ctx)
         .await
@@ -1038,9 +1146,18 @@ pub async fn converge_on_boot(
                 // half of the desired one — so republish that from the
                 // manifest authoritative for it, treating the abandoned
                 // manifest as what is currently out there.
-                if activate_staged(ctx, shared, &row, &manifest, previous.as_ref(), &state)
-                    .await
-                    .is_err()
+                // Inline: boot has no request to defer to (see `Maintenance`).
+                if activate_staged(
+                    ctx,
+                    shared,
+                    &row,
+                    &manifest,
+                    previous.as_ref(),
+                    &state,
+                    Maintenance::Inline,
+                )
+                .await
+                .is_err()
                 {
                     restore_active_site(ctx, Some(&manifest.site), previous.as_ref()).await?;
                 }

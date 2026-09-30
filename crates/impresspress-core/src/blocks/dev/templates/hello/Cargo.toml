@@ -16,13 +16,23 @@ crate-type = ["cdylib"]
 
 [dependencies]
 
-# The sandbox accepts an artifact of at most 4 MiB, and these five settings
-# are what keep a block well under it. `panic = "abort"` also means a panic
-# in a handler traps the instance instead of unwinding — return an error
-# response rather than panicking on anything a caller can cause.
+# The sandbox accepts an artifact of at most 4 MiB. Each setting below is
+# chosen for that limit or for compile time in the browser:
+#
+# - `opt-level = "z"` optimises for size, which is what keeps a block well
+#   under the limit.
+# - `lto = false` is deliberate: link-time optimisation roughly doubles the
+#   compile to save about 20 KB of artifact. Do not turn it on. With one
+#   codegen unit, `false` and `"off"` build the same thing.
+# - `codegen-units = 1` gives a smaller artifact and is also the faster
+#   compile here; more units build slower in the browser toolchain.
+# - `panic = "abort"` drops the unwinding machinery. It also means a panic in
+#   a handler traps the instance instead of unwinding — return an error
+#   response rather than panicking on anything a caller can cause.
+# - `strip = true` drops symbols and debug info from the artifact.
 [profile.release]
 opt-level = "z"
-lto = true
+lto = false
 codegen-units = 1
 panic = "abort"
 strip = true

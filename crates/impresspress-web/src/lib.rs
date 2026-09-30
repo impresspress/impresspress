@@ -99,6 +99,13 @@ pub async fn initialize(options: JsValue) -> Result<(), JsValue> {
         return Ok(());
     }
 
+    // Work a handler defers joins its own request's after-response queue,
+    // which `handle_request` hands the service worker to keep alive with
+    // `event.waitUntil`. The default, a bare `spawn_local`, is tied to no
+    // event, so nothing kept the worker alive for it. See
+    // `impresspress_core::deferred`.
+    impresspress_core::deferred::set_mode(impresspress_core::deferred::DeferMode::Queued);
+
     let dev_requested = js_sys::Reflect::get(&options, &JsValue::from_str("dev"))
         .ok()
         .and_then(|v| v.as_bool())
@@ -266,7 +273,13 @@ impl builder::BootHooks for BrowserBootHooks {
     }
 }
 
+/// Answer one fetch event: resolves to `{ response, after }`, where
+/// `response` is the `Response` to hand to `respondWith` and `after` is a
+/// promise for the work the request left to run after it (its request-log
+/// row and the tasks its handlers deferred). The service worker must pass
+/// `after` to `event.waitUntil`, or the worker can be stopped before that
+/// work has run. See `impresspress_browser::dispatch_request`.
 #[wasm_bindgen]
-pub async fn handle_request(request: web_sys::Request) -> Result<web_sys::Response, JsValue> {
-    impresspress_browser::dispatch_request(request).await
+pub async fn handle_request(request: web_sys::Request) -> Result<JsValue, JsValue> {
+    impresspress_browser::dispatch_fetch(request).await
 }

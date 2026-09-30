@@ -47,13 +47,19 @@
 //! ## OPFS flush durability contract
 //!
 //! `run_execute` (the `DbExec` primitive) does NOT flush to OPFS — it only
-//! mutates sql.js's in-memory database. Flushing is done exactly once per
-//! *logical* [`DatabaseService`] mutation, by [`BrowserDatabaseService::with_flush`],
-//! which wraps every mutating `DatabaseService` method. A logical mutation
-//! (e.g. `create`) may issue several SQL statements internally (a lazy
-//! column-add ALTER, then the INSERT) — those all share the ONE flush at the
-//! end of the call, instead of the previous behavior of flushing after every
-//! single statement.
+//! mutates sql.js's in-memory database. Outside a flush scope, flushing is
+//! done exactly once per *logical* [`DatabaseService`] mutation, by
+//! [`BrowserDatabaseService::with_flush`], which wraps every mutating
+//! `DatabaseService` method. A logical mutation (e.g. `create`) may issue
+//! several SQL statements internally (a lazy column-add ALTER, then the
+//! INSERT) — those all share the ONE flush at the end of the call, instead of
+//! the previous behavior of flushing after every single statement.
+//!
+//! Inside a [`crate::flush_scope`] — one request — the mutations share one
+//! flush instead: each records that the scope owes one, and the scope flushes
+//! once when the request's work is done, before its reply is returned. A
+//! flush exports the whole database, so it costs the same for one row as for
+//! nine, and a request that activates a generation makes about nine.
 //!
 //! The contract itself lives in [`with_flush_mapped`] and its precedence rules
 //! in [`resolve_flush_outcome`], because this is not the only writer to that
@@ -139,7 +145,9 @@ pub(crate) fn forget_table_schema(table: &str) {
 pub struct BrowserDatabaseService;
 
 /// The crate's ONE durability contract: run a mutating `op`, then flush the
-/// sql.js database to OPFS exactly once, whatever `op` returned.
+/// sql.js database to OPFS exactly once, whatever `op` returned — or, inside
+/// a [`crate::flush_scope`], record that the scope owes that flush, which it
+/// performs once at its own end.
 ///
 /// [`BrowserDatabaseService::with_flush`] is this with `E = DatabaseError`;
 /// `vector::service` is the other caller, with `E = VectorError`. `map_flush`
@@ -154,7 +162,10 @@ pub struct BrowserDatabaseService;
 ///
 /// Every logical mutation also starts and ends on a connection that is not
 /// inside a transaction — see [`end_open_transaction`] for why, and for what
-/// each end does when it finds one.
+/// each end does when it finds one. Inside a scope the end-of-write check
+/// still runs here, per write, although the flush is deferred: a write that
+/// left a transaction open is told so itself, not the request that happens to
+/// flush later.
 pub(crate) async fn with_flush_mapped<T, E>(
     op: impl std::future::Future<Output = Result<T, E>>,
     map_flush: impl FnOnce(String) -> E,
@@ -172,7 +183,23 @@ pub(crate) async fn with_flush_mapped<T, E>(
             tracing::error!(error = %e, "could not check the sql.js connection before a write")
         }
     }
-    with_flush_through(op, flush_through_bridge, map_flush).await
+    // Both marks are made before `op` runs, so a write dropped half-way still
+    // counts for the statements it did run: its scope owes a flush
+    // (`note_mutation`), and the guard's drop — at `op`'s end, or wherever
+    // this future is dropped — raises the mutation epoch, so no export
+    // requested before then is taken to hold them.
+    if crate::flush_scope::note_mutation() {
+        let result = {
+            let _ends = crate::flush_scope::MutationEnds::begin();
+            op.await
+        };
+        return resolve_flush_outcome(result, settle_transaction().map_err(map_flush));
+    }
+    let op = async {
+        let _ends = crate::flush_scope::MutationEnds::begin();
+        op.await
+    };
+    with_flush_through(op, crate::flush_scope::flush_covering_now, map_flush).await
 }
 
 /// The one flush this crate performs: end whatever transaction the operation
@@ -183,14 +210,24 @@ pub(crate) async fn with_flush_mapped<T, E>(
 /// committed statements before it are owed their durability. A transaction
 /// that was still open is an error even when the flush succeeds: its
 /// statements were rolled back, so the operation must not be reported done.
-async fn flush_through_bridge() -> Result<(), String> {
-    let left_open = end_open_transaction();
+///
+/// Reached only through [`crate::flush_scope::flush_covering_now`], which
+/// records what each export holds so a scope can tell whether it must flush.
+pub(crate) async fn flush_through_bridge() -> Result<(), String> {
+    let settled = settle_transaction();
     let flushed = bridge::dbFlush()
         .await
         .map(|_| ())
         .map_err(|e| format!("flush to OPFS: {}", bridge::describe(&e)));
-    match left_open {
-        Ok(false) => flushed,
+    settled.and(flushed)
+}
+
+/// End whatever transaction a write left open, as an error when there was
+/// one: its statements were rolled back, so the write must not be reported
+/// done. `Ok` when the connection was clean.
+fn settle_transaction() -> Result<(), String> {
+    match end_open_transaction() {
+        Ok(false) => Ok(()),
         Ok(true) => Err(
             "the write left a transaction open on the sql.js connection; it was rolled back, \
              with every statement run inside it"
@@ -252,6 +289,9 @@ where
 
 /// Which of an operation's outcome and its flush's outcome the caller is told
 /// about. Pure, so it is testable without a bridge (`flush_precedence`).
+/// Inside a [`crate::flush_scope`] the second argument is not a flush but the
+/// per-write transaction check ([`settle_transaction`]), with the same
+/// precedence; the scope's one flush is reported by the scope.
 ///
 /// - `op` succeeds, flush succeeds → `Ok`. The common case: durable.
 /// - `op` succeeds, flush fails → the flush error. The mutation is sitting in
@@ -282,7 +322,9 @@ unsafe impl Sync for BrowserDatabaseService {}
 
 impl BrowserDatabaseService {
     /// Run a mutating `op`, then flush the sql.js DB to OPFS exactly once —
-    /// this is the coalescing point described in the module doc comment.
+    /// or, inside a [`crate::flush_scope`], record that the scope owes that
+    /// flush, which it performs once at its own end. This is the coalescing
+    /// point described in the module doc comment.
     /// [`with_flush_mapped`] owns the contract; this is it at
     /// `E = DatabaseError`.
     async fn with_flush<T>(
@@ -955,35 +997,29 @@ mod conformance {
     }
 }
 
-/// **The `DatabaseService` contract on real sql.js.** A write that duplicates
-/// a primary or unique key is `AlreadyExists` — the 409
-/// `impresspress_core::blocks::crud` answers, without re-reading the key —
-/// and any other refused write is `Internal`. sql.js reports every refusal as
-/// a JS exception carrying only SQLite's text, so this is the one place the
-/// classification can be seen working: the exception comes from the vendored
-/// sql.js build the site serves, through `bridge.js`, into the adapter's own
-/// `create`.
+/// The sql.js-on-Node fixtures every live database test in this crate shares:
+/// an in-memory OPFS, a count of the writes made to it, and a fresh database
+/// on it.
 ///
 /// Under `wasm-pack test --node`, `js/test/node-hooks.mjs` points bridge.js's
-/// `/vendor/sql-wasm-esm.js` import at that vendored build, and
-/// [`install_memory_opfs`] stands in for the OPFS directory `dbInit` reads
-/// and `dbFlush` writes.
+/// `/vendor/sql-wasm-esm.js` import at the vendored sql.js build, and
+/// [`install_memory_opfs`](test_support::install_memory_opfs) stands in for
+/// the OPFS directory `dbInit` reads and `dbFlush` writes.
 #[cfg(all(test, target_arch = "wasm32"))]
-mod sql_js_conformance {
-    use std::collections::HashMap;
-
-    use wafer_core::interfaces::database::service::{DatabaseError, DatabaseService};
+pub(crate) mod test_support {
     use wasm_bindgen::prelude::wasm_bindgen;
-    use wasm_bindgen_test::wasm_bindgen_test;
 
     use super::BrowserDatabaseService;
 
     #[wasm_bindgen(inline_js = r#"
 let writes = 0;
+let failNextWrite = false;
 export function opfsWrites() { return writes; }
+export function failNextOpfsWrite() { failNextWrite = true; }
 export function installMemoryOpfs() {
     const files = new Map();
     writes = 0;
+    failNextWrite = false;
     const handle = (name) => ({
         async getFile() {
             const data = files.get(name);
@@ -993,7 +1029,14 @@ export function installMemoryOpfs() {
             let data = new Uint8Array(0);
             return {
                 async write(chunk) { data = chunk; },
-                async close() { files.set(name, data); writes += 1; },
+                async close() {
+                    if (failNextWrite) {
+                        failNextWrite = false;
+                        throw new DOMException('quota exceeded', 'QuotaExceededError');
+                    }
+                    files.set(name, data);
+                    writes += 1;
+                },
             };
         },
     });
@@ -1018,13 +1061,46 @@ export function installMemoryOpfs() {
         /// An in-memory OPFS: `navigator.storage.getDirectory()` answering
         /// the file-handle calls bridge.js makes, starting empty.
         #[wasm_bindgen(js_name = installMemoryOpfs)]
-        pub(super) fn install_memory_opfs();
+        pub(crate) fn install_memory_opfs();
 
         /// How many times a file was written to the OPFS installed last —
         /// one per `dbFlush`.
         #[wasm_bindgen(js_name = opfsWrites)]
-        pub(super) fn opfs_writes() -> u32;
+        pub(crate) fn opfs_writes() -> u32;
+
+        /// Make the next write to the OPFS installed last fail at its
+        /// `close()` — where a real quota error surfaces — leaving the file
+        /// as it was and the write uncounted. One-shot.
+        #[wasm_bindgen(js_name = failNextOpfsWrite)]
+        pub(crate) fn fail_next_opfs_write();
     }
+
+    /// A fresh in-memory OPFS and a fresh, empty sql.js database on it.
+    pub(crate) async fn fresh_db() -> BrowserDatabaseService {
+        install_memory_opfs();
+        crate::db_init().await.expect("sql.js loads");
+        BrowserDatabaseService
+    }
+}
+
+/// **The `DatabaseService` contract on real sql.js.** A write that duplicates
+/// a primary or unique key is `AlreadyExists` — the 409
+/// `impresspress_core::blocks::crud` answers, without re-reading the key —
+/// and any other refused write is `Internal`. sql.js reports every refusal as
+/// a JS exception carrying only SQLite's text, so this is the one place the
+/// classification can be seen working: the exception comes from the vendored
+/// sql.js build the site serves, through `bridge.js`, into the adapter's own
+/// `create`.
+///
+/// It runs on [`test_support`]'s in-memory OPFS and fresh database.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod sql_js_conformance {
+    use std::collections::HashMap;
+
+    use wafer_core::interfaces::database::service::{DatabaseError, DatabaseService};
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::test_support::fresh_db;
 
     fn row(id: &str, name: Option<&str>) -> HashMap<String, serde_json::Value> {
         let mut row = HashMap::from([("id".to_string(), serde_json::json!(id))]);
@@ -1036,9 +1112,7 @@ export function installMemoryOpfs() {
 
     #[wasm_bindgen_test]
     async fn a_duplicate_insert_is_already_exists() {
-        install_memory_opfs();
-        crate::bridge::dbInit().await.expect("sql.js loads");
-        let svc = BrowserDatabaseService;
+        let svc = fresh_db().await;
         svc.exec_raw(
             "CREATE TABLE sql_js_dup_t (id TEXT PRIMARY KEY, name TEXT NOT NULL UNIQUE)",
             &[],
@@ -1651,7 +1725,7 @@ mod sql_js_transactions {
 
     use super::{
         bridge_control, in_transaction,
-        sql_js_conformance::{install_memory_opfs, opfs_writes},
+        test_support::{fresh_db, opfs_writes},
         BrowserDatabaseService,
     };
 
@@ -1659,9 +1733,7 @@ mod sql_js_transactions {
 
     /// A fresh in-memory OPFS, a fresh sql.js database on it, and one table.
     async fn fresh() -> BrowserDatabaseService {
-        install_memory_opfs();
-        crate::db_init().await.expect("sql.js loads");
-        let svc = BrowserDatabaseService;
+        let svc = fresh_db().await;
         svc.exec_raw(
             &format!("CREATE TABLE {TABLE} (id TEXT PRIMARY KEY, name TEXT)"),
             &[],

@@ -3,11 +3,11 @@
 //! ([`crate::deferred`]).
 //!
 //! A host that must not pay for that work on the response path (the
-//! Cloudflare Worker) runs each request's dispatch inside [`scope`] with a
-//! fresh [`AfterResponse`], and afterwards takes the audit row and the tasks
-//! out of it and runs them under that same request's services. Outside a
-//! scope, the pipeline inserts the audit row inline and [`crate::deferred`]
-//! spawns (native, browser).
+//! Cloudflare Worker, the browser's service worker) runs each request's
+//! dispatch inside [`scope`] with a fresh [`AfterResponse`], and afterwards
+//! takes the audit row and the tasks out of it and runs them under that same
+//! request's services. Outside a scope, the pipeline inserts the audit row
+//! inline and [`crate::deferred`] spawns (native).
 //!
 //! The scope is selected per POLL, not per isolate: one Workers isolate
 //! interleaves concurrent requests whenever a future returns `Pending`, and

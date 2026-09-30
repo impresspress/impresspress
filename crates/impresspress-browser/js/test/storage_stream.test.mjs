@@ -77,11 +77,17 @@ function makeDir() {
     return handle;
 }
 
+/** File names whose `getFile()` rejects as if the file had just been removed. */
+let goneOnRead = new Set();
+
 function makeFile(name) {
     let bytes = new Uint8Array(0);
     return {
         kind: 'file',
         async getFile() {
+            if (goneOnRead.has(name)) {
+                throw notFound(name);
+            }
             // A `Blob` gives `size`, `text()` and a real `stream()`, which is
             // what the bridge reads.
             return new Blob([bytes]);
@@ -139,6 +145,7 @@ function quotaExceeded(name) {
 
 beforeEach(() => {
     failCloseOn = new Set();
+    goneOnRead = new Set();
     abortedFiles = [];
     const root = makeDir();
     // Node defines `navigator` as a getter-only global, so it is redefined
@@ -343,4 +350,51 @@ test('abandoning a read releases the OPFS reader', async () => {
 
     await readerCancel(started.stream_id);
     await assert.rejects(() => readerNextChunk(started.stream_id), /unknown stream id/);
+});
+
+test('a listing reports each object size, for the requested page', async () => {
+    await storagePut('blobs', 'b/two', new Uint8Array(12), 'application/octet-stream');
+    await storagePut('blobs', 'a/one', new Uint8Array(3), 'application/octet-stream');
+    const id = await storagePutStreamStart('blobs', 'c/three');
+    await storagePutStreamChunk(id, new Uint8Array(4));
+    await storagePutStreamChunk(id, new Uint8Array(3));
+    await storagePutStreamFinish(id, 'application/octet-stream');
+
+    assert.deepEqual(await storageList('blobs', '', 0, 0), {
+        keys: ['a/one', 'b/two', 'c/three'],
+        sizes: [3, 12, 7],
+        total: 3,
+    });
+    assert.deepEqual(
+        await storageList('blobs', '', 1, 1),
+        { keys: ['b/two'], sizes: [12], total: 3 },
+        'a page carries the sizes of its own keys',
+    );
+});
+
+test('an object removed between the walk and its size read is dropped from the page', async () => {
+    await storagePut('blobs', 'a', new Uint8Array(1), 'application/octet-stream');
+    await storagePut('blobs', 'b', new Uint8Array(2), 'application/octet-stream');
+    await storagePut('blobs', 'c', new Uint8Array(3), 'application/octet-stream');
+    goneOnRead.add('b');
+
+    assert.deepEqual(await storageList('blobs', '', 0, 0), {
+        keys: ['a', 'c'],
+        sizes: [1, 3],
+        total: 3,
+    });
+});
+
+test('a size read that fails for another reason still fails the listing', async () => {
+    await storagePut('blobs', 'a', new Uint8Array(1), 'application/octet-stream');
+    const root = await navigator.storage.getDirectory();
+    const folder = await (await root.getDirectoryHandle('storage')).getDirectoryHandle('blobs');
+    const file = await folder.getFileHandle('a');
+    file.getFile = async () => {
+        const err = new Error('denied');
+        err.name = 'NotAllowedError';
+        throw err;
+    };
+
+    await assert.rejects(() => storageList('blobs', '', 0, 0), { name: 'NotAllowedError' });
 });

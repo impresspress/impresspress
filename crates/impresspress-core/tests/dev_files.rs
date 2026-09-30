@@ -400,12 +400,15 @@ async fn delete_with_matching_hash_removes_the_entry_and_keeps_the_blob_for_hist
     )
     .await;
     assert_eq!(output_status(out).await, 200);
+    // Let the retention and collection the delete's activation scheduled for
+    // after its reply run, so the survival below is the collector's verdict.
+    ctx.drain_deferred().await;
 
     let l = output_json(ctx.dispatch_resolved(list_msg(None)).await).await;
     assert!(l["files"].as_array().expect("files array").is_empty());
 
     // The blob outlives the manifest entry: an earlier generation still
-    // names it, and Plan 4's GC — not the delete handler — reclaims it.
+    // names it, so the collector that has just run kept it.
     assert_eq!(
         blobs::get(&ctx, &sha).await.expect("blob survives delete"),
         b"a{}".to_vec()
@@ -708,6 +711,10 @@ async fn overwriting_one_path_accumulates_stored_blob_bytes() {
             .expect("sha256")
             .to_string();
     }
+    // The collections the writes scheduled for after their replies have run:
+    // the counters below are what they reset them to from the store, not
+    // only what the writes charged.
+    ctx.drain_deferred().await;
 
     let ws = workspace::load(&ctx).await.expect("load workspace");
     assert_eq!(ws.files.len(), 1, "one path is reachable");
@@ -1141,6 +1148,7 @@ async fn an_activation_composes_its_site_from_the_manifest_a_racing_write_has_no
         &shared,
         GenerationCause::SiteWrite,
         ActivationIntent::SiteOnly,
+        activation::Maintenance::Inline,
     );
     let racer = async {
         once_parked(&hold).await;

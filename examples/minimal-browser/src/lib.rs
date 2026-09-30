@@ -9,7 +9,7 @@
 //!
 //! The wasm-bindgen entrypoints are gated behind `#[cfg(target_arch =
 //! "wasm32")]` because they use `impresspress_browser::{db_init, store_wafer,
-//! dispatch_request}` which are themselves wasm32-only. Native `cargo test
+//! dispatch_fetch}` which are themselves wasm32-only. Native `cargo test
 //! --workspace` compiles this crate as an empty cdylib, which is fine.
 
 #![cfg(target_arch = "wasm32")]
@@ -39,7 +39,10 @@ pub async fn initialize() -> Result<(), JsValue> {
     Ok(())
 }
 
+/// Resolves to `{ response, after }`: the service worker hands `response` to
+/// `respondWith` and `after` to `event.waitUntil`. See
+/// `impresspress_browser::dispatch_request`.
 #[wasm_bindgen]
-pub async fn handle_request(req: web_sys::Request) -> Result<web_sys::Response, JsValue> {
-    impresspress_browser::dispatch_request(req).await
+pub async fn handle_request(req: web_sys::Request) -> Result<JsValue, JsValue> {
+    impresspress_browser::dispatch_fetch(req).await
 }

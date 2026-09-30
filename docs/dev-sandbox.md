@@ -86,7 +86,7 @@ interpreter — a normal ImpressPress block, minus everything that needs a
 crate registry:
 
     blocks/<name>/
-      Cargo.toml            crate-type cdylib, opt-level "z", lto, panic = "abort", no dependencies
+      Cargo.toml            crate-type cdylib, opt-level "z", panic = "abort", no dependencies
       src/lib.rs             your code: declares the block, its endpoints and agent tools
       src/wafer_guest.rs      vendored support module — ABI plumbing, request/response types,
                               database/storage/config/log calls, a JSON-schema builder
@@ -137,10 +137,10 @@ cannot drift from them. Read it before writing Rust.
 The Compile button — or the `dev_compile_block` tool — compiles
 `blocks/<name>/` in the browser. First use downloads about 72 MiB of
 compiler assets; after that, a cold start takes about 10 seconds and a
-compile takes about 40 seconds. A failed compile returns diagnostics (file,
-line, column, message) without touching the live site; a successful one is
-validated, staged and activated automatically, the same as any other
-change.
+compile takes about 20 seconds for the `hello` template and about 30 for the
+`table` template. A failed compile returns diagnostics (file, line, column,
+message) without touching the live site; a successful one is validated,
+staged and activated automatically, the same as any other change.
 
 Limits: at most 16 blocks per workspace; one compile at a time, with a
 120-second timeout; a compiled block's artifact must be 4 MiB or smaller; a

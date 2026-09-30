@@ -111,26 +111,65 @@ export function dbQueryRaw(sql, params) {
  * Export the sql.js DB to a Uint8Array and write it to OPFS at
  * `impresspress.db`.
  *
- * Durability contract: the Rust side (`BrowserDatabaseService::with_flush`
- * in `database.rs`) calls this exactly ONCE per logical `DatabaseService`
- * mutation (`create`/`update`/`delete`/`upsert`/`exec_raw`/schema changes),
- * not once per SQL statement — a logical mutation that issues several
- * statements (e.g. a lazy column-add ALTER before the INSERT) is one flush,
- * not N. The flush happens even when the logical operation's own result is
- * an error, since an earlier statement inside it may already have mutated
- * the in-memory sql.js DB. There is no background/debounced/timer-based
- * flush — every `DatabaseService` call that returns has already attempted
- * exactly one flush, so the only crash-loss window is "mid-flush" (the tab
- * or Service Worker is killed while `dbFlush` itself is exporting/writing),
- * which is an inherent OPFS/browser-crash risk independent of this
- * batching, not a window this change introduces.
+ * Durability contract (`with_flush_mapped` in `database.rs`; the scope's
+ * half in `src/flush_scope.rs`): outside a flush scope, the Rust side calls
+ * this exactly ONCE per logical `DatabaseService` mutation
+ * (`create`/`update`/`delete`/`upsert`/`exec_raw`/schema changes), not once
+ * per SQL statement — a logical mutation that issues several statements
+ * (e.g. a lazy column-add ALTER before the INSERT) is one flush, not N.
+ * Inside a flush scope (one request), a mutation calls nothing: it records
+ * that the scope owes a flush, and the scope calls this exactly ONCE when
+ * its work is done, before the request's reply is returned. A scope that
+ * mutated nothing calls it too, or awaits a running call, when another
+ * scope's mutations are not yet exported (the epoch rule in
+ * `src/flush_scope.rs`), and otherwise does not call it. Either way the
+ * flush happens even when a logical operation's own result is an error,
+ * since an earlier statement inside it may already have mutated the
+ * in-memory sql.js DB. There is no
+ * background/debounced/timer-based flush — a `DatabaseService` call made
+ * outside a scope has attempted its flush by the time it returns, and a
+ * scope has attempted its one flush by the time it hands its output back,
+ * so the only crash-loss windows are "mid-flush" (the tab or Service
+ * Worker is killed while `dbFlush` itself is exporting/writing) and, inside
+ * a scope, between a mutation and the end of every scope that could report
+ * it done: by the epoch rule no scope ends, and so no reply is sent, while a
+ * mutation completed before its end is unexported, whichever scope made it.
  *
  * sql.js's `export()` closes the connection and opens a new one, which rolls
  * back a transaction still open on it. The Rust side ends any such
  * transaction itself before calling this (`end_open_transaction` in
- * `database.rs`), so that rollback is reported rather than silent.
+ * `database.rs`), so that rollback is reported rather than silent. With
+ * calls serialized (below), `export()` runs at least a microtask after the
+ * call, and behind a running flush only once that flush's whole OPFS write
+ * has finished, so other code runs on the connection in between. A complete
+ * transaction there is still safe: the Rust side runs `BEGIN`, its
+ * statements and `COMMIT` synchronously (`in_transaction` in
+ * `database.rs`, no `await` in between), so no export can land inside
+ * one. Only a stray `BEGIN` left open through `query_raw` across an
+ * `await` could be rolled back, silently, by an export that lands in that
+ * window.
+ *
+ * Calls are serialized: each one exports only after every earlier call has
+ * finished writing (or failed). The service worker handles several requests
+ * at once and each flushes at its own end, so two calls can overlap; each
+ * would open its own `createWritable()` swap file, and the last `close()` to
+ * land would win — an earlier export finishing after a later one would put
+ * an older snapshot back on disk. Queued behind the running one, a call
+ * exports when its turn comes, so the export it writes holds every mutation
+ * made before the call, and its promise settles only once that export is
+ * written. A failed call rejects its own caller and does not stop the next.
  */
-export async function dbFlush() {
+export function dbFlush() {
+    const flush = _flushTail.then(exportToOpfs);
+    _flushTail = flush.catch(() => {});
+    return flush;
+}
+
+/** The last `dbFlush` queued, settled or not; see `dbFlush`. */
+let _flushTail = Promise.resolve();
+
+/** One export of the whole database, written to OPFS. Run only by `dbFlush`. */
+async function exportToOpfs() {
     if (!_db) return;
     const data = _db.export();
     // `export()` reopened the connection; set the new one up before anything
@@ -397,10 +436,25 @@ async function pruneEmptyDirs(folderHandle, dirs) {
  * @param {string} prefix
  * @param {number} limit
  * @param {number} offset
- * @returns {{keys: string[], total: number}} A plain JS object — NOT a JSON
- *   string. `total` is the full count of matching entries BEFORE slicing to
- *   the requested page (previously this returned only the page, and the
- *   caller reported the page length as the total).
+ * @returns {{keys: string[], sizes: number[], total: number}} A plain JS
+ *   object — NOT a JSON string. `sizes[i]` is the byte size of `keys[i]`.
+ *   `total` is the full count of matching entries BEFORE slicing to the
+ *   requested page (previously this returned only the page, and the caller
+ *   reported the page length as the total).
+ *
+ *   Each size is read off the object's own file (`getFile().size`, which
+ *   reads the file's metadata, not its bytes), for the requested page only.
+ *   Not off the metadata sidecar: that would be a second file handle, a read
+ *   of its bytes and a JSON parse per object, and after a streaming overwrite
+ *   whose sidecar write failed it can describe the previous body
+ *   (`storage.rs::put_streaming`), where the file itself cannot.
+ *
+ *   An object deleted between the walk and its size read is dropped from the
+ *   page: it is not there any more, which is what a listing taken a moment
+ *   later would say. Rejecting instead would surface as `NotFoundError`,
+ *   which `storage.rs` reads as "the folder is missing" — and the dev
+ *   sandbox's collector as an empty folder. `total` still counts it; it
+ *   describes the walk the page was cut from.
  *
  *   OPFS's directory iterator (`FileSystemDirectoryHandle.entries()`) has no
  *   native pagination, count, or cursor/skip-ahead API — it's
@@ -415,23 +469,38 @@ export async function storageList(folder, prefix, limit, offset) {
     const storageRoot = await getStorageRoot();
     const folderHandle = await getFolderHandle(storageRoot, folder, false);
 
-    const keys = [];
+    const found = [];
     async function walk(handle, dirs) {
         for await (const [name, entry] of handle.entries()) {
             if (entry.kind === 'directory') {
                 await walk(entry, [...dirs, name]);
             } else if (!isMetaName(name)) {
                 const key = joinKey(dirs, name);
-                if (!prefix || key.startsWith(prefix)) keys.push(key);
+                if (!prefix || key.startsWith(prefix)) found.push({ key, entry });
             }
         }
     }
     await walk(folderHandle, []);
 
-    keys.sort();
-    const total = keys.length;
-    const page = keys.slice(offset, limit > 0 ? offset + limit : undefined);
-    return { keys: page, total };
+    found.sort((a, b) => (a.key < b.key ? -1 : a.key > b.key ? 1 : 0));
+    const total = found.length;
+    const page = found.slice(offset, limit > 0 ? offset + limit : undefined);
+    const sized = await Promise.all(
+        page.map(async ({ key, entry }) => {
+            try {
+                return { key, size: (await entry.getFile()).size };
+            } catch (e) {
+                if (e && e.name === 'NotFoundError') return null;
+                throw e;
+            }
+        }),
+    );
+    const present = sized.filter((object) => object !== null);
+    return {
+        keys: present.map(({ key }) => key),
+        sizes: present.map(({ size }) => size),
+        total,
+    };
 }
 
 /**

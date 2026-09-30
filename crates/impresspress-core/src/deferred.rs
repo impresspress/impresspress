@@ -9,19 +9,20 @@
 //!
 //! Where "afterwards" runs depends on the host, so the host picks the mode:
 //!
-//! - [`DeferMode::Spawn`] (the default; native and the browser runtime): the
-//!   task is spawned on the current executor with
-//!   [`wafer_block::spawn_producer`] — `tokio::spawn` on native, where the
-//!   process outlives any one request, and `spawn_local` in the browser.
-//! - [`DeferMode::Queued`] (Cloudflare): the task is queued on the request
-//!   being polled ([`crate::after_response`]), and the platform entry takes
-//!   that request's tasks after its dispatch and hands them to
-//!   `ctx.wait_until`, inside that request's own service bindings. A task
-//!   spawned any other way on Workers is not tied to an event and is
-//!   cancelled once the response is sent, which is why this mode exists. The
-//!   queue is the request's, not the isolate's, so a task runs under the D1
-//!   budget of the request that deferred it and no other request can drain
-//!   or starve it (see [`crate::after_response`]).
+//! - [`DeferMode::Spawn`] (the default; native): the task is spawned on the
+//!   current executor with [`wafer_block::spawn_producer`] — `tokio::spawn`,
+//!   where the process outlives any one request.
+//! - [`DeferMode::Queued`] (Cloudflare, and the browser runtime): the task is
+//!   queued on the request being polled ([`crate::after_response`]), and the
+//!   platform entry takes that request's tasks after its dispatch and keeps
+//!   its host alive until they have run — `ctx.wait_until` on Cloudflare,
+//!   inside that request's own service bindings; the service worker's
+//!   `event.waitUntil` in the browser. A task spawned any other way on
+//!   either is tied to no event, and the host may stop once the response is
+//!   sent, which is why this mode exists. The queue is the request's, not
+//!   the isolate's, so on Cloudflare a task runs under the D1 budget of the
+//!   request that deferred it and no other request can drain or starve it
+//!   (see [`crate::after_response`]).
 //!
 //! Tests select [`DeferMode::Queued`] too (through `queue_for_test`) and run
 //! what the handler deferred, which makes "this path deferred a send"
@@ -32,8 +33,9 @@
 //! belong here.
 //!
 //! A task can also be dropped before it finishes: a native process shutting
-//! down drops every task its runtime still holds, a browser tab closing drops
-//! its `spawn_local` tasks, and a task deferred under [`DeferMode::Queued`]
+//! down drops every task its runtime still holds, a service worker stopped
+//! before its `waitUntil` settles drops its request's tasks, and a task
+//! deferred under [`DeferMode::Queued`]
 //! outside any request scope has nowhere to wait and is dropped at once. Each task carries a guard that logs a warning when that happens
 //! ([`Unfinished`]), so a mail lost to a restart leaves a line. A Cloudflare
 //! hard stop is the exception: it runs no destructors at all.
@@ -57,7 +59,8 @@ thread_local! {
 }
 
 /// Select how [`defer`] runs tasks on this thread. The Cloudflare entry sets
-/// [`DeferMode::Queued`] once per isolate; native never calls it.
+/// [`DeferMode::Queued`] once per isolate, and the browser's `initialize`
+/// once per service worker; native never calls it.
 pub fn set_mode(mode: DeferMode) {
     MODE.with(|m| m.set(mode));
 }

@@ -962,6 +962,7 @@ async fn seeded_instance(control: &std::sync::Arc<FakeControl>) -> TestContext {
         ActivationIntent::Seed {
             manifest: generation,
         },
+        activation::Maintenance::Inline,
     )
     .await
     .expect("activate the seed");

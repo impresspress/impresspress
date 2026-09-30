@@ -661,7 +661,7 @@ jobs:
         # unconditional behaviour the merge gate has always had.
         if: inputs.pull-request
         run: |
-          CHANGED=$(git diff --name-only ${{ github.event.pull_request.base.sha }}..HEAD -- crates/impresspress-browser/ crates/impresspress-core/ crates/impresspress-bundle/assets/vendor/ Cargo.toml Cargo.lock)
+          CHANGED=$(git diff --name-only ${{ github.event.pull_request.base.sha }}..HEAD -- crates/impresspress-browser/ crates/impresspress-core/ crates/impresspress-web/ crates/impresspress-bundle/assets/vendor/ Cargo.toml Cargo.lock)
           if [ -z "$CHANGED" ]; then
             echo "skip=true" >> "$GITHUB_OUTPUT"
           else
@@ -726,6 +726,17 @@ jobs:
         env:
           NODE_OPTIONS: --import ./js/test/node-hooks.mjs
         run: wasm-pack test --node crates/impresspress-browser
+
+      # impresspress-web's own wasm tests (the browser runtime factory's
+      # infrastructure config). The crate links impresspress-browser, so its
+      # test module imports bridge.js too and needs the same hook; the path is
+      # relative to `crates/impresspress-web`, where `wasm-pack` runs. That is
+      # also why `crates/impresspress-web/` is in the change gate above.
+      - name: Run impresspress-web wasm tests (Node)
+        if: steps.browser-changes.outputs.skip != 'true'
+        env:
+          NODE_OPTIONS: --import ../impresspress-browser/js/test/node-hooks.mjs
+        run: wasm-pack test --node crates/impresspress-web
 
   # E2E is split into a single build stage plus two independent test stages so
   # the browser-WASM smoke tests (port 8080) and the native-server visual
