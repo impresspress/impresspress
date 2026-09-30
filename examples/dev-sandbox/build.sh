@@ -5,8 +5,9 @@
 # This is the one bundle recipe dev.impresspress.org, CI's `e2e-dev-sandbox`
 # job and the local e2e run all share (Plan 1 shipped a scratch copy under
 # `crates/impresspress-web/tests/e2e/fixtures/`; this replaced it — see
-# `crates/impresspress-web/tests/e2e/dev-foundations.spec.ts`, which now reads
-# `seed/manifest.json` from this directory instead of pinning a hash).
+# `crates/impresspress-web/tests/e2e/dev-foundations.spec.ts`, which reads the
+# seed's manifest, `seeds/blank/manifest.json` in this directory, instead of
+# pinning a hash).
 #
 # Two halves have to agree for the sandbox to exist at all (design §13):
 #   * the wasm must be COMPILED with `--features browser-devtools`, and
@@ -86,7 +87,12 @@ check_seed() {
 stage_seed() {
   local src="$HERE/seeds/$SEED"
   if [ ! -d "$src" ]; then
-    echo "build.sh: no seed named '$SEED' under $HERE/seeds/ — available: $(ls "$HERE/seeds" | grep -v '\.py$' | tr '\n' ' ')" >&2
+    local available=""
+    local dir
+    for dir in "$HERE"/seeds/*/; do
+      [ -f "$dir/manifest.json" ] && available="$available $(basename "$dir")"
+    done
+    echo "build.sh: no seed named '$SEED' under $HERE/seeds/ — available:$available" >&2
     exit 1
   fi
   log "staging seeds/$SEED into seed/"
@@ -146,13 +152,12 @@ CHECK_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --check) CHECK_ONLY=1 ;;
-    --seed) SEED="${2:-}"; shift ;;
-    --out) OUT="${2:-}"; shift ;;
+    --seed) SEED="${2:-}"; [ -n "$SEED" ] || { echo "build.sh: --seed needs a name" >&2; exit 1; }; shift ;;
+    --out) OUT="${2:-}"; [ -n "$OUT" ] || { echo "build.sh: --out needs a directory" >&2; exit 1; }; shift ;;
     *) echo "build.sh: unknown argument '$1' (usage: build.sh [--check] [--seed NAME] [--out DIR])" >&2; exit 1 ;;
   esac
   shift
 done
-[ -n "$SEED" ] || { echo "build.sh: --seed needs a name" >&2; exit 1; }
 
 if [ "$CHECK_ONLY" = 1 ]; then
   check_seed
