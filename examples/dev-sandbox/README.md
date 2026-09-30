@@ -53,17 +53,17 @@ This is the one recipe CI's `e2e-dev-sandbox` job and local e2e runs both use
 
 Last line of stdout is the absolute path to `dist/`.
 
-`build.sh --seed bootstrap --out ../dist-bootstrap` builds another seed and
-moves the bundle to that directory (relative to where you run the script; it
-must be outside `examples/dev-sandbox/`), so `dist/` stays free for the next
-one.
+`build.sh --seed NAME --out ../dist-NAME` builds another seed and moves the
+bundle to that directory (relative to where you run the script; it must be
+outside `examples/dev-sandbox/`), so `dist/` stays free for the next one.
 
-`examples/dev-sandbox/build.sh --check` runs step 1 only — verifies every
-seed's manifest against its files and exits non-zero on drift, without
-building anything. Run `seeds/write-manifest.py <name>` after editing a seed's
-files, then this; a manifest that has drifted from the files it describes is
-exactly what `seed::import` refuses at runtime (a fresh origin would fail to
-boot).
+`examples/dev-sandbox/build.sh --check` runs step 1 — verifies every seed's
+manifest against its files — and, when `compiler/dist/` has been built, checks
+that tree against `compiler/dist/manifest.json` and Cloudflare's asset limit;
+it exits non-zero on drift and builds nothing either way. Run
+`seeds/write-manifest.py <name>` after editing a seed's files, then this; a
+manifest that has drifted from the files it describes is exactly what
+`seed::import` refuses at runtime (a fresh origin would fail to boot).
 `build.sh`'s normal path runs the same check first, so a stale manifest fails
 the build fast rather than shipping a bundle that cannot seed itself.
 
