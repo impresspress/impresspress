@@ -20,7 +20,7 @@
 # Usage:
 #   examples/dev-sandbox/build.sh                  # build dist/ from seeds/blank
 #   examples/dev-sandbox/build.sh --seed bootstrap  # build dist/ from seeds/bootstrap
-#   examples/dev-sandbox/build.sh --seed bootstrap --out ../dist-bootstrap
+#   examples/dev-sandbox/build.sh --seed bootstrap --out ../dist-bootstrap  # relative to where you run it
 #   examples/dev-sandbox/build.sh --check           # verify every seed and the compiler tree
 #
 # `IMPRESSPRESS=/path/to/impresspress` overrides which CLI binary assembles
@@ -86,13 +86,16 @@ check_seed() {
 # not bundle content.
 stage_seed() {
   local src="$HERE/seeds/$SEED"
-  if [ ! -d "$src" ]; then
+  case "$SEED" in
+    */*|.*) echo "build.sh: --seed takes a seed name, not a path (got '$SEED')" >&2; exit 1 ;;
+  esac
+  if [ ! -f "$src/manifest.json" ]; then
     local available=""
     local dir
     for dir in "$HERE"/seeds/*/; do
       [ -f "$dir/manifest.json" ] && available="$available $(basename "$dir")"
     done
-    echo "build.sh: no seed named '$SEED' under $HERE/seeds/ — available:$available" >&2
+    echo "build.sh: no seed named '$SEED' under $HERE/seeds/ — available:${available:- (none)}" >&2
     exit 1
   fi
   log "staging seeds/$SEED into seed/"
@@ -158,6 +161,25 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+# `--out` is resolved against the CALLER's directory and checked before any
+# build, because it is `rm -rf`ed: it must not be the default dist/, this
+# directory, anything inside it (seeds/, compiler/, the staged seed/), or an
+# ancestor of it. python3 rather than `realpath -m` — it is already a hard
+# dependency of this script, and macOS's realpath has no -m.
+if [ -n "$OUT" ]; then
+  OUT="$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$OUT")"
+  case "$OUT" in
+    "$HERE"/dist|"$HERE"|"$HERE"/*)
+      echo "build.sh: --out must be outside $HERE (got '$OUT')" >&2
+      exit 1 ;;
+  esac
+  case "$HERE" in
+    "$OUT"/*)
+      echo "build.sh: --out '$OUT' contains this directory" >&2
+      exit 1 ;;
+  esac
+fi
 
 if [ "$CHECK_ONLY" = 1 ]; then
   check_seed
@@ -237,13 +259,12 @@ grep -q 'const DEV_ENABLED = true;' "$DIST/sw.js" || {
 
 # `--out DIR` moves the finished bundle out of dist/, so a second seed can be
 # built into dist/ afterwards (CI builds the bootstrap seed, moves it aside,
-# then builds blank). A DIR that exists is replaced — it is a build output.
+# then builds blank). A relative DIR is relative to the directory the script
+# was run from, and was resolved and checked before the build (see the
+# argument handling above). A DIR that exists is replaced — it is a build
+# output.
 if [ -n "$OUT" ]; then
-  case "$OUT" in /*) ;; *) OUT="$(pwd)/$OUT" ;; esac
-  if [ "$OUT" = "$DIST" ]; then
-    echo "build.sh: --out must not be the default dist/ directory" >&2
-    exit 1
-  fi
+  mkdir -p "$(dirname "$OUT")"
   rm -rf "$OUT"
   mv "$DIST" "$OUT"
   DIST="$OUT"
