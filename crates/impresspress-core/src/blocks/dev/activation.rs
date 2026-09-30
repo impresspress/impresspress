@@ -55,7 +55,7 @@ use wafer_run::{context::Context, ErrorCode, OutputStream, WaferError};
 use super::{
     blobs,
     contracts::{GenerationSummary, SiteManifest},
-    control::DynamicBlockSpec,
+    control::{DynamicBlockSpec, GenerationAnnouncement},
     gc,
     generation::{self, GenerationManifest},
     no_store_error_status,
@@ -84,8 +84,10 @@ pub struct ActivationOutcome {
 
 /// One phase of an activation, with how long it took.
 ///
-/// Published in every mutating tool result (design §7.5) so the page can show
-/// where the time went without a push channel.
+/// Published in the result of every call that activates a generation — file
+/// writes and deletes, staging, block removal, rollback (design §7.5) — so the
+/// caller that asked for a change sees where its time went. The activation push (design
+/// §2.6) says only which generation went live; the timings travel here.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ProgressStep {
@@ -683,12 +685,34 @@ async fn activate(
     .map_err(storage_error)?;
     drop(composing);
 
+    // The blobs validation may take as present without probing. The active
+    // generation was validated when it activated, and the collector never
+    // deletes a blob a retained generation names, so everything its site
+    // names is still stored. Only the everyday edits take that shortcut. A
+    // rollback and a seed (like boot convergence, see `converge_on_boot`)
+    // are rare, so they deliberately trust nothing and probe every blob they
+    // name, the ones the active site shares included: defence in depth
+    // against a store that lost content behind the ledger's back, bought
+    // where it costs nothing that matters. In the browser a probe of a blob
+    // the storage read cache holds is answered from the worker's memory, not
+    // OPFS; under the single-writer premise (see `impresspress-browser`'s
+    // `storage_cache`) that is the same answer OPFS would give.
+    let present_site = match cause {
+        GenerationCause::SiteWrite
+        | GenerationCause::SiteDelete
+        | GenerationCause::BlockCompile
+        | GenerationCause::BlockRemove => previous.as_ref().map(|(_, active)| &active.site),
+        GenerationCause::Rollback | GenerationCause::Seed => None,
+    };
     let outcome = activate_staged(
         ctx,
         shared,
-        &row,
-        &manifest,
-        previous.as_ref(),
+        Staged {
+            row: &row,
+            manifest: &manifest,
+            previous: previous.as_ref(),
+        },
+        present_site,
         &state,
         maintenance,
     )
@@ -760,28 +784,50 @@ async fn adopt_site(
     workspace::save(ctx, &ws).await
 }
 
+/// A generation row that has been staged, with what it would succeed.
+///
+/// The three always travel together: [`activate_staged`] validates and
+/// publishes `manifest`, records the outcome on `row`, and restores
+/// `previous` if publishing fails. Both callers build the triple from the same
+/// two reads (`activate` after staging, [`converge_on_boot`] from the journal).
+struct Staged<'a> {
+    row: &'a GenerationRow,
+    manifest: &'a GenerationManifest,
+    /// The active generation this one succeeds, `None` for the first ever.
+    previous: Option<&'a (GenerationRow, GenerationManifest)>,
+}
+
 /// Drive an already-staged generation to live.
 ///
 /// Split from [`activate`] because boot recovery converges on a row that
 /// already exists: re-staging it would mint a second id for one desired state
 /// and break the append-only history's parent chain.
+///
+/// `present_site` is a site manifest whose blobs are known to be stored;
+/// validation does not probe them again (see [`missing_content`]).
 async fn activate_staged(
     ctx: &dyn Context,
     shared: &Arc<super::DevShared>,
-    row: &GenerationRow,
-    manifest: &GenerationManifest,
-    previous: Option<&(GenerationRow, GenerationManifest)>,
+    staged: Staged<'_>,
+    present_site: Option<&SiteManifest>,
     state: &RuntimeState,
     maintenance: Maintenance,
 ) -> Result<ActivationOutcome, ActivationError> {
+    let Staged {
+        row,
+        manifest,
+        previous,
+    } = staged;
     let id = row.id.as_str();
     let previous_manifest = previous.map(|(_, manifest)| manifest);
     let mut progress = Progress::start();
 
     // --- Validate ---------------------------------------------------------
+    // Every blob the manifest names except those `present_site` vouches for,
+    // and every artifact.
     journal(ctx, state, Some(id), ActivationPhase::Validating).await?;
     set_status(ctx, id, GenerationStatus::Validating, None, None).await?;
-    let missing = missing_content(ctx, manifest).await?;
+    let missing = missing_content(ctx, manifest, present_site).await?;
     if !missing.is_empty() {
         let error = ActivationError::Validation(missing);
         abandon(ctx, id, state, &error.to_string()).await?;
@@ -818,12 +864,17 @@ async fn activate_staged(
     // --- Publish the site -------------------------------------------------
     journal(ctx, state, Some(id), ActivationPhase::Publishing).await?;
     let diff = generation::diff(previous_manifest, manifest);
-    if let Err(e) = publish_site(ctx, previous_manifest.map(|m| &m.site), &manifest.site).await {
-        let error =
-            ActivationError::Storage(restore(ctx, shared, manifest, previous, rebuilt, e).await);
-        abandon(ctx, id, state, &error.to_string()).await?;
-        return Err(error);
-    }
+    let published =
+        match publish_site(ctx, previous_manifest.map(|m| &m.site), &manifest.site).await {
+            Ok(published) => published,
+            Err(e) => {
+                let error = ActivationError::Storage(
+                    restore(ctx, shared, manifest, previous, rebuilt, e).await,
+                );
+                abandon(ctx, id, state, &error.to_string()).await?;
+                return Err(error);
+            }
+        };
     progress.record(
         ActivationPhase::Publishing,
         format!(
@@ -864,6 +915,21 @@ async fn activate_staged(
     )
     .await
     .map_err(storage_error)?;
+    // Committed: the generation's ledger row and journal are written and say
+    // it is live, so every open page may now be told (design §2.6); the
+    // reply follows the announcement. Maintenance is scheduled after the
+    // announcement and, for a request, runs after the reply, so the page has
+    // nothing of it to wait for. The paths are spelled as the workspace
+    // spells them (`site/…`), the one form every `/b/dev` surface uses for a
+    // site file.
+    shared.control.announce_active(&GenerationAnnouncement {
+        id: row.id.clone(),
+        cause: row.cause,
+        changed_paths: published
+            .iter()
+            .map(|path| format!("{}{path}", workspace::SITE_PREFIX))
+            .collect(),
+    });
     schedule_maintenance(ctx, shared, maintenance).await;
     progress.record(ActivationPhase::Active, format!("generation {}", row.id));
 
@@ -1054,8 +1120,7 @@ async fn load_previous(
 /// pass over the site to learn something the key already states.
 ///
 /// Presence is asked as cheaply as each store allows, because this runs on
-/// every activation — every site-file save included — over the WHOLE manifest,
-/// not just what changed:
+/// every activation — every site-file save included:
 ///
 /// * **Artifacts** are answered by the builds ledger
 ///   ([`repo::builds::artifact_index`]) with no storage call at all. Every
@@ -1071,16 +1136,34 @@ async fn load_previous(
 ///   reads every artifact it loads, but one that keeps the block set — a site
 ///   write — commits naming it, as the generation before it already did.
 /// * **Blobs** have no ledger, so each is probed with [`blobs::exists`], which
-///   opens the object and declines its body rather than reading it.
+///   opens the object and declines its body rather than reading it — except
+///   a blob `present_site` names, which the caller vouches is stored. For an
+///   ordinary edit that is the active generation's site: it was validated
+///   when it activated, and the collector never deletes a blob a retained
+///   generation names, so a site write probes only the blob it adds (one
+///   storage open per save rather than one per site file). A rollback, a seed
+///   and boot convergence pass `None` and probe every blob.
 ///
 /// The `Err` is a storage failure — the store could not answer — which is a
 /// different thing from the store answering that content is gone.
 async fn missing_content(
     ctx: &dyn Context,
     manifest: &GenerationManifest,
+    present_site: Option<&SiteManifest>,
 ) -> Result<Vec<String>, ActivationError> {
+    let present: BTreeSet<&str> = present_site
+        .map(|site| {
+            site.files
+                .iter()
+                .map(|entry| entry.sha256.as_str())
+                .collect()
+        })
+        .unwrap_or_default();
     let mut missing = Vec::new();
     for sha in generation::site_blob_shas(manifest) {
+        if present.contains(sha) {
+            continue;
+        }
         if !blobs::exists(ctx, sha).await.map_err(storage_error)? {
             missing.push(format!("no blob is stored for site content {sha}"));
         }
@@ -1146,13 +1229,22 @@ pub async fn converge_on_boot(
                 // half of the desired one — so republish that from the
                 // manifest authoritative for it, treating the abandoned
                 // manifest as what is currently out there.
-                // Inline: boot has no request to defer to (see `Maintenance`).
+                // No site is vouched for, by the same policy as a rollback
+                // or a seed (see `activate`): boot convergence is rare, so it
+                // deliberately probes every blob the generation names rather
+                // than trusting the active one's. The crash is not the
+                // reason; it does not invalidate the active generation's
+                // blobs. Inline: boot has no request to defer to (see
+                // `Maintenance`).
                 if activate_staged(
                     ctx,
                     shared,
-                    &row,
-                    &manifest,
-                    previous.as_ref(),
+                    Staged {
+                        row: &row,
+                        manifest: &manifest,
+                        previous: previous.as_ref(),
+                    },
+                    None,
                     &state,
                     Maintenance::Inline,
                 )
@@ -1403,6 +1495,7 @@ async fn restore_active_site(
     };
     publish_site(ctx, published, &manifest.site)
         .await
+        .map(drop)
         .map_err(|e| e.message)
 }
 

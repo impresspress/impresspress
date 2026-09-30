@@ -18,7 +18,10 @@ use wafer_run::{AuthLevel, BlockEndpoint, BlockInfo, OutputStream};
 
 use super::{
     blobs,
-    control::{DynamicBlockSpec, RuntimeControl, ShellSource, ValidationFailure, ValidationStage},
+    control::{
+        DynamicBlockSpec, GenerationAnnouncement, RuntimeControl, ShellSource, ValidationFailure,
+        ValidationStage,
+    },
     paths, seed,
     seed::{SeedFetch, SeedFile},
 };
@@ -176,6 +179,10 @@ pub struct FakeControl {
     fail_restore: Mutex<Option<String>>,
     /// Bumped by every successful `rebuild`.
     generation: AtomicU64,
+    /// Every generation `announce_active` was told about, oldest first — the
+    /// fixture's stand-in for the messages the browser control posts to the
+    /// page.
+    announced: Mutex<Vec<GenerationAnnouncement>>,
 }
 
 impl FakeControl {
@@ -195,6 +202,7 @@ impl FakeControl {
             restores: AtomicU64::new(0),
             fail_restore: Mutex::new(None),
             generation: AtomicU64::new(0),
+            announced: Mutex::new(Vec::new()),
         })
     }
 
@@ -269,6 +277,11 @@ impl FakeControl {
     /// installed, or what a `restore_previous` put back.
     pub fn live_blocks(&self) -> Option<Vec<DynamicBlockSpec>> {
         self.live.lock().expect("live mutex").clone()
+    }
+
+    /// Every activation announced to the page, oldest first.
+    pub fn announcements(&self) -> Vec<GenerationAnnouncement> {
+        self.announced.lock().expect("announced mutex").clone()
     }
 
     /// Hold the next `rebuild` open until the returned sender fires (or is
@@ -357,6 +370,13 @@ impl RuntimeControl for FakeControl {
 
     fn runtime_generation(&self) -> u64 {
         self.generation.load(Ordering::SeqCst)
+    }
+
+    fn announce_active(&self, generation: &GenerationAnnouncement) {
+        self.announced
+            .lock()
+            .expect("announced mutex")
+            .push(generation.clone());
     }
 }
 

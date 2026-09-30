@@ -29,6 +29,8 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::repo::generations::GenerationCause;
+
 /// Access tier a dynamically-registered block asks the router to apply to one
 /// of its route prefixes.
 ///
@@ -315,6 +317,56 @@ pub trait RuntimeControl: wafer_run::MaybeSend + wafer_run::MaybeSync {
     /// rebuild). The `/b/dev` page re-registers its agent tools whenever this
     /// changes.
     fn runtime_generation(&self) -> u64;
+
+    /// Tell every open page that `generation` is now live (design §2.6).
+    ///
+    /// Called once per activation, after it has committed, whoever caused
+    /// it: its ledger row and journal are written and say it is active, and
+    /// the reply to the request that caused it follows the announcement. It
+    /// is how a tab
+    /// learns of a generation another tab (or an agent driving one) made, and
+    /// how the page's own preview learns it may reload without first reading
+    /// the status back.
+    ///
+    /// Fire-and-forget, hence synchronous and infallible: the activation has
+    /// already happened, so a failure to deliver the news must not be
+    /// reported as a failure to activate. An implementation logs what it
+    /// could not deliver; a page that missed the message still sees the
+    /// generation on its next status read.
+    fn announce_active(&self, generation: &GenerationAnnouncement);
+}
+
+/// What [`RuntimeControl::announce_active`] tells the page about a
+/// generation that has just gone live.
+///
+/// # The `dev-generation` message
+///
+/// This is the canonical statement of the wire shape; the browser's
+/// `dev_runtime.rs::announcement_message` builds it and `dev.js`'s
+/// `onGenerationActive` reads it. Every window on the origin receives, via
+/// `postMessage`, a plain object with exactly four fields:
+///
+/// - `type`: the string `"dev-generation"`, which is how a window tells this
+///   message from anything else the service worker posts;
+/// - `id`: [`Self::id`];
+/// - `cause`: [`Self::cause`] in [`GenerationCause::as_str`]'s snake_case
+///   spelling (`site_write`, `site_delete`, `block_compile`, `block_remove`,
+///   `rollback`, `seed`), the same spelling the `/b/dev` API uses;
+/// - `changed_paths`: [`Self::changed_paths`], an array of strings.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct GenerationAnnouncement {
+    /// The generation that is now active.
+    pub id: String,
+    /// What created it. Only `site_write` and `site_delete` leave the block
+    /// set as it was; any other cause may have changed the blocks the site
+    /// calls.
+    pub cause: GenerationCause,
+    /// Every workspace path (`site/…`) the activation wrote to or removed
+    /// from the published site, in the order the publisher touched them.
+    /// Empty when the site did not change — a compile, a block removal. The
+    /// page reads it to tell a CSS-only change (swap the stylesheets) from
+    /// any other (reload the preview).
+    pub changed_paths: Vec<String>,
 }
 
 /// The static shell the sandbox is running inside, as the export reads it.

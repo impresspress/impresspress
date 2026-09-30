@@ -326,6 +326,29 @@ test('a sidecar missing a field keeps that field default rather than erasing it'
     await readerCancel(started.stream_id);
 });
 
+test('a sidecar claiming a wrong size does not change the size either read reports', async () => {
+    // An overwrite whose sidecar write failed leaves the previous sidecar
+    // beside the new bytes. `storage.rs` caches what `storageGet` reports, so
+    // a stale sidecar size would outlive the read in the Service Worker's
+    // memory; the bytes actually read are the authority on both paths.
+    await storagePut('docs', 'sized.bin', new Uint8Array([1, 2, 3]), 'text/plain');
+
+    const root = await navigator.storage.getDirectory();
+    const folder = await (await root.getDirectoryHandle('storage')).getDirectoryHandle('docs');
+    const sidecar = await folder.getFileHandle(metaName('sized.bin'), { create: true });
+    const writable = await sidecar.createWritable();
+    await writable.write(JSON.stringify({ content_type: 'text/plain', size: 99 }));
+    await writable.close();
+
+    const buffered = await storageGet('docs', 'sized.bin');
+    assert.equal(buffered.data.length, 3);
+    assert.equal(buffered.meta.size, 3, 'storageGet must report the bytes it read');
+    assert.equal(buffered.meta.content_type, 'text/plain');
+    const started = await storageGetStream('docs', 'sized.bin');
+    assert.equal(started.meta.size, 3, 'storageGetStream must report the file it streams');
+    await readerCancel(started.stream_id);
+});
+
 test('streaming a missing object rejects as NotFoundError, like the buffered read', async () => {
     await assert.rejects(() => storageGetStream('docs', 'absent.txt'), (err) => {
         // `storage.rs::map_rejection` keys on exactly this name to answer

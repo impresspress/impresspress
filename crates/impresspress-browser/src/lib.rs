@@ -33,6 +33,12 @@ mod db_codec;
 #[cfg(any(target_arch = "wasm32", test))]
 mod storage_cursor;
 
+// The storage service's bounded read cache — pure bookkeeping, split out of the
+// wasm32-only `storage` module (same rationale as `storage_cursor`) so its
+// eviction and invalidation rules unit-test on the host.
+#[cfg(any(target_arch = "wasm32", test))]
+mod storage_cache;
+
 // wasm32-only — use wasm-bindgen, web-sys, js-sys.
 #[cfg(target_arch = "wasm32")]
 pub mod asset_loader;

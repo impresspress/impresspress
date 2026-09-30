@@ -190,34 +190,74 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
   expect(seeded.encoding).toBe('utf8');
   expect(seeded.content).toContain(WELCOME_PHRASE);
 
+  // The site-write loop is timed three ways, each from the write's start
+  // (design §2.7): the tool's round trip, until `GET /index.html` serves the
+  // new bytes, and until the preview iframe shows them. One
+  // `dev-workspace:` line carries all three; CI's summary lifts it out.
   const writeStart = Date.now();
   const wrote = structured<FileWrite>(await execute(page, 'dev_write_file', {
     path: 'site/index.html',
     content: shopPage(),
     expected_sha256: seeded.sha256,
   }));
+  const siteWriteMs = Date.now() - writeStart;
   // A `site/**` write publishes immediately — there is no separate deploy.
   expect(wrote.generation, JSON.stringify(wrote)).not.toBeNull();
   expect(wrote.generation?.cause).toBe('site_write');
   expect(wrote.generation?.status).toBe('active');
   expect(wrote.sha256).not.toBe(seeded.sha256);
 
-  // The progress channel (design §4.3): `dev.js` wraps every mutating tool in
-  // `withProgress`, which polls `/b/dev/api/status` for the duration of the
-  // call and logs each new live generation. Seeing the id this write returned
-  // in the panel is the proof the human watching the page learns what the
-  // agent did — and that the poll really ran, since nothing else writes that
-  // line.
+  // A reply means the generation is active, so the served page should
+  // already be the new one; polled rather than fetched once so a regression
+  // that serves the old bytes for a while shows up as a number, not a hang.
+  // Polled from the page, through its service worker, every 20 ms.
+  const served = await page.evaluate(async (heading) => {
+    const deadline = Date.now() + 30_000;
+    while (Date.now() < deadline) {
+      const body = await (await fetch('/index.html', { cache: 'no-store' })).text();
+      if (body.includes(heading)) {
+        return true;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    return false;
+  }, SHOP_HEADING);
+  const servedMs = Date.now() - writeStart;
+  expect(served, 'GET /index.html never served the written page').toBe(true);
+
+  // Until the preview iframe shows it, polled in the page every 20 ms too:
+  // `expect(…).toHaveText`'s own back-off (100, 250, 500, 1000 ms) would
+  // round a sub-100 ms reload up to whichever retry caught it. The frame is
+  // same-origin, so its document is readable from the page. The assertions
+  // below still say what it must show.
+  await page.waitForFunction(
+    (heading) => {
+      const frame = document.getElementById('dev-preview-frame') as HTMLIFrameElement | null;
+      return frame?.contentDocument?.querySelector('h1')?.textContent?.trim() === heading;
+    },
+    SHOP_HEADING,
+    { polling: 20, timeout: 60_000 },
+  );
+  const previewMs = Date.now() - writeStart;
+  console.log(
+    `dev-workspace: site_write_ms=${siteWriteMs} served_ms=${servedMs} preview_ms=${previewMs}`,
+  );
+
+  // The activation push (design §2.6): when the generation commits, the
+  // service worker posts `{ type: 'dev-generation', id, … }` to every window,
+  // and `dev.js`'s `onGenerationActive` logs the new live generation (the
+  // status poll `withProgress` runs during the call logs the same line if it
+  // sees the generation first; the page writes it once either way). Seeing
+  // the id this write returned in the panel is the proof the human watching
+  // the page learns what the agent did.
   await expect(page.locator('#dev-log')).toContainText(
     `live generation: ${wrote.generation?.id}`,
   );
 
-  // …and the preview iframe is showing it. `withProgress`'s catch-up reloads
-  // the frame after the last outstanding call, so this needs no nudge.
-  await expect(page.frameLocator('#dev-preview-frame').locator('h1')).toHaveText(SHOP_HEADING, {
-    timeout: 60_000,
-  });
-  console.log(`site write → published → preview shows it: ${Date.now() - writeStart} ms`);
+  // …and the preview iframe is showing it. The same push reloads the frame —
+  // the write published a generation, so `withProgress`'s catch-up leaves the
+  // preview to the push — and this needs no nudge.
+  await expect(page.frameLocator('#dev-preview-frame').locator('h1')).toHaveText(SHOP_HEADING);
 
   // --- 4. Stock the shop -------------------------------------------------
   const productStart = Date.now();
@@ -250,9 +290,10 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
   expect(live.status).toBe('active');
   console.log(`product → offer → publish → active: ${Date.now() - productStart} ms`);
 
-  // The agent can see its own work: `shop_update_product` is a mutating tool,
-  // so `withProgress` reloaded the preview, and the page the agent wrote
-  // three steps ago now lists the product it just activated.
+  // The agent can see its own work: `shop_update_product` is a mutating tool
+  // that publishes no generation, so no push comes for it and `withProgress`'s
+  // catch-up reloads the preview itself — and the page the agent wrote three
+  // steps ago now lists the product it just activated.
   await expect(
     page.frameLocator('#dev-preview-frame').locator('.shop-product-name'),
   ).toHaveText(SHOP_PRODUCT.name, { timeout: 60_000 });
@@ -611,6 +652,28 @@ test('the editor refuses to save a binary file over itself', async ({ page }) =>
   // `PAGE_TOOLS.length` is what it needs, not what it happens to satisfy.
   await waitForTool(page, 'dev_export');
 
+  // Every `/b/dev/api/files/write` the page sends, whoever sends it: the
+  // tool calls below go through the same endpoint, so the assertions compare
+  // counts before and after a click rather than expecting zero.
+  const writes: string[] = [];
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname === '/b/dev/api/files/write') {
+      writes.push(request.url());
+    }
+  });
+
+  // The positive control: on a TEXT file, a click on `#dev-save` sends
+  // exactly one write. This is what proves the button is wired to `save()`,
+  // so that the binary file's "no write" below is `save()` refusing and not a
+  // click that reaches nothing.
+  await page.locator('#dev-file-list a[data-path="site/index.html"]').click();
+  await expect(page.locator('#dev-editor-title')).toHaveText('site/index.html');
+  await expect(page.locator('#dev-editor-text')).toBeEnabled();
+  const beforeControl = writes.length;
+  await page.locator('#dev-save').click();
+  await expect(page.locator('#dev-log')).toContainText('saved site/index.html');
+  expect(writes.length - beforeControl).toBe(1);
+
   // A `.png` is binary whatever its bytes: `paths::content_type_for` maps the
   // extension to `image/png`, `may_be_text` says no, and so `dev_read_file`
   // answers `base64` for it — which is exactly the case the editor cannot
@@ -631,8 +694,9 @@ test('the editor refuses to save a binary file over itself', async ({ page }) =>
   );
 
   // Open it from the file pane, the way the human would. `dev_write_file` is
-  // a mutating tool, so `withProgress`'s catch-up has already reloaded the
-  // list; the click auto-waits for the entry regardless.
+  // a mutating tool, so `withProgress`'s catch-up has already re-read the
+  // file list before the call returned; the click auto-waits for the entry
+  // regardless.
   await page.locator(`#dev-file-list a[data-path="${PIXEL_PNG_PATH}"]`).click();
   await expect(page.locator('#dev-editor-title')).toHaveText(PIXEL_PNG_PATH);
 
@@ -654,21 +718,33 @@ test('the editor refuses to save a binary file over itself', async ({ page }) =>
   // Half two: `save()`'s own early return, which `page.rs` pins as a source
   // assertion precisely because "a caller could reach it another way". Here
   // that caller is the DOM: re-enable ONLY the button, leaving the textarea
-  // disabled, and click it for real. Emptying the file list first is the
-  // tripwire — `withProgress` reloads it in its `finally` whichever branch
-  // `save()` took, so a repopulated list means the handler really ran and
-  // this is not a click that quietly went nowhere.
+  // disabled, and click it for real. The early return does nothing visible —
+  // it is checked before `withProgress`, so there is no catch-up to observe
+  // (a no-op must not reload the preview). The click counter below proves
+  // only that the click was dispatched to an ENABLED button (a disabled one
+  // would swallow it); that the button runs `save()` is the positive control
+  // above. Together: `save()` ran, and sent nothing.
   await page.evaluate(() => {
-    document.getElementById('dev-file-list')!.replaceChildren();
-    (document.getElementById('dev-save') as HTMLButtonElement).disabled = false;
+    const button = document.getElementById('dev-save') as HTMLButtonElement;
+    (window as unknown as { __saveClicks: number }).__saveClicks = 0;
+    button.addEventListener('click', () => {
+      (window as unknown as { __saveClicks: number }).__saveClicks += 1;
+    });
+    button.disabled = false;
   });
+  const beforeClick = writes.length;
   await page.locator('#dev-save').click();
-  await expect(page.locator('#dev-file-list a')).not.toHaveCount(0);
+  expect(
+    await page.evaluate(() => (window as unknown as { __saveClicks: number }).__saveClicks),
+  ).toBe(1);
 
   // Nothing moved: same bytes, same hash, same ledger.
   const after = structured<FileRead>(await execute(page, 'dev_read_file', {
     path: PIXEL_PNG_PATH,
   }));
+  // Checked after a full round trip through the service worker, so a write
+  // the click had sent would already have been seen.
+  expect(writes.length - beforeClick, 'the refused save sent a write').toBe(0);
   expect(after.encoding).toBe('base64');
   expect(after.content).toBe(PIXEL_PNG_BASE64);
   expect(after.sha256).toBe(written.sha256);

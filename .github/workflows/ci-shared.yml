@@ -1099,6 +1099,15 @@ jobs:
             echo '```'
             grep -E ': [0-9]+ ms$' /tmp/dev-sandbox-e2e.log || echo 'no timing lines captured'
             echo '```'
+            echo
+            # The site-write loop (`dev-workspace.spec.ts`, design §2.7):
+            # tool round trip, served, preview — one line, three numbers.
+            echo '### Site write → served → preview'
+            echo
+            echo '```'
+            grep 'dev-workspace:' /tmp/dev-sandbox-e2e.log \
+              || echo '(no dev-workspace: lines — the run did not reach the site write)'
+            echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
   e2e-dev-compile:

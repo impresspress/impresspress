@@ -355,8 +355,9 @@ test('the spec scenario: welcome → login → block → site → shop → shopp
   const siteGeneration = wrote.generation!;
   expect(siteGeneration.blocks).toBe(1);
 
-  // `withProgress` reloads the preview after the last outstanding mutating
-  // call, so the frame needs no nudge. A frame with an `h1` in it is also the
+  // The write published a generation, and the service worker's push for it
+  // reloads the preview (`dev.js`'s `onGenerationActive`), so the frame
+  // needs no nudge. A frame with an `h1` in it is also the
   // only proof that a COEP document can embed this site at all.
   await expect(page.frameLocator('#dev-preview-frame').locator('h1')).toHaveText(SHOP_HEADING, {
     timeout: 60_000,
@@ -403,8 +404,9 @@ test('the spec scenario: welcome → login → block → site → shop → shopp
   expect(group.name).toBe(GROUP);
 
   // The agent can see its own work: the page it wrote in step 3 reads the
-  // public catalog, and `withProgress` reloaded the frame after the last
-  // mutating call.
+  // public catalog, and the `shop_*` calls publish no generation — so no push
+  // comes for them, and `withProgress`'s catch-up reloaded the frame after
+  // the last one.
   await expect(page.frameLocator('#dev-preview-frame').locator('.shop-product-name')).toHaveText(
     CATALOG_NAMES,
     { timeout: 60_000 },
