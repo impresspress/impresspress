@@ -1,6 +1,11 @@
 #!/usr/bin/env python3
 """Verify every seed under seeds/: its manifest.json is exactly what
-write-manifest.py would write from its tree.
+write-manifest.py would write from its tree, byte for byte.
+
+A seed is a directory whose name passes seedlib.SEED_NAME; anything else
+under seeds/ (__pycache__, a dotted directory) is not a seed and is skipped.
+Each seed is checked on its own: a seed that cannot be read or generated
+reports its own line and the next seed is still checked.
 
 Usage: seeds/check-seeds.py
 
@@ -16,15 +21,22 @@ import sys
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 import seedlib  # noqa: E402
 
-SEEDS = pathlib.Path(__file__).resolve().parent
-
 
 def problems_for(seed: pathlib.Path) -> list:
     manifest_path = seed / "manifest.json"
     if not manifest_path.is_file():
         return [f"{manifest_path}: missing — run seeds/write-manifest.py {seed.name}"]
-    committed = json.loads(manifest_path.read_text())
-    expected = seedlib.build_manifest(seed)
+    regenerate = f"regenerate with seeds/write-manifest.py {seed.name}"
+    try:
+        committed = json.loads(manifest_path.read_text())
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        return [f"{seed.name}: manifest.json is not valid JSON ({e}) — {regenerate}"]
+    if not isinstance(committed, dict):
+        return [f"{seed.name}: manifest.json is not a JSON object — {regenerate}"]
+    try:
+        expected = seedlib.build_manifest(seed)
+    except seedlib.SeedError as e:
+        return [f"{seed.name}: {e}"]
     problems = []
     declared = {e["path"]: e for e in committed.get("site", [])}
     actual = {e["path"]: e for e in expected["site"]}
@@ -41,15 +53,15 @@ def problems_for(seed: pathlib.Path) -> list:
         )
     if [e["path"] for e in committed.get("site", [])] != sorted(declared):
         problems.append("site entries are not in path order")
-    if committed != expected and not problems:
-        problems.append("manifest.json differs from what write-manifest.py writes (header fields)")
+    if not problems and manifest_path.read_text() != seedlib.render(expected):
+        problems.append("manifest.json differs from what write-manifest.py writes — regenerate")
     return [f"{seed.name}: {p}" for p in problems]
 
 
 def main() -> None:
-    seeds = sorted(p for p in SEEDS.iterdir() if p.is_dir() and not p.name.startswith("__"))
+    seeds = seedlib.seed_dirs()
     if not seeds:
-        raise SystemExit(f"{SEEDS}: no seed directories")
+        raise SystemExit(f"{seedlib.SEEDS_DIR}: no seed directories")
     problems = []
     for seed in seeds:
         found = problems_for(seed)

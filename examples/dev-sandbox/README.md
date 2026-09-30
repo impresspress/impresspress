@@ -51,11 +51,15 @@ This is the one recipe CI's `e2e-dev-sandbox` job and local e2e runs both use
 3. Runs `impresspress build --target web --release` from this directory
    (`IMPRESSPRESS_WEB_PKG_DIR` pointed at `pkg-dev`) to assemble `dist/`.
 
-Last line of stdout is the absolute path to `dist/`.
+Last line of stdout is the absolute path of the finished bundle (`dist/`, or
+the `--out` directory).
 
 `build.sh --seed NAME --out ../dist-NAME` builds another seed and moves the
-bundle to that directory (relative to where you run the script; it must be
-outside `examples/dev-sandbox/`), so `dist/` stays free for the next one.
+bundle to that directory, so `dist/` stays free for the next one. `--out` is
+relative to where you run the script and must be outside
+`examples/dev-sandbox/`; the target must not exist, be empty, or be a bundle
+this script made (`sw.js` beside `seed/manifest.json`) — anything else is
+refused before anything is built, and a previous bundle there is replaced.
 
 `examples/dev-sandbox/build.sh --check` runs step 1 — verifies every seed's
 manifest against its files — and, when `compiler/dist/` has been built, checks

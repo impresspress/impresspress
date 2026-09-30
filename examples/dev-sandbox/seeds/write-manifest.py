@@ -16,10 +16,13 @@ import seedlib  # noqa: E402
 def main() -> None:
     if len(sys.argv) != 2:
         raise SystemExit(__doc__)
-    seed = pathlib.Path(__file__).resolve().parent / sys.argv[1]
-    if not seed.is_dir():
-        raise SystemExit(f"{seed}: no such seed")
-    manifest = seedlib.build_manifest(seed)
+    try:
+        seed = seedlib.seed_dir(sys.argv[1])
+        if not seed.is_dir():
+            raise SystemExit(f"{seed}: no such seed")
+        manifest = seedlib.build_manifest(seed)
+    except seedlib.SeedError as e:
+        raise SystemExit(str(e))
     (seed / "manifest.json").write_text(seedlib.render(manifest))
     print(f"{seed / 'manifest.json'}: {len(manifest['site'])} site file(s)", file=sys.stderr)
 

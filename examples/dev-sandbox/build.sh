@@ -19,9 +19,13 @@
 #
 # Usage:
 #   examples/dev-sandbox/build.sh                  # build dist/ from seeds/blank
-#   examples/dev-sandbox/build.sh --seed bootstrap  # build dist/ from seeds/bootstrap
-#   examples/dev-sandbox/build.sh --seed bootstrap --out ../dist-bootstrap  # relative to where you run it
+#   examples/dev-sandbox/build.sh --seed NAME       # build dist/ from seeds/NAME
+#   examples/dev-sandbox/build.sh --seed NAME --out ../dist-NAME  # move the bundle there
 #   examples/dev-sandbox/build.sh --check           # verify every seed and the compiler tree
+#
+# A relative `--out` is relative to the directory the script is run from; it
+# must be outside `examples/dev-sandbox/` and either not exist, be empty, or be
+# a bundle this script made.
 #
 # `IMPRESSPRESS=/path/to/impresspress` overrides which CLI binary assembles
 # the bundle. Default is whatever is on `PATH`, which is the trap this
@@ -48,12 +52,12 @@
 # its own module (`IMPRESSPRESS_WEB_PKG_DIR`, resolved by
 # `crates/impresspress/src/cli/helpers/wasm.rs`).
 #
-# The last line of stdout is the absolute `dist/` path; CI captures it with
-# `tail -1`.
+# The last line of stdout is the absolute path of the finished bundle —
+# `dist/`, or the `--out` directory; CI captures it with `tail -1`.
 
 set -euo pipefail
 
-HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HERE="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd -P)"
 REPO="$(cd "$HERE/../.." && pwd)"
 
 log() { printf '==> %s\n' "$*" >&2; }
@@ -165,20 +169,35 @@ done
 # `--out` is resolved against the CALLER's directory and checked before any
 # build, because it is `rm -rf`ed: it must not be the default dist/, this
 # directory, anything inside it (seeds/, compiler/, the staged seed/), or an
-# ancestor of it. python3 rather than `realpath -m` — it is already a hard
+# ancestor of it — `/` included. Symlinks are resolved on both sides (`pwd -P`
+# for this directory, `realpath` for `--out`), so a link into this directory
+# is caught too. python3 rather than `realpath -m` — it is already a hard
 # dependency of this script, and macOS's realpath has no -m.
 if [ -n "$OUT" ]; then
-  OUT="$(python3 -c 'import os, sys; print(os.path.abspath(sys.argv[1]))' "$OUT")"
+  OUT="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$OUT")"
   case "$OUT" in
     "$HERE"/dist|"$HERE"|"$HERE"/*)
       echo "build.sh: --out must be outside $HERE (got '$OUT')" >&2
       exit 1 ;;
   esac
-  case "$HERE" in
-    "$OUT"/*)
+  case "$HERE/" in
+    "${OUT%/}/"*)
       echo "build.sh: --out '$OUT' contains this directory" >&2
       exit 1 ;;
   esac
+  # An existing --out is replaced only when it is empty or a bundle this
+  # script produced (sw.js beside seed/manifest.json). Anything else — a
+  # checkout, a home directory, a typo — is refused rather than rm -rf'ed.
+  if [ -e "$OUT" ]; then
+    if [ ! -d "$OUT" ]; then
+      echo "build.sh: --out '$OUT' exists and is not a directory" >&2
+      exit 1
+    fi
+    if [ -n "$(ls -A "$OUT")" ] && ! { [ -f "$OUT/sw.js" ] && [ -f "$OUT/seed/manifest.json" ]; }; then
+      echo "build.sh: --out '$OUT' exists and is not a bundle this script made (no sw.js + seed/manifest.json) — remove it yourself or choose another directory" >&2
+      exit 1
+    fi
+  fi
 fi
 
 if [ "$CHECK_ONLY" = 1 ]; then
@@ -260,9 +279,9 @@ grep -q 'const DEV_ENABLED = true;' "$DIST/sw.js" || {
 # `--out DIR` moves the finished bundle out of dist/, so a second seed can be
 # built into dist/ afterwards (CI builds the bootstrap seed, moves it aside,
 # then builds blank). A relative DIR is relative to the directory the script
-# was run from, and was resolved and checked before the build (see the
-# argument handling above). A DIR that exists is replaced — it is a build
-# output.
+# was run from, and was resolved and checked at parse time, before the build
+# (see the argument handling above): a DIR that exists here is empty or a
+# bundle this script made, so replacing it discards nothing else.
 if [ -n "$OUT" ]; then
   mkdir -p "$(dirname "$OUT")"
   rm -rf "$OUT"

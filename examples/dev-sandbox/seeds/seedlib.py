@@ -9,6 +9,39 @@ checked against it (`check-seeds.py`); it is never hand-edited.
 import hashlib
 import json
 import pathlib
+import re
+
+
+class SeedError(Exception):
+    """A seed that cannot be generated or checked; the message names the file and the fix."""
+
+
+SEEDS_DIR = pathlib.Path(__file__).resolve().parent
+
+# The runtime's block-name rule (paths::block_name_is_valid). Plan B reuses it
+# for the manifest's `template` name, so a seed directory and the template it
+# names are spelled by one rule. Like the runtime, a doubled hyphen and a
+# trailing one are refused (the lookaheads); use it with fullmatch.
+SEED_NAME = re.compile(r"[a-z](?!.*--)(?!.*-\Z)[a-z0-9-]{1,31}")
+
+# Mirrors paths::MAX_FILE_BYTES: the importer refuses a larger file at boot.
+MAX_FILE_BYTES = 512 * 1024
+
+
+def seed_dir(name: str) -> pathlib.Path:
+    """`seeds/<name>` for a valid seed name; a path or a bad name is refused."""
+    if not SEED_NAME.fullmatch(name):
+        raise SeedError(
+            f"{name!r} is not a seed name: lowercase letters, digits and hyphens, "
+            f"starting with a letter, 2 to 32 characters, no doubled or trailing hyphen"
+        )
+    return SEEDS_DIR / name
+
+
+def seed_dirs() -> list:
+    """Every directory under seeds/ whose name is a seed name, in name order —
+    with or without a manifest, so a seed that has none is reported, not skipped."""
+    return sorted(p for p in SEEDS_DIR.iterdir() if p.is_dir() and SEED_NAME.fullmatch(p.name))
 
 # Mirrors `paths::content_type_for` in
 # crates/impresspress-core/src/blocks/dev/paths.rs (the runtime's own table).
@@ -62,12 +95,19 @@ def site_entries(site_dir: pathlib.Path) -> list:
         rel = file.relative_to(site_dir).as_posix()
         ext = extension_of(file.name)
         if ext not in CONTENT_TYPES:
-            raise SystemExit(
+            raise SeedError(
                 f"{file}: no content type for extension {ext!r} — the runtime would serve it as "
                 f"application/octet-stream. Rename the file, or extend CONTENT_TYPES in step with "
                 f"paths::content_type_for."
             )
+        if file.is_symlink():
+            raise SeedError(f"{file}: is a symlink; a seed carries real files")
         data = file.read_bytes()
+        if len(data) > MAX_FILE_BYTES:
+            raise SeedError(
+                f"{file}: {len(data)} bytes is over the {MAX_FILE_BYTES}-byte limit "
+                f"the runtime enforces (paths::MAX_FILE_BYTES)"
+            )
         entries.append(
             {
                 "path": rel,
@@ -84,7 +124,7 @@ def build_manifest(seed_dir: pathlib.Path) -> dict:
     `seed::SeedManifest` serializes."""
     site_dir = seed_dir / "site"
     if not site_dir.is_dir():
-        raise SystemExit(f"{seed_dir}: has no site/ directory")
+        raise SeedError(f"{seed_dir}: has no site/ directory")
     return {
         "schema_version": SCHEMA_VERSION,
         "source_generation": None,
