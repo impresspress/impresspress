@@ -257,6 +257,7 @@ async fn a_site_write_whose_new_blob_is_missing_is_refused() {
             site: Some(site),
             blocks: Vec::new(),
         },
+        activation::Maintenance::Inline,
     )
     .await
     .expect_err("a new blob that is not stored cannot activate");
