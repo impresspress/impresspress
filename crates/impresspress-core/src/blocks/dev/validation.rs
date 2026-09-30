@@ -235,7 +235,7 @@ impl Diagnostic {
             format!(
                 "the artifact is at least {len} bytes; the sandbox accepts at most \
                  {MAX_ARTIFACT_BYTES}. Build with release size settings (opt-level = \"z\", \
-                 lto, strip)."
+                 codegen-units = 1, panic = \"abort\", strip = true)."
             ),
         )
     }

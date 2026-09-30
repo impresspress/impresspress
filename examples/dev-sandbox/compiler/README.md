@@ -298,14 +298,18 @@ node scripts/run-probe.mjs
 ```
 
 Every line below is from a run on 2026-09-03 against `dist/807ace9e`
-(rubrc `807ace9e`), chromium 146 headless, on a 24-core linux box.
+(rubrc `807ace9e`), chromium 146 headless, on a 24-core linux box, except
+the `compile` and artifact rows, which are from a re-run on 2026-09-30
+against the same dist on the same box after the templates dropped LTO. The
+2026-09-03 numbers were with `lto = true`: a 37 805 ms compile (cargo's own
+figure: 37.57 s) and an 88 892-byte artifact.
 
 | | |
 | --- | --- |
 | `ready` (cold: nothing cached) | **11 329 ms** (7.1-11.9 s over five runs — it varies with what else the machine is doing) |
 | `ready` (warm: component in IndexedDB) | **7 019 ms** (6.8-8.0 s) |
-| `compile` of the `hello` template, release, `wasm32-wasip1` | **37 805 ms** (cargo's own figure: 37.57 s) |
-| artifact | **88 892 bytes**, instantiates, exports the whole wafer ABI |
+| `compile` of the `hello` template, release, `wasm32-wasip1` | **21 458 ms** (cargo's own figure: 21.16 s) |
+| artifact | **111 130 bytes**, instantiates, exports the whole wafer ABI |
 | `compile` of the same crate with a syntax error | 5 585 ms |
 | total download to first `ready` | **75.1 MB** (13 files: 55.4 MB of component parts, 18.9 MB sysroot, 0.8 MB JS) |
 | largest single file | **25 165 824 bytes** — `vfs.core-*.wasm.br.part-001`, exactly our 24 MiB cap |
@@ -328,7 +332,8 @@ Every line below is from a run on 2026-09-03 against `dist/807ace9e`
    dies before cargo emits JSON (a malformed `Cargo.toml`), but it was not
    needed here. Confirmed.
 4. **The release build of the std-only guest is 88 892 bytes and
-   instantiates**, exporting the whole wafer ABI — the probe asserts all five
+   instantiates** (with `lto = true`; 111 130 bytes without it on
+   2026-09-30), exporting the whole wafer ABI — the probe asserts all five
    of `__wafer_alloc`, `__wafer_info`, `__wafer_handle`, `__wafer_lifecycle`
    and `__wafer_host_codec` rather than printing what it found, because a
    module that links but is missing one is not a block and the sandbox would
