@@ -1567,6 +1567,321 @@
       "summary": "Write a workspace file"
     }
   },
+  "/b/dev/api/files/write-batch": {
+    "post": {
+      "requestBody": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "description": "Request of `POST /b/dev/api/files/write-batch`.",
+              "properties": {
+                "files": {
+                  "description": "The files to write, 1 to 64, all under `site/` or all under one\n`blocks/<name>/`. Each entry is exactly a `dev_write_file` request.",
+                  "items": {
+                    "description": "Request of `POST /b/dev/api/files/write`.",
+                    "properties": {
+                      "content": {
+                        "description": "The file's content, in `encoding`.",
+                        "type": "string"
+                      },
+                      "encoding": {
+                        "default": "utf8",
+                        "description": "How `content` is encoded. Defaults to `utf8`.",
+                        "oneOf": [
+                          {
+                            "const": "utf8",
+                            "description": "`content` is the file's text. The default.",
+                            "type": "string"
+                          },
+                          {
+                            "const": "base64",
+                            "description": "`content` is the file's bytes, standard base64 with padding.",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      "expected_sha256": {
+                        "default": null,
+                        "description": "The SHA-256 you expect the file to have right now, or `null` if you\nexpect it not to exist yet. A mismatch is a `409` carrying the hash\nthe file actually has, so a caller that has fallen behind re-reads\ninstead of silently overwriting an edit it never saw.\n\nOmitting the field means the same as `null` — serde defaults an\nabsent `Option` to `None`, and `#[serde(default)]` says so in the\nsource rather than leaving it to a rule the schema does not show. That\nis a safe default rather than a lax one: over a file that exists,\n\"I expect nothing here\" is itself a conflict.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "path": {
+                        "description": "Workspace-relative path under `site/` or `blocks/<name>/`.",
+                        "type": "string"
+                      }
+                    },
+                    "required": [
+                      "path",
+                      "content"
+                    ],
+                    "type": "object"
+                  },
+                  "type": "array"
+                }
+              },
+              "required": [
+                "files"
+              ],
+              "title": "FileWriteBatchRequest",
+              "type": "object"
+            }
+          }
+        },
+        "required": true
+      },
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Response of `POST /b/dev/api/files/write-batch`.",
+                "properties": {
+                  "files": {
+                    "description": "Every file written, in path order, each with the hash to pass as its\nnext `expected_sha256`.",
+                    "items": {
+                      "additionalProperties": false,
+                      "description": "One file in the workspace: where it is, which blob holds it, how big it is\nand what it is served as.\n\nThe same type is what a generation's site manifest is made of — a\ngeneration *is* the workspace's `site/` entries, frozen — so there is one\ndefinition rather than a wire type and a stored type that have to be kept\nin step.",
+                      "properties": {
+                        "content_type": {
+                          "description": "Content type the file is served with.",
+                          "type": "string"
+                        },
+                        "path": {
+                          "description": "Where the file lives. Workspace-relative (`site/index.html`) in the\nfiles API; relative to its area's root (`index.html`) in a\ngeneration's site manifest and in a block's source listing.",
+                          "type": "string"
+                        },
+                        "sha256": {
+                          "description": "SHA-256 of the file's content-addressed blob, hex-encoded.",
+                          "type": "string"
+                        },
+                        "size": {
+                          "description": "Size in bytes.",
+                          "format": "uint64",
+                          "minimum": 0,
+                          "type": "integer"
+                        }
+                      },
+                      "required": [
+                        "path",
+                        "sha256",
+                        "size",
+                        "content_type"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  },
+                  "generation": {
+                    "additionalProperties": false,
+                    "description": "The one generation the batch published, or null for a `blocks/`\nbatch — only a compile turns block source into a published block.",
+                    "properties": {
+                      "activated_at": {
+                        "description": "RFC 3339 time the generation went live, or null if it never did.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "blocks": {
+                        "description": "Number of blocks in the generation's block manifest.",
+                        "format": "uint32",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "cause": {
+                        "description": "What created this generation.",
+                        "oneOf": [
+                          {
+                            "const": "site_write",
+                            "description": "A `site/**` write. Site-only — no runtime rebuild.",
+                            "type": "string"
+                          },
+                          {
+                            "const": "site_delete",
+                            "description": "A `site/**` delete. Site-only — no runtime rebuild.",
+                            "type": "string"
+                          },
+                          {
+                            "const": "block_compile",
+                            "description": "A successful compile stage; the block set changed.",
+                            "type": "string"
+                          },
+                          {
+                            "const": "block_remove",
+                            "description": "A block was removed; the block set changed.",
+                            "type": "string"
+                          },
+                          {
+                            "const": "rollback",
+                            "description": "A republish of an earlier generation's manifests.",
+                            "type": "string"
+                          },
+                          {
+                            "const": "seed",
+                            "description": "Generation 0, imported from the seed bundle on cold boot.",
+                            "type": "string"
+                          }
+                        ]
+                      },
+                      "created_at": {
+                        "description": "RFC 3339 creation time.",
+                        "type": "string"
+                      },
+                      "id": {
+                        "description": "Generation id.",
+                        "type": "string"
+                      },
+                      "parent_id": {
+                        "description": "The generation this one was derived from, or null for the first.",
+                        "type": [
+                          "string",
+                          "null"
+                        ]
+                      },
+                      "site_files": {
+                        "description": "Number of files in the generation's site manifest.",
+                        "format": "uint32",
+                        "minimum": 0,
+                        "type": "integer"
+                      },
+                      "status": {
+                        "description": "Where the generation sits in its lifecycle.",
+                        "oneOf": [
+                          {
+                            "const": "staged",
+                            "description": "Recorded, not yet examined.",
+                            "type": "string"
+                          },
+                          {
+                            "const": "validating",
+                            "description": "Blobs, artifacts and guests are being checked.",
+                            "type": "string"
+                          },
+                          {
+                            "const": "activating",
+                            "description": "The runtime swap and site publish are in progress.",
+                            "type": "string"
+                          },
+                          {
+                            "const": "active",
+                            "description": "Currently serving.",
+                            "type": "string"
+                          },
+                          {
+                            "const": "failed",
+                            "description": "Abandoned; `failure_message` says why.",
+                            "type": "string"
+                          },
+                          {
+                            "const": "superseded",
+                            "description": "No longer serving — replaced by a later generation.\n\nWritten by the activation that replaced it, and by nothing else. It is\nnot an ageing marker: a generation that falls out of the retention\nwindow is deleted rather than relabelled, so a `failed` generation\nstill reads as `failed` for as long as the ledger keeps it.",
+                            "type": "string"
+                          }
+                        ]
+                      }
+                    },
+                    "required": [
+                      "id",
+                      "parent_id",
+                      "cause",
+                      "status",
+                      "created_at",
+                      "activated_at",
+                      "site_files",
+                      "blocks"
+                    ],
+                    "type": [
+                      "object",
+                      "null"
+                    ]
+                  },
+                  "progress": {
+                    "description": "One entry per phase the batch's activation passed through, with how\nlong it took. The last is `active`. Empty when nothing was published.",
+                    "items": {
+                      "additionalProperties": false,
+                      "description": "One phase of an activation, with how long it took.\n\nPublished in the result of every call that activates a generation — file\nwrites and deletes, staging, block removal, rollback (design §7.5) — so the\ncaller that asked for a change sees where its time went. The activation push (design\n§2.6) says only which generation went live; the timings travel here.",
+                      "properties": {
+                        "detail": {
+                          "description": "Human-readable detail for the progress panel.",
+                          "type": "string"
+                        },
+                        "ms": {
+                          "description": "Milliseconds spent in it.",
+                          "format": "uint64",
+                          "minimum": 0,
+                          "type": "integer"
+                        },
+                        "phase": {
+                          "description": "The phase this step covers.",
+                          "oneOf": [
+                            {
+                              "const": "idle",
+                              "description": "Nothing in flight.",
+                              "type": "string"
+                            },
+                            {
+                              "const": "validating",
+                              "description": "Hashes, manifests and guests are being checked.",
+                              "type": "string"
+                            },
+                            {
+                              "const": "building_runtime",
+                              "description": "A candidate runtime is being constructed from the block set.",
+                              "type": "string"
+                            },
+                            {
+                              "const": "publishing",
+                              "description": "The site files are being written into `wafer-run/web/site`.",
+                              "type": "string"
+                            },
+                            {
+                              "const": "active",
+                              "description": "The generation is live.",
+                              "type": "string"
+                            },
+                            {
+                              "const": "failed",
+                              "description": "The activation was abandoned; the previous generation is still live.",
+                              "type": "string"
+                            }
+                          ]
+                        }
+                      },
+                      "required": [
+                        "phase",
+                        "ms",
+                        "detail"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "files",
+                  "generation",
+                  "progress"
+                ],
+                "title": "FileWriteBatchResponse",
+                "type": "object"
+              }
+            }
+          },
+          "description": "Successful response"
+        }
+      },
+      "security": [
+        {
+          "bearerAuth": []
+        }
+      ],
+      "summary": "Write several workspace files as one change"
+    }
+  },
   "/b/dev/api/generations": {
     "get": {
       "parameters": [

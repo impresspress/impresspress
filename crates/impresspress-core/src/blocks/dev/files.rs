@@ -110,7 +110,7 @@
 //!   `500`. A blob the manifest names but the store does not have is that
 //!   `500`, never a `404`: the path exists and its content has gone.
 
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use base64ct::{Base64, Encoding};
 use wafer_run::{context::Context, ErrorCode, InputStream, Message, OutputStream};
@@ -120,7 +120,8 @@ use super::{
     blobs,
     contracts::{
         FileConflict, FileDeleteRequest, FileDeleteResponse, FileEncoding, FileListQuery,
-        FileListResponse, FileReadRequest, FileReadResponse, FileWriteRequest, FileWriteResponse,
+        FileListResponse, FileReadRequest, FileReadResponse, FileWriteBatchConflict,
+        FileWriteBatchRequest, FileWriteBatchResponse, FileWriteRequest, FileWriteResponse,
         GenerationSummary,
     },
     no_store, no_store_db_error_internal, no_store_error, no_store_error_status,
@@ -323,6 +324,209 @@ pub async fn handle_write(
         path: entry.path,
         sha256: entry.sha256,
         size: entry.size,
+        generation,
+        progress,
+    })
+}
+
+/// `POST /b/dev/api/files/write-batch` — create or replace several files as
+/// one change.
+///
+/// The multi-file discipline is `scaffold::handle_create`'s: every hash,
+/// collision and quota is checked against a projection before any blob is
+/// stored, so a refusal on the fourth file has stored nothing for the first
+/// three. A `site/` batch then publishes ONE generation; a `blocks/` batch
+/// stages, exactly as a single write under `blocks/` does.
+///
+/// The whole batch is decoded up front — at worst [`paths::MAX_BATCH_FILES`]
+/// × [`paths::MAX_FILE_BYTES`], 32 MiB — because the hash check needs every
+/// file's bytes before the first store, and holding them beats decoding
+/// twice.
+pub async fn handle_write_batch(
+    ctx: &dyn Context,
+    shared: &Arc<DevShared>,
+    input: InputStream,
+) -> OutputStream {
+    let request: FileWriteBatchRequest = match read_body(input).await {
+        Ok(request) => request,
+        Err(refusal) => return refusal,
+    };
+    if request.files.is_empty() || request.files.len() > paths::MAX_BATCH_FILES {
+        return no_store_error(
+            ErrorCode::InvalidArgument,
+            &format!(
+                "a batch writes 1 to {} files; this one has {}",
+                paths::MAX_BATCH_FILES,
+                request.files.len()
+            ),
+        );
+    }
+
+    // Validate, pin the area, and decode every file before the workspace is
+    // touched. One area per call: a `site/` batch publishes and a `blocks/`
+    // batch only stages, and one call has to mean one of those.
+    let mut area: Option<WorkspaceArea> = None;
+    let mut seen = BTreeSet::new();
+    let mut decoded: Vec<(&str, Vec<u8>, Option<&str>)> = Vec::with_capacity(request.files.len());
+    for file in &request.files {
+        let this_area = match paths::validate_path(&file.path) {
+            Ok(area) => area,
+            Err(e) => {
+                return no_store_error(ErrorCode::InvalidArgument, &format!("{:?}: {e}", file.path))
+            }
+        };
+        match &area {
+            None => area = Some(this_area),
+            Some(first) if *first != this_area => {
+                return no_store_error(
+                    ErrorCode::InvalidArgument,
+                    &format!(
+                        "a batch writes one area — all under site/, or all under one \
+                         blocks/<name>/: {:?} is not in the same area as {:?}",
+                        file.path, request.files[0].path
+                    ),
+                );
+            }
+            Some(_) => {}
+        }
+        if !seen.insert(file.path.as_str()) {
+            return no_store_error(
+                ErrorCode::InvalidArgument,
+                &format!("{:?} appears twice in the batch", file.path),
+            );
+        }
+        // Before decoding, for the reason `handle_write` gives: a hostile
+        // body must not be allocated a second time.
+        if min_decoded_len(file.encoding, &file.content) > paths::MAX_FILE_BYTES {
+            return too_large(&format!(
+                "{:?}: the {} body decodes to more than the {}-byte file limit",
+                file.path,
+                encoding_label(file.encoding),
+                paths::MAX_FILE_BYTES
+            ));
+        }
+        let bytes = match decode_content(file.encoding, &file.content) {
+            Ok(bytes) => bytes,
+            Err(detail) => {
+                return no_store_error(
+                    ErrorCode::InvalidArgument,
+                    &format!("{:?}: {detail}", file.path),
+                )
+            }
+        };
+        if bytes.len() > paths::MAX_FILE_BYTES {
+            return too_large(&format!(
+                "{:?} is {} bytes; the limit is {} bytes",
+                file.path,
+                bytes.len(),
+                paths::MAX_FILE_BYTES
+            ));
+        }
+        decoded.push((&file.path, bytes, file.expected_sha256.as_deref()));
+    }
+    let Some(area) = area else {
+        unreachable!("a batch of at least one file has the area of its first file");
+    };
+
+    // Under `shared.workspace` for the reason `handle_write` gives, and
+    // released before the publish below for the same one.
+    let mut written = {
+        let _serialized = shared.workspace.lock().await;
+        let mut ws = match workspace::load(ctx).await {
+            Ok(ws) => ws,
+            Err(e) => return no_store_db_error_internal(e, "dev workspace load"),
+        };
+
+        // Every hash first. One stale entry refuses the whole batch and names
+        // every stale entry, so a caller that has fallen behind re-reads once.
+        let conflicts: Vec<FileConflict> = decoded
+            .iter()
+            .filter(|(path, _, expected)| !hash_matches(ws.get(path), *expected))
+            .map(|(path, _, _)| FileConflict::new(path, ws.get(path)))
+            .collect();
+        if !conflicts.is_empty() {
+            return no_store()
+                .status(409)
+                .json(&FileWriteBatchConflict { conflicts });
+        }
+
+        // Then every collision and quota, against a projection that already
+        // holds the entries ahead in this batch — so `site/a` followed by
+        // `site/a/b.css` is refused here, and identical content at two paths
+        // is charged once, as the store will charge it.
+        let mut projected = ws.clone();
+        let mut planned = Vec::with_capacity(decoded.len());
+        for (path, bytes, _) in &decoded {
+            if let Some(clash) = projected.path_collision(path) {
+                return no_store_error(
+                    ErrorCode::InvalidArgument,
+                    &format!(
+                        "{path:?} cannot be stored: {clash:?} already uses part of that path as a \
+                         directory, or is a file this path would need as one. A name is a file or \
+                         a directory, never both — rename one of them."
+                    ),
+                );
+            }
+            let sha = blobs::sha256_hex(bytes);
+            let new_blob_bytes = if projected.references(&sha) {
+                0
+            } else {
+                bytes.len() as u64
+            };
+            if let Err(e) = check_quotas(&projected, path, &area, new_blob_bytes) {
+                return e.into_response();
+            }
+            projected.insert(path, sha.clone(), bytes.len() as u64);
+            if new_blob_bytes > 0 {
+                projected.record_blob_stored(new_blob_bytes);
+            }
+            planned.push((*path, sha, bytes));
+        }
+
+        // Store every blob, then record every entry, then save once — the
+        // order `handle_write` and `scaffold::handle_create` use, for the
+        // reason they give: a manifest must never name a blob that was not
+        // written, and a half-written batch must not be named at all.
+        for (_, sha, bytes) in &planned {
+            match blobs::put_hashed(ctx, sha, bytes).await {
+                Ok(blobs::Stored::New) => ws.record_blob_stored(bytes.len() as u64),
+                Ok(blobs::Stored::Deduplicated) => {}
+                Err(e) => {
+                    // Blobs already written are charged for even though no
+                    // entry will name them; the next collection frees them
+                    // and resets the counters from what is left.
+                    if let Err(save) = workspace::save(ctx, &ws).await {
+                        tracing::error!(
+                            error = %save,
+                            "dev workspace: a batch blob write failed and the bytes already \
+                             stored could not be recorded — blob_bytes under-reports the store \
+                             until the next collection"
+                        );
+                    }
+                    return no_store_db_error_internal(e, "dev workspace blob write");
+                }
+            }
+        }
+        let written: Vec<FileEntry> = planned
+            .into_iter()
+            .map(|(path, sha, bytes)| ws.insert(path, sha, bytes.len() as u64))
+            .collect();
+        if let Err(e) = workspace::save(ctx, &ws).await {
+            return no_store_db_error_internal(e, "dev workspace save");
+        }
+        written
+    };
+    written.sort_by(|a, b| a.path.cmp(&b.path));
+
+    // One publish for the whole batch, after the save, for the reason
+    // `handle_write` gives for its own.
+    let outcome = match publish_if_site(ctx, shared, &area, GenerationCause::SiteWrite).await {
+        Ok(outcome) => outcome,
+        Err(refusal) => return refusal,
+    };
+    let (generation, progress) = split_outcome(outcome);
+    no_store().json(&FileWriteBatchResponse {
+        files: written,
         generation,
         progress,
     })

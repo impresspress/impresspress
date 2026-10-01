@@ -18,6 +18,12 @@ pub const MAX_FILE_BYTES: usize = 512 * 1024;
 /// Largest number of files the workspace may hold.
 pub const MAX_FILES: usize = 2_000;
 
+/// Most files one `POST /b/dev/api/files/write-batch` may carry. A scaffold
+/// is a handful; 64 is room for a whole small site in one generation while
+/// keeping the decoded batch (64 × [`MAX_FILE_BYTES`] at worst) well inside
+/// what the workspace quota already permits.
+pub const MAX_BATCH_FILES: usize = 64;
+
 /// Largest total size of the workspace's files, in bytes.
 pub const MAX_WORKSPACE_BYTES: u64 = 64 * 1024 * 1024;
 
