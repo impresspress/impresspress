@@ -204,3 +204,30 @@ def sandbox_block(seed_dir: pathlib.Path):
             "content_type": GUIDE_CONTENT_TYPE,
         },
     }
+
+
+def load_pin(seed_dir: pathlib.Path):
+    """The seed's vendor.json — `{name, version, license, files: [{path, url,
+    sha256}]}`, the third-party files `vendor.py` downloads into site/ — or
+    None when it carries none. Every `path` must stay inside site/."""
+    pin_path = seed_dir / "vendor.json"
+    if not pin_path.is_file():
+        return None
+    try:
+        pin = json.loads(pin_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise SeedError(f"{pin_path}: not valid JSON ({e}) — fix the pin")
+    shape = "a JSON object with name, version, license and files: [{path, url, sha256}]"
+    if not isinstance(pin, dict) or not {"name", "version", "license", "files"} <= set(pin):
+        raise SeedError(f"{pin_path}: needs {shape}")
+    if not isinstance(pin["files"], list):
+        raise SeedError(f"{pin_path}: files must be a list — needs {shape}")
+    site = (seed_dir / "site").resolve()
+    for entry in pin["files"]:
+        if not isinstance(entry, dict) or set(entry) != {"path", "url", "sha256"} or not all(
+            isinstance(v, str) for v in entry.values()
+        ):
+            raise SeedError(f"{pin_path}: entry {entry!r} needs exactly the string keys path, url and sha256")
+        if not (site / entry["path"]).resolve().is_relative_to(site):
+            raise SeedError(f"{pin_path}: path {entry['path']!r} is outside site/ — fix the pin")
+    return pin

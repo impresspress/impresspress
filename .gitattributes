@@ -1,0 +1,2 @@
+# Vendored, minified third-party files under a seed: not ours to diff or count.
+examples/dev-sandbox/seeds/*/site/vendor/** -diff linguist-vendored

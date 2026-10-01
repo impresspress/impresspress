@@ -37,7 +37,8 @@
 # `--root ./out` to keep it out of `~/.cargo/bin`) and point this at it.
 #
 # `--check` verifies every `seeds/<name>/manifest.json` against its `site/**`
-# and, when the seed has them, its `sandbox.json` and `guide.md`
+# and, when the seed has them, its `sandbox.json` and `guide.md`, and that
+# every file its `vendor.json` pins carries the pinned sha256
 # (seeds/check-seeds.py) — and, when `compiler/dist/` has been
 # built, that its files match `compiler/dist/manifest.json` and none of them
 # is over Cloudflare's asset limit — exiting non-zero on drift, WITHOUT
@@ -79,7 +80,7 @@ esac
 # drifted from its files is what `seed::import` refuses at boot, and the
 # check is cheap. The rules live in seeds/check-seeds.py.
 check_seed() {
-  log "verifying seeds/*/manifest.json against seeds/*/site/**, sandbox.json and guide.md"
+  log "verifying seeds/*/manifest.json against seeds/*/site/**, sandbox.json and guide.md, and vendor.json pins"
   python3 "$HERE/seeds/check-seeds.py"
 }
 
@@ -91,16 +92,10 @@ check_seed() {
 # not bundle content.
 stage_seed() {
   local src="$HERE/seeds/$SEED"
-  case "$SEED" in
-    */*|.*) echo "build.sh: --seed takes a seed name, not a path (got '$SEED')" >&2; exit 1 ;;
-  esac
   if [ ! -f "$src/manifest.json" ]; then
-    local available=""
-    local dir
-    for dir in "$HERE"/seeds/*/; do
-      [ -f "$dir/manifest.json" ] && available="$available $(basename "$dir")"
-    done
-    echo "build.sh: no seed named '$SEED' under $HERE/seeds/ — available:${available:- (none)}" >&2
+    local available
+    available="$(python3 -B -c 'import sys; sys.path.insert(0, sys.argv[1]); import seedlib; print(" ".join(p.name for p in seedlib.seed_dirs() if (p / "manifest.json").is_file()))' "$HERE/seeds")"
+    echo "build.sh: no seed named '$SEED' under $HERE/seeds/ — available: ${available:-(none)}" >&2
     exit 1
   fi
   log "staging seeds/$SEED into seed/"
@@ -169,6 +164,25 @@ while [ $# -gt 0 ]; do
   esac
   shift
 done
+
+# The seed name is held to the one rule check-seeds.py finds seeds by
+# (seedlib.SEED_NAME, the runtime's block-name rule): a directory that rule
+# skips is never verified, so it must never be staged either. Checked here,
+# before anything else runs, and on `--check` too.
+if ! reason="$(python3 -B - "$HERE/seeds" "$SEED" <<'SEEDNAME'
+import sys
+sys.path.insert(0, sys.argv[1])
+import seedlib
+try:
+    seedlib.seed_dir(sys.argv[2])
+except seedlib.SeedError as e:
+    print(e)
+    raise SystemExit(1)
+SEEDNAME
+)"; then
+  echo "build.sh: --seed takes a seed name, not a path — $reason" >&2
+  exit 1
+fi
 
 # `--out` is resolved against the CALLER's directory and checked before any
 # build, because it is `rm -rf`ed: it must not be the default dist/, this
