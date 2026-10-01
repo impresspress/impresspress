@@ -1,5 +1,10 @@
-import { test, expect } from '@playwright/test';
-import { ADMIN_EMAIL, ADMIN_PASSWORD, bootServiceWorker } from './fixtures/dev-sandbox';
+import { test, expect, type Page } from '@playwright/test';
+import {
+  ADMIN_EMAIL,
+  ADMIN_PASSWORD,
+  bootServiceWorker,
+  WELCOME_HEADING,
+} from './fixtures/dev-sandbox';
 
 /**
  * A failed sign-in says what failed.
@@ -11,20 +16,77 @@ import { ADMIN_EMAIL, ADMIN_PASSWORD, bootServiceWorker } from './fixtures/dev-s
  * the service worker's console, which neither the person nor the agent could
  * read, so there was nothing to act on and nothing to report.
  *
- * Two halves, one test each:
+ * Three claims, one test each:
  *
  *  1. **The page** shows what it was told, when the answer is not the app's
  *     JSON at all. (`auth_ui/assets/test/api_post.test.mjs` pins every branch
  *     of the wording; this pins that the login page a browser is served uses
  *     it.)
- *  2. **The worker** answers a request for a dead runtime itself, with the
- *     cause, and the page shows that. (`impresspress-bundle`'s
- *     `tests/sw/sw_runtime_stopped.test.mjs` pins the worker's branches
- *     against stubs; this is the real worker, the real wasm and the real page
- *     together.)
+ *  2. **A request the runtime dies on** is answered by the worker itself,
+ *     with the cause — and the page that asked is LEFT ALONE, so the cause is
+ *     still on screen seconds later and after a second try. The first version
+ *     of this fix returned the answer and re-navigated the page in the same
+ *     breath; the reloaded page was a clean login form that said nothing.
+ *  3. **A navigation the runtime dies on** lands on the boot shell, which
+ *     shows the cause, recovers once on its own, and the second time stops
+ *     with the cause on screen until the person chooses what to do.
+ *
+ * (`impresspress-bundle`'s `tests/sw/sw_runtime_stopped.test.mjs` pins the
+ * worker's branches against stubs; these are the real worker, the real wasm
+ * and the real pages together. Nothing in the worker is stubbed here except
+ * the one thing that kills the runtime.)
  */
 
-async function openLogin(page: import('@playwright/test').Page) {
+const CAUSE = 'injected by dev-auth-errors.spec.ts';
+
+/**
+ * Kill the runtime of the worker now serving `page`, in the one way a test
+ * can reach: `sw.js` is a module, so `handle_request` and `poisoned` are not
+ * on the worker's global, but the wasm glue resolves `Headers` there at call
+ * time. Every response the runtime builds constructs one, so the next request
+ * it handles throws out of `handle_request` — the catch path under test.
+ * (`runtimeStopped` passes its headers as a plain object, so the worker's own
+ * answer does not go through this.)
+ *
+ * The ACTIVE worker, found by the page's controller: after a recovery there
+ * is a new one, and the context still lists the old.
+ */
+async function killRuntime(page: Page) {
+  const scriptURL = await page.evaluate(() => navigator.serviceWorker.controller?.scriptURL);
+  expect(scriptURL, 'a service worker controls the page').toBeTruthy();
+  const workers = page.context().serviceWorkers().filter((w) => w.url() === scriptURL);
+  expect(workers.length, 'workers at the controller URL').toBeGreaterThan(0);
+  // Every instance at that URL: a worker that already died stays listed, and
+  // breaking it again is harmless.
+  for (const worker of workers) {
+    await worker
+      .evaluate((cause) => {
+        (globalThis as any).Headers = class {
+          constructor() {
+            throw new Error(cause);
+          }
+        };
+      }, CAUSE)
+      .catch(() => {});
+  }
+}
+
+/**
+ * Wait until the runtime is serving the page again after a recovery: a worker
+ * controls it and the boot shell (`#status` is its own, and on no page the
+ * runtime serves) has been replaced. The same two conditions
+ * `bootServiceWorker` ends on, for the same reason — the loader's last reload
+ * is on a timer nothing here can see.
+ */
+async function served(page: Page) {
+  await page.waitForFunction(
+    () => navigator.serviceWorker.controller !== null && document.getElementById('status') === null,
+    null,
+    { timeout: 120_000 },
+  );
+}
+
+async function openLogin(page: Page) {
   await bootServiceWorker(page);
   await page.goto('/b/auth/login', { waitUntil: 'commit' });
   await page.locator('input#email').fill(ADMIN_EMAIL);
@@ -54,63 +116,112 @@ test('the login page names the HTTP status of an answer that is not JSON', async
   await expect(page.getByRole('button', { name: /sign in/i })).toBeEnabled();
 });
 
-test('a login the runtime dies on gets the cause from the worker, and the page shows it', async ({
-  page,
-}) => {
+test('a login the runtime dies on shows the cause, and keeps showing it', async ({ page }) => {
   await openLogin(page);
+  await killRuntime(page);
 
-  // Kill the runtime from outside, in the one way a test can reach: `sw.js`
-  // is a module, so `handle_request` and `poisoned` are not on the worker's
-  // global, but the wasm glue resolves `Headers` there at call time. Every
-  // response the runtime builds constructs one, so the next request it
-  // handles throws out of `handle_request` — which is exactly the catch path
-  // under test. (`runtimeStopped` passes its headers as a plain object, so
-  // the worker's own answer does not go through this.)
-  //
-  // `clients.matchAll` is emptied for one reason: `selfDestruct` re-navigates
-  // every window it finds so `loader.js` can recover, and a page that is
-  // being replaced cannot be asserted on. Unregistering, the console line and
-  // the answer itself are untouched; the re-navigation is
-  // `sw_runtime_stopped.test.mjs`'s to pin.
-  const [worker] = page.context().serviceWorkers();
-  expect(worker, 'the sandbox service worker').toBeTruthy();
-  await worker.evaluate(() => {
-    const scope = globalThis as any;
-    scope.Headers = class {
-      constructor() {
-        throw new Error('injected by dev-auth-errors.spec.ts');
-      }
-    };
-    scope.clients.matchAll = async () => [];
-  });
-
+  const signIn = page.getByRole('button', { name: /sign in/i });
   const answered = page.waitForResponse((r) => r.url().endsWith('/b/auth/api/login'));
-  await page.getByRole('button', { name: /sign in/i }).click();
+  await signIn.click();
   const response = await answered;
 
+  const cause = `error handling request: Error: ${CAUSE}`;
   expect(response.status()).toBe(503);
   expect(response.fromServiceWorker(), 'answered by the worker, not the static host').toBe(true);
   expect(response.headers()['cache-control']).toBe('no-store');
   expect(await response.json()).toEqual({
     error: 'Unavailable',
-    message:
-      "The app's runtime stopped (error handling request: Error: injected by dev-auth-errors.spec.ts). Reload the page to restart it.",
+    message: `The app's runtime stopped (${cause}). Reload the page to restart it.`,
     code: 'runtime_stopped',
+    cause,
   });
 
   const error = page.locator('#error');
+  const shown = `The app's runtime stopped (${cause}). Reload the page to restart it.`;
   await expect(error).toBeVisible();
-  await expect(error).toContainText("The app's runtime stopped");
-  await expect(error).toContainText('injected by dev-auth-errors.spec.ts');
-  await expect(error).toContainText('Reload the page');
+  await expect(error).toHaveText(shown);
 
-  // Poisoned: the next request gets the same answer, with the first cause,
-  // without the runtime being asked again.
-  const again = await page.evaluate(async () => {
-    const r = await fetch('/b/auth/api/signup', { method: 'POST', body: '{}' });
-    return { status: r.status, body: await r.json() };
+  // What the person sees a moment later is the point: the page was not
+  // re-navigated out from under the message. Same document, same text.
+  await page.evaluate(() => {
+    (window as any).__sameDocument = true;
   });
-  expect(again.status).toBe(503);
-  expect(again.body.code).toBe('runtime_stopped');
-  expect(again.body.message).toContain('injected by dev-auth-errors.spec.ts');
+  await page.waitForTimeout(2500);
+  expect(await page.evaluate(() => (window as any).__sameDocument)).toBe(true);
+  expect(new URL(page.url()).pathname).toBe('/b/auth/login');
+  await expect(error).toHaveText(shown);
+
+  // A second try — what an agent does next — says the same thing, from the
+  // poisoned worker, with the FIRST cause.
+  await expect(signIn).toBeEnabled();
+  const again = page.waitForResponse((r) => r.url().endsWith('/b/auth/api/login'));
+  await signIn.click();
+  expect((await again).status()).toBe(503);
+  await expect(error).toHaveText(shown);
+  await page.waitForTimeout(1000);
+  expect(await page.evaluate(() => (window as any).__sameDocument)).toBe(true);
+  await expect(error).toHaveText(shown);
+
+  // The forgot-password link does not claim an email was sent, either.
+  await page.getByRole('button', { name: /forgot password/i }).click();
+  await expect(error).toHaveText(shown);
+  await expect(page.locator('#info')).toBeHidden();
+});
+
+test('a navigation the runtime dies on lands on a boot shell that shows the cause and stops', async ({
+  page,
+}) => {
+  await bootServiceWorker(page);
+  const heading = page.getByRole('heading', { name: WELCOME_HEADING });
+  await expect(heading).toBeVisible();
+
+  // First failure in this tab. The worker sends the navigation to the static
+  // host, the boot shell reads the cause the worker left, and recovers by
+  // itself — once: drop the worker and the caches, register afresh.
+  const statusLines: string[] = [];
+  await page.exposeFunction('__recordStatus', (text: string) => {
+    statusLines.push(text);
+  });
+  await page.addInitScript(() => {
+    document.addEventListener('DOMContentLoaded', () => {
+      const status = document.getElementById('status');
+      if (!status) return;
+      new MutationObserver(() => (window as any).__recordStatus(status.textContent)).observe(
+        status,
+        { childList: true, characterData: true, subtree: true },
+      );
+    });
+  });
+  await killRuntime(page);
+  await page.reload({ waitUntil: 'commit' });
+  const cause = `error handling request: Error: ${CAUSE}`;
+  await expect
+    .poll(() => statusLines, { message: 'the boot shell said why it was recovering' })
+    .toContain(`The app's runtime stopped: ${cause} — recovering…`);
+  await served(page);
+  await expect(heading).toBeVisible();
+
+  // Second failure in the same tab: the automatic recovery has been spent.
+  // The shell shows the cause and waits.
+  await killRuntime(page);
+  await page.reload({ waitUntil: 'commit' });
+
+  const stopped = page.locator('#impresspress-stopped-cause');
+  await expect(stopped).toHaveText(`The app's runtime stopped: ${cause}`, { timeout: 60_000 });
+  const retry = page.getByRole('button', { name: 'Try again' });
+  await expect(retry).toBeVisible();
+  await expect(page.getByRole('button', { name: 'Reset local data and reload' })).toBeVisible();
+
+  // It stays: no reload, no redirect, the same document and the same text.
+  await page.evaluate(() => {
+    (window as any).__sameDocument = true;
+  });
+  await page.waitForTimeout(3000);
+  expect(await page.evaluate(() => (window as any).__sameDocument)).toBe(true);
+  await expect(stopped).toHaveText(`The app's runtime stopped: ${cause}`);
+
+  // "Try again" is a real way out: nothing is wrong with a fresh worker.
+  await retry.click();
+  await served(page);
+  await expect(heading).toBeVisible();
 });
