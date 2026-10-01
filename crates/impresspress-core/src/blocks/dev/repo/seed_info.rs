@@ -117,6 +117,20 @@ mod tests {
         assert_eq!(read(&ctx).await.expect("read"), Some(info));
     }
 
+    /// The columns are declared `TEXT`, so text that happens to look like JSON
+    /// comes back as the same string — no backend decodes it behind our back.
+    #[tokio::test]
+    async fn json_shaped_text_round_trips_as_the_same_string() {
+        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let info = SeedInfo {
+            template: "bootstrap".to_string(),
+            suggested_prompt: "[1,2]".to_string(),
+            guide_markdown: r#"{"a":1}"#.to_string(),
+        };
+        write(&ctx, &info).await.expect("write");
+        assert_eq!(read(&ctx).await.expect("read"), Some(info));
+    }
+
     #[tokio::test]
     async fn template_is_none_until_a_write_then_the_written_name() {
         let ctx = TestContext::with_dev(FakeControl::new()).await;

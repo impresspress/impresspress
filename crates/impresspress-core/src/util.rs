@@ -95,10 +95,11 @@ pub trait RecordExt {
     /// A `TEXT` column as the string it holds, `""` when missing or when the
     /// value is not a JSON string.
     ///
-    /// A JSON-encoded column is *not* one of these: the SQLite and browser
-    /// backends re-parse JSON-shaped text on read, so such a column arrives as
-    /// a `Value::Object` and this accessor answers `""` for a payload that is
-    /// plainly there. Reach for [`Self::json_value_field`],
+    /// A JSON-encoded column is *not* one of these: declared `TEXT` it holds
+    /// the encoded text rather than the value, and declared JSON (or added
+    /// lazily for an object/array value) it arrives as a `Value::Object`, for
+    /// which this accessor answers `""` although the payload is plainly
+    /// there. Reach for [`Self::json_value_field`],
     /// [`Self::json_object_field`] or [`Self::json_text_field`] instead.
     fn str_field(&self, key: &str) -> &str;
     /// Field as `i64`, defaulting to `0` when missing/non-numeric.
@@ -121,10 +122,13 @@ pub trait RecordExt {
     /// A JSON-encoded `TEXT` column as the value it encodes, whichever way
     /// the backend returned it.
     ///
-    /// Such columns are written by [`serde_json::to_string`] and read back as
-    /// a real value by the SQLite backend (`row_to_record` sniffs JSON-shaped
-    /// text) but as the literal string by Postgres and D1. Normalizing here is
-    /// what lets a view declare `object` / `array` truthfully on all three.
+    /// Such columns are written by [`serde_json::to_string`]. A column declared
+    /// `TEXT` comes back as that literal string on every backend (SQLite,
+    /// Postgres, D1, the browser's sql.js), and this parses it. The
+    /// already-decoded arm is for a column declared JSON, or one added lazily
+    /// for an object/array value, which the backend hands back as the value
+    /// itself; the helper is correct either way, which is what lets a view
+    /// declare `object` / `array` truthfully.
     /// `Null` when the column is absent or does not decode.
     fn json_value_field(&self, key: &str) -> serde_json::Value;
 

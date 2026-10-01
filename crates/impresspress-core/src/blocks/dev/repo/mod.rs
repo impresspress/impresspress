@@ -32,19 +32,19 @@ pub(crate) fn now() -> String {
 /// A JSON-encoded `TEXT` column, returned as **canonical** JSON (sorted keys,
 /// no whitespace) on every backend.
 ///
-/// Two backend differences have to be flattened here, and the second is the
-/// one that matters:
+/// Two shapes have to be flattened here, and the second is the one that
+/// matters:
 ///
-/// * `wafer-block-sqlite`'s `row_to_record` sniffs JSON-shaped `TEXT` and
-///   hands back an already-decoded value, while Postgres and D1 return the
-///   literal string. `RecordExt::str_field` collapses the decoded case to
-///   `""`, which would silently lose a whole manifest on SQLite while working
-///   on Postgres.
-/// * Re-encoding the decoded value yields canonical JSON, whereas the Postgres
-///   literal is whatever was stored. Left alone, the *same row* would read back
-///   differently per backend — and since `manifest_sha256` is a hash over the
-///   canonical manifest (design §11.3), that difference would make hash
-///   verification pass on one backend and fail on another.
+/// * A column declared `TEXT` comes back as the literal string on every
+///   backend (SQLite, Postgres, D1, the browser's sql.js). A column declared
+///   JSON — or one added lazily for an object/array value — comes back
+///   already decoded. `RecordExt::str_field` collapses the decoded case to
+///   `""`, which would silently lose a whole manifest, so both are accepted.
+/// * Re-encoding a decoded value yields canonical JSON, whereas the literal
+///   string is whatever was stored. Left alone, the *same manifest* would read
+///   back differently depending on how its column is declared — and since
+///   `manifest_sha256` is a hash over the canonical manifest (design §11.3),
+///   that difference would make hash verification depend on the schema.
 ///
 /// So both arms are normalized to canonical JSON. A generation whose manifest
 /// was written non-canonically therefore fails its own hash check on every
@@ -64,11 +64,12 @@ pub(crate) fn now() -> String {
 pub(crate) fn json_text(record: &wafer_core::clients::database::Record, key: &str) -> String {
     let canonical = |value: serde_json::Value| super::generation::canonicalize(value).to_string();
     match record.data.get(key) {
-        // Postgres / D1: the literal column text.
+        // A `TEXT` column, on every backend: the literal column text.
         Some(serde_json::Value::String(text)) => {
             serde_json::from_str::<serde_json::Value>(text).map_or_else(|_| text.clone(), canonical)
         }
-        // SQLite / D1-with-sniffing: already decoded.
+        // A column declared JSON (or added lazily for an object/array value):
+        // already decoded.
         Some(value) => canonical(value.clone()),
         None => String::new(),
     }
