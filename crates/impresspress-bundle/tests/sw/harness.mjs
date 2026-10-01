@@ -45,11 +45,26 @@ export async function loadWorker(runtime = {}) {
   const network = [];
   const posted = [];
   const navigated = [];
+  const warnings = [];
   let unregistered = 0;
   const client = {
     url: `${ORIGIN}/b/auth/login`,
     postMessage: (message) => posted.push(message),
-    navigate: (url) => navigated.push(url)
+    // Resolves or rejects as `runtime.navigate` says: a real `navigate()`
+    // rejects for a client the worker does not control.
+    navigate: (url) => {
+      navigated.push(url);
+      return runtime.navigate ? runtime.navigate(url) : Promise.resolve(client);
+    }
+  };
+  // Cache Storage, as far as the worker uses it: `open(name).put(key, response)`.
+  const stored = new Map();
+  globalThis.caches = {
+    open: async (name) => ({
+      put: async (key, response) => {
+        stored.set(`${name} ${key}`, await response.json());
+      }
+    })
   };
 
   globalThis.__swRuntimeStubs = {
@@ -68,7 +83,7 @@ export async function loadWorker(runtime = {}) {
     registration: {
       unregister: async () => {
         unregistered += 1;
-        return true;
+        return runtime.unregisters ?? true;
       }
     },
     clients: { claim: async () => {}, matchAll: async () => [client] }
@@ -107,6 +122,8 @@ export async function loadWorker(runtime = {}) {
     network,
     posted,
     navigated,
+    /// What the worker left for the boot shell, or `undefined`.
+    leftForBootShell: () => stored.get('__impresspress_sw_stopped /__impresspress_sw_stopped'),
     unregistered: () => unregistered
   };
 }

@@ -14,12 +14,18 @@ fn pkg_copy() -> tempfile::TempDir {
 }
 
 /// [`pkg_copy`] with the fixture's three-line `sw.js.tmpl` stub swapped for the
-/// **shipped** template. Tests that assert on real template content have to
-/// render the thing that actually reaches a browser.
+/// **shipped** template, and the shipped `loader.js.tmpl` beside it. Tests
+/// that assert on real template content have to render the thing that
+/// actually reaches a browser.
 fn production_pkg_copy() -> tempfile::TempDir {
     let tmp = pkg_copy();
     let prod_tmpl = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/sw.js.tmpl"));
     fs::write(tmp.path().join("sw.js.tmpl"), prod_tmpl).unwrap();
+    let loader_tmpl = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/loader.js.tmpl"
+    ));
+    fs::write(tmp.path().join("loader.js.tmpl"), loader_tmpl).unwrap();
     tmp
 }
 
@@ -681,7 +687,40 @@ fn the_rendered_worker_parses() {
         let module = tmp.path().join("sw-check.mjs");
         fs::copy(tmp.path().join("sw.js"), &module).unwrap();
         node(&["--check".as_ref(), module.as_os_str()], &module);
+        // `loader.js` is a classic script, and is checked as one.
+        let loader = tmp.path().join("loader.js");
+        node(&["--check".as_ref(), loader.as_os_str()], &loader);
     }
+}
+
+/// `sw.js` leaves the cause of a dead runtime in Cache Storage and
+/// `loader.js` reads it there. Two files, two declarations of the same two
+/// names — a rename in one is a cause written where nothing looks.
+#[test]
+fn the_worker_and_the_loader_agree_on_where_the_stop_cause_is_left() {
+    let tmp = production_pkg_copy();
+    run(tmp.path(), tmp.path(), AppConfig::default()).expect("bundler ok");
+    let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
+    let loader = fs::read_to_string(tmp.path().join("loader.js")).unwrap();
+
+    for declaration in [
+        "const STOP_CAUSE_CACHE = '__impresspress_sw_stopped';",
+        "const STOP_CAUSE_KEY = '/__impresspress_sw_stopped';",
+    ] {
+        assert_eq!(sw.matches(declaration).count(), 1, "sw.js = {sw}");
+        assert_eq!(
+            loader.matches(declaration).count(),
+            1,
+            "loader.js = {loader}"
+        );
+    }
+    // The worker's answer carries `cause`, which is what the loader's boot
+    // probe reads back.
+    assert!(sw.contains("cause: poisonReason"), "sw.js = {sw}");
+    assert!(
+        loader.contains("body.code === 'runtime_stopped' ? String(body.cause) : null"),
+        "loader.js = {loader}"
+    );
 }
 
 /// Once the wasm runtime is dead, a request only it could have answered gets
