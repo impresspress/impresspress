@@ -11,7 +11,7 @@
 
 use wafer_block::db::{Filter, FilterOp, ListOptions};
 use wafer_core::clients::database as db;
-use wafer_run::{context::Context, WaferError};
+use wafer_run::{context::Context, ErrorCode, WaferError};
 
 use crate::util::RecordExt;
 
@@ -55,6 +55,7 @@ pub async fn read(ctx: &dyn Context) -> Result<Option<SeedInfo>, WaferError> {
 ///
 /// Reads only the `template` column: the status poll calls this a few times
 /// a second, and the row's `guide_markdown` can run to hundreds of KiB.
+/// A missing row is `NotFound`, as from [`read`].
 pub async fn template(ctx: &dyn Context) -> Result<Option<String>, WaferError> {
     let rows = db::list(
         ctx,
@@ -68,10 +69,11 @@ pub async fn template(ctx: &dyn Context) -> Result<Option<String>, WaferError> {
         },
     )
     .await?;
-    Ok(rows
+    let record = rows
         .records
         .first()
-        .and_then(|record| record.opt_str_field("template")))
+        .ok_or_else(|| WaferError::new(ErrorCode::NotFound, "record not found"))?;
+    Ok(record.opt_str_field("template"))
 }
 
 fn singleton_filter() -> Filter {
@@ -129,6 +131,19 @@ mod tests {
         };
         write(&ctx, &info).await.expect("write");
         assert_eq!(read(&ctx).await.expect("read"), Some(info));
+    }
+
+    /// A missing row is `NotFound` from both readers, not `None` from one.
+    #[tokio::test]
+    async fn a_missing_row_is_not_found_from_read_and_template_alike() {
+        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        db::delete_by_filters(&ctx, TABLE, vec![singleton_filter()])
+            .await
+            .expect("delete the seeded row");
+        let read_err = read(&ctx).await.expect_err("read of a missing row");
+        let template_err = template(&ctx).await.expect_err("template of a missing row");
+        assert_eq!(read_err.code, ErrorCode::NotFound);
+        assert_eq!(template_err.code, ErrorCode::NotFound);
     }
 
     #[tokio::test]

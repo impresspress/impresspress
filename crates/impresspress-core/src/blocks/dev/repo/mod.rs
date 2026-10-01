@@ -32,8 +32,8 @@ pub(crate) fn now() -> String {
 /// A JSON-encoded `TEXT` column, returned as **canonical** JSON (sorted keys,
 /// no whitespace) on every backend.
 ///
-/// Two shapes have to be flattened here, and the second is the one that
-/// matters:
+/// A column can arrive in two shapes, and both are flattened here; of the
+/// two points below, the second is the one that matters:
 ///
 /// * A column declared `TEXT` comes back as the literal string on every
 ///   backend (SQLite, Postgres, D1, the browser's sql.js). A column declared
@@ -47,9 +47,9 @@ pub(crate) fn now() -> String {
 ///   that difference would make hash verification depend on the schema.
 ///
 /// So both arms are normalized to canonical JSON. A generation whose manifest
-/// was written non-canonically therefore fails its own hash check on every
-/// backend rather than on some of them — which is the correct outcome, and a
-/// loud one.
+/// was written non-canonically therefore fails its own hash check regardless
+/// of how its column is declared — which is the correct outcome, and a loud
+/// one.
 ///
 /// The normalization is [`super::generation::canonicalize`] — the *same*
 /// function [`super::generation::canonical_text`] writes with, not a second
