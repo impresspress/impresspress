@@ -1,12 +1,13 @@
 # The dev sandbox
 
-`dev.impresspress.org` is a browser-local sandbox for building an ImpressPress
-site with a WebMCP-capable AI agent. Everything runs in your browser tab:
-the ImpressPress service worker, an in-browser SQL database, OPFS (Origin
-Private File System) storage for the workspace, and — once you compile a
-backend block — an in-browser Rust-to-WebAssembly compiler. There is no
-server behind any of it. When you like the result, one export downloads it
-as a static bundle you can serve yourself.
+The dev sandbox — `dev.impresspress.org`, and one more address for each
+other [template](#templates) — is a browser-local sandbox for building an
+ImpressPress site with a WebMCP-capable AI agent. Everything runs in your
+browser tab: the ImpressPress service worker, an in-browser SQL database,
+OPFS (Origin Private File System) storage for the workspace, and — once you
+compile a backend block — an in-browser Rust-to-WebAssembly compiler. There
+is no server behind any of it. When you like the result, one export
+downloads it as a static bundle you can serve yourself.
 
 Every visitor who opens the page gets their own instance: their own service
 worker and their own OPFS database, created fresh on first load. Nothing you
@@ -30,12 +31,28 @@ reports the active generation, the compiler state and a summary of the
 workspace — then it can read and write files, scaffold and compile backend
 blocks, stock the shop, and export.
 
-The page includes a "Suggested prompt" you can copy and paste. The prompt
-comes from the sandbox's seed (its `sandbox.json`), so the panel is absent
-when the seed carries none; the `blank` seed's walks an agent through
-building a small shop end to end: a home page, three products, a published
-offer for each, and a script tag that gives a visitor's *own* agent the
-shop's tools once the page is live.
+The page includes a "Suggested prompt" you can copy and paste — each
+template's own. The prompt comes from the sandbox's seed (its
+`sandbox.json`), so the panel is absent when the seed carries none; both
+templates' prompts walk an agent through building a small shop end to end: a
+home page, three products, a published offer for each, and a script tag that
+gives a visitor's *own* agent the shop's tools once the page is live.
+
+## Templates
+
+A sandbox is seeded from a **template**: what generation 0 holds, and the
+site-authoring guide `dev_read_reference` serves as `site_markdown`. Each
+template is its own sandbox; pick one by opening its address.
+
+| Template | Sandbox | What it ships |
+|---|---|---|
+| bootstrap | https://build-bootstrap.impresspress.org | Bootstrap 5 vendored under `site/vendor/bootstrap/`, a Bootstrap-built welcome page, a guide to the framework and the shop pieces |
+| blank | https://dev.impresspress.org | A minimal welcome page and stylesheet, the same guide without a framework |
+
+`dev_status` reports the template's name, and the workspace page names it
+in its guide pane, above the suggested prompt. There is no switching
+templates inside a workspace: a template is a starting point, and
+everything after it is yours.
 
 ## The workspace
 
@@ -108,10 +125,9 @@ names.
 `site/<name>` and its routes live under `/b/<name>/`. Only Rust's standard
 library and `wafer_guest` are available — no crates.io dependencies and no
 procedural macros, because the in-browser compiler doesn't do dependency
-resolution. A block
-can read and write its own database tables and its own storage folder, read
-config, and log; it cannot reach the network, and it cannot call another
-block.
+resolution. A block can read and write its own database tables and its own
+storage folder, read config, and log; it cannot reach the network, and it
+cannot call another block.
 
 ### Starting one
 
@@ -126,11 +142,11 @@ one of two templates:
 Both come out already carrying what an agent writing them by hand would have
 to get exactly right: the path dependency on `wafer_guest`, the
 `wafer_guest::export!(block, init);` line, and the block's name everywhere
-it has to appear at once: the
-crate name, the block id `site/<name>`, the route prefix `/b/<name>/`, the
-collection prefix `site__<name>__` and the config prefix `SITE__<NAME>__`
-(a hyphen in the name is `_` in those two prefixes, as the runtime spells a
-block's resources: `my-shop` owns `site__my_shop__*` and `SITE__MY_SHOP__*`).
+it has to appear at once: the crate name, the block id `site/<name>`, the
+route prefix `/b/<name>/`, the collection prefix `site__<name>__` and the
+config prefix `SITE__<NAME>__` (a hyphen in the name is `_` in those two
+prefixes, as the runtime spells a block's resources: `my-shop` owns
+`site__my_shop__*` and `SITE__MY_SHOP__*`).
 
 Scaffolding only stages source, the same as any other write under `blocks/`;
 nothing serves until the block is compiled. If anything already exists under
@@ -307,6 +323,8 @@ anything.
   content in total, and 16 backend blocks.
 - `dev_write_files` writes at most 64 files per batch; a larger change is
   several batches, and so several generations.
+- No switching templates inside a workspace; each template is its own
+  sandbox.
 
 ## See also
 

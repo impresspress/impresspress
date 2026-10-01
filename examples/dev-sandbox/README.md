@@ -1,17 +1,13 @@
 # dev-sandbox
 
-The bundle behind `dev.impresspress.org`: a browser-local WebMCP development
-sandbox. `impresspress.toml` sets `[dev] enabled = true`, which turns on the
-`impresspress/dev` block (`/b/dev`) and the service worker's seed-on-boot
-import (`impresspress-core::blocks::dev::seed`). A seed is a `site/**` tree
-plus a generated `manifest.json`, and optionally `sandbox.json` and
-`guide.md` — the template's suggested prompt and the site-authoring guide
-`dev_read_reference` serves. `seeds/blank/` is the welcome starter site every
-fresh origin boots with: `site/{index.html,styles.css}`, its prompt and its
-guide. `build.sh --seed NAME`
-stages `seeds/NAME/` into the gitignored `seed/`, which `[[assets.overlay]]`
-copies onto `dist/seed/` wholesale; `seeds/write-manifest.py NAME` regenerates
-a manifest after editing a seed's files.
+The bundle behind the build sandboxes — `dev.impresspress.org` and
+`build-bootstrap.impresspress.org`: a browser-local WebMCP development
+sandbox, one per seed. `impresspress.toml` sets `[dev] enabled = true`, which
+turns on the `impresspress/dev` block (`/b/dev`) and the service worker's
+seed-on-boot import (`impresspress-core::blocks::dev::seed`). What a fresh
+origin boots with is a **seed** (see [Seeds](#seeds) below):
+`build.sh --seed NAME` stages `seeds/NAME/` into the gitignored `seed/`,
+which `[[assets.overlay]]` copies onto `dist/seed/` wholesale.
 
 Every visitor who opens the deployed URL gets their **own** instance: a
 service worker and an OPFS database created fresh in their browser on first
@@ -24,6 +20,44 @@ For what a visitor can do with the sandbox once it's deployed — the
 workspace, backend blocks, stocking the shop, export, browser requirements —
 see [`docs/dev-sandbox.md`](../../docs/dev-sandbox.md). This README covers
 building, serving and deploying the bundle itself.
+
+## Seeds
+
+A seed is what a fresh origin boots with (generation 0). Each lives under
+`seeds/<name>/`, and each is its own deployed sandbox:
+
+| Seed        | Sandbox                                  | Ships |
+|-------------|------------------------------------------|-------|
+| `blank`     | https://dev.impresspress.org             | A minimal welcome page and stylesheet; the site guide without a framework |
+| `bootstrap` | https://build-bootstrap.impresspress.org | Bootstrap 5.3.8 vendored under `site/vendor/bootstrap/`; a Bootstrap-built welcome page; the site guide for the framework and the shop pieces |
+
+- `site/**` — the site files. `manifest.json` is **generated** from them by
+  `seeds/write-manifest.py <name>`; run it after every edit and commit both.
+- `sandbox.json` + `guide.md` — the template name, the prompt the workspace
+  page suggests, and the site-authoring guide `dev_read_reference` serves as
+  `site_markdown`. The generator puts them in the manifest's `sandbox` block.
+- `vendor.json` (bootstrap) — upstream URLs and sha256 pins of the vendored
+  files. `seeds/vendor.py bootstrap` downloads and verifies them; the
+  vendored bytes are identical to upstream.
+- `seeds/check-seeds.py` — what `build.sh --check` runs: every manifest
+  equals what the generator would write, and every vendored file matches its
+  pin.
+
+**Bumping Bootstrap:** edit `version` and the three URLs in
+`seeds/bootstrap/vendor.json`, and the version the guide and the welcome
+page name (`seeds/bootstrap/guide.md`, `seeds/bootstrap/site/index.html`),
+then, from `examples/dev-sandbox/`:
+
+```sh
+seeds/vendor.py bootstrap --refresh      # downloads, rewrites the sha256 pins
+seeds/write-manifest.py bootstrap        # regenerates the manifest
+./build.sh --check                       # proves the three agree
+```
+
+`crates/impresspress-web/tests/e2e/dev-bootstrap.spec.ts` asserts the guide
+names the version (`Bootstrap 5.3.8`, a literal) — change it with the rest.
+Commit `vendor.json`, `manifest.json`, the vendored files and those edits
+together.
 
 ## Build
 
@@ -58,6 +92,7 @@ This is the one recipe CI's `e2e-dev-sandbox` job and local e2e runs both use
 Last line of stdout is the absolute path of the finished bundle (`dist/`, or
 the `--out` directory).
 
+With no `--seed`, `build.sh` builds `blank`.
 `build.sh --seed NAME --out ../dist-NAME` builds another seed and moves the
 bundle to that directory, so `dist/` stays free for the next one. `--out` is
 relative to where you run the script and must be outside
@@ -88,40 +123,69 @@ workspace.
 
 ## Deploying
 
-The bundle is deployed as a Cloudflare Worker, `impresspress-dev-sandbox`,
-serving `dist/` as static assets with SPA fallback (`wrangler.toml`).
+Each seed is its own Cloudflare Worker serving `dist/` as static assets with
+SPA fallback, all from the same `wrangler.toml`: the blank seed is the
+top-level config (`impresspress-dev-sandbox`, `dev.impresspress.org`); every
+other seed is the wrangler *environment* of the same name (`[env.bootstrap]`
+→ `impresspress-build-bootstrap`, `build-bootstrap.impresspress.org`), which
+inherits `main`, `compatibility_date` and `[assets]` from the top level.
 `worker.js` is a pass-through (`env.ASSETS.fetch(req)`) so response headers
 can be added later without moving off static assets.
+
+Because every Worker serves the same `./dist`, a deploy is always the build
+and the deploy of ONE seed, back to back — never two builds and then two
+deploys.
 
 **One-time setup**, done by hand, not by any workflow:
 
 1. `impresspress.org` added as a zone on the Cloudflare account these
-   secrets belong to.
-2. A custom domain `dev.impresspress.org` attached to the
-   `impresspress-dev-sandbox` worker (`wrangler.toml`'s `routes` declares
-   this; Cloudflare still needs the domain provisioned once against the
-   zone).
+   secrets belong to. This is the only thing that must exist beforehand.
+2. The first `wrangler deploy` of the top-level config (the manual deploy
+   below). It creates the `impresspress-dev-sandbox` Worker *and* attaches
+   `dev.impresspress.org` to it: `wrangler deploy` attaches every route
+   marked `custom_domain = true` in `wrangler.toml` itself, against the
+   zone from step 1. Nothing is provisioned by hand in the dashboard.
 3. Two repository secrets — `CLOUDFLARE_API_TOKEN` and
    `CLOUDFLARE_ACCOUNT_ID` — set on this repo for the
    [`deploy-dev-sandbox`](/.github/workflows/deploy-dev-sandbox.yml) workflow
-   to use.
+   to use. Without them the workflow cannot deploy anything.
+4. The first `wrangler deploy --env bootstrap`, the same way as step 2: it
+   creates the `impresspress-build-bootstrap` Worker and attaches
+   `build-bootstrap.impresspress.org`. Adding a seed's environment is
+   therefore a resource-creating step — run it by hand, deliberately, before
+   the workflow's job for that seed gets the chance to. The first deploy of
+   a new Worker must be `wrangler deploy` (not `versions upload`).
 
 **Automatic deploys**: the `deploy-dev-sandbox` workflow runs on every push
-to `main` that touches `examples/dev-sandbox/**`,
-`crates/impresspress-web/**`, `crates/impresspress-core/**`,
-`crates/impresspress-browser/**`, `crates/impresspress-bundle/**`, or the
-workflow file itself, plus on manual `workflow_dispatch`. It builds this
-bundle the same way `build.sh` does locally, then runs `wrangler deploy`.
+to `main` that touches one of the paths its `paths:` filter lists (this
+directory, the crates the bundle and the CLI are built from, the workspace
+manifest and lockfile, and the workflow file itself), plus on manual
+`workflow_dispatch`. It runs once per seed as a matrix: each job builds its
+seed with `build.sh --seed <seed>`, then runs `wrangler deploy` (blank) or
+`wrangler deploy --env <seed>` (every other seed). One seed failing does not
+cancel the other.
 
 **Manual deploy**, from a machine with `wrangler` logged in to the same
-Cloudflare account:
+Cloudflare account — the bootstrap sandbox:
+
+```sh
+examples/dev-sandbox/build.sh --seed bootstrap
+cd examples/dev-sandbox && wrangler deploy --env bootstrap
+```
+
+and the blank one:
 
 ```sh
 examples/dev-sandbox/build.sh
 cd examples/dev-sandbox && wrangler deploy
 ```
 
-Live URL (once deployed): `https://dev.impresspress.org`
+(With an environment defined, a bare `wrangler deploy` warns that no target
+environment was given; it still deploys the top-level config, which is the
+blank sandbox.)
+
+Live URLs (once deployed): `https://dev.impresspress.org` (blank),
+`https://build-bootstrap.impresspress.org` (bootstrap)
 
 ## Credentials
 

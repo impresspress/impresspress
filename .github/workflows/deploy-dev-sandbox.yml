@@ -4,7 +4,7 @@ on:
   push:
     branches: [main]
     # Every input this job actually builds from. A path missing here is not a
-    # skipped run — it is dev.impresspress.org silently left on stale code
+    # skipped run — it is every sandbox silently left on stale code
     # until some unrelated change happens to trip the filter.
     paths:
       - 'examples/dev-sandbox/**'
@@ -40,6 +40,11 @@ concurrency:
 jobs:
   deploy:
     runs-on: ubuntu-latest
+    strategy:
+      # Every seed is its own Worker; one failing must not cancel the other.
+      fail-fast: false
+      matrix:
+        seed: [blank, bootstrap]
     steps:
       - uses: actions/checkout@v4
 
@@ -99,17 +104,20 @@ jobs:
 
       # `compiler_is_current` matches `compiler/PIN.json` against the tree the
       # step above put in place, so this builds the wasm and assembles the
-      # bundle without touching the compiler.
-      - name: Build examples/dev-sandbox
-        run: examples/dev-sandbox/build.sh
+      # bundle for THIS seed without touching the compiler. Each matrix job
+      # fetches the same published release asset — no cache, nothing to race.
+      - name: Build examples/dev-sandbox (${{ matrix.seed }} seed)
+        run: examples/dev-sandbox/build.sh --seed ${{ matrix.seed }}
 
-      - name: Deploy to Cloudflare Workers
+      - name: Deploy to Cloudflare Workers (${{ matrix.seed }})
         # Pinned to v3's tagged commit, not the floating major tag — this
         # job holds CLOUDFLARE_API_TOKEN, the same reasoning as the
         # wasm-pack-action pin above ("live push-to-main infra").
         uses: cloudflare/wrangler-action@9acf94ace14e7dc412b076f2c5c20b8ce93c79cd  # v3
         with:
           workingDirectory: examples/dev-sandbox
-          command: deploy
+          # The blank seed is the top-level wrangler config; every other
+          # seed is the environment of the same name (wrangler.toml).
+          command: ${{ matrix.seed == 'blank' && 'deploy' || format('deploy --env {0}', matrix.seed) }}
           apiToken: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           accountId: ${{ secrets.CLOUDFLARE_ACCOUNT_ID }}
