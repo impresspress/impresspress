@@ -558,9 +558,9 @@ pub struct ReferenceResponse {
     /// The `WAFER_GUEST_VERSION` of the guest SDK crate this reference
     /// documents and every scaffolded block depends on.
     pub wafer_guest_version: u32,
-    /// The authoring guide, as Markdown: the API, the host services, the
-    /// namespace rules, the limits, the diagnostic codes, and both templates
-    /// in full.
+    /// The backend-block (Rust) authoring guide, as Markdown: the API, the
+    /// host services, the namespace rules, the limits, the diagnostic codes,
+    /// and both templates in full.
     pub markdown: String,
     /// The template this sandbox was seeded from (`dev_status.template`), or
     /// null when the seed carried no sandbox block.

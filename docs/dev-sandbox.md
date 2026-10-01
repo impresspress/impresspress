@@ -30,10 +30,12 @@ reports the active generation, the compiler state and a summary of the
 workspace — then it can read and write files, scaffold and compile backend
 blocks, stock the shop, and export.
 
-The page includes a "Suggested prompt" you can copy and paste, which walks
-an agent through building a small shop end to end: a home page, three
-products, a published offer for each, and a script tag that gives a
-visitor's *own* agent the shop's tools once the page is live.
+The page includes a "Suggested prompt" you can copy and paste. The prompt
+comes from the sandbox's seed (its `sandbox.json`), so the panel is absent
+when the seed carries none; the `blank` seed's walks an agent through
+building a small shop end to end: a home page, three products, a published
+offer for each, and a script tag that gives a visitor's *own* agent the
+shop's tools once the page is live.
 
 ## The workspace
 

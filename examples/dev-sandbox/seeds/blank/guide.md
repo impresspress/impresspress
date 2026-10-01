@@ -48,8 +48,11 @@ through two public pieces:
   product's price and buy button. Load
   `<script src="/b/products/storefront.js" defer></script>` once per page.
   Attributes: `product-id` (required), `presentation` (`hosted`, `embedded`
-  or `payment_link`; default `hosted`), `api-base` (default: this origin),
-  `credentials` (`same-origin`, `omit` or `include`).
+  or `payment_link`; default `hosted`), `payment-link-id` (with
+  `presentation="payment_link"`; default: the offer's first link),
+  `success-url` and `cancel-url` (where checkout returns; default: this
+  page), `api-base` (default: this origin), `credentials` (`same-origin`,
+  `omit` or `include`).
 
 A product appears in the catalog once `shop_update_product` sets
 `status: "active"`; it can be bought once it has a published offer
@@ -66,7 +69,7 @@ send and read JSON.
 - A path outside `site/` or `blocks/<name>/`, a `..` segment, or a name that
   clashes with an existing file or directory.
 - A file over 512 KiB; more than 2,000 files; more than 64 MiB of stored
-  content in the workspace.
+  content in the workspace; more than 16 backend blocks.
 - A stale `expected_sha256`: the refusal carries the current hash, so
   re-read and retry.
 

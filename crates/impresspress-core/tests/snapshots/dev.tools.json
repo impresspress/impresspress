@@ -4767,7 +4767,7 @@
         "description": "Response of `GET /b/dev/api/reference`.",
         "properties": {
           "markdown": {
-            "description": "The authoring guide, as Markdown: the API, the host services, the\nnamespace rules, the limits, the diagnostic codes, and both templates\nin full.",
+            "description": "The backend-block (Rust) authoring guide, as Markdown: the API, the\nhost services, the namespace rules, the limits, the diagnostic codes,\nand both templates in full.",
             "type": "string"
           },
           "site_markdown": {

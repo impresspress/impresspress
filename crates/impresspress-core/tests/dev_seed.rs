@@ -175,6 +175,32 @@ async fn a_bundle_without_a_sandbox_block_records_nothing() {
     assert_eq!(seed_info::read(&ctx).await.expect("read"), None);
 }
 
+/// The `seed_info` row is written last: a bundle whose sandbox block is
+/// fine but whose data snapshot is refused — after the site is stored — must
+/// leave no row, or the page would offer a template's prompt and the
+/// reference its guide for a seed that never imported.
+#[tokio::test]
+async fn a_refusal_after_the_sandbox_block_checks_out_records_no_row() {
+    let (ctx, control) = fixture().await;
+    let data: &[u8] = b"{\"tables\":[]}";
+    let declared = seed::SeedFile {
+        path: "data.json".to_string(),
+        sha256: blobs::sha256_hex(b"some other snapshot"),
+        size: data.len() as u64,
+        content_type: seed::DATA_CONTENT_TYPE.to_string(),
+    };
+    let manifest = SeedManifest {
+        data: Some(declared),
+        ..manifest_with(sandbox())
+    };
+    let bundle = bundle_with_guide().with(&seed::data_url("data.json"), data);
+    let err = seed::import(&ctx, control.as_ref(), &manifest, &bundle)
+        .await
+        .expect_err("a data snapshot that does not match its hash is refused");
+    assert!(err.contains("hashes to"), "{err}");
+    assert_eq!(seed_info::read(&ctx).await.expect("read"), None);
+}
+
 #[tokio::test]
 async fn a_guide_over_the_limit_is_refused_before_anything_is_stored() {
     let mut declared = sandbox();

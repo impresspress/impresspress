@@ -320,12 +320,16 @@ pub async fn is_fresh(ctx: &dyn Context) -> Result<bool, String> {
 /// did not use it left four validation rules unapplied and every later
 /// staging attempt refused.
 ///
-/// The order is: check every declared spec, fetch and inspect every artifact,
-/// check every guest report, then write the blobs and artifacts, then save
-/// the workspace. A workspace saved before its blobs would name content that
-/// is not stored, and every later read of those paths would be a 500; in this
-/// order a failure part-way leaves stored bytes that no manifest names, which
-/// costs storage and nothing else — and a bundle refused for what its guests
+/// The order is: check every declared spec, fetch and check the sandbox block
+/// (its prompt and guide), fetch and inspect every artifact, check every
+/// guest report, then write the blobs and artifacts, then save the workspace,
+/// then import the data snapshot, and last record the sandbox block — so a
+/// `seed_info` row is never left behind by an import that was refused.
+///
+/// A workspace saved before its blobs would name content that is not stored,
+/// and every later read of those paths would be a 500; in this order a
+/// failure part-way leaves stored bytes that no manifest names, which costs
+/// storage and nothing else — and a bundle refused for what its guests
 /// report has stored nothing at all.
 ///
 /// The returned manifest is *staged* — it has no id and no parent. Minting
@@ -374,15 +378,6 @@ async fn import_bundle(
             paths::MAX_BLOCKS
         ));
     }
-
-    // The sandbox block, if any — verified before a single site byte is
-    // stored, so a bundle whose guide is wrong stores nothing at all. Held
-    // until the end, when the row is written beside the workspace it
-    // describes.
-    let sandbox = match &manifest.sandbox {
-        Some(declared) => Some(fetch_sandbox(fetch, declared).await?),
-        None => None,
-    };
 
     // Every spec, before a single byte is fetched. Two reasons for the
     // ordering: a bundle whose second block is refused must not have left the
@@ -434,6 +429,15 @@ async fn import_bundle(
             ));
         }
     }
+
+    // The sandbox block, if any — the first thing fetched, and verified
+    // before a single site byte is stored, so a bundle whose guide is wrong
+    // stores nothing at all. Held until the end, when the row is written
+    // beside the workspace it describes.
+    let sandbox = match &manifest.sandbox {
+        Some(declared) => Some(fetch_sandbox(fetch, declared).await?),
+        None => None,
+    };
 
     // Every artifact, fetched and INSPECTED before anything is stored.
     //

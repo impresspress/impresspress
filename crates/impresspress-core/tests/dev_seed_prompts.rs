@@ -1,10 +1,12 @@
-//! Every seed's `suggested_prompt` names only tools the workspace page has.
+//! Every seed's `suggested_prompt` and site guide name only tools the
+//! workspace page has.
 //!
 //! The prompt `/b/dev` suggests comes from the seed's `sandbox.json`
-//! (`examples/dev-sandbox/seeds/<name>/sandbox.json`), not from this crate, so
-//! nothing else ties a tool it names to one the page publishes. A renamed or
-//! dropped tool would leave the agent a prompt that tells it to call
-//! something that is not there.
+//! (`examples/dev-sandbox/seeds/<name>/sandbox.json`), and the guide
+//! `dev_read_reference` serves from its `guide.md` — neither from this crate,
+//! so nothing else ties a tool they name to one the page publishes. A renamed
+//! or dropped tool would leave the agent a prompt or a guide that tells it to
+//! call something that is not there.
 //!
 //! Gated on `block-dev` like the other dev tests: `blocks::dev` does not exist
 //! in a default-feature build.
@@ -24,54 +26,82 @@ fn seeds_dir() -> PathBuf {
 }
 
 /// Every `dev_*` / `shop_*` word in `text`: a run of `[a-z0-9_]`, so the
-/// punctuation around a tool name in prose is not part of it.
+/// punctuation around a tool name in prose is not part of it. A word ending
+/// in `_` is a family, not a tool (a guide may say `shop_*`), and is skipped.
 fn tool_tokens(text: &str) -> BTreeSet<&str> {
     text.split(|c: char| !(c.is_ascii_lowercase() || c.is_ascii_digit() || c == '_'))
         .filter(|word| word.starts_with("dev_") || word.starts_with("shop_"))
+        .filter(|word| !word.ends_with('_'))
         .collect()
+}
+
+/// Every tool the workspace page publishes.
+fn published() -> BTreeSet<&'static str> {
+    SELECTIONS
+        .iter()
+        .map(|(_, _, _, name, _)| *name)
+        .chain(PAGE_LOCAL_TOOLS.iter().copied())
+        .collect()
+}
+
+/// Every `seeds/*/<file>` that exists, with its text.
+fn seed_files(file: &str) -> Vec<(PathBuf, String)> {
+    let dir = seeds_dir();
+    let mut found = Vec::new();
+    for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
+        let path = entry.expect("seed dir entry").path().join(file);
+        if !path.is_file() {
+            continue;
+        }
+        let text =
+            std::fs::read_to_string(&path).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        found.push((path, text));
+    }
+    // A moved seeds directory must not pass by finding nothing to check.
+    assert!(
+        !found.is_empty(),
+        "no seeds/*/{file} under {}",
+        dir.display()
+    );
+    found
 }
 
 #[test]
 fn every_seed_prompt_names_only_tools_the_page_has() {
-    let published: BTreeSet<&str> = SELECTIONS
-        .iter()
-        .map(|(_, _, _, name, _)| *name)
-        .chain(PAGE_LOCAL_TOOLS.iter().copied())
-        .collect();
-
-    let dir = seeds_dir();
-    let mut checked = Vec::new();
-    for entry in std::fs::read_dir(&dir).unwrap_or_else(|e| panic!("{}: {e}", dir.display())) {
-        let sandbox_path = entry.expect("seed dir entry").path().join("sandbox.json");
-        if !sandbox_path.is_file() {
-            continue;
-        }
-        let text = std::fs::read_to_string(&sandbox_path)
-            .unwrap_or_else(|e| panic!("{}: {e}", sandbox_path.display()));
-        let sandbox: serde_json::Value = serde_json::from_str(&text)
-            .unwrap_or_else(|e| panic!("{}: {e}", sandbox_path.display()));
+    let published = published();
+    for (path, text) in seed_files("sandbox.json") {
+        let sandbox: serde_json::Value =
+            serde_json::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
         let prompt = sandbox["suggested_prompt"]
             .as_str()
-            .unwrap_or_else(|| panic!("{}: no suggested_prompt", sandbox_path.display()));
+            .unwrap_or_else(|| panic!("{}: no suggested_prompt", path.display()));
         for tool in tool_tokens(prompt) {
             assert!(
                 published.contains(tool),
                 "{}: suggested_prompt names {tool}, which the workspace page does not publish",
-                sandbox_path.display()
+                path.display()
             );
         }
-        checked.push(sandbox_path);
     }
-    // A moved seeds directory must not pass by finding nothing to check.
-    assert!(
-        !checked.is_empty(),
-        "no seeds/*/sandbox.json under {}",
-        dir.display()
-    );
+}
+
+#[test]
+fn every_seed_guide_names_only_tools_the_page_has() {
+    let published = published();
+    for (path, text) in seed_files("guide.md") {
+        for tool in tool_tokens(&text) {
+            assert!(
+                published.contains(tool),
+                "{}: names {tool}, which the workspace page does not publish",
+                path.display()
+            );
+        }
+    }
 }
 
 #[test]
 fn tool_tokens_splits_names_out_of_prose() {
-    let found = tool_tokens("create three with shop_create_product, then dev_status. Done");
+    let found =
+        tool_tokens("create three with shop_create_product, then dev_status. Any shop_* tool");
     assert_eq!(found, BTreeSet::from(["dev_status", "shop_create_product"]));
 }

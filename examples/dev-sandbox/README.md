@@ -3,9 +3,12 @@
 The bundle behind `dev.impresspress.org`: a browser-local WebMCP development
 sandbox. `impresspress.toml` sets `[dev] enabled = true`, which turns on the
 `impresspress/dev` block (`/b/dev`) and the service worker's seed-on-boot
-import (`impresspress-core::blocks::dev::seed`). `seeds/blank/` is the
-welcome starter site every fresh origin boots with — a generated
-`manifest.json` plus `site/{index.html,styles.css}`. `build.sh --seed NAME`
+import (`impresspress-core::blocks::dev::seed`). A seed is a `site/**` tree
+plus a generated `manifest.json`, and optionally `sandbox.json` and
+`guide.md` — the template's suggested prompt and the site-authoring guide
+`dev_read_reference` serves. `seeds/blank/` is the welcome starter site every
+fresh origin boots with: `site/{index.html,styles.css}`, its prompt and its
+guide. `build.sh --seed NAME`
 stages `seeds/NAME/` into the gitignored `seed/`, which `[[assets.overlay]]`
 copies onto `dist/seed/` wholesale; `seeds/write-manifest.py NAME` regenerates
 a manifest after editing a seed's files.
@@ -40,8 +43,9 @@ This is the one recipe CI's `e2e-dev-sandbox` job and local e2e runs both use
 (`crates/impresspress-web/tests/e2e/dev-foundations.spec.ts` and
 `dev-workspace.spec.ts`). It:
 
-1. Verifies every `seeds/*/manifest.json` against its `site/**`
-   (`seeds/check-seeds.py`) — see `--check` below. Runs first so a stale
+1. Verifies every `seeds/*/manifest.json` against its `site/**`,
+   `sandbox.json` and `guide.md` (`seeds/check-seeds.py`) — see `--check`
+   below. Runs first so a stale
    manifest fails fast rather than paying for a wasm build before finding out
    the bundle cannot seed itself.
 2. Builds `impresspress-web` to wasm with `--features browser-devtools` into
