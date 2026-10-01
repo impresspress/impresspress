@@ -9,6 +9,7 @@
   "GET /b/dev/api/reference admin",
   "GET /b/dev/api/status admin",
   "GET /b/dev/api/tools.json admin",
+  "GET /b/dev/enter public",
   "GET /b/dev/static/compiler-adapter.js admin",
   "GET /b/dev/static/dev.css admin",
   "GET /b/dev/static/dev.js admin",

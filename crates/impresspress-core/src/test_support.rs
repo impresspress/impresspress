@@ -870,11 +870,13 @@ impl TestContext {
         let store = Arc::new(InMemoryStorageService::new());
         self.storage = Some(store.clone());
         self.register_block("wafer-run/storage", crate::blocks::storage::create(store));
-        self.add_extra_route(ExtraRoute::new(
-            dev::ROUTE_PREFIX.to_string(),
-            dev::BLOCK_NAME.to_string(),
-            crate::routing::RouteAccess::Admin,
-        ));
+        for (prefix, access) in dev::WORKSPACE_ROUTES {
+            self.add_extra_route(ExtraRoute::new(
+                (*prefix).to_string(),
+                dev::BLOCK_NAME.to_string(),
+                *access,
+            ));
+        }
         // The grants the consumer hands `ImpresspressBuilder::wrap_grants`
         // alongside the block, and the block's own frame — its declared
         // `requires` included: `dev::export` reaches storage and the database
