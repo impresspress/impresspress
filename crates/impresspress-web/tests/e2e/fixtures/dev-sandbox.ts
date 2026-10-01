@@ -20,6 +20,13 @@ import path from 'node:path';
  * reusing `fixtures/auth.ts`'s saved `storageState`: `global-setup.ts` posts to
  * a server that is not running in this job, and the sandbox's credentials are
  * the seeded ones every fresh origin creates for itself.
+ *
+ * Through the FORM, deliberately, although the sandbox now ships a one-click
+ * entry page (`/b/dev/enter`, which the welcome page's "Open workspace" link
+ * leads to). The form is still how a human signs back in after a session
+ * expires, and these helpers are what keep it exercised; the entry page is
+ * the subject of `dev-enter.spec.ts`, and `dev-workspace.spec.ts` and
+ * `dev-bootstrap.spec.ts` walk the welcome link itself.
  */
 
 /**

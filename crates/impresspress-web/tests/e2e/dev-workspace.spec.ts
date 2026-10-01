@@ -68,30 +68,28 @@ const PIXEL_PNG_BYTES = 67;
 const PIXEL_PNG_PATH = 'site/pixel.png';
 
 /**
- * Sign in the way a first-time visitor does: from the welcome page's own
- * "Open workspace" link.
+ * Get into the workspace the way a first-time visitor does: from the welcome
+ * page's own "Open workspace" link.
  *
  * Not `loginToWorkspace` (`fixtures/dev-sandbox.ts`), and not `goto('/b/dev')`
  * — either would skip the one navigation this deployment actually ships to get
- * a human into the workspace, which is a link the seed site carries and a
- * `?redirect=` the login page has to honour. Both are part of Plan 2's
- * surface, so both are walked here; the shared helper is for the specs whose
- * subject is what happens AFTER the workspace is open.
+ * a human into the workspace: a link the seed site carries to `/b/dev/enter`,
+ * the one-click entry page, which signs the visitor in with nothing typed
+ * (`dev-enter.spec.ts` is where that page is the subject). The shared helper,
+ * which signs in through the login FORM, is for the specs whose subject is
+ * what happens after the workspace is open — and is what keeps the form path
+ * exercised.
  */
 async function openWorkspace(page: Page) {
   await expect(page.locator('body')).toContainText(WELCOME_PHRASE, { timeout: 60_000 });
   // The credentials are printed on the page for whoever lands here; that they
-  // are is part of the starter site's contract, so the test reads them the
-  // same way a visitor would rather than assuming them silently.
+  // are is part of the starter site's contract — they are how a human signs
+  // back in — so the test reads them the same way a visitor would.
   await expect(page.locator('body')).toContainText(ADMIN_EMAIL);
+  await expect(page.locator('body')).toContainText(ADMIN_PASSWORD);
   await page.getByRole('link', { name: /open workspace/i }).click();
-  await page.locator('input#email').fill(ADMIN_EMAIL);
-  await page.locator('input#password').fill(ADMIN_PASSWORD);
-  await page.getByRole('button', { name: /sign in/i }).click();
-  // `/b/auth/login?redirect=/b/dev` renders the target into the hidden
-  // `#redirect` field and the login script prefers it over the role-aware
-  // `default_redirect` — so landing anywhere else is the link being broken,
-  // not a detail to paper over.
+  // Landing anywhere else — the login form above all — is the link or the
+  // entry page being broken, not a detail to paper over.
   await page.waitForURL((url) => url.pathname === '/b/dev', { timeout: 60_000 });
 }
 
@@ -482,6 +480,19 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
       // No workspace. The `/b/dev` route is not registered in an exported
       // bundle, and the router is the gate — so this is a 404, not a 403.
       expect(await site.evaluate(async () => (await fetch('/b/dev/api/status')).status)).toBe(404);
+      // …and no one-click entry. That page is PUBLIC in the workspace and
+      // hands out an admin session, so its absence here is the boundary that
+      // makes it acceptable there: an exported site is served for real, and
+      // on it the path is a 404 for an anonymous caller like this one — not
+      // a page, and not a redirect to one.
+      const entry = await site.evaluate(async () => {
+        const response = await fetch('/b/dev/enter', { headers: { Accept: 'text/html' } });
+        return { status: response.status, redirected: response.redirected, body: await response.text() };
+      });
+      expect(entry.status).toBe(404);
+      expect(entry.redirected).toBe(false);
+      expect(entry.body).not.toContain('dev-enter');
+      expect(entry.body).not.toContain(ADMIN_PASSWORD);
 
       // And no cross-origin isolation: an exported site has no compiler
       // needing `SharedArrayBuffer` and no preview frame to keep loadable, so
