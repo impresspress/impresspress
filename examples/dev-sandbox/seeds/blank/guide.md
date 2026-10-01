@@ -77,6 +77,8 @@ send and read JSON.
 
 1. `dev_status`, then this reference.
 2. Read `site/index.html`, then overwrite it with your page.
-3. Add pages and assets with further writes; each write is one generation.
+3. Add pages and assets with further writes: `dev_write_files` for a
+   scaffold of several pages (one generation for the whole batch),
+   `dev_write_file` for one file (one generation each).
 4. Stock the shop with `shop_*`, then check the live site at `/`.
 5. `dev_export` when done.
