@@ -5,7 +5,7 @@ import init, { initialize, handle_request } from '__WASM_JS__';
 // `[dev] enabled` at BUILD time (`impresspress-bundle`'s `DEV_ENABLED` var).
 //
 // ONE constant, read by BOTH places the flag decides something: the
-// `initialize({ dev: DEV_ENABLED })` below, and the isolation-header
+// `initialize({ dev: DEV_ENABLED, … })` below, and the isolation-header
 // passthrough in the fetch handler. It used to be the placeholder itself
 // substituted at both sites, which meant a shipped `sw.js` stated the same
 // fact twice — and the dev sandbox's export (`blocks/dev/export.rs`), which
@@ -17,6 +17,16 @@ import init, { initialize, handle_request } from '__WASM_JS__';
 // requires it to occur exactly once, so a comment quoting it would be a
 // second, ambiguous match.)
 const DEV_ENABLED = __DEV_ENABLED__;
+
+// The requests the fetch handler below leaves to the network, as data:
+// `impresspress-bundle` renders this object and that handler's `if (…)`
+// condition from ONE value (`BypassRules`, `bundle/bypass.rs`). It is handed
+// to the runtime in `initialize()`, so the runtime knows exactly which paths
+// THIS worker will never ask it for — the development sandbox refuses a site
+// file at one, because the file would publish and never be shown. Read from
+// the running worker rather than fetched, so it is the rules in force, not
+// the ones a newer deployment may already be serving.
+const BYPASS_RULES = __BYPASS_RULES__;
 
 let initialized = false;
 let initPromise = null;
@@ -70,7 +80,7 @@ async function ensureInitialized() {
         }
         console.log('[__APP_NAME__] Initializing runtime...');
         try {
-            await initialize({ dev: DEV_ENABLED });
+            await initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES });
         } catch (e) {
             await selfDestruct(`runtime initialize() failed: ${e}`);
             throw e;
@@ -156,11 +166,9 @@ self.addEventListener('fetch', (event) => {
     //
     // The condition is rendered whole from `impresspress-bundle`'s
     // `BypassRules` (`bundle/bypass.rs`, which says why each rule is there),
-    // and the same rules are written to `asset-manifest.json`'s `bypass` —
-    // that is how the running runtime knows which paths it will never be
-    // asked for, so the development sandbox can refuse a site file at one.
-    // A rule added here by hand would be a rule the manifest does not state.
-    if (__BYPASS__) {
+    // the same value `BYPASS_RULES` above states as data for the runtime. A
+    // rule added here by hand would be a rule the runtime does not know of.
+    if (__BYPASS_CONDITION__) {
         // ------------------------------------------------------------------
         // Bypassed — the network answers this, not the wasm runtime.
         //

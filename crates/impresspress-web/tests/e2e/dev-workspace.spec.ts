@@ -805,10 +805,10 @@ test('the editor refuses to save a binary file over itself', async ({ page }) =>
 
 /**
  * A site file the service worker would never route to the runtime is refused,
- * on a real deployment: the rules come from THIS bundle's
- * `/asset-manifest.json` (`impresspress-bundle` writes them from the same
- * value it rendered `sw.js`'s bypass condition from), read by the service
- * worker's own `fetch`. `site/manifest.json` — a PWA manifest — is served at
+ * on a real deployment: the rules are the ones THIS bundle's `sw.js` hands
+ * the runtime in `initialize({ bypass })` (`impresspress-bundle` renders them
+ * from the same value as the fetch handler's bypass condition).
+ * `site/manifest.json` — a PWA manifest — is served at
  * `/manifest.json`, which `sw.js` hands to the static host, so a write there
  * would publish and 404. The agent gets an error result naming the path and
  * the rule instead, and the ledger does not move.

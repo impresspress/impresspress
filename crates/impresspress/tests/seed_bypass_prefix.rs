@@ -23,32 +23,40 @@ fn the_bundler_bypasses_exactly_the_prefix_the_seed_importer_fetches_from() {
         .starts_with(impresspress_bundle::bundle::SEED_BYPASS_PREFIX));
 }
 
-/// `asset-manifest.json`'s `bypass` is written by `impresspress-bundle` and
-/// read by the dev block, in two crates that share no type. This crate sees
-/// both, so it checks the round trip: what the bundler writes for the
-/// dev-sandbox deployment's configuration is what the sandbox reads back,
-/// rule for rule — and that `/manifest.json` (the likeliest collision, a PWA
-/// manifest an agent writes) is one of them.
+/// The rules a worker hands `initialize({ bypass })` are rendered by
+/// `impresspress-bundle` and read by the dev block, in two crates that share
+/// no type. This crate sees both, so it checks the round trip: what the
+/// bundler renders for the dev-sandbox deployment's configuration is what the
+/// sandbox reads back, rule for rule — and that `/manifest.json` (the
+/// likeliest collision, a PWA manifest an agent writes) is one of them.
 #[test]
-fn the_sandbox_reads_back_exactly_the_bypass_rules_the_bundler_writes() {
+fn the_sandbox_reads_back_exactly_the_bypass_rules_the_worker_hands_it() {
     let dist = tempfile::tempdir().unwrap();
     std::fs::write(dist.path().join("app_bg.wasm"), b"\0asm\x01\0\0\0").unwrap();
     std::fs::write(dist.path().join("app.js"), b"fetch('app_bg.wasm');").unwrap();
-    std::fs::write(dist.path().join("sw.js.tmpl"), b"if (__BYPASS__) {}").unwrap();
+    std::fs::write(
+        dist.path().join("sw.js.tmpl"),
+        b"const BYPASS_RULES = __BYPASS_RULES__;\nif (__BYPASS_CONDITION__) {}\n",
+    )
+    .unwrap();
     let app = impresspress_bundle::bundle::AppConfig {
         dev_enabled: true,
         extra_bypass_prefix: vec!["/__impresspress_dev/compiler/".to_string()],
         ..Default::default()
     };
+    let rendered = impresspress_bundle::bundle::BypassRules::for_bundle("/app", &app);
     impresspress_bundle::bundle::run(dist.path(), dist.path(), app).unwrap();
 
-    let written = std::fs::read(dist.path().join("asset-manifest.json")).unwrap();
-    let produced: impresspress_bundle::bundle::manifest::AssetManifest =
-        serde_json::from_slice(&written).unwrap();
-    let read = impresspress_core::blocks::dev::BypassRules::from_asset_manifest(&written).unwrap();
+    let sw = std::fs::read_to_string(dist.path().join("sw.js")).unwrap();
+    let data = sw
+        .strip_prefix("const BYPASS_RULES = ")
+        .and_then(|rest| rest.split_once(";\n"))
+        .map(|(data, _)| data)
+        .expect("sw.js declares BYPASS_RULES");
+    let read: impresspress_core::blocks::dev::BypassRules = serde_json::from_str(data).unwrap();
 
-    assert_eq!(read.exact, produced.bypass.exact);
-    assert_eq!(read.prefixes, produced.bypass.prefixes);
+    assert_eq!(read.exact, rendered.exact);
+    assert_eq!(read.prefixes, rendered.prefixes);
     assert!(
         read.exact.contains(&"/manifest.json".to_string()),
         "{read:?}"

@@ -3,8 +3,6 @@ use std::{collections::BTreeMap, path::Path};
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 
-use super::bypass::BypassRules;
-
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
 pub struct AssetManifest {
     #[serde(rename = "buildId")]
@@ -31,19 +29,6 @@ pub struct AssetManifest {
     /// exporting a site with no runtime in it.
     #[serde(default)]
     pub files: Vec<String>,
-    /// The request paths the bundle's service worker leaves to the network
-    /// instead of the wasm runtime — the same [`BypassRules`] value `sw.js`'s
-    /// bypass condition was rendered from, never a second list.
-    ///
-    /// The running runtime cannot read `sw.js`'s logic, and it needs the
-    /// rules: the development sandbox refuses a site file at a path these
-    /// shadow, because the service worker would send every request for it to
-    /// the static host and the file would never be shown.
-    ///
-    /// `#[serde(default)]` so a manifest written by an older bundler still
-    /// deserializes, with no rules.
-    #[serde(default)]
-    pub bypass: BypassRules,
 }
 
 /// Every file under `dir`, relative to it, `/`-separated and sorted, skipping
@@ -130,10 +115,6 @@ mod tests {
             build_id: "a1b2c3d4".into(),
             assets,
             files: vec!["index.html".into(), "vendor/sql-wasm.wasm".into()],
-            bypass: BypassRules {
-                exact: vec!["/sw.js".into()],
-                prefixes: vec!["/snippets/".into()],
-            },
         };
         m.write(&path).unwrap();
 
@@ -144,13 +125,6 @@ mod tests {
         // the export reads it back verbatim and fetches each one.
         let parsed: AssetManifest = serde_json::from_str(&contents).unwrap();
         assert_eq!(parsed.files, vec!["index.html", "vendor/sql-wasm.wasm"]);
-        // So do the bypass rules, under the field name the runtime reads.
-        let value: serde_json::Value = serde_json::from_str(&contents).unwrap();
-        assert_eq!(
-            value["bypass"],
-            serde_json::json!({"exact": ["/sw.js"], "prefixes": ["/snippets/"]})
-        );
-        assert_eq!(parsed.bypass, m.bypass);
     }
 
     /// A manifest written by a bundler that predates `files` still parses;
@@ -161,7 +135,6 @@ mod tests {
         let parsed: AssetManifest =
             serde_json::from_str(r#"{"buildId": "x", "assets": {}}"#).unwrap();
         assert!(parsed.files.is_empty());
-        assert_eq!(parsed.bypass, BypassRules::default());
     }
 
     /// Every file under the directory, relative and sorted, with unrendered
@@ -229,7 +202,6 @@ mod tests {
             build_id: "x".into(),
             assets,
             files: Vec::new(),
-            bypass: BypassRules::default(),
         };
         m.write(&path).unwrap();
         let body = std::fs::read_to_string(&path).unwrap();

@@ -29,8 +29,8 @@ pub struct AppConfig {
     /// Additional URL path prefixes that the Service Worker's fetch handler
     /// should bypass (let the origin serve directly). Each entry joins the
     /// bundle's [`BypassRules`] as a prefix rule, rendered into `sw.js` as a
-    /// `url.pathname.startsWith(<prefix>)` clause and listed in
-    /// `asset-manifest.json`'s `bypass`.
+    /// `url.pathname.startsWith(<prefix>)` clause and into the rules
+    /// `initialize()` hands the runtime.
     pub extra_bypass_prefix: Vec<String>,
     /// Additional exact URL paths the Service Worker's fetch handler should
     /// bypass. Unlike `extra_bypass_prefix` (a prefix rule), each entry is an
@@ -49,7 +49,7 @@ pub struct AppConfig {
     /// Whether the Service Worker boots the runtime with the browser
     /// development sandbox on: `sw.js.tmpl`'s `__DEV_ENABLED__` placeholder
     /// renders one constant, `const DEV_ENABLED = true;`, which both
-    /// `initialize({ dev: DEV_ENABLED })` and the isolation-header
+    /// `initialize({ dev: DEV_ENABLED, … })` and the isolation-header
     /// passthrough read. **Default: false.**
     /// Driven by `[dev] enabled` in `impresspress.toml`; the runtime still
     /// needs to have been compiled with `impresspress-web/browser-devtools`
@@ -220,9 +220,10 @@ pub fn run(pkg_dir: &Path, repo_dir: &Path, app: AppConfig) -> Result<()> {
     //    would name three `*.tmpl` files that no longer exist and omit the
     //    three real ones.
     //
-    //    The bypass rules are computed ONCE, here, and both `sw.js` (below)
-    //    and the manifest (step 6) are written from this one value — see
-    //    `bypass`'s module docs for why there must not be a second list.
+    //    The bypass rules are computed ONCE, here: `sw.js`'s fetch condition
+    //    and the rules it hands the runtime in `initialize()` are both
+    //    rendered from this one value — see `bypass`'s module docs for why
+    //    there must not be a second list.
     let base_name = pair.as_ref().map(|(b, _, _)| b.as_str()).unwrap_or("app");
     let bypass = BypassRules::for_bundle(&wasm_js_prefix_val, &app);
     let vars = build_template_vars(
@@ -238,10 +239,9 @@ pub fn run(pkg_dir: &Path, repo_dir: &Path, app: AppConfig) -> Result<()> {
     render_if_exists(pkg_dir, "index.html.tmpl", "index.html", &vars)?;
 
     // 6. The manifest, last: `assets` (the two logical names templates
-    //    reference), `files` (the whole shell, for a runtime that needs
+    //    reference) plus `files` (the whole shell, for a runtime that needs
     //    to enumerate the static files it was shipped inside of — see
-    //    `AssetManifest::files`) and `bypass` (the rules `sw.js` was just
-    //    rendered from — see `AssetManifest::bypass`).
+    //    `AssetManifest::files`).
     //
     //    `asset-manifest.json` names itself in `files`. That is deliberate
     //    and costs nothing: the listing is of NAMES, taken before the file
@@ -266,7 +266,6 @@ pub fn run(pkg_dir: &Path, repo_dir: &Path, app: AppConfig) -> Result<()> {
         build_id,
         assets: manifest_assets,
         files,
-        bypass,
     };
     manifest.write(&pkg_dir.join("asset-manifest.json"))?;
 
@@ -343,9 +342,10 @@ fn build_template_vars(
     vars.insert("BUILD_ID".to_string(), build_id);
     vars.insert("WASM_JS".to_string(), wasm_js);
     vars.insert("WASM_BIN".to_string(), wasm_bin);
-    // The fetch handler's whole bypass condition, from the same rules the
-    // manifest lists.
-    vars.insert("BYPASS".to_string(), bypass.render_condition());
+    // The fetch handler's whole bypass condition, and the same rules as the
+    // data `initialize()` hands the runtime — both from the one value.
+    vars.insert("BYPASS_CONDITION".to_string(), bypass.render_condition());
+    vars.insert("BYPASS_RULES".to_string(), bypass.render_data());
     vars.insert("APP_NAME".to_string(), app_name);
     vars.insert("APP_TITLE".to_string(), app_title);
     vars.insert("BOOT_REDIRECT".to_string(), boot_redirect);

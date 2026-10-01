@@ -1,6 +1,6 @@
 use std::{fs, path::PathBuf};
 
-use impresspress_bundle::bundle::{manifest::AssetManifest, run, AppConfig, BypassRules};
+use impresspress_bundle::bundle::{run, AppConfig, BypassRules};
 
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/bundle_fixtures/pkg-in")
@@ -42,7 +42,10 @@ fn exact_bypass_renders_into_sw() {
         sw.contains("url.pathname === '/index.html'"),
         "sw.js missing exact '/index.html' bypass"
     );
-    assert!(!sw.contains("__BYPASS__"), "placeholder not substituted");
+    assert!(
+        !sw.contains("__BYPASS_CONDITION__"),
+        "placeholder not substituted"
+    );
 }
 
 #[test]
@@ -50,7 +53,7 @@ fn exact_bypass_empty_leaves_sw_unchanged() {
     let tmp = pkg_copy();
     run(tmp.path(), tmp.path(), AppConfig::default()).expect("bundler ok");
     let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
-    assert!(!sw.contains("__BYPASS__"));
+    assert!(!sw.contains("__BYPASS_CONDITION__"));
     assert!(!sw.contains("=== '/'"));
 }
 
@@ -180,7 +183,7 @@ fn empty_exact_leaves_production_sw_bypass_unchanged() {
     let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
 
     assert!(
-        !sw.contains("__BYPASS__"),
+        !sw.contains("__BYPASS_CONDITION__"),
         "placeholder not substituted in sw.js"
     );
     // The whole default condition: the base exact paths, the shell's vendor
@@ -224,7 +227,7 @@ fn sw_passes_the_dev_flag_to_initialize() {
         "sw.js did not receive the dev flag; sw.js = {sw}"
     );
     assert!(
-        sw.contains("initialize({ dev: DEV_ENABLED })"),
+        sw.contains("initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES })"),
         "initialize() must read the one constant; sw.js = {sw}"
     );
 }
@@ -241,7 +244,7 @@ fn sw_defaults_the_dev_flag_to_false() {
     // the flag explicitly false, not merely absent.
     assert!(sw.contains("const DEV_ENABLED = false;"), "sw.js = {sw}");
     assert!(
-        sw.contains("initialize({ dev: DEV_ENABLED })"),
+        sw.contains("initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES })"),
         "initialize() must read the one constant; sw.js = {sw}"
     );
     assert!(
@@ -268,7 +271,10 @@ fn a_dev_bundle_bypasses_the_seed_prefix() {
         sw.contains("url.pathname.startsWith('/seed/')"),
         "sw.js does not bypass the seed bundle; sw.js = {sw}"
     );
-    assert!(!sw.contains("__BYPASS__"), "placeholder not substituted");
+    assert!(
+        !sw.contains("__BYPASS_CONDITION__"),
+        "placeholder not substituted"
+    );
 }
 
 /// And only then: a bundle with no sandbox serves no seed, so intercepting
@@ -319,14 +325,24 @@ fn bypasses(sw: &str, path: &str) -> bool {
             .any(|prefix| path.starts_with(prefix.as_str()))
 }
 
-/// `asset-manifest.json`'s `bypass` is what the running runtime believes the
-/// service worker leaves to the network — the development sandbox refuses a
-/// site file at any path it lists. It must be exactly the rules `sw.js`
-/// applies, for a plain bundle and for a dev bundle with an app's own extras:
-/// a rule only `sw.js` had would be a site file that publishes and 404s, and
-/// a rule only the manifest had would refuse a file the runtime could serve.
+/// The `BYPASS_RULES` constant the rendered `sw.js` hands `initialize()`.
+fn sw_initialize_rules(sw: &str) -> BypassRules {
+    let declaration = "const BYPASS_RULES = ";
+    assert_eq!(sw.matches(declaration).count(), 1, "sw.js = {sw}");
+    let start = sw.find(declaration).unwrap() + declaration.len();
+    let value = &sw[start..start + sw[start..].find(";\n").expect("declaration ends")];
+    serde_json::from_str(value).expect("BYPASS_RULES is JSON")
+}
+
+/// The rules `sw.js` hands the runtime in `initialize()` are what the running
+/// runtime believes this worker leaves to the network — the development
+/// sandbox refuses a site file at any path they list. They must be exactly
+/// the rules the fetch handler's condition applies, for a plain bundle and
+/// for a dev bundle with an app's own extras: a rule only the condition had
+/// would be a site file that publishes and 404s, and a rule only the data had
+/// would refuse a file the runtime could serve.
 #[test]
-fn the_manifest_states_exactly_the_bypass_rules_sw_js_applies() {
+fn initialize_is_handed_exactly_the_bypass_rules_the_fetch_handler_applies() {
     let configs = [
         AppConfig::default(),
         AppConfig {
@@ -341,35 +357,34 @@ fn the_manifest_states_exactly_the_bypass_rules_sw_js_applies() {
         let tmp = production_pkg_copy();
         run(tmp.path(), tmp.path(), app).expect("bundler ok");
         let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
-        let body = fs::read_to_string(tmp.path().join("asset-manifest.json")).unwrap();
-        let manifest: AssetManifest = serde_json::from_str(&body).unwrap();
+        let handed = sw_initialize_rules(&sw);
 
+        assert!(
+            sw.contains("await initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES });"),
+            "sw.js = {sw}"
+        );
         // Rule for rule, in order.
-        assert_eq!(manifest.bypass, sw_bypass_rules(&sw), "dev = {dev}");
-        // And each listed rule, put to the rendered condition, is bypassed —
+        assert_eq!(handed, sw_bypass_rules(&sw), "dev = {dev}");
+        // And each handed rule, put to the rendered condition, is bypassed —
         // so the comparison above is not two readings of the same mistake.
-        for path in &manifest.bypass.exact {
+        for path in &handed.exact {
             assert!(bypasses(&sw, path), "{path} (dev = {dev}); sw.js = {sw}");
         }
-        for prefix in &manifest.bypass.prefixes {
+        for prefix in &handed.prefixes {
             let under = format!("{prefix}x");
             assert!(bypasses(&sw, &under), "{under} (dev = {dev}); sw.js = {sw}");
         }
-        assert!(manifest
-            .bypass
-            .exact
-            .contains(&"/manifest.json".to_string()));
+        assert!(handed.exact.contains(&"/manifest.json".to_string()));
         assert_eq!(
-            manifest.bypass.prefixes.contains(&"/seed/".to_string()),
+            handed.prefixes.contains(&"/seed/".to_string()),
             dev,
             "the seed prefix is a dev bundle's alone"
         );
         if dev {
-            assert!(manifest
-                .bypass
+            assert!(handed
                 .prefixes
                 .contains(&"/__impresspress_dev/compiler/".to_string()));
-            assert!(manifest.bypass.exact.contains(&"/index.html".to_string()));
+            assert!(handed.exact.contains(&"/index.html".to_string()));
         }
     }
 }

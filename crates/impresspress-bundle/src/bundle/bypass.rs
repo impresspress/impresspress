@@ -2,17 +2,20 @@
 //! network (the static host) instead of the wasm runtime.
 //!
 //! [`BypassRules::for_bundle`] is the ONE place the list is assembled. Both of
-//! its consumers read the value it returns, never a list of their own:
+//! its consumers in `sw.js.tmpl` read the value it returns, never a list of
+//! their own:
 //!
-//! * `sw.js.tmpl`'s `__BYPASS__` placeholder, rendered by
-//!   [`BypassRules::render_condition`] into the fetch handler's `if (…)`;
-//! * `asset-manifest.json`'s `bypass` field ([`super::manifest::AssetManifest`]),
-//!   which is how the running runtime learns them. The development sandbox
-//!   reads it to refuse a site file at a path the service worker would never
-//!   route to the runtime — a file there would publish and then 404, because
-//!   the request for it never reaches the code that serves the site.
+//! * `__BYPASS_CONDITION__`, rendered by [`BypassRules::render_condition`]
+//!   into the fetch handler's `if (…)`;
+//! * `__BYPASS_RULES__`, rendered by [`BypassRules::render_data`] into the
+//!   `BYPASS_RULES` constant the worker passes to `initialize({ bypass })`.
+//!   That is how the running runtime learns the rules of the worker in front
+//!   of it: the development sandbox refuses a site file at a path the worker
+//!   would never route to the runtime — a file there would publish and then
+//!   404, because the request for it never reaches the code that serves the
+//!   site.
 //!
-//! A rule that `sw.js` applied but the manifest did not state would be exactly
+//! A rule the condition applied but the data did not state would be exactly
 //! that silent shadowing again, which is why there is no second list.
 
 use serde::{Deserialize, Serialize};
@@ -133,6 +136,14 @@ impl BypassRules {
             );
         clauses.collect::<Vec<_>>().join(CLAUSE_SEPARATOR)
     }
+
+    /// The rules as the JavaScript object literal `sw.js.tmpl`'s
+    /// `__BYPASS_RULES__` renders to — `{"exact":[…],"prefixes":[…]}`, on one
+    /// line. JSON is a JavaScript expression, and it is also exactly what the
+    /// runtime parses back out of the `initialize()` options.
+    pub fn render_data(&self) -> String {
+        serde_json::to_string(self).expect("a list of strings always serializes")
+    }
 }
 
 /// What joins two clauses of [`BypassRules::render_condition`]: the `||` and
@@ -209,6 +220,18 @@ mod tests {
         assert_eq!(
             rules.prefixes,
             ["/app", "/snippets/", "/cdn-cgi/", "/seed/"]
+        );
+    }
+
+    #[test]
+    fn the_data_is_the_rules_as_one_line_of_json() {
+        let rules = BypassRules {
+            exact: vec!["/a".to_string()],
+            prefixes: vec!["/p/".to_string()],
+        };
+        assert_eq!(
+            rules.render_data(),
+            r#"{"exact":["/a"],"prefixes":["/p/"]}"#
         );
     }
 

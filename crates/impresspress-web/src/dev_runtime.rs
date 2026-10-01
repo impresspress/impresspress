@@ -802,8 +802,7 @@ impl seed::SeedFetch for SwFetch {
 
 /// [`ShellSource`] over `/asset-manifest.json` and the service worker's own
 /// `fetch` — how the export reads the static files this deployment was
-/// shipped as, and how the sandbox learns which paths this deployment's
-/// service worker bypasses.
+/// shipped as.
 ///
 /// # Why fetching from in here reaches the network
 ///
@@ -886,15 +885,6 @@ impl ShellSource for BrowserShellSource {
     async fn fetch(&self, path: &str) -> Result<Vec<u8>, String> {
         self.get(&format!("/{path}")).await
     }
-
-    /// Read on every call — once per site write, never per file — rather than
-    /// cached for the worker's life: it is one small `no-store` fetch, and a
-    /// cached copy is one more thing that could disagree with the manifest
-    /// the deployment actually serves.
-    async fn bypass_rules(&self) -> Result<BypassRules, String> {
-        let bytes = self.get(ASSET_MANIFEST_URL).await?;
-        BypassRules::from_asset_manifest(&bytes)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -930,7 +920,13 @@ pub struct Sandbox {
 /// is byte-identical to one that never asked for a sandbox. Which of the two
 /// compiled-in modes this is decides what the FACTORY registers, not whether
 /// there is a control at all — see [`SandboxMode`](crate::SandboxMode).
-pub fn attach(factory: RuntimeFactory) -> (Rc<RuntimeFactory>, Option<Sandbox>) {
+///
+/// `bypass` is the rules the service worker handed `initialize({ bypass })`
+/// (see `crate::initialize`), kept on the `DevShared` this builds.
+pub fn attach(
+    factory: RuntimeFactory,
+    bypass: BypassRules,
+) -> (Rc<RuntimeFactory>, Option<Sandbox>) {
     if !factory.mode.runtime_present() {
         return (Rc::new(factory), None);
     }
@@ -939,7 +935,7 @@ pub fn attach(factory: RuntimeFactory) -> (Rc<RuntimeFactory>, Option<Sandbox>) 
     // same reason `RuntimeControl` is — this implementation resolves through a
     // `JsFuture`.
     let shell: Arc<dyn ShellSource> = Arc::new(BrowserShellSource);
-    let shared = DevShared::new(control.clone(), shell);
+    let shared = DevShared::new(control.clone(), shell, bypass);
     let factory = Rc::new(factory.with_dev(shared.clone()));
     control.set_factory(&factory);
     (factory, Some(Sandbox { control, shared }))
@@ -1080,13 +1076,13 @@ async fn seed_on_boot(ctx: &dyn Context, shared: &Arc<DevShared>) -> Result<(), 
     // activation rebuilds through: the importer uses it to `inspect` each
     // seeded artifact under deny-all capabilities and run the four validation
     // rules that need the guest's own `BlockInfo` (see `seed`'s module docs).
-    // `shared.shell` is how the importer learns the service worker's bypass
-    // rules: a seed's site file at a bypassed path would never be shown, so
-    // the import refuses it like any other bad bundle.
+    // `shared.bypass` is what this worker handed `initialize()`: a seed's
+    // site file at a path it bypasses would never be shown, so the import
+    // refuses it like any other bad bundle.
     let Some(generation) = seed::import(
         ctx,
         shared.control.as_ref(),
-        shared.shell.as_ref(),
+        &shared.bypass,
         &manifest,
         &fetch,
     )

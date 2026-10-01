@@ -41,7 +41,7 @@
 //! in-browser compiler, no cross-origin-isolation headers on static files.
 //! All three follow from one build-time constant in `sw.js`
 //! (`const DEV_ENABLED = true;`, `impresspress-bundle`'s `sw.js.tmpl`), which
-//! `initialize({ dev: DEV_ENABLED })` and the isolation-header passthrough
+//! `initialize({ dev: DEV_ENABLED, … })` and the isolation-header passthrough
 //! both read — so turning the sandbox off is one line rewritten, and its
 //! absence is an [`ErrorCode::Internal`], never a silent pass-through of a
 //! shell that would come up as a second sandbox.
@@ -52,6 +52,7 @@ use wafer_run::{context::Context, ErrorCode, OutputStream, WaferError};
 
 use super::{
     artifacts, blobs,
+    bypass::BypassRules,
     contracts::{ExportFile, ExportManifest},
     data_snapshot, generation, no_store, no_store_db_error_internal, no_store_error_status, repo,
     scaffold,
@@ -71,14 +72,8 @@ use crate::{config_vars::APP_NAME_KEY, http::err_internal};
 const SW_DEV_ON: &str = "const DEV_ENABLED = true;";
 const SW_DEV_OFF: &str = "const DEV_ENABLED = false;";
 
-/// The shell file whose code this export edits.
+/// The one shell file whose content this export edits.
 const SW_PATH: &str = "sw.js";
-
-/// The shell file that STATES `sw.js`'s bypass rules (its `bypass` field,
-/// written by `impresspress-bundle` from the same value it rendered `sw.js`
-/// from). Whatever this export removes from one it removes from the other —
-/// see [`strip_compiler_rule`].
-const ASSET_MANIFEST_PATH: &str = "asset-manifest.json";
 
 /// Where the data snapshot lands, relative to [`seed::ROOT`].
 ///
@@ -275,9 +270,7 @@ async fn assemble(ctx: &dyn Context, shared: &DevShared) -> Result<Assembled, Re
             .await
             .map_err(|e| Refusal::Shell(format!("{path}: {e}")))?;
         let bytes = if path == SW_PATH {
-            strip_compiler_bypass(sw_with_dev_off(&bytes)?)
-        } else if path == ASSET_MANIFEST_PATH {
-            strip_compiler_rule(bytes)?
+            strip_compiler_rule(strip_compiler_bypass(sw_with_dev_off(&bytes)?))?
         } else {
             bytes
         };
@@ -554,31 +547,46 @@ fn strip_compiler_bypass(bytes: Vec<u8>) -> Vec<u8> {
     }
 }
 
-/// `asset-manifest.json` with the compiler prefix removed from its `bypass`
-/// rules, if they list it — the manifest's half of [`strip_compiler_bypass`].
+/// The declaration `sw.js.tmpl` renders the rules the worker hands
+/// `initialize({ bypass })` into: one line, `const BYPASS_RULES = {…};`.
+const SW_BYPASS_RULES: &str = "const BYPASS_RULES = ";
+
+/// `sw.js` with the compiler prefix removed from the `BYPASS_RULES` it hands
+/// the runtime — the data half of [`strip_compiler_bypass`].
 ///
-/// The manifest states the rules `sw.js` applies, and the exported site's
-/// runtime reads them (its seed import refuses a site file at a bypassed
-/// path). A manifest still listing a prefix the exported `sw.js` no longer
-/// bypasses would refuse paths that site can serve. A manifest without the
-/// prefix — or without a `bypass` field at all, from an older bundler — is
-/// copied byte for byte.
+/// The exported worker hands those rules to its runtime, whose seed import
+/// refuses a site file at any path they list. Rules still naming a prefix the
+/// exported fetch handler no longer bypasses would refuse paths that site can
+/// serve. The declaration is found by its exact text and must occur at most
+/// once: absent, it is a `sw.js` from a bundler that predates it and is left
+/// alone (its runtime gets no rules); present twice, this cannot know which
+/// one the worker uses, and refuses rather than guess.
 fn strip_compiler_rule(bytes: Vec<u8>) -> Result<Vec<u8>, Refusal> {
-    let mut manifest: serde_json::Value = serde_json::from_slice(&bytes)
-        .map_err(|e| Refusal::Shell(format!("{ASSET_MANIFEST_PATH} did not parse: {e}")))?;
-    let Some(prefixes) = manifest
-        .pointer_mut("/bypass/prefixes")
-        .and_then(serde_json::Value::as_array_mut)
-    else {
-        return Ok(bytes);
-    };
-    let before = prefixes.len();
-    prefixes.retain(|prefix| prefix.as_str() != Some(COMPILER_ROOT));
-    if prefixes.len() == before {
-        return Ok(bytes);
+    let text = String::from_utf8(bytes)
+        .map_err(|e| Refusal::Shell(format!("the deployment's sw.js is not UTF-8: {e}")))?;
+    match text.matches(SW_BYPASS_RULES).count() {
+        0 => return Ok(text.into_bytes()),
+        1 => {}
+        n => {
+            return Err(Refusal::Shell(format!(
+                "the deployment's sw.js declares {SW_BYPASS_RULES:?} {n} times; the export \
+                 needs exactly one to remove the compiler's rule from it"
+            )))
+        }
     }
-    serde_json::to_vec_pretty(&manifest)
-        .map_err(|e| Refusal::Shell(format!("{ASSET_MANIFEST_PATH} did not serialize: {e}")))
+    let start = text.find(SW_BYPASS_RULES).expect("counted once") + SW_BYPASS_RULES.len();
+    let len = text[start..].find(";\n").ok_or_else(|| {
+        Refusal::Shell("the deployment's sw.js leaves BYPASS_RULES unterminated".to_string())
+    })?;
+    let mut rules: BypassRules = serde_json::from_str(&text[start..start + len]).map_err(|e| {
+        Refusal::Shell(format!(
+            "the deployment's sw.js BYPASS_RULES did not parse: {e}"
+        ))
+    })?;
+    rules.prefixes.retain(|prefix| prefix != COMPILER_ROOT);
+    let rendered = serde_json::to_string(&rules)
+        .map_err(|e| Refusal::Shell(format!("BYPASS_RULES did not serialize: {e}")))?;
+    Ok(format!("{}{rendered}{}", &text[..start], &text[start + len..]).into_bytes())
 }
 
 /// The first eight characters of a generation id — what the downloaded file

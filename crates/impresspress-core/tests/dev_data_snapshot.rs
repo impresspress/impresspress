@@ -25,7 +25,7 @@ use impresspress_core::{
             self,
             data_snapshot::{self, DataSnapshot},
             seed::{self, SeedManifest},
-            test_support::{seed_file, FakeControl, FakeShell, MapFetch},
+            test_support::{fake_bypass_rules, seed_file, FakeControl, MapFetch},
         },
         products::ProductsBlock,
     },
@@ -1128,9 +1128,15 @@ async fn seed_import_applies_data_json_when_present() {
         .with(&seed::site_url("index.html"), b"<h1>shop</h1>")
         .with(&seed::data_url("data.json"), &data_bytes);
 
-    seed::import(&ctx, control.as_ref(), &FakeShell::new(), &manifest, &fetch)
-        .await
-        .unwrap();
+    seed::import(
+        &ctx,
+        control.as_ref(),
+        &fake_bypass_rules(),
+        &manifest,
+        &fetch,
+    )
+    .await
+    .unwrap();
 
     let products = db::list_all(&ctx, PRODUCTS_TABLE, Vec::new())
         .await
@@ -1176,9 +1182,15 @@ async fn seed_import_fails_when_data_json_does_not_verify() {
         .with(&seed::site_url("index.html"), b"<h1>shop</h1>")
         .with(&seed::data_url("data.json"), &data_bytes);
 
-    let err = seed::import(&ctx, control.as_ref(), &FakeShell::new(), &manifest, &fetch)
-        .await
-        .expect_err("a hash mismatch on data.json must fail the whole seed import");
+    let err = seed::import(
+        &ctx,
+        control.as_ref(),
+        &fake_bypass_rules(),
+        &manifest,
+        &fetch,
+    )
+    .await
+    .expect_err("a hash mismatch on data.json must fail the whole seed import");
     assert!(
         err.contains("hashes to"),
         "expected a hash-mismatch message, got: {err}"

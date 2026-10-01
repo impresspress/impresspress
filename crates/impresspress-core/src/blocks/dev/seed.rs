@@ -76,8 +76,9 @@ use wafer_run::context::Context;
 
 use super::{
     artifacts, blobs,
+    bypass::BypassRules,
     contracts::SiteManifest,
-    control::{DynamicBlockSpec, RuntimeControl, ShellSource},
+    control::{DynamicBlockSpec, RuntimeControl},
     data_snapshot,
     generation::GenerationManifest,
     paths,
@@ -322,10 +323,10 @@ pub async fn is_fresh(ctx: &dyn Context) -> Result<bool, String> {
 /// did not use it left four validation rules unapplied and every later
 /// staging attempt refused.
 ///
-/// `shell` is the static-shell seam ([`ShellSource::bypass_rules`]): a site
-/// file at a path the service worker sends to the static host would never be
-/// shown, so the bundle is refused before anything is fetched, exactly as a
-/// site write to that path is.
+/// `bypass` is the running service worker's bypass rules
+/// ([`super::DevShared::bypass`]): a site file at a path the worker sends to
+/// the static host would never be shown, so the bundle is refused before
+/// anything is fetched, exactly as a site write to that path is.
 ///
 /// The order is: check every declared spec, fetch and check the sandbox block
 /// (its prompt and guide), fetch and inspect every artifact, check every
@@ -345,11 +346,11 @@ pub async fn is_fresh(ctx: &dyn Context) -> Result<bool, String> {
 pub async fn import(
     ctx: &dyn Context,
     control: &dyn RuntimeControl,
-    shell: &dyn ShellSource,
+    bypass: &BypassRules,
     manifest: &SeedManifest,
     fetch: &dyn SeedFetch,
 ) -> Result<Option<GenerationManifest>, String> {
-    let outcome = import_bundle(ctx, control, shell, manifest, fetch).await;
+    let outcome = import_bundle(ctx, control, bypass, manifest, fetch).await;
     match &outcome {
         // An attempt that ran and failed, and an attempt that ran and worked:
         // both are facts about THIS instance, and the second has to clear the
@@ -367,7 +368,7 @@ pub async fn import(
 async fn import_bundle(
     ctx: &dyn Context,
     control: &dyn RuntimeControl,
-    shell: &dyn ShellSource,
+    bypass: &BypassRules,
     manifest: &SeedManifest,
     fetch: &dyn SeedFetch,
 ) -> Result<Option<GenerationManifest>, String> {
@@ -391,22 +392,14 @@ async fn import_bundle(
     // Every site path against the service worker's bypass rules, before a
     // single byte is fetched — the same check every site write applies
     // (`super::bypass`). A seeded site file the service worker sends to the
-    // static host would import, publish and never be shown, and the rules are
-    // only knowable from the running shell, so this is a refusal the
-    // bundle's author cannot have run beforehand: it names the path.
-    // (Read only when there is a site to check: a block-only bundle has no
-    // path a request could be shadowed at.)
-    if !manifest.site.is_empty() {
-        let rules = shell
-            .bypass_rules()
-            .await
-            .map_err(|e| format!("the service worker's bypass rules could not be read: {e}"))?;
-        for entry in &manifest.site {
-            let workspace_path = format!("{}{}", workspace::SITE_PREFIX, entry.path);
-            rules
-                .refuse_shadowed(&workspace_path)
-                .map_err(|refused| format!("the seed bundle's site file {refused}"))?;
-        }
+    // static host would import, publish and never be shown, and the rules
+    // are the running worker's, so this is a refusal the bundle's author
+    // cannot have run beforehand: it names the path.
+    for entry in &manifest.site {
+        let workspace_path = format!("{}{}", workspace::SITE_PREFIX, entry.path);
+        bypass
+            .refuse_shadowed(&workspace_path)
+            .map_err(|refused| format!("the seed bundle's site file {refused}"))?;
     }
 
     // Every spec, before a single byte is fetched. Two reasons for the

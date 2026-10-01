@@ -10,36 +10,43 @@
 //! writing `site/manifest.json`.
 //!
 //! The rules are not restated here. `impresspress-bundle` renders `sw.js`'s
-//! bypass condition and `/asset-manifest.json`'s `bypass` field from ONE value
-//! (its `BypassRules`), and the sandbox reads that field back through its
-//! static-shell seam ([`ShellSource::bypass_rules`](super::ShellSource::bypass_rules)).
+//! bypass condition and a `BYPASS_RULES` constant from ONE value (its
+//! `BypassRules`), and the running worker hands that constant to the runtime
+//! as `initialize({ bypass })`. The browser host keeps it on
+//! [`DevShared::bypass`](super::DevShared::bypass), so every check reads the
+//! rules of the worker actually in front of this runtime — no fetch, nothing
+//! to fail, and not the rules a newer deployment may already be serving.
 //! This module is the reading side: the same JSON shape, and the one check
-//! every site-writing path applies — a single write, a batch, the scaffolder
-//! and the seed importer.
+//! every site-writing path applies — a single write, a batch, and the seed
+//! importer.
+//!
+//! # What it covers
+//!
+//! A site file's OWN URL: `site/<path>` is checked at `/<path>`. The web
+//! block's clean-URL aliases for the same file (`/about` for
+//! `site/about.html`, `/blog/` for `site/blog/index.html`) are not: a
+//! bypassed alias still leaves the file reachable at its own URL, so it is
+//! not shadowed, and no default rule names such an alias anyway.
 
 use serde::{Deserialize, Serialize};
 
 use super::workspace;
 
-/// The service worker's bypass rules, as `/asset-manifest.json`'s `bypass`
-/// states them: a request path equal to an `exact` entry, or starting with a
-/// `prefixes` entry, goes to the static host instead of the runtime.
+/// The service worker's bypass rules, as `sw.js` hands them to
+/// `initialize({ bypass })`: a request path equal to an `exact` entry, or
+/// starting with a `prefixes` entry, goes to the static host instead of the
+/// runtime.
+///
+/// [`Default`] is NO rules — what a runtime gets from an older `sw.js` that
+/// passes none. Its worker still bypasses what it always did; the sandbox
+/// simply cannot see which paths those are, so it refuses none, exactly as
+/// it did before the rules were handed over.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BypassRules {
     #[serde(default)]
     pub exact: Vec<String>,
     #[serde(default)]
     pub prefixes: Vec<String>,
-}
-
-/// The one field of `/asset-manifest.json` [`BypassRules::from_asset_manifest`]
-/// reads.
-#[derive(Deserialize)]
-struct AssetManifestBypass {
-    /// Absent from a manifest written by an `impresspress-bundle` that
-    /// predates the field — see [`BypassRules::from_asset_manifest`].
-    #[serde(default)]
-    bypass: BypassRules,
 }
 
 /// The rule a path matched — what a refusal names.
@@ -61,22 +68,6 @@ impl std::fmt::Display for BypassRule<'_> {
 }
 
 impl BypassRules {
-    /// The rules `/asset-manifest.json`'s bytes state.
-    ///
-    /// A manifest with no `bypass` field yields NO rules, not an error: it was
-    /// written by a bundler that predates the field, and its service worker
-    /// still bypasses what it always did — the sandbox simply cannot see
-    /// which paths those are, so it refuses none, exactly as it did before
-    /// the field existed. Refusing every site write on such a deployment
-    /// instead would turn a missing safety check into a broken sandbox.
-    ///
-    /// `Err` only for bytes that are not a JSON object at all.
-    pub fn from_asset_manifest(bytes: &[u8]) -> Result<Self, String> {
-        serde_json::from_slice::<AssetManifestBypass>(bytes)
-            .map(|manifest| manifest.bypass)
-            .map_err(|e| format!("/asset-manifest.json did not parse: {e}"))
-    }
-
     /// The rule that sends a request for `request_path` (`/manifest.json`)
     /// to the static host, if any — exact rules first, then prefixes, in the
     /// order the manifest lists them.
@@ -128,26 +119,20 @@ mod tests {
     }
 
     #[test]
-    fn a_manifest_without_the_field_states_no_rules() {
-        let parsed =
-            BypassRules::from_asset_manifest(br#"{"buildId":"x","assets":{},"files":[]}"#).unwrap();
-        assert_eq!(parsed, BypassRules::default());
-        assert_eq!(parsed.refuse_shadowed("site/manifest.json"), Ok(()));
+    fn no_rules_refuse_nothing() {
+        assert_eq!(
+            BypassRules::default().refuse_shadowed("site/manifest.json"),
+            Ok(())
+        );
     }
 
     #[test]
-    fn the_field_is_read_as_the_bundler_writes_it() {
-        let parsed = BypassRules::from_asset_manifest(
-            br#"{"buildId":"x","assets":{},"files":[],
-                 "bypass":{"exact":["/sw.js","/manifest.json"],"prefixes":["/snippets/","/seed/"]}}"#,
+    fn the_rules_are_read_in_the_shape_the_bundler_renders() {
+        let parsed: BypassRules = serde_json::from_str(
+            r#"{"exact":["/sw.js","/manifest.json"],"prefixes":["/snippets/","/seed/"]}"#,
         )
         .unwrap();
         assert_eq!(parsed, rules());
-    }
-
-    #[test]
-    fn bytes_that_are_not_a_manifest_are_an_error() {
-        assert!(BypassRules::from_asset_manifest(b"<!doctype html>").is_err());
     }
 
     #[test]

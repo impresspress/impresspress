@@ -16,7 +16,9 @@ use impresspress_core::{
             runtime_state::{self, ActivationPhase, RuntimeState},
             seed_info::{self, SeedInfo},
         },
-        test_support::{dev_status, dev_with_accounts, signed_in_as, FakeControl, FakeShell},
+        test_support::{
+            dev_status, dev_with_accounts, fake_bypass_rules, signed_in_as, FakeControl, FakeShell,
+        },
         DevBlock, DevShared, RuntimeControl, ROUTES, WAFER_GUEST_VERSION,
     },
     test_support::{
@@ -285,6 +287,7 @@ fn routes_and_endpoints_stay_in_lockstep() {
     let info = DevBlock::with_workspace(DevShared::new(
         FakeControl::new(),
         std::sync::Arc::new(FakeShell::new()),
+        fake_bypass_rules(),
     ))
     .info();
 
@@ -347,7 +350,11 @@ fn routes_and_endpoints_stay_in_lockstep() {
 /// does not serve.
 #[test]
 fn an_exported_bundle_declares_no_surface_it_does_not_route() {
-    let shared = DevShared::new(FakeControl::new(), std::sync::Arc::new(FakeShell::new()));
+    let shared = DevShared::new(
+        FakeControl::new(),
+        std::sync::Arc::new(FakeShell::new()),
+        fake_bypass_rules(),
+    );
     let exported = DevBlock::runtime_only(std::sync::Arc::clone(&shared)).info();
 
     assert!(

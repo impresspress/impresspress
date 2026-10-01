@@ -22,8 +22,8 @@
     "suggested_prompt": "Build me a small online shop for handmade ceramics. Create a home page at site/index.html that lists products from /b/products/catalog and lets a visitor open one, using the storefront widget from /b/products/storefront.js, and include <script src=\"/b/webmcp/webmcp.js\" defer></script> in its <head> so a visitor's agent can use the shop's tools. Then create three products with shop_create_product, give each a published offer with shop_create_offer and shop_publish_offer, and set their status to active with shop_update_product. Show me the live site when you are done.",
     "guide": {
       "path": "guide.md",
-      "sha256": "bd6aaa5c9cee99d2b5cf9226ca27ef2fd6912134ab077c73606777ed312dac13",
-      "size": 3848,
+      "sha256": "860edc74e34a22555f37615829f6cfe8e7ae8c21d9b1d4fbaffff19892fab0b0",
+      "size": 3881,
       "content_type": "text/markdown; charset=utf-8"
     }
   }

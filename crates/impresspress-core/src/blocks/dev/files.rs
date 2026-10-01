@@ -132,7 +132,7 @@ use super::{
     workspace::{self, FileEntry, Workspace},
     DevShared,
 };
-use crate::{blocks::crud, http::err_internal};
+use crate::blocks::crud;
 
 // ---------------------------------------------------------------------------
 // Handlers
@@ -245,7 +245,7 @@ pub async fn handle_write(
         ));
     }
     if let Err(refusal) =
-        refuse_shadowed_site_files(shared, &area, std::iter::once(request.path.as_str())).await
+        refuse_shadowed_site_files(shared, &area, std::iter::once(request.path.as_str()))
     {
         return refusal;
     }
@@ -431,7 +431,7 @@ pub async fn handle_write_batch(
     // Every path, before the workspace is touched: one shadowed file refuses
     // the whole batch and nothing is stored.
     if let Err(refusal) =
-        refuse_shadowed_site_files(shared, &area, decoded.iter().map(|(path, _, _)| *path)).await
+        refuse_shadowed_site_files(shared, &area, decoded.iter().map(|(path, _, _)| *path))
     {
         return refusal;
     }
@@ -596,32 +596,23 @@ pub(super) async fn store_files(
 /// names the path and the rule.
 ///
 /// Only a `site/` write is checked — a block's source is never requested by
-/// URL — and the rules are read once for the whole request, however many
-/// files it writes, BEFORE the workspace lock is taken: reading them is a
-/// fetch of `/asset-manifest.json`, which has no business holding up every
-/// other writer. A shell whose rules cannot be read at all is a sanitized
-/// `500`, the same answer the export gives for a shell it cannot read; a
-/// manifest from a bundler that predates the rules yields none, and refuses
-/// nothing ([`super::BypassRules::from_asset_manifest`]).
-async fn refuse_shadowed_site_files<'a>(
+/// URL. The rules are the running worker's, held on
+/// [`DevShared::bypass`]; checking them is a lookup, so it runs before the
+/// workspace lock and refuses before anything is stored.
+fn refuse_shadowed_site_files<'a>(
     shared: &DevShared,
     area: &WorkspaceArea,
-    paths: impl Iterator<Item = &'a str>,
+    mut paths: impl Iterator<Item = &'a str>,
 ) -> Result<(), OutputStream> {
     if *area != WorkspaceArea::Site {
         return Ok(());
     }
-    let rules = shared
-        .shell
-        .bypass_rules()
-        .await
-        .map_err(|e| err_internal("dev workspace: the service worker's bypass rules", e))?;
-    for path in paths {
-        rules
+    paths.try_for_each(|path| {
+        shared
+            .bypass
             .refuse_shadowed(path)
-            .map_err(|refused| no_store_error(ErrorCode::InvalidArgument, &refused))?;
-    }
-    Ok(())
+            .map_err(|refused| no_store_error(ErrorCode::InvalidArgument, &refused))
+    })
 }
 
 /// The `400` for a path that would make one name both a file and a directory

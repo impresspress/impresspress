@@ -12,9 +12,10 @@ use impresspress_core::{
         blobs, gc, paths,
         repo::generations::GenerationCause,
         test_support::{
-            dev_get, dev_post, dev_status, dev_with_accounts, signed_in_as, FakeControl, FakeShell,
+            dev_get, dev_post, dev_status, dev_with_accounts, fake_bypass_rules, signed_in_as,
+            FakeControl, FakeShell,
         },
-        workspace, DevBlock, DevShared,
+        workspace, BypassRules, DevBlock, DevShared,
     },
     test_support::{
         admin_msg, anon_msg, output_http_header, output_http_json, output_http_status, output_json,
@@ -636,6 +637,7 @@ fn the_write_schema_and_the_handler_agree_on_what_is_required() {
     let info = DevBlock::with_workspace(DevShared::new(
         FakeControl::new(),
         std::sync::Arc::new(FakeShell::new()),
+        fake_bypass_rules(),
     ))
     .info();
     let write = info
@@ -1737,17 +1739,17 @@ async fn block_sources_are_not_checked_against_the_bypass_rules() {
     );
 }
 
-/// A deployment whose `asset-manifest.json` predates the `bypass` field
-/// states no rules, and the sandbox refuses nothing on its account.
+/// An older `sw.js` hands `initialize()` no rules, and the sandbox refuses
+/// nothing on their account.
 #[tokio::test]
-async fn a_shell_manifest_without_bypass_rules_refuses_nothing() {
-    let shell = FakeShell::new().with(
-        "asset-manifest.json",
-        br#"{"buildId":"abc123","assets":{},"files":[]}"#,
-    );
+async fn a_worker_that_hands_over_no_bypass_rules_refuses_nothing() {
     let ctx = TestContext::with_admin()
         .await
-        .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(shell))
+        .with_dev_added_and_bypass(
+            FakeControl::new(),
+            std::sync::Arc::new(FakeShell::new()),
+            BypassRules::default(),
+        )
         .await;
     write_new(&ctx, "site/manifest.json", "{}").await;
     assert_eq!(listed(&ctx, "site/").await, ["site/manifest.json"]);

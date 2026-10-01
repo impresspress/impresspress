@@ -19,7 +19,7 @@ use impresspress_core::{
         control::{DynamicBlockSpec, DynamicRoute, RouteAccessKind},
         repo::{self, generations::GenerationCause, runtime_state, seed_info},
         seed::{self, SandboxSeed, SeedBlock, SeedManifest},
-        test_support::{hello_info, seed_file as file, FakeControl, FakeShell, MapFetch},
+        test_support::{fake_bypass_rules, hello_info, seed_file as file, FakeControl, MapFetch},
         validation, workspace,
     },
     test_support::TestContext,
@@ -133,9 +133,15 @@ fn bundle_with_guide() -> MapFetch {
 /// Import `manifest` and expect a refusal; nothing may have been stored.
 async fn refused(manifest: &SeedManifest, bundle: &MapFetch) -> String {
     let (ctx, control) = fixture().await;
-    let err = seed::import(&ctx, control.as_ref(), &FakeShell::new(), manifest, bundle)
-        .await
-        .expect_err("refused");
+    let err = seed::import(
+        &ctx,
+        control.as_ref(),
+        &fake_bypass_rules(),
+        manifest,
+        bundle,
+    )
+    .await
+    .expect_err("refused");
     let ws = workspace::load(&ctx).await.expect("workspace");
     assert!(ws.files.is_empty(), "stored files: {:?}", ws.files.keys());
     assert_eq!(ws.blob_count, 0);
@@ -153,7 +159,7 @@ async fn a_sandbox_block_is_recorded_for_the_reference_and_the_page() {
     seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest_with(sandbox()),
         &bundle_with_guide(),
     )
@@ -172,7 +178,7 @@ async fn a_bundle_without_a_sandbox_block_records_nothing() {
     seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest(),
         &bundle(),
     )
@@ -204,7 +210,7 @@ async fn a_refusal_after_the_sandbox_block_checks_out_records_no_row() {
     let err = seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest,
         &bundle,
     )
@@ -302,7 +308,7 @@ async fn a_seed_bundle_becomes_the_workspace_and_generation_zero() {
     let generation = seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest(),
         &bundle(),
     )
@@ -388,7 +394,7 @@ async fn the_imported_generation_activates_as_generation_zero() {
     let generation = seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest(),
         &bundle(),
     )
@@ -430,7 +436,7 @@ async fn the_imported_generation_activates_as_generation_zero() {
     assert!(seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest(),
         &bundle()
     )
@@ -452,7 +458,7 @@ async fn a_second_import_on_a_non_fresh_instance_is_a_no_op() {
     seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest(),
         &bundle(),
     )
@@ -474,7 +480,7 @@ async fn a_second_import_on_a_non_fresh_instance_is_a_no_op() {
     assert!(seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest(),
         &bundle()
     )
@@ -515,7 +521,7 @@ async fn a_failed_generation_still_makes_an_instance_non_fresh() {
     assert!(seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest(),
         &bundle()
     )
@@ -536,7 +542,7 @@ async fn content_that_does_not_match_its_declared_hash_is_refused() {
     let error = seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest(),
         &tampered,
     )
@@ -564,7 +570,7 @@ async fn an_artifact_that_does_not_match_its_declared_hash_is_refused() {
     let error = seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest(),
         &tampered,
     )
@@ -590,7 +596,7 @@ async fn an_oversized_artifact_is_refused_and_never_stored() {
     let error = seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest,
         &bundle,
     )
@@ -621,7 +627,7 @@ async fn a_size_that_does_not_match_the_content_is_refused() {
     let error = seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest,
         &bundle(),
     )
@@ -645,7 +651,7 @@ async fn a_content_type_that_is_not_what_the_path_is_served_as_is_refused() {
     let error = seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest,
         &bundle(),
     )
@@ -667,7 +673,7 @@ async fn a_path_that_escapes_the_workspace_is_refused() {
     let error = seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest,
         &bundle,
     )
@@ -695,7 +701,7 @@ async fn a_file_the_bundle_does_not_carry_is_refused() {
     let error = seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest(),
         &incomplete,
     )
@@ -717,7 +723,7 @@ async fn a_block_artifact_the_bundle_does_not_carry_is_refused() {
     let error = seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest(),
         &incomplete,
     )
@@ -742,7 +748,7 @@ async fn a_bundle_from_another_schema_version_is_refused() {
     let error = seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest,
         &bundle(),
     )
@@ -767,7 +773,7 @@ async fn a_block_name_that_cannot_be_registered_is_refused() {
     let error = seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest,
         &bundle,
     )
@@ -829,7 +835,7 @@ async fn a_seeded_block_reaching_outside_its_namespace_is_refused() {
         let Err(error) = seed::import(
             &ctx,
             control.as_ref(),
-            &FakeShell::new(),
+            &fake_bypass_rules(),
             &manifest,
             &bundle(),
         )
@@ -867,7 +873,7 @@ async fn a_seeded_block_claiming_someone_elses_route_is_refused() {
     let error = seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest,
         &bundle(),
     )
@@ -888,7 +894,7 @@ async fn identical_content_at_two_paths_is_stored_once() {
     seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest,
         &bundle,
     )
@@ -949,7 +955,7 @@ async fn a_seeded_block_whose_module_reports_another_name_is_refused() {
     let error = seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest(),
         &bundle(),
     )
@@ -986,7 +992,7 @@ async fn a_seeded_block_declaring_an_endpoint_outside_its_prefix_is_refused() {
     let error = seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest(),
         &bundle(),
     )
@@ -1013,7 +1019,7 @@ async fn a_seeded_spec_that_grants_more_than_the_module_asks_for_is_refused() {
     let error = seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest,
         &bundle(),
     )
@@ -1043,7 +1049,7 @@ async fn a_module_that_asks_for_more_than_the_seeded_spec_is_refused() {
     let error = seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest(),
         &bundle(),
     )
@@ -1077,7 +1083,7 @@ async fn a_seeded_hyphenated_block_claiming_the_hyphen_spelling_is_refused() {
     let error = seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest,
         &bundle,
     )
@@ -1103,7 +1109,7 @@ async fn a_seeded_build_row_records_the_block_info_the_guest_reported() {
     seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest(),
         &bundle(),
     )
@@ -1141,7 +1147,7 @@ async fn a_block_built_against_a_different_guest_version_is_refused() {
     let error = seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest,
         &bundle(),
     )
@@ -1176,7 +1182,7 @@ async fn a_block_that_reports_no_guest_version_still_imports() {
     seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest,
         &bundle(),
     )
@@ -1223,7 +1229,7 @@ async fn a_refused_import_records_its_reason_for_the_admin() {
     let error = seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest(),
         &tampered,
     )
@@ -1278,7 +1284,7 @@ async fn an_import_that_works_clears_an_earlier_refusal() {
     seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest(),
         &bundle().with(&seed::site_url("assets/app.js"), b"alert('gotcha')"),
     )
@@ -1289,7 +1295,7 @@ async fn an_import_that_works_clears_an_earlier_refusal() {
     seed::import(
         &ctx,
         control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest(),
         &bundle(),
     )

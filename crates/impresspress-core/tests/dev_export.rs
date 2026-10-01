@@ -373,7 +373,10 @@ async fn export_zip_contains_shell_seed_sources_and_data_with_dev_off() {
     let sw = text(&entries, "sw.js");
     assert!(sw.contains("const DEV_ENABLED = false;"), "{sw}");
     assert!(!sw.contains("const DEV_ENABLED = true;"), "{sw}");
-    assert!(sw.contains("initialize({ dev: DEV_ENABLED })"), "{sw}");
+    assert!(
+        sw.contains("initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES })"),
+        "{sw}"
+    );
     assert!(
         sw.contains("if (DEV_ENABLED && url.pathname !== '/sw.js')"),
         "{sw}"
@@ -619,23 +622,22 @@ async fn the_exported_sw_drops_the_compiler_bypass_and_keeps_the_seed_one() {
         "the remaining expression must be exactly what a compiler-less bundle renders; {sw}"
     );
 
-    // And the manifest that STATES those rules says the same: the exported
-    // site's runtime reads it, and a prefix its `sw.js` no longer bypasses
-    // would refuse paths that site can serve.
-    let manifest: serde_json::Value =
-        serde_json::from_slice(&archive["asset-manifest.json"]).expect("asset-manifest.json");
-    let prefixes = manifest["bypass"]["prefixes"].as_array().expect("prefixes");
-    assert!(
-        !prefixes
-            .iter()
-            .any(|p| p == "/__impresspress_dev/compiler/"),
-        "{manifest}"
+    // And the rules the exported worker hands its runtime say the same: that
+    // runtime's seed import refuses a site file at any path they list, and a
+    // prefix the exported fetch handler no longer bypasses would refuse paths
+    // that site can serve. Every other rule is kept, in order.
+    let mut expected = fake_bypass_rules();
+    expected
+        .prefixes
+        .retain(|prefix| prefix != "/__impresspress_dev/compiler/");
+    let declaration = format!(
+        "const BYPASS_RULES = {};\n",
+        serde_json::to_string(&expected).unwrap()
     );
-    assert!(prefixes.iter().any(|p| p == "/seed/"), "{manifest}");
-    assert!(prefixes.iter().any(|p| p == "/snippets/"), "{manifest}");
-    assert_eq!(
-        manifest["bypass"]["exact"],
-        json!(fake_bypass_rules().exact)
+    assert_eq!(sw.matches(&declaration).count(), 1, "{sw}");
+    assert!(
+        sw.contains("await initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES });"),
+        "{sw}"
     );
 }
 
@@ -1073,10 +1075,16 @@ async fn an_exported_seed_imports_into_a_fresh_instance() {
         .await
         .with_dev_added_and_shell(b_control.clone(), std::sync::Arc::new(FakeShell::new()))
         .await;
-    let generation = seed::import(&b, b_control.as_ref(), &FakeShell::new(), &manifest, &fetch)
-        .await
-        .expect("import")
-        .expect("a fresh instance imports");
+    let generation = seed::import(
+        &b,
+        b_control.as_ref(),
+        &fake_bypass_rules(),
+        &manifest,
+        &fetch,
+    )
+    .await
+    .expect("import")
+    .expect("a fresh instance imports");
     activation::request(
         &b,
         &b.dev_shared(),
@@ -1237,7 +1245,7 @@ async fn a_data_snapshot_over_the_import_limit_is_refused_at_export_and_one_at_i
     seed::import(
         &b,
         b_control.as_ref(),
-        &FakeShell::new(),
+        &fake_bypass_rules(),
         &manifest,
         &ArchiveFetch { archive },
     )
