@@ -95,6 +95,7 @@ async fn dev_page_is_admin_only_cross_origin_isolated_and_uncached() {
     .await;
     for id in [
         "dev-guide",
+        "dev-console",
         "dev-files",
         "dev-editor",
         "dev-preview",

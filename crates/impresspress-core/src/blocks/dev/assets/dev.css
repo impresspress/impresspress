@@ -46,6 +46,7 @@
 }
 
 #dev-guide,
+#dev-console,
 #dev-preview {
 	grid-column: 1 / -1;
 }
@@ -70,6 +71,79 @@
 	font-size: var(--text-sm);
 	color: var(--primary-color);
 	margin-top: var(--spacing-sm);
+}
+
+/* ---- the tool console -------------------------------------------------- */
+
+#dev-console label {
+	display: block;
+	font-size: var(--text-xs);
+	color: var(--text-secondary);
+	margin: var(--spacing-sm) 0 var(--spacing-xs);
+}
+
+#dev-console-tool {
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	font-size: var(--text-xs);
+	padding: 2px 6px;
+	max-width: 100%;
+	border: 1px solid var(--border-color);
+	border-radius: var(--radius-sm);
+	background: var(--surface-1);
+	color: var(--text-primary);
+}
+
+#dev-console summary {
+	cursor: pointer;
+	font-size: var(--text-xs);
+	color: var(--primary-color);
+}
+
+#dev-console-args {
+	display: block;
+	width: 100%;
+	height: 9rem;
+	box-sizing: border-box;
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	font-size: var(--text-xs);
+	line-height: 1.5;
+	color: var(--text-primary);
+	background: var(--surface-1);
+	border: 1px solid var(--border-color);
+	border-radius: var(--radius-sm);
+	padding: var(--spacing-sm);
+	resize: vertical;
+}
+
+#dev-console-args:focus-visible {
+	outline: none;
+	box-shadow: var(--focus-ring);
+}
+
+#dev-console-schema,
+#dev-console-result {
+	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+	font-size: var(--text-xs);
+	line-height: 1.6;
+	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	max-height: 30vh;
+	overflow-y: auto;
+	margin: 0;
+	padding: var(--spacing-sm);
+	background: var(--surface-3);
+	border: 1px solid var(--border-light);
+	border-radius: var(--radius-sm);
+	color: var(--text-primary);
+}
+
+/* Empty until the first run; a bordered empty box would read as a result. */
+#dev-console-result:empty {
+	display: none;
+}
+
+#dev-console-result[data-is-error='true'] {
+	border-color: var(--accent-danger);
 }
 
 /* ---- files ------------------------------------------------------------- */

@@ -570,14 +570,32 @@ if (typeof navigator !== 'undefined' && navigator.serviceWorker) {
 var MUTATING =
   /^(?:(?:dev_write_file|dev_write_files|dev_delete_file|dev_create_block|dev_rollback|dev_remove_block)$|shop_(?!list_))/;
 
-// Every name this page registered. `registerTool`'s options bag takes an
-// `AbortSignal`, but a browser (or a polyfill) that ignores it would leave
-// this page's tools live on the agent after the page is gone — with the
+// Whether this browser has WebMCP. Asked once: it is a property of the
+// browser, and everything below that differs by it — whether a tool is handed
+// to `document.modelContext`, what the guide says — must agree.
+var hasWebmcp =
+  'modelContext' in document && typeof document.modelContext.registerTool === 'function';
+
+// Every tool this page publishes, in publication order — the options objects
+// themselves, `execute` and all.
+//
+// This is the ONE list. A WebMCP browser's agent is handed these objects
+// through `document.modelContext.registerTool`; the Tool console (below)
+// lists the same objects and calls the same `execute`. So a tool run from the
+// console builds the same request, gets the same session check and — for a
+// mutating tool — the same progress panel and catch-up as one an agent
+// called, because it is the same function.
+var pageTools = [];
+
+// Every name this page registered with WebMCP. `registerTool`'s options bag
+// takes an `AbortSignal`, but a browser (or a polyfill) that ignores it would
+// leave this page's tools live on the agent after the page is gone — with the
 // document's session cookie no longer riding along, so every call is a 401. The
 // list is the fallback: on abort, unregister exactly these by name.
 var registered = [];
 
-// Register one tool, whichever registrar it came from.
+// Publish one tool, whichever registrar it came from: onto `pageTools`
+// always, and to WebMCP where the browser has it.
 //
 // The `withProgress` wrap lives HERE rather than in `registerFromManifest`
 // so that both registrars obey the same rule: a page-local tool that mutates
@@ -591,8 +609,13 @@ function registerPageTool(options) {
   if (MUTATING.test(options.name)) {
     options.execute = withProgress(options.execute);
   }
-  document.modelContext.registerTool(options, { signal: abort.signal });
-  registered.push(options.name);
+  // Before the WebMCP call, not after: a tool the browser's registrar
+  // rejects is still a tool this page can run from the console.
+  pageTools.push(options);
+  if (hasWebmcp) {
+    document.modelContext.registerTool(options, { signal: abort.signal });
+    registered.push(options.name);
+  }
 }
 
 function unregisterPageTools() {
@@ -601,8 +624,8 @@ function unregisterPageTools() {
   // WebMCP support at all has no `document.modelContext` (`registered` is
   // already `[]` in that case, from the guard below), so `document
   // .modelContext` must be checked for existence before its own methods
-  // are, or this throws on unload in exactly the browsers the top-level
-  // guard (`'modelContext' in document`) was written to tolerate.
+  // are, or this throws on unload in exactly the browsers `hasWebmcp` is
+  // false for.
   if (!document.modelContext || typeof document.modelContext.unregisterTool !== 'function') {
     registered = [];
     return;
@@ -660,7 +683,9 @@ function registerFromManifest(manifest) {
       logError(error);
     }
   });
-  log('registered ' + registered.length + ' workspace tools');
+  if (hasWebmcp) {
+    log('registered ' + registered.length + ' workspace tools');
+  }
 }
 
 // `dev_compile_block` and `dev_export` are the two tools with no HTTP tool
@@ -676,18 +701,228 @@ function registerPageLocal() {
   registerExportTool();
 }
 
-if ('modelContext' in document && typeof document.modelContext.registerTool === 'function') {
-  api
-    .get('/b/dev/api/tools.json')
-    .then(json)
-    .then(function (manifest) {
-      registerFromManifest(manifest);
-      registerPageLocal();
-    })
-    .catch(logError);
-} else {
-  log('this browser has no WebMCP support — the panes below still work');
+// ---- the tool console -----------------------------------------------------
+
+// The page's tools for an agent — or a person — whose browser has no WebMCP:
+// pick one, give it its arguments as JSON, run it, read the result. It lists
+// `pageTools` and calls `execute` on the entry it picked, so there is nothing
+// here that knows how a tool is invoked (see `pageTools`).
+var consoleSelect = document.getElementById('dev-console-tool');
+var consoleDescription = document.getElementById('dev-console-description');
+var consoleSchema = document.getElementById('dev-console-schema');
+var consoleArgs = document.getElementById('dev-console-args');
+var consoleRun = document.getElementById('dev-console-run');
+var consoleResult = document.getElementById('dev-console-result');
+var webmcpStatus = document.getElementById('dev-webmcp-status');
+
+// A value the schema would accept for one property, as a starting point for
+// whoever fills the box in — not a meaningful argument. `root` is the tool's
+// whole input schema, for the `$ref`s a generated schema points into it with.
+function placeholderFor(schema, root) {
+  if (!schema || typeof schema !== 'object') {
+    return null;
+  }
+  if (typeof schema.$ref === 'string' && schema.$ref.indexOf('#/') === 0) {
+    var target = root;
+    schema.$ref
+      .slice(2)
+      .split('/')
+      .forEach(function (key) {
+        target = target && target[key];
+      });
+    return placeholderFor(target, root);
+  }
+  if (schema.default !== undefined) {
+    return schema.default;
+  }
+  if (Array.isArray(schema.enum) && schema.enum.length > 0) {
+    return schema.enum[0];
+  }
+  var alternatives = schema.anyOf || schema.oneOf;
+  if (Array.isArray(alternatives) && alternatives.length > 0) {
+    return placeholderFor(alternatives[0], root);
+  }
+  // `["string", "null"]` is how an optional-but-nullable field is spelled;
+  // the first member that is not `null` is the one worth showing.
+  var type = Array.isArray(schema.type)
+    ? schema.type.filter(function (name) {
+        return name !== 'null';
+      })[0]
+    : schema.type;
+  if (type === 'string') {
+    return '';
+  }
+  if (type === 'integer' || type === 'number') {
+    return 0;
+  }
+  if (type === 'boolean') {
+    return false;
+  }
+  if (type === 'array') {
+    return [];
+  }
+  if (type === 'object') {
+    return exampleArguments(schema, root);
+  }
+  return null;
 }
+
+// The smallest argument object a tool's input schema accepts in shape: its
+// required properties, each with a placeholder. A tool that requires nothing
+// gets `{}`, which is a complete call.
+function exampleArguments(schema, root) {
+  var example = {};
+  var properties = (schema && schema.properties) || {};
+  ((schema && schema.required) || []).forEach(function (name) {
+    example[name] = placeholderFor(properties[name], root || schema);
+  });
+  return example;
+}
+
+function selectedConsoleTool() {
+  var name = consoleSelect.value;
+  for (var i = 0; i < pageTools.length; i += 1) {
+    if (pageTools[i].name === name) {
+      return pageTools[i];
+    }
+  }
+  return null;
+}
+
+// Show the selected tool: what it does, what it takes, and a starting point
+// for its arguments. Replaces whatever was in the arguments box — the box
+// belongs to the tool that is selected.
+function showConsoleTool() {
+  var tool = selectedConsoleTool();
+  consoleRun.disabled = !tool;
+  if (!tool) {
+    consoleDescription.textContent = '';
+    consoleSchema.textContent = '';
+    consoleArgs.value = '';
+    return;
+  }
+  consoleDescription.textContent = tool.description || '';
+  consoleSchema.textContent = JSON.stringify(tool.inputSchema || {}, null, 2);
+  consoleArgs.value = JSON.stringify(exampleArguments(tool.inputSchema), null, 2);
+}
+
+// Redraw the select from `pageTools`, keeping the selection when the tool it
+// names is still there.
+function renderConsole() {
+  var previous = consoleSelect.value;
+  var kept = false;
+  consoleSelect.innerHTML = '';
+  pageTools.forEach(function (tool) {
+    var option = document.createElement('option');
+    option.value = tool.name;
+    option.textContent = tool.name;
+    consoleSelect.appendChild(option);
+    kept = kept || tool.name === previous;
+  });
+  consoleSelect.value = kept ? previous : pageTools.length ? pageTools[0].name : '';
+  showConsoleTool();
+}
+
+// What the result box shows for one tool result: whether it failed, and the
+// answer as data. A tool result carries its answer as `structuredContent`
+// when the tool declared an output schema and as a text block always; the
+// text is parsed when it is JSON, so the box shows one value rather than a
+// string with escaped JSON inside it.
+function consoleReport(result) {
+  var body = null;
+  if (result && result.structuredContent !== undefined) {
+    body = result.structuredContent;
+  } else if (result && result.content && result.content[0]) {
+    body = result.content[0].text;
+    try {
+      body = JSON.parse(body);
+    } catch (error) {
+      // Not JSON — a refusal's sentence, or a plain-text answer. Shown as is.
+    }
+  }
+  return { isError: !!(result && result.isError), result: body };
+}
+
+function showConsoleReport(report) {
+  consoleResult.setAttribute('data-is-error', String(report.isError));
+  consoleResult.textContent = JSON.stringify(report, null, 2);
+}
+
+// Run the selected tool with the arguments in the box, and show its result.
+//
+// One run at a time from the console: the button is taken away for the
+// duration, so a second click cannot start a second write while the first is
+// still in flight.
+async function runConsoleTool() {
+  var tool = selectedConsoleTool();
+  if (!tool) {
+    return;
+  }
+  var args;
+  try {
+    args = JSON.parse(consoleArgs.value.trim() === '' ? '{}' : consoleArgs.value);
+  } catch (error) {
+    showConsoleReport({ isError: true, result: 'The arguments are not valid JSON: ' + error.message });
+    return;
+  }
+  if (args === null || typeof args !== 'object' || Array.isArray(args)) {
+    showConsoleReport({ isError: true, result: 'The arguments must be a JSON object.' });
+    return;
+  }
+  consoleRun.disabled = true;
+  consoleResult.setAttribute('data-is-error', '');
+  consoleResult.textContent = 'Running ' + tool.name + '…';
+  log('console: ' + tool.name);
+  try {
+    showConsoleReport(consoleReport(await tool.execute(args)));
+  } catch (error) {
+    // A tool reports its failures as results; a throw is the page's own
+    // machinery failing under it, and the caller still needs to be told.
+    logError(error);
+    showConsoleReport({
+      isError: true,
+      result: error && error.message ? error.message : String(error)
+    });
+  } finally {
+    // Only if the tools are still there: a run that ended the session has
+    // emptied the console, and the button must stay off with it.
+    consoleRun.disabled = !selectedConsoleTool();
+  }
+}
+
+consoleSelect.addEventListener('change', showConsoleTool);
+consoleRun.addEventListener('click', function () {
+  runConsoleTool().catch(logError);
+});
+
+// Say which way an agent reaches the tools in this browser. The guide is
+// where a person — or an agent reading the page — looks first, so it must not
+// describe tools the browser was never handed.
+function announceTools() {
+  if (hasWebmcp) {
+    webmcpStatus.textContent =
+      'This browser has WebMCP: ' +
+      registered.length +
+      ' tools are registered for an agent in this tab. The Tool console below runs the same tools.';
+  } else {
+    webmcpStatus.textContent =
+      'This browser has no WebMCP: use the Tool console below, or the file editor.';
+    log('this browser has no WebMCP — ' + pageTools.length + ' tools are in the Tool console');
+  }
+}
+
+// The tools are fetched whether or not the browser has WebMCP: the console
+// needs them either way.
+api
+  .get('/b/dev/api/tools.json')
+  .then(json)
+  .then(function (manifest) {
+    registerFromManifest(manifest);
+    registerPageLocal();
+    renderConsole();
+    announceTools();
+  })
+  .catch(logError);
 
 // `pagehide`, not `unload`: it is the event a bfcache-eligible navigation
 // actually fires, and it fires on the tab being closed as well.
@@ -720,6 +955,11 @@ abort.signal.addEventListener('abort', function () {
   outstanding = 0;
   stopPolling();
   unregisterPageTools();
+  // The console goes with them: its tools are the same tools, and every one
+  // of them would now be refused.
+  pageTools = [];
+  renderConsole();
+  webmcpStatus.textContent = 'The session expired and the tools were removed. Sign in again.';
   log('session expired — workspace tools removed; sign in again');
 });
 

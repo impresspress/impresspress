@@ -65,7 +65,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
         )
 }
 
-/// The page body: six panes with stable ids, then the assets that drive them.
+/// The page body: seven panes with stable ids, then the assets that drive them.
 ///
 /// The ids are the contract between this markup, `dev.js` and the end-to-end
 /// test — `dev.js` looks every element up by id and does nothing else with
@@ -87,8 +87,8 @@ fn body(seed: Option<&SeedInfo>) -> Markup {
                     }
                 }
                 p {
-                    "This page is a WebMCP workspace. An agent in your browser sees the tools \
-                     registered here and can edit the site under " code { "site/" } ", write Rust \
+                    "This page is a WebMCP workspace. An agent in your browser uses the tools \
+                     published here to edit the site under " code { "site/" } ", write Rust \
                      backend blocks under " code { "blocks/<name>/" } ", stock the shop with the "
                     code { "shop_*" } " tools, and export the result. Every successful change is \
                      live at " a href="/" target="_blank" { "/" } " immediately; "
@@ -97,6 +97,12 @@ fn body(seed: Option<&SeedInfo>) -> Markup {
                      you write under " code { "site/" } ", so a visitor's agent gets the site's \
                      public tools too."
                 }
+                // How an agent reaches the tools in THIS browser: through
+                // WebMCP, or — where the browser has none — through the Tool
+                // console below. Only `dev.js` can tell which, so it writes
+                // the sentence; the markup ships it empty rather than
+                // promising either.
+                p #dev-webmcp-status {}
                 p {
                     "Start with " code { "dev_status" } ". Credentials for this browser-local \
                      instance: " code { "admin@example.com" } " / " code { "admin123" } "."
@@ -107,6 +113,37 @@ fn body(seed: Option<&SeedInfo>) -> Markup {
                         pre #dev-suggested-prompt { (seed.suggested_prompt) }
                     }
                 }
+            }
+            section #dev-console .dev-pane {
+                // The same tools, for an agent whose browser has no WebMCP
+                // and can only drive the page: pick one, edit its arguments,
+                // press Run, read the result. Every control is filled in by
+                // `dev.js` from the list it publishes to WebMCP, and Run
+                // calls the same function an agent's tool call would — so
+                // this pane cannot offer a tool the page does not have, or
+                // run one differently.
+                h2 { "Tool console" }
+                p {
+                    "Every tool this page publishes, runnable by hand. Choose a tool, edit its \
+                     arguments as JSON, and press Run; the result appears below. A tool that \
+                     changes the site refreshes this page exactly as an agent's call would."
+                }
+                label for="dev-console-tool" { "Tool" }
+                select #dev-console-tool {}
+                p #dev-console-description {}
+                details {
+                    summary { "Input schema" }
+                    pre #dev-console-schema {}
+                }
+                label for="dev-console-args" { "Arguments (JSON)" }
+                textarea #dev-console-args spellcheck="false" {}
+                div .dev-editor-actions {
+                    // Ships `disabled`: there is nothing to run until
+                    // `dev.js` has fetched the tools.
+                    button #dev-console-run .btn .btn--primary type="button" disabled { "Run" }
+                }
+                label for="dev-console-result" { "Result" }
+                pre #dev-console-result {}
             }
             section #dev-files .dev-pane {
                 h2 { "Files" }
@@ -296,6 +333,13 @@ mod tests {
             "dev-compile",
             "dev-compile-block",
             "dev-compiler-version",
+            "dev-webmcp-status",
+            "dev-console-tool",
+            "dev-console-description",
+            "dev-console-schema",
+            "dev-console-args",
+            "dev-console-run",
+            "dev-console-result",
         ] {
             assert!(
                 assets::dev_js().contains(&format!("'{id}'")),
@@ -306,6 +350,50 @@ mod tests {
                 "{id} missing from the document"
             );
         }
+    }
+
+    /// The Tool console is a pane of its own with the id an agent is told to
+    /// look for, and it runs the page's tools through the one list WebMCP is
+    /// handed — not through a request builder of its own.
+    #[test]
+    fn the_tool_console_runs_the_tools_webmcp_is_handed() {
+        let html = body(None).into_string();
+        assert!(
+            html.contains(r#"<section class="dev-pane" id="dev-console">"#),
+            "{html}"
+        );
+        assert!(html.contains("<h2>Tool console</h2>"), "{html}");
+        assert!(
+            html.contains(
+                r#"<button class="btn btn--primary" id="dev-console-run" type="button" disabled>"#
+            ),
+            "Run must ship disabled until the tools are loaded; {html}"
+        );
+        let js = assets::dev_js();
+        // One publication point feeds both consumers…
+        assert_eq!(
+            js.matches("pageTools.push(options);").count(),
+            1,
+            "the console's list must be filled in exactly one place"
+        );
+        assert_eq!(
+            js.matches("document.modelContext.registerTool(").count(),
+            1,
+            "and WebMCP must be handed tools from that same place"
+        );
+        // …and the console calls the published `execute`, building no
+        // request itself: `buildRequest` is called once, in `toolOptions`
+        // (webmcp-core.js).
+        assert!(js.contains("await tool.execute(args)"));
+        assert_eq!(
+            js.matches("buildRequest(").count(),
+            2,
+            "definition + one call"
+        );
+        // What the guide says without WebMCP is the sentence an agent reads.
+        assert!(js.contains(
+            "'This browser has no WebMCP: use the Tool console below, or the file editor.'"
+        ));
     }
 
     /// Saving a binary file's placeholder over the file itself is the one

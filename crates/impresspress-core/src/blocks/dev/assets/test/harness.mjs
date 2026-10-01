@@ -15,6 +15,14 @@ import { fileURLToPath } from 'node:url';
 
 const here = path.dirname(fileURLToPath(import.meta.url));
 const tail = fs.readFileSync(path.join(here, '..', 'dev.js'), 'utf8');
+// The fragment `assets.rs` composes ahead of the tail inside the same IIFE
+// (`compose_webmcp_module`): `buildRequest` and `toolOptions`. The tail calls
+// `toolOptions` for every `tools.json` entry, so a harness without it could
+// only ever be given an empty manifest.
+const core = fs.readFileSync(
+  path.join(here, '..', '..', '..', '..', 'ui', 'assets', 'webmcp-core.js'),
+  'utf8'
+);
 
 // Builds one fresh, isolated instance of the tail's closure. Each instance
 // gets its own stub `document`/`window`/`fetch` so tests can't leak state
@@ -70,6 +78,14 @@ const tail = fs.readFileSync(path.join(here, '..', 'dev.js'), 'utf8');
  *   answers with — a `StatusResponse`. A function, for a test whose subject
  *   is what the page does when the answer CHANGES: the page polls it, and
  *   every mutating call ends with one more read of it.
+ * @param {{tools: object[]}|null} [options.toolsManifest]  what
+ *   `/b/dev/api/tools.json` answers with. `null` — the default — is a manifest
+ *   with nothing in it, which is what every test that is not about the
+ *   manifest's tools wants.
+ * @param {(url: string, init: object|undefined) => ({status?: number,
+ *   body: object}|undefined)} [options.endpoint]  the answer to a request no
+ *   other option covers — the endpoints a `tools.json` tool invokes. Return
+ *   `undefined` to decline.
  * @param {Promise<void>|null} [options.statusGate]  when set, every status
  *   request parks on this promise, so a test can fire more poll ticks WHILE
  *   one is still outstanding — the only way to see the poll's in-flight
@@ -126,6 +142,8 @@ export function instantiate({
   // An idle sandbox with nothing live, which is what every test that does not
   // care about the status wants: no `activation`, no `active_generation`.
   status = {},
+  toolsManifest = null,
+  endpoint = () => undefined,
   statusGate = null,
   exportManifest = null,
   exportZip = { status: 200, body: 'PK\u0003\u0004zip' },
@@ -374,10 +392,17 @@ export function instantiate({
           blob: async () => ({ size: body.length, type: 'application/zip' })
         });
       }
-      // `/b/dev/api/tools.json`. A body with no `tools` array is a manifest
-      // with nothing to register, which is what every test that is not about
-      // registration wants.
-      return answer({ files: [] });
+      if (url === '/b/dev/api/tools.json') {
+        // A body with no `tools` array is a manifest with nothing to
+        // register, which is what every test that is not about registration
+        // wants.
+        return answer(toolsManifest === null ? {} : toolsManifest);
+      }
+      const custom = endpoint(url, args[1]);
+      if (custom !== undefined) {
+        return answer(custom.body, custom.status ?? 200);
+      }
+      return answer({ error: 'not_found', message: `the harness has no answer for ${url}` }, 404);
     },
     // The tail's own name for the class `assets.rs` imports into the module.
     BrowserRustCompiler: compiler,
@@ -431,7 +456,8 @@ export function instantiate({
   // nothing in the tail needs real module semantics.
   const factory = new Function(
     ...Object.keys(sandbox),
-    `${tail}
+    `${core}
+${tail}
 return {
   withProgress,
   get outstanding() { return outstanding },
@@ -456,7 +482,13 @@ return {
   openFile,
   save,
   remove,
-  create
+  create,
+  get pageTools() { return pageTools.slice() },
+  get hasWebmcp() { return hasWebmcp },
+  exampleArguments,
+  showConsoleTool,
+  renderConsole,
+  runConsoleTool
 };`
   );
   const handle = factory(...Object.values(sandbox));
