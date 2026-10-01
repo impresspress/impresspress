@@ -304,15 +304,35 @@ fn sw_bypass_rules(sw: &str) -> BypassRules {
     for clause in expression.split("||").map(str::trim) {
         if let Some(rest) = clause.strip_prefix("url.pathname === '") {
             let path = rest.strip_suffix('\'').expect("quoted exact path");
-            rules.exact.push(path.to_string());
+            rules.exact.push(js_unquote(path));
         } else if let Some(rest) = clause.strip_prefix("url.pathname.startsWith('") {
             let prefix = rest.strip_suffix("')").expect("quoted prefix");
-            rules.prefixes.push(prefix.to_string());
+            rules.prefixes.push(js_unquote(prefix));
         } else {
             panic!("unrecognised bypass clause {clause:?} in sw.js = {sw}")
         }
     }
     rules
+}
+
+/// The value of a single-quoted JavaScript string's body: `\\` and `\'`
+/// unescaped, the two escapes the bundler emits. Any other backslash sequence
+/// panics, so an escape this reader does not know is not read as a path.
+fn js_unquote(body: &str) -> String {
+    let mut out = String::new();
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some(escaped @ ('\\' | '\'')) => out.push(escaped),
+                other => panic!("unrecognised escape \\{other:?} in {body:?}"),
+            }
+        } else {
+            assert_ne!(c, '\'', "unescaped quote in {body:?}");
+            out.push(c);
+        }
+    }
+    out
 }
 
 /// Whether the rendered `sw.js` bypasses `path`, by [`sw_bypass_rules`].
@@ -347,8 +367,18 @@ fn initialize_is_handed_exactly_the_bypass_rules_the_fetch_handler_applies() {
         AppConfig::default(),
         AppConfig {
             dev_enabled: true,
-            extra_bypass_prefix: vec!["/__impresspress_dev/compiler/".to_string()],
-            extra_bypass_exact: vec!["/".to_string(), "/index.html".to_string()],
+            // A quote and a backslash in configured paths: the condition
+            // escapes them for a JavaScript string and the data for JSON, and
+            // both must come back as the same path.
+            extra_bypass_prefix: vec![
+                "/__impresspress_dev/compiler/".to_string(),
+                "/it's/".to_string(),
+            ],
+            extra_bypass_exact: vec![
+                "/".to_string(),
+                "/index.html".to_string(),
+                "/back\\slash's.js".to_string(),
+            ],
             ..AppConfig::default()
         },
     ];
@@ -385,6 +415,8 @@ fn initialize_is_handed_exactly_the_bypass_rules_the_fetch_handler_applies() {
                 .prefixes
                 .contains(&"/__impresspress_dev/compiler/".to_string()));
             assert!(handed.exact.contains(&"/index.html".to_string()));
+            assert!(handed.exact.contains(&"/back\\slash's.js".to_string()));
+            assert!(handed.prefixes.contains(&"/it's/".to_string()));
         }
     }
 }
@@ -609,7 +641,7 @@ fn the_seed_prefix_joins_an_apps_own_bypass_list() {
 
     let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
     // The exact clause text the sandbox's export removes
-    // (`impresspress-core`'s `blocks::dev::export::strip_compiler_bypass`):
+    // (`impresspress-core`'s `blocks::dev::export::sw_without_compiler`):
     // a clause that led with anything else would survive into every export.
     assert!(sw.contains(" ||\n        url.pathname.startsWith('/__impresspress_dev/compiler/')"));
     assert!(sw.contains("url.pathname.startsWith('/seed/')"));

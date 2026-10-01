@@ -70,7 +70,7 @@ impl std::fmt::Display for BypassRule<'_> {
 impl BypassRules {
     /// The rule that sends a request for `request_path` (`/manifest.json`)
     /// to the static host, if any — exact rules first, then prefixes, in the
-    /// order the manifest lists them.
+    /// order the worker handed them.
     pub fn shadowing(&self, request_path: &str) -> Option<BypassRule<'_>> {
         self.exact
             .iter()

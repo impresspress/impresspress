@@ -921,11 +921,13 @@ pub struct Sandbox {
 /// compiled-in modes this is decides what the FACTORY registers, not whether
 /// there is a control at all — see [`SandboxMode`](crate::SandboxMode).
 ///
-/// `bypass` is the rules the service worker handed `initialize({ bypass })`
-/// (see `crate::initialize`), kept on the `DevShared` this builds.
+/// `bypass` reads the rules the service worker handed `initialize({ bypass })`
+/// (see `crate::initialize`), kept on the `DevShared` this builds. A closure
+/// rather than a value so the option is parsed — and its absence warned about
+/// — only when a sandbox is actually being attached.
 pub fn attach(
     factory: RuntimeFactory,
-    bypass: BypassRules,
+    bypass: impl FnOnce() -> BypassRules,
 ) -> (Rc<RuntimeFactory>, Option<Sandbox>) {
     if !factory.mode.runtime_present() {
         return (Rc::new(factory), None);
@@ -935,7 +937,7 @@ pub fn attach(
     // same reason `RuntimeControl` is — this implementation resolves through a
     // `JsFuture`.
     let shell: Arc<dyn ShellSource> = Arc::new(BrowserShellSource);
-    let shared = DevShared::new(control.clone(), shell, bypass);
+    let shared = DevShared::new(control.clone(), shell, bypass());
     let factory = Rc::new(factory.with_dev(shared.clone()));
     control.set_factory(&factory);
     (factory, Some(Sandbox { control, shared }))

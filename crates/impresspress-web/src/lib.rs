@@ -144,7 +144,7 @@ pub async fn initialize(options: JsValue) -> Result<(), JsValue> {
     // is then untouched. Without the feature there is no `attach` at all and
     // `factory` is used as constructed.
     #[cfg(feature = "browser-devtools")]
-    let (factory, sandbox) = dev_runtime::attach(factory, bypass_rules_option(&options));
+    let (factory, sandbox) = dev_runtime::attach(factory, || bypass_rules_option(&options));
 
     let wafer = factory.build(&[]).await?;
 

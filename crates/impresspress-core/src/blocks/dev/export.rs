@@ -86,8 +86,8 @@ const DATA_PATH: &str = "data.json";
 ///
 /// Two things in the exported bundle refer to it and both have to go: the
 /// files themselves (excluded from the shell listing by
-/// [`SHELL_EXCLUDED_PREFIXES`]) and the service worker's bypass clause for
-/// them ([`strip_compiler_bypass`]). Restated here rather than imported from
+/// [`SHELL_EXCLUDED_PREFIXES`]) and the service worker's bypass for them
+/// ([`sw_without_compiler`]). Restated here rather than imported from
 /// the bundle's `impresspress.toml`, which is a deployment's file and not
 /// something this crate can read — `page.rs` and `dev.js` state the same
 /// prefix for the same reason.
@@ -218,6 +218,20 @@ async fn assemble(ctx: &dyn Context, shared: &DevShared) -> Result<Assembled, Re
     let Some((row, manifest)) = generation::active(ctx).await.map_err(Refusal::Internal)? else {
         return Err(Refusal::NothingPublished);
     };
+
+    // A site file the EXPORTED worker would shadow, before anything is read.
+    // The exported runtime's seed import refuses a whole bundle over one such
+    // file (`seed::import`), so an export carrying it would be a folder that
+    // boots with no site at all. The sandbox refuses the write itself, so
+    // this only fires for a file that predates the check — written under an
+    // older `sw.js` that handed over no rules.
+    let exported_rules = without_compiler(shared.bypass.clone());
+    for entry in &manifest.site.files {
+        let workspace_path = format!("{}{}", workspace::SITE_PREFIX, entry.path);
+        exported_rules
+            .refuse_shadowed(&workspace_path)
+            .map_err(Refusal::ShadowedSiteFile)?;
+    }
     // The MANIFEST read is locked; the content reads below are not, and the
     // split is the whole of this module's concurrency position (see
     // [`content_gone`]). `workspace::load` snapshots `workspace.json` and then
@@ -270,7 +284,7 @@ async fn assemble(ctx: &dyn Context, shared: &DevShared) -> Result<Assembled, Re
             .await
             .map_err(|e| Refusal::Shell(format!("{path}: {e}")))?;
         let bytes = if path == SW_PATH {
-            strip_compiler_rule(strip_compiler_bypass(sw_with_dev_off(&bytes)?))?
+            sw_without_compiler(sw_with_dev_off(&bytes)?)?
         } else {
             bytes
         };
@@ -513,57 +527,64 @@ fn sw_with_dev_off(bytes: &[u8]) -> Result<Vec<u8>, Refusal> {
     Ok(text.replace(SW_DEV_ON, SW_DEV_OFF).into_bytes())
 }
 
-/// `sw.js` with the compiler's bypass clause removed, if it has one.
-///
-/// A deployment that ships the in-browser toolchain adds
-/// `/__impresspress_dev/compiler/` to the service worker's bypass list (the
-/// bundle's `extra_bypass_prefix`, rendered by `impresspress-bundle`'s
-/// `BypassRules::render_condition` as one `url.pathname.startsWith('…')`
-/// clause on a line of its own, led by its `||`).
-/// The export does not copy those assets — there is no `/b/dev` in an
-/// exported site to load them — so the clause would be a bypass for a tree
-/// that is not there: every request under the prefix waved past the runtime
-/// to a 404 from the static host, instead of the runtime's own answer.
-///
-/// Unlike the dev flag this is OPTIONAL and its absence is not an error: the
-/// prefix is an app's own bypass entry (CI's foundations bundle ships no
-/// compiler and never adds it), so a shell without the clause is an ordinary
-/// shell, not a mismatched one. Removing the whole rendered clause rather
-/// than editing the prefix keeps the remaining expression exactly as the
-/// bundler would have rendered it for a bundle that never asked.
-fn strip_compiler_bypass(bytes: Vec<u8>) -> Vec<u8> {
-    // The exact text `BypassRules::render_condition` emits for a prefix rule
-    // that is not the first clause (exact rules always precede it). Built
-    // here rather than matched loosely so a clause this does not recognise is
-    // left alone instead of half-edited.
-    let clause = format!(" ||\n        url.pathname.startsWith('{COMPILER_ROOT}')");
-    match String::from_utf8(bytes) {
-        Ok(text) if text.contains(&clause) => text.replace(&clause, "").into_bytes(),
-        Ok(text) => text.into_bytes(),
-        // Unreachable in practice — `sw_with_dev_off` has already parsed the
-        // same bytes as UTF-8 and would have refused otherwise. Returning
-        // them untouched rather than panicking keeps this function total.
-        Err(e) => e.into_bytes(),
-    }
+/// The rules the exported worker applies: the deployment's, minus the
+/// compiler prefix [`sw_without_compiler`] removes from the exported `sw.js`.
+fn without_compiler(mut rules: BypassRules) -> BypassRules {
+    rules.prefixes.retain(|prefix| prefix != COMPILER_ROOT);
+    rules
 }
 
 /// The declaration `sw.js.tmpl` renders the rules the worker hands
 /// `initialize({ bypass })` into: one line, `const BYPASS_RULES = {…};`.
 const SW_BYPASS_RULES: &str = "const BYPASS_RULES = ";
 
-/// `sw.js` with the compiler prefix removed from the `BYPASS_RULES` it hands
-/// the runtime — the data half of [`strip_compiler_bypass`].
+/// `sw.js` with the compiler's bypass removed, if it has one — from BOTH
+/// places the bundler renders it: the fetch handler's condition and the
+/// `BYPASS_RULES` the worker hands its runtime.
 ///
-/// The exported worker hands those rules to its runtime, whose seed import
-/// refuses a site file at any path they list. Rules still naming a prefix the
-/// exported fetch handler no longer bypasses would refuse paths that site can
-/// serve. The declaration is found by its exact text and must occur at most
-/// once: absent, it is a `sw.js` from a bundler that predates it and is left
-/// alone (its runtime gets no rules); present twice, this cannot know which
-/// one the worker uses, and refuses rather than guess.
-fn strip_compiler_rule(bytes: Vec<u8>) -> Result<Vec<u8>, Refusal> {
+/// A deployment that ships the in-browser toolchain adds
+/// `/__impresspress_dev/compiler/` to the service worker's bypass list (the
+/// bundle's `extra_bypass_prefix`). The export does not copy those assets —
+/// there is no `/b/dev` in an exported site to load them — so a clause for it
+/// would be a bypass for a tree that is not there: every request under the
+/// prefix waved past the runtime to a 404 from the static host. And the rules
+/// the exported worker hands its runtime must say what its condition does:
+/// that runtime's seed import refuses a site file at any path they list.
+///
+/// # The condition
+///
+/// `impresspress-bundle`'s `BypassRules::render_condition` renders the prefix
+/// as one `url.pathname.startsWith('…')` clause on a line of its own, led by
+/// its `||` (exact rules always precede it, so it is never the first clause).
+/// The clause is matched by that exact text rather than loosely, so a clause
+/// this does not recognise is left alone instead of half-edited, and removing
+/// the whole clause keeps the remaining expression exactly as the bundler
+/// would have rendered it for a bundle that never asked.
+///
+/// # The data
+///
+/// The declaration is found by its exact text and must occur at most once:
+/// absent, it is a `sw.js` from a bundler that predates it and is left alone
+/// (its runtime gets no rules); present twice, this cannot know which one the
+/// worker uses, and refuses rather than guess.
+///
+/// # They must agree
+///
+/// The prefix's absence is not an error — it is an app's own bypass entry
+/// (CI's foundations bundle ships no compiler and never adds it). But when
+/// the declaration exists, the data listing the prefix and the condition
+/// carrying the clause are one fact rendered twice: one without the other
+/// means the clause's text is not what this expects, and exporting anyway
+/// would ship a worker whose condition and stated rules differ. That is an
+/// export error, never a silent half-strip.
+fn sw_without_compiler(bytes: Vec<u8>) -> Result<Vec<u8>, Refusal> {
     let text = String::from_utf8(bytes)
         .map_err(|e| Refusal::Shell(format!("the deployment's sw.js is not UTF-8: {e}")))?;
+
+    let clause = format!(" ||\n        url.pathname.startsWith('{COMPILER_ROOT}')");
+    let had_clause = text.contains(&clause);
+    let text = text.replace(&clause, "");
+
     match text.matches(SW_BYPASS_RULES).count() {
         0 => return Ok(text.into_bytes()),
         1 => {}
@@ -578,13 +599,23 @@ fn strip_compiler_rule(bytes: Vec<u8>) -> Result<Vec<u8>, Refusal> {
     let len = text[start..].find(";\n").ok_or_else(|| {
         Refusal::Shell("the deployment's sw.js leaves BYPASS_RULES unterminated".to_string())
     })?;
-    let mut rules: BypassRules = serde_json::from_str(&text[start..start + len]).map_err(|e| {
+    let rules: BypassRules = serde_json::from_str(&text[start..start + len]).map_err(|e| {
         Refusal::Shell(format!(
             "the deployment's sw.js BYPASS_RULES did not parse: {e}"
         ))
     })?;
-    rules.prefixes.retain(|prefix| prefix != COMPILER_ROOT);
-    let rendered = serde_json::to_string(&rules)
+    let listed = rules.prefixes.iter().any(|prefix| prefix == COMPILER_ROOT);
+    if listed != had_clause {
+        return Err(Refusal::Shell(format!(
+            "the deployment's sw.js disagrees with itself about {COMPILER_ROOT:?}: its \
+             BYPASS_RULES {} the prefix and its fetch condition {} the clause the export \
+             removes, so the export cannot remove the compiler's bypass from both; the bundle \
+             was built by a different impresspress-bundle than this runtime expects",
+            if listed { "list" } else { "do not list" },
+            if had_clause { "has" } else { "does not have" },
+        )));
+    }
+    let rendered = serde_json::to_string(&without_compiler(rules))
         .map_err(|e| Refusal::Shell(format!("BYPASS_RULES did not serialize: {e}")))?;
     Ok(format!("{}{rendered}{}", &text[..start], &text[start + len..]).into_bytes())
 }
@@ -771,10 +802,23 @@ enum Refusal {
     /// workspace was edited (and collected) while this export was being
     /// assembled. See [`content_gone`].
     WorkspaceChanged,
+    /// A site file of the active generation is at a path the exported worker
+    /// would shadow; the message names it and the rule.
+    ShadowedSiteFile(String),
     /// The static shell could not be listed or read.
     Shell(String),
     /// A storage, ledger or encoding failure.
     Internal(WaferError),
+}
+
+/// What [`Refusal::ShadowedSiteFile`] says, on both surfaces. `refused` is
+/// [`BypassRules::refuse_shadowed`]'s own sentence — the path, the URL and
+/// the rule.
+fn shadowed_site_file(refused: &str) -> String {
+    format!(
+        "this site cannot be exported: {refused} The exported site would refuse to import a \
+         bundle that carries it. Delete the file or move it to another path, then export again."
+    )
 }
 
 /// What [`Refusal::DataTooLarge`] says, on both surfaces — one wording for
@@ -849,6 +893,13 @@ impl Refusal {
             Self::DataTooLarge { bytes } => {
                 no_store_error_status(ErrorCode::ResourceExhausted, 413, &data_too_large(bytes))
             }
+            // 400 and `FailedPrecondition`, as `NothingPublished` is: the
+            // caller can fix it, and nothing about the request is malformed.
+            Self::ShadowedSiteFile(refused) => no_store_error_status(
+                ErrorCode::FailedPrecondition,
+                400,
+                &shadowed_site_file(&refused),
+            ),
             Self::Shell(message) => err_internal("dev export shell", message),
             Self::Internal(error) => no_store_db_error_internal(error, "dev export"),
         }
@@ -865,6 +916,9 @@ impl Refusal {
             Self::WorkspaceChanged => WaferError::new(ErrorCode::Aborted, WORKSPACE_CHANGED),
             Self::DataTooLarge { bytes } => {
                 WaferError::new(ErrorCode::ResourceExhausted, data_too_large(bytes))
+            }
+            Self::ShadowedSiteFile(refused) => {
+                WaferError::new(ErrorCode::FailedPrecondition, shadowed_site_file(&refused))
             }
             Self::Shell(message) => WaferError::new(
                 ErrorCode::Internal,

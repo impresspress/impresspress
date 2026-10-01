@@ -116,7 +116,8 @@ impl BypassRules {
         rules
     }
 
-    /// The JavaScript condition `sw.js.tmpl`'s `__BYPASS__` renders to: every
+    /// The JavaScript condition `sw.js.tmpl`'s `__BYPASS_CONDITION__` renders
+    /// to: every
     /// exact rule, then every prefix rule, OR'd one clause per line.
     ///
     /// Every clause after the first LEADS with its `||`, so a clause can be
