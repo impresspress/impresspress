@@ -43,10 +43,12 @@ gives a visitor's *own* agent the shop's tools once the page is live.
 A sandbox is seeded from a **template**: what generation 0 holds, and the
 site-authoring guide `dev_read_reference` serves as `site_markdown`. Each
 template is its own sandbox; pick one by opening its address.
+https://impresspress.org/build always opens the default sandbox, so a link
+to it keeps working when the default changes.
 
 | Template | Sandbox | What it ships |
 |---|---|---|
-| bootstrap | https://build-bootstrap.impresspress.org | Bootstrap 5 vendored under `site/vendor/bootstrap/`, a Bootstrap-built welcome page, a guide to the framework and the shop pieces |
+| bootstrap (default) | https://build-bootstrap.impresspress.org | Bootstrap 5 vendored under `site/vendor/bootstrap/`, a Bootstrap-built welcome page, a guide to the framework and the shop pieces |
 | blank | https://dev.impresspress.org | A minimal welcome page and stylesheet, the same guide without a framework |
 
 `dev_status` reports the template's name, and the workspace page names it

@@ -612,8 +612,8 @@ async fn the_exported_sw_drops_the_compiler_bypass_and_keeps_the_seed_one() {
     assert!(sw.contains("url.pathname.startsWith('/snippets/')"), "{sw}");
     assert!(
         sw.contains(
-            "if (url.pathname.startsWith('/snippets/') || url.pathname.startsWith('/seed/')) \
-             { return; }"
+            "if (url.pathname.startsWith('/snippets/') || url.pathname.startsWith('/cdn-cgi/') \
+             || url.pathname.startsWith('/seed/')) { return; }"
         ),
         "the remaining expression must be exactly what a compiler-less bundle renders; {sw}"
     );

@@ -162,6 +162,15 @@ self.addEventListener('fetch', (event) => {
     // `/vendor/` is an ordinary directory for a site's own files (a seed's
     // CSS framework, an agent's library), and a prefix would hand every one
     // of them to the static host instead of the runtime that serves the site.
+    //
+    // `/cdn-cgi/` is a path namespace Cloudflare reserves on every proxied
+    // hostname (Web Analytics' RUM beacon, challenge pages, image resizing,
+    // email obfuscation, `/cdn-cgi/trace`): it is never site or runtime
+    // content, and only Cloudflare's edge can answer it. Without this clause
+    // the RUM beacon Cloudflare injects into every page POSTs to
+    // `/cdn-cgi/rum` once this worker controls the page, and the runtime
+    // answers 501 — a console error on every load of a Cloudflare-hosted
+    // deployment.
     if (url.pathname === '/sw.js' ||
         url.pathname === '/loader.js' ||
         url.pathname === '/manifest.json' ||
@@ -170,7 +179,8 @@ self.addEventListener('fetch', (event) => {
         url.pathname === '/embed-engine.js' ||
         url.pathname === '/t2i-engine.js' ||
         url.pathname.startsWith('__WASM_JS_PREFIX__') ||
-        url.pathname.startsWith('/snippets/')__SHELL_VENDOR_BYPASS____EXTRA_BYPASS____EXTRA_BYPASS_EXACT__) {
+        url.pathname.startsWith('/snippets/') ||
+        url.pathname.startsWith('/cdn-cgi/')__SHELL_VENDOR_BYPASS____EXTRA_BYPASS____EXTRA_BYPASS_EXACT__) {
         // ------------------------------------------------------------------
         // Bypassed — the network answers this, not the wasm runtime.
         //
