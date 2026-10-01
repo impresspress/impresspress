@@ -2923,11 +2923,23 @@ export interface paths {
                     content: {
                         "application/json": {
                             /**
-                             * @description The authoring guide, as Markdown: the API, the host services, the
-                             *     namespace rules, the limits, the diagnostic codes, and both templates
-                             *     in full.
+                             * @description The backend-block (Rust) authoring guide, as Markdown: the API, the
+                             *     host services, the namespace rules, the limits, the diagnostic codes,
+                             *     and both templates in full.
                              */
                             markdown: string;
+                            /**
+                             * @description This sandbox's site-authoring guide, as Markdown: the CSS framework
+                             *     it ships, the page skeleton, the storefront element, the catalog API,
+                             *     what a write refuses. Read it before writing under `site/`. Null when
+                             *     the seed carried none.
+                             */
+                            site_markdown: string | null;
+                            /**
+                             * @description The template this sandbox was seeded from (`dev_status.template`), or
+                             *     null when the seed carried no sandbox block.
+                             */
+                            template: string | null;
                             /**
                              * Format: uint32
                              * @description The `WAFER_GUEST_VERSION` of the guest SDK crate this reference
@@ -3080,6 +3092,12 @@ export interface paths {
                                  */
                                 workspace_files: number;
                             };
+                            /**
+                             * @description The template this sandbox was seeded from, or null when the seed
+                             *     carried no sandbox block. What an agent reads to know which guide
+                             *     `dev_read_reference.site_markdown` will be.
+                             */
+                            template: string | null;
                             /**
                              * Format: uint32
                              * @description `WAFER_GUEST_VERSION` of the `wafer_guest` crate this sandbox serves
