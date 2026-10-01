@@ -17,8 +17,8 @@ use impresspress_core::{
         workspace, DevBlock, DevShared,
     },
     test_support::{
-        admin_msg, anon_msg, output_http_header, output_http_status, output_json, output_status,
-        HeldGet, TestContext,
+        admin_msg, anon_msg, output_http_header, output_http_json, output_http_status, output_json,
+        output_status, HeldGet, TestContext,
     },
 };
 use serde_json::json;
@@ -301,6 +301,21 @@ async fn a_path_that_clashes_with_an_existing_file_or_directory_is_rejected() {
     )
     .await;
     assert_eq!(output_http_status(out).await, 400);
+    // The refusal names both paths in one readable sentence — no runs of
+    // spaces left behind by a broken line continuation.
+    let refusal = output_http_json(
+        dev_post(
+            &ctx,
+            "/b/dev/api/files/write",
+            json!({"path": "site/blog", "content": "x", "expected_sha256": null}),
+        )
+        .await,
+    )
+    .await;
+    let message = refusal["message"].as_str().expect("message").to_string();
+    assert!(message.contains("\"site/blog\""), "{message}");
+    assert!(message.contains("\"site/blog/index.html\""), "{message}");
+    assert!(!message.contains("  "), "a run of spaces in: {message:?}");
 
     // And the reverse, on a path that is already a file.
     write_new(&ctx, "site/style.css", "a{}").await;
@@ -1477,16 +1492,21 @@ async fn duplicate_paths_and_bad_sizes_of_batch_are_refused() {
 #[tokio::test]
 async fn a_batch_that_collides_with_itself_is_refused() {
     let ctx = TestContext::with_dev(FakeControl::new()).await;
-    let out = dev_post(
-        &ctx,
-        BATCH,
-        json!({"files": [
+    // Both orders: the file first, then a path under it; and the path under
+    // it first, then the file.
+    for files in [
+        json!([
             {"path": "site/a", "content": "file"},
             {"path": "site/a/b.css", "content": "b{}"},
-        ]}),
-    )
-    .await;
-    assert_eq!(output_http_status(out).await, 400);
+        ]),
+        json!([
+            {"path": "site/a/b.css", "content": "b{}"},
+            {"path": "site/a", "content": "file"},
+        ]),
+    ] {
+        let out = dev_post(&ctx, BATCH, json!({"files": files})).await;
+        assert_eq!(output_http_status(out).await, 400, "{files}");
+    }
     let listing = output_json(ctx.dispatch_resolved(list_msg(None)).await).await;
     assert_eq!(listing["files"].as_array().unwrap().len(), 0);
 }
@@ -1528,4 +1548,43 @@ async fn identical_content_in_one_batch_is_charged_once() {
     assert_eq!(ws.files.len(), 2);
     assert_eq!(ws.blob_count, 1);
     assert_eq!(ws.blob_bytes, "same{}".len() as u64);
+}
+
+/// The projection's quota arithmetic, in both directions, a few bytes under
+/// the workspace limit: files that fit one at a time but not together are
+/// refused, and identical content at two paths is charged once.
+#[tokio::test]
+async fn a_batch_is_held_to_the_quota_as_a_whole_and_charged_once_per_blob() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    let mut ws = workspace::load(&ctx).await.expect("workspace");
+    ws.blob_bytes = paths::MAX_WORKSPACE_BYTES - 6;
+    workspace::save(&ctx, &ws).await.expect("save");
+
+    // (a) Two different 6-byte files: each fits alone, the pair does not.
+    let out = dev_post(
+        &ctx,
+        BATCH,
+        json!({"files": [
+            {"path": "site/a.css", "content": "aaaa{}"},
+            {"path": "site/b.css", "content": "bbbb{}"},
+        ]}),
+    )
+    .await;
+    assert_eq!(output_http_status(out).await, 413);
+    let listing = output_json(ctx.dispatch_resolved(list_msg(None)).await).await;
+    assert_eq!(listing["files"].as_array().unwrap().len(), 0, "{listing}");
+    let after = workspace::load(&ctx).await.expect("workspace");
+    assert_eq!(after.blob_bytes, paths::MAX_WORKSPACE_BYTES - 6);
+
+    // (b) The same 6 bytes at two paths: one blob, which fits.
+    let out = dev_post(
+        &ctx,
+        BATCH,
+        json!({"files": [
+            {"path": "site/a.css", "content": "same{}"},
+            {"path": "site/b.css", "content": "same{}"},
+        ]}),
+    )
+    .await;
+    assert_eq!(output_http_status(out).await, 200);
 }
