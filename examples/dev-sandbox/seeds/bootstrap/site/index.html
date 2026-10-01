@@ -12,7 +12,7 @@
   <nav class="navbar navbar-expand-lg bg-body border-bottom">
     <div class="container">
       <a class="navbar-brand fw-semibold" href="/">ImpressPress build sandbox</a>
-      <a class="btn btn-primary" href="/b/auth/login?redirect=/b/dev">Open workspace</a>
+      <a class="btn btn-primary" href="/b/dev/enter">Open workspace</a>
     </div>
   </nav>
 
@@ -24,6 +24,8 @@
           This is a browser-local <strong>WebMCP</strong> sandbox seeded with Bootstrap 5.
           Open it in a browser whose agent supports WebMCP and the agent can build this
           site, compile Rust backend blocks and stock a shop — no server, no deploy.
+          An agent without WebMCP runs the same tools from the Tool console on the
+          workspace page.
         </p>
         <p>
           Every visitor gets their own instance: a service worker and an OPFS database
@@ -36,6 +38,8 @@
             <h2 class="h5 card-title">Credentials</h2>
             <p class="small text-body-secondary">
               Public on purpose: this instance exists only in your browser.
+              Open workspace signs you in; these are how you sign back in after
+              the session expires.
             </p>
             <dl class="row mb-3">
               <dt class="col-4">Email</dt>
@@ -43,7 +47,7 @@
               <dt class="col-4">Password</dt>
               <dd class="col-8"><code>admin123</code></dd>
             </dl>
-            <a class="btn btn-primary w-100" href="/b/auth/login?redirect=/b/dev">Open workspace</a>
+            <a class="btn btn-primary w-100" href="/b/dev/enter">Open workspace</a>
           </div>
         </div>
       </div>

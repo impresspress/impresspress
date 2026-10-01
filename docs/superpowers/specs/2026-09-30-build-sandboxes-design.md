@@ -109,7 +109,9 @@ re-litigated.
 2. The agent reads impresspress.org. The docs page "Build a website with an
    agent" — and therefore `llms.txt` — says: open
    `https://impresspress.org/build` in a WebMCP-capable Chromium browser,
-   sign in with the credentials on the landing page, call `dev_status`, then
+   follow "Open workspace" (which signs it in — amended 2026-10-02, dev
+   sandbox design amendment 21; it used to say "sign in with the credentials
+   on the landing page"), call `dev_status`, then
    `dev_read_reference`, and read its `site_markdown` before writing a file.
 3. `/build` redirects to `https://build-bootstrap.impresspress.org`.
 4. Generation 0 there is a Bootstrap-built welcome page showing the
