@@ -1281,12 +1281,14 @@ async fn reset_operation_to_pending(ctx: &crate::test_support::TestContext, id: 
 /// `impresspress_core::secret_tables` for why that distinction is load-
 /// bearing. It is a JSON-object column written as
 /// `serde_json::json!({..}).to_string()` and declared `TEXT NOT NULL DEFAULT
-/// '{}'`. Native SQLite and the browser re-parse a JSON-shaped TEXT column on
-/// read, so it arrives as a `Value::Object` — for which `str_field`, having no
-/// structured arm, answers `""`. Every reader that carries the summary from
-/// the refund ledger onto the provider-operation row therefore persisted an
-/// empty string, silently dropping the refund's provider outcome from a
-/// payments audit trail. Nothing reads it back, so nothing failed loudly.
+/// '{}'`. Before wafer-run #365, native SQLite and the browser re-parsed
+/// JSON-shaped TEXT on read, so it arrived as a `Value::Object` — for which
+/// `str_field`, having no structured arm, answered `""`. Every reader that
+/// carried the summary from the refund ledger onto the provider-operation
+/// row therefore persisted an empty string, silently dropping the refund's
+/// provider outcome from a payments audit trail. Nothing reads it back, so
+/// nothing failed loudly. Every backend now returns a `TEXT` column as the
+/// string; this pins that the summary still survives the carry.
 ///
 /// Four call sites carry that summary from the refund ledger onto the
 /// provider-operation row. Three are exercised here, in the order a real

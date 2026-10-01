@@ -2825,10 +2825,10 @@ async fn order_detail(
                         components::TableCol { label: "Configuration", width: None },
                     ];
                     @let rows: Vec<Vec<Markup>> = line_items.iter().map(|item| {
-                        // `input_snapshot` is a JSON-object column, so it
-                        // arrives structured on the backends that re-parse
-                        // JSON-shaped text and as the raw string on the ones
-                        // that do not. `json_text_field` renders both.
+                        // `input_snapshot` is a JSON object encoded into a
+                        // `TEXT` column, so it arrives as the encoded string
+                        // on every backend. `json_text_field` renders that,
+                        // and a decoded value too.
                         let snapshot = item.json_text_field("input_snapshot");
                         vec![
                             html! { strong { (item.str_field("product_name")) } },

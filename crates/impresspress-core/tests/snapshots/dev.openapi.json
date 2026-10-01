@@ -1619,6 +1619,8 @@
                     ],
                     "type": "object"
                   },
+                  "maxItems": 64,
+                  "minItems": 1,
                   "type": "array"
                 }
               },

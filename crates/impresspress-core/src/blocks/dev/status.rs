@@ -64,7 +64,8 @@ async fn build(ctx: &dyn Context, shared: &DevShared) -> Result<StatusResponse, 
         // the way a store listing is not, and the difference between an empty
         // sandbox that says why and one that does not.
         seed_error: seed::last_failure(ctx).await?,
-        // One indexed singleton read per poll, like seed_error.
-        template: seed_info::read(ctx).await?.map(|seed| seed.template),
+        // One indexed singleton read per poll, like seed_error, projected to
+        // the `template` column so the poll never drags the guide along.
+        template: seed_info::template(ctx).await?,
     })
 }

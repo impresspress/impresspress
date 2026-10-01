@@ -25,9 +25,9 @@
 //! * **The JSON types were backend-dependent.** `legal_hold`,
 //!   `reporter_wants_reply`, `public_visible`, `active` and friends are
 //!   `INTEGER` on SQLite/D1 and `BOOLEAN` on Postgres; `metadata_json` and
-//!   `suggested_actions_json` are JSON-encoded `TEXT` that only the SQLite
-//!   backend sniffs back into a value. Every field below is normalized, so the
-//!   schema is true on all three backends.
+//!   `suggested_actions_json` are JSON-encoded `TEXT`, which every backend
+//!   hands back as the encoded string rather than the value it holds. Every
+//!   field below is normalized, so the schema is true on all three backends.
 
 use serde::{Deserialize, Serialize};
 use wafer_core::clients::database::{Record, RecordList};

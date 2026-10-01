@@ -14,11 +14,11 @@
 //!   token. The views below are *closed* field lists built column by column, so
 //!   a column added to a table is never published by accident.
 //! * **The JSON types were backend-dependent.** `users.email_verified` /
-//!   `users.disabled` are `INTEGER` on SQLite/D1 but `BOOLEAN` on Postgres, and
-//!   `roles.permissions` is a JSON-encoded `TEXT` column that the SQLite backend
-//!   sniffs back into an array while Postgres/D1 hand back the raw string. A
-//!   schema could not have been true for all three. Every field below is
-//!   normalized through [`RecordExt`], so it now is.
+//!   `users.disabled` are `INTEGER` on SQLite/D1 but `BOOLEAN` on Postgres, so
+//!   a schema could not have been true for all three; and `roles.permissions`
+//!   is a JSON-encoded `TEXT` column, which every backend hands back as the
+//!   encoded string rather than the array it holds. Every field below is
+//!   normalized through [`RecordExt`], so the schema is true everywhere.
 //!
 //! The `{records, total_count, page, page_size}` envelope is preserved exactly:
 //! only the per-row shape changes, from `{id, data: {…}}` to the flat view.
