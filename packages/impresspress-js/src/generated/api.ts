@@ -2401,6 +2401,141 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/b/dev/api/files/write-batch": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Write several workspace files as one change */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /**
+                         * @description The files to write, 1 to 64, all under `site/` or all under one
+                         *     `blocks/<name>/`. Each entry is exactly a `dev_write_file` request.
+                         */
+                        files: {
+                            /** @description The file's content, in `encoding`. */
+                            content: string;
+                            /**
+                             * @description How `content` is encoded. Defaults to `utf8`.
+                             * @default utf8
+                             */
+                            encoding?: "utf8" | "base64";
+                            /**
+                             * @description The SHA-256 you expect the file to have right now, or `null` if you
+                             *     expect it not to exist yet. A mismatch is a `409` carrying the hash
+                             *     the file actually has, so a caller that has fallen behind re-reads
+                             *     instead of silently overwriting an edit it never saw.
+                             *
+                             *     Omitting the field means the same as `null` — serde defaults an
+                             *     absent `Option` to `None`, and `#[serde(default)]` says so in the
+                             *     source rather than leaving it to a rule the schema does not show. That
+                             *     is a safe default rather than a lax one: over a file that exists,
+                             *     "I expect nothing here" is itself a conflict.
+                             * @default null
+                             */
+                            expected_sha256?: string | null;
+                            /** @description Workspace-relative path under `site/` or `blocks/<name>/`. */
+                            path: string;
+                        }[];
+                    };
+                };
+            };
+            responses: {
+                /** @description Successful response */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /**
+                             * @description Every file written, in path order, each with the hash to pass as its
+                             *     next `expected_sha256`.
+                             */
+                            files: {
+                                /** @description Content type the file is served with. */
+                                content_type: string;
+                                /**
+                                 * @description Where the file lives. Workspace-relative (`site/index.html`) in the
+                                 *     files API; relative to its area's root (`index.html`) in a
+                                 *     generation's site manifest and in a block's source listing.
+                                 */
+                                path: string;
+                                /** @description SHA-256 of the file's content-addressed blob, hex-encoded. */
+                                sha256: string;
+                                /**
+                                 * Format: uint64
+                                 * @description Size in bytes.
+                                 */
+                                size: number;
+                            }[];
+                            /**
+                             * @description The one generation the batch published, or null for a `blocks/`
+                             *     batch — only a compile turns block source into a published block.
+                             */
+                            generation: {
+                                /** @description RFC 3339 time the generation went live, or null if it never did. */
+                                activated_at: string | null;
+                                /**
+                                 * Format: uint32
+                                 * @description Number of blocks in the generation's block manifest.
+                                 */
+                                blocks: number;
+                                /** @description What created this generation. */
+                                cause: "site_write" | "site_delete" | "block_compile" | "block_remove" | "rollback" | "seed";
+                                /** @description RFC 3339 creation time. */
+                                created_at: string;
+                                /** @description Generation id. */
+                                id: string;
+                                /** @description The generation this one was derived from, or null for the first. */
+                                parent_id: string | null;
+                                /**
+                                 * Format: uint32
+                                 * @description Number of files in the generation's site manifest.
+                                 */
+                                site_files: number;
+                                /** @description Where the generation sits in its lifecycle. */
+                                status: "staged" | "validating" | "activating" | "active" | "failed" | "superseded";
+                            } | null;
+                            /**
+                             * @description One entry per phase the batch's activation passed through, with how
+                             *     long it took. The last is `active`. Empty when nothing was published.
+                             */
+                            progress: {
+                                /** @description Human-readable detail for the progress panel. */
+                                detail: string;
+                                /**
+                                 * Format: uint64
+                                 * @description Milliseconds spent in it.
+                                 */
+                                ms: number;
+                                /** @description The phase this step covers. */
+                                phase: "idle" | "validating" | "building_runtime" | "publishing" | "active" | "failed";
+                            }[];
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/b/dev/api/generations": {
         parameters: {
             query?: never;
