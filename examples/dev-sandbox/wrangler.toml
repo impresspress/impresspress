@@ -7,3 +7,13 @@ routes = [{ pattern = "dev.impresspress.org", custom_domain = true }]
 directory = "./dist"
 binding = "ASSETS"
 not_found_handling = "single-page-application"
+
+# The bootstrap-seeded sandbox (`build.sh --seed bootstrap`), its own Worker
+# on its own domain. An environment shares `main` and `compatibility_date`
+# with the top level; `name` and `routes` are per environment. `[assets]`
+# still points at `./dist`, so a deploy is always "build THIS seed into
+# dist/, then deploy THIS environment" — the two lines the README keeps
+# together, and the matrix in deploy-dev-sandbox.yml keys on one variable.
+[env.bootstrap]
+name = "impresspress-build-bootstrap"
+routes = [{ pattern = "build-bootstrap.impresspress.org", custom_domain = true }]
