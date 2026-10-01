@@ -14,6 +14,29 @@ pub fn static_assets() -> &'static [Asset] {
     ASSETS
 }
 
+/// The directory the shell's own third-party files ship under.
+pub const VENDOR_DIR: &str = "vendor/";
+
+/// The shell's own files under [`VENDOR_DIR`] (`vendor/sql-wasm-esm.js`,
+/// `vendor/sql-wasm.wasm`), as asset paths.
+///
+/// The service worker bypasses exactly these, not the whole `/vendor/`
+/// prefix: the directory is a common one for a site's own files, and a
+/// prefix bypass would hand every one of them to the static host instead of
+/// the runtime that serves the site. This list is the one source of truth for
+/// the bypass clause `bundle::build_template_vars` renders.
+///
+/// The one other place that names these files is their loader,
+/// `crates/impresspress-browser/js/bridge.js`, which requests
+/// `/vendor/sql-wasm-esm.js` and `/vendor/sql-wasm.wasm` by literal path: a
+/// rename here must change it too, or the runtime's database cannot load.
+pub fn vendor_files() -> impl Iterator<Item = &'static str> {
+    static_assets()
+        .iter()
+        .map(|asset| asset.path)
+        .filter(|path| path.starts_with(VENDOR_DIR))
+}
+
 pub fn write_to(dir: &Path) -> std::io::Result<()> {
     for asset in static_assets() {
         let out = dir.join(asset.path);
@@ -75,6 +98,45 @@ mod tests {
         assert!(paths.contains(&"webllm-engine.js"));
         assert!(paths.contains(&"embed-engine.js"));
         assert!(paths.contains(&"t2i-engine.js"));
+    }
+
+    /// `bridge.js` loads sql.js by literal path; every `/vendor/` path it
+    /// requests must be one the shell ships (and the service worker bypasses),
+    /// so renaming a vendored file in only one of the two places fails here.
+    #[test]
+    fn every_vendor_path_bridge_js_requests_is_a_shipped_vendor_file() {
+        let bridge_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../impresspress-browser/js/bridge.js"
+        );
+        let bridge =
+            std::fs::read_to_string(bridge_path).unwrap_or_else(|e| panic!("{bridge_path}: {e}"));
+        let shipped: Vec<String> = vendor_files().map(|path| format!("/{path}")).collect();
+
+        let mut requested = Vec::new();
+        for quote in ['\'', '"'] {
+            let open = format!("{quote}/{VENDOR_DIR}");
+            let mut rest = bridge.as_str();
+            while let Some(start) = rest.find(&open) {
+                let literal = &rest[start + 1..];
+                let end = literal
+                    .find(quote)
+                    .unwrap_or_else(|| panic!("unterminated literal in {bridge_path}"));
+                requested.push(literal[..end].to_string());
+                rest = &literal[end + 1..];
+            }
+        }
+
+        assert!(
+            !requested.is_empty(),
+            "{bridge_path} names no /vendor/ path"
+        );
+        for path in &requested {
+            assert!(
+                shipped.contains(path),
+                "{bridge_path} requests {path}, which the shell does not ship; shipped: {shipped:?}"
+            );
+        }
     }
 
     #[test]

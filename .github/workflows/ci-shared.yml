@@ -1008,11 +1008,22 @@ jobs:
       - name: Check the dev-sandbox seed manifest
         run: examples/dev-sandbox/build.sh --check
 
+      # The bootstrap seed's bundle, built first and moved aside (`--out`) so
+      # the blank build below can take `dist/`. `dev-bootstrap.spec.ts` serves
+      # it on its own port from inside the spec (`serveDirectory`), the way
+      # the export specs serve an unpacked bundle, so nothing here serves it.
+      - name: Build the bootstrap-seed bundle
+        run: |
+          set -o pipefail
+          BOOTSTRAP_DIST="$(examples/dev-sandbox/build.sh --seed bootstrap --out "$RUNNER_TEMP/dist-bootstrap" | tail -1)"
+          echo "BOOTSTRAP_DIST=$BOOTSTRAP_DIST" >> "$GITHUB_ENV"
+
       # One script, shared with local runs: wasm-pack with `browser-devtools`,
       # then the sealed web flow with `[dev] enabled = true` and the welcome
       # seed overlaid onto `dist/seed/`. Its last stdout line is the dist path.
       - name: Build the dev-sandbox bundle
         run: |
+          set -o pipefail
           DIST="$(examples/dev-sandbox/build.sh | tail -1)"
           echo "DEV_DIST=$DIST" >> "$GITHUB_ENV"
 
@@ -1060,7 +1071,7 @@ jobs:
         # belongs with the other fake-worker specs.
         run: |
           set -o pipefail
-          npx playwright test --config=tests/playwright.config.ts tests/e2e/dev-foundations.spec.ts tests/e2e/dev-workspace.spec.ts tests/e2e/dev-compiler.spec.ts tests/e2e/dev-compile-tool.spec.ts 2>&1 \
+          npx playwright test --config=tests/playwright.config.ts tests/e2e/dev-foundations.spec.ts tests/e2e/dev-workspace.spec.ts tests/e2e/dev-compiler.spec.ts tests/e2e/dev-compile-tool.spec.ts tests/e2e/dev-bootstrap.spec.ts 2>&1 \
             | tee /tmp/dev-sandbox-e2e.log
 
       - name: Stop server
@@ -1258,6 +1269,7 @@ jobs:
       # bundle, with `compiler/dist/` overlaid at `/__impresspress_dev/compiler/`.
       - name: Build the dev-sandbox bundle
         run: |
+          set -o pipefail
           DIST="$(examples/dev-sandbox/build.sh | tail -1)"
           echo "DEV_DIST=$DIST" >> "$GITHUB_ENV"
 

@@ -609,10 +609,10 @@ async fn the_exported_sw_drops_the_compiler_bypass_and_keeps_the_seed_one() {
     // Only that one clause: the app's other bypasses are untouched, and the
     // expression still reads the way the bundler would have rendered it for a
     // bundle that never asked for the compiler.
-    assert!(sw.contains("url.pathname.startsWith('/sql-')"), "{sw}");
+    assert!(sw.contains("url.pathname.startsWith('/snippets/')"), "{sw}");
     assert!(
         sw.contains(
-            "if (url.pathname.startsWith('/sql-') || url.pathname.startsWith('/seed/')) \
+            "if (url.pathname.startsWith('/snippets/') || url.pathname.startsWith('/seed/')) \
              { return; }"
         ),
         "the remaining expression must be exactly what a compiler-less bundle renders; {sw}"

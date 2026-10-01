@@ -322,7 +322,8 @@ export async function serveDirectory(dir: string, port: number): Promise<ChildPr
 }
 
 /**
- * The ports the exported bundles are served on, beside the sandbox's own.
+ * The ports the specs serve a bundle of their own on, beside the sandbox's
+ * `TEST_PORT`: the exported bundles, and the bootstrap seed's bundle.
  *
  * One per spec, not one shared constant. `workers: 1` and
  * `fullyParallel: false` make an overlap unlikely rather than impossible —
@@ -333,3 +334,5 @@ export async function serveDirectory(dir: string, port: number): Promise<ChildPr
  */
 export const WORKSPACE_EXPORT_PORT = 8098;
 export const SCENARIO_EXPORT_PORT = 8099;
+/** Where `dev-bootstrap.spec.ts` serves the bootstrap seed's own bundle. */
+export const BOOTSTRAP_PORT = 8097;

@@ -1,0 +1,96 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>ImpressPress build sandbox</title>
+  <link rel="stylesheet" href="/vendor/bootstrap/bootstrap.min.css" />
+  <script src="/vendor/bootstrap/bootstrap.bundle.min.js" defer></script>
+  <script src="/b/webmcp/webmcp.js" defer></script>
+</head>
+<body class="bg-body-tertiary">
+  <nav class="navbar navbar-expand-lg bg-body border-bottom">
+    <div class="container">
+      <a class="navbar-brand fw-semibold" href="/">ImpressPress build sandbox</a>
+      <a class="btn btn-primary" href="/b/auth/login?redirect=/b/dev">Open workspace</a>
+    </div>
+  </nav>
+
+  <main class="container py-5">
+    <section class="row align-items-center g-5 mb-5">
+      <div class="col-lg-7">
+        <h1 class="display-5 fw-bold">Build a website with your browser agent</h1>
+        <p class="lead">
+          This is a browser-local <strong>WebMCP</strong> sandbox seeded with Bootstrap 5.
+          Open it in a browser whose agent supports WebMCP and the agent can build this
+          site, compile Rust backend blocks and stock a shop — no server, no deploy.
+        </p>
+        <p>
+          Every visitor gets their own instance: a service worker and an OPFS database
+          created fresh in your browser on first load. Nothing you do here leaves the browser.
+        </p>
+      </div>
+      <div class="col-lg-5">
+        <div class="card shadow-sm">
+          <div class="card-body">
+            <h2 class="h5 card-title">Credentials</h2>
+            <p class="small text-body-secondary">
+              Public on purpose: this instance exists only in your browser.
+            </p>
+            <dl class="row mb-3">
+              <dt class="col-4">Email</dt>
+              <dd class="col-8"><code>admin@example.com</code></dd>
+              <dt class="col-4">Password</dt>
+              <dd class="col-8"><code>admin123</code></dd>
+            </dl>
+            <a class="btn btn-primary w-100" href="/b/auth/login?redirect=/b/dev">Open workspace</a>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <section>
+      <h2 class="h4 mb-3">What the agent can do here</h2>
+      <div class="row g-4">
+        <div class="col-md-6 col-lg-3">
+          <div class="card h-100">
+            <div class="card-body">
+              <h3 class="h6 card-title">Build and publish this site</h3>
+              <p class="card-text small text-body-secondary">Every write under <code>site/</code> goes live at once.</p>
+            </div>
+          </div>
+        </div>
+        <div class="col-md-6 col-lg-3">
+          <div class="card h-100">
+            <div class="card-body">
+              <h3 class="h6 card-title">Write and compile Rust blocks</h3>
+              <p class="card-text small text-body-secondary">Compiled in the browser, served under <code>/b/&lt;name&gt;/</code>.</p>
+            </div>
+          </div>
+        </div>
+        <div class="col-md-6 col-lg-3">
+          <div class="card h-100">
+            <div class="card-body">
+              <h3 class="h6 card-title">Stock and configure a shop</h3>
+              <p class="card-text small text-body-secondary">Products, offers and a storefront widget, through the <code>shop_*</code> tools.</p>
+            </div>
+          </div>
+        </div>
+        <div class="col-md-6 col-lg-3">
+          <div class="card h-100">
+            <div class="card-body">
+              <h3 class="h6 card-title">Export the result</h3>
+              <p class="card-text small text-body-secondary">One zip you can serve from any static host.</p>
+            </div>
+          </div>
+        </div>
+      </div>
+    </section>
+  </main>
+
+  <footer class="container py-4 border-top small text-body-secondary">
+    Seeded from the <strong>bootstrap</strong> template — Bootstrap 5.3.8, MIT
+    (<a href="/vendor/bootstrap/LICENSE.txt">license</a>).
+  </footer>
+</body>
+</html>

@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Verify every seed under seeds/: its manifest.json is exactly what
-write-manifest.py would write from its tree, byte for byte.
+write-manifest.py would write from its tree, byte for byte, and every file its
+vendor.json (when it has one) pins is under site/ with the pinned sha256.
 
 A seed is a directory whose name passes seedlib.SEED_NAME; anything else
 under seeds/ (__pycache__, a dotted directory) is not a seed and is skipped.
@@ -58,18 +59,50 @@ def problems_for(seed: pathlib.Path) -> list:
     return [f"{seed.name}: {p}" for p in problems]
 
 
+def vendor_problems(seed: pathlib.Path) -> list:
+    """Every file vendor.json pins is present under site/ with the pinned bytes."""
+    try:
+        pin = seedlib.load_pin(seed)
+    except seedlib.SeedError as e:
+        return [f"{seed.name}: {e}"]
+    if pin is None:
+        return []
+    problems = []
+    for entry in pin["files"]:
+        target = seed / "site" / entry["path"]
+        if not target.is_file():
+            problems.append(
+                f"{seed.name}: vendor.json pins {entry['path']} but site/{entry['path']} is missing "
+                f"— run seeds/vendor.py {seed.name}"
+            )
+        elif seedlib.sha256_hex(target.read_bytes()) != entry["sha256"]:
+            problems.append(
+                f"{seed.name}: site/{entry['path']} differs from the bytes vendor.json pins "
+                f"({entry['url']}) — an edited vendored file is a bug; re-run seeds/vendor.py {seed.name}"
+            )
+    return problems
+
+
 def main() -> None:
     seeds = seedlib.seed_dirs()
     if not seeds:
         raise SystemExit(f"{seedlib.SEEDS_DIR}: no seed directories")
     problems = []
     for seed in seeds:
-        found = problems_for(seed)
+        found = problems_for(seed) + vendor_problems(seed)
         problems.extend(found)
         if not found:
-            print(f"seeds/{seed.name}: manifest.json matches its tree", file=sys.stderr)
+            print(
+                f"seeds/{seed.name}: manifest.json matches its tree"
+                + (", vendored files match vendor.json" if (seed / "vendor.json").is_file() else ""),
+                file=sys.stderr,
+            )
     if problems:
-        raise SystemExit("\n".join(problems) + "\n\nRegenerate with seeds/write-manifest.py <name>.")
+        raise SystemExit(
+            "\n".join(problems)
+            + "\n\nEach line names its fix: regenerate a manifest with seeds/write-manifest.py <name>, "
+            "restore a vendored file with seeds/vendor.py <name>."
+        )
 
 
 if __name__ == "__main__":

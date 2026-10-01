@@ -384,8 +384,11 @@ fn build_template_vars(
         out
     };
 
+    let shell_vendor_bypass = shell_vendor_bypass(crate::assets::vendor_files());
+
     let mut vars: BTreeMap<String, String> = BTreeMap::new();
     vars.insert("BUILD_ID".to_string(), build_id);
+    vars.insert("SHELL_VENDOR_BYPASS".to_string(), shell_vendor_bypass);
     vars.insert("WASM_JS".to_string(), wasm_js);
     vars.insert("WASM_BIN".to_string(), wasm_bin);
     vars.insert("WASM_JS_PREFIX".to_string(), wasm_js_prefix);
@@ -415,6 +418,20 @@ fn build_template_vars(
     vars
 }
 
+/// The bypass clauses for the shell's own vendored files, rendered into
+/// `sw.js.tmpl`'s `__SHELL_VENDOR_BYPASS__` from the asset list that ships
+/// them (`assets::vendor_files`), so the bypass and the files cannot disagree.
+///
+/// Exact paths, not a `/vendor/` prefix: anything else under `/vendor/` is the
+/// site's, and the runtime serves it. Each clause LEADS with its `||`, like
+/// `__EXTRA_BYPASS__`'s, so the expression stays valid for any number of
+/// files, none included.
+fn shell_vendor_bypass<'a>(files: impl Iterator<Item = &'a str>) -> String {
+    files
+        .map(|path| format!(" ||\n        url.pathname === '/{path}'"))
+        .collect()
+}
+
 fn render_if_exists(
     pkg_dir: &Path,
     src_name: &str,
@@ -437,4 +454,25 @@ fn render_if_exists(
         );
     }
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::shell_vendor_bypass;
+
+    #[test]
+    fn no_vendor_files_render_no_clause() {
+        assert_eq!(shell_vendor_bypass(std::iter::empty()), "");
+    }
+
+    #[test]
+    fn each_vendor_file_renders_one_leading_or_clause() {
+        assert_eq!(
+            shell_vendor_bypass(["vendor/a.js", "vendor/b.wasm"].into_iter()),
+            concat!(
+                " ||\n        url.pathname === '/vendor/a.js'",
+                " ||\n        url.pathname === '/vendor/b.wasm'",
+            )
+        );
+    }
 }

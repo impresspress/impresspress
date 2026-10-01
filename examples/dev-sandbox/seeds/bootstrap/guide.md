@@ -1,7 +1,11 @@
 # Building the site in this sandbox
 
-This sandbox seeded a blank site: `site/index.html` and `site/styles.css`,
-and no CSS framework. Write your own stylesheet, or replace `styles.css`.
+This sandbox seeded a site built on **Bootstrap 5.3.8**, vendored under
+`site/vendor/bootstrap/` (stock build, nothing customised, MIT — see
+`vendor/bootstrap/LICENSE.txt`). Keep that directory, and never
+`dev_read_file` anything under it: a minified framework file is hundreds
+of KiB of context that tells you nothing. The welcome page,
+`site/index.html`, is a worked example of the framework in use.
 
 ## How `site/` works
 
@@ -16,7 +20,8 @@ and no CSS framework. Write your own stylesheet, or replace `styles.css`.
 
 ## Page skeleton
 
-Every page you write carries this `<head>`:
+Every page you write carries this `<head>`. No stylesheet of your own is
+needed; add one only for what Bootstrap's utilities cannot express.
 
 ```html
 <!doctype html>
@@ -25,7 +30,8 @@ Every page you write carries this `<head>`:
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Page title</title>
-  <link rel="stylesheet" href="/styles.css" />
+  <link rel="stylesheet" href="/vendor/bootstrap/bootstrap.min.css" />
+  <script src="/vendor/bootstrap/bootstrap.bundle.min.js" defer></script>
   <script src="/b/webmcp/webmcp.js" defer></script>
 </head>
 ```
@@ -33,6 +39,24 @@ Every page you write carries this `<head>`:
 `/b/webmcp/webmcp.js` gives a visitor's own browser agent the site's public
 tools — the shop's, and any compiled block's agent tools. Without the tag a
 visitor's agent sees a plain page.
+
+## Bootstrap here
+
+Prefer the components the framework already styles:
+
+- Layout: `.container`, `.row` / `.col-*`, the spacing utilities (`py-5`,
+  `mb-3`, `g-4`).
+- Navigation: `.navbar` with `.navbar-brand`; a `.btn.btn-primary` for the
+  main action.
+- Content: `.card` / `.card-body` grids for products and features;
+  `.display-5` and `.lead` for a hero; `.badge` for tags.
+- Forms: `.form-control`, `.form-label`, `.form-select`, `.btn`.
+- Feedback: `.alert`. `.modal` and `.collapse` work from `data-bs-toggle`
+  attributes because the bundle is loaded; a `.toast` is shown from script
+  with `bootstrap.Toast.getOrCreateInstance(el).show()`.
+- Theme: add `data-bs-theme="dark"` on `<html>` for a dark site.
+
+Bootstrap Icons are **not** vendored; use text, Unicode or an inline SVG.
 
 ## The shop
 
@@ -43,7 +67,28 @@ through two public pieces:
   `{"records": [...], "total_count": N, "page": 1, "page_size": M}`. Each
   record carries `id`, `name`, `slug`, `description`, `image_url`, `tags`,
   `category`, `currency`, `stock`, `metadata` and `fulfillment_kind`. Pass
-  `?page=2` for the next page; `?page_size=` goes up to 100.
+  `?page=2` for the next page; `?page_size=` goes up to 100. Render the
+  list into a `.card` grid with a small script (`esc` keeps a product's
+  text from being read as markup):
+
+```html
+<div id="products" class="row g-4"></div>
+<script>
+  const esc = s => String(s ?? '').replace(/[&<>"']/g, c => `&#${c.charCodeAt(0)};`);
+  fetch('/b/products/catalog').then(r => r.json()).then(({ records }) => {
+    document.getElementById('products').innerHTML = records.map(p => `
+      <div class="col-md-4"><div class="card h-100">
+        ${p.image_url ? `<img class="card-img-top" src="${esc(p.image_url)}" alt="">` : ''}
+        <div class="card-body">
+          <h3 class="h5 card-title">${esc(p.name)}</h3>
+          <p class="card-text">${esc(p.description)}</p>
+          <a class="btn btn-outline-primary" href="/product.html?id=${encodeURIComponent(p.id)}">View</a>
+        </div>
+      </div></div>`).join('');
+  });
+</script>
+```
+
 - `<impresspress-product product-id="…"></impresspress-product>` renders one
   product's price and buy button. Load
   `<script src="/b/products/storefront.js" defer></script>` once per page.
@@ -76,7 +121,8 @@ send and read JSON.
 ## Workflow
 
 1. `dev_status`, then this reference.
-2. Read `site/index.html`, then overwrite it with your page.
+2. Read `site/index.html` (for its hash and as the example), then overwrite
+   it with your page.
 3. Add pages and assets with further writes: `dev_write_files` for a
    scaffold of several pages (one generation for the whole batch),
    `dev_write_file` for one file (one generation each).

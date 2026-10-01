@@ -400,9 +400,13 @@ user does it, or gives an explicit go-ahead at that step.
 ## 10. Security
 
 - No new network path. The seed is same-origin static content, verified
-  as today. Bootstrap runs under the existing CSP: `style-src 'self'`,
-  `script-src 'self'`, `img-src data:` for its inline SVG icons. It loads no
-  fonts.
+  as today. Bootstrap runs under the existing CSP (`wafer-run`'s
+  security-headers block, configured by `crates/impresspress-web/src/lib.rs`'s
+  `IMPRESSPRESS_CSP`): `script-src 'self' 'unsafe-inline'`, `style-src 'self'
+  'unsafe-inline'`, and an `img-src` that includes `data:` for its inline
+  SVG icons. It loads no fonts. The bootstrap guide's catalog example is an
+  inline `<script>`, so it relies on `script-src 'unsafe-inline'`; a policy
+  without it would need that example moved to a file under `site/`.
 - The guide is text stored in the sandbox database and returned to the
   admin's agent; nothing renders it as HTML. The page shows the suggested
   prompt inside `<pre>`, escaped by Maud.
