@@ -203,6 +203,7 @@ fn empty_exact_leaves_production_sw_bypass_unchanged() {
     assert!(
         sw.contains(concat!(
             "url.pathname.startsWith('/snippets/') ||\n",
+            "        url.pathname.startsWith('/cdn-cgi/') ||\n",
             "        url.pathname === '/vendor/sql-wasm-esm.js' ||\n",
             "        url.pathname === '/vendor/sql-wasm.wasm') {",
         )),
@@ -356,6 +357,36 @@ fn a_site_file_under_vendor_is_not_bypassed() {
         "/vendor/sql-wasm.wasm.map",
     ] {
         assert!(!bypasses(&sw, path), "{path} is bypassed; sw.js = {sw}");
+    }
+}
+
+/// Cloudflare reserves `/cdn-cgi/` on every proxied hostname — the RUM
+/// beacon it injects into each page POSTs to `/cdn-cgi/rum` — so the service
+/// worker leaves the whole prefix to the network, in dev and non-dev bundles
+/// alike, and never routes it to the runtime (which would answer 501).
+#[test]
+fn cloudflare_cdn_cgi_paths_are_bypassed() {
+    for dev_enabled in [false, true] {
+        let tmp = production_pkg_copy();
+        let app = AppConfig {
+            dev_enabled,
+            ..AppConfig::default()
+        };
+        run(tmp.path(), tmp.path(), app).expect("bundler ok");
+        let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
+
+        for path in ["/cdn-cgi/rum", "/cdn-cgi/trace"] {
+            assert!(
+                bypasses(&sw, path),
+                "{path} reaches the runtime (dev = {dev_enabled}); sw.js = {sw}"
+            );
+        }
+        // The prefix, not a look-alike: a site page that merely starts with
+        // the same letters is still the runtime's.
+        assert!(
+            !bypasses(&sw, "/cdn-cgi-notes.html"),
+            "dev = {dev_enabled}; sw.js = {sw}"
+        );
     }
 }
 
