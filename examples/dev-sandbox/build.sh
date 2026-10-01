@@ -37,6 +37,7 @@
 # `--root ./out` to keep it out of `~/.cargo/bin`) and point this at it.
 #
 # `--check` verifies every `seeds/<name>/manifest.json` against its `site/**`
+# and, when the seed has them, its `sandbox.json` and `guide.md`
 # (seeds/check-seeds.py) — and, when `compiler/dist/` has been
 # built, that its files match `compiler/dist/manifest.json` and none of them
 # is over Cloudflare's asset limit — exiting non-zero on drift, WITHOUT
@@ -78,7 +79,7 @@ esac
 # drifted from its files is what `seed::import` refuses at boot, and the
 # check is cheap. The rules live in seeds/check-seeds.py.
 check_seed() {
-  log "verifying seeds/*/manifest.json against seeds/*/site/**"
+  log "verifying seeds/*/manifest.json against seeds/*/site/**, sandbox.json and guide.md"
   python3 "$HERE/seeds/check-seeds.py"
 }
 
@@ -107,6 +108,9 @@ stage_seed() {
   mkdir -p "$HERE/seed"
   cp "$src/manifest.json" "$HERE/seed/manifest.json"
   cp -R "$src/site" "$HERE/seed/site"
+  # The guide rides the bundle when the seed carries a sandbox block; the
+  # manifest names it, so a seed with one and no file fails the check above.
+  if [ -f "$src/guide.md" ]; then cp "$src/guide.md" "$HERE/seed/guide.md"; fi
 }
 
 # The browser toolchain (`compiler/`) is 365 MiB of composed wasm and takes

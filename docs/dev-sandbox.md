@@ -142,6 +142,11 @@ means, the limits, and the complete source of both templates — spliced
 in at render time from the very files `dev_create_block` writes, so the guide
 cannot drift from them. Read it before writing Rust.
 
+The same response carries `site_markdown` — the site-authoring guide this
+sandbox's seed ships: the page skeleton, the shop pieces, what a write
+refuses — and `template`, the seed's name (`dev_status` reports it too). Read
+`site_markdown` before writing under `site/`.
+
 ### Compiling one
 
 The Compile button — or the `dev_compile_block` tool — compiles

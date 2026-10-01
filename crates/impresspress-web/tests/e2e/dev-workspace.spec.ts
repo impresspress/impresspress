@@ -170,7 +170,10 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
     active_generation: Generation | null;
     runtime_generation: number;
     blocks: unknown[];
+    template: string | null;
   }>(await execute(page, 'dev_status', {}));
+  // The seed this origin booted from names its template (seeds/blank/sandbox.json).
+  expect(status.template).toBe('blank');
   // Generation 0 came from `/seed/manifest.json` on this origin's first
   // fetch, and it carries no blocks — so nothing has rebuilt the runtime.
   expect(status.active_generation?.cause).toBe('seed');

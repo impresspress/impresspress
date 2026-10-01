@@ -3,7 +3,10 @@
 A seed is `seeds/<name>/`: a `site/` tree that becomes generation 0 of a
 fresh sandbox, and a `manifest.json` that lists every file of it with the
 sha256, size and content type `impresspress-core::blocks::dev::seed` verifies
-at boot. The manifest is generated from the tree (`write-manifest.py`) and
+at boot. A seed may also carry `sandbox.json` (its template name and the
+prompt `/b/dev` suggests) and `guide.md` (the site-authoring guide
+`dev_read_reference` serves); the manifest's `sandbox` block is built from
+the two. The manifest is generated from the tree (`write-manifest.py`) and
 checked against it (`check-seeds.py`); it is never hand-edited.
 """
 import hashlib
@@ -125,14 +128,79 @@ def build_manifest(seed_dir: pathlib.Path) -> dict:
     site_dir = seed_dir / "site"
     if not site_dir.is_dir():
         raise SeedError(f"{seed_dir}: has no site/ directory")
-    return {
+    manifest = {
         "schema_version": SCHEMA_VERSION,
         "source_generation": None,
         "site": site_entries(site_dir),
         "blocks": [],
         "data": None,
     }
+    # Last, and only when the seed carries one: `seed::SeedManifest` declares
+    # it last, and an absent block is how a bundle says it has none.
+    sandbox = sandbox_block(seed_dir)
+    if sandbox is not None:
+        manifest["sandbox"] = sandbox
+    return manifest
 
 
 def render(manifest: dict) -> str:
     return json.dumps(manifest, indent=2) + "\n"
+
+
+# Mirror seed::GUIDE_PATH, seed::GUIDE_CONTENT_TYPE, seed::MAX_GUIDE_BYTES and
+# seed::MAX_PROMPT_BYTES: the importer refuses a sandbox block outside them.
+GUIDE_PATH = "guide.md"
+GUIDE_CONTENT_TYPE = "text/markdown; charset=utf-8"
+MAX_GUIDE_BYTES = 256 * 1024
+MAX_PROMPT_BYTES = 4 * 1024
+
+
+def sandbox_block(seed_dir: pathlib.Path):
+    """The `sandbox` block of a seed that carries sandbox.json and guide.md,
+    or None when it carries neither. Checked here to the runtime's own limits
+    (seed::fetch_sandbox), so a seed the importer would refuse at boot is
+    refused at generation time instead."""
+    sandbox_path = seed_dir / "sandbox.json"
+    guide_path = seed_dir / GUIDE_PATH
+    if not sandbox_path.is_file():
+        if guide_path.exists():
+            raise SeedError(f"{guide_path}: present without sandbox.json, so nothing would serve it")
+        return None
+    try:
+        sandbox = json.loads(sandbox_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise SeedError(f"{sandbox_path}: not valid JSON ({e})")
+    if not isinstance(sandbox, dict) or set(sandbox) != {"template", "suggested_prompt"}:
+        raise SeedError(
+            f"{sandbox_path}: needs a JSON object with exactly the keys template and suggested_prompt"
+        )
+    template = sandbox["template"]
+    prompt = sandbox["suggested_prompt"]
+    if not isinstance(template, str) or not SEED_NAME.fullmatch(template):
+        raise SeedError(
+            f"{sandbox_path}: template {template!r} is not a valid name — the runtime's "
+            f"block-name rule (paths::block_name_is_valid)"
+        )
+    if not isinstance(prompt, str):
+        raise SeedError(f"{sandbox_path}: suggested_prompt must be a string")
+    if len(prompt.encode("utf-8")) > MAX_PROMPT_BYTES:
+        raise SeedError(f"{sandbox_path}: suggested_prompt is over {MAX_PROMPT_BYTES} bytes")
+    if not guide_path.is_file() or guide_path.is_symlink():
+        raise SeedError(f"{seed_dir}: sandbox.json is present but {GUIDE_PATH} is missing")
+    data = guide_path.read_bytes()
+    if len(data) > MAX_GUIDE_BYTES:
+        raise SeedError(f"{guide_path}: {len(data)} bytes is over the {MAX_GUIDE_BYTES}-byte limit")
+    try:
+        data.decode("utf-8")
+    except UnicodeDecodeError as e:
+        raise SeedError(f"{guide_path}: not valid UTF-8 ({e}); the importer refuses it at boot")
+    return {
+        "template": template,
+        "suggested_prompt": prompt,
+        "guide": {
+            "path": GUIDE_PATH,
+            "sha256": sha256_hex(data),
+            "size": len(data),
+            "content_type": GUIDE_CONTENT_TYPE,
+        },
+    }

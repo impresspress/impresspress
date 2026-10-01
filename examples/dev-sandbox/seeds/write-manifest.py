@@ -1,9 +1,10 @@
 #!/usr/bin/env python3
-"""Write seeds/<name>/manifest.json from seeds/<name>/site/**.
+"""Write seeds/<name>/manifest.json from seeds/<name>/site/** and, when the
+seed has them, seeds/<name>/sandbox.json and seeds/<name>/guide.md.
 
 Usage: seeds/write-manifest.py <name>
 
-Run it after every edit under site/ and commit the result; `build.sh --check`
+Run it after every edit under site/, to sandbox.json or to guide.md, and commit the result; `build.sh --check`
 (seeds/check-seeds.py) fails on a manifest that does not match its tree.
 """
 import pathlib
