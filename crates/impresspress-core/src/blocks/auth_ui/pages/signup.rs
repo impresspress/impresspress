@@ -3,7 +3,7 @@
 use maud::{html, PreEscaped};
 use wafer_run::{context::Context, Message, OutputStream};
 
-use super::{pw_field, signup_script, site_config};
+use super::{api_post_script, pw_field, signup_script, site_config};
 use crate::{
     blocks::auth_ui::redirect::is_safe_local_redirect,
     config_vars::ALLOW_SIGNUP_KEY,
@@ -80,6 +80,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     }
                 }
 
+                script { (PreEscaped(api_post_script())) }
                 script { (PreEscaped(signup_script())) }
             },
         ),

@@ -4,8 +4,8 @@ use maud::{html, PreEscaped};
 use wafer_run::{context::Context, Message, OutputStream};
 
 use super::{
-    login_script, oauth_button_script, oauth_provider_configured, oauth_provider_icon,
-    oauth_provider_label, pw_field, site_config,
+    api_post_script, login_script, oauth_button_script, oauth_provider_configured,
+    oauth_provider_icon, oauth_provider_label, pw_field, site_config,
 };
 use crate::{
     blocks::auth_ui::redirect::is_safe_local_redirect,
@@ -141,6 +141,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     }
                 }
 
+                script { (PreEscaped(api_post_script())) }
                 script { (PreEscaped(login_script())) }
                 @if !oauth_providers.is_empty() {
                     script { (PreEscaped(oauth_button_script())) }

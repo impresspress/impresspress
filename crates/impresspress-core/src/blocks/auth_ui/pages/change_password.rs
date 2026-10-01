@@ -3,7 +3,7 @@
 use maud::{html, PreEscaped};
 use wafer_run::{context::Context, Message, OutputStream};
 
-use super::{pw_field, site_config};
+use super::{api_post_script, pw_field, site_config};
 use crate::ui::{self, components::auth_panel, templates::auth_split};
 
 pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
@@ -60,6 +60,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     }
                 }
 
+                script { (PreEscaped(api_post_script())) }
                 script { (PreEscaped(r#"
 var $=function(id){return document.getElementById(id)};
 function showErr(m){var e=$('error');e.textContent=m;e.hidden=false}
@@ -71,11 +72,9 @@ async function handleChange(ev){
   if(pw.length<8){showErr('Password must be at least 8 characters.');return false}
   btn.disabled=true;btn.textContent='Changing...';
   try{
-    var r=await fetch('/b/auth/api/change-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({current_password:$('current').value,new_password:pw})});
-    var d=await r.json();
-    if(!r.ok||d.error){showErr((d.error&&d.error.message)||d.error||'Failed to change password');btn.disabled=false;btn.textContent='Change Password';return false}
+    await apiPost('/b/auth/api/change-password',{current_password:$('current').value,new_password:pw});
     $('form').hidden=true;$('success').hidden=false;
-  }catch(ex){showErr('Something went wrong');btn.disabled=false;btn.textContent='Change Password'}
+  }catch(ex){showErr(ex.message);btn.disabled=false;btn.textContent='Change Password'}
   return false;
 }
 document.addEventListener('submit',function(e){if(e.target&&e.target.id==='form')handleChange(e)});

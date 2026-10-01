@@ -4,6 +4,7 @@
 use maud::{html, PreEscaped};
 use wafer_run::{context::Context, Message, OutputStream};
 
+use super::api_post_script;
 use crate::{
     ui,
     ui::{components::auth_panel, icons, templates::auth_split},
@@ -78,6 +79,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     }
                 }
 
+                script { (PreEscaped(api_post_script())) }
                 script { (PreEscaped(r#"
 var $=function(id){return document.getElementById(id)};
 async function handleReset(e){
@@ -90,12 +92,10 @@ async function handleReset(e){
   if(pw.length<8){err.textContent='Password must be at least 8 characters.';err.hidden=false;return false;}
   btn.disabled=true;btn.textContent='Resetting...';
   try{
-    var r=await fetch('/b/auth/api/reset-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({token:token,new_password:pw})});
-    var d=await r.json();
-    if(d.error){err.textContent=d.error.message||d.error;err.hidden=false;}
-    else{suc.textContent='Password reset successfully. You can now sign in.';suc.hidden=false;$('form').hidden=true;
-      setTimeout(function(){window.location.href='/b/auth/login';},2000);}
-  }catch(ex){err.textContent='Something went wrong.';err.hidden=false;}
+    await apiPost('/b/auth/api/reset-password',{token:token,new_password:pw});
+    suc.textContent='Password reset successfully. You can now sign in.';suc.hidden=false;$('form').hidden=true;
+    setTimeout(function(){window.location.href='/b/auth/login';},2000);
+  }catch(ex){err.textContent=ex.message;err.hidden=false;}
   btn.disabled=false;btn.textContent='Reset Password';
   return false;
 }
