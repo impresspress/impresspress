@@ -32,24 +32,24 @@ pub(crate) fn now() -> String {
 /// A JSON-encoded `TEXT` column, returned as **canonical** JSON (sorted keys,
 /// no whitespace) on every backend.
 ///
-/// Two backend differences have to be flattened here, and the second is the
-/// one that matters:
+/// A column can arrive in two shapes, and both are flattened here; of the
+/// two points below, the second is the one that matters:
 ///
-/// * `wafer-block-sqlite`'s `row_to_record` sniffs JSON-shaped `TEXT` and
-///   hands back an already-decoded value, while Postgres and D1 return the
-///   literal string. `RecordExt::str_field` collapses the decoded case to
-///   `""`, which would silently lose a whole manifest on SQLite while working
-///   on Postgres.
-/// * Re-encoding the decoded value yields canonical JSON, whereas the Postgres
-///   literal is whatever was stored. Left alone, the *same row* would read back
-///   differently per backend — and since `manifest_sha256` is a hash over the
-///   canonical manifest (design §11.3), that difference would make hash
-///   verification pass on one backend and fail on another.
+/// * A column declared `TEXT` comes back as the literal string on every
+///   backend (SQLite, Postgres, D1, the browser's sql.js). A column declared
+///   JSON — or one added lazily for an object/array value — comes back
+///   already decoded. `RecordExt::str_field` collapses the decoded case to
+///   `""`, which would silently lose a whole manifest, so both are accepted.
+/// * Re-encoding a decoded value yields canonical JSON, whereas the literal
+///   string is whatever was stored. Left alone, the *same manifest* would read
+///   back differently depending on how its column is declared — and since
+///   `manifest_sha256` is a hash over the canonical manifest (design §11.3),
+///   that difference would make hash verification depend on the schema.
 ///
 /// So both arms are normalized to canonical JSON. A generation whose manifest
-/// was written non-canonically therefore fails its own hash check on every
-/// backend rather than on some of them — which is the correct outcome, and a
-/// loud one.
+/// was written non-canonically therefore fails its own hash check regardless
+/// of how its column is declared — which is the correct outcome, and a loud
+/// one.
 ///
 /// The normalization is [`super::generation::canonicalize`] — the *same*
 /// function [`super::generation::canonical_text`] writes with, not a second
@@ -64,11 +64,12 @@ pub(crate) fn now() -> String {
 pub(crate) fn json_text(record: &wafer_core::clients::database::Record, key: &str) -> String {
     let canonical = |value: serde_json::Value| super::generation::canonicalize(value).to_string();
     match record.data.get(key) {
-        // Postgres / D1: the literal column text.
+        // A `TEXT` column, on every backend: the literal column text.
         Some(serde_json::Value::String(text)) => {
             serde_json::from_str::<serde_json::Value>(text).map_or_else(|_| text.clone(), canonical)
         }
-        // SQLite / D1-with-sniffing: already decoded.
+        // A column declared JSON (or added lazily for an object/array value):
+        // already decoded.
         Some(value) => canonical(value.clone()),
         None => String::new(),
     }
@@ -93,13 +94,14 @@ mod tests {
 
     const CANONICAL: &str = r#"{"a":1,"b":[{"x":true,"y":null}]}"#;
 
-    /// The two backend shapes of the same stored row must decode to the same
-    /// bytes — otherwise a `manifest_sha256` check would be backend-dependent.
+    /// The two shapes of the same stored manifest must decode to the same
+    /// bytes — otherwise a `manifest_sha256` check would depend on how the
+    /// column is declared.
     #[test]
-    fn both_backend_shapes_yield_the_same_canonical_text() {
-        // Postgres / D1 hand back the literal string...
+    fn both_column_shapes_yield_the_same_canonical_text() {
+        // A `TEXT` column hands back the literal string...
         let literal = record(serde_json::json!(CANONICAL));
-        // ...SQLite hands back the decoded value.
+        // ...a column declared JSON hands back the decoded value.
         let decoded = record(serde_json::from_str::<serde_json::Value>(CANONICAL).expect("parse"));
 
         assert_eq!(json_text(&literal, "manifest"), CANONICAL);
@@ -107,7 +109,7 @@ mod tests {
     }
 
     /// Non-canonical input is canonicalized rather than passed through, so
-    /// the result does not depend on which backend stored it. This also pins
+    /// the result does not depend on how the column is declared. This also pins
     /// that `serde_json` has no `preserve_order`: were it ever enabled by
     /// feature unification, object key order would survive and this fails.
     #[test]
