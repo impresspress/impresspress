@@ -31,9 +31,17 @@ test('generation 0 is a Bootstrap site with the framework vendored and a site gu
   const server = await serveDirectory(BOOTSTRAP_DIST, BOOTSTRAP_PORT);
   const context = await browser.newContext({ baseURL: `http://127.0.0.1:${BOOTSTRAP_PORT}` });
   const uncaught: string[] = [];
+  const consoleErrors: string[] = [];
   try {
     const page = await context.newPage();
     page.on('pageerror', (error) => uncaught.push(error.message));
+    // Page-scoped on purpose: a resource the welcome page fails to load is
+    // logged here (with its URL in `location()`), and so is any error the
+    // page's own scripts report. The worker's logs are forwarded to the job
+    // log by `bootServiceWorker` and are not this test's subject.
+    page.on('console', (msg) => {
+      if (msg.type() === 'error') consoleErrors.push(`${msg.text()} (${msg.location().url})`);
+    });
     await bootServiceWorker(page);
 
     // Bootstrap-built: the navbar is the framework's, the heading is this seed's.
@@ -41,6 +49,11 @@ test('generation 0 is a Bootstrap site with the framework vendored and a site gu
     // stylesheet is `block` — so this is what proves the vendored CSS loaded.
     await expect(page.locator('nav.navbar')).toBeVisible({ timeout: 60_000 });
     await expect(page.locator('nav.navbar')).toHaveCSS('display', 'flex');
+    // …and the vendored bundle script ran: it defines `window.bootstrap`. Polled,
+    // because the script is `defer` and the boot helper returns at `commit`.
+    await expect
+      .poll(() => page.evaluate(() => typeof (window as any).bootstrap?.Toast))
+      .toBe('function');
     await expect(page.locator('h1')).toHaveText('Build a website with your browser agent');
     await expect(page.locator('body')).toContainText('Open workspace');
 
@@ -73,6 +86,7 @@ test('generation 0 is a Bootstrap site with the framework vendored and a site gu
     expect(reference.markdown).toContain('Block::new');
 
     expect(uncaught, 'the welcome page ran without an uncaught error').toEqual([]);
+    expect(consoleErrors, 'the page logged no console error').toEqual([]);
   } finally {
     await context.close();
     server.kill('SIGKILL');

@@ -100,6 +100,45 @@ mod tests {
         assert!(paths.contains(&"t2i-engine.js"));
     }
 
+    /// `bridge.js` loads sql.js by literal path; every `/vendor/` path it
+    /// requests must be one the shell ships (and the service worker bypasses),
+    /// so renaming a vendored file in only one of the two places fails here.
+    #[test]
+    fn every_vendor_path_bridge_js_requests_is_a_shipped_vendor_file() {
+        let bridge_path = concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../impresspress-browser/js/bridge.js"
+        );
+        let bridge =
+            std::fs::read_to_string(bridge_path).unwrap_or_else(|e| panic!("{bridge_path}: {e}"));
+        let shipped: Vec<String> = vendor_files().map(|path| format!("/{path}")).collect();
+
+        let mut requested = Vec::new();
+        for quote in ['\'', '"'] {
+            let open = format!("{quote}/{VENDOR_DIR}");
+            let mut rest = bridge.as_str();
+            while let Some(start) = rest.find(&open) {
+                let literal = &rest[start + 1..];
+                let end = literal
+                    .find(quote)
+                    .unwrap_or_else(|| panic!("unterminated literal in {bridge_path}"));
+                requested.push(literal[..end].to_string());
+                rest = &literal[end + 1..];
+            }
+        }
+
+        assert!(
+            !requested.is_empty(),
+            "{bridge_path} names no /vendor/ path"
+        );
+        for path in &requested {
+            assert!(
+                shipped.contains(path),
+                "{bridge_path} requests {path}, which the shell does not ship; shipped: {shipped:?}"
+            );
+        }
+    }
+
     #[test]
     fn every_asset_has_non_empty_bytes() {
         for asset in static_assets() {
