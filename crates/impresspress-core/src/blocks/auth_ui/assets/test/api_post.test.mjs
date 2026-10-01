@@ -101,3 +101,23 @@ test('a fetch that throws says the request did not reach the app', async () => {
       'The request did not reach the app (Failed to fetch). Check your connection and try again.'
   });
 });
+
+test('the error says whether the app itself refused, and with what status', async () => {
+  // `handleForgot` turns on these two: it hides what the app decided and
+  // shows everything else.
+  const thrown = async (stub) => apiPostWith(stub)('/x', {}).then(assert.fail, (e) => e);
+
+  const refused = await thrown(answering(json(429, { error: 'ResourceExhausted', message: 'Slow down' })));
+  assert.deepEqual([refused.status, refused.refused], [429, true]);
+
+  const stopped = await thrown(answering(json(503, { error: 'Unavailable', code: 'runtime_stopped' })));
+  assert.deepEqual([stopped.status, stopped.refused], [503, true]);
+
+  const notJson = await thrown(answering(new Response(null, { status: 405 })));
+  assert.deepEqual([notJson.status, notJson.refused], [405, false]);
+
+  const unreached = await thrown(async () => {
+    throw new TypeError('Failed to fetch');
+  });
+  assert.deepEqual([unreached.status, unreached.refused], [0, false]);
+});

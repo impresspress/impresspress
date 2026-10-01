@@ -159,6 +159,9 @@ pub(super) fn pw_field(id: &str, placeholder: &str, minlength: Option<&str>) -> 
 /// JS every auth form posts through: `apiPost(path, body)` resolves to the
 /// API's JSON answer, or throws an `Error` whose message says what happened.
 /// A form's whole failure path is then `catch(ex){showErr(ex.message)}`.
+/// The error also carries `status` (the HTTP status, `0` if there was no
+/// response) and `refused` (true only when the app itself answered, in JSON),
+/// for the one caller that must not show every refusal — `handleForgot`.
 ///
 /// Three failures, three different things to say:
 ///
@@ -198,6 +201,14 @@ pub(super) fn api_post_script() -> &'static str {
 /// — see the doc comment on `oauth_button_script`.
 ///
 /// Posts through [`api_post_script`]'s `apiPost`, which the page emits first.
+///
+/// `handleForgot` answers every outcome the APP decided — sent, no such
+/// address, refused — with the same "if that email is registered" line, so
+/// the form cannot be used to find out which addresses have accounts. What it
+/// does not hide is a request the app never decided: one that did not reach
+/// it, an answer that is not the app's JSON, or a 5xx (the service worker's
+/// `runtime_stopped` among them). Saying "a link has been sent" for those was
+/// a false statement about an email nobody tried to send.
 pub(super) fn login_script() -> &'static str {
     #[cfg(target_arch = "wasm32")]
     {
@@ -227,7 +238,8 @@ async function handleForgot(){
   var email=$('email').value.trim();
   if(!email){showErr('Enter your email address first.');return}
   $('error').hidden=true;$('info').hidden=true;
-  try{await fetch('/b/auth/api/forgot-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email})})}catch(e){}
+  try{await apiPost('/b/auth/api/forgot-password',{email:email})}
+  catch(ex){if(!ex.refused||ex.status>=500){showErr(ex.message);return}}
   showInfo('If that email is registered, a password reset link has been sent.');
 }
 document.addEventListener('submit',function(e){if(e.target&&e.target.id==='form')handleLogin(e)});
@@ -259,7 +271,8 @@ async function handleForgot(){
   var email=$('email').value.trim();
   if(!email){showErr('Enter your email address first.');return}
   $('error').hidden=true;$('info').hidden=true;
-  try{await fetch('/b/auth/api/forgot-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email})})}catch(e){}
+  try{await apiPost('/b/auth/api/forgot-password',{email:email})}
+  catch(ex){if(!ex.refused||ex.status>=500){showErr(ex.message);return}}
   showInfo('If that email is registered, a password reset link has been sent.');
 }
 document.addEventListener('submit',function(e){if(e.target&&e.target.id==='form')handleLogin(e)});
@@ -376,16 +389,37 @@ mod tests {
     /// is that no form still has a path around it.
     #[test]
     fn every_form_script_reports_what_api_post_threw() {
-        for script in [login_script(), signup_script()] {
+        for script in [
+            login_script(),
+            signup_script(),
+            change_password::SCRIPT,
+            reset_password::SCRIPT,
+        ] {
             assert!(script.contains("await apiPost('/b/auth/api/"), "{script}");
+            assert!(!script.contains("fetch("), "{script}");
             assert!(
-                script.contains("}catch(ex){showErr(ex.message);"),
+                script.contains("}catch(ex){showErr(ex.message);")
+                    || script.contains("}catch(ex){err.textContent=ex.message;"),
                 "{script}"
             );
             assert!(!script.contains(".json()"), "{script}");
             assert!(!script.contains("Something went wrong"), "{script}");
         }
         assert!(api_post_script().contains("async function apiPost(path,body){"));
+    }
+
+    /// The forgot-password link keeps its one answer for whatever the app
+    /// decided, and stops claiming an email was sent when the app never got
+    /// to decide.
+    #[test]
+    fn forgot_password_shows_a_request_the_app_never_decided() {
+        let script = login_script();
+        assert!(
+            script
+                .contains("catch(ex){if(!ex.refused||ex.status>=500){showErr(ex.message);return}}"),
+            "{script}"
+        );
+        assert!(!script.contains("catch(e){}"), "{script}");
     }
 
     #[tokio::test]

@@ -10,6 +10,30 @@ use crate::{
     ui::{components::auth_panel, icons, templates::auth_split},
 };
 
+/// JS that drives the reset-password form. Posts through
+/// [`api_post_script`]'s `apiPost`, which the page emits first.
+pub(super) const SCRIPT: &str = r#"
+var $=function(id){return document.getElementById(id)};
+async function handleReset(e){
+  e.preventDefault();
+  var pw=$('password').value,cf=$('confirm').value;
+  var err=$('error'),suc=$('success'),btn=$('btn');
+  var token=$('reset-token').value;
+  err.hidden=true;suc.hidden=true;
+  if(pw!==cf){err.textContent='Passwords do not match.';err.hidden=false;return false;}
+  if(pw.length<8){err.textContent='Password must be at least 8 characters.';err.hidden=false;return false;}
+  btn.disabled=true;btn.textContent='Resetting...';
+  try{
+    await apiPost('/b/auth/api/reset-password',{token:token,new_password:pw});
+    suc.textContent='Password reset successfully. You can now sign in.';suc.hidden=false;$('form').hidden=true;
+    setTimeout(function(){window.location.href='/b/auth/login';},2000);
+  }catch(ex){err.textContent=ex.message;err.hidden=false;}
+  btn.disabled=false;btn.textContent='Reset Password';
+  return false;
+}
+document.addEventListener('submit',function(e){if(e.target&&e.target.id==='form')handleReset(e)});
+"#;
+
 pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
     // Through the async loader, not `ctx.config_get`: that snapshot is frozen
     // at boot, so an admin's saved branding never reached this page without a
@@ -80,27 +104,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
                 }
 
                 script { (PreEscaped(api_post_script())) }
-                script { (PreEscaped(r#"
-var $=function(id){return document.getElementById(id)};
-async function handleReset(e){
-  e.preventDefault();
-  var pw=$('password').value,cf=$('confirm').value;
-  var err=$('error'),suc=$('success'),btn=$('btn');
-  var token=$('reset-token').value;
-  err.hidden=true;suc.hidden=true;
-  if(pw!==cf){err.textContent='Passwords do not match.';err.hidden=false;return false;}
-  if(pw.length<8){err.textContent='Password must be at least 8 characters.';err.hidden=false;return false;}
-  btn.disabled=true;btn.textContent='Resetting...';
-  try{
-    await apiPost('/b/auth/api/reset-password',{token:token,new_password:pw});
-    suc.textContent='Password reset successfully. You can now sign in.';suc.hidden=false;$('form').hidden=true;
-    setTimeout(function(){window.location.href='/b/auth/login';},2000);
-  }catch(ex){err.textContent=ex.message;err.hidden=false;}
-  btn.disabled=false;btn.textContent='Reset Password';
-  return false;
-}
-document.addEventListener('submit',function(e){if(e.target&&e.target.id==='form')handleReset(e)});
-"#)) }
+                script { (PreEscaped(SCRIPT)) }
             },
         ),
     );

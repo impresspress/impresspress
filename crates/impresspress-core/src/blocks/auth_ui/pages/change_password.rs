@@ -6,6 +6,33 @@ use wafer_run::{context::Context, Message, OutputStream};
 use super::{api_post_script, pw_field, site_config};
 use crate::ui::{self, components::auth_panel, templates::auth_split};
 
+/// JS that drives the change-password form. Posts through
+/// [`api_post_script`]'s `apiPost`, which the page emits first.
+pub(super) const SCRIPT: &str = r#"
+var $=function(id){return document.getElementById(id)};
+function showErr(m){var e=$('error');e.textContent=m;e.hidden=false}
+async function handleChange(ev){
+  ev.preventDefault();
+  var btn=$('btn');$('error').hidden=true;
+  var pw=$('newpw').value,cf=$('confirm').value;
+  if(pw!==cf){showErr('New passwords do not match.');return false}
+  if(pw.length<8){showErr('Password must be at least 8 characters.');return false}
+  btn.disabled=true;btn.textContent='Changing...';
+  try{
+    await apiPost('/b/auth/api/change-password',{current_password:$('current').value,new_password:pw});
+    $('form').hidden=true;$('success').hidden=false;
+  }catch(ex){showErr(ex.message);btn.disabled=false;btn.textContent='Change Password'}
+  return false;
+}
+document.addEventListener('submit',function(e){if(e.target&&e.target.id==='form')handleChange(e)});
+document.addEventListener('click',function(e){
+  if(!(e.target instanceof Element))return;
+  if(!e.target.closest('[data-action="history-back"]'))return;
+  e.preventDefault();
+  history.back();
+});
+"#;
+
 pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let config = match site_config(ctx).await {
         Ok(site) => site,
@@ -61,30 +88,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
                 }
 
                 script { (PreEscaped(api_post_script())) }
-                script { (PreEscaped(r#"
-var $=function(id){return document.getElementById(id)};
-function showErr(m){var e=$('error');e.textContent=m;e.hidden=false}
-async function handleChange(ev){
-  ev.preventDefault();
-  var btn=$('btn');$('error').hidden=true;
-  var pw=$('newpw').value,cf=$('confirm').value;
-  if(pw!==cf){showErr('New passwords do not match.');return false}
-  if(pw.length<8){showErr('Password must be at least 8 characters.');return false}
-  btn.disabled=true;btn.textContent='Changing...';
-  try{
-    await apiPost('/b/auth/api/change-password',{current_password:$('current').value,new_password:pw});
-    $('form').hidden=true;$('success').hidden=false;
-  }catch(ex){showErr(ex.message);btn.disabled=false;btn.textContent='Change Password'}
-  return false;
-}
-document.addEventListener('submit',function(e){if(e.target&&e.target.id==='form')handleChange(e)});
-document.addEventListener('click',function(e){
-  if(!(e.target instanceof Element))return;
-  if(!e.target.closest('[data-action="history-back"]'))return;
-  e.preventDefault();
-  history.back();
-});
-"#)) }
+                script { (PreEscaped(SCRIPT)) }
             },
         ),
     );
