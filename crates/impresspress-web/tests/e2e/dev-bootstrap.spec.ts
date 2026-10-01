@@ -43,17 +43,17 @@ test('generation 0 is a Bootstrap site with the framework vendored and a site gu
     await expect(page.locator('h1')).toHaveText('Build a website with your browser agent');
     await expect(page.locator('body')).toContainText('Open workspace');
 
-    // The vendored files serve from generation 0 with the types the manifest declares.
+    // The vendored files serve from generation 0 with the types and sizes the manifest declares.
     const css = await page.evaluate(async () => {
       const r = await fetch('/vendor/bootstrap/bootstrap.min.css');
-      return { status: r.status, type: r.headers.get('content-type'), length: (await r.text()).length };
+      return { status: r.status, type: r.headers.get('content-type'), bytes: (await r.arrayBuffer()).byteLength };
     });
-    expect(css).toEqual({ status: 200, type: 'text/css; charset=utf-8', length: 232111 });
+    expect(css).toEqual({ status: 200, type: 'text/css; charset=utf-8', bytes: 232111 });
     const js = await page.evaluate(async () => {
       const r = await fetch('/vendor/bootstrap/bootstrap.bundle.min.js');
-      return { status: r.status, type: r.headers.get('content-type'), length: (await r.text()).length };
+      return { status: r.status, type: r.headers.get('content-type'), bytes: (await r.arrayBuffer()).byteLength };
     });
-    expect(js).toEqual({ status: 200, type: 'application/javascript; charset=utf-8', length: 80496 });
+    expect(js).toEqual({ status: 200, type: 'application/javascript; charset=utf-8', bytes: 80496 });
 
     // The seed's sandbox block reached the runtime: status names the template,
     // the reference carries the guide.
