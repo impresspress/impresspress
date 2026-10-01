@@ -1001,8 +1001,8 @@ jobs:
         if: steps.compiler-fetch.outcome != 'success' && steps.compiler-dist.outputs.cache-hit != 'true'
         run: examples/dev-sandbox/compiler/build-compiler.sh --fast
 
-      # `--check` fails fast on a seed/manifest.json that has drifted from
-      # seed/site/** — the same check `build.sh`'s normal path runs before it
+      # `--check` fails fast on a seeds/*/manifest.json that has drifted from
+      # its site/** — the same check `build.sh`'s normal path runs before it
       # builds anything, surfaced as its own step so a stale manifest is
       # reported without paying for a wasm-pack build first.
       - name: Check the dev-sandbox seed manifest
@@ -1246,7 +1246,7 @@ jobs:
         if: steps.compiler-fetch.outcome != 'success' && steps.compiler-dist.outputs.cache-hit != 'true'
         run: examples/dev-sandbox/compiler/build-compiler.sh --fast
 
-      # Both halves of `--check`: the seed manifest, and the compiler tree —
+      # Both halves of `--check`: every seed's manifest, and the compiler tree —
       # every file against `compiler/dist/manifest.json`'s hashes, and nothing
       # over Cloudflare's asset limit. On a cache hit this is what proves the
       # restored tree is intact rather than assuming it.

@@ -12,8 +12,8 @@ import { bootServiceWorker, loginAdmin, WELCOME_PHRASE } from './fixtures/dev-sa
  * covered by a host test, so this file is the first and only place it runs.
  * The bundle it serves is built by `examples/dev-sandbox/build.sh` (a
  * `browser-devtools` wasm through the sealed web flow with `[dev] enabled =
- * true`, the welcome starter site at `examples/dev-sandbox/seed/` overlaid
- * onto `dist/seed/`).
+ * true`, the welcome starter site at `examples/dev-sandbox/seeds/blank/`
+ * overlaid onto `dist/seed/`).
  *
  * The first test is the anonymous half: **seed-on-boot** (a fresh origin
  * serving `/seed/manifest.json` imports generation 0 and publishes its site),
@@ -98,15 +98,15 @@ const PATCHED_B64 = Buffer.from(
 const GUEST_GREETING = 'Hello from a browser-compiled WAFER block!';
 
 /**
- * SHA-256 of `seed/site/index.html`, read from `examples/dev-sandbox/seed/
- * manifest.json` at test time rather than pinned here — it is what the
- * *first* write has to send as `expected_sha256`: the seed already published
- * `site/index.html`, so a write claiming to expect nothing there is a
- * conflict, not a create. `build.sh --check` fails the build if the manifest
+ * SHA-256 of `seeds/blank/site/index.html`, read from
+ * `examples/dev-sandbox/seeds/blank/manifest.json` at test time rather than
+ * pinned here — it is what the *first* write has to send as
+ * `expected_sha256`: the seed already published `site/index.html`, so a
+ * write claiming to expect nothing there is a conflict, not a create. `build.sh --check` fails the build if the manifest
  * and the file disagree, which is what keeps this read honest.
  */
 const seedManifestPath = fileURLToPath(
-  new URL('../../../../examples/dev-sandbox/seed/manifest.json', import.meta.url),
+  new URL('../../../../examples/dev-sandbox/seeds/blank/manifest.json', import.meta.url),
 );
 const seedManifest: { site: { path: string; sha256: string }[] } = JSON.parse(
   readFileSync(seedManifestPath, 'utf8'),

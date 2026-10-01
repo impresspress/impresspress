@@ -27,8 +27,9 @@ extra_bypass_prefix = ["/__impresspress_dev/compiler/"]
 # other bundle's default.
 opfs_wipe_on_recovery = false
 
-# The welcome starter site, overlaid onto the bundle wholesale: `seed/` holds
-# `manifest.json` + `site/**`, and `apply_overlays` now copies a directory
+# The seed being built, overlaid onto the bundle wholesale. `seed/` is a
+# build output: build.sh stages `seeds/<name>/` (default `blank`) into it,
+# because this entry takes no parameters. `apply_overlays` copies a directory
 # entry recursively (`crates/impresspress/src/cli/helpers/overlays.rs`).
 [[assets.overlay]]
 from = "seed"

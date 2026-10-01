@@ -24,8 +24,8 @@ import path from 'node:path';
 
 /**
  * A stable phrase from the real welcome page
- * (`examples/dev-sandbox/seed/site/index.html`) — the "Open workspace" link
- * text, present on every render regardless of copy edits elsewhere on the
+ * (`examples/dev-sandbox/seeds/blank/site/index.html`) — the "Open workspace"
+ * link text, present on every render regardless of copy edits elsewhere on the
  * page.
  */
 export const WELCOME_PHRASE = 'Open workspace';
