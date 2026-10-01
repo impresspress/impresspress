@@ -2656,7 +2656,7 @@ impl FailingDbOpContext {
     fn let_one_pass(&self) -> bool {
         use std::sync::atomic::Ordering;
         self.passes_before_failing
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
             .is_ok()
     }
 }
@@ -2801,7 +2801,7 @@ impl Context for FailingServiceOpContext {
             && self.failing.contains(&msg.action())
             && self
                 .passes_before_failing
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
                 .is_err()
         {
             return OutputStream::error(self.error.clone());
@@ -2904,7 +2904,7 @@ impl RendezvousDbOpContext {
     fn take_pass(&self) -> bool {
         use std::sync::atomic::Ordering;
         self.passes_left
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
             .is_ok()
     }
 
@@ -2912,7 +2912,7 @@ impl RendezvousDbOpContext {
     fn take_hold(&self) -> bool {
         use std::sync::atomic::Ordering;
         self.holds_left
-            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
+            .try_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1))
             .is_ok()
     }
 }

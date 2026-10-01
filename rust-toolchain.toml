@@ -1,0 +1,19 @@
+# The one Rust version this repository builds, lints and tests with — locally
+# and in every workflow (each runs a bare `rustup toolchain install`, which
+# reads this file).
+#
+# Pinned rather than floating on `stable`: CI runs clippy with `-D warnings`,
+# so a new stable release (new lints, new deprecations) used to turn every
+# open PR red on code nobody had touched. Moving to a new release is now its
+# own PR: bump `channel`, fix what the new compiler and clippy report.
+#
+# `cargo +nightly fmt` (rustfmt.toml uses nightly-only options) and the
+# nightly half of `examples/dev-sandbox/compiler/build-compiler.sh` name their
+# toolchain explicitly, which takes precedence over this file.
+[toolchain]
+channel = "1.99.0"
+profile = "minimal"
+components = ["clippy", "rustfmt"]
+# wasm32-unknown-unknown: the browser and Cloudflare Worker builds.
+# wasm32-wasip1: guest blocks (the templates, the proof guest).
+targets = ["wasm32-unknown-unknown", "wasm32-wasip1"]

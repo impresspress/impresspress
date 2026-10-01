@@ -128,7 +128,7 @@ impresspress-core = { path = "../impresspress-core", default-features = false, f
 # Config service (needed for EnvConfigService::new() and ConfigService::set())
 
 # Async traits
-async-trait = "0.1"
+async-trait = "0.1.92"
 
 # Futures utilities (BoxStream + stream helpers for the LlmService impl)
 futures = "0.3"
