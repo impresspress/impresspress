@@ -205,13 +205,13 @@ export async function loginToWorkspace(page: Page) {
 // Both halves below are read by more than one spec — `dev-workspace.spec.ts`
 // pins them as its own subject, and `dev-scenario.spec.ts` walks the whole of
 // design §16 through them — so they live here rather than in whichever file
-// happened to need them first. A second copy of a twenty-six name allowlist,
+// happened to need them first. A second copy of a twenty-seven name allowlist,
 // or of "spawn a static host and wait for the port", is a second thing to keep
 // in step with the contract it describes.
 // ---------------------------------------------------------------------------
 
 /**
- * The twelve `dev_*` tools `/b/dev/api/tools.json` projects, plus the two
+ * The thirteen `dev_*` tools `/b/dev/api/tools.json` projects, plus the two
  * `dev.js` registers itself.
  *
  * `dev_read_reference` and `dev_create_block` are Plan 3's — the guest-API
@@ -233,6 +233,7 @@ export const DEV_TOOLS = [
   'dev_read_file',
   'dev_read_reference',
   'dev_write_file',
+  'dev_write_files',
   'dev_delete_file',
   'dev_list_generations',
   'dev_get_generation',

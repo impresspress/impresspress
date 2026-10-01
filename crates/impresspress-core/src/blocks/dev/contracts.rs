@@ -345,6 +345,38 @@ pub struct FileWriteResponse {
     pub progress: Vec<ProgressStep>,
 }
 
+/// Request of `POST /b/dev/api/files/write-batch`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct FileWriteBatchRequest {
+    /// The files to write, 1 to 64, all under `site/` or all under one
+    /// `blocks/<name>/`. Each entry is exactly a `dev_write_file` request.
+    pub files: Vec<FileWriteRequest>,
+}
+
+/// Response of `POST /b/dev/api/files/write-batch`.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FileWriteBatchResponse {
+    /// Every file written, in path order, each with the hash to pass as its
+    /// next `expected_sha256`.
+    pub files: Vec<FileEntry>,
+    /// The one generation the batch published, or null for a `blocks/`
+    /// batch — only a compile turns block source into a published block.
+    pub generation: Option<GenerationSummary>,
+    /// One entry per phase the batch's activation passed through, with how
+    /// long it took. The last is `active`. Empty when nothing was published.
+    pub progress: Vec<ProgressStep>,
+}
+
+/// The `409` of a batch: every entry whose `expected_sha256` did not
+/// describe the file as it stands. Nothing was written.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct FileWriteBatchConflict {
+    /// In request order.
+    pub conflicts: Vec<FileConflict>,
+}
+
 /// Request of `POST /b/dev/api/files/delete`.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 pub struct FileDeleteRequest {

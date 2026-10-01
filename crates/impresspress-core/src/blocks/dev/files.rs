@@ -47,7 +47,9 @@
 //! Without exception, and the list is short enough to state:
 //! [`handle_read`], [`handle_list`], `gc::storage_usage` (the `/b/dev` page's
 //! ~3 Hz status poll), `activation::workspace_site` and `export::assemble`,
-//! alongside the five mutators. `workspace_site` is the one that matters most
+//! alongside the six mutators ([`handle_write`], [`handle_write_batch`],
+//! [`handle_delete`], `scaffold::handle_create`, `gc::collect_interleaved` and
+//! `activation::adopt_site`). `workspace_site` is the one that matters most
 //! and was the last to get it: [`handle_write`] and [`handle_delete`] release
 //! the guard before they publish, and `workspace_site` is what reads the
 //! manifest back inside the activation that publish asked for — so it backs
@@ -110,7 +112,7 @@
 //!   `500`. A blob the manifest names but the store does not have is that
 //!   `500`, never a `404`: the path exists and its content has gone.
 
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use base64ct::{Base64, Encoding};
 use wafer_run::{context::Context, ErrorCode, InputStream, Message, OutputStream};
@@ -120,7 +122,8 @@ use super::{
     blobs,
     contracts::{
         FileConflict, FileDeleteRequest, FileDeleteResponse, FileEncoding, FileListQuery,
-        FileListResponse, FileReadRequest, FileReadResponse, FileWriteRequest, FileWriteResponse,
+        FileListResponse, FileReadRequest, FileReadResponse, FileWriteBatchConflict,
+        FileWriteBatchRequest, FileWriteBatchResponse, FileWriteRequest, FileWriteResponse,
         GenerationSummary,
     },
     no_store, no_store_db_error_internal, no_store_error, no_store_error_status,
@@ -258,18 +261,9 @@ pub async fn handle_write(
         }
 
         // One name cannot be both a file and a directory in the store the
-        // workspace is published to. Refused here, with both paths named,
-        // rather than at publish time as an opaque backend type mismatch that
-        // then recurs on every later publish — see
-        // [`workspace::Workspace::path_collision`].
+        // workspace is published to — see [`collision_refusal`].
         if let Some(clash) = ws.path_collision(&request.path) {
-            return no_store_error(
-                ErrorCode::InvalidArgument,
-                &format!(
-                    "{:?} cannot be stored: {clash:?} already uses part of that path as a                      directory, or is a file this path would need as one. A name is a file or a                      directory, never both — rename one of them.",
-                    request.path
-                ),
-            );
+            return collision_refusal(&request.path, clash);
         }
 
         // How much the blob store would grow by. Content some entry already
@@ -326,6 +320,278 @@ pub async fn handle_write(
         generation,
         progress,
     })
+}
+
+/// `POST /b/dev/api/files/write-batch` — create or replace several files as
+/// one change.
+///
+/// Every hash is checked first, then [`store_files`] checks every collision
+/// and quota before any blob is stored — so a refusal on the fourth file has
+/// stored nothing for the first three — and saves the manifest once. The one
+/// exception is a blob store that fails midway: the blobs already stored are
+/// charged by saving the workspace's counters, and only its counters, before
+/// the refusal; no entry of the batch is saved. A `site/` batch then publishes
+/// ONE generation; a `blocks/` batch stages, exactly as a single write under
+/// `blocks/` does.
+///
+/// The whole batch is decoded up front — at worst [`paths::MAX_BATCH_FILES`]
+/// × [`paths::MAX_FILE_BYTES`], 32 MiB — because the hash check needs every
+/// file's bytes before the first store, and holding them beats decoding
+/// twice.
+pub async fn handle_write_batch(
+    ctx: &dyn Context,
+    shared: &Arc<DevShared>,
+    input: InputStream,
+) -> OutputStream {
+    let request: FileWriteBatchRequest = match read_body(input).await {
+        Ok(request) => request,
+        Err(refusal) => return refusal,
+    };
+    if request.files.is_empty() || request.files.len() > paths::MAX_BATCH_FILES {
+        return no_store_error(
+            ErrorCode::InvalidArgument,
+            &format!(
+                "a batch writes 1 to {} files; this one has {}",
+                paths::MAX_BATCH_FILES,
+                request.files.len()
+            ),
+        );
+    }
+
+    // Validate, pin the area, and decode every file before the workspace is
+    // touched. One area per call: a `site/` batch publishes and a `blocks/`
+    // batch only stages, and one call has to mean one of those.
+    let mut area: Option<WorkspaceArea> = None;
+    let mut seen = BTreeSet::new();
+    let mut decoded: Vec<(&str, Vec<u8>, Option<&str>)> = Vec::with_capacity(request.files.len());
+    for file in &request.files {
+        let this_area = match paths::validate_path(&file.path) {
+            Ok(area) => area,
+            Err(e) => {
+                return no_store_error(ErrorCode::InvalidArgument, &format!("{:?}: {e}", file.path))
+            }
+        };
+        match &area {
+            None => area = Some(this_area),
+            Some(first) if *first != this_area => {
+                return no_store_error(
+                    ErrorCode::InvalidArgument,
+                    &format!(
+                        "a batch writes one area — all under site/, or all under one \
+                         blocks/<name>/: {:?} is not in the same area as {:?}",
+                        file.path, request.files[0].path
+                    ),
+                );
+            }
+            Some(_) => {}
+        }
+        if !seen.insert(file.path.as_str()) {
+            return no_store_error(
+                ErrorCode::InvalidArgument,
+                &format!("{:?} appears twice in the batch", file.path),
+            );
+        }
+        // Before decoding, for the reason `handle_write` gives: a hostile
+        // body must not be allocated a second time.
+        if min_decoded_len(file.encoding, &file.content) > paths::MAX_FILE_BYTES {
+            return too_large(&format!(
+                "{:?}: the {} body decodes to more than the {}-byte file limit",
+                file.path,
+                encoding_label(file.encoding),
+                paths::MAX_FILE_BYTES
+            ));
+        }
+        let bytes = match decode_content(file.encoding, &file.content) {
+            Ok(bytes) => bytes,
+            Err(detail) => {
+                return no_store_error(
+                    ErrorCode::InvalidArgument,
+                    &format!("{:?}: {detail}", file.path),
+                )
+            }
+        };
+        if bytes.len() > paths::MAX_FILE_BYTES {
+            return too_large(&format!(
+                "{:?} is {} bytes; the limit is {} bytes",
+                file.path,
+                bytes.len(),
+                paths::MAX_FILE_BYTES
+            ));
+        }
+        decoded.push((&file.path, bytes, file.expected_sha256.as_deref()));
+    }
+    let Some(area) = area else {
+        unreachable!("a batch of at least one file has the area of its first file");
+    };
+
+    // Under `shared.workspace` for the reason `handle_write` gives, and
+    // released before the publish below for the same one.
+    let mut written = {
+        let _serialized = shared.workspace.lock().await;
+        let mut ws = match workspace::load(ctx).await {
+            Ok(ws) => ws,
+            Err(e) => return no_store_db_error_internal(e, "dev workspace load"),
+        };
+
+        // Every hash first. One stale entry refuses the whole batch and names
+        // every stale entry, so a caller that has fallen behind re-reads once.
+        let conflicts: Vec<FileConflict> = decoded
+            .iter()
+            .filter(|(path, _, expected)| !hash_matches(ws.get(path), *expected))
+            .map(|(path, _, _)| FileConflict::new(path, ws.get(path)))
+            .collect();
+        if !conflicts.is_empty() {
+            return no_store()
+                .status(409)
+                .json(&FileWriteBatchConflict { conflicts });
+        }
+
+        let files: Vec<(&str, &[u8])> = decoded
+            .iter()
+            .map(|(path, bytes, _)| (*path, bytes.as_slice()))
+            .collect();
+        match store_files(ctx, &mut ws, &area, &files).await {
+            Ok(written) => written,
+            Err(refusal) => return refusal,
+        }
+    };
+    written.sort_by(|a, b| a.path.cmp(&b.path));
+
+    // One publish for the whole batch, after the save, for the reason
+    // `handle_write` gives for its own.
+    let outcome = match publish_if_site(ctx, shared, &area, GenerationCause::SiteWrite).await {
+        Ok(outcome) => outcome,
+        Err(refusal) => return refusal,
+    };
+    let (generation, progress) = split_outcome(outcome);
+    no_store().json(&FileWriteBatchResponse {
+        files: written,
+        generation,
+        progress,
+    })
+}
+
+/// Write several files into the loaded workspace `ws` as one change, and
+/// save it: the half of a multi-file write that comes after the caller's own
+/// checks, shared by [`handle_write_batch`] and `scaffold::handle_create`.
+///
+/// The caller holds `DevShared::workspace` and loaded `ws` under it; `files`
+/// are workspace-relative paths in `area`, each with its bytes, with no path
+/// twice. Returns the written entries in `files` order, or the refusal to
+/// send.
+///
+/// # Every check before any store
+///
+/// EVERY file's collision and quota is checked before ANY blob is stored.
+/// Checking one and storing it before checking the next means a refusal on
+/// the second returns without ever reaching the save — leaving the first
+/// one's blob in the store while the `record_blob_stored` that charges for it
+/// is discarded with `ws`. [`check_quotas`] bounds on `blob_bytes` precisely
+/// because a blob no entry names still occupies the author's storage, so each
+/// such refusal would open a hole in the accounting that stays open until the
+/// next collection resets the counters from the store (`super::gc`) — and a
+/// `blocks/` write triggers no collection, so a caller sitting on the limit
+/// could widen it past [`paths::MAX_WORKSPACE_BYTES`] by retrying.
+///
+/// The checks run against a projection rather than against `ws`, so each file
+/// is counted on top of the ones ahead of it in this same call: `site/a`
+/// followed by `site/a/b.css` is a collision, a batch whose files fit one at a
+/// time but not together is over quota, and two files with identical content
+/// cost what the store will actually charge for them — once.
+///
+/// # Store, then record, then save
+///
+/// A manifest naming a blob that was never written would 500 on every later
+/// read of that path, so every blob is stored before any entry is inserted —
+/// which also means a store that fails on the second file does not leave the
+/// first one named by a half-written change. If a store fails midway, the
+/// blobs already written are charged for even though no entry will ever name
+/// them: they are in the store, `blob_bytes` is what the store holds, and the
+/// next collection frees them and resets the counters from what is left. So
+/// the workspace is saved with those counters (and nothing else changed)
+/// before the refusal; one saved without them would under-report storage
+/// until then.
+///
+/// The final save is the one place that charge cannot be kept. If every blob
+/// is stored and the save that records them fails, the blobs this call stored
+/// are charged by no counter, exactly as [`handle_write`] documents for its
+/// own store-then-save: the `record_blob_stored` calls made on `ws` are lost
+/// with the save, a retry of the same batch finds the blobs stored and charges
+/// nothing, and the quota under-counts the store until the next collection
+/// resets both counters from the store's own listing (`super::gc`).
+pub(super) async fn store_files(
+    ctx: &dyn Context,
+    ws: &mut Workspace,
+    area: &WorkspaceArea,
+    files: &[(&str, &[u8])],
+) -> Result<Vec<FileEntry>, OutputStream> {
+    let mut projected = ws.clone();
+    let mut planned = Vec::with_capacity(files.len());
+    for &(path, bytes) in files {
+        if let Some(clash) = projected.path_collision(path) {
+            return Err(collision_refusal(path, clash));
+        }
+        let sha = blobs::sha256_hex(bytes);
+        // What the blob store would grow by. Content some entry already
+        // names is certainly stored, so writing it again costs nothing.
+        let new_blob_bytes = if projected.references(&sha) {
+            0
+        } else {
+            bytes.len() as u64
+        };
+        if let Err(e) = check_quotas(&projected, path, area, new_blob_bytes) {
+            return Err(e.into_response());
+        }
+        projected.insert(path, sha.clone(), bytes.len() as u64);
+        if new_blob_bytes > 0 {
+            projected.record_blob_stored(new_blob_bytes);
+        }
+        planned.push((path, sha, bytes));
+    }
+
+    for (_, sha, bytes) in &planned {
+        match blobs::put_hashed(ctx, sha, bytes).await {
+            // Charge the workspace only when the store actually grew.
+            Ok(blobs::Stored::New) => ws.record_blob_stored(bytes.len() as u64),
+            Ok(blobs::Stored::Deduplicated) => {}
+            Err(e) => {
+                if let Err(save) = workspace::save(ctx, ws).await {
+                    tracing::error!(
+                        error = %save,
+                        "dev workspace: a blob write failed and the bytes already stored \
+                         could not be recorded — blob_bytes under-reports the store until the \
+                         next collection"
+                    );
+                }
+                return Err(no_store_db_error_internal(e, "dev workspace blob write"));
+            }
+        }
+    }
+    let written = planned
+        .into_iter()
+        .map(|(path, sha, bytes)| ws.insert(path, sha, bytes.len() as u64))
+        .collect();
+    if let Err(e) = workspace::save(ctx, ws).await {
+        return Err(no_store_db_error_internal(e, "dev workspace save"));
+    }
+    Ok(written)
+}
+
+/// The `400` for a path that would make one name both a file and a directory
+/// in the store the workspace is published to.
+///
+/// Refused on the way in, with both paths named, rather than at publish time
+/// as an opaque backend type mismatch that then recurs on every later publish
+/// — see [`workspace::Workspace::path_collision`].
+fn collision_refusal(path: &str, clash: &str) -> OutputStream {
+    no_store_error(
+        ErrorCode::InvalidArgument,
+        &format!(
+            "{path:?} cannot be stored: {clash:?} already uses part of that path as a directory, \
+             or is a file this path would need as one. A name is a file or a directory, never \
+             both — rename one of them."
+        ),
+    )
 }
 
 /// `POST /b/dev/api/files/delete` — drop one file from the manifest.

@@ -108,6 +108,8 @@ pub enum Route {
     ApiFilesRead,
     /// `POST /b/dev/api/files/write`
     ApiFilesWrite,
+    /// `POST /b/dev/api/files/write-batch`
+    ApiFilesWriteBatch,
     /// `POST /b/dev/api/files/delete`
     ApiFilesDelete,
     /// `GET /b/dev/api/generations`
@@ -195,6 +197,14 @@ pub const ROUTES: &[EndpointRoute<Route>] = &[
     .summary("Write a workspace file")
     .input(request_schema_of::<contracts::FileWriteRequest>)
     .output(response_schema_of::<contracts::FileWriteResponse>),
+    EndpointRoute::admin(
+        HttpMethod::Post,
+        "/b/dev/api/files/write-batch",
+        Route::ApiFilesWriteBatch,
+    )
+    .summary("Write several workspace files as one change")
+    .input(request_schema_of::<contracts::FileWriteBatchRequest>)
+    .output(response_schema_of::<contracts::FileWriteBatchResponse>),
     EndpointRoute::admin(
         HttpMethod::Post,
         "/b/dev/api/files/delete",
@@ -655,6 +665,7 @@ impl Block for DevBlock {
             Route::ApiFilesList => files::handle_list(ctx, &self.shared, &msg).await,
             Route::ApiFilesRead => files::handle_read(ctx, &self.shared, input).await,
             Route::ApiFilesWrite => files::handle_write(ctx, &self.shared, input).await,
+            Route::ApiFilesWriteBatch => files::handle_write_batch(ctx, &self.shared, input).await,
             Route::ApiFilesDelete => files::handle_delete(ctx, &self.shared, input).await,
             Route::ApiGenerations => generations_api::handle_list(ctx, &msg).await,
             Route::ApiGenerationDetail => generations_api::handle_detail(ctx, &msg).await,

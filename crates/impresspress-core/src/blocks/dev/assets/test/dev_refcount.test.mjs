@@ -110,3 +110,45 @@ test('unregisterPageTools clears everything it registered when the browser suppo
   assert.doesNotThrow(() => handle.unregisterPageTools());
   assert.deepEqual(handle.registered, []);
 });
+
+test('registerPageTool wraps exactly the mutating tools in withProgress, dev_write_files included', async () => {
+  // Through the real registration path: a wrapped `execute` is counted in
+  // `outstanding` while it runs, an unwrapped one is not. Each `dev_` name is
+  // matched whole, so `dev_write_files` is mutating in its own right — not
+  // because `dev_write_file` happens to be a prefix of it — and a name that
+  // merely starts with a mutator's is not.
+  const mutating = [
+    'dev_write_file',
+    'dev_write_files',
+    'dev_delete_file',
+    'dev_create_block',
+    'dev_rollback',
+    'dev_remove_block',
+    'shop_create_product',
+    'shop_publish_offer'
+  ];
+  const reads = [
+    'dev_status',
+    'dev_list_files',
+    'dev_read_file',
+    'dev_list_generations',
+    'dev_get_generation',
+    'dev_read_reference',
+    'dev_export_manifest',
+    'dev_write_files_preview',
+    'shop_list_products',
+    'shop_list_offers'
+  ];
+  const { handle, tools } = instantiate({ hasModelContext: true });
+  for (const name of [...mutating, ...reads]) {
+    let release;
+    const gate = new Promise((r) => (release = r));
+    handle.registerPageTool({ name, execute: async () => gate });
+    const pending = tools.get(name).execute({});
+    await Promise.resolve();
+    assert.equal(handle.outstanding, mutating.includes(name) ? 1 : 0, name);
+    release({ content: [] });
+    await pending;
+    assert.equal(handle.outstanding, 0, name);
+  }
+});

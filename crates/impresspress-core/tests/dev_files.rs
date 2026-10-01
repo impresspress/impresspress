@@ -11,12 +11,14 @@ use impresspress_core::{
         activation::{self, ActivationIntent},
         blobs, gc, paths,
         repo::generations::GenerationCause,
-        test_support::{dev_post, dev_with_accounts, signed_in_as, FakeControl, FakeShell},
+        test_support::{
+            dev_get, dev_post, dev_status, dev_with_accounts, signed_in_as, FakeControl, FakeShell,
+        },
         workspace, DevBlock, DevShared,
     },
     test_support::{
-        admin_msg, anon_msg, output_http_header, output_http_status, output_json, output_status,
-        HeldGet, TestContext,
+        admin_msg, anon_msg, output_http_header, output_http_json, output_http_status, output_json,
+        output_status, HeldGet, TestContext,
     },
 };
 use serde_json::json;
@@ -299,6 +301,21 @@ async fn a_path_that_clashes_with_an_existing_file_or_directory_is_rejected() {
     )
     .await;
     assert_eq!(output_http_status(out).await, 400);
+    // The refusal names both paths in one readable sentence — no runs of
+    // spaces left behind by a broken line continuation.
+    let refusal = output_http_json(
+        dev_post(
+            &ctx,
+            "/b/dev/api/files/write",
+            json!({"path": "site/blog", "content": "x", "expected_sha256": null}),
+        )
+        .await,
+    )
+    .await;
+    let message = refusal["message"].as_str().expect("message").to_string();
+    assert!(message.contains("\"site/blog\""), "{message}");
+    assert!(message.contains("\"site/blog/index.html\""), "{message}");
+    assert!(!message.contains("  "), "a run of spaces in: {message:?}");
 
     // And the reverse, on a path that is already a file.
     write_new(&ctx, "site/style.css", "a{}").await;
@@ -1308,4 +1325,276 @@ async fn the_status_poll_reads_the_manifest_a_racing_write_has_not_replaced() {
         "the poll must report the manifest it started from; seeing the racing \
          write's file means the load resumed on a manifest saved underneath it",
     );
+}
+
+// ---------------------------------------------------------------------------
+// POST /b/dev/api/files/write-batch
+// ---------------------------------------------------------------------------
+
+const BATCH: &str = "/b/dev/api/files/write-batch";
+
+#[tokio::test]
+async fn a_batch_of_site_files_publishes_one_generation() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    let body = output_json(
+        dev_post(
+            &ctx,
+            BATCH,
+            json!({"files": [
+                {"path": "site/index.html", "content": "<h1>hi</h1>", "expected_sha256": null},
+                {"path": "site/styles.css", "content": "h1{}", "expected_sha256": null},
+                {"path": "site/about/index.html", "content": "<h1>about</h1>", "expected_sha256": null},
+            ]}),
+        )
+        .await,
+    )
+    .await;
+    let paths: Vec<&str> = body["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(
+        paths,
+        vec![
+            "site/about/index.html",
+            "site/index.html",
+            "site/styles.css"
+        ],
+        "path order: {body}"
+    );
+    assert_eq!(
+        body["files"][1]["sha256"],
+        json!(blobs::sha256_hex(b"<h1>hi</h1>"))
+    );
+    assert_eq!(body["files"][1]["content_type"], "text/html; charset=utf-8");
+    assert_eq!(body["generation"]["site_files"], 3, "{body}");
+    // The one activation's phases, in the shape a single site write returns.
+    let phases: Vec<&str> = body["progress"]
+        .as_array()
+        .unwrap_or_else(|| panic!("a site batch carries its progress: {body}"))
+        .iter()
+        .map(|step| step["phase"].as_str().expect("phase"))
+        .collect();
+    assert_eq!(phases, ["validating", "publishing", "active"]);
+    // The one generation is live, and it is the first — no other was minted.
+    let status = dev_status(&ctx).await;
+    assert_eq!(status["active_generation"]["id"], body["generation"]["id"]);
+    assert_eq!(
+        status["active_generation"]["parent_id"],
+        serde_json::Value::Null
+    );
+    let listing = output_json(dev_get(&ctx, "/b/dev/api/generations").await).await;
+    assert_eq!(listing["generations"].as_array().unwrap().len(), 1);
+}
+
+#[tokio::test]
+async fn a_batch_with_a_stale_hash_writes_nothing_and_names_every_conflict() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    let current = write_new(&ctx, "site/a.css", "a{}").await;
+    let batch = json!({"files": [
+        {"path": "site/a.css", "content": "b{}", "expected_sha256": "deadbeef"},
+        {"path": "site/new.css", "content": "n{}", "expected_sha256": null},
+        {"path": "site/ghost.css", "content": "g{}", "expected_sha256": "cafebabe"},
+    ]});
+    assert_eq!(
+        output_http_status(dev_post(&ctx, BATCH, batch.clone()).await).await,
+        409
+    );
+    let body = output_json(dev_post(&ctx, BATCH, batch).await).await;
+    let conflicts = body["conflicts"].as_array().expect("conflicts");
+    assert_eq!(conflicts.len(), 2, "{body}");
+    assert_eq!(conflicts[0]["path"], "site/a.css");
+    assert_eq!(conflicts[0]["current_sha256"], json!(current));
+    assert_eq!(conflicts[0]["current_size"], 3);
+    assert_eq!(conflicts[1]["path"], "site/ghost.css");
+    assert_eq!(conflicts[1]["current_sha256"], serde_json::Value::Null);
+    // Nothing was written — not even the entry whose hash was right.
+    let listing = output_json(ctx.dispatch_resolved(list_msg(None)).await).await;
+    let paths: Vec<&str> = listing["files"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .map(|f| f["path"].as_str().unwrap())
+        .collect();
+    assert_eq!(paths, vec!["site/a.css"]);
+    assert_eq!(listing["files"][0]["sha256"], json!(current));
+}
+
+#[tokio::test]
+async fn a_block_batch_stages_without_publishing() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    let body = output_json(
+        dev_post(
+            &ctx,
+            BATCH,
+            json!({"files": [
+                {"path": "blocks/hello/Cargo.toml", "content": "[package]\nname = \"hello\"\n"},
+                {"path": "blocks/hello/src/lib.rs", "content": "// hi\n"},
+            ]}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(body["files"].as_array().unwrap().len(), 2, "{body}");
+    assert_eq!(body["generation"], serde_json::Value::Null);
+    assert_eq!(
+        dev_status(&ctx).await["active_generation"],
+        serde_json::Value::Null
+    );
+}
+
+#[tokio::test]
+async fn a_batch_that_mixes_areas_is_refused() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    for files in [
+        json!([
+            {"path": "site/index.html", "content": "x"},
+            {"path": "blocks/hello/src/lib.rs", "content": "y"},
+        ]),
+        json!([
+            {"path": "blocks/hello/src/lib.rs", "content": "x"},
+            {"path": "blocks/other/src/lib.rs", "content": "y"},
+        ]),
+    ] {
+        let out = dev_post(&ctx, BATCH, json!({"files": files})).await;
+        assert_eq!(output_http_status(out).await, 400);
+    }
+    let listing = output_json(ctx.dispatch_resolved(list_msg(None)).await).await;
+    assert_eq!(listing["files"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn duplicate_paths_and_bad_sizes_of_batch_are_refused() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    let dup = json!({"files": [
+        {"path": "site/a.css", "content": "a{}"},
+        {"path": "site/a.css", "content": "b{}"},
+    ]});
+    assert_eq!(
+        output_http_status(dev_post(&ctx, BATCH, dup).await).await,
+        400
+    );
+    assert_eq!(
+        output_http_status(dev_post(&ctx, BATCH, json!({"files": []})).await).await,
+        400
+    );
+    let too_many: Vec<serde_json::Value> = (0..=paths::MAX_BATCH_FILES)
+        .map(|i| json!({"path": format!("site/f{i}.css"), "content": "x{}"}))
+        .collect();
+    assert_eq!(
+        output_http_status(dev_post(&ctx, BATCH, json!({"files": too_many})).await).await,
+        400
+    );
+}
+
+#[tokio::test]
+async fn a_batch_that_collides_with_itself_is_refused() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    // Both orders: the file first, then a path under it; and the path under
+    // it first, then the file.
+    for files in [
+        json!([
+            {"path": "site/a", "content": "file"},
+            {"path": "site/a/b.css", "content": "b{}"},
+        ]),
+        json!([
+            {"path": "site/a/b.css", "content": "b{}"},
+            {"path": "site/a", "content": "file"},
+        ]),
+    ] {
+        // Status and body from the one rendering, so the message read is the
+        // one the 400 carried.
+        let refusal = wafer_block::http_codec::collect_http_response(
+            dev_post(&ctx, BATCH, json!({"files": files})).await,
+        )
+        .await;
+        assert_eq!(refusal.status, 400, "{files}");
+        let body: serde_json::Value = serde_json::from_slice(&refusal.body).expect("JSON refusal");
+        let message = body["message"].as_str().expect("message");
+        // Both halves of the clash are named, whichever came first.
+        assert!(message.contains("\"site/a\""), "{files}: {message}");
+        assert!(message.contains("\"site/a/b.css\""), "{files}: {message}");
+    }
+    let listing = output_json(ctx.dispatch_resolved(list_msg(None)).await).await;
+    assert_eq!(listing["files"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn an_oversized_file_in_a_batch_is_refused_before_anything_is_stored() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    let big = "x".repeat(paths::MAX_FILE_BYTES + 1);
+    let out = dev_post(
+        &ctx,
+        BATCH,
+        json!({"files": [
+            {"path": "site/ok.css", "content": "a{}"},
+            {"path": "site/big.css", "content": big},
+        ]}),
+    )
+    .await;
+    assert_eq!(output_http_status(out).await, 413);
+    let listing = output_json(ctx.dispatch_resolved(list_msg(None)).await).await;
+    assert_eq!(listing["files"].as_array().unwrap().len(), 0);
+}
+
+#[tokio::test]
+async fn identical_content_in_one_batch_is_charged_once() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    output_json(
+        dev_post(
+            &ctx,
+            BATCH,
+            json!({"files": [
+                {"path": "site/a.css", "content": "same{}"},
+                {"path": "site/b.css", "content": "same{}"},
+            ]}),
+        )
+        .await,
+    )
+    .await;
+    let ws = workspace::load(&ctx).await.expect("workspace");
+    assert_eq!(ws.files.len(), 2);
+    assert_eq!(ws.blob_count, 1);
+    assert_eq!(ws.blob_bytes, "same{}".len() as u64);
+}
+
+/// The projection's quota arithmetic, in both directions, a few bytes under
+/// the workspace limit: files that fit one at a time but not together are
+/// refused, and identical content at two paths is charged once.
+#[tokio::test]
+async fn a_batch_is_held_to_the_quota_as_a_whole_and_charged_once_per_blob() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    let mut ws = workspace::load(&ctx).await.expect("workspace");
+    ws.blob_bytes = paths::MAX_WORKSPACE_BYTES - 6;
+    workspace::save(&ctx, &ws).await.expect("save");
+
+    // (a) Two different 6-byte files: each fits alone, the pair does not.
+    let out = dev_post(
+        &ctx,
+        BATCH,
+        json!({"files": [
+            {"path": "site/a.css", "content": "aaaa{}"},
+            {"path": "site/b.css", "content": "bbbb{}"},
+        ]}),
+    )
+    .await;
+    assert_eq!(output_http_status(out).await, 413);
+    let listing = output_json(ctx.dispatch_resolved(list_msg(None)).await).await;
+    assert_eq!(listing["files"].as_array().unwrap().len(), 0, "{listing}");
+    let after = workspace::load(&ctx).await.expect("workspace");
+    assert_eq!(after.blob_bytes, paths::MAX_WORKSPACE_BYTES - 6);
+
+    // (b) The same 6 bytes at two paths: one blob, which fits.
+    let out = dev_post(
+        &ctx,
+        BATCH,
+        json!({"files": [
+            {"path": "site/a.css", "content": "same{}"},
+            {"path": "site/b.css", "content": "same{}"},
+        ]}),
+    )
+    .await;
+    assert_eq!(output_http_status(out).await, 200);
 }

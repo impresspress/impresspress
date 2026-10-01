@@ -259,6 +259,41 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
   // preview to the push — and this needs no nudge.
   await expect(page.frameLocator('#dev-preview-frame').locator('h1')).toHaveText(SHOP_HEADING);
 
+  // A scaffold is several files and ONE generation: the batch tool. After the
+  // single write's timings, so it does not count against them.
+  type FileWriteBatch = {
+    files: { path: string; sha256: string }[];
+    generation: Generation | null;
+    progress: { phase: string; ms: number; detail: string }[];
+  };
+  // Read through the tool, so "one generation" is counted in the ledger an
+  // agent sees rather than inferred from the response. The listing's default
+  // page is `RETAINED_GENERATIONS` (20, `blocks/dev/retention.rs`) — far above
+  // the handful this test publishes — so retention cannot hide a second one.
+  const ledgerBefore = structured<{ generations: Generation[] }>(
+    await execute(page, 'dev_list_generations', {}),
+  );
+  const batch = structured<FileWriteBatch>(await execute(page, 'dev_write_files', {
+    files: [
+      { path: 'site/about.html', content: '<!doctype html><title>About</title><h1>About</h1>', expected_sha256: null },
+      { path: 'site/about.css', content: 'h1 { color: teal }', expected_sha256: null },
+    ],
+  }));
+  expect(batch.files.map((f) => f.path)).toEqual(['site/about.css', 'site/about.html']);
+  expect(batch.generation, JSON.stringify(batch)).not.toBeNull();
+  expect(batch.generation?.cause).toBe('site_write');
+  expect(batch.generation!.id).not.toBe(wrote.generation!.id);
+  const ledgerAfter = structured<{ generations: Generation[] }>(
+    await execute(page, 'dev_list_generations', {}),
+  );
+  expect(ledgerAfter.generations.length, JSON.stringify(ledgerAfter)).toBe(
+    ledgerBefore.generations.length + 1,
+  );
+  expect(ledgerAfter.generations.map((g) => g.id)).toContain(batch.generation!.id);
+  await expect(page.locator('#dev-log')).toContainText(
+    `live generation: ${batch.generation?.id}`,
+  );
+
   // --- 4. Stock the shop -------------------------------------------------
   const productStart = Date.now();
   const product = structured<{ id: string; name: string; status: string }>(
@@ -392,7 +427,10 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
     // and it describes the site the agent wrote.
     expect(inspected.seed.schema_version).toBe(1);
     expect(inspected.seed.source_generation).toBe(exported.generation_id);
-    expect(inspected.seed.site.map((f) => f.path)).toContain('index.html');
+    // …including both files of the batch.
+    expect(inspected.seed.site.map((f) => f.path)).toEqual(
+      expect.arrayContaining(['index.html', 'about.html', 'about.css']),
+    );
     expect(inspected.index).toContain(SHOP_HEADING);
     // And the shop's data came with it.
     expect(inspected.data.tables['impresspress__products__products']).toHaveLength(1);

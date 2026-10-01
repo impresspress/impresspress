@@ -544,12 +544,16 @@ if (typeof navigator !== 'undefined' && navigator.serviceWorker) {
 // writes would otherwise flicker the iframe and re-fetch the file tree for
 // nothing.
 //
-// The five `dev_` names are the mutating half of the control plane — its
-// reads (`dev_status`, `dev_list_files`, `dev_read_file`,
-// `dev_list_generations`, `dev_get_generation`, `dev_read_reference`) change
-// nothing. `shop_` covers the products family except its three listers
-// (`shop_list_products`, `shop_list_groups`, `shop_list_offers`), which the
-// negative lookahead excludes.
+// The six `dev_` names (`dev_write_file`, `dev_write_files`,
+// `dev_delete_file`, `dev_create_block`, `dev_rollback`, `dev_remove_block`)
+// are the mutating half of the control plane — its reads (`dev_status`,
+// `dev_list_files`, `dev_read_file`, `dev_list_generations`,
+// `dev_get_generation`, `dev_read_reference`) change nothing. Each is a whole
+// tool name, anchored with `$`, so the batch tool is listed in its own right
+// rather than matched because `dev_write_file` is a prefix of it. `shop_`
+// covers the products family except its three listers (`shop_list_products`,
+// `shop_list_groups`, `shop_list_offers`), which the negative lookahead
+// excludes — a prefix by design, so it is the one alternative left open.
 //
 // `dev_compile_block` is deliberately NOT here, and it is the one absence
 // that is a decision rather than an oversight. Almost all of a compile
@@ -563,7 +567,8 @@ if (typeof navigator !== 'undefined' && navigator.serviceWorker) {
 // `dev_export` is not here either, for its own reason: it writes nothing — it
 // reads the live generation and hands the browser a file — so an export must
 // not reload the preview or re-fetch the file tree.
-var MUTATING = /^(dev_write_file|dev_delete_file|dev_create_block|dev_rollback|dev_remove_block|shop_(?!list_))/;
+var MUTATING =
+  /^(?:(?:dev_write_file|dev_write_files|dev_delete_file|dev_create_block|dev_rollback|dev_remove_block)$|shop_(?!list_))/;
 
 // Every name this page registered. `registerTool`'s options bag takes an
 // `AbortSignal`, but a browser (or a polyfill) that ignores it would leave

@@ -18,5 +18,6 @@
   "POST /b/dev/api/files/delete admin",
   "POST /b/dev/api/files/read admin",
   "POST /b/dev/api/files/write admin",
+  "POST /b/dev/api/files/write-batch admin",
   "POST /b/dev/api/generations/{id}/rollback admin"
 ]
