@@ -372,6 +372,9 @@ async fn assemble(ctx: &dyn Context, shared: &DevShared) -> Result<Assembled, Re
             size: data_bytes.len() as u64,
             content_type: seed::DATA_CONTENT_TYPE.to_string(),
         }),
+        // An export boots with the workspace off — no `/b/dev`, no reference
+        // tool — so a guide would describe tools the bundle does not have.
+        sandbox: None,
     };
     let manifest_bytes = serde_json::to_vec_pretty(&seed_manifest)
         .map_err(|e| Refusal::Internal(encoding_error("the seed manifest", e)))?;

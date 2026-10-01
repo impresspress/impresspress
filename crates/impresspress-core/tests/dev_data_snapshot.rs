@@ -1122,6 +1122,7 @@ async fn seed_import_applies_data_json_when_present() {
         site: vec![index_file()],
         blocks: vec![],
         data: Some(data_file("data.json", &data_bytes)),
+        sandbox: None,
     };
     let fetch = MapFetch::default()
         .with(&seed::site_url("index.html"), b"<h1>shop</h1>")
@@ -1169,6 +1170,7 @@ async fn seed_import_fails_when_data_json_does_not_verify() {
         site: vec![index_file()],
         blocks: vec![],
         data: Some(declared),
+        sandbox: None,
     };
     let fetch = MapFetch::default()
         .with(&seed::site_url("index.html"), b"<h1>shop</h1>")

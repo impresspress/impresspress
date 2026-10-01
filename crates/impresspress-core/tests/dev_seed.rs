@@ -17,8 +17,8 @@ use impresspress_core::{
         activation::{self, ActivationIntent},
         artifacts, blobs,
         control::{DynamicBlockSpec, DynamicRoute, RouteAccessKind},
-        repo::{self, generations::GenerationCause, runtime_state},
-        seed::{self, SeedBlock, SeedManifest},
+        repo::{self, generations::GenerationCause, runtime_state, seed_info},
+        seed::{self, SandboxSeed, SeedBlock, SeedManifest},
         test_support::{hello_info, seed_file as file, FakeControl, MapFetch},
         validation, workspace,
     },
@@ -88,6 +88,7 @@ fn manifest() -> SeedManifest {
             sources: vec![file("src/lib.rs", LIB_RS)],
         }],
         data: None,
+        sandbox: None,
     }
 }
 
@@ -97,6 +98,158 @@ fn bundle() -> MapFetch {
         .with(&seed::site_url("assets/app.js"), APP_JS)
         .with(&seed::artifact_url("hello"), ARTIFACT)
         .with(&seed::source_url("hello", "src/lib.rs"), LIB_RS)
+}
+
+const GUIDE: &[u8] = b"# Building the site\n\nWrite semantic HTML.\n";
+
+fn guide_file() -> seed::SeedFile {
+    seed::SeedFile {
+        path: seed::GUIDE_PATH.to_string(),
+        sha256: blobs::sha256_hex(GUIDE),
+        size: GUIDE.len() as u64,
+        content_type: seed::GUIDE_CONTENT_TYPE.to_string(),
+    }
+}
+
+fn sandbox() -> SandboxSeed {
+    SandboxSeed {
+        template: "blank".to_string(),
+        suggested_prompt: "Build me a shop.".to_string(),
+        guide: guide_file(),
+    }
+}
+
+fn manifest_with(sandbox: SandboxSeed) -> SeedManifest {
+    SeedManifest {
+        sandbox: Some(sandbox),
+        ..manifest()
+    }
+}
+
+fn bundle_with_guide() -> MapFetch {
+    bundle().with(&seed::guide_url(seed::GUIDE_PATH), GUIDE)
+}
+
+/// Import `manifest` and expect a refusal; nothing may have been stored.
+async fn refused(manifest: &SeedManifest, bundle: &MapFetch) -> String {
+    let (ctx, control) = fixture().await;
+    let err = seed::import(&ctx, control.as_ref(), manifest, bundle)
+        .await
+        .expect_err("refused");
+    let ws = workspace::load(&ctx).await.expect("workspace");
+    assert!(ws.files.is_empty(), "stored files: {:?}", ws.files.keys());
+    assert_eq!(ws.blob_count, 0);
+    assert_eq!(seed_info::read(&ctx).await.expect("read"), None);
+    err
+}
+
+// ---------------------------------------------------------------------------
+// The sandbox block
+// ---------------------------------------------------------------------------
+
+#[tokio::test]
+async fn a_sandbox_block_is_recorded_for_the_reference_and_the_page() {
+    let (ctx, control) = fixture().await;
+    seed::import(
+        &ctx,
+        control.as_ref(),
+        &manifest_with(sandbox()),
+        &bundle_with_guide(),
+    )
+    .await
+    .expect("import")
+    .expect("fresh");
+    let info = seed_info::read(&ctx).await.expect("read").expect("a row");
+    assert_eq!(info.template, "blank");
+    assert_eq!(info.suggested_prompt, "Build me a shop.");
+    assert_eq!(info.guide_markdown, std::str::from_utf8(GUIDE).unwrap());
+}
+
+#[tokio::test]
+async fn a_bundle_without_a_sandbox_block_records_nothing() {
+    let (ctx, control) = fixture().await;
+    seed::import(&ctx, control.as_ref(), &manifest(), &bundle())
+        .await
+        .expect("import")
+        .expect("fresh");
+    assert_eq!(seed_info::read(&ctx).await.expect("read"), None);
+}
+
+#[tokio::test]
+async fn a_guide_over_the_limit_is_refused_before_anything_is_stored() {
+    let mut declared = sandbox();
+    declared.guide.size = (seed::MAX_GUIDE_BYTES + 1) as u64;
+    let err = refused(&manifest_with(declared), &bundle_with_guide()).await;
+    assert!(
+        err.contains("/seed/guide.md") && err.contains("limit"),
+        "{err}"
+    );
+}
+
+#[tokio::test]
+async fn a_guide_not_in_the_bundle_is_refused() {
+    let err = refused(&manifest_with(sandbox()), &bundle()).await;
+    assert!(err.contains("/seed/guide.md"), "{err}");
+}
+
+#[tokio::test]
+async fn a_guide_that_is_not_utf8_is_refused() {
+    let bytes: &[u8] = b"# Guide\n\xff\xfe";
+    let mut declared = sandbox();
+    declared.guide.sha256 = blobs::sha256_hex(bytes);
+    declared.guide.size = bytes.len() as u64;
+    let bundle = bundle().with(&seed::guide_url(seed::GUIDE_PATH), bytes);
+    let err = refused(&manifest_with(declared), &bundle).await;
+    assert!(err.contains("UTF-8"), "{err}");
+}
+
+#[tokio::test]
+async fn a_template_name_that_is_not_a_block_name_is_refused() {
+    let mut declared = sandbox();
+    declared.template = "Boot strap".to_string();
+    let err = refused(&manifest_with(declared), &bundle_with_guide()).await;
+    assert!(err.contains("sandbox.template"), "{err}");
+}
+
+#[tokio::test]
+async fn a_prompt_over_the_limit_is_refused() {
+    let mut declared = sandbox();
+    declared.suggested_prompt = "x".repeat(seed::MAX_PROMPT_BYTES + 1);
+    let err = refused(&manifest_with(declared), &bundle_with_guide()).await;
+    assert!(err.contains("suggested_prompt"), "{err}");
+}
+
+#[tokio::test]
+async fn a_guide_declared_with_another_content_type_is_refused() {
+    let mut declared = sandbox();
+    declared.guide.content_type = "text/plain; charset=utf-8".to_string();
+    let err = refused(&manifest_with(declared), &bundle_with_guide()).await;
+    assert!(err.contains("content type"), "{err}");
+}
+
+#[tokio::test]
+async fn a_guide_not_named_guide_md_is_refused() {
+    let mut declared = sandbox();
+    declared.guide.path = "README.md".to_string();
+    let bundle = bundle().with(&seed::guide_url("README.md"), GUIDE);
+    let err = refused(&manifest_with(declared), &bundle).await;
+    assert!(err.contains("guide.md"), "{err}");
+}
+
+/// The field is additive: a manifest written before it existed parses, and
+/// a manifest without it serializes `null` (what every export writes).
+#[test]
+fn the_sandbox_field_is_optional_in_both_directions() {
+    let value = serde_json::to_value(manifest()).expect("serialize");
+    assert!(value["sandbox"].is_null());
+    let mut without = value;
+    without.as_object_mut().unwrap().remove("sandbox");
+    let parsed: SeedManifest = serde_json::from_value(without).expect("parse without the field");
+    assert!(parsed.sandbox.is_none());
+    let round: SeedManifest =
+        serde_json::from_value(serde_json::to_value(manifest_with(sandbox())).unwrap())
+            .expect("round trip");
+    assert_eq!(round.sandbox.expect("sandbox").template, "blank");
 }
 
 // ---------------------------------------------------------------------------

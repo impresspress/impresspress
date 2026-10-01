@@ -79,7 +79,7 @@ use super::{
     data_snapshot,
     generation::GenerationManifest,
     paths,
-    repo::{self, runtime_state},
+    repo::{self, runtime_state, seed_info},
     validation,
     workspace::{self, Workspace},
 };
@@ -127,6 +127,23 @@ pub struct SeedBlock {
     pub sources: Vec<SeedFile>,
 }
 
+/// What a seed bundle says about the sandbox it seeds — the template that
+/// produced it, the prompt the workspace page suggests, and the
+/// site-authoring guide `dev_read_reference` serves (build-sandboxes design
+/// §5.2). Never present on an exported bundle: an export boots with no
+/// `/b/dev`, so a guide there would describe tools the bundle does not have.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct SandboxSeed {
+    /// The template's name, e.g. `bootstrap`. Same rule as a block name.
+    pub template: String,
+    /// One paragraph the page shows verbatim; at most [`MAX_PROMPT_BYTES`].
+    pub suggested_prompt: String,
+    /// The guide, a Markdown file named [`GUIDE_PATH`] beside the manifest,
+    /// verified like every other file: hash, size, content type.
+    pub guide: SeedFile,
+}
+
 /// What a seed bundle describes.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
@@ -152,6 +169,11 @@ pub struct SeedManifest {
     /// type exactly as it does for every `site`/block-source entry (design
     /// §10.2) instead of trusting this one file unchecked.
     pub data: Option<SeedFile>,
+    /// The sandbox block, when this bundle seeds a workspace sandbox rather
+    /// than an exported site. `#[serde(default)]` so a manifest written before
+    /// the field existed still imports; `SCHEMA_VERSION` is unchanged.
+    #[serde(default)]
+    pub sandbox: Option<SandboxSeed>,
 }
 
 /// A future produced by [`SeedFetch::get`].
@@ -236,6 +258,25 @@ pub const DATA_CONTENT_TYPE: &str = "application/json";
 /// of a larger snapshot has been timed on a real browser cold boot; that
 /// measurement, not the write count, is what a higher value has to rest on.
 pub const MAX_DATA_BYTES: usize = 2 * 1024 * 1024;
+
+/// The one name the guide may have, beside the manifest.
+pub const GUIDE_PATH: &str = "guide.md";
+
+/// What the guide is declared and served as. Not `paths::content_type_for`:
+/// the guide is not a workspace file and is never published.
+pub const GUIDE_CONTENT_TYPE: &str = "text/markdown; charset=utf-8";
+
+/// Largest guide a bundle may carry. Sized for a document an agent reads
+/// once per session, not for a manual.
+pub const MAX_GUIDE_BYTES: usize = 256 * 1024;
+
+/// Largest suggested prompt: one paragraph, shown verbatim on the page.
+pub const MAX_PROMPT_BYTES: usize = 4 * 1024;
+
+/// URL of the guide.
+pub fn guide_url(path: &str) -> String {
+    format!("{ROOT}{path}")
+}
 
 /// The short workspace name of a registered block (`site/hello` → `hello`).
 ///
@@ -333,6 +374,15 @@ async fn import_bundle(
             paths::MAX_BLOCKS
         ));
     }
+
+    // The sandbox block, if any — verified before a single site byte is
+    // stored, so a bundle whose guide is wrong stores nothing at all. Held
+    // until the end, when the row is written beside the workspace it
+    // describes.
+    let sandbox = match &manifest.sandbox {
+        Some(declared) => Some(fetch_sandbox(fetch, declared).await?),
+        None => None,
+    };
 
     // Every spec, before a single byte is fetched. Two reasons for the
     // ordering: a bundle whose second block is refused must not have left the
@@ -543,6 +593,12 @@ async fn import_bundle(
             .map_err(|e| format!("{url}: {}", e.message))?;
     }
 
+    if let Some(info) = &sandbox {
+        seed_info::write(ctx, info)
+            .await
+            .map_err(|e| format!("recording the seed's sandbox block: {}", e.message))?;
+    }
+
     Ok(Some(GenerationManifest::staged(
         SiteManifest {
             files: workspace::site_manifest(&ws),
@@ -618,6 +674,49 @@ async fn fetch_verified(
         .map_err(|e| format!("the seed bundle names {workspace_path:?}: {e}"))?;
     let served = paths::content_type_for(workspace_path);
     fetch_and_verify(fetch, url, declared, served, paths::MAX_FILE_BYTES).await
+}
+
+/// Check and fetch a bundle's sandbox block: the template name, the prompt
+/// length, then the guide through [`fetch_and_verify`] like any other file.
+async fn fetch_sandbox(
+    fetch: &dyn SeedFetch,
+    declared: &SandboxSeed,
+) -> Result<seed_info::SeedInfo, String> {
+    if !paths::block_name_is_valid(&declared.template) {
+        return Err(format!(
+            "the seed bundle's sandbox.template {:?} is not allowed: {}",
+            declared.template,
+            paths::BLOCK_NAME_RULE
+        ));
+    }
+    if declared.suggested_prompt.len() > MAX_PROMPT_BYTES {
+        return Err(format!(
+            "the seed bundle's sandbox.suggested_prompt is {} bytes; the limit is {MAX_PROMPT_BYTES}",
+            declared.suggested_prompt.len()
+        ));
+    }
+    if declared.guide.path != GUIDE_PATH {
+        return Err(format!(
+            "the seed bundle's sandbox.guide is named {:?}; it must be {GUIDE_PATH:?} beside the manifest",
+            declared.guide.path
+        ));
+    }
+    let url = guide_url(&declared.guide.path);
+    let bytes = fetch_and_verify(
+        fetch,
+        &url,
+        &declared.guide,
+        GUIDE_CONTENT_TYPE,
+        MAX_GUIDE_BYTES,
+    )
+    .await?;
+    let guide_markdown =
+        String::from_utf8(bytes).map_err(|_| format!("{url}: the guide is not valid UTF-8"))?;
+    Ok(seed_info::SeedInfo {
+        template: declared.template.clone(),
+        suggested_prompt: declared.suggested_prompt.clone(),
+        guide_markdown,
+    })
 }
 
 /// One block's refusal, with every diagnostic's message and code.
