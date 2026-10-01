@@ -132,7 +132,7 @@ use super::{
     workspace::{self, FileEntry, Workspace},
     DevShared,
 };
-use crate::blocks::crud;
+use crate::{blocks::crud, http::err_internal};
 
 // ---------------------------------------------------------------------------
 // Handlers
@@ -243,6 +243,11 @@ pub async fn handle_write(
             bytes.len(),
             paths::MAX_FILE_BYTES
         ));
+    }
+    if let Err(refusal) =
+        refuse_shadowed_site_files(shared, &area, std::iter::once(request.path.as_str())).await
+    {
+        return refusal;
     }
 
     // The manifest is read, changed and written back under `shared.workspace`,
@@ -423,6 +428,13 @@ pub async fn handle_write_batch(
     let Some(area) = area else {
         unreachable!("a batch of at least one file has the area of its first file");
     };
+    // Every path, before the workspace is touched: one shadowed file refuses
+    // the whole batch and nothing is stored.
+    if let Err(refusal) =
+        refuse_shadowed_site_files(shared, &area, decoded.iter().map(|(path, _, _)| *path)).await
+    {
+        return refusal;
+    }
 
     // Under `shared.workspace` for the reason `handle_write` gives, and
     // released before the publish below for the same one.
@@ -575,6 +587,41 @@ pub(super) async fn store_files(
         return Err(no_store_db_error_internal(e, "dev workspace save"));
     }
     Ok(written)
+}
+
+/// Refuse a site write whose file the runtime's service worker would shadow:
+/// served at `/` + the path after `site/`, it matches one of the service
+/// worker's bypass rules, so every request for it goes to the static host and
+/// the file would publish and never be shown ([`super::bypass`]). The `400`
+/// names the path and the rule.
+///
+/// Only a `site/` write is checked — a block's source is never requested by
+/// URL — and the rules are read once for the whole request, however many
+/// files it writes, BEFORE the workspace lock is taken: reading them is a
+/// fetch of `/asset-manifest.json`, which has no business holding up every
+/// other writer. A shell whose rules cannot be read at all is a sanitized
+/// `500`, the same answer the export gives for a shell it cannot read; a
+/// manifest from a bundler that predates the rules yields none, and refuses
+/// nothing ([`super::BypassRules::from_asset_manifest`]).
+async fn refuse_shadowed_site_files<'a>(
+    shared: &DevShared,
+    area: &WorkspaceArea,
+    paths: impl Iterator<Item = &'a str>,
+) -> Result<(), OutputStream> {
+    if *area != WorkspaceArea::Site {
+        return Ok(());
+    }
+    let rules = shared
+        .shell
+        .bypass_rules()
+        .await
+        .map_err(|e| err_internal("dev workspace: the service worker's bypass rules", e))?;
+    for path in paths {
+        rules
+            .refuse_shadowed(path)
+            .map_err(|refused| no_store_error(ErrorCode::InvalidArgument, &refused))?;
+    }
+    Ok(())
 }
 
 /// The `400` for a path that would make one name both a file and a directory

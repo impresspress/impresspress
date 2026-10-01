@@ -32,7 +32,7 @@ use impresspress_core::{
         data_snapshot::DataSnapshot,
         repo::generations::GenerationCause,
         seed::{self, SeedManifest},
-        test_support::{dev_post, hello_info, FakeControl, FakeShell},
+        test_support::{dev_post, fake_bypass_rules, hello_info, FakeControl, FakeShell},
         WAFER_GUEST_VERSION,
     },
     platform_state::variables,
@@ -612,10 +612,30 @@ async fn the_exported_sw_drops_the_compiler_bypass_and_keeps_the_seed_one() {
     assert!(sw.contains("url.pathname.startsWith('/snippets/')"), "{sw}");
     assert!(
         sw.contains(
-            "if (url.pathname.startsWith('/snippets/') || url.pathname.startsWith('/cdn-cgi/') \
-             || url.pathname.startsWith('/seed/')) { return; }"
+            "if (url.pathname.startsWith('/snippets/') ||\n        \
+             url.pathname.startsWith('/cdn-cgi/') ||\n        \
+             url.pathname.startsWith('/seed/')) { return; }"
         ),
         "the remaining expression must be exactly what a compiler-less bundle renders; {sw}"
+    );
+
+    // And the manifest that STATES those rules says the same: the exported
+    // site's runtime reads it, and a prefix its `sw.js` no longer bypasses
+    // would refuse paths that site can serve.
+    let manifest: serde_json::Value =
+        serde_json::from_slice(&archive["asset-manifest.json"]).expect("asset-manifest.json");
+    let prefixes = manifest["bypass"]["prefixes"].as_array().expect("prefixes");
+    assert!(
+        !prefixes
+            .iter()
+            .any(|p| p == "/__impresspress_dev/compiler/"),
+        "{manifest}"
+    );
+    assert!(prefixes.iter().any(|p| p == "/seed/"), "{manifest}");
+    assert!(prefixes.iter().any(|p| p == "/snippets/"), "{manifest}");
+    assert_eq!(
+        manifest["bypass"]["exact"],
+        json!(fake_bypass_rules().exact)
     );
 }
 
@@ -1053,7 +1073,7 @@ async fn an_exported_seed_imports_into_a_fresh_instance() {
         .await
         .with_dev_added_and_shell(b_control.clone(), std::sync::Arc::new(FakeShell::new()))
         .await;
-    let generation = seed::import(&b, b_control.as_ref(), &manifest, &fetch)
+    let generation = seed::import(&b, b_control.as_ref(), &FakeShell::new(), &manifest, &fetch)
         .await
         .expect("import")
         .expect("a fresh instance imports");
@@ -1214,10 +1234,16 @@ async fn a_data_snapshot_over_the_import_limit_is_refused_at_export_and_one_at_i
         .await
         .with_dev_added_and_shell(b_control.clone(), std::sync::Arc::new(FakeShell::new()))
         .await;
-    seed::import(&b, b_control.as_ref(), &manifest, &ArchiveFetch { archive })
-        .await
-        .expect("a bundle at the limit imports")
-        .expect("a fresh instance imports");
+    seed::import(
+        &b,
+        b_control.as_ref(),
+        &FakeShell::new(),
+        &manifest,
+        &ArchiveFetch { archive },
+    )
+    .await
+    .expect("a bundle at the limit imports")
+    .expect("a fresh instance imports");
     let notes = variables::get_by_key(&b, NOTES_KEY)
         .await
         .expect("read")

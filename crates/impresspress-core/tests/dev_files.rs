@@ -1598,3 +1598,157 @@ async fn a_batch_is_held_to_the_quota_as_a_whole_and_charged_once_per_blob() {
     .await;
     assert_eq!(output_http_status(out).await, 200);
 }
+
+// ---------------------------------------------------------------------------
+// Paths the service worker shadows
+// ---------------------------------------------------------------------------
+
+/// The paths of every file under `prefix`, in order.
+async fn listed(ctx: &TestContext, prefix: &str) -> Vec<String> {
+    let l = output_json(ctx.dispatch_resolved(list_msg(Some(prefix))).await).await;
+    l["files"]
+        .as_array()
+        .expect("files")
+        .iter()
+        .map(|f| f["path"].as_str().expect("path").to_string())
+        .collect()
+}
+
+/// `site/manifest.json` is served at `/manifest.json`, which the service
+/// worker hands to the static host — so the file would publish and 404. The
+/// write is refused with a message naming the URL and the rule, and saying
+/// why, and nothing is stored.
+#[tokio::test]
+async fn a_site_file_at_an_exact_bypassed_path_is_refused() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    let write = || {
+        dev_post(
+            &ctx,
+            "/b/dev/api/files/write",
+            json!({"path": "site/manifest.json", "content": "{}", "expected_sha256": null}),
+        )
+    };
+    assert_eq!(output_http_status(write().await).await, 400);
+    let body = output_http_json(write().await).await;
+    let message = body["message"].as_str().expect("message");
+    assert!(message.contains("\"/manifest.json\""), "{message}");
+    assert!(message.contains("\"site/manifest.json\""), "{message}");
+    assert!(message.contains("the exact path"), "{message}");
+    assert!(
+        message.contains("serves this path from the static host"),
+        "{message}"
+    );
+    assert!(listed(&ctx, "site/").await.is_empty());
+}
+
+#[tokio::test]
+async fn a_site_file_under_a_bypassed_prefix_is_refused() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    for path in [
+        "site/snippets/x.js",
+        "site/seed/manifest.json",
+        "site/cdn-cgi/rum",
+    ] {
+        let out = dev_post(
+            &ctx,
+            "/b/dev/api/files/write",
+            json!({"path": path, "content": "x", "expected_sha256": null}),
+        )
+        .await;
+        let body = output_http_json(out).await;
+        let message = body["message"].as_str().expect("message");
+        assert!(message.contains("everything under"), "{path}: {message}");
+        assert!(
+            message.contains(&format!("{:?}", path.strip_prefix("site").unwrap())),
+            "{path}: {message}"
+        );
+    }
+    let out = dev_post(
+        &ctx,
+        "/b/dev/api/files/write",
+        json!({"path": "site/snippets/x.js", "content": "x", "expected_sha256": null}),
+    )
+    .await;
+    assert_eq!(output_http_status(out).await, 400);
+    assert!(listed(&ctx, "site/").await.is_empty());
+}
+
+/// The shell's own sql.js files are bypassed by exact path, so the rest of
+/// `/vendor/` is the site's — a seed's CSS framework lives there.
+#[tokio::test]
+async fn a_site_file_beside_the_shells_vendor_files_is_allowed() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    write_new(&ctx, "site/vendor/bootstrap/x.css", "a{}").await;
+    write_new(&ctx, "site/app/manifest.json", "{}").await;
+    let out = dev_post(
+        &ctx,
+        "/b/dev/api/files/write",
+        json!({"path": "site/vendor/sql-wasm.wasm", "content": "x", "expected_sha256": null}),
+    )
+    .await;
+    assert_eq!(output_http_status(out).await, 400);
+    assert_eq!(
+        listed(&ctx, "site/").await,
+        ["site/app/manifest.json", "site/vendor/bootstrap/x.css"]
+    );
+}
+
+/// One shadowed path refuses the whole batch, naming it, and nothing of the
+/// batch is stored.
+#[tokio::test]
+async fn a_batch_with_one_shadowed_site_file_stores_nothing() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    let batch = json!({"files": [
+        {"path": "site/index.html", "content": "<h1>hi</h1>", "expected_sha256": null},
+        {"path": "site/manifest.json", "content": "{}", "expected_sha256": null},
+        {"path": "site/style.css", "content": "a{}", "expected_sha256": null},
+    ]});
+    let out = dev_post(&ctx, "/b/dev/api/files/write-batch", batch.clone()).await;
+    assert_eq!(output_http_status(out).await, 400);
+    let body = output_http_json(dev_post(&ctx, "/b/dev/api/files/write-batch", batch).await).await;
+    let message = body["message"].as_str().expect("message");
+    assert!(message.contains("\"/manifest.json\""), "{message}");
+    assert!(listed(&ctx, "site/").await.is_empty());
+}
+
+/// A block's source is never requested by URL, so no bypass rule applies to
+/// it — a block may well have a `manifest.json` or a `snippets/` directory.
+#[tokio::test]
+async fn block_sources_are_not_checked_against_the_bypass_rules() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    write_new(&ctx, "blocks/hello/manifest.json", "{}").await;
+    let out = dev_post(
+        &ctx,
+        "/b/dev/api/files/write-batch",
+        json!({"files": [
+            {"path": "blocks/hello/snippets/x.rs", "content": "", "expected_sha256": null},
+            {"path": "blocks/hello/sw.js", "content": "", "expected_sha256": null},
+        ]}),
+    )
+    .await;
+    assert_eq!(output_http_status(out).await, 200);
+    assert_eq!(
+        listed(&ctx, "blocks/").await,
+        [
+            "blocks/hello/manifest.json",
+            "blocks/hello/snippets/x.rs",
+            "blocks/hello/sw.js"
+        ]
+    );
+}
+
+/// A deployment whose `asset-manifest.json` predates the `bypass` field
+/// states no rules, and the sandbox refuses nothing on its account.
+#[tokio::test]
+async fn a_shell_manifest_without_bypass_rules_refuses_nothing() {
+    let shell = FakeShell::new().with(
+        "asset-manifest.json",
+        br#"{"buildId":"abc123","assets":{},"files":[]}"#,
+    );
+    let ctx = TestContext::with_admin()
+        .await
+        .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(shell))
+        .await;
+    write_new(&ctx, "site/manifest.json", "{}").await;
+    assert_eq!(listed(&ctx, "site/").await, ["site/manifest.json"]);
+}

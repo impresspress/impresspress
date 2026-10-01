@@ -717,6 +717,15 @@ const INVENTORIED_TAILS: &[(&str, &[Tail])] = &[
         ],
     ),
     (
+        "dev/files.rs",
+        &[Tail {
+            label: "dev workspace: the service worker's bypass rules",
+            count: 1,
+            why: "provider: `ShellSource` answers the host's `/asset-manifest.json` as a \
+                  `String` error, a type with no database code",
+        }],
+    ),
+    (
         "dev/mod.rs",
         &[Tail {
             label: "context",

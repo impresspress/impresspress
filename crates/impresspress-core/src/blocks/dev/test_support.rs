@@ -18,6 +18,7 @@ use wafer_run::{AuthLevel, BlockEndpoint, BlockInfo, OutputStream};
 
 use super::{
     blobs,
+    bypass::BypassRules,
     control::{
         DynamicBlockSpec, GenerationAnnouncement, RuntimeControl, ShellSource, ValidationFailure,
         ValidationStage,
@@ -445,6 +446,11 @@ pub fn seed_file(path: &str, bytes: &[u8]) -> SeedFile {
 /// ships the in-browser toolchain does. So a test can assert BOTH edits the
 /// export makes to a shell file: the dev flag turned off, and the bypass for
 /// a compiler tree the export does not copy removed.
+///
+/// Its `asset-manifest.json` states [`fake_bypass_rules`] — the rules a real
+/// dev-sandbox bundle writes — and [`ShellSource::bypass_rules`] reads them
+/// back from those bytes, the way the browser reader does, so replacing the
+/// manifest with [`Self::with`] changes what the sandbox refuses.
 pub struct FakeShell {
     files: BTreeMap<String, Vec<u8>>,
     /// Set by [`Self::failing_to_list`]: what `list` refuses with.
@@ -457,14 +463,47 @@ pub struct FakeShell {
 /// lines the export acts on (the `DEV_ENABLED` declaration and the compiler's
 /// bypass clause) plus the ones it must leave exactly alone (the constant's
 /// two readers and the `/seed/` bypass, without which an exported folder
-/// could never import the seed shipped beside it).
+/// could never import the seed shipped beside it). The bypass condition is
+/// laid out the way `impresspress-bundle`'s `BypassRules::render_condition`
+/// renders one: a clause per line, each after the first leading with its `||`.
 pub const FAKE_SW_JS: &str = "const DEV_ENABLED = true;\n\
      await initialize({ dev: DEV_ENABLED });\n\
      if (DEV_ENABLED && url.pathname !== '/sw.js') { passthrough(); }\n\
-     if (url.pathname.startsWith('/snippets/') \
-     || url.pathname.startsWith('/cdn-cgi/') \
-     || url.pathname.startsWith('/__impresspress_dev/compiler/') \
-     || url.pathname.startsWith('/seed/')) { return; }\n";
+     if (url.pathname.startsWith('/snippets/') ||\n        \
+     url.pathname.startsWith('/cdn-cgi/') ||\n        \
+     url.pathname.startsWith('/__impresspress_dev/compiler/') ||\n        \
+     url.pathname.startsWith('/seed/')) { return; }\n";
+
+/// The bypass rules [`FakeShell::new`]'s `asset-manifest.json` states: what
+/// `impresspress-bundle` writes for the dev-sandbox deployment
+/// (`examples/dev-sandbox/impresspress.toml` — a dev bundle with the compiler
+/// prefix), with this shell's wasm-pack base name.
+pub fn fake_bypass_rules() -> BypassRules {
+    BypassRules {
+        exact: [
+            "/sw.js",
+            "/loader.js",
+            "/manifest.json",
+            "/asset-manifest.json",
+            "/webllm-engine.js",
+            "/embed-engine.js",
+            "/t2i-engine.js",
+            "/vendor/sql-wasm-esm.js",
+            "/vendor/sql-wasm.wasm",
+        ]
+        .map(String::from)
+        .to_vec(),
+        prefixes: [
+            "/impresspress_web",
+            "/snippets/",
+            "/cdn-cgi/",
+            "/__impresspress_dev/compiler/",
+            "/seed/",
+        ]
+        .map(String::from)
+        .to_vec(),
+    }
+}
 
 impl Default for FakeShell {
     fn default() -> Self {
@@ -493,7 +532,13 @@ impl FakeShell {
         );
         files.insert(
             "asset-manifest.json".to_string(),
-            br#"{"buildId":"abc123","assets":{},"files":[]}"#.to_vec(),
+            serde_json::to_vec(&serde_json::json!({
+                "buildId": "abc123",
+                "assets": {},
+                "files": [],
+                "bypass": fake_bypass_rules(),
+            }))
+            .expect("the fake asset manifest serializes"),
         );
         Self {
             files,
@@ -547,5 +592,12 @@ impl ShellSource for FakeShell {
             .get(path)
             .cloned()
             .ok_or_else(|| format!("{path}: not served by this shell"))
+    }
+    async fn bypass_rules(&self) -> Result<BypassRules, String> {
+        let manifest = self
+            .files
+            .get("asset-manifest.json")
+            .ok_or_else(|| "/asset-manifest.json: not served by this shell".to_string())?;
+        BypassRules::from_asset_manifest(manifest)
     }
 }

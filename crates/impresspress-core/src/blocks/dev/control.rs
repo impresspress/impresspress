@@ -369,7 +369,9 @@ pub struct GenerationAnnouncement {
     pub changed_paths: Vec<String>,
 }
 
-/// The static shell the sandbox is running inside, as the export reads it.
+/// The static shell the sandbox is running inside, as the export reads it —
+/// and the service worker's bypass rules, as the site-file checks read them
+/// ([`Self::bypass_rules`]).
 ///
 /// `impresspress-core` describes what an export bundle should contain, but it
 /// cannot read the deployment's own `index.html`, `sw.js` or wasm: those are
@@ -407,4 +409,16 @@ pub trait ShellSource: wafer_run::MaybeSend + wafer_run::MaybeSync {
     /// The bytes of one file [`Self::list`] named, by that same relative
     /// path.
     async fn fetch(&self, path: &str) -> Result<Vec<u8>, String>;
+
+    /// The request paths the running shell's service worker leaves to the
+    /// static host instead of the runtime, as `/asset-manifest.json`'s
+    /// `bypass` states them — the rules `impresspress-bundle` rendered
+    /// `sw.js`'s bypass condition from, so a site file at one of these paths
+    /// would never be shown ([`super::bypass`]).
+    ///
+    /// A manifest written by a bundler that predates the field yields NO
+    /// rules rather than an error — see
+    /// [`BypassRules::from_asset_manifest`](super::BypassRules::from_asset_manifest).
+    /// `Err` when the manifest cannot be fetched or parsed at all.
+    async fn bypass_rules(&self) -> Result<super::BypassRules, String>;
 }

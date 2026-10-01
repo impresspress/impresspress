@@ -31,6 +31,7 @@ pub mod artifacts;
 pub mod assets;
 pub mod blobs;
 pub mod blocks_api;
+pub mod bypass;
 pub mod contracts;
 pub mod control;
 pub mod data_snapshot;
@@ -66,9 +67,12 @@ use wafer_run::{
     LifecycleEvent, Message, OutputStream, WaferError,
 };
 
-pub use self::control::{
-    DynamicBlockSpec, DynamicRoute, RouteAccessKind, RuntimeControl, ShellSource,
-    ValidationFailure, ValidationStage,
+pub use self::{
+    bypass::{BypassRule, BypassRules},
+    control::{
+        DynamicBlockSpec, DynamicRoute, RouteAccessKind, RuntimeControl, ShellSource,
+        ValidationFailure, ValidationStage,
+    },
 };
 use crate::{
     endpoint_match::{self, request_schema_of, response_schema_of, EndpointRoute},

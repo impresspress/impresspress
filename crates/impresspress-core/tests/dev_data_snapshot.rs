@@ -25,7 +25,7 @@ use impresspress_core::{
             self,
             data_snapshot::{self, DataSnapshot},
             seed::{self, SeedManifest},
-            test_support::{seed_file, FakeControl, MapFetch},
+            test_support::{seed_file, FakeControl, FakeShell, MapFetch},
         },
         products::ProductsBlock,
     },
@@ -1128,7 +1128,7 @@ async fn seed_import_applies_data_json_when_present() {
         .with(&seed::site_url("index.html"), b"<h1>shop</h1>")
         .with(&seed::data_url("data.json"), &data_bytes);
 
-    seed::import(&ctx, control.as_ref(), &manifest, &fetch)
+    seed::import(&ctx, control.as_ref(), &FakeShell::new(), &manifest, &fetch)
         .await
         .unwrap();
 
@@ -1176,7 +1176,7 @@ async fn seed_import_fails_when_data_json_does_not_verify() {
         .with(&seed::site_url("index.html"), b"<h1>shop</h1>")
         .with(&seed::data_url("data.json"), &data_bytes);
 
-    let err = seed::import(&ctx, control.as_ref(), &manifest, &fetch)
+    let err = seed::import(&ctx, control.as_ref(), &FakeShell::new(), &manifest, &fetch)
         .await
         .expect_err("a hash mismatch on data.json must fail the whole seed import");
     assert!(

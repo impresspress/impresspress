@@ -59,7 +59,7 @@ use impresspress_core::blocks::dev::{
     },
     repo::generations::GenerationCause,
     seed::{self, SeedManifest},
-    DevShared, BLOCK_NAME,
+    BypassRules, DevShared, BLOCK_NAME,
 };
 use wafer_run::{
     context::Context, wasm::WasmiBlock, Block, BlockInfo, BlockRuntime, ErrorCode, FuelLimit,
@@ -802,7 +802,8 @@ impl seed::SeedFetch for SwFetch {
 
 /// [`ShellSource`] over `/asset-manifest.json` and the service worker's own
 /// `fetch` — how the export reads the static files this deployment was
-/// shipped as.
+/// shipped as, and how the sandbox learns which paths this deployment's
+/// service worker bypasses.
 ///
 /// # Why fetching from in here reaches the network
 ///
@@ -884,6 +885,15 @@ impl ShellSource for BrowserShellSource {
 
     async fn fetch(&self, path: &str) -> Result<Vec<u8>, String> {
         self.get(&format!("/{path}")).await
+    }
+
+    /// Read on every call — once per site write, never per file — rather than
+    /// cached for the worker's life: it is one small `no-store` fetch, and a
+    /// cached copy is one more thing that could disagree with the manifest
+    /// the deployment actually serves.
+    async fn bypass_rules(&self) -> Result<BypassRules, String> {
+        let bytes = self.get(ASSET_MANIFEST_URL).await?;
+        BypassRules::from_asset_manifest(&bytes)
     }
 }
 
@@ -1070,7 +1080,17 @@ async fn seed_on_boot(ctx: &dyn Context, shared: &Arc<DevShared>) -> Result<(), 
     // activation rebuilds through: the importer uses it to `inspect` each
     // seeded artifact under deny-all capabilities and run the four validation
     // rules that need the guest's own `BlockInfo` (see `seed`'s module docs).
-    let Some(generation) = seed::import(ctx, shared.control.as_ref(), &manifest, &fetch).await?
+    // `shared.shell` is how the importer learns the service worker's bypass
+    // rules: a seed's site file at a bypassed path would never be shown, so
+    // the import refuses it like any other bad bundle.
+    let Some(generation) = seed::import(
+        ctx,
+        shared.control.as_ref(),
+        shared.shell.as_ref(),
+        &manifest,
+        &fetch,
+    )
+    .await?
     else {
         return Ok(());
     };

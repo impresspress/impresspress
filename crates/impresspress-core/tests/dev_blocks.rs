@@ -27,7 +27,9 @@ use impresspress_core::{
             generations::GenerationCause,
         },
         seed::{self, SeedBlock, SeedManifest},
-        test_support::{dev_post, dev_status, hello_info, seed_file, FakeControl, MapFetch},
+        test_support::{
+            dev_post, dev_status, hello_info, seed_file, FakeControl, FakeShell, MapFetch,
+        },
         validation::MAX_ARTIFACT_BYTES,
     },
     test_support::{admin_msg, anon_msg, output_json, output_status, TestContext},
@@ -964,7 +966,7 @@ async fn seeded_instance(control: &std::sync::Arc<FakeControl>) -> TestContext {
     let (manifest, fetch, info) = greeter_bundle();
     control.set_validated_info(info);
     let ctx = TestContext::with_dev(control.clone()).await;
-    let generation = seed::import(&ctx, control.as_ref(), &manifest, &fetch)
+    let generation = seed::import(&ctx, control.as_ref(), &FakeShell::new(), &manifest, &fetch)
         .await
         .expect("import")
         .expect("fresh");

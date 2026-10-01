@@ -71,8 +71,14 @@ use crate::{config_vars::APP_NAME_KEY, http::err_internal};
 const SW_DEV_ON: &str = "const DEV_ENABLED = true;";
 const SW_DEV_OFF: &str = "const DEV_ENABLED = false;";
 
-/// The one shell file whose content this export edits.
+/// The shell file whose code this export edits.
 const SW_PATH: &str = "sw.js";
+
+/// The shell file that STATES `sw.js`'s bypass rules (its `bypass` field,
+/// written by `impresspress-bundle` from the same value it rendered `sw.js`
+/// from). Whatever this export removes from one it removes from the other —
+/// see [`strip_compiler_rule`].
+const ASSET_MANIFEST_PATH: &str = "asset-manifest.json";
 
 /// Where the data snapshot lands, relative to [`seed::ROOT`].
 ///
@@ -270,6 +276,8 @@ async fn assemble(ctx: &dyn Context, shared: &DevShared) -> Result<Assembled, Re
             .map_err(|e| Refusal::Shell(format!("{path}: {e}")))?;
         let bytes = if path == SW_PATH {
             strip_compiler_bypass(sw_with_dev_off(&bytes)?)
+        } else if path == ASSET_MANIFEST_PATH {
+            strip_compiler_rule(bytes)?
         } else {
             bytes
         };
@@ -517,7 +525,8 @@ fn sw_with_dev_off(bytes: &[u8]) -> Result<Vec<u8>, Refusal> {
 /// A deployment that ships the in-browser toolchain adds
 /// `/__impresspress_dev/compiler/` to the service worker's bypass list (the
 /// bundle's `extra_bypass_prefix`, rendered by `impresspress-bundle`'s
-/// `build_template_vars` as one ` || url.pathname.startsWith('…')` clause).
+/// `BypassRules::render_condition` as one `url.pathname.startsWith('…')`
+/// clause on a line of its own, led by its `||`).
 /// The export does not copy those assets — there is no `/b/dev` in an
 /// exported site to load them — so the clause would be a bypass for a tree
 /// that is not there: every request under the prefix waved past the runtime
@@ -530,10 +539,11 @@ fn sw_with_dev_off(bytes: &[u8]) -> Result<Vec<u8>, Refusal> {
 /// than editing the prefix keeps the remaining expression exactly as the
 /// bundler would have rendered it for a bundle that never asked.
 fn strip_compiler_bypass(bytes: Vec<u8>) -> Vec<u8> {
-    // The exact text `build_template_vars` emits per `extra_bypass_prefix`
-    // entry. Built here rather than matched loosely so a clause this does not
-    // recognise is left alone instead of half-edited.
-    let clause = format!(" || url.pathname.startsWith('{COMPILER_ROOT}')");
+    // The exact text `BypassRules::render_condition` emits for a prefix rule
+    // that is not the first clause (exact rules always precede it). Built
+    // here rather than matched loosely so a clause this does not recognise is
+    // left alone instead of half-edited.
+    let clause = format!(" ||\n        url.pathname.startsWith('{COMPILER_ROOT}')");
     match String::from_utf8(bytes) {
         Ok(text) if text.contains(&clause) => text.replace(&clause, "").into_bytes(),
         Ok(text) => text.into_bytes(),
@@ -542,6 +552,33 @@ fn strip_compiler_bypass(bytes: Vec<u8>) -> Vec<u8> {
         // them untouched rather than panicking keeps this function total.
         Err(e) => e.into_bytes(),
     }
+}
+
+/// `asset-manifest.json` with the compiler prefix removed from its `bypass`
+/// rules, if they list it — the manifest's half of [`strip_compiler_bypass`].
+///
+/// The manifest states the rules `sw.js` applies, and the exported site's
+/// runtime reads them (its seed import refuses a site file at a bypassed
+/// path). A manifest still listing a prefix the exported `sw.js` no longer
+/// bypasses would refuse paths that site can serve. A manifest without the
+/// prefix — or without a `bypass` field at all, from an older bundler — is
+/// copied byte for byte.
+fn strip_compiler_rule(bytes: Vec<u8>) -> Result<Vec<u8>, Refusal> {
+    let mut manifest: serde_json::Value = serde_json::from_slice(&bytes)
+        .map_err(|e| Refusal::Shell(format!("{ASSET_MANIFEST_PATH} did not parse: {e}")))?;
+    let Some(prefixes) = manifest
+        .pointer_mut("/bypass/prefixes")
+        .and_then(serde_json::Value::as_array_mut)
+    else {
+        return Ok(bytes);
+    };
+    let before = prefixes.len();
+    prefixes.retain(|prefix| prefix.as_str() != Some(COMPILER_ROOT));
+    if prefixes.len() == before {
+        return Ok(bytes);
+    }
+    serde_json::to_vec_pretty(&manifest)
+        .map_err(|e| Refusal::Shell(format!("{ASSET_MANIFEST_PATH} did not serialize: {e}")))
 }
 
 /// The first eight characters of a generation id — what the downloaded file

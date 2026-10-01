@@ -19,7 +19,7 @@ use impresspress_core::{
         control::{DynamicBlockSpec, DynamicRoute, RouteAccessKind},
         repo::{self, generations::GenerationCause, runtime_state, seed_info},
         seed::{self, SandboxSeed, SeedBlock, SeedManifest},
-        test_support::{hello_info, seed_file as file, FakeControl, MapFetch},
+        test_support::{hello_info, seed_file as file, FakeControl, FakeShell, MapFetch},
         validation, workspace,
     },
     test_support::TestContext,
@@ -133,7 +133,7 @@ fn bundle_with_guide() -> MapFetch {
 /// Import `manifest` and expect a refusal; nothing may have been stored.
 async fn refused(manifest: &SeedManifest, bundle: &MapFetch) -> String {
     let (ctx, control) = fixture().await;
-    let err = seed::import(&ctx, control.as_ref(), manifest, bundle)
+    let err = seed::import(&ctx, control.as_ref(), &FakeShell::new(), manifest, bundle)
         .await
         .expect_err("refused");
     let ws = workspace::load(&ctx).await.expect("workspace");
@@ -153,6 +153,7 @@ async fn a_sandbox_block_is_recorded_for_the_reference_and_the_page() {
     seed::import(
         &ctx,
         control.as_ref(),
+        &FakeShell::new(),
         &manifest_with(sandbox()),
         &bundle_with_guide(),
     )
@@ -168,10 +169,16 @@ async fn a_sandbox_block_is_recorded_for_the_reference_and_the_page() {
 #[tokio::test]
 async fn a_bundle_without_a_sandbox_block_records_nothing() {
     let (ctx, control) = fixture().await;
-    seed::import(&ctx, control.as_ref(), &manifest(), &bundle())
-        .await
-        .expect("import")
-        .expect("fresh");
+    seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest(),
+        &bundle(),
+    )
+    .await
+    .expect("import")
+    .expect("fresh");
     assert_eq!(seed_info::read(&ctx).await.expect("read"), None);
 }
 
@@ -194,9 +201,15 @@ async fn a_refusal_after_the_sandbox_block_checks_out_records_no_row() {
         ..manifest_with(sandbox())
     };
     let bundle = bundle_with_guide().with(&seed::data_url("data.json"), data);
-    let err = seed::import(&ctx, control.as_ref(), &manifest, &bundle)
-        .await
-        .expect_err("a data snapshot that does not match its hash is refused");
+    let err = seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest,
+        &bundle,
+    )
+    .await
+    .expect_err("a data snapshot that does not match its hash is refused");
     assert!(err.contains("hashes to"), "{err}");
     assert_eq!(seed_info::read(&ctx).await.expect("read"), None);
 }
@@ -286,10 +299,16 @@ fn the_sandbox_field_is_optional_in_both_directions() {
 async fn a_seed_bundle_becomes_the_workspace_and_generation_zero() {
     let (ctx, control) = fixture().await;
 
-    let generation = seed::import(&ctx, control.as_ref(), &manifest(), &bundle())
-        .await
-        .expect("import")
-        .expect("a fresh instance imports");
+    let generation = seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest(),
+        &bundle(),
+    )
+    .await
+    .expect("import")
+    .expect("a fresh instance imports");
 
     // The workspace holds every file, at its workspace-relative path.
     let ws = workspace::load(&ctx).await.expect("workspace");
@@ -366,10 +385,16 @@ async fn the_imported_generation_activates_as_generation_zero() {
     let (ctx, control) = fixture().await;
     let shared = ctx.dev_shared();
 
-    let generation = seed::import(&ctx, control.as_ref(), &manifest(), &bundle())
-        .await
-        .expect("import")
-        .expect("fresh");
+    let generation = seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest(),
+        &bundle(),
+    )
+    .await
+    .expect("import")
+    .expect("fresh");
     let outcome = activation::request(
         &ctx,
         &shared,
@@ -402,10 +427,16 @@ async fn the_imported_generation_activates_as_generation_zero() {
 
     // And the instance is no longer fresh, so a re-import is a no-op.
     assert!(!seed::is_fresh(&ctx).await.expect("is_fresh"));
-    assert!(seed::import(&ctx, control.as_ref(), &manifest(), &bundle())
-        .await
-        .expect("second import")
-        .is_none());
+    assert!(seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest(),
+        &bundle()
+    )
+    .await
+    .expect("second import")
+    .is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -418,10 +449,16 @@ async fn the_imported_generation_activates_as_generation_zero() {
 #[tokio::test]
 async fn a_second_import_on_a_non_fresh_instance_is_a_no_op() {
     let (ctx, control) = fixture().await;
-    seed::import(&ctx, control.as_ref(), &manifest(), &bundle())
-        .await
-        .expect("first import")
-        .expect("fresh");
+    seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest(),
+        &bundle(),
+    )
+    .await
+    .expect("first import")
+    .expect("fresh");
     // The first import wrote the workspace but staged nothing, so freshness
     // is still decided by the ledger — publish, then re-check.
     activation::request(
@@ -434,10 +471,16 @@ async fn a_second_import_on_a_non_fresh_instance_is_a_no_op() {
     .await
     .expect("publish");
 
-    assert!(seed::import(&ctx, control.as_ref(), &manifest(), &bundle())
-        .await
-        .expect("second import")
-        .is_none());
+    assert!(seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest(),
+        &bundle()
+    )
+    .await
+    .expect("second import")
+    .is_none());
 }
 
 /// A generation that only ever *failed* still means "something has been staged
@@ -469,10 +512,16 @@ async fn a_failed_generation_still_makes_an_instance_non_fresh() {
         "nothing is active — freshness must not rest on that alone"
     );
     assert!(!seed::is_fresh(&ctx).await.expect("is_fresh"));
-    assert!(seed::import(&ctx, control.as_ref(), &manifest(), &bundle())
-        .await
-        .expect("import")
-        .is_none());
+    assert!(seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest(),
+        &bundle()
+    )
+    .await
+    .expect("import")
+    .is_none());
 }
 
 // ---------------------------------------------------------------------------
@@ -484,9 +533,15 @@ async fn content_that_does_not_match_its_declared_hash_is_refused() {
     let (ctx, control) = fixture().await;
     let tampered = bundle().with(&seed::site_url("assets/app.js"), b"alert('gotcha')");
 
-    let error = seed::import(&ctx, control.as_ref(), &manifest(), &tampered)
-        .await
-        .expect_err("a hash mismatch must refuse the import");
+    let error = seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest(),
+        &tampered,
+    )
+    .await
+    .expect_err("a hash mismatch must refuse the import");
     assert!(
         error.contains("assets/app.js") && error.contains("hashes to"),
         "{error}"
@@ -506,9 +561,15 @@ async fn an_artifact_that_does_not_match_its_declared_hash_is_refused() {
     let (ctx, control) = fixture().await;
     let tampered = bundle().with(&seed::artifact_url("hello"), b"\0asm\x01\0\0\0different");
 
-    let error = seed::import(&ctx, control.as_ref(), &manifest(), &tampered)
-        .await
-        .expect_err("a hash mismatch must refuse the import");
+    let error = seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest(),
+        &tampered,
+    )
+    .await
+    .expect_err("a hash mismatch must refuse the import");
     assert!(
         error.contains("/seed/blocks/hello.wasm") && error.contains("site/hello"),
         "{error}"
@@ -526,9 +587,15 @@ async fn an_oversized_artifact_is_refused_and_never_stored() {
     manifest.blocks[0].spec.artifact_sha256 = blobs::sha256_hex(&huge);
     let bundle = bundle().with(&seed::artifact_url("hello"), &huge);
 
-    let error = seed::import(&ctx, control.as_ref(), &manifest, &bundle)
-        .await
-        .expect_err("an oversized artifact must refuse the import");
+    let error = seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest,
+        &bundle,
+    )
+    .await
+    .expect_err("an oversized artifact must refuse the import");
     assert!(
         error.contains("artifact is at least") && error.contains("/seed/blocks/hello.wasm"),
         "{error}"
@@ -551,9 +618,15 @@ async fn a_size_that_does_not_match_the_content_is_refused() {
     let mut manifest = manifest();
     manifest.site[0].size += 1;
 
-    let error = seed::import(&ctx, control.as_ref(), &manifest, &bundle())
-        .await
-        .expect_err("a size mismatch must refuse the import");
+    let error = seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest,
+        &bundle(),
+    )
+    .await
+    .expect_err("a size mismatch must refuse the import");
     assert!(
         error.contains("index.html") && error.contains("bytes"),
         "{error}"
@@ -569,9 +642,15 @@ async fn a_content_type_that_is_not_what_the_path_is_served_as_is_refused() {
     let mut manifest = manifest();
     manifest.site[0].content_type = "text/plain".to_string();
 
-    let error = seed::import(&ctx, control.as_ref(), &manifest, &bundle())
-        .await
-        .expect_err("a content-type mismatch must refuse the import");
+    let error = seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest,
+        &bundle(),
+    )
+    .await
+    .expect_err("a content-type mismatch must refuse the import");
     assert!(error.contains("content type"), "{error}");
 }
 
@@ -585,9 +664,15 @@ async fn a_path_that_escapes_the_workspace_is_refused() {
     manifest.site[0].path = "../../elsewhere.html".to_string();
     let bundle = bundle().with(&seed::site_url("../../elsewhere.html"), INDEX);
 
-    let error = seed::import(&ctx, control.as_ref(), &manifest, &bundle)
-        .await
-        .expect_err("a traversing path must refuse the import");
+    let error = seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest,
+        &bundle,
+    )
+    .await
+    .expect_err("a traversing path must refuse the import");
     assert!(
         error.contains("site/../../elsewhere.html") && error.contains(r#"segment "..""#),
         "{error}"
@@ -607,9 +692,15 @@ async fn a_file_the_bundle_does_not_carry_is_refused() {
         .with(&seed::artifact_url("hello"), ARTIFACT)
         .with(&seed::source_url("hello", "src/lib.rs"), LIB_RS);
 
-    let error = seed::import(&ctx, control.as_ref(), &manifest(), &incomplete)
-        .await
-        .expect_err("a missing file must refuse the import");
+    let error = seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest(),
+        &incomplete,
+    )
+    .await
+    .expect_err("a missing file must refuse the import");
     assert!(error.contains("assets/app.js"), "{error}");
 }
 
@@ -623,9 +714,15 @@ async fn a_block_artifact_the_bundle_does_not_carry_is_refused() {
         .with(&seed::site_url("index.html"), INDEX)
         .with(&seed::site_url("assets/app.js"), APP_JS);
 
-    let error = seed::import(&ctx, control.as_ref(), &manifest(), &incomplete)
-        .await
-        .expect_err("a missing artifact must refuse the import");
+    let error = seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest(),
+        &incomplete,
+    )
+    .await
+    .expect_err("a missing artifact must refuse the import");
     assert!(error.contains("/seed/blocks/hello.wasm"), "{error}");
     // And nothing was stored: the artifacts are fetched before the first
     // site file lands in the workspace.
@@ -642,9 +739,15 @@ async fn a_bundle_from_another_schema_version_is_refused() {
     let mut manifest = manifest();
     manifest.schema_version = seed::SCHEMA_VERSION + 1;
 
-    let error = seed::import(&ctx, control.as_ref(), &manifest, &bundle())
-        .await
-        .expect_err("an unknown schema version must refuse the import");
+    let error = seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest,
+        &bundle(),
+    )
+    .await
+    .expect_err("an unknown schema version must refuse the import");
     assert!(error.contains("schema_version"), "{error}");
 }
 
@@ -661,9 +764,15 @@ async fn a_block_name_that_cannot_be_registered_is_refused() {
         .with(&seed::artifact_url("my_shop"), ARTIFACT)
         .with(&seed::source_url("my_shop", "src/lib.rs"), LIB_RS);
 
-    let error = seed::import(&ctx, control.as_ref(), &manifest, &bundle)
-        .await
-        .expect_err("an unregisterable block name must refuse the import");
+    let error = seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest,
+        &bundle,
+    )
+    .await
+    .expect_err("an unregisterable block name must refuse the import");
     assert!(
         error.contains("site/my_shop") && error.contains("cannot be registered"),
         "{error}"
@@ -717,7 +826,15 @@ async fn a_seeded_block_reaching_outside_its_namespace_is_refused() {
         let mut manifest = manifest();
         manifest.blocks[0].spec.capabilities = capabilities;
 
-        let Err(error) = seed::import(&ctx, control.as_ref(), &manifest, &bundle()).await else {
+        let Err(error) = seed::import(
+            &ctx,
+            control.as_ref(),
+            &FakeShell::new(),
+            &manifest,
+            &bundle(),
+        )
+        .await
+        else {
             panic!("{label} must refuse the import");
         };
         assert!(error.contains("site/hello"), "{label}: {error}");
@@ -747,9 +864,15 @@ async fn a_seeded_block_claiming_someone_elses_route_is_refused() {
         access: RouteAccessKind::Public,
     }];
 
-    let error = seed::import(&ctx, control.as_ref(), &manifest, &bundle())
-        .await
-        .expect_err("a route claim outside the block's own prefix must refuse the import");
+    let error = seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest,
+        &bundle(),
+    )
+    .await
+    .expect_err("a route claim outside the block's own prefix must refuse the import");
     assert!(error.contains("route-prefix"), "{error}");
 }
 
@@ -762,10 +885,16 @@ async fn identical_content_at_two_paths_is_stored_once() {
     manifest.site.push(file("copy.html", INDEX));
     let bundle = bundle().with(&seed::site_url("copy.html"), INDEX);
 
-    seed::import(&ctx, control.as_ref(), &manifest, &bundle)
-        .await
-        .expect("import")
-        .expect("fresh");
+    seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest,
+        &bundle,
+    )
+    .await
+    .expect("import")
+    .expect("fresh");
 
     let ws = workspace::load(&ctx).await.expect("workspace");
     assert_eq!(ws.files.len(), 4);
@@ -817,9 +946,15 @@ async fn a_seeded_block_whose_module_reports_another_name_is_refused() {
     ));
     let ctx = TestContext::with_dev(control.clone()).await;
 
-    let error = seed::import(&ctx, control.as_ref(), &manifest(), &bundle())
-        .await
-        .expect_err("a guest that reports another name must refuse the import");
+    let error = seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest(),
+        &bundle(),
+    )
+    .await
+    .expect_err("a guest that reports another name must refuse the import");
     assert!(error.contains("name-mismatch"), "{error}");
     assert!(error.contains("site/imposter"), "{error}");
     // Refused before anything was stored: the artifacts are fetched and
@@ -848,9 +983,15 @@ async fn a_seeded_block_declaring_an_endpoint_outside_its_prefix_is_refused() {
     );
     let ctx = TestContext::with_dev(control.clone()).await;
 
-    let error = seed::import(&ctx, control.as_ref(), &manifest(), &bundle())
-        .await
-        .expect_err("an endpoint outside the block's prefix must refuse the import");
+    let error = seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest(),
+        &bundle(),
+    )
+    .await
+    .expect_err("an endpoint outside the block's prefix must refuse the import");
     assert!(error.contains("endpoint-outside-routes"), "{error}");
 }
 
@@ -869,9 +1010,15 @@ async fn a_seeded_spec_that_grants_more_than_the_module_asks_for_is_refused() {
         ..BlockCapabilities::none()
     };
 
-    let error = seed::import(&ctx, control.as_ref(), &manifest, &bundle())
-        .await
-        .expect_err("a spec the module does not report must refuse the import");
+    let error = seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest,
+        &bundle(),
+    )
+    .await
+    .expect_err("a spec the module does not report must refuse the import");
     assert!(
         error.contains("does not report") && error.contains("site/hello"),
         "{error}"
@@ -893,9 +1040,15 @@ async fn a_module_that_asks_for_more_than_the_seeded_spec_is_refused() {
     control.set_validated_info(info);
     let ctx = TestContext::with_dev(control.clone()).await;
 
-    let error = seed::import(&ctx, control.as_ref(), &manifest(), &bundle())
-        .await
-        .expect_err("a module declaring more than its spec must refuse the import");
+    let error = seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest(),
+        &bundle(),
+    )
+    .await
+    .expect_err("a module declaring more than its spec must refuse the import");
     assert!(
         error.contains("does not report") && error.contains("site/hello"),
         "{error}"
@@ -921,9 +1074,15 @@ async fn a_seeded_hyphenated_block_claiming_the_hyphen_spelling_is_refused() {
         .with(&seed::artifact_url("my-shop"), ARTIFACT)
         .with(&seed::source_url("my-shop", "src/lib.rs"), LIB_RS);
 
-    let error = seed::import(&ctx, control.as_ref(), &manifest, &bundle)
-        .await
-        .expect_err("the hyphen spelling must refuse the import");
+    let error = seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest,
+        &bundle,
+    )
+    .await
+    .expect_err("the hyphen spelling must refuse the import");
     assert!(error.contains("cap-collection"), "{error}");
     assert!(error.contains("site__my-shop__notes"), "{error}");
 }
@@ -941,10 +1100,16 @@ async fn a_seeded_hyphenated_block_claiming_the_hyphen_spelling_is_refused() {
 async fn a_seeded_build_row_records_the_block_info_the_guest_reported() {
     let (ctx, control) = fixture().await;
 
-    seed::import(&ctx, control.as_ref(), &manifest(), &bundle())
-        .await
-        .expect("import")
-        .expect("fresh");
+    seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest(),
+        &bundle(),
+    )
+    .await
+    .expect("import")
+    .expect("fresh");
 
     let build = repo::builds::latest_valid_for_artifact(&ctx, &blobs::sha256_hex(ARTIFACT))
         .await
@@ -973,9 +1138,15 @@ async fn a_block_built_against_a_different_guest_version_is_refused() {
     let mut manifest = manifest();
     manifest.blocks[0].spec.wafer_guest_version = 99;
 
-    let error = seed::import(&ctx, control.as_ref(), &manifest, &bundle())
-        .await
-        .expect_err("a stale guest module must refuse the import");
+    let error = seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest,
+        &bundle(),
+    )
+    .await
+    .expect_err("a stale guest module must refuse the import");
     // The staging path's code, with the import's own remedy: there is no
     // compiler session or workspace page to reload here.
     assert!(error.contains("wafer-guest-version"), "{error}");
@@ -1002,10 +1173,16 @@ async fn a_block_that_reports_no_guest_version_still_imports() {
     let mut manifest = manifest();
     manifest.blocks[0].spec.wafer_guest_version = 0;
 
-    seed::import(&ctx, control.as_ref(), &manifest, &bundle())
-        .await
-        .expect("a bundle that reports no version must still import")
-        .expect("fresh");
+    seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest,
+        &bundle(),
+    )
+    .await
+    .expect("a bundle that reports no version must still import")
+    .expect("fresh");
 }
 
 // ---------------------------------------------------------------------------
@@ -1043,9 +1220,15 @@ async fn a_refused_import_records_its_reason_for_the_admin() {
     let (ctx, control) = fixture().await;
     let tampered = bundle().with(&seed::site_url("assets/app.js"), b"alert('gotcha')");
 
-    let error = seed::import(&ctx, control.as_ref(), &manifest(), &tampered)
-        .await
-        .expect_err("a hash mismatch must refuse the import");
+    let error = seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest(),
+        &tampered,
+    )
+    .await
+    .expect_err("a hash mismatch must refuse the import");
 
     let row = recorded_seed_error_row(&ctx)
         .await
@@ -1095,6 +1278,7 @@ async fn an_import_that_works_clears_an_earlier_refusal() {
     seed::import(
         &ctx,
         control.as_ref(),
+        &FakeShell::new(),
         &manifest(),
         &bundle().with(&seed::site_url("assets/app.js"), b"alert('gotcha')"),
     )
@@ -1102,11 +1286,34 @@ async fn an_import_that_works_clears_an_earlier_refusal() {
     .expect_err("the tampered bundle is refused");
     assert!(recorded_seed_error(&ctx).await.is_some());
 
-    seed::import(&ctx, control.as_ref(), &manifest(), &bundle())
-        .await
-        .expect("the intact bundle imports")
-        .expect("still fresh — the refusal stored nothing");
+    seed::import(
+        &ctx,
+        control.as_ref(),
+        &FakeShell::new(),
+        &manifest(),
+        &bundle(),
+    )
+    .await
+    .expect("the intact bundle imports")
+    .expect("still fresh — the refusal stored nothing");
 
     assert_eq!(recorded_seed_error(&ctx).await, None);
     assert_eq!(seed::last_failure(&ctx).await.expect("read"), None);
+}
+
+/// A seeded site file at a path the service worker hands to the static host
+/// would import, publish and never be shown — the same reason a site write
+/// there is refused. The whole bundle is refused, by the path and the rule,
+/// before anything is stored.
+#[tokio::test]
+async fn a_site_file_the_service_worker_would_shadow_is_refused() {
+    const PWA: &[u8] = b"{\"name\":\"shop\"}";
+    let mut manifest = manifest();
+    manifest.site.push(file("manifest.json", PWA));
+    let bundle = bundle().with(&seed::site_url("manifest.json"), PWA);
+
+    let error = refused(&manifest, &bundle).await;
+    assert!(error.contains("\"site/manifest.json\""), "{error}");
+    assert!(error.contains("\"/manifest.json\""), "{error}");
+    assert!(error.contains("never be shown"), "{error}");
 }
