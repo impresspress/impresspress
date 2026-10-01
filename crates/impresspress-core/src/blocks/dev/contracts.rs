@@ -11,6 +11,7 @@ use super::{
     activation::ProgressStep,
     control::{DynamicBlockSpec, DynamicRoute},
     generation::{GenerationDiff, GenerationManifest},
+    paths::MAX_BATCH_FILES,
     repo::{
         generations::{GenerationCause, GenerationStatus},
         runtime_state::ActivationPhase,
@@ -354,6 +355,7 @@ pub struct FileWriteResponse {
 pub struct FileWriteBatchRequest {
     /// The files to write, 1 to 64, all under `site/` or all under one
     /// `blocks/<name>/`. Each entry is exactly a `dev_write_file` request.
+    #[schemars(length(min = 1, max = MAX_BATCH_FILES))]
     pub files: Vec<FileWriteRequest>,
 }
 
