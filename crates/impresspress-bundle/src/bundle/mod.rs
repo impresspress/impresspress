@@ -1,4 +1,5 @@
 pub mod build_id;
+pub mod bypass;
 pub mod hash;
 pub mod manifest;
 pub mod rename;
@@ -8,15 +9,7 @@ use std::{collections::BTreeMap, path::Path};
 
 use anyhow::{Context, Result};
 
-/// URL prefix the development sandbox's seed bundle is served under, added to
-/// the service worker's bypass list whenever [`AppConfig::dev_enabled`].
-///
-/// The same value as `impresspress_core::blocks::dev::seed::ROOT`. It is
-/// restated rather than imported because this crate deliberately depends on no
-/// impresspress crate — it is native bundling tooling that the wasm32 runtime
-/// never compiles — and pulling `impresspress-core` in for one string would
-/// invert that.
-pub const SEED_BYPASS_PREFIX: &str = "/seed/";
+pub use self::bypass::{BypassRules, SEED_BYPASS_PREFIX};
 
 /// Consumer-supplied configuration that controls how templates are rendered.
 /// All fields are optional; sensible defaults are derived from the discovered
@@ -34,15 +27,14 @@ pub struct AppConfig {
     /// Defaults to `"/"`.
     pub boot_redirect: Option<String>,
     /// Additional URL path prefixes that the Service Worker's fetch handler
-    /// should bypass (let the origin serve directly). Each entry is
-    /// appended to the default bypass list in `sw.js.tmpl` as a
-    /// `url.pathname.startsWith(<prefix>)` clause via the `__EXTRA_BYPASS__`
-    /// placeholder.
+    /// should bypass (let the origin serve directly). Each entry joins the
+    /// bundle's [`BypassRules`] as a prefix rule, rendered into `sw.js` as a
+    /// `url.pathname.startsWith(<prefix>)` clause and listed in
+    /// `asset-manifest.json`'s `bypass`.
     pub extra_bypass_prefix: Vec<String>,
     /// Additional exact URL paths the Service Worker's fetch handler should
-    /// bypass. Unlike `extra_bypass_prefix` (rendered as `startsWith`), each
-    /// entry renders as `url.pathname === <path>` via the
-    /// `__EXTRA_BYPASS_EXACT__` placeholder — needed for `/` and
+    /// bypass. Unlike `extra_bypass_prefix` (a prefix rule), each entry is an
+    /// exact rule, rendered as `url.pathname === <path>` — needed for `/` and
     /// `/index.html`, which cannot be expressed as a prefix.
     pub extra_bypass_exact: Vec<String>,
     /// Whether loader.js's recovery path should wipe OPFS when the Service
@@ -227,12 +219,17 @@ pub fn run(pkg_dir: &Path, repo_dir: &Path, app: AppConfig) -> Result<()> {
     //    `loader.js` / `index.html` have to be in it — a listing taken first
     //    would name three `*.tmpl` files that no longer exist and omit the
     //    three real ones.
+    //
+    //    The bypass rules are computed ONCE, here, and both `sw.js` (below)
+    //    and the manifest (step 6) are written from this one value — see
+    //    `bypass`'s module docs for why there must not be a second list.
     let base_name = pair.as_ref().map(|(b, _, _)| b.as_str()).unwrap_or("app");
+    let bypass = BypassRules::for_bundle(&wasm_js_prefix_val, &app);
     let vars = build_template_vars(
         build_id.clone(),
         wasm_js_val,
         wasm_bin_val,
-        wasm_js_prefix_val,
+        &bypass,
         base_name,
         &app,
     );
@@ -241,9 +238,10 @@ pub fn run(pkg_dir: &Path, repo_dir: &Path, app: AppConfig) -> Result<()> {
     render_if_exists(pkg_dir, "index.html.tmpl", "index.html", &vars)?;
 
     // 6. The manifest, last: `assets` (the two logical names templates
-    //    reference) plus `files` (the whole shell, for a runtime that needs
+    //    reference), `files` (the whole shell, for a runtime that needs
     //    to enumerate the static files it was shipped inside of — see
-    //    `AssetManifest::files`).
+    //    `AssetManifest::files`) and `bypass` (the rules `sw.js` was just
+    //    rendered from — see `AssetManifest::bypass`).
     //
     //    `asset-manifest.json` names itself in `files`. That is deliberate
     //    and costs nothing: the listing is of NAMES, taken before the file
@@ -268,6 +266,7 @@ pub fn run(pkg_dir: &Path, repo_dir: &Path, app: AppConfig) -> Result<()> {
         build_id,
         assets: manifest_assets,
         files,
+        bypass,
     };
     manifest.write(&pkg_dir.join("asset-manifest.json"))?;
 
@@ -326,7 +325,7 @@ fn build_template_vars(
     build_id: String,
     wasm_js: String,
     wasm_bin: String,
-    wasm_js_prefix: String,
+    bypass: &BypassRules,
     base_name: &str,
     app: &AppConfig,
 ) -> BTreeMap<String, String> {
@@ -340,63 +339,16 @@ fn build_template_vars(
         .unwrap_or_else(|| base_to_title(base_name));
     let boot_redirect = app.boot_redirect.clone().unwrap_or_else(|| "/".to_string());
 
-    // Render extra bypass prefixes into a chain of OR'd startsWith calls that
-    // slot into `sw.js.tmpl` via the `__EXTRA_BYPASS__` placeholder. When the
-    // list is empty we expand to the empty string, leaving the existing
-    // bypass expression intact. Each entry is quoted and escaped defensively
-    // against single quotes in the path.
-    // The development sandbox's seed bundle is served by the static host, not
-    // by the runtime: on a cold boot the service worker fetches
-    // `/seed/manifest.json` and imports generation 0 from it, and a page
-    // asking for the same files must reach the host too. A runtime that
-    // intercepted the prefix would answer from the published site — which,
-    // on the boot that needs the seed, is empty. Added here rather than by
-    // every consumer, so "the sandbox is on" is the only thing an app has to
-    // say. See `impresspress_core::blocks::dev::seed::ROOT`, which this
-    // crate cannot import (it depends on nothing of impresspress's).
-    let mut prefixes: Vec<&str> = app.extra_bypass_prefix.iter().map(String::as_str).collect();
-    if app.dev_enabled && !prefixes.contains(&SEED_BYPASS_PREFIX) {
-        prefixes.push(SEED_BYPASS_PREFIX);
-    }
-    let extra_bypass = if prefixes.is_empty() {
-        String::new()
-    } else {
-        let mut out = String::new();
-        for prefix in prefixes {
-            let escaped = prefix.replace('\\', "\\\\").replace('\'', "\\'");
-            out.push_str(" || url.pathname.startsWith('");
-            out.push_str(&escaped);
-            out.push_str("')");
-        }
-        out
-    };
-
-    let extra_bypass_exact = if app.extra_bypass_exact.is_empty() {
-        String::new()
-    } else {
-        let mut out = String::new();
-        for path in &app.extra_bypass_exact {
-            let escaped = path.replace('\\', "\\\\").replace('\'', "\\'");
-            out.push_str(" || url.pathname === '");
-            out.push_str(&escaped);
-            out.push('\'');
-        }
-        out
-    };
-
-    let shell_vendor_bypass = shell_vendor_bypass(crate::assets::vendor_files());
-
     let mut vars: BTreeMap<String, String> = BTreeMap::new();
     vars.insert("BUILD_ID".to_string(), build_id);
-    vars.insert("SHELL_VENDOR_BYPASS".to_string(), shell_vendor_bypass);
     vars.insert("WASM_JS".to_string(), wasm_js);
     vars.insert("WASM_BIN".to_string(), wasm_bin);
-    vars.insert("WASM_JS_PREFIX".to_string(), wasm_js_prefix);
+    // The fetch handler's whole bypass condition, from the same rules the
+    // manifest lists.
+    vars.insert("BYPASS".to_string(), bypass.render_condition());
     vars.insert("APP_NAME".to_string(), app_name);
     vars.insert("APP_TITLE".to_string(), app_title);
     vars.insert("BOOT_REDIRECT".to_string(), boot_redirect);
-    vars.insert("EXTRA_BYPASS".to_string(), extra_bypass);
-    vars.insert("EXTRA_BYPASS_EXACT".to_string(), extra_bypass_exact);
     vars.insert(
         "OPFS_WIPE_ON_RECOVERY".to_string(),
         if app.opfs_wipe_on_recovery {
@@ -416,20 +368,6 @@ fn build_template_vars(
         },
     );
     vars
-}
-
-/// The bypass clauses for the shell's own vendored files, rendered into
-/// `sw.js.tmpl`'s `__SHELL_VENDOR_BYPASS__` from the asset list that ships
-/// them (`assets::vendor_files`), so the bypass and the files cannot disagree.
-///
-/// Exact paths, not a `/vendor/` prefix: anything else under `/vendor/` is the
-/// site's, and the runtime serves it. Each clause LEADS with its `||`, like
-/// `__EXTRA_BYPASS__`'s, so the expression stays valid for any number of
-/// files, none included.
-fn shell_vendor_bypass<'a>(files: impl Iterator<Item = &'a str>) -> String {
-    files
-        .map(|path| format!(" ||\n        url.pathname === '/{path}'"))
-        .collect()
 }
 
 fn render_if_exists(
@@ -454,25 +392,4 @@ fn render_if_exists(
         );
     }
     Ok(())
-}
-
-#[cfg(test)]
-mod tests {
-    use super::shell_vendor_bypass;
-
-    #[test]
-    fn no_vendor_files_render_no_clause() {
-        assert_eq!(shell_vendor_bypass(std::iter::empty()), "");
-    }
-
-    #[test]
-    fn each_vendor_file_renders_one_leading_or_clause() {
-        assert_eq!(
-            shell_vendor_bypass(["vendor/a.js", "vendor/b.wasm"].into_iter()),
-            concat!(
-                " ||\n        url.pathname === '/vendor/a.js'",
-                " ||\n        url.pathname === '/vendor/b.wasm'",
-            )
-        );
-    }
 }
