@@ -1014,6 +1014,7 @@ jobs:
       # the export specs serve an unpacked bundle, so nothing here serves it.
       - name: Build the bootstrap-seed bundle
         run: |
+          set -o pipefail
           BOOTSTRAP_DIST="$(examples/dev-sandbox/build.sh --seed bootstrap --out "$RUNNER_TEMP/dist-bootstrap" | tail -1)"
           echo "BOOTSTRAP_DIST=$BOOTSTRAP_DIST" >> "$GITHUB_ENV"
 
@@ -1022,6 +1023,7 @@ jobs:
       # seed overlaid onto `dist/seed/`. Its last stdout line is the dist path.
       - name: Build the dev-sandbox bundle
         run: |
+          set -o pipefail
           DIST="$(examples/dev-sandbox/build.sh | tail -1)"
           echo "DEV_DIST=$DIST" >> "$GITHUB_ENV"
 
@@ -1267,6 +1269,7 @@ jobs:
       # bundle, with `compiler/dist/` overlaid at `/__impresspress_dev/compiler/`.
       - name: Build the dev-sandbox bundle
         run: |
+          set -o pipefail
           DIST="$(examples/dev-sandbox/build.sh | tail -1)"
           echo "DEV_DIST=$DIST" >> "$GITHUB_ENV"
 

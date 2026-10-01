@@ -25,6 +25,11 @@ pub const VENDOR_DIR: &str = "vendor/";
 /// prefix bypass would hand every one of them to the static host instead of
 /// the runtime that serves the site. This list is the one source of truth for
 /// the bypass clause `bundle::build_template_vars` renders.
+///
+/// The one other place that names these files is their loader,
+/// `crates/impresspress-browser/js/bridge.js`, which requests
+/// `/vendor/sql-wasm-esm.js` and `/vendor/sql-wasm.wasm` by literal path: a
+/// rename here must change it too, or the runtime's database cannot load.
 pub fn vendor_files() -> impl Iterator<Item = &'static str> {
     static_assets()
         .iter()

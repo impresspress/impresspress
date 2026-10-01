@@ -170,8 +170,7 @@ self.addEventListener('fetch', (event) => {
         url.pathname === '/embed-engine.js' ||
         url.pathname === '/t2i-engine.js' ||
         url.pathname.startsWith('__WASM_JS_PREFIX__') ||
-        url.pathname.startsWith('/snippets/') ||
-        __SHELL_VENDOR_BYPASS__url.pathname.startsWith('/sql-')__EXTRA_BYPASS____EXTRA_BYPASS_EXACT__) {
+        url.pathname.startsWith('/snippets/')__SHELL_VENDOR_BYPASS____EXTRA_BYPASS____EXTRA_BYPASS_EXACT__) {
         // ------------------------------------------------------------------
         // Bypassed — the network answers this, not the wasm runtime.
         //

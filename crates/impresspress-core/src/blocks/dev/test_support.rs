@@ -461,7 +461,7 @@ pub struct FakeShell {
 pub const FAKE_SW_JS: &str = "const DEV_ENABLED = true;\n\
      await initialize({ dev: DEV_ENABLED });\n\
      if (DEV_ENABLED && url.pathname !== '/sw.js') { passthrough(); }\n\
-     if (url.pathname.startsWith('/sql-') \
+     if (url.pathname.startsWith('/snippets/') \
      || url.pathname.startsWith('/__impresspress_dev/compiler/') \
      || url.pathname.startsWith('/seed/')) { return; }\n";
 

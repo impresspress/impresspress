@@ -1,5 +1,6 @@
 import { test, expect } from '@playwright/test';
 import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { BOOTSTRAP_PORT, bootServiceWorker, loginAdmin, serveDirectory } from './fixtures/dev-sandbox';
 
@@ -43,17 +44,22 @@ test('generation 0 is a Bootstrap site with the framework vendored and a site gu
     await expect(page.locator('h1')).toHaveText('Build a website with your browser agent');
     await expect(page.locator('body')).toContainText('Open workspace');
 
-    // The vendored files serve from generation 0 with the types and sizes the manifest declares.
-    const css = await page.evaluate(async () => {
-      const r = await fetch('/vendor/bootstrap/bootstrap.min.css');
-      return { status: r.status, type: r.headers.get('content-type'), bytes: (await r.arrayBuffer()).byteLength };
-    });
-    expect(css).toEqual({ status: 200, type: 'text/css; charset=utf-8', bytes: 232111 });
-    const js = await page.evaluate(async () => {
-      const r = await fetch('/vendor/bootstrap/bootstrap.bundle.min.js');
-      return { status: r.status, type: r.headers.get('content-type'), bytes: (await r.arrayBuffer()).byteLength };
-    });
-    expect(js).toEqual({ status: 200, type: 'application/javascript; charset=utf-8', bytes: 80496 });
+    // The vendored files serve from generation 0 with the types and sizes the
+    // bundle's own seed manifest declares (sizes in bytes, so compared as bytes).
+    const manifest = JSON.parse(readFileSync(path.join(BOOTSTRAP_DIST, 'seed', 'manifest.json'), 'utf8'));
+    const vendored: { path: string; size: number; content_type: string }[] = manifest.site.filter(
+      (entry: { path: string }) => entry.path.startsWith('vendor/bootstrap/'),
+    );
+    expect(vendored.map((entry) => entry.path)).toEqual(
+      expect.arrayContaining(['vendor/bootstrap/bootstrap.min.css', 'vendor/bootstrap/bootstrap.bundle.min.js']),
+    );
+    for (const entry of vendored) {
+      const served = await page.evaluate(async (url) => {
+        const r = await fetch(url);
+        return { status: r.status, type: r.headers.get('content-type'), bytes: (await r.arrayBuffer()).byteLength };
+      }, `/${entry.path}`);
+      expect(served, entry.path).toEqual({ status: 200, type: entry.content_type, bytes: entry.size });
+    }
 
     // The seed's sandbox block reached the runtime: status names the template,
     // the reference carries the guide.

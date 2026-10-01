@@ -198,10 +198,15 @@ fn empty_exact_leaves_production_sw_bypass_unchanged() {
         !sw.contains("|| url.pathname === '"),
         "unexpected exact-match bypass clause injected into sw.js"
     );
-    // The bypass expression must close exactly as in the pre-change form.
+    // The bypass expression closes on the shell's last vendor file, each
+    // vendor clause leading with its `||` — nothing trailing, nothing dangling.
     assert!(
-        sw.contains("startsWith('/sql-')) {"),
-        "production bypass closing token changed; sw.js = {sw}"
+        sw.contains(concat!(
+            "url.pathname.startsWith('/snippets/') ||\n",
+            "        url.pathname === '/vendor/sql-wasm-esm.js' ||\n",
+            "        url.pathname === '/vendor/sql-wasm.wasm') {",
+        )),
+        "production bypass closing clauses changed; sw.js = {sw}"
     );
 }
 
@@ -324,7 +329,7 @@ fn sw_bypasses_exactly_the_shells_vendor_files() {
     let vendor: Vec<&str> = impresspress_bundle::assets::vendor_files().collect();
     assert_eq!(vendor, ["vendor/sql-wasm-esm.js", "vendor/sql-wasm.wasm"]);
     for file in vendor {
-        let clause = format!("url.pathname === '/{file}' ||");
+        let clause = format!(" ||\n        url.pathname === '/{file}'");
         assert_eq!(sw.matches(&clause).count(), 1, "{clause} in sw.js = {sw}");
         assert!(bypasses(&sw, &format!("/{file}")), "/{file} is bypassed");
     }
@@ -350,6 +355,24 @@ fn a_site_file_under_vendor_is_not_bypassed() {
         "/vendor/bootstrap/bootstrap.bundle.min.js",
         "/vendor/sql-wasm.wasm.map",
     ] {
+        assert!(!bypasses(&sw, path), "{path} is bypassed; sw.js = {sw}");
+    }
+}
+
+/// Nothing the shell serves starts with `/sql-` (sql.js lives under
+/// `/vendor/`), so a site page whose name does is the runtime's to serve.
+#[test]
+fn a_site_page_named_sql_something_is_not_bypassed() {
+    let tmp = production_pkg_copy();
+    let app = AppConfig {
+        dev_enabled: true,
+        ..AppConfig::default()
+    };
+    run(tmp.path(), tmp.path(), app).expect("bundler ok");
+    let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
+
+    assert!(!sw.contains("'/sql-"), "sw.js = {sw}");
+    for path in ["/sql-tips.html", "/sql-wasm.wasm"] {
         assert!(!bypasses(&sw, path), "{path} is bypassed; sw.js = {sw}");
     }
 }
