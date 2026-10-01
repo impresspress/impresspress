@@ -211,7 +211,7 @@ export async function loginToWorkspace(page: Page) {
 // ---------------------------------------------------------------------------
 
 /**
- * The twelve `dev_*` tools `/b/dev/api/tools.json` projects, plus the two
+ * The thirteen `dev_*` tools `/b/dev/api/tools.json` projects, plus the two
  * `dev.js` registers itself.
  *
  * `dev_read_reference` and `dev_create_block` are Plan 3's — the guest-API
@@ -233,6 +233,7 @@ export const DEV_TOOLS = [
   'dev_read_file',
   'dev_read_reference',
   'dev_write_file',
+  'dev_write_files',
   'dev_delete_file',
   'dev_list_generations',
   'dev_get_generation',

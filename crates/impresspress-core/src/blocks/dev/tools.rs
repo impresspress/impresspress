@@ -73,6 +73,16 @@ pub const SELECTIONS: &[(&str, HttpMethod, &str, &str, &str)] = &[
     (
         "impresspress/dev",
         HttpMethod::Post,
+        "/b/dev/api/files/write-batch",
+        "dev_write_files",
+        "Write several workspace files as ONE change: all under `site/` (publishes one \
+         generation) or all under one `blocks/<name>/` (stages only). Every `expected_sha256` \
+         is checked before anything is written; any mismatch refuses the whole batch and lists \
+         every conflict. Use it for a scaffold of several pages; `dev_write_file` for one file.",
+    ),
+    (
+        "impresspress/dev",
+        HttpMethod::Post,
         "/b/dev/api/files/delete",
         "dev_delete_file",
         "Delete a workspace file. Requires the file's current SHA-256 as `expected_sha256`; a \

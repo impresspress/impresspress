@@ -50,7 +50,10 @@ The workspace has two areas:
 
 `dev_list_files` and `dev_read_file` read the workspace; a write or delete
 takes the file's last-seen `sha256` as `expected_sha256`, so an agent never
-overwrites an edit it hasn't read.
+overwrites an edit it hasn't read. `dev_write_files` writes several files at
+once — all under `site/`, publishing one generation, or all under one
+`blocks/<name>/`, staging only. Every hash is checked before anything is
+written; any mismatch refuses the whole batch and lists every conflict.
 
 ### Generations, rollback and retention
 
