@@ -8,6 +8,7 @@
 pub mod builds;
 pub mod generations;
 pub mod runtime_state;
+pub mod seed_info;
 
 /// A fresh row id.
 ///
