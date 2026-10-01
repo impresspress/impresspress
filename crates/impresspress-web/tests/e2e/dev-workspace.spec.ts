@@ -802,3 +802,55 @@ test('the editor refuses to save a binary file over itself', async ({ page }) =>
   // every one of them, not just the 409. It refused before it asked.
   expect(dialogs).toEqual([]);
 });
+
+/**
+ * A site file the service worker would never route to the runtime is refused,
+ * on a real deployment: the rules are the ones THIS bundle's `sw.js` hands
+ * the runtime in `initialize({ bypass })` (`impresspress-bundle` renders them
+ * from the same value as the fetch handler's bypass condition).
+ * `site/manifest.json` — a PWA manifest — is served at
+ * `/manifest.json`, which `sw.js` hands to the static host, so a write there
+ * would publish and 404. The agent gets an error result naming the path and
+ * the rule instead, and the ledger does not move.
+ */
+test('a site file the service worker would shadow is refused', async ({ page }) => {
+  test.setTimeout(300_000);
+  await page.addInitScript(MODEL_CONTEXT_POLYFILL);
+  await bootServiceWorker(page);
+  await openWorkspace(page);
+  await waitForTool(page, 'dev_export');
+
+  const before = structured<{ generations: Generation[] }>(
+    await execute(page, 'dev_list_generations', {}),
+  );
+
+  const refused = await execute(page, 'dev_write_file', {
+    path: 'site/manifest.json',
+    content: '{"name":"shop"}',
+  });
+  expect(refused.isError, JSON.stringify(refused)).toBe(true);
+  // `webmcp-core.js` reports a refusal as `Request failed (<status>): <body>`,
+  // and the body is the block's `{error, message}` JSON.
+  const text = refused.content[0]?.text ?? '';
+  expect(text).toMatch(/^Request failed \(400\): /);
+  const { message } = JSON.parse(text.slice(text.indexOf(': ') + 2)) as { message: string };
+  expect(message).toContain('"site/manifest.json"');
+  expect(message).toContain('"/manifest.json"');
+  expect(message).toContain('the exact path');
+  expect(message).toContain('never be shown');
+
+  // The positive control on the same deployment: a manifest one level down
+  // is the site's to serve, so the refusal above is the rule and not a
+  // write path that refuses everything.
+  const allowed = structured<FileWrite>(await execute(page, 'dev_write_file', {
+    path: 'site/app/manifest.json',
+    content: '{"name":"shop"}',
+  }));
+  expect(allowed.generation?.cause).toBe('site_write');
+
+  const after = structured<{ generations: Generation[] }>(
+    await execute(page, 'dev_list_generations', {}),
+  );
+  // Exactly one new generation — the allowed write's; the refused one made none.
+  expect(after.generations.length).toBe(before.generations.length + 1);
+});

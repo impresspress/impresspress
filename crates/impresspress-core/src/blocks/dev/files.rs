@@ -244,6 +244,11 @@ pub async fn handle_write(
             paths::MAX_FILE_BYTES
         ));
     }
+    if let Err(refusal) =
+        refuse_shadowed_site_files(shared, &area, std::iter::once(request.path.as_str()))
+    {
+        return refusal;
+    }
 
     // The manifest is read, changed and written back under `shared.workspace`,
     // so two writers cannot each save a snapshot that predates the other. The
@@ -423,6 +428,13 @@ pub async fn handle_write_batch(
     let Some(area) = area else {
         unreachable!("a batch of at least one file has the area of its first file");
     };
+    // Every path, before the workspace is touched: one shadowed file refuses
+    // the whole batch and nothing is stored.
+    if let Err(refusal) =
+        refuse_shadowed_site_files(shared, &area, decoded.iter().map(|(path, _, _)| *path))
+    {
+        return refusal;
+    }
 
     // Under `shared.workspace` for the reason `handle_write` gives, and
     // released before the publish below for the same one.
@@ -575,6 +587,32 @@ pub(super) async fn store_files(
         return Err(no_store_db_error_internal(e, "dev workspace save"));
     }
     Ok(written)
+}
+
+/// Refuse a site write whose file the runtime's service worker would shadow:
+/// served at `/` + the path after `site/`, it matches one of the service
+/// worker's bypass rules, so every request for it goes to the static host and
+/// the file would publish and never be shown ([`super::bypass`]). The `400`
+/// names the path and the rule.
+///
+/// Only a `site/` write is checked — a block's source is never requested by
+/// URL. The rules are the running worker's, held on
+/// [`DevShared::bypass`]; checking them is a lookup, so it runs before the
+/// workspace lock and refuses before anything is stored.
+fn refuse_shadowed_site_files<'a>(
+    shared: &DevShared,
+    area: &WorkspaceArea,
+    mut paths: impl Iterator<Item = &'a str>,
+) -> Result<(), OutputStream> {
+    if *area != WorkspaceArea::Site {
+        return Ok(());
+    }
+    paths.try_for_each(|path| {
+        shared
+            .bypass
+            .refuse_shadowed(path)
+            .map_err(|refused| no_store_error(ErrorCode::InvalidArgument, &refused))
+    })
 }
 
 /// The `400` for a path that would make one name both a file and a directory

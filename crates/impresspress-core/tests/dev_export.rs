@@ -30,10 +30,11 @@ use impresspress_core::{
         blobs,
         contracts::ExportManifest,
         data_snapshot::DataSnapshot,
+        export,
         repo::generations::GenerationCause,
         seed::{self, SeedManifest},
-        test_support::{dev_post, hello_info, FakeControl, FakeShell},
-        WAFER_GUEST_VERSION,
+        test_support::{dev_post, fake_bypass_rules, hello_info, FakeControl, FakeShell},
+        BypassRules, DevShared, WAFER_GUEST_VERSION,
     },
     platform_state::variables,
     test_support::{
@@ -373,7 +374,10 @@ async fn export_zip_contains_shell_seed_sources_and_data_with_dev_off() {
     let sw = text(&entries, "sw.js");
     assert!(sw.contains("const DEV_ENABLED = false;"), "{sw}");
     assert!(!sw.contains("const DEV_ENABLED = true;"), "{sw}");
-    assert!(sw.contains("initialize({ dev: DEV_ENABLED })"), "{sw}");
+    assert!(
+        sw.contains("initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES })"),
+        "{sw}"
+    );
     assert!(
         sw.contains("if (DEV_ENABLED && url.pathname !== '/sw.js')"),
         "{sw}"
@@ -526,6 +530,119 @@ async fn a_shell_that_cannot_be_listed_is_refused() {
     assert_eq!(status, 500);
 }
 
+/// A site file the exported worker would shadow refuses the export, on both
+/// surfaces, by path and rule — the exported runtime's seed import would
+/// refuse the whole bundle over it and the exported site would come up empty.
+///
+/// The sandbox refuses the write itself, so such a file can only predate the
+/// check: here it is written through a worker that handed over no rules, and
+/// then exported by one that hands over a dev-sandbox worker's.
+#[tokio::test]
+async fn a_site_file_the_exported_worker_would_shadow_refuses_the_export() {
+    let shell = std::sync::Arc::new(FakeShell::new());
+    let ctx = TestContext::with_admin()
+        .await
+        .with_dev_added_and_bypass(FakeControl::new(), shell.clone(), BypassRules::default())
+        .await;
+    for path in ["site/index.html", "site/manifest.json"] {
+        dev_post(
+            &ctx,
+            "/b/dev/api/files/write",
+            json!({"path": path, "content": "x", "expected_sha256": null}),
+        )
+        .await;
+    }
+    // Under the rules it was written with, the workspace exports: the check
+    // is the rules', not a refusal of every export.
+    export::build(&ctx, &ctx.dev_shared())
+        .await
+        .expect("no rules, nothing shadowed");
+
+    // The same workspace behind a worker that does hand its rules over.
+    let current = DevShared::new(FakeControl::new(), shell.clone(), fake_bypass_rules());
+    let fetched = shell.fetches();
+    for error in [
+        export::build(&ctx, &current).await.expect_err("refused"),
+        export::manifest_preview(&ctx, &current)
+            .await
+            .expect_err("refused"),
+    ] {
+        assert_eq!(error.code, wafer_run::ErrorCode::FailedPrecondition);
+        let message = &error.message;
+        assert!(message.contains("\"site/manifest.json\""), "{message}");
+        assert!(message.contains("\"/manifest.json\""), "{message}");
+        assert!(message.contains("the exact path"), "{message}");
+        assert!(message.contains("Delete the file or move it"), "{message}");
+    }
+    // Refused before the runtime was read.
+    assert_eq!(shell.fetches(), fetched);
+}
+
+/// The compiler prefix is NOT one of the exported worker's rules — the export
+/// strips it from the exported `sw.js` — so a site file under it does not
+/// refuse the export, however it got there.
+#[tokio::test]
+async fn the_compiler_prefix_is_not_an_exported_rule() {
+    let shell = std::sync::Arc::new(FakeShell::new());
+    let ctx = TestContext::with_admin()
+        .await
+        .with_dev_added_and_bypass(FakeControl::new(), shell.clone(), BypassRules::default())
+        .await;
+    dev_post(
+        &ctx,
+        "/b/dev/api/files/write",
+        json!({"path": "site/__impresspress_dev/compiler/notes.txt", "content": "x", "expected_sha256": null}),
+    )
+    .await;
+    let current = DevShared::new(FakeControl::new(), shell, fake_bypass_rules());
+    export::build(&ctx, &current).await.expect("exports");
+}
+
+/// The export removes the compiler's bypass from two renderings of one fact
+/// in `sw.js`: the fetch condition's clause and the `BYPASS_RULES` data. A
+/// worker whose data lists the prefix while its condition lacks the clause
+/// the export recognises (or the reverse) cannot be stripped consistently,
+/// and exporting it anyway would ship a worker that says one thing and does
+/// another — so it is an export error.
+#[tokio::test]
+async fn an_sw_whose_condition_and_rules_disagree_about_the_compiler_is_refused() {
+    let listed_only = "const DEV_ENABLED = true;\n\
+        const BYPASS_RULES = {\"exact\":[\"/sw.js\"],\"prefixes\":[\"/__impresspress_dev/compiler/\",\"/seed/\"]};\n\
+        if (url.pathname === '/sw.js' || url.pathname.startsWith('/__impresspress_dev/compiler/') || url.pathname.startsWith('/seed/')) { return; }\n";
+    let clause_only = "const DEV_ENABLED = true;\n\
+        const BYPASS_RULES = {\"exact\":[\"/sw.js\"],\"prefixes\":[\"/seed/\"]};\n\
+        if (url.pathname === '/sw.js' ||\n        url.pathname.startsWith('/__impresspress_dev/compiler/') ||\n        url.pathname.startsWith('/seed/')) { return; }\n";
+    for sw in [listed_only, clause_only] {
+        let shell = FakeShell::new().with("sw.js", sw.as_bytes());
+        let ctx = TestContext::with_admin()
+            .await
+            .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(shell))
+            .await;
+        dev_post(
+            &ctx,
+            "/b/dev/api/files/write",
+            json!({"path": "site/index.html", "content": "x", "expected_sha256": null}),
+        )
+        .await;
+
+        let error = export::build(&ctx, &ctx.dev_shared())
+            .await
+            .expect_err("a worker that disagrees with itself is not exported");
+        assert_eq!(error.code, wafer_run::ErrorCode::Internal, "{sw}");
+        assert!(
+            error.message.contains("disagrees with itself"),
+            "{}",
+            error.message
+        );
+        let status = output_http_status(
+            ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export"))
+                .await,
+        )
+        .await;
+        assert_eq!(status, 500, "{sw}");
+    }
+}
+
 /// Two exports of one generation are byte-identical — the WHOLE archive,
 /// README included.
 ///
@@ -612,10 +729,29 @@ async fn the_exported_sw_drops_the_compiler_bypass_and_keeps_the_seed_one() {
     assert!(sw.contains("url.pathname.startsWith('/snippets/')"), "{sw}");
     assert!(
         sw.contains(
-            "if (url.pathname.startsWith('/snippets/') || url.pathname.startsWith('/cdn-cgi/') \
-             || url.pathname.startsWith('/seed/')) { return; }"
+            "if (url.pathname.startsWith('/snippets/') ||\n        \
+             url.pathname.startsWith('/cdn-cgi/') ||\n        \
+             url.pathname.startsWith('/seed/')) { return; }"
         ),
         "the remaining expression must be exactly what a compiler-less bundle renders; {sw}"
+    );
+
+    // And the rules the exported worker hands its runtime say the same: that
+    // runtime's seed import refuses a site file at any path they list, and a
+    // prefix the exported fetch handler no longer bypasses would refuse paths
+    // that site can serve. Every other rule is kept, in order.
+    let mut expected = fake_bypass_rules();
+    expected
+        .prefixes
+        .retain(|prefix| prefix != "/__impresspress_dev/compiler/");
+    let declaration = format!(
+        "const BYPASS_RULES = {};\n",
+        serde_json::to_string(&expected).unwrap()
+    );
+    assert_eq!(sw.matches(&declaration).count(), 1, "{sw}");
+    assert!(
+        sw.contains("await initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES });"),
+        "{sw}"
     );
 }
 
@@ -1053,10 +1189,16 @@ async fn an_exported_seed_imports_into_a_fresh_instance() {
         .await
         .with_dev_added_and_shell(b_control.clone(), std::sync::Arc::new(FakeShell::new()))
         .await;
-    let generation = seed::import(&b, b_control.as_ref(), &manifest, &fetch)
-        .await
-        .expect("import")
-        .expect("a fresh instance imports");
+    let generation = seed::import(
+        &b,
+        b_control.as_ref(),
+        &fake_bypass_rules(),
+        &manifest,
+        &fetch,
+    )
+    .await
+    .expect("import")
+    .expect("a fresh instance imports");
     activation::request(
         &b,
         &b.dev_shared(),
@@ -1214,10 +1356,16 @@ async fn a_data_snapshot_over_the_import_limit_is_refused_at_export_and_one_at_i
         .await
         .with_dev_added_and_shell(b_control.clone(), std::sync::Arc::new(FakeShell::new()))
         .await;
-    seed::import(&b, b_control.as_ref(), &manifest, &ArchiveFetch { archive })
-        .await
-        .expect("a bundle at the limit imports")
-        .expect("a fresh instance imports");
+    seed::import(
+        &b,
+        b_control.as_ref(),
+        &fake_bypass_rules(),
+        &manifest,
+        &ArchiveFetch { archive },
+    )
+    .await
+    .expect("a bundle at the limit imports")
+    .expect("a fresh instance imports");
     let notes = variables::get_by_key(&b, NOTES_KEY)
         .await
         .expect("read")

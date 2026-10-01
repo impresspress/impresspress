@@ -34,8 +34,8 @@
     "suggested_prompt": "Build me a small online shop for handmade ceramics. Read dev_read_reference's site_markdown first. Replace site/index.html with a Bootstrap page (the framework is already at /vendor/bootstrap/) that lists products from /b/products/catalog in a card grid and lets a visitor open one, using <impresspress-product> from /b/products/storefront.js, and include <script src=\"/b/webmcp/webmcp.js\" defer></script> in its <head> so a visitor's agent can use the shop's tools. Then create three products with shop_create_product, give each a published offer with shop_create_offer and shop_publish_offer, and set their status to active with shop_update_product. Show me the live site when you are done.",
     "guide": {
       "path": "guide.md",
-      "sha256": "2dcd18bafbeb0888747be5448674ba29bba411ab8fa64c2e86267c30cd8435fe",
-      "size": 5607,
+      "sha256": "eb234c8876514cb3ccf7f4f19a66c60a1b47b24679108a960dbf40cc428a9350",
+      "size": 6032,
       "content_type": "text/markdown; charset=utf-8"
     }
   }

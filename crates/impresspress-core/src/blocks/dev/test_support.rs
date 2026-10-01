@@ -18,6 +18,7 @@ use wafer_run::{AuthLevel, BlockEndpoint, BlockInfo, OutputStream};
 
 use super::{
     blobs,
+    bypass::BypassRules,
     control::{
         DynamicBlockSpec, GenerationAnnouncement, RuntimeControl, ShellSource, ValidationFailure,
         ValidationStage,
@@ -445,6 +446,11 @@ pub fn seed_file(path: &str, bytes: &[u8]) -> SeedFile {
 /// ships the in-browser toolchain does. So a test can assert BOTH edits the
 /// export makes to a shell file: the dev flag turned off, and the bypass for
 /// a compiler tree the export does not copy removed.
+///
+/// Its `sw.js` also declares the `BYPASS_RULES` the worker hands
+/// `initialize()` — [`fake_bypass_rules`], the rules a real dev-sandbox bundle
+/// renders — so a test can assert the export strips the compiler prefix from
+/// those too.
 pub struct FakeShell {
     files: BTreeMap<String, Vec<u8>>,
     /// Set by [`Self::failing_to_list`]: what `list` refuses with.
@@ -457,14 +463,57 @@ pub struct FakeShell {
 /// lines the export acts on (the `DEV_ENABLED` declaration and the compiler's
 /// bypass clause) plus the ones it must leave exactly alone (the constant's
 /// two readers and the `/seed/` bypass, without which an exported folder
-/// could never import the seed shipped beside it).
-pub const FAKE_SW_JS: &str = "const DEV_ENABLED = true;\n\
-     await initialize({ dev: DEV_ENABLED });\n\
-     if (DEV_ENABLED && url.pathname !== '/sw.js') { passthrough(); }\n\
-     if (url.pathname.startsWith('/snippets/') \
-     || url.pathname.startsWith('/cdn-cgi/') \
-     || url.pathname.startsWith('/__impresspress_dev/compiler/') \
-     || url.pathname.startsWith('/seed/')) { return; }\n";
+/// could never import the seed shipped beside it). The bypass condition is
+/// laid out the way `impresspress-bundle`'s `BypassRules::render_condition`
+/// renders one: a clause per line, each after the first leading with its `||`.
+pub const FAKE_SW_JS: &str = concat!(
+    "const DEV_ENABLED = true;\n",
+    "const BYPASS_RULES = ",
+    r#"{"exact":["/sw.js","/loader.js","/manifest.json","/asset-manifest.json","#,
+    r#""/webllm-engine.js","/embed-engine.js","/t2i-engine.js","#,
+    r#""/vendor/sql-wasm-esm.js","/vendor/sql-wasm.wasm"],"#,
+    r#""prefixes":["/impresspress_web","/snippets/","/cdn-cgi/","#,
+    r#""/__impresspress_dev/compiler/","/seed/"]};"#,
+    "\n",
+    "await initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES });\n",
+    "if (DEV_ENABLED && url.pathname !== '/sw.js') { passthrough(); }\n",
+    "if (url.pathname.startsWith('/snippets/') ||\n        ",
+    "url.pathname.startsWith('/cdn-cgi/') ||\n        ",
+    "url.pathname.startsWith('/__impresspress_dev/compiler/') ||\n        ",
+    "url.pathname.startsWith('/seed/')) { return; }\n",
+);
+
+/// The bypass rules a dev-sandbox worker hands `initialize()`: what
+/// `impresspress-bundle` renders for the dev-sandbox deployment
+/// (`examples/dev-sandbox/impresspress.toml` — a dev bundle with the compiler
+/// prefix), with [`FakeShell`]'s wasm-pack base name. [`FAKE_SW_JS`] declares
+/// exactly these, and the test fixtures build `DevShared` with them.
+pub fn fake_bypass_rules() -> BypassRules {
+    BypassRules {
+        exact: [
+            "/sw.js",
+            "/loader.js",
+            "/manifest.json",
+            "/asset-manifest.json",
+            "/webllm-engine.js",
+            "/embed-engine.js",
+            "/t2i-engine.js",
+            "/vendor/sql-wasm-esm.js",
+            "/vendor/sql-wasm.wasm",
+        ]
+        .map(String::from)
+        .to_vec(),
+        prefixes: [
+            "/impresspress_web",
+            "/snippets/",
+            "/cdn-cgi/",
+            "/__impresspress_dev/compiler/",
+            "/seed/",
+        ]
+        .map(String::from)
+        .to_vec(),
+    }
+}
 
 impl Default for FakeShell {
     fn default() -> Self {

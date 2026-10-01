@@ -31,6 +31,7 @@ pub mod artifacts;
 pub mod assets;
 pub mod blobs;
 pub mod blocks_api;
+pub mod bypass;
 pub mod contracts;
 pub mod control;
 pub mod data_snapshot;
@@ -66,9 +67,12 @@ use wafer_run::{
     LifecycleEvent, Message, OutputStream, WaferError,
 };
 
-pub use self::control::{
-    DynamicBlockSpec, DynamicRoute, RouteAccessKind, RuntimeControl, ShellSource,
-    ValidationFailure, ValidationStage,
+pub use self::{
+    bypass::{BypassRule, BypassRules},
+    control::{
+        DynamicBlockSpec, DynamicRoute, RouteAccessKind, RuntimeControl, ShellSource,
+        ValidationFailure, ValidationStage,
+    },
 };
 use crate::{
     endpoint_match::{self, request_schema_of, response_schema_of, EndpointRoute},
@@ -478,6 +482,15 @@ pub struct DevShared {
     /// host was shipped as — and because a host may legitimately have one
     /// without the other (an export is a read; a runtime rebuild is not).
     pub shell: Arc<dyn ShellSource>,
+    /// The paths the service worker in front of this runtime leaves to the
+    /// static host — what it handed `initialize({ bypass })`, kept for the
+    /// worker's life. A site file at one of them would never be shown, so
+    /// every site write and the seed import refuse it ([`bypass`]).
+    ///
+    /// Fixed at construction because the worker that handed them over is the
+    /// one that routes every request this runtime ever sees: a redeploy
+    /// brings a new worker, and a new worker boots a new runtime.
+    pub bypass: BypassRules,
     /// The one serialized path from a desired state to a live one.
     ///
     /// On the shared state rather than on [`DevBlock`] because activation is
@@ -538,7 +551,8 @@ pub struct DevShared {
 }
 
 impl DevShared {
-    /// Build the shared state around the two host seams.
+    /// Build the shared state around the two host seams and the service
+    /// worker's bypass rules.
     ///
     /// [`RuntimeControl`] is bounded on `MaybeSend + MaybeSync`, which is
     /// unbounded on wasm32 — that is what lets the browser control hold the
@@ -547,10 +561,15 @@ impl DevShared {
     /// not need to be; see the crate-level
     /// `expect(clippy::arc_with_non_send_sync)` in `lib.rs` for why the lint
     /// that says so is off for wasm32 only.
-    pub fn new(control: Arc<dyn RuntimeControl>, shell: Arc<dyn ShellSource>) -> Arc<Self> {
+    pub fn new(
+        control: Arc<dyn RuntimeControl>,
+        shell: Arc<dyn ShellSource>,
+        bypass: BypassRules,
+    ) -> Arc<Self> {
         Arc::new(Self {
             control,
             shell,
+            bypass,
             activation: activation::ActivationQueue::new(),
             workspace: futures::lock::Mutex::new(()),
             compile: futures::lock::Mutex::new(()),
@@ -893,6 +912,7 @@ mod tests {
         let declared = DevBlock::with_workspace(DevShared::new(
             test_support::FakeControl::new(),
             std::sync::Arc::new(test_support::FakeShell::new()),
+            test_support::fake_bypass_rules(),
         ))
         .info()
         .endpoints;

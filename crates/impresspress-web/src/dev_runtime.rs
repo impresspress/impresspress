@@ -59,7 +59,7 @@ use impresspress_core::blocks::dev::{
     },
     repo::generations::GenerationCause,
     seed::{self, SeedManifest},
-    DevShared, BLOCK_NAME,
+    BypassRules, DevShared, BLOCK_NAME,
 };
 use wafer_run::{
     context::Context, wasm::WasmiBlock, Block, BlockInfo, BlockRuntime, ErrorCode, FuelLimit,
@@ -920,7 +920,15 @@ pub struct Sandbox {
 /// is byte-identical to one that never asked for a sandbox. Which of the two
 /// compiled-in modes this is decides what the FACTORY registers, not whether
 /// there is a control at all — see [`SandboxMode`](crate::SandboxMode).
-pub fn attach(factory: RuntimeFactory) -> (Rc<RuntimeFactory>, Option<Sandbox>) {
+///
+/// `bypass` reads the rules the service worker handed `initialize({ bypass })`
+/// (see `crate::initialize`), kept on the `DevShared` this builds. A closure
+/// rather than a value so the option is parsed — and its absence warned about
+/// — only when a sandbox is actually being attached.
+pub fn attach(
+    factory: RuntimeFactory,
+    bypass: impl FnOnce() -> BypassRules,
+) -> (Rc<RuntimeFactory>, Option<Sandbox>) {
     if !factory.mode.runtime_present() {
         return (Rc::new(factory), None);
     }
@@ -929,7 +937,7 @@ pub fn attach(factory: RuntimeFactory) -> (Rc<RuntimeFactory>, Option<Sandbox>) 
     // same reason `RuntimeControl` is — this implementation resolves through a
     // `JsFuture`.
     let shell: Arc<dyn ShellSource> = Arc::new(BrowserShellSource);
-    let shared = DevShared::new(control.clone(), shell);
+    let shared = DevShared::new(control.clone(), shell, bypass());
     let factory = Rc::new(factory.with_dev(shared.clone()));
     control.set_factory(&factory);
     (factory, Some(Sandbox { control, shared }))
@@ -1070,7 +1078,17 @@ async fn seed_on_boot(ctx: &dyn Context, shared: &Arc<DevShared>) -> Result<(), 
     // activation rebuilds through: the importer uses it to `inspect` each
     // seeded artifact under deny-all capabilities and run the four validation
     // rules that need the guest's own `BlockInfo` (see `seed`'s module docs).
-    let Some(generation) = seed::import(ctx, shared.control.as_ref(), &manifest, &fetch).await?
+    // `shared.bypass` is what this worker handed `initialize()`: a seed's
+    // site file at a path it bypasses would never be shown, so the import
+    // refuses it like any other bad bundle.
+    let Some(generation) = seed::import(
+        ctx,
+        shared.control.as_ref(),
+        &shared.bypass,
+        &manifest,
+        &fetch,
+    )
+    .await?
     else {
         return Ok(());
     };

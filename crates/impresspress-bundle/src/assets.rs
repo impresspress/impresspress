@@ -24,7 +24,7 @@ pub const VENDOR_DIR: &str = "vendor/";
 /// prefix: the directory is a common one for a site's own files, and a
 /// prefix bypass would hand every one of them to the static host instead of
 /// the runtime that serves the site. This list is the one source of truth for
-/// the bypass clause `bundle::build_template_vars` renders.
+/// those exact rules in `bundle::BypassRules::for_bundle`.
 ///
 /// The one other place that names these files is their loader,
 /// `crates/impresspress-browser/js/bridge.js`, which requests

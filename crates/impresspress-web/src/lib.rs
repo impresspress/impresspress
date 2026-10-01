@@ -71,9 +71,11 @@ const IMPRESSPRESS_CSP: &str = concat!(
 
 /// Boot the runtime inside the Service Worker.
 ///
-/// `options` is the object `sw.js` passes: `{ dev: <bool> }`, rendered from
-/// the bundle's `__DEV_ENABLED__` placeholder. A missing or non-boolean `dev`
-/// reads as `false` — the sandbox is never enabled by an unparseable value.
+/// `options` is the object `sw.js` passes: `{ dev: <bool>, bypass: <rules> }`,
+/// rendered from the bundle's `__DEV_ENABLED__` and `__BYPASS_RULES__`
+/// placeholders. A missing or non-boolean `dev` reads as `false` — the
+/// sandbox is never enabled by an unparseable value. `bypass` is the paths
+/// this worker leaves to the static host (see `bypass_rules_option`).
 ///
 /// The flag is a *request*, and it selects the WORKSPACE half of the sandbox
 /// only (see [`SandboxMode`]). A build with `browser-devtools` compiled in
@@ -142,7 +144,7 @@ pub async fn initialize(options: JsValue) -> Result<(), JsValue> {
     // is then untouched. Without the feature there is no `attach` at all and
     // `factory` is used as constructed.
     #[cfg(feature = "browser-devtools")]
-    let (factory, sandbox) = dev_runtime::attach(factory);
+    let (factory, sandbox) = dev_runtime::attach(factory, || bypass_rules_option(&options));
 
     let wafer = factory.build(&[]).await?;
 
@@ -164,6 +166,43 @@ pub async fn initialize(options: JsValue) -> Result<(), JsValue> {
     }
 
     Ok(())
+}
+
+/// The `bypass` option of `initialize()`: the rules the running worker's fetch
+/// handler applies, rendered by `impresspress-bundle` from the same value as
+/// its condition (`BYPASS_RULES` in `sw.js.tmpl`). The development sandbox
+/// keeps them and refuses a site file at a path they list — exactly this
+/// worker's rules, with no fetch and nothing that can fail later.
+///
+/// Missing or unparseable — a `sw.js` rendered before the option existed —
+/// is NO rules, with a console warning: that worker still bypasses what it
+/// always did, the sandbox just cannot see which paths those are, so it
+/// refuses none, as before. Refusing to boot instead would turn a missing
+/// check into a dead deployment.
+#[cfg(feature = "browser-devtools")]
+fn bypass_rules_option(options: &JsValue) -> impresspress_core::blocks::dev::BypassRules {
+    let value =
+        js_sys::Reflect::get(options, &JsValue::from_str("bypass")).unwrap_or(JsValue::UNDEFINED);
+    let parsed = if value.is_undefined() || value.is_null() {
+        Err("initialize() was not handed any".to_string())
+    } else {
+        js_sys::JSON::stringify(&value)
+            .ok()
+            .and_then(|json| json.as_string())
+            .ok_or_else(|| "the option is not JSON-serializable".to_string())
+            .and_then(|json| serde_json::from_str(&json).map_err(|e| e.to_string()))
+    };
+    parsed.unwrap_or_else(|reason| {
+        web_sys::console::warn_1(
+            &format!(
+                "impresspress: no service-worker bypass rules ({reason}); the dev sandbox \
+                 will not refuse site files this worker serves from the static host — \
+                 rebuild the bundle with a current impresspress-bundle"
+            )
+            .into(),
+        );
+        impresspress_core::blocks::dev::BypassRules::default()
+    })
 }
 
 /// [`BootHooks`](impresspress_core::builder::BootHooks) impl for the browser

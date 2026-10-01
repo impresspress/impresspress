@@ -826,9 +826,29 @@ impl TestContext {
     /// to it with the default shell.
     #[cfg(feature = "block-dev")]
     pub async fn with_dev_added_and_shell(
+        self,
+        control: Arc<dyn crate::blocks::dev::RuntimeControl>,
+        shell: Arc<dyn crate::blocks::dev::ShellSource>,
+    ) -> Self {
+        self.with_dev_added_and_bypass(
+            control,
+            shell,
+            crate::blocks::dev::test_support::fake_bypass_rules(),
+        )
+        .await
+    }
+
+    /// [`Self::with_dev_added_and_shell`] with explicit service-worker bypass
+    /// rules — what the worker handed `initialize({ bypass })`. The other
+    /// two constructors pass the rules a dev-sandbox worker renders
+    /// (`fake_bypass_rules`); this is for the tests whose subject is the
+    /// rules themselves, such as an older worker that hands none.
+    #[cfg(feature = "block-dev")]
+    pub async fn with_dev_added_and_bypass(
         mut self,
         control: Arc<dyn crate::blocks::dev::RuntimeControl>,
         shell: Arc<dyn crate::blocks::dev::ShellSource>,
+        bypass: crate::blocks::dev::BypassRules,
     ) -> Self {
         use crate::blocks::dev;
 
@@ -838,7 +858,7 @@ impl TestContext {
             dev::migrations::POSTGRES_MIGRATIONS,
         )
         .await;
-        let shared = dev::DevShared::new(control, shell);
+        let shared = dev::DevShared::new(control, shell, bypass);
         self.dev_shared = Some(shared.clone());
         let block = Arc::new(dev::DevBlock::with_workspace(shared));
         self.register_block(dev::BLOCK_NAME, block);
@@ -4131,6 +4151,7 @@ pub fn real_block_infos() -> Vec<BlockInfo> {
         crate::blocks::dev::DevBlock::with_workspace(crate::blocks::dev::DevShared::new(
             crate::blocks::dev::test_support::FakeControl::new(),
             Arc::new(crate::blocks::dev::test_support::FakeShell::new()),
+            crate::blocks::dev::test_support::fake_bypass_rules(),
         ))
         .info(),
     );

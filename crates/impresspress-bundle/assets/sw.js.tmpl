@@ -5,7 +5,7 @@ import init, { initialize, handle_request } from '__WASM_JS__';
 // `[dev] enabled` at BUILD time (`impresspress-bundle`'s `DEV_ENABLED` var).
 //
 // ONE constant, read by BOTH places the flag decides something: the
-// `initialize({ dev: DEV_ENABLED })` below, and the isolation-header
+// `initialize({ dev: DEV_ENABLED, … })` below, and the isolation-header
 // passthrough in the fetch handler. It used to be the placeholder itself
 // substituted at both sites, which meant a shipped `sw.js` stated the same
 // fact twice — and the dev sandbox's export (`blocks/dev/export.rs`), which
@@ -17,6 +17,16 @@ import init, { initialize, handle_request } from '__WASM_JS__';
 // requires it to occur exactly once, so a comment quoting it would be a
 // second, ambiguous match.)
 const DEV_ENABLED = __DEV_ENABLED__;
+
+// The requests the fetch handler below leaves to the network, as data:
+// `impresspress-bundle` renders this object and that handler's `if (…)`
+// condition from ONE value (`BypassRules`, `bundle/bypass.rs`). It is handed
+// to the runtime in `initialize()`, so the runtime knows exactly which paths
+// THIS worker will never ask it for — the development sandbox refuses a site
+// file at one, because the file would publish and never be shown. Read from
+// the running worker rather than fetched, so it is the rules in force, not
+// the ones a newer deployment may already be serving.
+const BYPASS_RULES = __BYPASS_RULES__;
 
 let initialized = false;
 let initPromise = null;
@@ -70,7 +80,7 @@ async function ensureInitialized() {
         }
         console.log('[__APP_NAME__] Initializing runtime...');
         try {
-            await initialize({ dev: DEV_ENABLED });
+            await initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES });
         } catch (e) {
             await selfDestruct(`runtime initialize() failed: ${e}`);
             throw e;
@@ -146,41 +156,19 @@ self.addEventListener('fetch', (event) => {
     const url = new URL(event.request.url);
     // Only intercept same-origin requests
     if (url.origin !== self.location.origin) return;
-    // Don't intercept requests for the SW's own script, the boot loader, the
-    // PWA manifest (which the browser fetches as metadata), or the wasm-pack /
-    // bundler output. `/` and `/index.html` are intentionally INTERCEPTED so
-    // the consumer's router can render a UI block at root.
+    // The requests the network answers instead of the wasm runtime: the SW's
+    // own script, the boot loader, the PWA and asset manifests, the wasm-pack
+    // / bundler output, the shell's vendored files, Cloudflare's `/cdn-cgi/`
+    // namespace, and whatever the app adds (`--extra-bypass-prefix`,
+    // `--extra-bypass-exact`; `/seed/` in a dev bundle). `/` and `/index.html`
+    // are intentionally INTERCEPTED unless the app lists them, so the
+    // consumer's router can render a UI block at root.
     //
-    // Consumers inject additional app-specific bypass prefixes via the
-    // `--extra-bypass-prefix` flag on export-assets; those get appended to
-    // the last line of the `if` expression below as further `startsWith`
-    // clauses. That's where app-level static assets (custom JS / CSS)
-    // should be listed.
-    //
-    // The shell's own vendored files (sql.js) are bypassed by EXACT path,
-    // rendered from the bundler's asset list, never as a `/vendor/` prefix:
-    // `/vendor/` is an ordinary directory for a site's own files (a seed's
-    // CSS framework, an agent's library), and a prefix would hand every one
-    // of them to the static host instead of the runtime that serves the site.
-    //
-    // `/cdn-cgi/` is a path namespace Cloudflare reserves on every proxied
-    // hostname (Web Analytics' RUM beacon, challenge pages, image resizing,
-    // email obfuscation, `/cdn-cgi/trace`): it is never site or runtime
-    // content, and only Cloudflare's edge can answer it. Without this clause
-    // the RUM beacon Cloudflare injects into every page POSTs to
-    // `/cdn-cgi/rum` once this worker controls the page, and the runtime
-    // answers 501 — a console error on every load of a Cloudflare-hosted
-    // deployment.
-    if (url.pathname === '/sw.js' ||
-        url.pathname === '/loader.js' ||
-        url.pathname === '/manifest.json' ||
-        url.pathname === '/asset-manifest.json' ||
-        url.pathname === '/webllm-engine.js' ||
-        url.pathname === '/embed-engine.js' ||
-        url.pathname === '/t2i-engine.js' ||
-        url.pathname.startsWith('__WASM_JS_PREFIX__') ||
-        url.pathname.startsWith('/snippets/') ||
-        url.pathname.startsWith('/cdn-cgi/')__SHELL_VENDOR_BYPASS____EXTRA_BYPASS____EXTRA_BYPASS_EXACT__) {
+    // The condition is rendered whole from `impresspress-bundle`'s
+    // `BypassRules` (`bundle/bypass.rs`, which says why each rule is there),
+    // the same value `BYPASS_RULES` above states as data for the runtime. A
+    // rule added here by hand would be a rule the runtime does not know of.
+    if (__BYPASS_CONDITION__) {
         // ------------------------------------------------------------------
         // Bypassed — the network answers this, not the wasm runtime.
         //

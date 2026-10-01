@@ -1,6 +1,6 @@
 use std::{fs, path::PathBuf};
 
-use impresspress_bundle::bundle::{run, AppConfig};
+use impresspress_bundle::bundle::{run, AppConfig, BypassRules};
 
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/bundle_fixtures/pkg-in")
@@ -43,7 +43,7 @@ fn exact_bypass_renders_into_sw() {
         "sw.js missing exact '/index.html' bypass"
     );
     assert!(
-        !sw.contains("__EXTRA_BYPASS_EXACT__"),
+        !sw.contains("__BYPASS_CONDITION__"),
         "placeholder not substituted"
     );
 }
@@ -53,7 +53,7 @@ fn exact_bypass_empty_leaves_sw_unchanged() {
     let tmp = pkg_copy();
     run(tmp.path(), tmp.path(), AppConfig::default()).expect("bundler ok");
     let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
-    assert!(!sw.contains("__EXTRA_BYPASS_EXACT__"));
+    assert!(!sw.contains("__BYPASS_CONDITION__"));
     assert!(!sw.contains("=== '/'"));
 }
 
@@ -182,32 +182,29 @@ fn empty_exact_leaves_production_sw_bypass_unchanged() {
 
     let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
 
-    // Placeholders must be fully substituted.
     assert!(
-        !sw.contains("__EXTRA_BYPASS_EXACT__"),
+        !sw.contains("__BYPASS_CONDITION__"),
         "placeholder not substituted in sw.js"
     );
-    assert!(
-        !sw.contains("__EXTRA_BYPASS__"),
-        "placeholder not substituted in sw.js"
-    );
-    // No injected exact-match bypass clause (the bundler emits " || url.pathname === '<path>'"
-    // for each entry; the template itself uses "=== '" for its own static pathname checks but
-    // never prefixed with "|| url.pathname").
-    assert!(
-        !sw.contains("|| url.pathname === '"),
-        "unexpected exact-match bypass clause injected into sw.js"
-    );
-    // The bypass expression closes on the shell's last vendor file, each
-    // vendor clause leading with its `||` — nothing trailing, nothing dangling.
+    // The whole default condition: the base exact paths, the shell's vendor
+    // files, then the prefixes — one clause per line, each after the first
+    // leading with its `||`, nothing trailing and nothing dangling.
     assert!(
         sw.contains(concat!(
-            "url.pathname.startsWith('/snippets/') ||\n",
-            "        url.pathname.startsWith('/cdn-cgi/') ||\n",
+            "    if (url.pathname === '/sw.js' ||\n",
+            "        url.pathname === '/loader.js' ||\n",
+            "        url.pathname === '/manifest.json' ||\n",
+            "        url.pathname === '/asset-manifest.json' ||\n",
+            "        url.pathname === '/webllm-engine.js' ||\n",
+            "        url.pathname === '/embed-engine.js' ||\n",
+            "        url.pathname === '/t2i-engine.js' ||\n",
             "        url.pathname === '/vendor/sql-wasm-esm.js' ||\n",
-            "        url.pathname === '/vendor/sql-wasm.wasm') {",
+            "        url.pathname === '/vendor/sql-wasm.wasm' ||\n",
+            "        url.pathname.startsWith('/app') ||\n",
+            "        url.pathname.startsWith('/snippets/') ||\n",
+            "        url.pathname.startsWith('/cdn-cgi/')) {",
         )),
-        "production bypass closing clauses changed; sw.js = {sw}"
+        "production bypass condition changed; sw.js = {sw}"
     );
 }
 
@@ -230,7 +227,7 @@ fn sw_passes_the_dev_flag_to_initialize() {
         "sw.js did not receive the dev flag; sw.js = {sw}"
     );
     assert!(
-        sw.contains("initialize({ dev: DEV_ENABLED })"),
+        sw.contains("initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES })"),
         "initialize() must read the one constant; sw.js = {sw}"
     );
 }
@@ -247,7 +244,7 @@ fn sw_defaults_the_dev_flag_to_false() {
     // the flag explicitly false, not merely absent.
     assert!(sw.contains("const DEV_ENABLED = false;"), "sw.js = {sw}");
     assert!(
-        sw.contains("initialize({ dev: DEV_ENABLED })"),
+        sw.contains("initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES })"),
         "initialize() must read the one constant; sw.js = {sw}"
     );
     assert!(
@@ -275,7 +272,7 @@ fn a_dev_bundle_bypasses_the_seed_prefix() {
         "sw.js does not bypass the seed bundle; sw.js = {sw}"
     );
     assert!(
-        !sw.contains("__EXTRA_BYPASS__"),
+        !sw.contains("__BYPASS_CONDITION__"),
         "placeholder not substituted"
     );
 }
@@ -289,29 +286,139 @@ fn a_non_dev_bundle_does_not_bypass_the_seed_prefix() {
     run(tmp.path(), tmp.path(), AppConfig::default()).expect("bundler ok");
 
     let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
-    assert!(!sw.contains("/seed/"), "sw.js = {sw}");
+    assert!(!bypasses(&sw, "/seed/manifest.json"), "sw.js = {sw}");
 }
 
-/// Whether the rendered `sw.js` bypasses `path`: its bypass `if (…) {`
-/// expression, evaluated clause by clause (`url.pathname === '…'` and
-/// `url.pathname.startsWith('…')`, OR'd). Panics on a clause of any other
-/// shape, so a template change this cannot read fails loudly instead of
-/// being read as "not bypassed".
-fn bypasses(sw: &str, path: &str) -> bool {
+/// The rendered `sw.js`'s bypass `if (…) {` expression, read back clause by
+/// clause (`url.pathname === '…'` and `url.pathname.startsWith('…')`, OR'd)
+/// into the rules it applies. Panics on a clause of any other shape, so a
+/// template change this cannot read fails loudly instead of being read as
+/// "not bypassed".
+fn sw_bypass_rules(sw: &str) -> BypassRules {
     let start = sw
         .find("if (url.pathname === '/sw.js' ||")
         .expect("sw.js has its bypass expression");
     let expression = &sw[start + "if (".len()..];
     let expression = &expression[..expression.find(") {").expect("bypass expression closes")];
-    expression.split("||").map(str::trim).any(|clause| {
+    let mut rules = BypassRules::default();
+    for clause in expression.split("||").map(str::trim) {
         if let Some(rest) = clause.strip_prefix("url.pathname === '") {
-            path == rest.strip_suffix('\'').expect("quoted exact path")
+            let path = rest.strip_suffix('\'').expect("quoted exact path");
+            rules.exact.push(js_unquote(path));
         } else if let Some(rest) = clause.strip_prefix("url.pathname.startsWith('") {
-            path.starts_with(rest.strip_suffix("')").expect("quoted prefix"))
+            let prefix = rest.strip_suffix("')").expect("quoted prefix");
+            rules.prefixes.push(js_unquote(prefix));
         } else {
             panic!("unrecognised bypass clause {clause:?} in sw.js = {sw}")
         }
-    })
+    }
+    rules
+}
+
+/// The value of a single-quoted JavaScript string's body: `\\` and `\'`
+/// unescaped, the two escapes the bundler emits. Any other backslash sequence
+/// panics, so an escape this reader does not know is not read as a path.
+fn js_unquote(body: &str) -> String {
+    let mut out = String::new();
+    let mut chars = body.chars();
+    while let Some(c) = chars.next() {
+        if c == '\\' {
+            match chars.next() {
+                Some(escaped @ ('\\' | '\'')) => out.push(escaped),
+                other => panic!("unrecognised escape \\{other:?} in {body:?}"),
+            }
+        } else {
+            assert_ne!(c, '\'', "unescaped quote in {body:?}");
+            out.push(c);
+        }
+    }
+    out
+}
+
+/// Whether the rendered `sw.js` bypasses `path`, by [`sw_bypass_rules`].
+fn bypasses(sw: &str, path: &str) -> bool {
+    let rules = sw_bypass_rules(sw);
+    rules.exact.iter().any(|exact| exact == path)
+        || rules
+            .prefixes
+            .iter()
+            .any(|prefix| path.starts_with(prefix.as_str()))
+}
+
+/// The `BYPASS_RULES` constant the rendered `sw.js` hands `initialize()`.
+fn sw_initialize_rules(sw: &str) -> BypassRules {
+    let declaration = "const BYPASS_RULES = ";
+    assert_eq!(sw.matches(declaration).count(), 1, "sw.js = {sw}");
+    let start = sw.find(declaration).unwrap() + declaration.len();
+    let value = &sw[start..start + sw[start..].find(";\n").expect("declaration ends")];
+    serde_json::from_str(value).expect("BYPASS_RULES is JSON")
+}
+
+/// The rules `sw.js` hands the runtime in `initialize()` are what the running
+/// runtime believes this worker leaves to the network — the development
+/// sandbox refuses a site file at any path they list. They must be exactly
+/// the rules the fetch handler's condition applies, for a plain bundle and
+/// for a dev bundle with an app's own extras: a rule only the condition had
+/// would be a site file that publishes and 404s, and a rule only the data had
+/// would refuse a file the runtime could serve.
+#[test]
+fn initialize_is_handed_exactly_the_bypass_rules_the_fetch_handler_applies() {
+    let configs = [
+        AppConfig::default(),
+        AppConfig {
+            dev_enabled: true,
+            // A quote and a backslash in configured paths: the condition
+            // escapes them for a JavaScript string and the data for JSON, and
+            // both must come back as the same path.
+            extra_bypass_prefix: vec![
+                "/__impresspress_dev/compiler/".to_string(),
+                "/it's/".to_string(),
+            ],
+            extra_bypass_exact: vec![
+                "/".to_string(),
+                "/index.html".to_string(),
+                "/back\\slash's.js".to_string(),
+            ],
+            ..AppConfig::default()
+        },
+    ];
+    for app in configs {
+        let dev = app.dev_enabled;
+        let tmp = production_pkg_copy();
+        run(tmp.path(), tmp.path(), app).expect("bundler ok");
+        let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
+        let handed = sw_initialize_rules(&sw);
+
+        assert!(
+            sw.contains("await initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES });"),
+            "sw.js = {sw}"
+        );
+        // Rule for rule, in order.
+        assert_eq!(handed, sw_bypass_rules(&sw), "dev = {dev}");
+        // And each handed rule, put to the rendered condition, is bypassed —
+        // so the comparison above is not two readings of the same mistake.
+        for path in &handed.exact {
+            assert!(bypasses(&sw, path), "{path} (dev = {dev}); sw.js = {sw}");
+        }
+        for prefix in &handed.prefixes {
+            let under = format!("{prefix}x");
+            assert!(bypasses(&sw, &under), "{under} (dev = {dev}); sw.js = {sw}");
+        }
+        assert!(handed.exact.contains(&"/manifest.json".to_string()));
+        assert_eq!(
+            handed.prefixes.contains(&"/seed/".to_string()),
+            dev,
+            "the seed prefix is a dev bundle's alone"
+        );
+        if dev {
+            assert!(handed
+                .prefixes
+                .contains(&"/__impresspress_dev/compiler/".to_string()));
+            assert!(handed.exact.contains(&"/index.html".to_string()));
+            assert!(handed.exact.contains(&"/back\\slash's.js".to_string()));
+            assert!(handed.prefixes.contains(&"/it's/".to_string()));
+        }
+    }
 }
 
 /// The shell owns two files under `/vendor/`, and the service worker bypasses
@@ -533,7 +640,10 @@ fn the_seed_prefix_joins_an_apps_own_bypass_list() {
     run(tmp.path(), tmp.path(), app).expect("bundler ok");
 
     let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
-    assert!(sw.contains("url.pathname.startsWith('/__impresspress_dev/compiler/')"));
+    // The exact clause text the sandbox's export removes
+    // (`impresspress-core`'s `blocks::dev::export::sw_without_compiler`):
+    // a clause that led with anything else would survive into every export.
+    assert!(sw.contains(" ||\n        url.pathname.startsWith('/__impresspress_dev/compiler/')"));
     assert!(sw.contains("url.pathname.startsWith('/seed/')"));
 }
 
