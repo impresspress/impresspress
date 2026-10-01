@@ -8,6 +8,7 @@
 use impresspress_core::{
     blocks::dev::{
         assets,
+        repo::seed_info::{self, SeedInfo},
         test_support::{dev_with_accounts, signed_in_as, FakeControl},
         validation::MAX_ARTIFACT_BYTES,
     },
@@ -417,4 +418,57 @@ fn the_adapter_speaks_every_message_the_protocol_defines() {
             "the adapter never handles {received}"
         );
     }
+}
+
+/// The prompt an operator copies comes from the seed, not from the crate:
+/// each template's sandbox suggests its own. Without a sandbox block there is
+/// no disclosure at all — an empty `<pre>` would be a prompt that says
+/// nothing.
+#[tokio::test]
+async fn the_suggested_prompt_and_template_come_from_the_seed() {
+    let ctx = dev_with_accounts(FakeControl::new()).await;
+    let operator = signed_in_as(&ctx, "admin").await;
+
+    let before = output_html(
+        ctx.request(navigation(operator.cookie(anon_msg("retrieve", "/b/dev"))))
+            .await,
+    )
+    .await;
+    assert!(!before.contains("dev-suggested-prompt"), "{before}");
+    assert!(!before.contains("Suggested prompt"));
+
+    seed_info::write(
+        &ctx,
+        &SeedInfo {
+            template: "bootstrap".to_string(),
+            // Hostile on purpose: the page must escape it, not render it.
+            suggested_prompt: "Build me a shop </pre><script>alert(1)</script>".to_string(),
+            guide_markdown: String::new(),
+        },
+    )
+    .await
+    .expect("seed info");
+
+    let after = output_html(
+        ctx.request(navigation(operator.cookie(anon_msg("retrieve", "/b/dev"))))
+            .await,
+    )
+    .await;
+    assert!(
+        after.contains(r#"<pre id="dev-suggested-prompt">"#),
+        "{after}"
+    );
+    assert!(
+        after.contains("Build me a shop &lt;/pre&gt;&lt;script&gt;alert(1)&lt;/script&gt;"),
+        "{after}"
+    );
+    assert!(!after.contains("<script>alert(1)</script>"));
+    assert!(
+        after.contains("<strong>bootstrap</strong>"),
+        "names the template: {after}"
+    );
+    assert!(
+        after.contains("site_markdown"),
+        "points at the site guide: {after}"
+    );
 }

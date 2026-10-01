@@ -4,7 +4,8 @@
 //! `/b/dev/api/*` and the tools projected from it; this document is what lets
 //! the human see what the agent did, edit a file themselves, watch an
 //! activation land, and read the live site — plus the "how this works"
-//! section and the suggested prompt that get a first-time visitor started.
+//! section and, when the seed suggested one, the prompt that gets a
+//! first-time visitor started.
 //!
 //! # Why it builds its own response
 //!
@@ -34,32 +35,22 @@
 use maud::{html, Markup};
 use wafer_run::{context::Context, Message, OutputStream};
 
-use super::{assets, no_store};
+use super::{
+    assets, no_store,
+    repo::seed_info::{self, SeedInfo},
+};
 use crate::{http::ResponseBuilder, ui};
-
-/// The prompt the "Suggested prompt" disclosure offers for copying.
-///
-/// It is one paragraph on purpose: a visitor pastes it verbatim, so it has to
-/// name the tools (`shop_create_product`, `shop_create_offer`,
-/// `shop_publish_offer`, `shop_update_product`) and the endpoints the agent
-/// would otherwise have to discover, and end by asking for the result to be
-/// shown — which is what makes the live-site iframe the last thing that moves.
-/// It also carries the same `/b/webmcp/webmcp.js` instruction as the guide
-/// above, as a clause on the `site/index.html` sentence rather than a
-/// separate one, since a visitor's agent only gets the shop's tools if the
-/// page the agent writes actually includes the tag.
-const SUGGESTED_PROMPT: &str = "Build me a small online shop for handmade ceramics. Create a home \
-page at site/index.html that lists products from /b/products/catalog and lets a visitor open one, \
-using the storefront widget from /b/products/storefront.js, and include <script \
-src=\"/b/webmcp/webmcp.js\" defer></script> in its <head> so a visitor's agent can use the shop's \
-tools. Then create three products with shop_create_product, give each a published offer with \
-shop_create_offer and shop_publish_offer, and set their status to active with \
-shop_update_product. Show me the live site when you are done.";
 
 /// Serve the workspace document.
 pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
+    let seed = match seed_info::read(ctx).await {
+        Ok(seed) => seed,
+        Err(e) => {
+            return super::no_store_db_error_internal(e, "workspace page: seed info read failed")
+        }
+    };
     let shell = ui::Shell::simple("Workspace", ui::NavKind::Admin, "Workspace");
-    let markup = match ui::shell_document(ctx, msg, shell, body()).await {
+    let markup = match ui::shell_document(ctx, msg, shell, body(seed.as_ref())).await {
         Ok(markup) => markup,
         Err(e) => {
             return super::no_store_db_error_internal(e, "workspace page: site config read failed")
@@ -79,11 +70,22 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
 /// The ids are the contract between this markup, `dev.js` and the end-to-end
 /// test — `dev.js` looks every element up by id and does nothing else with
 /// the document's shape, so the layout can change without touching it.
-fn body() -> Markup {
+///
+/// `seed` is what the seed bundle said about this sandbox — the template
+/// and the prompt to suggest. `None` renders no prompt disclosure at all.
+fn body(seed: Option<&SeedInfo>) -> Markup {
     html! {
         div .dev-workspace {
             section #dev-guide .dev-pane {
                 h2 { "How this workspace works" }
+                @if let Some(seed) = seed {
+                    p {
+                        "This sandbox was seeded from the " strong { (seed.template) } " template. "
+                        code { "dev_read_reference" } " returns two guides: " code { "markdown" }
+                        " for backend blocks and " code { "site_markdown" } " for the site — read \
+                         the second before writing under " code { "site/" } "."
+                    }
+                }
                 p {
                     "This page is a WebMCP workspace. An agent in your browser sees the tools \
                      registered here and can edit the site under " code { "site/" } ", write Rust \
@@ -99,9 +101,11 @@ fn body() -> Markup {
                     "Start with " code { "dev_status" } ". Credentials for this browser-local \
                      instance: " code { "admin@example.com" } " / " code { "admin123" } "."
                 }
-                details {
-                    summary { "Suggested prompt" }
-                    pre #dev-suggested-prompt { (SUGGESTED_PROMPT) }
+                @if let Some(seed) = seed {
+                    details {
+                        summary { "Suggested prompt" }
+                        pre #dev-suggested-prompt { (seed.suggested_prompt) }
+                    }
                 }
             }
             section #dev-files .dev-pane {
@@ -277,7 +281,7 @@ mod tests {
     /// test can see without a browser.
     #[test]
     fn every_id_dev_js_looks_up_is_in_the_document() {
-        let html = body().into_string();
+        let html = body(None).into_string();
         for id in [
             "dev-log",
             "dev-progress-steps",
@@ -342,7 +346,7 @@ mod tests {
     /// the other is there.
     #[test]
     fn the_script_tag_is_a_module() {
-        let html = body().into_string();
+        let html = body(None).into_string();
         assert!(
             html.contains(r#"<script type="module" src="/b/dev/static/dev.js">"#),
             "{html}"
@@ -374,7 +378,7 @@ mod tests {
     /// nothing in between.
     #[test]
     fn the_compile_button_is_enabled_only_by_a_toolchain_and_a_block() {
-        let html = body().into_string();
+        let html = body(None).into_string();
         assert!(
             html.contains(
                 r#"<button class="btn btn--secondary" id="dev-compile" type="button" disabled>"#
@@ -481,25 +485,5 @@ mod tests {
             super::super::scaffold::GUEST_LIB_RS.contains(&expected),
             "the guest crate must state `{expected}` for dev.js's regex to find it"
         );
-    }
-
-    /// The prompt names tools, not endpoints the agent would have to guess
-    /// at, and every tool it names is one `/b/dev/api/tools.json` publishes.
-    #[test]
-    fn the_suggested_prompt_only_names_tools_that_exist() {
-        for tool in [
-            "shop_create_product",
-            "shop_create_offer",
-            "shop_publish_offer",
-            "shop_update_product",
-        ] {
-            assert!(SUGGESTED_PROMPT.contains(tool), "{tool}");
-            assert!(
-                super::super::tools::SELECTIONS
-                    .iter()
-                    .any(|(_, _, _, name, _)| *name == tool),
-                "{tool} is not in the page's tool manifest"
-            );
-        }
     }
 }
