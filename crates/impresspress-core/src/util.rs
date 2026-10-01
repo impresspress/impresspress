@@ -144,9 +144,10 @@ pub trait RecordExt {
     /// carries the payload onward rather than inspecting it — re-persisting it
     /// on another row, or rendering it.
     ///
-    /// A backend that handed back the raw string returns it verbatim (it is
-    /// already the encoded text); a backend that re-parsed it gets the value
-    /// re-encoded, which can reorder object keys but never loses a field. `""`
+    /// A `TEXT` column comes back as the raw string on every backend and is
+    /// returned verbatim (it is already the encoded text); a column declared
+    /// JSON arrives decoded and is re-encoded, which can reorder object keys
+    /// but never loses a field. `""`
     /// when the column is absent, so an `is_empty()` guard still means
     /// "nothing stored".
     fn json_text_field(&self, key: &str) -> String;
@@ -1239,8 +1240,8 @@ mod tests {
 
     #[test]
     fn json_fields_decode_text_and_pass_through_decoded_values() {
-        // SQLite hands JSON-shaped TEXT back decoded; Postgres/D1 hand back
-        // the literal string. Both must read the same.
+        // A `TEXT` column comes back as the literal string on every backend;
+        // a column declared JSON comes back decoded. Both must read the same.
         let decoded = record(serde_json::json!({
             "tags": ["a", "b", 3],
             "meta": {"k": 1},

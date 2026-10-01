@@ -94,13 +94,14 @@ mod tests {
 
     const CANONICAL: &str = r#"{"a":1,"b":[{"x":true,"y":null}]}"#;
 
-    /// The two backend shapes of the same stored row must decode to the same
-    /// bytes — otherwise a `manifest_sha256` check would be backend-dependent.
+    /// The two shapes of the same stored manifest must decode to the same
+    /// bytes — otherwise a `manifest_sha256` check would depend on how the
+    /// column is declared.
     #[test]
-    fn both_backend_shapes_yield_the_same_canonical_text() {
-        // Postgres / D1 hand back the literal string...
+    fn both_column_shapes_yield_the_same_canonical_text() {
+        // A `TEXT` column hands back the literal string...
         let literal = record(serde_json::json!(CANONICAL));
-        // ...SQLite hands back the decoded value.
+        // ...a column declared JSON hands back the decoded value.
         let decoded = record(serde_json::from_str::<serde_json::Value>(CANONICAL).expect("parse"));
 
         assert_eq!(json_text(&literal, "manifest"), CANONICAL);
@@ -108,7 +109,7 @@ mod tests {
     }
 
     /// Non-canonical input is canonicalized rather than passed through, so
-    /// the result does not depend on which backend stored it. This also pins
+    /// the result does not depend on how the column is declared. This also pins
     /// that `serde_json` has no `preserve_order`: were it ever enabled by
     /// feature unification, object key order would survive and this fails.
     #[test]

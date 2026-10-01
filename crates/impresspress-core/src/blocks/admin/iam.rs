@@ -38,9 +38,9 @@ pub(super) async fn handle_list_roles(ctx: &dyn Context) -> OutputStream {
     match db::list(ctx, ROLES_TABLE, &opts).await {
         // Project onto the closed `AdminRoleView` field list. Besides pinning
         // the published field set, this normalizes `permissions`: the column is
-        // JSON-encoded TEXT that the SQLite backend sniffs back into an array
-        // while Postgres/D1 return the raw string, so the untyped response had
-        // no single shape a schema could describe.
+        // JSON-encoded TEXT, so every backend returns the encoded string, and
+        // the untyped response published an array as a string a schema could
+        // not describe as one. The view decodes it into the array it holds.
         Ok(result) => ok_json(&AdminRoleListResponse::from_record_list(&result)),
         Err(e) => crud::db_error_internal(e, "Database error"),
     }
@@ -767,9 +767,8 @@ mod tests {
     /// `permissions` arrives as an array of strings.
     ///
     /// The array is the part worth pinning: the column is JSON-encoded TEXT,
-    /// and only the SQLite backend decodes it on read. Echoing the row would
-    /// make the published `array of string` schema false on Postgres and D1,
-    /// where the same column comes back as a string.
+    /// which every backend hands back as the encoded string. Echoing the row
+    /// would make the published `array of string` schema false.
     #[tokio::test]
     async fn list_roles_publishes_exactly_the_contract_fields() {
         let ctx = TestContext::with_admin()

@@ -550,12 +550,11 @@ mod tests {
     /// A manifest pair in the canonical form design §11.3 mandates (sorted
     /// keys, no whitespace) — the form `manifest_sha256` is a hash over.
     ///
-    /// Both are JSON-shaped, which is the point: the SQLite backend sniffs
-    /// JSON-shaped `TEXT` back into a decoded value in `row_to_record`, so a
-    /// repo reading these columns with `str_field` would round-trip them to
-    /// `""` here while staying green on Postgres. `repo::json_text` is what
-    /// makes the round trip byte-exact, and only for canonical input — see
-    /// its own tests for the non-canonical case.
+    /// Both are JSON-shaped, which is the point: the columns are declared
+    /// `TEXT`, so every backend hands them back as the stored string, and this
+    /// pins that the repo's reads keep them byte-exact. `repo::json_text`
+    /// re-encodes canonically, so the round trip is byte-exact only for
+    /// canonical input — see its own tests for the non-canonical case.
     const SITE_MANIFEST: &str = r#"{"files":[{"content_type":"text/html; charset=utf-8","path":"index.html","sha256":"aa","size":5}]}"#;
     const BLOCK_MANIFEST: &str = r#"[{"artifact_sha256":"bb","capabilities":{},"name":"site/newsletter","routes":[{"access":"Public","prefix":"/b/newsletter/"}],"wafer_guest_version":1}]"#;
 

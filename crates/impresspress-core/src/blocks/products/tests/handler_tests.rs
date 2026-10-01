@@ -3939,12 +3939,13 @@ async fn order_pages_use_exact_currency_and_enforce_buyer_seller_actions() {
 
 /// A line item's `input_snapshot` is a JSON-object column: written by
 /// `serde_json::to_string(&preview.inputs)`, declared `TEXT NOT NULL DEFAULT
-/// '{}'`. Two of the three database adapters (native SQLite and the browser)
-/// re-parse a JSON-shaped TEXT column on read, so the column arrives as a
-/// `Value::Object`, and `str_field` — which has no structured arm — answers
-/// `""` for it. The order-detail Configuration column then took its
-/// "nothing selected" branch and rendered a dash for every configured item,
-/// on the buyer, seller and admin views alike.
+/// '{}'`. Before wafer-run #365, native SQLite and the browser re-parsed
+/// JSON-shaped TEXT on read, so the column arrived as a `Value::Object`, and
+/// `str_field` — which has no structured arm — answered `""` for it. The
+/// order-detail Configuration column then took its "nothing selected" branch
+/// and rendered a dash for every configured item, on the buyer, seller and
+/// admin views alike. Every backend now returns a `TEXT` column as the
+/// string; this pins that the configuration still renders.
 #[tokio::test]
 async fn order_detail_renders_a_line_item_configuration_snapshot() {
     let ctx = ctx().await;

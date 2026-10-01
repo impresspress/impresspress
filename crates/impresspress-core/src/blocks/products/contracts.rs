@@ -1700,8 +1700,9 @@ pub struct ProviderReconcileResult {
 // Until these existed the product, group, type and purchase endpoints echoed
 // the database layer's `Record` / `RecordList` (`{id, data: {column → value}}`)
 // straight to the wire, so a response was whatever the row held and its JSON
-// types depended on the backend (`tags` / `metadata` are JSON-encoded `TEXT`
-// that only SQLite decodes; `is_system` / `livemode` are `INTEGER`). Each view
+// types were wrong or backend-dependent (`tags` / `metadata` are JSON-encoded
+// `TEXT`, published as the encoded string rather than the value it holds;
+// `is_system` / `livemode` are `INTEGER`). Each view
 // below is a closed field list built column by column, normalized through
 // `RecordExt`, so a column added by a migration is never published by
 // accident and one schema is true on SQLite, D1 and Postgres.

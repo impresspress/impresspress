@@ -560,8 +560,8 @@ mod tests {
     use super::*;
     use crate::{blocks::dev::test_support::FakeControl, test_support::TestContext};
 
-    /// JSON-shaped columns in canonical form — same round-trip hazard as the
-    /// generation manifests (see `repo::json_text`).
+    /// JSON-encoded `TEXT` columns in canonical form, read back through
+    /// `repo::json_text` like the generation manifests.
     const BLOCK_INFO: &str = r#"{"name":"site/newsletter","version":"0.1.0"}"#;
     const DIAGNOSTICS: &str = r#"[{"level":"warning","message":"unused import"}]"#;
 
