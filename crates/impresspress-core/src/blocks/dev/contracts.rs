@@ -53,6 +53,10 @@ pub struct StatusResponse {
     /// its own "said this already" state, and the agent that would act on a
     /// refused seed reads `dev_status` rather than the log.
     pub seed_error: Option<String>,
+    /// The template this sandbox was seeded from, or null when the seed
+    /// carried no sandbox block. What an agent reads to know which guide
+    /// `dev_read_reference.site_markdown` will be.
+    pub template: Option<String>,
 }
 
 /// What the sandbox's two content stores, its workspace and its ledger hold.
@@ -558,6 +562,14 @@ pub struct ReferenceResponse {
     /// namespace rules, the limits, the diagnostic codes, and both templates
     /// in full.
     pub markdown: String,
+    /// The template this sandbox was seeded from (`dev_status.template`), or
+    /// null when the seed carried no sandbox block.
+    pub template: Option<String>,
+    /// This sandbox's site-authoring guide, as Markdown: the CSS framework
+    /// it ships, the page skeleton, the storefront element, the catalog API,
+    /// what a write refuses. Read it before writing under `site/`. Null when
+    /// the seed carried none.
+    pub site_markdown: Option<String>,
 }
 
 /// Response of `GET /b/dev/api/guest`.

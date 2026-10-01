@@ -117,8 +117,11 @@ pub const SELECTIONS: &[(&str, HttpMethod, &str, &str, &str)] = &[
         HttpMethod::Get,
         "/b/dev/api/reference",
         "dev_read_reference",
-        "The authoring reference for backend blocks: API, host services, limits, and the two \
-         templates. Read it before writing Rust.",
+        "The authoring guides. `markdown` is the backend-block guide (API, host services, \
+         limits, the two templates) — read it before writing Rust. `site_markdown` is this \
+         sandbox's site-authoring guide (the CSS framework it ships, the page skeleton, the \
+         storefront element, the catalog API, what a write refuses) — read it before writing \
+         under `site/`.",
     ),
     (
         "impresspress/dev",

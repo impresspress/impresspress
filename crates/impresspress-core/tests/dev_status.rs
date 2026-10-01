@@ -14,6 +14,7 @@ use impresspress_core::{
             self,
             generations::{self, GenerationCause, GenerationStatus, NewGeneration},
             runtime_state::{self, ActivationPhase, RuntimeState},
+            seed_info::{self, SeedInfo},
         },
         test_support::{dev_status, dev_with_accounts, signed_in_as, FakeControl, FakeShell},
         DevBlock, DevShared, RuntimeControl, ROUTES, WAFER_GUEST_VERSION,
@@ -373,4 +374,25 @@ fn an_exported_bundle_declares_no_surface_it_does_not_route() {
     assert!(!exported.can_disable);
     assert!(!workspace.endpoints.is_empty());
     assert!(!workspace.admin_url.is_empty());
+}
+
+#[tokio::test]
+async fn status_reports_the_template_the_seed_named() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    // `get`, not indexing: an absent field indexes as null too.
+    assert_eq!(
+        dev_status(&ctx).await.get("template"),
+        Some(&serde_json::Value::Null)
+    );
+    seed_info::write(
+        &ctx,
+        &SeedInfo {
+            template: "bootstrap".to_string(),
+            suggested_prompt: String::new(),
+            guide_markdown: String::new(),
+        },
+    )
+    .await
+    .expect("seed info");
+    assert_eq!(dev_status(&ctx).await["template"], "bootstrap");
 }

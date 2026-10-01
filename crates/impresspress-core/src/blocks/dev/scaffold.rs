@@ -34,6 +34,7 @@ use super::{
     },
     files, no_store, no_store_db_error_internal, no_store_error,
     paths::{self, WorkspaceArea, BLOCK_NAME_RULE},
+    repo::seed_info,
     validation, workspace, DevShared, WAFER_GUEST_VERSION,
 };
 use crate::blocks::crud;
@@ -264,11 +265,18 @@ pub async fn handle_create(
     })
 }
 
-/// `GET /b/dev/api/reference` — the authoring guide.
-pub async fn handle_reference(_ctx: &dyn Context) -> OutputStream {
+/// `GET /b/dev/api/reference` — the authoring guides: the Rust one this
+/// crate ships, and the site one the seed carried.
+pub async fn handle_reference(ctx: &dyn Context) -> OutputStream {
+    let seed = match seed_info::read(ctx).await {
+        Ok(seed) => seed,
+        Err(e) => return no_store_db_error_internal(e, "dev reference: seed info read"),
+    };
     no_store().json(&ReferenceResponse {
         wafer_guest_version: WAFER_GUEST_VERSION,
         markdown: reference_markdown(),
+        template: seed.as_ref().map(|seed| seed.template.clone()),
+        site_markdown: seed.map(|seed| seed.guide_markdown),
     })
 }
 

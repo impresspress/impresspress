@@ -10,6 +10,7 @@ use base64ct::{Base64, Encoding};
 use impresspress_core::{
     blocks::dev::{
         blobs, paths,
+        repo::seed_info::{self, SeedInfo},
         scaffold::Template,
         test_support::{dev_post, hello_info, FakeControl},
         workspace, RuntimeControl, WAFER_GUEST_VERSION,
@@ -426,4 +427,51 @@ async fn an_unreported_module_version_is_recorded_as_unknown() {
     .await;
     assert_eq!(body["success"], true, "{body}");
     assert_eq!(control.rebuilds()[0][0].wafer_guest_version, 0);
+}
+
+/// A sandbox seeded from a template serves that template's site guide beside
+/// the Rust one, under its own field, so an agent building a static site
+/// reads the right document first.
+#[tokio::test]
+async fn reference_returns_the_site_guide_the_seed_carried() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    seed_info::write(
+        &ctx,
+        &SeedInfo {
+            template: "bootstrap".to_string(),
+            suggested_prompt: "Build me a shop.".to_string(),
+            guide_markdown: "# Building the site\n\nLink /vendor/bootstrap/bootstrap.min.css.\n"
+                .to_string(),
+        },
+    )
+    .await
+    .expect("seed info");
+    let body = output_json(
+        ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/reference"))
+            .await,
+    )
+    .await;
+    assert_eq!(body["template"], "bootstrap");
+    assert_eq!(
+        body["site_markdown"],
+        "# Building the site\n\nLink /vendor/bootstrap/bootstrap.min.css.\n"
+    );
+    // The Rust guide is untouched by the seed.
+    assert!(body["markdown"].as_str().unwrap().contains("Block::new"));
+}
+
+/// No sandbox block (an instance whose seed was refused, or carried none):
+/// both fields are null and the call still answers.
+#[tokio::test]
+async fn reference_without_a_seed_guide_answers_null_fields() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    let body = output_json(
+        ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/reference"))
+            .await,
+    )
+    .await;
+    // `get`, not indexing: an absent field indexes as null too, and the
+    // contract is that both fields are present and null.
+    assert_eq!(body.get("template"), Some(&serde_json::Value::Null));
+    assert_eq!(body.get("site_markdown"), Some(&serde_json::Value::Null));
 }
