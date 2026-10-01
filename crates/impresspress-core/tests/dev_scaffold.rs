@@ -1,5 +1,5 @@
 //! Scaffolding a block and reading the authoring reference —
-//! `POST /b/dev/api/blocks` and `GET /b/dev/api/reference`.
+//! `POST /b/dev/api/blocks`, `GET /b/dev/api/reference` and `GET /b/dev/api/guest`.
 //!
 //! Gated on `block-dev` for the same reason the other `dev_*.rs` files are:
 //! the block does not exist in a default-feature build, so these tests must
@@ -36,10 +36,10 @@ async fn read_file(ctx: &TestContext, path: &str) -> String {
 // POST /b/dev/api/blocks
 // ---------------------------------------------------------------------------
 
-/// The endpoint writes three files: the crate manifest, the instantiated
-/// template, and the vendored support module verbatim.
+/// The endpoint writes two files, the crate manifest and the instantiated
+/// template, and the manifest depends on the guest SDK crate by path.
 #[tokio::test]
-async fn create_block_writes_the_template_and_the_module() {
+async fn create_block_writes_the_template_as_two_files() {
     let ctx = TestContext::with_dev(FakeControl::new()).await;
     let created = output_json(
         dev_post(
@@ -62,8 +62,7 @@ async fn create_block_writes_the_template_and_the_module() {
         paths,
         vec![
             "blocks/newsletter/Cargo.toml",
-            "blocks/newsletter/src/lib.rs",
-            "blocks/newsletter/src/wafer_guest.rs",
+            "blocks/newsletter/src/lib.rs"
         ]
     );
 
@@ -73,17 +72,18 @@ async fn create_block_writes_the_template_and_the_module() {
         "the template is instantiated with the block name"
     );
     assert!(lib.contains("site__newsletter__subscribers"));
-    assert!(read_file(&ctx, "blocks/newsletter/Cargo.toml")
-        .await
-        .contains(r#"name = "newsletter""#));
-    // The support module is the canonical bytes, not a rendering of them.
-    assert_eq!(
-        read_file(&ctx, "blocks/newsletter/src/wafer_guest.rs").await,
-        Template::WAFER_GUEST
+    // The SDK is not written into the block: the block names it and hands
+    // its entry points to it.
+    assert!(lib.contains("wafer_guest::export!(block, init);"), "{lib}");
+    let cargo = read_file(&ctx, "blocks/newsletter/Cargo.toml").await;
+    assert!(cargo.contains(r#"name = "newsletter""#), "{cargo}");
+    assert!(
+        cargo.contains(r#"wafer_guest = { path = "../../wafer_guest" }"#),
+        "{cargo}"
     );
 
     // A second create over the same directory is a conflict, whichever
-    // template it names — overwriting two of three files would leave a crate
+    // template it names — overwriting the files there would leave a crate
     // that is neither what the author wrote nor what the template is.
     let again = dev_post(
         &ctx,
@@ -178,7 +178,7 @@ async fn an_unknown_template_is_refused() {
 
 /// A create that runs out of quota part-way stores nothing at all.
 ///
-/// The endpoint writes three files, and the quota is a running total: a
+/// The endpoint writes two files, and the quota is a running total: a
 /// workspace with room for the first and not the second used to store the
 /// first blob and then return without saving, so the bytes it had just put in
 /// the store were never charged for. `check_quotas` bounds on `blob_bytes`
@@ -278,12 +278,6 @@ async fn reference_returns_the_authoring_guide() {
     )
     .await;
     assert_eq!(body["wafer_guest_version"], WAFER_GUEST_VERSION);
-    // The module a block built against an older copy writes over its own:
-    // the stale-module diagnostic points here.
-    assert_eq!(
-        body["wafer_guest_module"].as_str(),
-        Some(Template::WAFER_GUEST)
-    );
 
     let markdown = body["markdown"].as_str().expect("markdown");
     for needle in [
@@ -292,7 +286,8 @@ async fn reference_returns_the_authoring_guide() {
         "agent_tool",
         "site__<name>__",
         "wasm32-wasip1",
-        "no dependencies",
+        "no registry access",
+        r#"wafer_guest = { path = "../../wafer_guest" }"#,
     ] {
         assert!(
             markdown.contains(needle),
@@ -306,10 +301,46 @@ async fn reference_returns_the_authoring_guide() {
 }
 
 // ---------------------------------------------------------------------------
+// GET /b/dev/api/guest
+// ---------------------------------------------------------------------------
+
+/// What the page hands the compiler at start-up: the guest crate and a block
+/// to build it with. Crate-relative paths, because that is what the worker
+/// writes and what the export archive lays down.
+#[tokio::test]
+async fn the_guest_endpoint_hands_out_the_crate_and_a_warmup_block() {
+    let ctx = TestContext::with_dev(FakeControl::new()).await;
+    let body = output_json(
+        ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/guest"))
+            .await,
+    )
+    .await;
+    assert_eq!(body["version"], WAFER_GUEST_VERSION);
+    assert_eq!(
+        body["files"]["Cargo.toml"].as_str(),
+        Some(impresspress_core::blocks::dev::scaffold::GUEST_CARGO_TOML)
+    );
+    assert!(body["files"]["src/lib.rs"]
+        .as_str()
+        .expect("lib.rs")
+        .contains("pub const WAFER_GUEST_VERSION"));
+    assert_eq!(body["warmup"]["crate_name"], "hello");
+    let warmup = body["warmup"]["files"].as_object().expect("warmup files");
+    assert_eq!(
+        warmup.keys().collect::<Vec<_>>(),
+        vec!["Cargo.toml", "src/lib.rs"]
+    );
+    assert!(warmup["Cargo.toml"]
+        .as_str()
+        .expect("Cargo.toml")
+        .contains("path = \"../../wafer_guest\""));
+}
+
+// ---------------------------------------------------------------------------
 // The guest-module version gate
 // ---------------------------------------------------------------------------
 
-/// A block compiled against an older `wafer_guest.rs` is refused with a coded
+/// A block compiled against an older guest SDK is refused with a coded
 /// diagnostic, before the module is loaded.
 #[tokio::test]
 async fn staging_with_a_stale_module_version_is_a_diagnostic() {
@@ -333,6 +364,12 @@ async fn staging_with_a_stale_module_version_is_a_diagnostic() {
     .await;
     assert_eq!(body["success"], false);
     assert_eq!(body["diagnostics"][0]["code"], "wafer-guest-version");
+    let message = body["diagnostics"][0]["message"].as_str().expect("message");
+    assert!(message.contains("reload"), "names the remedy: {message}");
+    assert!(
+        !message.contains("wafer_guest_module"),
+        "no retired field: {message}"
+    );
     // Refused before the artifact was executed: nothing was inspected and
     // nothing was activated.
     assert_eq!(control.inspections(), 0);
@@ -366,7 +403,7 @@ async fn staging_records_the_module_version_it_was_built_against() {
     assert_eq!(rebuilt[0][0].wafer_guest_version, WAFER_GUEST_VERSION);
 }
 
-/// A compiler that could not read the file reports nothing, and nothing is
+/// A compiler session with no guest crate reports nothing, and nothing is
 /// checked — the spec records `0`, "unknown".
 #[tokio::test]
 async fn an_unreported_module_version_is_recorded_as_unknown() {

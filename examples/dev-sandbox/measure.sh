@@ -35,7 +35,8 @@
 #   MEASURE_MAX_DEV_DELTA_KIB        default 1536  — dev gzip minus default
 #                                                     gzip, in KiB
 #     (the dev-only bundle carries the workspace page, the compiler adapter,
-#     the vendored wafer_guest.rs + templates + reference; the guard is
+#     the wafer_guest crate's source (embedded once, for /b/dev/api/guest),
+#     the templates and the reference; the guard is
 #     against runaway growth, not this delta — Plan 2 measured +661 KiB
 #     before Plan 3's additions)
 #   MEASURE_MAX_COMPILER_TOTAL_MIB   default 80    — compiler/dist total, MiB

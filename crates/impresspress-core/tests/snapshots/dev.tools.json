@@ -2723,7 +2723,7 @@
             "type": "object"
           },
           "wafer_guest_version": {
-            "description": "`wafer_guest.rs` version the block scaffolder currently writes.",
+            "description": "`WAFER_GUEST_VERSION` of the `wafer_guest` crate this sandbox serves\n(`GET /b/dev/api/guest`) and compiles blocks against.",
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
@@ -3691,7 +3691,7 @@
                       "type": "array"
                     },
                     "wafer_guest_version": {
-                      "description": "`wafer_guest.rs` ABI version the artifact was built against.",
+                      "description": "`WAFER_GUEST_VERSION` of the `wafer_guest` crate the artifact was\nbuilt against; `0` when the compiler did not report one.",
                       "format": "uint32",
                       "minimum": 0,
                       "type": "integer"
@@ -4463,12 +4463,8 @@
             "description": "The authoring guide, as Markdown: the API, the host services, the\nnamespace rules, the limits, the diagnostic codes, and both templates\nin full.",
             "type": "string"
           },
-          "wafer_guest_module": {
-            "description": "The current `src/wafer_guest.rs`, verbatim: what a block built against\nan older copy writes over its own before compiling again.",
-            "type": "string"
-          },
           "wafer_guest_version": {
-            "description": "The `WAFER_GUEST_VERSION` of the support module this reference\ndocuments and `POST /b/dev/api/blocks` writes.",
+            "description": "The `WAFER_GUEST_VERSION` of the guest SDK crate this reference\ndocuments and every scaffolded block depends on.",
             "format": "uint32",
             "minimum": 0,
             "type": "integer"
@@ -4476,8 +4472,7 @@
         },
         "required": [
           "wafer_guest_version",
-          "markdown",
-          "wafer_guest_module"
+          "markdown"
         ],
         "type": "object"
       }

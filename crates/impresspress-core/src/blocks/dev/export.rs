@@ -18,6 +18,9 @@
 //!     seed/blocks/<name>.wasm       each compiled block
 //!     seed/blocks/<name>/**         and its full source, so the export is
 //!                                   editable and re-compilable
+//!     seed/wafer_guest/**           the guest crate every block depends on
+//!                                   by path, present iff there is a block;
+//!                                   not in `seed/manifest.json`
 //!     seed/data.json                the data snapshot
 //! ```
 //!
@@ -51,6 +54,7 @@ use super::{
     artifacts, blobs,
     contracts::{ExportFile, ExportManifest},
     data_snapshot, generation, no_store, no_store_db_error_internal, no_store_error_status, repo,
+    scaffold,
     seed::{self, SeedBlock, SeedManifest},
     workspace,
     zip::ZipWriter,
@@ -340,6 +344,21 @@ async fn assemble(ctx: &dyn Context, shared: &DevShared) -> Result<Assembled, Re
             spec: spec.clone(),
             sources,
         });
+    }
+    // The crate every block depends on, once, beside the blocks. It is not a
+    // seed entry: `SeedManifest` lists what `seed::import` installs — site
+    // files, blocks and the data snapshot — and the crate is none of those,
+    // only an input to rebuilding the blocks' sources. So it is an archive
+    // entry the manifest above never lists. From `seed/blocks/<name>/` the
+    // template's `path = "../../wafer_guest"` resolves here, which is what
+    // makes an exported block buildable on a host toolchain.
+    if !manifest.blocks.is_empty() {
+        for (path, content) in scaffold::guest_files() {
+            seed_entries.push(Entry {
+                path: format!("{}wafer_guest/{path}", archive_seed_prefix()),
+                bytes: content.into_bytes(),
+            });
+        }
     }
 
     let seed_manifest = SeedManifest {

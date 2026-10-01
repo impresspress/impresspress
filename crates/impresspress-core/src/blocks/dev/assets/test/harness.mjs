@@ -39,10 +39,16 @@ const tail = fs.readFileSync(path.join(here, '..', 'dev.js'), 'utf8');
  *   `base64` is how the real endpoint reports a file that is not text, which
  *   is the case `snapshotBlock` has to refuse.
  * @param {Function} [options.compiler]  what the tail's
- *   `new BrowserRustCompiler(manifest)` builds. In the shipped page this
+ *   `new BrowserRustCompiler(manifest, { guest })` builds. In the shipped page this
  *   binding comes from the module import `assets.rs` emits ahead of the IIFE
  *   (`DEV_JS_IMPORTS`); the harness reads the TAIL, which has no import, so it
  *   is supplied here instead.
+ * @param {object|(() => {status?: number, body: object})} [options.guest]
+ *   what `GET /b/dev/api/guest` answers with — a `GuestResponse`
+ *   (`contracts.rs`). The default is a well-formed one at version 1, so a
+ *   test that is not about the guest never has to build one. A function, for
+ *   a test whose subject is a failed fetch: called once per request, it
+ *   returns the status (200 when omitted) and the body to answer with.
  * @param {(request: object) => object} [options.stage]  what
  *   `POST /b/dev/api/builds/stage` answers with, given the decoded request
  *   body — a `StageBuildResponse` (`contracts.rs`).
@@ -85,6 +91,17 @@ export function instantiate({
   compiler = class {
     constructor() {
       throw new Error('this harness instance was not given a compiler');
+    }
+  },
+  guest = {
+    version: 1,
+    files: {
+      'Cargo.toml': '[package]\nname = "wafer_guest"\n',
+      'src/lib.rs': 'pub const WAFER_GUEST_VERSION: u32 = 1;\n'
+    },
+    warmup: {
+      crate_name: 'hello',
+      files: { 'Cargo.toml': '[package]\nname = "hello"\n', 'src/lib.rs': '' }
     }
   },
   // A refusal rather than a throw or a success: an instance that was never
@@ -307,6 +324,13 @@ export function instantiate({
           encoding: file.encoding ?? 'utf8',
           content: file.content
         });
+      }
+      if (url === '/b/dev/api/guest') {
+        if (typeof guest === 'function') {
+          const { status: code = 200, body } = guest();
+          return answer(body, code);
+        }
+        return answer(guest);
       }
       if (url === '/b/dev/api/builds/stage') {
         return answer(stage(JSON.parse(args[1].body)));

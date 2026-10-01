@@ -83,9 +83,10 @@ pub const BLOCK_NAME: &str = "impresspress/dev";
 /// in this module — is what keeps the sandbox admin-only.
 pub const ROUTE_PREFIX: &str = "/b/dev";
 
-/// `wafer_guest.rs` ABI version the block scaffolder currently writes.
-/// Published in the status response so the page can tell whether a block it
-/// compiled earlier was built against a stale guest shim.
+/// ABI version of the guest SDK crate (`crates/wafer-guest`) that scaffolded
+/// blocks depend on. Must equal `wafer_guest::WAFER_GUEST_VERSION`, which the
+/// parity test asserts. Published in the status response so the page can
+/// tell whether a block it compiled earlier was built against an older SDK.
 pub const WAFER_GUEST_VERSION: u32 = 2;
 
 /// In-block dispatch targets, one per declared HTTP endpoint.
@@ -123,6 +124,8 @@ pub enum Route {
     ApiBlockRemove,
     /// `GET /b/dev/api/reference`
     ApiReference,
+    /// `GET /b/dev/api/guest`
+    ApiGuest,
     /// `GET /b/dev/api/tools.json`
     ApiToolsJson,
     /// `GET /b/dev/api/export/manifest`
@@ -235,10 +238,11 @@ pub const ROUTES: &[EndpointRoute<Route>] = &[
     EndpointRoute::admin(HttpMethod::Post, "/b/dev/api/blocks", Route::ApiBlockCreate)
         .summary("Scaffold a new block from a template")
         .description(
-            "Writes blocks/<name>/{Cargo.toml, src/lib.rs, src/wafer_guest.rs}. The \
-             support module is written verbatim — it is the guest ABI and must not be \
-             hand-written or edited. Writing source activates nothing; compile the \
-             block to make it serve.",
+            "Writes blocks/<name>/{Cargo.toml, src/lib.rs}, instantiated from the \
+             template. The manifest depends on the guest SDK crate by path \
+             (`../../wafer_guest`), which the sandbox provides; the block never \
+             contains the SDK. Writing source activates nothing; compile the block to \
+             make it serve.",
         )
         .input(request_schema_of::<contracts::CreateBlockRequest>)
         .output(response_schema_of::<contracts::CreateBlockResponse>),
@@ -253,11 +257,19 @@ pub const ROUTES: &[EndpointRoute<Route>] = &[
     EndpointRoute::admin(HttpMethod::Get, "/b/dev/api/reference", Route::ApiReference)
         .summary("The backend-block authoring reference")
         .description(
-            "The guide for writing a block: the wafer_guest.rs API, the database / \
+            "The guide for writing a block: the wafer_guest crate's API, the database / \
              storage / config services, the namespace and capability rules, the limits, \
              the diagnostic codes, and both templates in full.",
         )
         .output(response_schema_of::<contracts::ReferenceResponse>),
+    EndpointRoute::admin(HttpMethod::Get, "/b/dev/api/guest", Route::ApiGuest)
+        .summary("The guest SDK crate the compiler builds against")
+        .description(
+            "The `wafer_guest` crate every block depends on by path, plus the block the \
+             compiler builds once at session start to warm it. The page fetches this before \
+             starting the toolchain; an agent only needs it to read the SDK's source.",
+        )
+        .output(response_schema_of::<contracts::GuestResponse>),
     // Deliberately carries no `.agent_tool(..)`: this endpoint IS a tool
     // manifest, and a tool that named itself in its own output is exactly
     // the leak `dev_tools_manifest.rs`'s
@@ -653,6 +665,7 @@ impl Block for DevBlock {
             Route::ApiBlockCreate => scaffold::handle_create(ctx, &self.shared, input).await,
             Route::ApiBlockRemove => blocks_api::handle_remove(ctx, &self.shared, &msg).await,
             Route::ApiReference => scaffold::handle_reference(ctx).await,
+            Route::ApiGuest => scaffold::handle_guest(ctx).await,
             Route::ApiToolsJson => tools::handle(ctx).await,
             Route::ApiExportManifest => export::handle_manifest(ctx, &self.shared).await,
             Route::ApiExport => export::handle_export(ctx, &self.shared).await,

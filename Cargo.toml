@@ -10,6 +10,7 @@ members = [
     "crates/impresspress-server",
     "crates/impresspress",
     "crates/impresspress-web",
+    "crates/wafer-guest",
     "examples/minimal-browser",
     "examples/webmcp-demo",
 ]
@@ -29,6 +30,7 @@ default-members = [
     "crates/impresspress-server",
     "crates/impresspress",
     "crates/impresspress-web",
+    "crates/wafer-guest",
     "examples/minimal-browser",
 ]
 

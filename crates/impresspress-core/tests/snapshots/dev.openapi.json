@@ -1,7 +1,7 @@
 {
   "/b/dev/api/blocks": {
     "post": {
-      "description": "Writes blocks/<name>/{Cargo.toml, src/lib.rs, src/wafer_guest.rs}. The support module is written verbatim — it is the guest ABI and must not be hand-written or edited. Writing source activates nothing; compile the block to make it serve.",
+      "description": "Writes blocks/<name>/{Cargo.toml, src/lib.rs}, instantiated from the template. The manifest depends on the guest SDK crate by path (`../../wafer_guest`), which the sandbox provides; the block never contains the SDK. Writing source activates nothing; compile the block to make it serve.",
       "requestBody": {
         "content": {
           "application/json": {
@@ -441,7 +441,7 @@
                 },
                 "wafer_guest_version": {
                   "default": null,
-                  "description": "The `WAFER_GUEST_VERSION` of the `src/wafer_guest.rs` the artifact was\ncompiled against, read out of that file by whoever ran the compile.\n\nA value that is not the sandbox's own is refused with a\n`wafer-guest-version` diagnostic: the vendored module IS the ABI, so a\nblock built against an older copy is talking a contract this runtime\nno longer speaks. Replace the block's `src/wafer_guest.rs` with the\ncurrent module (`GET /b/dev/api/reference`, `wafer_guest_module`) and\ncompile again.\n\nOmit it only if the compiler genuinely could not read the file. It is\nthen recorded as `0` — \"unknown\" — and nothing is checked.",
+                  "description": "The `WAFER_GUEST_VERSION` of the `wafer_guest` crate the compiler\nsession was started with: `version` from `GET /b/dev/api/guest`.\n\nA value that is not the sandbox's own is refused with a\n`wafer-guest-version` diagnostic: the guest crate IS the ABI, so a\nblock built against an older copy is talking a contract this runtime\nno longer speaks. Reload the workspace page (a fresh compiler session\nfetches and builds the current crate) and compile again.\n\nOmit it only if the compiler session has no guest crate. It is then\nrecorded as `0` — \"unknown\" — and nothing is checked.",
                   "format": "uint32",
                   "minimum": 0,
                   "type": [
@@ -1875,7 +1875,7 @@
                               "type": "array"
                             },
                             "wafer_guest_version": {
-                              "description": "`wafer_guest.rs` ABI version the artifact was built against.",
+                              "description": "`WAFER_GUEST_VERSION` of the `wafer_guest` crate the artifact was\nbuilt against; `0` when the compiler did not report one.",
                               "format": "uint32",
                               "minimum": 0,
                               "type": "integer"
@@ -2332,9 +2332,77 @@
       "summary": "Republish an earlier generation"
     }
   },
+  "/b/dev/api/guest": {
+    "get": {
+      "description": "The `wafer_guest` crate every block depends on by path, plus the block the compiler builds once at session start to warm it. The page fetches this before starting the toolchain; an agent only needs it to read the SDK's source.",
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "additionalProperties": false,
+                "description": "Response of `GET /b/dev/api/guest`.\n\nEverything the compiler session needs before the first compile: the\nguest crate a block depends on, and a block to build it with.",
+                "properties": {
+                  "files": {
+                    "additionalProperties": {
+                      "type": "string"
+                    },
+                    "description": "The `wafer_guest` crate, crate-relative: `Cargo.toml`, `src/lib.rs`.",
+                    "type": "object"
+                  },
+                  "version": {
+                    "description": "`WAFER_GUEST_VERSION` of the crate below. A block compiled in a\nsession started from this response reports this number to\n`POST /b/dev/api/builds/stage`.",
+                    "format": "uint32",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "warmup": {
+                    "additionalProperties": false,
+                    "description": "The `hello` template scaffolded as `hello`: what the compiler builds\nonce at start-up so the crate above is compiled before any real block.",
+                    "properties": {
+                      "crate_name": {
+                        "description": "Cargo's package name, which names the artifact and the VFS directory:\nthe crate is built at `blocks/<crate_name>/`, with `blocks/` beside\n`wafer_guest/`, which is the layout its `../../wafer_guest` dependency\nneeds.",
+                        "type": "string"
+                      },
+                      "files": {
+                        "additionalProperties": {
+                          "type": "string"
+                        },
+                        "description": "Crate-relative paths: `Cargo.toml`, `src/lib.rs`.",
+                        "type": "object"
+                      }
+                    },
+                    "required": [
+                      "crate_name",
+                      "files"
+                    ],
+                    "type": "object"
+                  }
+                },
+                "required": [
+                  "version",
+                  "files",
+                  "warmup"
+                ],
+                "title": "GuestResponse",
+                "type": "object"
+              }
+            }
+          },
+          "description": "Successful response"
+        }
+      },
+      "security": [
+        {
+          "bearerAuth": []
+        }
+      ],
+      "summary": "The guest SDK crate the compiler builds against"
+    }
+  },
   "/b/dev/api/reference": {
     "get": {
-      "description": "The guide for writing a block: the wafer_guest.rs API, the database / storage / config services, the namespace and capability rules, the limits, the diagnostic codes, and both templates in full.",
+      "description": "The guide for writing a block: the wafer_guest crate's API, the database / storage / config services, the namespace and capability rules, the limits, the diagnostic codes, and both templates in full.",
       "responses": {
         "200": {
           "content": {
@@ -2347,12 +2415,8 @@
                     "description": "The authoring guide, as Markdown: the API, the host services, the\nnamespace rules, the limits, the diagnostic codes, and both templates\nin full.",
                     "type": "string"
                   },
-                  "wafer_guest_module": {
-                    "description": "The current `src/wafer_guest.rs`, verbatim: what a block built against\nan older copy writes over its own before compiling again.",
-                    "type": "string"
-                  },
                   "wafer_guest_version": {
-                    "description": "The `WAFER_GUEST_VERSION` of the support module this reference\ndocuments and `POST /b/dev/api/blocks` writes.",
+                    "description": "The `WAFER_GUEST_VERSION` of the guest SDK crate this reference\ndocuments and every scaffolded block depends on.",
                     "format": "uint32",
                     "minimum": 0,
                     "type": "integer"
@@ -2360,8 +2424,7 @@
                 },
                 "required": [
                   "wafer_guest_version",
-                  "markdown",
-                  "wafer_guest_module"
+                  "markdown"
                 ],
                 "title": "ReferenceResponse",
                 "type": "object"
@@ -2698,7 +2761,7 @@
                     "type": "object"
                   },
                   "wafer_guest_version": {
-                    "description": "`wafer_guest.rs` version the block scaffolder currently writes.",
+                    "description": "`WAFER_GUEST_VERSION` of the `wafer_guest` crate this sandbox serves\n(`GET /b/dev/api/guest`) and compiles blocks against.",
                     "format": "uint32",
                     "minimum": 0,
                     "type": "integer"

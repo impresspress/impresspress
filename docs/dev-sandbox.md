@@ -86,22 +86,30 @@ interpreter — a normal ImpressPress block, minus everything that needs a
 crate registry:
 
     blocks/<name>/
-      Cargo.toml            crate-type cdylib, opt-level "z", panic = "abort", no dependencies
+      Cargo.toml            crate-type cdylib, opt-level "z", panic = "abort",
+                            one dependency: wafer_guest = { path = "../../wafer_guest" }
       src/lib.rs             your code: declares the block, its endpoints and agent tools
-      src/wafer_guest.rs      vendored support module — ABI plumbing, request/response types,
-                              database/storage/config/log calls, a JSON-schema builder
+
+The SDK is the `wafer_guest` crate — ABI plumbing, request/response types,
+database/storage/config/log calls, a JSON-schema builder, and the `export!`
+macro a block's `lib.rs` calls to wire its `block()` and `init()` to the
+host. It is not part of the block and not a workspace file: the sandbox
+serves it at `GET /b/dev/api/guest`, and the compiler places it at
+`../../wafer_guest` beside the blocks, the one path every block's manifest
+names.
 
 `<name>` matches `^[a-z][a-z0-9-]{1,31}$`; the block is registered as
 `site/<name>` and its routes live under `/b/<name>/`. Only Rust's standard
-library is available — no crates.io dependencies and no procedural macros,
-because the in-browser compiler doesn't do dependency resolution. A block
+library and `wafer_guest` are available — no crates.io dependencies and no
+procedural macros, because the in-browser compiler doesn't do dependency
+resolution. A block
 can read and write its own database tables and its own storage folder, read
 config, and log; it cannot reach the network, and it cannot call another
 block.
 
 ### Starting one
 
-Don't write those three files by hand — `dev_create_block` writes them, from
+Don't write those two files by hand — `dev_create_block` writes them, from
 one of two templates:
 
 - `hello` — one public `GET` and nothing else, the smallest block that
@@ -109,12 +117,10 @@ one of two templates:
 - `table` — a newsletter block: a claimed collection, a table created in
   `init`, a public write endpoint with an agent tool, and two admin reads.
 
-`src/wafer_guest.rs` is written byte for byte from the copy the sandbox
-itself compiles against. It is about 1,500 lines of ABI plumbing that has to
-be an exact copy — an agent asked to reproduce it from the reference would
-get it approximately right, and the failure would surface as a trap inside
-the interpreter rather than as a compile error. The other two files come out
-already carrying the block's name everywhere it has to appear at once: the
+Both come out already carrying what an agent writing them by hand would have
+to get exactly right: the path dependency on `wafer_guest`, the
+`wafer_guest::export!(block, init);` line, and the block's name everywhere
+it has to appear at once: the
 crate name, the block id `site/<name>`, the route prefix `/b/<name>/`, the
 collection prefix `site__<name>__` and the config prefix `SITE__<NAME>__`
 (a hyphen in the name is `_` in those two prefixes, as the runtime spells a
@@ -123,8 +129,8 @@ block's resources: `my-shop` owns `site__my_shop__*` and `SITE__MY_SHOP__*`).
 Scaffolding only stages source, the same as any other write under `blocks/`;
 nothing serves until the block is compiled. If anything already exists under
 `blocks/<name>/` the call is refused rather than overwriting — a directory
-with a stray file in it is a block someone started, and replacing two of its
-three files would leave a crate that is neither.
+with a stray file in it is a block someone started, and writing a template
+over it would leave a crate that is neither.
 
 `dev_read_reference` returns the authoring guide: the block API, the host
 services (database, storage, config, logging), what each refusal diagnostic
@@ -136,13 +142,20 @@ cannot drift from them. Read it before writing Rust.
 
 The Compile button — or the `dev_compile_block` tool — compiles
 `blocks/<name>/` in the browser. The toolchain (about 72 MiB, downloaded
-on first visit) downloads and starts as soon as the workspace has a block —
-on page load, or when the first block is scaffolded — so a compile normally
-does not wait for it; a workspace with no block never loads the compiler. A
-compile takes about 20 seconds for the `hello` template and about 30 for the
-`table` template. A failed compile returns diagnostics (file, line, column,
-message) without touching the live site; a successful one is validated,
-staged and activated automatically, the same as any other change.
+on first visit) downloads and starts in the background as soon as the
+workspace has a block — on page load, or when the first block is
+scaffolded — and a workspace with no block never loads the compiler.
+Starting a session includes building the `wafer_guest` crate once, about
+30 seconds; a compile that arrives before that has finished waits for it.
+After that, each compile rebuilds only the block's own crate and takes a few
+seconds (measured: about 2 seconds for the `hello` template and about 6 for
+`table`). A block from before the SDK was a crate — three files, with its own
+`src/wafer_guest.rs` — still compiles, rebuilding its copy every time, in
+about 20 seconds, and staging still checks it against the guest version its
+own vendored copy states. A failed compile returns diagnostics (file,
+line, column, message) without touching the live site; a successful one is
+validated, staged and activated automatically, the same as any other
+change.
 
 Limits: at most 16 blocks per workspace; one compile at a time, with a
 120-second timeout; a compiled block's artifact must be 4 MiB or smaller; a
@@ -186,6 +199,9 @@ carry, with its size, and how many rows of each data table.) The zip holds:
 - `seed/blocks/<name>.wasm` and `seed/blocks/<name>/src/**` — every backend
   block's compiled artifact *and* its source, so the export stays editable
   and recompilable, not a binary drop;
+- `seed/wafer_guest/**` — the guest SDK crate the blocks depend on by path,
+  whenever there is at least one block, so `cargo build --release --target
+  wasm32-wasip1` inside `seed/blocks/<name>/` works on your own machine;
 - `seed/data.json` — a snapshot of your shop's data;
 - a `README.md` explaining how to serve it and what it contains.
 

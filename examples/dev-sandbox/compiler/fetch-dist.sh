@@ -14,9 +14,10 @@
 #   tag     compiler-<version>
 #   repo    this one
 #
-# `<version>` is `PIN.json`'s `version`, which is rubrc's commit at eight
-# characters — so the asset a tree asks for moves with its pin and can never
-# be a toolchain this checkout did not ask for.
+# `<version>` is `PIN.json`'s `version` — rubrc's commit at eight characters,
+# then a packaging revision (`807ace9e.2`) — so the asset a tree asks for
+# moves with its pin and with every change to the packaging, and can never be
+# a toolchain this checkout did not ask for.
 #
 # What comes down is checked, not trusted: `verify-compiler-assets.mjs` hashes
 # every file against the manifest inside the tar, refuses anything over the
@@ -104,7 +105,7 @@ fi
 
 [ -f "$TARBALL" ] || die "there is no $ASSET on release $TAG of $REPO_SLUG.
 
-  compiler/PIN.json pins rubrc $VERSION, and the optimized toolchain for that
+  compiler/PIN.json pins compiler $VERSION, and the optimized toolchain for that
   pin has not been published. Nothing here can build it: the composition needs
   ~35 minutes and 12.6 GB of RSS. On a machine that has them:
 

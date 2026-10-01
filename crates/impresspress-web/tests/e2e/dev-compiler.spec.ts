@@ -64,10 +64,11 @@ const TEST_WORKER_URL = '/__impresspress_dev/compiler/test/worker.js';
 /**
  * Three manifests, one worker.
  *
- * An `init` message carries nothing but its id, so a fake that has to behave
- * differently DURING start-up can only be told which way through the URL it
- * was started from — and the manifest's `entry` is where the page gets that
- * URL. Hence a manifest per init behaviour rather than a worker per behaviour.
+ * An `init` message carries its id and the guest crate the API served, neither
+ * of which is a switch, so a fake that has to behave differently DURING
+ * start-up can only be told which way through the URL it was started from —
+ * and the manifest's `entry` is where the page gets that URL. Hence a
+ * manifest per init behaviour rather than a worker per behaviour.
  */
 const SILENT_MANIFEST_URL = '/__impresspress_dev/compiler/test/manifest-silent.json';
 const DRIP_MANIFEST_URL = '/__impresspress_dev/compiler/test/manifest-drip.json';
@@ -238,6 +239,73 @@ test('the compiler adapter reports progress, results and diagnostics', async ({ 
   });
 
   expect(result.afterDispose).toContain('disposed');
+});
+
+/**
+ * The guest crate `dev.js` hands the adapter reaches the worker in the
+ * protocol's shape.
+ *
+ * `dev.js` constructs `new BrowserRustCompiler(manifest, { guest })` with
+ * `GET /b/dev/api/guest`'s answer unchanged, so this does the same. The
+ * adapter renames `warmup.crate_name` to `warmup.crateName` on the way into
+ * `postMessage`; a worker handed the API's spelling would build no warm-up
+ * crate at all, and every compile of the session would rebuild the SDK. The
+ * fake keeps the `init` it received on `self.receivedInit`, and Playwright's
+ * handle on the worker reads it back — the one place that message is visible.
+ */
+test('the compiler adapter starts its worker with the guest crate the API serves', async ({
+  page,
+}) => {
+  test.setTimeout(300_000);
+  await loginToWorkspace(page);
+
+  const started = await page.evaluate(async (manifestUrl) => {
+    const modulePath = '/b/dev/static/compiler-adapter.js';
+    const { BrowserRustCompiler } = await import(modulePath);
+    const manifest = await (await fetch(manifestUrl)).json();
+    const guest = await (await fetch('/b/dev/api/guest')).json();
+    const compiler = new BrowserRustCompiler(manifest, { guest });
+    const progress: Array<{ stage: string; detail?: string }> = [];
+    await compiler.initialize((p: any) => progress.push({ stage: p.stage, detail: p.detail }));
+    // Kept alive for the worker read below: `dispose` terminates the worker,
+    // and with it the global that holds the `init`.
+    (window as any).__guestCompiler = compiler;
+    return { guest, progress };
+  }, TEST_MANIFEST_URL);
+
+  const worker = page.workers().find((w) => new URL(w.url()).pathname === TEST_WORKER_URL);
+  expect(worker, page.workers().map((w) => w.url()).join(', ')).toBeTruthy();
+  const received = await worker!.evaluate(() => (self as any).receivedInit);
+
+  // What the API serves: the two files of the SDK crate and a `hello` block
+  // that depends on it, which the worker builds once before `ready`.
+  expect(Object.keys(started.guest.files).sort()).toEqual(['Cargo.toml', 'src/lib.rs']);
+  expect(started.guest.warmup.crate_name).toBe('hello');
+
+  // …and what the worker received: the same files, byte for byte, in the
+  // protocol's shape — `crateName`, not `crate_name`, and no `version` (the
+  // adapter keeps that for the `CompileResult`, not the worker).
+  expect(received.type).toBe('init');
+  expect(received.guest).toEqual({
+    files: started.guest.files,
+    warmup: { crateName: 'hello', files: started.guest.warmup.files },
+  });
+
+  // The warm-up is reported as its own start-up step, so a page showing
+  // progress can say what the first thirty seconds are for.
+  expect(started.progress).toContainEqual({
+    stage: 'initializing',
+    detail: 'building wafer_guest once for this session',
+  });
+
+  // Every build of the session records the guest it was linked against.
+  const built = await page.evaluate(async () => {
+    const compiler = (window as any).__guestCompiler;
+    const result = await compiler.compile({ crateName: 'hello', files: { 'src/lib.rs': '// ok' } });
+    await compiler.dispose();
+    return { success: result.success, guestVersion: result.guestVersion };
+  });
+  expect(built).toEqual({ success: true, guestVersion: started.guest.version });
 });
 
 test('the compiler adapter queues compiles, cancels one, and recovers from a broken worker', async ({

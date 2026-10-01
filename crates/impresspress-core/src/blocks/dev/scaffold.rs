@@ -1,22 +1,21 @@
-//! `POST /b/dev/api/blocks` and `GET /b/dev/api/reference` — starting a block,
-//! and the guide for writing one.
+//! `POST /b/dev/api/blocks`, `GET /b/dev/api/reference` and
+//! `GET /b/dev/api/guest` — starting a block, the guide for writing one, and
+//! the SDK crate it is compiled against.
 //!
 //! # Why a scaffolder and not a documented file list
 //!
-//! A block is three files, and one of them —
-//! [`templates/wafer_guest.rs`](Template::WAFER_GUEST) — is ~1 500 lines of
-//! vendored ABI the author must not write, must not edit, and must have an
-//! exact copy of. An agent told to "create `blocks/x/src/wafer_guest.rs` with
-//! the contents of the reference" would reproduce it approximately, and the
-//! failure would surface as a trap inside wasmi. So the sandbox writes it,
-//! byte for byte, from [`include_str!`].
-//!
-//! The other two files are instantiated from a template: the block's name is
+//! A block is two files, `Cargo.toml` and `src/lib.rs`, and both are
+//! instantiated from a template: the block's name is
 //! its directory, its crate name, its block id (`site/<name>`), its route
 //! prefix (`/b/<name>/`) and its collection prefix (`site__<name>__`, a
 //! hyphen spelled `_`) all at once, and a template that got any one of those
 //! wrong would be refused by validation with a diagnostic the author did not
-//! cause.
+//! cause. The manifest also carries the one dependency a block may have —
+//! the guest SDK crate, by path — and an agent that wrote the manifest by
+//! hand would have to get that path exactly right too.
+//!
+//! The SDK itself is not part of a block: it is the `crates/wafer-guest`
+//! crate, served whole by [`guest_files`] and built once beside the blocks.
 //!
 //! # Why the reference is served rather than shipped as a file
 //!
@@ -30,12 +29,34 @@ use wafer_run::{context::Context, ErrorCode, InputStream, OutputStream};
 
 use super::{
     blobs,
-    contracts::{CreateBlockRequest, CreateBlockResponse, FileConflict, ReferenceResponse},
+    contracts::{
+        CreateBlockRequest, CreateBlockResponse, FileConflict, GuestResponse, ReferenceResponse,
+        WarmupCrate,
+    },
     files, no_store, no_store_db_error_internal, no_store_error,
     paths::{self, WorkspaceArea, BLOCK_NAME_RULE},
     validation, workspace, DevShared, WAFER_GUEST_VERSION,
 };
 use crate::blocks::crud;
+
+/// The guest SDK crate, byte for byte from `crates/wafer-guest`.
+///
+/// One source, three readers: `GET /b/dev/api/guest` hands it to the page
+/// (which hands it to the compiler), the export archive carries it beside
+/// the blocks, and the golden test builds the templates against it. A
+/// scaffolded block never contains it — the block depends on it by path.
+pub const GUEST_CARGO_TOML: &str = include_str!("../../../../wafer-guest/Cargo.toml");
+pub const GUEST_LIB_RS: &str = include_str!("../../../../wafer-guest/src/lib.rs");
+
+/// The crate as the compiler and the archive want it: crate-relative paths.
+pub fn guest_files() -> std::collections::BTreeMap<String, String> {
+    [
+        ("Cargo.toml".to_string(), GUEST_CARGO_TOML.to_string()),
+        ("src/lib.rs".to_string(), GUEST_LIB_RS.to_string()),
+    ]
+    .into_iter()
+    .collect()
+}
 
 /// The two starting points `dev_create_block` offers.
 ///
@@ -53,14 +74,6 @@ pub enum Template {
 }
 
 impl Template {
-    /// The vendored support module, byte for byte.
-    ///
-    /// `include_str!` of the canonical file. The templates' own
-    /// `src/wafer_guest.rs` are symlinks to that same file, so the copy this
-    /// endpoint writes, the copy the golden test compiles, and the copy the
-    /// reference documents cannot be three different things.
-    pub const WAFER_GUEST: &'static str = include_str!("templates/wafer_guest.rs");
-
     /// Parse the wire spelling.
     pub fn parse(value: &str) -> Option<Template> {
         match value {
@@ -107,11 +120,8 @@ impl Template {
         }
     }
 
-    /// The three files a block starts as, workspace-relative, in path order.
-    ///
-    /// `wafer_guest.rs` is written verbatim: nothing in it names the block,
-    /// and rewriting it would break the byte-for-byte identity the version
-    /// check depends on.
+    /// The two files a block starts as, workspace-relative, in path order,
+    /// each instantiated under `name`.
     pub fn files(self, name: &str) -> Vec<(String, String)> {
         vec![
             (
@@ -121,10 +131,6 @@ impl Template {
             (
                 format!("{}{name}/src/lib.rs", workspace::BLOCKS_PREFIX),
                 instantiate(self.lib_rs(), self.identifier(), name),
-            ),
-            (
-                format!("{}{name}/src/wafer_guest.rs", workspace::BLOCKS_PREFIX),
-                Template::WAFER_GUEST.to_string(),
             ),
         ]
     }
@@ -178,7 +184,7 @@ pub fn reference_markdown() -> String {
 // Handlers
 // ---------------------------------------------------------------------------
 
-/// `POST /b/dev/api/blocks` — write a new block's three files.
+/// `POST /b/dev/api/blocks` — write a new block's two files.
 ///
 /// Writes source and nothing else: a block does not serve until it is
 /// compiled and staged, exactly as a hand-written `blocks/` edit does not.
@@ -224,9 +230,9 @@ pub async fn handle_create(
         Err(e) => return no_store_db_error_internal(e, "dev workspace load"),
     };
 
-    // Refuse if ANY path under `blocks/<name>/` is taken, not just the three
+    // Refuse if ANY path under `blocks/<name>/` is taken, not just the two
     // this would write: a directory that holds a stray file is a block the
-    // author started, and overwriting two of its three files would leave a
+    // author started, and overwriting its manifest and root would leave a
     // crate that is neither what they wrote nor what the template is.
     let prefix = format!("{}{}/", workspace::BLOCKS_PREFIX, request.name);
     if let Some(existing) = ws.files.keys().find(|path| path.starts_with(&prefix)) {
@@ -251,16 +257,15 @@ pub async fn handle_create(
     //
     // `planned` is checked against a projection rather than against `ws`, so
     // each file is counted on top of the ones ahead of it in this same
-    // request — including their content, which is what makes two identical
-    // template files cost what the store will actually charge for them.
+    // request — including their content, which is what makes two files with
+    // identical content cost what the store will actually charge for them.
     let mut planned = Vec::with_capacity(files.len());
     let mut projected = ws.clone();
     for (path, content) in &files {
         let bytes = content.as_bytes();
         let sha = blobs::sha256_hex(bytes);
         // What the blob store would grow by. Content some entry already
-        // names is certainly stored, so writing the same `wafer_guest.rs`
-        // into a second block costs nothing — which is the common case.
+        // names is certainly stored, so writing it again costs nothing.
         let new_blob_bytes = if projected.references(&sha) {
             0
         } else {
@@ -328,7 +333,29 @@ pub async fn handle_reference(_ctx: &dyn Context) -> OutputStream {
     no_store().json(&ReferenceResponse {
         wafer_guest_version: WAFER_GUEST_VERSION,
         markdown: reference_markdown(),
-        wafer_guest_module: Template::WAFER_GUEST.to_string(),
+    })
+}
+
+/// `GET /b/dev/api/guest` — the guest crate and a warm-up block.
+pub async fn handle_guest(_ctx: &dyn Context) -> OutputStream {
+    let prefix = format!("{}hello/", workspace::BLOCKS_PREFIX);
+    let files = Template::Hello
+        .files("hello")
+        .into_iter()
+        .map(|(path, content)| {
+            let relative = path
+                .strip_prefix(&prefix)
+                .expect("Template::files writes under blocks/<name>/");
+            (relative.to_string(), content)
+        })
+        .collect();
+    no_store().json(&GuestResponse {
+        version: WAFER_GUEST_VERSION,
+        files: guest_files(),
+        warmup: WarmupCrate {
+            crate_name: "hello".to_string(),
+            files,
+        },
     })
 }
 
@@ -336,25 +363,49 @@ pub async fn handle_reference(_ctx: &dyn Context) -> OutputStream {
 mod tests {
     use super::*;
 
-    /// The three files, in the order the manifest will list them.
+    /// Every template's `Cargo.toml` is the same file but for its package
+    /// name — the profile above all.
+    ///
+    /// cargo builds a dependency under the ROOT package's profile, so the
+    /// `wafer_guest` build in `/target` is only reused by a block whose
+    /// `[profile.release]` matches the one it was built with. The session's
+    /// warm-up builds `hello`; a table-based block whose profile had drifted
+    /// from it would silently pay the ~30 s guest rebuild on every session,
+    /// and nothing but its compile time would say so.
     #[test]
-    fn a_scaffolded_block_is_three_files_under_its_own_directory() {
+    fn every_template_manifest_differs_from_hello_only_in_its_package_name() {
+        let hello: Vec<&str> = Template::Hello.cargo_toml().lines().collect();
+        let table: Vec<&str> = Template::Table.cargo_toml().lines().collect();
+        assert_eq!(
+            hello.len(),
+            table.len(),
+            "the two manifests differ in length"
+        );
+        let differing: Vec<(&str, &str)> = hello
+            .iter()
+            .zip(&table)
+            .filter(|(a, b)| a != b)
+            .map(|(a, b)| (*a, *b))
+            .collect();
+        assert_eq!(
+            differing,
+            vec![(r#"name = "hello""#, r#"name = "newsletter""#)],
+            "the templates may differ only in `[package] name`"
+        );
+    }
+
+    /// The two files, in the order the manifest will list them.
+    #[test]
+    fn a_scaffolded_block_is_two_files_under_its_own_directory() {
         let files = Template::Table.files("newsletter");
         let paths: Vec<&str> = files.iter().map(|(path, _)| path.as_str()).collect();
         assert_eq!(
             paths,
             vec![
                 "blocks/newsletter/Cargo.toml",
-                "blocks/newsletter/src/lib.rs",
-                "blocks/newsletter/src/wafer_guest.rs",
+                "blocks/newsletter/src/lib.rs"
             ]
         );
-        // The support module is written verbatim — a rewritten copy would no
-        // longer be the version its `WAFER_GUEST_VERSION` line claims.
-        assert_eq!(files[2].1, Template::WAFER_GUEST);
-        assert!(files[2]
-            .1
-            .contains(&format!("WAFER_GUEST_VERSION: u32 = {WAFER_GUEST_VERSION}")));
     }
 
     /// Every place the name is load-bearing is rewritten, and nothing else

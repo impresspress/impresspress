@@ -20,9 +20,16 @@
  * What the guest is, is a terminal: rubrc composes rustc, cargo, llvm and a
  * shell into one component, and the only way in is to type at session 0 and
  * read what comes back. So `compile` writes the crate's files through the
- * VFS's write-file event, types a cargo line, waits for the prompt to come
- * back, and asks the shell to `download` the artifact — which is delivered
- * back through the same host bridge as chunks.
+ * VFS's write-file event, cleans that one package out of `/target`, types a
+ * cargo line, waits for the prompt to come back, and asks the shell to
+ * `download` the artifact — which is delivered back through the same host
+ * bridge as chunks.
+ *
+ * The VFS is laid out like an export archive: a block lives at
+ * `/blocks/<crate>/`, the guest SDK it depends on by path at `/wafer_guest/`,
+ * and every build of the session shares one `--target-dir /target`. `init`
+ * builds the guest into `/target` once (the warm-up), so a `compile` rebuilds
+ * only the block.
  */
 
 /// <reference lib="webworker" />
@@ -174,6 +181,19 @@ const writeFile = (path: string, content: string) => {
 };
 
 /**
+ * Write a crate under `root`.
+ *
+ * This only writes: whatever was under `root` before stays unless a file
+ * here replaces it. A compile of a block therefore runs `clearBlock` first,
+ * so the crate on disk is exactly the files this compile was handed.
+ */
+const writeCrate = (root: string, files: Record<string, string>) => {
+  for (const [path, content] of Object.entries(files)) {
+    writeFile(`${root}/${path.replace(/^\/+/, "")}`, content);
+  }
+};
+
+/**
  * Type a line at session 0 and hand back what it printed.
  *
  * The prompt is the only completion signal the shell offers, so the transcript
@@ -189,6 +209,116 @@ const runCommand = async (line: string, timeoutMs: number, what: string): Promis
   // Drop the echoed command line and the prompt that closes the output.
   const body = text.slice(text.indexOf("\n") + 1);
   return body.slice(0, body.lastIndexOf("\n") + 1);
+};
+
+/** The flags every cargo invocation on a block shares. */
+const blockFlags = (crateName: string, target: string, release: boolean) =>
+  `${release ? " --release" : ""} --manifest-path /blocks/${crateName}/Cargo.toml ` +
+  `--target-dir /target --target ${target}`;
+
+/**
+ * Force the block's own package to be rebuilt, and nothing else.
+ *
+ * Cargo decides freshness by comparing source mtimes with the last build's,
+ * and in rubrc's VFS those cannot be trusted: the write-file event does not
+ * move a file's mtime, and the VFS's timestamps are nanosecond-scale
+ * counters rather than times. A crate with no dependencies came back
+ * `Fresh` — the previous module, for code that had just been edited — and
+ * `touch` did not change that (tried 2026-09-30). A block that depends on
+ * `wafer_guest` happens to rebuild every time only because those counters
+ * make cargo think the guest was rebuilt, which is nothing to rely on.
+ * `cargo clean -p <crate>` is cargo's own way to rebuild one package: it
+ * removes that package's artifacts and leaves `/wafer_guest`'s build in
+ * `/target` alone, so the guest is still compiled once per session. The
+ * upstream fix is real file timestamps in rubrc's VFS; with those, this
+ * could go.
+ */
+const cleanBlock = async (crateName: string, target: string, release: boolean) =>
+  runCommand(
+    `cargo clean -p ${crateName}${blockFlags(crateName, target, release)}`,
+    COMPILE_TIMEOUT_MS,
+    `cargo clean -p ${crateName}`,
+  );
+
+const buildCommand = (crateName: string, target: string, release: boolean) =>
+  `cargo build${blockFlags(crateName, target, release)} --message-format=json`;
+
+/** Where cargo leaves a block's module, and what `download` reads. */
+const artifactPath = (crateName: string, target: string, release: boolean) =>
+  `/target/${target}/${release ? "release" : "debug"}/${crateName.replace(/-/g, "_")}.wasm`;
+
+/**
+ * Remove the block's sources from the VFS before writing this compile's.
+ *
+ * `/blocks/<crate>/` outlives a compile, and writing a file does not remove
+ * the ones beside it. A file an earlier compile wrote and this one does not
+ * have would still be on disk — and not harmlessly: an author who deletes
+ * `src/util.rs` but keeps `mod util;` would get a green build from a file the
+ * workspace no longer has, and an export that does not build on a host. So
+ * the crate's `src/` and `Cargo.toml` go first, and rustc sees exactly the
+ * files this compile was handed. `/target` (the guest's build, reused by
+ * every block) and `/wafer_guest` are not touched. `-f` because the first
+ * compile of a block has nothing to remove.
+ */
+const clearBlock = async (crateName: string) =>
+  runCommand(
+    `rm -rf /blocks/${crateName}/src /blocks/${crateName}/Cargo.toml`,
+    COMPILE_TIMEOUT_MS,
+    `rm -rf for ${crateName}'s sources`,
+  );
+
+/**
+ * Remove the block's previous module before building it again.
+ *
+ * `/target` is kept for the whole session, so the last build's module is
+ * still there when the next build starts — and this toolchain's cargo does
+ * not report every failure: `build-finished` says `success: true` after
+ * rustc has failed (rustc's status never reaches cargo), and a build that
+ * dies before cargo emits any JSON can leave no diagnostic at all (a path
+ * dependency that is not there prints neither JSON nor a `-->` span). Either
+ * way the previous module would be downloaded and answered
+ * as this compile's — a green build of code nobody wrote. With it removed,
+ * a build that fails for ANY reason leaves nothing at `artifactPath`, and
+ * `download` finding nothing is answered `success: false`. `cleanBlock`
+ * does not cover this: a manifest cargo cannot resolve fails the clean as
+ * well as the build, and the module stays. This works around rubrc (cargo's
+ * `build-finished` does not reflect a rustc failure); the root-cause fix is
+ * upstream and belongs to the next pin bump. `-f` because the first build
+ * of a block has nothing to remove.
+ */
+const removeArtifact = async (crateName: string, target: string, release: boolean) =>
+  runCommand(
+    `rm -f ${artifactPath(crateName, target, release)}`,
+    COMPILE_TIMEOUT_MS,
+    `rm for ${crateName}`,
+  );
+
+/**
+ * `download` a file out of the VFS and hand back its bytes, if it exists.
+ *
+ * `download` prints "File not found" and streams nothing when the path is
+ * wrong, so the name the bridge reported is checked rather than assumed:
+ * chunks left over from an earlier request must never be served as this
+ * request's artifact.
+ */
+const readArtifact = async (path: string): Promise<{ bytes?: ArrayBuffer; output: string }> => {
+  downloadChunks = [];
+  downloadName = "";
+  const output = await runCommand(`download ${path}`, COMPILE_TIMEOUT_MS, "download");
+  let bytes: ArrayBuffer | undefined;
+  if (downloadChunks.length > 0 && downloadName === path) {
+    const total = downloadChunks.reduce((n, c) => n + c.byteLength, 0);
+    const joined = new Uint8Array(total);
+    let at = 0;
+    for (const chunk of downloadChunks) {
+      joined.set(chunk, at);
+      at += chunk.byteLength;
+    }
+    bytes = joined.buffer;
+  }
+  downloadChunks = [];
+  downloadName = "";
+  return { bytes, output };
 };
 
 // ------------------------------------------------------------ the WASI farm
@@ -228,15 +358,15 @@ const toMap = (entries: [string, Inode][]) => new Map<string, Inode>(entries);
 /**
  * The filesystem the guest starts from.
  *
- * `/sysroot` is filled by `load_sysroot`, and the crate's own files arrive
- * through the write-file event, so this is only the skeleton: an empty cargo
- * config (cargo insists on one) and the two directories the rest hangs off.
+ * `/sysroot` is filled by `load_sysroot`, and the crates arrive through the
+ * write-file event, which creates `/wafer_guest` and `/blocks/<crate>` as it
+ * goes, so this is only the skeleton: an empty cargo config (cargo insists on
+ * one) and the directory the sysroot is loaded into.
  */
 const rootDir = new PreopenDirectory(
   "/",
   toMap([
     ["sysroot", new Directory([])],
-    ["src", new Directory([])],
     [".cargo", new Directory(toMap([["config.toml", new File(new Uint8Array())]]))],
   ]),
 );
@@ -284,8 +414,8 @@ const loadSysrootQueue = async (triple: string) => {
 
 let farm: WASIFarm;
 
-// No registry. A block's `Cargo.toml` has an empty `[dependencies]` table (see
-// the templates), so an outbound request from the toolchain is a block doing
+// No registry. A block's only dependency is the guest SDK, by path (see the
+// templates), so an outbound request from the toolchain is a block doing
 // something it cannot do, not a fetch to proxy: refusing it keeps the sandbox
 // offline by construction rather than by policy. Rubrc's own page points this
 // at a crates.io proxy worker instead.
@@ -497,7 +627,8 @@ const postProgress = (
   post({ type: "progress", id, stage, ...extra });
 };
 
-const init = async (id: string) => {
+const init = async (message: Extract<PageMessage, { type: "init" }>) => {
+  const id = message.id;
   state = "initializing";
   currentId = id;
   postProgress(id, "download", { loaded: 0, total: 0 });
@@ -511,6 +642,40 @@ const init = async (id: string) => {
   await runCommand(`load_sysroot ${SYSROOT_TRIPLE}`, SYSROOT_TIMEOUT_MS, "load_sysroot");
 
   rustcVersion = (await runCommand("rustc --version", SYSROOT_TIMEOUT_MS, "rustc --version")).trim();
+
+  if (message.guest) {
+    postProgress(id, "initializing", { detail: "writing the guest crate" });
+    writeCrate("/wafer_guest", message.guest.files);
+    writeCrate(`/blocks/${message.guest.warmup.crateName}`, message.guest.warmup.files);
+    await cleanBlock(message.guest.warmup.crateName, SYSROOT_TRIPLE, true);
+    await removeArtifact(message.guest.warmup.crateName, SYSROOT_TRIPLE, true);
+    postProgress(id, "initializing", { detail: "building wafer_guest once for this session" });
+    const output = await runCommand(
+      buildCommand(message.guest.warmup.crateName, SYSROOT_TRIPLE, true),
+      COMPILE_TIMEOUT_MS,
+      "the warm-up build",
+    );
+    const { diagnostics, buildFinished, plain } = parseBuild(output);
+    const firstError = diagnostics.find((d) => d.severity === "error");
+    if (buildFinished === false || firstError) {
+      throw new Error(
+        `the guest crate does not build on this toolchain` +
+          (firstError ? `: ${firstError.file}:${firstError.line}: ${firstError.message}` : ""),
+      );
+    }
+    // No error was reported, which on this toolchain does not mean the build
+    // worked (see `removeArtifact`): the warm-up's module has to be there.
+    const warmupPath = artifactPath(message.guest.warmup.crateName, SYSROOT_TRIPLE, true);
+    const { bytes, output: downloadOutput } = await readArtifact(warmupPath);
+    if (!bytes) {
+      throw new Error(
+        `the guest crate does not build on this toolchain: the warm-up left no ${warmupPath} ` +
+          `(\`download\` said: ${downloadOutput.trim() || "nothing"}); cargo said: ` +
+          (plain.join("\n").trim() || "nothing"),
+      );
+    }
+  }
+
   state = "ready";
   post({ type: "ready", id, rustcVersion });
 };
@@ -521,65 +686,45 @@ const compile = async (message: Extract<PageMessage, { type: "compile" }>) => {
   inFlight = message.id;
   currentId = message.id;
   stderrText = "";
-  downloadChunks = [];
-  downloadName = "";
-  /** Shell output that is not the build's own: `cargo clean`, `download`. */
+  /** Shell output that is not the build's own: `cargo clean -p`, `rm`, `download`. */
   let shellLog = "";
+  const builtPath = artifactPath(message.crateName, message.target, message.release);
 
-  for (const [path, content] of Object.entries(message.files)) {
-    writeFile(path.startsWith("/") ? path : `/${path}`, content);
-  }
-
-  // Cargo decides what to rebuild from file mtimes, and the VFS's write-file
-  // event replaces a file's contents without moving its mtime — so a second
-  // compile of an edited crate comes back `"fresh": true` with the FIRST
-  // build's artifact, which is the worst possible failure here: a green build
-  // of code nobody wrote. `cargo clean` is what makes each compile mean what
-  // it says. It costs nothing to speak of: a block has no dependencies (the
-  // toolchain has no registry), so there is no dependency graph to keep warm
-  // — the only thing being rebuilt is the block itself, which has to be
-  // rebuilt anyway.
-  shellLog += await runCommand("cargo clean", COMPILE_TIMEOUT_MS, "cargo clean");
-
-  const profile = message.release ? " --release" : "";
+  shellLog += await clearBlock(message.crateName);
+  writeCrate(`/blocks/${message.crateName}`, message.files);
+  shellLog += await cleanBlock(message.crateName, message.target, message.release);
+  shellLog += await removeArtifact(message.crateName, message.target, message.release);
   const output = await runCommand(
-    `cargo build${profile} --target ${message.target} --message-format=json`,
+    buildCommand(message.crateName, message.target, message.release),
     COMPILE_TIMEOUT_MS,
     "cargo build",
   );
   const { diagnostics, rendered, plain, buildFinished } = parseBuild(output);
   const errored = diagnostics.some((d) => d.severity === "error");
-  const built = buildFinished ?? !errored;
+  // An error diagnostic fails the build whatever cargo concludes, because
+  // cargo's verdict is not reliable here: a syntax error in the block comes
+  // back with rustc's error rendered and then cargo's `Finished` and
+  // `"build-finished", "success": true` (see `removeArtifact`). Removing the
+  // previous module already keeps such a build from being answered with it;
+  // this check is what makes the answer carry rustc's diagnostics rather
+  // than only "artifact missing".
+  const built = buildFinished !== false && !errored;
 
   let artifact: ArrayBuffer | undefined;
   if (built) {
-    const crateFile = `${message.crateName.replace(/-/g, "_")}.wasm`;
-    const artifactPath =
-      `/target/${message.target}/${message.release ? "release" : "debug"}/${crateFile}`;
-    postProgress(message.id, "compiling", { detail: `reading ${artifactPath}` });
-    const downloadOutput = await runCommand(
-      `download ${artifactPath}`,
-      COMPILE_TIMEOUT_MS,
-      "download",
-    );
+    postProgress(message.id, "compiling", { detail: `reading ${builtPath}` });
+    const { bytes, output: downloadOutput } = await readArtifact(builtPath);
     shellLog += downloadOutput;
-    // `download` prints "File not found" and streams nothing when the path is
-    // wrong, so the name the bridge reported is checked rather than assumed:
-    // chunks left over from an earlier request must never be served as this
-    // request's artifact.
-    if (downloadChunks.length > 0 && downloadName === artifactPath) {
-      const total = downloadChunks.reduce((n, c) => n + c.byteLength, 0);
-      const bytes = new Uint8Array(total);
-      let at = 0;
-      for (const chunk of downloadChunks) {
-        bytes.set(chunk, at);
-        at += chunk.byteLength;
-      }
-      artifact = bytes.buffer;
+    if (bytes) {
+      artifact = bytes;
     } else {
-      // cargo said it finished and there is nothing at the path we derived
-      // from `crateName` — most plausibly a `Cargo.toml` whose `[package]
-      // name` was changed, since that is what cargo names the file after.
+      // Nothing reported an error and there is nothing at the path derived
+      // from `crateName`: either the build failed without a diagnostic this
+      // worker can parse (a malformed `Cargo.toml`, an internal compiler
+      // error — `stderr` has cargo's own words; `removeArtifact` is why the
+      // previous module is not here to be mistaken for this one), or a
+      // `Cargo.toml` whose `[package] name` was changed, since that is what
+      // cargo names the file after.
       // Without this the request goes back as `success: false` with an EMPTY
       // diagnostics list: the one answer that tells an agent nothing at all,
       // and the exact shape `compile-timeout` exists to avoid. It is a
@@ -592,24 +737,23 @@ const compile = async (message: Extract<PageMessage, { type: "compile" }>) => {
         severity: "error",
         code: "artifact-missing",
         message:
-          `the build finished but ${artifactPath} could not be read out of the VFS ` +
+          `the build produced no ${builtPath} ` +
           `(\`download\` said: ${downloadOutput.trim() || "nothing"}). ` +
-          "`[package] name` in Cargo.toml must be the block's name — cargo names " +
-          "the artifact after the package.",
+          "Either the build failed without a diagnostic (see stderr for cargo's " +
+          "output), or `[package] name` in Cargo.toml is not the block's name — " +
+          "cargo names the artifact after the package.",
       });
     }
   }
-  downloadChunks = [];
-  downloadName = "";
 
   // How the two text fields are filled, and why they are not fd 1 and fd 2:
   // the guest's streams reach us already merged into one terminal transcript,
   // so the split is by content. `stderr` is what a human would have seen from
   // the build — rustc's own rendering of each diagnostic, then cargo's status
   // output, then anything the guest wrote to fd 2 outside the shell's stream.
-  // `stdout` is the rest of the session: `cargo clean` and `download`. Cargo's
-  // `--message-format=json` protocol lines appear in neither; they are what
-  // `diagnostics` is made of.
+  // `stdout` is the rest of the session: `cargo clean -p`, `rm` and
+  // `download`. Cargo's `--message-format=json` protocol lines appear in
+  // neither; they are what `diagnostics` is made of.
   const humanBuildOutput = [...rendered, plain.join("\n").trim()]
     .filter((part) => part.length > 0)
     .join("\n");
@@ -664,7 +808,7 @@ globalThis.addEventListener("message", (event: MessageEvent) => {
         post({ type: "error", id: message.id, message: `init in state ${state}` });
         return;
       }
-      init(message.id).catch((error) => {
+      init(message).catch((error) => {
         state = "broken";
         post({ type: "error", id: message.id, message: String(error) });
       });

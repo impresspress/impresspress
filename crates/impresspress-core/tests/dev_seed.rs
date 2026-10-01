@@ -781,8 +781,8 @@ async fn a_seeded_build_row_records_the_block_info_the_guest_reported() {
     assert_eq!(control.inspections(), 1);
 }
 
-/// The staging path refuses a module built against a different
-/// `wafer_guest.rs` before it executes it (`blocks_api::handle_stage`), and a
+/// The staging path refuses a module built against a different guest SDK
+/// version before it executes it (`blocks_api::handle_stage`), and a
 /// seed is the other way a module reaches this runtime. The failure the gate
 /// prevents is a trap inside wasmi during the boot activation — the one boot
 /// that can least explain itself — and §10.1 makes exports deliberately
@@ -797,10 +797,12 @@ async fn a_block_built_against_a_different_guest_version_is_refused() {
     let error = seed::import(&ctx, control.as_ref(), &manifest, &bundle())
         .await
         .expect_err("a stale guest module must refuse the import");
-    // The staging path's own diagnostic, code and remedy included.
+    // The staging path's code, with the import's own remedy: there is no
+    // compiler session or workspace page to reload here.
     assert!(error.contains("wafer-guest-version"), "{error}");
     assert!(error.contains("version 99"), "{error}");
     assert!(error.contains("site/hello"), "{error}");
+    assert!(!error.contains("reload"), "{error}");
     // Refused before anything was fetched, let alone stored: the version is
     // knowable from the manifest.
     assert_eq!(control.inspections(), 0);
@@ -811,10 +813,10 @@ async fn a_block_built_against_a_different_guest_version_is_refused() {
         .is_empty());
 }
 
-/// Zero is "no version reported" on both paths — a compiler that could not
-/// read the file records `0`, and so does a bundle exported before the field
-/// existed. Neither is a mismatch, and refusing them would make every such
-/// bundle unimportable.
+/// Zero is "no version reported" on both paths — a compile from a compiler
+/// session with no guest crate records `0`, and an export carries it forward.
+/// It is not a mismatch, and refusing it would make every such bundle
+/// unimportable.
 #[tokio::test]
 async fn a_block_that_reports_no_guest_version_still_imports() {
     let (ctx, control) = fixture().await;

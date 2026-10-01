@@ -1122,6 +1122,30 @@ and read together with this list.
     running the block's real lifecycle rather than reproducing its migrations
     from the boot path under a grant on another block's table.
 
+20. **§4.2 / §6.1 / §6.2 / §8 / amendment 8 — the guest SDK is a crate, built
+    once per session (2026-09-30).** The design is
+    `2026-09-29-dev-block-compile-speed-design.md`; this is what it changes
+    here. §6.1's premise that Rubrc shares code only through in-crate modules
+    was wrong: a path dependency builds and links fine, so the vendored
+    `src/wafer_guest.rs` was a workaround for a constraint that did not
+    exist. The SDK is now `crates/wafer-guest` (package `wafer_guest`, still
+    std-only, `WAFER_GUEST_VERSION` still 2), a block is two files —
+    `Cargo.toml` with `wafer_guest = { path = "../../wafer_guest" }` and a
+    `lib.rs` that calls `wafer_guest::export!(block, init)` for the ABI
+    exports §6.2 lists — and the crate lives beside the blocks, not in the
+    workspace: `GET /b/dev/api/guest` serves it, and an export archive
+    carries it at `seed/wafer_guest/`. §4.2's background prefetch is now real:
+    the page starts the toolchain on load, or when the first block is
+    scaffolded. §8's pipeline gains a session step: the worker is started
+    with the guest crate and a warm-up block, builds the guest once into a
+    target directory every block shares, and forces each block's rebuild
+    with `cargo clean -p <crate>` rather than cleaning the whole target
+    (Rubrc's VFS does not move mtimes, and `touch` was tried and does not
+    work). Amendment 8's version now comes from the guest the page handed
+    the compiler (the API's `version`), not from parsing a file in the
+    workspace, and the `wafer-guest-version` refusal's remedy is to reload
+    the page and compile again.
+
 ## 21. Definition of done
 
 - `browser-devtools` is off by default and absent from a normal bundle; the

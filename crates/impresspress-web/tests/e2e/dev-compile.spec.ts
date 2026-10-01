@@ -246,7 +246,6 @@ test('an agent scaffolds, compiles and uses a Rust block end to end', async ({ p
   expect(created.files.map((f) => f.path)).toEqual([
     `blocks/${BLOCK}/Cargo.toml`,
     `blocks/${BLOCK}/src/lib.rs`,
-    `blocks/${BLOCK}/src/wafer_guest.rs`,
   ]);
   // Source is not a deployment: nothing serves until it is compiled.
   expect((await listSubscribers(page)).status).toBe(404);
@@ -291,14 +290,16 @@ test('an agent scaffolds, compiles and uses a Rust block end to end', async ({ p
 
   // The numbers CI greps into its job summary.
   //
-  // `ready_ms` is toolchain start-up — download included on a cold cache —
-  // measured from just before the scaffold call that starts it to the page's
-  // `compiler: ready` log line. It includes the part of the scaffold that runs
-  // before the warm-up begins, and the log line is polled, so it can read late
-  // by both, never early. `compile_ms` is the worker's own figure for the
-  // build (cargo's clock plus the shell round trip); `artifact_bytes` is the
-  // module the page staged. `first_compile_ms` is the whole first
-  // `dev_compile_block` call against the already started toolchain.
+  // `ready_ms` is start-up — the toolchain (download included on a cold
+  // cache), the `GET /b/dev/api/guest` it is started with and the one-time
+  // build of that guest crate — measured from just before the scaffold call
+  // that starts it to the page's `compiler: ready` log line. It includes the
+  // part of the scaffold that runs before the warm-up begins, and the log line
+  // is polled, so it can read late by both, never early. `compile_ms` is the
+  // worker's own figure for the build (cargo's clock plus the shell round
+  // trip); `artifact_bytes` is the module the page staged. `first_compile_ms`
+  // is the whole first `dev_compile_block` call against the already started
+  // toolchain.
   const probe = await page.evaluate(
     () =>
       (window as unknown as { __devStageProbe: { artifactBytes: number; stages: number } })

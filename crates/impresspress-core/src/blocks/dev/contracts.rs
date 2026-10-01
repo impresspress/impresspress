@@ -35,7 +35,8 @@ pub struct StatusResponse {
     pub activation: Option<ActivationView>,
     /// What the sandbox's content stores hold right now.
     pub storage: StorageUsage,
-    /// `wafer_guest.rs` version the block scaffolder currently writes.
+    /// `WAFER_GUEST_VERSION` of the `wafer_guest` crate this sandbox serves
+    /// (`GET /b/dev/api/guest`) and compiles blocks against.
     pub wafer_guest_version: u32,
     /// Why this instance's seed import was refused, if it was.
     ///
@@ -426,18 +427,17 @@ pub struct StageBuildRequest {
     /// with the build and returned alongside any the validator adds.
     #[serde(default)]
     pub diagnostics: Vec<Diagnostic>,
-    /// The `WAFER_GUEST_VERSION` of the `src/wafer_guest.rs` the artifact was
-    /// compiled against, read out of that file by whoever ran the compile.
+    /// The `WAFER_GUEST_VERSION` of the `wafer_guest` crate the compiler
+    /// session was started with: `version` from `GET /b/dev/api/guest`.
     ///
     /// A value that is not the sandbox's own is refused with a
-    /// `wafer-guest-version` diagnostic: the vendored module IS the ABI, so a
+    /// `wafer-guest-version` diagnostic: the guest crate IS the ABI, so a
     /// block built against an older copy is talking a contract this runtime
-    /// no longer speaks. Replace the block's `src/wafer_guest.rs` with the
-    /// current module (`GET /b/dev/api/reference`, `wafer_guest_module`) and
-    /// compile again.
+    /// no longer speaks. Reload the workspace page (a fresh compiler session
+    /// fetches and builds the current crate) and compile again.
     ///
-    /// Omit it only if the compiler genuinely could not read the file. It is
-    /// then recorded as `0` — "unknown" — and nothing is checked.
+    /// Omit it only if the compiler session has no guest crate. It is then
+    /// recorded as `0` — "unknown" — and nothing is checked.
     #[serde(default)]
     pub wafer_guest_version: Option<u32>,
 }
@@ -519,16 +519,44 @@ pub struct CreateBlockResponse {
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct ReferenceResponse {
-    /// The `WAFER_GUEST_VERSION` of the support module this reference
-    /// documents and `POST /b/dev/api/blocks` writes.
+    /// The `WAFER_GUEST_VERSION` of the guest SDK crate this reference
+    /// documents and every scaffolded block depends on.
     pub wafer_guest_version: u32,
     /// The authoring guide, as Markdown: the API, the host services, the
     /// namespace rules, the limits, the diagnostic codes, and both templates
     /// in full.
     pub markdown: String,
-    /// The current `src/wafer_guest.rs`, verbatim: what a block built against
-    /// an older copy writes over its own before compiling again.
-    pub wafer_guest_module: String,
+}
+
+/// Response of `GET /b/dev/api/guest`.
+///
+/// Everything the compiler session needs before the first compile: the
+/// guest crate a block depends on, and a block to build it with.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct GuestResponse {
+    /// `WAFER_GUEST_VERSION` of the crate below. A block compiled in a
+    /// session started from this response reports this number to
+    /// `POST /b/dev/api/builds/stage`.
+    pub version: u32,
+    /// The `wafer_guest` crate, crate-relative: `Cargo.toml`, `src/lib.rs`.
+    pub files: std::collections::BTreeMap<String, String>,
+    /// The `hello` template scaffolded as `hello`: what the compiler builds
+    /// once at start-up so the crate above is compiled before any real block.
+    pub warmup: WarmupCrate,
+}
+
+/// A block crate the compiler builds to warm its target directory.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+#[serde(deny_unknown_fields)]
+pub struct WarmupCrate {
+    /// Cargo's package name, which names the artifact and the VFS directory:
+    /// the crate is built at `blocks/<crate_name>/`, with `blocks/` beside
+    /// `wafer_guest/`, which is the layout its `../../wafer_guest` dependency
+    /// needs.
+    pub crate_name: String,
+    /// Crate-relative paths: `Cargo.toml`, `src/lib.rs`.
+    pub files: std::collections::BTreeMap<String, String>,
 }
 
 /// One entry of the export bundle: where it lands in the zip, and how big it

@@ -11,9 +11,13 @@
 
 <h1>dev-sandbox compiler probe</h1>
 <p>
-  Compiles the <code>hello</code> block template with the packaged Rubrc
-  toolchain, then compiles a deliberately broken copy of it. Results are also
-  left on <code>window.__PROBE__</code> for
+  Starts the packaged Rubrc toolchain with the guest SDK crate, which it builds
+  once, then compiles the <code>hello</code> and <code>table</code> block
+  templates against that build, a self-contained block in the shape blocks had
+  before the guest was a crate, a deliberately broken copy of
+  <code>hello</code>, and a copy that names a module whose file an earlier
+  compile had and this one does not; then checks that a guest which does not build fails
+  <code>init</code>. Results are also left on <code>window.__PROBE__</code> for
   <code>scripts/run-probe.mjs</code>.
 </p>
 <div id="log"></div>
@@ -87,6 +91,12 @@
     }
   };
 
+  // The first compile after the warm-up rebuilds only the block. Measured at
+  // 2.3 s on a 24-core box; the old path, which rebuilt the guest inside every
+  // block, took ~20 s. The bound sits between the two so a regression to the
+  // old path fails here rather than only reading slower.
+  const HELLO_COMPILE_BUDGET_MS = 15000;
+
   const talk = (worker) => {
     const pending = new Map();
     const progress = [];
@@ -132,6 +142,56 @@
     step(true, `manifest ${manifest.version}: ${manifest.assets.length} files, ${(manifest.total_bytes / 1024 / 1024).toFixed(1)} MiB`);
     show();
 
+    /**
+     * Compile `crate` on `channel`, record it under `key`, and check the
+     * artifact is a block: it instantiates and exports the whole wafer ABI.
+     */
+    const compileBlock = async (channel, key, crate, label) => {
+      const started = performance.now();
+      const answer = await channel.send({
+        type: "compile",
+        id: `compile-${key}`,
+        crateName: crate.crateName,
+        files: crate.files,
+        target: "wasm32-wasip1",
+        release: true,
+      });
+      const ms = Math.round(performance.now() - started);
+      results.measurements[key] = {
+        compile_ms: ms,
+        success: answer.success,
+        elapsedMs: answer.elapsedMs,
+        artifact_bytes: answer.artifact?.byteLength ?? 0,
+        diagnostics: answer.diagnostics,
+        stdout_tail: (answer.stdout ?? "").slice(-2000),
+        stderr_tail: (answer.stderr ?? "").slice(-2000),
+      };
+      step(answer.success, `${label} compiled in ${ms} ms, artifact ${answer.artifact?.byteLength ?? 0} bytes`);
+      if (answer.artifact) {
+        try {
+          const exports = await instantiates(answer.artifact);
+          const missing = REQUIRED_EXPORTS.filter((name) => !exports.includes(name));
+          results.measurements[key].instantiate = { ok: missing.length === 0, exports, missing };
+          step(
+            missing.length === 0,
+            missing.length === 0
+              ? `${label} instantiates and exports the wafer ABI (${REQUIRED_EXPORTS.length}/${REQUIRED_EXPORTS.length})`
+              : `${label} is missing wafer ABI exports: ${missing.join(", ")}`,
+          );
+        } catch (error) {
+          results.measurements[key].instantiate = { ok: false, error: String(error) };
+          step(false, `${label} does not instantiate: ${error}`);
+        }
+      }
+      show();
+      return { answer, ms };
+    };
+
+    const fetchJson = async (url) => (await fetch(url)).json();
+    const guest = await fetchJson("./guest.json");
+    results.measurements.guest_version = guest.version;
+    const initGuest = { files: guest.files, warmup: { crateName: guest.warmup.crateName, files: guest.warmup.files } };
+
     const worker = new Worker(`./${manifest.version}/worker.js`, { type: "module" });
     worker.addEventListener("error", (event) => {
       step(false, `worker error: ${event.message}`);
@@ -139,59 +199,34 @@
     });
     const channel = talk(worker);
 
+    // `ready` now includes the warm-up: the guest is built into `/target`
+    // before the worker says it is ready.
     const initStarted = performance.now();
-    const ready = await channel.send({ type: "init", id: "init-1" });
+    const ready = await channel.send({ type: "init", id: "init-1", guest: initGuest });
     results.measurements.ready_ms = Math.round(performance.now() - initStarted);
     results.measurements.ready = ready;
     results.measurements.download_progress = channel.progress
       .filter((p) => p.stage === "download")
       .slice(-1)[0] ?? null;
-    step(ready.type === "ready", `ready in ${results.measurements.ready_ms} ms: ${ready.rustcVersion ?? ready.message}`);
+    results.measurements.init_steps = channel.progress
+      .filter((p) => p.stage === "initializing")
+      .map((p) => p.detail);
+    step(
+      ready.type === "ready",
+      `ready (with the guest warm-up) in ${results.measurements.ready_ms} ms: ${ready.rustcVersion ?? ready.message}`,
+    );
     show();
 
-    const template = await (await fetch("./template/hello.json")).json();
-
-    const compileStarted = performance.now();
-    const good = await channel.send({
-      type: "compile",
-      id: "compile-1",
-      crateName: template.crateName,
-      files: template.files,
-      target: "wasm32-wasip1",
-      release: true,
-    });
-    results.measurements.compile_ms = Math.round(performance.now() - compileStarted);
-    results.measurements.compile = {
-      success: good.success,
-      elapsedMs: good.elapsedMs,
-      artifact_bytes: good.artifact?.byteLength ?? 0,
-      diagnostics: good.diagnostics,
-      stdout_tail: (good.stdout ?? "").slice(-2000),
-      stderr_tail: (good.stderr ?? "").slice(-2000),
-    };
-    step(good.success, `compiled in ${results.measurements.compile_ms} ms, artifact ${good.artifact?.byteLength ?? 0} bytes`);
-    show();
-
-    if (good.artifact) {
-      try {
-        const exports = await instantiates(good.artifact);
-        const missing = REQUIRED_EXPORTS.filter((name) => !exports.includes(name));
-        results.measurements.instantiate = { ok: missing.length === 0, exports, missing };
-        step(
-          missing.length === 0,
-          missing.length === 0
-            ? `artifact instantiates and exports the wafer ABI (${REQUIRED_EXPORTS.length}/${REQUIRED_EXPORTS.length})`
-            : `artifact is missing wafer ABI exports: ${missing.join(", ")}`,
-        );
-      } catch (error) {
-        results.measurements.instantiate = { ok: false, error: String(error) };
-        step(false, `artifact does not instantiate: ${error}`);
-      }
-    }
+    const hello = await fetchJson("./template/hello.json");
+    const helloCompile = await compileBlock(channel, "hello", hello, "hello");
+    step(
+      helloCompile.answer.success && helloCompile.ms < HELLO_COMPILE_BUDGET_MS,
+      `hello rebuilt only the block: ${helloCompile.ms} ms < ${HELLO_COMPILE_BUDGET_MS} ms`,
+    );
     show();
 
     // A cancel with nothing in flight must be refused, not obeyed: it used to
-    // brick the worker. The error build that follows is the proof that it did
+    // brick the worker. The compile that follows is the proof that it did
     // not — a broken worker answers `error` there instead of compiling.
     const strayCancel = await channel.send({ type: "cancel", id: "cancel-nothing" });
     results.measurements.stray_cancel = strayCancel;
@@ -201,10 +236,36 @@
     );
     show();
 
-    // The same crate with a statement that is missing its semicolon.
+    // Two edits of `src/lib.rs` alone, each right after a build of the same
+    // crate with the same `Cargo.toml`: the edited greeting must come back as
+    // a different module, and the syntax error must reach rustc. This is the
+    // real case — a block that depends on `wafer_guest` — and it is asserted
+    // for that reason, but it is not what proves freshness: on this pin cargo
+    // marks such a block dirty on every build anyway ("the dependency
+    // `wafer_guest` was rebuilt", from the VFS's counter timestamps). The
+    // dependency-free crate further down is the step that proves it.
+    const GREETING = "Hello from site/hello — a block compiled in your browser.";
+    if (!hello.files["src/lib.rs"].includes(GREETING)) throw new Error("hello's greeting moved; update the probe");
+    const edited = {
+      ...hello,
+      files: { ...hello.files, "src/lib.rs": hello.files["src/lib.rs"].replace(GREETING, "Hello, edited by the probe.") },
+    };
+    const editedCompile = await compileBlock(channel, "hello_edited", edited, "hello with its greeting edited");
+    const before = new Uint8Array(helloCompile.answer.artifact ?? new ArrayBuffer(0));
+    const after = new Uint8Array(editedCompile.answer.artifact ?? new ArrayBuffer(0));
+    const differs = after.length > 0 && (before.length !== after.length || before.some((byte, i) => byte !== after[i]));
+    step(
+      editedCompile.answer.success && differs,
+      `edited greeting rebuilt the module: ${before.length} -> ${after.length} bytes, contents ${differs ? "differ" : "IDENTICAL"}`,
+    );
+    show();
+
+    // The same crate with a statement that is missing its semicolon. rustc
+    // has to see it: the diagnostic must be rustc's, in `src/lib.rs`, not an
+    // `artifact-missing` from a cargo that skipped the build.
     const brokenFiles = {
-      ...template.files,
-      "src/lib.rs": `${template.files["src/lib.rs"]}
+      ...edited.files,
+      "src/lib.rs": `${edited.files["src/lib.rs"]}
 fn probe_deliberate_error() -> i32 {
     let value = 1
     value
@@ -214,8 +275,8 @@ fn probe_deliberate_error() -> i32 {
     const errorStarted = performance.now();
     const bad = await channel.send({
       type: "compile",
-      id: "compile-2",
-      crateName: template.crateName,
+      id: "compile-error",
+      crateName: hello.crateName,
       files: brokenFiles,
       target: "wasm32-wasip1",
       release: true,
@@ -223,6 +284,7 @@ fn probe_deliberate_error() -> i32 {
     results.measurements.error_compile_ms = Math.round(performance.now() - errorStarted);
     results.measurements.error_compile = {
       success: bad.success,
+      artifact_bytes: bad.artifact?.byteLength ?? null,
       diagnostics: bad.diagnostics,
       stdout_tail: (bad.stdout ?? "").slice(-2000),
       // rustc's own rendering of the failure: this is what `stderr` is for,
@@ -231,20 +293,218 @@ fn probe_deliberate_error() -> i32 {
     };
     const diagnostic = (bad.diagnostics ?? []).find((d) => d.severity === "error");
     step(
-      !bad.success && !!diagnostic && diagnostic.file.includes("lib.rs") && diagnostic.line > 0,
-      `error build: success=${bad.success}, first diagnostic=${JSON.stringify(diagnostic ?? null)}`,
+      !bad.success && bad.artifact === undefined && diagnostic?.file === "src/lib.rs" && diagnostic.line > 0,
+      `error build: success=${bad.success}, artifact=${bad.artifact?.byteLength ?? "none"}, first diagnostic=${JSON.stringify(diagnostic ?? null)}`,
     );
     show();
 
-    // A second worker in the same page: the component is in IndexedDB now, so
-    // this is the warm start every visit after the first one gets.
+    // Freshness. A crate with no dependencies, built, then rebuilt with only
+    // `src/lib.rs` changed: nothing but the source's mtime could tell cargo it
+    // changed, and in this VFS the mtime does not move. Without the worker's
+    // `cargo clean -p` cargo calls the edit `Fresh` and the module still
+    // answers the old value.
+    const freshCrate = (value) => ({
+      crateName: "probe_fresh",
+      files: {
+        "Cargo.toml":
+          '[package]\nname = "probe_fresh"\nversion = "0.1.0"\nedition = "2021"\n\n' +
+          '[lib]\ncrate-type = ["cdylib"]\n\n[dependencies]\n\n' +
+          '[profile.release]\nopt-level = "z"\npanic = "abort"\nstrip = true\n',
+        "src/lib.rs": `#[no_mangle]\npub extern "C" fn probe_value() -> i32 {\n    ${value}\n}\n`,
+      },
+    });
+    /** Build `probe_fresh` answering `value`, and call what came back. */
+    const freshValue = async (key, value) => {
+      const started = performance.now();
+      const answer = await channel.send({
+        type: "compile",
+        id: `compile-${key}`,
+        ...freshCrate(value),
+        target: "wasm32-wasip1",
+        release: true,
+      });
+      let got = null;
+      if (answer.artifact) {
+        const module = await WebAssembly.compile(answer.artifact);
+        const imports = {};
+        for (const { module: namespace, name, kind } of WebAssembly.Module.imports(module)) {
+          imports[namespace] ??= {};
+          if (kind === "function") imports[namespace][name] = () => 0;
+        }
+        got = (await WebAssembly.instantiate(module, imports)).exports.probe_value();
+      }
+      results.measurements[key] = {
+        compile_ms: Math.round(performance.now() - started),
+        success: answer.success,
+        value: got,
+        diagnostics: answer.diagnostics,
+        stderr_tail: (answer.stderr ?? "").slice(-2000),
+      };
+      return { answer, got };
+    };
+    const firstFresh = await freshValue("fresh_first", 1);
+    step(firstFresh.answer.success && firstFresh.got === 1, `dependency-free crate built: probe_value() = ${firstFresh.got}`);
+    const secondFresh = await freshValue("fresh_edited", 2);
+    step(
+      secondFresh.answer.success && secondFresh.got === 2,
+      `only src/lib.rs edited, crate rebuilt: probe_value() = ${secondFresh.got} (expected 2)`,
+    );
+    show();
+
+    // A source file the block no longer has. `hello` with a second module,
+    // then the same `lib.rs` — `mod extra;` still in it — without that file.
+    // The second build must fail in rustc: if the first build's
+    // `src/extra.rs` were still in the VFS, it would compile from a file the
+    // workspace no longer has. This is the step that fails if the worker
+    // stops clearing the block's sources before writing a compile's.
+    const withExtraModule = {
+      ...hello,
+      files: {
+        ...hello.files,
+        "src/lib.rs": `${hello.files["src/lib.rs"]}\nmod extra;\n`,
+        "src/extra.rs": "pub fn probe_extra() -> i32 {\n    1\n}\n",
+      },
+    };
+    await compileBlock(channel, "hello_extra", withExtraModule, "hello with src/extra.rs and `mod extra;`");
+    const { "src/extra.rs": _removed, ...withoutExtraFile } = withExtraModule.files;
+    const orphanStarted = performance.now();
+    const orphan = await channel.send({
+      type: "compile",
+      id: "compile-orphan-module",
+      crateName: hello.crateName,
+      files: withoutExtraFile,
+      target: "wasm32-wasip1",
+      release: true,
+    });
+    results.measurements.orphan_module = {
+      compile_ms: Math.round(performance.now() - orphanStarted),
+      success: orphan.success,
+      artifact_bytes: orphan.artifact?.byteLength ?? null,
+      diagnostics: orphan.diagnostics,
+      stdout_tail: (orphan.stdout ?? "").slice(-2000),
+      stderr_tail: (orphan.stderr ?? "").slice(-2000),
+    };
+    const orphanDiagnostic = (orphan.diagnostics ?? []).find((d) => d.severity === "error");
+    step(
+      !orphan.success &&
+        orphan.artifact === undefined &&
+        /file not found for module `extra`/.test(orphanDiagnostic?.message ?? ""),
+      `src/extra.rs removed, \`mod extra;\` kept: success=${orphan.success}, ` +
+        `artifact=${orphan.artifact?.byteLength ?? "none"}, first diagnostic=${JSON.stringify(orphanDiagnostic ?? null)}`,
+    );
+    show();
+
+    // Two builds that fail before rustc runs, each right after a good build
+    // of the same crate, so `hello.wasm` is still in `/target` — and this
+    // toolchain's cargo does not report every failure, so these are the
+    // cases where the previous module could be answered as this compile's.
+    // Neither may be.
+    const failsWithoutRustc = async (key, label, cargoToml) => {
+      const started = performance.now();
+      const answer = await channel.send({
+        type: "compile",
+        id: `compile-${key}`,
+        crateName: hello.crateName,
+        files: { ...hello.files, "Cargo.toml": cargoToml },
+        target: "wasm32-wasip1",
+        release: true,
+      });
+      results.measurements[key] = {
+        compile_ms: Math.round(performance.now() - started),
+        success: answer.success,
+        artifact_bytes: answer.artifact?.byteLength ?? null,
+        diagnostics: answer.diagnostics,
+        stdout_tail: (answer.stdout ?? "").slice(-2000),
+        stderr_tail: (answer.stderr ?? "").slice(-2000),
+      };
+      step(
+        answer.success === false && answer.artifact === undefined,
+        `${label}: success=${answer.success}, artifact=${answer.artifact?.byteLength ?? "none"}, ` +
+          `first diagnostic=${JSON.stringify((answer.diagnostics ?? [])[0] ?? null)}`,
+      );
+      show();
+    };
+
+    // Truncated: cargo prints a `-->` span, which the worker parses into an
+    // error diagnostic.
+    await compileBlock(channel, "hello_again", hello, "hello (again, to leave hello.wasm in /target)");
+    await failsWithoutRustc("malformed_manifest", "malformed Cargo.toml", '[package\nname = "hello"\n');
+
+    // A path dependency that is not there: cargo fails with no JSON and no
+    // `-->` span, so no diagnostic is parsed and nothing but the missing
+    // module says the build failed. This is the step that fails if the
+    // worker stops removing the previous module before a build.
+    const missingDependency = hello.files["Cargo.toml"].replace("../../wafer_guest", "../../no_such_crate");
+    if (missingDependency === hello.files["Cargo.toml"]) throw new Error("hello's Cargo.toml no longer names ../../wafer_guest");
+    await compileBlock(channel, "hello_third", hello, "hello (a third time, to leave hello.wasm in /target)");
+    await failsWithoutRustc("missing_dependency", "Cargo.toml with a missing path dependency", missingDependency);
+
+    // The scaffolded `table` template (package `newsletter`), with its real
+    // profile: the heaviest template a user starts from.
+    await compileBlock(channel, "newsletter", await fetchJson("./template/table.json"), "newsletter (table template)");
+
+    // A block from before the guest was a crate: self-contained, no
+    // dependencies, the SDK a module inside it. A seed archive exported then
+    // still has to build — it just builds the SDK itself, every time.
+    await compileBlock(channel, "legacy_hello", await fetchJson("./template/legacy-hello.json"), "legacy self-contained hello");
     worker.terminate();
+
+    // A guest that does not build must fail `init`, not produce a worker that
+    // says `ready` and then fails every compile with an error in a file the
+    // user never wrote.
+    const brokenGuestWorker = new Worker(`./${manifest.version}/worker.js`, { type: "module" });
+    const brokenGuestChannel = talk(brokenGuestWorker);
+    const brokenGuestStarted = performance.now();
+    const brokenGuest = await brokenGuestChannel.send({
+      type: "init",
+      id: "init-broken-guest",
+      guest: { ...initGuest, files: { ...initGuest.files, "src/lib.rs": "fn { broken" } },
+    });
+    results.measurements.broken_guest_ms = Math.round(performance.now() - brokenGuestStarted);
+    results.measurements.broken_guest = brokenGuest;
+    step(
+      brokenGuest.type === "error" && /guest crate does not build/.test(brokenGuest.message ?? ""),
+      `init with a broken guest: ${brokenGuest.type} ${brokenGuest.message ?? ""}`,
+    );
+    brokenGuestWorker.terminate();
+    show();
+
+    // The same, for a guest that fails with no diagnostic at all (a path
+    // dependency that is not there): no error is reported, so only the
+    // missing warm-up module can say the build failed.
+    const guestCargo = initGuest.files["Cargo.toml"];
+    const guestCargoMissingDependency = guestCargo.replace(
+      "[dependencies]",
+      '[dependencies]\nno_such_crate = { path = "../no_such_crate" }',
+    );
+    if (guestCargoMissingDependency === guestCargo) throw new Error("the guest's Cargo.toml has no [dependencies] table");
+    const silentGuestWorker = new Worker(`./${manifest.version}/worker.js`, { type: "module" });
+    const silentGuestChannel = talk(silentGuestWorker);
+    const silentGuest = await silentGuestChannel.send({
+      type: "init",
+      id: "init-silent-broken-guest",
+      guest: { ...initGuest, files: { ...initGuest.files, "Cargo.toml": guestCargoMissingDependency } },
+    });
+    results.measurements.silent_broken_guest = silentGuest;
+    step(
+      silentGuest.type === "error" && /guest crate does not build/.test(silentGuest.message ?? ""),
+      `init with a guest that fails without a diagnostic: ${silentGuest.type} ${(silentGuest.message ?? "").slice(0, 300)}`,
+    );
+    silentGuestWorker.terminate();
+    show();
+
+    // Another worker in the same page: the component is in IndexedDB now, so
+    // this is the warm start every visit after the first one gets — warm-up
+    // build included, because the page always sends the guest.
     const warmWorker = new Worker(`./${manifest.version}/worker.js`, { type: "module" });
     const warmChannel = talk(warmWorker);
     const warmStarted = performance.now();
-    const warmReady = await warmChannel.send({ type: "init", id: "init-2" });
+    const warmReady = await warmChannel.send({ type: "init", id: "init-warm", guest: initGuest });
     results.measurements.warm_ready_ms = Math.round(performance.now() - warmStarted);
-    step(warmReady.type === "ready", `warm ready in ${results.measurements.warm_ready_ms} ms (IndexedDB cache)`);
+    step(
+      warmReady.type === "ready",
+      `warm ready in ${results.measurements.warm_ready_ms} ms (IndexedDB cache, with the guest warm-up)`,
+    );
     warmWorker.terminate();
 
     results.done = true;

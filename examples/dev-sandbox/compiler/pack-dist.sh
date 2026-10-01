@@ -65,7 +65,7 @@ Publish it with:
 
   gh release create $TAG '$TARBALL' \\
     --title 'Compiler dist $VERSION' \\
-    --notes 'Packaged Rubrc toolchain for compiler/PIN.json version $VERSION (rubrc $VERSION), built by build-compiler.sh without --fast. Fetched by examples/dev-sandbox/compiler/fetch-dist.sh; nothing else consumes this release.'
+    --notes 'Packaged Rubrc toolchain for compiler/PIN.json version $VERSION, built by build-compiler.sh without --fast. Fetched by examples/dev-sandbox/compiler/fetch-dist.sh; nothing else consumes this release.'
 
 An existing release for this pin takes an upload instead:
 

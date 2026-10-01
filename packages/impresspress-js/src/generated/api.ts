@@ -1614,7 +1614,7 @@ export interface paths {
         put?: never;
         /**
          * Scaffold a new block from a template
-         * @description Writes blocks/<name>/{Cargo.toml, src/lib.rs, src/wafer_guest.rs}. The support module is written verbatim — it is the guest ABI and must not be hand-written or edited. Writing source activates nothing; compile the block to make it serve.
+         * @description Writes blocks/<name>/{Cargo.toml, src/lib.rs}, instantiated from the template. The manifest depends on the guest SDK crate by path (`../../wafer_guest`), which the sandbox provides; the block never contains the SDK. Writing source activates nothing; compile the block to make it serve.
          */
         post: {
             parameters: {
@@ -1850,18 +1850,17 @@ export interface paths {
                         source_manifest_sha256?: string | null;
                         /**
                          * Format: uint32
-                         * @description The `WAFER_GUEST_VERSION` of the `src/wafer_guest.rs` the artifact was
-                         *     compiled against, read out of that file by whoever ran the compile.
+                         * @description The `WAFER_GUEST_VERSION` of the `wafer_guest` crate the compiler
+                         *     session was started with: `version` from `GET /b/dev/api/guest`.
                          *
                          *     A value that is not the sandbox's own is refused with a
-                         *     `wafer-guest-version` diagnostic: the vendored module IS the ABI, so a
+                         *     `wafer-guest-version` diagnostic: the guest crate IS the ABI, so a
                          *     block built against an older copy is talking a contract this runtime
-                         *     no longer speaks. Replace the block's `src/wafer_guest.rs` with the
-                         *     current module (`GET /b/dev/api/reference`, `wafer_guest_module`) and
-                         *     compile again.
+                         *     no longer speaks. Reload the workspace page (a fresh compiler session
+                         *     fetches and builds the current crate) and compile again.
                          *
-                         *     Omit it only if the compiler genuinely could not read the file. It is
-                         *     then recorded as `0` — "unknown" — and nothing is checked.
+                         *     Omit it only if the compiler session has no guest crate. It is then
+                         *     recorded as `0` — "unknown" — and nothing is checked.
                          * @default null
                          */
                         wafer_guest_version?: number | null;
@@ -2537,7 +2536,8 @@ export interface paths {
                                     }[];
                                     /**
                                      * Format: uint32
-                                     * @description `wafer_guest.rs` ABI version the artifact was built against.
+                                     * @description `WAFER_GUEST_VERSION` of the `wafer_guest` crate the artifact was
+                                     *     built against; `0` when the compiler did not report one.
                                      */
                                     wafer_guest_version: number;
                                 }[];
@@ -2692,6 +2692,74 @@ export interface paths {
         patch?: never;
         trace?: never;
     };
+    "/b/dev/api/guest": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        /**
+         * The guest SDK crate the compiler builds against
+         * @description The `wafer_guest` crate every block depends on by path, plus the block the compiler builds once at session start to warm it. The page fetches this before starting the toolchain; an agent only needs it to read the SDK's source.
+         */
+        get: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Successful response */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /** @description The `wafer_guest` crate, crate-relative: `Cargo.toml`, `src/lib.rs`. */
+                            files: {
+                                [key: string]: string;
+                            };
+                            /**
+                             * Format: uint32
+                             * @description `WAFER_GUEST_VERSION` of the crate below. A block compiled in a
+                             *     session started from this response reports this number to
+                             *     `POST /b/dev/api/builds/stage`.
+                             */
+                            version: number;
+                            /**
+                             * @description The `hello` template scaffolded as `hello`: what the compiler builds
+                             *     once at start-up so the crate above is compiled before any real block.
+                             */
+                            warmup: {
+                                /**
+                                 * @description Cargo's package name, which names the artifact and the VFS directory:
+                                 *     the crate is built at `blocks/<crate_name>/`, with `blocks/` beside
+                                 *     `wafer_guest/`, which is the layout its `../../wafer_guest` dependency
+                                 *     needs.
+                                 */
+                                crate_name: string;
+                                /** @description Crate-relative paths: `Cargo.toml`, `src/lib.rs`. */
+                                files: {
+                                    [key: string]: string;
+                                };
+                            };
+                        };
+                    };
+                };
+            };
+        };
+        put?: never;
+        post?: never;
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/b/dev/api/reference": {
         parameters: {
             query?: never;
@@ -2701,7 +2769,7 @@ export interface paths {
         };
         /**
          * The backend-block authoring reference
-         * @description The guide for writing a block: the wafer_guest.rs API, the database / storage / config services, the namespace and capability rules, the limits, the diagnostic codes, and both templates in full.
+         * @description The guide for writing a block: the wafer_guest crate's API, the database / storage / config services, the namespace and capability rules, the limits, the diagnostic codes, and both templates in full.
          */
         get: {
             parameters: {
@@ -2726,14 +2794,9 @@ export interface paths {
                              */
                             markdown: string;
                             /**
-                             * @description The current `src/wafer_guest.rs`, verbatim: what a block built against
-                             *     an older copy writes over its own before compiling again.
-                             */
-                            wafer_guest_module: string;
-                            /**
                              * Format: uint32
-                             * @description The `WAFER_GUEST_VERSION` of the support module this reference
-                             *     documents and `POST /b/dev/api/blocks` writes.
+                             * @description The `WAFER_GUEST_VERSION` of the guest SDK crate this reference
+                             *     documents and every scaffolded block depends on.
                              */
                             wafer_guest_version: number;
                         };
@@ -2884,7 +2947,8 @@ export interface paths {
                             };
                             /**
                              * Format: uint32
-                             * @description `wafer_guest.rs` version the block scaffolder currently writes.
+                             * @description `WAFER_GUEST_VERSION` of the `wafer_guest` crate this sandbox serves
+                             *     (`GET /b/dev/api/guest`) and compiles blocks against.
                              */
                             wafer_guest_version: number;
                         };

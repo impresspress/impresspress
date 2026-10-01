@@ -47,9 +47,10 @@
 //   slow                    take five seconds, so a `cancel` has something to hit
 //
 // The two that happen during INIT cannot travel that way — an `init` message
-// carries nothing but its id — so they are query parameters on the worker's
-// own URL, which the manifest's `entry` supplies and `self.location` reads
-// back. They exist for the start-up silence watchdog:
+// carries its id and, optionally, the guest crate the API served, neither of
+// which is a switch — so they are query parameters on the worker's own URL,
+// which the manifest's `entry` supplies and `self.location` reads back. They
+// exist for the start-up silence watchdog:
 //
 //   ?silent-init=1     post one `progress` and then never speak again
 //   ?drip-init=<ms>    post a `progress` every <ms> for six ticks, then `ready`
@@ -97,6 +98,18 @@ let state = 'new';
 
 /** The id of the compile that is running, if one is. */
 let inFlight;
+
+/**
+ * The `init` message this worker was started with, verbatim, or `null`
+ * before one arrives.
+ *
+ * The adapter translates the API's guest (`warmup.crate_name`) into the
+ * protocol's (`warmup.crateName`) on its way into `postMessage`, and nothing
+ * the page can see afterwards shows whether it did. So the fake keeps what it
+ * received on its own global, where `dev-compiler.spec.ts` reads it through
+ * Playwright's handle on this worker.
+ */
+self.receivedInit = null;
 
 /** Compiles already answered with `cancelled: true`; their results are dropped. */
 const cancelledIds = new Set();
@@ -175,18 +188,29 @@ const failure = (files) => {
     : null;
 };
 
-/** The last two messages of a successful start-up. */
-const finishInit = (id) => {
+/**
+ * The last messages of a successful start-up: the shell, then — when the page
+ * handed over a guest crate — the one-time build of it the real worker runs
+ * before `ready` (`worker-entry.ts`, same detail string), so a page that
+ * shows start-up progress sees the step it will wait thirty seconds on.
+ */
+const finishInit = (id, guest) => {
   postProgress(id, 'initializing', { detail: 'waiting for the shell' });
+  if (guest) {
+    postProgress(id, 'initializing', { detail: 'building wafer_guest once for this session' });
+  }
   state = 'ready';
   post({ type: 'ready', id, rustcVersion: 'rustc 1.90.0-nightly (fake worker)' });
 };
 
-const init = (id) => {
+const init = (id, guest) => {
   state = 'initializing';
-  // Two progress messages then `ready`. The real worker sends one more
-  // `initializing` (it loads the sysroot); the adapter passes through
-  // whatever arrives, so the count is the fake's business, not the page's.
+  // On the plain path, two progress messages then `ready` — three with a
+  // guest; `drip-init` adds its ticks between the first and the rest, and
+  // `silent-init` stops after the first. The real worker sends more
+  // `initializing` (it loads the sysroot, writes the guest crate);
+  // the adapter passes through whatever arrives, so the count is the fake's
+  // business, not the page's.
   postProgress(id, 'download', { loaded: 0, total: 75124002 });
 
   // The hang the start-up watchdog exists for: the worker is alive, the
@@ -208,12 +232,12 @@ const init = (id) => {
         return;
       }
       clearInterval(ticking);
-      finishInit(id);
+      finishInit(id, guest);
     }, DRIP_INIT_MS);
     return;
   }
 
-  finishInit(id);
+  finishInit(id, guest);
 };
 
 const compile = (message) => {
@@ -375,7 +399,8 @@ self.addEventListener('message', (event) => {
         post({ type: 'error', id: message.id, message: `init in state ${state}` });
         return;
       }
-      init(message.id);
+      self.receivedInit = message;
+      init(message.id, message.guest);
       return;
 
     case 'compile':

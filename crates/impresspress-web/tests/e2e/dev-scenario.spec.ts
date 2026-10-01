@@ -510,10 +510,14 @@ test('the spec scenario: welcome → login → block → site → shop → shopp
     expect(exported.tables[table], `${table} in ${JSON.stringify(exported.tables)}`).toBe(rows);
   }
   // The block travelled as both artifact and source, so the folder can serve
-  // it and its owner can keep working on it.
+  // it and its owner can keep working on it — and the source builds outside
+  // the sandbox only with the guest SDK crate its `Cargo.toml` names by path
+  // (`../../wafer_guest`), so that crate travels beside `seed/blocks/`.
   const entries = exported.files.map((f) => f.path);
   expect(entries).toContain(`seed/blocks/${BLOCK}.wasm`);
   expect(entries).toContain(`seed/blocks/${BLOCK}/src/lib.rs`);
+  expect(entries).toContain('seed/wafer_guest/Cargo.toml');
+  expect(entries).toContain('seed/wafer_guest/src/lib.rs');
   expect(entries).toContain('seed/data.json');
 
   const scratch = mkdtempSync(path.join(tmpdir(), 'dev-scenario-export-'));

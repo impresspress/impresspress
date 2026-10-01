@@ -1,20 +1,17 @@
-//! `wafer_guest.rs` — the ImpressPress guest runtime for std-only blocks.
+//! `wafer_guest` — the ImpressPress guest SDK for std-only blocks.
 //!
-//! **VENDORED — do not edit.** `dev_create_block` writes this file verbatim
-//! into every scaffolded block, `GET /b/dev/api/reference` documents its API,
-//! and [`WAFER_GUEST_VERSION`] is what a staged build reports so the sandbox
-//! can tell a block compiled against a stale copy from a current one. An
-//! edited copy is not a supported configuration: the next scaffold overwrites
-//! it, and the version it reports would be a lie.
-//!
-//! # Why it is vendored rather than a crate
+//! This crate is the SDK. Every block `dev_create_block` scaffolds depends on
+//! it by path (`wafer_guest = { path = "../../wafer_guest" }`); the sandbox
+//! page hands its source to the in-browser compiler, which builds it once per
+//! session and links every block against that build.
+//! `GET /b/dev/api/reference` documents its API, and [`WAFER_GUEST_VERSION`]
+//! is what a staged build reports so the sandbox can tell a block compiled
+//! against an older SDK from a current one.
 //!
 //! The sandbox's compiler is a browser toolchain (Rubrc) with **no registry
-//! access**: it can build `core` + `std` and nothing else. A block's
-//! `Cargo.toml` therefore has an empty `[dependencies]` table, and the only
-//! way to share code with it is to put the code in the crate. This file is
-//! that shared code — the whole SDK, in one module, written to compile with
-//! no crates, no proc macros and no build script.
+//! access**: it builds `core`, `std` and the crates it is handed as source,
+//! nothing else. So this crate has no dependencies, no proc macros and no
+//! build script.
 //!
 //! # What it is
 //!
@@ -44,24 +41,26 @@
 //! pub fn init(ctx: &Ctx) -> Result<(), String>;  // runs once, on Init
 //! ```
 //!
-//! The `#[no_mangle]` exports below call them. `block()` is what the sandbox
-//! validates (its name, its routes, and the capabilities its collections /
-//! storage folders / config keys imply), so the declaration and the code are
-//! one artifact — there is no separate manifest to keep in step.
+//! and one line that hands them to the host:
+//!
+//! ```ignore
+//! wafer_guest::export!(block, init);
+//! ```
+//!
+//! The `#[no_mangle]` exports [`export!`] stamps into the block call them.
+//! `block()` is what the sandbox validates (its name, its routes, and the
+//! capabilities its collections / storage folders / config keys imply), so
+//! the declaration and the code are one artifact — there is no separate
+//! manifest to keep in step.
 
-#![expect(
-    dead_code,
-    reason = "this is the whole guest ABI; a block uses the part it needs"
-)]
-
-/// ABI version of this vendored module.
+/// ABI version of this crate.
 ///
-/// Bumped whenever the guest↔host contract this file implements changes in a
+/// Bumped whenever the guest↔host contract this crate implements changes in a
 /// way that makes an already-compiled block wrong. The staging endpoint
 /// compares it against the sandbox's own
 /// `impresspress_core::blocks::dev::WAFER_GUEST_VERSION` and refuses a
 /// mismatch with a `wafer-guest-version` diagnostic — a block compiled
-/// against an older copy is rebuilt, not silently activated.
+/// against an older SDK is rebuilt, not silently activated.
 pub const WAFER_GUEST_VERSION: u32 = 2;
 
 /// The `BlockInfo::interface` every sandboxed block reports.
@@ -83,7 +82,7 @@ pub const CONFIG: &str = "wafer-run/config";
 
 // The streaming host-call ABI, plus the log sink. (A `///` comment here
 // would be an `unused_doc_comments` warning — rustdoc documents no extern
-// block — and vendored code must not warn in a block author's build.)
+// block — and the SDK must not warn in a block author's build.)
 //
 // One `stream_init` -> `write_chunk`* -> `finish` -> `read_chunk`* ->
 // `take_error` -> `close` cycle is one host call. `read_chunk` and
@@ -104,7 +103,7 @@ extern "C" {
 
 /// Host-call stand-ins for a native build.
 ///
-/// The sandbox's own parity test compiles this file for the host, so that the
+/// The sandbox's own parity test compiles this crate for the host, so that the
 /// JSON it *renders* can be parsed by the real `wafer_block` types. There is
 /// no host to call there, so every import panics rather than returning a
 /// plausible-looking zero: a test that reached one would otherwise pass while
@@ -161,13 +160,14 @@ use host_shim::*;
 // ABI exports
 // ---------------------------------------------------------------------------
 
-/// The four exports the host calls, plus the two it negotiates on.
+/// The bodies of the five exports the host calls.
 ///
-/// wasm32 only: on the host there is no linear memory to hand back and no
-/// `crate::block()` to read (the parity test includes this file as a plain
-/// module, not as a block crate's root).
-#[cfg(target_arch = "wasm32")]
-mod abi {
+/// A library cannot export `#[no_mangle]` symbols on behalf of the crate that
+/// depends on it, and the host's exports have to reach the block's own
+/// `block()` and `init()`, so the symbols themselves are stamped into the
+/// block by [`export!`]. Each one is a single call into here, which is where
+/// the pointer handling lives.
+pub mod abi {
     use super::{dispatch, json, render_block_info, render_result, Ctx, Request, Response};
 
     /// Pack a slice as the `(ptr << 32) | len` the host unpacks.
@@ -185,45 +185,56 @@ mod abi {
         Box::leak(s.into_boxed_str()).as_bytes()
     }
 
-    /// Allocate `size` bytes for the host to write a frame into.
-    #[no_mangle]
-    pub extern "C" fn __wafer_alloc(size: i32) -> i32 {
+    /// `__wafer_alloc`: `size` bytes for the host to write a frame into.
+    pub fn alloc(size: i32) -> i32 {
         Box::leak(vec![0u8; size.max(0) as usize].into_boxed_slice()).as_mut_ptr() as i32
     }
 
-    /// Negotiate the JSON host-call codec
+    /// `__wafer_host_codec`: the JSON host-call codec
     /// (`wafer_block::abi::HOST_CODEC_JSON`).
-    #[no_mangle]
-    pub extern "C" fn __wafer_host_codec() -> i32 {
+    pub fn host_codec() -> i32 {
         1
     }
 
-    /// Report the block's `BlockInfo`, rendered from `crate::block()`.
-    #[no_mangle]
-    pub extern "C" fn __wafer_info() -> i64 {
-        pack(leak(render_block_info(&crate::block())))
+    /// `__wafer_info`: the block's `BlockInfo`, rendered from its declaration.
+    pub fn info(block: &super::Block) -> i64 {
+        pack(leak(render_block_info(block)))
     }
 
-    /// Serve one request: decode the frame, route it, render the result.
-    #[no_mangle]
-    pub extern "C" fn __wafer_handle(ptr: i32, len: i32) -> i64 {
+    /// `__wafer_handle`: decode the frame, route it, render the result.
+    ///
+    /// # Safety
+    /// `ptr`/`len` must name `len` initialized bytes the host wrote into
+    /// memory it obtained from `__wafer_alloc`, alive for the whole call. The
+    /// host guarantees that for the export [`export!`](crate::export!)
+    /// stamps, and that export is the only caller; block code must not call
+    /// this itself.
+    pub unsafe fn handle(block: &super::Block, ptr: i32, len: i32) -> i64 {
+        // SAFETY: the caller upholds this function's contract (see above).
         let frame = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
         let response = match Request::from_frame(frame) {
-            Ok(request) => dispatch(&crate::block(), &request),
+            Ok(request) => dispatch(block, &request),
             Err(detail) => Response::text(400, &format!("bad request frame: {detail}")),
         };
         pack(leak(render_result(&response)))
     }
 
-    /// Run `crate::init` on `Init`, and nothing on the other transitions.
+    /// `__wafer_lifecycle`: run `init` on `Init`, nothing on the other transitions.
     ///
     /// The wire shape is `Result<(), WaferError>` in the v1 core ABI —
     /// `{"Ok":null}` or `{"Err":{"code":…,"message":…,"meta":[]}}` — which is
     /// serde's external tagging of a `Result`. An `Err` here fails the whole
     /// activation, which is the point: a block whose `init` could not create
     /// its tables must not start serving.
-    #[no_mangle]
-    pub extern "C" fn __wafer_lifecycle(ptr: i32, len: i32) -> i64 {
+    ///
+    /// # Safety
+    /// `ptr`/`len` must name `len` initialized bytes the host wrote into
+    /// memory it obtained from `__wafer_alloc`, alive for the whole call. The
+    /// host guarantees that for the export [`export!`](crate::export!)
+    /// stamps, and that export is the only caller; block code must not call
+    /// this itself.
+    pub unsafe fn lifecycle(init: fn(&Ctx) -> Result<(), String>, ptr: i32, len: i32) -> i64 {
+        // SAFETY: the caller upholds this function's contract (see above).
         let event = unsafe { std::slice::from_raw_parts(ptr as *const u8, len as usize) };
         let is_init = json::Json::parse(&String::from_utf8_lossy(event))
             .ok()
@@ -234,7 +245,7 @@ mod abi {
             })
             .unwrap_or(false);
         let out = if is_init {
-            match crate::init(&Ctx) {
+            match init(&Ctx) {
                 Ok(()) => r#"{"Ok":null}"#.to_string(),
                 Err(message) => format!(
                     r#"{{"Err":{{"code":"Internal","message":{},"meta":[]}}}}"#,
@@ -246,6 +257,55 @@ mod abi {
         };
         pack(leak(out))
     }
+}
+
+/// Stamp the host's five exports into a block crate.
+///
+/// Invoke once, at the crate root, naming the block's two functions:
+///
+/// ```ignore
+/// wafer_guest::export!(block, init);
+/// ```
+///
+/// Every export is gated on `wasm32`, so a template still compiles on the
+/// host (the sandbox's parity test does exactly that).
+#[macro_export]
+macro_rules! export {
+    ($block:path, $init:path) => {
+        #[cfg(target_arch = "wasm32")]
+        #[no_mangle]
+        pub extern "C" fn __wafer_alloc(size: i32) -> i32 {
+            $crate::abi::alloc(size)
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        #[no_mangle]
+        pub extern "C" fn __wafer_host_codec() -> i32 {
+            $crate::abi::host_codec()
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        #[no_mangle]
+        pub extern "C" fn __wafer_info() -> i64 {
+            $crate::abi::info(&$block())
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        #[no_mangle]
+        pub extern "C" fn __wafer_handle(ptr: i32, len: i32) -> i64 {
+            // SAFETY: the host calls this export with a frame it wrote
+            // through `__wafer_alloc`, which is `abi::handle`'s contract.
+            unsafe { $crate::abi::handle(&$block(), ptr, len) }
+        }
+
+        #[cfg(target_arch = "wasm32")]
+        #[no_mangle]
+        pub extern "C" fn __wafer_lifecycle(ptr: i32, len: i32) -> i64 {
+            // SAFETY: the host calls this export with an event it wrote
+            // through `__wafer_alloc`, which is `abi::lifecycle`'s contract.
+            unsafe { $crate::abi::lifecycle($init, ptr, len) }
+        }
+    };
 }
 
 // ---------------------------------------------------------------------------
@@ -2214,11 +2274,10 @@ pub mod log {
 /// Edge cases of the JSON codec that no template exercises.
 ///
 /// They live here, beside the code, rather than in the sandbox's own test
-/// suite: the sandbox reaches them anyway (its parity test includes this file
-/// with `#[path]`, and an integration-test crate is compiled with `cfg(test)`),
-/// and a block author running `cargo test` in their own crate gets them too.
-/// Nothing here is compiled into a block's `.wasm` — `cargo build` does not
-/// set `cfg(test)`.
+/// suite: they run as this crate's own `cargo test`, and a block author who
+/// runs `cargo test` against the crate gets them too. Nothing here is
+/// compiled into a block's `.wasm` — a dependency is never built with
+/// `cfg(test)`.
 #[cfg(test)]
 mod tests {
     use super::json::Json;

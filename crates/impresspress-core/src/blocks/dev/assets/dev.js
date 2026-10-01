@@ -999,6 +999,12 @@ var compilerVersionEl = document.getElementById('dev-compiler-version');
 // carries the pinned toolchain's version.
 var compilerManifest = null;
 
+// `GET /b/dev/api/guest`'s answer — the guest SDK crate the compiler session
+// is started from — or `null` until the first compile asks for it. Fetched
+// once per page: the session is built from it, and a page that re-fetched it
+// mid-session would report a version its worker did not build.
+var guestCrate = null;
+
 // MiB, not MB, and `1048576` rather than a round million: `total_bytes` is a
 // byte count, and every other figure published about this toolchain — the
 // build script's own summary, the README's, the 24 MiB per-file asset limit
@@ -1216,7 +1222,19 @@ async function ensureCompiler(onProgress) {
     throw new Error('No compiler in this build.');
   }
   if (!compiler) {
-    compiler = new BrowserRustCompiler(compilerManifest);
+    if (!guestCrate) {
+      // Named, because the caller is a compile: a bare transport or HTTP
+      // error would read as the build's own failure. `guestCrate` is only
+      // assigned on success, so the next compile fetches again.
+      try {
+        guestCrate = await json(await api.get('/b/dev/api/guest'));
+      } catch (error) {
+        throw new Error(
+          'fetching the guest crate: ' + (error && error.message ? error.message : String(error))
+        );
+      }
+    }
+    compiler = new BrowserRustCompiler(compilerManifest, { guest: guestCrate });
   }
   // Idempotent, and the only place the toolchain's start-up is paid for: a
   // later compile joins whatever worker this one leaves behind.
@@ -1347,7 +1365,12 @@ async function snapshotBlock(name) {
   }
   var files = {};
   var diagnostics = [];
-  var guestVersion = null;
+  // Whether this is a legacy block — one that carries its own vendored copy
+  // of the guest SDK as `src/wafer_guest.rs` rather than depending on the
+  // crate — and, if so, the `WAFER_GUEST_VERSION` that copy states. See the
+  // read below.
+  var legacy = false;
+  var legacyGuestVersion = null;
   // The source manifest, one `<crate-relative path>\0<sha256>\n` line per
   // file, sorted. NUL rather than a space because a path may contain
   // anything but that, so no two different snapshots can produce one string;
@@ -1436,23 +1459,27 @@ async function snapshotBlock(name) {
         });
       }
     }
-    // The vendored module IS the ABI, so the version the block was compiled
-    // against is read out of the copy that was compiled — not out of the
-    // sandbox's own constant, which would report agreement it cannot see. A
-    // block whose module has been edited past recognition simply reports
-    // nothing, and staging records `0` — "unknown" — rather than a guess.
+    // A legacy block compiles as a self-contained crate against its OWN
+    // vendored module, not against the session's guest crate, so the ABI it
+    // was built with is the one that copy states. The version staging checks
+    // is a claim about the artifact, not about the session: reporting the
+    // session's version here would record an old version-1 block as 2, pass
+    // the gate, and activate it with the v1 contract. So the version is read
+    // out of the copy that was compiled, and a copy edited past recognition
+    // reports `null`, which staging records as `0` — "unknown" — rather than
+    // a guess.
     if (rel === 'src/wafer_guest.rs') {
+      legacy = true;
       var found = /WAFER_GUEST_VERSION: u32 = (\d+)/.exec(file.content);
-      if (found) {
-        guestVersion = Number(found[1]);
-      }
+      legacyGuestVersion = found ? Number(found[1]) : null;
     }
   }
   manifest.sort();
   return {
     files: files,
     diagnostics: diagnostics,
-    guestVersion: guestVersion,
+    legacy: legacy,
+    legacyGuestVersion: legacyGuestVersion,
     sourceSha: await sha256Hex(manifest.join(''))
   };
 }
@@ -1620,7 +1647,10 @@ async function runCompile(name) {
         source_manifest_sha256: snapshot.sourceSha,
         compiler_version: compilerVersion,
         diagnostics: diagnostics,
-        wafer_guest_version: snapshot.guestVersion
+        // A legacy block reports the version of the module it vendors;
+        // every other block was built against the session's guest crate.
+        // `snapshotBlock` says why.
+        wafer_guest_version: snapshot.legacy ? snapshot.legacyGuestVersion : built.guestVersion
       })
     );
   })();
@@ -1651,8 +1681,8 @@ function registerCompileTool() {
   registerPageTool({
     name: 'dev_compile_block',
     description:
-      'Compile blocks/<name>/ with the in-browser Rust toolchain (wasm32-wasip1, no \
-dependencies — the whole SDK is the vendored src/wafer_guest.rs). On success the block is \
+      'Compile blocks/<name>/ with the in-browser Rust toolchain (wasm32-wasip1; the only \
+dependency is the wafer_guest SDK crate, built once per session). On success the block is \
 validated and activated immediately and its routes are live at /b/<name>/; on failure the result \
 carries structured compiler or validator diagnostics and the previous generation keeps serving. \
 Only one compile runs at a time.',
