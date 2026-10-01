@@ -70,6 +70,12 @@ send and read JSON.
   clashes with an existing file or directory.
 - A file over 512 KiB; more than 2,000 files; more than 64 MiB of stored
   content in the workspace; more than 16 backend blocks.
+- A site file at a URL the runtime reserves for its own static files, which
+  would never be shown: `site/manifest.json` (served at `/manifest.json`),
+  `site/sw.js`, the shell's `site/vendor/sql-wasm*` files, or anything under
+  `site/snippets/`, `site/seed/` or `site/cdn-cgi/`. The refusal names the
+  rule; pick another path (e.g. `site/app.json`). The rest of
+  `site/vendor/` is yours.
 - A stale `expected_sha256`: the refusal carries the current hash, so
   re-read and retry.
 
