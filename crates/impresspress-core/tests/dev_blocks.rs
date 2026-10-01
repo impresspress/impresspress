@@ -949,6 +949,7 @@ fn greeter_bundle() -> (SeedManifest, MapFetch, BlockInfo) {
             sources: vec![seed_file("src/lib.rs", LIB_RS)],
         }],
         data: None,
+        sandbox: None,
     };
     let fetch = MapFetch::default()
         .with(&seed::site_url("index.html"), b"<h1>hi</h1>")

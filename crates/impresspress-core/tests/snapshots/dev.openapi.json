@@ -2727,8 +2727,22 @@
                 "description": "Response of `GET /b/dev/api/reference`.",
                 "properties": {
                   "markdown": {
-                    "description": "The authoring guide, as Markdown: the API, the host services, the\nnamespace rules, the limits, the diagnostic codes, and both templates\nin full.",
+                    "description": "The backend-block (Rust) authoring guide, as Markdown: the API, the\nhost services, the namespace rules, the limits, the diagnostic codes,\nand both templates in full.",
                     "type": "string"
+                  },
+                  "site_markdown": {
+                    "description": "This sandbox's site-authoring guide, as Markdown: the CSS framework\nit ships, the page skeleton, the storefront element, the catalog API,\nwhat a write refuses. Read it before writing under `site/`. Null when\nthe seed carried none.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
+                  "template": {
+                    "description": "The template this sandbox was seeded from (`dev_status.template`), or\nnull when the seed carried no sandbox block.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
                   },
                   "wafer_guest_version": {
                     "description": "The `WAFER_GUEST_VERSION` of the guest SDK crate this reference\ndocuments and every scaffolded block depends on.",
@@ -2739,7 +2753,9 @@
                 },
                 "required": [
                   "wafer_guest_version",
-                  "markdown"
+                  "markdown",
+                  "template",
+                  "site_markdown"
                 ],
                 "title": "ReferenceResponse",
                 "type": "object"
@@ -3075,6 +3091,13 @@
                     ],
                     "type": "object"
                   },
+                  "template": {
+                    "description": "The template this sandbox was seeded from, or null when the seed\ncarried no sandbox block. What an agent reads to know which guide\n`dev_read_reference.site_markdown` will be.",
+                    "type": [
+                      "string",
+                      "null"
+                    ]
+                  },
                   "wafer_guest_version": {
                     "description": "`WAFER_GUEST_VERSION` of the `wafer_guest` crate this sandbox serves\n(`GET /b/dev/api/guest`) and compiles blocks against.",
                     "format": "uint32",
@@ -3089,7 +3112,8 @@
                   "activation",
                   "storage",
                   "wafer_guest_version",
-                  "seed_error"
+                  "seed_error",
+                  "template"
                 ],
                 "title": "StatusResponse",
                 "type": "object"

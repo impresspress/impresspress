@@ -30,10 +30,12 @@ reports the active generation, the compiler state and a summary of the
 workspace — then it can read and write files, scaffold and compile backend
 blocks, stock the shop, and export.
 
-The page includes a "Suggested prompt" you can copy and paste, which walks
-an agent through building a small shop end to end: a home page, three
-products, a published offer for each, and a script tag that gives a
-visitor's *own* agent the shop's tools once the page is live.
+The page includes a "Suggested prompt" you can copy and paste. The prompt
+comes from the sandbox's seed (its `sandbox.json`), so the panel is absent
+when the seed carries none; the `blank` seed's walks an agent through
+building a small shop end to end: a home page, three products, a published
+offer for each, and a script tag that gives a visitor's *own* agent the
+shop's tools once the page is live.
 
 ## The workspace
 
@@ -141,6 +143,11 @@ services (database, storage, config, logging), what each refusal diagnostic
 means, the limits, and the complete source of both templates — spliced
 in at render time from the very files `dev_create_block` writes, so the guide
 cannot drift from them. Read it before writing Rust.
+
+The same response carries `site_markdown` — the site-authoring guide this
+sandbox's seed ships: the page skeleton, the shop pieces, what a write
+refuses — and `template`, the seed's name (`dev_status` reports it too). Read
+`site_markdown` before writing under `site/`.
 
 ### Compiling one
 

@@ -67,7 +67,7 @@ def main() -> None:
         found = problems_for(seed)
         problems.extend(found)
         if not found:
-            print(f"seeds/{seed.name}: manifest.json matches site/**", file=sys.stderr)
+            print(f"seeds/{seed.name}: manifest.json matches its tree", file=sys.stderr)
     if problems:
         raise SystemExit("\n".join(problems) + "\n\nRegenerate with seeds/write-manifest.py <name>.")
 

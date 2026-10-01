@@ -136,8 +136,9 @@ export const SHOP_HEADING = 'The print shop';
  * (`GET /b/webmcp/webmcp.js`, `pipeline.rs`, `ui::assets::
  * WEBMCP_JS_STABLE_PATH`) rather than the content-hashed one, since a page
  * the agent writes has no SSR document to read the current hash off. The
- * guide and `SUGGESTED_PROMPT` on `/b/dev` tell the agent to write exactly
- * this tag (`blocks/dev/page.rs`).
+ * blank seed's site guide and the prompt `/b/dev` suggests tell the agent to
+ * write exactly this tag (`examples/dev-sandbox/seeds/blank/guide.md`, and
+ * `suggested_prompt` in that seed's `sandbox.json`).
  */
 export function shopPage(): string {
   return `<!doctype html>

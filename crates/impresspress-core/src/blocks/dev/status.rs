@@ -9,8 +9,9 @@ use wafer_run::{context::Context, OutputStream, WaferError};
 
 use super::{
     contracts::{ActivationView, ActiveBlockView, StatusResponse},
-    gc, generation, no_store, no_store_db_error_internal, repo, seed, DevShared,
-    WAFER_GUEST_VERSION,
+    gc, generation, no_store, no_store_db_error_internal,
+    repo::{self, seed_info},
+    seed, DevShared, WAFER_GUEST_VERSION,
 };
 
 /// Answer the status endpoint.
@@ -63,5 +64,7 @@ async fn build(ctx: &dyn Context, shared: &DevShared) -> Result<StatusResponse, 
         // the way a store listing is not, and the difference between an empty
         // sandbox that says why and one that does not.
         seed_error: seed::last_failure(ctx).await?,
+        // One indexed singleton read per poll, like seed_error.
+        template: seed_info::read(ctx).await?.map(|seed| seed.template),
     })
 }
