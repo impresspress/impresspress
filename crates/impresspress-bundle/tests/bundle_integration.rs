@@ -647,6 +647,60 @@ fn the_seed_prefix_joins_an_apps_own_bypass_list() {
     assert!(sw.contains("url.pathname.startsWith('/seed/')"));
 }
 
+/// Run `node` with `args`, failing the test with its output if it does not
+/// exit cleanly — or if there is no `node` to run. Not a skip: a check that
+/// quietly does not run is a check that passes on a broken worker.
+fn node(args: &[&std::ffi::OsStr], sw: &std::path::Path) {
+    let output = std::process::Command::new("node")
+        .args(args)
+        .env("SW_JS", sw)
+        .output()
+        .expect("`node` must be on PATH: the rendered sw.js is checked by running it");
+    assert!(
+        output.status.success(),
+        "node {args:?} failed\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+/// The shipped template, rendered, is a script a JavaScript engine accepts.
+/// Every other test in this file reads the worker as text, and text that
+/// contains the right substrings can still be a file no browser will run.
+#[test]
+fn the_rendered_worker_parses() {
+    for dev_enabled in [false, true] {
+        let tmp = production_pkg_copy();
+        let app = AppConfig {
+            dev_enabled,
+            ..AppConfig::default()
+        };
+        run(tmp.path(), tmp.path(), app).expect("bundler ok");
+        // `.mjs`: the worker is registered as a module (it `import`s the wasm
+        // glue), and that is how it has to be parsed.
+        let module = tmp.path().join("sw-check.mjs");
+        fs::copy(tmp.path().join("sw.js"), &module).unwrap();
+        node(&["--check".as_ref(), module.as_os_str()], &module);
+    }
+}
+
+/// Once the wasm runtime is dead, a request only it could have answered gets
+/// a 503 that names the cause, and a navigation still reaches the static
+/// host. The behaviour is driven in Node against the rendered file —
+/// `tests/sw/sw_runtime_stopped.test.mjs` says what and why.
+#[test]
+fn the_rendered_worker_answers_for_a_stopped_runtime() {
+    let tmp = production_pkg_copy();
+    run(tmp.path(), tmp.path(), AppConfig::default()).expect("bundler ok");
+
+    let tests =
+        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/sw/sw_runtime_stopped.test.mjs");
+    node(
+        &["--test".as_ref(), tests.as_os_str()],
+        &tmp.path().join("sw.js"),
+    );
+}
+
 fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
     for entry in fs::read_dir(src).unwrap() {
         let e = entry.unwrap();

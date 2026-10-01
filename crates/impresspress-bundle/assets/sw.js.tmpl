@@ -36,10 +36,19 @@ let initPromise = null;
 // deploy whose hashed asset URL no longer exists keeps returning 5xx forever
 // — the user has to manually unregister via DevTools to recover.
 let poisoned = false;
+// Why it is poisoned: the `reason` `selfDestruct` was called with. Kept so
+// every request this worker refuses from then on can say what happened —
+// see `runtimeStopped`.
+let poisonReason = '';
+
+// The longest cause `runtimeStopped` puts in a response. A wasm-bindgen error
+// can carry a whole stack; the reader needs the first line or two.
+const CAUSE_MAX_CHARS = 300;
 
 async function selfDestruct(reason) {
     if (poisoned) return;
     poisoned = true;
+    poisonReason = String(reason);
     console.error('[__APP_NAME__] SW self-destructing:', reason);
     try {
         await self.registration.unregister();
@@ -278,9 +287,9 @@ async function passthrough(request) {
 async function handleFetch(event) {
     const request = event.request;
     if (poisoned) {
-        // wasm is dead — let the network serve this. The page should already
-        // be in the middle of a re-navigation triggered by selfDestruct().
-        return fetch(request);
+        // wasm is dead. The page should already be in the middle of a
+        // re-navigation triggered by selfDestruct().
+        return runtimeStopped(request);
     }
     try {
         await ensureInitialized();
@@ -305,13 +314,51 @@ async function handleFetch(event) {
         // module cache pointing at filenames the new build no longer has).
         // Both modes mean the wasm instance is unusable for the rest of
         // this SW's life, so self-destruct (which posts the breaker
-        // message and triggers a re-navigation) and fall through to
-        // network — that lets the browser fetch the static boot HTML
-        // instead of seeing the raw error JSON, which is what runs
-        // loader.js's recovery path.
+        // message and triggers a re-navigation) and answer as a stopped
+        // runtime does — see `runtimeStopped`.
         if (!poisoned) {
             await selfDestruct(`error handling request: ${error}`);
         }
+        return runtimeStopped(request);
+    }
+}
+
+/**
+ * The answer to a request the runtime would have handled, once the runtime
+ * is dead (`poisoned`).
+ *
+ * A NAVIGATION goes to the network: the static host answers it with the boot
+ * HTML, which is what runs loader.js's recovery path.
+ *
+ * Nothing else does. Every path the static host serves is on the bypass list
+ * and never reaches `handleFetch`, so what is left here is a request only the
+ * runtime could answer — an API call, a form post. The static host's answer
+ * to one of those is an empty 405 or a 404 page (or `index.html` with a 200,
+ * behind an SPA fallback), and the script that made the request can then
+ * report nothing but "something went wrong": the cause is in THIS worker's
+ * console, which neither the person nor an agent driving the page can read.
+ * So the worker answers it itself, in the shape the runtime gives every error
+ * (`wafer_block::http_codec::error_to_http_response`: `error` is the coarse
+ * code, `message` the human text, `code` the precise one), with the cause in
+ * the message.
+ */
+function runtimeStopped(request) {
+    if (request.mode === 'navigate') {
         return fetch(request);
     }
+    const cause = poisonReason.length > CAUSE_MAX_CHARS
+        ? `${poisonReason.slice(0, CAUSE_MAX_CHARS)}…`
+        : poisonReason;
+    const body = {
+        error: 'Unavailable',
+        message: `The app's runtime stopped (${cause}). Reload the page to restart it.`,
+        code: 'runtime_stopped'
+    };
+    return new Response(JSON.stringify(body), {
+        status: 503,
+        headers: {
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-store'
+        }
+    });
 }
