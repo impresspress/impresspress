@@ -139,18 +139,22 @@ deploys.
 **One-time setup**, done by hand, not by any workflow:
 
 1. `impresspress.org` added as a zone on the Cloudflare account these
-   secrets belong to.
-2. A custom domain `dev.impresspress.org` attached to the
-   `impresspress-dev-sandbox` worker (`wrangler.toml`'s `routes` declares
-   this; Cloudflare still needs the domain provisioned once against the
-   zone).
+   secrets belong to. This is the only thing that must exist beforehand.
+2. The first `wrangler deploy` of the top-level config (the manual deploy
+   below). It creates the `impresspress-dev-sandbox` Worker *and* attaches
+   `dev.impresspress.org` to it: `wrangler deploy` attaches every route
+   marked `custom_domain = true` in `wrangler.toml` itself, against the
+   zone from step 1. Nothing is provisioned by hand in the dashboard.
 3. Two repository secrets — `CLOUDFLARE_API_TOKEN` and
    `CLOUDFLARE_ACCOUNT_ID` — set on this repo for the
    [`deploy-dev-sandbox`](/.github/workflows/deploy-dev-sandbox.yml) workflow
-   to use.
-4. A custom domain `build-bootstrap.impresspress.org` attached to the
-   `impresspress-build-bootstrap` worker, the same way as step 2. The first
-   deploy of a new Worker must be `wrangler deploy` (not `versions upload`).
+   to use. Without them the workflow cannot deploy anything.
+4. The first `wrangler deploy --env bootstrap`, the same way as step 2: it
+   creates the `impresspress-build-bootstrap` Worker and attaches
+   `build-bootstrap.impresspress.org`. Adding a seed's environment is
+   therefore a resource-creating step — run it by hand, deliberately, before
+   the workflow's job for that seed gets the chance to. The first deploy of
+   a new Worker must be `wrangler deploy` (not `versions upload`).
 
 **Automatic deploys**: the `deploy-dev-sandbox` workflow runs on every push
 to `main` that touches one of the paths its `paths:` filter lists (this
