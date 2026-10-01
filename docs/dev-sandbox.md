@@ -43,7 +43,8 @@ an iframe that reloads after each change, and a progress/log panel.
 The workspace has two areas:
 
 - `site/` — published verbatim to the live site. Writing or deleting a file
-  under `site/` (`dev_write_file`, `dev_delete_file`) publishes immediately.
+  under `site/` (`dev_write_file`, `dev_write_files`, `dev_delete_file`)
+  publishes immediately.
 - `blocks/<name>/` — a backend block's Rust source. Writing here only stages
   source; nothing runs until the block is compiled (see
   [Backend blocks](#backend-blocks) below).
@@ -297,6 +298,8 @@ anything.
   share it with.
 - Workspace quotas: up to 2,000 files, 512 KiB per file, 64 MiB of stored
   content in total, and 16 backend blocks.
+- `dev_write_files` writes at most 64 files per batch; a larger change is
+  several batches, and so several generations.
 
 ## See also
 

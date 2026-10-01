@@ -266,6 +266,13 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
     generation: Generation | null;
     progress: { phase: string; ms: number; detail: string }[];
   };
+  // Read through the tool, so "one generation" is counted in the ledger an
+  // agent sees rather than inferred from the response. The listing's default
+  // page is `RETAINED_GENERATIONS` (20, `blocks/dev/retention.rs`) — far above
+  // the handful this test publishes — so retention cannot hide a second one.
+  const ledgerBefore = structured<{ generations: Generation[] }>(
+    await execute(page, 'dev_list_generations', {}),
+  );
   const batch = structured<FileWriteBatch>(await execute(page, 'dev_write_files', {
     files: [
       { path: 'site/about.html', content: '<!doctype html><title>About</title><h1>About</h1>', expected_sha256: null },
@@ -276,6 +283,13 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
   expect(batch.generation, JSON.stringify(batch)).not.toBeNull();
   expect(batch.generation?.cause).toBe('site_write');
   expect(batch.generation!.id).not.toBe(wrote.generation!.id);
+  const ledgerAfter = structured<{ generations: Generation[] }>(
+    await execute(page, 'dev_list_generations', {}),
+  );
+  expect(ledgerAfter.generations.length, JSON.stringify(ledgerAfter)).toBe(
+    ledgerBefore.generations.length + 1,
+  );
+  expect(ledgerAfter.generations.map((g) => g.id)).toContain(batch.generation!.id);
   await expect(page.locator('#dev-log')).toContainText(
     `live generation: ${batch.generation?.id}`,
   );

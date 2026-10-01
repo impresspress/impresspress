@@ -1504,8 +1504,18 @@ async fn a_batch_that_collides_with_itself_is_refused() {
             {"path": "site/a", "content": "file"},
         ]),
     ] {
-        let out = dev_post(&ctx, BATCH, json!({"files": files})).await;
-        assert_eq!(output_http_status(out).await, 400, "{files}");
+        // Status and body from the one rendering, so the message read is the
+        // one the 400 carried.
+        let refusal = wafer_block::http_codec::collect_http_response(
+            dev_post(&ctx, BATCH, json!({"files": files})).await,
+        )
+        .await;
+        assert_eq!(refusal.status, 400, "{files}");
+        let body: serde_json::Value = serde_json::from_slice(&refusal.body).expect("JSON refusal");
+        let message = body["message"].as_str().expect("message");
+        // Both halves of the clash are named, whichever came first.
+        assert!(message.contains("\"site/a\""), "{files}: {message}");
+        assert!(message.contains("\"site/a/b.css\""), "{files}: {message}");
     }
     let listing = output_json(ctx.dispatch_resolved(list_msg(None)).await).await;
     assert_eq!(listing["files"].as_array().unwrap().len(), 0);

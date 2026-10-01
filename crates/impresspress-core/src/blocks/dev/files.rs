@@ -47,7 +47,9 @@
 //! Without exception, and the list is short enough to state:
 //! [`handle_read`], [`handle_list`], `gc::storage_usage` (the `/b/dev` page's
 //! ~3 Hz status poll), `activation::workspace_site` and `export::assemble`,
-//! alongside the five mutators. `workspace_site` is the one that matters most
+//! alongside the six mutators ([`handle_write`], [`handle_write_batch`],
+//! [`handle_delete`], `scaffold::handle_create`, `gc::collect_interleaved` and
+//! `activation::adopt_site`). `workspace_site` is the one that matters most
 //! and was the last to get it: [`handle_write`] and [`handle_delete`] release
 //! the guard before they publish, and `workspace_site` is what reads the
 //! manifest back inside the activation that publish asked for — so it backs
@@ -509,6 +511,14 @@ pub async fn handle_write_batch(
 /// the workspace is saved with those counters (and nothing else changed)
 /// before the refusal; one saved without them would under-report storage
 /// until then.
+///
+/// The final save is the one place that charge cannot be kept. If every blob
+/// is stored and the save that records them fails, the blobs this call stored
+/// are charged by no counter, exactly as [`handle_write`] documents for its
+/// own store-then-save: the `record_blob_stored` calls made on `ws` are lost
+/// with the save, a retry of the same batch finds the blobs stored and charges
+/// nothing, and the quota under-counts the store until the next collection
+/// resets both counters from the store's own listing (`super::gc`).
 pub(super) async fn store_files(
     ctx: &dyn Context,
     ws: &mut Workspace,

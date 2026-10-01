@@ -205,7 +205,7 @@ export async function loginToWorkspace(page: Page) {
 // Both halves below are read by more than one spec — `dev-workspace.spec.ts`
 // pins them as its own subject, and `dev-scenario.spec.ts` walks the whole of
 // design §16 through them — so they live here rather than in whichever file
-// happened to need them first. A second copy of a twenty-six name allowlist,
+// happened to need them first. A second copy of a twenty-seven name allowlist,
 // or of "spawn a static host and wait for the port", is a second thing to keep
 // in step with the contract it describes.
 // ---------------------------------------------------------------------------

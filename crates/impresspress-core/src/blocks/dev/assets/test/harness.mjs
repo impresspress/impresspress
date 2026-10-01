@@ -437,6 +437,7 @@ return {
   get outstanding() { return outstanding },
   get isPolling() { return polling !== null },
   abort,
+  registerPageTool,
   unregisterPageTools,
   get registered() { return registered.slice() },
   isFileConflict,
