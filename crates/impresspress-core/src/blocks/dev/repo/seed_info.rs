@@ -9,7 +9,7 @@
 //! how the row says "this instance's seed carried no `sandbox` block" — an
 //! exported bundle never does (`export` writes `sandbox: None`).
 
-use wafer_block::db::{Filter, FilterOp};
+use wafer_block::db::{Filter, FilterOp, ListOptions};
 use wafer_core::clients::database as db;
 use wafer_run::{context::Context, WaferError};
 
@@ -51,6 +51,37 @@ pub async fn read(ctx: &dyn Context) -> Result<Option<SeedInfo>, WaferError> {
     }))
 }
 
+/// The seeding template's name, or `None` until an import has written it.
+///
+/// Reads only the `template` column: the status poll calls this a few times
+/// a second, and the row's `guide_markdown` can run to hundreds of KiB.
+pub async fn template(ctx: &dyn Context) -> Result<Option<String>, WaferError> {
+    let rows = db::list(
+        ctx,
+        TABLE,
+        &ListOptions {
+            columns: Some(vec!["template".to_string()]),
+            filters: vec![singleton_filter()],
+            limit: Some(1),
+            skip_count: true,
+            ..Default::default()
+        },
+    )
+    .await?;
+    Ok(rows
+        .records
+        .first()
+        .and_then(|record| record.opt_str_field("template")))
+}
+
+fn singleton_filter() -> Filter {
+    Filter {
+        field: SINGLETON_COLUMN.to_string(),
+        operator: FilterOp::Equal,
+        value: serde_json::json!(SINGLETON_ID),
+    }
+}
+
 /// Overwrite the row with `info`, stamping `imported_at`.
 pub async fn write(ctx: &dyn Context, info: &SeedInfo) -> Result<(), WaferError> {
     let data = crate::util::json_map(serde_json::json!({
@@ -59,17 +90,7 @@ pub async fn write(ctx: &dyn Context, info: &SeedInfo) -> Result<(), WaferError>
         "guide_markdown": info.guide_markdown,
         "imported_at": super::now(),
     }));
-    db::update_by_filters(
-        ctx,
-        TABLE,
-        vec![Filter {
-            field: SINGLETON_COLUMN.to_string(),
-            operator: FilterOp::Equal,
-            value: serde_json::json!(SINGLETON_ID),
-        }],
-        data,
-    )
-    .await
+    db::update_by_filters(ctx, TABLE, vec![singleton_filter()], data).await
 }
 
 #[cfg(test)]
@@ -94,5 +115,25 @@ mod tests {
         };
         write(&ctx, &info).await.expect("write");
         assert_eq!(read(&ctx).await.expect("read"), Some(info));
+    }
+
+    #[tokio::test]
+    async fn template_is_none_until_a_write_then_the_written_name() {
+        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        assert_eq!(template(&ctx).await.expect("template"), None);
+        write(
+            &ctx,
+            &SeedInfo {
+                template: "bootstrap".to_string(),
+                suggested_prompt: "Build me a shop.".to_string(),
+                guide_markdown: "# Guide\n".to_string(),
+            },
+        )
+        .await
+        .expect("write");
+        assert_eq!(
+            template(&ctx).await.expect("template"),
+            Some("bootstrap".to_string())
+        );
     }
 }
