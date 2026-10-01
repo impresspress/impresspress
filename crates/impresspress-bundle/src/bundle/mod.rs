@@ -384,8 +384,17 @@ fn build_template_vars(
         out
     };
 
+    // The shell's own vendored files, one exact clause each, rendered from
+    // the asset list that ships them (`assets::vendor_files`) so the bypass
+    // and the files cannot disagree. Exact paths, not a `/vendor/` prefix:
+    // anything else under `/vendor/` is the site's, and the runtime serves it.
+    let shell_vendor_bypass: String = crate::assets::vendor_files()
+        .map(|path| format!("url.pathname === '/{path}' ||\n        "))
+        .collect();
+
     let mut vars: BTreeMap<String, String> = BTreeMap::new();
     vars.insert("BUILD_ID".to_string(), build_id);
+    vars.insert("SHELL_VENDOR_BYPASS".to_string(), shell_vendor_bypass);
     vars.insert("WASM_JS".to_string(), wasm_js);
     vars.insert("WASM_BIN".to_string(), wasm_bin);
     vars.insert("WASM_JS_PREFIX".to_string(), wasm_js_prefix);

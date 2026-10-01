@@ -156,6 +156,12 @@ self.addEventListener('fetch', (event) => {
     // the last line of the `if` expression below as further `startsWith`
     // clauses. That's where app-level static assets (custom JS / CSS)
     // should be listed.
+    //
+    // The shell's own vendored files (sql.js) are bypassed by EXACT path,
+    // rendered from the bundler's asset list, never as a `/vendor/` prefix:
+    // `/vendor/` is an ordinary directory for a site's own files (a seed's
+    // CSS framework, an agent's library), and a prefix would hand every one
+    // of them to the static host instead of the runtime that serves the site.
     if (url.pathname === '/sw.js' ||
         url.pathname === '/loader.js' ||
         url.pathname === '/manifest.json' ||
@@ -165,8 +171,7 @@ self.addEventListener('fetch', (event) => {
         url.pathname === '/t2i-engine.js' ||
         url.pathname.startsWith('__WASM_JS_PREFIX__') ||
         url.pathname.startsWith('/snippets/') ||
-        url.pathname.startsWith('/vendor/') ||
-        url.pathname.startsWith('/sql-')__EXTRA_BYPASS____EXTRA_BYPASS_EXACT__) {
+        __SHELL_VENDOR_BYPASS__url.pathname.startsWith('/sql-')__EXTRA_BYPASS____EXTRA_BYPASS_EXACT__) {
         // ------------------------------------------------------------------
         // Bypassed — the network answers this, not the wasm runtime.
         //

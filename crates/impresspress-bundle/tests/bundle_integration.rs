@@ -286,6 +286,74 @@ fn a_non_dev_bundle_does_not_bypass_the_seed_prefix() {
     assert!(!sw.contains("/seed/"), "sw.js = {sw}");
 }
 
+/// Whether the rendered `sw.js` bypasses `path`: its bypass `if (…) {`
+/// expression, evaluated clause by clause (`url.pathname === '…'` and
+/// `url.pathname.startsWith('…')`, OR'd). Panics on a clause of any other
+/// shape, so a template change this cannot read fails loudly instead of
+/// being read as "not bypassed".
+fn bypasses(sw: &str, path: &str) -> bool {
+    let start = sw
+        .find("if (url.pathname === '/sw.js' ||")
+        .expect("sw.js has its bypass expression");
+    let expression = &sw[start + "if (".len()..];
+    let expression = &expression[..expression.find(") {").expect("bypass expression closes")];
+    expression.split("||").map(str::trim).any(|clause| {
+        if let Some(rest) = clause.strip_prefix("url.pathname === '") {
+            path == rest.strip_suffix('\'').expect("quoted exact path")
+        } else if let Some(rest) = clause.strip_prefix("url.pathname.startsWith('") {
+            path.starts_with(rest.strip_suffix("')").expect("quoted prefix"))
+        } else {
+            panic!("unrecognised bypass clause {clause:?} in sw.js = {sw}")
+        }
+    })
+}
+
+/// The shell owns two files under `/vendor/`, and the service worker bypasses
+/// exactly those — rendered from the asset list that ships them — not the
+/// whole prefix, which would shadow every site file under `/vendor/`.
+#[test]
+fn sw_bypasses_exactly_the_shells_vendor_files() {
+    let tmp = production_pkg_copy();
+    run(tmp.path(), tmp.path(), AppConfig::default()).expect("bundler ok");
+    let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
+
+    assert!(
+        !sw.contains("startsWith('/vendor/')"),
+        "sw.js still bypasses the whole /vendor/ prefix; sw.js = {sw}"
+    );
+    let vendor: Vec<&str> = impresspress_bundle::assets::vendor_files().collect();
+    assert_eq!(vendor, ["vendor/sql-wasm-esm.js", "vendor/sql-wasm.wasm"]);
+    for file in vendor {
+        let clause = format!("url.pathname === '/{file}' ||");
+        assert_eq!(sw.matches(&clause).count(), 1, "{clause} in sw.js = {sw}");
+        assert!(bypasses(&sw, &format!("/{file}")), "/{file} is bypassed");
+    }
+}
+
+/// A site file under `/vendor/` reaches the runtime — in a dev bundle too,
+/// whose bypass list is the longest.
+#[test]
+fn a_site_file_under_vendor_is_not_bypassed() {
+    let tmp = production_pkg_copy();
+    let app = AppConfig {
+        dev_enabled: true,
+        ..AppConfig::default()
+    };
+    run(tmp.path(), tmp.path(), app).expect("bundler ok");
+    let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
+
+    // The reader is load-bearing: it does see the bypasses that are there.
+    assert!(bypasses(&sw, "/seed/manifest.json"));
+    assert!(bypasses(&sw, "/vendor/sql-wasm.wasm"));
+    for path in [
+        "/vendor/bootstrap/bootstrap.min.css",
+        "/vendor/bootstrap/bootstrap.bundle.min.js",
+        "/vendor/sql-wasm.wasm.map",
+    ] {
+        assert!(!bypasses(&sw, path), "{path} is bypassed; sw.js = {sw}");
+    }
+}
+
 /// A dev bundle's service worker is the deployment's header layer.
 ///
 /// The in-browser Rust toolchain runs in a dedicated worker started from a

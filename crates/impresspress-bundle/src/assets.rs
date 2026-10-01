@@ -14,6 +14,24 @@ pub fn static_assets() -> &'static [Asset] {
     ASSETS
 }
 
+/// The directory the shell's own third-party files ship under.
+pub const VENDOR_DIR: &str = "vendor/";
+
+/// The shell's own files under [`VENDOR_DIR`] (`vendor/sql-wasm-esm.js`,
+/// `vendor/sql-wasm.wasm`), as asset paths.
+///
+/// The service worker bypasses exactly these, not the whole `/vendor/`
+/// prefix: the directory is a common one for a site's own files, and a
+/// prefix bypass would hand every one of them to the static host instead of
+/// the runtime that serves the site. This list is the one source of truth for
+/// the bypass clause `bundle::build_template_vars` renders.
+pub fn vendor_files() -> impl Iterator<Item = &'static str> {
+    static_assets()
+        .iter()
+        .map(|asset| asset.path)
+        .filter(|path| path.starts_with(VENDOR_DIR))
+}
+
 pub fn write_to(dir: &Path) -> std::io::Result<()> {
     for asset in static_assets() {
         let out = dir.join(asset.path);
