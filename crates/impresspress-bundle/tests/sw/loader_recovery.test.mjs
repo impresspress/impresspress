@@ -524,7 +524,7 @@ test('a worker that never takes the page is waited for and asked about, not navi
 // worker on its own: that would kill the very start it is waiting for. It
 // waits once more by itself, then asks.
 const WAITING_NEXT =
-  'It may only be slow: a first start, a large update or a slow device can take longer than this. You can keep waiting, or restart it, which starts over and so does not help an app that is only slow; both keep the data stored locally in this browser. Or reset, which erases it. Restarting and resetting start the app from its first page.';
+  'It may only be slow: a first start, a large update or a slow device can take longer than this. You can keep waiting. Or restart it, which keeps the data stored locally in this browser, or reset, which erases it; both start the app from its first page, and neither helps an app that is only slow. A restart or reset takes effect only once the app has finished what it is doing now, or the browser has given up on it; nothing is erased before then.';
 
 for (const [branch, search, destination] of [
   ['reload', '', null],
@@ -609,6 +609,12 @@ for (const [branch, search, destination] of [
       const restarting = waiting(2);
       await restarting.booted;
       await restarting.stuck('impresspress-restart').click();
+      // What the button says meanwhile is what is happening: the replacement
+      // waits for the worker it replaces to stop.
+      assert.equal(
+        restarting.stuck('impresspress-restart').textContent,
+        'Waiting for the app to stop…'
+      );
       assert.deepEqual(restarting.registeredUrls, ['/sw.js', REPLACEMENT]);
       assert.deepEqual(restarting.written(RECOVERY_DONE), ['restarted']);
       assert.deepEqual(restarting.opfs(), ['app.sqlite']);
@@ -623,6 +629,10 @@ for (const [branch, search, destination] of [
       const resetting = waiting(2);
       await resetting.booted;
       await resetting.stuck('impresspress-reset').click();
+      assert.equal(
+        resetting.stuck('impresspress-reset').textContent,
+        'Waiting for the app to stop…'
+      );
       assert.deepEqual(resetting.opfs(), []);
       assert.deepEqual(resetting.events, [
         'register /sw.js',

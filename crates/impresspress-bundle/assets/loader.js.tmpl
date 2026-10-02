@@ -545,11 +545,11 @@ function renderChoices({ title, said, next, buttons }) {
 // failure, and the browser's other storage for it — and start the app from
 // its boot URL on a new worker. The person has explicitly opted in by
 // clicking.
-function resetButton(failure, status) {
+function resetButton(failure, status, busy = 'Resetting…') {
     return {
         id: 'impresspress-reset',
         label: 'Reset local data and reload',
-        busy: 'Resetting…',
+        busy,
         style: 'danger',
         act: () => recoverFromButton({ erase: true, forget: true, failure }, status),
     };
@@ -635,12 +635,18 @@ function renderEraseFailedUI(request, worker, status) {
 // gets to finish. "Restart it" is `recoverFromButton` without erasing — the
 // way out for a worker that is truly stuck, and no help for one that is only
 // slow, which the text says. Neither erases anything.
+//
+// "Restart it" and the reset replace a worker that may be ALIVE, and a
+// browser lets the replacement take over only once the old worker has
+// finished the event it is in (`recoverFromButton`). The text says so, and their busy label is
+// what is actually happening meanwhile.
 function renderWaitingUI(target, worker, status, waitedMs) {
     const name = appTitle();
+    const STOPPING = 'Waiting for the app to stop…';
     renderChoices({
         title: `${name} is taking a long time to start`,
         said: `The app has not answered for ${waitedMs / 1000} seconds.`,
-        next: 'It may only be slow: a first start, a large update or a slow device can take longer than this. You can keep waiting, or restart it, which starts over and so does not help an app that is only slow; both keep the data stored locally in this browser. Or reset, which erases it. Restarting and resetting start the app from its first page.',
+        next: 'It may only be slow: a first start, a large update or a slow device can take longer than this. You can keep waiting. Or restart it, which keeps the data stored locally in this browser, or reset, which erases it; both start the app from its first page, and neither helps an app that is only slow. A restart or reset takes effect only once the app has finished what it is doing now, or the browser has given up on it; nothing is erased before then.',
         buttons: [
             {
                 id: 'impresspress-wait',
@@ -652,11 +658,11 @@ function renderWaitingUI(target, worker, status, waitedMs) {
             {
                 id: 'impresspress-restart',
                 label: 'Restart it',
-                busy: 'Restarting…',
+                busy: STOPPING,
                 style: 'plain',
                 act: () => recoverFromButton({ erase: false, forget: false, failure: null }, status),
             },
-            resetButton(null, status),
+            resetButton(null, status, STOPPING),
         ],
     });
 }
