@@ -1418,17 +1418,62 @@ async fn a_data_snapshot_over_the_import_limit_is_refused_at_export_and_one_at_i
 /// The sandbox's own `llms.txt`, as a seed import records it.
 const SANDBOX_LLMS: &str = "# ImpressPress build sandbox\n\nBuild a website here.\n";
 
-/// A boot page the way `impresspress-bundle` renders one for the sandbox
-/// deployment: its title in `<title>` and wrapped twice in the body, and its
-/// boot notice between the markers.
-const SANDBOX_INDEX: &str = concat!(
-    "<title>ImpressPress dev sandbox</title>\n",
-    "<h1><span data-app-title>ImpressPress dev sandbox</span></h1>\n",
-    "<!--boot-notice--><p>This is a build sandbox. Read <a href=\"/llms.txt\">/llms.txt</a>, ",
-    "then open <a href=\"/b/dev/enter\">/b/dev/enter</a>.</p><!--/boot-notice-->\n",
-    "<p id=\"status\">Loading...</p>\n",
-    "<noscript><p><span data-app-title>ImpressPress dev sandbox</span> needs JavaScript.</p></noscript>\n",
-);
+/// The sandbox deployment's own boot shell: the shipped templates, rendered
+/// by the bundler with `examples/dev-sandbox`'s `[app]` name and title and
+/// its real boot notice, development mode on and the compiler's bypass —
+/// what `build.sh` produces, minus the wasm. Returned as a [`FakeShell`] over
+/// the three files the export edits or a visitor reads text from.
+fn sandbox_shell() -> FakeShell {
+    let sandbox =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/dev-sandbox");
+    let config = std::fs::read_to_string(sandbox.join("impresspress.toml")).expect("toml");
+    // The two `[app]` strings, read from the deployment's own file so this
+    // cannot go on testing a title the sandbox no longer has.
+    let app_string = |key: &str| {
+        config
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{key} = \"")))
+            .and_then(|rest| rest.strip_suffix('"'))
+            .unwrap_or_else(|| panic!("impresspress.toml has no [app] {key}"))
+            .to_string()
+    };
+    let (name, title) = (app_string("name"), app_string("title"));
+    assert!(name.contains("sandbox") && title.contains("sandbox"));
+    let notice = std::fs::read_to_string(sandbox.join("boot-notice.html")).expect("notice");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    impresspress_bundle::assets::write_to(dir.path()).expect("shell assets");
+    impresspress_bundle::bundle::run(
+        dir.path(),
+        dir.path(),
+        impresspress_bundle::bundle::AppConfig {
+            app_name: Some(name),
+            app_title: Some(title),
+            boot_notice_html: Some(notice),
+            dev_enabled: true,
+            extra_bypass_prefix: vec!["/__impresspress_dev/compiler/".to_string()],
+            ..Default::default()
+        },
+    )
+    .expect("render the shell");
+    let mut shell = FakeShell::new();
+    for file in ["index.html", "loader.js", "sw.js"] {
+        let bytes = std::fs::read(dir.path().join(file)).expect("rendered file");
+        shell = shell.with(file, &bytes);
+    }
+    shell
+}
+
+/// Every string literal and every piece of markup text in `source`, minus
+/// the lines a visitor never sees: comments and `console.*` calls (which
+/// keep the build's own name as their prefix, for whoever built it).
+fn visible_lines(source: &str) -> Vec<&str> {
+    source
+        .lines()
+        .map(str::trim_start)
+        .filter(|line| !line.starts_with("//") && !line.starts_with("console."))
+        .collect()
+}
 
 async fn record_sandbox_llms(ctx: &TestContext) {
     seed_info::write(
@@ -1461,10 +1506,15 @@ async fn name_the_site(ctx: &TestContext, name: &str) {
 /// The exported site is not the sandbox, and nothing the sandbox says about
 /// itself goes with it: not its `llms.txt` (which the runtime IS publishing
 /// for this site, and which is in no manifest the export reads), and not a
-/// word of its boot page — the notice is gone and the title is the site's.
+/// word a visitor could read on its boot shell — the page's notice is gone,
+/// its title is the site's, and the loader names the app by that title.
+///
+/// Checked on the shell the bundler really renders for the sandbox
+/// ([`sandbox_shell`]), so a new place the templates show the deployment's
+/// name or wording fails here.
 #[tokio::test]
 async fn nothing_the_sandbox_says_about_itself_is_exported() {
-    let shell = FakeShell::new().with("index.html", SANDBOX_INDEX.as_bytes());
+    let shell = sandbox_shell();
     let ctx = TestContext::with_admin()
         .await
         .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(shell))
@@ -1502,21 +1552,43 @@ async fn nothing_the_sandbox_says_about_itself_is_exported() {
         serde_json::from_slice(&entries["seed/manifest.json"]).expect("a seed manifest");
     assert!(manifest.sandbox.is_none());
     assert_eq!(manifest.site.len(), 1);
+
     // The boot page is the exported site's: its own name everywhere the
-    // sandbox's title was (escaped, as the bundler escapes one), and an
-    // empty notice region.
+    // sandbox's title was (escaped, as the bundler escapes one), an empty
+    // notice region, and not a word about a sandbox anywhere in the file.
     let index = text(&entries, "index.html");
+    assert!(index.contains("<title>Kiln &amp; Co</title>"), "{index}");
     assert_eq!(
-        index,
-        concat!(
-            "<title>Kiln &amp; Co</title>\n",
-            "<h1><span data-app-title>Kiln &amp; Co</span></h1>\n",
-            "<!--boot-notice--><!--/boot-notice-->\n",
-            "<p id=\"status\">Loading...</p>\n",
-            "<noscript><p><span data-app-title>Kiln &amp; Co</span> needs JavaScript.</p></noscript>\n",
-        )
+        index
+            .matches("<span data-app-title>Kiln &amp; Co</span>")
+            .count(),
+        2,
+        "{index}"
     );
-    assert!(!index.to_lowercase().contains("sandbox"), "{index}");
+    assert!(
+        index.contains("<!--boot-notice--><!--/boot-notice-->"),
+        "{index}"
+    );
+    for word in ["sandbox", "llms.txt", "/b/dev"] {
+        assert!(
+            !index.to_lowercase().contains(word),
+            "the exported boot page says {word:?}: {index}"
+        );
+    }
+    // The loader is copied as it is, and that is safe because nothing in it
+    // that a visitor reads names the deployment: it takes the app's name
+    // from the page above.
+    let loader = text(&entries, "loader.js");
+    assert!(
+        loader.contains("[data-app-title]"),
+        "the loader reads the page"
+    );
+    for line in visible_lines(&loader) {
+        assert!(
+            !line.to_lowercase().contains("sandbox"),
+            "the exported loader shows: {line}"
+        );
+    }
     // The README is headed with the same name.
     assert!(text(&entries, "README.md").contains("Kiln & Co"));
 }

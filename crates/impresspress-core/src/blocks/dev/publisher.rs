@@ -188,21 +188,33 @@ pub async fn publish_site(
     Ok(touched)
 }
 
-/// Whether the sandbox's `llms.txt` is where the record and the active
-/// generation say it should be — and publish it if not.
+/// Put the sandbox's `llms.txt` where `recorded` and the active generation
+/// say it should be, if it is not there.
 ///
-/// The boot repair's second half (`seed::repair_llms`): a text recorded
-/// after the last publish is in no folder yet. Republishing the active
-/// generation over itself is a diff of that one file. Returns whether
-/// anything was written.
+/// The boot repair's second half (`seed::repair_llms`, which read `recorded`
+/// and passes it on rather than have it read twice): a text recorded after
+/// the last publish is in no folder yet. Returns whether anything was
+/// written.
+///
+/// A record that names this very text settles it without another read: the
+/// record is only ever set by a publish that wrote the file because the
+/// site left the name free. Otherwise the active generation decides — its
+/// site may hold the name itself — and republishing it over itself is a
+/// diff of that one file.
 pub async fn converge_sandbox_llms(
     ctx: &dyn Context,
-    active: &SiteManifest,
+    recorded: seed_info::LlmsRow,
 ) -> Result<bool, WaferError> {
-    let recorded = seed_info::llms(ctx).await?;
     let Some(llms) = recorded.text.map(SandboxLlms::new) else {
         return Ok(false);
     };
+    if recorded.published_sha256.as_deref() == Some(llms.entry.sha256.as_str()) {
+        return Ok(false);
+    }
+    let Some((_, manifest)) = super::generation::active(ctx).await? else {
+        return Ok(false);
+    };
+    let active = &manifest.site;
     let wanted = match published_view(&active.files, Some(&llms)).get(seed::LLMS_PATH) {
         Some(Published::Sandbox(llms)) => Some(llms.entry.sha256.as_str()),
         _ => None,
@@ -731,8 +743,9 @@ mod tests {
         );
     }
 
-    /// A text recorded AFTER the site was published — the boot repair's case —
-    /// is written by the next publish, although no site file changed: what is
+    /// A text recorded AFTER the site was published — the boot repair's case
+    /// (`tests/dev_seed.rs` drives the repair itself) — is written by the next
+    /// publish, although no site file changed: what is
     /// in the folder is read from the record, not assumed from the row.
     #[tokio::test]
     async fn a_text_recorded_after_the_last_publish_is_written_by_the_next_one() {
@@ -754,21 +767,20 @@ mod tests {
         )
         .await
         .expect("a row from before the column");
-        assert!(!converge_sandbox_llms(&ctx, &site)
-            .await
-            .expect("nothing yet"));
+        let republish = || publish_site(&ctx, Some(&site), &site);
+        assert!(republish().await.expect("nothing yet").is_empty());
         seed_info::record_llms_text(&ctx, SANDBOX_LLMS)
             .await
             .expect("record");
 
-        assert!(converge_sandbox_llms(&ctx, &site).await.expect("converge"));
+        assert_eq!(republish().await.expect("republish"), ["llms.txt"]);
         assert_eq!(
             published(&ctx, "llms.txt").await.as_deref(),
             Some(SANDBOX_LLMS.as_bytes())
         );
-        // And once it is there, converging again writes nothing.
+        // And once it is there, republishing again writes nothing.
         let before = site_ops(&ctx).len();
-        assert!(!converge_sandbox_llms(&ctx, &site).await.expect("again"));
+        assert!(republish().await.expect("again").is_empty());
         assert_eq!(site_ops(&ctx).len(), before);
     }
 
@@ -796,8 +808,11 @@ mod tests {
             seed_info::llms(&ctx).await.expect("row").published_sha256,
             None
         );
-        // A site with its own file needs no convergence.
-        assert!(!converge_sandbox_llms(&ctx, &own).await.expect("converge"));
+        // …and republishing a site with its own file touches nothing.
+        assert!(publish_site(&ctx, Some(&own), &own)
+            .await
+            .expect("republish")
+            .is_empty());
     }
 
     /// A manifest naming a blob that is not stored is corruption, and must

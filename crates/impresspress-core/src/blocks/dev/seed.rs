@@ -829,14 +829,23 @@ pub enum LlmsRepair {
 /// The caller logs it and carries on.
 ///
 /// Publishing is a separate question from recording and is asked on every
-/// boot, not only the one that fetched ([`publisher::converge_sandbox_llms`]
+/// boot, not only the one that fetched (`publisher::converge_sandbox_llms`
 /// compares the record of what is published): a boot that recorded the text
 /// and then failed to publish it is finished by the next.
+///
+/// # What it costs
+///
+/// The row is read once and handed on. A sandbox whose text is published —
+/// the ordinary boot — stops there: one read of three columns. A sandbox
+/// whose text is recorded but NOT what is published (the site has its own
+/// `llms.txt`, or nothing is live) also reads the active generation's
+/// manifest, to learn which of those it is; only a boot that then has
+/// something to write goes on to a publish, which reads the row again.
 pub async fn repair_llms(ctx: &dyn Context, fetch: &dyn SeedFetch) -> Result<LlmsRepair, String> {
-    let row = seed_info::llms(ctx).await.map_err(|e| e.message)?;
-    if row.template.is_none() {
+    let mut row = seed_info::llms(ctx).await.map_err(|e| e.message)?;
+    let Some(template) = row.template.clone() else {
         return Ok(LlmsRepair::NotASandbox);
-    }
+    };
     let fetched = row.text.is_none();
     if fetched {
         let bytes = fetch.get(MANIFEST_URL).await?;
@@ -845,20 +854,28 @@ pub async fn repair_llms(ctx: &dyn Context, fetch: &dyn SeedFetch) -> Result<Llm
         let declared = manifest.sandbox.ok_or_else(|| {
             format!("{MANIFEST_URL}: carries no sandbox block, so there is no llms.txt to record")
         })?;
+        // The bundle the origin serves NOW need not be the one this instance
+        // was seeded from: an origin can be redeployed with another seed. Its
+        // `llms.txt` embeds that seed's guide — another framework's files and
+        // advice — and once recorded it is never fetched again. So a bundle
+        // for another template records nothing; this instance keeps having
+        // no text, which is true, rather than getting a wrong one for good.
+        if declared.template != template {
+            return Err(format!(
+                "{MANIFEST_URL}: is the {:?} seed, but this instance was seeded from {template:?}; \
+                 its llms.txt describes another sandbox and was not recorded",
+                declared.template
+            ));
+        }
         let text = fetch_llms(fetch, &declared.llms).await?;
         seed_info::record_llms_text(ctx, &text)
             .await
             .map_err(|e| format!("recording the sandbox's llms.txt: {}", e.message))?;
+        row.text = Some(text);
     }
-    let published = match super::generation::active(ctx)
+    let published = super::publisher::converge_sandbox_llms(ctx, row)
         .await
-        .map_err(|e| e.message)?
-    {
-        Some((_, manifest)) => super::publisher::converge_sandbox_llms(ctx, &manifest.site)
-            .await
-            .map_err(|e| format!("publishing the sandbox's llms.txt: {}", e.message))?,
-        None => false,
-    };
+        .map_err(|e| format!("publishing the sandbox's llms.txt: {}", e.message))?;
     Ok(match (fetched, published) {
         (true, _) => LlmsRepair::Recorded,
         (false, true) => LlmsRepair::Published,

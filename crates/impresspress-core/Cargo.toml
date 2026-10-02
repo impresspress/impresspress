@@ -277,6 +277,12 @@ impresspress-core = { path = ".", default-features = false, features = [
 # exercise the streaming client's truncation and read-timeout handling.
 tokio = { workspace = true, features = ["macros", "rt", "time", "net", "io-util"] }
 tempfile = "3"
+# The bundler, for `tests/dev_export.rs` only: the export edits the boot shell
+# the bundler rendered, and the test that says "nothing of the sandbox is in
+# an export" has to say it about that shell, not about a page the test wrote
+# to look like one. Native tooling with no impresspress dependency, so this
+# adds no cycle and nothing to any shipped build.
+impresspress-bundle = { path = "../impresspress-bundle" }
 # Test-fixture setup only: `blocks::vector::legacy_names` builds an index in
 # the shape the pre-lowercase code wrote, which the vector service now refuses
 # to create, straight onto the SQLite file its `SqliteVecService` opens.

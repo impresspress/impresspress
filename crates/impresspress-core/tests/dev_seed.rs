@@ -389,6 +389,47 @@ async fn a_failed_repair_changes_nothing_and_the_next_boot_retries() {
     assert_eq!(published_llms(&ctx).await.as_deref(), Some(LLMS));
 }
 
+/// An origin redeployed with ANOTHER seed must not hand its `llms.txt` —
+/// another framework's guide — to a browser seeded from the old one: once
+/// recorded it would never be fetched again. Nothing is recorded, and a
+/// later deploy of the right seed still repairs the instance.
+#[tokio::test]
+async fn a_bundle_for_another_template_records_nothing() {
+    let ctx = seeded_before_llms().await;
+    let mut other = sandbox();
+    other.template = "bootstrap".to_string();
+    let other_llms: &[u8] = b"# The bootstrap sandbox\n";
+    other.llms = seed::SeedFile {
+        path: seed::LLMS_PATH.to_string(),
+        sha256: blobs::sha256_hex(other_llms),
+        size: other_llms.len() as u64,
+        content_type: seed::LLMS_CONTENT_TYPE.to_string(),
+    };
+    let redeployed = MapFetch::default()
+        .with(
+            seed::MANIFEST_URL,
+            &serde_json::to_vec(&manifest_with(other)).expect("manifest"),
+        )
+        .with(&seed::llms_url(seed::LLMS_PATH), other_llms);
+
+    let err = seed::repair_llms(&ctx, &redeployed)
+        .await
+        .expect_err("another seed's text");
+    assert!(
+        err.contains("\"bootstrap\"") && err.contains("\"blank\""),
+        "{err}"
+    );
+    let info = seed_info::read(&ctx).await.expect("read").expect("row");
+    assert_eq!(info.llms_text, None);
+    assert!(published_llms(&ctx).await.is_none());
+
+    assert_eq!(
+        seed::repair_llms(&ctx, &repair_bundle()).await,
+        Ok(seed::LlmsRepair::Recorded)
+    );
+    assert_eq!(published_llms(&ctx).await.as_deref(), Some(LLMS));
+}
+
 /// A boot that recorded the text and died before publishing it is finished
 /// by the next one — without fetching again.
 #[tokio::test]

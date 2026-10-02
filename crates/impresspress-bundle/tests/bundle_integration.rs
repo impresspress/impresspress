@@ -898,6 +898,34 @@ fn the_boot_shell_shows_the_title_only_where_it_can_be_found_again() {
     assert!(!index.contains("Kiln & <Co>"), "{index}");
 }
 
+/// `loader.js` names the app to a PERSON only by what the page shows
+/// (`appTitle()`); the name it was built with appears in console lines and
+/// nowhere else. A baked name in visible text would survive a copy of the
+/// shell that retitles `index.html` — the development sandbox's export —
+/// and go on telling the copied site's visitors "Loading dev-sandbox...".
+#[test]
+fn the_loader_bakes_the_app_name_into_console_lines_only() {
+    let tmp = production_pkg_copy();
+    let app = AppConfig {
+        app_name: Some("zq-build-name".to_string()),
+        ..AppConfig::default()
+    };
+    run(tmp.path(), tmp.path(), app).expect("bundler ok");
+    let loader = fs::read_to_string(tmp.path().join("loader.js")).unwrap();
+    let naming: Vec<&str> = loader
+        .lines()
+        .filter(|line| line.contains("zq-build-name"))
+        .collect();
+    assert!(!naming.is_empty(), "the console prefix is still rendered");
+    for line in naming {
+        assert!(
+            line.trim_start().starts_with("console."),
+            "loader.js shows the build's name outside a console line: {line}"
+        );
+    }
+    assert!(loader.contains("document.querySelector('[data-app-title]')"));
+}
+
 /// A notice carrying one of the markers would end its own region early (or
 /// open a second), and whoever removes the notice later would cut in the
 /// wrong place.

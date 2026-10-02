@@ -69,6 +69,8 @@ function element() {
 /// - `now`       — what `Date.now()` returns
 /// - `search`    — the query string the shell was loaded with (the boot URL
 ///                 is `/`, so any makes this load a redirect, not a reload)
+/// - `title`     — what the page's `[data-app-title]` element shows, or `null`
+///                 for a page without one; `documentTitle` is `<title>`
 /// - `timesOut`  — the boot probe never answers: its 60 s timer fires at once
 ///                 and `fetch` rejects as an aborted request does
 export function loadShell({
@@ -78,7 +80,9 @@ export function loadShell({
   wipe = false,
   now = 1_000_000,
   search = '',
-  timesOut = false
+  timesOut = false,
+  title = 'Kiln & Co',
+  documentTitle = title
 } = {}) {
   const sessionStorage = storage(session);
   const localStorage = storage();
@@ -94,7 +98,17 @@ export function loadShell({
       if (!ui.has(id)) ui.set(id, element());
       return ui.get(id);
     },
-    querySelector: (selector) => (selector === '.loader' ? card : null),
+    // `index.html` shows the title inside the card, so it is there until the
+    // stuck UI replaces the card's content. `title: null` is a page with no
+    // such element (a deployment's own boot page).
+    querySelector: (selector) => {
+      if (selector === '.loader') return card;
+      if (selector === '[data-app-title]' && title !== null && card.innerHTML === '') {
+        return { textContent: title };
+      }
+      return null;
+    },
+    title: documentTitle,
     body: card
   };
 
