@@ -216,6 +216,53 @@ test('the load a recovery lands on probes too, before it goes to the boot URL', 
   assert.equal(died.location.reloads, 1);
 });
 
+// A boot URL that does not answer within the probe's 60 s is treated as a
+// dead runtime: the recovery runs. On `main` that was already so for an app
+// whose boot URL is the shell's own (the reload branch). The redirect branch
+// did not probe at all, so it inherits this — including, in a wipe-enabled
+// build, the erasure.
+for (const [branch, search] of [
+  ['reload', ''],
+  ['redirect', '?utm=1']
+]) {
+  test(`a boot probe that times out runs the recovery (${branch} branch)`, async () => {
+    const said = "The app's runtime stopped: the app did not answer within 60 seconds — recovering…";
+
+    const shell = loadShell({ timesOut: true, search, now: NOW });
+    await shell.booted;
+    assert.equal(shell.probes.length, 1);
+    assert.equal(shell.status.textContent, said);
+    assert.equal(shell.session.getItem(RECOVERY_DONE), '1');
+    assert.equal(shell.unregistered(), 1);
+    assert.deepEqual(shell.opfs(), ['app.sqlite']);
+    assert.equal(shell.location.replaced.length, 1);
+    assert.ok(shell.location.replaced[0].includes(`_freshen=${NOW}`), shell.location.replaced[0]);
+    assert.equal(shell.location.reloads, 0, 'it does not also go on to the boot URL');
+
+    // The same timeout in a wipe-enabled build erases local data.
+    const wiping = loadShell({ timesOut: true, search, now: NOW, wipe: true });
+    await wiping.booted;
+    assert.equal(wiping.status.textContent, said);
+    assert.deepEqual(wiping.opfs(), []);
+
+    // And a second timeout before the app has answered stops and waits.
+    const again = loadShell({
+      timesOut: true,
+      search,
+      now: NOW,
+      wipe: true,
+      session: { [RECOVERY_DONE]: '1' }
+    });
+    await again.booted;
+    assert.equal(
+      again.stuck('impresspress-stopped-cause').textContent,
+      "The app's runtime stopped: the app did not answer within 60 seconds"
+    );
+    assert.deepEqual(again.opfs(), ['app.sqlite']);
+    assert.deepEqual(again.location.replaced, []);
+  });
+}
+
 test('a probe that threw proves nothing and clears nothing', async () => {
   const shell = loadShell({
     session: { [RECOVERY_DONE]: '1' },

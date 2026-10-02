@@ -19,7 +19,7 @@ const trap = (message = 'unreachable executed') => async () => {
 const RESTART = 'Reload the page to restart it.';
 const RECOVER = 'Reload the page to recover.';
 const ERASES =
-  'Reloading the page runs a recovery that erases the data this browser stores for the app.';
+  'Reloading the page may run a recovery that erases the data this browser stores for the app.';
 
 async function assertStoppedAnswer(response, cause, next = RESTART) {
   assert.equal(response.status, 503);

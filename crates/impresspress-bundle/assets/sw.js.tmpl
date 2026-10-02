@@ -431,9 +431,12 @@ async function handleFetch(event) {
  *   ordinary boot with a fresh worker. Nothing is recovered, nothing erased.
  * - The pages were sent to the boot shell, or this worker could NOT
  *   unregister (so a reload is a navigation back to it, which leaves the
- *   cause for the shell): the shell runs its recovery. In a build rendered
- *   with `opfs_wipe_on_recovery`, that recovery erases the app's local data,
- *   and the message says so rather than calling it a restart.
+ *   cause for the shell): the shell that finds the cause runs its recovery.
+ *   In a build rendered with `opfs_wipe_on_recovery`, that recovery erases
+ *   the app's local data, and the message says so rather than calling it a
+ *   restart. "May", because the cause is read once: if another tab's shell
+ *   took it first, this page's reload is an ordinary boot — and the data is
+ *   the origin's, so it may already be gone by that tab's recovery.
  */
 async function runtimeStopped(request) {
     if (request.mode === 'navigate') {
@@ -443,7 +446,7 @@ async function runtimeStopped(request) {
     let next = 'Reload the page to restart it.';
     if (sentToBootShell || !unregistered) {
         next = OPFS_WIPE_ON_RECOVERY
-            ? 'Reloading the page runs a recovery that erases the data this browser stores for the app.'
+            ? 'Reloading the page may run a recovery that erases the data this browser stores for the app.'
             : 'Reload the page to recover.';
     }
     // `cause` is the one field the runtime's shape does not have: the bare

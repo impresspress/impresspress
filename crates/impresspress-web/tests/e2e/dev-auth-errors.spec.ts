@@ -99,11 +99,16 @@ async function served(page: Page) {
  * replaces the document, so the line is on screen for a moment; this is how a
  * test knows whether it was said — or, as importantly, that it was NOT.
  *
- * Not `sessionStorage`, which is where the loader keeps its own record. In a
- * dev bundle the pages the runtime serves are cross-origin isolated and the
- * boot shell is not, and in this job a value set on a runtime page was not
- * there when the shell loaded next — so a flag read from a runtime page says
- * nothing about what the shell did.
+ * Not by setting anything in `sessionStorage` from a runtime page. The tab has
+ * one `sessionStorage` and the loader's flags live in it, but measured in
+ * this job's Chromium the two kinds of page do not see it alike: what the
+ * SHELL writes is there on the runtime pages that follow and on later shell
+ * loads, while a value written on a RUNTIME page (cross-origin isolated in a
+ * dev bundle, so a different process from the shell's) was absent the next
+ * time the shell loaded — and present again on the runtime page after that.
+ * So a runtime page can READ what the shell did (the navigation test below
+ * does), but cannot stage state for it. The loader only ever writes and reads
+ * its flags from the shell, so it does not depend on the half that fails.
  */
 async function recordShellStatus(page: Page): Promise<string[]> {
   const lines: string[] = [];
@@ -114,6 +119,9 @@ async function recordShellStatus(page: Page): Promise<string[]> {
     document.addEventListener('DOMContentLoaded', () => {
       const status = document.getElementById('status');
       if (!status) return;
+      // Written by the shell, for the test that reads the loader's flags
+      // from a runtime page to show that such a read is meaningful.
+      sessionStorage.setItem('__e2e_written_by_shell', 'yes');
       new MutationObserver(() => (window as any).__recordStatus(status.textContent)).observe(
         status,
         { childList: true, characterData: true, subtree: true },
@@ -236,9 +244,17 @@ test('a navigation the runtime dies on lands on a boot shell that shows the caus
   await served(page);
   await expect(heading).toBeVisible();
 
-  // The app answered the boot probe, so that recovery is over and done: a
-  // later failure in the same tab is recovered from automatically again
-  // instead of going straight to the stuck screen.
+  // The app answered the boot probe, so that recovery is over and done. The
+  // flag the recovery set is gone — read here from a runtime page, which sees
+  // what the shell wrote: the marker proves that, on this very load.
+  expect(
+    await page.evaluate(() => ({
+      marker: sessionStorage.getItem('__e2e_written_by_shell'),
+      recoveryDone: sessionStorage.getItem('__impresspress_recovery_done'),
+    })),
+  ).toEqual({ marker: 'yes', recoveryDone: null });
+  // So a later failure in the same tab is recovered from automatically
+  // again, instead of going straight to the stuck screen.
   const recovering = `The app's runtime stopped: ${cause} — recovering…`;
   await killRuntime(page);
   await page.reload({ waitUntil: 'commit' });

@@ -69,13 +69,16 @@ function element() {
 /// - `now`       — what `Date.now()` returns
 /// - `search`    — the query string the shell was loaded with (the boot URL
 ///                 is `/`, so any makes this load a redirect, not a reload)
+/// - `timesOut`  — the boot probe never answers: its 60 s timer fires at once
+///                 and `fetch` rejects as an aborted request does
 export function loadShell({
   session = {},
   stop,
   probe,
   wipe = false,
   now = 1_000_000,
-  search = ''
+  search = '',
+  timesOut = false
 } = {}) {
   const sessionStorage = storage(session);
   const localStorage = storage();
@@ -162,6 +165,10 @@ export function loadShell({
   const probes = [];
   const fetch = async (url, init) => {
     probes.push({ url, init });
+    if (timesOut) {
+      if (!init.signal.aborted) throw new Error('the probe timer did not abort the request');
+      throw new DOMException('The operation was aborted.', 'AbortError');
+    }
     const answer = typeof probe === 'function' ? await probe() : probe;
     return answer ?? new Response('<html>', { status: 200 });
   };
@@ -169,7 +176,8 @@ export function loadShell({
   // `reload()` after a good probe is deferred with `setTimeout(…, 0)`; run it
   // at once so a test sees it without waiting.
   // The probe's 60 s abort timer is real but must not hold the process open.
-  const setTimeoutStub = (fn, ms) => (ms === 0 ? (fn(), 0) : setTimeout(fn, ms).unref());
+  const setTimeoutStub = (fn, ms) =>
+    ms === 0 || timesOut ? (fn(), 0) : setTimeout(fn, ms).unref();
   const DateStub = { now: () => now };
   const consoleStub = { log() {}, warn() {}, error() {} };
 

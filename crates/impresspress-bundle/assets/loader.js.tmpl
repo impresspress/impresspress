@@ -262,6 +262,13 @@ async function boot() {
         // what the two guards below turn on. Whether the boot URL is this
         // one (a reload) or another (a redirect) makes no difference to
         // either, so the probe runs for both.
+        //
+        // Two consequences for an app with a boot redirect, which before
+        // this simply navigated. Its boot URL is now requested TWICE — this
+        // probe, then the navigation — so it has to be an idempotent GET.
+        // And it now shares the timeout below: a boot URL that does not
+        // answer within BOOT_PROBE_TIMEOUT_MS runs the recovery, which in a
+        // build rendered with OPFS_WIPE_ON_RECOVERY erases local data.
         const probeController = new AbortController();
         const probeTimeout = setTimeout(
             () => probeController.abort(),
