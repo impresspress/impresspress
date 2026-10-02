@@ -250,13 +250,76 @@ test('a returning browser moves to the new deployment’s worker and runtime, wi
   }
 });
 
+// A recovery replaces a dead worker by registering the same file under a
+// new script URL, `/sw.js?recovery=<time>` (`WORKER_URL` in `loader.js.tmpl`
+// says why), and that URL is the registration's from then on. A deployment
+// must still replace it: the browser's update check asks for the
+// registration's script URL, query and all, and the static host answers the
+// query-less file's new bytes.
+//
+// The one known cost of the query, which this host cannot show: a CDN that
+// keys its cache on the query string and is purged of `/sw.js` only could
+// answer `/sw.js?recovery=T` with the previous deployment's worker once.
+// That worker imports a glue file the new deployment no longer serves, fails
+// at stage `load`, and is replaced again — under another new URL, which the
+// CDN has never cached — with nothing erased.
+test('a new deployment replaces a worker that a recovery registered', async ({ browser }) => {
+  test.setTimeout(300_000);
+  const next = runtimeOf(UPDATE_DIST);
+
+  let server = await serveDirectory(DEV_DIST, SW_UPDATE_PORT);
+  const context = await browser.newContext({ baseURL: ORIGIN });
+  const workers: Worker[] = [];
+  context.on('serviceworker', (worker) => workers.push(worker));
+  try {
+    const page = await context.newPage();
+    await bootServiceWorker(page);
+    expect(workers).toHaveLength(1);
+
+    // A recovery: the runtime dies on a navigation, the shell replaces the
+    // worker and the page comes back.
+    await killRuntime(page, 'injected by sw-update.spec.ts before a recovery');
+    await page.goto('/b/auth/login', { waitUntil: 'commit' });
+    await page.waitForFunction(
+      () => navigator.serviceWorker.controller !== null && document.getElementById('status') === null,
+      null,
+      { timeout: 120_000 },
+    );
+    await expect(page.locator('input#email')).toBeVisible();
+    const scriptUrl = () =>
+      page.evaluate(async () => (await navigator.serviceWorker.getRegistration())!.active!.scriptURL);
+    const recovered = await scriptUrl();
+    expect(recovered).toMatch(/\/sw\.js\?recovery=\d+$/);
+    expect(workers).toHaveLength(2);
+    expect(await registrationOf(page)).toEqual(SETTLED);
+
+    // The next deployment (dated as in the tests above), and a visit.
+    await stop(server);
+    const deployedAt = new Date();
+    utimesSync(path.join(UPDATE_DIST, 'sw.js'), deployedAt, deployedAt);
+    server = await serveDirectory(UPDATE_DIST, SW_UPDATE_PORT);
+    await page.goto('/', { waitUntil: 'load' });
+    await expect.poll(() => workers.length, { timeout: 120_000 }).toBe(3);
+    await expect.poll(() => registrationOf(page), { timeout: 60_000 }).toEqual(SETTLED);
+
+    // The new deployment's runtime answers, under the same script URL: the
+    // deploy changed the bytes behind it, not the registration.
+    expect((await viaWorker(page, '/b/auth/login')).status).toBe(200);
+    expect(await fetchedBy(workers[2])).toContain(next);
+    expect(await scriptUrl()).toBe(recovered);
+  } finally {
+    await context.close();
+    await stop(server);
+  }
+});
+
 // A worker whose runtime has died stays registered (`poisoned` in
 // `sw.js.tmpl` says why): it answers navigations with the boot shell and
 // everything else with a 503. That must not make it a worker a deployment
 // cannot replace. It is replaced the way any worker is — the browser's
 // update check finds the new script, `skipWaiting()` activates it over the
-// dead one, and the open page is handed to it — with no recovery, no reload
-// and nothing unregistered.
+// dead one, and the open page is handed to it — with no recovery and no
+// reload.
 test('a new deployment replaces a worker whose runtime has died', async ({ browser }) => {
   test.setTimeout(300_000);
   const next = runtimeOf(UPDATE_DIST);

@@ -19,8 +19,8 @@ import { killRuntime, recordShellStatus, served } from './fixtures/stopped-runti
  *
  * Now the dead worker stays registered and answers every navigation in its
  * scope with the shell, fetched from the shell's own address; the shell's
- * recovery is what unregisters it, and the boot after that goes back to the
- * page. The host in this job is that plain file server
+ * recovery replaces it in place — nothing is ever unregistered — and goes on,
+ * on the same document, to the page that was asked for. The host in this job is that plain file server
  * (`python3 -m http.server`), and each test proves it rather than assuming
  * it. `tests/sw/` in `impresspress-bundle` pins the worker and the loader
  * against stubs; this is the real worker, the real wasm and a real host
@@ -83,8 +83,8 @@ test('a navigation to a runtime path the runtime dies on shows the cause and com
     .poll(() => statusLines, { message: 'the boot shell said why it was restarting' })
     .toContain(RESTARTING);
 
-  // Its recovery goes through `/` — the one address the host can answer with
-  // no worker registered — and the boot after it comes back HERE.
+  // Its recovery replaces the worker under it and goes on HERE: the host is
+  // never asked for this address.
   await served(page);
   expect(new URL(page.url()).pathname).toBe(RUNTIME_PATH);
   await expect(page.locator('input#email')).toBeVisible();

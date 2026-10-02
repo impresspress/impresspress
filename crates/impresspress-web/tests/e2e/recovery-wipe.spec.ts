@@ -104,6 +104,13 @@ test('an initialize() failure erases the local data and the app starts clean', a
 
   await corruptDatabase(page);
 
+  // The erase happens under the dead worker, which is still registered (it
+  // is replaced, not unregistered). If that worker held the database open
+  // the erase could not complete, and the loader would say so here.
+  const eraseFailures: string[] = [];
+  page.on('console', (message) => {
+    if (message.text().includes('OPFS wipe failed')) eraseFailures.push(message.text());
+  });
   const statusLines = await recordShellStatus(page);
   await page.reload({ waitUntil: 'commit' });
 
@@ -124,6 +131,11 @@ test('an initialize() failure erases the local data and the app starts clean', a
   const after = await stored(page);
   expect(after).toContain(DATABASE);
   expect(after).not.toContain(WITNESS);
+  expect(eraseFailures, 'every entry was removed').toEqual([]);
+  // The worker serving it is the replacement, registered in place.
+  expect(
+    await page.evaluate(async () => (await navigator.serviceWorker.getRegistration())!.active!.scriptURL),
+  ).toMatch(/\/sw\.js\?recovery=\d+$/);
 });
 
 test('a navigation the runtime dies on shows the cause and keeps the local data', async ({
@@ -157,8 +169,8 @@ test('a navigation the runtime dies on shows the cause and keeps the local data'
 
 // Every tab of an origin shares the worker and the data, and a dead worker
 // answers each of them with the shell and the cause. Uncoordinated, the
-// second tab to act would unregister the worker the first one's recovery
-// registered and erase what the person has done since — here, in a tab held
+// second tab to act would replace the worker the first one's recovery
+// brought in and erase what the person has done since — here, in a tab held
 // back the way a throttled background tab is, well after the first is done.
 test('two tabs told of one initialize() failure erase once, and what the first then writes survives the second', async ({
   context,
@@ -224,6 +236,38 @@ test('two tabs told of one initialize() failure erase once, and what the first t
   expect(await first.evaluate(async () => (await fetch('/b/auth/login')).status)).toBe(200);
 });
 
+// A tab can be under a dead worker and have been told nothing: the cause
+// the worker left was for a shell that never read it, or another tab's shell
+// took it. Such a tab boots as any tab does — and its probe is what finds
+// the worker dead, so it still ends in a recovery that keeps the data, on
+// the page it was on.
+test('a tab under a dead worker that was left no cause still gets the app back, data kept', async ({
+  page,
+}) => {
+  await boot(page);
+  await plantWitness(page);
+
+  const release = await holdLoader(page);
+  const statusLines = await recordShellStatus(page);
+  const cause = 'injected by recovery-wipe.spec.ts with no cause left';
+  await killRuntime(page, cause);
+  await page.goto(LOGIN, { waitUntil: 'commit' });
+  await expect(page.locator('#status')).toHaveText('Loading...');
+  // The shell is standing there, its loader not yet run; what the worker
+  // left for it goes.
+  expect(await page.evaluate(() => caches.delete('__impresspress_sw_stopped'))).toBe(true);
+  release();
+
+  await expect
+    .poll(() => statusLines, { timeout: 60_000 })
+    .toContain(`The app's runtime stopped: error handling request: Error: ${cause} — ${KEPT}`);
+  expect(statusLines.filter((line) => line.endsWith(ERASED))).toEqual([]);
+  await served(page);
+  await expect(page.locator('input#email')).toBeVisible({ timeout: 60_000 });
+  expect(new URL(page.url()).pathname).toBe(LOGIN);
+  expect(await stored(page)).toEqual(expect.arrayContaining([DATABASE, WITNESS]));
+});
+
 // Its own host, because the job's cannot be made slow: the worker's first act
 // is to fetch the wasm module, and holding that answer is a start that has
 // not finished — with the worker untouched.
@@ -240,8 +284,8 @@ test('a start that does not answer in time is waited for, and keeps the local da
     await boot(page);
     await plantWitness(page);
 
-    // A cold start behind the boot shell, as on a later visit after the
-    // browser has dropped the worker: no registration, the data still there.
+    // A cold start behind the boot shell, as on a first visit to an origin
+    // that has data: no registration, the data still there.
     await page.evaluate(async () => {
       for (const registration of await navigator.serviceWorker.getRegistrations()) {
         await registration.unregister();

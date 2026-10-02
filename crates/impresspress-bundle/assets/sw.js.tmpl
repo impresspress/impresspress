@@ -35,20 +35,20 @@ let initPromise = null;
 // answers a navigation with the boot shell and everything else with a 503
 // that carries the cause (`runtimeStopped`).
 //
-// It stays registered. An unregistered worker is no longer asked for
-// navigations, so every path only the runtime serves (`/b/…`) would become
-// the static host's to answer — its 404, on a host with no fallback for
-// unknown paths — and a reload of the page the failure happened on would
-// lose the person the app. Registered, this worker can hand any navigation
-// in its scope to the boot shell, whose recovery (`replaceWorker` in
-// `loader.js`) is the one place a dead worker is unregistered — and
-// replaced by one registered under a new script URL, since a browser may
-// otherwise hand this same instance back (`WORKER_URL` there).
+// It stays registered, and is never unregistered. An unregistered worker
+// is no longer asked for navigations, so every path only the runtime serves
+// (`/b/…`) would become the static host's to answer — its 404, on a host
+// with no fallback for unknown paths — and a reload of the page the failure
+// happened on would lose the person the app. Registered, this worker can
+// hand any navigation in its scope to the boot shell, whose recovery
+// REPLACES it in place: it registers this same file under a new script URL
+// over this registration (`WORKER_URL` in `loader.js`), and the version
+// that installs takes over through `skipWaiting` / `clients.claim` below,
+// exactly as a new deployment's does.
 //
-// Nor is it a trap: `poisoned` is this instance's memory, so a worker the
-// browser stops and starts again tries `initialize()` afresh, and a new
-// deployment's `sw.js` replaces it the usual way (the loader's update check,
-// then `skipWaiting` / `clients.claim` below).
+// Nor is it a trap without the shell: `poisoned` is this instance's memory,
+// so a worker the browser stops and starts again tries `initialize()`
+// afresh.
 let poisoned = false;
 // Why it is poisoned: the `reason` `selfDestruct` was called with. Kept so
 // every request this worker refuses from then on can say what happened —
@@ -256,12 +256,10 @@ self.addEventListener('message', (event) => {
     if (!msg) return;
 
     // The boot shell asking to be controlled. `clients.claim()` in `activate`
-    // reaches only the pages that existed then; a shell that loaded later
-    // from the static host (the load a recovery lands on, when another tab
-    // registered this worker first), or one still controlled by a worker
-    // that has since been unregistered, is not this worker's — and until it
-    // is, its boot probe cannot reach the runtime. See `takeControl` in
-    // `loader.js`.
+    // reaches only the pages that existed then; a shell the static host
+    // served later, or a page loaded past the worker, is not this worker's —
+    // and until it is, its boot probe cannot reach the runtime. See
+    // `takeControl` in `loader.js`.
     if (msg.type === 'impresspress-claim') {
         event.waitUntil(self.clients.claim());
         return;

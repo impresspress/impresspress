@@ -33,17 +33,22 @@ export const STOP_CACHE = '__impresspress_sw_stopped';
 export const STOP_KEY = '/__impresspress_sw_stopped';
 export const BREAKER = '__impresspress_sw_recover';
 export const RECOVERY_DONE = '__impresspress_recovery_done';
-export const RESUME = '__impresspress_resume';
 export const RECOVERY_LOCK = '__impresspress_recovery';
 export const RECOVERED_CACHE = '__impresspress_recovered';
 export const RECOVERED_KEY = '/__impresspress_recovered';
-export const NEXT_WORKER = '__impresspress_worker_url';
 
 function storage(initial = {}) {
   const map = new Map(Object.entries(initial));
+  // Every value a key was set to, in order: a recovery and the probe that
+  // ends it happen on one load now, so what a flag WAS is read here.
+  const writes = [];
   return {
+    writes,
     getItem: (k) => (map.has(k) ? map.get(k) : null),
-    setItem: (k, v) => map.set(k, String(v)),
+    setItem: (k, v) => {
+      writes.push([k, String(v)]);
+      map.set(k, String(v));
+    },
     removeItem: (k) => map.delete(k),
     clear: () => map.clear(),
     map
@@ -93,6 +98,8 @@ function element() {
 /// - `locks`     — whether the browser has Web Locks
 /// - `registeredUrl` — the script URL of the worker the origin already has
 ///                 registered, if it has one
+/// - `installs`  — whether a newly registered worker installs; `false` is one
+///                 the browser discards (its state is `redundant`)
 /// - `eraseFails` — OPFS entries that cannot be removed
 /// - `opfsFiles` — the OPFS entries there are
 /// - `onProbe`   — called when the probe is made, with `post` (sw.js posting a
@@ -115,14 +122,24 @@ export function loadShell({
   locks = true,
   eraseFails = [],
   registeredUrl,
+  installs = true,
   opfsFiles = ['app.sqlite'],
   title = 'Kiln & Co',
   documentTitle = title
 } = {}) {
   const sessionStorage = storage(session);
   const localStorage = storage();
-  const status = element();
-  status.textContent = 'Loading...';
+  // `#status`, keeping every line written to it.
+  const statusLines = [];
+  const status = {
+    ...element(),
+    get textContent() {
+      return statusLines.length ? statusLines[statusLines.length - 1] : 'Loading...';
+    },
+    set textContent(text) {
+      statusLines.push(text);
+    }
+  };
   const card = { innerHTML: '' };
   const ui = new Map();
   const document = {
@@ -192,7 +209,7 @@ export function loadShell({
   const registeredUrls = [];
   const asked = [];
   const worker = {
-    state: 'activated',
+    state: installs ? 'activated' : 'redundant',
     addEventListener: () => {},
     // The page asking the worker to take it.
     postMessage: (message) => {
@@ -329,6 +346,10 @@ export function loadShell({
   return {
     booted,
     status,
+    /// Every line written to `#status`, in order.
+    statusLines,
+    /// What `sessionStorage` key `key` was set to, in order.
+    written: (key) => sessionStorage.writes.filter(([k]) => k === key).map(([, v]) => v),
     location,
     session: sessionStorage,
     probes,
@@ -344,6 +365,12 @@ export function loadShell({
     lockRequests,
     /// What the page asked the registered worker.
     asked,
+    /// Another tab recording, in the origin's Cache Storage, that it has
+    /// recovered from the death `id`.
+    recordElsewhere: async (id) => {
+      const cache = await caches.open(RECOVERED_CACHE);
+      await cache.put(RECOVERED_KEY, new Response(JSON.stringify({ deaths: [{ id, at: now }] })));
+    },
     /// The script URLs this load registered.
     registeredUrls,
     /// The record of deaths recovered from, whole.

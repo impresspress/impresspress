@@ -529,9 +529,9 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
       await expect(site.locator('h1')).toHaveText(SHOP_HEADING, { timeout: 120_000 });
 
       // Two tabs, one death. This bundle never erases, and the second tab
-      // to act could still do harm: unregister the healthy worker the first
-      // tab's recovery registered. It must not — it joins that worker. (The
-      // tabs are held before their loaders run, the second until the first
+      // to act could still do harm: replace, a second time, the healthy
+      // worker the first tab's recovery brought in. It must not — it boots
+      // onto that worker. (The tabs are held before their loaders run, the second until the first
       // is done, as a throttled background tab would be;
       // `recovery-wipe.spec.ts` does the same where erasing is allowed.)
       const other = await exportedContext.newPage();
@@ -552,10 +552,12 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
       releaseSite();
       await expect.poll(() => statusLines).toContain(restarting);
       await runtimeServing(site);
-      // The registration the first tab's recovery made, held to compare.
-      await site.evaluate(async () => {
-        (window as any).__registration = await navigator.serviceWorker.getRegistration();
-      });
+      // The worker the first tab's recovery brought in: registered under a
+      // script URL of its own.
+      const workerUrl = () =>
+        site.evaluate(async () => (await navigator.serviceWorker.getRegistration())!.active!.scriptURL);
+      const replacement = await workerUrl();
+      expect(replacement).toContain('/sw.js?recovery=');
 
       await tellShell(other, death);
       releaseOther();
@@ -563,13 +565,9 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
       expect(otherLines.length, 'the second tab booted through the shell').toBeGreaterThan(0);
       expect(new URL(other.url()).pathname).toBe('/b/auth/login');
       expect(otherLines).not.toContain(restarting);
-      // Still that registration: the second tab unregistered nothing.
-      expect(
-        await site.evaluate(
-          async () =>
-            (await navigator.serviceWorker.getRegistration()) === (window as any).__registration,
-        ),
-      ).toBe(true);
+      // Still that worker: the second tab replaced nothing (a second
+      // replacement would be registered under another URL).
+      expect(await workerUrl()).toBe(replacement);
     } finally {
       await exportedContext.close();
       server.kill('SIGKILL');

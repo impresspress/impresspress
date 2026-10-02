@@ -71,10 +71,16 @@ export async function served(page: Page) {
 }
 
 /**
- * Every line the boot shell writes to `#status` from here on, across
- * navigations. The shell's recovery says why it is recovering and then
- * replaces the document, so the line is on screen for a moment; this is how a
- * test knows whether it was said — or, as importantly, that it was NOT.
+ * Every line the boot shell shows in `#status` from here on, across
+ * navigations — the line it starts with included. The shell says why it is
+ * recovering and then goes on, so the line is on screen for a moment; this is
+ * how a test knows whether it was said — or, as importantly, that it was NOT.
+ *
+ * The observer is attached from the init script, as soon as `#status` exists,
+ * and records what the element says at that moment. Not at
+ * `DOMContentLoaded`: that waits for the shell's module scripts, and
+ * `loader.js` — a classic script — runs and writes its first lines before
+ * it. An observer attached then misses them (it did, about one run in ten).
  *
  * Not by setting anything in `sessionStorage` from a runtime page. The tab has
  * one `sessionStorage` and the loader's flags live in it, but measured in
@@ -84,8 +90,9 @@ export async function served(page: Page) {
  * dev bundle, so a different process from the shell's) was absent the next
  * time the shell loaded — and present again on the runtime page after that.
  * So a runtime page can READ what the shell did (`dev-auth-errors.spec.ts`'s
- * navigation test does), but cannot stage state for it. The loader only ever writes and reads
- * its flags from the shell, so it does not depend on the half that fails.
+ * navigation test does), but cannot stage state for it. The loader only ever
+ * writes and reads its flags from the shell, so it does not depend on the half
+ * that fails.
  */
 export async function recordShellStatus(page: Page): Promise<string[]> {
   const lines: string[] = [];
@@ -93,17 +100,29 @@ export async function recordShellStatus(page: Page): Promise<string[]> {
     lines.push(text);
   });
   await page.addInitScript(() => {
-    document.addEventListener('DOMContentLoaded', () => {
+    const record = (text: string | null) => (window as any).__recordStatus(text ?? '');
+    const attach = () => {
       const status = document.getElementById('status');
-      if (!status) return;
+      if (!status) return false;
       // Written by the shell, for the test that reads the loader's flags
       // from a runtime page to show that such a read is meaningful.
       sessionStorage.setItem('__e2e_written_by_shell', 'yes');
-      new MutationObserver(() => (window as any).__recordStatus(status.textContent)).observe(
-        status,
-        { childList: true, characterData: true, subtree: true },
-      );
+      record(status.textContent);
+      new MutationObserver(() => record(status.textContent)).observe(status, {
+        childList: true,
+        characterData: true,
+        subtree: true,
+      });
+      return true;
+    };
+    // `#status` is parsed a moment after this runs; watch the document until
+    // it is there. A page with no such element (every page the runtime
+    // serves) stops being watched once it has been parsed.
+    const finder = new MutationObserver(() => {
+      if (attach()) finder.disconnect();
     });
+    finder.observe(document, { childList: true, subtree: true });
+    document.addEventListener('DOMContentLoaded', () => finder.disconnect());
   });
   return lines;
 }

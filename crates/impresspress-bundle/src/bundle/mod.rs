@@ -37,8 +37,8 @@ pub const APP_TITLE_CLOSE: &str = "</span>";
 /// `loader.js.tmpl` as `SHELL_URL`: the one address the static host itself
 /// must answer, because a first visit — no worker yet — starts there. The
 /// worker fetches the shell from it to answer a navigation once its runtime
-/// is dead, and the loader's recovery, which unregisters the worker, loads it
-/// rather than a path only a worker can answer. One value, so the two
+/// is dead, and the loader tells a shell standing there (the app being
+/// opened) from one standing at a page of the app. One value, so the two
 /// scripts cannot disagree about where the shell is.
 pub const SHELL_URL: &str = "/";
 

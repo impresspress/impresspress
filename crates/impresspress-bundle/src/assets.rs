@@ -161,7 +161,7 @@ mod tests {
     }
 
     // Regression: the loader's recovery path must include a loop-guard that
-    // stops the `self-destruct → wipe → ?_freshen reload → self-destruct`
+    // stops the `self-destruct → recover → self-destruct`
     // cycle that traps production builds (OPFS_WIPE_ON_RECOVERY=false) when
     // initialize() keeps failing after a wipe — and must surface a manual
     // reset UI instead. Render the actual template and assert the loop-guard
