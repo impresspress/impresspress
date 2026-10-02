@@ -1000,6 +1000,13 @@ jobs:
       - name: Check the dev-sandbox seed manifest
         run: examples/dev-sandbox/build.sh --check
 
+      # What that check says about a seed's boot title — the one piece of
+      # `sandbox.json` no manifest carries — run over copies of the committed
+      # seeds: a seed without one is refused, and so are two seeds with the
+      # same one.
+      - name: Test the seed check
+        run: python3 -B -m unittest discover -s examples/dev-sandbox/seeds -p 'test_*.py'
+
       # The bootstrap seed's bundle, built first and moved aside (`--out`) so
       # the blank build below can take `dist/`. `dev-bootstrap.spec.ts` serves
       # it on its own port from inside the spec (`serveDirectory`), the way

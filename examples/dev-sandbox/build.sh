@@ -37,7 +37,9 @@
 # `--root ./out` to keep it out of `~/.cargo/bin`) and point this at it.
 #
 # `--check` verifies every `seeds/<name>/manifest.json` against its `site/**`
-# and, when the seed has them, its `sandbox.json`, its `guide.md` and the
+# and, when the seed has them, its `sandbox.json` (which names the title its
+# boot page is built with — required, and no two seeds may share one), its
+# `guide.md` and the
 # `llms.txt` generated from `seeds/llms-preamble.md` and that guide, and that
 # every file its `vendor.json` pins carries the pinned sha256
 # (seeds/check-seeds.py) — and, when `compiler/dist/` has been
@@ -100,7 +102,7 @@ stage_seed() {
     exit 1
   fi
   log "staging seeds/$SEED into seed/"
-  rm -rf "$HERE/seed"
+  rm -rf "$HERE/seed" "$HERE/boot-title.txt"
   mkdir -p "$HERE/seed"
   cp "$src/manifest.json" "$HERE/seed/manifest.json"
   cp -R "$src/site" "$HERE/seed/site"
@@ -115,17 +117,27 @@ stage_seed() {
   # answers a reader that has no service worker. A seed with no sandbox block
   # has none — and impresspress.toml's overlay of it then fails the build,
   # which is right: this deployment is the sandbox.
-  python3 -B - "$HERE/seeds" "$SEED" "$HERE/seed/llms.txt" <<'STAGELLMS'
+  #
+  # The boot page's title is staged the same way and for the same reason: it
+  # is the seed's (sandbox.json), and impresspress.toml's `[app] title_file`
+  # names the one file it is staged to. Beside seed/, not inside it — seed/ is
+  # overlaid onto the bundle wholesale, and the title is the boot page's, not
+  # a file anything fetches.
+  python3 -B - "$HERE/seeds" "$SEED" "$HERE/seed/llms.txt" "$HERE/boot-title.txt" <<'STAGESANDBOX'
 import pathlib, sys
 sys.path.insert(0, sys.argv[1])
 import seedlib
 try:
-    text = seedlib.staged_llms(seedlib.seed_dir(sys.argv[2]))
+    seed = seedlib.seed_dir(sys.argv[2])
+    text = seedlib.staged_llms(seed)
+    title = seedlib.boot_title(seed)
 except seedlib.SeedError as e:
     raise SystemExit(f"build.sh: {e}")
 if text is not None:
     pathlib.Path(sys.argv[3]).write_bytes(text)
-STAGELLMS
+if title is not None:
+    pathlib.Path(sys.argv[4]).write_text(title + "\n", encoding="utf-8")
+STAGESANDBOX
 }
 
 # The browser toolchain (`compiler/`) is 365 MiB of composed wasm and takes
@@ -320,6 +332,22 @@ grep -q 'href="/llms.txt"' "$DIST/index.html" || {
   echo "  or an impresspress CLI older than it: $IMPRESSPRESS_BIN" >&2
   exit 1
 }
+# …and that page is headed with the title of the seed that was built, not
+# another seed's and not a title from anywhere else.
+python3 -B - "$HERE/seeds" "$SEED" "$DIST/index.html" <<'BOOTTITLE' || exit 1
+import html, pathlib, re, sys
+sys.path.insert(0, sys.argv[1])
+import seedlib
+title = seedlib.boot_title(seedlib.seed_dir(sys.argv[2]))
+page = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
+shown = [html.unescape(t) for t in re.findall(r"<title>(.*?)</title>", page, re.S)]
+shown += [html.unescape(t) for t in re.findall(r"<span data-app-title>(.*?)</span>", page, re.S)]
+if not shown or any(t != title for t in shown):
+    raise SystemExit(
+        f"build.sh: {sys.argv[3]} is titled {shown!r}, not the {sys.argv[2]} seed's {title!r} — "
+        f"check [app] title_file in impresspress.toml, or an impresspress CLI older than it"
+    )
+BOOTTITLE
 [ -f "$DIST/__impresspress_dev/compiler/manifest.json" ] || {
   echo "build.sh: $DIST/__impresspress_dev/compiler/manifest.json was not overlaid — check impresspress.toml's [[assets.overlay]]" >&2
   exit 1

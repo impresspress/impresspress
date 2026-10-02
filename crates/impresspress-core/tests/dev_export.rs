@@ -1418,26 +1418,35 @@ async fn a_data_snapshot_over_the_import_limit_is_refused_at_export_and_one_at_i
 /// The sandbox's own `llms.txt`, as a seed import records it.
 const SANDBOX_LLMS: &str = "# ImpressPress build sandbox\n\nBuild a website here.\n";
 
-/// The sandbox deployment's own boot shell: the shipped templates, rendered
-/// by the bundler with `examples/dev-sandbox`'s `[app]` name and title and
-/// its real boot notice, development mode on and the compiler's bypass —
-/// what `build.sh` produces, minus the wasm. Returned as a [`FakeShell`] over
-/// the three files the export edits or a visitor reads text from.
-fn sandbox_shell() -> FakeShell {
+/// The sandbox deployment's own boot shell, as built from `seed`: the shipped
+/// templates, rendered by the bundler with `examples/dev-sandbox`'s `[app]`
+/// name, that seed's title and the real boot notice, development mode on and
+/// the compiler's bypass — what `build.sh --seed <seed>` produces, minus the
+/// wasm. Returned as a [`FakeShell`] over the three files the export edits or
+/// a visitor reads text from, with the title it was rendered under.
+fn sandbox_shell(seed: &str) -> (FakeShell, String) {
     let sandbox =
         std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/dev-sandbox");
     let config = std::fs::read_to_string(sandbox.join("impresspress.toml")).expect("toml");
-    // The two `[app]` strings, read from the deployment's own file so this
-    // cannot go on testing a title the sandbox no longer has.
-    let app_string = |key: &str| {
-        config
-            .lines()
-            .find_map(|line| line.strip_prefix(&format!("{key} = \"")))
-            .and_then(|rest| rest.strip_suffix('"'))
-            .unwrap_or_else(|| panic!("impresspress.toml has no [app] {key}"))
-            .to_string()
-    };
-    let (name, title) = (app_string("name"), app_string("title"));
+    // The name and the title, read from where the deployment keeps them so
+    // this cannot go on testing strings the sandbox no longer has: the name
+    // from its configuration, the title from the seed's `sandbox.json` —
+    // which is where `build.sh` takes it from (`[app] title_file`).
+    let name = config
+        .lines()
+        .find_map(|line| line.strip_prefix("name = \""))
+        .and_then(|rest| rest.strip_suffix('"'))
+        .expect("impresspress.toml has no [app] name")
+        .to_string();
+    let seed_json: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(sandbox.join("seeds").join(seed).join("sandbox.json"))
+            .expect("sandbox.json"),
+    )
+    .expect("sandbox.json is JSON");
+    let title = seed_json["title"]
+        .as_str()
+        .unwrap_or_else(|| panic!("seeds/{seed}/sandbox.json has no title"))
+        .to_string();
     assert!(name.contains("sandbox") && title.contains("sandbox"));
     let notice = std::fs::read_to_string(sandbox.join("boot-notice.html")).expect("notice");
 
@@ -1448,7 +1457,7 @@ fn sandbox_shell() -> FakeShell {
         dir.path(),
         impresspress_bundle::bundle::AppConfig {
             app_name: Some(name),
-            app_title: Some(title),
+            app_title: Some(title.clone()),
             boot_notice_html: Some(notice),
             dev_enabled: true,
             extra_bypass_prefix: vec!["/__impresspress_dev/compiler/".to_string()],
@@ -1459,9 +1468,17 @@ fn sandbox_shell() -> FakeShell {
     let mut shell = FakeShell::new();
     for file in ["index.html", "loader.js", "sw.js"] {
         let bytes = std::fs::read(dir.path().join(file)).expect("rendered file");
+        if file == "index.html" {
+            // What the export is about to be asked to take out is really
+            // there. (No committed title has a character the bundler escapes.)
+            assert!(
+                String::from_utf8_lossy(&bytes).contains(&format!("<title>{title}</title>")),
+                "the {seed} shell is not titled {title:?}"
+            );
+        }
         shell = shell.with(file, &bytes);
     }
-    shell
+    (shell, title)
 }
 
 /// Every string literal and every piece of markup text in `source`, minus
@@ -1514,7 +1531,15 @@ async fn name_the_site(ctx: &TestContext, name: &str) {
 /// name or wording fails here.
 #[tokio::test]
 async fn nothing_the_sandbox_says_about_itself_is_exported() {
-    let shell = sandbox_shell();
+    // Each seed heads its boot page with a title of its own, so each is
+    // exported: the one that names its template has more to leave behind.
+    for seed in ["blank", "bootstrap"] {
+        nothing_a_sandbox_built_from_this_seed_says_is_exported(seed).await;
+    }
+}
+
+async fn nothing_a_sandbox_built_from_this_seed_says_is_exported(seed: &str) {
+    let (shell, sandbox_title) = sandbox_shell(seed);
     let ctx = TestContext::with_admin()
         .await
         .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(shell))
@@ -1569,10 +1594,10 @@ async fn nothing_the_sandbox_says_about_itself_is_exported() {
         index.contains("<!--boot-notice--><!--/boot-notice-->"),
         "{index}"
     );
-    for word in ["sandbox", "llms.txt", "/b/dev"] {
+    for word in ["sandbox", "llms.txt", "/b/dev", sandbox_title.as_str()] {
         assert!(
-            !index.to_lowercase().contains(word),
-            "the exported boot page says {word:?}: {index}"
+            !index.to_lowercase().contains(&word.to_lowercase()),
+            "the exported boot page of the {seed} sandbox says {word:?}: {index}"
         );
     }
     // The loader is copied as it is, and that is safe because nothing in it
