@@ -1,7 +1,7 @@
 // Persists across the navigations sw.js triggers when it self-destructs,
 // so the very next page load hits the recovery path (below) instead of
-// re-registering the SW with the same stale browser-cached modules. Its value
-// is the cause sw.js gave, which that load shows.
+// carrying on under the dead worker. Its value is what sw.js reported —
+// the cause and the stage, as JSON — which that load shows and acts on.
 const SW_RECOVER_KEY = '__impresspress_sw_recover';
 // Where sw.js leaves the cause for a boot shell that was not listening when
 // it died — a page the runtime rendered, or the very navigation that failed.
@@ -19,44 +19,67 @@ const STOP_CAUSE_KEY = '/__impresspress_sw_stopped';
 // BOOT_PROBE_TIMEOUT_MS below by coincidence; neither is derived from the
 // other.)
 const STOP_CAUSE_MAX_AGE_MS = 60_000;
-// Set when the recovery path runs in this tab, and cleared once the app has
-// answered a boot probe since. A second self-destruct while it is still set
-// means the automatic recovery didn't resolve the underlying failure —
-// looping again would just burn another `?_freshen` reload and fail the same
-// way. We surface to the user via `renderRecoveryStuckUI` instead, which
-// keeps what happened on screen until they choose what to do.
+// Set when a recovery runs in this tab — automatically, or from one of the
+// buttons below — and cleared once the app has answered a boot probe since.
+// A failure the worker reports while it is still set means that recovery
+// didn't resolve the underlying failure: looping again would just burn
+// another `?_freshen` reload and fail the same way, so the shell shows what
+// happened instead (`renderStoppedUI`) and waits for the person.
+//
+// Its value is WHICH recovery was spent — RECOVERY_ERASED or
+// RECOVERY_RESTARTED — because the screen that follows says what did not
+// help, and "the data was erased" must only be said where it was.
 const RECOVERY_DONE_KEY = '__impresspress_recovery_done';
+const RECOVERY_ERASED = 'erased';
+const RECOVERY_RESTARTED = 'restarted';
+// Where the person was when the AUTOMATIC recovery left for the shell's own
+// address: path, query and fragment. The next boot goes back there instead
+// of to the boot URL. Written and read by the boot shell only, and read
+// exactly once. A recovery started from a button saves nothing: by then one
+// return to that page has already failed, and the app's first page is the
+// way out that does not go round.
+const RESUME_KEY = '__impresspress_resume';
 // Whether the recovery may wipe OPFS. Set per-build via the
 // `opfs_wipe_on_recovery` field on the bundle config (CLI flag
 // `--opfs-wipe-on-recovery`). Demo builds set it true so a schema-drift
 // loop self-resolves; production apps whose OPFS holds user data leave
 // it false and surface the error instead. Even where it is true, only a
-// failure the worker REPORTED is recovered from by wiping — `erasesFor` is
-// the one place that decides.
+// failure of the runtime's `initialize()` is recovered from by wiping —
+// `erasesFor` is the one place that decides.
 const OPFS_WIPE_ON_RECOVERY = __OPFS_WIPE_ON_RECOVERY__;
-// How long the boot probe waits for the app to answer. A pending Service
+// The stage sw.js reports for a failure of the runtime's `initialize()`
+// (`STAGE_INITIALIZE` there): opening the database, migrating it, importing
+// the seed. Its other stages — the wasm module could not be loaded, a started
+// runtime died on a request — say nothing about the stored data.
+const STAGE_INITIALIZE = 'initialize';
+// How long one boot probe waits for the app to answer. A pending Service
 // Worker response has no browser-level deadline, so without this a boot that
 // never answers leaves the shell on "Loading..." forever.
 //
-// This is everything the number means: after it, the shell stops WAITING. It
-// is not a verdict on the app. A probe that has not answered proves the app
-// is slow — a cold start, a slow device, a long first migration — and says
-// nothing about the data stored in this browser, so running out of time
-// never erases any of it, in any build: the shell restarts the worker once
-// (`recoverBrowserState`), and if the app still does not answer it shows the
-// stuck screen and the person decides. See `didNotAnswer` and `erasesFor`.
+// This is everything the number means: after it, the shell stops waiting
+// SILENTLY. It is not a verdict on the app. A probe that has not answered
+// proves the app is slow — a cold start, a slow device, a long first
+// migration — and says nothing about the data stored in this browser. So
+// running out of time never erases anything and never restarts the worker
+// on its own: a restart kills the very start that may only be slow, and a
+// start that needs longer than this would then never finish. The first time,
+// the shell says so and probes the same worker again; the second time it
+// shows the choice (`renderWaitingUI`) and the person decides.
 const BOOT_PROBE_TIMEOUT_MS = 60_000;
+// How many probes in a row may run out of time before the shell asks.
+const BOOT_PROBES_BEFORE_ASKING = 2;
 // The boot shell's own URL: the one address the static host itself must
 // answer, because a first visit — no worker yet — starts there. Every other
 // path of the app may exist only while a worker is registered (a host with no
-// fallback for unknown paths answers `/b/…` with its 404), so whatever leaves
-// this page with the worker gone goes HERE, not back to where it was. The
-// same name is declared in sw.js, for the same reason.
-const SHELL_URL = '/';
+// fallback for unknown paths answers `/b/…` with its 404), so a recovery,
+// which unregisters the worker, loads THIS and not the address it was at.
+// Rendered from the bundler's one `SHELL_URL`, which sw.js is rendered with
+// too.
+const SHELL_URL = '__SHELL_URL__';
 
 // Unregister all SWs, drop Cache Storage, and (if asked) clear OPFS.
-// Used both by automatic recovery and by the manual reset button on the
-// stuck-UI fallback, so the wipe semantics stay in one place.
+// Used both by automatic recovery and by the buttons below, so the wipe
+// semantics stay in one place.
 async function wipeBrowserState({ wipeOpfs }) {
     try {
         const regs = await navigator.serviceWorker.getRegistrations();
@@ -85,42 +108,41 @@ function stoppedText(cause) {
     return "The app's runtime stopped: " + cause;
 }
 
-// The two failures this shell acts on. `said` is the sentence shown;
-// `reported` is whether the worker itself said the runtime failed, and why.
-//
-// A cause the worker reported: it reached this page in the worker's
-// `sw-self-destruct` message, in the Cache Storage entry it left, or in its
-// 503 to the boot probe. There is no other source of one.
-function stoppedByRuntime(cause) {
-    return { said: stoppedText(cause), reported: true };
+// What sw.js reported, as this shell holds it: `cause` is its reason and
+// `stage` where it failed. Both are whatever arrived, as strings; a stage
+// that is missing or unknown (a worker from an older build) is one that does
+// not erase, because `erasesFor` asks for exactly one value.
+function reported(cause, stage) {
+    return { cause: String(cause), stage: typeof stage === 'string' ? stage : '' };
 }
 
-// The boot probe ran out of time (BOOT_PROBE_TIMEOUT_MS says what that does
-// and does not mean). Nothing reported a failure; the app just has not
-// answered.
-function didNotAnswer() {
-    return {
-        said: `The app did not answer within ${BOOT_PROBE_TIMEOUT_MS / 1000} seconds`,
-        reported: false,
-    };
-}
-
-// Whether recovering from `failure` — automatically, or by "Try again" —
-// erases the data this browser stores for the app. The only gate in front of
-// the automatic OPFS wipe: the build must allow it AND the worker must have
-// reported the failure. Slowness is not evidence that the data is
-// incompatible, and the wipe cannot be undone.
+// Whether recovering from `failure` — automatically, or from the retry
+// button — erases the data this browser stores for the app. The only gate in
+// front of the OPFS wipe a recovery does: the build must allow it AND the
+// failure must be the runtime's `initialize()`, the one failure that can mean
+// the stored data is not what this build can use. A module that could not be
+// loaded, a request the runtime died on and a probe that ran out of time are
+// not evidence of that, and the wipe cannot be undone. (sw.js states the same
+// rule as `recoveryErases`, to word its 503.)
 function erasesFor(failure) {
-    return OPFS_WIPE_ON_RECOVERY && failure.reported;
+    return OPFS_WIPE_ON_RECOVERY && failure.stage === STAGE_INITIALIZE;
 }
 
 // What stopped the runtime, if this load follows a self-destruct; `null` if
 // it does not. Two sources, both consumed here so the cause is acted on once:
-// the breaker this page's own listener set (it was the boot shell when sw.js
-// posted the message), and the Cache Storage entry sw.js leaves for every
-// page that was not listening.
+// the breaker this page set (it was the boot shell when sw.js posted the
+// message, or its probe got sw.js's 503), and the Cache Storage entry sw.js
+// leaves for every page that was not listening.
 async function takeStopCause() {
-    const told = sessionStorage.getItem(SW_RECOVER_KEY);
+    let told = null;
+    try {
+        const breaker = JSON.parse(sessionStorage.getItem(SW_RECOVER_KEY));
+        if (breaker && typeof breaker.cause === 'string') {
+            told = reported(breaker.cause, breaker.stage);
+        }
+    } catch (_) {
+        // Not something this script wrote; there is no cause in it.
+    }
     sessionStorage.removeItem(SW_RECOVER_KEY);
     let left = null;
     try {
@@ -131,7 +153,7 @@ async function takeStopCause() {
             await caches.delete(STOP_CAUSE_CACHE);
             const age = stop && typeof stop.at === 'number' ? Date.now() - stop.at : NaN;
             if (age >= 0 && age <= STOP_CAUSE_MAX_AGE_MS) {
-                left = String(stop.reason);
+                left = reported(stop.reason, stop.stage);
             }
         }
     } catch (e) {
@@ -140,44 +162,87 @@ async function takeStopCause() {
     return told !== null ? told : left;
 }
 
-// The cause in sw.js's answer to a request for a dead runtime
+// Set the breaker: what the next load of the shell is to recover from.
+function setBreaker(failure) {
+    sessionStorage.setItem(
+        SW_RECOVER_KEY,
+        JSON.stringify({ cause: failure.cause, stage: failure.stage }),
+    );
+}
+
+// What sw.js's answer to a request for a dead runtime reports
 // (`runtimeStopped` there), or `null` for any other response.
 async function stoppedCauseOf(response) {
     if (response.status !== 503) return null;
     try {
         const body = await response.json();
-        return body.code === 'runtime_stopped' ? String(body.cause) : null;
+        return body.code === 'runtime_stopped' ? reported(body.cause, body.stage) : null;
     } catch (_) {
         return null;
     }
 }
 
-// Drop the SW and caches (and OPFS, when `erasesFor(failure)`) and load the
-// boot shell afresh. The automatic recovery and the "Try again" button are
-// the same act; only who decided differs.
+// Where this page is, as a path to come back to: without the `_freshen` a
+// recovery added, which is not part of where the person was.
+function pathHere() {
+    const url = new URL(window.location.href);
+    url.searchParams.delete('_freshen');
+    return url.pathname + url.search + url.hash;
+}
+
+// The path a recovery saved for this load, or `null`. Removed as it is read:
+// it is about the load right after the recovery and no other, and one left
+// behind would send some later, unrelated boot to a page nobody asked for.
+// Only a path on this origin is honoured.
+function takeResume() {
+    const saved = sessionStorage.getItem(RESUME_KEY);
+    sessionStorage.removeItem(RESUME_KEY);
+    if (saved === null) return null;
+    try {
+        const url = new URL(saved, window.location.href);
+        return url.origin === new URL(window.location.href).origin ? saved : null;
+    } catch (_) {
+        return null;
+    }
+}
+
+// Drop the SW and caches (and OPFS, when `erase`) and load the boot shell
+// afresh. The one place a dead worker is unregistered — sw.js leaves that to
+// this (`poisoned` there says why).
 //
 // It loads SHELL_URL, not the address this page is at: the worker is gone by
 // then, and this shell may be standing at a path only a worker can answer
 // (sw.js answers a navigation to a dead runtime with the shell, at the
-// address that was asked for).
-async function restartFresh(failure) {
-    await wipeBrowserState({ wipeOpfs: erasesFor(failure) });
+// address that was asked for). With `resume`, where it was is saved for the
+// next boot to go back to, so the person ends on the page they were on
+// (RESUME_KEY says who asks for that).
+async function restartFresh({ erase, resume }) {
+    sessionStorage.setItem(RECOVERY_DONE_KEY, erase ? RECOVERY_ERASED : RECOVERY_RESTARTED);
+    const back = pathHere();
+    if (resume && back !== SHELL_URL) {
+        sessionStorage.setItem(RESUME_KEY, back);
+    } else {
+        sessionStorage.removeItem(RESUME_KEY);
+    }
+    await wipeBrowserState({ wipeOpfs: erase });
     const url = new URL(SHELL_URL, window.location.href);
     url.searchParams.set('_freshen', String(Date.now()));
     window.location.replace(url.toString());
 }
 
-// Fallback UI shown when automatic recovery can't break the failure loop.
-// Replaces the loader card with what happened and the two things left to try.
-// It stays until one of them is clicked — nothing here navigates on its own.
-//
-// "Try again" is `restartFresh` for this failure — what the automatic
-// recovery would do for it. "Reset" does a full wipe including OPFS whatever
-// the build and whatever the failure — the user has explicitly opted in by
-// clicking.
-//
-// What happened is set with `textContent`: a cause is an error string from
-// wherever the runtime failed, not markup.
+// Erase everything this origin stores for the app and start it from its
+// first page: the "Reset local data and reload" button, on both screens
+// below. A full wipe including OPFS whatever the build and whatever the
+// failure — the person has explicitly opted in by clicking.
+async function resetEverything() {
+    await wipeBrowserState({ wipeOpfs: true });
+    try { localStorage.clear(); } catch (_) {}
+    try { sessionStorage.clear(); } catch (_) {}
+    // The shell's own address, for the reason `restartFresh` gives — and
+    // without `?_freshen`, so the next boot starts from a clean URL.
+    window.location.replace(new URL(SHELL_URL, window.location.href).toString());
+}
+
 // The app's name, for text a PERSON reads — taken from the page this script
 // runs in (the title `index.html` shows, else the document's), never from a
 // constant rendered into this file. The page is what says whose app this is:
@@ -190,72 +255,226 @@ function appTitle() {
     return (shown && shown.textContent) || document.title || 'The app';
 }
 
-function renderRecoveryStuckUI(failure) {
-    // Read before the card is replaced: the title lives inside it.
-    const name = appTitle();
+// Replace the loader card with a title, what happened, what the buttons do,
+// and the buttons. It stays until one of them is clicked — nothing here
+// navigates on its own. A click disables every button, relabels the one
+// clicked with its `busy` text and runs its `act`.
+//
+// Everything is set with `textContent`: a cause is an error string from
+// wherever the runtime failed, not markup.
+function renderChoices({ title, said, next, buttons }) {
     const card = document.querySelector('.loader') || document.body;
+    const styles = {
+        primary: 'background:#1f6feb;color:#fff;border:0;',
+        plain: 'background:#fff;color:#1f2328;border:1px solid #8c959f;',
+        danger: 'background:#fff;color:#b42318;border:1px solid #b42318;',
+    };
     card.innerHTML =
         '<div style="max-width:480px;margin:0 auto;text-align:left;padding:1.5rem;font:inherit;line-height:1.5;">' +
         '<h1 id="impresspress-stopped-title" style="margin-top:0;font-size:1.25rem;"></h1>' +
         '<p id="impresspress-stopped-cause" style="overflow-wrap:anywhere;"></p>' +
         '<p id="impresspress-stopped-next"></p>' +
-        '<button id="impresspress-retry" style="background:#1f6feb;color:#fff;border:0;border-radius:6px;padding:0.6rem 1rem;font:inherit;cursor:pointer;margin-right:0.5rem;">Try again</button>' +
-        '<button id="impresspress-reset" style="background:#fff;color:#b42318;border:1px solid #b42318;border-radius:6px;padding:0.6rem 1rem;font:inherit;cursor:pointer;">Reset local data and reload</button>' +
+        buttons
+            .map(
+                (b) =>
+                    `<button id="${b.id}" style="${styles[b.style]}border-radius:6px;padding:0.6rem 1rem;font:inherit;cursor:pointer;margin:0 0.5rem 0.5rem 0;"></button>`,
+            )
+            .join('') +
         '</div>';
-    document.getElementById('impresspress-stopped-title').textContent = `${name} couldn't start`;
-    document.getElementById('impresspress-stopped-cause').textContent = failure.said;
-    // What each button costs. "Try again" is the recovery, and for a failure
-    // the worker reported, in a build rendered with OPFS_WIPE_ON_RECOVERY,
-    // the recovery erases local data — so there it is not offered as the
-    // harmless option. Everywhere else it keeps the data, and after a probe
-    // that only ran out of time the text says that waiting may be all it
-    // takes.
-    let next;
-    if (!failure.reported) {
-        next = "Restarting it didn't help. It may only be slow: a first start, a large update or a slow device can take longer than this. You can try again, which keeps the data stored locally in this browser, or reset, which erases it and reloads the app.";
-    } else if (erasesFor(failure)) {
-        next = "Automatic recovery didn't resolve it. You can try again or reset; in this app both erase the data stored locally in this browser and reload the app.";
-    } else {
-        next = "Automatic recovery didn't resolve it. You can try again, which keeps the data stored locally in this browser, or reset, which erases it and reloads the app.";
-    }
+    document.getElementById('impresspress-stopped-title').textContent = title;
+    document.getElementById('impresspress-stopped-cause').textContent = said;
     document.getElementById('impresspress-stopped-next').textContent = next;
-    const retry = document.getElementById('impresspress-retry');
-    const reset = document.getElementById('impresspress-reset');
-    retry.addEventListener('click', async () => {
-        retry.disabled = true;
-        reset.disabled = true;
-        retry.textContent = 'Trying again…';
-        await restartFresh(failure);
-    });
-    reset.addEventListener('click', async () => {
-        retry.disabled = true;
-        reset.disabled = true;
-        reset.textContent = 'Resetting…';
-        await wipeBrowserState({ wipeOpfs: true });
-        try { localStorage.clear(); } catch (_) {}
-        try { sessionStorage.clear(); } catch (_) {}
-        // The shell's own address, for the reason `restartFresh` gives — and
-        // without `?_freshen`, so the next boot starts from a clean URL.
-        window.location.replace(new URL(SHELL_URL, window.location.href).toString());
+    const elements = buttons.map((b) => document.getElementById(b.id));
+    buttons.forEach((b, i) => {
+        elements[i].textContent = b.label;
+        elements[i].addEventListener('click', async () => {
+            for (const element of elements) element.disabled = true;
+            elements[i].textContent = b.busy;
+            await b.act();
+        });
     });
 }
 
-// Run one automatic recovery in this tab, saying why. A failure the worker
-// reported and a boot probe that ran out of time both use this path, so they
-// share one loop guard; what they do not share is the OPFS wipe, which
-// `erasesFor` allows only for the first. The second time in a tab — whichever
-// of the two the first was — it does not recover anything: it shows what
-// happened and waits.
+const RESET_BUTTON = {
+    id: 'impresspress-reset',
+    label: 'Reset local data and reload',
+    busy: 'Resetting…',
+    style: 'danger',
+    act: resetEverything,
+};
+
+// Shown when the worker reports a failure and this tab's recovery has
+// already been spent: the cause, and the two things left to try.
+//
+// The retry is `restartFresh` for this failure — what the automatic recovery
+// would do for it, except that it starts the app from its first page — and
+// where that erases local data (`erasesFor`) the button
+// is labelled as erasing, not offered as the harmless option. `spent` is the
+// recovery that did not help (RECOVERY_DONE_KEY's value), so the first
+// sentence is about what was actually done.
+function renderStoppedUI(failure, spent) {
+    // Read before the card is replaced: the title lives inside it.
+    const name = appTitle();
+    const erases = erasesFor(failure);
+    const tried =
+        spent === RECOVERY_ERASED
+            ? "Erasing the data stored locally in this browser and restarting didn't resolve it."
+            : "Restarting it didn't help.";
+    const offered = erases
+        ? 'You can erase the data stored locally in this browser and try again, or reset, which also clears everything else this browser keeps for the app. Both start the app from its first page.'
+        : 'You can try again, which keeps the data stored locally in this browser, or reset, which erases it. Both start the app from its first page.';
+    renderChoices({
+        title: `${name} couldn't start`,
+        said: stoppedText(failure.cause),
+        next: `${tried} ${offered}`,
+        buttons: [
+            {
+                id: 'impresspress-retry',
+                label: erases ? 'Erase local data and try again' : 'Try again',
+                busy: 'Trying again…',
+                style: 'primary',
+                act: () => restartFresh({ erase: erases, resume: false }),
+            },
+            RESET_BUTTON,
+        ],
+    });
+}
+
+// Shown when BOOT_PROBES_BEFORE_ASKING probes in a row have run out of time.
+// Nothing reported a failure; the app just has not answered, and the person
+// decides what that is worth.
+//
+// "Keep waiting" probes the SAME worker again, so a start that is only slow
+// gets to finish. "Restart it" is `restartFresh` without erasing — the way
+// out for a worker that is truly stuck, and no help for one that is only
+// slow, which the text says. Neither erases anything.
+function renderWaitingUI(target, status, timeouts) {
+    const name = appTitle();
+    const seconds = (timeouts * BOOT_PROBE_TIMEOUT_MS) / 1000;
+    renderChoices({
+        title: `${name} is taking a long time to start`,
+        said: `The app has not answered for ${seconds} seconds.`,
+        next: 'It may only be slow: a first start, a large update or a slow device can take longer than this. You can keep waiting, or restart it, which starts over and so does not help an app that is only slow; both keep the data stored locally in this browser. Or reset, which erases it. Restarting and resetting start the app from its first page.',
+        buttons: [
+            {
+                id: 'impresspress-wait',
+                label: 'Keep waiting',
+                busy: 'Waiting…',
+                style: 'primary',
+                act: () => enterApp(target, status, timeouts),
+            },
+            {
+                id: 'impresspress-restart',
+                label: 'Restart it',
+                busy: 'Restarting…',
+                style: 'plain',
+                act: () => restartFresh({ erase: false, resume: false }),
+            },
+            RESET_BUTTON,
+        ],
+    });
+}
+
+// Recover from a failure the worker reported, saying why — once per tab
+// until the app has answered. The second time it does not recover anything:
+// it shows the cause and waits.
 async function recoverBrowserState(status, failure) {
-    if (sessionStorage.getItem(RECOVERY_DONE_KEY)) {
-        renderRecoveryStuckUI(failure);
+    const spent = sessionStorage.getItem(RECOVERY_DONE_KEY);
+    if (spent) {
+        renderStoppedUI(failure, spent);
         return;
     }
-    sessionStorage.setItem(RECOVERY_DONE_KEY, '1');
-    status.textContent = failure.reported
-        ? failure.said + ' — recovering…'
-        : failure.said + ' — restarting it; the data stored locally in this browser is kept…';
-    await restartFresh(failure);
+    const erase = erasesFor(failure);
+    status.textContent =
+        stoppedText(failure.cause) +
+        (erase
+            ? ' — recovering; the data stored locally in this browser is being erased…'
+            : ' — restarting it; the data stored locally in this browser is kept…');
+    await restartFresh({ erase, resume: true });
+}
+
+// One probe of `target`: its response (`null` if the request threw), and
+// whether it ran out of BOOT_PROBE_TIMEOUT_MS.
+async function probeOnce(target) {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), BOOT_PROBE_TIMEOUT_MS);
+    try {
+        const probe = await fetch(target.href, {
+            cache: 'no-store',
+            credentials: 'same-origin',
+            signal: controller.signal,
+        });
+        return { probe, timedOut: false };
+    } catch (error) {
+        // Only the timer aborts this request, so an aborted probe is one
+        // that ran out of time. Anything else that throws is a request that
+        // could not be made (the network, or a worker that went away under
+        // it): it carries no cause, is not acted on, and erases nothing.
+        if (controller.signal.aborted) return { probe: null, timedOut: true };
+        console.warn('[__APP_NAME__] Boot probe failed:', error);
+        return { probe: null, timedOut: false };
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+// Probe `target` until the app answers, then go there. `timeouts` is how
+// many probes have already run out of time on this load.
+//
+// A claimed worker initializes lazily on its first fetch. Probing before
+// going there means a cold origin does not race that initialization and
+// render the static loader twice — and this page learns whether the app
+// answers at all, which is what everything below turns on. Whether `target`
+// is this page's own address (a reload) or another (a redirect) makes no
+// difference, so the probe runs for both. `target` is therefore requested
+// TWICE — this probe, then the navigation — and has to be an idempotent GET.
+async function enterApp(target, status, timeouts) {
+    const { probe, timedOut } = await probeOnce(target);
+    // A probe the runtime could not START for self-destructs the worker,
+    // which sets the breaker and re-navigates this client itself.
+    // Navigating on top of that would be a second, uncoordinated
+    // navigation, so stand down and let the recovery path in `boot` run on
+    // the load sw.js is starting. Checked before the timeout: a worker that
+    // reported a failure just as the timer fired has said more than the
+    // timer has.
+    if (sessionStorage.getItem(SW_RECOVER_KEY) !== null) return;
+    if (timedOut) {
+        // BOOT_PROBE_TIMEOUT_MS says what this does and does not mean. The
+        // worker is left alone: its start goes on while this page asks again
+        // — by itself the first time, at the person's word after that.
+        const waited = timeouts + 1;
+        if (waited < BOOT_PROBES_BEFORE_ASKING) {
+            status.textContent = `The app has not answered for ${(waited * BOOT_PROBE_TIMEOUT_MS) / 1000} seconds. Still waiting — it may only be slow…`;
+            await enterApp(target, status, waited);
+            return;
+        }
+        renderWaitingUI(target, status, waited);
+        return;
+    }
+    // A probe a STARTED runtime died on is a request from a page like any
+    // other: sw.js answers it with the cause and navigates nobody. Going on
+    // as if it had worked would land on the shell again, probe again and get
+    // the same answer, forever — so take the same road as a self-destruct
+    // notice: set the breaker, and let the next load recover once and then
+    // stop with the cause on screen. (The reload is answered by the dead
+    // worker with this shell, whatever the static host has at this address.)
+    const stopped = probe ? await stoppedCauseOf(probe) : null;
+    if (stopped !== null) {
+        setBreaker(stopped);
+        window.location.reload();
+        return;
+    }
+    // The app answered. Whatever the last recovery in this tab was for is
+    // over, so the next failure — hours later, unrelated — gets its own
+    // automatic recovery instead of the stopped screen. (A probe that threw
+    // proves nothing and clears nothing.)
+    if (probe) sessionStorage.removeItem(RECOVERY_DONE_KEY);
+    if (target.href === window.location.href) {
+        // Leave the current navigation task before requesting the reload.
+        setTimeout(() => window.location.reload(), 0);
+    } else {
+        window.location.replace(target.href);
+    }
 }
 
 async function boot() {
@@ -265,34 +484,33 @@ async function boot() {
         return;
     }
 
+    const resume = takeResume();
+
     // Recovery path: a SW self-destructed and left its cause, for this page
     // (the breaker) or for whichever boot shell loaded next (the cache
-    // entry). Wipe all SW + cache state — and OPFS too, in a build rendered
-    // with OPFS_WIPE_ON_RECOVERY: this is the failure the worker reported,
-    // the only kind `erasesFor` allows that for — force a fresh document
-    // fetch via a cache-busting query string, and let the next load proceed
-    // normally.
+    // entry). Replace the worker and drop all cache state — and OPFS too,
+    // where `erasesFor` allows it — force a fresh document fetch via a
+    // cache-busting query string, and let the next load proceed normally.
     //
-    // OPFS wipe is the critical step for any schema-drift class of bug: if
-    // the OPFS DB was written by a prior build with an incompatible schema,
-    // re-registering the SW against the same OPFS will keep failing
-    // `initialize()` and re-entering recovery forever (caches + SW are
-    // already innocent in that scenario). For a browser-local demo this
-    // costs the user's local rows but breaks the loop; that trade-off is
-    // why self-destruct fires in the first place.
+    // The OPFS wipe is for the schema-drift class of bug: if the OPFS DB was
+    // written by a prior build with an incompatible schema, a fresh worker
+    // against the same OPFS will keep failing `initialize()` and re-entering
+    // recovery (caches + SW are already innocent in that scenario). For a
+    // browser-local demo this costs the user's local rows but breaks the
+    // loop; that trade-off is what OPFS_WIPE_ON_RECOVERY opts into.
     const stopped = await takeStopCause();
     if (stopped !== null) {
-        await recoverBrowserState(status, stoppedByRuntime(stopped));
+        await recoverBrowserState(status, stopped);
         return;
     }
 
     // Listen for self-destruct notices. The SW posts this message just
-    // before navigating its clients to the boot shell, so by the time the
-    // navigation lands, the breaker is set — to the cause — and the
-    // recovery path above runs.
+    // before re-navigating its clients, so by the time the navigation
+    // lands, the breaker is set — to what it reported — and the recovery
+    // path above runs.
     navigator.serviceWorker.addEventListener('message', (event) => {
         if (event.data?.type === 'sw-self-destruct') {
-            sessionStorage.setItem(SW_RECOVER_KEY, String(event.data.reason));
+            setBreaker(reported(event.data.reason, event.data.stage));
         }
     });
 
@@ -332,92 +550,30 @@ async function boot() {
                 window.location.reload();
             });
         }
+        // Where this boot is going: back to the page a recovery left, if it
+        // saved one, else the boot URL.
+        const target = new URL(
+            resume !== null ? resume : '__BOOT_REDIRECT__',
+            window.location.href,
+        );
         if (!navigator.serviceWorker.controller) {
             status.textContent = `First-time setup complete. Loading ${appTitle()}...`;
             window.__impresspressReloading = true;
-            window.location.reload();
+            // A worker is registered and active but does not control this
+            // document, so load one it does. Ordinarily that is this same
+            // address again; after a recovery it is the page to go back to,
+            // since the saved path has been read and a reload would not
+            // bring this script back to use it.
+            if (resume !== null) {
+                window.location.replace(target.href);
+            } else {
+                window.location.reload();
+            }
             return;
         }
         status.textContent = `Loading ${appTitle()}...`;
-        const target = new URL('__BOOT_REDIRECT__', window.location.href);
         window.__impresspressReloading = true;
-        // A claimed worker initializes lazily on its first fetch. Probe
-        // the boot URL before going there, so a cold public origin does not
-        // race that initialization and render the static loader twice —
-        // and so this page learns whether the app answers at all, which is
-        // what the two guards below turn on. Whether the boot URL is this
-        // one (a reload) or another (a redirect) makes no difference to
-        // either, so the probe runs for both.
-        //
-        // Two consequences for an app with a boot redirect: its boot URL is
-        // requested TWICE — this probe, then the navigation — so it has to
-        // be an idempotent GET, and it is given BOOT_PROBE_TIMEOUT_MS to
-        // answer (the declaration says what running out of it means).
-        const probeController = new AbortController();
-        const probeTimeout = setTimeout(
-            () => probeController.abort(),
-            BOOT_PROBE_TIMEOUT_MS,
-        );
-        let probe = null;
-        let timedOut = false;
-        try {
-            probe = await fetch(target.href, {
-                cache: 'no-store',
-                credentials: 'same-origin',
-                signal: probeController.signal,
-            });
-        } catch (error) {
-            // Only the timer aborts this request, so an aborted probe is one
-            // that ran out of time. Anything else that throws is a request
-            // that could not be made (the network, or a worker that went
-            // away under it): it carries no cause, is not acted on, and
-            // erases nothing.
-            timedOut = probeController.signal.aborted;
-            if (!timedOut) {
-                console.warn('[__APP_NAME__] Boot probe failed:', error);
-            }
-        } finally {
-            clearTimeout(probeTimeout);
-        }
-        // A probe the runtime could not START for self-destructs the
-        // worker, which sets the breaker and navigates this client to the
-        // boot shell itself. Navigating on top of that would be a second,
-        // uncoordinated navigation, so stand down and let the recovery
-        // path above run on the load sw.js is starting. Checked before the
-        // timeout: a worker that reported a failure just as the timer fired
-        // has said more than the timer has.
-        if (sessionStorage.getItem(SW_RECOVER_KEY) !== null) return;
-        if (timedOut) {
-            console.warn('[__APP_NAME__] Boot probe timed out; restarting without erasing local data.');
-            await recoverBrowserState(status, didNotAnswer());
-            return;
-        }
-        // A probe a STARTED runtime died on is a request from a page like
-        // any other: sw.js answers it with the cause and navigates
-        // nobody. Going on as if it had worked would register a fresh
-        // worker, probe again and die again, forever — so take the same
-        // road as above: set the breaker, and let the next load recover
-        // once and then stop with the cause on screen. That load is of
-        // SHELL_URL, not a reload: the worker that died unregisters itself,
-        // and this shell may be standing at a path only a worker answers
-        // (see `restartFresh`).
-        const stopped = probe ? await stoppedCauseOf(probe) : null;
-        if (stopped !== null) {
-            sessionStorage.setItem(SW_RECOVER_KEY, stopped);
-            window.location.replace(new URL(SHELL_URL, window.location.href).toString());
-            return;
-        }
-        // The app answered. Whatever the last recovery in this tab was
-        // for is over, so the next failure — hours later, unrelated —
-        // gets its own automatic recovery instead of the stuck screen.
-        // (A probe that threw proves nothing and clears nothing.)
-        if (probe) sessionStorage.removeItem(RECOVERY_DONE_KEY);
-        if (target.href === window.location.href) {
-            // Leave the current navigation task before requesting the reload.
-            setTimeout(() => window.location.reload(), 0);
-        } else {
-            window.location.replace(target.href);
-        }
+        await enterApp(target, status, 0);
     } catch (error) {
         status.textContent = 'Error: ' + error.message;
         console.error('[__APP_NAME__] Boot error:', error);

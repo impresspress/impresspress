@@ -503,10 +503,10 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
       // And when its runtime dies, it says why. An exported folder is served
       // by whatever its recipient has — here a plain file server, which
       // answers a path only the runtime serves with its own 404 — so the
-      // worker has to hand a navigation to the boot shell itself
-      // (`dev-stopped-navigation.spec.ts` says what it did before). The
-      // recovery then returns to `/`, the one address such a host has, and
-      // the site is there again: nothing was erased.
+      // dead worker has to stay registered and hand a navigation to the boot
+      // shell itself (`dev-stopped-navigation.spec.ts` says what it did
+      // before). The shell restarts it without erasing anything and comes
+      // back to the page that was asked for; the site is still there.
       const exportCause = 'injected by dev-workspace.spec.ts';
       const hostAlone = await exportedContext.request.get('/b/auth/login');
       expect(hostAlone.status(), 'the export host has no fallback').toBe(404);
@@ -518,10 +518,11 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
       await expect
         .poll(() => statusLines)
         .toContain(
-          `The app's runtime stopped: error handling request: Error: ${exportCause} — recovering…`,
+          `The app's runtime stopped: error handling request: Error: ${exportCause} — restarting it; the data stored locally in this browser is kept…`,
         );
       await runtimeServing(site);
-      expect(new URL(site.url()).pathname).toBe('/');
+      expect(new URL(site.url()).pathname).toBe('/b/auth/login');
+      await site.goto('/', { waitUntil: 'commit' });
       await expect(site.locator('h1')).toHaveText(SHOP_HEADING, { timeout: 120_000 });
     } finally {
       await exportedContext.close();

@@ -82,8 +82,7 @@ test('a login the runtime dies on shows the cause, and keeps showing it', async 
   const response = await answered;
 
   const cause = `error handling request: Error: ${CAUSE}`;
-  // What the worker says to do next names the boot shell's address.
-  const stopped = `The app's runtime stopped (${cause}). Open ${new URL('/', page.url()).href} to restart it.`;
+  const stopped = `The app's runtime stopped (${cause}). Reload the page to restart it; the data this browser stores for the app is kept.`;
   expect(response.status()).toBe(503);
   expect(response.fromServiceWorker(), 'answered by the worker, not the static host').toBe(true);
   expect(response.headers()['cache-control']).toBe('no-store');
@@ -92,6 +91,7 @@ test('a login the runtime dies on shows the cause, and keeps showing it', async 
     message: stopped,
     code: 'runtime_stopped',
     cause,
+    stage: 'request',
   });
 
   const error = page.locator('#error');
@@ -125,17 +125,22 @@ test('a login the runtime dies on shows the cause, and keeps showing it', async 
   await expect(error).toHaveText(shown);
   await expect(page.locator('#info')).toBeHidden();
 
-  // And the message's last sentence is true: opening the address it names is
-  // an ordinary boot with a fresh worker — no recovery ran, so nothing was
-  // wiped. (It names `/` and not "reload the page" because the worker has
-  // unregistered, and the static host in this job — like any with no
-  // fallback — answers `/b/auth/login` with its own 404.)
+  // And the message's last sentence is true, on a static host that has
+  // nothing at `/b/auth/login` (this job's has no fallback): the dead worker
+  // is still registered, so it answers the reload with the boot shell, which
+  // says why, replaces the worker without erasing anything, and comes back
+  // to this page.
   const statusLines = await recordShellStatus(page);
-  await page.goto('/', { waitUntil: 'commit' });
+  await page.reload({ waitUntil: 'commit' });
+  await expect
+    .poll(() => statusLines)
+    .toContain(
+      `The app's runtime stopped: ${cause} — restarting it; the data stored locally in this browser is kept…`,
+    );
   await served(page);
-  await expect(page.getByRole('heading', { name: WELCOME_HEADING })).toBeVisible();
-  expect(statusLines.length, 'the boot shell was loaded and booted').toBeGreaterThan(0);
-  expect(statusLines.filter((line) => line.includes('runtime stopped'))).toEqual([]);
+  expect(new URL(page.url()).pathname).toBe('/b/auth/login');
+  await expect(page.locator('input#email')).toBeVisible();
+  await expect(error).toBeHidden();
 });
 
 test('a navigation the runtime dies on lands on a boot shell that shows the cause and stops', async ({
@@ -152,9 +157,10 @@ test('a navigation the runtime dies on lands on a boot shell that shows the caus
   await killRuntime(page);
   await page.reload({ waitUntil: 'commit' });
   const cause = `error handling request: Error: ${CAUSE}`;
+  const recovering = `The app's runtime stopped: ${cause} — restarting it; the data stored locally in this browser is kept…`;
   await expect
-    .poll(() => statusLines, { message: 'the boot shell said why it was recovering' })
-    .toContain(`The app's runtime stopped: ${cause} — recovering…`);
+    .poll(() => statusLines, { message: 'the boot shell said why it was restarting' })
+    .toContain(recovering);
   await served(page);
   await expect(heading).toBeVisible();
 
@@ -168,8 +174,7 @@ test('a navigation the runtime dies on lands on a boot shell that shows the caus
     })),
   ).toEqual({ marker: 'yes', recoveryDone: null });
   // So a later failure in the same tab is recovered from automatically
-  // again, instead of going straight to the stuck screen.
-  const recovering = `The app's runtime stopped: ${cause} — recovering…`;
+  // again, instead of going straight to the stopped screen.
   await killRuntime(page);
   await page.reload({ waitUntil: 'commit' });
   await expect
@@ -187,7 +192,7 @@ test('a navigation the runtime dies on lands on a boot shell that shows the caus
   // loader; what only a browser can show is the screen itself.)
   await page.addInitScript(() => {
     if (new URLSearchParams(location.search).has('recovery-spent')) {
-      sessionStorage.setItem('__impresspress_recovery_done', '1');
+      sessionStorage.setItem('__impresspress_recovery_done', 'restarted');
     }
   });
   await killRuntime(page);
@@ -195,6 +200,9 @@ test('a navigation the runtime dies on lands on a boot shell that shows the caus
 
   const stopped = page.locator('#impresspress-stopped-cause');
   await expect(stopped).toHaveText(`The app's runtime stopped: ${cause}`, { timeout: 60_000 });
+  await expect(page.locator('#impresspress-stopped-next')).toHaveText(
+    "Restarting it didn't help. You can try again, which keeps the data stored locally in this browser, or reset, which erases it. Both start the app from its first page.",
+  );
   const retry = page.getByRole('button', { name: 'Try again' });
   await expect(retry).toBeVisible();
   await expect(page.getByRole('button', { name: 'Reset local data and reload' })).toBeVisible();

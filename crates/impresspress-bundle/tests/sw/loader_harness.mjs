@@ -33,6 +33,7 @@ export const STOP_CACHE = '__impresspress_sw_stopped';
 export const STOP_KEY = '/__impresspress_sw_stopped';
 export const BREAKER = '__impresspress_sw_recover';
 export const RECOVERY_DONE = '__impresspress_recovery_done';
+export const RESUME = '__impresspress_resume';
 
 function storage(initial = {}) {
   const map = new Map(Object.entries(initial));
@@ -74,8 +75,10 @@ function element() {
 ///                 is `/`, so any makes this load a redirect, not a reload)
 /// - `title`     — what the page's `[data-app-title]` element shows, or `null`
 ///                 for a page without one; `documentTitle` is `<title>`
-/// - `timesOut`  — the boot probe never answers: its 60 s timer fires at once
-///                 and `fetch` rejects as an aborted request does
+/// - `timesOut`  — how many boot probes in a row never answer (`true`: all
+///                 of them): the 60 s timer of each fires at once and its
+///                 `fetch` rejects as an aborted request does
+/// - `controlled` — whether a worker controls the page once registered
 /// - `onProbe`   — called when the probe is made, with `post` (sw.js posting a
 ///                 message to this page), before the probe is answered
 /// - `registerFails` — `navigator.serviceWorker.register` rejects with this
@@ -90,6 +93,7 @@ export function loadShell({
   timesOut = false,
   onProbe,
   registerFails,
+  controlled = true,
   title = 'Kiln & Co',
   documentTitle = title
 } = {}) {
@@ -155,7 +159,7 @@ export function loadShell({
   let unregistered = 0;
   const worker = { state: 'activated', addEventListener: () => {} };
   const serviceWorker = {
-    controller: { scriptURL: `${ORIGIN}/sw.js` },
+    controller: controlled ? { scriptURL: `${ORIGIN}/sw.js` } : null,
     addEventListener: (type, listener) => {
       if (type === 'message') messageListeners.push(listener);
     },
@@ -187,11 +191,14 @@ export function loadShell({
   };
 
   const post = (data) => messageListeners.forEach((l) => l({ data }));
+  // Whether the probe with this index (0 for the first) runs out of time.
+  const probeTimesOut = (index) => timesOut === true || index < Number(timesOut);
   const probes = [];
   const fetch = async (url, init) => {
+    const outOfTime = probeTimesOut(probes.length);
     probes.push({ url, init });
     if (onProbe) onProbe({ post });
-    if (timesOut) {
+    if (outOfTime) {
       if (!init.signal.aborted) throw new Error('the probe timer did not abort the request');
       throw new DOMException('The operation was aborted.', 'AbortError');
     }
@@ -201,9 +208,11 @@ export function loadShell({
 
   // `reload()` after a good probe is deferred with `setTimeout(…, 0)`; run it
   // at once so a test sees it without waiting.
-  // The probe's 60 s abort timer is real but must not hold the process open.
+  // The probe's 60 s abort timer is set just before its `fetch`, so the probe
+  // it belongs to is the next one: fired at once for a probe that is to run
+  // out of time, real otherwise — but never holding the process open.
   const setTimeoutStub = (fn, ms) =>
-    ms === 0 || timesOut ? (fn(), 0) : setTimeout(fn, ms).unref();
+    ms === 0 || probeTimesOut(probes.length) ? (fn(), 0) : setTimeout(fn, ms).unref();
   const DateStub = { now: () => now };
   const consoleStub = { log() {}, warn() {}, error() {} };
 
@@ -250,10 +259,11 @@ export function loadShell({
   };
 }
 
-/// sw.js's answer to a request for a dead runtime.
-export function stoppedResponse(cause) {
+/// sw.js's answer to a request for a dead runtime. `stage` is left out of the
+/// body when not given, as a worker from before stages existed would.
+export function stoppedResponse(cause, stage) {
   return new Response(
-    JSON.stringify({ error: 'Unavailable', message: 'x', code: 'runtime_stopped', cause }),
+    JSON.stringify({ error: 'Unavailable', message: 'x', code: 'runtime_stopped', cause, stage }),
     { status: 503, headers: { 'Content-Type': 'application/json' } }
   );
 }

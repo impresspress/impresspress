@@ -56,7 +56,7 @@ test("a refusal in the runtime's error shape shows its message, not its code", a
 
 test("the service worker's stopped-runtime answer is shown whole", async () => {
   const message =
-    "The app's runtime stopped (error handling request: RuntimeError: unreachable). Open https://app.example/ to restart it.";
+    "The app's runtime stopped (error handling request: RuntimeError: unreachable). Reload the page to restart it; the data this browser stores for the app is kept.";
   const apiPost = apiPostWith(
     answering(json(503, { error: 'Unavailable', message, code: 'runtime_stopped' }))
   );

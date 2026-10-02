@@ -3,9 +3,18 @@ import { expect, type Page } from '@playwright/test';
 /**
  * What the specs about a DEAD runtime share: the one way a test can kill it,
  * and the two ways it can watch the boot shell deal with that.
- * (`dev-auth-errors.spec.ts`, `dev-stopped-navigation.spec.ts`, and the
- * exported bundle in `dev-workspace.spec.ts`.)
+ * (`dev-auth-errors.spec.ts`, `dev-stopped-navigation.spec.ts`,
+ * `recovery-wipe.spec.ts`, and the exported bundle in `dev-workspace.spec.ts`.)
  */
+
+/** Stop every service worker, as a browser does with an idle one. The next
+ * request starts a new instance, which runs `initialize()` afresh. */
+export async function stopWorkers(page: Page) {
+  const cdp = await page.context().newCDPSession(page);
+  await cdp.send('ServiceWorker.enable');
+  await cdp.send('ServiceWorker.stopAllWorkers');
+  await cdp.detach();
+}
 
 /**
  * Kill the runtime of the worker now serving `page`, so that the next request

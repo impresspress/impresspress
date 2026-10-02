@@ -40,6 +40,9 @@ function source(variable) {
 const SOURCES = { plain: source('SW_JS'), wipe: source('SW_JS_WIPE') };
 
 export const ORIGIN = 'https://app.example';
+/// The address of the page the harness's one client is on: a path only the
+/// runtime serves.
+export const CLIENT_URL = `${ORIGIN}/b/auth/login`;
 /// What the static host serves at the boot shell's URL.
 export const SHELL_HTML = '<!DOCTYPE html><title>the boot shell</title>';
 
@@ -61,7 +64,7 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
   const warnings = [];
   let unregistered = 0;
   const client = {
-    url: `${ORIGIN}/b/auth/login`,
+    url: CLIENT_URL,
     postMessage: (message) => posted.push(message),
     // Resolves or rejects as `runtime.navigate` says: a real `navigate()`
     // rejects for a client the worker does not control.
@@ -142,6 +145,8 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
     navigated,
     /// What the worker left for the boot shell, or `undefined`.
     leftForBootShell: () => stored.get('__impresspress_sw_stopped /__impresspress_sw_stopped'),
+    /// How many times the worker unregistered itself. It never should: a
+    /// dead worker stays registered so that it can answer navigations.
     unregistered: () => unregistered
   };
 }
