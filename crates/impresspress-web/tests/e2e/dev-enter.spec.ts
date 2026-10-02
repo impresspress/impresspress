@@ -87,6 +87,16 @@ test('"Open workspace" lands on /b/dev signed in, with no form', async ({ page }
   // page whose only act is to send the visitor forward again.
   await page.goBack({ waitUntil: 'commit' });
   await page.waitForURL((url) => url.pathname === '/', { timeout: 60_000 });
+
+  // Following the link a second time, already signed in, mints no second
+  // session: the entry page finds the one that is there and goes straight on.
+  const logins: string[] = [];
+  page.on('request', (request) => {
+    if (new URL(request.url()).pathname === '/b/auth/api/login') logins.push(request.method());
+  });
+  await page.goto('/b/dev/enter', { waitUntil: 'commit' });
+  await page.waitForURL((url) => url.pathname === '/b/dev', { timeout: 60_000 });
+  expect(logins).toEqual([]);
 });
 
 test('once the admin password is changed, entry falls back to the login page and says why', async ({
@@ -111,6 +121,8 @@ test('once the admin password is changed, entry falls back to the login page and
     [ADMIN_PASSWORD, NEW_PASSWORD] as const,
   );
   expect(changed).toBe(200);
+  // Changing the password ends the sessions made with the old one; cleared
+  // here as well so what follows does not depend on that.
   await context.clearCookies();
 
   // The entry page still tries the seeded password — it is what the instance
@@ -130,6 +142,15 @@ test('once the admin password is changed, entry falls back to the login page and
   await page.locator('input#password').fill(NEW_PASSWORD);
   await page.getByRole('button', { name: /sign in/i }).click();
   await page.waitForURL((url) => url.pathname === '/b/dev', { timeout: 60_000 });
+
+  // Signed in again, "Open workspace" works again: the entry page uses the
+  // session that is there instead of signing in — which, with the seeded
+  // password now wrong, it could not do. Without that check the owner of a
+  // sandbox with its own password would be shown "one-click entry is off"
+  // every time they followed the welcome page's link.
+  await page.goto('/b/dev/enter', { waitUntil: 'commit' });
+  await page.waitForURL((url) => url.pathname === '/b/dev', { timeout: 60_000 });
+  expect(await page.evaluate(async () => (await fetch('/b/dev/api/status')).status)).toBe(200);
 });
 
 test('without WebMCP, the Tool console lists the tools, reads the status and publishes a file', async ({

@@ -718,8 +718,17 @@ var webmcpStatus = document.getElementById('dev-webmcp-status');
 // A value the schema would accept for one property, as a starting point for
 // whoever fills the box in — not a meaningful argument. `root` is the tool's
 // whole input schema, for the `$ref`s a generated schema points into it with.
-function placeholderFor(schema, root) {
-  if (!schema || typeof schema !== 'object') {
+//
+// `depth` bounds the walk. A schema may refer to itself (`$ref` to its own
+// definition, directly or through a required property), and an unbounded walk
+// of one would overflow the stack — inside `renderConsole`, taking the whole
+// console and the guide's status line down with it. Past the bound the
+// placeholder is `null`: a value the person replaces anyway.
+var PLACEHOLDER_DEPTH = 8;
+
+function placeholderFor(schema, root, depth) {
+  depth = depth || 0;
+  if (!schema || typeof schema !== 'object' || depth > PLACEHOLDER_DEPTH) {
     return null;
   }
   if (typeof schema.$ref === 'string' && schema.$ref.indexOf('#/') === 0) {
@@ -730,7 +739,7 @@ function placeholderFor(schema, root) {
       .forEach(function (key) {
         target = target && target[key];
       });
-    return placeholderFor(target, root);
+    return placeholderFor(target, root, depth + 1);
   }
   if (schema.default !== undefined) {
     return schema.default;
@@ -740,7 +749,7 @@ function placeholderFor(schema, root) {
   }
   var alternatives = schema.anyOf || schema.oneOf;
   if (Array.isArray(alternatives) && alternatives.length > 0) {
-    return placeholderFor(alternatives[0], root);
+    return placeholderFor(alternatives[0], root, depth + 1);
   }
   // `["string", "null"]` is how an optional-but-nullable field is spelled;
   // the first member that is not `null` is the one worth showing.
@@ -762,7 +771,7 @@ function placeholderFor(schema, root) {
     return [];
   }
   if (type === 'object') {
-    return exampleArguments(schema, root);
+    return exampleArguments(schema, root, depth + 1);
   }
   return null;
 }
@@ -770,11 +779,11 @@ function placeholderFor(schema, root) {
 // The smallest argument object a tool's input schema accepts in shape: its
 // required properties, each with a placeholder. A tool that requires nothing
 // gets `{}`, which is a complete call.
-function exampleArguments(schema, root) {
+function exampleArguments(schema, root, depth) {
   var example = {};
   var properties = (schema && schema.properties) || {};
   ((schema && schema.required) || []).forEach(function (name) {
-    example[name] = placeholderFor(properties[name], root || schema);
+    example[name] = placeholderFor(properties[name], root || schema, depth || 0);
   });
   return example;
 }
@@ -922,7 +931,18 @@ api
     renderConsole();
     announceTools();
   })
-  .catch(logError);
+  .catch(function (error) {
+    logError(error);
+    // Said on the page, not only in the log: without the tools there is no
+    // console to use, and a guide left blank would read as "still loading".
+    // Run ships disabled and nothing has enabled it. Not when the session is
+    // what went (a 401/403 aborts, and the abort handler has already said so).
+    if (!abort.signal.aborted) {
+      webmcpStatus.textContent =
+        'The tools could not be loaded, so the Tool console is empty. Reload the page to try ' +
+        'again; the file editor still works.';
+    }
+  });
 
 // `pagehide`, not `unload`: it is the event a bfcache-eligible navigation
 // actually fires, and it fires on the tab being closed as well.

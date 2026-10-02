@@ -328,3 +328,63 @@ test('a tool call that finds the session gone empties the console', async () => 
   // The refusal itself is still what the result box shows.
   assert.equal(JSON.parse(elements.get('dev-console-result').textContent).isError, true);
 });
+
+test('a schema that refers to itself cannot stop the console from rendering', async () => {
+  // Directly, and through a required property of an object: both are cycles
+  // an unbounded walk would never leave.
+  const cyclic = {
+    type: 'object',
+    properties: { node: { $ref: '#/$defs/Node' }, self: { $ref: '#/properties/self' } },
+    required: ['node', 'self'],
+    $defs: {
+      Node: {
+        type: 'object',
+        properties: { name: { type: 'string' }, next: { $ref: '#/$defs/Node' } },
+        required: ['name', 'next']
+      }
+    }
+  };
+  const { handle, elements } = instantiate({
+    toolsManifest: {
+      tools: [{ ...MANIFEST.tools[0], name: 'dev_cyclic', inputSchema: cyclic }, MANIFEST.tools[1]]
+    }
+  });
+  assert.doesNotThrow(() => handle.exampleArguments(cyclic));
+  await settle();
+
+  // The walk ended, in a value of the schema's shape as far as it went.
+  const example = JSON.parse(elements.get('dev-console-args').value);
+  assert.equal(example.self, null);
+  assert.equal(example.node.name, '');
+  assert.equal(example.node.next.name, '');
+  // …and everything after `showConsoleTool` in the load still happened: the
+  // other tools are listed and the guide's status line was written.
+  assert.deepEqual(optionNames(elements).slice(0, 2), ['dev_cyclic', 'dev_write_file']);
+  assert.match(elements.get('dev-webmcp-status').textContent, /^This browser has no WebMCP/);
+  assert.equal(elements.get('dev-console-run').disabled, false);
+});
+
+test('when the tool manifest cannot be loaded the page says so and Run stays off', async () => {
+  const { handle, elements } = instantiate({ toolsFailure: 500 });
+  // What the markup ships (`page.rs`): Run is `disabled` until tools arrive.
+  elements.get('dev-console-run').disabled = true;
+  await settle();
+
+  assert.deepEqual(handle.pageTools, []);
+  assert.deepEqual(optionNames(elements), []);
+  assert.match(
+    elements.get('dev-webmcp-status').textContent,
+    /^The tools could not be loaded, so the Tool console is empty\./
+  );
+  assert.equal(elements.get('dev-console-run').disabled, true);
+  assert.match(elements.get('dev-log').textContent, /error: HTTP 500/);
+  // Not a lost session: the page is still alive for the editor.
+  assert.equal(handle.abort.signal.aborted, false);
+});
+
+test('a manifest refused for a lost session reports the session, not a load failure', async () => {
+  const { handle, elements } = instantiate({ toolsFailure: 401 });
+  await settle();
+  assert.equal(handle.abort.signal.aborted, true);
+  assert.match(elements.get('dev-webmcp-status').textContent, /^The session expired/);
+});

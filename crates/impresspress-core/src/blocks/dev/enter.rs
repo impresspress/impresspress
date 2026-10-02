@@ -34,17 +34,20 @@
 //!
 //! # Where it exists
 //!
-//! Only in a sandbox **workspace**. The row is one of this block's `ROUTES`,
-//! so an exported bundle — which registers the block without routing it and
-//! whose `handle` refuses every request — has no such page, and a deployment
-//! built without `block-dev` has no such code. That boundary is what makes a
+//! Only in a sandbox **workspace**. Two things make that so, and neither is
+//! the row's presence in `ROUTES` (the dispatch table is the same in every
+//! mode): `WORKSPACE_ROUTES`, which only a workspace hands the router, and
+//! the `workspace` guard at the top of `DevBlock::handle`, which refuses
+//! every request on a runtime-only block. So an exported bundle — which
+//! registers the block without routing it — has no such page, and a
+//! deployment built without `block-dev` has no such code. That boundary is what makes a
 //! public page carrying a password acceptable: it is public only to the one
 //! visitor whose browser the instance lives in, and the password it carries
 //! is the one printed on the welcome page beside the link that leads here.
 
 use maud::{html, Markup, PreEscaped};
 use wafer_core::clients::config;
-use wafer_run::{context::Context, OutputStream};
+use wafer_run::{context::Context, OutputStream, WaferError};
 
 use super::{no_store, no_store_db_error_internal, ROUTE_PREFIX};
 use crate::{
@@ -55,6 +58,10 @@ use crate::{
 /// The auth block's login endpoint — the one the login form posts to.
 const LOGIN_API: &str = "/b/auth/api/login";
 
+/// What the script asks first: an endpoint only a signed-in admin is
+/// answered by. A 200 means there is already a session to use.
+const SESSION_PROBE: &str = "/b/dev/api/status";
+
 /// The page's script: `assets/enter.js`, inlined.
 const ENTER_JS: &str = include_str!("assets/enter.js");
 
@@ -63,23 +70,33 @@ fn login_page_url() -> String {
     format!("/b/auth/login?redirect={ROUTE_PREFIX}")
 }
 
+/// The bootstrap admin's email and password, when this instance has both
+/// configured.
+///
+/// The one place the sandbox's pages learn the credentials — this page signs
+/// in with them and the workspace guide prints them (`page.rs`). Read through
+/// the config client, as `AuthConfig::from_ctx` reads them: the same keys,
+/// from the same store, at request time.
+pub(super) async fn bootstrap_credentials(
+    ctx: &dyn Context,
+) -> Result<Option<(String, String)>, WaferError> {
+    let email = config::get_default(ctx, BOOTSTRAP_ADMIN_EMAIL_KEY, "").await?;
+    let password = config::get_default(ctx, BOOTSTRAP_ADMIN_PASSWORD_KEY, "").await?;
+    Ok((!email.is_empty() && !password.is_empty()).then_some((email, password)))
+}
+
 /// Serve the entry page.
 pub async fn handle(ctx: &dyn Context) -> OutputStream {
     let site = match ui::SiteConfig::load(ctx).await {
         Ok(site) => site,
         Err(e) => return no_store_db_error_internal(e, "entry page: site config read failed"),
     };
-    // Through the config client, as `AuthConfig::from_ctx` reads them: the
-    // same keys, from the same store, at request time.
-    let email = match config::get_default(ctx, BOOTSTRAP_ADMIN_EMAIL_KEY, "").await {
-        Ok(email) => email,
-        Err(e) => return no_store_db_error_internal(e, "entry page: admin email read failed"),
+    let credentials = match bootstrap_credentials(ctx).await {
+        Ok(credentials) => credentials,
+        Err(e) => {
+            return no_store_db_error_internal(e, "entry page: admin credentials read failed")
+        }
     };
-    let password = match config::get_default(ctx, BOOTSTRAP_ADMIN_PASSWORD_KEY, "").await {
-        Ok(password) => password,
-        Err(e) => return no_store_db_error_internal(e, "entry page: admin password read failed"),
-    };
-    let credentials = (!email.is_empty() && !password.is_empty()).then_some((email, password));
     let markup = ui::layout::page(
         "Open workspace",
         &site,
@@ -113,6 +130,7 @@ fn body(credentials: Option<(&str, &str)>) -> Markup {
             @if let Some((email, password)) = credentials {
                 div #dev-enter
                     data-login=(LOGIN_API)
+                    data-session-probe=(SESSION_PROBE)
                     data-email=(email)
                     data-password=(password)
                     data-workspace=(ROUTE_PREFIX) {
@@ -155,6 +173,7 @@ mod tests {
         }
         for attribute in [
             "data-login",
+            "data-session-probe",
             "data-email",
             "data-password",
             "data-workspace",
@@ -182,10 +201,17 @@ mod tests {
     #[test]
     fn the_script_uses_the_login_endpoint_and_the_login_pages_cookie() {
         assert!(ENTER_JS.contains("fetch(root.getAttribute('data-login')"));
+        // An existing session is used, not replaced: the probe comes first,
+        // and it is a route this block serves at `Admin`.
+        assert!(ENTER_JS.contains("fetch(root.getAttribute('data-session-probe')"));
+        assert!(super::super::ROUTES
+            .iter()
+            .any(|row| row.template == SESSION_PROBE && row.auth == wafer_run::AuthLevel::Admin));
         assert!(ENTER_JS.contains(
             "'auth_token=' + body.access_token + '; Path=/; SameSite=Lax; Max-Age=' + maxAge + secure"
         ));
         assert!(ENTER_JS.contains("location.replace(root.getAttribute('data-workspace'))"));
+        assert!(ENTER_JS.contains("return signedIn ? openWorkspace() : signIn();"));
         // Inlined in a `<script>` element, so it must not be able to end it.
         assert!(!ENTER_JS.contains("</script"));
     }

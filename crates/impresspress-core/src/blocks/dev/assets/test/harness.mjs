@@ -82,6 +82,8 @@ const core = fs.readFileSync(
  *   `/b/dev/api/tools.json` answers with. `null` — the default — is a manifest
  *   with nothing in it, which is what every test that is not about the
  *   manifest's tools wants.
+ * @param {number|null} [options.toolsFailure]  when set, `tools.json` is
+ *   refused with this status instead of answered.
  * @param {(url: string, init: object|undefined) => ({status?: number,
  *   body: object}|undefined)} [options.endpoint]  the answer to a request no
  *   other option covers — the endpoints a `tools.json` tool invokes. Return
@@ -143,6 +145,7 @@ export function instantiate({
   // care about the status wants: no `activation`, no `active_generation`.
   status = {},
   toolsManifest = null,
+  toolsFailure = null,
   endpoint = () => undefined,
   statusGate = null,
   exportManifest = null,
@@ -227,6 +230,7 @@ export function instantiate({
   // may clear it, so a stub that started it enabled would let a
   // `discoverCompiler` that did nothing at all pass.
   const MARKUP = {
+    'dev-console-run': { disabled: true },
     'dev-compile': { disabled: true },
     'dev-export': { disabled: true }
   };
@@ -396,6 +400,9 @@ export function instantiate({
         // A body with no `tools` array is a manifest with nothing to
         // register, which is what every test that is not about registration
         // wants.
+        if (toolsFailure !== null) {
+          return answer({ error: 'internal', message: 'no manifest' }, toolsFailure);
+        }
         return answer(toolsManifest === null ? {} : toolsManifest);
       }
       const custom = endpoint(url, args[1]);

@@ -49,8 +49,22 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
             return super::no_store_db_error_internal(e, "workspace page: seed info read failed")
         }
     };
+    // The same read the entry page signs in with (`enter.rs`), so the guide
+    // can never print credentials other than the ones this instance has.
+    let credentials = match super::enter::bootstrap_credentials(ctx).await {
+        Ok(credentials) => credentials,
+        Err(e) => {
+            return super::no_store_db_error_internal(
+                e,
+                "workspace page: admin credentials read failed",
+            )
+        }
+    };
+    let credentials = credentials
+        .as_ref()
+        .map(|(email, password)| (email.as_str(), password.as_str()));
     let shell = ui::Shell::simple("Workspace", ui::NavKind::Admin, "Workspace");
-    let markup = match ui::shell_document(ctx, msg, shell, body(seed.as_ref())).await {
+    let markup = match ui::shell_document(ctx, msg, shell, body(seed.as_ref(), credentials)).await {
         Ok(markup) => markup,
         Err(e) => {
             return super::no_store_db_error_internal(e, "workspace page: site config read failed")
@@ -73,7 +87,11 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
 ///
 /// `seed` is what the seed bundle said about this sandbox — the template
 /// and the prompt to suggest. `None` renders no prompt disclosure at all.
-fn body(seed: Option<&SeedInfo>) -> Markup {
+///
+/// `credentials` is the bootstrap admin's email and password as this instance
+/// has them configured (`enter::bootstrap_credentials`). `None` — the password
+/// row was cleared — prints none: there is nothing true to print.
+fn body(seed: Option<&SeedInfo>, credentials: Option<(&str, &str)>) -> Markup {
     html! {
         div .dev-workspace {
             section #dev-guide .dev-pane {
@@ -104,8 +122,12 @@ fn body(seed: Option<&SeedInfo>) -> Markup {
                 // promising either.
                 p #dev-webmcp-status {}
                 p {
-                    "Start with " code { "dev_status" } ". Credentials for this browser-local \
-                     instance: " code { "admin@example.com" } " / " code { "admin123" } "."
+                    "Start with " code { "dev_status" } "."
+                    @if let Some((email, password)) = credentials {
+                        " Credentials for this browser-local instance: "
+                        code #dev-credentials-email { (email) } " / "
+                        code #dev-credentials-password { (password) } "."
+                    }
                 }
                 @if let Some(seed) = seed {
                     details {
@@ -318,7 +340,7 @@ mod tests {
     /// test can see without a browser.
     #[test]
     fn every_id_dev_js_looks_up_is_in_the_document() {
-        let html = body(None).into_string();
+        let html = body(None, None).into_string();
         for id in [
             "dev-log",
             "dev-progress-steps",
@@ -352,12 +374,35 @@ mod tests {
         }
     }
 
+    /// The guide prints the credentials it is GIVEN — the configured ones —
+    /// and none when the instance has none configured.
+    #[test]
+    fn the_guide_prints_the_configured_credentials_and_no_others() {
+        let html = body(None, Some(("owner@example.com", "a-seeded-password"))).into_string();
+        assert!(
+            html.contains(r#"<code id="dev-credentials-email">owner@example.com</code>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<code id="dev-credentials-password">a-seeded-password</code>"#),
+            "{html}"
+        );
+        let bare = body(None, None).into_string();
+        assert!(!bare.contains("dev-credentials"), "{bare}");
+        assert!(!bare.contains("Credentials for"), "{bare}");
+        // No literal credential is left in the markup's own source.
+        for html in [&html, &bare] {
+            assert!(!html.contains("admin123"), "{html}");
+            assert!(!html.contains("admin@example.com"), "{html}");
+        }
+    }
+
     /// The Tool console is a pane of its own with the id an agent is told to
     /// look for, and it runs the page's tools through the one list WebMCP is
     /// handed — not through a request builder of its own.
     #[test]
     fn the_tool_console_runs_the_tools_webmcp_is_handed() {
-        let html = body(None).into_string();
+        let html = body(None, None).into_string();
         assert!(
             html.contains(r#"<section class="dev-pane" id="dev-console">"#),
             "{html}"
@@ -434,7 +479,7 @@ mod tests {
     /// the other is there.
     #[test]
     fn the_script_tag_is_a_module() {
-        let html = body(None).into_string();
+        let html = body(None, None).into_string();
         assert!(
             html.contains(r#"<script type="module" src="/b/dev/static/dev.js">"#),
             "{html}"
@@ -466,7 +511,7 @@ mod tests {
     /// nothing in between.
     #[test]
     fn the_compile_button_is_enabled_only_by_a_toolchain_and_a_block() {
-        let html = body(None).into_string();
+        let html = body(None, None).into_string();
         assert!(
             html.contains(
                 r#"<button class="btn btn--secondary" id="dev-compile" type="button" disabled>"#

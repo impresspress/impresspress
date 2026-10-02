@@ -52,9 +52,9 @@ const ACCOUNT_PASSWORD: &str = "correct-horse-battery-staple";
 /// Seed an account with `role` on a [`dev_with_accounts`] fixture and sign it
 /// in through the login route.
 ///
-/// Not `admin@example.com`: the workspace guide prints that address as the
-/// local credentials, so a page assertion on it must not be satisfied by the
-/// signed-in operator's own email.
+/// Not the bootstrap admin's address: the workspace guide prints that one as
+/// the local credentials, so a page assertion on it must not be satisfied by
+/// the signed-in operator's own email.
 pub async fn signed_in_as(ctx: &TestContext, role: &str) -> Session {
     let email = format!("{role}-account@example.com");
     ctx.seed_account(&email, ACCOUNT_PASSWORD, role).await;

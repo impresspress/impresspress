@@ -1173,7 +1173,10 @@ and read together with this list.
     posts them to `POST /b/auth/api/login`, sets the `auth_token` cookie as
     the login page does, and navigates to `/b/dev`. No token is minted
     outside the auth block's login, and the values are not written a second
-    time anywhere. When that login is refused — the admin's password was
+    time anywhere (the workspace guide prints them from the same read). A
+    visitor who already holds an admin session — `GET /b/dev/api/status`
+    answers 200 — is sent straight to `/b/dev` without signing in again.
+    When that login is refused — the admin's password was
     changed in this instance — or no password is configured, the page says
     one-click entry is off and links the normal login page.
     **The boundary.** The row exists only where the workspace does:
