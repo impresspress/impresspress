@@ -104,13 +104,16 @@ fn toolchain_ready() -> Result<(), String> {
                 Ok(())
             } else {
                 Err(format!(
-                    "the wasm32-wasip1 std is not installed ({dir} is missing) — \
-                     `rustup target add wasm32-wasip1`"
+                    "the wasm32-wasip1 std is not installed ({dir} is missing) — run \
+                     `rustup toolchain install` from the repository root, which installs \
+                     the pinned toolchain with the targets `rust-toolchain.toml` lists"
                 ))
             }
         }
         Ok(_) => Err(
-            "rustc does not know the wasm32-wasip1 target — `rustup target add wasm32-wasip1`"
+            "rustc does not know the wasm32-wasip1 target — run `rustup toolchain install` from \
+             the repository root, which installs the pinned toolchain with the targets \
+             `rust-toolchain.toml` lists"
                 .to_string(),
         ),
         Err(e) => Err(format!("`rustc` is not runnable: {e}")),
