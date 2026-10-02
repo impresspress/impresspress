@@ -4,14 +4,14 @@
   "site": [
     {
       "path": "index.html",
-      "sha256": "634195cac5340956da3633481f90d58e9fee249bf0bae07dc3eeb48af15fa692",
-      "size": 1551,
+      "sha256": "1d99a70032bb6653006a92103e1ca3bb2310a1ae92ec10a27d384f080310ad79",
+      "size": 1525,
       "content_type": "text/html; charset=utf-8"
     },
     {
       "path": "styles.css",
-      "sha256": "c21546e3d201fbb45043943e42e86c5c2ddf5dc3ebc289ce6aa445440ba54a1c",
-      "size": 935,
+      "sha256": "42dc260049205400b87903b91ca8c079a56e5fdd392e3c9cad63f3d86b01f8a8",
+      "size": 832,
       "content_type": "text/css; charset=utf-8"
     }
   ],
@@ -25,6 +25,12 @@
       "sha256": "2e7006b750dbab6eb8ca8b9e105c8147f1206ccd2401575bf4ae3522b7a3391d",
       "size": 4280,
       "content_type": "text/markdown; charset=utf-8"
+    },
+    "llms": {
+      "path": "llms.txt",
+      "sha256": "10d46021d72aa9edf1c247fc2a70c11c0fdf31062c09d09171505677bd3b752c",
+      "size": 6567,
+      "content_type": "text/plain; charset=utf-8"
     }
   }
 }

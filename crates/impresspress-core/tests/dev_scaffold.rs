@@ -442,6 +442,7 @@ async fn reference_returns_the_site_guide_the_seed_carried() {
             suggested_prompt: "Build me a shop.".to_string(),
             guide_markdown: "# Building the site\n\nLink /vendor/bootstrap/bootstrap.min.css.\n"
                 .to_string(),
+            llms_text: None,
         },
     )
     .await

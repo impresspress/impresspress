@@ -45,6 +45,19 @@
 //! both read — so turning the sandbox off is one line rewritten, and its
 //! absence is an [`ErrorCode::Internal`], never a silent pass-through of a
 //! shell that would come up as a second sandbox.
+//!
+//! The boot page is the second edit: a deployment's boot notice (the sandbox
+//! says what it is and where its `llms.txt` is) describes the deployment, not
+//! the site, and comes out — see [`index_without_boot_notice`].
+//!
+//! # What of the sandbox's `llms.txt`
+//!
+//! It is not exported. The copy the static host serves at `/llms.txt` is a
+//! deployment overlay, held back from the shell by name
+//! ([`SHELL_EXCLUDED_LLMS`]); the copy the
+//! runtime serves is published by `super::publisher` without being in any
+//! generation's manifest, and the `seed/site/**` below is that manifest. A
+//! site's OWN `site/llms.txt` is an ordinary site file and is exported as one.
 
 use std::collections::BTreeMap;
 
@@ -72,8 +85,21 @@ use crate::{config_vars::APP_NAME_KEY, http::err_internal};
 const SW_DEV_ON: &str = "const DEV_ENABLED = true;";
 const SW_DEV_OFF: &str = "const DEV_ENABLED = false;";
 
-/// The one shell file whose content this export edits.
+/// The shell's service worker: development mode off, the compiler's bypass
+/// gone.
 const SW_PATH: &str = "sw.js";
+
+/// The shell's boot page, the other shell file this export edits: the
+/// deployment's boot notice comes out ([`index_without_boot_notice`]).
+const INDEX_PATH: &str = "index.html";
+
+/// The two comments the bundler renders a deployment's boot notice between
+/// (`impresspress-bundle`'s `BOOT_NOTICE_START` / `BOOT_NOTICE_END`,
+/// `index.html.tmpl`). Restated for the reason [`COMPILER_ROOT`] is: the
+/// bundler is not a dependency of this crate.
+/// `crates/impresspress/tests/seed_bypass_prefix.rs` compares the spellings.
+pub const BOOT_NOTICE_START: &str = "<!--boot-notice-->";
+pub const BOOT_NOTICE_END: &str = "<!--/boot-notice-->";
 
 /// Where the data snapshot lands, relative to [`seed::ROOT`].
 ///
@@ -93,11 +119,12 @@ const DATA_PATH: &str = "data.json";
 /// prefix for the same reason.
 const COMPILER_ROOT: &str = "/__impresspress_dev/compiler/";
 
-/// Shell paths the export never copies, by prefix.
+/// Shell paths the export never copies, by prefix — and one by name,
+/// [`SHELL_EXCLUDED_LLMS`].
 ///
-/// Both are things a DEPLOYMENT overlays on top of the bundler's output
+/// All are things a DEPLOYMENT overlays on top of the bundler's output
 /// (`impresspress`'s `apply_overlays`, run after `bundle::run` returns), so
-/// neither is in `/asset-manifest.json`'s `files` today. They are excluded
+/// none is in `/asset-manifest.json`'s `files` today. They are excluded
 /// explicitly all the same, because "the manifest happens not to list them"
 /// is a property of the order two CLI steps run in, and this is a property of
 /// what an export MEANS:
@@ -108,6 +135,21 @@ const COMPILER_ROOT: &str = "/__impresspress_dev/compiler/";
 /// * `__impresspress_dev/` — the in-browser Rust toolchain: 72 MiB of
 ///   compiler that only `/b/dev` loads, and the exported site has no `/b/dev`.
 const SHELL_EXCLUDED_PREFIXES: &[&str] = &["seed/", "__impresspress_dev/"];
+
+/// The deployment's own `/llms.txt`: the sandbox describing itself to a
+/// reader its service worker does not control. The exported site is not that
+/// sandbox, and its static host must not say it is. (The exported SITE's
+/// `llms.txt`, if it has one, is `seed/site/llms.txt` and is served by the
+/// exported runtime.)
+const SHELL_EXCLUDED_LLMS: &str = seed::LLMS_PATH;
+
+/// Whether the export leaves a listed shell file behind.
+fn shell_excluded(path: &str) -> bool {
+    path == SHELL_EXCLUDED_LLMS
+        || SHELL_EXCLUDED_PREFIXES
+            .iter()
+            .any(|prefix| path.starts_with(prefix))
+}
 
 /// The README template, rendered with this export's own numbers.
 const README_TEMPLATE: &str = include_str!("templates/export-readme.md");
@@ -272,10 +314,7 @@ async fn assemble(ctx: &dyn Context, shared: &DevShared) -> Result<Assembled, Re
     let listed = shared.shell.list().await.map_err(Refusal::Shell)?;
     let mut shell: Vec<Entry> = Vec::new();
     for path in listed {
-        if SHELL_EXCLUDED_PREFIXES
-            .iter()
-            .any(|prefix| path.starts_with(prefix))
-        {
+        if shell_excluded(&path) {
             continue;
         }
         let bytes = shared
@@ -285,6 +324,8 @@ async fn assemble(ctx: &dyn Context, shared: &DevShared) -> Result<Assembled, Re
             .map_err(|e| Refusal::Shell(format!("{path}: {e}")))?;
         let bytes = if path == SW_PATH {
             sw_without_compiler(sw_with_dev_off(&bytes)?)?
+        } else if path == INDEX_PATH {
+            index_without_boot_notice(bytes)?
         } else {
             bytes
         };
@@ -525,6 +566,56 @@ fn sw_with_dev_off(bytes: &[u8]) -> Result<Vec<u8>, Refusal> {
         )));
     }
     Ok(text.replace(SW_DEV_ON, SW_DEV_OFF).into_bytes())
+}
+
+/// `index.html` with the deployment's boot notice taken out.
+///
+/// The sandbox's boot page says what the sandbox is and sends an agent to
+/// `/llms.txt` and `/b/dev/enter` — none of which the exported site has. The
+/// bundler renders that text between two comments
+/// ([`BOOT_NOTICE_START`], [`BOOT_NOTICE_END`]) and renders the comments with
+/// nothing between them for an app that has no notice, so emptying the region
+/// leaves exactly the boot page a plain bundle of this shell would have had.
+///
+/// A page with neither comment has no notice to remove and is exported as it
+/// is — a deployment may overlay a boot page of its own. One comment without
+/// the other, either of them twice, or the pair out of order is a page this
+/// cannot edit safely, and that is [`ErrorCode::Internal`] rather than a
+/// guess at where the sandbox's text ends.
+fn index_without_boot_notice(bytes: Vec<u8>) -> Result<Vec<u8>, Refusal> {
+    let malformed = |what: &str| {
+        Refusal::Internal(WaferError::new(
+            ErrorCode::Internal,
+            format!(
+                "the deployment's index.html {what}, so the export cannot remove its boot \
+                 notice; the bundle was built by a different impresspress-bundle than this \
+                 runtime expects"
+            ),
+        ))
+    };
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return Err(malformed("is not valid UTF-8"));
+    };
+    let starts = text.matches(BOOT_NOTICE_START).count();
+    let ends = text.matches(BOOT_NOTICE_END).count();
+    if starts == 0 && ends == 0 {
+        return Ok(bytes);
+    }
+    if starts != 1 || ends != 1 {
+        return Err(malformed(&format!(
+            "contains {starts} of {BOOT_NOTICE_START:?} and {ends} of {BOOT_NOTICE_END:?} \
+             where the export needs one of each"
+        )));
+    }
+    let (before, rest) = text
+        .split_once(BOOT_NOTICE_START)
+        .expect("counted exactly one");
+    let Some((_notice, after)) = rest.split_once(BOOT_NOTICE_END) else {
+        return Err(malformed(&format!(
+            "closes its boot notice ({BOOT_NOTICE_END:?}) before opening it"
+        )));
+    };
+    Ok(format!("{before}{BOOT_NOTICE_START}{BOOT_NOTICE_END}{after}").into_bytes())
 }
 
 /// The rules the exported worker applies: the deployment's, minus the

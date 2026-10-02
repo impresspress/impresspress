@@ -111,11 +111,23 @@ fn guide_file() -> seed::SeedFile {
     }
 }
 
+const LLMS: &[u8] = b"# The sandbox\n\nBuild a website here.\n";
+
+fn llms_file() -> seed::SeedFile {
+    seed::SeedFile {
+        path: seed::LLMS_PATH.to_string(),
+        sha256: blobs::sha256_hex(LLMS),
+        size: LLMS.len() as u64,
+        content_type: seed::LLMS_CONTENT_TYPE.to_string(),
+    }
+}
+
 fn sandbox() -> SandboxSeed {
     SandboxSeed {
         template: "blank".to_string(),
         suggested_prompt: "Build me a shop.".to_string(),
         guide: guide_file(),
+        llms: llms_file(),
     }
 }
 
@@ -126,8 +138,11 @@ fn manifest_with(sandbox: SandboxSeed) -> SeedManifest {
     }
 }
 
-fn bundle_with_guide() -> MapFetch {
-    bundle().with(&seed::guide_url(seed::GUIDE_PATH), GUIDE)
+/// [`bundle`] plus the two files a sandbox block names.
+fn sandbox_bundle() -> MapFetch {
+    bundle()
+        .with(&seed::guide_url(seed::GUIDE_PATH), GUIDE)
+        .with(&seed::llms_url(seed::LLMS_PATH), LLMS)
 }
 
 /// Import `manifest` and expect a refusal; nothing may have been stored.
@@ -161,7 +176,7 @@ async fn a_sandbox_block_is_recorded_for_the_reference_and_the_page() {
         control.as_ref(),
         &fake_bypass_rules(),
         &manifest_with(sandbox()),
-        &bundle_with_guide(),
+        &sandbox_bundle(),
     )
     .await
     .expect("import")
@@ -170,6 +185,97 @@ async fn a_sandbox_block_is_recorded_for_the_reference_and_the_page() {
     assert_eq!(info.template, "blank");
     assert_eq!(info.suggested_prompt, "Build me a shop.");
     assert_eq!(info.guide_markdown, std::str::from_utf8(GUIDE).unwrap());
+    assert_eq!(
+        info.llms_text.as_deref(),
+        Some(std::str::from_utf8(LLMS).unwrap())
+    );
+}
+
+/// What the recorded text is FOR: once the seed's generation is live, the
+/// runtime serves the sandbox's `llms.txt` at the site path — the seed's
+/// site has no such file — and the generation's own manifest still does not
+/// name it, which is what keeps it out of an export.
+#[tokio::test]
+async fn a_seeded_sandbox_serves_its_llms_txt_without_owning_it_as_a_site_file() {
+    let (ctx, control) = fixture().await;
+    let shared = ctx.dev_shared();
+    let generation = seed::import(
+        &ctx,
+        control.as_ref(),
+        &fake_bypass_rules(),
+        &manifest_with(sandbox()),
+        &sandbox_bundle(),
+    )
+    .await
+    .expect("import")
+    .expect("fresh");
+    assert!(
+        generation
+            .site
+            .files
+            .iter()
+            .all(|f| f.path != seed::LLMS_PATH),
+        "the sandbox's llms.txt is not a site file"
+    );
+    let outcome = activation::request(
+        &ctx,
+        &shared,
+        GenerationCause::Seed,
+        ActivationIntent::Seed {
+            manifest: generation,
+        },
+        activation::Maintenance::Inline,
+    )
+    .await
+    .expect("activate the seed");
+    assert_eq!(outcome.generation.site_files, 2);
+    assert_eq!(
+        ctx.storage_get("wafer-run/web", "site", seed::LLMS_PATH)
+            .await
+            .expect("published llms.txt"),
+        LLMS.to_vec()
+    );
+    let ws = workspace::load(&ctx).await.expect("workspace");
+    assert!(
+        !ws.files.contains_key("site/llms.txt"),
+        "{:?}",
+        ws.files.keys()
+    );
+}
+
+#[tokio::test]
+async fn an_llms_txt_not_in_the_bundle_is_refused() {
+    let bundle = bundle().with(&seed::guide_url(seed::GUIDE_PATH), GUIDE);
+    let err = refused(&manifest_with(sandbox()), &bundle).await;
+    assert!(err.contains("/seed/llms.txt"), "{err}");
+}
+
+#[tokio::test]
+async fn an_llms_txt_that_is_not_the_declared_bytes_is_refused() {
+    let bundle = bundle()
+        .with(&seed::guide_url(seed::GUIDE_PATH), GUIDE)
+        .with(
+            &seed::llms_url(seed::LLMS_PATH),
+            b"# Another sandbox\n\nBuild a website.\n\n",
+        );
+    let err = refused(&manifest_with(sandbox()), &bundle).await;
+    assert!(err.contains("/seed/llms.txt"), "{err}");
+}
+
+#[tokio::test]
+async fn an_llms_txt_under_another_name_is_refused() {
+    let mut declared = sandbox();
+    declared.llms.path = "site/llms.txt".to_string();
+    let err = refused(&manifest_with(declared), &sandbox_bundle()).await;
+    assert!(err.contains("sandbox.llms"), "{err}");
+}
+
+#[tokio::test]
+async fn an_llms_txt_declared_with_another_content_type_is_refused() {
+    let mut declared = sandbox();
+    declared.llms.content_type = "text/markdown; charset=utf-8".to_string();
+    let err = refused(&manifest_with(declared), &sandbox_bundle()).await;
+    assert!(err.contains("content type"), "{err}");
 }
 
 #[tokio::test]
@@ -206,7 +312,7 @@ async fn a_refusal_after_the_sandbox_block_checks_out_records_no_row() {
         data: Some(declared),
         ..manifest_with(sandbox())
     };
-    let bundle = bundle_with_guide().with(&seed::data_url("data.json"), data);
+    let bundle = sandbox_bundle().with(&seed::data_url("data.json"), data);
     let err = seed::import(
         &ctx,
         control.as_ref(),
@@ -224,7 +330,7 @@ async fn a_refusal_after_the_sandbox_block_checks_out_records_no_row() {
 async fn a_guide_over_the_limit_is_refused_before_anything_is_stored() {
     let mut declared = sandbox();
     declared.guide.size = (seed::MAX_GUIDE_BYTES + 1) as u64;
-    let err = refused(&manifest_with(declared), &bundle_with_guide()).await;
+    let err = refused(&manifest_with(declared), &sandbox_bundle()).await;
     assert!(
         err.contains("/seed/guide.md") && err.contains("limit"),
         "{err}"
@@ -252,7 +358,7 @@ async fn a_guide_that_is_not_utf8_is_refused() {
 async fn a_template_name_that_is_not_a_block_name_is_refused() {
     let mut declared = sandbox();
     declared.template = "Boot strap".to_string();
-    let err = refused(&manifest_with(declared), &bundle_with_guide()).await;
+    let err = refused(&manifest_with(declared), &sandbox_bundle()).await;
     assert!(err.contains("sandbox.template"), "{err}");
 }
 
@@ -260,7 +366,7 @@ async fn a_template_name_that_is_not_a_block_name_is_refused() {
 async fn a_prompt_over_the_limit_is_refused() {
     let mut declared = sandbox();
     declared.suggested_prompt = "x".repeat(seed::MAX_PROMPT_BYTES + 1);
-    let err = refused(&manifest_with(declared), &bundle_with_guide()).await;
+    let err = refused(&manifest_with(declared), &sandbox_bundle()).await;
     assert!(err.contains("suggested_prompt"), "{err}");
 }
 
@@ -268,7 +374,7 @@ async fn a_prompt_over_the_limit_is_refused() {
 async fn a_guide_declared_with_another_content_type_is_refused() {
     let mut declared = sandbox();
     declared.guide.content_type = "text/plain; charset=utf-8".to_string();
-    let err = refused(&manifest_with(declared), &bundle_with_guide()).await;
+    let err = refused(&manifest_with(declared), &sandbox_bundle()).await;
     assert!(err.contains("content type"), "{err}");
 }
 
@@ -925,6 +1031,8 @@ fn the_bundle_layout_is_stated_once() {
     );
     assert_eq!(seed::short_name("site/hello"), "hello");
     assert_eq!(seed::short_name("hello"), "hello");
+    assert_eq!(seed::guide_url(seed::GUIDE_PATH), "/seed/guide.md");
+    assert_eq!(seed::llms_url(seed::LLMS_PATH), "/seed/llms.txt");
 }
 
 // ---------------------------------------------------------------------------

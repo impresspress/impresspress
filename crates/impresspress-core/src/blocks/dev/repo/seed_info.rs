@@ -1,10 +1,13 @@
 //! The single-row record of what the seed bundle said about this sandbox
 //! (`impresspress__dev__seed_info`): which template seeded it, the prompt
-//! the workspace page suggests, and the site-authoring guide
-//! `dev_read_reference` serves as `site_markdown`.
+//! the workspace page suggests, the site-authoring guide
+//! `dev_read_reference` serves as `site_markdown`, and the sandbox's own
+//! `llms.txt`, which the publisher serves at `/llms.txt` for a site that has
+//! none.
 //!
 //! Written once, by `seed::import`, on the boot that seeds the instance;
-//! read on every reference call, status poll and workspace page render. The
+//! read on every reference call, status poll, workspace page render and
+//! publish. The
 //! migration seeds the row with every column `NULL`, and a `NULL` template is
 //! how the row says "this instance's seed carried no `sandbox` block" — an
 //! exported bundle never does (`export` writes `sandbox: None`).
@@ -30,6 +33,10 @@ pub struct SeedInfo {
     pub suggested_prompt: String,
     /// The site-authoring guide, Markdown.
     pub guide_markdown: String,
+    /// The sandbox's `llms.txt`. `None` only on a row an import wrote before
+    /// the column existed (migration 004): that seed carried none, and
+    /// nothing re-imports a seed into an instance that already has a site.
+    pub llms_text: Option<String>,
 }
 
 /// The row, or `None` until an import has written it.
@@ -48,7 +55,35 @@ pub async fn read(ctx: &dyn Context) -> Result<Option<SeedInfo>, WaferError> {
         template,
         suggested_prompt: record.str_field("suggested_prompt").to_string(),
         guide_markdown: record.str_field("guide_markdown").to_string(),
+        llms_text: record.opt_str_field("llms_text"),
     }))
+}
+
+/// The sandbox's `llms.txt`, or `None` when no import recorded one — the
+/// seed carried no `sandbox` block, or was imported before the column
+/// existed.
+///
+/// Reads only that column, for [`template`]'s reason: every publish calls
+/// this, and the row's guide is beside it. A missing row is `NotFound`, as
+/// from [`read`].
+pub async fn llms_text(ctx: &dyn Context) -> Result<Option<String>, WaferError> {
+    let rows = db::list(
+        ctx,
+        TABLE,
+        &ListOptions {
+            columns: Some(vec!["llms_text".to_string()]),
+            filters: vec![singleton_filter()],
+            limit: Some(1),
+            skip_count: true,
+            ..Default::default()
+        },
+    )
+    .await?;
+    let record = rows
+        .records
+        .first()
+        .ok_or_else(|| WaferError::new(ErrorCode::NotFound, "record not found"))?;
+    Ok(record.opt_str_field("llms_text"))
 }
 
 /// The seeding template's name, or `None` until an import has written it.
@@ -90,6 +125,7 @@ pub async fn write(ctx: &dyn Context, info: &SeedInfo) -> Result<(), WaferError>
         "template": info.template,
         "suggested_prompt": info.suggested_prompt,
         "guide_markdown": info.guide_markdown,
+        "llms_text": info.llms_text,
         "imported_at": super::now(),
     }));
     db::update_by_filters(ctx, TABLE, vec![singleton_filter()], data).await
@@ -114,6 +150,7 @@ mod tests {
             template: "bootstrap".to_string(),
             suggested_prompt: "Build me a shop.".to_string(),
             guide_markdown: "# Guide\n\nWrite HTML.\n".to_string(),
+            llms_text: Some("# Sandbox\n".to_string()),
         };
         write(&ctx, &info).await.expect("write");
         assert_eq!(read(&ctx).await.expect("read"), Some(info));
@@ -128,6 +165,7 @@ mod tests {
             template: "bootstrap".to_string(),
             suggested_prompt: "[1,2]".to_string(),
             guide_markdown: r#"{"a":1}"#.to_string(),
+            llms_text: Some("[3]".to_string()),
         };
         write(&ctx, &info).await.expect("write");
         assert_eq!(read(&ctx).await.expect("read"), Some(info));
@@ -146,6 +184,28 @@ mod tests {
         assert_eq!(template_err.code, ErrorCode::NotFound);
     }
 
+    /// The publisher's narrow read: nothing until an import records the
+    /// text, and still nothing for a row written without one.
+    #[tokio::test]
+    async fn llms_text_is_none_until_a_write_that_carries_one() {
+        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        assert_eq!(llms_text(&ctx).await.expect("llms"), None);
+        let mut info = SeedInfo {
+            template: "bootstrap".to_string(),
+            suggested_prompt: "Build me a shop.".to_string(),
+            guide_markdown: "# Guide\n".to_string(),
+            llms_text: None,
+        };
+        write(&ctx, &info).await.expect("write");
+        assert_eq!(llms_text(&ctx).await.expect("llms"), None);
+        info.llms_text = Some("# Sandbox\n".to_string());
+        write(&ctx, &info).await.expect("write");
+        assert_eq!(
+            llms_text(&ctx).await.expect("llms"),
+            Some("# Sandbox\n".to_string())
+        );
+    }
+
     #[tokio::test]
     async fn template_is_none_until_a_write_then_the_written_name() {
         let ctx = TestContext::with_dev(FakeControl::new()).await;
@@ -156,6 +216,7 @@ mod tests {
                 template: "bootstrap".to_string(),
                 suggested_prompt: "Build me a shop.".to_string(),
                 guide_markdown: "# Guide\n".to_string(),
+                llms_text: None,
             },
         )
         .await

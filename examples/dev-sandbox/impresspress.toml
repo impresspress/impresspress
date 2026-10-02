@@ -11,6 +11,11 @@
 name = "dev-sandbox"
 title = "ImpressPress dev sandbox"
 boot_redirect = "/"
+# What the boot page says under its title. The static host serves that page
+# for every path until the service worker is installed, and a reader that
+# runs no JavaScript never gets past it — so it has to say what this is and
+# where the instructions are, in the HTML itself.
+boot_notice = "boot-notice.html"
 
 [assets]
 # `/seed/` is already bypassed whenever `[dev] enabled` (`impresspress-bundle`
@@ -34,6 +39,20 @@ opfs_wipe_on_recovery = false
 [[assets.overlay]]
 from = "seed"
 to = "seed"
+
+# The sandbox's own llms.txt, at the root, for a reader the service worker
+# does not control yet (a first visit, `curl`, a fetch tool). build.sh
+# generates it into `seed/`; the `seed` overlay above already carries it to
+# `/seed/llms.txt`, which is where the seed importer reads it from.
+#
+# `/llms.txt` is deliberately NOT on the bypass list. Once the worker controls
+# the page the runtime answers the path — with the site's own `site/llms.txt`
+# when it has one, and otherwise with this same text, which the dev block
+# publishes for a site that has none (`blocks/dev/publisher.rs`). A bypass
+# would shadow the site's file for good.
+[[assets.overlay]]
+from = "seed/llms.txt"
+to = "llms.txt"
 
 # The browser toolchain, built by `compiler/build-compiler.sh` and versioned
 # by the rubrc commit `compiler/PIN.json` pins.

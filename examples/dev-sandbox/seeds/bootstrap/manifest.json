@@ -4,8 +4,8 @@
   "site": [
     {
       "path": "index.html",
-      "sha256": "704bbbceed1d825e6a7f57ecec11f7fdb79674dc1f02e4435a1e1510cebe2ad2",
-      "size": 4162,
+      "sha256": "211f9566ed092474b0eb017eb30e10763b8c3dbbd0e2586727732e1124f211c2",
+      "size": 4085,
       "content_type": "text/html; charset=utf-8"
     },
     {
@@ -37,6 +37,12 @@
       "sha256": "e17edbf276627b07604af6a3ec1f7d447ef51561c56165ace415392858458ac0",
       "size": 6431,
       "content_type": "text/markdown; charset=utf-8"
+    },
+    "llms": {
+      "path": "llms.txt",
+      "sha256": "3b10f120e1d79cbd56823ba09e4f251b4fd7d366b1543748599d4af5ff9e9356",
+      "size": 8722,
+      "content_type": "text/plain; charset=utf-8"
     }
   }
 }

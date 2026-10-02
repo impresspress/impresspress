@@ -131,10 +131,11 @@ pub struct SeedBlock {
 }
 
 /// What a seed bundle says about the sandbox it seeds — the template that
-/// produced it, the prompt the workspace page suggests, and the
-/// site-authoring guide `dev_read_reference` serves (build-sandboxes design
-/// §5.2). Never present on an exported bundle: an export boots with no
-/// `/b/dev`, so a guide there would describe tools the bundle does not have.
+/// produced it, the prompt the workspace page suggests, the site-authoring
+/// guide `dev_read_reference` serves (build-sandboxes design §5.2), and the
+/// sandbox's own `llms.txt`. Never present on an exported bundle: an export
+/// boots with no `/b/dev`, so a guide there would describe tools the bundle
+/// does not have, and an `llms.txt` a sandbox that is not there.
 #[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
 #[serde(deny_unknown_fields)]
 pub struct SandboxSeed {
@@ -145,6 +146,13 @@ pub struct SandboxSeed {
     /// The guide, a Markdown file named [`GUIDE_PATH`] beside the manifest,
     /// verified like every other file: hash, size, content type.
     pub guide: SeedFile,
+    /// What the sandbox tells a reader about itself, a text file named
+    /// [`LLMS_PATH`] beside the manifest. The static host serves the same
+    /// bytes at `/llms.txt` to a reader the service worker does not control;
+    /// the importer records them so the runtime can go on answering that
+    /// path once it does, for as long as the site has no `llms.txt` of its
+    /// own (`super::publisher`).
+    pub llms: SeedFile,
 }
 
 /// What a seed bundle describes.
@@ -278,6 +286,24 @@ pub const MAX_PROMPT_BYTES: usize = 4 * 1024;
 
 /// URL of the guide.
 pub fn guide_url(path: &str) -> String {
+    format!("{ROOT}{path}")
+}
+
+/// The one name the sandbox's `llms.txt` may have, beside the manifest — and
+/// the site path the publisher serves it at (`/llms.txt`).
+pub const LLMS_PATH: &str = "llms.txt";
+
+/// What the sandbox's `llms.txt` is declared and served as: what
+/// `paths::content_type_for` gives a site's own `llms.txt`, so the path is
+/// one content type whichever of the two is being served.
+pub const LLMS_CONTENT_TYPE: &str = "text/plain; charset=utf-8";
+
+/// Largest `llms.txt` a bundle may carry: [`paths::MAX_FILE_BYTES`], because
+/// it is published where a site file of that name would be.
+pub const MAX_LLMS_BYTES: usize = paths::MAX_FILE_BYTES;
+
+/// URL of the sandbox's `llms.txt`.
+pub fn llms_url(path: &str) -> String {
     format!("{ROOT}{path}")
 }
 
@@ -704,7 +730,8 @@ async fn fetch_verified(
 }
 
 /// Check and fetch a bundle's sandbox block: the template name, the prompt
-/// length, then the guide through [`fetch_and_verify`] like any other file.
+/// length, then the guide and `llms.txt` through [`fetch_and_verify`] like
+/// any other file.
 async fn fetch_sandbox(
     fetch: &dyn SeedFetch,
     declared: &SandboxSeed,
@@ -739,10 +766,28 @@ async fn fetch_sandbox(
     .await?;
     let guide_markdown =
         String::from_utf8(bytes).map_err(|_| format!("{url}: the guide is not valid UTF-8"))?;
+    if declared.llms.path != LLMS_PATH {
+        return Err(format!(
+            "the seed bundle's sandbox.llms is named {:?}; it must be {LLMS_PATH:?} beside the manifest",
+            declared.llms.path
+        ));
+    }
+    let url = llms_url(&declared.llms.path);
+    let bytes = fetch_and_verify(
+        fetch,
+        &url,
+        &declared.llms,
+        LLMS_CONTENT_TYPE,
+        MAX_LLMS_BYTES,
+    )
+    .await?;
+    let llms_text =
+        String::from_utf8(bytes).map_err(|_| format!("{url}: llms.txt is not valid UTF-8"))?;
     Ok(seed_info::SeedInfo {
         template: declared.template.clone(),
         suggested_prompt: declared.suggested_prompt.clone(),
         guide_markdown,
+        llms_text: Some(llms_text),
     })
 }
 

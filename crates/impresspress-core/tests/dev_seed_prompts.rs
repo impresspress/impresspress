@@ -99,6 +99,86 @@ fn every_seed_guide_names_only_tools_the_page_has() {
     }
 }
 
+/// Every seed's `llms.txt` — what the static host serves at `/llms.txt` and
+/// the importer records — is the shared preamble naming the seed's template,
+/// then the seed's guide, and the committed manifest declares exactly those
+/// bytes.
+///
+/// `seeds/seedlib.py` generates it and `check-seeds.py` checks the manifest
+/// against the generator; this is the same statement made from the side that
+/// reads it, so the two cannot agree with each other and disagree with the
+/// importer (`seed::SeedManifest`, `seed::LLMS_PATH`, the content type and
+/// the size limit). It also holds the preamble to the rule the guides are
+/// held to: it names no tool the workspace page does not publish.
+#[test]
+fn every_seed_llms_txt_is_the_preamble_then_the_guide_as_the_manifest_declares() {
+    use impresspress_core::blocks::dev::{blobs, seed};
+
+    let preamble_path = seeds_dir().join("llms-preamble.md");
+    let preamble = std::fs::read_to_string(&preamble_path)
+        .unwrap_or_else(|e| panic!("{}: {e}", preamble_path.display()));
+    let published = published();
+    for tool in tool_tokens(&preamble) {
+        assert!(
+            published.contains(tool),
+            "{}: names {tool}, which the workspace page does not publish",
+            preamble_path.display()
+        );
+    }
+    // What a reader must be told before it can get in, whichever seed.
+    for needle in [
+        "/b/dev/enter",
+        "no credentials to",
+        "WebMCP",
+        "Tool console",
+        "dev_write_files",
+        "dev_export",
+        "JavaScript",
+    ] {
+        assert!(
+            preamble.contains(needle),
+            "{}: does not mention {needle:?}",
+            preamble_path.display()
+        );
+    }
+
+    for (path, text) in seed_files("manifest.json") {
+        let manifest: seed::SeedManifest =
+            serde_json::from_str(&text).unwrap_or_else(|e| panic!("{}: {e}", path.display()));
+        let sandbox = manifest
+            .sandbox
+            .unwrap_or_else(|| panic!("{}: no sandbox block", path.display()));
+        let guide_path = path.with_file_name("guide.md");
+        let guide = std::fs::read_to_string(&guide_path)
+            .unwrap_or_else(|e| panic!("{}: {e}", guide_path.display()));
+        let llms = format!(
+            "{}\n{guide}",
+            preamble.replace("{template}", &sandbox.template)
+        );
+        assert!(
+            llms.contains(&format!("the `{}` template", sandbox.template)),
+            "{}: the preamble does not name the template",
+            path.display()
+        );
+        assert_eq!(sandbox.llms.path, seed::LLMS_PATH, "{}", path.display());
+        assert_eq!(
+            sandbox.llms.content_type,
+            seed::LLMS_CONTENT_TYPE,
+            "{}",
+            path.display()
+        );
+        assert!(llms.len() <= seed::MAX_LLMS_BYTES, "{}", path.display());
+        assert_eq!(sandbox.llms.size, llms.len() as u64, "{}", path.display());
+        assert_eq!(
+            sandbox.llms.sha256,
+            blobs::sha256_hex(llms.as_bytes()),
+            "{}: sandbox.llms is not the preamble plus this seed's guide — \
+             run seeds/write-manifest.py for every seed",
+            path.display()
+        );
+    }
+}
+
 #[test]
 fn tool_tokens_splits_names_out_of_prose() {
     let found =

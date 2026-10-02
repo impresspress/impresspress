@@ -31,7 +31,10 @@ use impresspress_core::{
         contracts::ExportManifest,
         data_snapshot::DataSnapshot,
         export,
-        repo::generations::GenerationCause,
+        repo::{
+            generations::GenerationCause,
+            seed_info::{self, SeedInfo},
+        },
         seed::{self, SeedManifest},
         test_support::{dev_post, fake_bypass_rules, hello_info, FakeControl, FakeShell},
         BypassRules, DevShared, WAFER_GUEST_VERSION,
@@ -1406,4 +1409,225 @@ async fn a_data_snapshot_over_the_import_limit_is_refused_at_export_and_one_at_i
         .await
         .expect_err("an oversized snapshot refuses the export");
     assert_eq!(error.code, wafer_run::ErrorCode::ResourceExhausted);
+}
+
+// ---------------------------------------------------------------------------
+// What the sandbox says about itself stays in the sandbox
+// ---------------------------------------------------------------------------
+
+/// The sandbox's own `llms.txt`, as a seed import records it.
+const SANDBOX_LLMS: &str = "# ImpressPress build sandbox\n\nBuild a website here.\n";
+
+/// A boot page the way `impresspress-bundle` renders one for a deployment
+/// with a boot notice.
+const SANDBOX_INDEX: &str = concat!(
+    "<h1>ImpressPress dev sandbox</h1>\n",
+    "<!--boot-notice--><p>This is a build sandbox. Read <a href=\"/llms.txt\">/llms.txt</a>, ",
+    "then open <a href=\"/b/dev/enter\">/b/dev/enter</a>.</p><!--/boot-notice-->\n",
+    "<p id=\"status\">Loading...</p>\n",
+);
+
+async fn record_sandbox_llms(ctx: &TestContext) {
+    seed_info::write(
+        ctx,
+        &SeedInfo {
+            template: "blank".to_string(),
+            suggested_prompt: String::new(),
+            guide_markdown: String::new(),
+            llms_text: Some(SANDBOX_LLMS.to_string()),
+        },
+    )
+    .await
+    .expect("seed info");
+}
+
+/// The exported site is not the sandbox: neither copy of the sandbox's
+/// `llms.txt` (the static host's, the one the runtime publishes for a site
+/// with none) and none of the boot page's sandbox wording go with it.
+#[tokio::test]
+async fn the_sandboxes_llms_txt_and_boot_notice_are_not_exported() {
+    let shell = FakeShell::new()
+        .with("llms.txt", SANDBOX_LLMS.as_bytes())
+        .with("index.html", SANDBOX_INDEX.as_bytes());
+    let ctx = TestContext::with_admin()
+        .await
+        .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(shell))
+        .await;
+    record_sandbox_llms(&ctx).await;
+    dev_post(
+        &ctx,
+        "/b/dev/api/files/write",
+        json!({"path": "site/index.html", "content": "<h1>shop</h1>", "expected_sha256": null}),
+    )
+    .await;
+    // The sandbox IS answering `/llms.txt` for this site, which has none…
+    assert_eq!(
+        ctx.storage_get("wafer-run/web", "site", "llms.txt")
+            .await
+            .expect("the sandbox's llms.txt, published"),
+        SANDBOX_LLMS.as_bytes()
+    );
+
+    let entries = entries(
+        output_body(
+            ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export"))
+                .await,
+        )
+        .await,
+    );
+    // …and none of it is in the archive.
+    assert!(
+        !entries.keys().any(|path| path.ends_with("llms.txt")),
+        "{:?}",
+        sorted(&entries)
+    );
+    let manifest: SeedManifest =
+        serde_json::from_slice(&entries["seed/manifest.json"]).expect("a seed manifest");
+    assert!(manifest.sandbox.is_none());
+    assert_eq!(manifest.site.len(), 1);
+    // The boot page is the one a plain bundle renders: the region, empty.
+    assert_eq!(
+        text(&entries, "index.html"),
+        concat!(
+            "<h1>ImpressPress dev sandbox</h1>\n",
+            "<!--boot-notice--><!--/boot-notice-->\n",
+            "<p id=\"status\">Loading...</p>\n",
+        )
+    );
+}
+
+/// A site's OWN `llms.txt` is a site file like any other: writable (the path
+/// is not one the service worker keeps from the runtime), exported under
+/// `seed/site/`, and what the instance seeded from the export serves.
+#[tokio::test]
+async fn a_sites_own_llms_txt_is_exported_and_served_by_the_imported_instance() {
+    const OWN: &str = "# Kiln & Co\n\nHandmade ceramics.\n";
+    let a_control = FakeControl::new();
+    let a = shop_instance(&a_control).await;
+    record_sandbox_llms(&a).await;
+    let written = output_json(
+        dev_post(
+            &a,
+            "/b/dev/api/files/write",
+            json!({"path": "site/llms.txt", "content": OWN, "expected_sha256": null}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(written["path"], "site/llms.txt", "{written}");
+    assert_eq!(
+        a.storage_get("wafer-run/web", "site", "llms.txt")
+            .await
+            .expect("published llms.txt"),
+        OWN.as_bytes(),
+        "the site's file is what the sandbox serves once it exists"
+    );
+
+    let archive = entries(
+        output_body(
+            a.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export"))
+                .await,
+        )
+        .await,
+    );
+    assert_eq!(text(&archive, "seed/site/llms.txt"), OWN);
+    assert!(!archive.contains_key("llms.txt"), "{:?}", sorted(&archive));
+
+    let manifest: SeedManifest =
+        serde_json::from_slice(&archive["seed/manifest.json"]).expect("a seed manifest");
+    let fetch = ArchiveFetch { archive };
+    let b_control = FakeControl::new();
+    b_control.set_validated_info(hello_info("site/hello"));
+    let b = TestContext::with_products()
+        .await
+        .with_auth_added()
+        .await
+        .with_dev_added_and_shell(b_control.clone(), std::sync::Arc::new(FakeShell::new()))
+        .await;
+    let generation = seed::import(
+        &b,
+        b_control.as_ref(),
+        &fake_bypass_rules(),
+        &manifest,
+        &fetch,
+    )
+    .await
+    .expect("import")
+    .expect("a fresh instance imports");
+    activation::request(
+        &b,
+        &b.dev_shared(),
+        GenerationCause::Seed,
+        ActivationIntent::Seed {
+            manifest: generation,
+        },
+        activation::Maintenance::Inline,
+    )
+    .await
+    .expect("activate the imported generation");
+    assert_eq!(
+        b.storage_get("wafer-run/web", "site", "llms.txt")
+            .await
+            .expect("published llms.txt"),
+        OWN.as_bytes()
+    );
+}
+
+/// A boot page with no notice region has nothing to remove and is exported
+/// byte for byte — a deployment may overlay its own.
+#[tokio::test]
+async fn a_boot_page_with_no_notice_region_is_exported_unchanged() {
+    let page = b"<!doctype html><h1>My app</h1>";
+    let shell = FakeShell::new().with("index.html", page);
+    let ctx = TestContext::with_admin()
+        .await
+        .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(shell))
+        .await;
+    dev_post(
+        &ctx,
+        "/b/dev/api/files/write",
+        json!({"path": "site/index.html", "content": "x", "expected_sha256": null}),
+    )
+    .await;
+    let entries = entries(
+        output_body(
+            ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export"))
+                .await,
+        )
+        .await,
+    );
+    assert_eq!(
+        entries.get("index.html").map(Vec::as_slice),
+        Some(&page[..])
+    );
+}
+
+/// A region the export cannot delimit is a 500, never a guess at where the
+/// sandbox's text ends.
+#[tokio::test]
+async fn a_boot_page_whose_notice_region_is_malformed_is_refused() {
+    for page in [
+        "<!--boot-notice--><p>sandbox</p>",
+        "<p>sandbox</p><!--/boot-notice-->",
+        "<!--/boot-notice--><p>sandbox</p><!--boot-notice-->",
+        "<!--boot-notice-->a<!--/boot-notice--><!--boot-notice-->b<!--/boot-notice-->",
+    ] {
+        let shell = FakeShell::new().with("index.html", page.as_bytes());
+        let ctx = TestContext::with_admin()
+            .await
+            .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(shell))
+            .await;
+        dev_post(
+            &ctx,
+            "/b/dev/api/files/write",
+            json!({"path": "site/index.html", "content": "x", "expected_sha256": null}),
+        )
+        .await;
+        let status = output_http_status(
+            ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export"))
+                .await,
+        )
+        .await;
+        assert_eq!(status, 500, "{page}");
+    }
 }

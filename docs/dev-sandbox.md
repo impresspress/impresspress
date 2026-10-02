@@ -25,16 +25,23 @@ lets an agent call the tools directly, and an agent without it uses the
 workspace**: it goes to `/b/dev/enter`, which signs you in as the sandbox's
 admin and lands you on `/b/dev`, the workspace, with nothing to type.
 
-The landing page also shows the throwaway admin credentials —
+When the session expires, open `/b/dev/enter` again. The instance's admin
+account is a throwaway — this is a per-browser, per-visitor instance with
+nothing of consequence behind it — and the workspace page shows the email and
+password this instance is configured with, for the login form at
+`/b/auth/login`. No page or document prints a fixed password, because it can
+be changed: if you change the admin's password in your instance, one-click
+entry stops working for it — the entry page says so and links the login page.
 
-- Email: `admin@example.com`
-- Password: `admin123`
-
-— and why it's fine that they're public: this is a per-browser, per-visitor
-instance with nothing of consequence behind it. They are how you sign back
-in at `/b/auth/login` once the session expires. If you change the admin's
-password in your instance, one-click entry stops working for it — the entry
-page says so and links the login page.
+An agent that has not opened the sandbox yet reads `/llms.txt`: what the
+sandbox is, how to get in, the two ways to call the tools, and the site
+guide. The static host serves it, so it is there for a client with no service
+worker and for one that runs no JavaScript — which is told there that it
+cannot build anything and must say so. The boot page (what every path
+answers with until the service worker is installed) says the same in two
+sentences and links both `/llms.txt` and `/b/dev/enter`. Once the sandbox is
+running, `/llms.txt` is answered by the runtime: the same text until the site
+has an `llms.txt` of its own (`site/llms.txt`), and that file from then on.
 
 *Changed 2026-10-02: the link used to lead to the login form, and the visitor
 or their agent typed the credentials. One-click entry exists only in the
@@ -301,11 +308,11 @@ bundle always boots with the in-browser workspace turned off — there is no
 `/b/dev` on it, and no in-browser compiler.
 
 **Change the admin password before serving an export anywhere but
-localhost.** The starter credentials above are printed in this file and on
-every sandbox's own welcome page, and the export carries the account that
-uses them — so until you change it, anyone who gets the folder, or who can
+localhost.** Every sandbox is seeded with the same starter admin account
+(its email and password are shown on the workspace page), and the export
+carries that account — so until you change it, anyone who gets the folder, or who can
 reach the host you serve it from, is an admin of the exported site. Sign in
-as `admin@example.com` and change it at `/b/auth/change-password`. The
+as that admin and change it at `/b/auth/change-password`. The
 "they're throwaway because this is a per-browser instance with nothing of
 consequence behind it" premise stops holding the moment a copy of the
 instance leaves the browser.

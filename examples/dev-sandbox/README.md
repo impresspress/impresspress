@@ -36,6 +36,21 @@ A seed is what a fresh origin boots with (generation 0). Each lives under
 - `sandbox.json` + `guide.md` — the template name, the prompt the workspace
   page suggests, and the site-authoring guide `dev_read_reference` serves as
   `site_markdown`. The generator puts them in the manifest's `sandbox` block.
+- `llms.txt` — not a file in the seed: it is **generated** from
+  `seeds/llms-preamble.md` (shared by every seed: what the sandbox is, that
+  an agent is expected to build a site in it, how to get in, that a
+  JavaScript-capable browser is required) followed by the seed's `guide.md`
+  verbatim, so the building instructions are written once. The manifest's
+  `sandbox.llms` declares its hash; `build.sh` writes the file. The bundle
+  serves it twice: at `/llms.txt` from the static host, for a reader with no
+  service worker, and at `/seed/llms.txt`, which the seed importer verifies
+  and records. From then on the runtime answers `/llms.txt` — with this text
+  while the site has no `site/llms.txt`, and with the site's own once it
+  does. It is never a service-worker bypass and never part of an export.
+  After editing `llms-preamble.md`, regenerate **every** seed's manifest.
+- `../boot-notice.html` (shared) — the two sentences the boot page shows
+  under its title (`[app] boot_notice` in `impresspress.toml`): the only
+  text a reader gets before the service worker exists.
 - `vendor.json` (bootstrap) — upstream URLs and sha256 pins of the vendored
   files. `seeds/vendor.py bootstrap` downloads and verifies them; the
   vendored bytes are identical to upstream.
@@ -78,7 +93,8 @@ This is the one recipe CI's `e2e-dev-sandbox` job and local e2e runs both use
 `dev-workspace.spec.ts`). It:
 
 1. Verifies every `seeds/*/manifest.json` against its `site/**`,
-   `sandbox.json` and `guide.md` (`seeds/check-seeds.py`) — see `--check`
+   `sandbox.json`, `guide.md` and generated `llms.txt`
+   (`seeds/check-seeds.py`) — see `--check`
    below. Runs first so a stale
    manifest fails fast rather than paying for a wasm build before finding out
    the bundle cannot seed itself.
@@ -191,14 +207,15 @@ Live URLs (once deployed): `https://dev.impresspress.org` (blank),
 
 The seeded admin account (`WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL` /
 `_PASSWORD`, seeded by every browser build — see
-`crates/impresspress-web/src/config.rs`):
+`crates/impresspress-web/src/config.rs`).
 
-- Email: `admin@example.com`
-- Password: `admin123`
-
-This is a throwaway per-browser instance with no data of any consequence
-behind it, which is why the credentials are public in the welcome page
-itself.
+The values are the browser build's defaults in that file; nothing here
+repeats them, because an instance's password can be changed. A visitor does
+not type them: the welcome page's **Open workspace** link goes to
+`/b/dev/enter`, which signs in with whatever this instance is configured
+with, and the workspace page shows the same pair for the login form. This is
+a throwaway per-browser instance with no data of any consequence behind it,
+which is why they are public at all.
 
 ## `seed/data.json` — read this before adding one to this bundle
 
