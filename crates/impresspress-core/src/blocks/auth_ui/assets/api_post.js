@@ -12,3 +12,9 @@ async function apiPost(path,body){
   }
   return d;
 }
+function keepSession(d){
+  if(!d||!d.access_token)return;
+  var secure=location.protocol==='https:'?'; Secure':'';
+  document.cookie='auth_token='+d.access_token+'; Path=/; SameSite=Lax; Max-Age='+(d.expires_in||1800)+secure;
+}
+function hasKeptSession(){return /(?:^|;\s*)auth_token=[^;]/.test(document.cookie)}

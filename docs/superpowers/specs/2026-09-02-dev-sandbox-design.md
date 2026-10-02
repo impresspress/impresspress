@@ -1170,8 +1170,10 @@ and read together with this list.
     password, read at request time from the config keys the auth block reads
     (`WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL` / `_PASSWORD`, seeded
     for the browser build by `impresspress-web/src/config.rs`); its script
-    posts them to `POST /b/auth/api/login`, sets the `auth_token` cookie as
-    the login page does, and navigates to `/b/dev`. No token is minted
+    posts them to `POST /b/auth/api/login` and keeps the session through
+    the auth forms' own `apiPost` and `keepSession`
+    (`auth_ui/assets/api_post.js` — one request path, one cookie writer),
+    then navigates to `/b/dev`. No token is minted
     outside the auth block's login, and the values are not written a second
     time anywhere (the workspace guide prints them from the same read). A
     visitor who already holds an admin session — `GET /b/dev/api/status`

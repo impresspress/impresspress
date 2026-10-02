@@ -21,8 +21,12 @@
 //!
 //! The script, rather than a redirect carrying `Set-Cookie`, because the
 //! sandbox's runtime answers from a service worker and a synthetic response's
-//! `Set-Cookie` is not persisted: the login page sets its cookie from the
-//! login response's JSON for that reason, and this page does the same.
+//! `Set-Cookie` is not persisted: the login page keeps its session from the
+//! login response's JSON for that reason, and this page does the same — with
+//! the login page's own functions. `apiPost` and `keepSession`
+//! (`auth_ui/assets/api_post.js`) are emitted ahead of the script, so there
+//! is one request path and one cookie writer, and a sign-in that fails here
+//! says why in the words the login form would use.
 //!
 //! # When it does not work
 //!
@@ -142,6 +146,9 @@ fn body(credentials: Option<(&str, &str)>) -> Markup {
                 noscript {
                     p { "This page needs JavaScript. " a href=(login_page) { "Sign in" } " instead." }
                 }
+                // The auth forms' own helpers first — `apiPost` and
+                // `keepSession` — which the entry script signs in through.
+                script { (PreEscaped(crate::blocks::auth_ui::pages::api_post_script())) }
                 script { (PreEscaped(ENTER_JS)) }
             } @else {
                 div #dev-enter {
@@ -200,16 +207,30 @@ mod tests {
     /// because only a browser can run it (`dev-enter.spec.ts` does).
     #[test]
     fn the_script_uses_the_login_endpoint_and_the_login_pages_cookie() {
-        assert!(ENTER_JS.contains("fetch(root.getAttribute('data-login')"));
+        assert!(ENTER_JS.contains("apiPost(root.getAttribute('data-login')"));
+        // The helpers it calls are on the page, ahead of it.
+        let html = body(Some(("a@b.c", "pw"))).into_string();
+        let helpers = html
+            .find("async function apiPost(path,body){")
+            .expect("the page emits the shared auth helpers");
+        assert!(html.find("function keepSession(d){").is_some(), "{html}");
+        let own = html
+            .find("function giveUp(message)")
+            .expect("the entry script");
+        assert!(
+            helpers < own,
+            "the helpers must be defined before the script runs"
+        );
         // An existing session is used, not replaced: the probe comes first,
         // and it is a route this block serves at `Admin`.
         assert!(ENTER_JS.contains("fetch(root.getAttribute('data-session-probe')"));
+        assert!(ENTER_JS.contains("if (!hasKeptSession()) {"));
         assert!(super::super::ROUTES
             .iter()
             .any(|row| row.template == SESSION_PROBE && row.auth == wafer_run::AuthLevel::Admin));
-        assert!(ENTER_JS.contains(
-            "'auth_token=' + body.access_token + '; Path=/; SameSite=Lax; Max-Age=' + maxAge + secure"
-        ));
+        // …through the forms' one cookie writer, never one of its own.
+        assert!(ENTER_JS.contains("keepSession(answer);"));
+        assert!(!ENTER_JS.contains("document.cookie"));
         assert!(ENTER_JS.contains("location.replace(root.getAttribute('data-workspace'))"));
         assert!(ENTER_JS.contains("return signedIn ? openWorkspace() : signIn();"));
         // Inlined in a `<script>` element, so it must not be able to end it.
