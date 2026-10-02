@@ -404,6 +404,7 @@ async fn status_reports_the_template_the_seed_named() {
             template: "bootstrap".to_string(),
             suggested_prompt: String::new(),
             guide_markdown: String::new(),
+            llms_text: None,
         },
     )
     .await

@@ -2,8 +2,8 @@
 //!
 //! The sandbox is a browser-local instance: every visitor gets a private
 //! runtime and database, and the admin account in it is a throwaway whose
-//! credentials the welcome page prints. Making the visitor type them back into
-//! a form bought nothing and cost a great deal — an agent driving a cloud
+//! credentials are public (the workspace page prints them). Making the visitor
+//! type them into a form bought nothing and cost a great deal — an agent driving a cloud
 //! browser could not get past the form at all — so the welcome page's "Open
 //! workspace" link comes here instead (2026-10-02 amendment to design §4,
 //! reversing its "no auto sign-in" decision).
@@ -47,7 +47,7 @@
 //! deployment built without `block-dev` has no such code. That boundary is what makes a
 //! public page carrying a password acceptable: it is public only to the one
 //! visitor whose browser the instance lives in, and the password it carries
-//! is the one printed on the welcome page beside the link that leads here.
+//! is the one that instance's own workspace page prints.
 
 use maud::{html, Markup, PreEscaped};
 use wafer_core::clients::config;

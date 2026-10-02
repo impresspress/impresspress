@@ -8,6 +8,13 @@ prompt `/b/dev` suggests) and `guide.md` (the site-authoring guide
 `dev_read_reference` serves); the manifest's `sandbox` block is built from
 the two. The manifest is generated from the tree (`write-manifest.py`) and
 checked against it (`check-seeds.py`); it is never hand-edited.
+
+A seed with a sandbox block also has an `llms.txt` — what a reader that has
+not entered the sandbox yet is told about it. It is not a file in the seed
+directory: `llms_text` generates it from `seeds/llms-preamble.md` (what every
+sandbox says: what this is, how to get in) followed by the seed's own
+`guide.md`, so the building instructions exist once. The manifest's sandbox
+block declares its hash and `build.sh` writes the file when it stages a seed.
 """
 import hashlib
 import json
@@ -155,6 +162,36 @@ MAX_GUIDE_BYTES = 256 * 1024
 MAX_PROMPT_BYTES = 4 * 1024
 
 
+# Mirror seed::LLMS_PATH, seed::LLMS_CONTENT_TYPE and seed::MAX_LLMS_BYTES.
+LLMS_PATH = "llms.txt"
+LLMS_CONTENT_TYPE = "text/plain; charset=utf-8"
+MAX_LLMS_BYTES = 512 * 1024
+
+# What every sandbox's llms.txt opens with, whichever seed it was built from.
+LLMS_PREAMBLE = SEEDS_DIR / "llms-preamble.md"
+# The one hole in it: the seed's template name.
+LLMS_TEMPLATE_HOLE = "{template}"
+
+
+def llms_text(template: str, guide: str) -> str:
+    """The seed's llms.txt: the shared preamble, naming the template, then the
+    seed's guide verbatim. The guide is the single source of the building
+    instructions — the same text `dev_read_reference` serves — so a reader
+    that never gets as far as that tool is told exactly what one that does
+    is."""
+    try:
+        preamble = LLMS_PREAMBLE.read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError) as e:
+        raise SeedError(f"{LLMS_PREAMBLE}: cannot be read ({e})")
+    if preamble.count(LLMS_TEMPLATE_HOLE) != 1:
+        raise SeedError(
+            f"{LLMS_PREAMBLE}: must name the template exactly once, as {LLMS_TEMPLATE_HOLE}"
+        )
+    if not preamble.endswith("\n") or not guide.endswith("\n"):
+        raise SeedError(f"{LLMS_PREAMBLE} and the seed's {GUIDE_PATH} must each end with a newline")
+    return preamble.replace(LLMS_TEMPLATE_HOLE, template) + "\n" + guide
+
+
 def sandbox_block(seed_dir: pathlib.Path):
     """The `sandbox` block of a seed that carries sandbox.json and guide.md,
     or None when it carries neither. Checked here to the runtime's own limits
@@ -191,9 +228,15 @@ def sandbox_block(seed_dir: pathlib.Path):
     if len(data) > MAX_GUIDE_BYTES:
         raise SeedError(f"{guide_path}: {len(data)} bytes is over the {MAX_GUIDE_BYTES}-byte limit")
     try:
-        data.decode("utf-8")
+        guide = data.decode("utf-8")
     except UnicodeDecodeError as e:
         raise SeedError(f"{guide_path}: not valid UTF-8 ({e}); the importer refuses it at boot")
+    llms = llms_text(template, guide).encode("utf-8")
+    if len(llms) > MAX_LLMS_BYTES:
+        raise SeedError(
+            f"{seed_dir}: the generated {LLMS_PATH} is {len(llms)} bytes, over the "
+            f"{MAX_LLMS_BYTES}-byte limit"
+        )
     return {
         "template": template,
         "suggested_prompt": prompt,
@@ -203,7 +246,24 @@ def sandbox_block(seed_dir: pathlib.Path):
             "size": len(data),
             "content_type": GUIDE_CONTENT_TYPE,
         },
+        "llms": {
+            "path": LLMS_PATH,
+            "sha256": sha256_hex(llms),
+            "size": len(llms),
+            "content_type": LLMS_CONTENT_TYPE,
+        },
     }
+
+
+def staged_llms(seed_dir: pathlib.Path):
+    """The bytes of the llms.txt `build.sh` stages beside the manifest, or
+    None for a seed with no sandbox block. Generated the way `sandbox_block`
+    hashed it, so the staged file is the one the manifest declares."""
+    if sandbox_block(seed_dir) is None:
+        return None
+    sandbox = json.loads((seed_dir / "sandbox.json").read_text(encoding="utf-8"))
+    guide = (seed_dir / GUIDE_PATH).read_text(encoding="utf-8")
+    return llms_text(sandbox["template"], guide).encode("utf-8")
 
 
 def load_pin(seed_dir: pathlib.Path):

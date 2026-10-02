@@ -2667,6 +2667,7 @@ dependencies = [
  "crc32fast",
  "futures",
  "getrandom 0.2.17",
+ "impresspress-bundle",
  "impresspress-core",
  "js-sys",
  "maud",

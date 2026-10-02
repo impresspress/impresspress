@@ -50,6 +50,13 @@ pub struct AppConfig {
     pub name: String,
     pub title: String,
     pub boot_redirect: String,
+    /// An HTML fragment file (relative to the directory holding
+    /// `impresspress.toml`, like an overlay's `from`) that the boot shell
+    /// shows under its title — what a first visitor, or a reader that runs no
+    /// JavaScript, is told before the runtime exists. See
+    /// `impresspress_bundle::bundle::AppConfig::boot_notice_html`.
+    #[serde(default)]
+    pub boot_notice: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -104,6 +111,38 @@ pub fn parse(toml_text: &str) -> Result<Config, toml::de::Error> {
 }
 
 use std::path::{Path, PathBuf};
+
+impl Config {
+    /// What this configuration asks the bundler for — the one place the two
+    /// web flows (`sealed × web`, `embed × web`) turn `impresspress.toml` into
+    /// an `impresspress_bundle` `AppConfig`. `repo_root` is the directory the
+    /// file was found in; `[app] boot_notice` is read relative to it.
+    pub fn bundle_app(
+        &self,
+        repo_root: &Path,
+    ) -> anyhow::Result<impresspress_bundle::bundle::AppConfig> {
+        let boot_notice_html = match &self.app.boot_notice {
+            Some(path) => {
+                let file = repo_root.join(path);
+                Some(
+                    std::fs::read_to_string(&file)
+                        .map_err(|e| anyhow::anyhow!("read [app] boot_notice {file:?}: {e}"))?,
+                )
+            }
+            None => None,
+        };
+        Ok(impresspress_bundle::bundle::AppConfig {
+            app_name: Some(self.app.name.clone()),
+            app_title: Some(self.app.title.clone()),
+            boot_redirect: Some(self.app.boot_redirect.clone()),
+            extra_bypass_prefix: self.assets.extra_bypass_prefix.clone(),
+            extra_bypass_exact: self.assets.extra_bypass_exact.clone(),
+            opfs_wipe_on_recovery: self.assets.opfs_wipe_on_recovery,
+            dev_enabled: self.dev.enabled,
+            boot_notice_html,
+        })
+    }
+}
 
 /// Walk up from `start` looking for `impresspress.toml`; parse and return
 /// `(config, repo_root)` where `repo_root` is the directory that contains

@@ -4,7 +4,6 @@ import { mkdtempSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import {
-  ADMIN_EMAIL,
   ADMIN_PASSWORD,
   bootServiceWorker,
   loginToWorkspace,
@@ -82,11 +81,6 @@ const PIXEL_PNG_PATH = 'site/pixel.png';
  */
 async function openWorkspace(page: Page) {
   await expect(page.locator('body')).toContainText(WELCOME_PHRASE, { timeout: 60_000 });
-  // The credentials are printed on the page for whoever lands here; that they
-  // are is part of the starter site's contract — they are how a human signs
-  // back in — so the test reads them the same way a visitor would.
-  await expect(page.locator('body')).toContainText(ADMIN_EMAIL);
-  await expect(page.locator('body')).toContainText(ADMIN_PASSWORD);
   await page.getByRole('link', { name: /open workspace/i }).click();
   // Landing anywhere else — the login form above all — is the link or the
   // entry page being broken, not a detail to paper over.

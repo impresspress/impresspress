@@ -460,6 +460,7 @@ async fn the_suggested_prompt_and_template_come_from_the_seed() {
             // Hostile on purpose: the page must escape it, not render it.
             suggested_prompt: "Build me a shop </pre><script>alert(1)</script>".to_string(),
             guide_markdown: String::new(),
+            llms_text: None,
         },
     )
     .await

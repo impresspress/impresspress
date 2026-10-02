@@ -30,6 +30,12 @@ imports `seed/`, so it takes a few seconds; every load after that is instant.
         workspace, no in-browser compiler and no agent tooling here. This is
         the site, not the sandbox that built it.
 
+    llms.txt
+        Only if your site has one (`seed/site/llms.txt`): the same file,
+        placed where your static host serves it to a reader that runs no
+        JavaScript. Counted with the shell above. If you edit one, edit
+        both — and the hash in `seed/manifest.json`.
+
     seed/manifest.json
         What the runtime imports on its first boot: every file below, with
         its SHA-256 and size. The runtime verifies all of them and refuses

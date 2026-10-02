@@ -11,6 +11,28 @@ use anyhow::{Context, Result};
 
 pub use self::bypass::{BypassRules, SEED_BYPASS_PREFIX};
 
+/// The two comments `index.html.tmpl` renders [`AppConfig::boot_notice_html`]
+/// between — always, with nothing between them when the app has no notice.
+///
+/// They exist so the notice can be taken back out by exact text: a
+/// development sandbox's notice describes the sandbox, and the sandbox's
+/// export ships this same `index.html` as the shell of a plain site
+/// (`impresspress-core`'s `blocks::dev::export`, which restates the pair;
+/// `crates/impresspress/tests/seed_bypass_prefix.rs` compares the spellings).
+pub const BOOT_NOTICE_START: &str = "<!--boot-notice-->";
+pub const BOOT_NOTICE_END: &str = "<!--/boot-notice-->";
+
+/// What `index.html.tmpl` wraps each place it shows [`AppConfig::app_title`]
+/// in the page body in, so the title can be replaced by exact text. The
+/// third place is `<title>` itself, which needs no wrapper.
+///
+/// For the same consumer as the notice markers: the title is the DEPLOYMENT's
+/// (`[app] title`), and a development sandbox's export ships this page as the
+/// boot shell of a site that has a name of its own. The export restates the
+/// pair; the same test compares the spellings.
+pub const APP_TITLE_OPEN: &str = "<span data-app-title>";
+pub const APP_TITLE_CLOSE: &str = "</span>";
+
 /// Consumer-supplied configuration that controls how templates are rendered.
 /// All fields are optional; sensible defaults are derived from the discovered
 /// wasm-pack output pair when omitted.
@@ -55,6 +77,17 @@ pub struct AppConfig {
     /// needs to have been compiled with `impresspress-web/browser-devtools`
     /// for the flag to register anything.
     pub dev_enabled: bool,
+    /// An HTML fragment the boot shell (`index.html`) shows under its title,
+    /// between [`BOOT_NOTICE_START`] and [`BOOT_NOTICE_END`]. **Default:
+    /// none.**
+    ///
+    /// The boot shell is the only document the static host serves, and until
+    /// the service worker is installed it is the whole of what a visitor — or
+    /// a reader that runs no JavaScript at all — gets: a title and
+    /// "Loading...". An app whose first visitor needs to be told something
+    /// before the runtime exists says it here. The fragment is the app's own
+    /// markup, rendered verbatim; it may not contain either marker.
+    pub boot_notice_html: Option<String>,
 }
 
 /// Discover the wasm-pack output pair (`{base}.js` + `{base}_bg.wasm`) in
@@ -225,6 +258,17 @@ pub fn run(pkg_dir: &Path, repo_dir: &Path, app: AppConfig) -> Result<()> {
     //    rendered from this one value — see `bypass`'s module docs for why
     //    there must not be a second list.
     let base_name = pair.as_ref().map(|(b, _, _)| b.as_str()).unwrap_or("app");
+    if let Some(notice) = &app.boot_notice_html {
+        // The markers are how the notice is found again; a notice carrying
+        // one would end the region early or open a second.
+        for marker in [BOOT_NOTICE_START, BOOT_NOTICE_END] {
+            if notice.contains(marker) {
+                anyhow::bail!(
+                    "the boot notice contains {marker:?}, which marks where it is rendered"
+                );
+            }
+        }
+    }
     let bypass = BypassRules::for_bundle(&wasm_js_prefix_val, &app);
     let vars = build_template_vars(
         build_id.clone(),
@@ -347,8 +391,16 @@ fn build_template_vars(
     vars.insert("BYPASS_CONDITION".to_string(), bypass.render_condition());
     vars.insert("BYPASS_RULES".to_string(), bypass.render_data());
     vars.insert("APP_NAME".to_string(), app_name);
-    vars.insert("APP_TITLE".to_string(), app_title);
+    // `index.html` is the only template that shows the title, and it shows
+    // it as text: in `<title>` and between `APP_TITLE_OPEN`/`_CLOSE`.
+    // Escaped, so a title is never markup — and can never contain the
+    // closing tag whoever replaces it looks for.
+    vars.insert("APP_TITLE".to_string(), html_text(&app_title));
     vars.insert("BOOT_REDIRECT".to_string(), boot_redirect);
+    vars.insert(
+        "BOOT_NOTICE".to_string(),
+        app.boot_notice_html.clone().unwrap_or_default(),
+    );
     vars.insert(
         "OPFS_WIPE_ON_RECOVERY".to_string(),
         if app.opfs_wipe_on_recovery {
@@ -368,6 +420,13 @@ fn build_template_vars(
         },
     );
     vars
+}
+
+/// `text` as HTML text content.
+fn html_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn render_if_exists(

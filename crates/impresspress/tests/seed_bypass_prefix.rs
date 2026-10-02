@@ -10,6 +10,9 @@
 //! A drift here is silent and total: the service worker would intercept
 //! `/seed/…`, answer it from the published site, and every fresh instance
 //! would boot with no seed and no error.
+//!
+//! The boot notice's two markers are the same kind of pair: the bundler
+//! renders them, the sandbox's export finds the notice by them.
 
 #[test]
 fn the_bundler_bypasses_exactly_the_prefix_the_seed_importer_fetches_from() {
@@ -66,4 +69,31 @@ fn the_sandbox_reads_back_exactly_the_bypass_rules_the_worker_hands_it() {
         .contains(&impresspress_core::blocks::dev::seed::ROOT.to_string()));
     assert!(read.refuse_shadowed("site/manifest.json").is_err());
     assert!(read.refuse_shadowed("site/vendor/bootstrap/x.css").is_ok());
+}
+
+/// The markers the bundler renders a boot notice between are the ones the
+/// export removes it by. A drift here would not fail anything by itself — the
+/// export leaves a page with neither marker alone — it would ship the
+/// sandbox's "build a website here" text as the boot page of every exported
+/// site.
+#[test]
+fn the_export_removes_the_boot_notice_by_the_markers_the_bundler_renders() {
+    assert_eq!(
+        impresspress_bundle::bundle::BOOT_NOTICE_START,
+        impresspress_core::blocks::dev::export::BOOT_NOTICE_START,
+    );
+    assert_eq!(
+        impresspress_bundle::bundle::BOOT_NOTICE_END,
+        impresspress_core::blocks::dev::export::BOOT_NOTICE_END,
+    );
+    // The same for the wrapper around the deployment's title, which the
+    // export replaces with the exported site's name.
+    assert_eq!(
+        impresspress_bundle::bundle::APP_TITLE_OPEN,
+        impresspress_core::blocks::dev::export::APP_TITLE_OPEN,
+    );
+    assert_eq!(
+        impresspress_bundle::bundle::APP_TITLE_CLOSE,
+        impresspress_core::blocks::dev::export::APP_TITLE_CLOSE,
+    );
 }

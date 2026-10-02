@@ -47,15 +47,7 @@ pub async fn build(repo_root: &Path, release: bool) -> Result<()> {
     //    This calls impresspress_bundle::bundle::run, which writes the
     //    static shell (index.html, sw.js, loader.js) into dist/.
     let app = match cfg.as_ref() {
-        Some((c, _)) => impresspress_bundle::bundle::AppConfig {
-            app_name: Some(c.app.name.clone()),
-            app_title: Some(c.app.title.clone()),
-            boot_redirect: Some(c.app.boot_redirect.clone()),
-            extra_bypass_prefix: c.assets.extra_bypass_prefix.clone(),
-            extra_bypass_exact: c.assets.extra_bypass_exact.clone(),
-            opfs_wipe_on_recovery: c.assets.opfs_wipe_on_recovery,
-            dev_enabled: c.dev.enabled,
-        },
+        Some((c, root)) => c.bundle_app(root)?,
         // No `impresspress.toml` — every knob, the sandbox included, stays
         // at its default.
         None => impresspress_bundle::bundle::AppConfig::default(),

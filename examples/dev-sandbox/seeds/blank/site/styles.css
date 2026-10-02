@@ -32,18 +32,8 @@ code {
   font-size: 0.95em;
 }
 
-dl {
-  display: grid;
-  grid-template-columns: auto 1fr;
-  gap: 0.25rem 1rem;
-}
-
-dt {
-  color: #9aa4b2;
-}
-
-dd {
-  margin: 0;
+a {
+  color: #8ab4f8;
 }
 
 .workspace-link a {

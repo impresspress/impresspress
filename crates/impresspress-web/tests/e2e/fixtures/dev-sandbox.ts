@@ -207,6 +207,44 @@ export async function loginToWorkspace(page: Page) {
 }
 
 // ---------------------------------------------------------------------------
+// The sandbox as an agent with no WebMCP uses it: the welcome page's link to
+// the one-click entry page, then the Tool console. `dev-enter.spec.ts` is
+// where both are the subject; `dev-llms.spec.ts` gets in and writes a file
+// the same way, because that is the path the sandbox's `llms.txt` describes.
+// ---------------------------------------------------------------------------
+
+/** Follow the welcome page's own "Open workspace" link to the workspace. */
+export async function enterFromWelcome(page: Page) {
+  await expect(page.locator('body')).toContainText(WELCOME_PHRASE, { timeout: 60_000 });
+  await page.getByRole('link', { name: /open workspace/i }).first().click();
+  await page.waitForURL((url) => url.pathname === '/b/dev', { timeout: 60_000 });
+  // The script ran: the progress ladder is drawn by its first status read.
+  await expect(page.locator('#dev-progress-steps li').first()).toBeAttached({ timeout: 60_000 });
+}
+
+/** Run one tool from the Tool console and return what the result box shows. */
+export async function runFromConsole(
+  page: Page,
+  tool: string,
+  args: Record<string, unknown> | null,
+): Promise<{ isError: boolean; result: any }> {
+  await page.locator('#dev-console-tool').selectOption(tool);
+  if (args !== null) {
+    await page.locator('#dev-console-args').fill(JSON.stringify(args));
+  }
+  // Emptied first, so the wait below is for THIS run's report rather than
+  // one a previous run left in the box.
+  await page.locator('#dev-console-result').evaluate((el) => {
+    el.removeAttribute('data-is-error');
+  });
+  await page.locator('#dev-console-run').click();
+  await expect(page.locator('#dev-console-result')).toHaveAttribute('data-is-error', /^(true|false)$/, {
+    timeout: 60_000,
+  });
+  return JSON.parse((await page.locator('#dev-console-result').textContent()) ?? '');
+}
+
+// ---------------------------------------------------------------------------
 // What the workspace publishes, and how the exported bundle is served.
 //
 // Both halves below are read by more than one spec — `dev-workspace.spec.ts`
@@ -343,3 +381,5 @@ export const WORKSPACE_EXPORT_PORT = 8098;
 export const SCENARIO_EXPORT_PORT = 8099;
 /** Where `dev-bootstrap.spec.ts` serves the bootstrap seed's own bundle. */
 export const BOOTSTRAP_PORT = 8097;
+/** Where `dev-llms.spec.ts` serves that same bundle, for its plain GETs. */
+export const LLMS_BOOTSTRAP_PORT = 8096;

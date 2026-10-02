@@ -37,7 +37,8 @@
 # `--root ./out` to keep it out of `~/.cargo/bin`) and point this at it.
 #
 # `--check` verifies every `seeds/<name>/manifest.json` against its `site/**`
-# and, when the seed has them, its `sandbox.json` and `guide.md`, and that
+# and, when the seed has them, its `sandbox.json`, its `guide.md` and the
+# `llms.txt` generated from `seeds/llms-preamble.md` and that guide, and that
 # every file its `vendor.json` pins carries the pinned sha256
 # (seeds/check-seeds.py) — and, when `compiler/dist/` has been
 # built, that its files match `compiler/dist/manifest.json` and none of them
@@ -80,7 +81,7 @@ esac
 # drifted from its files is what `seed::import` refuses at boot, and the
 # check is cheap. The rules live in seeds/check-seeds.py.
 check_seed() {
-  log "verifying seeds/*/manifest.json against seeds/*/site/**, sandbox.json and guide.md, and vendor.json pins"
+  log "verifying seeds/*/manifest.json against seeds/*/site/**, sandbox.json, guide.md and the generated llms.txt, and vendor.json pins"
   python3 "$HERE/seeds/check-seeds.py"
 }
 
@@ -106,6 +107,25 @@ stage_seed() {
   # The guide rides the bundle when the seed carries a sandbox block; the
   # manifest names it, so a seed with one and no file fails the check above.
   if [ -f "$src/guide.md" ]; then cp "$src/guide.md" "$HERE/seed/guide.md"; fi
+  # llms.txt is generated, not copied: seedlib builds it from
+  # seeds/llms-preamble.md and the seed's guide, exactly as it hashed it for
+  # the manifest. It is staged at seed/llms.txt, which the bundle then carries
+  # twice (impresspress.toml): at /seed/llms.txt, where the importer fetches
+  # and verifies it like the guide, and at /llms.txt, where the static host
+  # answers a reader that has no service worker. A seed with no sandbox block
+  # has none — and impresspress.toml's overlay of it then fails the build,
+  # which is right: this deployment is the sandbox.
+  python3 -B - "$HERE/seeds" "$SEED" "$HERE/seed/llms.txt" <<'STAGELLMS'
+import pathlib, sys
+sys.path.insert(0, sys.argv[1])
+import seedlib
+try:
+    text = seedlib.staged_llms(seedlib.seed_dir(sys.argv[2]))
+except seedlib.SeedError as e:
+    raise SystemExit(f"build.sh: {e}")
+if text is not None:
+    pathlib.Path(sys.argv[3]).write_bytes(text)
+STAGELLMS
 }
 
 # The browser toolchain (`compiler/`) is 365 MiB of composed wasm and takes
@@ -287,6 +307,17 @@ grep -q 'const DEV_ENABLED = true;' "$DIST/sw.js" || {
   echo "build.sh: $DIST/seed/manifest.json was not overlaid — check impresspress.toml's [[assets.overlay]]," >&2
   echo "  or an impresspress CLI older than the recursive-directory overlay (cli/helpers/overlays.rs):" >&2
   echo "  $IMPRESSPRESS_BIN" >&2
+  exit 1
+}
+# The two things a reader with no service worker gets from this deployment:
+# the sandbox's llms.txt at the root, and a boot page that says what this is.
+cmp -s "$DIST/llms.txt" "$DIST/seed/llms.txt" || {
+  echo "build.sh: $DIST/llms.txt is missing or is not the seed's llms.txt — check impresspress.toml's [[assets.overlay]]" >&2
+  exit 1
+}
+grep -q 'href="/llms.txt"' "$DIST/index.html" || {
+  echo "build.sh: $DIST/index.html does not carry the boot notice — check [app] boot_notice in impresspress.toml," >&2
+  echo "  or an impresspress CLI older than it: $IMPRESSPRESS_BIN" >&2
   exit 1
 }
 [ -f "$DIST/__impresspress_dev/compiler/manifest.json" ] || {

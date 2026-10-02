@@ -3,6 +3,11 @@
 write-manifest.py would write from its tree, byte for byte, and every file its
 vendor.json (when it has one) pins is under site/ with the pinned sha256.
 
+"Its tree" includes what the manifest's sandbox block is generated from:
+sandbox.json, guide.md, and the llms.txt seedlib builds out of
+seeds/llms-preamble.md and that guide. An edit to any of them without
+regenerating is a manifest whose declared hash the importer would refuse.
+
 A seed is a directory whose name passes seedlib.SEED_NAME; anything else
 under seeds/ (__pycache__, a dotted directory) is not a seed and is skipped.
 Each seed is checked on its own: a seed that cannot be read or generated
@@ -54,6 +59,24 @@ def problems_for(seed: pathlib.Path) -> list:
         )
     if [e["path"] for e in committed.get("site", [])] != sorted(declared):
         problems.append("site entries are not in path order")
+    # The sandbox block by name, before the byte comparison below: "differs"
+    # alone does not say that the stale half is the llms.txt every seed
+    # shares a preamble for, which no file in THIS seed's directory changed.
+    declared_sandbox = committed.get("sandbox")
+    expected_sandbox = expected.get("sandbox")
+    if declared_sandbox != expected_sandbox:
+        for key in ("guide", "llms"):
+            before = (declared_sandbox or {}).get(key)
+            after = (expected_sandbox or {}).get(key)
+            if before != after:
+                source = (
+                    f"{seedlib.GUIDE_PATH}"
+                    if key == "guide"
+                    else f"{seedlib.LLMS_PREAMBLE.name} + {seedlib.GUIDE_PATH}"
+                )
+                problems.append(
+                    f"sandbox.{key}: manifest.json declares {before}, {source} gives {after}"
+                )
     if not problems and manifest_path.read_text() != seedlib.render(expected):
         problems.append("manifest.json differs from what write-manifest.py writes — regenerate")
     return [f"{seed.name}: {p}" for p in problems]

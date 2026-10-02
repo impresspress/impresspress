@@ -274,3 +274,38 @@ test('a probe that threw proves nothing and clears nothing', async () => {
 
   assert.equal(shell.session.getItem(RECOVERY_DONE), '1');
 });
+
+// What a person reads names the app by what the PAGE says it is, not by a
+// name rendered into this script: a shell that is copied and retitled (the
+// development sandbox's export) must not go on naming where it came from.
+test('visible text names the app the page shows, not the build', async () => {
+  const stuckLoad = (page) =>
+    loadShell({
+      stop: { reason: CAUSE, at: NOW },
+      now: NOW,
+      session: { [RECOVERY_DONE]: '1' },
+      ...page
+    });
+
+  const shown = stuckLoad({ title: 'Kiln & Co', documentTitle: 'Something else' });
+  await shown.booted;
+  assert.equal(shown.stuck('impresspress-stopped-title').textContent, "Kiln & Co couldn't start");
+
+  // A boot page with no title element of the shell's: the document's title.
+  const overlaid = stuckLoad({ title: null, documentTitle: 'My own page' });
+  await overlaid.booted;
+  assert.equal(
+    overlaid.stuck('impresspress-stopped-title').textContent,
+    "My own page couldn't start"
+  );
+
+  // And a page that names nothing at all still says something true.
+  const bare = stuckLoad({ title: null, documentTitle: '' });
+  await bare.booted;
+  assert.equal(bare.stuck('impresspress-stopped-title').textContent, "The app couldn't start");
+
+  // The ordinary boot's progress line, the same way.
+  const booting = loadShell({ now: NOW, title: 'Kiln & Co' });
+  await booting.booted;
+  assert.match(booting.status.textContent, /Loading Kiln & Co\.\.\.$/);
+});

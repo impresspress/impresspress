@@ -17,6 +17,7 @@ use impresspress_core::{
         activation::{self, ActivationIntent},
         artifacts, blobs,
         control::{DynamicBlockSpec, DynamicRoute, RouteAccessKind},
+        publisher,
         repo::{self, generations::GenerationCause, runtime_state, seed_info},
         seed::{self, SandboxSeed, SeedBlock, SeedManifest},
         test_support::{fake_bypass_rules, hello_info, seed_file as file, FakeControl, MapFetch},
@@ -111,11 +112,23 @@ fn guide_file() -> seed::SeedFile {
     }
 }
 
+const LLMS: &[u8] = b"# The sandbox\n\nBuild a website here.\n";
+
+fn llms_file() -> seed::SeedFile {
+    seed::SeedFile {
+        path: seed::LLMS_PATH.to_string(),
+        sha256: blobs::sha256_hex(LLMS),
+        size: LLMS.len() as u64,
+        content_type: seed::LLMS_CONTENT_TYPE.to_string(),
+    }
+}
+
 fn sandbox() -> SandboxSeed {
     SandboxSeed {
         template: "blank".to_string(),
         suggested_prompt: "Build me a shop.".to_string(),
         guide: guide_file(),
+        llms: llms_file(),
     }
 }
 
@@ -126,8 +139,11 @@ fn manifest_with(sandbox: SandboxSeed) -> SeedManifest {
     }
 }
 
-fn bundle_with_guide() -> MapFetch {
-    bundle().with(&seed::guide_url(seed::GUIDE_PATH), GUIDE)
+/// [`bundle`] plus the two files a sandbox block names.
+fn sandbox_bundle() -> MapFetch {
+    bundle()
+        .with(&seed::guide_url(seed::GUIDE_PATH), GUIDE)
+        .with(&seed::llms_url(seed::LLMS_PATH), LLMS)
 }
 
 /// Import `manifest` and expect a refusal; nothing may have been stored.
@@ -161,7 +177,7 @@ async fn a_sandbox_block_is_recorded_for_the_reference_and_the_page() {
         control.as_ref(),
         &fake_bypass_rules(),
         &manifest_with(sandbox()),
-        &bundle_with_guide(),
+        &sandbox_bundle(),
     )
     .await
     .expect("import")
@@ -170,6 +186,339 @@ async fn a_sandbox_block_is_recorded_for_the_reference_and_the_page() {
     assert_eq!(info.template, "blank");
     assert_eq!(info.suggested_prompt, "Build me a shop.");
     assert_eq!(info.guide_markdown, std::str::from_utf8(GUIDE).unwrap());
+    assert_eq!(
+        info.llms_text.as_deref(),
+        Some(std::str::from_utf8(LLMS).unwrap())
+    );
+}
+
+/// What the recorded text is FOR: once the seed's generation is live, the
+/// runtime serves the sandbox's `llms.txt` at the site path — the seed's
+/// site has no such file — and the generation's own manifest still does not
+/// name it, which is what keeps it out of an export.
+#[tokio::test]
+async fn a_seeded_sandbox_serves_its_llms_txt_without_owning_it_as_a_site_file() {
+    let (ctx, control) = fixture().await;
+    let shared = ctx.dev_shared();
+    let generation = seed::import(
+        &ctx,
+        control.as_ref(),
+        &fake_bypass_rules(),
+        &manifest_with(sandbox()),
+        &sandbox_bundle(),
+    )
+    .await
+    .expect("import")
+    .expect("fresh");
+    assert!(
+        generation
+            .site
+            .files
+            .iter()
+            .all(|f| f.path != seed::LLMS_PATH),
+        "the sandbox's llms.txt is not a site file"
+    );
+    let outcome = activation::request(
+        &ctx,
+        &shared,
+        GenerationCause::Seed,
+        ActivationIntent::Seed {
+            manifest: generation,
+        },
+        activation::Maintenance::Inline,
+    )
+    .await
+    .expect("activate the seed");
+    assert_eq!(outcome.generation.site_files, 2);
+    assert_eq!(
+        ctx.storage_get("wafer-run/web", "site", seed::LLMS_PATH)
+            .await
+            .expect("published llms.txt"),
+        LLMS.to_vec()
+    );
+    let ws = workspace::load(&ctx).await.expect("workspace");
+    assert!(
+        !ws.files.contains_key("site/llms.txt"),
+        "{:?}",
+        ws.files.keys()
+    );
+}
+
+// ---------------------------------------------------------------------------
+// The boot repair: an instance seeded before the bundle had an llms.txt
+// ---------------------------------------------------------------------------
+
+/// A live sandbox in the state a browser that visited BEFORE the bundle
+/// carried `sandbox.llms` is in after migration 004: a seeded, active
+/// generation, a `seed_info` row with a template, and neither a recorded
+/// text nor the file in the published folder.
+async fn seeded_before_llms() -> TestContext {
+    let (ctx, control) = fixture().await;
+    let shared = ctx.dev_shared();
+    let generation = seed::import(
+        &ctx,
+        control.as_ref(),
+        &fake_bypass_rules(),
+        &manifest_with(sandbox()),
+        &sandbox_bundle(),
+    )
+    .await
+    .expect("import")
+    .expect("fresh");
+    activation::request(
+        &ctx,
+        &shared,
+        GenerationCause::Seed,
+        ActivationIntent::Seed {
+            manifest: generation,
+        },
+        activation::Maintenance::Inline,
+    )
+    .await
+    .expect("activate the seed");
+    // Back to what the old importer and the old publisher left.
+    let mut info = seed_info::read(&ctx).await.expect("read").expect("row");
+    info.llms_text = None;
+    seed_info::write(&ctx, &info)
+        .await
+        .expect("row without a text");
+    seed_info::set_llms_published(&ctx, None)
+        .await
+        .expect("nothing published");
+    wafer_core::clients::storage::delete(&ctx, publisher::SITE_FOLDER, seed::LLMS_PATH)
+        .await
+        .expect("remove the published file");
+    assert!(published_llms(&ctx).await.is_none());
+    ctx
+}
+
+async fn published_llms(ctx: &TestContext) -> Option<Vec<u8>> {
+    ctx.storage_get("wafer-run/web", "site", seed::LLMS_PATH)
+        .await
+        .ok()
+}
+
+/// What the static host serves an already-seeded instance: the manifest and
+/// the one file the repair reads. Nothing else of the bundle is in it, so a
+/// repair that fetched anything more would fail here.
+fn repair_bundle() -> MapFetch {
+    MapFetch::default()
+        .with(
+            seed::MANIFEST_URL,
+            &serde_json::to_vec(&manifest_with(sandbox())).expect("manifest"),
+        )
+        .with(&seed::llms_url(seed::LLMS_PATH), LLMS)
+}
+
+/// The bug this exists for: a browser seeded before the deploy gets the file
+/// on its next boot — recorded AND in the published folder, although no site
+/// file changed and no generation was published.
+#[tokio::test]
+async fn a_sandbox_seeded_before_llms_txt_gets_it_on_the_next_boot() {
+    let ctx = seeded_before_llms().await;
+    let generations = repo::generations::list_recent(&ctx, 10)
+        .await
+        .expect("ledger")
+        .len();
+
+    assert_eq!(
+        seed::repair_llms(&ctx, &repair_bundle()).await,
+        Ok(seed::LlmsRepair::Recorded)
+    );
+    assert_eq!(published_llms(&ctx).await.as_deref(), Some(LLMS));
+    let info = seed_info::read(&ctx).await.expect("read").expect("row");
+    assert_eq!(
+        info.llms_text.as_deref(),
+        Some(std::str::from_utf8(LLMS).unwrap())
+    );
+    // The site itself is untouched: same generation, same entrypoint.
+    assert_eq!(
+        repo::generations::list_recent(&ctx, 10)
+            .await
+            .expect("ledger")
+            .len(),
+        generations
+    );
+    assert_eq!(
+        ctx.storage_get("wafer-run/web", "site", "index.html")
+            .await
+            .expect("index"),
+        INDEX.to_vec()
+    );
+
+    // Every boot after that reads one row and fetches nothing: a bundle with
+    // nothing in it would fail any fetch.
+    assert_eq!(
+        seed::repair_llms(&ctx, &MapFetch::default()).await,
+        Ok(seed::LlmsRepair::InPlace)
+    );
+}
+
+/// Offline, or a host that fails: the boot goes on with the sandbox as it
+/// was, nothing half-recorded, and the next boot tries again.
+#[tokio::test]
+async fn a_failed_repair_changes_nothing_and_the_next_boot_retries() {
+    let ctx = seeded_before_llms().await;
+
+    let err = seed::repair_llms(&ctx, &MapFetch::default())
+        .await
+        .expect_err("nothing can be fetched");
+    assert!(err.contains(seed::MANIFEST_URL), "{err}");
+    // A file that is not the one the manifest declares is not recorded either.
+    let tampered = repair_bundle().with(&seed::llms_url(seed::LLMS_PATH), b"# Something else\n");
+    let err = seed::repair_llms(&ctx, &tampered)
+        .await
+        .expect_err("the hash does not match");
+    assert!(err.contains("/seed/llms.txt"), "{err}");
+
+    let info = seed_info::read(&ctx).await.expect("read").expect("row");
+    assert_eq!(info.llms_text, None);
+    assert_eq!(info.template, "blank");
+    assert!(published_llms(&ctx).await.is_none());
+    assert_eq!(
+        ctx.storage_get("wafer-run/web", "site", "index.html")
+            .await
+            .expect("the site is still served"),
+        INDEX.to_vec()
+    );
+
+    assert_eq!(
+        seed::repair_llms(&ctx, &repair_bundle()).await,
+        Ok(seed::LlmsRepair::Recorded)
+    );
+    assert_eq!(published_llms(&ctx).await.as_deref(), Some(LLMS));
+}
+
+/// An origin redeployed with ANOTHER seed must not hand its `llms.txt` —
+/// another framework's guide — to a browser seeded from the old one: once
+/// recorded it would never be fetched again. Nothing is recorded, and a
+/// later deploy of the right seed still repairs the instance.
+#[tokio::test]
+async fn a_bundle_for_another_template_records_nothing() {
+    let ctx = seeded_before_llms().await;
+    let mut other = sandbox();
+    other.template = "bootstrap".to_string();
+    let other_llms: &[u8] = b"# The bootstrap sandbox\n";
+    other.llms = seed::SeedFile {
+        path: seed::LLMS_PATH.to_string(),
+        sha256: blobs::sha256_hex(other_llms),
+        size: other_llms.len() as u64,
+        content_type: seed::LLMS_CONTENT_TYPE.to_string(),
+    };
+    let redeployed = MapFetch::default()
+        .with(
+            seed::MANIFEST_URL,
+            &serde_json::to_vec(&manifest_with(other)).expect("manifest"),
+        )
+        .with(&seed::llms_url(seed::LLMS_PATH), other_llms);
+
+    let err = seed::repair_llms(&ctx, &redeployed)
+        .await
+        .expect_err("another seed's text");
+    assert!(
+        err.contains("\"bootstrap\"") && err.contains("\"blank\""),
+        "{err}"
+    );
+    let info = seed_info::read(&ctx).await.expect("read").expect("row");
+    assert_eq!(info.llms_text, None);
+    assert!(published_llms(&ctx).await.is_none());
+
+    assert_eq!(
+        seed::repair_llms(&ctx, &repair_bundle()).await,
+        Ok(seed::LlmsRepair::Recorded)
+    );
+    assert_eq!(published_llms(&ctx).await.as_deref(), Some(LLMS));
+}
+
+/// A boot that recorded the text and died before publishing it is finished
+/// by the next one — without fetching again.
+#[tokio::test]
+async fn a_text_recorded_but_never_published_is_published_by_the_next_boot() {
+    let ctx = seeded_before_llms().await;
+    seed_info::record_llms_text(&ctx, std::str::from_utf8(LLMS).unwrap())
+        .await
+        .expect("record");
+    assert_eq!(
+        seed::repair_llms(&ctx, &MapFetch::default()).await,
+        Ok(seed::LlmsRepair::Published)
+    );
+    assert_eq!(published_llms(&ctx).await.as_deref(), Some(LLMS));
+}
+
+/// An instance whose seed had no sandbox block — an exported site — is owed
+/// no sandbox text, and its boot fetches nothing to find that out.
+#[tokio::test]
+async fn an_instance_that_is_not_a_sandbox_fetches_nothing() {
+    let (ctx, control) = fixture().await;
+    let shared = ctx.dev_shared();
+    let generation = seed::import(
+        &ctx,
+        control.as_ref(),
+        &fake_bypass_rules(),
+        &manifest(),
+        &bundle(),
+    )
+    .await
+    .expect("import")
+    .expect("fresh");
+    activation::request(
+        &ctx,
+        &shared,
+        GenerationCause::Seed,
+        ActivationIntent::Seed {
+            manifest: generation,
+        },
+        activation::Maintenance::Inline,
+    )
+    .await
+    .expect("activate");
+    // `MapFetch::default()` fails every fetch, so `Ok` means none was made —
+    // and a bundle that DOES carry one is not read either.
+    assert_eq!(
+        seed::repair_llms(&ctx, &MapFetch::default()).await,
+        Ok(seed::LlmsRepair::NotASandbox)
+    );
+    assert_eq!(
+        seed::repair_llms(&ctx, &repair_bundle()).await,
+        Ok(seed::LlmsRepair::NotASandbox)
+    );
+    assert!(published_llms(&ctx).await.is_none());
+    assert_eq!(seed_info::read(&ctx).await.expect("read"), None);
+}
+
+#[tokio::test]
+async fn an_llms_txt_not_in_the_bundle_is_refused() {
+    let bundle = bundle().with(&seed::guide_url(seed::GUIDE_PATH), GUIDE);
+    let err = refused(&manifest_with(sandbox()), &bundle).await;
+    assert!(err.contains("/seed/llms.txt"), "{err}");
+}
+
+#[tokio::test]
+async fn an_llms_txt_that_is_not_the_declared_bytes_is_refused() {
+    let bundle = bundle()
+        .with(&seed::guide_url(seed::GUIDE_PATH), GUIDE)
+        .with(
+            &seed::llms_url(seed::LLMS_PATH),
+            b"# Another sandbox\n\nBuild a website.\n\n",
+        );
+    let err = refused(&manifest_with(sandbox()), &bundle).await;
+    assert!(err.contains("/seed/llms.txt"), "{err}");
+}
+
+#[tokio::test]
+async fn an_llms_txt_under_another_name_is_refused() {
+    let mut declared = sandbox();
+    declared.llms.path = "site/llms.txt".to_string();
+    let err = refused(&manifest_with(declared), &sandbox_bundle()).await;
+    assert!(err.contains("sandbox.llms"), "{err}");
+}
+
+#[tokio::test]
+async fn an_llms_txt_declared_with_another_content_type_is_refused() {
+    let mut declared = sandbox();
+    declared.llms.content_type = "text/markdown; charset=utf-8".to_string();
+    let err = refused(&manifest_with(declared), &sandbox_bundle()).await;
+    assert!(err.contains("content type"), "{err}");
 }
 
 #[tokio::test]
@@ -206,7 +555,7 @@ async fn a_refusal_after_the_sandbox_block_checks_out_records_no_row() {
         data: Some(declared),
         ..manifest_with(sandbox())
     };
-    let bundle = bundle_with_guide().with(&seed::data_url("data.json"), data);
+    let bundle = sandbox_bundle().with(&seed::data_url("data.json"), data);
     let err = seed::import(
         &ctx,
         control.as_ref(),
@@ -224,7 +573,7 @@ async fn a_refusal_after_the_sandbox_block_checks_out_records_no_row() {
 async fn a_guide_over_the_limit_is_refused_before_anything_is_stored() {
     let mut declared = sandbox();
     declared.guide.size = (seed::MAX_GUIDE_BYTES + 1) as u64;
-    let err = refused(&manifest_with(declared), &bundle_with_guide()).await;
+    let err = refused(&manifest_with(declared), &sandbox_bundle()).await;
     assert!(
         err.contains("/seed/guide.md") && err.contains("limit"),
         "{err}"
@@ -252,7 +601,7 @@ async fn a_guide_that_is_not_utf8_is_refused() {
 async fn a_template_name_that_is_not_a_block_name_is_refused() {
     let mut declared = sandbox();
     declared.template = "Boot strap".to_string();
-    let err = refused(&manifest_with(declared), &bundle_with_guide()).await;
+    let err = refused(&manifest_with(declared), &sandbox_bundle()).await;
     assert!(err.contains("sandbox.template"), "{err}");
 }
 
@@ -260,7 +609,7 @@ async fn a_template_name_that_is_not_a_block_name_is_refused() {
 async fn a_prompt_over_the_limit_is_refused() {
     let mut declared = sandbox();
     declared.suggested_prompt = "x".repeat(seed::MAX_PROMPT_BYTES + 1);
-    let err = refused(&manifest_with(declared), &bundle_with_guide()).await;
+    let err = refused(&manifest_with(declared), &sandbox_bundle()).await;
     assert!(err.contains("suggested_prompt"), "{err}");
 }
 
@@ -268,7 +617,7 @@ async fn a_prompt_over_the_limit_is_refused() {
 async fn a_guide_declared_with_another_content_type_is_refused() {
     let mut declared = sandbox();
     declared.guide.content_type = "text/plain; charset=utf-8".to_string();
-    let err = refused(&manifest_with(declared), &bundle_with_guide()).await;
+    let err = refused(&manifest_with(declared), &sandbox_bundle()).await;
     assert!(err.contains("content type"), "{err}");
 }
 
@@ -925,6 +1274,8 @@ fn the_bundle_layout_is_stated_once() {
     );
     assert_eq!(seed::short_name("site/hello"), "hello");
     assert_eq!(seed::short_name("hello"), "hello");
+    assert_eq!(seed::guide_url(seed::GUIDE_PATH), "/seed/guide.md");
+    assert_eq!(seed::llms_url(seed::LLMS_PATH), "/seed/llms.txt");
 }
 
 // ---------------------------------------------------------------------------

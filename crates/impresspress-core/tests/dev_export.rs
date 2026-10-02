@@ -31,7 +31,10 @@ use impresspress_core::{
         contracts::ExportManifest,
         data_snapshot::DataSnapshot,
         export,
-        repo::generations::GenerationCause,
+        repo::{
+            generations::GenerationCause,
+            seed_info::{self, SeedInfo},
+        },
         seed::{self, SeedManifest},
         test_support::{dev_post, fake_bypass_rules, hello_info, FakeControl, FakeShell},
         BypassRules, DevShared, WAFER_GUEST_VERSION,
@@ -1406,4 +1409,394 @@ async fn a_data_snapshot_over_the_import_limit_is_refused_at_export_and_one_at_i
         .await
         .expect_err("an oversized snapshot refuses the export");
     assert_eq!(error.code, wafer_run::ErrorCode::ResourceExhausted);
+}
+
+// ---------------------------------------------------------------------------
+// What the sandbox says about itself stays in the sandbox
+// ---------------------------------------------------------------------------
+
+/// The sandbox's own `llms.txt`, as a seed import records it.
+const SANDBOX_LLMS: &str = "# ImpressPress build sandbox\n\nBuild a website here.\n";
+
+/// The sandbox deployment's own boot shell: the shipped templates, rendered
+/// by the bundler with `examples/dev-sandbox`'s `[app]` name and title and
+/// its real boot notice, development mode on and the compiler's bypass —
+/// what `build.sh` produces, minus the wasm. Returned as a [`FakeShell`] over
+/// the three files the export edits or a visitor reads text from.
+fn sandbox_shell() -> FakeShell {
+    let sandbox =
+        std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("../../examples/dev-sandbox");
+    let config = std::fs::read_to_string(sandbox.join("impresspress.toml")).expect("toml");
+    // The two `[app]` strings, read from the deployment's own file so this
+    // cannot go on testing a title the sandbox no longer has.
+    let app_string = |key: &str| {
+        config
+            .lines()
+            .find_map(|line| line.strip_prefix(&format!("{key} = \"")))
+            .and_then(|rest| rest.strip_suffix('"'))
+            .unwrap_or_else(|| panic!("impresspress.toml has no [app] {key}"))
+            .to_string()
+    };
+    let (name, title) = (app_string("name"), app_string("title"));
+    assert!(name.contains("sandbox") && title.contains("sandbox"));
+    let notice = std::fs::read_to_string(sandbox.join("boot-notice.html")).expect("notice");
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    impresspress_bundle::assets::write_to(dir.path()).expect("shell assets");
+    impresspress_bundle::bundle::run(
+        dir.path(),
+        dir.path(),
+        impresspress_bundle::bundle::AppConfig {
+            app_name: Some(name),
+            app_title: Some(title),
+            boot_notice_html: Some(notice),
+            dev_enabled: true,
+            extra_bypass_prefix: vec!["/__impresspress_dev/compiler/".to_string()],
+            ..Default::default()
+        },
+    )
+    .expect("render the shell");
+    let mut shell = FakeShell::new();
+    for file in ["index.html", "loader.js", "sw.js"] {
+        let bytes = std::fs::read(dir.path().join(file)).expect("rendered file");
+        shell = shell.with(file, &bytes);
+    }
+    shell
+}
+
+/// Every string literal and every piece of markup text in `source`, minus
+/// the lines a visitor never sees: comments and `console.*` calls (which
+/// keep the build's own name as their prefix, for whoever built it).
+fn visible_lines(source: &str) -> Vec<&str> {
+    source
+        .lines()
+        .map(str::trim_start)
+        .filter(|line| !line.starts_with("//") && !line.starts_with("console."))
+        .collect()
+}
+
+async fn record_sandbox_llms(ctx: &TestContext) {
+    seed_info::write(
+        ctx,
+        &SeedInfo {
+            template: "blank".to_string(),
+            suggested_prompt: String::new(),
+            guide_markdown: String::new(),
+            llms_text: Some(SANDBOX_LLMS.to_string()),
+        },
+    )
+    .await
+    .expect("seed info");
+}
+
+/// Name the site, the way an admin does on the settings page.
+async fn name_the_site(ctx: &TestContext, name: &str) {
+    variables::upsert_by_key(
+        ctx,
+        impresspress_core::config_vars::APP_NAME_KEY,
+        variables::VariablePatch {
+            value: Some(name.to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("app name");
+}
+
+/// The exported site is not the sandbox, and nothing the sandbox says about
+/// itself goes with it: not its `llms.txt` (which the runtime IS publishing
+/// for this site, and which is in no manifest the export reads), and not a
+/// word a visitor could read on its boot shell — the page's notice is gone,
+/// its title is the site's, and the loader names the app by that title.
+///
+/// Checked on the shell the bundler really renders for the sandbox
+/// ([`sandbox_shell`]), so a new place the templates show the deployment's
+/// name or wording fails here.
+#[tokio::test]
+async fn nothing_the_sandbox_says_about_itself_is_exported() {
+    let shell = sandbox_shell();
+    let ctx = TestContext::with_admin()
+        .await
+        .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(shell))
+        .await;
+    record_sandbox_llms(&ctx).await;
+    name_the_site(&ctx, "Kiln & Co").await;
+    dev_post(
+        &ctx,
+        "/b/dev/api/files/write",
+        json!({"path": "site/index.html", "content": "<h1>shop</h1>", "expected_sha256": null}),
+    )
+    .await;
+    // The sandbox IS answering `/llms.txt` for this site, which has none…
+    assert_eq!(
+        ctx.storage_get("wafer-run/web", "site", "llms.txt")
+            .await
+            .expect("the sandbox's llms.txt, published"),
+        SANDBOX_LLMS.as_bytes()
+    );
+
+    let entries = entries(
+        output_body(
+            ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export"))
+                .await,
+        )
+        .await,
+    );
+    // …and none of it is in the archive, at the root or under the seed.
+    assert!(
+        !entries.keys().any(|path| path.ends_with("llms.txt")),
+        "{:?}",
+        sorted(&entries)
+    );
+    let manifest: SeedManifest =
+        serde_json::from_slice(&entries["seed/manifest.json"]).expect("a seed manifest");
+    assert!(manifest.sandbox.is_none());
+    assert_eq!(manifest.site.len(), 1);
+
+    // The boot page is the exported site's: its own name everywhere the
+    // sandbox's title was (escaped, as the bundler escapes one), an empty
+    // notice region, and not a word about a sandbox anywhere in the file.
+    let index = text(&entries, "index.html");
+    assert!(index.contains("<title>Kiln &amp; Co</title>"), "{index}");
+    assert_eq!(
+        index
+            .matches("<span data-app-title>Kiln &amp; Co</span>")
+            .count(),
+        2,
+        "{index}"
+    );
+    assert!(
+        index.contains("<!--boot-notice--><!--/boot-notice-->"),
+        "{index}"
+    );
+    for word in ["sandbox", "llms.txt", "/b/dev"] {
+        assert!(
+            !index.to_lowercase().contains(word),
+            "the exported boot page says {word:?}: {index}"
+        );
+    }
+    // The loader is copied as it is, and that is safe because nothing in it
+    // that a visitor reads names the deployment: it takes the app's name
+    // from the page above.
+    let loader = text(&entries, "loader.js");
+    assert!(
+        loader.contains("[data-app-title]"),
+        "the loader reads the page"
+    );
+    for line in visible_lines(&loader) {
+        assert!(
+            !line.to_lowercase().contains("sandbox"),
+            "the exported loader shows: {line}"
+        );
+    }
+    // The README is headed with the same name.
+    assert!(text(&entries, "README.md").contains("Kiln & Co"));
+}
+
+/// A deployment that is NOT the sandbox may bundle an `llms.txt` of its own
+/// in its shell — listed in its asset manifest like any shell file. The
+/// export copies it: there is no rule about the name, only about what the
+/// export reads. (The sandbox's own is an overlay the listing never names.)
+#[tokio::test]
+async fn a_shell_file_named_llms_txt_is_exported_like_any_other() {
+    let bundled = b"# An app that ships its own\n";
+    let shell = FakeShell::new().with("llms.txt", bundled);
+    let ctx = TestContext::with_admin()
+        .await
+        .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(shell))
+        .await;
+    dev_post(
+        &ctx,
+        "/b/dev/api/files/write",
+        json!({"path": "site/index.html", "content": "x", "expected_sha256": null}),
+    )
+    .await;
+    let exported = entries(
+        output_body(
+            ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export"))
+                .await,
+        )
+        .await,
+    );
+    assert_eq!(
+        exported.get("llms.txt").map(Vec::as_slice),
+        Some(&bundled[..])
+    );
+    assert!(!exported.contains_key("seed/site/llms.txt"));
+
+    // Once the site has its own, that is the one the static host is given:
+    // the worker will serve the site's, and the two must say the same thing.
+    dev_post(
+        &ctx,
+        "/b/dev/api/files/write",
+        json!({"path": "site/llms.txt", "content": "# The site\n", "expected_sha256": null}),
+    )
+    .await;
+    let preview: ExportManifest = serde_json::from_value(
+        output_json(
+            ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export/manifest"))
+                .await,
+        )
+        .await,
+    )
+    .expect("manifest");
+    let named: Vec<&str> = preview
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .filter(|path| path.ends_with("llms.txt"))
+        .collect();
+    assert_eq!(named, ["llms.txt", "seed/site/llms.txt"], "one root copy");
+    let exported = entries(
+        output_body(
+            ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export"))
+                .await,
+        )
+        .await,
+    );
+    assert_eq!(text(&exported, "llms.txt"), "# The site\n");
+}
+
+/// A site's OWN `llms.txt` is a site file like any other: writable (the path
+/// is not one the service worker keeps from the runtime), exported under
+/// `seed/site/` — and once more at the root, for readers with no worker —
+/// and what the instance seeded from the export serves.
+#[tokio::test]
+async fn a_sites_own_llms_txt_is_exported_and_served_by_the_imported_instance() {
+    const OWN: &str = "# Kiln & Co\n\nHandmade ceramics.\n";
+    let a_control = FakeControl::new();
+    let a = shop_instance(&a_control).await;
+    record_sandbox_llms(&a).await;
+    let written = output_json(
+        dev_post(
+            &a,
+            "/b/dev/api/files/write",
+            json!({"path": "site/llms.txt", "content": OWN, "expected_sha256": null}),
+        )
+        .await,
+    )
+    .await;
+    assert_eq!(written["path"], "site/llms.txt", "{written}");
+    assert_eq!(
+        a.storage_get("wafer-run/web", "site", "llms.txt")
+            .await
+            .expect("published llms.txt"),
+        OWN.as_bytes(),
+        "the site's file is what the sandbox serves once it exists"
+    );
+
+    let archive = entries(
+        output_body(
+            a.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export"))
+                .await,
+        )
+        .await,
+    );
+    // Twice, and the same bytes: under the seed, for the exported runtime to
+    // import and serve once its worker controls the page; and at the root,
+    // for the static host to serve a reader that never gets a worker.
+    assert_eq!(text(&archive, "seed/site/llms.txt"), OWN);
+    assert_eq!(archive["llms.txt"], archive["seed/site/llms.txt"]);
+    // The root copy shadows nothing: `/llms.txt` is not a path the exported
+    // worker leaves to the static host, so the runtime's copy is the one a
+    // controlled page gets.
+    assert!(!text(&archive, "sw.js").contains("llms.txt"));
+
+    let manifest: SeedManifest =
+        serde_json::from_slice(&archive["seed/manifest.json"]).expect("a seed manifest");
+    let fetch = ArchiveFetch { archive };
+    let b_control = FakeControl::new();
+    b_control.set_validated_info(hello_info("site/hello"));
+    let b = TestContext::with_products()
+        .await
+        .with_auth_added()
+        .await
+        .with_dev_added_and_shell(b_control.clone(), std::sync::Arc::new(FakeShell::new()))
+        .await;
+    let generation = seed::import(
+        &b,
+        b_control.as_ref(),
+        &fake_bypass_rules(),
+        &manifest,
+        &fetch,
+    )
+    .await
+    .expect("import")
+    .expect("a fresh instance imports");
+    activation::request(
+        &b,
+        &b.dev_shared(),
+        GenerationCause::Seed,
+        ActivationIntent::Seed {
+            manifest: generation,
+        },
+        activation::Maintenance::Inline,
+    )
+    .await
+    .expect("activate the imported generation");
+    assert_eq!(
+        b.storage_get("wafer-run/web", "site", "llms.txt")
+            .await
+            .expect("published llms.txt"),
+        OWN.as_bytes()
+    );
+}
+
+/// A boot page with no notice region has nothing to remove and is exported
+/// byte for byte — a deployment may overlay its own.
+#[tokio::test]
+async fn a_boot_page_with_no_notice_region_is_exported_unchanged() {
+    let page = b"<!doctype html><h1>My app</h1>";
+    let shell = FakeShell::new().with("index.html", page);
+    let ctx = TestContext::with_admin()
+        .await
+        .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(shell))
+        .await;
+    dev_post(
+        &ctx,
+        "/b/dev/api/files/write",
+        json!({"path": "site/index.html", "content": "x", "expected_sha256": null}),
+    )
+    .await;
+    let entries = entries(
+        output_body(
+            ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export"))
+                .await,
+        )
+        .await,
+    );
+    assert_eq!(
+        entries.get("index.html").map(Vec::as_slice),
+        Some(&page[..])
+    );
+}
+
+/// A region the export cannot delimit is a 500, never a guess at where the
+/// sandbox's text ends.
+#[tokio::test]
+async fn a_boot_page_whose_notice_region_is_malformed_is_refused() {
+    for page in [
+        "<!--boot-notice--><p>sandbox</p>",
+        "<p>sandbox</p><!--/boot-notice-->",
+        "<!--/boot-notice--><p>sandbox</p><!--boot-notice-->",
+        "<!--boot-notice-->a<!--/boot-notice--><!--boot-notice-->b<!--/boot-notice-->",
+    ] {
+        let shell = FakeShell::new().with("index.html", page.as_bytes());
+        let ctx = TestContext::with_admin()
+            .await
+            .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(shell))
+            .await;
+        dev_post(
+            &ctx,
+            "/b/dev/api/files/write",
+            json!({"path": "site/index.html", "content": "x", "expected_sha256": null}),
+        )
+        .await;
+        let status = output_http_status(
+            ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export"))
+                .await,
+        )
+        .await;
+        assert_eq!(status, 500, "{page}");
+    }
 }

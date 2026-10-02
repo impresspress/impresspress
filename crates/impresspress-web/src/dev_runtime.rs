@@ -976,6 +976,13 @@ pub fn attach(
 /// step corrective rather than merely idempotent — including the case where
 /// the ledger says nothing is active and the runtime is holding a block.
 ///
+/// Between 2 and 3, a sandbox whose seed was imported before the bundle
+/// carried an `llms.txt` fetches and publishes the one it carries now
+/// ([`seed::repair_llms`]). On every other boot that step is one read of
+/// three `seed_info` columns — plus the active generation's manifest when
+/// the sandbox's text is recorded but is not what is published (the site
+/// has an `llms.txt` of its own). See that function for the accounting.
+///
 /// Every step logs its own failure and continues rather than failing
 /// `initialize()`. A sandbox that refuses to boot is a sandbox whose `/b/dev`
 /// page — the only thing that could fix it — never comes up; a sandbox that
@@ -1021,6 +1028,23 @@ pub async fn install(sandbox: &Sandbox) {
             return;
         }
     };
+    // After convergence, so this never publishes beside an activation the
+    // journal was still finishing. A failure is logged and retried by the
+    // next boot; the sandbox is no worse off than before it was tried.
+    match seed::repair_llms(&ctx, &SwFetch).await {
+        Ok(seed::LlmsRepair::Recorded) => web_sys::console::log_1(
+            &"impresspress: dev sandbox recorded the llms.txt its bundle now carries".into(),
+        ),
+        Ok(_) => {}
+        Err(e) => web_sys::console::warn_1(
+            &format!(
+                "impresspress: dev sandbox could not record its llms.txt ({e}); /llms.txt \
+                 stays the site's fallback document until a later boot can"
+            )
+            .into(),
+        ),
+    }
+
     if sandbox.control.already_built(&blocks) {
         return;
     }

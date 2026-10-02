@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """Write seeds/<name>/manifest.json from seeds/<name>/site/** and, when the
-seed has them, seeds/<name>/sandbox.json and seeds/<name>/guide.md.
+seed has them, seeds/<name>/sandbox.json and seeds/<name>/guide.md — plus
+seeds/llms-preamble.md, which every such seed's llms.txt opens with.
 
 Usage: seeds/write-manifest.py <name>
 
-Run it after every edit under site/, to sandbox.json or to guide.md, and commit the result; `build.sh --check`
-(seeds/check-seeds.py) fails on a manifest that does not match its tree.
+Run it after every edit under site/, to sandbox.json or to guide.md, and
+commit the result — and for EVERY seed after an edit to llms-preamble.md;
+`build.sh --check` (seeds/check-seeds.py) fails on a manifest that does not
+match its tree.
 """
 import pathlib
 import sys
