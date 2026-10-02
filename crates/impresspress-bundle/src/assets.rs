@@ -225,11 +225,16 @@ mod tests {
             "the wipe is not gated on an initialize() failure"
         );
         // The automatic recovery runs from exactly one place — a cause the
-        // worker reported — and a timeout never reaches it.
+        // worker reported — and it reads the cause, decides and wipes holding
+        // one lock. A timeout never reaches it.
         assert_eq!(
-            body.matches("await recoverBrowserState(").count(),
+            body.matches("await recoverIfStopped(").count(),
             1,
             "something other than a reported cause runs the automatic recovery"
+        );
+        assert!(
+            body.contains("return navigator.locks.request(RECOVERY_LOCK, act);"),
+            "the recovery is not serialized across tabs"
         );
         assert!(
             !body.contains("local data is incompatible"),

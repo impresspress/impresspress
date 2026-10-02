@@ -63,6 +63,7 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
   const navigated = [];
   const warnings = [];
   let unregistered = 0;
+  let claimed = 0;
   const client = {
     url: CLIENT_URL,
     postMessage: (message) => posted.push(message),
@@ -103,7 +104,12 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
         return runtime.unregisters ?? true;
       }
     },
-    clients: { claim: async () => {}, matchAll: async () => [client] }
+    clients: {
+      claim: async () => {
+        claimed += 1;
+      },
+      matchAll: async () => [client]
+    }
   };
   // What the static host would say. `network` records what it was asked for:
   // the URL string the worker passed, or the request object it forwarded.
@@ -138,8 +144,19 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
     return { response: await answer, sent: event.request };
   }
 
+  /// A page posting `data` to the worker; resolves once whatever the worker
+  /// asked to be kept alive for has finished.
+  async function message(data) {
+    const kept = [];
+    listeners.message({ data, waitUntil: (promise) => kept.push(promise) });
+    await Promise.all(kept);
+  }
+
   return {
     request,
+    message,
+    /// How many times the worker claimed its clients.
+    claimed: () => claimed,
     network,
     posted,
     navigated,

@@ -40,8 +40,10 @@ let initPromise = null;
 // the static host's to answer — its 404, on a host with no fallback for
 // unknown paths — and a reload of the page the failure happened on would
 // lose the person the app. Registered, this worker can hand any navigation
-// in its scope to the boot shell, whose recovery (`restartFresh` in
-// `loader.js`) is the one place a dead worker is unregistered.
+// in its scope to the boot shell, whose recovery (`replaceWorker` in
+// `loader.js`) is the one place a dead worker is unregistered — and
+// replaced by one registered under a new script URL, since a browser may
+// otherwise hand this same instance back (`WORKER_URL` there).
 //
 // Nor is it a trap: `poisoned` is this instance's memory, so a worker the
 // browser stops and starts again tries `initialize()` afresh, and a new
@@ -58,6 +60,14 @@ let poisonReason = '';
 // It is what the loader's recovery decides on, so it is a field of its own:
 // nothing ever reads it back out of `poisonReason`.
 let poisonStage = '';
+// WHICH death this is: an id made once, when this worker is poisoned, and the
+// time it happened. Sent beside the cause on every road, the same on each.
+// A worker answers many navigations after it dies and several tabs may hold
+// its cause at once; the id is how `loader.js` knows they are all about ONE
+// failure, so that the tab that recovers from it does so for the others too
+// and none of them recovers — or erases — a second time.
+let poisonId = '';
+let poisonedAt = 0;
 
 // The wasm module could not be fetched or instantiated (`init()`): a network
 // failure, a deploy that replaced the hashed file mid-load, a stale module
@@ -126,6 +136,8 @@ async function selfDestruct(reason, stage, toBootShell) {
     if (poisoned) return;
     poisoned = true;
     poisonStage = stage;
+    poisonId = crypto.randomUUID();
+    poisonedAt = Date.now();
     poisonReason = String(reason);
     if (poisonReason.length > CAUSE_MAX_CHARS) {
         poisonReason = `${poisonReason.slice(0, CAUSE_MAX_CHARS)}…`;
@@ -141,7 +153,13 @@ async function selfDestruct(reason, stage, toBootShell) {
             // every other page gets the cause from the cache entry, which
             // the navigation below leaves again when this worker answers it.
             try {
-                c.postMessage({ type: 'sw-self-destruct', reason: poisonReason, stage: poisonStage });
+                c.postMessage({
+                    type: 'sw-self-destruct',
+                    reason: poisonReason,
+                    stage: poisonStage,
+                    id: poisonId,
+                    diedAt: poisonedAt
+                });
             } catch (e) {
                 console.warn('[__APP_NAME__] postMessage failed:', e);
             }
@@ -167,9 +185,12 @@ async function selfDestruct(reason, stage, toBootShell) {
 }
 
 /**
- * Leave `poisonReason` and `poisonStage` where the boot shell will find them
- * — see `STOP_CAUSE_CACHE`. `at` lets the shell tell a cause left for the
- * navigation in progress from one no shell ever came to read.
+ * Leave what this worker reports where the boot shell will find it — see
+ * `STOP_CAUSE_CACHE`. `id` and `diedAt` are the death's own and the same on
+ * every leave. `at` is when THIS entry was left: it lets the shell tell a
+ * cause left for the navigation in progress from one no shell ever came to
+ * read. (Not `diedAt`, for that: a poisoned worker stays poisoned, and a
+ * reload ten minutes after it died is still a navigation in progress.)
  */
 async function leaveCauseForBootShell() {
     try {
@@ -177,7 +198,13 @@ async function leaveCauseForBootShell() {
         await cache.put(
             STOP_CAUSE_KEY,
             new Response(
-                JSON.stringify({ reason: poisonReason, stage: poisonStage, at: Date.now() }),
+                JSON.stringify({
+                    reason: poisonReason,
+                    stage: poisonStage,
+                    id: poisonId,
+                    diedAt: poisonedAt,
+                    at: Date.now()
+                }),
                 { headers: { 'Content-Type': 'application/json' } }
             )
         );
@@ -227,6 +254,18 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('message', (event) => {
     const msg = event.data;
     if (!msg) return;
+
+    // The boot shell asking to be controlled. `clients.claim()` in `activate`
+    // reaches only the pages that existed then; a shell that loaded later
+    // from the static host (the load a recovery lands on, when another tab
+    // registered this worker first), or one still controlled by a worker
+    // that has since been unregistered, is not this worker's — and until it
+    // is, its boot probe cannot reach the runtime. See `takeControl` in
+    // `loader.js`.
+    if (msg.type === 'impresspress-claim') {
+        event.waitUntil(self.clients.claim());
+        return;
+    }
 
     // Asset loader bridge: route reply to bridge.js's pending-load map.
     // bridge.js exposes the resolver on globalThis because this script
@@ -472,9 +511,10 @@ function recoveryErases() {
  * - `recoveryErases()` — its recovery erases the app's local data, and the
  *   message says so rather than calling it a restart. "May", because that
  *   recovery runs automatically only once per tab (after that the shell
- *   stops and asks), and because the browser may have stopped this worker by
- *   then: the reload then starts a new one, which tries the runtime again and
- *   may simply work.
+ *   stops and asks) and only once per death (another tab may already have
+ *   done it), and because the browser may have stopped this worker by then:
+ *   the reload then starts a new one, which tries the runtime again and may
+ *   simply work.
  * - otherwise — the shell replaces this worker with a fresh one and comes
  *   back to the page; nothing is erased. True on any static host, since the
  *   reload never reaches the host.
@@ -487,16 +527,18 @@ async function runtimeStopped(request) {
     const next = recoveryErases()
         ? 'Reloading the page may run a recovery that erases the data this browser stores for the app.'
         : 'Reload the page to restart it; the data this browser stores for the app is kept.';
-    // `cause` and `stage` are the two fields the runtime's shape does not
-    // have: the bare reason and where it failed, for `loader.js`, whose boot
-    // probe is a request like any other and which words the sentence around
-    // them itself.
+    // `cause`, `stage`, `id` and `diedAt` are the fields the runtime's shape
+    // does not have: the bare reason, where it failed and which death this
+    // is, for `loader.js`, whose boot probe is a request like any other and
+    // which words the sentence around them itself.
     const body = {
         error: 'Unavailable',
         message: `The app's runtime stopped (${poisonReason}). ${next}`,
         code: 'runtime_stopped',
         cause: poisonReason,
-        stage: poisonStage
+        stage: poisonStage,
+        id: poisonId,
+        diedAt: poisonedAt
     };
     return new Response(JSON.stringify(body), {
         status: 503,

@@ -34,6 +34,10 @@ export const STOP_KEY = '/__impresspress_sw_stopped';
 export const BREAKER = '__impresspress_sw_recover';
 export const RECOVERY_DONE = '__impresspress_recovery_done';
 export const RESUME = '__impresspress_resume';
+export const RECOVERY_LOCK = '__impresspress_recovery';
+export const RECOVERED_CACHE = '__impresspress_recovered';
+export const RECOVERED_KEY = '/__impresspress_recovered';
+export const NEXT_WORKER = '__impresspress_worker_url';
 
 function storage(initial = {}) {
   const map = new Map(Object.entries(initial));
@@ -78,7 +82,19 @@ function element() {
 /// - `timesOut`  — how many boot probes in a row never answer (`true`: all
 ///                 of them): the 60 s timer of each fires at once and its
 ///                 `fetch` rejects as an aborted request does
-/// - `controlled` — whether a worker controls the page once registered
+/// - `controlled` — what controls the page: `true`, the registered worker;
+///                 `false`, nothing; `'dead'`, a worker that is not the
+///                 registered one (a dead one another tab unregistered)
+/// - `claims`    — whether the registered worker takes the page when asked
+///                 to; `false` is a worker that never does, and the wait for
+///                 it runs out at once
+/// - `recovered` — the deaths already recorded as recovered from on this
+///                 origin: `[{ id, at }]`
+/// - `locks`     — whether the browser has Web Locks
+/// - `registeredUrl` — the script URL of the worker the origin already has
+///                 registered, if it has one
+/// - `eraseFails` — OPFS entries that cannot be removed
+/// - `opfsFiles` — the OPFS entries there are
 /// - `onProbe`   — called when the probe is made, with `post` (sw.js posting a
 ///                 message to this page), before the probe is answered
 /// - `registerFails` — `navigator.serviceWorker.register` rejects with this
@@ -94,6 +110,12 @@ export function loadShell({
   onProbe,
   registerFails,
   controlled = true,
+  claims = true,
+  recovered,
+  locks = true,
+  eraseFails = [],
+  registeredUrl,
+  opfsFiles = ['app.sqlite'],
   title = 'Kiln & Co',
   documentTitle = title
 } = {}) {
@@ -125,18 +147,27 @@ export function loadShell({
     body: card
   };
 
-  const cacheNames = new Set(['assets-v1']);
-  if (stop !== undefined) cacheNames.add(STOP_CACHE);
+  // Cache Storage: cache name → (key → JSON body).
+  const cacheStore = new Map([['assets-v1', new Map()]]);
+  if (stop !== undefined) cacheStore.set(STOP_CACHE, new Map([[STOP_KEY, stop]]));
+  if (recovered !== undefined) {
+    cacheStore.set(RECOVERED_CACHE, new Map([[RECOVERED_KEY, { deaths: recovered }]]));
+  }
   const caches = {
-    has: async (name) => cacheNames.has(name),
-    keys: async () => [...cacheNames],
-    delete: async (name) => cacheNames.delete(name),
-    open: async (name) => ({
-      match: async (key) =>
-        name === STOP_CACHE && key === STOP_KEY && stop !== undefined
-          ? new Response(JSON.stringify(stop))
-          : undefined
-    })
+    has: async (name) => cacheStore.has(name),
+    keys: async () => [...cacheStore.keys()],
+    delete: async (name) => cacheStore.delete(name),
+    open: async (name) => {
+      if (!cacheStore.has(name)) cacheStore.set(name, new Map());
+      const cache = cacheStore.get(name);
+      return {
+        match: async (key) =>
+          cache.has(key) ? new Response(JSON.stringify(cache.get(key))) : undefined,
+        put: async (key, response) => {
+          cache.set(key, await response.json());
+        }
+      };
+    }
   };
 
   const location = {
@@ -157,17 +188,43 @@ export function loadShell({
   const messageListeners = [];
   let registered = 0;
   let unregistered = 0;
-  const worker = { state: 'activated', addEventListener: () => {} };
+  const controlListeners = [];
+  const registeredUrls = [];
+  const asked = [];
+  const worker = {
+    state: 'activated',
+    addEventListener: () => {},
+    // The page asking the worker to take it.
+    postMessage: (message) => {
+      asked.push(message);
+      if (!claims || message.type !== 'impresspress-claim') return;
+      queueMicrotask(() => {
+        controller = worker;
+        controlListeners.forEach((l) => l({}));
+      });
+    }
+  };
+  let controller = null;
+  if (controlled === true) controller = worker;
+  if (controlled === 'dead') controller = { state: 'activated', scriptURL: `${ORIGIN}/sw.js` };
   const serviceWorker = {
-    controller: controlled ? { scriptURL: `${ORIGIN}/sw.js` } : null,
+    get controller() {
+      return controller;
+    },
     addEventListener: (type, listener) => {
       if (type === 'message') messageListeners.push(listener);
+      if (type === 'controllerchange') controlListeners.push(listener);
     },
-    register: async () => {
+    register: async (url) => {
       if (registerFails) throw registerFails;
       registered += 1;
+      registeredUrls.push(url);
       return { active: worker, update: async () => {} };
     },
+    // The registration the origin already has, if any: `registeredUrl` is
+    // its worker's script URL.
+    getRegistration: async () =>
+      registeredUrl === undefined ? undefined : { active: { scriptURL: registeredUrl } },
     getRegistrations: async () => [
       {
         unregister: async () => {
@@ -177,7 +234,8 @@ export function loadShell({
       }
     ]
   };
-  const opfs = new Set(['app.sqlite']);
+  const opfs = new Set(opfsFiles);
+  const lockRequests = [];
   const navigator = {
     serviceWorker,
     storage: {
@@ -185,10 +243,32 @@ export function loadShell({
         entries: async function* () {
           for (const name of [...opfs]) yield [name, {}];
         },
-        removeEntry: async (name) => opfs.delete(name)
+        removeEntry: async (name) => {
+          if (eraseFails.includes(name)) {
+            throw new DOMException('the file is in use', 'NoModificationAllowedError');
+          }
+          opfs.delete(name);
+        }
       })
     }
   };
+  if (locks) {
+    // One tab, so the lock is always free: what a test reads is that the
+    // work was done holding it.
+    let held = false;
+    navigator.locks = {
+      request: async (name, act) => {
+        if (held) throw new Error('the recovery lock was requested while held');
+        lockRequests.push({ name, registrations: registered, unregistered, opfs: [...opfs] });
+        held = true;
+        try {
+          return await act();
+        } finally {
+          held = false;
+        }
+      }
+    };
+  }
 
   const post = (data) => messageListeners.forEach((l) => l({ data }));
   // Whether the probe with this index (0 for the first) runs out of time.
@@ -211,8 +291,12 @@ export function loadShell({
   // The probe's 60 s abort timer is set just before its `fetch`, so the probe
   // it belongs to is the next one: fired at once for a probe that is to run
   // out of time, real otherwise — but never holding the process open.
-  const setTimeoutStub = (fn, ms) =>
-    ms === 0 || probeTimesOut(probes.length) ? (fn(), 0) : setTimeout(fn, ms).unref();
+  // The 10 s wait for control runs out at once for a worker that never
+  // claims.
+  const setTimeoutStub = (fn, ms) => {
+    const now = ms === 0 || (ms === 10_000 ? !claims : probeTimesOut(probes.length));
+    return now ? (fn(), 0) : setTimeout(fn, ms).unref();
+  };
   const DateStub = { now: () => now };
   const consoleStub = { log() {}, warn() {}, error() {} };
 
@@ -252,7 +336,18 @@ export function loadShell({
     stuck: (id) => document.getElementById(id),
     registered: () => registered,
     unregistered: () => unregistered,
-    cacheNames: () => [...cacheNames],
+    cacheNames: () => [...cacheStore.keys()],
+    /// The ids of the deaths recorded as recovered from.
+    recovered: () =>
+      (cacheStore.get(RECOVERED_CACHE)?.get(RECOVERED_KEY)?.deaths ?? []).map((d) => d.id),
+    /// Each request for the recovery lock, with the state it was made in.
+    lockRequests,
+    /// What the page asked the registered worker.
+    asked,
+    /// The script URLs this load registered.
+    registeredUrls,
+    /// The record of deaths recovered from, whole.
+    recoveryRecord: () => cacheStore.get(RECOVERED_CACHE)?.get(RECOVERED_KEY)?.deaths ?? [],
     opfs: () => [...opfs],
     /// sw.js posting a message to this page.
     post

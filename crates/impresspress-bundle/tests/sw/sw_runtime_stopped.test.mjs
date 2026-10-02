@@ -28,17 +28,24 @@ const ERASES =
 
 const TRAPPED = 'error handling request: Error: unreachable executed';
 
+/// The 503, whole. Answers the death's stamp (`id`, `diedAt`), which is
+/// the worker's to make: a test checks its shape here and its constancy
+/// across roads where that is the subject.
 async function assertStoppedAnswer(response, cause, stage, next = RESTART) {
   assert.equal(response.status, 503);
   assert.equal(response.headers.get('content-type'), 'application/json');
   assert.equal(response.headers.get('cache-control'), 'no-store');
-  assert.deepEqual(await response.json(), {
+  const { id, diedAt, ...body } = await response.json();
+  assert.deepEqual(body, {
     error: 'Unavailable',
     message: `The app's runtime stopped (${cause}). ${next}`,
     code: 'runtime_stopped',
     cause,
     stage
   });
+  assert.match(id, /^[0-9a-f-]{36}$/);
+  assert.equal(typeof diedAt, 'number');
+  return { id, diedAt };
 }
 
 /// The navigation was answered with the boot shell the host has at `/`, and
@@ -63,12 +70,18 @@ function assertPageLeftAlone(worker) {
 /// address, which this still-registered worker answers with the shell — with
 /// the cause and the stage both ways they can arrive there.
 function assertSentToBootShell(worker, cause, stage) {
-  assert.deepEqual(worker.posted, [{ type: 'sw-self-destruct', reason: cause, stage }]);
+  assert.equal(worker.posted.length, 1);
+  const { id, diedAt, ...message } = worker.posted[0];
+  assert.deepEqual(message, { type: 'sw-self-destruct', reason: cause, stage });
   assert.deepEqual(worker.navigated, [CLIENT_URL]);
   const left = worker.leftForBootShell();
   assert.equal(left.reason, cause);
   assert.equal(left.stage, stage);
   assert.equal(typeof left.at, 'number');
+  // The message and the entry are about the same death.
+  assert.match(id, /^[0-9a-f-]{36}$/);
+  assert.deepEqual({ id: left.id, diedAt: left.diedAt }, { id, diedAt });
+  return { id, diedAt };
 }
 
 test('a request from a page that the runtime dies on gets the cause, and the page is left alone', async (t) => {
@@ -241,6 +254,53 @@ test('the stage does not come from the wording of the cause', async (t) => {
   const body = await response.json();
   assert.equal(body.stage, 'request');
   assert.ok(body.message.endsWith(RESTART), body.message);
+});
+
+// One death, one stamp: made when the worker is poisoned and repeated on
+// every road and every later answer, so that however many tabs are told,
+// they can tell it is the same failure — and only one of them recovers.
+test('every road carries the same death id, however often it is taken', async (t) => {
+  captureConsole(t);
+  const worker = await loadWorker({ initialize: trap('migration 0007 failed') });
+  const cause = 'runtime initialize() failed: Error: migration 0007 failed';
+
+  const first = await assertStoppedAnswer(
+    (await worker.request('/', { method: 'GET' })).response,
+    cause,
+    'initialize'
+  );
+  const told = assertSentToBootShell(worker, cause, 'initialize');
+  assert.deepEqual(told, first);
+
+  // Later: another tab's navigation, another request. `at` on the entry is
+  // when it was left; the death's own stamp does not move.
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  await worker.request('/b/products/', { mode: 'navigate' });
+  const left = worker.leftForBootShell();
+  assert.deepEqual({ id: left.id, diedAt: left.diedAt }, first);
+  assert.ok(left.at > left.diedAt, 'the entry is dated when it was left');
+  const again = await assertStoppedAnswer(
+    (await worker.request(LOGIN, { method: 'POST' })).response,
+    cause,
+    'initialize'
+  );
+  assert.deepEqual(again, first);
+
+  // And another worker's death is another death.
+  const other = await loadWorker({ initialize: trap('migration 0007 failed') });
+  const { id } = await (await other.request('/', { method: 'GET' })).response.json();
+  assert.notEqual(id, first.id);
+});
+
+test('a shell that asks to be controlled is claimed', async (t) => {
+  captureConsole(t);
+  const worker = await loadWorker();
+
+  await worker.message({ type: 'impresspress-claim' });
+  assert.equal(worker.claimed(), 1);
+
+  await worker.message({ type: 'something-else' });
+  assert.equal(worker.claimed(), 1);
 });
 
 test('a client that refuses to be navigated is a warning, not an unhandled rejection', async (t) => {

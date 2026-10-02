@@ -18,6 +18,8 @@
 //     with stage `initialize`                   recovers once, ERASES
 //     with stage `load` or `request`            restarts once, keeps data
 //     with no stage, or one not known           restarts once, keeps data
+//     for a death another tab recovered from    nothing unregistered or erased
+//     in a browser with no Web Locks            restarts once, keeps data
 //   a cause entry that is stale, undated or malformed    no recovery
 //   the boot probe ran out of time (either branch)       waits; asks; keeps data
 //   the boot probe could not be made (it threw)          no recovery
@@ -30,8 +32,11 @@ import assert from 'node:assert/strict';
 import {
   BREAKER,
   loadShell,
+  NEXT_WORKER,
   ORIGIN,
+  RECOVERED_CACHE,
   RECOVERY_DONE,
+  RECOVERY_LOCK,
   RESUME,
   STOP_CACHE,
   stoppedResponse
@@ -42,15 +47,18 @@ const CAUSE = 'runtime initialize() failed: Error: migration 0007 failed';
 const STOPPED = `The app's runtime stopped: ${CAUSE}`;
 const FRESHEN = `${ORIGIN}/?_freshen=${NOW}`;
 
-const breaker = (cause, stage) => JSON.stringify({ cause, stage });
-const left = (stage, at = NOW - 2_000) => ({ reason: CAUSE, stage, at });
+// The breaker as the loader writes it: what the worker reported, and when
+// this page was told. A report with no death stamp is held as `''` and `0`.
+const breaker = (cause, stage, { id = '', diedAt = 0, at = NOW } = {}) =>
+  JSON.stringify({ cause, stage: typeof stage === 'string' ? stage : '', id, diedAt, at });
+const left = (stage, at = NOW - 2_000, death = {}) => ({ reason: CAUSE, stage, at, ...death });
 const sessionOf = (shell) => Object.fromEntries(shell.session.map);
 
 /// A recovery ran — the automatic one, or a button's: said why (when
 /// automatic), dropped the worker and the caches, recorded which kind it was,
 /// and loaded the shell's own address past the document cache. `erased` is
 /// whether it took the local data with it.
-function assertRestarted(shell, { erased, automatic = true, registered = 0 }) {
+function assertRestarted(shell, { erased, automatic = true, registered = 0, caches = [] }) {
   if (automatic) {
     assert.equal(
       shell.status.textContent,
@@ -61,7 +69,9 @@ function assertRestarted(shell, { erased, automatic = true, registered = 0 }) {
   }
   assert.equal(shell.session.getItem(RECOVERY_DONE), erased ? 'erased' : 'restarted');
   assert.equal(shell.unregistered(), 1);
-  assert.deepEqual(shell.cacheNames(), []);
+  // Every cache is dropped but the record of deaths recovered from, which
+  // exists once a death with an id has been.
+  assert.deepEqual(shell.cacheNames(), caches);
   assert.deepEqual(shell.location.replaced, [FRESHEN]);
   assert.equal(shell.location.reloads, 0);
   // A load that recovers from a reported failure does so before it
@@ -135,7 +145,8 @@ for (const [name, stage] of [
     // The 503 to the boot probe: this load sets the breaker, the next acts.
     const probing = loadShell({ probe: stoppedResponse(CAUSE, stage), now: NOW, wipe: true });
     await probing.booted;
-    assertUntouched({ ...probing, location: { ...probing.location, reloads: 0 } });
+    assert.equal(probing.unregistered(), 0);
+    assert.deepEqual(probing.opfs(), ['app.sqlite']);
     const viaProbe = loadShell({ session: sessionOf(probing), now: NOW, wipe: true });
     await viaProbe.booted;
     assertRestarted(viaProbe, { erased: false });
@@ -193,13 +204,24 @@ test('a cause is read once: the entry is gone after the load that took it', asyn
   assert.deepEqual(shell.cacheNames(), ['assets-v1']);
 });
 
-test('a breaker this script did not write carries no cause', async () => {
-  const shell = loadShell({ session: { [BREAKER]: 'not json' }, now: NOW, wipe: true });
-  await shell.booted;
+// The breaker is this tab's own note, and like the entry it is about the load
+// that follows it. One that was never followed by a shell load — the worker's
+// navigation failed, the tab sat there — must not be acted on by some shell
+// load hours later.
+for (const [name, value] of [
+  ['that this script did not write', 'not json'],
+  ['from before breakers were dated', JSON.stringify({ cause: CAUSE, stage: 'initialize' })],
+  ['older than a minute', breaker(CAUSE, 'initialize', { at: NOW - 60_001 })],
+  ['from the future', breaker(CAUSE, 'initialize', { at: NOW + 1 })]
+]) {
+  test(`a breaker ${name} is discarded, not acted on`, async () => {
+    const shell = loadShell({ session: { [BREAKER]: value }, now: NOW, wipe: true });
+    await shell.booted;
 
-  assertBootedNormally(shell);
-  assert.equal(shell.session.getItem(BREAKER), null);
-});
+    assertBootedNormally(shell);
+    assert.equal(shell.session.getItem(BREAKER), null);
+  });
+}
 
 // ---------------------------------------------------------------------------
 // The worker's other two roads
@@ -335,7 +357,8 @@ for (const { spent, stage, wipe, tried, offer, label, erases } of [
     assert.deepEqual(other.opfs(), []);
     assert.equal(other.unregistered(), 1);
     assert.deepEqual(other.location.replaced, [`${ORIGIN}/`]);
-    assert.equal(other.session.map.size, 0);
+    // …but the script URL the next load is to register its worker under.
+    assert.deepEqual([...other.session.map.keys()], [NEXT_WORKER]);
   });
 }
 
@@ -394,18 +417,53 @@ test('a remembered page is used once, whatever that boot comes to', async () => 
   assert.equal(shell.session.getItem(RESUME), null);
 });
 
-test('a worker that does not control the shell yet is given the remembered page to load', async () => {
-  const resumed = loadShell({ controlled: false, session: { [RESUME]: '/b/auth/login' } });
-  await resumed.booted;
-  assert.deepEqual(resumed.location.replaced, [`${ORIGIN}/b/auth/login`]);
-  assert.equal(resumed.location.reloads, 0);
-  assert.equal(resumed.probes.length, 0);
+// The load a recovery lands on comes from the static host. If the worker was
+// registered and had activated before this document existed (another tab got
+// there first), its claim did not reach this page — and a page it does not
+// control cannot probe it. Going straight to the remembered page would leave
+// the recovery flag set for good: every recovery has to end in a probe.
+test('a shell the registered worker does not control asks for control, then probes', async () => {
+  const page = `${ORIGIN}/b/auth/login`;
+  for (const controlled of [false, 'dead']) {
+    const shell = loadShell({
+      controlled,
+      search: '?_freshen=999',
+      session: { [RESUME]: '/b/auth/login', [RECOVERY_DONE]: 'restarted' }
+    });
+    await shell.booted;
 
-  // With nothing remembered: the first visit's reload, as always.
+    assert.deepEqual(shell.asked, [{ type: 'impresspress-claim' }]);
+    assert.equal(shell.probes.length, 1);
+    assert.equal(shell.probes[0].url, page);
+    assert.deepEqual(shell.location.replaced, [page]);
+    assert.equal(shell.location.reloads, 0, 'being claimed does not reload the shell');
+    assert.equal(shell.session.getItem(RECOVERY_DONE), null, 'the recovery is over');
+  }
+});
+
+test('a worker that never takes the page is still given the remembered page to load', async () => {
+  // A worker from a build that does not answer the request. The page is the
+  // right place to go; what is lost is the probe, so the flag stays.
+  const shell = loadShell({
+    controlled: false,
+    claims: false,
+    session: { [RESUME]: '/b/auth/login', [RECOVERY_DONE]: 'restarted' }
+  });
+  await shell.booted;
+
+  assert.deepEqual(shell.location.replaced, [`${ORIGIN}/b/auth/login`]);
+  assert.equal(shell.probes.length, 0);
+  assert.equal(shell.session.getItem(RECOVERY_DONE), 'restarted');
+});
+
+test('a first visit, with nothing remembered, reloads as it always did', async () => {
   const first = loadShell({ controlled: false });
   await first.booted;
+
+  assert.deepEqual(first.asked, []);
   assert.deepEqual(first.location.replaced, []);
   assert.equal(first.location.reloads, 1);
+  assert.equal(first.probes.length, 0);
 });
 
 test('a remembered address on another origin is not followed', async () => {
@@ -669,6 +727,282 @@ test('a worker that cannot be registered is said, and nothing is recovered or er
   assert.equal(shell.session.getItem(RECOVERY_DONE), null);
   assertUntouched(shell);
   assert.equal(shell.probes.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// Several tabs, one death
+// ---------------------------------------------------------------------------
+
+// Every tab of the origin shares the worker and the data, and a dead worker
+// tells each of them. The tab that recovers does so for all: it works holding
+// a lock, and records the death it recovered from; a tab that comes to the
+// same death afterwards must not unregister the worker that recovery left,
+// nor erase the data written since.
+const DEATH = { id: '0f8fad5b-d9cb-469f-a165-70867728950e', diedAt: NOW - 5_000 };
+
+test('a recovery reads, decides and wipes holding the lock, and records the death', async () => {
+  const shell = loadShell({ stop: left('initialize', NOW, DEATH), now: NOW, wipe: true });
+  await shell.booted;
+
+  // One request, made before anything was touched…
+  assert.deepEqual(shell.lockRequests, [
+    { name: RECOVERY_LOCK, registrations: 0, unregistered: 0, opfs: ['app.sqlite'] }
+  ]);
+  // …and by the time it was let go, everything was done.
+  assert.equal(shell.unregistered(), 1);
+  assert.deepEqual(shell.opfs(), []);
+  assert.deepEqual(shell.recovered(), [DEATH.id]);
+  // The record outlives the recovery's own cache wipe.
+  assert.deepEqual(shell.cacheNames(), [RECOVERED_CACHE]);
+});
+
+test('an ordinary boot takes the lock too, and finds nothing to do', async () => {
+  const shell = loadShell({ now: NOW });
+  await shell.booted;
+
+  assert.equal(shell.lockRequests.length, 1);
+  assertBootedNormally(shell);
+});
+
+for (const [road, source] of [
+  ['the breaker', { session: { [BREAKER]: breaker(CAUSE, 'initialize', DEATH) } }],
+  ['the cache entry', { stop: left('initialize', NOW, DEATH) }]
+]) {
+  test(`a tab told of a death another tab recovered from joins it, erasing nothing (${road})`, async () => {
+    // Tab B: a shell at the person's page, still controlled by the dead
+    // worker that tab A's recovery unregistered. A recorded the death.
+    const shell = loadShell({
+      ...source,
+      path: '/b/auth/login',
+      search: '?next=1',
+      controlled: 'dead',
+      recovered: [{ id: DEATH.id, at: NOW - 1_000 }],
+      now: NOW,
+      wipe: true
+    });
+    await shell.booted;
+
+    assert.equal(shell.unregistered(), 0, 'the worker tab A registered is left alone');
+    assert.deepEqual(shell.opfs(), ['app.sqlite'], 'the data written since is left alone');
+    assert.ok(shell.cacheNames().includes('assets-v1'));
+    assert.equal(shell.session.getItem(BREAKER), null, 'the breaker is consumed');
+    assert.equal(shell.session.getItem(RECOVERY_DONE), null, 'nothing was spent');
+    assert.equal(shell.stuck('impresspress-stopped-cause'), null);
+    // It boots here: joins the registered worker, has it take this page,
+    // probes its own address and loads it.
+    assert.equal(shell.registered(), 1);
+    assert.deepEqual(shell.asked, [{ type: 'impresspress-claim' }]);
+    const here = `${ORIGIN}/b/auth/login?next=1`;
+    assert.equal(shell.probes[0].url, here);
+    assert.equal(shell.location.reloads, 1);
+    assert.deepEqual(shell.location.replaced, []);
+    assert.deepEqual(shell.recovered(), [DEATH.id]);
+  });
+}
+
+// A browser answers a registration of the script URL a dead worker was
+// registered under — while another tab is still controlled by it — by handing
+// that same dead instance back. So a recovery's replacement is registered
+// under a URL of its own, and everyone who registers because of that recovery
+// uses it.
+const REPLACEMENT = `/sw.js?recovery=${NOW}`;
+
+test('a recovery chooses a new script URL for the replacement, and the next load registers it', async () => {
+  const shell = loadShell({ stop: left('initialize', NOW, DEATH), now: NOW });
+  await shell.booted;
+  assert.equal(shell.session.getItem(NEXT_WORKER), REPLACEMENT);
+  assert.deepEqual(shell.recoveryRecord(), [{ id: DEATH.id, at: NOW, workerUrl: REPLACEMENT }]);
+
+  // The load the recovery lands on. The origin's registration, as the
+  // browser still reports it, is the dead worker's.
+  const next = loadShell({
+    search: '?_freshen=1',
+    session: sessionOf(shell),
+    registeredUrl: `${ORIGIN}/sw.js`,
+    now: NOW + 50
+  });
+  await next.booted;
+  assert.deepEqual(next.registeredUrls, [REPLACEMENT]);
+  assert.equal(next.session.getItem(NEXT_WORKER), null, 'read once');
+});
+
+test('a tab that joins a recovery registers the replacement that recovery chose', async () => {
+  const shell = loadShell({
+    session: { [BREAKER]: breaker(CAUSE, 'initialize', DEATH) },
+    controlled: 'dead',
+    recovered: [{ id: DEATH.id, at: NOW - 1_000, workerUrl: REPLACEMENT }],
+    registeredUrl: `${ORIGIN}/sw.js`,
+    now: NOW
+  });
+  await shell.booted;
+
+  assert.deepEqual(shell.registeredUrls, [REPLACEMENT]);
+  assert.equal(shell.unregistered(), 0);
+});
+
+test('every other boot registers the script URL the origin already has', async () => {
+  // A healthy worker registered by an earlier recovery is not replaced by a
+  // boot that has no reason to.
+  const kept = loadShell({ registeredUrl: `${ORIGIN}${REPLACEMENT}`, now: NOW });
+  await kept.booted;
+  assert.deepEqual(kept.registeredUrls, [`${ORIGIN}${REPLACEMENT}`]);
+
+  // No registration: the worker's script, plainly.
+  const first = loadShell({ now: NOW });
+  await first.booted;
+  assert.deepEqual(first.registeredUrls, ['/sw.js']);
+
+  // A note or a registration that is not the worker's script is not followed.
+  for (const odd of [
+    { session: { [NEXT_WORKER]: 'https://evil.example/sw.js' } },
+    { session: { [NEXT_WORKER]: '/other.js' } },
+    { registeredUrl: `${ORIGIN}/other.js` }
+  ]) {
+    const shell = loadShell({ ...odd, now: NOW });
+    await shell.booted;
+    assert.deepEqual(shell.registeredUrls, ['/sw.js']);
+  }
+});
+
+test('a different death is recovered from, and both are on record', async () => {
+  const shell = loadShell({
+    stop: left('initialize', NOW, DEATH),
+    recovered: [{ id: 'another-death', at: NOW - 1_000 }],
+    now: NOW,
+    wipe: true
+  });
+  await shell.booted;
+
+  assertRestarted(shell, { erased: true, caches: [RECOVERED_CACHE] });
+  assert.deepEqual(shell.recovered(), ['another-death', DEATH.id]);
+});
+
+test('a death recorded long ago is forgotten, and a cause with no id matches none', async () => {
+  const day = 24 * 60 * 60 * 1000;
+  const old = loadShell({
+    stop: left('initialize', NOW, DEATH),
+    recovered: [{ id: DEATH.id, at: NOW - day - 1 }],
+    now: NOW
+  });
+  await old.booted;
+  assert.equal(old.unregistered(), 1);
+  assert.deepEqual(old.recovered(), [DEATH.id], 'the stale record was dropped, this one written');
+
+  const anonymous = loadShell({
+    stop: left('initialize', NOW),
+    recovered: [{ id: '', at: NOW }],
+    now: NOW
+  });
+  await anonymous.booted;
+  assert.equal(anonymous.unregistered(), 1);
+});
+
+test('the buttons do not redo a recovery another tab has done', async () => {
+  const stuck = () =>
+    loadShell({
+      stop: left('initialize', NOW, DEATH),
+      now: NOW,
+      wipe: true,
+      session: { [RECOVERY_DONE]: 'restarted' }
+    });
+
+  // While this tab sat on the stopped screen, another recovered from the
+  // same death — recorded here between the screen and the click.
+  const shell = stuck();
+  await shell.booted;
+  assert.equal(shell.stuck('impresspress-retry').textContent, 'Erase local data and try again');
+  const joined = loadShell({
+    stop: left('initialize', NOW, DEATH),
+    recovered: [{ id: DEATH.id, at: NOW }],
+    now: NOW,
+    wipe: true,
+    session: { [RECOVERY_DONE]: 'restarted' }
+  });
+  await joined.booted;
+  // (A load that finds it already recorded never shows the screen at all.)
+  assert.equal(joined.stuck('impresspress-retry'), null);
+  assert.equal(joined.unregistered(), 0);
+
+  // The retry and the reset each record the death they dealt with, under
+  // the lock, so that no other tab deals with it again.
+  await shell.stuck('impresspress-retry').click();
+  assert.deepEqual(shell.recovered(), [DEATH.id]);
+  assert.equal(shell.lockRequests.length, 2);
+  const reset = stuck();
+  await reset.booted;
+  await reset.stuck('impresspress-reset').click();
+  assert.deepEqual(reset.recovered(), [DEATH.id]);
+  assert.equal(reset.lockRequests.length, 2);
+});
+
+// Without Web Locks two tabs cannot be kept from recovering at once, so the
+// one thing that cannot be undone is not done automatically.
+test('a browser with no Web Locks never erases automatically', async () => {
+  const shell = loadShell({
+    stop: left('initialize', NOW, DEATH),
+    now: NOW,
+    wipe: true,
+    locks: false
+  });
+  await shell.booted;
+
+  assertRestarted(shell, { erased: false, caches: [RECOVERED_CACHE] });
+  assert.deepEqual(shell.lockRequests, []);
+
+  // The person still can, from the stopped screen: the button says it erases.
+  const stuck = loadShell({
+    stop: left('initialize', NOW, DEATH),
+    now: NOW,
+    wipe: true,
+    locks: false,
+    session: { [RECOVERY_DONE]: 'restarted' }
+  });
+  await stuck.booted;
+  assert.equal(stuck.stuck('impresspress-retry').textContent, 'Erase local data and try again');
+  await stuck.stuck('impresspress-retry').click();
+  assert.deepEqual(stuck.opfs(), []);
+});
+
+// ---------------------------------------------------------------------------
+// An erase that did not complete
+// ---------------------------------------------------------------------------
+
+test('an erase is recorded as done only once it is', async () => {
+  // The database is held open by a worker that is still running; the other
+  // file goes.
+  const shell = loadShell({
+    stop: left('initialize'),
+    now: NOW,
+    wipe: true,
+    opfsFiles: ['app.sqlite', 'uploads'],
+    eraseFails: ['app.sqlite']
+  });
+  await shell.booted;
+
+  assert.deepEqual(shell.opfs(), ['app.sqlite'], 'what could be removed was');
+  assert.equal(shell.session.getItem(RECOVERY_DONE), 'erase-failed');
+  assert.deepEqual(shell.location.replaced, [FRESHEN], 'the restart still happens');
+
+  // And if the app then fails again, the screen says what happened — not
+  // that the data was erased.
+  const stuck = loadShell({
+    stop: left('initialize', NOW),
+    now: NOW,
+    wipe: true,
+    session: sessionOf(shell)
+  });
+  await stuck.booted;
+  assert.equal(
+    stuck.stuck('impresspress-stopped-next').textContent,
+    `The data stored locally in this browser could not be erased, and restarting didn't help. ${OFFER_ERASES}`
+  );
+});
+
+test('a recovery that erases nothing never says it erased', async () => {
+  const shell = loadShell({ stop: left('request'), now: NOW, wipe: true, eraseFails: ['app.sqlite'] });
+  await shell.booted;
+
+  assert.equal(shell.session.getItem(RECOVERY_DONE), 'restarted');
 });
 
 // ---------------------------------------------------------------------------

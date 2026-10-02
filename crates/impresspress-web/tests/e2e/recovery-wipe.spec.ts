@@ -3,7 +3,15 @@ import { fileURLToPath } from 'node:url';
 
 import { test, expect, type Page } from '@playwright/test';
 import { serveGated } from './fixtures/gated-server';
-import { killRuntime, recordShellStatus, served, stopWorkers } from './fixtures/stopped-runtime';
+import {
+  holdLoader,
+  killRuntime,
+  leftCause,
+  recordShellStatus,
+  served,
+  stopWorkers,
+  tellShell,
+} from './fixtures/stopped-runtime';
 
 /**
  * What a recovery does to the data this browser stores for the app, in a
@@ -24,6 +32,9 @@ import { killRuntime, recordShellStatus, served, stopWorkers } from './fixtures/
  *  3. The app does not answer in time → nothing is restarted and nothing is
  *     erased; the shell waits, then asks, and "Keep waiting" is how a slow
  *     start gets to finish.
+ *  4. Two tabs are told of the one `initialize()` failure → one of them
+ *     erases, once; the other joins the app the first one's recovery left,
+ *     and what was written there in between is still there.
  *
  * `impresspress-bundle`'s `tests/sw/loader_recovery.test.mjs` drives every
  * road through the rendered loader against stubs. This is the real worker,
@@ -71,13 +82,12 @@ async function stored(page: Page): Promise<string[]> {
   });
 }
 
-test('an initialize() failure erases the local data and the app starts clean', async ({ page }) => {
-  await boot(page);
-  await plantWitness(page);
-
-  // A database this build cannot use: not a database at all. Written while
-  // no worker is running — a running one holds its own copy and would write
-  // it back — so the next worker to start is the one that meets it.
+/**
+ * Leave a database this build cannot use: not a database at all. Written
+ * while no worker is running — a running one holds its own copy and would
+ * write it back — so the next worker to start is the one that meets it.
+ */
+async function corruptDatabase(page: Page) {
   await stopWorkers(page);
   await page.evaluate(async (name) => {
     const root = await navigator.storage.getDirectory();
@@ -86,6 +96,13 @@ test('an initialize() failure erases the local data and the app starts clean', a
     await writable.write(new TextEncoder().encode('this is not a database '.repeat(400)));
     await writable.close();
   }, DATABASE);
+}
+
+test('an initialize() failure erases the local data and the app starts clean', async ({ page }) => {
+  await boot(page);
+  await plantWitness(page);
+
+  await corruptDatabase(page);
 
   const statusLines = await recordShellStatus(page);
   await page.reload({ waitUntil: 'commit' });
@@ -136,6 +153,75 @@ test('a navigation the runtime dies on shows the cause and keeps the local data'
   await expect(page.locator('input#email')).toBeVisible({ timeout: 60_000 });
   expect(new URL(page.url()).pathname).toBe(LOGIN);
   expect(await stored(page)).toEqual(expect.arrayContaining([DATABASE, WITNESS]));
+});
+
+// Every tab of an origin shares the worker and the data, and a dead worker
+// answers each of them with the shell and the cause. Uncoordinated, the
+// second tab to act would unregister the worker the first one's recovery
+// registered and erase what the person has done since — here, in a tab held
+// back the way a throttled background tab is, well after the first is done.
+test('two tabs told of one initialize() failure erase once, and what the first then writes survives the second', async ({
+  context,
+}) => {
+  const first = await context.newPage();
+  const second = await context.newPage();
+  await boot(first);
+  await boot(second);
+  await plantWitness(first);
+
+  const releaseFirst = await holdLoader(first);
+  const releaseSecond = await holdLoader(second);
+  const firstLines = await recordShellStatus(first);
+  const secondLines = await recordShellStatus(second);
+  await corruptDatabase(first);
+
+  // Both tabs get the shell from the worker that failed to start, and both
+  // sit there: neither loader has run.
+  await first.reload({ waitUntil: 'commit' });
+  await expect(first.locator('#status')).toHaveText('Loading...');
+  await second.reload({ waitUntil: 'commit' });
+  await expect(second.locator('#status')).toHaveText('Loading...');
+  const death = await leftCause(second);
+  expect(death.stage).toBe('initialize');
+  expect(death.id).toMatch(/^[0-9a-f-]{36}$/);
+
+  // The first tab recovers: erases, restarts, and the app is back.
+  releaseFirst();
+  await expect
+    .poll(() => firstLines.filter((line) => line.endsWith(ERASED)).length, { timeout: 60_000 })
+    .toBe(1);
+  await served(first);
+  await expect(first.locator('input#email')).toBeVisible({ timeout: 60_000 });
+  expect(await stored(first)).not.toContain(WITNESS);
+
+  // The person carries on there: data written AFTER the recovery.
+  const AFTER = 'e2e-written-after-the-recovery.txt';
+  await first.evaluate(async (name) => {
+    const root = await navigator.storage.getDirectory();
+    const writable = await (await root.getFileHandle(name, { create: true })).createWritable();
+    await writable.write('what the person did after the app came back');
+    await writable.close();
+  }, AFTER);
+
+  // Only now does the second tab get to run — holding the same death, as a
+  // shell that was listening when the worker died holds it.
+  // (What it says while it joins is replaced by its next progress line in
+  // the same breath, so there is nothing on screen to wait for; what it did
+  // and did not do is read below.)
+  await tellShell(second, death);
+  releaseSecond();
+  await served(second);
+  await expect(second.locator('input#email')).toBeVisible({ timeout: 60_000 });
+  expect(new URL(second.url()).pathname).toBe(LOGIN);
+
+  // Exactly one erase, by the first tab; the second erased and restarted
+  // nothing — and it did act on what it was told: the breaker is consumed.
+  expect(secondLines.filter((line) => line.endsWith(ERASED) || line.endsWith(KEPT))).toEqual([]);
+  expect(secondLines.length, 'the second tab booted through the shell').toBeGreaterThan(0);
+  expect(firstLines.filter((line) => line.endsWith(ERASED)).length).toBe(1);
+  expect(await stored(first)).toEqual(expect.arrayContaining([DATABASE, AFTER]));
+  // And the first tab's app is still the app: its worker answers.
+  expect(await first.evaluate(async () => (await fetch('/b/auth/login')).status)).toBe(200);
 });
 
 // Its own host, because the job's cannot be made slow: the worker's first act

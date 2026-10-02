@@ -16,9 +16,12 @@ import {
 } from './fixtures/dev-sandbox';
 import { MODEL_CONTEXT_POLYFILL } from './fixtures/model-context-polyfill';
 import {
+  holdLoader,
   killRuntime,
+  leftCause,
   recordShellStatus,
   served as runtimeServing,
+  tellShell,
 } from './fixtures/stopped-runtime';
 import { SHOP_HEADING, SHOP_OFFER, SHOP_PRODUCT, shopPage } from './fixtures/shop-fixture';
 import { execute, registeredTools, structured, waitForTool } from './fixtures/webmcp-helpers';
@@ -524,6 +527,49 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
       expect(new URL(site.url()).pathname).toBe('/b/auth/login');
       await site.goto('/', { waitUntil: 'commit' });
       await expect(site.locator('h1')).toHaveText(SHOP_HEADING, { timeout: 120_000 });
+
+      // Two tabs, one death. This bundle never erases, and the second tab
+      // to act could still do harm: unregister the healthy worker the first
+      // tab's recovery registered. It must not — it joins that worker. (The
+      // tabs are held before their loaders run, the second until the first
+      // is done, as a throttled background tab would be;
+      // `recovery-wipe.spec.ts` does the same where erasing is allowed.)
+      const other = await exportedContext.newPage();
+      await other.goto('/b/auth/login', { waitUntil: 'commit' });
+      await runtimeServing(other);
+      const releaseSite = await holdLoader(site);
+      const releaseOther = await holdLoader(other);
+      const otherLines = await recordShellStatus(other);
+      const twoTabCause = 'injected by dev-workspace.spec.ts for two tabs';
+      const restarting = `The app's runtime stopped: error handling request: Error: ${twoTabCause} — restarting it; the data stored locally in this browser is kept…`;
+      await killRuntime(site, twoTabCause);
+      await site.goto('/b/auth/login', { waitUntil: 'commit' });
+      await expect(site.locator('#status')).toHaveText('Loading...');
+      await other.reload({ waitUntil: 'commit' });
+      await expect(other.locator('#status')).toHaveText('Loading...');
+      const death = await leftCause(other);
+
+      releaseSite();
+      await expect.poll(() => statusLines).toContain(restarting);
+      await runtimeServing(site);
+      // The registration the first tab's recovery made, held to compare.
+      await site.evaluate(async () => {
+        (window as any).__registration = await navigator.serviceWorker.getRegistration();
+      });
+
+      await tellShell(other, death);
+      releaseOther();
+      await runtimeServing(other);
+      expect(otherLines.length, 'the second tab booted through the shell').toBeGreaterThan(0);
+      expect(new URL(other.url()).pathname).toBe('/b/auth/login');
+      expect(otherLines).not.toContain(restarting);
+      // Still that registration: the second tab unregistered nothing.
+      expect(
+        await site.evaluate(
+          async () =>
+            (await navigator.serviceWorker.getRegistration()) === (window as any).__registration,
+        ),
+      ).toBe(true);
     } finally {
       await exportedContext.close();
       server.kill('SIGKILL');

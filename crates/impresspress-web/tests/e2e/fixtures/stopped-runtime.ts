@@ -107,3 +107,61 @@ export async function recordShellStatus(page: Page): Promise<string[]> {
   });
   return lines;
 }
+
+/**
+ * Hold a page's boot shell before its loader runs, until the returned
+ * function is called.
+ *
+ * `loader.js` is on the service worker's bypass list, and in a bundle built
+ * without the dev sandbox a bypassed request is the browser's own — so
+ * Playwright can route it. A shell whose `loader.js` has not arrived is a
+ * tab that has been told nothing yet and done nothing yet: the state of a
+ * background tab the browser is throttling. (Not usable on a dev bundle,
+ * whose worker answers bypassed requests itself.)
+ */
+export async function holdLoader(page: Page): Promise<() => void> {
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route('**/loader.js', async (route) => {
+    await gate;
+    await route.continue();
+  });
+  return release;
+}
+
+/**
+ * What the dead worker left for the boot shell `page` is showing: the cause,
+ * the stage and the death's stamp. Read without consuming it.
+ */
+export async function leftCause(
+  page: Page,
+): Promise<{ reason: string; stage: string; id: string; diedAt: number }> {
+  return page.evaluate(async () => {
+    const cache = await caches.open('__impresspress_sw_stopped');
+    const entry = await cache.match('/__impresspress_sw_stopped');
+    if (!entry) throw new Error('the worker left no cause');
+    return entry.json();
+  });
+}
+
+/**
+ * Give the shell `page` is showing the breaker a LISTENING shell holds: what
+ * the worker's `sw-self-destruct` message told it, noted in this tab's
+ * `sessionStorage` (`setBreaker` in `loader.js.tmpl`). A test cannot make the
+ * worker post that message to a page of its choosing at a moment of its
+ * choosing, so it writes what the message's handler writes.
+ */
+export async function tellShell(
+  page: Page,
+  death: { reason: string; stage: string; id: string; diedAt: number },
+) {
+  await page.evaluate((d) => {
+    sessionStorage.setItem(
+      '__impresspress_sw_recover',
+      JSON.stringify({ cause: d.reason, stage: d.stage, id: d.id, diedAt: d.diedAt, at: Date.now() }),
+    );
+  }, death);
+}
+

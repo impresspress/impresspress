@@ -1,7 +1,9 @@
 // Persists across the navigations sw.js triggers when it self-destructs,
 // so the very next page load hits the recovery path (below) instead of
 // carrying on under the dead worker. Its value is what sw.js reported —
-// the cause and the stage, as JSON — which that load shows and acts on.
+// the cause, the stage and which death it was, as JSON — which that load
+// shows and acts on, and when this page set it: like the cache entry below,
+// it is acted on only while it is about the load in progress.
 const SW_RECOVER_KEY = '__impresspress_sw_recover';
 // Where sw.js leaves the cause for a boot shell that was not listening when
 // it died — a page the runtime rendered, or the very navigation that failed.
@@ -26,12 +28,60 @@ const STOP_CAUSE_MAX_AGE_MS = 60_000;
 // another `?_freshen` reload and fail the same way, so the shell shows what
 // happened instead (`renderStoppedUI`) and waits for the person.
 //
-// Its value is WHICH recovery was spent — RECOVERY_ERASED or
-// RECOVERY_RESTARTED — because the screen that follows says what did not
-// help, and "the data was erased" must only be said where it was.
+// Its value is WHICH recovery was spent, because the screen that follows
+// says what did not help, and "the data was erased" must only be said where
+// it was: RECOVERY_ERASED once an erase has completed, RECOVERY_ERASE_FAILED
+// when one was tried and did not, RECOVERY_RESTARTED when none was.
 const RECOVERY_DONE_KEY = '__impresspress_recovery_done';
 const RECOVERY_ERASED = 'erased';
+const RECOVERY_ERASE_FAILED = 'erase-failed';
 const RECOVERY_RESTARTED = 'restarted';
+// Every tab of this origin shares one worker and one set of local data, and
+// a dead worker's cause can be in several of them at once. Two things keep
+// them from recovering over each other:
+//
+// - RECOVERY_LOCK, a Web Lock. Reading the cause, deciding and doing the
+//   recovery all happen while holding it, so two tabs never do them at once.
+// - The record of deaths already recovered from, origin-wide in Cache
+//   Storage (RECOVERED_CACHE; the recovery's own cache wipe leaves it).
+//   sw.js gives each death an id; the tab that recovers writes it here
+//   before letting the lock go, and a tab that then finds its cause is for a
+//   recorded death does NOT unregister or erase anything — the worker and
+//   the data now there are the ones the first tab's recovery made. It joins
+//   them (`boot`).
+//
+// A death is forgotten after RECOVERED_MAX_AGE_MS; nothing can still hold
+// its cause by then (a cause is acted on for STOP_CAUSE_MAX_AGE_MS).
+//
+// Where the browser has no Web Locks the tabs cannot be kept apart, so the
+// AUTOMATIC recovery never erases there: it restarts, and erasing is left to
+// the person, on the stopped screen (`mayEraseAutomatically`).
+const RECOVERY_LOCK = '__impresspress_recovery';
+const RECOVERED_CACHE = '__impresspress_recovered';
+const RECOVERED_KEY = '/__impresspress_recovered';
+const RECOVERED_MAX_AGE_MS = 24 * 60 * 60 * 1000;
+// How long the shell waits to be controlled by the registered worker after
+// asking it to (`takeControl`).
+const CONTROL_WAIT_MS = 10_000;
+// The worker's script, and the script URL a recovery registers its
+// replacement under: the same file with a query that makes the URL new.
+//
+// Why the URL changes. A recovery unregisters the dead worker and the next
+// boot registers again — and while any OTHER tab is still controlled by the
+// dead worker, a browser answers a registration of the SAME script URL by
+// reviving that registration with that worker in it: the same instance,
+// still poisoned (measured in Chromium, with a second tab open). A script
+// URL the registration has not seen is installed as a new version instead,
+// which takes over from the dead one in every tab.
+//
+// So the replacement's URL is chosen by the recovery (`replaceWorker`) and
+// used by whoever registers next because of it: this tab's next load reads
+// it from NEXT_WORKER_KEY (shell-written, shell-read, read once), and a tab
+// that joins the recovery reads it from the death's record. Every other boot
+// registers the URL the origin's registration already has, so a healthy
+// worker is not replaced for nothing; with no registration, WORKER_URL.
+const WORKER_URL = '/sw.js';
+const NEXT_WORKER_KEY = '__impresspress_worker_url';
 // Where the person was when the AUTOMATIC recovery left for the shell's own
 // address: path, query and fragment. The next boot goes back there instead
 // of to the boot URL. Written and read by the boot shell only, and read
@@ -79,27 +129,102 @@ const SHELL_URL = '__SHELL_URL__';
 
 // Unregister all SWs, drop Cache Storage, and (if asked) clear OPFS.
 // Used both by automatic recovery and by the buttons below, so the wipe
-// semantics stay in one place.
+// semantics stay in one place. RECOVERED_CACHE is not dropped: it is this
+// script's own record, not the app's state.
+//
+// Answers whether the OPFS erase COMPLETED: `true` only if it was asked for
+// and every entry was removed. An entry that could not be removed (a file a
+// running worker still holds open) does not stop the others being tried.
 async function wipeBrowserState({ wipeOpfs }) {
     try {
         const regs = await navigator.serviceWorker.getRegistrations();
         for (const r of regs) await r.unregister();
         const keys = await caches.keys();
-        for (const k of keys) await caches.delete(k);
+        for (const k of keys) {
+            if (k !== RECOVERED_CACHE) await caches.delete(k);
+        }
     } catch (e) {
         console.error('[__APP_NAME__] cache wipe failed:', e);
     }
-    if (wipeOpfs) {
-        try {
-            if (navigator.storage && navigator.storage.getDirectory) {
-                const root = await navigator.storage.getDirectory();
-                for await (const [name] of root.entries()) {
-                    await root.removeEntry(name, { recursive: true });
-                }
+    if (!wipeOpfs) return false;
+    try {
+        const root = await navigator.storage.getDirectory();
+        const names = [];
+        for await (const [name] of root.entries()) names.push(name);
+        let left = 0;
+        for (const name of names) {
+            try {
+                await root.removeEntry(name, { recursive: true });
+            } catch (e) {
+                left += 1;
+                console.error('[__APP_NAME__] OPFS wipe failed:', e);
             }
-        } catch (e) {
-            console.error('[__APP_NAME__] OPFS wipe failed:', e);
         }
+        return left === 0;
+    } catch (e) {
+        console.error('[__APP_NAME__] OPFS wipe failed:', e);
+        return false;
+    }
+}
+
+// Run `act` holding RECOVERY_LOCK, where the browser has Web Locks; without
+// them, just run it (RECOVERY_LOCK says what is given up then).
+function underRecoveryLock(act) {
+    if (navigator.locks && navigator.locks.request) {
+        return navigator.locks.request(RECOVERY_LOCK, act);
+    }
+    return act();
+}
+
+// Whether the automatic recovery may erase at all in this browser: only
+// where tabs can be kept from doing it twice.
+function mayEraseAutomatically() {
+    return Boolean(navigator.locks && navigator.locks.request);
+}
+
+// The deaths recovered from on this origin, most recent last, without the
+// ones too old to matter.
+async function recoveredDeaths() {
+    try {
+        if (!(await caches.has(RECOVERED_CACHE))) return [];
+        const cache = await caches.open(RECOVERED_CACHE);
+        const entry = await cache.match(RECOVERED_KEY);
+        const record = entry ? await entry.json() : null;
+        const deaths = record && Array.isArray(record.deaths) ? record.deaths : [];
+        return deaths.filter(
+            (d) => d && typeof d.id === 'string' && Date.now() - d.at <= RECOVERED_MAX_AGE_MS,
+        );
+    } catch (e) {
+        console.warn('[__APP_NAME__] could not read the recovered deaths:', e);
+        return [];
+    }
+}
+
+// The record of the recovery some tab has already made from the death
+// `failure` is about, or `null`. A failure with no id (a worker from before
+// deaths had one) has none.
+async function recoveryOf(failure) {
+    if (failure.id === '') return null;
+    return (await recoveredDeaths()).find((d) => d.id === failure.id) ?? null;
+}
+
+// Record that the death `failure` is about has been recovered from, and the
+// script URL its replacement is registered under. Called holding
+// RECOVERY_LOCK, after the recovery's wipe.
+async function recordRecovered(failure, workerUrl) {
+    if (failure.id === '') return;
+    try {
+        const deaths = await recoveredDeaths();
+        deaths.push({ id: failure.id, at: Date.now(), workerUrl });
+        const cache = await caches.open(RECOVERED_CACHE);
+        await cache.put(
+            RECOVERED_KEY,
+            new Response(JSON.stringify({ deaths }), {
+                headers: { 'Content-Type': 'application/json' },
+            }),
+        );
+    } catch (e) {
+        console.error('[__APP_NAME__] could not record the recovery:', e);
     }
 }
 
@@ -108,12 +233,19 @@ function stoppedText(cause) {
     return "The app's runtime stopped: " + cause;
 }
 
-// What sw.js reported, as this shell holds it: `cause` is its reason and
-// `stage` where it failed. Both are whatever arrived, as strings; a stage
-// that is missing or unknown (a worker from an older build) is one that does
-// not erase, because `erasesFor` asks for exactly one value.
-function reported(cause, stage) {
-    return { cause: String(cause), stage: typeof stage === 'string' ? stage : '' };
+// What sw.js reported, as this shell holds it: `cause` is its reason,
+// `stage` where it failed, `id` and `diedAt` which death it was. Each is
+// whatever arrived, held as the type it should be; a stage that is missing
+// or unknown (a worker from an older build) is one that does not erase,
+// because `erasesFor` asks for exactly one value, and a missing id is one
+// that matches no recorded death.
+function reported(cause, stage, id, diedAt) {
+    return {
+        cause: String(cause),
+        stage: typeof stage === 'string' ? stage : '',
+        id: typeof id === 'string' ? id : '',
+        diedAt: typeof diedAt === 'number' ? diedAt : 0,
+    };
 }
 
 // Whether recovering from `failure` — automatically, or from the retry
@@ -128,17 +260,26 @@ function erasesFor(failure) {
     return OPFS_WIPE_ON_RECOVERY && failure.stage === STAGE_INITIALIZE;
 }
 
+// Whether something stamped `at` is about the load in progress: its age is
+// between zero and STOP_CAUSE_MAX_AGE_MS.
+function isFresh(at) {
+    const age = typeof at === 'number' ? Date.now() - at : NaN;
+    return age >= 0 && age <= STOP_CAUSE_MAX_AGE_MS;
+}
+
 // What stopped the runtime, if this load follows a self-destruct; `null` if
-// it does not. Two sources, both consumed here so the cause is acted on once:
-// the breaker this page set (it was the boot shell when sw.js posted the
-// message, or its probe got sw.js's 503), and the Cache Storage entry sw.js
-// leaves for every page that was not listening.
+// it does not. Two sources, both consumed here: the breaker this page set
+// (it was the boot shell when sw.js posted the message, or its probe got
+// sw.js's 503), and the Cache Storage entry sw.js leaves for every page that
+// was not listening. Each is honoured only while fresh. Called holding
+// RECOVERY_LOCK, so reading the entry and deleting it is one step as far as
+// any other tab can tell.
 async function takeStopCause() {
     let told = null;
     try {
         const breaker = JSON.parse(sessionStorage.getItem(SW_RECOVER_KEY));
-        if (breaker && typeof breaker.cause === 'string') {
-            told = reported(breaker.cause, breaker.stage);
+        if (breaker && typeof breaker.cause === 'string' && isFresh(breaker.at)) {
+            told = reported(breaker.cause, breaker.stage, breaker.id, breaker.diedAt);
         }
     } catch (_) {
         // Not something this script wrote; there is no cause in it.
@@ -151,9 +292,8 @@ async function takeStopCause() {
             const entry = await cache.match(STOP_CAUSE_KEY);
             const stop = entry ? await entry.json() : null;
             await caches.delete(STOP_CAUSE_CACHE);
-            const age = stop && typeof stop.at === 'number' ? Date.now() - stop.at : NaN;
-            if (age >= 0 && age <= STOP_CAUSE_MAX_AGE_MS) {
-                left = reported(stop.reason, stop.stage);
+            if (stop && isFresh(stop.at)) {
+                left = reported(stop.reason, stop.stage, stop.id, stop.diedAt);
             }
         }
     } catch (e) {
@@ -162,11 +302,18 @@ async function takeStopCause() {
     return told !== null ? told : left;
 }
 
-// Set the breaker: what the next load of the shell is to recover from.
+// Set the breaker: what the next load of the shell is to recover from, and
+// when this page was told.
 function setBreaker(failure) {
     sessionStorage.setItem(
         SW_RECOVER_KEY,
-        JSON.stringify({ cause: failure.cause, stage: failure.stage }),
+        JSON.stringify({
+            cause: failure.cause,
+            stage: failure.stage,
+            id: failure.id,
+            diedAt: failure.diedAt,
+            at: Date.now(),
+        }),
     );
 }
 
@@ -176,7 +323,8 @@ async function stoppedCauseOf(response) {
     if (response.status !== 503) return null;
     try {
         const body = await response.json();
-        return body.code === 'runtime_stopped' ? reported(body.cause, body.stage) : null;
+        if (body.code !== 'runtime_stopped') return null;
+        return reported(body.cause, body.stage, body.id, body.diedAt);
     } catch (_) {
         return null;
     }
@@ -206,39 +354,113 @@ function takeResume() {
     }
 }
 
-// Drop the SW and caches (and OPFS, when `erase`) and load the boot shell
-// afresh. The one place a dead worker is unregistered — sw.js leaves that to
-// this (`poisoned` there says why).
+// Replace the worker: drop the SW and caches (and OPFS, when `erase`), note
+// what was done, and record the death as recovered. The one place a dead
+// worker is unregistered — sw.js leaves that to this (`poisoned` there says
+// why). Called holding RECOVERY_LOCK. `failure` is what is being recovered
+// from, or `null` when nothing was reported.
 //
-// It loads SHELL_URL, not the address this page is at: the worker is gone by
-// then, and this shell may be standing at a path only a worker can answer
-// (sw.js answers a navigation to a dead runtime with the shell, at the
-// address that was asked for). With `resume`, where it was is saved for the
-// next boot to go back to, so the person ends on the page they were on
-// (RESUME_KEY says who asks for that).
-async function restartFresh({ erase, resume }) {
-    sessionStorage.setItem(RECOVERY_DONE_KEY, erase ? RECOVERY_ERASED : RECOVERY_RESTARTED);
+// With `resume`, where this page is is saved for the next boot to go back
+// to, so the person ends on the page they were on (RESUME_KEY says who asks
+// for that).
+//
+// RECOVERY_DONE_KEY says "restarted" before anything is touched and "erased"
+// only once the erase has completed, so what the stopped screen later says
+// was done is what was done.
+async function replaceWorker({ erase, resume, failure }) {
+    sessionStorage.setItem(RECOVERY_DONE_KEY, RECOVERY_RESTARTED);
+    const workerUrl = replacementWorkerUrl();
+    sessionStorage.setItem(NEXT_WORKER_KEY, workerUrl);
     const back = pathHere();
     if (resume && back !== SHELL_URL) {
         sessionStorage.setItem(RESUME_KEY, back);
     } else {
         sessionStorage.removeItem(RESUME_KEY);
     }
-    await wipeBrowserState({ wipeOpfs: erase });
+    const erased = await wipeBrowserState({ wipeOpfs: erase });
+    if (erase) {
+        sessionStorage.setItem(
+            RECOVERY_DONE_KEY,
+            erased ? RECOVERY_ERASED : RECOVERY_ERASE_FAILED,
+        );
+    }
+    if (failure !== null) await recordRecovered(failure, workerUrl);
+}
+
+// A script URL no registration of this origin has had (WORKER_URL says why
+// a recovery needs one).
+function replacementWorkerUrl() {
+    return `${WORKER_URL}?recovery=${Date.now()}`;
+}
+
+// The script URL this tab's last recovery chose for the replacement, or
+// `null`. Removed as it is read: it is for the load right after.
+function takeNextWorkerUrl() {
+    const next = sessionStorage.getItem(NEXT_WORKER_KEY);
+    sessionStorage.removeItem(NEXT_WORKER_KEY);
+    return isWorkerUrl(next) ? next : null;
+}
+
+// The script URL of the worker this origin has registered, or `null`.
+async function registeredWorkerUrl() {
+    const registration = await navigator.serviceWorker.getRegistration();
+    const worker =
+        registration && (registration.active || registration.waiting || registration.installing);
+    return worker && isWorkerUrl(worker.scriptURL) ? worker.scriptURL : null;
+}
+
+// Whether `url` is the worker's script on this origin, with any query.
+function isWorkerUrl(url) {
+    if (typeof url !== 'string') return false;
+    try {
+        const parsed = new URL(url, window.location.href);
+        return (
+            parsed.origin === new URL(window.location.href).origin &&
+            parsed.pathname === WORKER_URL
+        );
+    } catch (_) {
+        return false;
+    }
+}
+
+// Load the boot shell afresh, past the document cache. SHELL_URL, not the
+// address this page is at: after `replaceWorker` no worker is registered,
+// and this shell may be standing at a path only a worker can answer (sw.js
+// answers a navigation to a dead runtime with the shell, at the address
+// that was asked for).
+function loadShellAfresh() {
     const url = new URL(SHELL_URL, window.location.href);
     url.searchParams.set('_freshen', String(Date.now()));
     window.location.replace(url.toString());
+}
+
+// A recovery started from a button: `replaceWorker`, then the shell — from
+// the app's first page. If another tab has meanwhile recovered from the
+// same death, nothing is unregistered or erased again; the shell is loaded
+// all the same, and boots with what that tab left.
+async function restartFromButton({ erase, failure }) {
+    await underRecoveryLock(async () => {
+        if (failure !== null && (await recoveryOf(failure)) !== null) return;
+        await replaceWorker({ erase, resume: false, failure });
+    });
+    loadShellAfresh();
 }
 
 // Erase everything this origin stores for the app and start it from its
 // first page: the "Reset local data and reload" button, on both screens
 // below. A full wipe including OPFS whatever the build and whatever the
 // failure — the person has explicitly opted in by clicking.
-async function resetEverything() {
-    await wipeBrowserState({ wipeOpfs: true });
+async function resetEverything(failure) {
+    const workerUrl = replacementWorkerUrl();
+    await underRecoveryLock(async () => {
+        await wipeBrowserState({ wipeOpfs: true });
+        if (failure !== null) await recordRecovered(failure, workerUrl);
+    });
     try { localStorage.clear(); } catch (_) {}
     try { sessionStorage.clear(); } catch (_) {}
-    // The shell's own address, for the reason `restartFresh` gives — and
+    // The one thing the next load needs from this one (WORKER_URL).
+    sessionStorage.setItem(NEXT_WORKER_KEY, workerUrl);
+    // The shell's own address, for the reason `loadShellAfresh` gives — and
     // without `?_freshen`, so the next boot starts from a clean URL.
     window.location.replace(new URL(SHELL_URL, window.location.href).toString());
 }
@@ -295,19 +517,22 @@ function renderChoices({ title, said, next, buttons }) {
     });
 }
 
-const RESET_BUTTON = {
-    id: 'impresspress-reset',
-    label: 'Reset local data and reload',
-    busy: 'Resetting…',
-    style: 'danger',
-    act: resetEverything,
-};
+function resetButton(failure) {
+    return {
+        id: 'impresspress-reset',
+        label: 'Reset local data and reload',
+        busy: 'Resetting…',
+        style: 'danger',
+        act: () => resetEverything(failure),
+    };
+}
 
 // Shown when the worker reports a failure and this tab's recovery has
 // already been spent: the cause, and the two things left to try.
 //
-// The retry is `restartFresh` for this failure — what the automatic recovery
-// would do for it, except that it starts the app from its first page — and
+// The retry is `restartFromButton` for this failure — what the automatic
+// recovery would do for it, except that it starts the app from its first
+// page — and
 // where that erases local data (`erasesFor`) the button
 // is labelled as erasing, not offered as the harmless option. `spent` is the
 // recovery that did not help (RECOVERY_DONE_KEY's value), so the first
@@ -316,10 +541,12 @@ function renderStoppedUI(failure, spent) {
     // Read before the card is replaced: the title lives inside it.
     const name = appTitle();
     const erases = erasesFor(failure);
-    const tried =
-        spent === RECOVERY_ERASED
-            ? "Erasing the data stored locally in this browser and restarting didn't resolve it."
-            : "Restarting it didn't help.";
+    let tried = "Restarting it didn't help.";
+    if (spent === RECOVERY_ERASED) {
+        tried = "Erasing the data stored locally in this browser and restarting didn't resolve it.";
+    } else if (spent === RECOVERY_ERASE_FAILED) {
+        tried = "The data stored locally in this browser could not be erased, and restarting didn't help.";
+    }
     const offered = erases
         ? 'You can erase the data stored locally in this browser and try again, or reset, which also clears everything else this browser keeps for the app. Both start the app from its first page.'
         : 'You can try again, which keeps the data stored locally in this browser, or reset, which erases it. Both start the app from its first page.';
@@ -333,9 +560,9 @@ function renderStoppedUI(failure, spent) {
                 label: erases ? 'Erase local data and try again' : 'Try again',
                 busy: 'Trying again…',
                 style: 'primary',
-                act: () => restartFresh({ erase: erases, resume: false }),
+                act: () => restartFromButton({ erase: erases, failure }),
             },
-            RESET_BUTTON,
+            resetButton(failure),
         ],
     });
 }
@@ -345,7 +572,7 @@ function renderStoppedUI(failure, spent) {
 // decides what that is worth.
 //
 // "Keep waiting" probes the SAME worker again, so a start that is only slow
-// gets to finish. "Restart it" is `restartFresh` without erasing — the way
+// gets to finish. "Restart it" is `restartFromButton` without erasing — the way
 // out for a worker that is truly stuck, and no help for one that is only
 // slow, which the text says. Neither erases anything.
 function renderWaitingUI(target, status, timeouts) {
@@ -368,29 +595,61 @@ function renderWaitingUI(target, status, timeouts) {
                 label: 'Restart it',
                 busy: 'Restarting…',
                 style: 'plain',
-                act: () => restartFresh({ erase: false, resume: false }),
+                act: () => restartFromButton({ erase: false, failure: null }),
             },
-            RESET_BUTTON,
+            resetButton(null),
         ],
     });
 }
 
-// Recover from a failure the worker reported, saying why — once per tab
-// until the app has answered. The second time it does not recover anything:
-// it shows the cause and waits.
-async function recoverBrowserState(status, failure) {
-    const spent = sessionStorage.getItem(RECOVERY_DONE_KEY);
-    if (spent) {
-        renderStoppedUI(failure, spent);
-        return;
-    }
-    const erase = erasesFor(failure);
-    status.textContent =
-        stoppedText(failure.cause) +
-        (erase
-            ? ' — recovering; the data stored locally in this browser is being erased…'
-            : ' — restarting it; the data stored locally in this browser is kept…');
-    await restartFresh({ erase, resume: true });
+// What this load does about a dead runtime, decided — and, where it is a
+// recovery, done — holding RECOVERY_LOCK:
+//
+// - `none`      nothing was reported: an ordinary boot.
+// - `joined`    the death reported has already been recovered from by
+//               another tab. Nothing is unregistered or erased; this tab
+//               boots onto the worker that tab's recovery left (`boot`),
+//               registered under the script URL that recovery recorded.
+// - `spent`     this tab's one automatic recovery has been used and the app
+//               has not answered since: show the cause and wait.
+// - `recovered` the worker was replaced (and the data erased, where
+//               `erasesFor` and `mayEraseAutomatically` allow): load the
+//               shell afresh.
+async function recoverIfStopped(status) {
+    return underRecoveryLock(async () => {
+        const failure = await takeStopCause();
+        if (failure === null) return { kind: 'none' };
+        const done = await recoveryOf(failure);
+        if (done !== null) return { kind: 'joined', failure, workerUrl: done.workerUrl };
+        const spent = sessionStorage.getItem(RECOVERY_DONE_KEY);
+        if (spent) return { kind: 'spent', failure, spent };
+        const erase = erasesFor(failure) && mayEraseAutomatically();
+        status.textContent =
+            stoppedText(failure.cause) +
+            (erase
+                ? ' — recovering; the data stored locally in this browser is being erased…'
+                : ' — restarting it; the data stored locally in this browser is kept…');
+        await replaceWorker({ erase, resume: true, failure });
+        return { kind: 'recovered' };
+    });
+}
+
+// Have `worker` — the registration's active worker — control this page, if
+// it does not already. Asks it to claim its clients and waits for that;
+// `false` if CONTROL_WAIT_MS pass without it (a worker from a build that
+// does not answer the request).
+function takeControl(worker) {
+    if (navigator.serviceWorker.controller === worker) return Promise.resolve(true);
+    return new Promise((resolve) => {
+        const timer = setTimeout(() => resolve(false), CONTROL_WAIT_MS);
+        navigator.serviceWorker.addEventListener('controllerchange', () => {
+            if (navigator.serviceWorker.controller === worker) {
+                clearTimeout(timer);
+                resolve(true);
+            }
+        });
+        worker.postMessage({ type: 'impresspress-claim' });
+    });
 }
 
 // One probe of `target`: its response (`null` if the request threw), and
@@ -484,7 +743,8 @@ async function boot() {
         return;
     }
 
-    const resume = takeResume();
+    let resume = takeResume();
+    let workerUrl = takeNextWorkerUrl();
 
     // Recovery path: a SW self-destructed and left its cause, for this page
     // (the breaker) or for whichever boot shell loaded next (the cache
@@ -498,10 +758,26 @@ async function boot() {
     // recovery (caches + SW are already innocent in that scenario). For a
     // browser-local demo this costs the user's local rows but breaks the
     // loop; that trade-off is what OPFS_WIPE_ON_RECOVERY opts into.
-    const stopped = await takeStopCause();
-    if (stopped !== null) {
-        await recoverBrowserState(status, stopped);
+    const recovery = await recoverIfStopped(status);
+    if (recovery.kind === 'recovered') {
+        loadShellAfresh();
         return;
+    }
+    if (recovery.kind === 'spent') {
+        renderStoppedUI(recovery.failure, recovery.spent);
+        return;
+    }
+    // Another tab recovered from the death this one was told of. This page
+    // is a shell standing at the person's address under a worker that tab
+    // unregistered, so it boots from here — registering, or finding, the
+    // worker that replaced it — and its destination is that address.
+    const joining = recovery.kind === 'joined';
+    if (joining) {
+        status.textContent =
+            stoppedText(recovery.failure.cause) +
+            ' — already recovered from in another tab; loading the app…';
+        resume = pathHere();
+        if (isWorkerUrl(recovery.workerUrl)) workerUrl = recovery.workerUrl;
     }
 
     // Listen for self-destruct notices. The SW posts this message just
@@ -510,13 +786,22 @@ async function boot() {
     // path above runs.
     navigator.serviceWorker.addEventListener('message', (event) => {
         if (event.data?.type === 'sw-self-destruct') {
-            setBreaker(reported(event.data.reason, event.data.stage));
+            setBreaker(
+                reported(
+                    event.data.reason,
+                    event.data.stage,
+                    event.data.id,
+                    event.data.diedAt,
+                ),
+            );
         }
     });
 
     try {
         status.textContent = 'Registering Service Worker...';
-        const registration = await navigator.serviceWorker.register('/sw.js', {
+        // WORKER_URL says which script URL, and why it is not always the same.
+        if (workerUrl === null) workerUrl = (await registeredWorkerUrl()) ?? WORKER_URL;
+        const registration = await navigator.serviceWorker.register(workerUrl, {
             type: 'module',
             scope: '/',
             updateViaCache: 'none',
@@ -556,20 +841,34 @@ async function boot() {
             resume !== null ? resume : '__BOOT_REDIRECT__',
             window.location.href,
         );
-        if (!navigator.serviceWorker.controller) {
-            status.textContent = `First-time setup complete. Loading ${appTitle()}...`;
-            window.__impresspressReloading = true;
-            // A worker is registered and active but does not control this
-            // document, so load one it does. Ordinarily that is this same
-            // address again; after a recovery it is the page to go back to,
-            // since the saved path has been read and a reload would not
-            // bring this script back to use it.
-            if (resume !== null) {
-                window.location.replace(target.href);
-            } else {
+        // The worker to boot on is the registration's active one — `sw`,
+        // now that it has activated. It controls this page already on an
+        // ordinary load (its `activate` claims the pages there are). It does
+        // not when this document came from the static host after it had
+        // activated — the load a recovery lands on, if another tab registered
+        // it first — or when this page is still controlled by a dead worker
+        // another tab has unregistered.
+        const worker = registration.active || sw;
+        if (navigator.serviceWorker.controller !== worker) {
+            if (navigator.serviceWorker.controller === null && resume === null) {
+                // A first visit: nothing to come back to, so load this
+                // address again and let the worker serve it.
+                status.textContent = `First-time setup complete. Loading ${appTitle()}...`;
+                window.__impresspressReloading = true;
                 window.location.reload();
+                return;
             }
-            return;
+            // After a recovery there IS something to come back to, and the
+            // recovery is not over until the app has answered a probe (that
+            // is what clears RECOVERY_DONE_KEY). So ask the worker to take
+            // this page, and probe through it like any other boot.
+            window.__impresspressReloading = true;
+            if (!(await takeControl(worker))) {
+                // It did not. The destination is still the right place to
+                // go, and the worker registered for it will answer.
+                window.location.replace(target.href);
+                return;
+            }
         }
         status.textContent = `Loading ${appTitle()}...`;
         window.__impresspressReloading = true;
