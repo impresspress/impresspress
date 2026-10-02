@@ -15,6 +15,7 @@ import { fileURLToPath } from 'node:url';
 
 import { loginToWorkspace } from './fixtures/dev-sandbox';
 import { MODEL_CONTEXT_POLYFILL } from './fixtures/model-context-polyfill';
+import { pinnedToolchainEnv } from './fixtures/rust-toolchain';
 import { execute, waitForTool, type ToolResult } from './fixtures/webmcp-helpers';
 
 /**
@@ -237,7 +238,9 @@ async function buildOnHost(page: Page, files: string[]) {
     execFileSync(
       'cargo',
       ['build', '--release', '--target', 'wasm32-wasip1', '--offline', '--target-dir', targetDir],
-      { cwd: crate, stdio: 'inherit' },
+      // `crate` is under the system temp directory, where no
+      // `rust-toolchain.toml` is in scope: name the pinned toolchain.
+      { cwd: crate, stdio: 'inherit', env: pinnedToolchainEnv() },
     );
     copyFileSync(
       path.join(targetDir, 'wasm32-wasip1', 'release', `${BLOCK}.wasm`),

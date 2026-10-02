@@ -190,8 +190,12 @@ if [ ! -x "$WVL_DIR/wasi_virt_layer" ]; then
   [ -x "$WVL_DIR/wasi_virt_layer" ] || die "the wasi_virt_layer-cli tarball did not contain the binary"
 fi
 
-log "rustup: wasm32-wasip1-threads on the default and the nightly toolchain"
-rustup target add wasm32-wasip1-threads >/dev/null
+# The composition runs under `$HERE/.rubrc`, where the repository's
+# `rust-toolchain.toml` selects the toolchain, so the target has to be added
+# from inside the tree too: from the caller's working directory it could land
+# on a different (default) toolchain than the one that then builds.
+log "rustup: wasm32-wasip1-threads on the pinned and the nightly toolchain"
+(cd "$HERE" && rustup target add wasm32-wasip1-threads >/dev/null)
 if ! rustup toolchain list | grep -q '^nightly-'; then
   log "installing the nightly toolchain (rust-src + wasm32-wasip1-threads)"
   rustup toolchain install nightly --profile minimal \
