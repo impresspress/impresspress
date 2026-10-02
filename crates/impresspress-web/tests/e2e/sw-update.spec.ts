@@ -1,7 +1,7 @@
 import { test, expect, type Page, type Worker } from '@playwright/test';
 import { once } from 'node:events';
 import { type ChildProcess } from 'node:child_process';
-import { readFileSync } from 'node:fs';
+import { readFileSync, utimesSync } from 'node:fs';
 import path from 'node:path';
 import {
   bootServiceWorker,
@@ -25,10 +25,14 @@ import {
  * in `install`. Without it the new worker sits in `waiting` for as long as
  * any tab of the site stays open, through every reload, and the visitor stays
  * on the old runtime. With it the new worker activates at once and the
- * browser hands it the pages the old one controlled. (`clients.claim()` in
- * `activate` is not part of this: it is for a page NO worker controls yet —
- * the first visit, which every other sandbox spec starts with. Removing it
- * leaves this test passing, and removing `skipWaiting()` fails it.)
+ * browser hands it the pages the old one controlled. Removing
+ * `skipWaiting()` fails this test.
+ *
+ * `clients.claim()` in `activate` is NOT asserted, here or by any other spec.
+ * It is for a page no worker controls yet, and removing it leaves this test
+ * passing. A first visit works without it too: `loader.js` reloads the boot
+ * shell when the page has no controller, and the reloaded page is the
+ * worker's.
  *
  * Three bundles, all built by `examples/dev-sandbox/build.sh`:
  *
@@ -73,6 +77,14 @@ function runtimeOf(dist: string): string {
   const manifest = JSON.parse(readFileSync(path.join(dist, 'asset-manifest.json'), 'utf8'));
   const hashed: string = manifest.assets['impresspress_web_bg.wasm'];
   expect(hashed).toMatch(/^\/impresspress_web_bg-[0-9a-f]+\.wasm$/);
+  return hashed;
+}
+
+/** The URL path of the glue module a bundle's worker imports. */
+function glueOf(dist: string): string {
+  const manifest = JSON.parse(readFileSync(path.join(dist, 'asset-manifest.json'), 'utf8'));
+  const hashed: string = manifest.assets['impresspress_web.js'];
+  expect(hashed).toMatch(/^\/impresspress_web-[0-9a-f]+\.js$/);
   return hashed;
 }
 
@@ -125,9 +137,16 @@ test('a rebuild that changed nothing ships the same worker, and a new runtime sh
   // byte for byte, so identical here is what "no spurious update" means.
   expect(workerScript(BOOTSTRAP_DIST)).toBe(workerScript(DEV_DIST));
   expect(runtimeOf(BOOTSTRAP_DIST)).toBe(runtimeOf(DEV_DIST));
-  // …and a different runtime binary is a different hashed name, which is a
-  // different worker script: the only thing that makes the browser install.
+  // …and a different runtime binary is a different worker script, which is
+  // the only thing that makes the browser install. `sw.js` does not name the
+  // wasm: it imports the glue, and the glue — which does name the wasm — is
+  // hashed after that name is written into it, so its own name follows the
+  // wasm's. (The build id in `sw.js`'s first line differs here too, but only
+  // because this directory is not a git root; at one it is the commit, and
+  // the glue's name is the whole difference.)
   expect(runtimeOf(UPDATE_DIST)).not.toBe(runtimeOf(DEV_DIST));
+  expect(glueOf(UPDATE_DIST)).not.toBe(glueOf(DEV_DIST));
+  expect(workerScript(UPDATE_DIST)).toContain(`from '${glueOf(UPDATE_DIST)}'`);
   expect(workerScript(UPDATE_DIST)).not.toBe(workerScript(DEV_DIST));
 });
 
@@ -176,6 +195,16 @@ test('a returning browser moves to the new deployment’s worker and runtime, wi
 
     // ---- the next deployment ----------------------------------------------
     await stop(server);
+    // A deployment is newer than the one it replaces, and here that has to be
+    // made true: CI builds this bundle BEFORE the first one (the blank build
+    // goes last, because it keeps `dist/`). `python3 -m http.server`
+    // validates by modification time alone, so a worker script older than
+    // the one the browser holds is answered `304 Not Modified` — the browser
+    // is told nothing changed, whatever the bytes are — and no update is ever
+    // installed. (A host that validates by content, as an ETag does, has no
+    // such blind spot; this is the stand-in host's, not the bundle's.)
+    const deployedAt = new Date();
+    utimesSync(path.join(UPDATE_DIST, 'sw.js'), deployedAt, deployedAt);
     server = await serveDirectory(UPDATE_DIST, SW_UPDATE_PORT);
     // As after any deploy, the previous runtime's file is no longer served:
     // nothing from here on can be loading it.

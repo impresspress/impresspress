@@ -166,31 +166,44 @@ pub fn run(pkg_dir: &Path, repo_dir: &Path, app: AppConfig) -> Result<()> {
 
     // --- Derive template vars from discovery + AppConfig ---------------------
     let (wasm_js_val, wasm_bin_val, wasm_js_prefix_val) = if let Some((base, js, wasm)) = &pair {
-        // 1. Hash + rename the discovered pair.
-        for filename in &[js, wasm] {
+        // 1. Hash + rename the wasm, then write its hashed name into the
+        //    glue, and only THEN hash + rename the glue.
+        //
+        //    The order is the point. The glue names the wasm
+        //    (`'{base}_bg.wasm'` → `'{base}_bg-<hash>.wasm'`, exactly one
+        //    such reference), so its bytes depend on the wasm's hash. Hashed
+        //    before that rewrite, two builds that differed only in the wasm
+        //    shipped a glue file with the SAME name and different contents —
+        //    and, wherever the build id is a commit sha rather than a hash of
+        //    these, a byte-identical `sw.js`: a browser comparing worker
+        //    scripts saw no new deployment, and an old worker restarted
+        //    later asked for a wasm the deploy had deleted. Hashed after, the
+        //    glue's name follows the wasm's, and `sw.js` — which imports the
+        //    glue by name — follows the glue's.
+        let hash_and_rename = |filename: &String| -> Result<(String, std::path::PathBuf)> {
             let src = pkg_dir.join(filename);
             let bytes =
                 std::fs::read(&src).with_context(|| format!("reading {}", src.display()))?;
             let h = hash::short_hash(&bytes);
             let new_path = rename::rename_with_hash(&src, &h)?;
-            hashes.insert((*filename).clone(), h);
-            renamed.insert((*filename).clone(), new_path);
-        }
-
-        // 2. Rewrite the cross-reference inside the glue JS:
-        //    `'{base}_bg.wasm'` → `'{base}_bg-<hash>.wasm'`.
-        let js_renamed = renamed.get(js).unwrap();
-        let old_literal = format!("'{wasm}'");
-        let new_wasm_name = renamed
-            .get(wasm)
-            .unwrap()
+            Ok((h, new_path))
+        };
+        let (wasm_hash, wasm_path) = hash_and_rename(wasm)?;
+        let new_wasm_name = wasm_path
             .file_name()
             .unwrap()
             .to_string_lossy()
             .into_owned();
-        let new_literal = format!("'{new_wasm_name}'");
-        // wasm-bindgen glue has exactly one such reference.
-        rename::rewrite_literal(js_renamed, &old_literal, &new_literal)?;
+        rename::rewrite_literal(
+            &pkg_dir.join(js),
+            &format!("'{wasm}'"),
+            &format!("'{new_wasm_name}'"),
+        )?;
+        let (js_hash, js_path) = hash_and_rename(js)?;
+        hashes.insert(wasm.clone(), wasm_hash);
+        renamed.insert(wasm.clone(), wasm_path);
+        hashes.insert(js.clone(), js_hash);
+        renamed.insert(js.clone(), js_path);
 
         let hashed_js_name = renamed
             .get(js)

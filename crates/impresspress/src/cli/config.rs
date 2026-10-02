@@ -45,20 +45,10 @@ pub struct ImpresspressConfig {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "RawAppConfig")]
 pub struct AppConfig {
     pub name: String,
-    /// The app's title, as the boot shell shows it. Exactly one of this and
-    /// `title_file` is given; [`parse`] refuses a file with both or neither.
-    #[serde(default)]
-    pub title: Option<String>,
-    /// A text file (relative to the directory holding `impresspress.toml`,
-    /// like an overlay's `from`) whose one line is the app's title — for a
-    /// build whose title is decided by an earlier build step rather than
-    /// written in the configuration. One trailing newline is not part of the
-    /// title; an empty file or a second line is refused.
-    #[serde(default)]
-    pub title_file: Option<String>,
+    pub title: AppTitle,
     pub boot_redirect: String,
     /// An HTML fragment file (relative to the directory holding
     /// `impresspress.toml`, like an overlay's `from`) that the boot shell
@@ -67,6 +57,60 @@ pub struct AppConfig {
     /// `impresspress_bundle::bundle::AppConfig::boot_notice_html`.
     #[serde(default)]
     pub boot_notice: Option<String>,
+}
+
+/// Where the app's title, as the boot shell shows it, comes from. `[app]`
+/// gives exactly one of the two keys; a file with both or neither does not
+/// parse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppTitle {
+    /// `title = "…"`: written in the configuration.
+    Inline(String),
+    /// `title_file = "<file>"`: a text file (relative to the directory
+    /// holding `impresspress.toml`, like an overlay's `from`) whose one line
+    /// is the title — for a build whose title is decided by an earlier build
+    /// step. One trailing newline is not part of the title; an empty file or
+    /// a second line is refused.
+    File(String),
+}
+
+/// `[app]` as it is written, before the two title keys become one value.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAppConfig {
+    name: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    title_file: Option<String>,
+    boot_redirect: String,
+    #[serde(default)]
+    boot_notice: Option<String>,
+}
+
+impl TryFrom<RawAppConfig> for AppConfig {
+    type Error = &'static str;
+
+    fn try_from(raw: RawAppConfig) -> Result<Self, Self::Error> {
+        let title = match (raw.title, raw.title_file) {
+            (Some(title), None) => AppTitle::Inline(title),
+            (None, Some(file)) => AppTitle::File(file),
+            (Some(_), Some(_)) => {
+                return Err("[app] sets both `title` and `title_file`; give exactly one")
+            }
+            (None, None) => {
+                return Err(
+                    "[app] needs a `title` (or a `title_file` naming the file that holds it)",
+                )
+            }
+        };
+        Ok(Self {
+            name: raw.name,
+            title,
+            boot_redirect: raw.boot_redirect,
+            boot_notice: raw.boot_notice,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -117,18 +161,7 @@ impl Default for WasmConfig {
 }
 
 pub fn parse(toml_text: &str) -> Result<Config, toml::de::Error> {
-    let cfg: Config = toml::from_str(toml_text)?;
-    // Checked here rather than where the title is used, so that every flow —
-    // the native ones never render a title — refuses the same files.
-    match (&cfg.app.title, &cfg.app.title_file) {
-        (Some(_), None) | (None, Some(_)) => Ok(cfg),
-        (Some(_), Some(_)) => Err(serde::de::Error::custom(
-            "[app] sets both `title` and `title_file`; give exactly one",
-        )),
-        (None, None) => Err(serde::de::Error::custom(
-            "[app] needs a `title` (or a `title_file` naming the file that holds it)",
-        )),
-    }
+    toml::from_str(toml_text)
 }
 
 use std::path::{Path, PathBuf};
@@ -168,13 +201,11 @@ impl Config {
 impl Config {
     /// The app's title: `[app] title`, or the one line of `[app] title_file`
     /// (read relative to `repo_root`, the directory the configuration was
-    /// found in). [`parse`] has already refused a file with both or neither.
+    /// found in).
     pub fn app_title(&self, repo_root: &Path) -> anyhow::Result<String> {
-        if let Some(title) = &self.app.title {
-            return Ok(title.clone());
-        }
-        let Some(path) = &self.app.title_file else {
-            anyhow::bail!("[app] has neither `title` nor `title_file`");
+        let path = match &self.app.title {
+            AppTitle::Inline(title) => return Ok(title.clone()),
+            AppTitle::File(path) => path,
         };
         let file = repo_root.join(path);
         let text = std::fs::read_to_string(&file)
@@ -252,7 +283,7 @@ boot_redirect = "/b/system/"
 "#;
         let cfg = parse(input).unwrap();
         assert_eq!(cfg.app.name, "impresspress-web");
-        assert_eq!(cfg.app.title.as_deref(), Some("Impresspress"));
+        assert_eq!(cfg.app.title, AppTitle::Inline("Impresspress".to_string()));
         assert_eq!(cfg.app.boot_redirect, "/b/system/");
         assert_eq!(cfg.assets.extra_bypass_prefix, Vec::<String>::new());
         assert!(cfg.assets.overlay.is_empty());

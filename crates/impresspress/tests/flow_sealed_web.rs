@@ -66,8 +66,9 @@ async fn the_dev_sandbox_configuration_emits_a_static_llms_txt_and_a_readable_bo
     // The title has one source. `title_file` is the only way this
     // configuration gets one, and no seed's title is spelled in it.
     let parsed = impresspress::cli::config::parse(&config).unwrap();
-    assert_eq!(parsed.app.title, None);
-    let title_file = parsed.app.title_file.expect("[app] title_file");
+    let impresspress::cli::config::AppTitle::File(title_file) = parsed.app.title else {
+        panic!("[app] title is written inline: {:?}", parsed.app.title);
+    };
 
     let mut titles = Vec::new();
     for seed in ["blank", "bootstrap"] {
