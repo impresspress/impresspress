@@ -36,6 +36,8 @@ A seed is what a fresh origin boots with (generation 0). Each lives under
 - `sandbox.json` + `guide.md` — the template name, the prompt the workspace
   page suggests, and the site-authoring guide `dev_read_reference` serves as
   `site_markdown`. The generator puts them in the manifest's `sandbox` block.
+  `sandbox.json` also names the boot page's `title` (below), which the
+  manifest does not carry.
 - `llms.txt` — not a file in the seed: it is **generated** from
   `seeds/llms-preamble.md` (shared by every seed: what the sandbox is, that
   an agent is expected to build a site in it, how to get in, that a
@@ -51,6 +53,11 @@ A seed is what a fresh origin boots with (generation 0). Each lives under
 - `../boot-notice.html` (shared) — the two sentences the boot page shows
   under its title (`[app] boot_notice` in `impresspress.toml`): the only
   text a reader gets before the service worker exists.
+- The boot page's title is the seed's: `sandbox.json`'s `title`, which
+  `build.sh` stages into `boot-title.txt` for `[app] title_file`. Each seed
+  names itself — `check-seeds.py` refuses a seed without a title and two
+  seeds with the same one — so a sandbox says which template it was built
+  from before anything has loaded. It is written nowhere else.
 - `vendor.json` (bootstrap) — upstream URLs and sha256 pins of the vendored
   files. `seeds/vendor.py bootstrap` downloads and verifies them; the
   vendored bytes are identical to upstream.

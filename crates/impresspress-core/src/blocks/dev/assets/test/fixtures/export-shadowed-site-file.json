@@ -1,0 +1,4 @@
+{
+  "error": "FailedPrecondition",
+  "message": "this site cannot be exported: \"site/manifest.json\" would be served at \"/manifest.json\", which the runtime reserves (the exact path \"/manifest.json\"): the runtime's service worker serves this path from the static host, so a site file here would never be shown. Use a different path. The exported site would refuse to import a bundle that carries it. Delete the file or move it to another path, then export again."
+}

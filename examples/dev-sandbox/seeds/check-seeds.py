@@ -8,6 +8,10 @@ sandbox.json, guide.md, and the llms.txt seedlib builds out of
 seeds/llms-preamble.md and that guide. An edit to any of them without
 regenerating is a manifest whose declared hash the importer would refuse.
 
+sandbox.json also holds the one thing the manifest does not carry: the title
+of the seed's boot page, which build.sh hands to the bundler. A seed without
+one, or two seeds with the same one, fail here.
+
 A seed is a directory whose name passes seedlib.SEED_NAME; anything else
 under seeds/ (__pycache__, a dotted directory) is not a seed and is skipped.
 Each seed is checked on its own: a seed that cannot be read or generated
@@ -106,10 +110,9 @@ def vendor_problems(seed: pathlib.Path) -> list:
     return problems
 
 
-def main() -> None:
-    seeds = seedlib.seed_dirs()
-    if not seeds:
-        raise SystemExit(f"{seedlib.SEEDS_DIR}: no seed directories")
+def check(seeds: list) -> list:
+    """Every problem with `seeds`, one line each; a line per clean seed goes
+    to stderr."""
     problems = []
     for seed in seeds:
         found = problems_for(seed) + vendor_problems(seed)
@@ -120,11 +123,21 @@ def main() -> None:
                 + (", vendored files match vendor.json" if (seed / "vendor.json").is_file() else ""),
                 file=sys.stderr,
             )
+    problems.extend(seedlib.shared_titles(seeds))
+    return problems
+
+
+def main() -> None:
+    seeds = seedlib.seed_dirs()
+    if not seeds:
+        raise SystemExit(f"{seedlib.SEEDS_DIR}: no seed directories")
+    problems = check(seeds)
     if problems:
         raise SystemExit(
             "\n".join(problems)
             + "\n\nEach line names its fix: regenerate a manifest with seeds/write-manifest.py <name>, "
-            "restore a vendored file with seeds/vendor.py <name>."
+            "restore a vendored file with seeds/vendor.py <name>, give a seed its own title in its "
+            "sandbox.json."
         )
 
 

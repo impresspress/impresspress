@@ -1,5 +1,7 @@
 import { test, expect, type APIRequestContext } from '@playwright/test';
 import { createHash } from 'node:crypto';
+import { readFileSync } from 'node:fs';
+import path from 'node:path';
 import {
   bootServiceWorker,
   enterFromWelcome,
@@ -41,6 +43,23 @@ if (!BOOTSTRAP_DIST) {
 }
 
 const sha256 = (text: string) => createHash('sha256').update(text, 'utf8').digest('hex');
+
+/**
+ * The title a seed gives its sandbox's boot page — read from the seed's own
+ * `sandbox.json`, the one place it is written. `build.sh` hands it to the
+ * bundler, so what a bundle's static `/` is titled is that seed's and no
+ * other's.
+ */
+function seedTitle(seed: string): string {
+  const sandbox = JSON.parse(
+    readFileSync(
+      path.join(import.meta.dirname, '../../../../examples/dev-sandbox/seeds', seed, 'sandbox.json'),
+      'utf8',
+    ),
+  );
+  expect(typeof sandbox.title).toBe('string');
+  return sandbox.title;
+}
 
 /** `GET url` with no JavaScript and no service worker. */
 async function plainGet(request: APIRequestContext, url: string) {
@@ -87,11 +106,20 @@ async function sandboxLlms(request: APIRequestContext, origin: string, template:
   return llms.text;
 }
 
-/** The boot page, as HTML: readable text and the two links, with no script run. */
-async function readableBootPage(request: APIRequestContext, origin: string) {
+/**
+ * The boot page, as HTML: the seed's own title, readable text and the two
+ * links, with no script run.
+ */
+async function readableBootPage(request: APIRequestContext, origin: string, seed: string) {
   const boot = await plainGet(request, `${origin}/`);
   expect(boot.status).toBe(200);
   expect(boot.type).toMatch(/^text\/html/);
+  // Titled and headed by the seed it was built from. (Neither seed's title
+  // has a character HTML escapes.)
+  const title = seedTitle(seed);
+  expect(title).not.toMatch(/[&<>]/);
+  expect(boot.text).toContain(`<title>${title}</title>`);
+  expect(boot.text).toContain(`<h1><span data-app-title>${title}</span></h1>`);
   expect(boot.text).toMatch(/<title>[^<]*sandbox[^<]*<\/title>/i);
   expect(boot.text).toContain('This is an ImpressPress build sandbox');
   expect(boot.text).toContain('you are expected');
@@ -108,13 +136,17 @@ test('a fetch-only reader gets readable text from / and /llms.txt, on both seeds
   baseURL,
 }) => {
   const blank = await sandboxLlms(request, baseURL!, 'blank');
-  await readableBootPage(request, baseURL!);
+  await readableBootPage(request, baseURL!, 'blank');
 
   const server = await serveDirectory(BOOTSTRAP_DIST, LLMS_BOOTSTRAP_PORT);
   try {
     const origin = `http://127.0.0.1:${LLMS_BOOTSTRAP_PORT}`;
     const bootstrap = await sandboxLlms(request, origin, 'bootstrap');
-    await readableBootPage(request, origin);
+    await readableBootPage(request, origin, 'bootstrap');
+    // Two sandboxes a reader can tell apart before either has loaded: the
+    // one built from a template says which.
+    expect(seedTitle('bootstrap')).not.toBe(seedTitle('blank'));
+    expect(seedTitle('bootstrap')).toMatch(/bootstrap/i);
     // The bootstrap seed says where the framework is; the blank one has none.
     expect(bootstrap).toContain('`site/vendor/bootstrap/`');
     expect(bootstrap).toContain('/vendor/bootstrap/bootstrap.min.css');

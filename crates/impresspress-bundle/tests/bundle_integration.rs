@@ -107,6 +107,115 @@ fn end_to_end_renames_rewrites_and_templates() {
     assert!(!glue.contains("'app_bg.wasm'"));
 }
 
+/// The glue's hashed name, as `sw.js` imports it.
+fn glue_name(dir: &std::path::Path) -> String {
+    fs::read_dir(dir)
+        .unwrap()
+        .map(|e| e.unwrap().file_name().into_string().unwrap())
+        .find(|n| n.starts_with("app-") && n.ends_with(".js"))
+        .expect("a hashed glue file")
+}
+
+/// A directory that is a git repository with one commit, so the build id of
+/// anything bundled against it is that commit — the same for every build —
+/// as it is for an app whose `impresspress.toml` sits at a repository root.
+fn committed_repo() -> tempfile::TempDir {
+    let repo = tempfile::tempdir().unwrap();
+    for args in [
+        &["init", "-q"][..],
+        &[
+            "-c",
+            "user.name=t",
+            "-c",
+            "user.email=t@example.com",
+            "-c",
+            "commit.gpgsign=false",
+            "commit",
+            "-q",
+            "--allow-empty",
+            "-m",
+            "one",
+        ][..],
+    ] {
+        let status = std::process::Command::new("git")
+            .args(args)
+            .current_dir(repo.path())
+            .status()
+            .expect("git");
+        assert!(status.success(), "git {args:?}");
+    }
+    repo
+}
+
+/// A build that differs from the last one ONLY in the wasm is a different
+/// deployment, and the browser has to be able to see that from `sw.js`
+/// alone: it installs a new worker when the script's bytes change and never
+/// otherwise.
+///
+/// The build id cannot be what carries the difference — here it is the
+/// commit, identical for both builds, as it is whenever the app is built at
+/// a repository root. What carries it is the glue: it names the hashed wasm,
+/// so it is hashed AFTER that name is written into it, its own name changes
+/// with the wasm's, and `sw.js` imports it by name. Hashed before, the two
+/// builds shipped one glue name with two contents and a byte-identical
+/// `sw.js`.
+#[test]
+fn a_build_that_differs_only_in_the_wasm_ships_another_glue_name_and_another_sw_js() {
+    let repo = committed_repo();
+    let build = |wasm: Option<&[u8]>| {
+        let pkg = production_pkg_copy();
+        if let Some(bytes) = wasm {
+            fs::write(pkg.path().join("app_bg.wasm"), bytes).unwrap();
+        }
+        run(pkg.path(), repo.path(), AppConfig::default()).expect("bundler ok");
+        pkg
+    };
+    let first = build(None);
+    let again = build(None);
+    let mut other_bytes = fs::read(fixture_path().join("app_bg.wasm")).unwrap();
+    other_bytes.extend_from_slice(b"\0a later build");
+    let next = build(Some(&other_bytes));
+
+    let sw = |pkg: &tempfile::TempDir| fs::read_to_string(pkg.path().join("sw.js")).unwrap();
+    let manifest = |pkg: &tempfile::TempDir| -> serde_json::Value {
+        serde_json::from_str(&fs::read_to_string(pkg.path().join("asset-manifest.json")).unwrap())
+            .unwrap()
+    };
+
+    // The premise: one build id for all three, and it is the commit's, not a
+    // hash of the assets.
+    let id = manifest(&first)["buildId"].as_str().unwrap().to_string();
+    assert_eq!(manifest(&again)["buildId"], id.as_str());
+    assert_eq!(manifest(&next)["buildId"], id.as_str());
+    assert!(
+        sw(&next).contains(&format!("build: {id} ")),
+        "{}",
+        sw(&next)
+    );
+
+    // Identical inputs: identical names, identical bytes.
+    assert_eq!(glue_name(first.path()), glue_name(again.path()));
+    assert_eq!(sw(&first), sw(&again));
+    assert_eq!(manifest(&first), manifest(&again));
+    assert_eq!(
+        fs::read(first.path().join(glue_name(first.path()))).unwrap(),
+        fs::read(again.path().join(glue_name(again.path()))).unwrap()
+    );
+
+    // Another wasm: another glue name, and so another `sw.js`.
+    assert_ne!(glue_name(first.path()), glue_name(next.path()));
+    assert_ne!(sw(&first), sw(&next));
+    assert!(sw(&next).contains(&format!("from '/{}'", glue_name(next.path()))));
+    // …and the name is the hash of the bytes under it, reference included.
+    let glue = fs::read_to_string(next.path().join(glue_name(next.path()))).unwrap();
+    let wasm_name = manifest(&next)["assets"]["app_bg.wasm"]
+        .as_str()
+        .unwrap()
+        .trim_start_matches('/')
+        .to_string();
+    assert!(glue.contains(&format!("'{wasm_name}'")), "{glue}");
+}
+
 /// `files` is the whole shell, and it is what the development sandbox's
 /// export copies into the bundle it hands the user. Three properties have to
 /// hold, and each has a way of failing silently:

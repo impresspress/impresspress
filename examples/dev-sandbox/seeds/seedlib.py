@@ -3,10 +3,13 @@
 A seed is `seeds/<name>/`: a `site/` tree that becomes generation 0 of a
 fresh sandbox, and a `manifest.json` that lists every file of it with the
 sha256, size and content type `impresspress-core::blocks::dev::seed` verifies
-at boot. A seed may also carry `sandbox.json` (its template name and the
-prompt `/b/dev` suggests) and `guide.md` (the site-authoring guide
-`dev_read_reference` serves); the manifest's `sandbox` block is built from
-the two. The manifest is generated from the tree (`write-manifest.py`) and
+at boot. A seed may also carry `sandbox.json` (its template name, the title
+of its boot page and the prompt `/b/dev` suggests) and `guide.md` (the
+site-authoring guide `dev_read_reference` serves); the manifest's `sandbox`
+block is built from the two. The title is the one thing in `sandbox.json`
+the manifest does not carry: it is what the static boot page is headed with,
+before any runtime exists to read a manifest, so `build.sh` hands it to the
+bundler (`boot_title`). The manifest is generated from the tree (`write-manifest.py`) and
 checked against it (`check-seeds.py`); it is never hand-edited.
 
 A seed with a sandbox block also has an `llms.txt` — what a reader that has
@@ -161,6 +164,11 @@ GUIDE_CONTENT_TYPE = "text/markdown; charset=utf-8"
 MAX_GUIDE_BYTES = 256 * 1024
 MAX_PROMPT_BYTES = 4 * 1024
 
+# The keys of sandbox.json, all required.
+SANDBOX_KEYS = {"template", "title", "suggested_prompt"}
+# A title is one line of a boot page's <title> and heading.
+MAX_TITLE_BYTES = 120
+
 
 # Mirror seed::LLMS_PATH, seed::LLMS_CONTENT_TYPE and seed::MAX_LLMS_BYTES.
 LLMS_PATH = "llms.txt"
@@ -192,6 +200,61 @@ def llms_text(template: str, guide: str) -> str:
     return preamble.replace(LLMS_TEMPLATE_HOLE, template) + "\n" + guide
 
 
+def load_sandbox(seed_dir: pathlib.Path):
+    """The seed's sandbox.json, checked key by key, or None when it has none."""
+    sandbox_path = seed_dir / "sandbox.json"
+    if not sandbox_path.is_file():
+        return None
+    try:
+        sandbox = json.loads(sandbox_path.read_text(encoding="utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        raise SeedError(f"{sandbox_path}: not valid JSON ({e})")
+    if not isinstance(sandbox, dict) or set(sandbox) != SANDBOX_KEYS:
+        raise SeedError(
+            f"{sandbox_path}: needs a JSON object with exactly the keys "
+            f"{', '.join(sorted(SANDBOX_KEYS))}"
+        )
+    title = sandbox["title"]
+    if not isinstance(title, str) or not title or title != title.strip():
+        raise SeedError(
+            f"{sandbox_path}: title must be a non-empty string with no space around it — "
+            f"it heads the boot page of a sandbox built from this seed"
+        )
+    if not title.isprintable():
+        raise SeedError(f"{sandbox_path}: title must be one line of printable text")
+    if len(title.encode("utf-8")) > MAX_TITLE_BYTES:
+        raise SeedError(f"{sandbox_path}: title is over {MAX_TITLE_BYTES} bytes")
+    return sandbox
+
+
+def boot_title(seed_dir: pathlib.Path):
+    """The title of the boot page of a sandbox built from this seed, or None
+    for a seed with no sandbox.json. `build.sh` stages it for the bundler; it
+    is written nowhere else."""
+    sandbox = load_sandbox(seed_dir)
+    return None if sandbox is None else sandbox["title"]
+
+
+def shared_titles(seeds: list) -> list:
+    """One line per boot title that more than one of `seeds` carries. Two
+    sandboxes with one title cannot be told apart from their boot pages, which
+    are all a reader has until the runtime is installed. A seed whose
+    sandbox.json cannot be read is skipped: it is reported on its own."""
+    by_title = {}
+    for seed in seeds:
+        try:
+            title = boot_title(seed)
+        except SeedError:
+            continue
+        if title is not None:
+            by_title.setdefault(title, []).append(seed.name)
+    return [
+        f"{', '.join(names)}: share the title {title!r} — each seed's sandbox.json names its own"
+        for title, names in sorted(by_title.items())
+        if len(names) > 1
+    ]
+
+
 def sandbox_block(seed_dir: pathlib.Path):
     """The `sandbox` block of a seed that carries sandbox.json and guide.md,
     or None when it carries neither. Checked here to the runtime's own limits
@@ -199,18 +262,11 @@ def sandbox_block(seed_dir: pathlib.Path):
     refused at generation time instead."""
     sandbox_path = seed_dir / "sandbox.json"
     guide_path = seed_dir / GUIDE_PATH
-    if not sandbox_path.is_file():
+    sandbox = load_sandbox(seed_dir)
+    if sandbox is None:
         if guide_path.exists():
             raise SeedError(f"{guide_path}: present without sandbox.json, so nothing would serve it")
         return None
-    try:
-        sandbox = json.loads(sandbox_path.read_text(encoding="utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        raise SeedError(f"{sandbox_path}: not valid JSON ({e})")
-    if not isinstance(sandbox, dict) or set(sandbox) != {"template", "suggested_prompt"}:
-        raise SeedError(
-            f"{sandbox_path}: needs a JSON object with exactly the keys template and suggested_prompt"
-        )
     template = sandbox["template"]
     prompt = sandbox["suggested_prompt"]
     if not isinstance(template, str) or not SEED_NAME.fullmatch(template):

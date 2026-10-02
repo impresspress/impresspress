@@ -18,6 +18,7 @@
 // the shipped file.
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
 import { instantiate } from './harness.mjs';
 
 /** One macrotask, which is long enough for the tail's load-time work. */
@@ -149,6 +150,140 @@ test('a failed export reaches the agent as isError, never as a silent success', 
   const result = await tools.get('dev_export').execute({});
   assert.equal(result.isError, true);
   assert.match(result.content[0].text, /^dev_export: /);
+});
+
+// ---- a refusal that names a file -------------------------------------------
+//
+// The export refuses a site whose files the exported worker would shadow, and
+// the answer names the file, the URL and the rule (`export.rs`'s
+// `ShadowedSiteFile`). That sentence is the whole of what the person can act
+// on, so it has to arrive whole on every surface the page offers — and none of
+// them is the handler: the button, the `dev_export` tool, and the
+// `dev_export_manifest` tool run from WebMCP or from the Tool console.
+//
+// The body is not written here. It is the file
+// `tests/dev_export.rs` compares the two routes' real answer with
+// (`the_export_routes_answer_a_shadowed_site_file_with_a_400_that_names_it`),
+// so these tests are fed what the handler says, not a paraphrase of it.
+const SHADOWED = JSON.parse(
+  fs.readFileSync(new URL('./fixtures/export-shadowed-site-file.json', import.meta.url), 'utf8')
+);
+const SHADOWED_REFUSAL = { status: 400, body: SHADOWED };
+
+/** `dev_export_manifest` as `/b/dev/api/tools.json` publishes it. */
+const MANIFEST_TOOL = {
+  name: 'dev_export_manifest',
+  description: 'What an export would contain.',
+  inputSchema: { type: 'object', properties: {}, additionalProperties: false },
+  outputSchema: { type: 'object' },
+  invocation: {
+    method: 'get',
+    path: '/b/dev/api/export/manifest',
+    path_params: [],
+    query_params: [],
+    body_params: []
+  }
+};
+
+/**
+ * The handler's answer, out of the text a tool result carries it in: both
+ * tools put the response body after a prefix that says which request failed.
+ */
+function refusalIn(text, prefix) {
+  assert.ok(text.startsWith(prefix), text);
+  return JSON.parse(text.slice(prefix.length));
+}
+
+test('the fixture is the refusal these tests are about', () => {
+  // A guard on the file, so a fixture regenerated from some other refusal
+  // cannot leave the tests below passing on a message that names nothing.
+  assert.match(SHADOWED.message, /"site\/manifest\.json"/);
+  assert.match(SHADOWED.message, /"\/manifest\.json"/);
+  assert.match(SHADOWED.message, /Delete the file or move it/);
+});
+
+test('dev_export passes on a refusal that names a file, whole, and downloads nothing', async () => {
+  const { tools, downloads, fetchCalls, elements } = instantiate({
+    hasModelContext: true,
+    exportManifest: MANIFEST,
+    exportRefusal: SHADOWED_REFUSAL
+  });
+  await settle();
+  fetchCalls.length = 0;
+
+  const result = await tools.get('dev_export').execute({});
+
+  assert.equal(result.isError, true);
+  assert.equal(result.structuredContent, undefined);
+  assert.deepEqual(refusalIn(result.content[0].text, 'dev_export: HTTP 400: '), SHADOWED);
+  // Refused at the manifest: the archive was never asked for, and nothing
+  // was handed to the browser as a download.
+  assert.deepEqual(
+    fetchCalls.map(([url]) => String(url)).filter((url) => url.startsWith('/b/dev/api/export')),
+    ['/b/dev/api/export/manifest']
+  );
+  assert.deepEqual(downloads, []);
+  // The person watching the page is told the same thing the agent is.
+  assert.ok(
+    elements.get('dev-log').textContent.includes(JSON.stringify(SHADOWED.message).slice(1, -1)),
+    elements.get('dev-log').textContent
+  );
+});
+
+test('dev_export_manifest passes the same refusal on through WebMCP', async () => {
+  const { tools } = instantiate({
+    hasModelContext: true,
+    toolsManifest: { tools: [MANIFEST_TOOL] },
+    exportRefusal: SHADOWED_REFUSAL
+  });
+  await settle();
+
+  const result = await tools.get('dev_export_manifest').execute({});
+
+  assert.equal(result.isError, true);
+  assert.deepEqual(refusalIn(result.content[0].text, 'Request failed (400): '), SHADOWED);
+});
+
+test('the Tool console shows that refusal for both export tools', async () => {
+  // No WebMCP: the console is the only way this agent calls a tool.
+  const { handle, elements } = instantiate({
+    toolsManifest: { tools: [MANIFEST_TOOL] },
+    exportRefusal: SHADOWED_REFUSAL
+  });
+  await settle();
+
+  for (const [tool, prefix] of [
+    ['dev_export_manifest', 'Request failed (400): '],
+    ['dev_export', 'dev_export: HTTP 400: ']
+  ]) {
+    elements.get('dev-console-tool').value = tool;
+    handle.showConsoleTool();
+    await handle.runConsoleTool();
+
+    const box = elements.get('dev-console-result');
+    assert.equal(box.getAttribute('data-is-error'), 'true', tool);
+    const report = JSON.parse(box.textContent);
+    assert.equal(report.isError, true, tool);
+    // What an agent reading the box gets: the handler's own answer, with the
+    // file's name in it.
+    assert.deepEqual(refusalIn(report.result, prefix), SHADOWED, tool);
+    assert.equal(elements.get('dev-console-run').disabled, false, 'Run comes back on');
+  }
+});
+
+test('the Export button’s own export rejects with that refusal and leaves no export in flight', async () => {
+  const { handle, downloads } = instantiate({ exportRefusal: SHADOWED_REFUSAL });
+  await settle();
+
+  await assert.rejects(
+    () => handle.exportSite(),
+    (error) => {
+      assert.deepEqual(refusalIn(error.message, 'HTTP 400: '), SHADOWED);
+      return true;
+    }
+  );
+  assert.deepEqual(downloads, []);
+  assert.equal(handle.exportInFlight, null);
 });
 
 test('a second export joins the one in flight rather than starting another', async () => {
