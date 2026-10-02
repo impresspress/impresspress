@@ -62,7 +62,7 @@ wafer-block-fastembed = { git = "https://github.com/wafer-run/wafer-run", rev = 
 wafer-net-security = { git = "https://github.com/wafer-run/wafer-run", rev = "3a8bdd83bd8a9784b3c2b30b87dd2cf5a2bfbe1e" }
 
 # Core
-async-trait = "0.1"
+async-trait = "0.1.92"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 tokio = { version = "1", features = ["rt", "sync", "macros", "rt-multi-thread"] }

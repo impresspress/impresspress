@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-async-trait = "0.1"
+async-trait = "0.1.92"
 tokio = { version = "1", features = ["macros", "rt"] }
 wafer-run = { git = "https://github.com/wafer-run/wafer-run", rev = "61e68a0252324af7a6b233e2d250ec3d0612ca5c", default-features = false, features = ["wasmi"] }
 

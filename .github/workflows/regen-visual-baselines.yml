@@ -69,9 +69,7 @@ jobs:
           token: ${{ secrets.BASELINE_PUSH_TOKEN || secrets.GITHUB_TOKEN }}
 
       - name: Install Rust
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          targets: wasm32-unknown-unknown
+        run: rustup toolchain install
 
       - name: Rust cache
         uses: Swatinem/rust-cache@v2
