@@ -97,7 +97,8 @@ function element() {
 ///                 origin: `[{ id, at }]`
 /// - `locks`     — whether the browser has Web Locks
 /// - `registeredUrl` — the script URL of the worker the origin already has
-///                 registered, if it has one
+///                 registered, if it has one; or `{ installing, waiting,
+///                 active }`, a script URL for each version there is
 /// - `installs`  — whether a newly registered worker installs; `false` is one
 ///                 the browser discards (its state is `redundant`)
 /// - `eraseFails` — OPFS entries that cannot be removed
@@ -206,6 +207,8 @@ export function loadShell({
   let registered = 0;
   let unregistered = 0;
   const controlListeners = [];
+  // Registrations and erasures, in the order they happened.
+  const events = [];
   const registeredUrls = [];
   const asked = [];
   const worker = {
@@ -236,12 +239,18 @@ export function loadShell({
       if (registerFails) throw registerFails;
       registered += 1;
       registeredUrls.push(url);
+      events.push(`register ${url}`);
       return { active: worker, update: async () => {} };
     },
     // The registration the origin already has, if any: `registeredUrl` is
     // its worker's script URL.
-    getRegistration: async () =>
-      registeredUrl === undefined ? undefined : { active: { scriptURL: registeredUrl } },
+    getRegistration: async () => {
+      if (registeredUrl === undefined) return undefined;
+      const urls = typeof registeredUrl === 'string' ? { active: registeredUrl } : registeredUrl;
+      return Object.fromEntries(
+        Object.entries(urls).map(([slot, scriptURL]) => [slot, { scriptURL }])
+      );
+    },
     getRegistrations: async () => [
       {
         unregister: async () => {
@@ -261,6 +270,7 @@ export function loadShell({
           for (const name of [...opfs]) yield [name, {}];
         },
         removeEntry: async (name) => {
+          events.push(`erase ${name}`);
           if (eraseFails.includes(name)) {
             throw new DOMException('the file is in use', 'NoModificationAllowedError');
           }
@@ -371,6 +381,9 @@ export function loadShell({
       const cache = await caches.open(RECOVERED_CACHE);
       await cache.put(RECOVERED_KEY, new Response(JSON.stringify({ deaths: [{ id, at: now }] })));
     },
+    /// Registrations (`register <url>`) and OPFS removals (`erase <name>`),
+    /// in the order they happened.
+    events,
     /// The script URLs this load registered.
     registeredUrls,
     /// The record of deaths recovered from, whole.

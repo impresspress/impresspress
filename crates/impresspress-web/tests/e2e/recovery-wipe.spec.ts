@@ -1,8 +1,8 @@
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
-import { test, expect, type Page } from '@playwright/test';
-import { serveGated } from './fixtures/gated-server';
+import { test, expect, type Browser, type BrowserContext, type Page } from '@playwright/test';
+import { serveGated, type GatedServer } from './fixtures/gated-server';
 import {
   holdLoader,
   killRuntime,
@@ -35,6 +35,8 @@ import {
  *  4. Two tabs are told of the one `initialize()` failure → one of them
  *     erases, once; the other joins the app the first one's recovery left,
  *     and what was written there in between is still there.
+ *  5. "Reset" while the worker is still starting → the data is really gone
+ *     afterwards; and an erase the browser refuses is said, not assumed.
  *
  * `impresspress-bundle`'s `tests/sw/loader_recovery.test.mjs` drives every
  * road through the rendered loader against stubs. This is the real worker,
@@ -268,15 +270,72 @@ test('a tab under a dead worker that was left no cause still gets the app back, 
   expect(await stored(page)).toEqual(expect.arrayContaining([DATABASE, WITNESS]));
 });
 
+// The same two tabs, neither held back: the death navigates both at once and
+// both loaders run together. One takes the lock and registers the
+// replacement; the other gets the lock while that replacement is still
+// installing and the dead worker is still the registration's active one. It
+// must boot onto the replacement — registering the dead worker's script URL
+// there would be a registration over it, discarding it under the first tab.
+test('two tabs recovering at the same moment both end in the app, on one replacement', async ({
+  context,
+}) => {
+  const first = await context.newPage();
+  const second = await context.newPage();
+  await boot(first);
+  await boot(second);
+  await plantWitness(first);
+
+  const releaseFirst = await holdLoader(first);
+  const releaseSecond = await holdLoader(second);
+  const firstLines = await recordShellStatus(first);
+  const secondLines = await recordShellStatus(second);
+  await corruptDatabase(first);
+  await first.reload({ waitUntil: 'commit' });
+  await expect(first.locator('#status')).toHaveText('Loading...');
+  await second.reload({ waitUntil: 'commit' });
+  await expect(second.locator('#status')).toHaveText('Loading...');
+
+  releaseFirst();
+  releaseSecond();
+
+  for (const page of [first, second]) {
+    await served(page);
+    await expect(page.locator('input#email')).toBeVisible({ timeout: 60_000 });
+    expect(new URL(page.url()).pathname).toBe(LOGIN);
+  }
+  const lines = [...firstLines, ...secondLines];
+  // One erase between them, no replacement discarded, nobody left waiting.
+  expect(lines.filter((line) => line.endsWith(ERASED)).length).toBe(1);
+  expect(lines.filter((line) => line.startsWith('Error:'))).toEqual([]);
+  expect(lines.filter((line) => line.includes('has not answered'))).toEqual([]);
+  // Both are on the same worker: the one replacement.
+  const workerOf = (page: Page) =>
+    page.evaluate(async () => (await navigator.serviceWorker.getRegistration())!.active!.scriptURL);
+  expect(await workerOf(first)).toMatch(/\/sw\.js\?recovery=\d+$/);
+  expect(await workerOf(second)).toBe(await workerOf(first));
+  expect(await stored(first)).not.toContain(WITNESS);
+});
+
 // Its own host, because the job's cannot be made slow: the worker's first act
 // is to fetch the wasm module, and holding that answer is a start that has
 // not finished — with the worker untouched.
 const SLOW_PORT = 8094;
 const PKG = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../pkg');
 
-test('a start that does not answer in time is waited for, and keeps the local data', async ({
-  browser,
-}) => {
+/**
+ * Bring a tab to the waiting screen with the app's data in place and its
+ * worker ALIVE but unfinished — held at the fetch of its wasm module — and
+ * run `body` there.
+ */
+async function withSlowStart(
+  browser: Browser,
+  body: (at: {
+    page: Page;
+    context: BrowserContext;
+    server: GatedServer;
+    statusLines: string[];
+  }) => Promise<void>,
+) {
   const server = await serveGated(PKG, SLOW_PORT);
   const context = await browser.newContext({ baseURL: `http://127.0.0.1:${SLOW_PORT}` });
   try {
@@ -316,6 +375,17 @@ test('a start that does not answer in time is waited for, and keeps the local da
     await expect(page.locator('#impresspress-stopped-cause')).toHaveText(
       'The app has not answered for 120 seconds.',
     );
+    await body({ page, context, server, statusLines });
+  } finally {
+    await context.close();
+    await server.close();
+  }
+}
+
+test('a start that does not answer in time is waited for, and keeps the local data', async ({
+  browser,
+}) => {
+  await withSlowStart(browser, async ({ page, server, statusLines }) => {
     const keepWaiting = page.getByRole('button', { name: 'Keep waiting' });
     await expect(keepWaiting).toBeVisible();
     await expect(page.getByRole('button', { name: 'Restart it' })).toBeVisible();
@@ -336,8 +406,81 @@ test('a start that does not answer in time is waited for, and keeps the local da
     await page.waitForURL(/\/b\/auth\/login/, { timeout: 60_000 });
     await expect(page.locator('input#email')).toBeVisible();
     expect(await stored(page)).toEqual(expect.arrayContaining([DATABASE, WITNESS]));
-  } finally {
-    await context.close();
-    await server.close();
-  }
+  });
+});
+
+// "Reset" on the waiting screen is pressed while a worker is ALIVE. Erasing
+// under it would not stick — a running worker writes its own copy back, or
+// holds a file the erase then cannot remove — so the reset brings the
+// replacement in first and erases after. What matters is the end: the data
+// is really gone, and the app starts on a database of its own making.
+test('a reset while the worker is still starting ends with the local data really gone', async ({
+  browser,
+}) => {
+  await withSlowStart(browser, async ({ page, server }) => {
+    await page.getByRole('button', { name: 'Reset local data and reload' }).click();
+    // The replacement is registered at once, and waits: a browser does not
+    // activate a new version while the old one is still in the middle of
+    // something — here, its start. Nothing has been erased under it.
+    const versions = () =>
+      page.evaluate(async () => {
+        const registration = await navigator.serviceWorker.getRegistration();
+        return {
+          active: registration?.active?.scriptURL ?? null,
+          coming: (registration?.waiting ?? registration?.installing)?.scriptURL ?? null,
+        };
+      });
+    await expect.poll(async () => (await versions()).coming).toMatch(/\/sw\.js\?recovery=\d+$/);
+    await page.waitForTimeout(1500);
+    expect((await versions()).active).toMatch(/\/sw\.js$/);
+    expect(await stored(page)).toEqual(expect.arrayContaining([DATABASE, WITNESS]));
+
+    // The old worker's start finishes; the replacement takes over; THEN the
+    // data is erased, and the app starts on the replacement.
+    server.release();
+
+    await page.waitForURL(/\/b\/auth\/login/, { timeout: 60_000 });
+    await expect(page.locator('input#email')).toBeVisible();
+    const after = await stored(page);
+    expect(after).toContain(DATABASE);
+    expect(after).not.toContain(WITNESS);
+  });
+});
+
+// An erase the browser refuses — here because another tab has one of the
+// files open — is not passed off as done: the screen says so, and the app
+// is not entered until the person has chosen.
+test('a reset whose erase cannot complete says so instead of starting the app', async ({
+  browser,
+}) => {
+  await withSlowStart(browser, async ({ page, context, server }) => {
+    // Another tab of the origin, holding the witness open for writing. (A
+    // file the host serves itself, so it loads without the worker.)
+    const other = await context.newPage();
+    await other.goto('/manifest.json');
+    await other.evaluate(async (name) => {
+      const root = await navigator.storage.getDirectory();
+      (window as any).__held = await (await root.getFileHandle(name)).createWritable();
+    }, WITNESS);
+
+    await page.getByRole('button', { name: 'Reset local data and reload' }).click();
+    // (The replacement activates once the old worker's start has finished.)
+    server.release();
+    await expect(page.locator('#impresspress-stopped-title')).toHaveText(
+      /local data could not be erased$/,
+      { timeout: 60_000 },
+    );
+    await expect(page.locator('#impresspress-stopped-cause')).toHaveText(
+      'The data stored locally in this browser could not be erased.',
+    );
+    expect(await stored(other)).toContain(WITNESS);
+    expect(new URL(page.url()).pathname, 'the app was not entered').toBe('/');
+
+    // The other tab lets go; trying again erases, and the app starts clean.
+    await other.evaluate(() => (window as any).__held.abort());
+    await page.getByRole('button', { name: 'Erase local data and try again' }).click();
+    await page.waitForURL(/\/b\/auth\/login/, { timeout: 60_000 });
+    await expect(page.locator('input#email')).toBeVisible();
+    expect(await stored(page)).not.toContain(WITNESS);
+  });
 });

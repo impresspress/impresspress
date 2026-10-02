@@ -28,14 +28,14 @@ const ERASES =
 
 const TRAPPED = 'error handling request: Error: unreachable executed';
 
-/// The 503, whole. Answers the death's stamp (`id`, `diedAt`), which is
-/// the worker's to make: a test checks its shape here and its constancy
-/// across roads where that is the subject.
+/// The 503, whole. Answers the death's `id`, which is the worker's to make:
+/// a test checks its shape here and its constancy across roads where that
+/// is the subject.
 async function assertStoppedAnswer(response, cause, stage, next = RESTART) {
   assert.equal(response.status, 503);
   assert.equal(response.headers.get('content-type'), 'application/json');
   assert.equal(response.headers.get('cache-control'), 'no-store');
-  const { id, diedAt, ...body } = await response.json();
+  const { id, ...body } = await response.json();
   assert.deepEqual(body, {
     error: 'Unavailable',
     message: `The app's runtime stopped (${cause}). ${next}`,
@@ -44,8 +44,7 @@ async function assertStoppedAnswer(response, cause, stage, next = RESTART) {
     stage
   });
   assert.match(id, /^[0-9a-f-]{36}$/);
-  assert.equal(typeof diedAt, 'number');
-  return { id, diedAt };
+  return id;
 }
 
 /// The navigation was answered with the boot shell the host has at `/`, and
@@ -71,7 +70,7 @@ function assertPageLeftAlone(worker) {
 /// the cause and the stage both ways they can arrive there.
 function assertSentToBootShell(worker, cause, stage) {
   assert.equal(worker.posted.length, 1);
-  const { id, diedAt, ...message } = worker.posted[0];
+  const { id, ...message } = worker.posted[0];
   assert.deepEqual(message, { type: 'sw-self-destruct', reason: cause, stage });
   assert.deepEqual(worker.navigated, [CLIENT_URL]);
   const left = worker.leftForBootShell();
@@ -80,8 +79,8 @@ function assertSentToBootShell(worker, cause, stage) {
   assert.equal(typeof left.at, 'number');
   // The message and the entry are about the same death.
   assert.match(id, /^[0-9a-f-]{36}$/);
-  assert.deepEqual({ id: left.id, diedAt: left.diedAt }, { id, diedAt });
-  return { id, diedAt };
+  assert.equal(left.id, id);
+  return id;
 }
 
 test('a request from a page that the runtime dies on gets the cause, and the page is left alone', async (t) => {
@@ -270,26 +269,27 @@ test('every road carries the same death id, however often it is taken', async (t
     'initialize'
   );
   const told = assertSentToBootShell(worker, cause, 'initialize');
-  assert.deepEqual(told, first);
+  assert.equal(told, first);
 
   // Later: another tab's navigation, another request. `at` on the entry is
-  // when it was left; the death's own stamp does not move.
+  // when it was left and moves; the death's id does not.
+  const firstLeft = worker.leftForBootShell().at;
   await new Promise((resolve) => setTimeout(resolve, 5));
   await worker.request('/b/products/', { mode: 'navigate' });
   const left = worker.leftForBootShell();
-  assert.deepEqual({ id: left.id, diedAt: left.diedAt }, first);
-  assert.ok(left.at > left.diedAt, 'the entry is dated when it was left');
+  assert.equal(left.id, first);
+  assert.ok(left.at > firstLeft, 'the entry is dated when it was left');
   const again = await assertStoppedAnswer(
     (await worker.request(LOGIN, { method: 'POST' })).response,
     cause,
     'initialize'
   );
-  assert.deepEqual(again, first);
+  assert.equal(again, first);
 
   // And another worker's death is another death.
   const other = await loadWorker({ initialize: trap('migration 0007 failed') });
   const { id } = await (await other.request('/', { method: 'GET' })).response.json();
-  assert.notEqual(id, first.id);
+  assert.notEqual(id, first);
 });
 
 test('a shell that asks to be controlled is claimed', async (t) => {

@@ -152,11 +152,11 @@ export async function holdLoader(page: Page): Promise<() => void> {
 
 /**
  * What the dead worker left for the boot shell `page` is showing: the cause,
- * the stage and the death's stamp. Read without consuming it.
+ * the stage and the death's id. Read without consuming it.
  */
 export async function leftCause(
   page: Page,
-): Promise<{ reason: string; stage: string; id: string; diedAt: number }> {
+): Promise<{ reason: string; stage: string; id: string }> {
   return page.evaluate(async () => {
     const cache = await caches.open('__impresspress_sw_stopped');
     const entry = await cache.match('/__impresspress_sw_stopped');
@@ -174,12 +174,12 @@ export async function leftCause(
  */
 export async function tellShell(
   page: Page,
-  death: { reason: string; stage: string; id: string; diedAt: number },
+  death: { reason: string; stage: string; id: string },
 ) {
   await page.evaluate((d) => {
     sessionStorage.setItem(
       '__impresspress_sw_recover',
-      JSON.stringify({ cause: d.reason, stage: d.stage, id: d.id, diedAt: d.diedAt, at: Date.now() }),
+      JSON.stringify({ cause: d.reason, stage: d.stage, id: d.id, at: Date.now() }),
     );
   }, death);
 }

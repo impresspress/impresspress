@@ -60,14 +60,13 @@ let poisonReason = '';
 // It is what the loader's recovery decides on, so it is a field of its own:
 // nothing ever reads it back out of `poisonReason`.
 let poisonStage = '';
-// WHICH death this is: an id made once, when this worker is poisoned, and the
-// time it happened. Sent beside the cause on every road, the same on each.
+// WHICH death this is: an id made once, when this worker is poisoned. Sent
+// beside the cause on every road, the same on each.
 // A worker answers many navigations after it dies and several tabs may hold
 // its cause at once; the id is how `loader.js` knows they are all about ONE
 // failure, so that the tab that recovers from it does so for the others too
 // and none of them recovers — or erases — a second time.
 let poisonId = '';
-let poisonedAt = 0;
 
 // The wasm module could not be fetched or instantiated (`init()`): a network
 // failure, a deploy that replaced the hashed file mid-load, a stale module
@@ -137,7 +136,6 @@ async function selfDestruct(reason, stage, toBootShell) {
     poisoned = true;
     poisonStage = stage;
     poisonId = crypto.randomUUID();
-    poisonedAt = Date.now();
     poisonReason = String(reason);
     if (poisonReason.length > CAUSE_MAX_CHARS) {
         poisonReason = `${poisonReason.slice(0, CAUSE_MAX_CHARS)}…`;
@@ -157,8 +155,7 @@ async function selfDestruct(reason, stage, toBootShell) {
                     type: 'sw-self-destruct',
                     reason: poisonReason,
                     stage: poisonStage,
-                    id: poisonId,
-                    diedAt: poisonedAt
+                    id: poisonId
                 });
             } catch (e) {
                 console.warn('[__APP_NAME__] postMessage failed:', e);
@@ -186,11 +183,11 @@ async function selfDestruct(reason, stage, toBootShell) {
 
 /**
  * Leave what this worker reports where the boot shell will find it — see
- * `STOP_CAUSE_CACHE`. `id` and `diedAt` are the death's own and the same on
- * every leave. `at` is when THIS entry was left: it lets the shell tell a
- * cause left for the navigation in progress from one no shell ever came to
- * read. (Not `diedAt`, for that: a poisoned worker stays poisoned, and a
- * reload ten minutes after it died is still a navigation in progress.)
+ * `STOP_CAUSE_CACHE`. `id` is the death's own and the same on every leave.
+ * `at` is when THIS entry was left: it lets the shell tell a cause left for
+ * the navigation in progress from one no shell ever came to read. (Not when
+ * the worker died: a poisoned worker stays poisoned, and a reload ten
+ * minutes after it died is still a navigation in progress.)
  */
 async function leaveCauseForBootShell() {
     try {
@@ -202,7 +199,6 @@ async function leaveCauseForBootShell() {
                     reason: poisonReason,
                     stage: poisonStage,
                     id: poisonId,
-                    diedAt: poisonedAt,
                     at: Date.now()
                 }),
                 { headers: { 'Content-Type': 'application/json' } }
@@ -525,8 +521,8 @@ async function runtimeStopped(request) {
     const next = recoveryErases()
         ? 'Reloading the page may run a recovery that erases the data this browser stores for the app.'
         : 'Reload the page to restart it; the data this browser stores for the app is kept.';
-    // `cause`, `stage`, `id` and `diedAt` are the fields the runtime's shape
-    // does not have: the bare reason, where it failed and which death this
+    // `cause`, `stage` and `id` are the fields the runtime's shape does not
+    // have: the bare reason, where it failed and which death this
     // is, for `loader.js`, whose boot probe is a request like any other and
     // which words the sentence around them itself.
     const body = {
@@ -535,8 +531,7 @@ async function runtimeStopped(request) {
         code: 'runtime_stopped',
         cause: poisonReason,
         stage: poisonStage,
-        id: poisonId,
-        diedAt: poisonedAt
+        id: poisonId
     };
     return new Response(JSON.stringify(body), {
         status: 503,

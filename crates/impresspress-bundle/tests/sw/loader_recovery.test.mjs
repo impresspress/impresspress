@@ -54,12 +54,12 @@ const ERASING = `${STOPPED} — recovering; the data stored locally in this brow
 const KEEPING = `${STOPPED} — restarting it; the data stored locally in this browser is kept…`;
 // The script URL a recovery registers its replacement under.
 const REPLACEMENT = `/sw.js?recovery=${NOW}`;
-const DEATH = { id: '0f8fad5b-d9cb-469f-a165-70867728950e', diedAt: NOW - 5_000 };
+const DEATH = { id: '0f8fad5b-d9cb-469f-a165-70867728950e' };
 
 // The breaker as the loader writes it: what the worker reported, and when
-// this page was told. A report with no death stamp is held as `''` and `0`.
-const breaker = (cause, stage, { id = '', diedAt = 0, at = NOW } = {}) =>
-  JSON.stringify({ cause, stage: typeof stage === 'string' ? stage : '', id, diedAt, at });
+// this page was told. A report with no death id is held as `''`.
+const breaker = (cause, stage, { id = '', at = NOW } = {}) =>
+  JSON.stringify({ cause, stage: typeof stage === 'string' ? stage : '', id, at });
 const left = (stage, at = NOW - 2_000, death = {}) => ({ reason: CAUSE, stage, at, ...death });
 const sessionOf = (shell) => Object.fromEntries(shell.session.map);
 
@@ -403,11 +403,15 @@ test('a recovery on a page of the app goes on to that page', async () => {
   assertEntered(shell);
 });
 
-test('a shell at the app’s own address goes on to the boot URL, whatever its query', async () => {
-  const shell = loadShell({ search: '?utm=1', now: NOW });
+// The boot URL here is the shell's own address, so the app is opened where
+// it was opened: what the address carried — a query, a fragment — is the
+// app's to read, and a first visit must not lose it.
+test('a first visit keeps the query and the fragment it came with', async () => {
+  const shell = loadShell({ search: '?invite=abc#welcome', now: NOW });
   await shell.booted;
 
-  assertEntered(shell, `${ORIGIN}/`);
+  assert.equal(shell.probes[0].url, `${ORIGIN}/?invite=abc#welcome`);
+  assertEntered(shell);
 });
 
 // The loop guard for the return itself: if the page the person was on is
@@ -524,7 +528,7 @@ const WAITING_NEXT =
 
 for (const [branch, search, destination] of [
   ['reload', '', null],
-  ['redirect', '?utm=1', `${ORIGIN}/`]
+  ['reload with a query', '?utm=1', null]
 ]) {
   for (const wipe of [false, true]) {
     const rendering = wipe ? 'wipe-enabled' : 'default';
@@ -612,12 +616,20 @@ for (const [branch, search, destination] of [
       assert.equal(restarting.probes[2].url, `${ORIGIN}/`);
       assert.equal(restarting.session.getItem(RECOVERY_DONE), null);
 
-      // "Reset" erases — the person's choice.
+      // "Reset" erases — the person's choice. The worker it was waiting on
+      // may well be running, so the replacement is brought in FIRST and the
+      // data erased after: erased under a running worker, it could be
+      // written straight back.
       const resetting = waiting(2);
       await resetting.booted;
       await resetting.stuck('impresspress-reset').click();
       assert.deepEqual(resetting.opfs(), []);
-      assert.deepEqual(resetting.registeredUrls, ['/sw.js', REPLACEMENT]);
+      assert.deepEqual(resetting.events, [
+        'register /sw.js',
+        `register ${REPLACEMENT}`,
+        'erase app.sqlite'
+      ]);
+      assert.equal(resetting.probes[2].url, `${ORIGIN}/`);
     });
   }
 }
@@ -815,7 +827,8 @@ test('the buttons do not redo a recovery another tab has done', async () => {
   await alone.booted;
   await alone.stuck('impresspress-reset').click();
   assert.deepEqual(alone.recovered(), [DEATH.id]);
-  assert.equal(alone.lockRequests.length, 2);
+  // The boot's, the replacement's, and the erase's that follows it.
+  assert.equal(alone.lockRequests.length, 3);
 });
 
 // Without Web Locks two tabs cannot be kept from recovering at once, so the
@@ -867,6 +880,51 @@ test('a recovery registers its replacement under a new script URL, over the live
   assert.equal(shell.unregistered(), 0);
 });
 
+// "The script URL the origin already has" is its NEWEST version's. While a
+// replacement another tab has just registered is still installing, the
+// registration's active worker is still the dead one, under the old URL —
+// and registering that URL would be a registration over the replacement,
+// which discards it and leaves the tab that made it with nothing.
+test('a boot that meets a replacement still installing registers that replacement, not the dead worker under it', async () => {
+  const replacing = { active: `${ORIGIN}/sw.js`, installing: `${ORIGIN}${REPLACEMENT}` };
+
+  // A tab that was told of the death and finds it recorded…
+  const joining = loadShell({
+    session: { [BREAKER]: breaker(CAUSE, 'initialize', DEATH) },
+    recovered: [{ id: DEATH.id, at: NOW }],
+    registeredUrl: replacing,
+    now: NOW,
+    wipe: true
+  });
+  await joining.booted;
+  assert.deepEqual(joining.registeredUrls, [`${ORIGIN}${REPLACEMENT}`]);
+
+  // …a tab that was told nothing…
+  const ordinary = loadShell({ registeredUrl: replacing, now: NOW });
+  await ordinary.booted;
+  assert.deepEqual(ordinary.registeredUrls, [`${ORIGIN}${REPLACEMENT}`]);
+
+  // …and a button pressed on a death that has since been recovered from.
+  const stuck = loadShell({
+    stop: left('initialize', NOW, DEATH),
+    registeredUrl: replacing,
+    now: NOW,
+    session: { [RECOVERY_DONE]: 'restarted' }
+  });
+  await stuck.booted;
+  await stuck.recordElsewhere(DEATH.id);
+  await stuck.stuck('impresspress-retry').click();
+  assert.deepEqual(stuck.registeredUrls, [`${ORIGIN}${REPLACEMENT}`]);
+
+  // A waiting version counts the same way.
+  const waiting = loadShell({
+    registeredUrl: { active: `${ORIGIN}/sw.js`, waiting: `${ORIGIN}${REPLACEMENT}` },
+    now: NOW
+  });
+  await waiting.booted;
+  assert.deepEqual(waiting.registeredUrls, [`${ORIGIN}${REPLACEMENT}`]);
+});
+
 test('every other boot registers the script URL the origin already has', async () => {
   // A healthy replacement is not replaced by a boot that has no reason to.
   const kept = loadShell({ registeredUrl: `${ORIGIN}${REPLACEMENT}`, now: NOW });
@@ -913,6 +971,62 @@ test('an erase is recorded as done only once it is', async () => {
     stuck.stuck('impresspress-stopped-next').textContent,
     `${ERASE_NOT_DONE} ${OFFER_ERASES}`
   );
+});
+
+// The automatic recovery erases under a worker that is DEAD, and before its
+// replacement exists, so that the replacement never starts on what is being
+// erased. (The buttons' order is the other way round — the waiting screen's
+// test above says why.)
+test('the automatic recovery erases before it registers the replacement', async () => {
+  const shell = loadShell({ stop: left('initialize'), now: NOW, wipe: true });
+  await shell.booted;
+
+  assert.deepEqual(shell.events, ['erase app.sqlite', `register ${REPLACEMENT}`]);
+});
+
+test('a button’s erase that does not complete is shown, and the app is not entered as though it had', async () => {
+  const failing = () =>
+    loadShell({
+      path: '/b/auth/login',
+      stop: left('initialize', NOW, DEATH),
+      now: NOW,
+      wipe: true,
+      session: { [RECOVERY_DONE]: 'restarted' },
+      opfsFiles: ['app.sqlite', 'uploads'],
+      eraseFails: ['app.sqlite']
+    });
+
+  for (const button of ['impresspress-reset', 'impresspress-retry']) {
+    const shell = failing();
+    await shell.booted;
+    await shell.stuck(button).click();
+
+    assert.equal(
+      shell.stuck('impresspress-stopped-title').textContent,
+      "Kiln & Co's local data could not be erased"
+    );
+    assert.equal(
+      shell.stuck('impresspress-stopped-cause').textContent,
+      'The data stored locally in this browser could not be erased.'
+    );
+    assert.equal(shell.stuck('impresspress-retry').textContent, 'Erase local data and try again');
+    assert.equal(shell.stuck('impresspress-continue').textContent, 'Continue without erasing');
+    assert.equal(shell.stuck('impresspress-reset'), null);
+    // Not entered, and — on the reset too — the note of what happened kept.
+    assert.equal(shell.probes.length, 0);
+    assert.deepEqual(shell.location.replaced, []);
+    assert.equal(shell.session.getItem(RECOVERY_DONE), 'erase-failed');
+    assert.deepEqual(shell.opfs(), ['app.sqlite']);
+
+    // Trying again tries the erase again, on another replacement…
+    await shell.stuck('impresspress-retry').click();
+    assert.equal(shell.events.filter((event) => event === 'erase app.sqlite').length, 2);
+    assert.equal(shell.probes.length, 0);
+    // …and going on without it is the person's to choose.
+    await shell.stuck('impresspress-continue').click();
+    assert.deepEqual(shell.location.replaced, [`${ORIGIN}/`]);
+    assert.deepEqual(shell.opfs(), ['app.sqlite']);
+  }
 });
 
 test('a recovery that erases nothing never says it erased', async () => {
