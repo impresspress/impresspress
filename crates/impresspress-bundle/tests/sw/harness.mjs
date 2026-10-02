@@ -40,12 +40,17 @@ function source(variable) {
 const SOURCES = { plain: source('SW_JS'), wipe: source('SW_JS_WIPE') };
 
 export const ORIGIN = 'https://app.example';
+/// What the static host serves at the boot shell's URL.
+export const SHELL_HTML = '<!DOCTYPE html><title>the boot shell</title>';
 
 let instances = 0;
 
 /// One fresh worker: its own module instance (so its own `poisoned` state),
 /// its own stubs. `runtime` supplies `init` / `initialize` / `handle_request`;
-/// each defaults to succeeding. `wipe` picks the `opfs_wipe_on_recovery`
+/// each defaults to succeeding. `runtime.host(url)` is the static host's
+/// answer to a request the worker makes; by default it has the boot shell at
+/// `/` and nothing else — a plain file server, with no fallback for the paths
+/// only the runtime serves. `wipe` picks the `opfs_wipe_on_recovery`
 /// rendering.
 export async function loadWorker(runtime = {}, { wipe = false } = {}) {
   const source = SOURCES[wipe ? 'wipe' : 'plain'];
@@ -83,7 +88,7 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
       (async () => ({ response: new Response('from the runtime'), after: Promise.resolve() }))
   };
   globalThis.self = {
-    location: { origin: ORIGIN },
+    location: { origin: ORIGIN, href: `${ORIGIN}/sw.js` },
     addEventListener: (type, listener) => {
       listeners[type] = listener;
     },
@@ -97,10 +102,14 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
     },
     clients: { claim: async () => {}, matchAll: async () => [client] }
   };
-  // What the static host would say. The 405 is the one the incident met.
+  // What the static host would say. `network` records what it was asked for:
+  // the URL string the worker passed, or the request object it forwarded.
   globalThis.fetch = async (request) => {
     network.push(request);
-    return new Response(null, { status: 405 });
+    if (runtime.host) return runtime.host(request);
+    return request === '/'
+      ? new Response(SHELL_HTML, { status: 200, headers: { 'Content-Type': 'text/html' } })
+      : new Response('no such file', { status: 404 });
   };
 
   // A distinct URL per call, so each call evaluates the module afresh.

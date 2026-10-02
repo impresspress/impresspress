@@ -67,20 +67,29 @@ function element() {
 ///                 function returning one / throwing
 /// - `wipe`      — the `opfs_wipe_on_recovery` rendering
 /// - `now`       — what `Date.now()` returns
+/// - `path`      — the path the shell was loaded at; `/` is its own, anything
+///                 else is a shell sw.js answered a dead-runtime navigation
+///                 with
 /// - `search`    — the query string the shell was loaded with (the boot URL
 ///                 is `/`, so any makes this load a redirect, not a reload)
 /// - `title`     — what the page's `[data-app-title]` element shows, or `null`
 ///                 for a page without one; `documentTitle` is `<title>`
 /// - `timesOut`  — the boot probe never answers: its 60 s timer fires at once
 ///                 and `fetch` rejects as an aborted request does
+/// - `onProbe`   — called when the probe is made, with `post` (sw.js posting a
+///                 message to this page), before the probe is answered
+/// - `registerFails` — `navigator.serviceWorker.register` rejects with this
 export function loadShell({
   session = {},
   stop,
   probe,
   wipe = false,
   now = 1_000_000,
+  path = '/',
   search = '',
   timesOut = false,
+  onProbe,
+  registerFails,
   title = 'Kiln & Co',
   documentTitle = title
 } = {}) {
@@ -127,9 +136,9 @@ export function loadShell({
   };
 
   const location = {
-    href: `${ORIGIN}/${search}`,
+    href: `${ORIGIN}${path}${search}`,
     origin: ORIGIN,
-    pathname: '/',
+    pathname: path,
     reloads: 0,
     replaced: [],
     reload() {
@@ -151,6 +160,7 @@ export function loadShell({
       if (type === 'message') messageListeners.push(listener);
     },
     register: async () => {
+      if (registerFails) throw registerFails;
       registered += 1;
       return { active: worker, update: async () => {} };
     },
@@ -176,9 +186,11 @@ export function loadShell({
     }
   };
 
+  const post = (data) => messageListeners.forEach((l) => l({ data }));
   const probes = [];
   const fetch = async (url, init) => {
     probes.push({ url, init });
+    if (onProbe) onProbe({ post });
     if (timesOut) {
       if (!init.signal.aborted) throw new Error('the probe timer did not abort the request');
       throw new DOMException('The operation was aborted.', 'AbortError');
@@ -234,7 +246,7 @@ export function loadShell({
     cacheNames: () => [...cacheNames],
     opfs: () => [...opfs],
     /// sw.js posting a message to this page.
-    post: (data) => messageListeners.forEach((l) => l({ data }))
+    post
   };
 }
 

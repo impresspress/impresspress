@@ -1063,7 +1063,7 @@ jobs:
         # belongs with the other fake-worker specs.
         run: |
           set -o pipefail
-          npx playwright test --config=tests/playwright.config.ts tests/e2e/dev-foundations.spec.ts tests/e2e/dev-workspace.spec.ts tests/e2e/dev-enter.spec.ts tests/e2e/dev-compiler.spec.ts tests/e2e/dev-compile-tool.spec.ts tests/e2e/dev-bootstrap.spec.ts tests/e2e/dev-llms.spec.ts tests/e2e/dev-auth-errors.spec.ts 2>&1 \
+          npx playwright test --config=tests/playwright.config.ts tests/e2e/dev-foundations.spec.ts tests/e2e/dev-workspace.spec.ts tests/e2e/dev-enter.spec.ts tests/e2e/dev-compiler.spec.ts tests/e2e/dev-compile-tool.spec.ts tests/e2e/dev-bootstrap.spec.ts tests/e2e/dev-llms.spec.ts tests/e2e/dev-auth-errors.spec.ts tests/e2e/dev-stopped-navigation.spec.ts 2>&1 \
             | tee /tmp/dev-sandbox-e2e.log
 
       - name: Stop server

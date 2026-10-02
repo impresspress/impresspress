@@ -66,7 +66,10 @@ pub struct AppConfig {
     /// via `impresspress build --target web --opfs-wipe-on-recovery` so the
     /// stale-schema migration scenario self-resolves without manual user
     /// action; other apps surface the error to the user instead and let
-    /// them choose whether to clear data.
+    /// them choose whether to clear data. Even when true, only a failure the
+    /// worker reported is recovered from by wiping: a boot that merely runs
+    /// out of time restarts the worker and keeps the data (`erasesFor` in
+    /// `loader.js.tmpl`).
     pub opfs_wipe_on_recovery: bool,
     /// Whether the Service Worker boots the runtime with the browser
     /// development sandbox on: `sw.js.tmpl`'s `__DEV_ENABLED__` placeholder

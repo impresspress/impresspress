@@ -42,14 +42,16 @@ let poisoned = false;
 let poisonReason = '';
 
 // Whether `unregister()` went through. If it did not, this worker is still
-// the one a reload reaches, and `runtimeStopped` words its answer for that.
+// the one a navigation reaches, and `runtimeStopped` words its answer for
+// that.
 let unregistered = false;
 // Whether the open pages were sent to the boot shell (`selfDestruct`).
 let sentToBootShell = false;
 
 // Whether `loader.js`'s recovery erases the data this browser stores for the
-// app (OPFS) — the same build-time flag `loader.js` is rendered with. Here so
-// that an answer which tells someone to reload can say what the reload costs.
+// app (OPFS) for a failure this worker reports — the same build-time flag
+// `loader.js` is rendered with. Here so that an answer which sends someone
+// to that recovery can say what it costs.
 const OPFS_WIPE_ON_RECOVERY = __OPFS_WIPE_ON_RECOVERY__;
 
 // The longest cause kept. A wasm-bindgen error can carry a whole stack; the
@@ -68,6 +70,16 @@ const CAUSE_MAX_CHARS = 300;
 const STOP_CAUSE_CACHE = '__impresspress_sw_stopped';
 const STOP_CAUSE_KEY = '/__impresspress_sw_stopped';
 
+// The boot shell's own URL: the one address the static host itself must
+// answer, because a first visit — no worker yet — starts there. It is where
+// this worker gets the shell document it answers a navigation with once the
+// runtime is dead (`bootShell`), and where it sends the pages it navigates
+// (`selfDestruct`). Not the address that was asked for: a host with no
+// fallback for unknown paths answers `/b/…` with its 404, and the shell is
+// the only thing that can show the cause. The same name is declared in
+// `loader.js`, for the same reason.
+const SHELL_URL = '/';
+
 /**
  * The runtime is dead for the rest of this worker's life. Poison the worker
  * and unregister it, so the next page load registers a fresh one.
@@ -78,16 +90,17 @@ const STOP_CAUSE_KEY = '/__impresspress_sw_stopped';
  *
  * - `true` — nothing can be served at all (`init()` / `initialize()` failed),
  *   or a NAVIGATION failed and its document is going to be the boot shell
- *   anyway (`runtimeStopped` sends it there). The cause is left for the shell (`leaveCauseForBootShell`), each
- *   page is told and re-navigated, and `loader.js` runs its recovery path
- *   with the cause on screen.
+ *   anyway (`runtimeStopped` answers it with the shell). The cause is left
+ *   for the shell (`leaveCauseForBootShell`), each page is told and sent to
+ *   the shell, and `loader.js` runs its recovery path with the cause on
+ *   screen.
  * - `false` — a request FROM a page failed (an API call, a form post) after
  *   the runtime had started. The page is left exactly where it is: the
  *   request gets `runtimeStopped`'s 503 and the page shows the cause.
  *   Re-navigating here would replace the page a moment after the cause
- *   reached it, with a clean form that says nothing. What a reload then does
- *   depends on whether the unregister went through — `runtimeStopped` says
- *   which in its answer.
+ *   reached it, with a clean form that says nothing. What loading the app
+ *   again then does depends on whether the unregister went through —
+ *   `runtimeStopped` says which in its answer.
  */
 async function selfDestruct(reason, toBootShell) {
     if (poisoned) return;
@@ -121,11 +134,17 @@ async function selfDestruct(reason, toBootShell) {
             } catch (e) {
                 console.warn('[__APP_NAME__] postMessage failed:', e);
             }
+            // To SHELL_URL, not back to `c.url`: if the unregister above
+            // went through, the navigation is the static host's to answer,
+            // and the shell's address is the one it is sure to have. (If it
+            // did not, the navigation comes back here and `runtimeStopped`
+            // answers it with the same shell.)
+            //
             // `navigate()` returns a promise, and rejects for a client this
             // worker does not control: the `.catch` is for that, the `try`
             // for a client that has no `navigate` at all.
             try {
-                c.navigate(c.url).catch((e) => {
+                c.navigate(SHELL_URL).catch((e) => {
                     console.warn('[__APP_NAME__] navigate() failed:', e);
                 });
             } catch (e) {
@@ -408,9 +427,9 @@ async function handleFetch(event) {
  * The answer to a request the runtime would have handled, once the runtime
  * is dead (`poisoned`).
  *
- * A NAVIGATION goes to the network: the static host answers it with the boot
- * HTML, and `loader.js` shows the cause this leaves for it and runs its
- * recovery path.
+ * A NAVIGATION is answered with the boot shell (`bootShell`), at the address
+ * that was asked for, and `loader.js` shows the cause this leaves for it and
+ * runs its recovery path.
  *
  * Nothing else does. What reaches `handleFetch` is a request the runtime was
  * going to answer — an API call, a form post — and the static host has
@@ -424,30 +443,40 @@ async function handleFetch(event) {
  * one), with the cause in the message. A page that shows `message` — every
  * auth form does — then shows the cause.
  *
- * The message ends with what a reload will do, because that differs and one
- * of the answers costs data:
+ * The message ends with what to do next and what it costs, because that
+ * differs and one of the answers costs data:
  *
- * - The page was left alone and this worker is unregistered: a reload is an
- *   ordinary boot with a fresh worker. Nothing is recovered, nothing erased.
+ * - The page was left alone and this worker is unregistered: loading the app
+ *   again is an ordinary boot with a fresh worker. Nothing is recovered,
+ *   nothing erased.
  * - The pages were sent to the boot shell, or this worker could NOT
- *   unregister (so a reload is a navigation back to it, which leaves the
- *   cause for the shell): the shell that finds the cause runs its recovery.
- *   In a build rendered with `opfs_wipe_on_recovery`, that recovery erases
- *   the app's local data, and the message says so rather than calling it a
- *   restart. "May", because the cause is read once: if another tab's shell
- *   took it first, this page's reload is an ordinary boot — and the data is
- *   the origin's, so it may already be gone by that tab's recovery.
+ *   unregister (so a navigation in its scope comes back to it, and it
+ *   answers with the shell and leaves the cause): the shell that finds the
+ *   cause runs its recovery. `loader.js` erases the app's local data in that
+ *   recovery only for a failure this worker reported, in a build rendered
+ *   with `opfs_wipe_on_recovery` — which is this case, so the message says so
+ *   rather than calling it a restart. "May", because the cause is read once:
+ *   if another tab's shell took it first, this page's reload is an ordinary
+ *   boot — and the data is the origin's, so it may already be gone by that
+ *   tab's recovery.
+ *
+ * "Open <the shell's address>", not "reload the page", in the two sentences
+ * that tell someone what to do. An unregistered worker answers nothing: a
+ * reload of a page at `/b/…` is then the static host's to answer, and a host
+ * with no fallback for unknown paths answers it 404. The shell's address is
+ * the one that works on every host (see SHELL_URL).
  */
 async function runtimeStopped(request) {
     if (request.mode === 'navigate') {
         await leaveCauseForBootShell();
-        return fetch(request);
+        return bootShell();
     }
-    let next = 'Reload the page to restart it.';
+    const shell = new URL(SHELL_URL, self.location.href).href;
+    let next = `Open ${shell} to restart it.`;
     if (sentToBootShell || !unregistered) {
         next = OPFS_WIPE_ON_RECOVERY
             ? 'Reloading the page may run a recovery that erases the data this browser stores for the app.'
-            : 'Reload the page to recover.';
+            : `Open ${shell} to recover.`;
     }
     // `cause` is the one field the runtime's shape does not have: the bare
     // reason, for `loader.js`, whose boot probe is a request like any other
@@ -464,5 +493,35 @@ async function runtimeStopped(request) {
             'Content-Type': 'application/json',
             'Cache-Control': 'no-store'
         }
+    });
+}
+
+/**
+ * The boot shell's document, as the answer to a navigation to a dead runtime.
+ *
+ * Fetched from SHELL_URL and not from the address that was asked for. Handing
+ * the navigation itself to the static host only works where the host answers
+ * unknown paths with the shell; a plain file server answers `/b/…` with its
+ * own 404, the shell never loads, and the cause this worker left is never
+ * shown. The shell's own address is the one the host must have.
+ *
+ * A document, not a redirect: the address bar keeps what was asked for, and
+ * nothing here can go round — this worker answers, and `loader.js` decides
+ * what happens next. The shell loads `/loader.js` and its other scripts by
+ * absolute path, and those are on the bypass list, so the fetch handler above
+ * leaves them to the network (or to `passthrough`) even now.
+ *
+ * Rebuilt rather than returned as fetched: a host that answers SHELL_URL by
+ * redirecting (to `/index.html`, say) gives a response marked as redirected,
+ * which a browser refuses as the answer to a navigation. The body is piped,
+ * as in `passthrough`. Whatever the host said is passed on — if it has no
+ * shell at SHELL_URL, its answer is the truth about this deployment.
+ */
+async function bootShell() {
+    const shell = await fetch(SHELL_URL, { cache: 'no-store' });
+    return new Response(shell.body, {
+        status: shell.status,
+        statusText: shell.statusText,
+        headers: shell.headers
     });
 }

@@ -15,6 +15,11 @@ import {
   WORKSPACE_EXPORT_PORT,
 } from './fixtures/dev-sandbox';
 import { MODEL_CONTEXT_POLYFILL } from './fixtures/model-context-polyfill';
+import {
+  killRuntime,
+  recordShellStatus,
+  served as runtimeServing,
+} from './fixtures/stopped-runtime';
 import { SHOP_HEADING, SHOP_OFFER, SHOP_PRODUCT, shopPage } from './fixtures/shop-fixture';
 import { execute, registeredTools, structured, waitForTool } from './fixtures/webmcp-helpers';
 
@@ -494,6 +499,30 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
       // (spec amendment 14's stated tradeoff, amendment 19's other half).
       expect(await site.evaluate(() => window.crossOriginIsolated)).toBe(false);
       console.log(`exported bundle: served, booted, shop renders: ${Date.now() - runStart} ms`);
+
+      // And when its runtime dies, it says why. An exported folder is served
+      // by whatever its recipient has — here a plain file server, which
+      // answers a path only the runtime serves with its own 404 — so the
+      // worker has to hand a navigation to the boot shell itself
+      // (`dev-stopped-navigation.spec.ts` says what it did before). The
+      // recovery then returns to `/`, the one address such a host has, and
+      // the site is there again: nothing was erased.
+      const exportCause = 'injected by dev-workspace.spec.ts';
+      const hostAlone = await exportedContext.request.get('/b/auth/login');
+      expect(hostAlone.status(), 'the export host has no fallback').toBe(404);
+      const statusLines = await recordShellStatus(site);
+      await killRuntime(site, exportCause);
+      const answer = await site.goto('/b/auth/login', { waitUntil: 'commit' });
+      expect(answer!.fromServiceWorker(), 'answered by the worker').toBe(true);
+      expect(answer!.status()).toBe(200);
+      await expect
+        .poll(() => statusLines)
+        .toContain(
+          `The app's runtime stopped: error handling request: Error: ${exportCause} — recovering…`,
+        );
+      await runtimeServing(site);
+      expect(new URL(site.url()).pathname).toBe('/');
+      await expect(site.locator('h1')).toHaveText(SHOP_HEADING, { timeout: 120_000 });
     } finally {
       await exportedContext.close();
       server.kill('SIGKILL');

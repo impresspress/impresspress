@@ -206,13 +206,26 @@ mod tests {
             2,
             "timeout and self-destruct do not share recovery"
         );
-        // The stuck UI says what stopped the runtime — as text, never as
-        // markup — and offers the retry beside the reset.
+        // The stuck UI says what happened — as text, never as markup — and
+        // offers the retry beside the reset.
         assert!(
             body.contains(
-                "document.getElementById('impresspress-stopped-cause').textContent = stoppedText(cause);"
+                "document.getElementById('impresspress-stopped-cause').textContent = failure.said;"
             ),
             "the stuck UI does not show the cause"
+        );
+        // The recovery's OPFS wipe has one gate, and it asks whether the
+        // worker reported the failure — a boot probe that ran out of time
+        // did not. (`tests/sw/loader_recovery.test.mjs` drives every road
+        // into it.)
+        assert!(
+            body.contains("return OPFS_WIPE_ON_RECOVERY && failure.reported;"),
+            "the wipe is not gated on a reported failure"
+        );
+        assert_eq!(
+            body.matches("wipeOpfs: erasesFor(failure)").count(),
+            1,
+            "the recovery does not take its wipe from the one gate"
         );
         assert!(body.contains(">Try again</button>"), "missing retry button");
         assert!(
