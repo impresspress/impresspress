@@ -67,6 +67,10 @@ const core = fs.readFileSync(
  *   what `/b/dev/api/export` answers with. The body is opaque to the page —
  *   it only ever calls `.blob()` on it — so a short string stands in for the
  *   archive.
+ * @param {{status: number, body: object}|null} [options.exportRefusal]  when
+ *   set, BOTH export endpoints answer with this instead — a refusal that is
+ *   about the site rather than about either request (`export.rs`'s `Refusal`
+ *   is raised before the two handlers diverge).
  * @param {Promise<void>|null} [options.exportGate]  when set, the archive
  *   request parks on this promise, so a test can observe the page WHILE an
  *   export is in flight.
@@ -151,6 +155,7 @@ export function instantiate({
   exportManifest = null,
   exportZip = { status: 200, body: 'PK\u0003\u0004zip' },
   exportGate = null,
+  exportRefusal = null,
   // The human's answers to Delete's `confirm()` and New file's `prompt()`.
   // Throwing by default: a test that reaches a dialog it did not answer is
   // testing something it did not mean to.
@@ -363,6 +368,9 @@ export function instantiate({
         // `exportGate` exists: a parked request that had already snapshotted
         // its answer could not show a test what changed while it was parked.
         return statusGate ? statusGate.then(() => answer(body())) : answer(body());
+      }
+      if (exportRefusal !== null && url.startsWith('/b/dev/api/export')) {
+        return answer(exportRefusal.body, exportRefusal.status);
       }
       if (url === '/b/dev/api/export/manifest') {
         // `null` is the 400 the endpoint answers on an instance that has

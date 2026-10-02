@@ -581,6 +581,110 @@ async fn a_site_file_the_exported_worker_would_shadow_refuses_the_export() {
     assert_eq!(shell.fetches(), fetched);
 }
 
+/// What a caller of the two ROUTES is told about that refusal — the page's
+/// Export button, the `dev_export` tool and the `dev_export_manifest` tool
+/// all go through them, and none of them reaches `export::build`.
+///
+/// A 400 whose body names the file, the URL and the rule, and says what to do.
+/// Not the sanitized 500 an unclassified failure becomes: the person can fix
+/// this one, and only if they are told which file it is.
+///
+/// The body is compared with a file the page's own tests read
+/// (`assets/test/dev_export.test.mjs`), which hold the tools to passing this
+/// message on whole. So what the handler says and what the agent is shown are
+/// one text, checked from both ends.
+///
+/// The workspace is the one the test above builds: the file is written
+/// through a worker that handed over no rules, and the routes are then asked
+/// by the block a newer worker registers over the same workspace.
+#[tokio::test]
+async fn the_export_routes_answer_a_shadowed_site_file_with_a_400_that_names_it() {
+    use impresspress_core::blocks::dev::{DevBlock, BLOCK_NAME};
+
+    const ROUTES: [&str; 2] = ["/b/dev/api/export", "/b/dev/api/export/manifest"];
+
+    let shell = std::sync::Arc::new(FakeShell::new());
+    let mut ctx = TestContext::with_admin()
+        .await
+        .with_dev_added_and_bypass(FakeControl::new(), shell.clone(), BypassRules::default())
+        .await;
+    for path in ["site/index.html", "site/manifest.json"] {
+        dev_post(
+            &ctx,
+            "/b/dev/api/files/write",
+            json!({"path": path, "content": "x", "expected_sha256": null}),
+        )
+        .await;
+    }
+    // The routes themselves are not what refuses: under the rules the file
+    // was written with, both answer.
+    for route in ROUTES {
+        assert_eq!(
+            output_http_status(ctx.dispatch_resolved(admin_msg("retrieve", route)).await).await,
+            200,
+            "{route}"
+        );
+    }
+
+    // The same workspace, now behind a worker that hands its rules over.
+    ctx.register_block(
+        BLOCK_NAME,
+        std::sync::Arc::new(DevBlock::with_workspace(DevShared::new(
+            FakeControl::new(),
+            shell.clone(),
+            fake_bypass_rules(),
+        ))),
+    );
+    let fetched = shell.fetches();
+
+    let fixture = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("src/blocks/dev/assets/test/fixtures/export-shadowed-site-file.json");
+    let expected: serde_json::Value = serde_json::from_str(
+        &std::fs::read_to_string(&fixture).unwrap_or_else(|e| panic!("{}: {e}", fixture.display())),
+    )
+    .expect("the fixture is JSON");
+
+    for route in ROUTES {
+        let parts = wafer_block::http_codec::collect_http_response(
+            ctx.dispatch_resolved(admin_msg("retrieve", route)).await,
+        )
+        .await;
+        assert_eq!(parts.status, 400, "{route}");
+        let header = |name: &str| {
+            parts
+                .headers
+                .iter()
+                .find(|(key, _)| key.eq_ignore_ascii_case(name))
+                .map(|(_, value)| value.as_str())
+        };
+        assert_eq!(header("content-type"), Some("application/json"), "{route}");
+        assert_eq!(header("cache-control"), Some("no-store"), "{route}");
+        // Never a download: a refusal saved as `impresspress-site-….zip`
+        // would be a broken archive with the explanation inside it.
+        assert_eq!(header("content-disposition"), None, "{route}");
+
+        let body: serde_json::Value =
+            serde_json::from_slice(&parts.body).unwrap_or_else(|e| panic!("{route}: {e}"));
+        let message = body["message"].as_str().expect("message");
+        // The file, the URL the worker keeps from the runtime, the rule, and
+        // the way out.
+        assert!(message.contains("\"site/manifest.json\""), "{message}");
+        assert!(message.contains("\"/manifest.json\""), "{message}");
+        assert!(message.contains("the exact path"), "{message}");
+        assert!(message.contains("Delete the file or move it"), "{message}");
+        // And nothing an internal error would say instead.
+        assert!(!message.contains("Internal server error"), "{message}");
+        assert_eq!(
+            body,
+            expected,
+            "{route}: the answer and {} have drifted apart; the page's tests read that file",
+            fixture.display()
+        );
+    }
+    // Both routes refused before the runtime shell was read.
+    assert_eq!(shell.fetches(), fetched);
+}
+
 /// The compiler prefix is NOT one of the exported worker's rules — the export
 /// strips it from the exported `sw.js` — so a site file under it does not
 /// refuse the export, however it got there.
