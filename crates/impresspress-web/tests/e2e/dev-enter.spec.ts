@@ -3,8 +3,9 @@ import {
   ADMIN_EMAIL,
   ADMIN_PASSWORD,
   bootServiceWorker,
+  enterFromWelcome,
   PAGE_TOOLS,
-  WELCOME_PHRASE,
+  runFromConsole,
 } from './fixtures/dev-sandbox';
 
 /**
@@ -30,51 +31,21 @@ function recordNavigations(page: Page): string[] {
   return visited;
 }
 
-/** Follow the welcome page's own "Open workspace" link to the workspace. */
-async function enterFromWelcome(page: Page) {
-  await expect(page.locator('body')).toContainText(WELCOME_PHRASE, { timeout: 60_000 });
-  await page.getByRole('link', { name: /open workspace/i }).first().click();
-  await page.waitForURL((url) => url.pathname === '/b/dev', { timeout: 60_000 });
-  // The script ran: the progress ladder is drawn by its first status read.
-  await expect(page.locator('#dev-progress-steps li').first()).toBeAttached({ timeout: 60_000 });
-}
-
-/** Run one tool from the Tool console and return what the result box shows. */
-async function runFromConsole(
-  page: Page,
-  tool: string,
-  args: Record<string, unknown> | null,
-): Promise<{ isError: boolean; result: any }> {
-  await page.locator('#dev-console-tool').selectOption(tool);
-  if (args !== null) {
-    await page.locator('#dev-console-args').fill(JSON.stringify(args));
-  }
-  // Emptied first, so the wait below is for THIS run's report rather than
-  // one a previous run left in the box.
-  await page.locator('#dev-console-result').evaluate((el) => {
-    el.removeAttribute('data-is-error');
-  });
-  await page.locator('#dev-console-run').click();
-  await expect(page.locator('#dev-console-result')).toHaveAttribute('data-is-error', /^(true|false)$/, {
-    timeout: 60_000,
-  });
-  return JSON.parse((await page.locator('#dev-console-result').textContent()) ?? '');
-}
-
 test('"Open workspace" lands on /b/dev signed in, with no form', async ({ page }) => {
   test.setTimeout(300_000);
   await bootServiceWorker(page);
 
   // Anonymous to begin with: the workspace's API refuses this page.
   expect(await page.evaluate(async () => (await fetch('/b/dev/api/status')).status)).toBe(401);
-  // The link the seed ships, and the credentials still printed beside it —
-  // they are how a human signs back in once this session expires.
+  // The link the seed ships — and no password beside it. The welcome page is
+  // a static seed file: a password printed there would go on being printed
+  // after somebody changed it, so the page points at the entry link instead
+  // (the workspace page prints this instance's CONFIGURED credentials).
   await expect(page.getByRole('link', { name: /open workspace/i })).toHaveAttribute(
     'href',
     '/b/dev/enter',
   );
-  await expect(page.locator('body')).toContainText(ADMIN_EMAIL);
-  await expect(page.locator('body')).toContainText(ADMIN_PASSWORD);
+  await expect(page.locator('body')).not.toContainText(ADMIN_PASSWORD);
 
   const visited = recordNavigations(page);
   await enterFromWelcome(page);

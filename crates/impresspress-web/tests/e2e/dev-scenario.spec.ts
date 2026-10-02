@@ -5,13 +5,13 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 
 import {
-  ADMIN_EMAIL,
   bootServiceWorker,
   loginAdmin,
   loginToWorkspace,
   PAGE_TOOLS,
   SCENARIO_EXPORT_PORT,
   serveDirectory,
+  WELCOME_HEADING,
   WELCOME_PHRASE,
 } from './fixtures/dev-sandbox';
 import { MODEL_CONTEXT_POLYFILL } from './fixtures/model-context-polyfill';
@@ -250,11 +250,14 @@ test('the spec scenario: welcome → login → block → site → shop → shopp
   const step1Start = Date.now();
   await bootServiceWorker(page);
 
-  // The starter site tells whoever lands here how to get in. Both halves are
-  // part of its contract, so both are read the way a visitor reads them
-  // rather than assumed.
+  // The starter site tells whoever lands here how to get in: the link to the
+  // one-click entry page, read the way a visitor reads it rather than
+  // assumed.
   await expect(page.locator('body')).toContainText(WELCOME_PHRASE, { timeout: 60_000 });
-  await expect(page.locator('body')).toContainText(ADMIN_EMAIL);
+  await expect(page.getByRole('link', { name: /open workspace/i })).toHaveAttribute(
+    'href',
+    '/b/dev/enter',
+  );
 
   // `loginToWorkspace` boots again before signing in. That is a handful of
   // waits that are already satisfied — the worker is controlling, `/b/auth/
@@ -634,7 +637,7 @@ test('the spec scenario: welcome → login → block → site → shop → shopp
   const reverted = structured<{ generation: Generation }>(
     await execute(page, 'dev_rollback', { id: seedGeneration.id }),
   );
-  await expect(page.frameLocator('#dev-preview-frame').locator('body')).toContainText(ADMIN_EMAIL, {
+  await expect(page.frameLocator('#dev-preview-frame').locator('h1')).toHaveText(WELCOME_HEADING, {
     timeout: 60_000,
   });
   // …and the block went with the site. The runtime was rebuilt without it, so
@@ -654,7 +657,7 @@ test('the spec scenario: welcome → login → block → site → shop → shopp
   });
   await bootServiceWorker(page);
   await expect(page.locator('body')).toContainText(WELCOME_PHRASE, { timeout: 60_000 });
-  await expect(page.locator('body')).toContainText(ADMIN_EMAIL);
+  await expect(page.locator('h1')).toHaveText(WELCOME_HEADING);
 
   // What the page renders would also be true of a re-seeded instance. The
   // ledger is what tells the two apart: the active generation is still the
