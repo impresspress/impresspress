@@ -59,9 +59,33 @@ use wafer_run::{wasm::WasmiBlock, ResourceLimits, Wafer};
 // Building a template
 // ---------------------------------------------------------------------------
 
+/// The channel `rust-toolchain.toml` pins at the repository root.
+fn pinned_toolchain() -> String {
+    let file = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../rust-toolchain.toml");
+    let text = std::fs::read_to_string(&file).expect("read rust-toolchain.toml");
+    let doc: toml::Table = text.parse().expect("rust-toolchain.toml is TOML");
+    doc["toolchain"]["channel"]
+        .as_str()
+        .expect("rust-toolchain.toml names a channel")
+        .to_string()
+}
+
+/// `cargo` or `rustc` on the repository's pinned toolchain.
+///
+/// The templates are built in a temp directory, where no `rust-toolchain.toml`
+/// is in scope. Under `cargo test` the rustup proxy has already exported
+/// `RUSTUP_TOOLCHAIN` and the children would inherit it; a test binary run
+/// directly would instead build on the machine's default toolchain, which
+/// need not carry the wasm target. Naming it here makes both the same.
+fn toolchain_command(program: &str) -> Command {
+    let mut command = Command::new(program);
+    command.env("RUSTUP_TOOLCHAIN", pinned_toolchain());
+    command
+}
+
 /// Whether this machine can build a template, and why not when it cannot.
 fn toolchain_ready() -> Result<(), String> {
-    let probe = Command::new("cargo").arg("--version").output();
+    let probe = toolchain_command("cargo").arg("--version").output();
     match probe {
         Ok(out) if out.status.success() => {}
         Ok(out) => return Err(format!("`cargo --version` failed: {}", out.status)),
@@ -70,7 +94,7 @@ fn toolchain_ready() -> Result<(), String> {
     // `--print target-libdir` succeeds only when the target's std is actually
     // installed, which is the thing the build needs — `rustc --print
     // target-list` would answer yes for every target rustc knows about.
-    let std_probe = Command::new("rustc")
+    let std_probe = toolchain_command("rustc")
         .args(["--print", "target-libdir", "--target", "wasm32-wasip1"])
         .output();
     match std_probe {
@@ -211,7 +235,7 @@ fn build_crate(name: &str, root: &Path, dir: &Path) -> Vec<u8> {
     // ambient `CARGO_TARGET_DIR` cannot move the artifact out from under the
     // read below.
     let target_dir = root.join("target");
-    let status = Command::new("cargo")
+    let status = toolchain_command("cargo")
         .args([
             "build",
             "--release",

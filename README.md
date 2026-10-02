@@ -2,10 +2,10 @@
 
 ## Run Impresspress locally
 
-Install the Rust WASM target and the build tools, then build the web assets and native binary from the repository root:
+Install the pinned Rust toolchain (`rust-toolchain.toml` names the version, components and WASM targets) and the build tools, then build the web assets and native binary from the repository root:
 
 ```sh
-rustup target add wasm32-unknown-unknown
+rustup toolchain install
 cargo install just
 cargo install wasm-pack --version 0.15.0
 just build-debug
