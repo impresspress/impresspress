@@ -41,10 +41,16 @@ let poisoned = false;
 // see `runtimeStopped`.
 let poisonReason = '';
 
-// Whether `unregister()` went through, and the navigations already sent
-// round again because it did — see the navigation branch of `runtimeStopped`.
+// Whether `unregister()` went through. If it did not, this worker is still
+// the one a reload reaches, and `runtimeStopped` words its answer for that.
 let unregistered = false;
-const sentRoundAgain = new Set();
+// Whether the open pages were sent to the boot shell (`selfDestruct`).
+let sentToBootShell = false;
+
+// Whether `loader.js`'s recovery erases the data this browser stores for the
+// app (OPFS) — the same build-time flag `loader.js` is rendered with. Here so
+// that an answer which tells someone to reload can say what the reload costs.
+const OPFS_WIPE_ON_RECOVERY = __OPFS_WIPE_ON_RECOVERY__;
 
 // The longest cause kept. A wasm-bindgen error can carry a whole stack; the
 // reader needs the first line or two. (The console line has all of it.)
@@ -77,10 +83,11 @@ const STOP_CAUSE_KEY = '/__impresspress_sw_stopped';
  *   with the cause on screen.
  * - `false` — a request FROM a page failed (an API call, a form post) after
  *   the runtime had started. The page is left exactly where it is: the
- *   request gets `runtimeStopped`'s 503, the page shows the cause, and
- *   "reload the page" is true because this worker is already unregistered.
+ *   request gets `runtimeStopped`'s 503 and the page shows the cause.
  *   Re-navigating here would replace the page a moment after the cause
- *   reached it, with a clean form that says nothing.
+ *   reached it, with a clean form that says nothing. What a reload then does
+ *   depends on whether the unregister went through — `runtimeStopped` says
+ *   which in its answer.
  */
 async function selfDestruct(reason, toBootShell) {
     if (poisoned) return;
@@ -96,6 +103,7 @@ async function selfDestruct(reason, toBootShell) {
         console.error('[__APP_NAME__] self-destruct unregister failed:', e);
     }
     if (!toBootShell) return;
+    sentToBootShell = true;
     await leaveCauseForBootShell();
     try {
         const clients = await self.clients.matchAll({ type: 'window' });
@@ -359,8 +367,9 @@ async function passthrough(request) {
 async function handleFetch(event) {
     const request = event.request;
     if (poisoned) {
-        // wasm is dead, and this worker is unregistered: what still reaches
-        // it comes from a page it controlled when it died.
+        // wasm is dead. What still reaches this worker comes from a page it
+        // controlled when it died — or from anywhere in its scope, if it
+        // could not unregister.
         return runtimeStopped(request);
     }
     try {
@@ -399,45 +408,50 @@ async function handleFetch(event) {
  * The answer to a request the runtime would have handled, once the runtime
  * is dead (`poisoned`).
  *
- * A NAVIGATION is for the static host: it answers with the boot HTML, and
- * `loader.js` shows the cause this leaves for it and runs its recovery path.
- * It is sent there by a redirect to its own URL, not by `fetch`. A document
- * this worker answers for — even with the network's bytes — is a document
- * this worker CONTROLS, and the boot shell controlled by a dead, unregistered
- * worker cannot load `loader.js`: the page sits on "Loading..." for good.
- * Once this worker is unregistered the redirected navigation no longer
- * matches it, goes straight to the network, and the shell it gets is
- * controlled by nobody. Each URL is sent round once; if it comes back here
- * anyway (or the unregister did not go through), `fetch` is what is left.
+ * A NAVIGATION goes to the network: the static host answers it with the boot
+ * HTML, and `loader.js` shows the cause this leaves for it and runs its
+ * recovery path.
  *
- * Nothing else does. Every path the static host serves is on the bypass list
- * and never reaches `handleFetch`, so what is left here is a request only the
- * runtime could answer — an API call, a form post. The static host's answer
- * to one of those is an empty 405 or a 404 page (or `index.html` with a 200,
- * behind an SPA fallback), and the script that made the request can then
- * report nothing but "something went wrong": the cause is in THIS worker's
- * console, which neither the person nor an agent driving the page can read.
- * So the worker answers it itself, in the shape the runtime gives every error
- * (`wafer_block::http_codec::error_to_http_response`: `error` is the coarse
- * code, `message` the human text, `code` the precise one), with the cause in
- * the message. A page that shows `message` — every auth form does — then
- * shows the cause.
+ * Nothing else does. What reaches `handleFetch` is a request the runtime was
+ * going to answer — an API call, a form post — and the static host has
+ * nothing of its own to say to one: an empty 405, a 404 page, or `index.html`
+ * with a 200 where it falls back for unknown paths. The script that made the
+ * request can then report nothing but "something went wrong": the cause is in
+ * THIS worker's console, which neither the person nor an agent driving the
+ * page can read. So the worker answers it itself, in the shape the runtime
+ * gives every error (`wafer_block::http_codec::error_to_http_response`:
+ * `error` is the coarse code, `message` the human text, `code` the precise
+ * one), with the cause in the message. A page that shows `message` — every
+ * auth form does — then shows the cause.
+ *
+ * The message ends with what a reload will do, because that differs and one
+ * of the answers costs data:
+ *
+ * - The page was left alone and this worker is unregistered: a reload is an
+ *   ordinary boot with a fresh worker. Nothing is recovered, nothing erased.
+ * - The pages were sent to the boot shell, or this worker could NOT
+ *   unregister (so a reload is a navigation back to it, which leaves the
+ *   cause for the shell): the shell runs its recovery. In a build rendered
+ *   with `opfs_wipe_on_recovery`, that recovery erases the app's local data,
+ *   and the message says so rather than calling it a restart.
  */
 async function runtimeStopped(request) {
     if (request.mode === 'navigate') {
         await leaveCauseForBootShell();
-        if (unregistered && !sentRoundAgain.has(request.url)) {
-            sentRoundAgain.add(request.url);
-            return Response.redirect(request.url, 302);
-        }
         return fetch(request);
+    }
+    let next = 'Reload the page to restart it.';
+    if (sentToBootShell || !unregistered) {
+        next = OPFS_WIPE_ON_RECOVERY
+            ? 'Reloading the page runs a recovery that erases the data this browser stores for the app.'
+            : 'Reload the page to recover.';
     }
     // `cause` is the one field the runtime's shape does not have: the bare
     // reason, for `loader.js`, whose boot probe is a request like any other
     // and which words the sentence around it itself.
     const body = {
         error: 'Unavailable',
-        message: `The app's runtime stopped (${poisonReason}). Reload the page to restart it.`,
+        message: `The app's runtime stopped (${poisonReason}). ${next}`,
         code: 'runtime_stopped',
         cause: poisonReason
     };

@@ -15,13 +15,19 @@ const trap = (message = 'unreachable executed') => async () => {
   throw new Error(message);
 };
 
-async function assertStoppedAnswer(response, cause) {
+// What the answer says a reload will do — see `runtimeStopped`.
+const RESTART = 'Reload the page to restart it.';
+const RECOVER = 'Reload the page to recover.';
+const ERASES =
+  'Reloading the page runs a recovery that erases the data this browser stores for the app.';
+
+async function assertStoppedAnswer(response, cause, next = RESTART) {
   assert.equal(response.status, 503);
   assert.equal(response.headers.get('content-type'), 'application/json');
   assert.equal(response.headers.get('cache-control'), 'no-store');
   assert.deepEqual(await response.json(), {
     error: 'Unavailable',
-    message: `The app's runtime stopped (${cause}). Reload the page to restart it.`,
+    message: `The app's runtime stopped (${cause}). ${next}`,
     code: 'runtime_stopped',
     cause
   });
@@ -33,12 +39,6 @@ function assertPageLeftAlone(worker) {
   assert.deepEqual(worker.posted, []);
   assert.deepEqual(worker.navigated, []);
   assert.equal(worker.leftForBootShell(), undefined);
-}
-
-/// A navigation is redirected to its own URL.
-function assertSentRound(response, pathname) {
-  assert.equal(response.status, 302);
-  assert.equal(response.headers.get('location'), `https://app.example${pathname}`);
 }
 
 /// Every open page is sent to the boot shell, with the cause both ways it
@@ -84,11 +84,11 @@ test('a poisoned worker answers later requests the same way, with the first caus
   assert.equal(worker.unregistered(), 1, 'self-destruct runs once');
   assertPageLeftAlone(worker);
 
-  // A navigation that still reaches it is sent round to the static host,
-  // and the boot shell it lands on is left the cause.
+  // A navigation that still reaches it goes to the network, and the boot
+  // shell it lands on is left the cause.
   const navigation = await worker.request('/', { mode: 'navigate' });
-  assertSentRound(navigation.response, '/');
-  assert.deepEqual(worker.network, []);
+  assert.equal(navigation.response.status, 405);
+  assert.deepEqual(worker.network, [navigation.sent]);
   assert.equal(worker.leftForBootShell().reason, 'error handling request: Error: trap 1');
 });
 
@@ -96,30 +96,57 @@ test('a navigation the runtime dies on goes to the network and sends the pages t
   captureConsole(t);
   const worker = await loadWorker({ handle_request: trap() });
 
-  const first = await worker.request('/b/auth/login', { mode: 'navigate' });
+  const { response, sent } = await worker.request('/b/auth/login', { mode: 'navigate' });
 
-  // Not answered from here, not even with the network's bytes: a redirect to
-  // itself, which an unregistered worker no longer sees.
-  assertSentRound(first.response, '/b/auth/login');
-  assert.deepEqual(worker.network, []);
+  assert.equal(response.status, 405, "the network's own answer, untouched");
+  assert.deepEqual(worker.network, [sent]);
   assert.equal(worker.unregistered(), 1);
   assertSentToBootShell(worker, 'error handling request: Error: unreachable executed');
-
-  // If it comes back anyway, it is not sent round a second time.
-  const second = await worker.request('/b/auth/login', { mode: 'navigate' });
-  assert.equal(second.response.status, 405, "the network's own answer");
-  assert.deepEqual(worker.network, [second.sent]);
 });
 
-test('a worker that could not unregister answers a navigation from the network', async (t) => {
+// The last sentence of the answer is a statement about what a reload does,
+// and in one rendering a reload erases data.
+test('the answer says what a reload will do, and what it erases', async (t) => {
   captureConsole(t);
-  const worker = await loadWorker({ handle_request: trap(), unregisters: false });
+  const cause = 'error handling request: Error: unreachable executed';
+  const post = (worker) => worker.request(LOGIN, { method: 'POST' });
 
-  const { response, sent } = await worker.request('/', { mode: 'navigate' });
+  // Left alone and unregistered: a reload is an ordinary boot, in either
+  // rendering. Nothing is recovered, so nothing is erased.
+  for (const wipe of [false, true]) {
+    const worker = await loadWorker({ handle_request: trap() }, { wipe });
+    await assertStoppedAnswer((await post(worker)).response, cause, RESTART);
+  }
 
-  // A redirect would come straight back to this worker.
-  assert.equal(response.status, 405);
-  assert.deepEqual(worker.network, [sent]);
+  // Could not unregister: a reload comes back to this worker, which leaves
+  // the cause for the boot shell, which recovers.
+  const stuck = await loadWorker({ handle_request: trap(), unregisters: false });
+  await assertStoppedAnswer((await post(stuck)).response, cause, RECOVER);
+  const stuckWipe = await loadWorker({ handle_request: trap(), unregisters: false }, { wipe: true });
+  await assertStoppedAnswer((await post(stuckWipe)).response, cause, ERASES);
+
+  // Sent to the boot shell (the runtime never started): the same.
+  const init = 'runtime initialize() failed: Error: unreachable executed';
+  const dead = await loadWorker({ initialize: trap() }, { wipe: true });
+  await assertStoppedAnswer((await post(dead)).response, init, ERASES);
+});
+
+test('a worker whose unregister throws is still poisoned and still answers', async (t) => {
+  captureConsole(t);
+  const worker = await loadWorker({
+    handle_request: trap(),
+    unregisters: () => {
+      throw new Error('registration is gone');
+    }
+  });
+
+  const { response } = await worker.request(LOGIN, { method: 'POST' });
+
+  await assertStoppedAnswer(
+    response,
+    'error handling request: Error: unreachable executed',
+    RECOVER
+  );
 });
 
 test('a runtime that fails to initialize answers with the cause and sends the pages to the boot shell', async (t) => {
@@ -130,7 +157,7 @@ test('a runtime that fails to initialize answers with the cause and sends the pa
   // The boot shell's probe is the usual first request: not a navigation.
   const { response } = await worker.request('/', { method: 'GET' });
 
-  await assertStoppedAnswer(response, cause);
+  await assertStoppedAnswer(response, cause, RECOVER);
   assertSentToBootShell(worker, cause);
 });
 
@@ -141,7 +168,7 @@ test('a wasm module that fails to load does the same', async (t) => {
 
   const { response } = await worker.request('/', { method: 'GET' });
 
-  await assertStoppedAnswer(response, cause);
+  await assertStoppedAnswer(response, cause, RECOVER);
   assertSentToBootShell(worker, cause);
 });
 
@@ -172,7 +199,7 @@ test('a long cause is cut, not sent whole', async (t) => {
   const { response } = await worker.request(LOGIN, { method: 'POST' });
   const { message, cause } = await response.json();
 
-  assert.ok(message.includes('…). Reload the page to restart it.'), message);
+  assert.ok(message.endsWith(`…). ${RESTART}`), message);
   assert.ok(message.length < 400, `message is ${message.length} characters`);
   assert.ok(cause.endsWith('…') && cause.length < 320, `cause is ${cause.length} characters`);
 });

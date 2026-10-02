@@ -15,23 +15,29 @@
 // below it runs as shipped, against a stub `self` and a stub `fetch`.
 import fs from 'node:fs';
 
-const swPath = process.env.SW_JS;
-if (!swPath) {
-  throw new Error(
-    'SW_JS is not set: these tests load a rendered sw.js, which ' +
-      '`cargo test -p impresspress-bundle` renders and passes in'
+const GLUE_IMPORT = /^import init, \{ initialize, handle_request \} from '[^']+';$/m;
+
+function source(variable) {
+  const file = process.env[variable];
+  if (!file) {
+    throw new Error(
+      `${variable} is not set: these tests load a rendered sw.js, which ` +
+        '`cargo test -p impresspress-bundle` renders and passes in'
+    );
+  }
+  const rendered = fs.readFileSync(file, 'utf8');
+  if (!GLUE_IMPORT.test(rendered)) {
+    throw new Error('the rendered sw.js no longer imports the wasm glue the way this harness replaces');
+  }
+  return rendered.replace(
+    GLUE_IMPORT,
+    'const { init, initialize, handle_request } = globalThis.__swRuntimeStubs;'
   );
 }
-const rendered = fs.readFileSync(swPath, 'utf8');
 
-const GLUE_IMPORT = /^import init, \{ initialize, handle_request \} from '[^']+';$/m;
-if (!GLUE_IMPORT.test(rendered)) {
-  throw new Error('the rendered sw.js no longer imports the wasm glue the way this harness replaces');
-}
-const source = rendered.replace(
-  GLUE_IMPORT,
-  'const { init, initialize, handle_request } = globalThis.__swRuntimeStubs;'
-);
+// `SW_JS` is the default rendering; `SW_JS_WIPE` the one with
+// `opfs_wipe_on_recovery`, whose answers say what a reload erases.
+const SOURCES = { plain: source('SW_JS'), wipe: source('SW_JS_WIPE') };
 
 export const ORIGIN = 'https://app.example';
 
@@ -39,8 +45,10 @@ let instances = 0;
 
 /// One fresh worker: its own module instance (so its own `poisoned` state),
 /// its own stubs. `runtime` supplies `init` / `initialize` / `handle_request`;
-/// each defaults to succeeding.
-export async function loadWorker(runtime = {}) {
+/// each defaults to succeeding. `wipe` picks the `opfs_wipe_on_recovery`
+/// rendering.
+export async function loadWorker(runtime = {}, { wipe = false } = {}) {
+  const source = SOURCES[wipe ? 'wipe' : 'plain'];
   const listeners = {};
   const network = [];
   const posted = [];
@@ -83,6 +91,7 @@ export async function loadWorker(runtime = {}) {
     registration: {
       unregister: async () => {
         unregistered += 1;
+        if (typeof runtime.unregisters === 'function') return runtime.unregisters();
         return runtime.unregisters ?? true;
       }
     },

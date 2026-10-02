@@ -12,11 +12,14 @@ const STOP_CAUSE_KEY = '/__impresspress_sw_stopped';
 // A cause older than this was left for a navigation that never reached a
 // boot shell (a static host with no fallback answered it 404). It is not
 // about THIS load, and acting on it would run a recovery — which may wipe
-// local data — for a failure that is not happening.
+// local data — for a failure that is not happening. An entry is acted on only
+// if its age is between zero and this: one with no timestamp, or one from the
+// future (a clock that moved), cannot be shown to be about this load either.
 const STOP_CAUSE_MAX_AGE_MS = 60_000;
-// Set once the recovery path has already run in this tab. A second
-// self-destruct after recovery means wiping SW + caches (and OPFS, when
-// allowed) didn't resolve the underlying failure — looping again would
+// Set when the recovery path runs in this tab, and cleared once the app has
+// answered a boot probe since. A second self-destruct while it is still set
+// means wiping SW + caches (and OPFS, when allowed) didn't resolve the
+// underlying failure — looping again would
 // just burn another `?_freshen` reload and crash the same way. We surface
 // to the user via `renderRecoveryStuckUI` instead, which keeps the cause on
 // screen until they choose what to do.
@@ -77,7 +80,8 @@ async function takeStopCause() {
             const entry = await cache.match(STOP_CAUSE_KEY);
             const stop = entry ? await entry.json() : null;
             await caches.delete(STOP_CAUSE_CACHE);
-            if (stop && Date.now() - stop.at <= STOP_CAUSE_MAX_AGE_MS) {
+            const age = stop && typeof stop.at === 'number' ? Date.now() - stop.at : NaN;
+            if (age >= 0 && age <= STOP_CAUSE_MAX_AGE_MS) {
                 left = String(stop.reason);
             }
         }
@@ -125,11 +129,17 @@ function renderRecoveryStuckUI(cause) {
         '<div style="max-width:480px;margin:0 auto;text-align:left;padding:1.5rem;font:inherit;line-height:1.5;">' +
         '<h1 style="margin-top:0;font-size:1.25rem;">__APP_NAME__ couldn\'t start</h1>' +
         '<p id="impresspress-stopped-cause" style="overflow-wrap:anywhere;"></p>' +
-        '<p>Automatic recovery didn\'t resolve it. You can try again, or reset: resetting will erase data stored locally in this browser and reload the app.</p>' +
+        '<p id="impresspress-stopped-next"></p>' +
         '<button id="impresspress-retry" style="background:#1f6feb;color:#fff;border:0;border-radius:6px;padding:0.6rem 1rem;font:inherit;cursor:pointer;margin-right:0.5rem;">Try again</button>' +
         '<button id="impresspress-reset" style="background:#fff;color:#b42318;border:1px solid #b42318;border-radius:6px;padding:0.6rem 1rem;font:inherit;cursor:pointer;">Reset local data and reload</button>' +
         '</div>';
     document.getElementById('impresspress-stopped-cause').textContent = stoppedText(cause);
+    // What each button costs. "Try again" is the recovery, and in a build
+    // rendered with OPFS_WIPE_ON_RECOVERY the recovery erases local data —
+    // so there it is not offered as the harmless option.
+    document.getElementById('impresspress-stopped-next').textContent = OPFS_WIPE_ON_RECOVERY
+        ? "Automatic recovery didn't resolve it. You can try again or reset; in this app both erase the data stored locally in this browser and reload the app."
+        : "Automatic recovery didn't resolve it. You can try again, which keeps the data stored locally in this browser, or reset, which erases it and reloads the app.";
     const retry = document.getElementById('impresspress-retry');
     const reset = document.getElementById('impresspress-reset');
     retry.addEventListener('click', async () => {
@@ -173,9 +183,9 @@ async function boot() {
 
     // Recovery path: a SW self-destructed and left its cause, for this page
     // (the breaker) or for whichever boot shell loaded next (the cache
-    // entry). Wipe all SW + cache state AND clear OPFS, force a fresh
-    // document fetch via a cache-busting query string, and let the next load
-    // proceed normally.
+    // entry). Wipe all SW + cache state — and OPFS too, in a build rendered
+    // with OPFS_WIPE_ON_RECOVERY — force a fresh document fetch via a
+    // cache-busting query string, and let the next load proceed normally.
     //
     // OPFS wipe is the critical step for any schema-drift class of bug: if
     // the OPFS DB was written by a prior build with an incompatible schema,
@@ -245,54 +255,62 @@ async function boot() {
         status.textContent = 'Loading __APP_NAME__...';
         const target = new URL('__BOOT_REDIRECT__', window.location.href);
         window.__impresspressReloading = true;
-        if (target.href === window.location.href) {
-            // A claimed worker initializes lazily on its first fetch. Probe
-            // the boot URL before reloading so a cold public origin does not
-            // race that initialization and render the static loader twice.
-            // A probe the runtime dies on is handled below.
-            const probeController = new AbortController();
-            const probeTimeout = setTimeout(
-                () => probeController.abort(),
-                BOOT_PROBE_TIMEOUT_MS,
-            );
-            let probe = null;
-            try {
-                probe = await fetch(target.href, {
-                    cache: 'no-store',
-                    credentials: 'same-origin',
-                    signal: probeController.signal,
-                });
-            } catch (error) {
-                if (probeController.signal.aborted) {
-                    console.warn('[__APP_NAME__] Boot probe timed out; recovering.');
-                    await recoverBrowserState(
-                        status,
-                        `the app did not answer within ${BOOT_PROBE_TIMEOUT_MS / 1000} seconds`,
-                    );
-                    return;
-                }
-                console.warn('[__APP_NAME__] Boot probe failed:', error);
-            } finally {
-                clearTimeout(probeTimeout);
-            }
-            // A probe the runtime could not START for self-destructs the
-            // worker, which sets the breaker and re-navigates this client
-            // itself. Reloading on top of that would be a second,
-            // uncoordinated navigation, so stand down and let the recovery
-            // path above run on the load sw.js is starting.
-            if (sessionStorage.getItem(SW_RECOVER_KEY) !== null) return;
-            // A probe a STARTED runtime died on is a request from a page like
-            // any other: sw.js answers it with the cause and navigates
-            // nobody. Reloading as if it had worked would register a fresh
-            // worker, probe again and die again, forever — so take the same
-            // road as above: set the breaker, and let the next load recover
-            // once and then stop with the cause on screen.
-            const stopped = probe ? await stoppedCauseOf(probe) : null;
-            if (stopped !== null) {
-                sessionStorage.setItem(SW_RECOVER_KEY, stopped);
-                window.location.reload();
+        // A claimed worker initializes lazily on its first fetch. Probe
+        // the boot URL before going there, so a cold public origin does not
+        // race that initialization and render the static loader twice —
+        // and so this page learns whether the app answers at all, which is
+        // what the two guards below turn on. Whether the boot URL is this
+        // one (a reload) or another (a redirect) makes no difference to
+        // either, so the probe runs for both.
+        const probeController = new AbortController();
+        const probeTimeout = setTimeout(
+            () => probeController.abort(),
+            BOOT_PROBE_TIMEOUT_MS,
+        );
+        let probe = null;
+        try {
+            probe = await fetch(target.href, {
+                cache: 'no-store',
+                credentials: 'same-origin',
+                signal: probeController.signal,
+            });
+        } catch (error) {
+            if (probeController.signal.aborted) {
+                console.warn('[__APP_NAME__] Boot probe timed out; recovering.');
+                await recoverBrowserState(
+                    status,
+                    `the app did not answer within ${BOOT_PROBE_TIMEOUT_MS / 1000} seconds`,
+                );
                 return;
             }
+            console.warn('[__APP_NAME__] Boot probe failed:', error);
+        } finally {
+            clearTimeout(probeTimeout);
+        }
+        // A probe the runtime could not START for self-destructs the
+        // worker, which sets the breaker and re-navigates this client
+        // itself. Reloading on top of that would be a second,
+        // uncoordinated navigation, so stand down and let the recovery
+        // path above run on the load sw.js is starting.
+        if (sessionStorage.getItem(SW_RECOVER_KEY) !== null) return;
+        // A probe a STARTED runtime died on is a request from a page like
+        // any other: sw.js answers it with the cause and navigates
+        // nobody. Reloading as if it had worked would register a fresh
+        // worker, probe again and die again, forever — so take the same
+        // road as above: set the breaker, and let the next load recover
+        // once and then stop with the cause on screen.
+        const stopped = probe ? await stoppedCauseOf(probe) : null;
+        if (stopped !== null) {
+            sessionStorage.setItem(SW_RECOVER_KEY, stopped);
+            window.location.reload();
+            return;
+        }
+        // The app answered. Whatever the last recovery in this tab was
+        // for is over, so the next failure — hours later, unrelated —
+        // gets its own automatic recovery instead of the stuck screen.
+        // (A probe that threw proves nothing and clears nothing.)
+        if (probe) sessionStorage.removeItem(RECOVERY_DONE_KEY);
+        if (target.href === window.location.href) {
             // Leave the current navigation task before requesting the reload.
             setTimeout(() => window.location.reload(), 0);
         } else {

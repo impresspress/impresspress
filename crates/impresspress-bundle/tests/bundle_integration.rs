@@ -653,15 +653,15 @@ fn the_seed_prefix_joins_an_apps_own_bypass_list() {
     assert!(sw.contains("url.pathname.startsWith('/seed/')"));
 }
 
-/// Run `node` with `args`, failing the test with its output if it does not
-/// exit cleanly — or if there is no `node` to run. Not a skip: a check that
-/// quietly does not run is a check that passes on a broken worker.
-fn node(args: &[&std::ffi::OsStr], sw: &std::path::Path) {
+/// Run `node` with `args` and `env`, failing the test with its output if it
+/// does not exit cleanly — or if there is no `node` to run. Not a skip: a
+/// check that quietly does not run is a check that passes on a broken worker.
+fn node(args: &[&std::ffi::OsStr], env: &[(&str, &std::path::Path)]) {
     let output = std::process::Command::new("node")
         .args(args)
-        .env("SW_JS", sw)
+        .envs(env.iter().copied())
         .output()
-        .expect("`node` must be on PATH: the rendered sw.js is checked by running it");
+        .expect("`node` must be on PATH: the rendered scripts are checked by running them");
     assert!(
         output.status.success(),
         "node {args:?} failed\n--- stdout ---\n{}\n--- stderr ---\n{}",
@@ -670,7 +670,37 @@ fn node(args: &[&std::ffi::OsStr], sw: &std::path::Path) {
     );
 }
 
-/// The shipped template, rendered, is a script a JavaScript engine accepts.
+/// The shipped templates rendered into a fresh directory, with
+/// `opfs_wipe_on_recovery` as given.
+fn rendered_shell(opfs_wipe_on_recovery: bool) -> tempfile::TempDir {
+    let tmp = production_pkg_copy();
+    let app = AppConfig {
+        opfs_wipe_on_recovery,
+        ..AppConfig::default()
+    };
+    run(tmp.path(), tmp.path(), app).expect("bundler ok");
+    tmp
+}
+
+/// `node --test` on one file of `tests/sw/`, against both renderings of
+/// `rendered` (`sw.js` or `loader.js`): the default, in `plain_var`, and the
+/// `opfs_wipe_on_recovery` one, in `wipe_var`.
+fn node_test(test_file: &str, rendered: &str, plain_var: &str, wipe_var: &str) {
+    let plain = rendered_shell(false);
+    let wipe = rendered_shell(true);
+    let tests = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/sw")
+        .join(test_file);
+    node(
+        &["--test".as_ref(), tests.as_os_str()],
+        &[
+            (plain_var, &plain.path().join(rendered)),
+            (wipe_var, &wipe.path().join(rendered)),
+        ],
+    );
+}
+
+/// The shipped templates, rendered, are scripts a JavaScript engine accepts.
 /// Every other test in this file reads the worker as text, and text that
 /// contains the right substrings can still be a file no browser will run.
 #[test]
@@ -686,10 +716,10 @@ fn the_rendered_worker_parses() {
         // glue), and that is how it has to be parsed.
         let module = tmp.path().join("sw-check.mjs");
         fs::copy(tmp.path().join("sw.js"), &module).unwrap();
-        node(&["--check".as_ref(), module.as_os_str()], &module);
+        node(&["--check".as_ref(), module.as_os_str()], &[]);
         // `loader.js` is a classic script, and is checked as one.
         let loader = tmp.path().join("loader.js");
-        node(&["--check".as_ref(), loader.as_os_str()], &loader);
+        node(&["--check".as_ref(), loader.as_os_str()], &[]);
     }
 }
 
@@ -724,20 +754,45 @@ fn the_worker_and_the_loader_agree_on_where_the_stop_cause_is_left() {
 }
 
 /// Once the wasm runtime is dead, a request only it could have answered gets
-/// a 503 that names the cause, and a navigation still reaches the static
-/// host. The behaviour is driven in Node against the rendered file —
-/// `tests/sw/sw_runtime_stopped.test.mjs` says what and why.
+/// a 503 that names the cause and says what a reload will do, and a
+/// navigation still reaches the static host. The behaviour is driven in Node
+/// against the rendered file — `tests/sw/sw_runtime_stopped.test.mjs` says
+/// what and why.
 #[test]
 fn the_rendered_worker_answers_for_a_stopped_runtime() {
-    let tmp = production_pkg_copy();
-    run(tmp.path(), tmp.path(), AppConfig::default()).expect("bundler ok");
-
-    let tests =
-        PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/sw/sw_runtime_stopped.test.mjs");
-    node(
-        &["--test".as_ref(), tests.as_os_str()],
-        &tmp.path().join("sw.js"),
+    node_test(
+        "sw_runtime_stopped.test.mjs",
+        "sw.js",
+        "SW_JS",
+        "SW_JS_WIPE",
     );
+}
+
+/// The boot shell acts on a cause only when it is about this load, recovers
+/// automatically once per failure, and does not mistake a probe the runtime
+/// died on for a boot that worked — `tests/sw/loader_recovery.test.mjs`.
+#[test]
+fn the_rendered_loader_recovers_once_and_keeps_the_cause() {
+    node_test(
+        "loader_recovery.test.mjs",
+        "loader.js",
+        "LOADER_JS",
+        "LOADER_JS_WIPE",
+    );
+}
+
+/// `sw.js` states what a reload costs from the same build-time flag
+/// `loader.js` acts on: one `AppConfig` field, rendered into both.
+#[test]
+fn the_worker_and_the_loader_are_rendered_with_the_same_wipe_flag() {
+    for wipe in [false, true] {
+        let tmp = rendered_shell(wipe);
+        let declaration = format!("const OPFS_WIPE_ON_RECOVERY = {wipe};");
+        for file in ["sw.js", "loader.js"] {
+            let body = fs::read_to_string(tmp.path().join(file)).unwrap();
+            assert_eq!(body.matches(&declaration).count(), 1, "{file} = {body}");
+        }
+    }
 }
 
 fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {
