@@ -1,6 +1,8 @@
 use std::{fs, path::PathBuf};
 
-use impresspress_bundle::bundle::{run, AppConfig, BypassRules};
+use impresspress_bundle::bundle::{
+    run, AppConfig, BypassRules, BOOT_NOTICE_END, BOOT_NOTICE_START,
+};
 
 fn fixture_path() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("tests/bundle_fixtures/pkg-in")
@@ -792,6 +794,138 @@ fn the_worker_and_the_loader_are_rendered_with_the_same_wipe_flag() {
             let body = fs::read_to_string(tmp.path().join(file)).unwrap();
             assert_eq!(body.matches(&declaration).count(), 1, "{file} = {body}");
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// The boot shell's text, and what the bundler does NOT put in a bundle
+// ---------------------------------------------------------------------------
+
+/// [`production_pkg_copy`] with the shipped `index.html.tmpl` as well.
+fn production_pkg_copy_with_index() -> tempfile::TempDir {
+    let tmp = production_pkg_copy();
+    let index_tmpl = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/index.html.tmpl"
+    ));
+    fs::write(tmp.path().join("index.html.tmpl"), index_tmpl).unwrap();
+    tmp
+}
+
+const NOTICE: &str =
+    r#"<p>This is a build sandbox. Read <a href="/llms.txt">/llms.txt</a> first.</p>"#;
+
+/// An app's boot notice is in the HTML the static host serves — readable by
+/// a client that never runs `loader.js` — between the two markers that let it
+/// be found again, and beside the status line `loader.js` writes to.
+#[test]
+fn the_boot_shell_carries_an_apps_boot_notice_between_its_markers() {
+    let tmp = production_pkg_copy_with_index();
+    let app = AppConfig {
+        app_title: Some("Sandbox".to_string()),
+        boot_notice_html: Some(NOTICE.to_string()),
+        ..AppConfig::default()
+    };
+    run(tmp.path(), tmp.path(), app).expect("bundler ok");
+    let index = fs::read_to_string(tmp.path().join("index.html")).unwrap();
+    assert!(
+        index.contains(&format!("{BOOT_NOTICE_START}{NOTICE}{BOOT_NOTICE_END}")),
+        "{index}"
+    );
+    assert_eq!(index.matches(BOOT_NOTICE_START).count(), 1, "{index}");
+    assert_eq!(index.matches(BOOT_NOTICE_END).count(), 1, "{index}");
+    // What #117's loader needs is still there, after the notice.
+    let status = index
+        .find(r#"<p id="status">Loading...</p>"#)
+        .expect("status line");
+    assert!(index.find(NOTICE).unwrap() < status, "{index}");
+    assert!(index.contains(r#"<script src="/loader.js"></script>"#));
+}
+
+/// The template is generic: an app with no notice gets the empty region and
+/// a `<noscript>` line built from its own title — and not a word about a
+/// sandbox, an `llms.txt` or `/b/dev`.
+#[test]
+fn a_plain_boot_shell_has_an_empty_notice_region_and_no_sandbox_wording() {
+    let tmp = production_pkg_copy_with_index();
+    let app = AppConfig {
+        app_title: Some("My Shop".to_string()),
+        ..AppConfig::default()
+    };
+    run(tmp.path(), tmp.path(), app).expect("bundler ok");
+    let index = fs::read_to_string(tmp.path().join("index.html")).unwrap();
+    assert!(
+        index.contains(&format!("{BOOT_NOTICE_START}{BOOT_NOTICE_END}")),
+        "{index}"
+    );
+    assert!(
+        index.contains(
+            "<noscript><p>My Shop runs in your browser and needs JavaScript to start.</p></noscript>"
+        ),
+        "{index}"
+    );
+    let lower = index.to_lowercase();
+    for word in ["sandbox", "llms.txt", "/b/dev", "impresspress.org"] {
+        assert!(
+            !lower.contains(word),
+            "the generic shell says {word:?}: {index}"
+        );
+    }
+}
+
+/// A notice carrying one of the markers would end its own region early (or
+/// open a second), and whoever removes the notice later would cut in the
+/// wrong place.
+#[test]
+fn a_boot_notice_containing_a_marker_is_refused() {
+    for marker in [BOOT_NOTICE_START, BOOT_NOTICE_END] {
+        let tmp = production_pkg_copy_with_index();
+        let app = AppConfig {
+            boot_notice_html: Some(format!("<p>hi</p>{marker}")),
+            ..AppConfig::default()
+        };
+        let err = run(tmp.path(), tmp.path(), app).expect_err("refused");
+        assert!(err.to_string().contains("boot notice"), "{err}");
+    }
+}
+
+/// `/llms.txt` is not the bundler's: no bundle — plain or dev, with a boot
+/// notice or without — carries the file, lists it in the shell, or keeps the
+/// path from the runtime. A deployment that wants a static one overlays it
+/// (the dev sandbox does); the runtime must still be the one asked once the
+/// worker controls the page, or a site's own `llms.txt` would be shadowed.
+#[test]
+fn no_bundle_emits_lists_or_bypasses_llms_txt() {
+    for dev_enabled in [false, true] {
+        let tmp = production_pkg_copy_with_index();
+        let app = AppConfig {
+            dev_enabled,
+            boot_notice_html: dev_enabled.then(|| NOTICE.to_string()),
+            ..AppConfig::default()
+        };
+        let rules = BypassRules::for_bundle("/app", &app);
+        run(tmp.path(), tmp.path(), app).expect("bundler ok");
+
+        assert!(!tmp.path().join("llms.txt").exists(), "dev={dev_enabled}");
+        let manifest: serde_json::Value = serde_json::from_str(
+            &fs::read_to_string(tmp.path().join("asset-manifest.json")).unwrap(),
+        )
+        .unwrap();
+        let files = manifest["files"].as_array().expect("files");
+        assert!(
+            !files.iter().any(|f| f.as_str() == Some("llms.txt")),
+            "dev={dev_enabled}: {files:?}"
+        );
+        let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
+        assert!(!bypasses(&sw, "/llms.txt"), "dev={dev_enabled}");
+        assert!(!rules.exact.iter().any(|p| p == "/llms.txt"), "{rules:?}");
+        assert!(
+            !rules
+                .prefixes
+                .iter()
+                .any(|p| "/llms.txt".starts_with(p.as_str())),
+            "{rules:?}"
+        );
     }
 }
 

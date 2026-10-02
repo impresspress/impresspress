@@ -32,15 +32,7 @@ pub async fn build(repo_root: &Path, release: bool) -> Result<()> {
 
     // 3. Bundle: write static assets + content-hash + render templates.
     let dist_dir = repo_root.join(&cfg.wasm.out_dir);
-    let app = impresspress_bundle::bundle::AppConfig {
-        app_name: Some(cfg.app.name.clone()),
-        app_title: Some(cfg.app.title.clone()),
-        boot_redirect: Some(cfg.app.boot_redirect.clone()),
-        extra_bypass_prefix: cfg.assets.extra_bypass_prefix.clone(),
-        extra_bypass_exact: cfg.assets.extra_bypass_exact.clone(),
-        opfs_wipe_on_recovery: cfg.assets.opfs_wipe_on_recovery,
-        dev_enabled: cfg.dev.enabled,
-    };
+    let app = cfg.bundle_app(repo_root)?;
     impresspress_bundle::assets::write_to(&dist_dir)?;
     impresspress_bundle::bundle::run(&dist_dir, repo_root, app)?;
     // `release` no longer flips the bundle path — every build is hashed so
