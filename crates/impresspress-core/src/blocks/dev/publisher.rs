@@ -68,9 +68,23 @@
 //! `/llms.txt` away from the runtime (a service-worker bypass), because that
 //! would shadow the `site/llms.txt` an agent may well write.
 //!
-//! Both sides of a publish's diff get the same treatment, so the existing
-//! ordering does the rest: writing `site/llms.txt` replaces the sandbox's
-//! text as a changed file, and deleting it puts the sandbox's text back.
+//! The file joins both sides of a publish's diff, so the existing ordering
+//! does the rest: writing `site/llms.txt` replaces the sandbox's text as a
+//! changed file, and deleting it puts the sandbox's text back.
+//!
+//! The two sides are not derived the same way, and that is deliberate. What
+//! this publish SHOULD leave at `llms.txt` is computed: the sandbox's text,
+//! when one is recorded and the site leaves the name free. What an earlier
+//! publish DID leave there is read, from the record this module keeps
+//! (`seed_info.llms_published_sha256`, written at the end of every publish
+//! that changes it). It is not inferred from "a text is recorded", because
+//! that is false whenever the text arrived after the last publish — an
+//! instance seeded before the sandbox had an `llms.txt` gets one from the
+//! boot repair (`seed::repair_llms`), and a publisher that assumed it was
+//! already in the folder would find it "unchanged" and never write it. The
+//! record is written last, so a publish that fails part-way leaves it
+//! saying what was true before; the worst that costs is one rewrite of an
+//! identical file.
 //!
 //! # Why only changed files
 //!
@@ -107,13 +121,23 @@ pub async fn publish_site(
     prev: Option<&SiteManifest>,
     next: &SiteManifest,
 ) -> Result<Vec<String>, WaferError> {
-    let sandbox_llms = SandboxLlms::read(ctx).await?;
-    // `prev` is what an earlier call of this function published, so it gets
-    // the same view `next` does; no `prev` is an empty folder.
-    let prev_by_path = match prev {
-        Some(manifest) => published_view(&manifest.files, sandbox_llms.as_ref()),
-        None => BTreeMap::new(),
-    };
+    let recorded = seed_info::llms(ctx).await?;
+    let sandbox_llms = recorded.text.map(SandboxLlms::new);
+    // What is in the folder: `prev`'s files, and the sandbox's `llms.txt` if
+    // the record says an earlier publish left one — unless `prev`'s own
+    // files hold that name, in which case that publish replaced or removed
+    // it and failed before it could say so.
+    let mut prev_by_path: BTreeMap<&str, &str> = prev
+        .map(|manifest| manifest.files.as_slice())
+        .unwrap_or_default()
+        .iter()
+        .map(|f| (f.path.as_str(), f.sha256.as_str()))
+        .collect();
+    if let Some(published) = recorded.published_sha256.as_deref() {
+        if name_is_free(seed::LLMS_PATH, &prev_by_path) {
+            prev_by_path.insert(seed::LLMS_PATH, published);
+        }
+    }
     let next_by_path = published_view(&next.files, sandbox_llms.as_ref());
 
     let (colliding, rest): (Vec<&str>, Vec<&str>) = prev_by_path
@@ -152,7 +176,47 @@ pub async fn publish_site(
             touched.push(ENTRYPOINT.to_string());
         }
     }
+
+    // Last: say what is at `llms.txt` now, when that changed.
+    let published_now = match next_by_path.get(seed::LLMS_PATH) {
+        Some(Published::Sandbox(llms)) => Some(llms.entry.sha256.as_str()),
+        _ => None,
+    };
+    if published_now != recorded.published_sha256.as_deref() {
+        seed_info::set_llms_published(ctx, published_now).await?;
+    }
     Ok(touched)
+}
+
+/// Whether the sandbox's `llms.txt` is where the record and the active
+/// generation say it should be — and publish it if not.
+///
+/// The boot repair's second half (`seed::repair_llms`): a text recorded
+/// after the last publish is in no folder yet. Republishing the active
+/// generation over itself is a diff of that one file. Returns whether
+/// anything was written.
+pub async fn converge_sandbox_llms(
+    ctx: &dyn Context,
+    active: &SiteManifest,
+) -> Result<bool, WaferError> {
+    let recorded = seed_info::llms(ctx).await?;
+    let Some(llms) = recorded.text.map(SandboxLlms::new) else {
+        return Ok(false);
+    };
+    let wanted = match published_view(&active.files, Some(&llms)).get(seed::LLMS_PATH) {
+        Some(Published::Sandbox(llms)) => Some(llms.entry.sha256.as_str()),
+        _ => None,
+    };
+    if wanted == recorded.published_sha256.as_deref() {
+        return Ok(false);
+    }
+    Ok(!publish_site(ctx, Some(active), active).await?.is_empty())
+}
+
+/// Whether the published folder can hold a file at `path` beside `files`:
+/// the name is a file or a directory and never both.
+fn name_is_free<V>(path: &str, files: &BTreeMap<&str, V>) -> bool {
+    !files.contains_key(path) && !collides_with_any(path, files)
 }
 
 /// Whether `removed` shares a name with any path the new manifest holds — one
@@ -192,14 +256,11 @@ struct SandboxLlms {
 }
 
 impl SandboxLlms {
-    /// `None` on an instance whose seed carried no sandbox block — an
-    /// exported bundle, above all — or recorded no `llms.txt`.
-    async fn read(ctx: &dyn Context) -> Result<Option<Self>, WaferError> {
-        let Some(text) = seed_info::llms_text(ctx).await? else {
-            return Ok(None);
-        };
+    /// From the recorded text. There is none on an instance whose seed
+    /// carried no sandbox block — an exported bundle, above all.
+    fn new(text: String) -> Self {
         let bytes = text.into_bytes();
-        Ok(Some(Self {
+        Self {
             entry: FileEntry {
                 path: seed::LLMS_PATH.to_string(),
                 sha256: blobs::sha256_hex(&bytes),
@@ -207,7 +268,7 @@ impl SandboxLlms {
                 content_type: seed::LLMS_CONTENT_TYPE.to_string(),
             },
             bytes,
-        }))
+        }
     }
 }
 
@@ -246,7 +307,7 @@ fn published_view<'a>(
         .collect();
     if let Some(llms) = sandbox_llms {
         let path = llms.entry.path.as_str();
-        if !view.contains_key(path) && !collides_with_any(path, &view) {
+        if name_is_free(path, &view) {
             view.insert(path, Published::Sandbox(llms));
         }
     }
@@ -279,9 +340,9 @@ async fn remove(ctx: &dyn Context, path: &str) -> Result<(), WaferError> {
 }
 
 /// Whether `entry` is already published at `path` with the same content.
-fn is_unchanged(prev: &BTreeMap<&str, Published<'_>>, path: &str, file: Published<'_>) -> bool {
+fn is_unchanged(prev: &BTreeMap<&str, &str>, path: &str, file: Published<'_>) -> bool {
     prev.get(path)
-        .is_some_and(|before| before.entry().sha256 == file.entry().sha256)
+        .is_some_and(|before| *before == file.entry().sha256)
 }
 
 #[cfg(test)]
@@ -668,6 +729,75 @@ mod tests {
                 "put wafer-run/web/site/llms.txt/index.html",
             ]
         );
+    }
+
+    /// A text recorded AFTER the site was published — the boot repair's case —
+    /// is written by the next publish, although no site file changed: what is
+    /// in the folder is read from the record, not assumed from the row.
+    #[tokio::test]
+    async fn a_text_recorded_after_the_last_publish_is_written_by_the_next_one() {
+        let ctx = TestContext::with_dev(FakeControl::new()).await;
+        let site = SiteManifest {
+            files: vec![entry(&ctx, "index.html", b"<h1>hi</h1>").await],
+        };
+        publish_site(&ctx, None, &site).await.expect("publish");
+        assert!(published(&ctx, "llms.txt").await.is_none());
+
+        seed_info::write(
+            &ctx,
+            &seed_info::SeedInfo {
+                template: "blank".to_string(),
+                suggested_prompt: String::new(),
+                guide_markdown: String::new(),
+                llms_text: None,
+            },
+        )
+        .await
+        .expect("a row from before the column");
+        assert!(!converge_sandbox_llms(&ctx, &site)
+            .await
+            .expect("nothing yet"));
+        seed_info::record_llms_text(&ctx, SANDBOX_LLMS)
+            .await
+            .expect("record");
+
+        assert!(converge_sandbox_llms(&ctx, &site).await.expect("converge"));
+        assert_eq!(
+            published(&ctx, "llms.txt").await.as_deref(),
+            Some(SANDBOX_LLMS.as_bytes())
+        );
+        // And once it is there, converging again writes nothing.
+        let before = site_ops(&ctx).len();
+        assert!(!converge_sandbox_llms(&ctx, &site).await.expect("again"));
+        assert_eq!(site_ops(&ctx).len(), before);
+    }
+
+    /// The record follows the folder: set when the sandbox's text is
+    /// written, cleared when the site's own file takes the name.
+    #[tokio::test]
+    async fn the_record_says_whether_the_sandboxes_text_is_in_the_folder() {
+        let ctx = seeded_sandbox().await;
+        let bare = SiteManifest {
+            files: vec![entry(&ctx, "index.html", b"<h1>hi</h1>").await],
+        };
+        publish_site(&ctx, None, &bare).await.expect("publish");
+        assert_eq!(
+            seed_info::llms(&ctx).await.expect("row").published_sha256,
+            Some(blobs::sha256_hex(SANDBOX_LLMS.as_bytes()))
+        );
+        let own = SiteManifest {
+            files: vec![
+                entry(&ctx, "index.html", b"<h1>hi</h1>").await,
+                entry(&ctx, "llms.txt", b"# My shop\n").await,
+            ],
+        };
+        publish_site(&ctx, Some(&bare), &own).await.expect("own");
+        assert_eq!(
+            seed_info::llms(&ctx).await.expect("row").published_sha256,
+            None
+        );
+        // A site with its own file needs no convergence.
+        assert!(!converge_sandbox_llms(&ctx, &own).await.expect("converge"));
     }
 
     /// A manifest naming a blob that is not stored is corruption, and must

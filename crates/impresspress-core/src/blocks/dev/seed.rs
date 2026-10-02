@@ -766,28 +766,103 @@ async fn fetch_sandbox(
     .await?;
     let guide_markdown =
         String::from_utf8(bytes).map_err(|_| format!("{url}: the guide is not valid UTF-8"))?;
-    if declared.llms.path != LLMS_PATH {
-        return Err(format!(
-            "the seed bundle's sandbox.llms is named {:?}; it must be {LLMS_PATH:?} beside the manifest",
-            declared.llms.path
-        ));
-    }
-    let url = llms_url(&declared.llms.path);
-    let bytes = fetch_and_verify(
-        fetch,
-        &url,
-        &declared.llms,
-        LLMS_CONTENT_TYPE,
-        MAX_LLMS_BYTES,
-    )
-    .await?;
-    let llms_text =
-        String::from_utf8(bytes).map_err(|_| format!("{url}: llms.txt is not valid UTF-8"))?;
+    let llms_text = fetch_llms(fetch, &declared.llms).await?;
     Ok(seed_info::SeedInfo {
         template: declared.template.clone(),
         suggested_prompt: declared.suggested_prompt.clone(),
         guide_markdown,
         llms_text: Some(llms_text),
+    })
+}
+
+/// Fetch and check the sandbox's `llms.txt` as a manifest declares it: the
+/// one name it may have, then hash, size and content type like any other
+/// file. Shared by the import and by [`repair_llms`], so a text recorded on
+/// a later boot passed exactly the checks one recorded at import did.
+async fn fetch_llms(fetch: &dyn SeedFetch, declared: &SeedFile) -> Result<String, String> {
+    if declared.path != LLMS_PATH {
+        return Err(format!(
+            "the seed bundle's sandbox.llms is named {:?}; it must be {LLMS_PATH:?} beside the manifest",
+            declared.path
+        ));
+    }
+    let url = llms_url(&declared.path);
+    let bytes = fetch_and_verify(fetch, &url, declared, LLMS_CONTENT_TYPE, MAX_LLMS_BYTES).await?;
+    String::from_utf8(bytes).map_err(|_| format!("{url}: llms.txt is not valid UTF-8"))
+}
+
+/// What [`repair_llms`] found and did.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LlmsRepair {
+    /// This instance's seed carried no sandbox block: it has no sandbox
+    /// `llms.txt` and is owed none. Nothing was fetched.
+    NotASandbox,
+    /// The text is recorded and the published folder agrees with the record.
+    /// Nothing was fetched or written.
+    InPlace,
+    /// The text was already recorded but was not where it should be in the
+    /// published folder; it is now.
+    Published,
+    /// The text was missing, was fetched from the bundle and recorded — and
+    /// published, when a generation is live to publish it with.
+    Recorded,
+}
+
+/// Give a sandbox seeded before it had an `llms.txt` the one its origin now
+/// serves, and make sure the published folder carries it. Runs on every
+/// boot, after convergence.
+///
+/// A seed is imported once, on the boot that finds the instance fresh, so a
+/// browser that visited before the bundle carried `sandbox.llms` has a
+/// `seed_info` row with a template and no text — and its `/llms.txt`, once
+/// the worker controls the page, is the site's fallback document. Nothing
+/// but a boot can mend that: the text is in the bundle the static host
+/// serves, and only the worker can fetch it.
+///
+/// What is fetched is the bundle's manifest and the one file it declares,
+/// through [`fetch_llms`] — hash, size and type, as at import. Nothing else
+/// of the bundle is read and nothing of the site is touched.
+///
+/// An `Err` — the host unreachable, the manifest unreadable, the file not
+/// what was declared — changes nothing: the row still has no text, so the
+/// next boot tries again, and the sandbox runs meanwhile exactly as it did.
+/// The caller logs it and carries on.
+///
+/// Publishing is a separate question from recording and is asked on every
+/// boot, not only the one that fetched ([`publisher::converge_sandbox_llms`]
+/// compares the record of what is published): a boot that recorded the text
+/// and then failed to publish it is finished by the next.
+pub async fn repair_llms(ctx: &dyn Context, fetch: &dyn SeedFetch) -> Result<LlmsRepair, String> {
+    let row = seed_info::llms(ctx).await.map_err(|e| e.message)?;
+    if row.template.is_none() {
+        return Ok(LlmsRepair::NotASandbox);
+    }
+    let fetched = row.text.is_none();
+    if fetched {
+        let bytes = fetch.get(MANIFEST_URL).await?;
+        let manifest: SeedManifest = serde_json::from_slice(&bytes)
+            .map_err(|e| format!("{MANIFEST_URL}: not a seed manifest: {e}"))?;
+        let declared = manifest.sandbox.ok_or_else(|| {
+            format!("{MANIFEST_URL}: carries no sandbox block, so there is no llms.txt to record")
+        })?;
+        let text = fetch_llms(fetch, &declared.llms).await?;
+        seed_info::record_llms_text(ctx, &text)
+            .await
+            .map_err(|e| format!("recording the sandbox's llms.txt: {}", e.message))?;
+    }
+    let published = match super::generation::active(ctx)
+        .await
+        .map_err(|e| e.message)?
+    {
+        Some((_, manifest)) => super::publisher::converge_sandbox_llms(ctx, &manifest.site)
+            .await
+            .map_err(|e| format!("publishing the sandbox's llms.txt: {}", e.message))?,
+        None => false,
+    };
+    Ok(match (fetched, published) {
+        (true, _) => LlmsRepair::Recorded,
+        (false, true) => LlmsRepair::Published,
+        (false, false) => LlmsRepair::InPlace,
     })
 }
 

@@ -22,6 +22,17 @@ pub use self::bypass::{BypassRules, SEED_BYPASS_PREFIX};
 pub const BOOT_NOTICE_START: &str = "<!--boot-notice-->";
 pub const BOOT_NOTICE_END: &str = "<!--/boot-notice-->";
 
+/// What `index.html.tmpl` wraps each place it shows [`AppConfig::app_title`]
+/// in the page body in, so the title can be replaced by exact text. The
+/// third place is `<title>` itself, which needs no wrapper.
+///
+/// For the same consumer as the notice markers: the title is the DEPLOYMENT's
+/// (`[app] title`), and a development sandbox's export ships this page as the
+/// boot shell of a site that has a name of its own. The export restates the
+/// pair; the same test compares the spellings.
+pub const APP_TITLE_OPEN: &str = "<span data-app-title>";
+pub const APP_TITLE_CLOSE: &str = "</span>";
+
 /// Consumer-supplied configuration that controls how templates are rendered.
 /// All fields are optional; sensible defaults are derived from the discovered
 /// wasm-pack output pair when omitted.
@@ -380,7 +391,11 @@ fn build_template_vars(
     vars.insert("BYPASS_CONDITION".to_string(), bypass.render_condition());
     vars.insert("BYPASS_RULES".to_string(), bypass.render_data());
     vars.insert("APP_NAME".to_string(), app_name);
-    vars.insert("APP_TITLE".to_string(), app_title);
+    // `index.html` is the only template that shows the title, and it shows
+    // it as text: in `<title>` and between `APP_TITLE_OPEN`/`_CLOSE`.
+    // Escaped, so a title is never markup — and can never contain the
+    // closing tag whoever replaces it looks for.
+    vars.insert("APP_TITLE".to_string(), html_text(&app_title));
     vars.insert("BOOT_REDIRECT".to_string(), boot_redirect);
     vars.insert(
         "BOOT_NOTICE".to_string(),
@@ -405,6 +420,13 @@ fn build_template_vars(
         },
     );
     vars
+}
+
+/// `text` as HTML text content.
+fn html_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 fn render_if_exists(

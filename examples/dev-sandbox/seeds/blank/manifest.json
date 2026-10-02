@@ -28,8 +28,8 @@
     },
     "llms": {
       "path": "llms.txt",
-      "sha256": "10d46021d72aa9edf1c247fc2a70c11c0fdf31062c09d09171505677bd3b752c",
-      "size": 6567,
+      "sha256": "de430100fe93ecd9177c2bdb2e169d1dfc8e2bb979b79f761e423f6281f144b8",
+      "size": 6931,
       "content_type": "text/plain; charset=utf-8"
     }
   }

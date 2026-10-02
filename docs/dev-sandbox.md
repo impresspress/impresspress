@@ -42,6 +42,12 @@ answers with until the service worker is installed) says the same in two
 sentences and links both `/llms.txt` and `/b/dev/enter`. Once the sandbox is
 running, `/llms.txt` is answered by the runtime: the same text until the site
 has an `llms.txt` of its own (`site/llms.txt`), and that file from then on.
+A sandbox opened in a browser before this existed picks the text up on its
+next load. An [export](#export) never carries the sandbox's text or its boot
+page wording — the exported boot page is titled with the site's own name —
+and a site's own `llms.txt` is exported twice: for the exported runtime, and
+at the folder's root so a static host serves it to readers that run no
+JavaScript.
 
 *Changed 2026-10-02: the link used to lead to the login form, and the visitor
 or their agent typed the credentials. One-click entry exists only in the

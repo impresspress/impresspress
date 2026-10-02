@@ -48,16 +48,39 @@
 //!
 //! The boot page is the second edit: a deployment's boot notice (the sandbox
 //! says what it is and where its `llms.txt` is) describes the deployment, not
-//! the site, and comes out — see [`index_without_boot_notice`].
+//! the site, and comes out.
 //!
-//! # What of the sandbox's `llms.txt`
+//! Its title is the third: the page shows the DEPLOYMENT's title ("…dev
+//! sandbox") in `<title>` and twice in the body, and the exported site has a
+//! name of its own — the one the README is headed with. See
+//! [`index_for_export`].
 //!
-//! It is not exported. The copy the static host serves at `/llms.txt` is a
-//! deployment overlay, held back from the shell by name
-//! ([`SHELL_EXCLUDED_LLMS`]); the copy the
-//! runtime serves is published by `super::publisher` without being in any
-//! generation's manifest, and the `seed/site/**` below is that manifest. A
-//! site's OWN `site/llms.txt` is an ordinary site file and is exported as one.
+//! # `llms.txt`
+//!
+//! Two different files have that name, and the export treats them
+//! differently by construction rather than by a rule about the name.
+//!
+//! The SANDBOX's — what the sandbox tells a reader about itself — is not
+//! exported, because nothing the export reads holds it. The static host's
+//! copy is a deployment overlay, laid down after the bundler listed the
+//! shell, so it is not in `/asset-manifest.json`'s `files` (the CLI's
+//! `flow_sealed_web` test pins that for the sandbox's own configuration).
+//! The runtime's copy is published by `super::publisher` without being in
+//! any generation's manifest, and `seed/site/**` is that manifest. A shell
+//! file the listing DOES name is the deployment's own bundled file and is
+//! copied like any other.
+//!
+//! The SITE's — `site/llms.txt`, if the site has one — is exported twice,
+//! from one read of one blob: as `seed/site/llms.txt`, which the exported
+//! runtime imports and serves once its worker controls the page, and as
+//! `llms.txt` at the archive's root, which the static host serves to a
+//! reader that runs no JavaScript and so never gets a worker. `/llms.txt`
+//! is not a path the worker leaves to the static host (the
+//! shadowed-site-file refusal below is about exactly those paths, and a
+//! site file at one of them is refused), so the root copy shadows nothing:
+//! it answers only where the runtime cannot. The two cannot differ in the
+//! archive — they are the same bytes written in the same assembly — and the
+//! exported instance has no workspace to edit the site with afterwards.
 
 use std::collections::BTreeMap;
 
@@ -90,7 +113,8 @@ const SW_DEV_OFF: &str = "const DEV_ENABLED = false;";
 const SW_PATH: &str = "sw.js";
 
 /// The shell's boot page, the other shell file this export edits: the
-/// deployment's boot notice comes out ([`index_without_boot_notice`]).
+/// deployment's boot notice comes out and its title becomes the exported
+/// site's ([`index_for_export`]).
 const INDEX_PATH: &str = "index.html";
 
 /// The two comments the bundler renders a deployment's boot notice between
@@ -100,6 +124,12 @@ const INDEX_PATH: &str = "index.html";
 /// `crates/impresspress/tests/seed_bypass_prefix.rs` compares the spellings.
 pub const BOOT_NOTICE_START: &str = "<!--boot-notice-->";
 pub const BOOT_NOTICE_END: &str = "<!--/boot-notice-->";
+
+/// What the bundler wraps each showing of the deployment's title in, in the
+/// boot page's body (`impresspress-bundle`'s `APP_TITLE_OPEN` /
+/// `APP_TITLE_CLOSE`). Restated and compared like the notice markers.
+pub const APP_TITLE_OPEN: &str = "<span data-app-title>";
+pub const APP_TITLE_CLOSE: &str = "</span>";
 
 /// Where the data snapshot lands, relative to [`seed::ROOT`].
 ///
@@ -119,12 +149,11 @@ const DATA_PATH: &str = "data.json";
 /// prefix for the same reason.
 const COMPILER_ROOT: &str = "/__impresspress_dev/compiler/";
 
-/// Shell paths the export never copies, by prefix — and one by name,
-/// [`SHELL_EXCLUDED_LLMS`].
+/// Shell paths the export never copies, by prefix.
 ///
-/// All are things a DEPLOYMENT overlays on top of the bundler's output
+/// Both are things a DEPLOYMENT overlays on top of the bundler's output
 /// (`impresspress`'s `apply_overlays`, run after `bundle::run` returns), so
-/// none is in `/asset-manifest.json`'s `files` today. They are excluded
+/// neither is in `/asset-manifest.json`'s `files` today. They are excluded
 /// explicitly all the same, because "the manifest happens not to list them"
 /// is a property of the order two CLI steps run in, and this is a property of
 /// what an export MEANS:
@@ -136,19 +165,11 @@ const COMPILER_ROOT: &str = "/__impresspress_dev/compiler/";
 ///   compiler that only `/b/dev` loads, and the exported site has no `/b/dev`.
 const SHELL_EXCLUDED_PREFIXES: &[&str] = &["seed/", "__impresspress_dev/"];
 
-/// The deployment's own `/llms.txt`: the sandbox describing itself to a
-/// reader its service worker does not control. The exported site is not that
-/// sandbox, and its static host must not say it is. (The exported SITE's
-/// `llms.txt`, if it has one, is `seed/site/llms.txt` and is served by the
-/// exported runtime.)
-const SHELL_EXCLUDED_LLMS: &str = seed::LLMS_PATH;
-
 /// Whether the export leaves a listed shell file behind.
 fn shell_excluded(path: &str) -> bool {
-    path == SHELL_EXCLUDED_LLMS
-        || SHELL_EXCLUDED_PREFIXES
-            .iter()
-            .any(|prefix| path.starts_with(prefix))
+    SHELL_EXCLUDED_PREFIXES
+        .iter()
+        .any(|prefix| path.starts_with(prefix))
 }
 
 /// The README template, rendered with this export's own numbers.
@@ -170,6 +191,8 @@ struct Entry {
 /// `site_files` for `shell_files` would produce a plausible, wrong README
 /// that no type would catch.
 struct ReadmeFacts<'a> {
+    /// The exported site's name ([`exported_title`]).
+    title: &'a str,
     generation_id: &'a str,
     /// The ACTIVE GENERATION's `created_at`, never the wall clock — see
     /// [`render_readme`].
@@ -310,6 +333,10 @@ async fn assemble(ctx: &dyn Context, shared: &DevShared) -> Result<Assembled, Re
         });
     }
 
+    // The exported site's name: the README's heading and the boot page's
+    // title are the same string, read once.
+    let title = exported_title(ctx).await.map_err(Refusal::Internal)?;
+
     // --- the shell -------------------------------------------------------
     let listed = shared.shell.list().await.map_err(Refusal::Shell)?;
     let mut shell: Vec<Entry> = Vec::new();
@@ -325,7 +352,7 @@ async fn assemble(ctx: &dyn Context, shared: &DevShared) -> Result<Assembled, Re
         let bytes = if path == SW_PATH {
             sw_without_compiler(sw_with_dev_off(&bytes)?)?
         } else if path == INDEX_PATH {
-            index_without_boot_notice(bytes)?
+            index_for_export(bytes, &title)?
         } else {
             bytes
         };
@@ -348,6 +375,19 @@ async fn assemble(ctx: &dyn Context, shared: &DevShared) -> Result<Assembled, Re
     let mut site: Vec<seed::SeedFile> = Vec::new();
     for entry in &manifest.site.files {
         let bytes = blobs::get(ctx, &entry.sha256).await.map_err(content_gone)?;
+        // The site's own `llms.txt` also goes to the root, for the static
+        // host to serve where there is no worker — the same bytes as the
+        // entry below, from this one read (see the module docs). It takes
+        // the place of a shell file of that name: once the worker runs, the
+        // site's is what `/llms.txt` answers, and the static host must not
+        // say something else to a reader without one.
+        if entry.path == seed::LLMS_PATH {
+            shell.retain(|shell_entry| shell_entry.path != seed::LLMS_PATH);
+            shell.push(Entry {
+                path: seed::LLMS_PATH.to_string(),
+                bytes: bytes.clone(),
+            });
+        }
         seed_entries.push(Entry {
             path: format!("seed/site/{}", entry.path),
             bytes,
@@ -448,6 +488,7 @@ async fn assemble(ctx: &dyn Context, shared: &DevShared) -> Result<Assembled, Re
     let readme = render_readme(
         ctx,
         &ReadmeFacts {
+            title: &title,
             generation_id: &manifest.generation_id,
             created_at: &row.created_at,
             shell_files,
@@ -568,41 +609,55 @@ fn sw_with_dev_off(bytes: &[u8]) -> Result<Vec<u8>, Refusal> {
     Ok(text.replace(SW_DEV_ON, SW_DEV_OFF).into_bytes())
 }
 
-/// `index.html` with the deployment's boot notice taken out.
+/// The boot page as the exported site's: the deployment's boot notice taken
+/// out, and the deployment's title replaced by the site's name.
+///
+/// Both are things the bundler rendered from the DEPLOYMENT's configuration
+/// (`[app] boot_notice`, `[app] title`), and both are found by the exact
+/// text the bundler renders them in — never by guessing at the sandbox's
+/// wording, which this crate does not know.
+fn index_for_export(bytes: Vec<u8>, title: &str) -> Result<Vec<u8>, Refusal> {
+    let Ok(text) = std::str::from_utf8(&bytes) else {
+        return Err(index_malformed("is not valid UTF-8"));
+    };
+    let text = index_without_boot_notice(text)?;
+    let text = index_with_title(&text, title)?;
+    Ok(text.into_bytes())
+}
+
+/// The refusal for a boot page the export cannot edit safely.
+fn index_malformed(what: &str) -> Refusal {
+    Refusal::Internal(WaferError::new(
+        ErrorCode::Internal,
+        format!(
+            "the deployment's index.html {what}, so the export cannot make it the exported \
+             site's boot page; the bundle was built by a different impresspress-bundle than \
+             this runtime expects"
+        ),
+    ))
+}
+
+/// The page with its boot notice region emptied.
 ///
 /// The sandbox's boot page says what the sandbox is and sends an agent to
 /// `/llms.txt` and `/b/dev/enter` — none of which the exported site has. The
 /// bundler renders that text between two comments
 /// ([`BOOT_NOTICE_START`], [`BOOT_NOTICE_END`]) and renders the comments with
 /// nothing between them for an app that has no notice, so emptying the region
-/// leaves exactly the boot page a plain bundle of this shell would have had.
+/// leaves exactly what a plain bundle of this shell would have had there.
 ///
-/// A page with neither comment has no notice to remove and is exported as it
-/// is — a deployment may overlay a boot page of its own. One comment without
-/// the other, either of them twice, or the pair out of order is a page this
-/// cannot edit safely, and that is [`ErrorCode::Internal`] rather than a
-/// guess at where the sandbox's text ends.
-fn index_without_boot_notice(bytes: Vec<u8>) -> Result<Vec<u8>, Refusal> {
-    let malformed = |what: &str| {
-        Refusal::Internal(WaferError::new(
-            ErrorCode::Internal,
-            format!(
-                "the deployment's index.html {what}, so the export cannot remove its boot \
-                 notice; the bundle was built by a different impresspress-bundle than this \
-                 runtime expects"
-            ),
-        ))
-    };
-    let Ok(text) = std::str::from_utf8(&bytes) else {
-        return Err(malformed("is not valid UTF-8"));
-    };
+/// A page with neither comment has no notice to remove — a deployment may
+/// overlay a boot page of its own. One comment without the other, either of
+/// them twice, or the pair out of order is [`ErrorCode::Internal`] rather
+/// than a guess at where the sandbox's text ends.
+fn index_without_boot_notice(text: &str) -> Result<String, Refusal> {
     let starts = text.matches(BOOT_NOTICE_START).count();
     let ends = text.matches(BOOT_NOTICE_END).count();
     if starts == 0 && ends == 0 {
-        return Ok(bytes);
+        return Ok(text.to_string());
     }
     if starts != 1 || ends != 1 {
-        return Err(malformed(&format!(
+        return Err(index_malformed(&format!(
             "contains {starts} of {BOOT_NOTICE_START:?} and {ends} of {BOOT_NOTICE_END:?} \
              where the export needs one of each"
         )));
@@ -611,11 +666,74 @@ fn index_without_boot_notice(bytes: Vec<u8>) -> Result<Vec<u8>, Refusal> {
         .split_once(BOOT_NOTICE_START)
         .expect("counted exactly one");
     let Some((_notice, after)) = rest.split_once(BOOT_NOTICE_END) else {
-        return Err(malformed(&format!(
+        return Err(index_malformed(&format!(
             "closes its boot notice ({BOOT_NOTICE_END:?}) before opening it"
         )));
     };
-    Ok(format!("{before}{BOOT_NOTICE_START}{BOOT_NOTICE_END}{after}").into_bytes())
+    Ok(format!(
+        "{before}{BOOT_NOTICE_START}{BOOT_NOTICE_END}{after}"
+    ))
+}
+
+/// The page with `title` everywhere the bundler showed the deployment's.
+///
+/// The bundler shows the title in `<title>` and, in the body, inside
+/// [`APP_TITLE_OPEN`]…[`APP_TITLE_CLOSE`] (the heading and the `<noscript>`
+/// line), always as escaped text — so the closing tag that ends each one is
+/// the first one after it opens.
+///
+/// A page with no wrapped title in its body is not the bundler's page (an
+/// overlaid boot page) and is left exactly as it is, `<title>` included: its
+/// author chose that title. A bundler page must have exactly one `<title>`,
+/// and every wrapper must close; anything else is [`ErrorCode::Internal`].
+fn index_with_title(text: &str, title: &str) -> Result<String, Refusal> {
+    if !text.contains(APP_TITLE_OPEN) {
+        return Ok(text.to_string());
+    }
+    let title = html_text(title);
+    let replaced = replace_between(text, "<title>", "</title>", &title)?;
+    if replaced.1 != 1 {
+        return Err(index_malformed(&format!(
+            "has {} <title> elements where the export needs one",
+            replaced.1
+        )));
+    }
+    Ok(replace_between(&replaced.0, APP_TITLE_OPEN, APP_TITLE_CLOSE, &title)?.0)
+}
+
+/// `text` with the content of every `open`…`close` span replaced by `with`,
+/// and how many there were.
+fn replace_between(
+    text: &str,
+    open: &str,
+    close: &str,
+    with: &str,
+) -> Result<(String, usize), Refusal> {
+    let mut out = String::with_capacity(text.len());
+    let mut rest = text;
+    let mut count = 0;
+    while let Some((before, after_open)) = rest.split_once(open) {
+        let Some((_old, after_close)) = after_open.split_once(close) else {
+            return Err(index_malformed(&format!(
+                "opens {open:?} without closing it"
+            )));
+        };
+        out.push_str(before);
+        out.push_str(open);
+        out.push_str(with);
+        out.push_str(close);
+        rest = after_close;
+        count += 1;
+    }
+    out.push_str(rest);
+    Ok((out, count))
+}
+
+/// `text` as HTML text content — the bundler's own escaping of a title.
+fn html_text(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
 }
 
 /// The rules the exported worker applies: the deployment's, minus the
@@ -717,17 +835,9 @@ fn short_id(generation_id: &str) -> String {
     generation_id.chars().take(8).collect()
 }
 
-/// The README, with this export's own numbers substituted in.
-///
-/// `created_at` is the ACTIVE GENERATION's timestamp, not the wall clock. An
-/// export is a function of what is live, and `ZipWriter` already fixes every
-/// entry's timestamp for the same reason — dating the README by when the
-/// download happened would have made the one entry that changes between two
-/// otherwise identical exports the README, which is both useless and the
-/// exact thing `two_exports_of_the_same_generation_are_identical` exists to
-/// deny. The generation's own creation time is also the more useful fact: it
-/// is when the site being exported came to be.
-async fn render_readme(ctx: &dyn Context, facts: &ReadmeFacts<'_>) -> Result<String, WaferError> {
+/// The exported site's name: what its README is headed with and what its
+/// boot page is titled.
+async fn exported_title(ctx: &dyn Context) -> Result<String, WaferError> {
     use wafer_core::clients::config;
 
     // Through the config client, not `ctx.config_get`: that snapshot is
@@ -742,6 +852,22 @@ async fn render_readme(ctx: &dyn Context, facts: &ReadmeFacts<'_>) -> Result<Str
     } else {
         title
     };
+    Ok(title)
+}
+
+/// The README, with this export's own numbers substituted in.
+///
+/// `created_at` is the ACTIVE GENERATION's timestamp, not the wall clock. An
+/// export is a function of what is live, and `ZipWriter` already fixes every
+/// entry's timestamp for the same reason — dating the README by when the
+/// download happened would have made the one entry that changes between two
+/// otherwise identical exports the README, which is both useless and the
+/// exact thing `two_exports_of_the_same_generation_are_identical` exists to
+/// deny. The generation's own creation time is also the more useful fact: it
+/// is when the site being exported came to be.
+async fn render_readme(ctx: &dyn Context, facts: &ReadmeFacts<'_>) -> Result<String, WaferError> {
+    use wafer_core::clients::config;
+
     let admin_email = config::get_default(
         ctx,
         crate::blocks::auth::config::BOOTSTRAP_ADMIN_EMAIL_KEY,
@@ -759,7 +885,7 @@ async fn render_readme(ctx: &dyn Context, facts: &ReadmeFacts<'_>) -> Result<Str
     // `export_zip_contains_shell_seed_sources_and_data_with_dev_off` asserts
     // no `{{` survives.
     Ok(README_TEMPLATE
-        .replace("{{TITLE}}", &title)
+        .replace("{{TITLE}}", facts.title)
         .replace("{{DATE}}", facts.created_at)
         .replace("{{GENERATION_ID}}", facts.generation_id)
         .replace("{{SHELL_FILES}}", &facts.shell_files.to_string())

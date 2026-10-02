@@ -125,6 +125,27 @@ fn every_seed_llms_txt_is_the_preamble_then_the_guide_as_the_manifest_declares()
             preamble_path.display()
         );
     }
+    // The preamble's list of `dev_*` tools is the WHOLE set, not a sample: an
+    // agent with only the Tool console has no other way to learn that it can
+    // list, delete or roll back. Compared against what the page publishes, so
+    // a tool added to the manifest fails here until the preamble names it.
+    let dev_tools: BTreeSet<&str> = published
+        .iter()
+        .copied()
+        .filter(|tool| tool.starts_with("dev_"))
+        .collect();
+    let named: BTreeSet<&str> = tool_tokens(&preamble)
+        .into_iter()
+        .filter(|tool| tool.starts_with("dev_"))
+        .collect();
+    assert_eq!(
+        named,
+        dev_tools,
+        "{}: its tool list is not the workspace page's dev_* tools",
+        preamble_path.display()
+    );
+    assert!(preamble.contains("`shop_*`"), "{}", preamble_path.display());
+
     // What a reader must be told before it can get in, whichever seed.
     for needle in [
         "/b/dev/enter",

@@ -1418,13 +1418,16 @@ async fn a_data_snapshot_over_the_import_limit_is_refused_at_export_and_one_at_i
 /// The sandbox's own `llms.txt`, as a seed import records it.
 const SANDBOX_LLMS: &str = "# ImpressPress build sandbox\n\nBuild a website here.\n";
 
-/// A boot page the way `impresspress-bundle` renders one for a deployment
-/// with a boot notice.
+/// A boot page the way `impresspress-bundle` renders one for the sandbox
+/// deployment: its title in `<title>` and wrapped twice in the body, and its
+/// boot notice between the markers.
 const SANDBOX_INDEX: &str = concat!(
-    "<h1>ImpressPress dev sandbox</h1>\n",
+    "<title>ImpressPress dev sandbox</title>\n",
+    "<h1><span data-app-title>ImpressPress dev sandbox</span></h1>\n",
     "<!--boot-notice--><p>This is a build sandbox. Read <a href=\"/llms.txt\">/llms.txt</a>, ",
     "then open <a href=\"/b/dev/enter\">/b/dev/enter</a>.</p><!--/boot-notice-->\n",
     "<p id=\"status\">Loading...</p>\n",
+    "<noscript><p><span data-app-title>ImpressPress dev sandbox</span> needs JavaScript.</p></noscript>\n",
 );
 
 async fn record_sandbox_llms(ctx: &TestContext) {
@@ -1441,19 +1444,33 @@ async fn record_sandbox_llms(ctx: &TestContext) {
     .expect("seed info");
 }
 
-/// The exported site is not the sandbox: neither copy of the sandbox's
-/// `llms.txt` (the static host's, the one the runtime publishes for a site
-/// with none) and none of the boot page's sandbox wording go with it.
+/// Name the site, the way an admin does on the settings page.
+async fn name_the_site(ctx: &TestContext, name: &str) {
+    variables::upsert_by_key(
+        ctx,
+        impresspress_core::config_vars::APP_NAME_KEY,
+        variables::VariablePatch {
+            value: Some(name.to_string()),
+            ..Default::default()
+        },
+    )
+    .await
+    .expect("app name");
+}
+
+/// The exported site is not the sandbox, and nothing the sandbox says about
+/// itself goes with it: not its `llms.txt` (which the runtime IS publishing
+/// for this site, and which is in no manifest the export reads), and not a
+/// word of its boot page — the notice is gone and the title is the site's.
 #[tokio::test]
-async fn the_sandboxes_llms_txt_and_boot_notice_are_not_exported() {
-    let shell = FakeShell::new()
-        .with("llms.txt", SANDBOX_LLMS.as_bytes())
-        .with("index.html", SANDBOX_INDEX.as_bytes());
+async fn nothing_the_sandbox_says_about_itself_is_exported() {
+    let shell = FakeShell::new().with("index.html", SANDBOX_INDEX.as_bytes());
     let ctx = TestContext::with_admin()
         .await
         .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(shell))
         .await;
     record_sandbox_llms(&ctx).await;
+    name_the_site(&ctx, "Kiln & Co").await;
     dev_post(
         &ctx,
         "/b/dev/api/files/write",
@@ -1475,7 +1492,7 @@ async fn the_sandboxes_llms_txt_and_boot_notice_are_not_exported() {
         )
         .await,
     );
-    // …and none of it is in the archive.
+    // …and none of it is in the archive, at the root or under the seed.
     assert!(
         !entries.keys().any(|path| path.ends_with("llms.txt")),
         "{:?}",
@@ -1485,20 +1502,93 @@ async fn the_sandboxes_llms_txt_and_boot_notice_are_not_exported() {
         serde_json::from_slice(&entries["seed/manifest.json"]).expect("a seed manifest");
     assert!(manifest.sandbox.is_none());
     assert_eq!(manifest.site.len(), 1);
-    // The boot page is the one a plain bundle renders: the region, empty.
+    // The boot page is the exported site's: its own name everywhere the
+    // sandbox's title was (escaped, as the bundler escapes one), and an
+    // empty notice region.
+    let index = text(&entries, "index.html");
     assert_eq!(
-        text(&entries, "index.html"),
+        index,
         concat!(
-            "<h1>ImpressPress dev sandbox</h1>\n",
+            "<title>Kiln &amp; Co</title>\n",
+            "<h1><span data-app-title>Kiln &amp; Co</span></h1>\n",
             "<!--boot-notice--><!--/boot-notice-->\n",
             "<p id=\"status\">Loading...</p>\n",
+            "<noscript><p><span data-app-title>Kiln &amp; Co</span> needs JavaScript.</p></noscript>\n",
         )
     );
+    assert!(!index.to_lowercase().contains("sandbox"), "{index}");
+    // The README is headed with the same name.
+    assert!(text(&entries, "README.md").contains("Kiln & Co"));
+}
+
+/// A deployment that is NOT the sandbox may bundle an `llms.txt` of its own
+/// in its shell — listed in its asset manifest like any shell file. The
+/// export copies it: there is no rule about the name, only about what the
+/// export reads. (The sandbox's own is an overlay the listing never names.)
+#[tokio::test]
+async fn a_shell_file_named_llms_txt_is_exported_like_any_other() {
+    let bundled = b"# An app that ships its own\n";
+    let shell = FakeShell::new().with("llms.txt", bundled);
+    let ctx = TestContext::with_admin()
+        .await
+        .with_dev_added_and_shell(FakeControl::new(), std::sync::Arc::new(shell))
+        .await;
+    dev_post(
+        &ctx,
+        "/b/dev/api/files/write",
+        json!({"path": "site/index.html", "content": "x", "expected_sha256": null}),
+    )
+    .await;
+    let exported = entries(
+        output_body(
+            ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export"))
+                .await,
+        )
+        .await,
+    );
+    assert_eq!(
+        exported.get("llms.txt").map(Vec::as_slice),
+        Some(&bundled[..])
+    );
+    assert!(!exported.contains_key("seed/site/llms.txt"));
+
+    // Once the site has its own, that is the one the static host is given:
+    // the worker will serve the site's, and the two must say the same thing.
+    dev_post(
+        &ctx,
+        "/b/dev/api/files/write",
+        json!({"path": "site/llms.txt", "content": "# The site\n", "expected_sha256": null}),
+    )
+    .await;
+    let preview: ExportManifest = serde_json::from_value(
+        output_json(
+            ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export/manifest"))
+                .await,
+        )
+        .await,
+    )
+    .expect("manifest");
+    let named: Vec<&str> = preview
+        .files
+        .iter()
+        .map(|file| file.path.as_str())
+        .filter(|path| path.ends_with("llms.txt"))
+        .collect();
+    assert_eq!(named, ["llms.txt", "seed/site/llms.txt"], "one root copy");
+    let exported = entries(
+        output_body(
+            ctx.dispatch_resolved(admin_msg("retrieve", "/b/dev/api/export"))
+                .await,
+        )
+        .await,
+    );
+    assert_eq!(text(&exported, "llms.txt"), "# The site\n");
 }
 
 /// A site's OWN `llms.txt` is a site file like any other: writable (the path
 /// is not one the service worker keeps from the runtime), exported under
-/// `seed/site/`, and what the instance seeded from the export serves.
+/// `seed/site/` — and once more at the root, for readers with no worker —
+/// and what the instance seeded from the export serves.
 #[tokio::test]
 async fn a_sites_own_llms_txt_is_exported_and_served_by_the_imported_instance() {
     const OWN: &str = "# Kiln & Co\n\nHandmade ceramics.\n";
@@ -1530,8 +1620,15 @@ async fn a_sites_own_llms_txt_is_exported_and_served_by_the_imported_instance() 
         )
         .await,
     );
+    // Twice, and the same bytes: under the seed, for the exported runtime to
+    // import and serve once its worker controls the page; and at the root,
+    // for the static host to serve a reader that never gets a worker.
     assert_eq!(text(&archive, "seed/site/llms.txt"), OWN);
-    assert!(!archive.contains_key("llms.txt"), "{:?}", sorted(&archive));
+    assert_eq!(archive["llms.txt"], archive["seed/site/llms.txt"]);
+    // The root copy shadows nothing: `/llms.txt` is not a path the exported
+    // worker leaves to the static host, so the runtime's copy is the one a
+    // controlled page gets.
+    assert!(!text(&archive, "sw.js").contains("llms.txt"));
 
     let manifest: SeedManifest =
         serde_json::from_slice(&archive["seed/manifest.json"]).expect("a seed manifest");

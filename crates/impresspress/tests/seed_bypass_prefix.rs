@@ -86,4 +86,14 @@ fn the_export_removes_the_boot_notice_by_the_markers_the_bundler_renders() {
         impresspress_bundle::bundle::BOOT_NOTICE_END,
         impresspress_core::blocks::dev::export::BOOT_NOTICE_END,
     );
+    // The same for the wrapper around the deployment's title, which the
+    // export replaces with the exported site's name.
+    assert_eq!(
+        impresspress_bundle::bundle::APP_TITLE_OPEN,
+        impresspress_core::blocks::dev::export::APP_TITLE_OPEN,
+    );
+    assert_eq!(
+        impresspress_bundle::bundle::APP_TITLE_CLOSE,
+        impresspress_core::blocks::dev::export::APP_TITLE_CLOSE,
+    );
 }

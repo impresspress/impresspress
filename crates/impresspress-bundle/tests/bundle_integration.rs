@@ -1,7 +1,8 @@
 use std::{fs, path::PathBuf};
 
 use impresspress_bundle::bundle::{
-    run, AppConfig, BypassRules, BOOT_NOTICE_END, BOOT_NOTICE_START,
+    run, AppConfig, BypassRules, APP_TITLE_CLOSE, APP_TITLE_OPEN, BOOT_NOTICE_END,
+    BOOT_NOTICE_START,
 };
 
 fn fixture_path() -> PathBuf {
@@ -860,7 +861,7 @@ fn a_plain_boot_shell_has_an_empty_notice_region_and_no_sandbox_wording() {
     );
     assert!(
         index.contains(
-            "<noscript><p>My Shop runs in your browser and needs JavaScript to start.</p></noscript>"
+            "<noscript><p><span data-app-title>My Shop</span> runs in your browser and needs JavaScript to start.</p></noscript>"
         ),
         "{index}"
     );
@@ -871,6 +872,30 @@ fn a_plain_boot_shell_has_an_empty_notice_region_and_no_sandbox_wording() {
             "the generic shell says {word:?}: {index}"
         );
     }
+}
+
+/// Every place the shell shows the app's title is one a consumer can find by
+/// exact text — `<title>`, and the wrapper around each of the two in the
+/// body — and the title is text there, never markup.
+#[test]
+fn the_boot_shell_shows_the_title_only_where_it_can_be_found_again() {
+    let tmp = production_pkg_copy_with_index();
+    let app = AppConfig {
+        app_title: Some("Kiln & <Co>".to_string()),
+        ..AppConfig::default()
+    };
+    run(tmp.path(), tmp.path(), app).expect("bundler ok");
+    let index = fs::read_to_string(tmp.path().join("index.html")).unwrap();
+    let escaped = "Kiln &amp; &lt;Co&gt;";
+    assert!(
+        index.contains(&format!("<title>{escaped}</title>")),
+        "{index}"
+    );
+    let wrapped = format!("{APP_TITLE_OPEN}{escaped}{APP_TITLE_CLOSE}");
+    assert_eq!(index.matches(&wrapped).count(), 2, "{index}");
+    // …and nowhere else: three occurrences, all accounted for.
+    assert_eq!(index.matches(escaped).count(), 3, "{index}");
+    assert!(!index.contains("Kiln & <Co>"), "{index}");
 }
 
 /// A notice carrying one of the markers would end its own region early (or

@@ -32,10 +32,20 @@ built.
    `/b/dev`. There is no form to fill in and there are no credentials to
    type.
 3. Use the tools the workspace page publishes. A browser with WebMCP sees
-   them as tools: `dev_status`, `dev_read_reference`, `dev_read_file`,
-   `dev_write_file`, `dev_write_files`, `dev_export` and the `shop_*` family.
-   A browser without WebMCP runs the same tools from the Tool console on the
-   same page — see "If your browser has no WebMCP" below.
+   them as tools; a browser without it runs the same tools from the
+   Tool console on the same page — see "If your browser has no WebMCP"
+   below.
+   Either way they are:
+   - to look: `dev_status`, `dev_read_reference`, `dev_list_files`,
+     `dev_read_file`;
+   - to change the site: `dev_write_file`, `dev_write_files`,
+     `dev_delete_file`;
+   - to add a backend block: `dev_create_block`, `dev_compile_block`,
+     `dev_remove_block`;
+   - to go back: `dev_list_generations`, `dev_get_generation`,
+     `dev_rollback`;
+   - to hand the site over: `dev_export_manifest`, `dev_export`;
+   - and the `shop_*` family, for products and offers.
 4. Write the site under `site/`. Every write is published at once; the live
    site is at `/`.
 5. When the site is done, `dev_export` downloads it as one zip that any

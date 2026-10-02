@@ -17,6 +17,7 @@ use impresspress_core::{
         activation::{self, ActivationIntent},
         artifacts, blobs,
         control::{DynamicBlockSpec, DynamicRoute, RouteAccessKind},
+        publisher,
         repo::{self, generations::GenerationCause, runtime_state, seed_info},
         seed::{self, SandboxSeed, SeedBlock, SeedManifest},
         test_support::{fake_bypass_rules, hello_info, seed_file as file, FakeControl, MapFetch},
@@ -241,6 +242,207 @@ async fn a_seeded_sandbox_serves_its_llms_txt_without_owning_it_as_a_site_file()
         "{:?}",
         ws.files.keys()
     );
+}
+
+// ---------------------------------------------------------------------------
+// The boot repair: an instance seeded before the bundle had an llms.txt
+// ---------------------------------------------------------------------------
+
+/// A live sandbox in the state a browser that visited BEFORE the bundle
+/// carried `sandbox.llms` is in after migration 004: a seeded, active
+/// generation, a `seed_info` row with a template, and neither a recorded
+/// text nor the file in the published folder.
+async fn seeded_before_llms() -> TestContext {
+    let (ctx, control) = fixture().await;
+    let shared = ctx.dev_shared();
+    let generation = seed::import(
+        &ctx,
+        control.as_ref(),
+        &fake_bypass_rules(),
+        &manifest_with(sandbox()),
+        &sandbox_bundle(),
+    )
+    .await
+    .expect("import")
+    .expect("fresh");
+    activation::request(
+        &ctx,
+        &shared,
+        GenerationCause::Seed,
+        ActivationIntent::Seed {
+            manifest: generation,
+        },
+        activation::Maintenance::Inline,
+    )
+    .await
+    .expect("activate the seed");
+    // Back to what the old importer and the old publisher left.
+    let mut info = seed_info::read(&ctx).await.expect("read").expect("row");
+    info.llms_text = None;
+    seed_info::write(&ctx, &info)
+        .await
+        .expect("row without a text");
+    seed_info::set_llms_published(&ctx, None)
+        .await
+        .expect("nothing published");
+    wafer_core::clients::storage::delete(&ctx, publisher::SITE_FOLDER, seed::LLMS_PATH)
+        .await
+        .expect("remove the published file");
+    assert!(published_llms(&ctx).await.is_none());
+    ctx
+}
+
+async fn published_llms(ctx: &TestContext) -> Option<Vec<u8>> {
+    ctx.storage_get("wafer-run/web", "site", seed::LLMS_PATH)
+        .await
+        .ok()
+}
+
+/// What the static host serves an already-seeded instance: the manifest and
+/// the one file the repair reads. Nothing else of the bundle is in it, so a
+/// repair that fetched anything more would fail here.
+fn repair_bundle() -> MapFetch {
+    MapFetch::default()
+        .with(
+            seed::MANIFEST_URL,
+            &serde_json::to_vec(&manifest_with(sandbox())).expect("manifest"),
+        )
+        .with(&seed::llms_url(seed::LLMS_PATH), LLMS)
+}
+
+/// The bug this exists for: a browser seeded before the deploy gets the file
+/// on its next boot — recorded AND in the published folder, although no site
+/// file changed and no generation was published.
+#[tokio::test]
+async fn a_sandbox_seeded_before_llms_txt_gets_it_on_the_next_boot() {
+    let ctx = seeded_before_llms().await;
+    let generations = repo::generations::list_recent(&ctx, 10)
+        .await
+        .expect("ledger")
+        .len();
+
+    assert_eq!(
+        seed::repair_llms(&ctx, &repair_bundle()).await,
+        Ok(seed::LlmsRepair::Recorded)
+    );
+    assert_eq!(published_llms(&ctx).await.as_deref(), Some(LLMS));
+    let info = seed_info::read(&ctx).await.expect("read").expect("row");
+    assert_eq!(
+        info.llms_text.as_deref(),
+        Some(std::str::from_utf8(LLMS).unwrap())
+    );
+    // The site itself is untouched: same generation, same entrypoint.
+    assert_eq!(
+        repo::generations::list_recent(&ctx, 10)
+            .await
+            .expect("ledger")
+            .len(),
+        generations
+    );
+    assert_eq!(
+        ctx.storage_get("wafer-run/web", "site", "index.html")
+            .await
+            .expect("index"),
+        INDEX.to_vec()
+    );
+
+    // Every boot after that reads one row and fetches nothing: a bundle with
+    // nothing in it would fail any fetch.
+    assert_eq!(
+        seed::repair_llms(&ctx, &MapFetch::default()).await,
+        Ok(seed::LlmsRepair::InPlace)
+    );
+}
+
+/// Offline, or a host that fails: the boot goes on with the sandbox as it
+/// was, nothing half-recorded, and the next boot tries again.
+#[tokio::test]
+async fn a_failed_repair_changes_nothing_and_the_next_boot_retries() {
+    let ctx = seeded_before_llms().await;
+
+    let err = seed::repair_llms(&ctx, &MapFetch::default())
+        .await
+        .expect_err("nothing can be fetched");
+    assert!(err.contains(seed::MANIFEST_URL), "{err}");
+    // A file that is not the one the manifest declares is not recorded either.
+    let tampered = repair_bundle().with(&seed::llms_url(seed::LLMS_PATH), b"# Something else\n");
+    let err = seed::repair_llms(&ctx, &tampered)
+        .await
+        .expect_err("the hash does not match");
+    assert!(err.contains("/seed/llms.txt"), "{err}");
+
+    let info = seed_info::read(&ctx).await.expect("read").expect("row");
+    assert_eq!(info.llms_text, None);
+    assert_eq!(info.template, "blank");
+    assert!(published_llms(&ctx).await.is_none());
+    assert_eq!(
+        ctx.storage_get("wafer-run/web", "site", "index.html")
+            .await
+            .expect("the site is still served"),
+        INDEX.to_vec()
+    );
+
+    assert_eq!(
+        seed::repair_llms(&ctx, &repair_bundle()).await,
+        Ok(seed::LlmsRepair::Recorded)
+    );
+    assert_eq!(published_llms(&ctx).await.as_deref(), Some(LLMS));
+}
+
+/// A boot that recorded the text and died before publishing it is finished
+/// by the next one — without fetching again.
+#[tokio::test]
+async fn a_text_recorded_but_never_published_is_published_by_the_next_boot() {
+    let ctx = seeded_before_llms().await;
+    seed_info::record_llms_text(&ctx, std::str::from_utf8(LLMS).unwrap())
+        .await
+        .expect("record");
+    assert_eq!(
+        seed::repair_llms(&ctx, &MapFetch::default()).await,
+        Ok(seed::LlmsRepair::Published)
+    );
+    assert_eq!(published_llms(&ctx).await.as_deref(), Some(LLMS));
+}
+
+/// An instance whose seed had no sandbox block — an exported site — is owed
+/// no sandbox text, and its boot fetches nothing to find that out.
+#[tokio::test]
+async fn an_instance_that_is_not_a_sandbox_fetches_nothing() {
+    let (ctx, control) = fixture().await;
+    let shared = ctx.dev_shared();
+    let generation = seed::import(
+        &ctx,
+        control.as_ref(),
+        &fake_bypass_rules(),
+        &manifest(),
+        &bundle(),
+    )
+    .await
+    .expect("import")
+    .expect("fresh");
+    activation::request(
+        &ctx,
+        &shared,
+        GenerationCause::Seed,
+        ActivationIntent::Seed {
+            manifest: generation,
+        },
+        activation::Maintenance::Inline,
+    )
+    .await
+    .expect("activate");
+    // `MapFetch::default()` fails every fetch, so `Ok` means none was made —
+    // and a bundle that DOES carry one is not read either.
+    assert_eq!(
+        seed::repair_llms(&ctx, &MapFetch::default()).await,
+        Ok(seed::LlmsRepair::NotASandbox)
+    );
+    assert_eq!(
+        seed::repair_llms(&ctx, &repair_bundle()).await,
+        Ok(seed::LlmsRepair::NotASandbox)
+    );
+    assert!(published_llms(&ctx).await.is_none());
+    assert_eq!(seed_info::read(&ctx).await.expect("read"), None);
 }
 
 #[tokio::test]

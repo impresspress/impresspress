@@ -34,8 +34,8 @@ pub struct SeedInfo {
     /// The site-authoring guide, Markdown.
     pub guide_markdown: String,
     /// The sandbox's `llms.txt`. `None` only on a row an import wrote before
-    /// the column existed (migration 004): that seed carried none, and
-    /// nothing re-imports a seed into an instance that already has a site.
+    /// the column existed (migration 004), until the next boot's
+    /// `seed::repair_llms` fetches it.
     pub llms_text: Option<String>,
 }
 
@@ -57,33 +57,6 @@ pub async fn read(ctx: &dyn Context) -> Result<Option<SeedInfo>, WaferError> {
         guide_markdown: record.str_field("guide_markdown").to_string(),
         llms_text: record.opt_str_field("llms_text"),
     }))
-}
-
-/// The sandbox's `llms.txt`, or `None` when no import recorded one — the
-/// seed carried no `sandbox` block, or was imported before the column
-/// existed.
-///
-/// Reads only that column, for [`template`]'s reason: every publish calls
-/// this, and the row's guide is beside it. A missing row is `NotFound`, as
-/// from [`read`].
-pub async fn llms_text(ctx: &dyn Context) -> Result<Option<String>, WaferError> {
-    let rows = db::list(
-        ctx,
-        TABLE,
-        &ListOptions {
-            columns: Some(vec!["llms_text".to_string()]),
-            filters: vec![singleton_filter()],
-            limit: Some(1),
-            skip_count: true,
-            ..Default::default()
-        },
-    )
-    .await?;
-    let record = rows
-        .records
-        .first()
-        .ok_or_else(|| WaferError::new(ErrorCode::NotFound, "record not found"))?;
-    Ok(record.opt_str_field("llms_text"))
 }
 
 /// The seeding template's name, or `None` until an import has written it.
@@ -109,6 +82,67 @@ pub async fn template(ctx: &dyn Context) -> Result<Option<String>, WaferError> {
         .first()
         .ok_or_else(|| WaferError::new(ErrorCode::NotFound, "record not found"))?;
     Ok(record.opt_str_field("template"))
+}
+
+/// The columns the sandbox's `llms.txt` lives in, read without the guide.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct LlmsRow {
+    /// The seeding template; `None` when the seed carried no sandbox block.
+    pub template: Option<String>,
+    /// The sandbox's `llms.txt`, when an import or the boot repair
+    /// (`seed::repair_llms`) recorded one.
+    pub text: Option<String>,
+    /// The hash of the sandbox text the publisher has in the published
+    /// folder at `llms.txt`, or `None` when it has none there — the site's
+    /// own file holds the name, or nothing was ever written.
+    pub published_sha256: Option<String>,
+}
+
+/// The three `llms.txt` columns.
+///
+/// Reads only those, for [`template`]'s reason: every publish and every boot
+/// calls this, and the row's guide is beside them. A missing row is
+/// `NotFound`, as from [`read`].
+pub async fn llms(ctx: &dyn Context) -> Result<LlmsRow, WaferError> {
+    let rows = db::list(
+        ctx,
+        TABLE,
+        &ListOptions {
+            columns: Some(vec![
+                "template".to_string(),
+                "llms_text".to_string(),
+                "llms_published_sha256".to_string(),
+            ]),
+            filters: vec![singleton_filter()],
+            limit: Some(1),
+            skip_count: true,
+            ..Default::default()
+        },
+    )
+    .await?;
+    let record = rows
+        .records
+        .first()
+        .ok_or_else(|| WaferError::new(ErrorCode::NotFound, "record not found"))?;
+    Ok(LlmsRow {
+        template: record.opt_str_field("template"),
+        text: record.opt_str_field("llms_text"),
+        published_sha256: record.opt_str_field("llms_published_sha256"),
+    })
+}
+
+/// Record the sandbox's `llms.txt` on a row that has none — the boot repair's
+/// write. Nothing else on the row changes.
+pub async fn record_llms_text(ctx: &dyn Context, text: &str) -> Result<(), WaferError> {
+    let data = crate::util::json_map(serde_json::json!({ "llms_text": text }));
+    db::update_by_filters(ctx, TABLE, vec![singleton_filter()], data).await
+}
+
+/// Record what the publisher now has at `llms.txt` in the published folder:
+/// the hash of the sandbox text it wrote, or `None` once it is not there.
+pub async fn set_llms_published(ctx: &dyn Context, sha256: Option<&str>) -> Result<(), WaferError> {
+    let data = crate::util::json_map(serde_json::json!({ "llms_published_sha256": sha256 }));
+    db::update_by_filters(ctx, TABLE, vec![singleton_filter()], data).await
 }
 
 fn singleton_filter() -> Filter {
@@ -184,26 +218,49 @@ mod tests {
         assert_eq!(template_err.code, ErrorCode::NotFound);
     }
 
-    /// The publisher's narrow read: nothing until an import records the
-    /// text, and still nothing for a row written without one.
+    /// The narrow read, and the two single-column writes beside it.
     #[tokio::test]
-    async fn llms_text_is_none_until_a_write_that_carries_one() {
+    async fn the_llms_columns_are_read_and_written_without_the_rest_of_the_row() {
         let ctx = TestContext::with_dev(FakeControl::new()).await;
-        assert_eq!(llms_text(&ctx).await.expect("llms"), None);
-        let mut info = SeedInfo {
+        let empty = LlmsRow {
+            template: None,
+            text: None,
+            published_sha256: None,
+        };
+        assert_eq!(llms(&ctx).await.expect("llms"), empty);
+
+        let info = SeedInfo {
             template: "bootstrap".to_string(),
             suggested_prompt: "Build me a shop.".to_string(),
             guide_markdown: "# Guide\n".to_string(),
             llms_text: None,
         };
         write(&ctx, &info).await.expect("write");
-        assert_eq!(llms_text(&ctx).await.expect("llms"), None);
-        info.llms_text = Some("# Sandbox\n".to_string());
-        write(&ctx, &info).await.expect("write");
         assert_eq!(
-            llms_text(&ctx).await.expect("llms"),
-            Some("# Sandbox\n".to_string())
+            llms(&ctx).await.expect("llms"),
+            LlmsRow {
+                template: Some("bootstrap".to_string()),
+                ..empty.clone()
+            }
         );
+
+        record_llms_text(&ctx, "# Sandbox\n").await.expect("text");
+        set_llms_published(&ctx, Some("abc")).await.expect("set");
+        assert_eq!(
+            llms(&ctx).await.expect("llms"),
+            LlmsRow {
+                template: Some("bootstrap".to_string()),
+                text: Some("# Sandbox\n".to_string()),
+                published_sha256: Some("abc".to_string()),
+            }
+        );
+        // The rest of the row is as the import wrote it.
+        let row = read(&ctx).await.expect("read").expect("row");
+        assert_eq!(row.guide_markdown, "# Guide\n");
+        assert_eq!(row.llms_text.as_deref(), Some("# Sandbox\n"));
+
+        set_llms_published(&ctx, None).await.expect("clear");
+        assert_eq!(llms(&ctx).await.expect("llms").published_sha256, None);
     }
 
     #[tokio::test]

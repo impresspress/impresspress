@@ -176,11 +176,19 @@ test('with the worker active /llms.txt is the sandbox’s until the site writes 
   expect(own.status).toBe(200);
   expect(own.type).toMatch(/^text\/plain/);
   expect(own.text).toBe(OWN);
-  // An export would carry the site's file, and only as a site file.
+  // An export would carry the site's file twice — at the root for the static
+  // host, under the seed for the exported runtime — and nothing else by
+  // that name.
   const preview = await runFromConsole(page, 'dev_export_manifest', {});
   expect(preview.isError, JSON.stringify(preview)).toBe(false);
-  const exported: string[] = preview.result.files.map((file: { path: string }) => file.path);
-  expect(exported.filter((path) => path.endsWith('llms.txt'))).toEqual(['seed/site/llms.txt']);
+  const exported: { path: string; bytes: number }[] = preview.result.files.filter(
+    (file: { path: string }) => file.path.endsWith('llms.txt'),
+  );
+  const ownBytes = new TextEncoder().encode(OWN).length;
+  expect(exported).toEqual([
+    { path: 'llms.txt', bytes: ownBytes },
+    { path: 'seed/site/llms.txt', bytes: ownBytes },
+  ]);
 
   // A reader with no worker is still told about the sandbox: the static host
   // never learned of the site's file.
