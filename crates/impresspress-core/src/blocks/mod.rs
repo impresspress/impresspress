@@ -104,11 +104,6 @@ macro_rules! feature_block_manifest {
         /// Used by `collect_all_config_vars()` to discover declared config
         /// variables, by the inspector route table, and by the routing/auth
         /// policy, before block registration runs.
-        #[expect(
-            clippy::vec_init_then_push,
-            reason = "each push is individually `#[cfg]`-gated by the manifest entry \
-                      it comes from, which a `vec![..]` literal cannot express"
-        )]
         pub fn all_block_infos() -> Vec<wafer_run::BlockInfo> {
             use wafer_run::Block as _;
             let mut infos: Vec<wafer_run::BlockInfo> = Vec::new();
