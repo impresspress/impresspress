@@ -14,12 +14,18 @@ fn pkg_copy() -> tempfile::TempDir {
 }
 
 /// [`pkg_copy`] with the fixture's three-line `sw.js.tmpl` stub swapped for the
-/// **shipped** template. Tests that assert on real template content have to
-/// render the thing that actually reaches a browser.
+/// **shipped** template, and the shipped `loader.js.tmpl` beside it. Tests
+/// that assert on real template content have to render the thing that
+/// actually reaches a browser.
 fn production_pkg_copy() -> tempfile::TempDir {
     let tmp = pkg_copy();
     let prod_tmpl = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/assets/sw.js.tmpl"));
     fs::write(tmp.path().join("sw.js.tmpl"), prod_tmpl).unwrap();
+    let loader_tmpl = include_str!(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/assets/loader.js.tmpl"
+    ));
+    fs::write(tmp.path().join("loader.js.tmpl"), loader_tmpl).unwrap();
     tmp
 }
 
@@ -645,6 +651,148 @@ fn the_seed_prefix_joins_an_apps_own_bypass_list() {
     // a clause that led with anything else would survive into every export.
     assert!(sw.contains(" ||\n        url.pathname.startsWith('/__impresspress_dev/compiler/')"));
     assert!(sw.contains("url.pathname.startsWith('/seed/')"));
+}
+
+/// Run `node` with `args` and `env`, failing the test with its output if it
+/// does not exit cleanly — or if there is no `node` to run. Not a skip: a
+/// check that quietly does not run is a check that passes on a broken worker.
+fn node(args: &[&std::ffi::OsStr], env: &[(&str, &std::path::Path)]) {
+    let output = std::process::Command::new("node")
+        .args(args)
+        .envs(env.iter().copied())
+        .output()
+        .expect("`node` must be on PATH: the rendered scripts are checked by running them");
+    assert!(
+        output.status.success(),
+        "node {args:?} failed\n--- stdout ---\n{}\n--- stderr ---\n{}",
+        String::from_utf8_lossy(&output.stdout),
+        String::from_utf8_lossy(&output.stderr),
+    );
+}
+
+/// The shipped templates rendered into a fresh directory, with
+/// `opfs_wipe_on_recovery` as given.
+fn rendered_shell(opfs_wipe_on_recovery: bool) -> tempfile::TempDir {
+    let tmp = production_pkg_copy();
+    let app = AppConfig {
+        opfs_wipe_on_recovery,
+        ..AppConfig::default()
+    };
+    run(tmp.path(), tmp.path(), app).expect("bundler ok");
+    tmp
+}
+
+/// `node --test` on one file of `tests/sw/`, against both renderings of
+/// `rendered` (`sw.js` or `loader.js`): the default, in `plain_var`, and the
+/// `opfs_wipe_on_recovery` one, in `wipe_var`.
+fn node_test(test_file: &str, rendered: &str, plain_var: &str, wipe_var: &str) {
+    let plain = rendered_shell(false);
+    let wipe = rendered_shell(true);
+    let tests = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("tests/sw")
+        .join(test_file);
+    node(
+        &["--test".as_ref(), tests.as_os_str()],
+        &[
+            (plain_var, &plain.path().join(rendered)),
+            (wipe_var, &wipe.path().join(rendered)),
+        ],
+    );
+}
+
+/// The shipped templates, rendered, are scripts a JavaScript engine accepts.
+/// Every other test in this file reads the worker as text, and text that
+/// contains the right substrings can still be a file no browser will run.
+#[test]
+fn the_rendered_worker_parses() {
+    for dev_enabled in [false, true] {
+        let tmp = production_pkg_copy();
+        let app = AppConfig {
+            dev_enabled,
+            ..AppConfig::default()
+        };
+        run(tmp.path(), tmp.path(), app).expect("bundler ok");
+        // `.mjs`: the worker is registered as a module (it `import`s the wasm
+        // glue), and that is how it has to be parsed.
+        let module = tmp.path().join("sw-check.mjs");
+        fs::copy(tmp.path().join("sw.js"), &module).unwrap();
+        node(&["--check".as_ref(), module.as_os_str()], &[]);
+        // `loader.js` is a classic script, and is checked as one.
+        let loader = tmp.path().join("loader.js");
+        node(&["--check".as_ref(), loader.as_os_str()], &[]);
+    }
+}
+
+/// `sw.js` leaves the cause of a dead runtime in Cache Storage and
+/// `loader.js` reads it there. Two files, two declarations of the same two
+/// names — a rename in one is a cause written where nothing looks.
+#[test]
+fn the_worker_and_the_loader_agree_on_where_the_stop_cause_is_left() {
+    let tmp = production_pkg_copy();
+    run(tmp.path(), tmp.path(), AppConfig::default()).expect("bundler ok");
+    let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
+    let loader = fs::read_to_string(tmp.path().join("loader.js")).unwrap();
+
+    for declaration in [
+        "const STOP_CAUSE_CACHE = '__impresspress_sw_stopped';",
+        "const STOP_CAUSE_KEY = '/__impresspress_sw_stopped';",
+    ] {
+        assert_eq!(sw.matches(declaration).count(), 1, "sw.js = {sw}");
+        assert_eq!(
+            loader.matches(declaration).count(),
+            1,
+            "loader.js = {loader}"
+        );
+    }
+    // The worker's answer carries `cause`, which is what the loader's boot
+    // probe reads back.
+    assert!(sw.contains("cause: poisonReason"), "sw.js = {sw}");
+    assert!(
+        loader.contains("body.code === 'runtime_stopped' ? String(body.cause) : null"),
+        "loader.js = {loader}"
+    );
+}
+
+/// Once the wasm runtime is dead, a request only it could have answered gets
+/// a 503 that names the cause and says what a reload will do, and a
+/// navigation still reaches the static host. The behaviour is driven in Node
+/// against the rendered file — `tests/sw/sw_runtime_stopped.test.mjs` says
+/// what and why.
+#[test]
+fn the_rendered_worker_answers_for_a_stopped_runtime() {
+    node_test(
+        "sw_runtime_stopped.test.mjs",
+        "sw.js",
+        "SW_JS",
+        "SW_JS_WIPE",
+    );
+}
+
+/// The boot shell acts on a cause only when it is about this load, recovers
+/// automatically once per failure, and does not mistake a probe the runtime
+/// died on for a boot that worked — `tests/sw/loader_recovery.test.mjs`.
+#[test]
+fn the_rendered_loader_recovers_once_and_keeps_the_cause() {
+    node_test(
+        "loader_recovery.test.mjs",
+        "loader.js",
+        "LOADER_JS",
+        "LOADER_JS_WIPE",
+    );
+}
+
+/// `sw.js` states what a reload costs from the same build-time flag
+/// `loader.js` acts on: one `AppConfig` field, rendered into both.
+#[test]
+fn the_worker_and_the_loader_are_rendered_with_the_same_wipe_flag() {
+    for wipe in [false, true] {
+        let tmp = rendered_shell(wipe);
+        let declaration = format!("const OPFS_WIPE_ON_RECOVERY = {wipe};");
+        for file in ["sw.js", "loader.js"] {
+            let body = fs::read_to_string(tmp.path().join(file)).unwrap();
+            assert_eq!(body.matches(&declaration).count(), 1, "{file} = {body}");
+        }
+    }
 }
 
 fn copy_dir(src: &std::path::Path, dst: &std::path::Path) {

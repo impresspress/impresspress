@@ -201,9 +201,23 @@ mod tests {
             body.contains("signal: probeController.signal"),
             "readiness fetch is not abortable"
         );
-        assert!(
-            body.contains("await recoverBrowserState(status)"),
+        assert_eq!(
+            body.matches("await recoverBrowserState(").count(),
+            2,
             "timeout and self-destruct do not share recovery"
+        );
+        // The stuck UI says what stopped the runtime — as text, never as
+        // markup — and offers the retry beside the reset.
+        assert!(
+            body.contains(
+                "document.getElementById('impresspress-stopped-cause').textContent = stoppedText(cause);"
+            ),
+            "the stuck UI does not show the cause"
+        );
+        assert!(body.contains(">Try again</button>"), "missing retry button");
+        assert!(
+            !body.contains("local data is incompatible"),
+            "the stuck UI still guesses at a cause instead of showing it"
         );
     }
 }

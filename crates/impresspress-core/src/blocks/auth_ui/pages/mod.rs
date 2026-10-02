@@ -156,6 +156,38 @@ pub(super) fn pw_field(id: &str, placeholder: &str, minlength: Option<&str>) -> 
     }
 }
 
+/// JS every auth form posts through: `apiPost(path, body)` resolves to the
+/// API's JSON answer, or throws an `Error` whose message says what happened.
+/// A form's whole failure path is then `catch(ex){showErr(ex.message)}`.
+/// The error also carries `status` (the HTTP status, `0` if there was no
+/// response) and `refused` (true only when the app itself answered, in JSON),
+/// for the one caller that must not show every refusal — `handleForgot`.
+///
+/// Three failures, three different things to say:
+///
+/// - **The API refused** (a non-2xx status, or a body with `error`): its own
+///   `message`. That is the runtime's error shape
+///   (`wafer_block::http_codec::error_to_http_response`) — `error` is the
+///   coarse code, `message` the human text — so `message` is read FIRST. The
+///   forms used to read `d.error.message || d.error || d.message`, which for
+///   that shape is the code: a wrong password said "Unauthenticated".
+/// - **The answer is not JSON**: the HTTP status. Something other than the
+///   app answered — a static host's empty 405, a proxy's HTML error page —
+///   and the status is the only thing it said.
+/// - **`fetch` itself threw**: the request did not reach the app, with the
+///   browser's reason.
+///
+/// The second and third were both "Something went wrong", which left a person
+/// (or an agent driving the page, with no view of the console) nothing to act
+/// on or report.
+///
+/// One script for wasm32 and native: nothing here depends on where the server
+/// runs. Emitted as its own `<script>` before the page's. A file rather than a
+/// string literal so `assets/test/api_post.test.mjs` can run it.
+pub(super) fn api_post_script() -> &'static str {
+    include_str!("../assets/api_post.js")
+}
+
 /// JS that drives the login + forgot-password forms.
 ///
 /// On browser (wasm32) targets, the server runs inside a Service Worker and
@@ -167,6 +199,16 @@ pub(super) fn pw_field(id: &str, placeholder: &str, minlength: Option<&str>) -> 
 /// `#error`/`#info` are `components::alert`, which starts `hidden`. Toggling
 /// visibility must clear/set the `hidden` IDL property, not `style.display`
 /// — see the doc comment on `oauth_button_script`.
+///
+/// Posts through [`api_post_script`]'s `apiPost`, which the page emits first.
+///
+/// `handleForgot` answers every outcome the APP decided — sent, no such
+/// address, refused — with the same "if that email is registered" line, so
+/// the form cannot be used to find out which addresses have accounts. What it
+/// does not hide is a request the app never decided: one that did not reach
+/// it, an answer that is not the app's JSON, or a 5xx (the service worker's
+/// `runtime_stopped` among them). Saying "a link has been sent" for those was
+/// a false statement about an email nobody tried to send.
 pub(super) fn login_script() -> &'static str {
     #[cfg(target_arch = "wasm32")]
     {
@@ -179,9 +221,7 @@ async function handleLogin(ev){
   var btn=$('btn');btn.disabled=true;btn.textContent='Signing in...';
   $('error').hidden=true;$('info').hidden=true;
   try{
-    var r=await fetch('/b/auth/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:$('email').value,password:$('password').value})});
-    var d=await r.json();
-    if(!r.ok||d.error){showErr((d.error&&d.error.message)||d.error||d.message||'Invalid credentials');btn.disabled=false;btn.textContent='Sign In';return false}
+    var d=await apiPost('/b/auth/api/login',{email:$('email').value,password:$('password').value});
     // Service-worker synthetic responses don't persist Set-Cookie, so set the
     // auth cookie client-side from the response body.
     if(d.access_token){
@@ -191,14 +231,15 @@ async function handleLogin(ev){
     }
     var redir=$('redirect').value||d.default_redirect||'/';
     window.location.href=redir;
-  }catch(ex){showErr('Something went wrong');btn.disabled=false;btn.textContent='Sign In'}
+  }catch(ex){showErr(ex.message);btn.disabled=false;btn.textContent='Sign In'}
   return false;
 }
 async function handleForgot(){
   var email=$('email').value.trim();
   if(!email){showErr('Enter your email address first.');return}
   $('error').hidden=true;$('info').hidden=true;
-  try{await fetch('/b/auth/api/forgot-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email})})}catch(e){}
+  try{await apiPost('/b/auth/api/forgot-password',{email:email})}
+  catch(ex){if(!ex.refused||ex.status>=500){showErr(ex.message);return}}
   showInfo('If that email is registered, a password reset link has been sent.');
 }
 document.addEventListener('submit',function(e){if(e.target&&e.target.id==='form')handleLogin(e)});
@@ -220,19 +261,18 @@ async function handleLogin(ev){
   var btn=$('btn');btn.disabled=true;btn.textContent='Signing in...';
   $('error').hidden=true;$('info').hidden=true;
   try{
-    var r=await fetch('/b/auth/api/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:$('email').value,password:$('password').value})});
-    var d=await r.json();
-    if(!r.ok||d.error){showErr((d.error&&d.error.message)||d.error||d.message||'Invalid credentials');btn.disabled=false;btn.textContent='Sign In';return false}
+    var d=await apiPost('/b/auth/api/login',{email:$('email').value,password:$('password').value});
     var redir=$('redirect').value||d.default_redirect||'/';
     window.location.href=redir;
-  }catch(ex){showErr('Something went wrong');btn.disabled=false;btn.textContent='Sign In'}
+  }catch(ex){showErr(ex.message);btn.disabled=false;btn.textContent='Sign In'}
   return false;
 }
 async function handleForgot(){
   var email=$('email').value.trim();
   if(!email){showErr('Enter your email address first.');return}
   $('error').hidden=true;$('info').hidden=true;
-  try{await fetch('/b/auth/api/forgot-password',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email})})}catch(e){}
+  try{await apiPost('/b/auth/api/forgot-password',{email:email})}
+  catch(ex){if(!ex.refused||ex.status>=500){showErr(ex.message);return}}
   showInfo('If that email is registered, a password reset link has been sent.');
 }
 document.addEventListener('submit',function(e){if(e.target&&e.target.id==='form')handleLogin(e)});
@@ -265,6 +305,8 @@ document.addEventListener('click',function(e){
 ///   the response computed, honoring an explicit `redirect` param first.
 ///   This replaces the old unconditional bounce to `/b/auth/login`, which
 ///   ignored the fact the user was already authenticated.
+///
+/// Posts through [`api_post_script`]'s `apiPost`, which the page emits first.
 pub(super) fn signup_script() -> &'static str {
     #[cfg(target_arch = "wasm32")]
     {
@@ -277,9 +319,7 @@ async function handleSignup(ev){
   $('error').hidden=true;
   var email=$('email').value,pw=$('password').value;
   try{
-    var r=await fetch('/b/auth/api/signup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email,password:pw})});
-    var d=await r.json();
-    if(!r.ok||d.error){showErr((d.error&&d.error.message)||d.error||d.message||'Signup failed');btn.disabled=false;btn.textContent='Create Account';return false}
+    var d=await apiPost('/b/auth/api/signup',{email:email,password:pw});
     if(d.email_verified===false){
       $('form').hidden=true;$('signin-link').hidden=true;
       $('verify-msg').textContent='We sent a verification link to '+email+'. Click the link to activate your account.';
@@ -295,7 +335,7 @@ async function handleSignup(ev){
       var redir=$('redirect').value||d.default_redirect||'/';
       window.location.href=redir;
     }
-  }catch(ex){showErr('Something went wrong');btn.disabled=false;btn.textContent='Create Account'}
+  }catch(ex){showErr(ex.message);btn.disabled=false;btn.textContent='Create Account'}
   return false;
 }
 document.addEventListener('submit',function(e){if(e.target&&e.target.id==='form')handleSignup(e)});
@@ -312,9 +352,7 @@ async function handleSignup(ev){
   $('error').hidden=true;
   var email=$('email').value,pw=$('password').value;
   try{
-    var r=await fetch('/b/auth/api/signup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({email:email,password:pw})});
-    var d=await r.json();
-    if(!r.ok||d.error){showErr((d.error&&d.error.message)||d.error||d.message||'Signup failed');btn.disabled=false;btn.textContent='Create Account';return false}
+    var d=await apiPost('/b/auth/api/signup',{email:email,password:pw});
     if(d.email_verified===false){
       $('form').hidden=true;$('signin-link').hidden=true;
       $('verify-msg').textContent='We sent a verification link to '+email+'. Click the link to activate your account.';
@@ -325,7 +363,7 @@ async function handleSignup(ev){
       var redir=$('redirect').value||d.default_redirect||'/';
       window.location.href=redir;
     }
-  }catch(ex){showErr('Something went wrong');btn.disabled=false;btn.textContent='Create Account'}
+  }catch(ex){showErr(ex.message);btn.disabled=false;btn.textContent='Create Account'}
   return false;
 }
 document.addEventListener('submit',function(e){if(e.target&&e.target.id==='form')handleSignup(e)});
@@ -345,6 +383,44 @@ mod tests {
         },
         test_support::TestContext,
     };
+
+    /// Every form script posts through `apiPost` and reports what it threw.
+    /// What `apiPost` says is `assets/test/api_post.test.mjs`'s subject; this
+    /// is that no form still has a path around it.
+    #[test]
+    fn every_form_script_reports_what_api_post_threw() {
+        for script in [
+            login_script(),
+            signup_script(),
+            change_password::SCRIPT,
+            reset_password::SCRIPT,
+        ] {
+            assert!(script.contains("await apiPost('/b/auth/api/"), "{script}");
+            assert!(!script.contains("fetch("), "{script}");
+            assert!(
+                script.contains("}catch(ex){showErr(ex.message);")
+                    || script.contains("}catch(ex){err.textContent=ex.message;"),
+                "{script}"
+            );
+            assert!(!script.contains(".json()"), "{script}");
+            assert!(!script.contains("Something went wrong"), "{script}");
+        }
+        assert!(api_post_script().contains("async function apiPost(path,body){"));
+    }
+
+    /// The forgot-password link keeps its one answer for whatever the app
+    /// decided, and stops claiming an email was sent when the app never got
+    /// to decide.
+    #[test]
+    fn forgot_password_shows_a_request_the_app_never_decided() {
+        let script = login_script();
+        assert!(
+            script
+                .contains("catch(ex){if(!ex.refused||ex.status>=500){showErr(ex.message);return}}"),
+            "{script}"
+        );
+        assert!(!script.contains("catch(e){}"), "{script}");
+    }
 
     #[tokio::test]
     async fn site_config_reads_from_ctx_config_get_with_defaults() {
