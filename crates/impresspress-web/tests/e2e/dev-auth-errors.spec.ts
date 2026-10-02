@@ -28,8 +28,9 @@ import {
  *     of this fix returned the answer and re-navigated the page in the same
  *     breath; the reloaded page was a clean login form that said nothing.
  *  3. **A navigation the runtime dies on** lands on the boot shell, which
- *     shows the cause, recovers once on its own, and the second time stops
- *     with the cause on screen until the person chooses what to do.
+ *     shows the cause and recovers once on its own; if it fails again before
+ *     the app has answered, the shell stops with the cause on screen until
+ *     the person chooses what to do.
  *
  * (`impresspress-bundle`'s `tests/sw/sw_runtime_stopped.test.mjs` pins the
  * worker's branches against stubs; these are the real worker, the real wasm
@@ -42,11 +43,17 @@ const CAUSE = 'injected by dev-auth-errors.spec.ts';
 /**
  * Kill the runtime of the worker now serving `page`, in the one way a test
  * can reach: `sw.js` is a module, so `handle_request` and `poisoned` are not
- * on the worker's global, but the wasm glue resolves `Headers` there at call
- * time. Every response the runtime builds constructs one, so the next request
- * it handles throws out of `handle_request` — the catch path under test.
- * (`runtimeStopped` passes its headers as a plain object, so the worker's own
- * answer does not go through this.)
+ * on the worker's global, but the wasm glue calls `Headers.prototype.set`
+ * through it. Every response the runtime builds sets a `Content-Type`, so the
+ * next request it handles throws out of `handle_request` — the catch path
+ * under test.
+ *
+ * The RUNTIME, and nothing else in the worker. `sw.js`'s own code sets
+ * exactly two headers, the `Cross-Origin-*` pair `passthrough` adds to the
+ * static files a dev bundle serves, and those still work: an earlier version
+ * of this helper replaced `Headers` wholesale, which also broke `passthrough`
+ * — so the boot shell could not load `loader.js`, and the test "found" a hang
+ * that was its own doing.
  *
  * The ACTIVE worker, found by the page's controller: after a recovery there
  * is a new one, and the context still lists the old.
@@ -61,10 +68,10 @@ async function killRuntime(page: Page) {
   for (const worker of workers) {
     await worker
       .evaluate((cause) => {
-        (globalThis as any).Headers = class {
-          constructor() {
-            throw new Error(cause);
-          }
+        const set = Headers.prototype.set;
+        Headers.prototype.set = function (name: string, value: string) {
+          if (!/^cross-origin-/i.test(name)) throw new Error(cause);
+          return set.call(this, name, value);
         };
       }, CAUSE)
       .catch(() => {});
@@ -84,6 +91,36 @@ async function served(page: Page) {
     null,
     { timeout: 120_000 },
   );
+}
+
+/**
+ * Every line the boot shell writes to `#status` from here on, across
+ * navigations. The shell's recovery says why it is recovering and then
+ * replaces the document, so the line is on screen for a moment; this is how a
+ * test knows whether it was said — or, as importantly, that it was NOT.
+ *
+ * Not `sessionStorage`, which is where the loader keeps its own record. In a
+ * dev bundle the pages the runtime serves are cross-origin isolated and the
+ * boot shell is not, and in this job a value set on a runtime page was not
+ * there when the shell loaded next — so a flag read from a runtime page says
+ * nothing about what the shell did.
+ */
+async function recordShellStatus(page: Page): Promise<string[]> {
+  const lines: string[] = [];
+  await page.exposeFunction('__recordStatus', (text: string) => {
+    lines.push(text);
+  });
+  await page.addInitScript(() => {
+    document.addEventListener('DOMContentLoaded', () => {
+      const status = document.getElementById('status');
+      if (!status) return;
+      new MutationObserver(() => (window as any).__recordStatus(status.textContent)).observe(
+        status,
+        { childList: true, characterData: true, subtree: true },
+      );
+    });
+  });
+  return lines;
 }
 
 async function openLogin(page: Page) {
@@ -166,6 +203,17 @@ test('a login the runtime dies on shows the cause, and keeps showing it', async 
   await page.getByRole('button', { name: /forgot password/i }).click();
   await expect(error).toHaveText(shown);
   await expect(page.locator('#info')).toBeHidden();
+
+  // And the message's last sentence is true: loading the app again is an
+  // ordinary boot with a fresh worker — no recovery ran, so nothing was
+  // wiped. (`/`, because the static host in this job has no fallback to
+  // answer `/b/auth/login` with the boot shell.)
+  const statusLines = await recordShellStatus(page);
+  await page.goto('/', { waitUntil: 'commit' });
+  await served(page);
+  await expect(page.getByRole('heading', { name: WELCOME_HEADING })).toBeVisible();
+  expect(statusLines.length, 'the boot shell was loaded and booted').toBeGreaterThan(0);
+  expect(statusLines.filter((line) => line.includes('runtime stopped'))).toEqual([]);
 });
 
 test('a navigation the runtime dies on lands on a boot shell that shows the cause and stops', async ({
@@ -178,20 +226,7 @@ test('a navigation the runtime dies on lands on a boot shell that shows the caus
   // First failure in this tab. The worker sends the navigation to the static
   // host, the boot shell reads the cause the worker left, and recovers by
   // itself — once: drop the worker and the caches, register afresh.
-  const statusLines: string[] = [];
-  await page.exposeFunction('__recordStatus', (text: string) => {
-    statusLines.push(text);
-  });
-  await page.addInitScript(() => {
-    document.addEventListener('DOMContentLoaded', () => {
-      const status = document.getElementById('status');
-      if (!status) return;
-      new MutationObserver(() => (window as any).__recordStatus(status.textContent)).observe(
-        status,
-        { childList: true, characterData: true, subtree: true },
-      );
-    });
-  });
+  const statusLines = await recordShellStatus(page);
   await killRuntime(page);
   await page.reload({ waitUntil: 'commit' });
   const cause = `error handling request: Error: ${CAUSE}`;
@@ -201,10 +236,32 @@ test('a navigation the runtime dies on lands on a boot shell that shows the caus
   await served(page);
   await expect(heading).toBeVisible();
 
-  // Second failure in the same tab: the automatic recovery has been spent.
-  // The shell shows the cause and waits.
+  // The app answered the boot probe, so that recovery is over and done: a
+  // later failure in the same tab is recovered from automatically again
+  // instead of going straight to the stuck screen.
+  const recovering = `The app's runtime stopped: ${cause} — recovering…`;
   await killRuntime(page);
   await page.reload({ waitUntil: 'commit' });
+  await expect
+    .poll(() => statusLines.filter((line) => line === recovering).length)
+    .toBe(2);
+  await served(page);
+  await expect(heading).toBeVisible();
+
+  // A failure BEFORE the app has answered again: the automatic recovery has
+  // been spent, so the shell shows the cause and waits. That state cannot be
+  // staged for real here — it needs a worker that dies on its very first
+  // request, and a test can only reach a worker after it has served one — so
+  // the loader's own flag is set, in the shell, before the loader runs.
+  // (`loader_recovery.test.mjs` drives the real sequence against the rendered
+  // loader; what only a browser can show is the screen itself.)
+  await page.addInitScript(() => {
+    if (new URLSearchParams(location.search).has('recovery-spent')) {
+      sessionStorage.setItem('__impresspress_recovery_done', '1');
+    }
+  });
+  await killRuntime(page);
+  await page.goto('/?recovery-spent', { waitUntil: 'commit' });
 
   const stopped = page.locator('#impresspress-stopped-cause');
   await expect(stopped).toHaveText(`The app's runtime stopped: ${cause}`, { timeout: 60_000 });
