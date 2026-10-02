@@ -9,7 +9,12 @@
 # service-worker plumbing around it.
 [app]
 name = "dev-sandbox"
-title = "ImpressPress dev sandbox"
+# The boot page's title is the seed's: each seed names itself in its
+# `sandbox.json`, and build.sh stages the one being built into this file (a
+# build output, like `seed/`). A title written here would be the same for
+# every seed, which is how two different sandboxes came to be indistinguishable
+# before either had loaded.
+title_file = "boot-title.txt"
 boot_redirect = "/"
 # What the boot page says under its title. The static host serves that page
 # for every path until the service worker is installed, and a reader that

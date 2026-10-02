@@ -21,11 +21,21 @@
 #   examples/dev-sandbox/build.sh                  # build dist/ from seeds/blank
 #   examples/dev-sandbox/build.sh --seed NAME       # build dist/ from seeds/NAME
 #   examples/dev-sandbox/build.sh --seed NAME --out ../dist-NAME  # move the bundle there
+#   examples/dev-sandbox/build.sh --pkg-dir DIR     # assemble from DIR instead of compiling the wasm
 #   examples/dev-sandbox/build.sh --check           # verify every seed and the compiler tree
 #
 # A relative `--out` is relative to the directory the script is run from; it
 # must be outside `examples/dev-sandbox/` and either not exist, be empty, or be
 # a bundle this script made.
+#
+# `--pkg-dir DIR` skips step 1 below: DIR is a wasm-pack output of
+# `impresspress-web` built with `--features browser-devtools` — `pkg-dev/` as
+# an earlier run of this script left it, or a copy of it — and the bundle is
+# assembled from that. It is how a second bundle with a DIFFERENT runtime is
+# built without compiling one twice: `sw-update.spec.ts` deploys one bundle
+# over another, and the second is assembled from a restamped copy of
+# `pkg-dev/` (`crates/impresspress-web/tests/e2e/fixtures/next-runtime-pkg.mjs`).
+# Everything after step 1 is the same recipe either way.
 #
 # `IMPRESSPRESS=/path/to/impresspress` overrides which CLI binary assembles
 # the bundle. Default is whatever is on `PATH`, which is the trap this
@@ -37,7 +47,9 @@
 # `--root ./out` to keep it out of `~/.cargo/bin`) and point this at it.
 #
 # `--check` verifies every `seeds/<name>/manifest.json` against its `site/**`
-# and, when the seed has them, its `sandbox.json`, its `guide.md` and the
+# and, when the seed has them, its `sandbox.json` (which names the title its
+# boot page is built with — required, and no two seeds may share one), its
+# `guide.md` and the
 # `llms.txt` generated from `seeds/llms-preamble.md` and that guide, and that
 # every file its `vendor.json` pins carries the pinned sha256
 # (seeds/check-seeds.py) — and, when `compiler/dist/` has been
@@ -100,7 +112,7 @@ stage_seed() {
     exit 1
   fi
   log "staging seeds/$SEED into seed/"
-  rm -rf "$HERE/seed"
+  rm -rf "$HERE/seed" "$HERE/boot-title.txt"
   mkdir -p "$HERE/seed"
   cp "$src/manifest.json" "$HERE/seed/manifest.json"
   cp -R "$src/site" "$HERE/seed/site"
@@ -115,17 +127,27 @@ stage_seed() {
   # answers a reader that has no service worker. A seed with no sandbox block
   # has none — and impresspress.toml's overlay of it then fails the build,
   # which is right: this deployment is the sandbox.
-  python3 -B - "$HERE/seeds" "$SEED" "$HERE/seed/llms.txt" <<'STAGELLMS'
+  #
+  # The boot page's title is staged the same way and for the same reason: it
+  # is the seed's (sandbox.json), and impresspress.toml's `[app] title_file`
+  # names the one file it is staged to. Beside seed/, not inside it — seed/ is
+  # overlaid onto the bundle wholesale, and the title is the boot page's, not
+  # a file anything fetches.
+  python3 -B - "$HERE/seeds" "$SEED" "$HERE/seed/llms.txt" "$HERE/boot-title.txt" <<'STAGESANDBOX'
 import pathlib, sys
 sys.path.insert(0, sys.argv[1])
 import seedlib
 try:
-    text = seedlib.staged_llms(seedlib.seed_dir(sys.argv[2]))
+    seed = seedlib.seed_dir(sys.argv[2])
+    text = seedlib.staged_llms(seed)
+    title = seedlib.boot_title(seed)
 except seedlib.SeedError as e:
     raise SystemExit(f"build.sh: {e}")
 if text is not None:
     pathlib.Path(sys.argv[3]).write_bytes(text)
-STAGELLMS
+if title is not None:
+    pathlib.Path(sys.argv[4]).write_text(title + "\n", encoding="utf-8")
+STAGESANDBOX
 }
 
 # The browser toolchain (`compiler/`) is 365 MiB of composed wasm and takes
@@ -174,13 +196,15 @@ check_compiler() {
 
 SEED="blank"
 OUT=""
+PKG_DIR=""
 CHECK_ONLY=0
 while [ $# -gt 0 ]; do
   case "$1" in
     --check) CHECK_ONLY=1 ;;
     --seed) SEED="${2:-}"; [ -n "$SEED" ] || { echo "build.sh: --seed needs a name" >&2; exit 1; }; shift ;;
     --out) OUT="${2:-}"; [ -n "$OUT" ] || { echo "build.sh: --out needs a directory" >&2; exit 1; }; shift ;;
-    *) echo "build.sh: unknown argument '$1' (usage: build.sh [--check] [--seed NAME] [--out DIR])" >&2; exit 1 ;;
+    --pkg-dir) PKG_DIR="${2:-}"; [ -n "$PKG_DIR" ] || { echo "build.sh: --pkg-dir needs a directory" >&2; exit 1; }; shift ;;
+    *) echo "build.sh: unknown argument '$1' (usage: build.sh [--check] [--seed NAME] [--out DIR] [--pkg-dir DIR])" >&2; exit 1 ;;
   esac
   shift
 done
@@ -238,6 +262,22 @@ if [ -n "$OUT" ]; then
   fi
 fi
 
+# `--pkg-dir`, like `--out`, is the caller's path: resolved here, before the
+# `cd` further down, and checked before anything is built.
+if [ -n "$PKG_DIR" ]; then
+  PKG_DIR="$(python3 -c 'import os, sys; print(os.path.realpath(sys.argv[1]))' "$PKG_DIR")"
+  for file in impresspress_web.js impresspress_web_bg.wasm; do
+    [ -f "$PKG_DIR/$file" ] || {
+      echo "build.sh: --pkg-dir '$PKG_DIR' has no $file — it must be a wasm-pack output of impresspress-web" >&2
+      exit 1
+    }
+  done
+  [ -d "$PKG_DIR/snippets" ] || {
+    echo "build.sh: --pkg-dir '$PKG_DIR' has no snippets/ — the JS glue cannot resolve its imports" >&2
+    exit 1
+  }
+fi
+
 if [ "$CHECK_ONLY" = 1 ]; then
   check_seed
   check_compiler
@@ -271,8 +311,14 @@ check_compiler
 #    is the ordinary (feature-off) bundle every other consumer serves — a
 #    tree that has just built the ordinary bundle must not be disturbed by
 #    this script, and vice versa.
-log "wasm-pack build --features browser-devtools -> $REPO/crates/impresspress-web/pkg-dev"
-(cd "$REPO/crates/impresspress-web" && wasm-pack build --target web --release --out-dir pkg-dev -- --features browser-devtools)
+#    `--pkg-dir` names one that already exists, and nothing is compiled.
+if [ -n "$PKG_DIR" ]; then
+  log "using the wasm-pack output at $PKG_DIR"
+else
+  PKG_DIR="$REPO/crates/impresspress-web/pkg-dev"
+  log "wasm-pack build --features browser-devtools -> $PKG_DIR"
+  (cd "$REPO/crates/impresspress-web" && wasm-pack build --target web --release --out-dir pkg-dev -- --features browser-devtools)
+fi
 
 # 2. The sealed × web flow. `examples/dev-sandbox` has an `impresspress.toml`
 #    but no `Cargo.toml`, so the CLI's mode detection (`mode.rs`) takes the
@@ -286,7 +332,7 @@ cd "$HERE"
   exit 1
 }
 log "assembling the bundle with $IMPRESSPRESS_BIN"
-IMPRESSPRESS_WEB_PKG_DIR="$REPO/crates/impresspress-web/pkg-dev" \
+IMPRESSPRESS_WEB_PKG_DIR="$PKG_DIR" \
   "$IMPRESSPRESS_BIN" build --target web --release
 
 DIST="$HERE/dist"
@@ -320,6 +366,22 @@ grep -q 'href="/llms.txt"' "$DIST/index.html" || {
   echo "  or an impresspress CLI older than it: $IMPRESSPRESS_BIN" >&2
   exit 1
 }
+# …and that page is headed with the title of the seed that was built, not
+# another seed's and not a title from anywhere else.
+python3 -B - "$HERE/seeds" "$SEED" "$DIST/index.html" <<'BOOTTITLE' || exit 1
+import html, pathlib, re, sys
+sys.path.insert(0, sys.argv[1])
+import seedlib
+title = seedlib.boot_title(seedlib.seed_dir(sys.argv[2]))
+page = pathlib.Path(sys.argv[3]).read_text(encoding="utf-8")
+shown = [html.unescape(t) for t in re.findall(r"<title>(.*?)</title>", page, re.S)]
+shown += [html.unescape(t) for t in re.findall(r"<span data-app-title>(.*?)</span>", page, re.S)]
+if not shown or any(t != title for t in shown):
+    raise SystemExit(
+        f"build.sh: {sys.argv[3]} is titled {shown!r}, not the {sys.argv[2]} seed's {title!r} — "
+        f"check [app] title_file in impresspress.toml, or an impresspress CLI older than it"
+    )
+BOOTTITLE
 [ -f "$DIST/__impresspress_dev/compiler/manifest.json" ] || {
   echo "build.sh: $DIST/__impresspress_dev/compiler/manifest.json was not overlaid — check impresspress.toml's [[assets.overlay]]" >&2
   exit 1

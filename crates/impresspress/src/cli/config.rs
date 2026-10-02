@@ -45,10 +45,10 @@ pub struct ImpresspressConfig {
 }
 
 #[derive(Debug, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "RawAppConfig")]
 pub struct AppConfig {
     pub name: String,
-    pub title: String,
+    pub title: AppTitle,
     pub boot_redirect: String,
     /// An HTML fragment file (relative to the directory holding
     /// `impresspress.toml`, like an overlay's `from`) that the boot shell
@@ -57,6 +57,60 @@ pub struct AppConfig {
     /// `impresspress_bundle::bundle::AppConfig::boot_notice_html`.
     #[serde(default)]
     pub boot_notice: Option<String>,
+}
+
+/// Where the app's title, as the boot shell shows it, comes from. `[app]`
+/// gives exactly one of the two keys; a file with both or neither does not
+/// parse.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum AppTitle {
+    /// `title = "…"`: written in the configuration.
+    Inline(String),
+    /// `title_file = "<file>"`: a text file (relative to the directory
+    /// holding `impresspress.toml`, like an overlay's `from`) whose one line
+    /// is the title — for a build whose title is decided by an earlier build
+    /// step. One trailing newline is not part of the title; an empty file or
+    /// a second line is refused.
+    File(String),
+}
+
+/// `[app]` as it is written, before the two title keys become one value.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawAppConfig {
+    name: String,
+    #[serde(default)]
+    title: Option<String>,
+    #[serde(default)]
+    title_file: Option<String>,
+    boot_redirect: String,
+    #[serde(default)]
+    boot_notice: Option<String>,
+}
+
+impl TryFrom<RawAppConfig> for AppConfig {
+    type Error = &'static str;
+
+    fn try_from(raw: RawAppConfig) -> Result<Self, Self::Error> {
+        let title = match (raw.title, raw.title_file) {
+            (Some(title), None) => AppTitle::Inline(title),
+            (None, Some(file)) => AppTitle::File(file),
+            (Some(_), Some(_)) => {
+                return Err("[app] sets both `title` and `title_file`; give exactly one")
+            }
+            (None, None) => {
+                return Err(
+                    "[app] needs a `title` (or a `title_file` naming the file that holds it)",
+                )
+            }
+        };
+        Ok(Self {
+            name: raw.name,
+            title,
+            boot_redirect: raw.boot_redirect,
+            boot_notice: raw.boot_notice,
+        })
+    }
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -133,7 +187,7 @@ impl Config {
         };
         Ok(impresspress_bundle::bundle::AppConfig {
             app_name: Some(self.app.name.clone()),
-            app_title: Some(self.app.title.clone()),
+            app_title: Some(self.app_title(repo_root)?),
             boot_redirect: Some(self.app.boot_redirect.clone()),
             extra_bypass_prefix: self.assets.extra_bypass_prefix.clone(),
             extra_bypass_exact: self.assets.extra_bypass_exact.clone(),
@@ -141,6 +195,32 @@ impl Config {
             dev_enabled: self.dev.enabled,
             boot_notice_html,
         })
+    }
+}
+
+impl Config {
+    /// The app's title: `[app] title`, or the one line of `[app] title_file`
+    /// (read relative to `repo_root`, the directory the configuration was
+    /// found in).
+    pub fn app_title(&self, repo_root: &Path) -> anyhow::Result<String> {
+        let path = match &self.app.title {
+            AppTitle::Inline(title) => return Ok(title.clone()),
+            AppTitle::File(path) => path,
+        };
+        let file = repo_root.join(path);
+        let text = std::fs::read_to_string(&file)
+            .map_err(|e| anyhow::anyhow!("read [app] title_file {file:?}: {e}"))?;
+        let title = text
+            .strip_suffix('\n')
+            .map(|line| line.strip_suffix('\r').unwrap_or(line))
+            .unwrap_or(&text);
+        if title.trim().is_empty() {
+            anyhow::bail!("[app] title_file {file:?} is empty; it holds the app's title");
+        }
+        if title.contains(['\n', '\r']) {
+            anyhow::bail!("[app] title_file {file:?} has more than one line; it holds the app's title and nothing else");
+        }
+        Ok(title.to_string())
     }
 }
 
@@ -203,7 +283,7 @@ boot_redirect = "/b/system/"
 "#;
         let cfg = parse(input).unwrap();
         assert_eq!(cfg.app.name, "impresspress-web");
-        assert_eq!(cfg.app.title, "Impresspress");
+        assert_eq!(cfg.app.title, AppTitle::Inline("Impresspress".to_string()));
         assert_eq!(cfg.app.boot_redirect, "/b/system/");
         assert_eq!(cfg.assets.extra_bypass_prefix, Vec::<String>::new());
         assert!(cfg.assets.overlay.is_empty());
@@ -259,6 +339,56 @@ color = "red"
             msg.contains("color"),
             "expected error to mention 'color', got: {msg}"
         );
+    }
+
+    /// The title is written in the configuration or read from a file an
+    /// earlier build step wrote — one or the other, and always one.
+    #[test]
+    fn the_title_is_given_once_inline_or_as_a_file() {
+        let app = |lines: &str| format!("[app]\nname = \"x\"\nboot_redirect = \"/\"\n{lines}");
+        let tmp = tempfile::tempdir().unwrap();
+
+        let inline = parse(&app("title = \"Inline\"\n")).unwrap();
+        assert_eq!(inline.app_title(tmp.path()).unwrap(), "Inline");
+
+        let from_file = parse(&app("title_file = \"t/title.txt\"\n")).unwrap();
+        std::fs::create_dir(tmp.path().join("t")).unwrap();
+        // One trailing newline (either spelling) is the file's, not the title's.
+        for (written, title) in [
+            ("From a file\n", "From a file"),
+            ("From a file\r\n", "From a file"),
+            ("No newline", "No newline"),
+            ("  kept as written \n", "  kept as written "),
+        ] {
+            std::fs::write(tmp.path().join("t/title.txt"), written).unwrap();
+            assert_eq!(from_file.app_title(tmp.path()).unwrap(), title);
+            assert_eq!(
+                from_file
+                    .bundle_app(tmp.path())
+                    .unwrap()
+                    .app_title
+                    .as_deref(),
+                Some(title)
+            );
+        }
+        for bad in ["", "\n", "   \n", "one\ntwo\n", "one\n\n"] {
+            std::fs::write(tmp.path().join("t/title.txt"), bad).unwrap();
+            let err = from_file.app_title(tmp.path()).unwrap_err().to_string();
+            assert!(err.contains("title_file"), "{bad:?}: {err}");
+        }
+        std::fs::remove_file(tmp.path().join("t/title.txt")).unwrap();
+        let err = from_file.app_title(tmp.path()).unwrap_err().to_string();
+        assert!(
+            err.contains("title_file") && err.contains("title.txt"),
+            "{err}"
+        );
+
+        let both = parse(&app("title = \"A\"\ntitle_file = \"b\"\n"))
+            .unwrap_err()
+            .to_string();
+        assert!(both.contains("both"), "{both}");
+        let neither = parse(&app("")).unwrap_err().to_string();
+        assert!(neither.contains("title"), "{neither}");
     }
 
     #[test]
