@@ -36,13 +36,76 @@ let initPromise = null;
 // deploy whose hashed asset URL no longer exists keeps returning 5xx forever
 // — the user has to manually unregister via DevTools to recover.
 let poisoned = false;
+// Why it is poisoned: the `reason` `selfDestruct` was called with. Kept so
+// every request this worker refuses from then on can say what happened —
+// see `runtimeStopped`.
+let poisonReason = '';
 
-async function selfDestruct(reason) {
+// Whether `unregister()` went through. If it did not, this worker is still
+// the one a reload reaches, and `runtimeStopped` words its answer for that.
+let unregistered = false;
+// Whether the open pages were sent to the boot shell (`selfDestruct`).
+let sentToBootShell = false;
+
+// Whether `loader.js`'s recovery erases the data this browser stores for the
+// app (OPFS) — the same build-time flag `loader.js` is rendered with. Here so
+// that an answer which tells someone to reload can say what the reload costs.
+const OPFS_WIPE_ON_RECOVERY = __OPFS_WIPE_ON_RECOVERY__;
+
+// The longest cause kept. A wasm-bindgen error can carry a whole stack; the
+// reader needs the first line or two. (The console line has all of it.)
+const CAUSE_MAX_CHARS = 300;
+
+// Where the cause is left for the boot shell: one entry in one Cache Storage
+// cache, which `loader.js` reads and deletes (the same two names are declared
+// there). Cache Storage because it is the one store both this worker and a
+// page can reach that needs no listener on the page: a page the runtime
+// rendered has no `message` handler, the navigation that hit the failure has
+// no client to post to yet, and `sessionStorage` does not exist in a worker.
+// Not a query parameter on the navigated URL either — that only reaches the
+// clients this worker navigates, never the navigation that failed, and it
+// would put an error message in the address bar and the history.
+const STOP_CAUSE_CACHE = '__impresspress_sw_stopped';
+const STOP_CAUSE_KEY = '/__impresspress_sw_stopped';
+
+/**
+ * The runtime is dead for the rest of this worker's life. Poison the worker
+ * and unregister it, so the next page load registers a fresh one.
+ *
+ * `toBootShell` says whether the open pages are also sent back to the static
+ * boot shell, and it is the caller's to decide because it depends on what
+ * failed:
+ *
+ * - `true` — nothing can be served at all (`init()` / `initialize()` failed),
+ *   or a NAVIGATION failed and its document is going to be the boot shell
+ *   anyway (`runtimeStopped` sends it there). The cause is left for the shell (`leaveCauseForBootShell`), each
+ *   page is told and re-navigated, and `loader.js` runs its recovery path
+ *   with the cause on screen.
+ * - `false` — a request FROM a page failed (an API call, a form post) after
+ *   the runtime had started. The page is left exactly where it is: the
+ *   request gets `runtimeStopped`'s 503 and the page shows the cause.
+ *   Re-navigating here would replace the page a moment after the cause
+ *   reached it, with a clean form that says nothing. What a reload then does
+ *   depends on whether the unregister went through — `runtimeStopped` says
+ *   which in its answer.
+ */
+async function selfDestruct(reason, toBootShell) {
     if (poisoned) return;
     poisoned = true;
+    poisonReason = String(reason);
+    if (poisonReason.length > CAUSE_MAX_CHARS) {
+        poisonReason = `${poisonReason.slice(0, CAUSE_MAX_CHARS)}…`;
+    }
     console.error('[__APP_NAME__] SW self-destructing:', reason);
     try {
-        await self.registration.unregister();
+        unregistered = await self.registration.unregister();
+    } catch (e) {
+        console.error('[__APP_NAME__] self-destruct unregister failed:', e);
+    }
+    if (!toBootShell) return;
+    sentToBootShell = true;
+    await leaveCauseForBootShell();
+    try {
         const clients = await self.clients.matchAll({ type: 'window' });
         for (const c of clients) {
             // Notify the page so loader.js sets its sessionStorage breaker
@@ -50,20 +113,46 @@ async function selfDestruct(reason) {
             // through a recovery path (clear caches, drop any lingering SW,
             // bust the document cache, reload once) — that breaks
             // stale-module loops where a fresh `*_bg.wasm` can't link
-            // against a browser-cached previous-build `*.js`.
+            // against a browser-cached previous-build `*.js`. Only the boot
+            // shell listens; every other page gets the cause from the cache
+            // entry above.
             try {
-                c.postMessage({ type: 'sw-self-destruct', reason });
+                c.postMessage({ type: 'sw-self-destruct', reason: poisonReason });
             } catch (e) {
                 console.warn('[__APP_NAME__] postMessage failed:', e);
             }
+            // `navigate()` returns a promise, and rejects for a client this
+            // worker does not control: the `.catch` is for that, the `try`
+            // for a client that has no `navigate` at all.
             try {
-                c.navigate(c.url);
+                c.navigate(c.url).catch((e) => {
+                    console.warn('[__APP_NAME__] navigate() failed:', e);
+                });
             } catch (e) {
                 console.warn('[__APP_NAME__] navigate() failed:', e);
             }
         }
     } catch (e) {
         console.error('[__APP_NAME__] self-destruct cleanup failed:', e);
+    }
+}
+
+/**
+ * Leave `poisonReason` where the boot shell will find it — see
+ * `STOP_CAUSE_CACHE`. `at` lets the shell tell a cause left for the
+ * navigation in progress from one no shell ever came to read.
+ */
+async function leaveCauseForBootShell() {
+    try {
+        const cache = await caches.open(STOP_CAUSE_CACHE);
+        await cache.put(
+            STOP_CAUSE_KEY,
+            new Response(JSON.stringify({ reason: poisonReason, at: Date.now() }), {
+                headers: { 'Content-Type': 'application/json' }
+            })
+        );
+    } catch (e) {
+        console.error('[__APP_NAME__] could not leave the cause for the boot shell:', e);
     }
 }
 
@@ -75,14 +164,14 @@ async function ensureInitialized() {
         try {
             await init();
         } catch (e) {
-            await selfDestruct(`wasm module load failed: ${e}`);
+            await selfDestruct(`wasm module load failed: ${e}`, true);
             throw e;
         }
         console.log('[__APP_NAME__] Initializing runtime...');
         try {
             await initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES });
         } catch (e) {
-            await selfDestruct(`runtime initialize() failed: ${e}`);
+            await selfDestruct(`runtime initialize() failed: ${e}`, true);
             throw e;
         }
         initialized = true;
@@ -278,9 +367,10 @@ async function passthrough(request) {
 async function handleFetch(event) {
     const request = event.request;
     if (poisoned) {
-        // wasm is dead — let the network serve this. The page should already
-        // be in the middle of a re-navigation triggered by selfDestruct().
-        return fetch(request);
+        // wasm is dead. What still reaches this worker comes from a page it
+        // controlled when it died — or from anywhere in its scope, if it
+        // could not unregister.
+        return runtimeStopped(request);
     }
     try {
         await ensureInitialized();
@@ -300,18 +390,79 @@ async function handleFetch(event) {
     } catch (error) {
         console.error('[__APP_NAME__] Error handling request:', error);
         // wasm-bindgen surfaces a `RuntimeError` for an `unreachable` trap;
-        // ensureInitialized() also synthesises errors for `init()` /
-        // `initialize()` failures (most often caused by a stale browser
-        // module cache pointing at filenames the new build no longer has).
-        // Both modes mean the wasm instance is unusable for the rest of
-        // this SW's life, so self-destruct (which posts the breaker
-        // message and triggers a re-navigation) and fall through to
-        // network — that lets the browser fetch the static boot HTML
-        // instead of seeing the raw error JSON, which is what runs
-        // loader.js's recovery path.
-        if (!poisoned) {
-            await selfDestruct(`error handling request: ${error}`);
-        }
+        // ensureInitialized() also throws for `init()` / `initialize()`
+        // failures (most often caused by a stale browser module cache
+        // pointing at filenames the new build no longer has), having
+        // self-destructed already. Both modes mean the wasm instance is
+        // unusable for the rest of this SW's life. What is left to decide
+        // here is the trap in a running runtime, and it turns on what was
+        // asked for — see `selfDestruct`: a failed navigation sends the open
+        // pages to the boot shell, a failed request from a page leaves the
+        // page alone to show the answer below.
+        await selfDestruct(`error handling request: ${error}`, request.mode === 'navigate');
+        return runtimeStopped(request);
+    }
+}
+
+/**
+ * The answer to a request the runtime would have handled, once the runtime
+ * is dead (`poisoned`).
+ *
+ * A NAVIGATION goes to the network: the static host answers it with the boot
+ * HTML, and `loader.js` shows the cause this leaves for it and runs its
+ * recovery path.
+ *
+ * Nothing else does. What reaches `handleFetch` is a request the runtime was
+ * going to answer — an API call, a form post — and the static host has
+ * nothing of its own to say to one: an empty 405, a 404 page, or `index.html`
+ * with a 200 where it falls back for unknown paths. The script that made the
+ * request can then report nothing but "something went wrong": the cause is in
+ * THIS worker's console, which neither the person nor an agent driving the
+ * page can read. So the worker answers it itself, in the shape the runtime
+ * gives every error (`wafer_block::http_codec::error_to_http_response`:
+ * `error` is the coarse code, `message` the human text, `code` the precise
+ * one), with the cause in the message. A page that shows `message` — every
+ * auth form does — then shows the cause.
+ *
+ * The message ends with what a reload will do, because that differs and one
+ * of the answers costs data:
+ *
+ * - The page was left alone and this worker is unregistered: a reload is an
+ *   ordinary boot with a fresh worker. Nothing is recovered, nothing erased.
+ * - The pages were sent to the boot shell, or this worker could NOT
+ *   unregister (so a reload is a navigation back to it, which leaves the
+ *   cause for the shell): the shell that finds the cause runs its recovery.
+ *   In a build rendered with `opfs_wipe_on_recovery`, that recovery erases
+ *   the app's local data, and the message says so rather than calling it a
+ *   restart. "May", because the cause is read once: if another tab's shell
+ *   took it first, this page's reload is an ordinary boot — and the data is
+ *   the origin's, so it may already be gone by that tab's recovery.
+ */
+async function runtimeStopped(request) {
+    if (request.mode === 'navigate') {
+        await leaveCauseForBootShell();
         return fetch(request);
     }
+    let next = 'Reload the page to restart it.';
+    if (sentToBootShell || !unregistered) {
+        next = OPFS_WIPE_ON_RECOVERY
+            ? 'Reloading the page may run a recovery that erases the data this browser stores for the app.'
+            : 'Reload the page to recover.';
+    }
+    // `cause` is the one field the runtime's shape does not have: the bare
+    // reason, for `loader.js`, whose boot probe is a request like any other
+    // and which words the sentence around it itself.
+    const body = {
+        error: 'Unavailable',
+        message: `The app's runtime stopped (${poisonReason}). ${next}`,
+        code: 'runtime_stopped',
+        cause: poisonReason
+    };
+    return new Response(JSON.stringify(body), {
+        status: 503,
+        headers: {
+            'Content-Type': 'application/json',
+            'Cache-Control': 'no-store'
+        }
+    });
 }

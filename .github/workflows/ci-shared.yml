@@ -311,6 +311,20 @@ jobs:
       - name: Run webmcp.js unit tests (node --test)
         run: node --test crates/impresspress-core/src/ui/assets/test/*.test.mjs
 
+      # `apiPost` is the one function every auth form posts through
+      # (`auth_ui/assets/api_post.js`), and what it throws is what a failed
+      # sign-in SAYS: the API's message, the HTTP status of an answer that is
+      # not JSON, or that the request never reached the app. The Rust suite
+      # can pin that the forms call it, not what it does.
+      #
+      # (The service worker's half of the same story — a stopped runtime
+      # answers with its cause — is `crates/impresspress-bundle/tests/sw/`,
+      # which needs a RENDERED `sw.js` and is therefore driven by
+      # `bundle_integration.rs` in the workspace `cargo test` above. It runs
+      # `node` too, so this job's Node is load-bearing for that step as well.)
+      - name: Run auth form unit tests (node --test)
+        run: node --test crates/impresspress-core/src/blocks/auth_ui/assets/test/*.test.mjs
+
   # Every `#[cfg(feature = "postgres")]` assertion in the repo — the seven
   # migration tests that check each block's `*.postgres.sql` twin is the one
   # its Rust list actually references — was dead code in CI: nothing anywhere
@@ -1049,7 +1063,7 @@ jobs:
         # belongs with the other fake-worker specs.
         run: |
           set -o pipefail
-          npx playwright test --config=tests/playwright.config.ts tests/e2e/dev-foundations.spec.ts tests/e2e/dev-workspace.spec.ts tests/e2e/dev-compiler.spec.ts tests/e2e/dev-compile-tool.spec.ts tests/e2e/dev-bootstrap.spec.ts 2>&1 \
+          npx playwright test --config=tests/playwright.config.ts tests/e2e/dev-foundations.spec.ts tests/e2e/dev-workspace.spec.ts tests/e2e/dev-compiler.spec.ts tests/e2e/dev-compile-tool.spec.ts tests/e2e/dev-bootstrap.spec.ts tests/e2e/dev-auth-errors.spec.ts 2>&1 \
             | tee /tmp/dev-sandbox-e2e.log
 
       - name: Stop server
