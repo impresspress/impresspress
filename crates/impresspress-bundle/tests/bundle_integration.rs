@@ -837,7 +837,9 @@ fn the_rendered_worker_parses() {
 
 /// `sw.js` leaves the cause of a dead runtime in Cache Storage and
 /// `loader.js` reads it there. Two files, two declarations of the same two
-/// names — a rename in one is a cause written where nothing looks.
+/// names — a rename in one is a cause written where nothing looks. The boot
+/// shell's address is the third: the worker fetches the shell from it and
+/// the loader's recovery returns to it.
 #[test]
 fn the_worker_and_the_loader_agree_on_where_the_stop_cause_is_left() {
     let tmp = production_pkg_copy();
@@ -845,9 +847,18 @@ fn the_worker_and_the_loader_agree_on_where_the_stop_cause_is_left() {
     let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
     let loader = fs::read_to_string(tmp.path().join("loader.js")).unwrap();
 
+    let shell_url = format!(
+        "const SHELL_URL = '{}';",
+        impresspress_bundle::bundle::SHELL_URL
+    );
     for declaration in [
         "const STOP_CAUSE_CACHE = '__impresspress_sw_stopped';",
         "const STOP_CAUSE_KEY = '/__impresspress_sw_stopped';",
+        // Rendered into both from the bundler's one `SHELL_URL`.
+        shell_url.as_str(),
+        // The stage only an `initialize()` failure carries: the worker
+        // states it, the loader's wipe gate asks for it.
+        "const STAGE_INITIALIZE = 'initialize';",
     ] {
         assert_eq!(sw.matches(declaration).count(), 1, "sw.js = {sw}");
         assert_eq!(
@@ -856,18 +867,20 @@ fn the_worker_and_the_loader_agree_on_where_the_stop_cause_is_left() {
             "loader.js = {loader}"
         );
     }
-    // The worker's answer carries `cause`, which is what the loader's boot
-    // probe reads back.
-    assert!(sw.contains("cause: poisonReason"), "sw.js = {sw}");
+    // The worker's answer carries `cause`, `stage` and the death's stamp,
+    // which is what the loader's boot probe reads back.
+    for field in ["cause: poisonReason", "stage: poisonStage", "id: poisonId"] {
+        assert!(sw.contains(field), "sw.js = {sw}");
+    }
     assert!(
-        loader.contains("body.code === 'runtime_stopped' ? String(body.cause) : null"),
+        loader.contains("return reported(body.cause, body.stage, body.id);"),
         "loader.js = {loader}"
     );
 }
 
 /// Once the wasm runtime is dead, a request only it could have answered gets
 /// a 503 that names the cause and says what a reload will do, and a
-/// navigation still reaches the static host. The behaviour is driven in Node
+/// navigation is answered with the boot shell. The behaviour is driven in Node
 /// against the rendered file — `tests/sw/sw_runtime_stopped.test.mjs` says
 /// what and why.
 #[test]
@@ -880,9 +893,11 @@ fn the_rendered_worker_answers_for_a_stopped_runtime() {
     );
 }
 
-/// The boot shell acts on a cause only when it is about this load, recovers
-/// automatically once per failure, and does not mistake a probe the runtime
-/// died on for a boot that worked — `tests/sw/loader_recovery.test.mjs`.
+/// The boot shell acts on a cause only when it is about this load, erases
+/// local data only for a failure of the runtime's `initialize()`, never
+/// restarts a boot that is merely slow, recovers automatically
+/// once per failure, and does not mistake a probe the runtime died on for a
+/// boot that worked — `tests/sw/loader_recovery.test.mjs`.
 #[test]
 fn the_rendered_loader_recovers_once_and_keeps_the_cause() {
     node_test(

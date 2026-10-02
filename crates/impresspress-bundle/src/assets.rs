@@ -161,7 +161,7 @@ mod tests {
     }
 
     // Regression: the loader's recovery path must include a loop-guard that
-    // stops the `self-destruct → wipe → ?_freshen reload → self-destruct`
+    // stops the `self-destruct → recover → self-destruct`
     // cycle that traps production builds (OPFS_WIPE_ON_RECOVERY=false) when
     // initialize() keeps failing after a wipe — and must surface a manual
     // reset UI instead. Render the actual template and assert the loop-guard
@@ -179,42 +179,63 @@ mod tests {
         vars.insert("APP_NAME".into(), "demo-app".into());
         vars.insert("BOOT_REDIRECT".into(), "/".into());
         vars.insert("OPFS_WIPE_ON_RECOVERY".into(), "false".into());
+        vars.insert("SHELL_URL".into(), crate::bundle::SHELL_URL.into());
 
         template::render_to_file(&src, &out, &vars).unwrap();
         let body = std::fs::read_to_string(&out).unwrap();
 
         assert!(body.contains("RECOVERY_DONE_KEY"), "missing loop-guard key");
         assert!(
-            body.contains("renderRecoveryStuckUI"),
-            "missing stuck-UI fallback fn"
+            body.contains("renderStoppedUI"),
+            "missing stopped-UI fallback fn"
         );
         assert!(
-            body.contains("Reset local data and reload"),
+            body.contains("label: 'Reset local data and reload'"),
             "missing manual reset button label"
         );
         assert!(body.contains("const OPFS_WIPE_ON_RECOVERY = false;"));
+        assert!(body.contains("const SHELL_URL = '/';"));
         assert!(
             body.contains("const BOOT_PROBE_TIMEOUT_MS = 60_000;"),
             "missing readiness-probe timeout"
         );
         assert!(
-            body.contains("signal: probeController.signal"),
+            body.contains("signal: controller.signal"),
             "readiness fetch is not abortable"
         );
-        assert_eq!(
-            body.matches("await recoverBrowserState(").count(),
-            2,
-            "timeout and self-destruct do not share recovery"
-        );
-        // The stuck UI says what stopped the runtime — as text, never as
+        // The stopped UI says what stopped the runtime — as text, never as
         // markup — and offers the retry beside the reset.
         assert!(
-            body.contains(
-                "document.getElementById('impresspress-stopped-cause').textContent = stoppedText(cause);"
-            ),
-            "the stuck UI does not show the cause"
+            body.contains("said: stoppedText(failure.cause),"),
+            "the stopped UI does not show the cause"
         );
-        assert!(body.contains(">Try again</button>"), "missing retry button");
+        assert!(
+            body.contains(
+                "document.getElementById('impresspress-stopped-cause').textContent = said;"
+            ),
+            "the cause is not set as text"
+        );
+        // A recovery's OPFS wipe has one gate, and it asks for the one stage
+        // that can mean the stored data is unusable. A module that failed to
+        // load, a request the runtime died on and a probe that ran out of
+        // time do not pass it. (`tests/sw/loader_recovery.test.mjs` drives
+        // every road into it.)
+        assert!(
+            body.contains("return OPFS_WIPE_ON_RECOVERY && failure.stage === STAGE_INITIALIZE;"),
+            "the wipe is not gated on an initialize() failure"
+        );
+        // The automatic recovery runs from exactly one place — a cause the
+        // worker reported — and it reads the cause, decides and wipes holding
+        // one lock. A timeout never reaches it.
+        assert_eq!(
+            body.matches("await recoverIfStopped(").count(),
+            1,
+            "something other than a reported cause runs the automatic recovery"
+        );
+        assert!(
+            body.contains("return navigator.locks.request(RECOVERY_LOCK, act);"),
+            "the recovery is not serialized across tabs"
+        );
         assert!(
             !body.contains("local data is incompatible"),
             "the stuck UI still guesses at a cause instead of showing it"

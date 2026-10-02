@@ -145,7 +145,7 @@ test('a runtime that has stopped shows its cause, as the login form does', async
   // (`impresspress-bundle`'s `sw.js.tmpl`): a 503 in the runtime's error
   // shape whose message carries the cause.
   const message =
-    "The app's runtime stopped (error handling request: RuntimeError: unreachable). Reload the page to restart it.";
+    "The app's runtime stopped (error handling request: RuntimeError: unreachable). Reload the page to restart it; the data this browser stores for the app is kept.";
   const page = await run(async () =>
     json(503, { error: 'Unavailable', message, code: 'runtime_stopped' })
   );
@@ -192,7 +192,7 @@ const requests = (page) => page.calls.map((call) => `${call.method} ${call.url}`
 
 test('a kept session and a stopped runtime: the probe’s 503 is not an entry, the sign-in reports the cause', async () => {
   const message =
-    "The app's runtime stopped (error handling request: RuntimeError: unreachable). Reload the page to restart it.";
+    "The app's runtime stopped (error handling request: RuntimeError: unreachable). Reload the page to restart it; the data this browser stores for the app is kept.";
   const page = await run(
     async () => json(503, { error: 'Unavailable', message, code: 'runtime_stopped' }),
     { cookie: 'auth_token=x' }

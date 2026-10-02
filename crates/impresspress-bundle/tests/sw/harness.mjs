@@ -40,12 +40,20 @@ function source(variable) {
 const SOURCES = { plain: source('SW_JS'), wipe: source('SW_JS_WIPE') };
 
 export const ORIGIN = 'https://app.example';
+/// The address of the page the harness's one client is on: a path only the
+/// runtime serves.
+export const CLIENT_URL = `${ORIGIN}/b/auth/login`;
+/// What the static host serves at the boot shell's URL.
+export const SHELL_HTML = '<!DOCTYPE html><title>the boot shell</title>';
 
 let instances = 0;
 
 /// One fresh worker: its own module instance (so its own `poisoned` state),
 /// its own stubs. `runtime` supplies `init` / `initialize` / `handle_request`;
-/// each defaults to succeeding. `wipe` picks the `opfs_wipe_on_recovery`
+/// each defaults to succeeding. `runtime.host(url)` is the static host's
+/// answer to a request the worker makes; by default it has the boot shell at
+/// `/` and nothing else — a plain file server, with no fallback for the paths
+/// only the runtime serves. `wipe` picks the `opfs_wipe_on_recovery`
 /// rendering.
 export async function loadWorker(runtime = {}, { wipe = false } = {}) {
   const source = SOURCES[wipe ? 'wipe' : 'plain'];
@@ -55,8 +63,9 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
   const navigated = [];
   const warnings = [];
   let unregistered = 0;
+  let claimed = 0;
   const client = {
-    url: `${ORIGIN}/b/auth/login`,
+    url: CLIENT_URL,
     postMessage: (message) => posted.push(message),
     // Resolves or rejects as `runtime.navigate` says: a real `navigate()`
     // rejects for a client the worker does not control.
@@ -83,7 +92,7 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
       (async () => ({ response: new Response('from the runtime'), after: Promise.resolve() }))
   };
   globalThis.self = {
-    location: { origin: ORIGIN },
+    location: { origin: ORIGIN, href: `${ORIGIN}/sw.js` },
     addEventListener: (type, listener) => {
       listeners[type] = listener;
     },
@@ -95,12 +104,21 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
         return runtime.unregisters ?? true;
       }
     },
-    clients: { claim: async () => {}, matchAll: async () => [client] }
+    clients: {
+      claim: async () => {
+        claimed += 1;
+      },
+      matchAll: async () => [client]
+    }
   };
-  // What the static host would say. The 405 is the one the incident met.
+  // What the static host would say. `network` records what it was asked for:
+  // the URL string the worker passed, or the request object it forwarded.
   globalThis.fetch = async (request) => {
     network.push(request);
-    return new Response(null, { status: 405 });
+    if (runtime.host) return runtime.host(request);
+    return request === '/'
+      ? new Response(SHELL_HTML, { status: 200, headers: { 'Content-Type': 'text/html' } })
+      : new Response('no such file', { status: 404 });
   };
 
   // A distinct URL per call, so each call evaluates the module afresh.
@@ -126,13 +144,26 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
     return { response: await answer, sent: event.request };
   }
 
+  /// A page posting `data` to the worker; resolves once whatever the worker
+  /// asked to be kept alive for has finished.
+  async function message(data) {
+    const kept = [];
+    listeners.message({ data, waitUntil: (promise) => kept.push(promise) });
+    await Promise.all(kept);
+  }
+
   return {
     request,
+    message,
+    /// How many times the worker claimed its clients.
+    claimed: () => claimed,
     network,
     posted,
     navigated,
     /// What the worker left for the boot shell, or `undefined`.
     leftForBootShell: () => stored.get('__impresspress_sw_stopped /__impresspress_sw_stopped'),
+    /// How many times the worker unregistered itself. It never should: a
+    /// dead worker stays registered so that it can answer navigations.
     unregistered: () => unregistered
   };
 }

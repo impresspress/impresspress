@@ -15,6 +15,14 @@ import {
   WORKSPACE_EXPORT_PORT,
 } from './fixtures/dev-sandbox';
 import { MODEL_CONTEXT_POLYFILL } from './fixtures/model-context-polyfill';
+import {
+  holdLoader,
+  killRuntime,
+  leftCause,
+  recordShellStatus,
+  served as runtimeServing,
+  tellShell,
+} from './fixtures/stopped-runtime';
 import { SHOP_HEADING, SHOP_OFFER, SHOP_PRODUCT, shopPage } from './fixtures/shop-fixture';
 import { execute, registeredTools, structured, waitForTool } from './fixtures/webmcp-helpers';
 
@@ -494,6 +502,72 @@ test('an agent builds the shop on /b/dev and a shopper sees it at /', async ({
       // (spec amendment 14's stated tradeoff, amendment 19's other half).
       expect(await site.evaluate(() => window.crossOriginIsolated)).toBe(false);
       console.log(`exported bundle: served, booted, shop renders: ${Date.now() - runStart} ms`);
+
+      // And when its runtime dies, it says why. An exported folder is served
+      // by whatever its recipient has — here a plain file server, which
+      // answers a path only the runtime serves with its own 404 — so the
+      // dead worker has to stay registered and hand a navigation to the boot
+      // shell itself (`dev-stopped-navigation.spec.ts` says what it did
+      // before). The shell restarts it without erasing anything and comes
+      // back to the page that was asked for; the site is still there.
+      const exportCause = 'injected by dev-workspace.spec.ts';
+      const hostAlone = await exportedContext.request.get('/b/auth/login');
+      expect(hostAlone.status(), 'the export host has no fallback').toBe(404);
+      const statusLines = await recordShellStatus(site);
+      await killRuntime(site, exportCause);
+      const answer = await site.goto('/b/auth/login', { waitUntil: 'commit' });
+      expect(answer!.fromServiceWorker(), 'answered by the worker').toBe(true);
+      expect(answer!.status()).toBe(200);
+      await expect
+        .poll(() => statusLines)
+        .toContain(
+          `The app's runtime stopped: error handling request: Error: ${exportCause} — restarting it; the data stored locally in this browser is kept…`,
+        );
+      await runtimeServing(site);
+      expect(new URL(site.url()).pathname).toBe('/b/auth/login');
+      await site.goto('/', { waitUntil: 'commit' });
+      await expect(site.locator('h1')).toHaveText(SHOP_HEADING, { timeout: 120_000 });
+
+      // Two tabs, one death. This bundle never erases, and the second tab
+      // to act could still do harm: replace, a second time, the healthy
+      // worker the first tab's recovery brought in. It must not — it boots
+      // onto that worker. (The tabs are held before their loaders run, the second until the first
+      // is done, as a throttled background tab would be;
+      // `recovery-wipe.spec.ts` does the same where erasing is allowed.)
+      const other = await exportedContext.newPage();
+      await other.goto('/b/auth/login', { waitUntil: 'commit' });
+      await runtimeServing(other);
+      const releaseSite = await holdLoader(site);
+      const releaseOther = await holdLoader(other);
+      const otherLines = await recordShellStatus(other);
+      const twoTabCause = 'injected by dev-workspace.spec.ts for two tabs';
+      const restarting = `The app's runtime stopped: error handling request: Error: ${twoTabCause} — restarting it; the data stored locally in this browser is kept…`;
+      await killRuntime(site, twoTabCause);
+      await site.goto('/b/auth/login', { waitUntil: 'commit' });
+      await expect(site.locator('#status')).toHaveText('Loading...');
+      await other.reload({ waitUntil: 'commit' });
+      await expect(other.locator('#status')).toHaveText('Loading...');
+      const death = await leftCause(other);
+
+      releaseSite();
+      await expect.poll(() => statusLines).toContain(restarting);
+      await runtimeServing(site);
+      // The worker the first tab's recovery brought in: registered under a
+      // script URL of its own.
+      const workerUrl = () =>
+        site.evaluate(async () => (await navigator.serviceWorker.getRegistration())!.active!.scriptURL);
+      const replacement = await workerUrl();
+      expect(replacement).toContain('/sw.js?recovery=');
+
+      await tellShell(other, death);
+      releaseOther();
+      await runtimeServing(other);
+      expect(otherLines.length, 'the second tab booted through the shell').toBeGreaterThan(0);
+      expect(new URL(other.url()).pathname).toBe('/b/auth/login');
+      expect(otherLines).not.toContain(restarting);
+      // Still that worker: the second tab replaced nothing (a second
+      // replacement would be registered under another URL).
+      expect(await workerUrl()).toBe(replacement);
     } finally {
       await exportedContext.close();
       server.kill('SIGKILL');

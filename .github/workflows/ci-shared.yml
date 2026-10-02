@@ -853,9 +853,14 @@ jobs:
             sleep 1
           done
 
+      # `recovery-wipe.spec.ts` is here because this is the one served bundle
+      # built with `opfs_wipe_on_recovery = true`: what a recovery may erase
+      # can only be shown where erasing is allowed. It uses this job's server
+      # (a static host with no fallback) and, for its slow-start test, one of
+      # its own on 8094 over the same `pkg/`.
       - name: Run smoke tests (browser WASM, port 8080)
         working-directory: crates/impresspress-web
-        run: npx playwright test --config=tests/playwright.config.ts tests/e2e/smoke.spec.ts
+        run: npx playwright test --config=tests/playwright.config.ts tests/e2e/smoke.spec.ts tests/e2e/recovery-wipe.spec.ts
 
       - name: Stop server
         if: always()
@@ -1089,7 +1094,7 @@ jobs:
         # first, which is the one thing no spec before it does.
         run: |
           set -o pipefail
-          npx playwright test --config=tests/playwright.config.ts tests/e2e/dev-foundations.spec.ts tests/e2e/dev-workspace.spec.ts tests/e2e/dev-enter.spec.ts tests/e2e/dev-compiler.spec.ts tests/e2e/dev-compile-tool.spec.ts tests/e2e/dev-bootstrap.spec.ts tests/e2e/dev-llms.spec.ts tests/e2e/dev-auth-errors.spec.ts tests/e2e/sw-update.spec.ts 2>&1 \
+          npx playwright test --config=tests/playwright.config.ts tests/e2e/dev-foundations.spec.ts tests/e2e/dev-workspace.spec.ts tests/e2e/dev-enter.spec.ts tests/e2e/dev-compiler.spec.ts tests/e2e/dev-compile-tool.spec.ts tests/e2e/dev-bootstrap.spec.ts tests/e2e/dev-llms.spec.ts tests/e2e/dev-auth-errors.spec.ts tests/e2e/dev-stopped-navigation.spec.ts tests/e2e/sw-update.spec.ts 2>&1 \
             | tee /tmp/dev-sandbox-e2e.log
 
       - name: Stop server

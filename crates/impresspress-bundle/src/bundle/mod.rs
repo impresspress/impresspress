@@ -33,6 +33,15 @@ pub const BOOT_NOTICE_END: &str = "<!--/boot-notice-->";
 pub const APP_TITLE_OPEN: &str = "<span data-app-title>";
 pub const APP_TITLE_CLOSE: &str = "</span>";
 
+/// The boot shell's own URL, rendered into both `sw.js.tmpl` and
+/// `loader.js.tmpl` as `SHELL_URL`: the one address the static host itself
+/// must answer, because a first visit — no worker yet — starts there. The
+/// worker fetches the shell from it to answer a navigation once its runtime
+/// is dead, and the loader tells a shell standing there (the app being
+/// opened) from one standing at a page of the app. One value, so the two
+/// scripts cannot disagree about where the shell is.
+pub const SHELL_URL: &str = "/";
+
 /// Consumer-supplied configuration that controls how templates are rendered.
 /// All fields are optional; sensible defaults are derived from the discovered
 /// wasm-pack output pair when omitted.
@@ -66,7 +75,11 @@ pub struct AppConfig {
     /// via `impresspress build --target web --opfs-wipe-on-recovery` so the
     /// stale-schema migration scenario self-resolves without manual user
     /// action; other apps surface the error to the user instead and let
-    /// them choose whether to clear data.
+    /// them choose whether to clear data. Even when true, only a failure
+    /// of the runtime's `initialize()` is recovered from by wiping: a module
+    /// that could not be loaded, a request the runtime died on and a boot
+    /// that merely runs out of time all keep the data (`erasesFor` in
+    /// `loader.js.tmpl`).
     pub opfs_wipe_on_recovery: bool,
     /// Whether the Service Worker boots the runtime with the browser
     /// development sandbox on: `sw.js.tmpl`'s `__DEV_ENABLED__` placeholder
@@ -410,6 +423,7 @@ fn build_template_vars(
     // closing tag whoever replaces it looks for.
     vars.insert("APP_TITLE".to_string(), html_text(&app_title));
     vars.insert("BOOT_REDIRECT".to_string(), boot_redirect);
+    vars.insert("SHELL_URL".to_string(), SHELL_URL.to_string());
     vars.insert(
         "BOOT_NOTICE".to_string(),
         app.boot_notice_html.clone().unwrap_or_default(),
