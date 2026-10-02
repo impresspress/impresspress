@@ -3,6 +3,14 @@
 This sandbox seeded a blank site: `site/index.html` and `site/styles.css`,
 and no CSS framework. Write your own stylesheet, or replace `styles.css`.
 
+## If your browser has no WebMCP
+
+The tools named in this guide are published by the workspace page, `/b/dev`.
+An agent without WebMCP runs them from that page's **Tool console**: choose
+the tool in `#dev-console-tool`, put its arguments as JSON in
+`#dev-console-args`, press `#dev-console-run`, and read the result from
+`#dev-console-result`. It is the same call either way, with the same result.
+
 ## How `site/` works
 
 - Every file under `site/` is published verbatim, and every write publishes

@@ -35,6 +35,7 @@ pub mod bypass;
 pub mod contracts;
 pub mod control;
 pub mod data_snapshot;
+pub mod enter;
 pub mod export;
 pub mod files;
 pub mod gc;
@@ -82,10 +83,30 @@ use crate::{
 /// Registered block name.
 pub const BLOCK_NAME: &str = "impresspress/dev";
 
-/// The single route prefix the block serves. Registered as one
+/// The route prefix the workspace is served under. Registered as a
 /// [`crate::routing::ExtraRoute`] at `Admin`, so the router — not any handler
 /// in this module — is what keeps the sandbox admin-only.
 pub const ROUTE_PREFIX: &str = "/b/dev";
+
+/// The one-click entry page (2026-10-02 amendment to design §4): the single
+/// path under [`ROUTE_PREFIX`] an anonymous visitor can reach. See [`enter`].
+pub const ENTER_PATH: &str = "/b/dev/enter";
+
+/// Every route a **workspace** registers for this block, in the order the
+/// router must be given them.
+///
+/// The order is the point, and is why the list is stated once here rather
+/// than at each registration site (the browser runtime factory and the test
+/// fixture): `routing::route_to_block` takes the FIRST extra route whose
+/// prefix matches, and `/b/dev/enter` also matches `/b/dev`. The entry row
+/// has to come first, or the `Admin` prefix would claim it and the page whose
+/// whole purpose is to sign a visitor in would demand a session.
+///
+/// An exported bundle registers none of them ([`DevBlock::runtime_only`]).
+pub const WORKSPACE_ROUTES: &[(&str, crate::routing::RouteAccess)] = &[
+    (ENTER_PATH, crate::routing::RouteAccess::Public),
+    (ROUTE_PREFIX, crate::routing::RouteAccess::Admin),
+];
 
 /// ABI version of the guest SDK crate (`crates/wafer-guest`) that scaffolded
 /// blocks depend on. Must equal `wafer_guest::WAFER_GUEST_VERSION`, which the
@@ -98,6 +119,8 @@ pub const WAFER_GUEST_VERSION: u32 = 2;
 pub enum Route {
     /// `GET /b/dev` — the workspace document.
     Page,
+    /// `GET /b/dev/enter` — the one-click entry page.
+    Enter,
     /// `GET /b/dev/static/dev.js`
     PageScript,
     /// `GET /b/dev/static/dev.css`
@@ -142,9 +165,11 @@ pub enum Route {
 
 /// The block's HTTP surface: what `handle()` dispatches on and what the
 /// workspace `info()` generates its endpoints from (an exported bundle
-/// declares none of it; see [`DevBlock::runtime_only`]). Every row is
+/// declares none of it; see [`DevBlock::runtime_only`]). Every row but one is
 /// `Admin` (design §13); the router is the sole gate, so the declaration is
-/// what pins that tier where the router can enforce it. The matcher binds
+/// what pins that tier where the router can enforce it. The exception is the
+/// entry page, which is `Public` because signing the visitor in is its job
+/// ([`enter`]). The matcher binds
 /// `{id}` / `{name}` into `req.param.*` for the handlers' `msg.var` readers.
 ///
 /// Reading and deleting are `POST`s, not a `GET` with a query and a `DELETE`
@@ -163,6 +188,17 @@ pub const ROUTES: &[EndpointRoute<Route>] = &[
             "The sandbox's HTML workspace: file tree and editor, the live site in a \
              sandboxed iframe, the activation progress panel, and the page-scoped agent \
              tools registered from /b/dev/api/tools.json.",
+        ),
+    // `Public`, and the only row that is: this page is what turns an
+    // anonymous visitor into the signed-in sandbox admin, so it cannot ask
+    // for a session. It is reachable without one only because
+    // `WORKSPACE_ROUTES` registers its path ahead of the `Admin` prefix.
+    EndpointRoute::public(HttpMethod::Get, ENTER_PATH, Route::Enter)
+        .summary("One-click entry to the workspace")
+        .description(
+            "Signs the visitor in as this browser-local sandbox's bootstrap admin, \
+             through the auth block's own login endpoint, and opens /b/dev. Exists \
+             only in a sandbox workspace; an exported site has no such page.",
         ),
     EndpointRoute::admin(HttpMethod::Get, "/b/dev/static/dev.js", Route::PageScript)
         .summary("The workspace page's script"),
@@ -670,13 +706,22 @@ impl Block for DevBlock {
         mut msg: Message,
         input: InputStream,
     ) -> OutputStream {
+        // An exported bundle has no HTTP surface. The router already says so
+        // — nothing routes to this block there — and this says it again from
+        // the inside, because one row of `ROUTES` is `Public` and hands out a
+        // session: that page must not be one stray route registration away
+        // from existing on a site that was exported to be served for real.
+        if !self.workspace {
+            return no_store_error(wafer_run::ErrorCode::NotFound, "endpoint not found");
+        }
         let Some(route) = endpoint_match::dispatch(&mut msg, ROUTES) else {
             return no_store_error(wafer_run::ErrorCode::NotFound, "endpoint not found");
         };
-        // Every route is `RouteAccess::Admin` at the router; handlers do not
-        // re-check the caller's role.
+        // Every route but `Enter` is `RouteAccess::Admin` at the router;
+        // handlers do not re-check the caller's role.
         match route {
             Route::Page => page::handle(ctx, &msg).await,
+            Route::Enter => enter::handle(ctx).await,
             Route::PageScript => page::handle_script(&msg),
             Route::PageStylesheet => page::handle_stylesheet(&msg),
             Route::PageCompilerAdapter => page::handle_compiler_adapter(&msg),
@@ -902,9 +947,9 @@ mod tests {
     }
 
     /// `info().endpoints` is generated from `ROUTES`; nothing else declares
-    /// an endpoint for this block. Every row and every declaration is
-    /// `Admin`, so the summary is compared too: it is what proves the rows
-    /// carry the declaration rather than merely matching it.
+    /// an endpoint for this block. Every row and every declaration but the
+    /// entry page's is `Admin`, so the summary is compared too: it is what
+    /// proves the rows carry the declaration rather than merely matching it.
     #[test]
     fn info_endpoints_come_from_the_table() {
         use wafer_run::Block as _;
@@ -923,6 +968,24 @@ mod tests {
             assert_eq!(ep.auth, row.auth, "{}", row.template);
             assert_eq!(ep.summary, row.summary, "{}", row.template);
         }
+    }
+
+    /// Exactly one row is reachable without a session, and it is the entry
+    /// page. A second `Public` row would be an unauthenticated door into the
+    /// control plane, so the count is pinned rather than left to review.
+    #[test]
+    fn the_entry_page_is_the_only_public_row() {
+        let public: Vec<&str> = ROUTES
+            .iter()
+            .filter(|row| row.auth != wafer_run::AuthLevel::Admin)
+            .map(|row| row.template)
+            .collect();
+        assert_eq!(public, [ENTER_PATH]);
+        // And the router is handed its path before the `Admin` prefix that
+        // would otherwise claim it (first match wins).
+        assert_eq!(WORKSPACE_ROUTES[0].0, ENTER_PATH);
+        assert_eq!(WORKSPACE_ROUTES[1].0, ROUTE_PREFIX);
+        assert!(ENTER_PATH.starts_with(ROUTE_PREFIX));
     }
 
     #[tokio::test]

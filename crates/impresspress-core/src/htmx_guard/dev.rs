@@ -1,4 +1,4 @@
-//! `impresspress/dev`: the dev sandbox page and its JSON workspace API.
+//! `impresspress/dev`: the dev sandbox's pages and its JSON workspace API.
 
 use std::sync::Arc;
 
@@ -70,7 +70,10 @@ fn fixture() -> std::pin::Pin<Box<dyn std::future::Future<Output = Fixture>>> {
             ctx,
             site: Site(vec![block as Arc<dyn Block>]),
             caller,
-            pages: vec![Page::at("/b/dev")],
+            // The workspace, and the one-click entry page that leads to it.
+            // Neither carries an htmx control; both are rendered so that
+            // stays a checked fact rather than an assumption.
+            pages: vec![Page::at("/b/dev"), Page::at("/b/dev/enter")],
             probes: vec![(
                 "/b/dev/api/generations/{id}",
                 format!("/b/dev/api/generations/{generation}"),

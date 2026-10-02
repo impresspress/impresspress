@@ -502,12 +502,13 @@ impl RuntimeFactory {
                 // `/b/dev` is registered at `RouteAccess::Admin` here, at the
                 // router — not by a check inside any handler. That is the
                 // single gate keeping the sandbox admin-only, and its absence
-                // is what makes `/b/dev` a 404 on an exported site.
-                builder = builder.add_route(
-                    dev::ROUTE_PREFIX,
-                    dev::BLOCK_NAME,
-                    impresspress_core::routing::RouteAccess::Admin,
-                );
+                // is what makes `/b/dev` a 404 on an exported site. The one
+                // `Public` row, the one-click entry page, is registered ahead
+                // of it and is absent from an exported site for the same
+                // reason; `dev::WORKSPACE_ROUTES` owns the list and its order.
+                for (prefix, access) in dev::WORKSPACE_ROUTES {
+                    builder = builder.add_route(*prefix, dev::BLOCK_NAME, *access);
+                }
                 // The `/b/dev` page previews the live site in a same-origin
                 // iframe. An exported site frames nothing.
                 security_headers["frame_ancestors"] = serde_json::json!("self");

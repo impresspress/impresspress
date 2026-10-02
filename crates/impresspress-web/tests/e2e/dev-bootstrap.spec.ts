@@ -2,7 +2,7 @@ import { test, expect } from '@playwright/test';
 import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { BOOTSTRAP_PORT, bootServiceWorker, loginAdmin, serveDirectory } from './fixtures/dev-sandbox';
+import { BOOTSTRAP_PORT, bootServiceWorker, serveDirectory } from './fixtures/dev-sandbox';
 
 /**
  * The bootstrap seed (`examples/dev-sandbox/seeds/bootstrap/`): generation 0
@@ -76,7 +76,16 @@ test('generation 0 is a Bootstrap site with the framework vendored and a site gu
 
     // The seed's sandbox block reached the runtime: status names the template,
     // the reference carries the guide.
-    await loginAdmin(page);
+    // Reached through this seed's own "Open workspace" link — the navbar's
+    // and the card's both lead to the one-click entry page — so the link the
+    // default sandbox ships is the one that is walked.
+    const links = page.getByRole('link', { name: /open workspace/i });
+    await expect(links).toHaveCount(2);
+    for (const link of await links.all()) {
+      await expect(link).toHaveAttribute('href', '/b/dev/enter');
+    }
+    await links.first().click();
+    await page.waitForURL((url) => url.pathname === '/b/dev', { timeout: 60_000 });
     const status = await page.evaluate(async () => (await fetch('/b/dev/api/status')).json());
     expect(status.template).toBe('bootstrap');
     const reference = await page.evaluate(async () => (await fetch('/b/dev/api/reference')).json());

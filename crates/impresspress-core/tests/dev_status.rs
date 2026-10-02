@@ -322,12 +322,19 @@ fn routes_and_endpoints_stay_in_lockstep() {
     assert_eq!(before, seen.len(), "duplicate route in the dispatch table");
 
     // Every `/b/dev` route is Admin (design §13); the router is the sole gate,
-    // so a route that slipped in at a weaker tier would be reachable.
+    // so a route that slipped in at a weaker tier would be reachable. The one
+    // exception is named, not allowed for by a looser check: the one-click
+    // entry page is `Public` because signing the visitor in is its job
+    // (design amendment 21), and `dev_enter.rs` pins what it does with that.
     for endpoint in &info.endpoints {
+        let expected = if endpoint.path == impresspress_core::blocks::dev::ENTER_PATH {
+            wafer_run::AuthLevel::Public
+        } else {
+            wafer_run::AuthLevel::Admin
+        };
         assert_eq!(
-            endpoint.auth,
-            wafer_run::AuthLevel::Admin,
-            "{} must be Admin",
+            endpoint.auth, expected,
+            "{} must be {expected:?}",
             endpoint.path
         );
         assert!(

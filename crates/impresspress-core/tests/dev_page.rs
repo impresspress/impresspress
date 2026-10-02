@@ -43,7 +43,15 @@ async fn dev_page_is_admin_only_cross_origin_isolated_and_uncached() {
     // A browser navigation carries the session cookie, so every request here
     // presents one, and the router resolves it the way it resolves a
     // visitor's.
-    let ctx = dev_with_accounts(FakeControl::new()).await;
+    let mut ctx = dev_with_accounts(FakeControl::new()).await;
+    ctx.set_config(
+        impresspress_core::blocks::auth::config::BOOTSTRAP_ADMIN_EMAIL_KEY,
+        "guide-owner@example.com",
+    );
+    ctx.set_config(
+        impresspress_core::blocks::auth::config::BOOTSTRAP_ADMIN_PASSWORD_KEY,
+        "guide-seeded-password",
+    );
     let member = signed_in_as(&ctx, "user").await;
     let operator = signed_in_as(&ctx, "admin").await;
 
@@ -95,6 +103,7 @@ async fn dev_page_is_admin_only_cross_origin_isolated_and_uncached() {
     .await;
     for id in [
         "dev-guide",
+        "dev-console",
         "dev-files",
         "dev-editor",
         "dev-preview",
@@ -119,10 +128,17 @@ async fn dev_page_is_admin_only_cross_origin_isolated_and_uncached() {
         "the page must load dev.js as a module: {html}"
     );
     assert!(html.contains("/b/dev/static/dev.css"));
+    // The guide shows the local credentials — the CONFIGURED ones, read from
+    // the keys the auth block reads, not a literal in the markup.
     assert!(
-        html.contains("admin@example.com"),
-        "the guide shows the local credentials"
+        html.contains(r#"<code id="dev-credentials-email">guide-owner@example.com</code>"#),
+        "the guide shows the configured email: {html}"
     );
+    assert!(
+        html.contains(r#"<code id="dev-credentials-password">guide-seeded-password</code>"#),
+        "the guide shows the configured password: {html}"
+    );
+    assert!(!html.contains("admin123"), "{html}");
 }
 
 /// COOP/COEP are deployment-wide now (amendment 14: the browser runtime sets

@@ -184,7 +184,23 @@ pub(super) fn pw_field(id: &str, placeholder: &str, minlength: Option<&str>) -> 
 /// One script for wasm32 and native: nothing here depends on where the server
 /// runs. Emitted as its own `<script>` before the page's. A file rather than a
 /// string literal so `assets/test/api_post.test.mjs` can run it.
-pub(super) fn api_post_script() -> &'static str {
+///
+/// It also carries `keepSession(d)`: write the `auth_token` cookie from a
+/// login or signup answer. That is the ONE place a page writes the session
+/// cookie, and only a page whose server is a service worker calls it — a
+/// synthetic response's `Set-Cookie` is not persisted, so the wasm32 login
+/// and signup scripts and the dev sandbox's entry page
+/// (`blocks/dev/assets/enter.js`) keep the session this way. The native
+/// scripts never call it: the server's own `HttpOnly` `Set-Cookie` works
+/// there, and a script-written cookie would be a weaker copy of it.
+///
+/// Beside it, `hasKeptSession()`: whether a cookie `keepSession` wrote is
+/// present. The cookie's name is spelled in these two functions and nowhere
+/// else in a page script.
+///
+/// `pub(crate)` for that entry page, which emits this script ahead of its
+/// own exactly as the forms do.
+pub(crate) fn api_post_script() -> &'static str {
     include_str!("../assets/api_post.js")
 }
 
@@ -224,11 +240,7 @@ async function handleLogin(ev){
     var d=await apiPost('/b/auth/api/login',{email:$('email').value,password:$('password').value});
     // Service-worker synthetic responses don't persist Set-Cookie, so set the
     // auth cookie client-side from the response body.
-    if(d.access_token){
-      var secure=location.protocol==='https:'?'; Secure':'';
-      var maxAge=d.expires_in||1800;
-      document.cookie='auth_token='+d.access_token+'; Path=/; SameSite=Lax; Max-Age='+maxAge+secure;
-    }
+    keepSession(d);
     var redir=$('redirect').value||d.default_redirect||'/';
     window.location.href=redir;
   }catch(ex){showErr(ex.message);btn.disabled=false;btn.textContent='Sign In'}
@@ -327,11 +339,7 @@ async function handleSignup(ev){
       if(back){var qs='email='+encodeURIComponent(email);var r2=$('redirect').value;if(r2){qs+='&redirect='+encodeURIComponent(r2)}back.setAttribute('href','/b/auth/login?'+qs);}
       $('success').hidden=false;
     }else{
-      if(d.access_token){
-        var secure=location.protocol==='https:'?'; Secure':'';
-        var maxAge=d.expires_in||1800;
-        document.cookie='auth_token='+d.access_token+'; Path=/; SameSite=Lax; Max-Age='+maxAge+secure;
-      }
+      keepSession(d);
       var redir=$('redirect').value||d.default_redirect||'/';
       window.location.href=redir;
     }
@@ -406,6 +414,30 @@ mod tests {
             assert!(!script.contains("Something went wrong"), "{script}");
         }
         assert!(api_post_script().contains("async function apiPost(path,body){"));
+        // …and none writes the session cookie itself: `keepSession` in the
+        // shared script is the only writer, so the cookie's attributes cannot
+        // drift between the pages that set it.
+        for script in [
+            login_script(),
+            signup_script(),
+            change_password::SCRIPT,
+            reset_password::SCRIPT,
+        ] {
+            assert!(!script.contains("document.cookie"), "{script}");
+        }
+        assert_eq!(api_post_script().matches("document.cookie=").count(), 1);
+        assert_eq!(api_post_script().matches("auth_token=").count(), 2);
+        assert!(api_post_script().contains("function hasKeptSession(){"));
+        assert!(api_post_script().contains("function keepSession(d){"));
+        // The split the doc comments describe: a service-worker build keeps
+        // the session from the answer, a native one leaves it to the server.
+        for script in [login_script(), signup_script()] {
+            assert_eq!(
+                script.contains("keepSession(d);"),
+                cfg!(target_arch = "wasm32"),
+                "{script}"
+            );
+        }
     }
 
     /// The forgot-password link keeps its one answer for whatever the app

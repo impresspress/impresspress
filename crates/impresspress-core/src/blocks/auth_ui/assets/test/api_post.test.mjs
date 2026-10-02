@@ -121,3 +121,47 @@ test('the error says whether the app itself refused, and with what status', asyn
   });
   assert.deepEqual([unreached.status, unreached.refused], [0, false]);
 });
+
+// `keepSession` — the one function that writes the session cookie. A page
+// served by a service worker calls it with the login (or signup) answer,
+// because a synthetic response's `Set-Cookie` is not persisted.
+
+/// `keepSession` bound to a stub `document` and `location`.
+function keepSessionWith(protocol) {
+  const document = { cookie: '' };
+  const keepSession = new Function('document', 'location', `${source}\nreturn keepSession;`)(
+    document,
+    { protocol },
+  );
+  return { keepSession, document };
+}
+
+test('keepSession writes the auth cookie from the answer', () => {
+  const { keepSession, document } = keepSessionWith('http:');
+  keepSession({ access_token: 'tok', expires_in: 900 });
+  assert.equal(document.cookie, 'auth_token=tok; Path=/; SameSite=Lax; Max-Age=900');
+});
+
+test('keepSession marks the cookie Secure on https and defaults the lifetime', () => {
+  const { keepSession, document } = keepSessionWith('https:');
+  keepSession({ access_token: 'tok' });
+  assert.equal(document.cookie, 'auth_token=tok; Path=/; SameSite=Lax; Max-Age=1800; Secure');
+});
+
+test('keepSession writes nothing for an answer that carries no token', () => {
+  const { keepSession, document } = keepSessionWith('https:');
+  keepSession({ email_verified: false });
+  keepSession(null);
+  assert.equal(document.cookie, '');
+});
+
+test('hasKeptSession sees the cookie keepSession writes, and only that one', () => {
+  const kept = (cookie) =>
+    new Function('document', `${source}\nreturn hasKeptSession;`)({ cookie })();
+  assert.equal(kept(''), false);
+  assert.equal(kept('theme=dark'), false);
+  assert.equal(kept('not_auth_token=x'), false);
+  assert.equal(kept('auth_token='), false, 'an emptied cookie is not a session');
+  assert.equal(kept('auth_token=tok'), true);
+  assert.equal(kept('theme=dark; auth_token=tok; other=1'), true);
+});

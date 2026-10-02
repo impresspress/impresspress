@@ -2,7 +2,8 @@
 
 The dev sandbox — `dev.impresspress.org`, and one more address for each
 other [template](#templates) — is a browser-local sandbox for building an
-ImpressPress site with a WebMCP-capable AI agent. Everything runs in your
+ImpressPress site with an AI agent: one whose browser has WebMCP, or one
+that can only drive the page (see [Without WebMCP](#without-webmcp)). Everything runs in your
 browser tab: the ImpressPress service worker, an in-browser SQL database,
 OPFS (Origin Private File System) storage for the workspace, and — once you
 compile a backend block — an in-browser Rust-to-WebAssembly compiler. There
@@ -17,16 +18,29 @@ shares is the static welcome bundle the site first boots with.
 
 ## Opening it with an agent
 
-You need a Chromium-based browser with WebMCP support (see
-[Browser requirements](#browser-requirements) below). Open the site: the
-landing page shows the throwaway admin credentials —
+You need a Chromium-based browser (see
+[Browser requirements](#browser-requirements) below); WebMCP support is what
+lets an agent call the tools directly, and an agent without it uses the
+[Tool console](#without-webmcp). Open the site and follow **Open
+workspace**: it goes to `/b/dev/enter`, which signs you in as the sandbox's
+admin and lands you on `/b/dev`, the workspace, with nothing to type.
+
+The landing page also shows the throwaway admin credentials —
 
 - Email: `admin@example.com`
 - Password: `admin123`
 
 — and why it's fine that they're public: this is a per-browser, per-visitor
-instance with nothing of consequence behind it. Sign in and you land on
-`/b/dev`, the workspace. Have your agent call `dev_status` first — it
+instance with nothing of consequence behind it. They are how you sign back
+in at `/b/auth/login` once the session expires. If you change the admin's
+password in your instance, one-click entry stops working for it — the entry
+page says so and links the login page.
+
+*Changed 2026-10-02: the link used to lead to the login form, and the visitor
+or their agent typed the credentials. One-click entry exists only in the
+sandbox's workspace; an [exported bundle](#export) has no `/b/dev/enter`.*
+
+Have your agent call `dev_status` first — it
 reports the active generation, the compiler state and a summary of the
 workspace — then it can read and write files, scaffold and compile backend
 blocks, stock the shop, and export.
@@ -58,8 +72,8 @@ everything after it is yours.
 
 ## The workspace
 
-`/b/dev` has three panes: a file tree and editor, the live site rendered in
-an iframe that reloads after each change, and a progress/log panel.
+`/b/dev` has a file tree and editor, the live site rendered in an iframe
+that reloads after each change, a progress/log panel, and a Tool console.
 
 The workspace has two areas:
 
@@ -102,6 +116,20 @@ Every mutating tool call reports the same phases the panel shows live —
 validating, rebuilding the runtime (only when the block set changed),
 publishing, active — so you can watch, and diagnose, what an agent's change
 is doing without leaving the page.
+
+### Without WebMCP
+
+An agent whose browser has no WebMCP — a cloud browser driving the page, say
+— is not handed the tools, so the page offers them as controls. The **Tool
+console** lists every tool the page publishes (`#dev-console-tool`), shows
+the selected tool's description and input schema, takes its arguments as
+JSON (`#dev-console-args`, pre-filled with the required properties), and on
+**Run** (`#dev-console-run`) shows the result and whether it is an error
+(`#dev-console-result`). It runs the very functions a WebMCP agent's calls
+run, so a write from the console publishes, refreshes the file tree and
+reloads the preview exactly as a tool call does. The guide pane at the top
+of the page says which case you are in: "This browser has no WebMCP: use the
+Tool console below, or the file editor", or that the tools are registered.
 
 ## Backend blocks
 
@@ -297,8 +325,9 @@ would treat any export of an account table.
 in-browser Rust compiler — available. The workspace and its database live
 in OPFS.
 
-In practice that means a **Chromium-based browser with WebMCP support**.
-Safari does not implement the `credentialless` cross-origin-embedder-policy
+In practice that means a **Chromium-based browser** — with WebMCP support
+for an agent to call the tools directly, or without it through the
+[Tool console](#without-webmcp). Safari does not implement the `credentialless` cross-origin-embedder-policy
 mode the sandbox relies on, so it gets no cross-origin isolation and no
 in-browser compiler. Firefox is untested.
 

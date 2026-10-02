@@ -78,9 +78,18 @@ do not re-litigate them.
    `ddl` could drop the products table. New structured ops
    (`create_table`, `create_index`, `add_column`, `drop_table`) are authorized
    on the table name.
-7. **No auto sign-in.** The landing page shows the credentials; the human or
-   the agent logs in once. Reason: no new auth code, and an agent filling the
-   login form from the page is itself a fair demonstration.
+7. **One-click entry, in the workspace only** *(amended 2026-10-02; this
+   reverses the original decision, "No auto sign-in")*. The landing page's
+   "Open workspace" link goes to `/b/dev/enter`, which signs the visitor in
+   as the bootstrap admin and opens `/b/dev` with nothing to type. The
+   landing page still shows the credentials: they are how a human signs back
+   in once the session expires. Reason for the reversal: the original
+   reasoning — "an agent filling the login form from the page is itself a
+   fair demonstration" — did not survive contact with one. A visitor's agent
+   in a cloud browser could not get past the form at all, and the form
+   protects nothing here: the account is a per-browser throwaway whose
+   password is printed beside the link. See amendment 21 for the mechanism
+   and its boundary.
 8. **Declared capabilities, granted exactly.** `allows_collection` matches
    exact names or `*`, so "own namespace" is enforced by validating that
    every declared collection/folder/key carries the block's prefix and then
@@ -96,8 +105,9 @@ the seed mechanism of §10. It says what dev.impresspress.org is ("a workspace
 for building websites with a WebMCP-capable browser agent"), tells the human to
 open it in such a browser, shows the local admin credentials and why they are
 safe to publish (per-instance, browser-local), and links **Open workspace →
-`/b/auth/login?redirect=/b/dev`** (the login page's redirect parameter is
-`redirect`, validated by `is_safe_local_redirect`).
+`/b/dev/enter`**, the one-click entry page (decision 7 as amended, amendment
+21). Until 2026-10-02 the link was `/b/auth/login?redirect=/b/dev`; that URL
+still works and is what the entry page falls back to.
 
 When the agent builds the visitor's site, it replaces this page. That is the
 intended lifecycle; the welcome page is just the first generation.
@@ -105,7 +115,9 @@ intended lifecycle; the welcome page is just the first generation.
 ### 4.2 `/b/dev`
 
 Admin-only. Three panes: file tree + editor; the live site in a sandboxed
-iframe; a progress and log panel. A visible "How this workspace works" section
+iframe; a progress and log panel; and a **Tool console** (amendment 22) that
+runs the page's tools by hand, for an agent whose browser has no WebMCP. A
+visible "How this workspace works" section
 gives the workflow, the file layout (`site/`, `blocks/<name>/`), the tool
 names, and a suggested prompt the human can copy. Because `/b/dev` is our own
 trusted document, instructing the agent from it is correct. The iframe's
@@ -613,7 +625,9 @@ the dev block adds no products routes.
 
 Kept from the existing plan: feature off by default and absent from normal
 bundles; `IMPRESSPRESS__DEV__ENABLED` false by default and checked before
-route registration; every `/b/dev` route Admin; same-origin cookie + CSRF;
+route registration; every `/b/dev` route Admin — except, since 2026-10-02,
+the one-click entry page `/b/dev/enter`, which is Public and exists only in
+a workspace (amendment 21); same-origin cookie + CSRF;
 normalized relative paths with quotas; hash-verified content-addressed
 blobs, artifacts and manifests; reserved names and collision checks;
 deny-by-default capabilities; no network for guests; publication cannot write
@@ -1145,6 +1159,55 @@ and read together with this list.
     the compiler (the API's `version`), not from parsing a file in the
     workspace, and the `wafer-guest-version` refusal's remedy is to reload
     the page and compile again.
+21. **§3 decision 7 / §4.1 / §13 — one-click entry (2026-10-02).** A
+    visitor's ChatGPT agent, in a cloud browser, could not get past the login
+    form; the owner decided the sandbox has no sign-in step. `GET
+    /b/dev/enter` is a `Public` row of the dev block's route table. It is an
+    HTML page, not a redirect, because the sandbox's runtime answers from a
+    service worker and a synthetic response's `Set-Cookie` is not persisted —
+    the login page sets its cookie from the login response's JSON for the
+    same reason. The page is rendered with the bootstrap admin's email and
+    password, read at request time from the config keys the auth block reads
+    (`WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL` / `_PASSWORD`, seeded
+    for the browser build by `impresspress-web/src/config.rs`); its script
+    posts them to `POST /b/auth/api/login` and keeps the session through
+    the auth forms' own `apiPost` and `keepSession`
+    (`auth_ui/assets/api_post.js` — one request path, one cookie writer),
+    then navigates to `/b/dev`. No token is minted
+    outside the auth block's login, and the values are not written a second
+    time anywhere (the workspace guide prints them from the same read). A
+    visitor who already holds an admin session — `GET /b/dev/api/status`
+    answers 200 — is sent straight to `/b/dev` without signing in again.
+    When that login is refused — the admin's password was
+    changed in this instance — or no password is configured, the page says
+    one-click entry is off and links the normal login page.
+    **The boundary.** The row exists only where the workspace does:
+    `dev::WORKSPACE_ROUTES` registers `/b/dev/enter` (`Public`) ahead of
+    `/b/dev` (`Admin`) in `SandboxMode::Workspace` and nowhere else. An
+    exported bundle (`SandboxMode::Exported`) registers the block through
+    `DevBlock::runtime_only`, which declares no endpoints, is given no
+    route, and refuses every request in `handle`; a build without
+    `browser-devtools` has no dev block at all. So an exported site, and
+    every non-sandbox deployment, answers `/b/dev/enter` with a 404. The
+    page is public only to the one visitor whose browser the instance lives
+    in, and what it carries is what the welcome page already prints.
+22. **§4.2 / §9.1 — the Tool console (2026-10-02).** The same agent would
+    have had no tools had it signed in: its browser has no WebMCP. `/b/dev`
+    gains a "Tool console" pane — a select of every tool the page publishes
+    (`tools.json`'s plus the page-local `dev_compile_block` and
+    `dev_export`), the selected tool's description and input schema, a JSON
+    arguments box pre-filled with the schema's required properties, a Run
+    button and a result box (`#dev-console`, `-tool`, `-args`, `-run`,
+    `-result`). It is not a second implementation: `dev.js` publishes each
+    tool once, onto one list, hands that list's entries to
+    `document.modelContext` where it exists, and the console calls the same
+    entry's `execute` — the same request builder (`webmcp-core.js`), session
+    check and, for a mutating tool, progress panel and catch-up. The tools
+    are fetched whether or not the browser has WebMCP, and the guide pane
+    says which way they are reachable: "This browser has no WebMCP: use the
+    Tool console below, or the file editor", or that the tools are
+    registered. Both seeds' guides and suggested prompts point an agent
+    without WebMCP at the console.
 
 ## 21. Definition of done
 

@@ -118,8 +118,8 @@ python3 -m http.server 8080 -d examples/dev-sandbox/dist
 ```
 
 Open `http://localhost:8080/` — the welcome page (generation 0, seeded).
-Sign in at `http://localhost:8080/b/auth/login?redirect=/b/dev` to reach the
-workspace.
+Its "Open workspace" link (`http://localhost:8080/b/dev/enter`) signs you in
+as the seeded admin and opens the workspace.
 
 ## Deploying
 
