@@ -185,4 +185,23 @@ mod tests {
             "signup page must not carry over the login page's brand-panel tagline: {html}"
         );
     }
+
+    /// A new password: managers offer to generate one, and the browser
+    /// enforces the server's configured minimum (8 by default; a configured
+    /// 12 is what the field then says), not a literal of the page's own.
+    #[tokio::test]
+    async fn the_password_is_a_new_one_with_the_configured_minimum() {
+        let mut ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
+        let html = output_html(handle(&ctx, &Message::new("http.request")).await).await;
+        assert!(html.contains(r#"autocomplete="new-password""#), "{html}");
+        assert!(html.contains(r#"minlength="8""#), "{html}");
+        assert!(html.contains(r#"role="alert""#), "{html}");
+
+        ctx.set_config(crate::blocks::auth::config::PASSWORD_MIN_LENGTH_KEY, "12");
+        let html = output_html(handle(&ctx, &Message::new("http.request")).await).await;
+        assert!(html.contains(r#"minlength="12""#), "{html}");
+        assert!(html.contains("Min 12 characters"), "{html}");
+    }
 }

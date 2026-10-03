@@ -75,8 +75,12 @@ impl<'a> SettingsSection<'a> {
     ///
     /// Hiding is CSS (`.settings-section--gated:has(...)` in `form.css`), so
     /// it follows the checkbox on first paint and on every click with no
-    /// script, and the hidden fields are still in the form: turning the
-    /// toggle off and saving keeps the credentials that were entered.
+    /// script. A save with the toggle off does not POST the gated fields
+    /// ([`submit_js`] skips every control in a region whose controlling
+    /// switch is off), and [`save_settings`] leaves a key the body does not
+    /// carry unchanged: the stored credentials are kept, and a value the
+    /// operator cannot see is never validated — a bad redirect URI behind a
+    /// switched-off OAuth section cannot make every save fail.
     ///
     /// # Panics
     /// When `key` is not a `Toggle` var of this section — a page wiring bug
@@ -366,6 +370,13 @@ function submitSettings(e) {{
     var form = document.getElementById('settings-form');
     var data = {{}};
     form.querySelectorAll('input[name], select[name], textarea[name]').forEach(function(el) {{
+        // A field in a gated section whose switch is off is not sent, so the
+        // server neither validates nor writes it (SettingsSection::gated_by).
+        var region = el.closest('.settings-section__gated');
+        if (region) {{
+            var gate = form.querySelector('[aria-controls="' + region.id + '"]');
+            if (gate && !gate.checked) return;
+        }}
         if (el.type === 'checkbox') {{ data[el.name] = el.checked ? 'true' : 'false'; }}
         else {{ data[el.name] = el.value; }}
     }});
@@ -1015,6 +1026,20 @@ mod tests {
     }
 
     #[test]
+    fn submit_js_skips_fields_behind_a_switched_off_gate() {
+        let js = submit_js("/x");
+        assert!(
+            js.contains("el.closest('.settings-section__gated')"),
+            "{js}"
+        );
+        assert!(
+            js.contains(r#"form.querySelector('[aria-controls="' + region.id + '"]')"#),
+            "{js}"
+        );
+        assert!(js.contains("if (gate && !gate.checked) return;"), "{js}");
+    }
+
+    #[test]
     fn submit_js_interpolates_post_url_safely() {
         let js = submit_js("/b/products/admin/settings");
         assert!(js.contains(r#"fetch("/b/products/admin/settings""#));
@@ -1108,6 +1133,50 @@ mod tests {
     }
 
     // --- SEC-060: save_settings' unchanged-secret guard ---
+
+    /// What a save with a gated section switched off posts (`submit_js`
+    /// skips the gated fields): the gated key is absent, so it is neither
+    /// validated nor written — even when the stored value is one the URL rule
+    /// would refuse today (stored before the rule, or through another path).
+    #[tokio::test]
+    async fn save_settings_leaves_a_key_the_body_does_not_carry_unvalidated_and_unchanged() {
+        let mut ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        ctx.set_config("X__CALLBACK_URL", "https://10.0.0.1/callback");
+        let allowed = [
+            var("X__ENABLED", "Enabled", InputType::Toggle),
+            var("X__CALLBACK_URL", "Callback", InputType::Url),
+        ];
+
+        let out = run_save(&ctx, &allowed, serde_json::json!({"X__ENABLED": "false"})).await;
+        assert_eq!(output_json(out).await["message"], "Settings saved");
+        assert_eq!(
+            config::get_default(&ctx, "X__CALLBACK_URL", "")
+                .await
+                .expect("config read"),
+            "https://10.0.0.1/callback",
+            "a key the save did not carry keeps its stored value"
+        );
+        assert_eq!(
+            config::get_default(&ctx, "X__ENABLED", "")
+                .await
+                .expect("config read"),
+            "false"
+        );
+
+        // The same value posted (the section switched on) IS validated.
+        let out = run_save(
+            &ctx,
+            &allowed,
+            serde_json::json!({"X__ENABLED": "true", "X__CALLBACK_URL": "https://10.0.0.1/callback"}),
+        )
+        .await;
+        assert!(matches!(
+            out.collect_buffered().await,
+            Err(TerminalNotResponse::Error(_))
+        ));
+    }
 
     #[tokio::test]
     async fn save_settings_leaves_a_sensitive_field_unchanged_on_empty_submit() {

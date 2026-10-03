@@ -489,8 +489,9 @@ body:has(.products-tabs) .filter-bar { margin: var(--space-4) 0; padding: var(--
 .settings-section--collapsible[open] { padding-bottom: var(--space-4); }
 /* `SettingsSection::gated_by`: the fields after the gating switch show only
  * while it is on. The switch is the only field group directly in the
- * section; the rest live in `.settings-section__gated`. Hidden fields stay
- * in the form, so a save with the switch off keeps what they hold. */
+ * section; the rest live in `.settings-section__gated`. A save with the
+ * switch off does not send them (the settings form's submit script skips
+ * the region), so the stored values are kept and never validated. */
 .settings-section--gated:has(> .form-group [role="switch"]:not(:checked)) > .settings-section__gated { display: none; }
 .settings-section__gated { margin-top: var(--space-5); }
 
@@ -521,11 +522,4 @@ body:has(.products-tabs) .filter-bar { margin: var(--space-4) 0; padding: var(--
 	.form-control,
 	.btn { min-height: 44px; }
 }
-/* Email/form sensitive input wrapper (e.g. the Mailgun API Key field, and
- * every ConfigVar Password widget) — previously an inline `display:flex`
- * row with the input + an eye-toggle button, which needed a narrow-screen
- * width fix keyed off the inline `style` attribute itself. Migrated to
- * `.value-reveal-wrapper` (button absolutely positioned over the input via
- * `.btn-icon-right`, no flex row), which doesn't have that collapse
- * failure mode — `.form-input`'s own `width: 100%` is enough. */
 

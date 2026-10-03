@@ -34,8 +34,9 @@ import { SHOP_OFFER, uniqueShopProduct } from './fixtures/shop-fixture';
  * drives the real server: nothing is intercepted except the provider's
  * model-discovery call, which would otherwise need a live LLM endpoint.
  *
- * It writes (a provider, contexts, entries, a product), so it runs after the
- * visual baselines in CI, never before them.
+ * It writes (a provider, contexts, entries, a product), so it is part of
+ * `e2e:writes`, which CI runs against its own fresh server — never the one
+ * the visual baselines are captured on.
  */
 
 /** A console line that means a script was refused or an eval was attempted. */

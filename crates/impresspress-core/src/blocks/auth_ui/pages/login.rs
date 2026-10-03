@@ -401,4 +401,34 @@ mod tests {
             "password toggle button must have a non-empty aria-label: {button_tag}"
         );
     }
+
+    /// The sign-in error box is an assertive live region from the start
+    /// (hidden and empty until a refusal fills it), so the message a failed
+    /// sign-in reveals is announced; the info box is polite. The password is
+    /// the account's current one: managers fill it, and no length rule.
+    #[tokio::test]
+    async fn the_error_box_is_an_alert_and_the_password_is_the_current_one() {
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
+        let html = output_html(handle(&ctx, &login_msg(&[])).await).await;
+        assert!(
+            html.contains(
+                r#"<div id="error" class="alert alert--error" role="alert" hidden></div>"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"<div id="info" class="alert alert--success" role="status" hidden></div>"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"autocomplete="current-password""#),
+            "{html}"
+        );
+        assert!(html.contains(r#"autocomplete="username""#), "{html}");
+        assert!(!html.contains("minlength"), "{html}");
+    }
 }
