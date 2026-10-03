@@ -550,7 +550,7 @@ mod tests {
     fn make_record(id: &str) -> db::Record {
         db::Record {
             id: id.to_string(),
-            data: std::collections::HashMap::new(),
+            data: Default::default(),
         }
     }
 
@@ -784,7 +784,7 @@ mod form_contract_tests {
     fn context_of_type(context_type: &str) -> db::Record {
         let mut record = db::Record {
             id: "ctx-1".to_string(),
-            data: std::collections::HashMap::new(),
+            data: Default::default(),
         };
         record
             .data

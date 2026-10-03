@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use wafer_core::clients::database::Record;
+use wafer_core::clients::database::{Record, RecordData};
 /// Hashing/hex helpers re-exported from `wafer_block` (the single canonical
 /// implementation). Re-exported here so the many `util::{hex_encode, sha256,
 /// sha256_hex}` call sites across the blocks keep one import path.
@@ -162,10 +162,10 @@ pub trait RecordExt {
 /// The one implementation: every `Record` shape the runtime hands out —
 /// `wafer_core::clients::database::Record` under WRAP and
 /// `wafer_core::interfaces::database::service::Record` at boot — carries a
-/// `data: HashMap<String, Value>` column map, and the platform-state codecs
-/// decode that map for both. Implemented on the map so the two flavours
-/// share one accessor set; the `Record` impl below forwards to it.
-impl RecordExt for HashMap<String, serde_json::Value> {
+/// `data: RecordData` column map, and the platform-state codecs decode that
+/// map for both. Implemented on the map so the two flavours share one
+/// accessor set; the `Record` impl below forwards to it.
+impl RecordExt for RecordData {
     fn str_field(&self, key: &str) -> &str {
         self.get(key).and_then(|v| v.as_str()).unwrap_or("")
     }
@@ -1007,7 +1007,7 @@ mod tests {
         assert!(enum_column::<Colour>(
             &Record {
                 id: "row-7".to_string(),
-                data: HashMap::new(),
+                data: Default::default(),
             },
             "colour"
         )
@@ -1224,7 +1224,7 @@ mod tests {
     fn record(data: serde_json::Value) -> Record {
         Record {
             id: "r1".to_string(),
-            data: json_map(data),
+            data: json_map(data).into_iter().collect(),
         }
     }
 
@@ -1363,7 +1363,7 @@ mod tests {
         data.insert("count".to_string(), serde_json::json!(42));
         let record = Record {
             id: "1".to_string(),
-            data,
+            data: data.into_iter().collect(),
         };
 
         assert_eq!(record.str_field("name"), "Alice");
@@ -1378,7 +1378,7 @@ mod tests {
         data.insert("name".to_string(), serde_json::json!("Alice"));
         let record = Record {
             id: "1".to_string(),
-            data,
+            data: data.into_iter().collect(),
         };
 
         assert_eq!(record.i64_field("count"), 42);
@@ -1398,7 +1398,7 @@ mod tests {
         data.insert("not_a_number".to_string(), serde_json::json!("abc"));
         let record = Record {
             id: "1".to_string(),
-            data,
+            data: data.into_iter().collect(),
         };
 
         assert_eq!(
@@ -1418,7 +1418,7 @@ mod tests {
         data.insert("junk".to_string(), serde_json::json!("x"));
         let record = Record {
             id: "1".to_string(),
-            data,
+            data: data.into_iter().collect(),
         };
 
         assert_eq!(record.opt_i64_field("num"), Some(7));
@@ -1440,7 +1440,7 @@ mod tests {
         data.insert("text_negative".to_string(), serde_json::json!("-2"));
         let record = Record {
             id: "1".to_string(),
-            data,
+            data: data.into_iter().collect(),
         };
 
         assert_eq!(record.u64_field("dims"), 384);
@@ -1470,7 +1470,7 @@ mod tests {
         data.insert("disabled".to_string(), serde_json::json!(false));
         let record = Record {
             id: "1".to_string(),
-            data,
+            data: data.into_iter().collect(),
         };
 
         assert!(record.bool_field("active"));
@@ -1486,7 +1486,7 @@ mod tests {
         data.insert("bool".to_string(), serde_json::json!(true));
         let record = Record {
             id: "1".to_string(),
-            data,
+            data: data.into_iter().collect(),
         };
 
         assert_eq!(field_as_string(&record, "str"), "hello");

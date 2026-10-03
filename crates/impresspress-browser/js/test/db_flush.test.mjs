@@ -88,7 +88,7 @@ function settle() {
 async function rowsOnDisk() {
     // Reopen from the file the flushes left behind.
     await dbInit();
-    return dbQueryRaw('SELECT id FROM t ORDER BY id', []).map((row) => row.id);
+    return dbQueryRaw('SELECT id FROM t ORDER BY id', []).values.map(([id]) => id);
 }
 
 beforeEach(async () => {
@@ -148,4 +148,19 @@ test('a failed flush does not block the next', async () => {
     await assert.rejects(failed, /quota/);
     await next;
     assert.deepEqual(await rowsOnDisk(), ['a']);
+});
+
+// `dbQueryRaw` answers sql.js's positional shape, so the Rust side sees the
+// SELECT's column order exactly — an object per row would enumerate the
+// integer-like `1` first and keep only one of the two `v` columns.
+test('a query answers its columns in SELECT order', () => {
+    dbExecRaw("INSERT INTO t (id) VALUES ('a')", []);
+    assert.deepEqual(dbQueryRaw("SELECT 'x' AS b, 1, id, 2 AS v, 3 AS v FROM t", []), {
+        columns: ['b', '1', 'id', 'v', 'v'],
+        values: [['x', 1, 'a', 2, 3]],
+    });
+    assert.deepEqual(dbQueryRaw("SELECT id FROM t WHERE id = 'none'", []), {
+        columns: [],
+        values: [],
+    });
 });

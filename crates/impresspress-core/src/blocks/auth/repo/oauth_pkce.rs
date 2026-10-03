@@ -15,7 +15,7 @@ use std::collections::HashMap;
 
 use serde_json::{json, Value};
 use wafer_block::db::{Filter, FilterOp};
-use wafer_core::clients::database as db;
+use wafer_core::clients::database::{self as db, RecordData};
 use wafer_run::{context::Context, WaferError};
 
 use super::{db_failed, internal_error, map_opt_str, map_str, now_iso};
@@ -43,7 +43,7 @@ pub struct PkceStateRow {
     pub expires_at: String,
 }
 
-fn row_from_map(m: &HashMap<String, Value>) -> Result<PkceStateRow, WaferError> {
+fn row_from_map(m: &RecordData) -> Result<PkceStateRow, WaferError> {
     Ok(PkceStateRow {
         provider: map_opt_str(m, "provider").ok_or_else(|| internal_error("missing provider"))?,
         code_verifier: map_opt_str(m, "code_verifier")

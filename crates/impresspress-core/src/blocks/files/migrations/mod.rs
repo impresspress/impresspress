@@ -253,18 +253,15 @@ mod replay_tests {
     //! re-run signs every user out (its 004 drops the refresh-token table);
     //! nothing here may do the equivalent to share links, buckets or uploads.
 
-    use std::collections::HashMap;
-
     use serde_json::json;
+    use wafer_core::clients::database::RecordData;
 
     use super::SQLITE_MIGRATIONS;
     use crate::{blocks::files::repo, migration_helper, test_support::TestContext};
 
     /// Every row of every table the files block owns, each column as stored,
     /// by table and id.
-    async fn every_row(
-        ctx: &TestContext,
-    ) -> Vec<(&'static str, String, HashMap<String, serde_json::Value>)> {
+    async fn every_row(ctx: &TestContext) -> Vec<(&'static str, String, RecordData)> {
         let tables = [
             ("buckets", repo::buckets::raw_rows(ctx).await),
             ("objects", repo::objects::raw_rows(ctx).await),

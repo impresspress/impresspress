@@ -919,7 +919,7 @@ mod tests {
         RecordList {
             records: vec![Record {
                 id: "1".to_string(),
-                data,
+                data: data.into_iter().collect(),
             }],
             total_count: 1,
             page: 1,
@@ -973,7 +973,7 @@ mod tests {
         ) -> Result<Vec<Record>, DatabaseError> {
             Ok(vec![Record {
                 id: format!("took:{collection}"),
-                data: HashMap::new(),
+                data: Default::default(),
             }])
         }
 
@@ -1001,6 +1001,16 @@ mod tests {
             _field: &str,
             _filters: &[Filter],
         ) -> Result<f64, DatabaseError> {
+            unreachable!()
+        }
+
+        async fn increment_field_where(
+            &self,
+            _collection: &str,
+            _col: &str,
+            _delta: i64,
+            _filters: &[Filter],
+        ) -> Result<i64, DatabaseError> {
             unreachable!()
         }
 

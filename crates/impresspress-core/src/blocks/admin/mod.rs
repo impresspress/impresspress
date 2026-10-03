@@ -236,7 +236,9 @@ const ROUTES: &[EndpointRoute<Route>] = &[
         "/b/admin/api/database/query",
         Route::DatabaseQueryApi,
     )
-    .summary("Run read-only SQL API"),
+    .summary("Run read-only SQL API")
+    .input(request_schema_of::<contracts::AdminSqlQueryRequest>)
+    .output(response_schema_of::<contracts::AdminSqlQueryResponse>),
     EndpointRoute::admin(
         HttpMethod::Get,
         "/b/admin/api/iam/roles",

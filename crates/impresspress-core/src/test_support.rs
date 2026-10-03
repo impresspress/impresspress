@@ -2174,11 +2174,11 @@ fn simulated_read_failure() -> wafer_core::interfaces::database::service::Databa
 /// `delete_where*`, `take_where`, `increment_field_where`), which this
 /// decorator must override explicitly — the mirror of the same paragraph on
 /// [`FailingReadsDb`]. The `DatabaseService` trait ships *read-based default
-/// implementations* of those: `update_where_count` counts and then updates,
-/// `update_where` lists and then updates by id, `delete_where` lists and then
-/// deletes by id, `take_where` lists and then deletes, and
-/// `increment_field_where` reports that the backend does not implement it at
-/// all. `wafer-block-sqlite`, `wafer-block-postgres` and `D1DatabaseService`
+/// implementations* of most of those: `update_where_count` counts and then
+/// updates, `update_where` lists and then updates by id, `delete_where` lists
+/// and then deletes by id, and `take_where` lists and then deletes;
+/// `increment_field_where` has no default, so every implementor states it.
+/// `wafer-block-sqlite`, `wafer-block-postgres` and `D1DatabaseService`
 /// all override the family with a single statement carrying no `count` and no
 /// `list`.
 ///
@@ -5190,9 +5190,9 @@ mod tests {
     /// The filtered-write family has to fail there too — and it is the family
     /// the `DatabaseService` trait ships READ-BASED defaults for:
     /// `update_where_count` counts and then updates, `update_where` lists and
-    /// then updates by id, `delete_where` lists and then deletes by id,
-    /// `take_where` lists and then deletes, and `increment_field_where`
-    /// reports "not implemented by this database backend".
+    /// then updates by id, `delete_where` lists and then deletes by id, and
+    /// `take_where` lists and then deletes. (`increment_field_where` has no
+    /// default: a double must implement it.)
     ///
     /// `wafer-block-sqlite`, `wafer-block-postgres` and `D1DatabaseService`
     /// every one override the family with a SINGLE statement carrying no

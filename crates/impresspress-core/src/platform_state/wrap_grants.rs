@@ -15,7 +15,10 @@ use std::{collections::HashMap, sync::Arc};
 
 use serde_json::{json, Value};
 use wafer_block::{db::ListOptions, GrantWrite};
-use wafer_core::{clients::database as db, interfaces::database::service::DatabaseService};
+use wafer_core::{
+    clients::database::{self as db, RecordData},
+    interfaces::database::service::DatabaseService,
+};
 use wafer_run::{context::Context, ErrorCode, ResourceGrant, ResourceType, WaferError};
 
 use crate::{
@@ -51,7 +54,7 @@ impl WrapGrantRow {
     /// than defaulted, so a malformed row can never widen access. The access
     /// columns are decoded by [`decode_access`]; a value it does not
     /// recognise, or a row that sets both flags, refuses the row too.
-    pub fn from_record(id: &str, data: &HashMap<String, Value>) -> Result<Self, String> {
+    pub fn from_record(id: &str, data: &RecordData) -> Result<Self, String> {
         let grantee = data
             .opt_str_field("grantee")
             .ok_or_else(|| format!("{TABLE} row `{id}` has no grantee"))?;
@@ -137,7 +140,7 @@ fn encode_access(write: GrantWrite) -> (i64, i64) {
 /// treating it as unset never grants more than `write` says.
 /// A row that sets both flags is refused: it names two different accesses,
 /// and neither is a safe guess.
-fn decode_access(data: &HashMap<String, Value>) -> Result<GrantWrite, String> {
+fn decode_access(data: &RecordData) -> Result<GrantWrite, String> {
     let Some(write) = data.get(WRITE_COLUMN) else {
         return Err("has no write column".to_string());
     };
@@ -361,7 +364,9 @@ mod tests {
         let rows = list(&ctx).await.expect("list");
         assert_eq!(rows, vec![created.clone()]);
 
-        let again = WrapGrantRow::from_record(&created.id, &created.to_data()).expect("decode");
+        let again =
+            WrapGrantRow::from_record(&created.id, &created.to_data().into_iter().collect())
+                .expect("decode");
         assert_eq!(again, created);
 
         let grant = created
@@ -503,8 +508,8 @@ mod tests {
         assert!(list(&failing).await.is_err());
     }
 
-    fn row_with(columns: &[(&str, Value)]) -> HashMap<String, Value> {
-        let mut data = HashMap::new();
+    fn row_with(columns: &[(&str, Value)]) -> RecordData {
+        let mut data = RecordData::new();
         data.insert("grantee".to_string(), serde_json::json!("a/b"));
         data.insert("resource".to_string(), serde_json::json!("a__b__c"));
         for (column, value) in columns {
@@ -562,7 +567,7 @@ mod tests {
                 ..new_grant("db")
             }
             .into_row();
-            let data = row.to_data();
+            let data: RecordData = row.to_data().into_iter().collect();
             assert_eq!(
                 (&data[WRITE_COLUMN], &data[APPEND_COLUMN]),
                 (&serde_json::json!(flags.0), &serde_json::json!(flags.1)),
@@ -580,7 +585,7 @@ mod tests {
     fn a_row_missing_a_required_column_is_refused() {
         for missing in ["grantee", "resource", "write"] {
             let mut data = row_with(&[(WRITE_COLUMN, serde_json::json!(1))]);
-            data.remove(missing);
+            data.shift_remove(missing);
             let err = WrapGrantRow::from_record("wg_1", &data).expect_err(missing);
             assert!(err.contains(missing) && err.contains("wg_1"), "{err}");
         }
@@ -978,6 +983,16 @@ mod boot_tests {
             _field: &str,
             _filters: &[Filter],
         ) -> Result<f64, DatabaseError> {
+            unreachable!()
+        }
+
+        async fn increment_field_where(
+            &self,
+            _collection: &str,
+            _col: &str,
+            _delta: i64,
+            _filters: &[Filter],
+        ) -> Result<i64, DatabaseError> {
             unreachable!()
         }
 

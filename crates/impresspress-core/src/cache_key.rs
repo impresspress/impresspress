@@ -175,10 +175,32 @@ fn format_key(table: CachedTable, value: &str) -> String {
 
 use std::collections::HashMap;
 
+use wafer_core::clients::database::RecordData;
+
+/// A row's columns by name. The cache keys of a write come from the data it
+/// writes (a `HashMap`) and those of a read or a re-read from the row the
+/// database returned (a [`RecordData`]); both answer the same lookups.
+pub trait RowColumns {
+    /// The value of column `name`, if the row has one.
+    fn column(&self, name: &str) -> Option<&serde_json::Value>;
+}
+
+impl RowColumns for HashMap<String, serde_json::Value> {
+    fn column(&self, name: &str) -> Option<&serde_json::Value> {
+        self.get(name)
+    }
+}
+
+impl RowColumns for RecordData {
+    fn column(&self, name: &str) -> Option<&serde_json::Value> {
+        self.get(name)
+    }
+}
+
 /// Pulls the cache-key column from a row payload. Returns Some(kv_key)
 /// when the column is present and string-typed.
-pub fn write_key(table: CachedTable, row: &HashMap<String, serde_json::Value>) -> Option<String> {
-    let value_str = row.get(key_column(table))?.as_str()?;
+pub fn write_key(table: CachedTable, row: &impl RowColumns) -> Option<String> {
+    let value_str = row.column(key_column(table))?.as_str()?;
     Some(format_key(table, value_str))
 }
 
@@ -191,10 +213,7 @@ pub fn write_key(table: CachedTable, row: &HashMap<String, serde_json::Value>) -
 /// any insert / toggle / delete must drop it. The all-rows key is emitted
 /// unconditionally for `block_settings` (even when the per-row key can't be
 /// extracted) so the full-table cache can never be left stale.
-pub fn invalidate_keys(
-    table: CachedTable,
-    row: &HashMap<String, serde_json::Value>,
-) -> Vec<String> {
+pub fn invalidate_keys(table: CachedTable, row: &impl RowColumns) -> Vec<String> {
     let mut keys = Vec::new();
     if let Some(k) = write_key(table, row) {
         keys.push(k);
@@ -222,8 +241,8 @@ pub fn invalidate_keys(
 /// pre-emptively) new key.
 pub fn invalidate_keys_for_update(
     table: CachedTable,
-    old_row: &HashMap<String, serde_json::Value>,
-    new_row: &HashMap<String, serde_json::Value>,
+    old_row: &impl RowColumns,
+    new_row: &impl RowColumns,
 ) -> Vec<String> {
     let mut keys = invalidate_keys(table, old_row);
     for k in invalidate_keys(table, new_row) {
@@ -270,18 +289,21 @@ fn sensitive_check_columns(table: CachedTable) -> Option<(&'static str, &'static
 /// of those ways must still be treated as sensitive here, or it would leak
 /// into KV while the display path correctly masks it. See the note in the
 /// body on why `json_as_i64` was the wrong decoder for exactly this.
-pub fn row_is_sensitive(table: CachedTable, row: &HashMap<String, serde_json::Value>) -> bool {
+pub fn row_is_sensitive(table: CachedTable, row: &impl RowColumns) -> bool {
     let Some((key_col, sensitive_col)) = sensitive_check_columns(table) else {
         return false;
     };
-    let key = row.get(key_col).and_then(|v| v.as_str()).unwrap_or("");
+    let key = row.column(key_col).and_then(|v| v.as_str()).unwrap_or("");
     // `flag_is_set`, not `json_as_i64`: that conversion answers `None` for a
     // JSON bool and for the string `"true"`, so a row stored in either shape
     // read as UNFLAGGED here while `RecordExt::bool_field` — which the repair
     // pass and the row codec use — read it as flagged. The row was therefore
     // skipped as "already fine" and cached as "not sensitive" at the same
     // time. One truth table for the column, shared with both.
-    let sensitive_flag = i64::from(row.get(sensitive_col).is_some_and(crate::util::flag_is_set));
+    let sensitive_flag = i64::from(
+        row.column(sensitive_col)
+            .is_some_and(crate::util::flag_is_set),
+    );
     crate::util::is_sensitive_key(key, sensitive_flag)
 }
 

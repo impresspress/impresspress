@@ -8,10 +8,10 @@ use wafer_block::{
     db::{Filter, FilterOp, FilterTree, ListOptions, SortField},
     wire::database as wire,
 };
-use wafer_core::clients::database::{self as db, Record};
+use wafer_core::clients::database::{self as db, Record, RecordData};
 use wafer_run::{context::Context, WaferError};
 
-use super::{db_failed, internal_error, map_bool, map_opt_str, map_str, now_iso};
+use super::{db_failed, internal_error, map_bool, map_opt_str, map_str, now_iso, value_bool};
 use crate::util::{daily_grouped, to_wire_filters, RecordExt};
 
 pub const TABLE: &str = "wafer_run__auth__users";
@@ -115,7 +115,7 @@ pub struct NewUser {
     pub verification_token_hash: Option<String>,
 }
 
-fn row_from(id: String, m: &HashMap<String, Value>) -> Result<UserRow, WaferError> {
+fn row_from(id: String, m: &RecordData) -> Result<UserRow, WaferError> {
     Ok(UserRow {
         id,
         email: map_opt_str(m, "email").ok_or_else(|| internal_error("missing email"))?,
@@ -134,7 +134,7 @@ fn row_from(id: String, m: &HashMap<String, Value>) -> Result<UserRow, WaferErro
     })
 }
 
-fn row_from_map(m: &HashMap<String, Value>) -> Result<UserRow, WaferError> {
+fn row_from_map(m: &RecordData) -> Result<UserRow, WaferError> {
     let id = map_opt_str(m, "id").ok_or_else(|| internal_error("missing id"))?;
     row_from(id, m)
 }
@@ -713,7 +713,7 @@ impl AdminUserPatch {
     /// Read the three writable fields out of a decoded JSON request body,
     /// ignoring everything else.
     ///
-    /// `disabled` accepts the shapes [`super::map_bool`] accepts (`true`,
+    /// `disabled` accepts the shapes [`super::value_bool`] accepts (`true`,
     /// `1`, `"1"`, `"true"`) because the admin UI has sent an integer for
     /// it. `name`/`avatar_url` accept JSON strings only — a number for a
     /// TEXT column is a malformed request, not a value.
@@ -723,7 +723,7 @@ impl AdminUserPatch {
             name: string_field("name"),
             disabled: match body.get("disabled") {
                 None | Some(Value::Null) => None,
-                Some(_) => Some(map_bool(body, "disabled")),
+                Some(value) => Some(value_bool(value)),
             },
             avatar_url: string_field("avatar_url"),
         }

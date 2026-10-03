@@ -870,7 +870,7 @@ mod tests {
         data.insert("created_at".to_string(), serde_json::json!("1970-01-01"));
         let record = db::Record {
             id: "b1".to_string(),
-            data,
+            data: data.into_iter().collect(),
         };
 
         let err = decode(&record).expect_err("unknown status must fail");
