@@ -978,6 +978,11 @@ async fn import_refuses_a_malformed_variable_key_and_export_holds_one_back() {
             .unwrap_err();
         assert_eq!(err.code, wafer_run::ErrorCode::InvalidArgument, "{key}");
         assert!(
+            err.message.contains(&format!("\"{key}\"")),
+            "the refusal must name the key: {}",
+            err.message
+        );
+        assert!(
             err.message
                 .contains(impresspress_core::config_vars::VARIABLE_KEY_FORMAT),
             "{key}: {}",

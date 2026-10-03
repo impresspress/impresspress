@@ -37,13 +37,15 @@ test.describe('admin variables', () => {
       'IMPRESSPRESS__EMAIL__MAILGUN_API_KEY',
       'MY_ORG__MY_BLOCK__SETTING_2',
       'ACME__S3__2FA_REQUIRED',
+      // The runtime accepts an org or block that starts with a digit.
+      '3D__VIEWER__X',
+      '1ACME__BLOCK__NAME',
     ];
     const invalid = [
       'bad key!',
       'BAD KEY!',
       'IMPRESSPRESS__EMAIL__from',
       'IMPRESSPRESS__EMAIL__FROM-ADDRESS',
-      '1ACME__BLOCK__NAME',
       '_ACME__BLOCK__NAME',
       'MY_SETTING',
       'WAFER_RUN_SHARED',

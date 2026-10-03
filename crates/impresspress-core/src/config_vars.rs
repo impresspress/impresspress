@@ -843,9 +843,11 @@ pub const VARIABLE_KEY_FORMAT: &str = "Use UPPER_SNAKE_CASE parts joined by a do
 /// [`check_variable_key`] as an HTML `pattern` (implicitly anchored; valid
 /// under the `v` flag browsers compile it with). The first branch is the
 /// shared namespace, the second the block-scoped one. Kept beside the check it
-/// mirrors; `variable_key_pattern_tests` holds the two to the same verdicts.
+/// mirrors; `variable_key_tests::the_html_pattern_reaches_the_checks_verdicts`
+/// holds the two to the same verdicts on one table of keys, and
+/// `admin-variables.spec.ts` holds a browser to it.
 pub const VARIABLE_KEY_HTML_PATTERN: &str = "WAFER_RUN_SHARED(__[A-Z0-9]+(_[A-Z0-9]+)*)+|\
-     [A-Z][A-Z0-9]*(_[A-Z0-9]+)*(__[A-Z0-9]+(_[A-Z0-9]+)*){2,}";
+     [A-Z0-9]+(_[A-Z0-9]+)*(__[A-Z0-9]+(_[A-Z0-9]+)*){2,}";
 
 /// Whether `key` may name a row in the variables table, by the naming rule in
 /// `CLAUDE.md`. `Err` carries the sentence a refusal shows: what is wrong and
@@ -865,13 +867,18 @@ pub const VARIABLE_KEY_HTML_PATTERN: &str = "WAFER_RUN_SHARED(__[A-Z0-9]+(_[A-Z0
 /// by every block, a block-scoped one by its owner, and an UNNAMESPACED key
 /// (`MY_SETTING`, `bad key!`) by no block at all — so a row like that is a
 /// setting nothing can honour. Each part is `[A-Z0-9]+` joined by single
-/// underscores because that is the inverse of `resource_prefix`
-/// (`my-org/auth` → `MY_ORG__AUTH__`) over the block names the runtime
-/// accepts; a part with a leading, trailing or doubled underscore would read
-/// back as a different block.
+/// underscores — a digit may lead, as in `3D__VIEWER__*` for the block
+/// `3d/viewer` — because that is the uppercased inverse of
+/// `wafer_block::wrap::resource_prefix` (`my-org/auth` → `my_org__auth__`)
+/// over the block names the runtime accepts (`validate_block_name`: lowercase
+/// alphanumerics with single inner hyphens); a part with a leading, trailing
+/// or doubled underscore would read back as a different block.
+/// `the_rule_is_the_inverse_of_resource_prefix` checks it against that
+/// function directly.
 ///
-/// Runtime-owned keys ([`is_runtime_owned_key`]) fail this rule on their own
-/// (`IMPRESSPRESS_RUN_MIGRATIONS` has one part, `__…__` empty ones); the write
+/// Runtime-owned keys ([`is_runtime_owned_key`]) fail this rule on their own:
+/// `IMPRESSPRESS_RUN_MIGRATIONS` is a single part, so it has no namespace, and
+/// an internal `__…__` key splits into an empty first and last part. The write
 /// surfaces still refuse them first, with the sentence that says why.
 ///
 /// Every declared `ConfigVar` passes — `every_declared_key_is_a_valid_variable_key`
@@ -884,9 +891,6 @@ pub fn check_variable_key(key: &str) -> Result<(), String> {
     };
     if key.is_empty() {
         return Err(format!("A variable key is required. {VARIABLE_KEY_FORMAT}"));
-    }
-    if !key.starts_with(|c: char| c.is_ascii_uppercase()) {
-        return refuse("it must start with a letter A-Z");
     }
     if let Some(c) = key
         .chars()
@@ -1417,40 +1421,48 @@ mod variable_key_tests {
         }
     }
 
+    /// Well-formed keys, beyond the declared ones above.
+    const VALID: &[&str] = &[
+        super::APP_NAME_KEY,
+        crate::blocks::auth::config::BOOTSTRAP_ADMIN_PASSWORD_KEY,
+        crate::blocks::auth::JWT_SECRET_KEY,
+        crate::blocks::email::MAILGUN_API_KEY,
+        "MY_ORG__MY_BLOCK__SETTING_2",
+        "ACME__S3__2FA_REQUIRED",
+        // The runtime accepts an org or block that starts with a digit.
+        "3D__VIEWER__X",
+        "1ACME__BLOCK__NAME",
+    ];
+
+    /// Malformed keys, each with what its refusal must say.
+    const INVALID: &[(&str, &str)] = &[
+        ("bad key!", "lowercase"),
+        ("BAD KEY!", "' '"),
+        ("IMPRESSPRESS__EMAIL__from", "lowercase"),
+        ("IMPRESSPRESS__EMAIL__FROM-ADDRESS", "'-'"),
+        ("_ACME__BLOCK__NAME", "exactly two underscores"),
+        ("MY_SETTING", "no namespace"),
+        ("WAFER_RUN_SHARED", "no namespace"),
+        ("IMPRESSPRESS__EMAIL", "no setting"),
+        ("ACME___BLOCK__NAME", "exactly two underscores"),
+        ("ACME__BLOCK__NAME_", "exactly two underscores"),
+        ("ACME____NAME", "exactly two underscores"),
+        ("WAFER_RUN_SHARED__", "exactly two underscores"),
+        // Runtime-owned keys fail the shape on their own.
+        (crate::migration_helper::RUN_MIGRATIONS_KEY, "no namespace"),
+        ("__IMPRESSPRESS_RUNTIME_KIND__", "exactly two underscores"),
+    ];
+
     #[test]
     fn namespaced_upper_snake_keys_are_accepted() {
-        for key in [
-            super::APP_NAME_KEY,
-            crate::blocks::auth::config::BOOTSTRAP_ADMIN_PASSWORD_KEY,
-            crate::blocks::auth::JWT_SECRET_KEY,
-            crate::blocks::email::MAILGUN_API_KEY,
-            "MY_ORG__MY_BLOCK__SETTING_2",
-            "ACME__S3__2FA_REQUIRED",
-        ] {
+        for key in VALID {
             assert_eq!(check_variable_key(key), Ok(()), "{key}");
         }
     }
 
     #[test]
     fn malformed_and_unnamespaced_keys_are_refused_saying_what_is_valid() {
-        for (key, why) in [
-            ("bad key!", "start with a letter"),
-            ("BAD KEY!", "' '"),
-            ("IMPRESSPRESS__EMAIL__from", "lowercase"),
-            ("IMPRESSPRESS__EMAIL__FROM-ADDRESS", "'-'"),
-            ("1ACME__BLOCK__NAME", "start with a letter"),
-            ("_ACME__BLOCK__NAME", "start with a letter"),
-            ("MY_SETTING", "no namespace"),
-            ("WAFER_RUN_SHARED", "no namespace"),
-            ("IMPRESSPRESS__EMAIL", "no setting"),
-            ("ACME___BLOCK__NAME", "exactly two underscores"),
-            ("ACME__BLOCK__NAME_", "exactly two underscores"),
-            ("ACME____NAME", "exactly two underscores"),
-            ("WAFER_RUN_SHARED__", "exactly two underscores"),
-            // Runtime-owned keys fail the shape on their own.
-            (crate::migration_helper::RUN_MIGRATIONS_KEY, "no namespace"),
-            ("__IMPRESSPRESS_RUNTIME_KIND__", "start with a letter"),
-        ] {
+        for (key, why) in INVALID {
             let e = check_variable_key(key).expect_err(key);
             assert!(e.contains(why), "{key}: {e:?} should say {why:?}");
             assert!(
@@ -1460,5 +1472,56 @@ mod variable_key_tests {
         }
         let e = check_variable_key("").expect_err("empty");
         assert!(e.starts_with("A variable key is required"), "{e}");
+    }
+
+    /// The browser's copy of the rule reaches the server's verdict on every
+    /// key in both tables. Compiled the way a browser compiles a `pattern`:
+    /// anchored at both ends around the whole alternation.
+    #[test]
+    fn the_html_pattern_reaches_the_checks_verdicts() {
+        let pattern = regex::Regex::new(&format!("^(?:{})$", super::VARIABLE_KEY_HTML_PATTERN))
+            .expect("the pattern compiles");
+        for key in VALID
+            .iter()
+            .copied()
+            .chain(INVALID.iter().map(|(key, _)| *key))
+        {
+            assert_eq!(
+                pattern.is_match(key),
+                check_variable_key(key).is_ok(),
+                "the HTML pattern and check_variable_key disagree about {key:?}"
+            );
+        }
+    }
+
+    /// The rule is the inverse of WRAP's own mapping between a block and its
+    /// key namespace: for every block name the runtime accepts, the uppercased
+    /// `resource_prefix` plus a setting is a valid key, and WRAP reads that key
+    /// back as owned by the same block.
+    #[test]
+    fn the_rule_is_the_inverse_of_resource_prefix() {
+        use wafer_block::wrap::{resource_owner, resource_prefix};
+        for block in [
+            "wafer-run/auth",
+            "impresspress/email",
+            "impresspress/auth-ui",
+            "my-org/my-block",
+            "3d/viewer",
+            "a1-b2/c-3",
+            "x/y",
+        ] {
+            let key = format!("{}SETTING", resource_prefix(block).to_uppercase());
+            assert_eq!(check_variable_key(&key), Ok(()), "{block} -> {key}");
+            assert_eq!(
+                resource_owner(&key).as_deref(),
+                Some(block),
+                "{key} must read back as owned by {block}"
+            );
+            assert_eq!(
+                super::key_block_prefix(&key),
+                super::screaming_block(block),
+                "{key}: the stored block column must name {block}"
+            );
+        }
     }
 }

@@ -670,9 +670,12 @@ impl Block for VariablesConfigBlock {
                         ),
                     ));
                 }
-                // The key rule every variables-table writer applies: this
-                // operation creates a row for a key it has not seen, and a
-                // malformed or unnamespaced one is a row no block can read.
+                // The key rule every variables-table writer applies. This
+                // operation updates a stored row or creates one for a key it
+                // has not seen; a malformed or unnamespaced key is a row no
+                // block can read, so it is refused either way — including a
+                // legacy row stored under such a key before the rule existed,
+                // which can be deleted from the Variables page but not updated.
                 if let Err(message) = crate::config_vars::check_variable_key(&req.key) {
                     return OutputStream::error(WaferError::new(
                         ErrorCode::InvalidArgument,
@@ -1166,9 +1169,10 @@ mod boot_owned_key_tests {
         );
     }
 
-    /// `CONFIG_SET` creates a row for a key it has not seen, so it applies
-    /// the variable naming rule like every other writer of the table: a
-    /// malformed or unnamespaced key is refused and nothing is stored.
+    /// `CONFIG_SET` updates a row or creates one for a key it has not seen,
+    /// so it applies the variable naming rule like every other writer of the
+    /// table: a malformed or unnamespaced key is refused and nothing is
+    /// stored.
     #[tokio::test]
     async fn config_set_refuses_a_malformed_key() {
         let ctx = booted_with(&[]).await;

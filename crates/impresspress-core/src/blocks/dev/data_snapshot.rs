@@ -547,12 +547,23 @@ pub async fn export(ctx: &dyn Context) -> Result<DataSnapshot, WaferError> {
                         .get("key")
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("<no key>");
-                    tracing::info!(
-                        key = %key,
-                        "not exporting this config variable: it is sensitive, or names \
-                         instance-scoped infrastructure. The imported site will need it set \
-                         there"
-                    );
+                    // A malformed key gets its own reason: the remedy is a
+                    // rename here, not setting it on the importing site.
+                    match crate::config_vars::check_variable_key(key) {
+                        Err(reason) => tracing::warn!(
+                            key = %key,
+                            reason = %reason,
+                            "not exporting this config variable: malformed key — no block can \
+                             read it, and an import would refuse it. Rename it: delete the row \
+                             and add the setting again under a valid key"
+                        ),
+                        Ok(()) => tracing::info!(
+                            key = %key,
+                            "not exporting this config variable: it is sensitive, or names \
+                             instance-scoped infrastructure. The imported site will need it set \
+                             there"
+                        ),
+                    }
                     return false;
                 }
                 true
@@ -883,7 +894,10 @@ pub async fn import(
             if let Err(message) = crate::config_vars::check_variable_key(key) {
                 return Err(WaferError::new(
                     ErrorCode::InvalidArgument,
-                    format!("the data snapshot carries a variable this build refuses: {message}"),
+                    format!(
+                        "the data snapshot carries a variable whose key this build refuses, so \
+                         nothing was imported: {message}"
+                    ),
                 ));
             }
         }
