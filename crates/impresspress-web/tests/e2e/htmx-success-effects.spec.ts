@@ -149,6 +149,111 @@ test.describe('htmx after-success effects under the served CSP', () => {
     await expect(page.locator('#variables-content')).toHaveCount(1);
     await expect(page.locator('#create-var-form')).toHaveCount(1);
     await expect(page.locator('#create-var')).toBeHidden();
+    // The response closed the modal (`closeModal`) rather than only swapping
+    // it away: the toast says what landed, and focus is back on the trigger.
+    await expect(page.locator('body > #toast-container .toast')).toContainText('Variable created');
+    await expect(
+      page.locator('[data-action="modal-open"][data-modal-target="create-var"]'),
+    ).toBeFocused();
+  });
+
+  /**
+   * The `closeModal` channel end to end: the Create Role form's answer carries
+   * `HX-Trigger: {"closeModal":…,"showToast":…}` and the re-rendered roles tab
+   * for `#iam-content` — which holds both the modal and the button that opened
+   * it. The modal closes, the toast is drawn (in the top layer, above where the
+   * modal was), the new row is there, and focus lands on the re-rendered
+   * Create Role button rather than on nothing.
+   */
+  test('creating a role closes its modal, toasts, and returns focus to the new trigger', async ({
+    page,
+  }) => {
+    await loginAsAdmin(page);
+    await gotoUnderCsp(page, '/b/admin/users?tab=roles');
+
+    const name = `e2e-role-${Date.now().toString(36)}`;
+    const trigger = page.locator('[data-action="modal-open"][data-modal-target="create-role"]');
+    await trigger.click();
+    const modal = page.locator('dialog#create-role');
+    await expect(modal).toBeVisible();
+    await page.locator('#role-name').fill(name);
+    await modal.getByRole('button', { name: 'Create' }).click();
+
+    await expect(page.locator('#toast-container .toast')).toContainText('Role created');
+    await expect(page.locator('#iam-content')).toContainText(name);
+    await expect(modal).toBeHidden();
+    await expect(trigger).toBeFocused();
+  });
+
+  /**
+   * Edit Variable is an htmx-loaded modal opened from a row's `hx-get` button,
+   * and its Save re-renders `#content` — row, button and all. Focus must come
+   * back to that row's (re-rendered) Edit button, found again by its id.
+   * Saves the value it already holds.
+   */
+  test('saving Edit Variable returns focus to the row it was opened from', async ({ page }) => {
+    await loginAsAdmin(page);
+    await gotoUnderCsp(page, '/b/admin/settings/variables?tab=all');
+
+    const edit = page.locator('#edit-var-open-WAFER_RUN_SHARED__APP_NAME');
+    await edit.click();
+    const modal = page.locator('dialog#edit-var');
+    await expect(modal).toBeVisible();
+    await modal.getByRole('button', { name: 'Save' }).click();
+
+    await expect(modal).toHaveCount(0);
+    await expect(page.locator('#edit-var-open-WAFER_RUN_SHARED__APP_NAME')).toBeFocused();
+  });
+
+  /**
+   * The portal button Edit modal lives outside `#buttons-table`, which its
+   * Save re-renders — so the save must close it (`closeModal`), not leave it
+   * open over the saved row.
+   */
+  test('saving a portal button closes its modal, toasts, and shows the new label', async ({
+    page,
+  }) => {
+    await loginAsAdmin(page);
+    await gotoUnderCsp(page, '/b/userportal/admin/buttons');
+
+    const label = `E2E ${Date.now().toString(36)}`;
+    await page.locator('#label').fill(label);
+    await page.locator('#path').fill('/b/storage/');
+    await page.getByRole('button', { name: 'Add' }).click();
+    const edit = page.getByRole('button', { name: `Edit ${label}` });
+    await expect(edit).toBeVisible();
+
+    await edit.click();
+    const modal = page.locator('dialog.modal[open]');
+    await expect(modal).toBeVisible();
+    await modal.getByLabel('Label').fill(`${label} saved`);
+    await modal.getByRole('button', { name: 'Save' }).click();
+
+    await expect(page.locator('#toast-container .toast')).toContainText('Button saved');
+    await expect(page.locator('dialog.modal[open]')).toHaveCount(0);
+    await expect(page.locator('#buttons-table')).toContainText(`${label} saved`);
+    await expect(page.getByRole('button', { name: `Edit ${label} saved` })).toBeFocused();
+  });
+
+  /**
+   * The block detail's Enabled toggle re-renders `#content`, modal and card
+   * with it. Focus comes back to that card's title button, found again by its
+   * id. Toggled twice, so the block ends as it started.
+   */
+  test('toggling a block in its detail modal returns focus to its card', async ({ page }) => {
+    await loginAsAdmin(page);
+    await gotoUnderCsp(page, '/b/admin/blocks');
+
+    const card = page.locator('#block-card-impresspress--legalpages');
+    for (let i = 0; i < 2; i++) {
+      await card.click();
+      const modal = page.locator('dialog#block-detail');
+      await expect(modal).toBeVisible();
+      await expect(modal.getByRole('checkbox', { name: 'Enable impresspress/legalpages' })).toHaveCount(1);
+      await modal.locator('label.toggle').click();
+      await expect(page.locator('dialog#block-detail')).toHaveCount(0);
+      await expect(page.locator('#block-card-impresspress--legalpages')).toBeFocused();
+    }
   });
 
   test('creating a messages context resets the form and prepends the row', async ({ page }) => {

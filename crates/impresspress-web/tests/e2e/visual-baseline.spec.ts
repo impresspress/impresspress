@@ -154,7 +154,7 @@ async function expectPageScreenshot(page: Page, name: string, mask?: ReturnType<
 //   Users, both bucket lists).
 // - The dashboard charts' first/last-day labels, which move daily because the
 //   window ends today (`ui/components/chart.rs`). The whole
-//   `.charts-css__range` row is masked, not its two `<time>` spans: a span is
+//   `.chart__range` row is masked, not its two `<time>` spans: a span is
 //   as wide as its text, so "Aug 31" and "Sep 1" would paint different mask
 //   boxes, while the row is as wide as the chart and the mask box stays put.
 //   Masking the spans let a baseline captured with a two-digit first day
@@ -183,7 +183,7 @@ async function expectPageScreenshot(page: Page, name: string, mask?: ReturnType<
 //   below).
 //
 // What stays unmasked, deliberately: the dashboard's error figures, error
-// chart and Recent Errors card are zero and empty on a healthy run, so an
+// chart and Recent 4xx/5xx card are zero and empty on a healthy run, so an
 // error there is a regression the capture should catch. The request chart,
 // the request sparkline and the new-user chart plot everything on the last
 // day of the window whatever the count, and "Total Users" / "New Today" are
@@ -194,7 +194,7 @@ async function expectPageScreenshot(page: Page, name: string, mask?: ReturnType<
 function volatileMasks(page: Page) {
   return [
     page.locator('[data-relative-time], .relative-time, time'),
-    page.locator('.charts-css__range'),
+    page.locator('.chart__range'),
     page.locator('tr[data-bucket] td[data-label="Owner"]'),
     page.locator('td:has([data-volatile-metric]), .stat-card:has-text("Avg Response") .stat-value'),
     page.locator('.stat-card:has-text("Requests Today") .stat-value'),
@@ -257,7 +257,7 @@ const MOBILE_ADMIN_ROUTES = [
   // Portal pages — primary mobile audience. Admin is desktop-first per
   // master spec; the hint banner inside is the explicit accommodation.
   // Admin pages aren't mobile-snapshotted because the dashboard's
-  // "Recent Errors" table is fed by the request_log accumulated during
+  // "Recent 4xx/5xx" table is fed by the request_log accumulated during
   // the rest of the baseline run, so its content + width drift between
   // local and CI.
   { path: '/b/userportal/', name: 'portal-dashboard' },

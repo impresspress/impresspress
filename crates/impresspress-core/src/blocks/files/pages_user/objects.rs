@@ -160,6 +160,49 @@ pub fn render_objects_table(
     }
 }
 
+/// The "Create share link" modal a row's kebab menu opens: the shared
+/// `components::modal` dialog. `files-browser.js` (`shareModal`) writes the
+/// object it is about into `#share-object` and opens it through chrome.js's
+/// `openModal` event; its form handler POSTs `/b/cloudstorage/shares`.
+///
+/// The expiry values are HOURS — the unit that endpoint takes in
+/// `expires_in_hours`; the labels are the days the user thinks in. There is
+/// no "never": a share link is a bearer credential, so every one of them
+/// ends. The longest option is the deployment's default ceiling
+/// (`IMPRESSPRESS__FILES__MAX_SHARE_EXPIRY_HOURS`), which the server applies
+/// to a request that names no expiry at all. The `cloud` tests read these
+/// options back out of this markup and hold them to the endpoint.
+pub(crate) fn render_share_modal() -> Markup {
+    components::modal(
+        "share-link",
+        "Create share link",
+        html! {
+            form method="dialog" {
+                p .text-sm .text-muted .mb-3 { "Object: " code #share-object {} }
+                div .form-group {
+                    label .form-label for="share-expires" { "Expires in" }
+                    select .form-input #share-expires name="expires" autofocus {
+                        option value="24" { "1 day" }
+                        option value="168" selected { "7 days" }
+                        option value="720" { "30 days" }
+                        option value="8760" { "365 days" }
+                    }
+                }
+                div .form-group {
+                    label .form-label for="share-max" { "Max accesses" }
+                    input .form-input #share-max name="max" type="number" min="0"
+                        placeholder="Unlimited" aria-describedby="share-max-hint";
+                    p .form-hint #share-max-hint { "Leave empty for no limit." }
+                }
+                (components::modal_footer(html! {
+                    (components::modal_cancel())
+                    button .btn .btn--primary .btn--block type="submit" { "Create link" }
+                }))
+            }
+        },
+    )
+}
+
 /// Render breadcrumb crumbs for the page body (below the topbar).
 ///
 /// This is distinct from the shell `Topbar { crumbs: vec![Crumb {...}] }`
@@ -252,6 +295,7 @@ pub async fn object_list_page(
         // many files at once. Same upload endpoint as drag-drop.
         input #file-upload-input type="file" multiple hidden;
         (table)
+        (render_share_modal())
         (super::render_bootstrap_script(bucket, current_prefix))
     };
 
@@ -491,7 +535,7 @@ mod tests {
         );
         // ...while the visible text is the humanized form, not the raw string.
         assert!(
-            html.contains(">2026-07-11 19:13<"),
+            html.contains(">2026-07-11 19:13 UTC<"),
             "visible modified text not humanized: {html}"
         );
         assert!(

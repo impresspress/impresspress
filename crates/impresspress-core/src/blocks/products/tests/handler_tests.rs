@@ -2342,7 +2342,7 @@ async fn overview_shows_disabled_notice_when_user_products_off() {
 
 /// Enabled + empty catalog: the Overview page must show a working
 /// "Add your first product" CTA to the real admin create path (Manage
-/// Products, which owns the "+ New Product" modal), and must not show the
+/// Products, whose "+ New Product" opens the product wizard), and must not show the
 /// disabled-state notice.
 #[tokio::test]
 async fn overview_shows_add_product_cta_when_enabled_and_empty() {

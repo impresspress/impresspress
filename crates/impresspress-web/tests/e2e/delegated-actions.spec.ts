@@ -91,7 +91,7 @@ test.describe('delegated actions', () => {
     // The close button `components::modal` renders is the same verb.
     await page.locator('[data-action="modal-open"][data-modal-target="create-var"]').click();
     await expect(modal).toBeVisible();
-    await modal.locator('button.modal-close').click();
+    await modal.getByRole('button', { name: 'Close' }).click();
     await expect(modal).toBeHidden();
   });
 
