@@ -105,11 +105,11 @@ test.describe('admin variables', () => {
     // stale page, a hand-built post) meets the server's 400 instead, and the
     // modal shows that too.
     await page.locator('#var-key').evaluate((el) => el.removeAttribute('pattern'));
-    await page.locator('#var-key').fill('bad key!');
+    await page.locator('#var-key').fill('e2e bad key!');
     await modal.getByRole('button', { name: 'Create' }).click();
 
     const error = page.locator('#var-key-error');
-    await expect(error).toContainText('"bad key!" is not a valid variable key');
+    await expect(error).toContainText('"e2e bad key!" is not a valid variable key');
     await expect(error).toContainText('WAFER_RUN_SHARED__<NAME>');
     await expect(page.locator('#var-key')).toHaveAttribute('aria-invalid', 'true');
     await expect(modal).toBeVisible();
@@ -118,6 +118,6 @@ test.describe('admin variables', () => {
     // The page behind the modal gained no row.
     await modal.locator('button.modal-close').click();
     await page.goto('/b/admin/variables?tab=all', { waitUntil: 'networkidle' });
-    await expect(page.getByText('bad key!', { exact: true })).toHaveCount(0);
+    await expect(page.getByText('e2e bad key!', { exact: true })).toHaveCount(0);
   });
 });
