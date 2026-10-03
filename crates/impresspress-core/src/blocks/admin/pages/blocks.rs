@@ -112,17 +112,21 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     // entries breaks that invariant.
     all_blocks.sort_by(|a, b| a.name.cmp(&b.name));
 
-    let page_action = html! {
-        div .flex .gap-2 {
+    // Two separate topbar actions, so the topbar can wrap them one per row
+    // on a narrow screen.
+    let page_actions = vec![
+        html! {
             a .btn .btn--sm .btn--secondary .gap-1 href="https://wafer.run/registry" target="_blank"
             {
                 (icons::arrow_up_right()) " Explore WASM blocks"
             }
+        },
+        html! {
             a .btn .btn--secondary .btn--sm href="/b/inspector/ui" target="_blank" {
                 (icons::globe()) " Open Inspector"
             }
-        }
-    };
+        },
+    ];
 
     let tabs_and_body = html! {
         (tab_navigation(vec![
@@ -248,7 +252,7 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         "Blocks",
         Topbar {
             crumbs: crumb("Blocks"),
-            primary_action: Some(page_action),
+            actions: page_actions,
             subtitle: Some("Registered WAFER blocks"),
             show_palette: true,
         },

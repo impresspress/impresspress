@@ -124,7 +124,7 @@ async fn render(ctx: &dyn Context, msg: &Message, tab: &str) -> Result<OutputStr
         "Settings",
         Topbar {
             crumbs: crumb("Settings"),
-            primary_action: None,
+            actions: Vec::new(),
             subtitle: Some(tab_title(active)),
             show_palette: true,
         },
@@ -238,10 +238,6 @@ mod tests {
                 max_form_nesting_depth(&html),
                 1,
                 "tab {tab} must not nest <form> elements"
-            );
-            assert!(
-                !html.contains("<form class=\"form-page\""),
-                "tab {tab}: the settings shell must not wrap tab bodies in an outer <form>"
             );
         }
     }

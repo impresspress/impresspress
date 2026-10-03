@@ -748,8 +748,7 @@
 /* ===== Messages block: task/notification single-pane entries list ===== */
 .entries-list--scroll { max-height: 60vh; overflow-y: auto; }
 
-/* ===== Legal pages editor status bar (blocks/legalpages/pages.rs) ===== */
-.editor-status__title { font-size: 1.25rem; font-weight: 600; margin: 0; }
+/* ===== Legal pages editor status row (blocks/legalpages/pages.rs) ===== */
 .editor-status__version { background: var(--bg-hover); color: var(--text-muted); }
 
 /* ===== Tickets admin (blocks/tickets/pages.rs) =====

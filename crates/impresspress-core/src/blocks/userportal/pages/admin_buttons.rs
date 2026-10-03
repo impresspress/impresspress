@@ -345,10 +345,10 @@ pub async fn handle_edit_button_form(ctx: &dyn Context, id: &str) -> OutputStrea
                         value=(record.i64_field("sort_order"));
                 }
                 div .flex .gap-2 .justify-end {
-                    button .btn .btn--secondary type="button"
+                    button .btn .btn--secondary .btn--block type="button"
                         data-action="modal-close" data-modal-target=(&modal_id)
                     { "Cancel" }
-                    button .btn .btn--primary type="submit" { "Save" }
+                    button .btn .btn--primary .btn--block type="submit" { "Save" }
                 }
             }
         }))

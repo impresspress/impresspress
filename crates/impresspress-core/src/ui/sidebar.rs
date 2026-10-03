@@ -167,9 +167,7 @@ pub fn sidebar_grouped(
                         (crate::ui::components::avatar(&u.email, crate::ui::components::CtrlSize::Sm))
                         div .sidebar__user-text {
                             div .sidebar__user-email { (u.email) }
-                            div .sidebar__user-role {
-                                @if u.is_admin() { "Admin" } @else { "User" }
-                            }
+                            div .sidebar__user-role { (u.role_label()) }
                         }
                     }
                     div .profile-menu #profile-menu hidden {
@@ -177,7 +175,7 @@ pub fn sidebar_grouped(
                             div .profile-menu-avatar { (u.avatar_initial()) }
                             div .profile-menu-info {
                                 div .profile-menu-email { (u.email) }
-                                div .profile-menu-role { (u.roles.join(", ")) }
+                                div .profile-menu-role { (u.role_label()) }
                             }
                         }
                         div .profile-menu-divider {}

@@ -41,7 +41,7 @@ async fn files_page<'a>(
     content: Markup,
     msg: &Message,
 ) -> OutputStream {
-    files_page_with_action(ctx, title, crumb_label, subtitle, None, content, msg).await
+    files_page_with_action(ctx, title, crumb_label, subtitle, Vec::new(), content, msg).await
 }
 
 /// Admin storage shell. Thin wrapper over [`ui::shell_page`] that fixes the
@@ -52,7 +52,7 @@ async fn files_page_with_action<'a>(
     title: &'a str,
     crumb_label: &'a str,
     subtitle: Option<&'a str>,
-    primary_action: Option<Markup>,
+    actions: Vec<Markup>,
     content: Markup,
     msg: &Message,
 ) -> OutputStream {
@@ -67,7 +67,7 @@ async fn files_page_with_action<'a>(
                 href: None,
             }],
             subtitle,
-            primary_action,
+            actions,
         },
         content,
     )
@@ -310,12 +310,12 @@ pub async fn buckets(ctx: &dyn Context, msg: &Message) -> OutputStream {
         "Buckets",
         "Buckets",
         Some("All storage buckets"),
-        Some(crate::ui::components::button(
+        vec![crate::ui::components::button(
             crate::ui::components::BtnVariant::Primary,
             crate::ui::components::CtrlSize::Sm,
             "+ New bucket",
             maud::PreEscaped(r#"type="button" data-action="open-new-bucket""#.to_string()),
-        )),
+        )],
         body,
         msg,
     )

@@ -376,7 +376,7 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
         "Dashboard",
         Topbar {
             crumbs: crumb("Dashboard"),
-            primary_action: None,
+            actions: Vec::new(),
             subtitle: Some("System overview"),
             show_palette: true,
         },

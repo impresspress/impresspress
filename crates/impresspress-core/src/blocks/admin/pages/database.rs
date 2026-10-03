@@ -284,10 +284,10 @@ async fn schema_panel(ctx: &dyn Context, table: Option<&str>) -> Result<Markup, 
 
     Ok(html! {
         div .db-panel {
-            header .db-panel__head {
-                h3 { (name) }
-                span .text-muted .text-sm { (row_count) " rows" }
-            }
+            (components::section_header(
+                name,
+                Some(html! { span .text-muted .text-sm { (row_count) " rows" } }),
+            ))
             (components::data_table::<fn(usize) -> Option<String>>(
                 &SCHEMA_COLUMNS,
                 rows,
@@ -454,7 +454,7 @@ pub async fn database_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         "Database",
         Topbar {
             crumbs: crumb("Database"),
-            primary_action: Some(backend_badge(backend, tables.len())),
+            actions: vec![backend_badge(backend, tables.len())],
             subtitle: Some("Browse tables, view schema, run read-only SQL"),
             show_palette: true,
         },
