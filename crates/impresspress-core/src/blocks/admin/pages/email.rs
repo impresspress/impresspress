@@ -39,7 +39,7 @@ fn mailgun_vars() -> Vec<ConfigVar> {
 /// Render the email settings tab body. The parent `settings_page` handler
 /// wraps this in the form-LESS `tabbed_page` shell, so this tab owns its
 /// `<form>` outright: the full self-contained `settings_form` (its own
-/// `<form id="settings-form">` + "Save Settings" button), posting JSON via
+/// `<form class="settings-form" id="settings-form">` + "Save settings" button), posting JSON via
 /// fetch to `POST /b/admin/email` — the `SaveEmailSettings` route that
 /// [`handle_save_email_settings`] serves. Same pattern as every other
 /// block's admin settings page (products / userportal / legalpages /
