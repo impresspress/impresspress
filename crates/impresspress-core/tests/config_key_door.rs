@@ -155,6 +155,8 @@ const DECLARES_A_CONFIG_KEY: &[&str] = &[
 ///   `data_snapshot.rs`'s) store ad hoc, and the admin pages' probe rows.
 /// * `blocks/admin/ops.rs` — a retired shared key an operator must be able
 ///   to delete.
+/// * `blocks/dev/data_snapshot.rs` — an undeclared key sensitive by its
+///   `_KEY` suffix, which the export must hold back.
 /// * `blocks/config.rs` — undeclared keys `CONFIG_SET` stores ad hoc, one of
 ///   them sensitive by suffix.
 /// * `blocks/llm/routes/providers.rs`, `blocks/llm/schema.rs` — `key_var`
@@ -170,6 +172,7 @@ const DECLARES_A_TEST_FIXTURE_KEY: &[&str] = &[
     "blocks/admin/mod.rs",
     "blocks/admin/ops.rs",
     "blocks/config.rs",
+    "blocks/dev/data_snapshot.rs",
     "blocks/llm/routes/providers.rs",
     "blocks/llm/schema.rs",
     "test_support.rs",

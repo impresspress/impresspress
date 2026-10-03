@@ -323,6 +323,10 @@ pub fn variable_is_exportable(row: &serde_json::Map<String, Value>) -> bool {
 #[cfg(test)]
 mod variable_is_exportable_tests {
     use super::*;
+
+    /// A well-formed, undeclared key that is sensitive by its `_KEY` suffix
+    /// alone. Only this module stores it, so it is declared here.
+    const SUFFIX_SENSITIVE_KEY: &str = "WAFER_RUN_SHARED__JWT_KEY";
     use crate::{
         blocks::{
             email::MAILGUN_DOMAIN,
@@ -369,7 +373,7 @@ mod variable_is_exportable_tests {
             "sensitive": false,
         }))));
         assert!(!variable_is_exportable(&row(serde_json::json!({
-            "key": crate::blocks::admin::fixture_keys::JWT_KEY,
+            "key": SUFFIX_SENSITIVE_KEY,
             "sensitive": 0,
         }))));
     }

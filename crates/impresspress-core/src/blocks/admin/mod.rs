@@ -28,7 +28,6 @@ pub(crate) mod fixture_keys {
     /// Sensitive by suffix (`_SECRET`/`_KEY`), not by declaration.
     pub(crate) const STRIPE_SECRET: &str = "WAFER_RUN_SHARED__STRIPE_SECRET";
     pub(crate) const JWT_SECRET: &str = "WAFER_RUN_SHARED__JWT_SECRET";
-    pub(crate) const JWT_KEY: &str = "WAFER_RUN_SHARED__JWT_KEY";
     pub(crate) const MAILER_API_KEY: &str = "WAFER_RUN_SHARED__MAILER_API_KEY";
     pub(crate) const MAILGUN_API_KEY: &str = "WAFER_RUN_SHARED__MAILGUN_API_KEY";
     /// Neither suffix nor declaration: sensitive only by the stored flag.
