@@ -12,7 +12,7 @@ use wafer_block::{
     db::{Filter, FilterOp},
     wire::database::BatchWrite,
 };
-use wafer_core::clients::database as db;
+use wafer_core::clients::database::{self as db, RecordData};
 use wafer_run::{context::Context, WaferError};
 
 use super::{db_failed, internal_error, map_bool, map_opt_str, map_str, now_iso};
@@ -27,7 +27,7 @@ pub struct LocalCredentialRow {
     pub created_at: String,
 }
 
-fn row_from_map(m: &HashMap<String, Value>) -> Result<LocalCredentialRow, WaferError> {
+fn row_from_map(m: &RecordData) -> Result<LocalCredentialRow, WaferError> {
     Ok(LocalCredentialRow {
         user_id: map_opt_str(m, "user_id").ok_or_else(|| internal_error("missing user_id"))?,
         password_hash: map_opt_str(m, "password_hash")
@@ -193,7 +193,7 @@ mod typed_client_tests {
     #[test]
     fn row_from_map_accepts_bool_int_and_string_must_reset() {
         let mk = |v: Value| {
-            let mut m = HashMap::new();
+            let mut m = RecordData::new();
             m.insert("user_id".into(), json!("u"));
             m.insert("password_hash".into(), json!("h"));
             m.insert("must_reset".into(), v);

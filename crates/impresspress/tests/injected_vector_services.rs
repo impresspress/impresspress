@@ -12,8 +12,8 @@ use std::sync::Arc;
 
 use impresspress_core::builder::{fill_config_service, ImpresspressBuilder, RuntimeConfig};
 use wafer_core::interfaces::vector::service::{
-    EmbeddingService, MetadataFilter, Result as VectorResult, SearchMode, VectorEntry,
-    VectorIndexConfig, VectorMatch, VectorService,
+    DescribeIndexResponse, EmbeddingService, MetadataFilter, Result as VectorResult, SearchMode,
+    VectorEntry, VectorIndexConfig, VectorMatch, VectorService,
 };
 
 /// A vector store no test calls: only its registration is under test.
@@ -48,6 +48,15 @@ impl VectorService for UnusedVectorStore {
         unreachable!("registration only")
     }
     async fn rename_index(&self, _from: &str, _to: &str) -> VectorResult<()> {
+        unreachable!("registration only")
+    }
+    async fn list_indexes(&self, _prefix: &str) -> VectorResult<Vec<String>> {
+        unreachable!("registration only")
+    }
+    async fn describe_index(&self, _index: &str) -> VectorResult<DescribeIndexResponse> {
+        unreachable!("registration only")
+    }
+    async fn list_ids(&self, _index: &str, _filter: MetadataFilter) -> VectorResult<Vec<String>> {
         unreachable!("registration only")
     }
 }

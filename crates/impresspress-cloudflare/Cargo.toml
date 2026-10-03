@@ -159,6 +159,8 @@ impresspress-core = { path = "../impresspress-core", default-features = false }
 worker = { workspace = true }
 wasm-bindgen = { workspace = true }
 js-sys = { workspace = true }
+# Decodes D1 `raw()` answers (positional rows) into `serde_json` values.
+serde-wasm-bindgen = "0.6"
 
 # Serialization
 serde = { workspace = true }

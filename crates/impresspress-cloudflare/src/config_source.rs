@@ -392,7 +392,7 @@ mod tests {
                     data.insert("value".to_string(), serde_json::json!(value));
                     Record {
                         id: i.to_string(),
-                        data,
+                        data: data.into_iter().collect(),
                     }
                 })
                 .collect();
@@ -402,7 +402,7 @@ mod tests {
                     while padded.len() < n {
                         padded.push(Record {
                             id: format!("pad-{}", padded.len()),
-                            data: HashMap::new(),
+                            data: Default::default(),
                         });
                     }
                     padded
@@ -443,6 +443,16 @@ mod tests {
             unreachable!()
         }
         async fn sum(&self, _c: &str, _f: &str, _x: &[Filter]) -> Result<f64, DatabaseError> {
+            unreachable!()
+        }
+
+        async fn increment_field_where(
+            &self,
+            _collection: &str,
+            _col: &str,
+            _delta: i64,
+            _filters: &[Filter],
+        ) -> Result<i64, DatabaseError> {
             unreachable!()
         }
         async fn query_raw(

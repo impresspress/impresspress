@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use serde_json::{json, Value};
 use wafer_block::db::{Filter, FilterOp, SortField};
-use wafer_core::clients::database as db;
+use wafer_core::clients::database::{self as db, RecordData};
 use wafer_run::{context::Context, WaferError};
 
 use super::{db_failed, decode_hex, internal_error, map_opt_str, map_str, now_iso};
@@ -66,7 +66,7 @@ fn decode_scopes(v: &Value) -> Result<Vec<String>, WaferError> {
     }
 }
 
-fn row_from_map(m: &HashMap<String, Value>) -> Result<PatRow, WaferError> {
+fn row_from_map(m: &RecordData) -> Result<PatRow, WaferError> {
     let token_hash = m
         .get("token_hash")
         .and_then(decode_bytes)

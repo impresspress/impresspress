@@ -17,7 +17,7 @@ use std::collections::HashMap;
 
 use serde_json::{json, Value};
 use wafer_block::db::{Filter, FilterOp};
-use wafer_core::clients::database as db;
+use wafer_core::clients::database::{self as db, RecordData};
 use wafer_run::{context::Context, ErrorCode, WaferError};
 
 use crate::{
@@ -46,7 +46,7 @@ impl UserRoleRow {
     /// Decode one row. `user_id` and `role` are required (both `NOT NULL`);
     /// a row without them grants nothing and is refused rather than
     /// defaulted.
-    pub fn from_record(id: &str, data: &HashMap<String, Value>) -> Result<Self, String> {
+    pub fn from_record(id: &str, data: &RecordData) -> Result<Self, String> {
         let user_id = data.str_field("user_id");
         if user_id.is_empty() {
             return Err(format!("{TABLE} row `{id}` has no user_id"));
@@ -340,7 +340,8 @@ mod tests {
         let rows = list_for_user(&ctx, "u-1").await.expect("list");
         assert_eq!(rows, vec![created.clone()]);
 
-        let again = UserRoleRow::from_record(&created.id, &created.to_data()).expect("decode");
+        let again = UserRoleRow::from_record(&created.id, &created.to_data().into_iter().collect())
+            .expect("decode");
         assert_eq!(again, created);
 
         assert!(matches!(
@@ -523,10 +524,10 @@ mod tests {
     #[test]
     fn a_record_without_a_user_or_role_does_not_decode() {
         for missing in ["user_id", "role"] {
-            let mut data = HashMap::new();
+            let mut data = RecordData::new();
             data.insert("user_id".to_string(), serde_json::json!("u-1"));
             data.insert("role".to_string(), serde_json::json!("editor"));
-            data.remove(missing);
+            data.shift_remove(missing);
             let err = UserRoleRow::from_record("ur_1", &data).expect_err(missing);
             assert!(err.contains(missing) && err.contains("ur_1"), "{err}");
         }

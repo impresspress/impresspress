@@ -163,17 +163,17 @@ use std::{
 use impresspress_core::IdentityCache;
 use wafer_block::db::{Filter, ListOptions};
 use wafer_core::interfaces::database::{
-    codec::{record_from_json_row, scalar_f64, scalar_i64, JsonColumns},
+    codec::{record_from_columns, rows_from_positional, scalar_f64, scalar_i64, JsonColumns},
     exec::{BatchOp, BatchResult, DbExec, TxOp, TxResult},
     schema_cache::SchemaCache,
     service::{
         AggregateSpec, CapGuard, Column, DatabaseError, DatabaseService, GuardedInsert,
-        GuardedUpdate, Record, RecordList, StatementBudget, Table, UpsertSpec, WriteOp,
+        GuardedUpdate, Record, RecordData, RecordList, StatementBudget, Table, UpsertSpec, WriteOp,
         WriteOutcome,
     },
 };
 use wafer_sql_utils::{introspect, Backend};
-use wasm_bindgen::JsValue;
+use wasm_bindgen::{JsCast, JsValue};
 use worker::*;
 
 thread_local! {
@@ -488,11 +488,10 @@ impl DbExec for D1DatabaseService {
     ) -> Result<Vec<Record>, DatabaseError> {
         let stmt = self.prepare_bind(sql, params)?;
         self.send(1)?;
-        let results = stmt.all().await.map_err(db_err)?;
-        let rows: Vec<serde_json::Value> = results.results().map_err(db_err)?;
-        Ok(rows
+        Ok(fetch_rows(&stmt)
+            .await?
             .into_iter()
-            .map(|row| record_from_json_row(row, json))
+            .map(|row| record_from_columns(row, json))
             .collect())
     }
 
@@ -504,15 +503,15 @@ impl DbExec for D1DatabaseService {
     ) -> Result<Record, DatabaseError> {
         let stmt = self.prepare_bind(sql, params)?;
         self.send(1)?;
-        // A missing table is a fault, not an absent row: it goes through
-        // `db_err` like every other failure and comes back `Internal`, as it
-        // does on native SQLite and PostgreSQL. `NotFound` is only a query
+        // A missing table is a fault, not an absent row: it is a rejection,
+        // classified like every other failure and coming back `Internal`, as
+        // it does on native SQLite and PostgreSQL. `NotFound` is only a query
         // that ran and matched no row.
-        let row = stmt
-            .first::<serde_json::Value>(None)
-            .await
-            .map_err(db_err)?;
-        row.map(|row| record_from_json_row(row, json))
+        fetch_rows(&stmt)
+            .await?
+            .into_iter()
+            .next()
+            .map(|row| record_from_columns(row, json))
             .ok_or(DatabaseError::NotFound)
     }
 
@@ -536,7 +535,7 @@ impl DbExec for D1DatabaseService {
     /// as `run()` does while also handing back the `RETURNING` rows. (This
     /// adapter uses no D1 Sessions API, so no read-replica routing exists
     /// here either.) Delegating rather than repeating `prepare_bind` +
-    /// `all()` + `record_from_json_row` keeps the two decode paths identical
+    /// `all()` + `record_from_columns` keeps the two decode paths identical
     /// by construction.
     ///
     /// It stays a distinct trait method rather than riding on `run_fetch`
@@ -601,9 +600,9 @@ impl DbExec for D1DatabaseService {
     /// decoded positionally into the [`BatchResult`] variant its op names,
     /// reusing the very helpers the single-statement primitives use:
     ///
-    /// - [`BatchOp::Rows`] → `results()` → [`record_from_json_row`] per row (as
+    /// - [`BatchOp::Rows`] → `results()` → [`record_from_columns`] per row (as
     ///   [`run_fetch`](DbExec::run_fetch)).
-    /// - [`BatchOp::FetchOne`] → first of `results()` → `record_from_json_row`,
+    /// - [`BatchOp::FetchOne`] → first of `results()` → `record_from_columns`,
     ///   empty ⇒ [`DatabaseError::NotFound`] (as
     ///   [`run_fetch_one`](DbExec::run_fetch_one)).
     /// - [`BatchOp::Execute`] → `meta().changes` (as
@@ -667,17 +666,17 @@ impl DbExec for D1DatabaseService {
             check_statement_succeeded(result)?;
             let decoded = match op {
                 BatchOp::Rows { json, .. } => {
-                    let rows: Vec<serde_json::Value> = result.results().map_err(db_err)?;
+                    let rows: Vec<RecordData> = result.results().map_err(db_err)?;
                     BatchResult::Rows(
                         rows.into_iter()
-                            .map(|row| record_from_json_row(row, json))
+                            .map(|row| record_from_columns(row, json))
                             .collect(),
                     )
                 }
                 BatchOp::FetchOne { json, .. } => {
-                    let rows: Vec<serde_json::Value> = result.results().map_err(db_err)?;
+                    let rows: Vec<RecordData> = result.results().map_err(db_err)?;
                     let row = rows.into_iter().next().ok_or(DatabaseError::NotFound)?;
-                    BatchResult::FetchOne(record_from_json_row(row, json))
+                    BatchResult::FetchOne(record_from_columns(row, json))
                 }
                 // Same source as `run_execute`: D1Result meta's `changes`.
                 BatchOp::Execute { .. } => BatchResult::Execute(changes(result)?),
@@ -704,7 +703,7 @@ impl DbExec for D1DatabaseService {
     /// Decoded positionally, as [`run_batch`](DbExec::run_batch) is: a
     /// [`TxOp::Execute`] yields `meta().changes`, as
     /// [`run_execute`](DbExec::run_execute) does, and a [`TxOp::Returning`]
-    /// its `RETURNING` rows through [`record_from_json_row`], as
+    /// its `RETURNING` rows through [`record_from_columns`], as
     /// [`run_execute_returning`](DbExec::run_execute_returning) does.
     async fn run_transaction(&self, ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, DatabaseError> {
         if ops.is_empty() {
@@ -731,10 +730,10 @@ impl DbExec for D1DatabaseService {
                 Ok(match op {
                     TxOp::Execute { .. } => TxResult::Execute(changes(result)?),
                     TxOp::Returning { json, .. } => {
-                        let rows: Vec<serde_json::Value> = result.results().map_err(db_err)?;
+                        let rows: Vec<RecordData> = result.results().map_err(db_err)?;
                         TxResult::Returning(
                             rows.into_iter()
-                                .map(|row| record_from_json_row(row, json))
+                                .map(|row| record_from_columns(row, json))
                                 .collect(),
                         )
                     }
@@ -1001,6 +1000,96 @@ fn db_err(e: worker::Error) -> DatabaseError {
     impresspress_core::sqlite_text_error::statement_error(d1_error_text(&e))
 }
 
+#[wasm_bindgen::prelude::wasm_bindgen]
+extern "C" {
+    /// A D1 prepared statement, seen through the one method worker 0.7.5
+    /// binds without its argument: `raw(options)`. Only
+    /// `{ columnNames: true }` makes D1 answer the result's column names.
+    #[wasm_bindgen(extends = js_sys::Object)]
+    type RawStatement;
+
+    #[wasm_bindgen(method, catch, js_name = raw)]
+    fn raw_with_options(this: &RawStatement, options: &JsValue)
+        -> Result<js_sys::Promise, JsValue>;
+}
+
+/// The rows of `stmt`, each in the order the statement returned its columns.
+///
+/// Read through `raw({ columnNames: true })`, which answers the column names
+/// as its first array and each row's values positionally after it, paired by
+/// [`rows_from_positional`]. Not `all()`: that answers each row as a JS
+/// object, and a JS object enumerates integer-like names (`SELECT name, 1`)
+/// before the others, so the result's column order would be lost.
+///
+/// `db.batch()` has no such option — its results are row objects — so the
+/// batched reads ([`DbExec::run_batch`]'s `Rows`/`FetchOne`,
+/// [`DbExec::run_transaction`]'s `Returning`) keep object key order. They
+/// only ever run statements the shared `wafer-sql-utils` builders generate,
+/// whose result columns are a table's own columns or the builders' aliases —
+/// SQL identifiers, never integer-like — so for them that order is the
+/// result's.
+async fn fetch_rows(stmt: &D1PreparedStatement) -> Result<Vec<RecordData>, DatabaseError> {
+    let options = js_sys::Object::new();
+    js_sys::Reflect::set(&options, &JsValue::from_str("columnNames"), &JsValue::TRUE)
+        .map_err(js_failure)?;
+    let promise = stmt
+        .inner()
+        .unchecked_ref::<RawStatement>()
+        .raw_with_options(&options)
+        .map_err(js_failure)?;
+    let answer = worker::wasm_bindgen_futures::JsFuture::from(promise)
+        .await
+        .map_err(js_failure)?;
+    let mut arrays: Vec<Vec<serde_json::Value>> =
+        serde_wasm_bindgen::from_value(answer).map_err(|e| {
+            DatabaseError::Internal(format!("D1 raw() answered an unexpected shape: {e}"))
+        })?;
+    if arrays.is_empty() {
+        return Ok(Vec::new());
+    }
+    let columns = arrays
+        .remove(0)
+        .into_iter()
+        .map(|name| match name {
+            serde_json::Value::String(name) => Ok(name),
+            other => Err(DatabaseError::Internal(format!(
+                "D1 raw() answered a non-text column name: {other}"
+            ))),
+        })
+        .collect::<Result<Vec<String>, _>>()?;
+    rows_from_positional(&columns, arrays)
+}
+
+/// A rejection (or a failed JS call) from a D1 statement, classified as
+/// [`db_err`] classifies one worker-rs hands back: by its whole text, a `D1_…`
+/// message followed by its `cause`.
+fn js_failure(error: JsValue) -> DatabaseError {
+    let text = match error.dyn_ref::<js_sys::Error>() {
+        Some(error) => {
+            let message = String::from(error.message());
+            let cause = error.cause();
+            if cause.is_undefined() {
+                message
+            } else {
+                format!("{message}: {}", js_text(&cause))
+            }
+        }
+        None => js_text(&error),
+    };
+    impresspress_core::sqlite_text_error::statement_error(text)
+}
+
+/// A JS value's text: an `Error`'s message, a string as itself, anything else
+/// as JS would print it.
+fn js_text(value: &JsValue) -> String {
+    if let Some(error) = value.dyn_ref::<js_sys::Error>() {
+        return String::from(error.message());
+    }
+    value
+        .as_string()
+        .unwrap_or_else(|| String::from(js_sys::JSON::stringify(value).unwrap_or_default()))
+}
+
 /// The whole text of a failed D1 call.
 ///
 /// worker-rs wraps a rejection whose message starts with `D1` as
@@ -1094,7 +1183,7 @@ mod tests {
     /// needs a workerd D1 binding CI does not have).
     #[wasm_bindgen_test]
     fn a_json_column_decodes_back_and_a_text_column_stays_text() {
-        let record = record_from_json_row(
+        let record = record_from_columns(
             serde_json::json!({
                 "id": "r1",
                 "meta": "{\"k\":[1,2],\"nested\":{\"b\":true}}",
@@ -1102,7 +1191,10 @@ mod tests {
                 "note": "hello world",
                 "braced_prose": "{not json at all",
                 "count": 3,
-            }),
+            })
+            .as_object()
+            .cloned()
+            .expect("a row object"),
             &JsonColumns::new(["meta", "braced_prose"]),
         );
 
@@ -1158,29 +1250,37 @@ mod tests {
         wasm_bindgen::JsCast::unchecked_into::<D1Database>(JsValue::undefined())
     }
 
-    /// A D1 handle whose every statement's `first()` rejects with the error
-    /// D1 raises for a table that does not exist — its message as D1 spells
-    /// it, with `cause` attached when `cause` is `Some`, since D1 sets one on
-    /// some rejections and not on others — and whose `all()` (the
-    /// introspection reads) answers no rows, as SQLite's `PRAGMA table_info`
-    /// does for a missing table. The object is structural: worker-rs calls
-    /// `prepare`, `bind`, `first` and `all` on it by name, as on a real
-    /// binding.
+    /// A D1 handle whose every row read (`raw()`) rejects with the error D1
+    /// raises for a table that does not exist — its message as D1 spells it,
+    /// with `cause` attached when `cause` is `Some`, since D1 sets one on some
+    /// rejections and not on others — except the introspection reads
+    /// (`pragma_table_info`), which answer no rows, as SQLite does for a
+    /// missing table. The object is structural: the adapter calls `prepare`,
+    /// `bind` and `raw` on it by name, as on a real binding.
     fn missing_table_handle(cause: Option<&str>) -> D1Database {
         let handle = js_sys::Function::new_with_args(
             "cause",
-            "const stmt = {
-                bind() { return stmt; },
-                first() {
-                    const message =
-                        'D1_ERROR: no such table: impresspress__d1test__never_created: SQLITE_ERROR';
-                    return Promise.reject(
-                        cause === undefined ? new Error(message) : new Error(message, { cause }),
-                    );
+            "return {
+                prepare(sql) {
+                    const stmt = {
+                        bind() { return stmt; },
+                        raw(options) {
+                            if (!options || options.columnNames !== true) {
+                                throw new Error('raw() must be asked for the column names');
+                            }
+                            if (sql.includes('pragma_table_info')) {
+                                return Promise.resolve([['name', 'decl_type']]);
+                            }
+                            const message =
+                                'D1_ERROR: no such table: impresspress__d1test__never_created: SQLITE_ERROR';
+                            return Promise.reject(
+                                cause === undefined ? new Error(message) : new Error(message, { cause }),
+                            );
+                        },
+                    };
+                    return stmt;
                 },
-                all() { return Promise.resolve({ results: [], success: true, meta: {} }); },
-            };
-            return { prepare() { return stmt; } };",
+            };",
         )
         .call1(&JsValue::NULL, &cause.map_or(JsValue::UNDEFINED, JsValue::from_str))
         .expect("the fake binding builds");
@@ -1207,6 +1307,82 @@ mod tests {
                 matches!(err, DatabaseError::Internal(ref text) if text.contains("no such table")),
                 "cause {cause:?}: a missing table must be Internal, got {err:?}"
             );
+        }
+    }
+
+    /// A D1 handle whose every statement's `raw({ columnNames: true })`
+    /// answers `answer` (a JS array literal: the column names, then the rows)
+    /// and whose plain `all()` throws, so a read that went through row objects
+    /// fails the test instead of passing by accident.
+    fn raw_answer_handle(answer: &str) -> D1Database {
+        let handle = js_sys::Function::new_no_args(&format!(
+            "const stmt = {{
+                bind() {{ return stmt; }},
+                raw(options) {{
+                    if (!options || options.columnNames !== true) {{
+                        throw new Error('raw() must be asked for the column names');
+                    }}
+                    return Promise.resolve({answer});
+                }},
+                all() {{ throw new Error('rows must be read positionally, not as objects'); }},
+            }};
+            return {{ prepare() {{ return stmt; }} }};"
+        ))
+        .call0(&JsValue::NULL)
+        .expect("the fake binding builds");
+        wasm_bindgen::JsCast::unchecked_into::<D1Database>(handle)
+    }
+
+    fn column_names(record: &Record) -> Vec<&str> {
+        record.data.keys().map(String::as_str).collect()
+    }
+
+    /// `SELECT name, 1, id` keeps its order on D1: read through `raw()` and
+    /// paired by position, the integer-like `1` stays second, where a row
+    /// object would have enumerated it first.
+    #[wasm_bindgen_test]
+    async fn a_raw_query_keeps_its_column_order_integer_like_names_included() {
+        let svc = service(
+            raw_answer_handle(r#"[["name", "1", "id"], ["x", 1, "r1"], ["y", 1, "r2"]]"#),
+            true,
+            "DB",
+        );
+        let rows = DatabaseService::query_raw(&svc, "SELECT name, 1, id FROM t", &[])
+            .await
+            .expect("query");
+        assert_eq!(rows.len(), 2);
+        for row in &rows {
+            assert_eq!(column_names(row), ["name", "1", "id"]);
+        }
+        assert_eq!(rows[1].id, "r2");
+    }
+
+    /// Two result columns of one name collapse into one entry, at the first
+    /// one's position, holding the last one's value — as in every
+    /// `RecordData`. Alias them apart to see both.
+    #[wasm_bindgen_test]
+    async fn a_duplicate_column_name_keeps_one_entry() {
+        let svc = service(
+            raw_answer_handle(r#"[["v", "w", "v"], [1, 2, 3]]"#),
+            true,
+            "DB",
+        );
+        let rows = DatabaseService::query_raw(&svc, "SELECT 1 AS v, 2 AS w, 3 AS v", &[])
+            .await
+            .expect("query");
+        assert_eq!(column_names(&rows[0]), ["v", "w"]);
+        assert_eq!(rows[0].data["v"], serde_json::json!(3));
+    }
+
+    /// No rows: D1 may answer the names alone, or nothing at all.
+    #[wasm_bindgen_test]
+    async fn an_empty_result_is_no_rows() {
+        for answer in [r#"[["a", "b"]]"#, "[]"] {
+            let svc = service(raw_answer_handle(answer), true, "DB");
+            let rows = DatabaseService::query_raw(&svc, "SELECT a, b FROM t WHERE 0", &[])
+                .await
+                .expect("query");
+            assert!(rows.is_empty(), "{answer}");
         }
     }
 
@@ -1498,7 +1674,7 @@ mod tests {
         batching_d1_with_columns(answer, batches, &[])
     }
 
-    /// [`batching_d1`] whose lone-statement `all()` — the executor's column
+    /// [`batching_d1`] whose lone-statement `raw()` — the executor's column
     /// list, `SELECT name, type AS decl_type FROM pragma_table_info(?1)` —
     /// answers `columns`, each declared `TEXT`, as a migrated table would.
     fn batching_d1_with_columns(
@@ -1521,42 +1697,36 @@ mod tests {
             )
             .expect("set bind");
             bind.forget();
-            // A lone statement's `all()`: the executor's one read of a table's
-            // columns and their declared types (which hold JSON). It answers
-            // `columns`, all `TEXT`, so every value is written and read as it
-            // is.
-            let all = Closure::<dyn Fn() -> js_sys::Promise>::new(move || {
-                let result = js_sys::Object::new();
-                js_sys::Reflect::set(&result, &JsValue::from_str("success"), &JsValue::TRUE)
-                    .expect("set success");
-                let rows = js_sys::Array::new();
-                for column in columns {
-                    let row = js_sys::Object::new();
-                    js_sys::Reflect::set(
-                        &row,
+            // A lone statement's `raw({ columnNames: true })`: the executor's
+            // one read of a table's columns and their declared types (which
+            // hold JSON). It answers the column names, then `columns`, all
+            // `TEXT`, so every value is written and read as it is.
+            let raw =
+                Closure::<dyn Fn(JsValue) -> js_sys::Promise>::new(move |options: JsValue| {
+                    let asked_for_names =
+                        js_sys::Reflect::get(&options, &JsValue::from_str("columnNames"))
+                            .is_ok_and(|v| v == JsValue::TRUE);
+                    assert!(asked_for_names, "raw() must be asked for the column names");
+                    let rows = js_sys::Array::new();
+                    rows.push(&js_sys::Array::of2(
                         &JsValue::from_str("name"),
-                        &JsValue::from_str(column),
-                    )
-                    .expect("set name");
-                    js_sys::Reflect::set(
-                        &row,
                         &JsValue::from_str("decl_type"),
-                        &JsValue::from_str("TEXT"),
-                    )
-                    .expect("set decl_type");
-                    rows.push(&row);
-                }
-                js_sys::Reflect::set(&result, &JsValue::from_str("results"), &rows)
-                    .expect("set results");
-                js_sys::Promise::resolve(&JsValue::from(result))
-            });
+                    ));
+                    for column in columns {
+                        rows.push(&js_sys::Array::of2(
+                            &JsValue::from_str(column),
+                            &JsValue::from_str("TEXT"),
+                        ));
+                    }
+                    js_sys::Promise::resolve(&JsValue::from(rows))
+                });
             js_sys::Reflect::set(
                 &statement,
-                &JsValue::from_str("all"),
-                all.as_ref().unchecked_ref(),
+                &JsValue::from_str("raw"),
+                raw.as_ref().unchecked_ref(),
             )
-            .expect("set all");
-            all.forget();
+            .expect("set raw");
+            raw.forget();
             // A lone statement's `first()`: the executor's one probe of where
             // a created row's id comes from (`introspect::build_id_policy`),
             // issued in strict mode too. It answers `0` — the executor mints
@@ -1850,10 +2020,13 @@ mod tests {
     #[wasm_bindgen_test]
     async fn each_primitive_counts_the_statements_it_sends() {
         forget_isolate_schema();
+        // One column, so a lone `raw()` answers a row and `run_fetch_one`
+        // finds it.
         let svc = service(
-            batching_d1(
+            batching_d1_with_columns(
                 BatchAnswer::Succeed,
                 Rc::new(std::cell::RefCell::new(Vec::new())),
+                &["a"],
             ),
             true,
             "DB",
