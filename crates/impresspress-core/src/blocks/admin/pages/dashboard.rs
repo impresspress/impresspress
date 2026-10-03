@@ -1,7 +1,7 @@
 use std::collections::HashMap;
 
 use maud::{html, Markup};
-use wafer_run::{context::Context, Message, OutputStream};
+use wafer_run::{context::Context, Message, OutputStream, WaferError};
 
 use super::{admin_page, crumb, status_code_badge_variant};
 use crate::{
@@ -106,9 +106,11 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
     // though — each round-trip is a billed statement on Cloudflare — so the
     // header tiles now fold their several per-filter counts into ONE aggregate
     // per table (conditional `CaseWhenSum` columns), and the two REQUEST_LOGS
-    // chart series come from ONE grouped-by-day statement. That is six D1
+    // chart series come from ONE grouped-by-day statement. That is eight D1
     // statements to render the whole page (was ten): two consolidated header
-    // aggregates, two recent-row lists, and two daily grouped aggregates.
+    // aggregates, two recent-row lists, two daily grouped aggregates, and two
+    // one-row reads of the oldest account and the oldest logged request,
+    // which tell each chart how far back its series really goes.
     let (start_30d, start_iso) = window_30d();
 
     let user_counts_fut = users::active_count_and_created_since(ctx, &today_start);
@@ -121,6 +123,9 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
 
     let recent_errors_fut = request_logs::list_recent_errors(ctx, 5);
 
+    let first_user_fut = users::first_created_at(ctx);
+    let first_request_fut = request_logs::first_logged_at(ctx);
+
     let (
         user_counts_r,
         request_counts_r,
@@ -128,6 +133,8 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
         recent_errors_r,
         users_daily_r,
         request_days_r,
+        first_user_r,
+        first_request_r,
     ) = futures::join!(
         user_counts_fut,
         request_counts_fut,
@@ -135,7 +142,28 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
         recent_errors_fut,
         users_daily_fut,
         requests_daily_fut,
+        first_user_fut,
+        first_request_fut,
     );
+
+    // How far back each chart's records go. A failed read makes no claim
+    // (`Unknown`): the chart is still drawn, without the history note.
+    let history = |first: Result<Option<String>, WaferError>, what: &str| match first {
+        Ok(Some(at)) => at
+            .get(..10)
+            .and_then(|d| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok())
+            .map_or(
+                components::ChartHistory::Unknown,
+                components::ChartHistory::Since,
+            ),
+        Ok(None) => components::ChartHistory::Empty,
+        Err(e) => {
+            tracing::error!(error = %e, "admin dashboard: oldest {what} read failed");
+            components::ChartHistory::Unknown
+        }
+    };
+    let users_history = history(first_user_r, "account");
+    let requests_history = history(first_request_r, "request log");
 
     // Each read is logged and marked where it renders, rather than being
     // published as `0` and the empty state. Everything below reads `Option`:
@@ -227,11 +255,14 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let errors_spark = spark(&errors_daily, "var(--accent-danger)");
 
     let stats = vec![
+        // A running total has no daily series of its own; the signup
+        // sparkline beside it would draw "new per day" under a cumulative
+        // figure and read as the total's trend. No sparkline.
         components::stat_card(
             "Total Users",
             tile_value(&user_count_str),
             icons::users(),
-            new_users_spark.clone(),
+            None,
         ),
         components::stat_card(
             "New Today",
@@ -245,8 +276,14 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
             icons::file_text(),
             requests_spark,
         ),
+        // Every 4xx and 5xx response (`request_logs::ERROR_STATUS_FLOOR`), so
+        // the label says so: "Errors" read as server failures while most of
+        // the count is clients' 404s and 401s. The same definition, and the
+        // same "4xx/5xx" name, is used by the chart below, the "Recent
+        // 4xx/5xx" card and the logs page's "4xx/5xx only" filter they link
+        // to.
         components::stat_card(
-            "Errors Today",
+            "4xx/5xx Today",
             tile_value(&errors_str),
             icons::triangle_alert(),
             errors_spark,
@@ -276,7 +313,7 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
                             html! { (record.email) },
                             // `.text-right` needs a block box to align against,
                             // and the component owns the `<td>`.
-                            html! { div .text-muted .text-right { time datetime=(created) { (created.get(..10).unwrap_or(created)) } } },
+                            html! { div .text-muted .text-right { (components::timestamp(created)) } },
                         ])
                     }).collect();
                     (components::DataTable::new(&RECENT_USERS_COLUMNS).rows(rows).headless().render())
@@ -291,13 +328,13 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let recent_errors_card = html! {
         section .card {
             header .card__head {
-                h2 .card__title { "Recent Errors" }
+                h2 .card__title { "Recent 4xx/5xx" }
                 a .btn .btn--ghost .btn--sm .card__actions href="/b/admin/logs?errors=1" { "View all" }
             }
             div .card__body {
                 @if let Some(recent_errors) = &recent_errors {
                 @if recent_errors.is_empty() {
-                    p .text-muted .text-sm { "No errors recently" }
+                    p .text-muted .text-sm { "No 4xx/5xx responses recently" }
                 } @else {
                     @let rows: Vec<Vec<Markup>> = recent_errors.iter().map(|row| {
                         let code = row.status_code;
@@ -305,8 +342,8 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
                         vec![
                             Badge::new(status_code_badge_variant(code)).render(html! { (code) }),
                             html! { span .font-medium { (row.method.to_uppercase()) } },
-                            html! { (row.path) },
-                            html! { span .text-muted { (created.get(..19).unwrap_or(created)) } },
+                            html! { (components::breakable_id(&row.path)) },
+                            html! { span .text-muted { (components::timestamp(created)) } },
                         ]
                     }).collect();
                     (components::data_table::<fn(usize) -> Option<String>>(
@@ -328,6 +365,7 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
             "New users",
             "Last 30 days",
             series,
+            users_history,
             "var(--primary-color)",
             "/b/admin/users",
         ),
@@ -338,6 +376,7 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
             "Requests",
             "Last 30 days",
             series,
+            requests_history,
             "var(--accent-warning)",
             "/b/admin/logs",
         ),
@@ -345,13 +384,18 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
     };
     let errors_chart = match &errors_daily {
         Some(series) => components::line_chart_card(
-            "Errors",
+            "4xx/5xx responses",
             "Last 30 days",
             series,
+            requests_history,
             "var(--accent-danger)",
             "/b/admin/logs?errors=1",
         ),
-        None => chart_unavailable_card("Errors", "Last 30 days", "/b/admin/logs?errors=1"),
+        None => chart_unavailable_card(
+            "4xx/5xx responses",
+            "Last 30 days",
+            "/b/admin/logs?errors=1",
+        ),
     };
 
     let charts_section = html! {
@@ -390,33 +434,15 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
 /// because the `data-label` the component stamps on every `<td>` is what names
 /// the cells when the table collapses to cards on a narrow viewport.
 const RECENT_USERS_COLUMNS: [components::TableCol<'static>; 2] = [
-    components::TableCol {
-        label: "Email",
-        width: None,
-    },
-    components::TableCol {
-        label: "Created",
-        width: None,
-    },
+    components::TableCol::new("Email").primary(),
+    components::TableCol::new("Created"),
 ];
 
 const RECENT_ERRORS_COLUMNS: [components::TableCol<'static>; 4] = [
-    components::TableCol {
-        label: "Status",
-        width: None,
-    },
-    components::TableCol {
-        label: "Method",
-        width: None,
-    },
-    components::TableCol {
-        label: "Path",
-        width: None,
-    },
-    components::TableCol {
-        label: "Time",
-        width: None,
-    },
+    components::TableCol::new("Status"),
+    components::TableCol::new("Method"),
+    components::TableCol::new("Path").primary(),
+    components::TableCol::new("Time"),
 ];
 
 #[cfg(test)]
@@ -515,7 +541,7 @@ mod outage_tests {
     //! rest of the page still renders. What it must never do is what it did:
     //! publish the failure as the number `0` and the empty state, so a
     //! deployment in trouble rendered as a healthy, unused one — "Total Users
-    //! 0", "Errors Today 0", "No errors recently", and three flat charts
+    //! 0", "Errors Today 0", "No 4xx/5xx responses recently", and three flat charts
     //! along the axis.
 
     use super::*;
@@ -547,7 +573,7 @@ mod outage_tests {
             "all five stat tiles are fed by the two failed aggregates"
         );
         assert!(
-            !html.contains("No errors recently"),
+            !html.contains("No 4xx/5xx responses recently"),
             "an unreadable error log must not render as 'no errors recently': {html}"
         );
         assert!(
@@ -560,7 +586,7 @@ mod outage_tests {
             "two recent-row cards and three chart cards each carry a marker"
         );
         assert!(
-            !html.contains("chart__plot") && !html.contains("charts-css"),
+            !html.contains("chart__plot") && !html.contains("chart__bar"),
             "a chart whose series could not be read must not be plotted at all — a \
              zero-filled 30-day series draws a flat line along the axis, which is a \
              picture of 'nothing happened': {html}"
@@ -585,7 +611,7 @@ mod outage_tests {
             "a healthy dashboard carries no unavailable marker: {html}"
         );
         assert!(
-            html.contains("No users yet") && html.contains("No errors recently"),
+            html.contains("No users yet") && html.contains("No 4xx/5xx responses recently"),
             "the genuine empty states still render on a healthy, unused deployment: {html}"
         );
         assert_eq!(
@@ -595,8 +621,79 @@ mod outage_tests {
             "all three chart cards render"
         );
         assert!(
-            html.contains("chart__plot") && html.contains("charts-css"),
+            html.contains("chart__plot") && html.contains("chart__bar"),
             "both the line charts and the bar chart are plotted: {html}"
+        );
+    }
+
+    /// "Total Users" is cumulative: no per-day sparkline under it. The error
+    /// tile says what it counts.
+    #[tokio::test]
+    async fn the_cumulative_tile_has_no_sparkline_and_the_error_tile_says_4xx_5xx() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        let html = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
+        let tile = |label: &str| {
+            let at = html
+                .find(&format!(r#"<div class="stat-label">{label}</div>"#))
+                .unwrap_or_else(|| panic!("no {label} tile: {html}"));
+            let start = html[..at].rfind(r#"<div class="stat-card">"#).unwrap();
+            html[start..at].to_string()
+        };
+        assert!(!tile("Total Users").contains("stat-spark"), "{html}");
+        assert!(tile("New Today").contains("stat-spark"), "{html}");
+        assert!(tile("4xx/5xx Today").contains("stat-spark"), "{html}");
+        assert!(!html.contains("Errors Today"), "{html}");
+    }
+
+    /// The chart notes follow how far the records go back. A request log
+    /// that began 40 days ago with no 4xx/5xx since says "None in the last 30
+    /// days" — zero is data — and never "Collecting data".
+    #[tokio::test]
+    async fn chart_notes_follow_the_oldest_record_not_the_first_non_zero_day() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        let fresh = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
+        assert_eq!(
+            fresh
+                .matches("Collecting data — nothing recorded yet")
+                .count(),
+            3,
+            "no accounts and no request log yet: all three charts say so: {fresh}"
+        );
+
+        let at = (chrono::Utc::now() - chrono::Duration::days(40)).to_rfc3339();
+        request_logs::insert_at(
+            &ctx,
+            "old",
+            &request_logs::NewRequestLog {
+                method: "GET",
+                path: "/",
+                status_code: 200,
+                error_message: "",
+                duration_ms: 1,
+                client_ip: "203.0.113.7",
+                user_id: "",
+            },
+            &at,
+        )
+        .await
+        .expect("seed an old request log row");
+
+        let html = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
+        assert_eq!(
+            html.matches(r#"<p class="chart__note">None in the last 30 days</p>"#)
+                .count(),
+            2,
+            "requests and 4xx/5xx: covered and all zero: {html}"
+        );
+        assert_eq!(
+            html.matches("Collecting data — nothing recorded yet")
+                .count(),
+            1,
+            "only the signup chart still has no records: {html}"
         );
     }
 
@@ -611,7 +708,7 @@ mod outage_tests {
         let html = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
 
         assert!(
-            html.contains(r#"datetime="2026-01-01T00:00:00Z">2026-01-01</time>"#),
+            html.contains(r#"datetime="2026-01-01T00:00:00.000Z" title="2026-01-01T00:00:00.000Z">2026-01-01 00:00 UTC</time>"#),
             "the Recent Users date must be a <time>: {html}"
         );
     }

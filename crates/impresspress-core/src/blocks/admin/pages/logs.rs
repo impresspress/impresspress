@@ -138,7 +138,7 @@ async fn system_logs_tab(ctx: &dyn Context, msg: &Message) -> Result<Markup, Waf
 
             @if errors_only {
                 div .flex .items-center .gap-2 .mb-2 .text-sm {
-                    span .text-muted { "Errors only (status " (request_logs::ERROR_STATUS_FLOOR) "+)" }
+                    span .text-muted { "4xx/5xx only (status " (request_logs::ERROR_STATUS_FLOOR) "+)" }
                     a .btn .btn--ghost .btn--sm
                         href=(all_rows_href)
                         hx-get=(all_rows_href)
@@ -150,7 +150,7 @@ async fn system_logs_tab(ctx: &dyn Context, msg: &Message) -> Result<Markup, Waf
                     href=(errors_href)
                     hx-get=(errors_href)
                     hx-target="#content"
-                { (icons::triangle_alert()) " Errors only" }
+                { (icons::triangle_alert()) " 4xx/5xx only" }
             }
         }
 
@@ -162,14 +162,14 @@ async fn system_logs_tab(ctx: &dyn Context, msg: &Message) -> Result<Markup, Waf
             vec![
                 Badge::new(status_code_badge_variant(status_code)).render(html! { (status_code) }),
                 html! { span .font-medium { (row.method.to_uppercase()) } },
-                html! { (path) },
+                html! { (components::breakable_id(path)) },
                 html! { span .text-muted { (row.duration_ms) "ms" } },
                 html! {
                     @if !user_id.is_empty() {
                         span .text-muted { (user_id.get(..8).unwrap_or(user_id)) }
                     }
                 },
-                html! { span .text-muted { (created.get(..19).unwrap_or(created)) } },
+                html! { span .text-muted { (components::timestamp(created)) } },
             ]
         }).collect();
 
@@ -179,7 +179,7 @@ async fn system_logs_tab(ctx: &dyn Context, msg: &Message) -> Result<Markup, Waf
             None,
             html! {
                 p .text-center .text-muted {
-                    @if errors_only { "No error request logs" } @else { "No request logs yet" }
+                    @if errors_only { "No 4xx/5xx request logs" } @else { "No request logs yet" }
                 }
             },
         ))
@@ -231,7 +231,7 @@ async fn audit_logs_tab(ctx: &dyn Context, msg: &Message) -> Result<Markup, Wafe
                 html! { (record.str_field("resource")) },
                 html! { span .text-muted { (user_id.get(..8).unwrap_or(user_id)) } },
                 html! { span .text-muted { (record.str_field("ip_address")) } },
-                html! { span .text-muted { (created.get(..19).unwrap_or(created)) } },
+                html! { span .text-muted { (components::timestamp(created)) } },
             ]
         }).collect();
 
@@ -251,53 +251,20 @@ async fn audit_logs_tab(ctx: &dyn Context, msg: &Message) -> Result<Markup, Wafe
 /// The two log tables' columns. Declared once each so the `<td data-label>`
 /// the component stamps on every cell names the same column its header does.
 const SYSTEM_LOG_COLUMNS: [components::TableCol<'static>; 6] = [
-    components::TableCol {
-        label: "Status",
-        width: None,
-    },
-    components::TableCol {
-        label: "Method",
-        width: None,
-    },
-    components::TableCol {
-        label: "Path",
-        width: None,
-    },
-    components::TableCol {
-        label: "Duration",
-        width: None,
-    },
-    components::TableCol {
-        label: "User",
-        width: None,
-    },
-    components::TableCol {
-        label: "Time",
-        width: None,
-    },
+    components::TableCol::new("Status"),
+    components::TableCol::new("Method"),
+    components::TableCol::new("Path").primary(),
+    components::TableCol::new("Duration"),
+    components::TableCol::new("User").optional(),
+    components::TableCol::new("Time"),
 ];
 
 const AUDIT_LOG_COLUMNS: [components::TableCol<'static>; 5] = [
-    components::TableCol {
-        label: "Action",
-        width: None,
-    },
-    components::TableCol {
-        label: "Resource",
-        width: None,
-    },
-    components::TableCol {
-        label: "User",
-        width: None,
-    },
-    components::TableCol {
-        label: "IP",
-        width: None,
-    },
-    components::TableCol {
-        label: "Time",
-        width: None,
-    },
+    components::TableCol::new("Action"),
+    components::TableCol::new("Resource").primary(),
+    components::TableCol::new("User"),
+    components::TableCol::new("IP"),
+    components::TableCol::new("Time"),
 ];
 
 #[cfg(test)]
@@ -396,7 +363,7 @@ mod tests {
     }
 
     /// The link the dashboard emits and the filter the Logs page reads are
-    /// one contract: whatever the dashboard's "Recent Errors" and error-chart
+    /// one contract: whatever the dashboard's "Recent 4xx/5xx" and error-chart
     /// cards link to must narrow the page. A link naming a parameter the page
     /// does not read is silent — it opens the unfiltered list — so nothing but
     /// a test that follows the link itself can catch the two drifting apart.
@@ -462,7 +429,7 @@ mod tests {
             "the page offers a way back to all rows, keeping the search: {html}"
         );
         assert!(
-            html.contains("Errors only"),
+            html.contains("4xx/5xx only"),
             "the active filter is named on the page: {html}"
         );
         // The search box's own Clear and the error filter's way out are two

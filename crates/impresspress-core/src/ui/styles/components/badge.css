@@ -1,8 +1,13 @@
-/* Badges */
+/* Badges. The base is neutral (slate): a badge that names a state or a
+   category is information, not an alert, and brand red is kept for primary
+   actions and `.badge-primary`. One line always -- a status that wraps in a
+   narrow column reads as two badges. */
 .badge {
 	display: inline-flex; align-items: center;
 	padding: var(--space-1) var(--space-2); border-radius: 4px;
 	font-size: 0.75rem; font-weight: 500;
+	white-space: nowrap;
+	background: var(--border-color); color: var(--text-primary);
 }
 
 .badge-success { background: #10b98119; color: var(--accent-success-text); }
@@ -17,13 +22,10 @@
    text-safe sibling and already existed; this rule simply never adopted it,
    the way .alert--warning did. */
 .badge-warning { background: #f59e0b19; color: var(--accent-warning-text); }
-/* --accent-info was #fd3534, byte-identical to --primary-color -- the
-   white-on-red bug (Task 12a) hiding behind an alias, here in the reverse
-   (text) direction. --accent-info/--accent-info-bg are retired (see
-   tokens.css); a local 6% color-mix plus --primary-button (4.60:1,
-   computed) matches .badge-primary's fix above. */
-.badge-info { background: color-mix(in srgb, var(--primary-color) 6%, var(--surface-1)); color: var(--primary-button); }
-.badge-secondary { background: #e2e8f0; color: #334155; }
+/* Info and secondary are the neutral base, named for the callers that
+   pick a variant. Info used to be a brand-red tint, which put the primary
+   colour on every informational count and category on the admin pages. */
+.badge-info, .badge-secondary { background: var(--border-color); color: var(--text-primary); }
 .badge--center { justify-content: center; }
 
 /* ===== Tone badges (blocks/admin/pages/blocks.rs block-detail modal) =====

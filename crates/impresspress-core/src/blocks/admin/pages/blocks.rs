@@ -597,37 +597,16 @@ fn custom_tab_content() -> maud::Markup {
 /// its header does; the two widths are the ones the old `th .w-70` / `.w-80`
 /// utility classes gave those headers.
 const ENDPOINT_COLUMNS: [components::TableCol<'static>; 4] = [
-    components::TableCol {
-        label: "Method",
-        width: Some("70px"),
-    },
-    components::TableCol {
-        label: "Path",
-        width: None,
-    },
-    components::TableCol {
-        label: "Description",
-        width: None,
-    },
-    components::TableCol {
-        label: "Auth",
-        width: Some("80px"),
-    },
+    components::TableCol::new("Method").width("70px"),
+    components::TableCol::new("Path"),
+    components::TableCol::new("Description"),
+    components::TableCol::new("Auth").width("80px"),
 ];
 
 const CONFIG_KEY_COLUMNS: [components::TableCol<'static>; 3] = [
-    components::TableCol {
-        label: "Key",
-        width: None,
-    },
-    components::TableCol {
-        label: "Description",
-        width: None,
-    },
-    components::TableCol {
-        label: "Default",
-        width: None,
-    },
+    components::TableCol::new("Key"),
+    components::TableCol::new("Description"),
+    components::TableCol::new("Default"),
 ];
 
 /// Regression coverage for the swallowed-failure finding: block enable/disable

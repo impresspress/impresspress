@@ -9,7 +9,7 @@ use wafer_run::{context::Context, Message, OutputStream, WaferError};
 
 use super::service::{display_index_name, vector_backend_available, IndexRow};
 use crate::ui::{
-    self,
+    self, components,
     shell::Crumb,
     templates::{detail_page, list_page, DetailHero, DetailMeta},
 };
@@ -188,16 +188,20 @@ pub async fn index_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         None,
         html! {
             @if !backend_available {
-                div .callout .callout--warning {
-                    strong { "Vector backend not available" }
-                    p .mt-1 .text-13 {
-                        "The "
-                        code .callout__code { "wafer-run/vector" }
-                        " block isn't registered in this build, so indexes can't be created or queried here. Use the browser-WASM build (with "
-                        code .callout__code { "impresspress-web" }
-                        ") or wire a vector service via your runtime config."
-                    }
-                }
+                (components::callout(
+                    components::CalloutTone::Warning,
+                    "Vector backend not available",
+                    html! {
+                        p {
+                            "The "
+                            code .callout__code { "wafer-run/vector" }
+                            " block isn't registered in this build, so indexes can't be created or queried here. Use the browser-WASM build (with "
+                            code .callout__code { "impresspress-web" }
+                            ") or wire a vector service via your runtime config."
+                        }
+                    },
+                    None,
+                ))
             }
             div #vector-index-list { (render_index_list_table(&rows)) }
             @if backend_available {

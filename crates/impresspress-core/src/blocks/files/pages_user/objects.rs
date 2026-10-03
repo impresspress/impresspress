@@ -535,7 +535,7 @@ mod tests {
         );
         // ...while the visible text is the humanized form, not the raw string.
         assert!(
-            html.contains(">2026-07-11 19:13<"),
+            html.contains(">2026-07-11 19:13 UTC<"),
             "visible modified text not humanized: {html}"
         );
         assert!(

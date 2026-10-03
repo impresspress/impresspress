@@ -167,26 +167,11 @@ async fn users_table(
 /// so the single-row htmx swap in [`user_row_fragment`] renders against the
 /// same list the table did.
 const USER_COLUMNS: [components::TableCol<'static>; 5] = [
-    components::TableCol {
-        label: "Email",
-        width: None,
-    },
-    components::TableCol {
-        label: "Roles",
-        width: None,
-    },
-    components::TableCol {
-        label: "Status",
-        width: None,
-    },
-    components::TableCol {
-        label: "Created",
-        width: None,
-    },
-    components::TableCol {
-        label: "Actions",
-        width: None,
-    },
+    components::TableCol::new("Email").primary(),
+    components::TableCol::new("Roles"),
+    components::TableCol::new("Status"),
+    components::TableCol::new("Created"),
+    components::TableCol::new("Actions").actions(),
 ];
 
 /// Render one row of the users table. Shared between the multi-row table
@@ -205,10 +190,10 @@ fn single_user_row(record: &UserRow, roles: &[String], current_uid: &str) -> com
         html! { (email) },
         html! {
             @for role in roles {
-                (Badge::new(BadgeVariant::Primary).classes("mr-1").render(html! { (role) }))
+                (Badge::new(BadgeVariant::Secondary).classes("mr-1").render(html! { (role) }))
             }
             @if roles.is_empty() {
-                span .text-muted { "\u{2014}" }
+                span .text-muted { (components::NO_VALUE) }
             }
         },
         html! {
@@ -218,7 +203,7 @@ fn single_user_row(record: &UserRow, roles: &[String], current_uid: &str) -> com
                 (components::status_badge("active"))
             }
         },
-        html! { time .text-muted datetime=(created) { (created.get(..10).unwrap_or(created)) } },
+        html! { span .text-muted { (components::timestamp(created)) } },
         html! {
                 @if is_self {
                     span .text-muted { "(you)" }
@@ -495,13 +480,16 @@ async fn roles_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
             let name = record.str_field("name");
             let is_system = record.bool_field("is_system");
             vec![
-                html! { span .font-medium { (name) } },
-                html! { span .text-muted { (record.str_field("description")) } },
+                html! { (name) },
+                html! {
+                    @let description = record.str_field("description");
+                    @if !description.is_empty() { span .text-muted { (description) } }
+                },
                 html! {
                     @if is_system {
-                        (badge(BadgeVariant::Info, "System"))
+                        (badge(BadgeVariant::Secondary, "System"))
                     } @else {
-                        (badge(BadgeVariant::Primary, "Custom"))
+                        (badge(BadgeVariant::Secondary, "Custom"))
                     }
                 },
                 html! {
@@ -575,7 +563,7 @@ async fn api_keys_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
                 html! { code { (record.key_prefix) "..." } },
                 html! { (record.name) },
                 html! { span .text-muted { (user_id.get(..8).unwrap_or(user_id)) } },
-                html! { span .text-muted { (created.get(..10).unwrap_or(created)) } },
+                html! { span .text-muted { (components::timestamp(created)) } },
                 html! {
                     @if let Some(reason) = retired {
                         (components::badge(components::BadgeVariant::Danger, reason))
@@ -627,49 +615,19 @@ async fn api_keys_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
 /// `<td data-label>` the component stamps on every cell names the same column
 /// its header does.
 const ROLE_COLUMNS: [components::TableCol<'static>; 4] = [
-    components::TableCol {
-        label: "Name",
-        width: None,
-    },
-    components::TableCol {
-        label: "Description",
-        width: None,
-    },
-    components::TableCol {
-        label: "Type",
-        width: None,
-    },
-    components::TableCol {
-        label: "Actions",
-        width: None,
-    },
+    components::TableCol::new("Name").primary(),
+    components::TableCol::new("Description").optional(),
+    components::TableCol::new("Type"),
+    components::TableCol::new("Actions").actions(),
 ];
 
 const API_KEY_COLUMNS: [components::TableCol<'static>; 6] = [
-    components::TableCol {
-        label: "Prefix",
-        width: None,
-    },
-    components::TableCol {
-        label: "Name",
-        width: None,
-    },
-    components::TableCol {
-        label: "User",
-        width: None,
-    },
-    components::TableCol {
-        label: "Created",
-        width: None,
-    },
-    components::TableCol {
-        label: "Status",
-        width: None,
-    },
-    components::TableCol {
-        label: "Actions",
-        width: None,
-    },
+    components::TableCol::new("Prefix"),
+    components::TableCol::new("Name").primary(),
+    components::TableCol::new("User"),
+    components::TableCol::new("Created"),
+    components::TableCol::new("Status"),
+    components::TableCol::new("Actions").actions(),
 ];
 
 #[cfg(test)]
@@ -697,7 +655,7 @@ mod tests {
 
         assert_eq!(parts.status, 200, "{html}");
         assert!(
-            html.contains(r#"datetime="2026-01-01T00:00:00Z">2026-01-01</time>"#),
+            html.contains(r#"datetime="2026-01-01T00:00:00.000Z" title="2026-01-01T00:00:00.000Z">2026-01-01 00:00 UTC</time>"#),
             "the Created cell must be a <time>: {html}"
         );
     }

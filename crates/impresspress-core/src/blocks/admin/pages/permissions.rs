@@ -515,23 +515,18 @@ async fn permissions_all_tab(
                         "No permissions configured yet."
                     }
                 } @else {
+                    // The type is a category, not a status: one neutral
+                    // badge for all of them (D5) — status colours (amber,
+                    // green) read as "warning" and "OK".
                     @let rows: Vec<Vec<Markup>> = all_rows.iter().map(|row| {
-                        let variant = match row.type_label.as_str() {
-                            "DB" | "DB/Config" => BadgeVariant::Info,
-                            "Config" => BadgeVariant::Info,
-                            "Storage" => BadgeVariant::Warning,
-                            "Network" => BadgeVariant::Success,
-                            "Crypto" => BadgeVariant::Secondary,
-                            _ => BadgeVariant::Secondary,
-                        };
                         vec![
-                            Badge::new(variant).classes("text-11").render(html! { (row.type_label) }),
+                            Badge::new(BadgeVariant::Secondary).classes("text-11").render(html! { (row.type_label) }),
                             html! { span .text-13 { (row.sentence) } },
                             html! {
                                 @if row.origin == "code" {
                                     (Badge::new(BadgeVariant::Secondary).classes("text-10").render(html! { "code" }))
                                 } @else {
-                                    (Badge::new(BadgeVariant::Primary).classes("text-10").render(html! { "custom" }))
+                                    (Badge::new(BadgeVariant::Secondary).classes("text-10").render(html! { "custom" }))
                                 }
                             },
                         ]
@@ -567,68 +562,26 @@ async fn permissions_database_tab(
 /// `.w-110` utility classes gave those headers, and the unlabelled column is
 /// the one that only carries the delete control.
 const CODE_GRANT_COLUMNS: [components::TableCol<'static>; 5] = [
-    components::TableCol {
-        label: "Block (Owner)",
-        width: None,
-    },
-    components::TableCol {
-        label: "Grantee",
-        width: None,
-    },
-    components::TableCol {
-        label: "Type",
-        width: None,
-    },
-    components::TableCol {
-        label: "Resource Pattern",
-        width: None,
-    },
-    components::TableCol {
-        label: "Access",
-        width: None,
-    },
+    components::TableCol::new("Block (Owner)"),
+    components::TableCol::new("Grantee").primary(),
+    components::TableCol::new("Type"),
+    components::TableCol::new("Resource Pattern"),
+    components::TableCol::new("Access"),
 ];
 
 const CUSTOM_GRANT_COLUMNS: [components::TableCol<'static>; 6] = [
-    components::TableCol {
-        label: "Grantee",
-        width: None,
-    },
-    components::TableCol {
-        label: "Type",
-        width: None,
-    },
-    components::TableCol {
-        label: "Resource Pattern",
-        width: None,
-    },
-    components::TableCol {
-        label: "Access",
-        width: None,
-    },
-    components::TableCol {
-        label: "Description",
-        width: None,
-    },
-    components::TableCol {
-        label: "",
-        width: Some("60px"),
-    },
+    components::TableCol::new("Grantee").primary(),
+    components::TableCol::new("Type"),
+    components::TableCol::new("Resource Pattern"),
+    components::TableCol::new("Access"),
+    components::TableCol::new("Description").optional(),
+    components::TableCol::new("Actions").actions().width("60px"),
 ];
 
 const PERMISSION_COLUMNS: [components::TableCol<'static>; 3] = [
-    components::TableCol {
-        label: "Type",
-        width: Some("110px"),
-    },
-    components::TableCol {
-        label: "Permission",
-        width: None,
-    },
-    components::TableCol {
-        label: "Origin",
-        width: Some("80px"),
-    },
+    components::TableCol::new("Type").width("110px"),
+    components::TableCol::new("Permission").primary(),
+    components::TableCol::new("Origin").width("80px"),
 ];
 
 #[cfg(test)]

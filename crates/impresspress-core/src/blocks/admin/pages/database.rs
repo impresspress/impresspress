@@ -366,39 +366,43 @@ fn render_sql_results(rows: &[db::Record], duration_ms: u128) -> Markup {
         };
     }
 
-    // The grid's columns are the query's, in the order it returned them.
+    // The grid's columns are the query's, in the order it returned them, so
+    // they are built per render rather than declared as a const the way the
+    // fixed tables are.
     let columns = result_columns(rows);
-
-    // The result grid's columns are the query's, so they are built per render
-    // rather than declared as a const the way the fixed tables are.
     let cols: Vec<components::TableCol<'_>> = columns
         .iter()
-        .map(|c| components::TableCol {
-            label: c.as_str(),
-            width: None,
-        })
+        .map(|c| components::TableCol::new(c.as_str()))
         .collect();
-    let cells: Vec<Vec<Markup>> = rows
+    let cells: Vec<components::TableRow> = rows
         .iter()
         .map(|r| {
-            columns
-                .iter()
-                .map(|c| html! { @if let Some(v) = r.data.get(c) { (format_cell(v)) } })
-                .collect()
+            components::TableRow::new(
+                columns
+                    .iter()
+                    .map(|c| html! { @if let Some(v) = r.data.get(c) { (format_cell(v)) } })
+                    .collect(),
+            )
         })
         .collect();
 
+    // A query's columns are arbitrary and can be many: the result stays a
+    // grid at every width, in a labelled, focusable horizontal scroller,
+    // rather than collapsing each row into a card.
     html! {
         p .text-muted .text-sm { (rows.len()) " rows in " (duration_ms) "ms" }
-        (components::data_table::<fn(usize) -> Option<String>>(&cols, cells, None, html! {}))
+        (components::DataTable::new(&cols).rows(cells).scroll("Query results").render())
     }
 }
 
-fn format_cell(v: &serde_json::Value) -> String {
+/// One result value, as the query returned it: the explorer shows what is
+/// stored, so a date-time string is not reformatted the way the curated
+/// tables' `components::timestamp` does.
+fn format_cell(v: &serde_json::Value) -> Markup {
     match v {
-        serde_json::Value::Null => "".to_string(),
-        serde_json::Value::String(s) => s.clone(),
-        other => other.to_string(),
+        serde_json::Value::Null => html! {},
+        serde_json::Value::String(s) => html! { (s) },
+        other => html! { (other.to_string()) },
     }
 }
 
@@ -495,26 +499,11 @@ pub async fn handle_database_query(
 /// The schema panel's columns. Declared once so the `<td data-label>` the
 /// component stamps on every cell names the same column the header does.
 const SCHEMA_COLUMNS: [components::TableCol<'static>; 5] = [
-    components::TableCol {
-        label: "Column",
-        width: None,
-    },
-    components::TableCol {
-        label: "Type",
-        width: None,
-    },
-    components::TableCol {
-        label: "Not null",
-        width: None,
-    },
-    components::TableCol {
-        label: "PK",
-        width: None,
-    },
-    components::TableCol {
-        label: "Default",
-        width: None,
-    },
+    components::TableCol::new("Column").primary(),
+    components::TableCol::new("Type"),
+    components::TableCol::new("Not null"),
+    components::TableCol::new("PK"),
+    components::TableCol::new("Default").optional(),
 ];
 
 #[cfg(test)]

@@ -1393,7 +1393,8 @@ mod tests {
             ".toast",
             ".palette",
             ".stat-",
-            ".charts-css",
+            ".chart__plot",
+            ".callout",
             ".auth-split",
         ] {
             assert!(s.contains(marker), "missing layer marker: {marker}");

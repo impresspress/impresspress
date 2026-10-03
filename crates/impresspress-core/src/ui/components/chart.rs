@@ -1,17 +1,164 @@
-//! Bar chart card. Moved from `blocks/admin/pages/dashboard.rs`.
+//! Dashboard charts: the 30-day line and bar chart cards and the stat-tile
+//! sparkline.
+//!
+//! Both chart cards are one component ([`chart_card`]) with two plot kinds,
+//! so they share the value axis, the gridlines, the per-day tooltips, the
+//! date range, the history note and the accessible table of
+//! values. The drawing is decorative (`aria-hidden`): what a screen reader,
+//! a keyboard or a touch user reads is the "Show values" disclosure under it,
+//! a real `<table>` with a caption.
 
 use maud::{html, Markup};
 
-/// Render a 30-day column bar chart card. `data` is ordered
-/// chronologically; bars are normalized against the max count.
+/// How a [`chart_card`] draws its series.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Plot {
+    /// A line with a shaded area under it and a dot on the last day.
+    Line,
+    /// One column per day.
+    Bars,
+}
+
+/// Render a 30-day column bar chart card. `data` is ordered chronologically,
+/// one `(YYYY-MM-DD, count)` per day; the columns are drawn against the same
+/// value axis as [`line_chart_card`].
 pub fn bar_chart_card(
     title: &str,
     subtitle: &str,
     data: &[(String, i64)],
+    history: ChartHistory,
     color_var: &str,
     view_href: &str,
-) -> maud::Markup {
-    let max = data.iter().map(|(_, v)| *v).max().unwrap_or(0).max(1);
+) -> Markup {
+    chart_card(
+        Plot::Bars,
+        title,
+        subtitle,
+        data,
+        history,
+        color_var,
+        view_href,
+    )
+}
+
+/// 30-day line + area chart with gridlines and y-axis ticks.
+///
+/// `bar_chart_card` renders the same data as columns; pick per series —
+/// the dashboard uses bars for Requests and lines for New users / errors.
+pub fn line_chart_card(
+    title: &str,
+    subtitle: &str,
+    data: &[(String, i64)],
+    history: ChartHistory,
+    color_var: &str,
+    view_href: &str,
+) -> Markup {
+    chart_card(
+        Plot::Line,
+        title,
+        subtitle,
+        data,
+        history,
+        color_var,
+        view_href,
+    )
+}
+
+/// How far back the data behind a chart's series goes — which is not the
+/// same as its first non-zero day: a day with zero requests after logging
+/// began is a measurement, a day before it is not.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChartHistory {
+    /// Records exist from this day on (the day of the oldest one).
+    Since(chrono::NaiveDate),
+    /// Nothing has been recorded yet.
+    Empty,
+    /// Could not be read; the card makes no claim about it.
+    Unknown,
+}
+
+/// A day as the chart labels it: `Sep 3`.
+fn short_day(day: &str) -> String {
+    chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d")
+        .map(|d| d.format("%b %-d").to_string())
+        .unwrap_or_else(|_| day.to_string())
+}
+
+/// The note above a chart, or `None` when the series speaks for itself.
+///
+/// - Nothing recorded yet: "Collecting data — nothing recorded yet".
+/// - Records reach back fewer days than the window: "Collecting data — N
+///   days so far" (with "none yet" when those days are all zero), because the
+///   flat line before them is not data.
+/// - The whole window is covered and every day is zero: "None in the last N
+///   days" — zero is data, and the note says so in words, since an all-zero
+///   plot is easy to misread as an empty one.
+fn history_note(data: &[(String, i64)], history: ChartHistory) -> Option<String> {
+    let window = data.len();
+    let last = data
+        .last()
+        .and_then(|(d, _)| chrono::NaiveDate::parse_from_str(d, "%Y-%m-%d").ok());
+    let all_zero = data.iter().all(|(_, v)| *v == 0);
+    let covered = match (history, last) {
+        (ChartHistory::Unknown, _) | (_, None) => return None,
+        (ChartHistory::Empty, _) => {
+            return Some("Collecting data — nothing recorded yet".to_string())
+        }
+        (ChartHistory::Since(first), Some(last)) => ((last - first).num_days() + 1).max(1) as usize,
+    };
+    if covered < window {
+        let days = if covered == 1 {
+            "1 day".to_string()
+        } else {
+            format!("{covered} days")
+        };
+        let none = if all_zero { "; none yet" } else { "" };
+        Some(format!("Collecting data — {days} so far{none}"))
+    } else if all_zero {
+        Some(format!("None in the last {window} days"))
+    } else {
+        None
+    }
+}
+
+/// The shared chart card.
+///
+/// The plot, its gridlines, its y-axis labels, its bars and its endpoint dot
+/// are all placed from one [`ValueAxis`]: a gridline and its label share the
+/// same fraction of the plot's height, so a label cannot sit beside another
+/// tick's line, and a bar reaches exactly its value.
+///
+/// Over the plot sits one transparent column per day carrying that day's
+/// tooltip (`data-tooltip`). The tooltip is out of layout until shown
+/// (`display: none`), so it never widens the page, and it shows on hover and
+/// on focus — the columns take focus from a tap (`tabindex="-1"`) without
+/// adding thirty tab stops. Keyboard and screen-reader users get the same
+/// values from the "Show values" table.
+fn chart_card(
+    plot: Plot,
+    title: &str,
+    subtitle: &str,
+    data: &[(String, i64)],
+    history: ChartHistory,
+    color_var: &str,
+    view_href: &str,
+) -> Markup {
+    let axis = ValueAxis::for_max(data.iter().map(|(_, v)| *v).max().unwrap_or(0));
+    // Distance from the top of the plot as a percentage, the unit the labels
+    // and the dot are positioned in; the SVG uses the same value scaled to its
+    // 60-unit-tall viewBox.
+    let from_top = |value: i64| (1.0 - axis.fraction(value)) * 100.0;
+    let ticks = axis.ticks();
+    let n = data.len();
+    let note = history_note(data, history);
+    // The line's points, in the 100x60 viewBox (unused by a bar chart).
+    let step = if n > 1 { 100.0 / (n - 1) as f64 } else { 0.0 };
+    let line = data
+        .iter()
+        .enumerate()
+        .map(|(i, (_, v))| format!("{:.2},{:.2}", i as f64 * step, from_top(*v) * 0.6))
+        .collect::<Vec<_>>()
+        .join(" ");
     html! {
         section .card {
             header .card__head {
@@ -22,18 +169,91 @@ pub fn bar_chart_card(
                 a .btn .btn--ghost .btn--sm .card__actions href=(view_href) { "View" }
             }
             div .card__body {
-                table .charts-css .column style=(format!("--chart-color: {color_var}")) {
-                    tbody {
-                        @for (day, val) in data {
-                            tr data-tooltip=(format!("{day}: {val}")) {
-                                td style=(format!("--size: {:.4}", *val as f64 / max as f64)) {
-                                    (val)
+                @if let Some(note) = &note {
+                    p .chart__note { (note) }
+                }
+                // The drawing. Decorative: the table below carries the values.
+                div .chart aria-hidden="true" {
+                    // Every label is stacked in the axis's one grid cell and
+                    // moved down to its gridline by `--tick-y`, so the column
+                    // is as wide as the widest label and each label is centred
+                    // on its line (see `.chart__ytick` in chart.css).
+                    div .chart__yaxis {
+                        @for tick in &ticks {
+                            span .chart__ytick style=(format!("--tick-y: {:.2}%", from_top(*tick))) { (tick) }
+                        }
+                    }
+                    // `--chart-color` is declared on this wrapper (not the <svg>
+                    // itself) so it's visible to the plot, the bars and the
+                    // `.chart__dot` — a CSS custom property only inherits to
+                    // descendants of the element it's set on.
+                    div .chart__plot-wrap style=(format!("--chart-color: {color_var}")) {
+                        svg .chart__plot viewBox="0 0 100 60" preserveAspectRatio="none" {
+                            // maud's `;` void-element syntax emits `<tag attrs>` with no
+                            // closing tag for *any* element name — it isn't restricted to
+                            // real HTML5 void elements. Browsers require SVG shape elements
+                            // (line/polygon/polyline/circle) to be explicitly closed; without
+                            // that, each of these becomes a nested *child* of the previous
+                            // one instead of a sibling, and browsers refuse to paint shape
+                            // elements nested inside another shape element — only the first
+                            // gridline would render. `{}` (an empty block body) generates a
+                            // matched `<tag></tag>` pair, keeping them proper siblings.
+                            @for tick in &ticks {
+                                @let y = format!("{:.2}", from_top(*tick) * 0.6);
+                                line .chart__gridline x1="0" x2="100" y1=(y) y2=(y) {}
+                            }
+                            @if plot == Plot::Line {
+                                polygon .chart__area points=(format!("0,60 {line} 100,60")) {}
+                                polyline .chart__line points=(line) fill="none" {}
+                            }
+                        }
+                        // The endpoint dot is an HTML div positioned with CSS, not an
+                        // SVG <circle>. `viewBox="0 0 100 60"` with
+                        // preserveAspectRatio="none" scales x and y by different
+                        // factors depending on the rendered box size, which distorts a
+                        // circle's *fill geometry* into an ellipse — vector-effect only
+                        // preserves stroke width, it does not help here. A circular div
+                        // positioned by percentage over the plot stays circular at any
+                        // width. `--dot-y`, like the labels' `--tick-y`, is a dynamic
+                        // runtime value passed as a custom property — the only thing
+                        // these inline styles carry.
+                        @if plot == Plot::Line {
+                            @if let Some((_, last)) = data.last() {
+                                div .chart__dot style=(format!("--dot-y: {:.2}%", from_top(*last))) {}
+                            }
+                        }
+                        // One column per day: the bar (for a bar chart) and the
+                        // hover/tap target for that day's tooltip. Columns in the
+                        // outer fifths anchor their tooltip to their own edge so
+                        // it stays inside the card.
+                        div .chart__cols {
+                            @for (i, (day, val)) in data.iter().enumerate() {
+                                @let edge = if i * 5 < n { " chart__col--start" } else if (i + 1) * 5 > n * 4 { " chart__col--end" } else { "" };
+                                div class={ "chart__col" (edge) } tabindex="-1" data-tooltip=(format!("{}: {val}", short_day(day))) {
+                                    @if plot == Plot::Bars {
+                                        div .chart__bar style=(format!("--size: {:.4}", axis.fraction(*val))) {}
+                                    }
                                 }
                             }
                         }
                     }
                 }
                 (date_range(data))
+                details .chart__values {
+                    summary { "Show values" }
+                    table .chart__table {
+                        caption { (title) ", " (subtitle.to_lowercase()) }
+                        thead { tr { th scope="col" { "Day" } th scope="col" { "Count" } } }
+                        tbody {
+                            @for (day, val) in data {
+                                tr {
+                                    th scope="row" { time datetime=(day) { (short_day(day)) } }
+                                    td { (val) }
+                                }
+                            }
+                        }
+                    }
+                }
             }
         }
     }
@@ -43,21 +263,17 @@ pub fn bar_chart_card(
 ///
 /// Each label is a `<time>` carrying the ISO day, because it is a date: the
 /// window ends today, so the text changes every day, and the visual-baseline
-/// suite masks `time` elements for exactly that reason.
+/// suite masks `time` elements (and this whole row) for exactly that reason.
+/// Decorative, like the drawing above it: the values table carries the days.
 fn date_range(data: &[(String, i64)]) -> Markup {
     let label = |day: Option<&String>| -> Markup {
         match day {
-            Some(day) => {
-                let short = chrono::NaiveDate::parse_from_str(day, "%Y-%m-%d")
-                    .map(|d| d.format("%b %-d").to_string())
-                    .unwrap_or_else(|_| day.clone());
-                html! { time datetime=(day) { (short) } }
-            }
+            Some(day) => html! { time datetime=(day) { (short_day(day)) } },
             None => html! { span {} },
         }
     };
     html! {
-        div .charts-css__range {
+        div .chart__range aria-hidden="true" {
             (label(data.first().map(|(d, _)| d)))
             (label(data.last().map(|(d, _)| d)))
         }
@@ -182,105 +398,6 @@ impl ValueAxis {
     }
 }
 
-/// 30-day line + area chart with gridlines and y-axis ticks.
-///
-/// `bar_chart_card` renders the same data as columns; pick per series —
-/// the dashboard uses bars for Requests and lines for New users / Errors.
-///
-/// The plot, its gridlines, its y-axis labels and its endpoint dot are all
-/// placed from one [`ValueAxis`]: a gridline and its label share the same
-/// fraction of the plot's height, so a label cannot sit beside another
-/// tick's line.
-pub fn line_chart_card(
-    title: &str,
-    subtitle: &str,
-    data: &[(String, i64)],
-    color_var: &str,
-    view_href: &str,
-) -> Markup {
-    let axis = ValueAxis::for_max(data.iter().map(|(_, v)| *v).max().unwrap_or(0));
-    // Distance from the top of the plot as a percentage, the unit the labels
-    // and the dot are positioned in; the SVG uses the same value scaled to its
-    // 60-unit-tall viewBox.
-    let from_top = |value: i64| (1.0 - axis.fraction(value)) * 100.0;
-    let step = if data.len() > 1 {
-        100.0 / (data.len() - 1) as f64
-    } else {
-        0.0
-    };
-    let line = data
-        .iter()
-        .enumerate()
-        .map(|(i, (_, v))| format!("{:.2},{:.2}", i as f64 * step, from_top(*v) * 0.6))
-        .collect::<Vec<_>>()
-        .join(" ");
-    let area = format!("0,60 {line} 100,60");
-    let ticks = axis.ticks();
-    html! {
-        section .card {
-            header .card__head {
-                div {
-                    h2 .card__title { (title) }
-                    p .card__subtitle { (subtitle) }
-                }
-                a .btn .btn--ghost .btn--sm .card__actions href=(view_href) { "View" }
-            }
-            div .card__body {
-                div .chart {
-                    // Every label is stacked in the axis's one grid cell and
-                    // moved down to its gridline by `--tick-y`, so the column
-                    // is as wide as the widest label and each label is centred
-                    // on its line (see `.chart__ytick` in chart.css).
-                    div .chart__yaxis {
-                        @for tick in &ticks {
-                            span .chart__ytick style=(format!("--tick-y: {:.2}%", from_top(*tick))) { (tick) }
-                        }
-                    }
-                    // `--chart-color` is declared on this wrapper (not the <svg>
-                    // itself) so it's visible to both the plot and the `.chart__dot`
-                    // div below — a CSS custom property only inherits to descendants
-                    // of the element it's set on, and the dot is now a sibling of the
-                    // svg, not nested inside it.
-                    div .chart__plot-wrap style=(format!("--chart-color: {color_var}")) {
-                        svg .chart__plot viewBox="0 0 100 60" preserveAspectRatio="none"
-                            role="img" aria-label=(format!("{title}, {subtitle}")) {
-                            // maud's `;` void-element syntax emits `<tag attrs>` with no
-                            // closing tag for *any* element name — it isn't restricted to
-                            // real HTML5 void elements. Browsers require SVG shape elements
-                            // (line/polygon/polyline/circle) to be explicitly closed; without
-                            // that, each of these becomes a nested *child* of the previous
-                            // one instead of a sibling, and browsers refuse to paint shape
-                            // elements nested inside another shape element — only the first
-                            // gridline would render. `{}` (an empty block body) generates a
-                            // matched `<tag></tag>` pair, keeping them proper siblings.
-                            @for tick in &ticks {
-                                @let y = format!("{:.2}", from_top(*tick) * 0.6);
-                                line .chart__gridline x1="0" x2="100" y1=(y) y2=(y) {}
-                            }
-                            polygon .chart__area points=(area) {}
-                            polyline .chart__line points=(line) fill="none" {}
-                        }
-                        // The endpoint dot is an HTML div positioned with CSS, not an
-                        // SVG <circle>. `viewBox="0 0 100 60"` with
-                        // preserveAspectRatio="none" scales x and y by different
-                        // factors depending on the rendered box size, which distorts a
-                        // circle's *fill geometry* into an ellipse — vector-effect only
-                        // preserves stroke width, it does not help here. A circular div
-                        // positioned by percentage over the plot stays circular at any
-                        // width. `--dot-y`, like the labels' `--tick-y`, is a dynamic
-                        // runtime value passed as a custom property — the only thing
-                        // these inline styles carry.
-                        @if let Some((_, last)) = data.last() {
-                            div .chart__dot style=(format!("--dot-y: {:.2}%", from_top(*last))) {}
-                        }
-                    }
-                }
-                (date_range(data))
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
     #[test]
@@ -349,6 +466,7 @@ mod tests {
             "New users",
             "Last 30 days",
             &data,
+            super::ChartHistory::Unknown,
             "var(--primary-color)",
             "/b/admin/users",
         )
@@ -369,8 +487,22 @@ mod tests {
     fn chart_date_range_labels_are_time_elements() {
         let data = vec![("2026-08-27".to_string(), 0), ("2026-09-25".to_string(), 4)];
         let cards = [
-            super::line_chart_card("Errors", "Last 30 days", &data, "var(--x)", "/x"),
-            super::bar_chart_card("Requests", "Last 30 days", &data, "var(--x)", "/x"),
+            super::line_chart_card(
+                "Errors",
+                "Last 30 days",
+                &data,
+                super::ChartHistory::Unknown,
+                "var(--x)",
+                "/x",
+            ),
+            super::bar_chart_card(
+                "Requests",
+                "Last 30 days",
+                &data,
+                super::ChartHistory::Unknown,
+                "var(--x)",
+                "/x",
+            ),
         ];
         for card in cards {
             let m = card.into_string();
@@ -380,6 +512,183 @@ mod tests {
                 "range labels are not <time> elements: {m}"
             );
         }
+    }
+
+    fn days(values: &[i64]) -> Vec<(String, i64)> {
+        values
+            .iter()
+            .enumerate()
+            .map(|(i, v)| (format!("2026-09-{:02}", i + 1), *v))
+            .collect()
+    }
+
+    /// The drawing is decorative; the values are a real table with a
+    /// caption, inside a disclosure keyboard and touch users can open.
+    #[test]
+    fn chart_values_are_an_accessible_table_and_the_drawing_is_hidden() {
+        for card in [
+            super::line_chart_card(
+                "New users",
+                "Last 30 days",
+                &days(&[1, 3]),
+                super::ChartHistory::Unknown,
+                "var(--x)",
+                "/x",
+            ),
+            super::bar_chart_card(
+                "New users",
+                "Last 30 days",
+                &days(&[1, 3]),
+                super::ChartHistory::Unknown,
+                "var(--x)",
+                "/x",
+            ),
+        ] {
+            let m = card.into_string();
+            assert!(
+                m.contains(r#"<div class="chart" aria-hidden="true">"#),
+                "{m}"
+            );
+            assert!(
+                m.contains(r#"<div class="chart__range" aria-hidden="true">"#),
+                "{m}"
+            );
+            assert!(
+                m.contains(r#"<details class="chart__values"><summary>Show values</summary><table class="chart__table"><caption>New users, last 30 days</caption>"#),
+                "{m}"
+            );
+            assert!(
+                m.contains(r#"<tr><th scope="row"><time datetime="2026-09-02">Sep 2</time></th><td>3</td></tr>"#),
+                "{m}"
+            );
+        }
+    }
+
+    /// One tooltip column per day, focusable by a tap but not a tab stop,
+    /// with the outer fifths anchored to their own edge.
+    #[test]
+    fn every_day_has_a_tap_focusable_tooltip_column() {
+        let data = days(&[0, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
+        let m = super::line_chart_card(
+            "Requests",
+            "Last 30 days",
+            &data,
+            super::ChartHistory::Unknown,
+            "var(--x)",
+            "/x",
+        )
+        .into_string();
+        assert_eq!(m.matches(r#"tabindex="-1""#).count(), 10, "{m}");
+        assert!(
+            m.contains(r#"<div class="chart__col chart__col--start" tabindex="-1" data-tooltip="Sep 1: 0">"#),
+            "{m}"
+        );
+        assert!(
+            m.contains(r#"<div class="chart__col" tabindex="-1" data-tooltip="Sep 5: 4">"#),
+            "{m}"
+        );
+        assert!(
+            m.contains(
+                r#"<div class="chart__col chart__col--end" tabindex="-1" data-tooltip="Sep 10: 9">"#
+            ),
+            "{m}"
+        );
+        assert!(!m.contains("chart__bar"), "a line chart draws no bars: {m}");
+    }
+
+    /// The bar chart is drawn against the same axis as the line chart: the
+    /// same ticks and gridlines, and each bar's height is its value's
+    /// fraction of the axis top (not of the series maximum).
+    #[test]
+    fn bar_chart_shares_the_line_chart_axis() {
+        let data = days(&[0, 3, 5]);
+        let bars = super::bar_chart_card(
+            "Requests",
+            "Last 30 days",
+            &data,
+            super::ChartHistory::Unknown,
+            "var(--x)",
+            "/x",
+        )
+        .into_string();
+        let line = super::line_chart_card(
+            "Requests",
+            "Last 30 days",
+            &data,
+            super::ChartHistory::Unknown,
+            "var(--x)",
+            "/x",
+        )
+        .into_string();
+        assert_eq!(axis_of(&bars), axis_of(&line));
+        assert_eq!(
+            axis_of(&bars)
+                .0
+                .iter()
+                .map(|(t, _)| t.as_str())
+                .collect::<Vec<_>>(),
+            ["6", "4", "2", "0"]
+        );
+        // 5 of a top of 6, 3 of 6, 0.
+        assert!(bars.contains(r#"style="--size: 0.8333""#), "{bars}");
+        assert!(bars.contains(r#"style="--size: 0.5000""#), "{bars}");
+        assert!(bars.contains(r#"style="--size: 0.0000""#), "{bars}");
+    }
+
+    /// The note follows how far the records go back, not which days are
+    /// non-zero: zero is data once logging has begun.
+    #[test]
+    fn the_history_note_follows_how_far_the_records_go_back() {
+        use super::ChartHistory;
+        let note = |values: &[i64], history: ChartHistory| {
+            let m = super::line_chart_card(
+                "Errors",
+                "Last 30 days",
+                &days(values),
+                history,
+                "var(--x)",
+                "/x",
+            )
+            .into_string();
+            m.split(r#"<p class="chart__note">"#)
+                .nth(1)
+                .map(|rest| rest.split("</p>").next().unwrap().to_string())
+        };
+        let day =
+            |d: u32| ChartHistory::Since(chrono::NaiveDate::from_ymd_opt(2026, 9, d).unwrap());
+        // `days(..)` runs from Sep 1.
+        assert_eq!(
+            note(&[0, 0, 0], ChartHistory::Empty).as_deref(),
+            Some("Collecting data — nothing recorded yet")
+        );
+        assert_eq!(
+            note(&[0, 0, 4], day(3)).as_deref(),
+            Some("Collecting data — 1 day so far")
+        );
+        assert_eq!(
+            note(&[0, 2, 4], day(2)).as_deref(),
+            Some("Collecting data — 2 days so far")
+        );
+        assert_eq!(
+            note(&[0, 0, 0], day(2)).as_deref(),
+            Some("Collecting data — 2 days so far; none yet")
+        );
+        // A healthy, fully covered window of zeros: zero is the answer.
+        assert_eq!(
+            note(&[0, 0, 0], day(1)).as_deref(),
+            Some("None in the last 3 days")
+        );
+        assert_eq!(
+            note(
+                &[0, 0, 0],
+                ChartHistory::Since(chrono::NaiveDate::from_ymd_opt(2026, 1, 1).unwrap())
+            )
+            .as_deref(),
+            Some("None in the last 3 days")
+        );
+        // Covered and non-zero, or unknown: no note.
+        assert_eq!(note(&[0, 0, 1], day(1)), None);
+        assert_eq!(note(&[0, 0, 0], ChartHistory::Unknown), None);
     }
 
     #[test]
@@ -437,8 +746,15 @@ mod tests {
     #[test]
     fn line_chart_labels_sit_on_the_gridline_for_their_value() {
         let data = vec![("2026-08-01".to_string(), 0), ("2026-08-02".to_string(), 1)];
-        let m = super::line_chart_card("New users", "Last 30 days", &data, "var(--x)", "/x")
-            .into_string();
+        let m = super::line_chart_card(
+            "New users",
+            "Last 30 days",
+            &data,
+            super::ChartHistory::Unknown,
+            "var(--x)",
+            "/x",
+        )
+        .into_string();
         let (labels, gridlines) = axis_of(&m);
         assert_eq!(
             labels,
@@ -460,8 +776,15 @@ mod tests {
     #[test]
     fn line_chart_all_zero_series_labels_only_zero() {
         let data = vec![("2026-08-01".to_string(), 0), ("2026-08-02".to_string(), 0)];
-        let m =
-            super::line_chart_card("Errors", "Last 30 days", &data, "var(--x)", "/x").into_string();
+        let m = super::line_chart_card(
+            "Errors",
+            "Last 30 days",
+            &data,
+            super::ChartHistory::Unknown,
+            "var(--x)",
+            "/x",
+        )
+        .into_string();
         let (labels, gridlines) = axis_of(&m);
         assert_eq!(labels, vec![("0".to_string(), 100.0)], "{m}");
         assert_eq!(gridlines, vec![60.0], "{m}");

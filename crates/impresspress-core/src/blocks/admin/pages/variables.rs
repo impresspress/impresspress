@@ -346,7 +346,7 @@ fn variable_cell(
 ) -> Markup {
     html! {
         div .var-cell {
-            code .var-cell__key { (components::breakable_id(key)) }
+            code .var-cell__key .data-table__title { (components::breakable_id(key)) }
             @if let Some(name) = name.filter(|name| !name.is_empty()) {
                 span .var-cell__name { (name) }
             }
@@ -451,35 +451,17 @@ fn var_table(header: Markup, rows: Vec<Vec<Markup>>) -> Markup {
 /// only carries the controls; it keeps the 50px width the old `th .w-50` gave
 /// it.
 const VAR_COLUMNS: [components::TableCol<'static>; 3] = [
-    components::TableCol {
-        label: "Variable",
-        width: None,
-    },
-    components::TableCol {
-        label: "Value",
-        width: None,
-    },
-    components::TableCol {
-        label: "",
-        width: Some("50px"),
-    },
+    components::TableCol::new("Variable").primary(),
+    components::TableCol::new("Value"),
+    components::TableCol::new("Actions").actions().width("50px"),
 ];
 
 /// The "All Variables" tab's columns — the same shape as [`VAR_COLUMNS`], with
 /// an explicitly labelled actions column.
 const ALL_VAR_COLUMNS: [components::TableCol<'static>; 3] = [
-    components::TableCol {
-        label: "Variable",
-        width: None,
-    },
-    components::TableCol {
-        label: "Value",
-        width: None,
-    },
-    components::TableCol {
-        label: "Actions",
-        width: None,
-    },
+    components::TableCol::new("Variable").primary(),
+    components::TableCol::new("Value"),
+    components::TableCol::new("Actions").actions(),
 ];
 
 /// The delete control, shared by every table that offers one so the affordance
