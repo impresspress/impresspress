@@ -9,13 +9,15 @@ use std::{collections::HashMap, sync::Mutex};
 use wafer_core::interfaces::vector::{
     self as vector_rrf,
     service::{
-        check_rename, ColumnInfo, DescribeIndexResponse, DistanceMetric, MetadataFilter,
-        Result as VResult, SearchMode, VectorEntry, VectorError, VectorIndexConfig, VectorMatch,
-        VectorService,
+        ColumnInfo, DescribeIndexResponse, DistanceMetric, MetadataFilter, Result as VResult,
+        SearchMode, VectorEntry, VectorError, VectorIndexConfig, VectorMatch, VectorService,
     },
 };
 
-use crate::{bridge, database, db_codec, vector::sql};
+use crate::{
+    bridge, database, db_codec,
+    vector::sql::{self, IndexName},
+};
 
 fn js_err(e: wasm_bindgen::JsValue) -> String {
     e.as_string().unwrap_or_else(|| format!("{e:?}"))
@@ -76,12 +78,12 @@ impl BrowserVectorService {
     /// row on a cache miss before concluding the index is genuinely absent.
     /// A miss can mean either "no such index" or "cold cache after a
     /// Service Worker restart" — see the `IndexState` doc comment.
-    fn lookup(&self, name: &str) -> VResult<Option<IndexState>> {
+    fn lookup(&self, name: &IndexName) -> VResult<Option<IndexState>> {
         if let Some(state) = self
             .indexes
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .get(name)
+            .get(name.as_str())
             .cloned()
         {
             return Ok(Some(state));
@@ -94,7 +96,7 @@ impl BrowserVectorService {
     /// either the index was never created, or it predates this table
     /// (unrecoverable; falls back to `IndexNotFound` like a genuinely
     /// missing index).
-    fn hydrate(&self, name: &str) -> VResult<Option<IndexState>> {
+    fn hydrate(&self, name: &IndexName) -> VResult<Option<IndexState>> {
         // Idempotent — guarantees the table exists so the SELECT below
         // can't fail with "no such table" on a DB that has never had any
         // index created in it yet.
@@ -109,7 +111,7 @@ impl BrowserVectorService {
         self.indexes
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .insert(name.to_string(), state.clone());
+            .insert(name.as_str().to_string(), state.clone());
         Ok(Some(state))
     }
 
@@ -117,7 +119,7 @@ impl BrowserVectorService {
     /// in-memory cache. Assumes the registry table already exists (callers
     /// run `sql::build_registry_ddl()` first). Shared by `hydrate` (cache
     /// rebuild) and `create_index` (re-create guard).
-    fn read_registry_row(&self, name: &str) -> VResult<Option<IndexState>> {
+    fn read_registry_row(&self, name: &IndexName) -> VResult<Option<IndexState>> {
         let (query, params) = sql::build_registry_select_sql(name);
         let params_js = db_codec::params_to_js(&params).map_err(VectorError::Internal)?;
         let value = bridge::db_query_raw(&query, params_js)
@@ -139,20 +141,24 @@ impl BrowserVectorService {
 #[async_trait::async_trait(?Send)]
 impl VectorService for BrowserVectorService {
     async fn create_index(&self, config: VectorIndexConfig) -> VResult<()> {
+        let name = IndexName::parse(&config.name)?;
         // Everything from the first DDL statement to the last is one logical
         // mutation with one OPFS flush at the end — including the
         // config-mismatch refusal below, which is reached only AFTER the
         // registry DDL has already run. The hand-written `dbFlush()?` this
         // replaced returned early on that path and left the registry table
         // in memory only.
-        database::with_flush_mapped(self.create_index_statements(&config), VectorError::Internal)
-            .await?;
+        database::with_flush_mapped(
+            self.create_index_statements(&name, &config),
+            VectorError::Internal,
+        )
+        .await?;
 
         self.indexes
             .lock()
             .unwrap_or_else(|p| p.into_inner())
             .insert(
-                config.name.clone(),
+                name.as_str().to_string(),
                 IndexState {
                     dimensions: config.dimensions,
                     metric: config.metric,
@@ -163,14 +169,15 @@ impl VectorService for BrowserVectorService {
     }
 
     async fn delete_index(&self, name: &str) -> VResult<()> {
+        let name = IndexName::parse(name)?;
         // Read-only, so it stays outside the flush: a miss must not cost a
         // whole-database write to OPFS.
         let state = self
-            .lookup(name)?
-            .ok_or_else(|| VectorError::IndexNotFound(name.into()))?;
+            .lookup(&name)?
+            .ok_or_else(|| VectorError::IndexNotFound(name.as_str().into()))?;
 
         database::with_flush_mapped(
-            self.delete_index_statements(name, state.keyword_search),
+            self.delete_index_statements(&name, state.keyword_search),
             VectorError::Internal,
         )
         .await?;
@@ -178,7 +185,7 @@ impl VectorService for BrowserVectorService {
         self.indexes
             .lock()
             .unwrap_or_else(|p| p.into_inner())
-            .remove(name);
+            .remove(name.as_str());
         Ok(())
     }
 
@@ -193,18 +200,18 @@ impl VectorService for BrowserVectorService {
     /// case-insensitive table names, so `Docs` and `docs` registry rows can
     /// point at the same tables; refusing leaves the operator to delete one.
     async fn rename_index(&self, from: &str, to: &str) -> VResult<()> {
-        check_rename(from, to)?;
+        let (from, to) = IndexName::rename(from, to)?;
         exec_ddl(
             &[sql::build_registry_ddl()],
             &[sql::REGISTRY_TABLE.to_string()],
         )?;
         let state = self
-            .read_registry_row(from)?
-            .ok_or_else(|| VectorError::IndexNotFound(from.into()))?;
-        if self.read_registry_row(to)?.is_some() {
-            return Err(VectorError::IndexAlreadyExists(to.into()));
+            .read_registry_row(&from)?
+            .ok_or_else(|| VectorError::IndexNotFound(from.as_str().into()))?;
+        if self.read_registry_row(&to)?.is_some() {
+            return Err(VectorError::IndexAlreadyExists(to.as_str().into()));
         }
-        let (conflicts, conflict_params) = sql::build_rename_conflicts_sql(from, to);
+        let (conflicts, conflict_params) = sql::build_rename_conflicts_sql(&from, &to);
         let params_js = db_codec::params_to_js(&conflict_params).map_err(VectorError::Internal)?;
         let taken = bridge::db_query_raw(&conflicts, params_js)
             .map_err(|e| VectorError::Internal(js_err(e)))?;
@@ -212,15 +219,18 @@ impl VectorService for BrowserVectorService {
             .map_err(VectorError::Internal)?
             .is_empty()
         {
-            return Err(VectorError::IndexAlreadyExists(to.into()));
+            return Err(VectorError::IndexAlreadyExists(to.as_str().into()));
         }
 
-        let mut touched = sql::index_tables(from, true);
-        touched.extend(sql::index_tables(to, true));
+        let mut touched = sql::index_tables(&from, true);
+        touched.extend(sql::index_tables(&to, true));
         database::with_flush_mapped(
             async {
-                let moved =
-                    in_transaction(&sql::build_rename_index_sql(from, to, state.keyword_search));
+                let moved = in_transaction(&sql::build_rename_index_sql(
+                    &from,
+                    &to,
+                    state.keyword_search,
+                ));
                 for table in &touched {
                     database::forget_table_schema(table);
                 }
@@ -231,8 +241,8 @@ impl VectorService for BrowserVectorService {
         .await?;
 
         let mut indexes = self.indexes.lock().unwrap_or_else(|p| p.into_inner());
-        indexes.remove(from);
-        indexes.insert(to.to_string(), state);
+        indexes.remove(from.as_str());
+        indexes.insert(to.as_str().to_string(), state);
         Ok(())
     }
 
@@ -257,9 +267,10 @@ impl VectorService for BrowserVectorService {
     }
 
     async fn upsert(&self, index: &str, entries: Vec<VectorEntry>) -> VResult<()> {
+        let index = IndexName::parse(index)?;
         let state = self
-            .lookup(index)?
-            .ok_or_else(|| VectorError::IndexNotFound(index.into()))?;
+            .lookup(&index)?
+            .ok_or_else(|| VectorError::IndexNotFound(index.as_str().into()))?;
 
         use base64ct::{Base64, Encoding};
         let prepared: Result<Vec<sql::SqlUpsertEntry>, VectorError> = entries
@@ -293,7 +304,7 @@ impl VectorService for BrowserVectorService {
 
         database::with_flush_mapped(
             async {
-                for stmt in sql::build_upsert_sql_stmts(index, state.keyword_search, &prepared) {
+                for stmt in sql::build_upsert_sql_stmts(&index, state.keyword_search, &prepared) {
                     let params_js =
                         db_codec::params_to_js(&stmt.params).map_err(VectorError::Internal)?;
                     bridge::db_exec_raw(&stmt.sql, params_js)
@@ -315,9 +326,10 @@ impl VectorService for BrowserVectorService {
         mode: SearchMode,
         keyword_query: Option<String>,
     ) -> VResult<Vec<VectorMatch>> {
+        let index = IndexName::parse(index)?;
         let state = self
-            .lookup(index)?
-            .ok_or_else(|| VectorError::IndexNotFound(index.into()))?;
+            .lookup(&index)?
+            .ok_or_else(|| VectorError::IndexNotFound(index.as_str().into()))?;
 
         let needs_keyword = matches!(mode, SearchMode::Keyword | SearchMode::Hybrid);
         if needs_keyword && !state.keyword_search {
@@ -344,7 +356,7 @@ impl VectorService for BrowserVectorService {
 
         match mode {
             SearchMode::Vector => {
-                let candidates = load_all_vectors(index, state.dimensions, &f)?;
+                let candidates = load_all_vectors(&index, state.dimensions, &f)?;
                 let scored = score::top_k_borrowed(
                     &vector,
                     candidates
@@ -358,8 +370,8 @@ impl VectorService for BrowserVectorService {
             SearchMode::Keyword => {
                 let kq =
                     keyword_query.ok_or(VectorError::KeywordQueryRequired(SearchMode::Keyword))?;
-                let ids = fts_search(index, &kq, fetch_n)?;
-                let metadata = load_metadata_for_ids(index, &ids)?;
+                let ids = fts_search(&index, &kq, fetch_n)?;
+                let metadata = load_metadata_for_ids(&index, &ids)?;
                 Ok(ids
                     .into_iter()
                     .enumerate()
@@ -379,7 +391,7 @@ impl VectorService for BrowserVectorService {
             SearchMode::Hybrid => {
                 let kq =
                     keyword_query.ok_or(VectorError::KeywordQueryRequired(SearchMode::Hybrid))?;
-                let candidates = load_all_vectors(index, state.dimensions, &f)?;
+                let candidates = load_all_vectors(&index, state.dimensions, &f)?;
                 let vec_top = score::top_k_borrowed(
                     &vector,
                     candidates
@@ -388,7 +400,7 @@ impl VectorService for BrowserVectorService {
                     fetch_n,
                     state.metric,
                 );
-                let kw_top = fts_search(index, &kq, fetch_n)?;
+                let kw_top = fts_search(&index, &kq, fetch_n)?;
 
                 // Reciprocal Rank Fusion, from the shared implementation the
                 // native sqlite-vec backend also fuses with. `fuse_scored`
@@ -413,7 +425,7 @@ impl VectorService for BrowserVectorService {
                     .into_iter()
                     .filter(|id| !by_id.contains_key(id))
                     .collect();
-                let kw_meta = load_metadata_for_ids(index, &kw_only_ids)?;
+                let kw_meta = load_metadata_for_ids(&index, &kw_only_ids)?;
                 for (id, m) in kw_meta {
                     by_id.insert(id, m);
                 }
@@ -431,9 +443,10 @@ impl VectorService for BrowserVectorService {
     }
 
     async fn delete(&self, index: &str, ids: Vec<String>) -> VResult<()> {
+        let index = IndexName::parse(index)?;
         let state = self
-            .lookup(index)?
-            .ok_or_else(|| VectorError::IndexNotFound(index.into()))?;
+            .lookup(&index)?
+            .ok_or_else(|| VectorError::IndexNotFound(index.as_str().into()))?;
         // Nothing to write, so nothing to flush.
         if ids.is_empty() {
             return Ok(());
@@ -441,7 +454,7 @@ impl VectorService for BrowserVectorService {
         database::with_flush_mapped(
             async {
                 let (stmts, id_params) =
-                    sql::build_delete_ids_sql(index, &ids, state.keyword_search);
+                    sql::build_delete_ids_sql(&index, &ids, state.keyword_search);
                 let params: Vec<serde_json::Value> = id_params
                     .into_iter()
                     .map(serde_json::Value::String)
@@ -464,8 +477,8 @@ impl VectorService for BrowserVectorService {
     /// keyed on the tables rather than on the registry row, because what this
     /// op promises is what is on disk.
     async fn describe_index(&self, index: &str) -> VResult<DescribeIndexResponse> {
-        check_index_name(index)?;
-        let meta = sql::meta_table(index);
+        let index = IndexName::parse(index)?;
+        let meta = sql::meta_table(&index);
         if !table_exists(&meta)? {
             return Ok(DescribeIndexResponse {
                 exists: false,
@@ -491,7 +504,7 @@ impl VectorService for BrowserVectorService {
                 })
             })
             .collect::<VResult<Vec<_>>>()?;
-        let keyword_search = table_exists(&sql::fts_table(index))?;
+        let keyword_search = table_exists(&sql::fts_table(&index))?;
         Ok(DescribeIndexResponse {
             exists: true,
             columns,
@@ -500,17 +513,25 @@ impl VectorService for BrowserVectorService {
     }
 
     /// Ids of the entries whose metadata satisfies every `filter.equals`
-    /// condition, as [`MetadataFilter::matches`] defines it — the same
-    /// predicate `query` filters its candidates with here. The filter must be
-    /// non-empty and its values JSON strings or numbers, as the trait
-    /// requires of every backend.
+    /// condition. The filter must be non-empty and its values JSON strings or
+    /// numbers, as the trait requires of every backend.
+    ///
+    /// Two differences from the native backend, both this backend's own
+    /// rules rather than the trait's:
+    /// - An index is missing when it has no registry row — the test every
+    ///   other op here applies (see `IndexState`) — where native looks for
+    ///   the `_meta` table.
+    /// - A condition holds as [`MetadataFilter::matches`] defines it, the
+    ///   predicate `query` filters with here: JSON value equality, so `1`
+    ///   matches neither `1.0` nor `true`. Native compares `json_extract`
+    ///   output with SQLite's `=`, under which `1` and `1.0` are equal.
     async fn list_ids(&self, index: &str, filter: MetadataFilter) -> VResult<Vec<String>> {
         check_list_ids_filter(&filter)?;
-        check_index_name(index)?;
-        if self.lookup(index)?.is_none() {
-            return Err(VectorError::IndexNotFound(index.into()));
+        let index = IndexName::parse(index)?;
+        if self.lookup(&index)?.is_none() {
+            return Err(VectorError::IndexNotFound(index.as_str().into()));
         }
-        Ok(query_rows(&sql::build_select_meta_sql(index), &[])?
+        Ok(query_rows(&sql::build_select_meta_sql(&index), &[])?
             .into_iter()
             .filter_map(|row| {
                 let id = row.get("id")?.as_str()?.to_string();
@@ -524,10 +545,11 @@ impl VectorService for BrowserVectorService {
     }
 
     async fn count(&self, index: &str) -> VResult<u64> {
-        if self.lookup(index)?.is_none() {
-            return Err(VectorError::IndexNotFound(index.into()));
+        let index = IndexName::parse(index)?;
+        if self.lookup(&index)?.is_none() {
+            return Err(VectorError::IndexNotFound(index.as_str().into()));
         }
-        let value = bridge::db_query_raw(&sql::build_count_sql(index), db_codec::empty_params())
+        let value = bridge::db_query_raw(&sql::build_count_sql(&index), db_codec::empty_params())
             .map_err(|e| VectorError::Internal(js_err(e)))?;
         // sql.js returns rows as `[{ "n": <number> }]`.
         let rows = db_codec::rows_from_js(value).map_err(VectorError::Internal)?;
@@ -544,7 +566,11 @@ impl BrowserVectorService {
     /// Every statement `create_index` writes, as one future so the caller can
     /// wrap it in a single flush. Returns without touching the in-memory
     /// index cache — that update belongs after the write is durable.
-    async fn create_index_statements(&self, config: &VectorIndexConfig) -> VResult<()> {
+    async fn create_index_statements(
+        &self,
+        name: &IndexName,
+        config: &VectorIndexConfig,
+    ) -> VResult<()> {
         // Idempotent — ensures the registry table exists before the select
         // and upsert below, on the very first index ever created in this DB.
         exec_ddl(
@@ -565,7 +591,7 @@ impl BrowserVectorService {
         // stay a no-op (matches native's `IndexAlreadyExists` contract for
         // the collision case, see `wafer-block-sqlite`'s
         // `create_index_duplicate_fails`).
-        if let Some(existing) = self.read_registry_row(&config.name)? {
+        if let Some(existing) = self.read_registry_row(name)? {
             let existing_tuple = (
                 existing.dimensions,
                 existing.metric,
@@ -580,14 +606,14 @@ impl BrowserVectorService {
         }
 
         exec_ddl(
-            &sql::build_create_index_sql(&config.name, config.keyword_search),
-            &sql::index_tables(&config.name, config.keyword_search),
+            &sql::build_create_index_sql(name, config.keyword_search),
+            &sql::index_tables(name, config.keyword_search),
         )?;
 
         // Persist the config so a future cold cache (post-SW-restart) can
         // hydrate this index instead of returning `IndexNotFound`.
         let reg = sql::build_registry_upsert_sql(
-            &config.name,
+            name,
             config.dimensions,
             config.metric,
             config.keyword_search,
@@ -599,7 +625,7 @@ impl BrowserVectorService {
 
     /// Every statement `delete_index` writes, as one future. The in-memory
     /// cache eviction happens in the caller, after the write is durable.
-    async fn delete_index_statements(&self, name: &str, keyword_search: bool) -> VResult<()> {
+    async fn delete_index_statements(&self, name: &IndexName, keyword_search: bool) -> VResult<()> {
         exec_ddl(
             &sql::build_delete_index_sql(name, keyword_search),
             &sql::index_tables(name, keyword_search),
@@ -644,16 +670,6 @@ fn exec_ddl(statements: &[String], tables: &[String]) -> VResult<()> {
         database::forget_table_schema(table);
     }
     ran
-}
-
-/// Refuse an index name that is not a plain identifier, as the native
-/// backend does for the ops that introspect the catalog by name.
-fn check_index_name(index: &str) -> VResult<()> {
-    if wafer_block::db::is_plain_ident(index) {
-        Ok(())
-    } else {
-        Err(VectorError::InvalidIndexName(index.to_string()))
-    }
 }
 
 /// The `list_ids` filter rule every backend applies: at least one condition,
@@ -735,7 +751,7 @@ struct VectorBlobRow {
     metadata: Option<String>,
 }
 
-fn load_all_vectors(index: &str, dims: u32, f: &MetadataFilter) -> VResult<Vec<VectorRow>> {
+fn load_all_vectors(index: &IndexName, dims: u32, f: &MetadataFilter) -> VResult<Vec<VectorRow>> {
     let s = format!(r#"SELECT id, vector, metadata FROM "{index}_vectors""#);
     let value = bridge::db_query_raw(&s, db_codec::empty_params())
         .map_err(|e| VectorError::Internal(js_err(e)))?;
@@ -755,7 +771,7 @@ fn load_all_vectors(index: &str, dims: u32, f: &MetadataFilter) -> VResult<Vec<V
     Ok(out)
 }
 
-fn fts_search(index: &str, query: &str, limit: usize) -> VResult<Vec<String>> {
+fn fts_search(index: &IndexName, query: &str, limit: usize) -> VResult<Vec<String>> {
     let s = format!(
         r#"SELECT id FROM "{index}_fts" WHERE "{index}_fts" MATCH ? ORDER BY rank LIMIT ?"#
     );
@@ -771,7 +787,7 @@ fn fts_search(index: &str, query: &str, limit: usize) -> VResult<Vec<String>> {
 }
 
 fn load_metadata_for_ids(
-    index: &str,
+    index: &IndexName,
     ids: &[String],
 ) -> VResult<std::collections::HashMap<String, Option<serde_json::Value>>> {
     if ids.is_empty() {
@@ -1138,6 +1154,149 @@ mod introspection {
             .await
             .expect_err("refused");
         assert!(matches!(err, VectorError::InvalidIndexName(_)), "{err:?}");
+    }
+}
+
+/// An index name is spliced into quoted identifiers, and sql.js runs every
+/// statement in the string it is handed — so a name carrying `"` or `;` would
+/// reach other tables or append statements. The host only checks a caller's
+/// `{org}__{block}__` prefix, so every op here must refuse such a name before
+/// any SQL runs. Each op is driven with such names over real sql.js, and the
+/// database is shown untouched: the same catalog (so the registry DDL did not
+/// run either) and no changed rows.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod hostile_names {
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::{
+        BrowserVectorService, DistanceMetric, MetadataFilter, SearchMode, VectorEntry, VectorError,
+        VectorIndexConfig, VectorService,
+    };
+    use crate::{bridge, database::test_support::fresh_db, db_codec};
+
+    const HOSTILE: [&str; 3] = [
+        r#"evil__block__a" ; DROP TABLE "sentinel"; --"#,
+        r#"evil__block__a"_meta" WHERE 1=1 UNION SELECT name, sql FROM sqlite_master --"#,
+        "evil__block__a;b",
+    ];
+
+    /// Everything a statement could have changed: the catalog, and the
+    /// connection's count of changed rows.
+    fn snapshot() -> serde_json::Value {
+        let rows = |sql: &str| {
+            db_codec::rows_from_js(
+                bridge::db_query_raw(sql, db_codec::empty_params()).expect("snapshot query"),
+            )
+            .expect("decode")
+        };
+        serde_json::json!({
+            "catalog": rows("SELECT type, name, sql FROM sqlite_master ORDER BY name"),
+            "changes": rows("SELECT total_changes() AS n"),
+        })
+    }
+
+    async fn sentinel_db() -> serde_json::Value {
+        fresh_db().await;
+        bridge::db_exec_raw(
+            r#"CREATE TABLE "sentinel" (id TEXT PRIMARY KEY)"#,
+            db_codec::empty_params(),
+        )
+        .expect("sentinel");
+        snapshot()
+    }
+
+    fn filter() -> MetadataFilter {
+        let mut f = MetadataFilter::default();
+        f.equals.insert("k".into(), serde_json::json!("v"));
+        f
+    }
+
+    fn assert_invalid_name<T: std::fmt::Debug>(op: &str, name: &str, got: Result<T, VectorError>) {
+        assert!(
+            matches!(got, Err(VectorError::InvalidIndexName(_))),
+            "{op}({name:?}) must be refused as an invalid name: {got:?}"
+        );
+    }
+
+    #[wasm_bindgen_test]
+    async fn every_op_refuses_a_hostile_name_before_any_sql_runs() {
+        for name in HOSTILE {
+            let before = sentinel_db().await;
+            let svc = BrowserVectorService::new();
+
+            assert_invalid_name(
+                "create_index",
+                name,
+                svc.create_index(VectorIndexConfig {
+                    name: name.to_string(),
+                    model: "m".into(),
+                    dimensions: 3,
+                    metric: DistanceMetric::Cosine,
+                    keyword_search: true,
+                })
+                .await,
+            );
+            assert_invalid_name("delete_index", name, svc.delete_index(name).await);
+            assert_invalid_name(
+                "upsert",
+                name,
+                svc.upsert(
+                    name,
+                    vec![VectorEntry {
+                        id: "a".into(),
+                        vector: vec![1.0, 0.0, 0.0],
+                        metadata: None,
+                        text: Some("t".into()),
+                    }],
+                )
+                .await,
+            );
+            for mode in [SearchMode::Vector, SearchMode::Keyword, SearchMode::Hybrid] {
+                assert_invalid_name(
+                    "query",
+                    name,
+                    svc.query(name, vec![1.0, 0.0, 0.0], 3, None, mode, Some("t".into()))
+                        .await,
+                );
+            }
+            assert_invalid_name("delete", name, svc.delete(name, vec!["a".into()]).await);
+            assert_invalid_name("count", name, svc.count(name).await);
+            assert_invalid_name("describe_index", name, svc.describe_index(name).await);
+            assert_invalid_name("list_ids", name, svc.list_ids(name, filter()).await);
+
+            let renamed = svc.rename_index(name, &name.to_ascii_lowercase()).await;
+            assert!(
+                matches!(renamed, Err(VectorError::InvalidRename { .. })),
+                "rename_index({name:?}) must be refused: {renamed:?}"
+            );
+
+            assert_eq!(snapshot(), before, "{name:?}: a statement ran");
+        }
+    }
+
+    /// The prefix `list_indexes` takes is a bound value, never spliced, so a
+    /// hostile one is only a prefix nothing matches.
+    #[wasm_bindgen_test]
+    async fn list_indexes_binds_its_prefix() {
+        sentinel_db().await;
+        for prefix in HOSTILE {
+            assert_eq!(
+                BrowserVectorService::new()
+                    .list_indexes(prefix)
+                    .await
+                    .expect("list"),
+                Vec::<String>::new()
+            );
+        }
+        let sentinel = db_codec::rows_from_js(
+            bridge::db_query_raw(
+                "SELECT name FROM sqlite_master WHERE name = 'sentinel'",
+                db_codec::empty_params(),
+            )
+            .expect("query"),
+        )
+        .expect("decode");
+        assert_eq!(sentinel.len(), 1);
     }
 }
 
