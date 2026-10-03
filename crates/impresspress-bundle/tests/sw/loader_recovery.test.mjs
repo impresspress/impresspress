@@ -25,6 +25,11 @@
 //     with stage `load` or `request`            restarts once, keeps data
 //     with no stage, or one not known           restarts once, keeps data
 //     for a death another tab recovered from    nothing replaced or erased
+//     while an update has installed a newer version, or already put one in
+//                                               nothing replaced or erased:
+//                                               the update owns it
+//     while an update's install fails           restarts once, as above
+//     and the replacement cannot be brought in  the stopped screen
 //     in a browser with no Web Locks            restarts once, keeps data
 //   a cause entry or breaker that is stale, undated or malformed   no recovery
 //   the boot probe ran out of time (either branch)       waits; asks; keeps data
@@ -39,6 +44,8 @@ import assert from 'node:assert/strict';
 import {
   BREAKER,
   loadShell,
+  NEW_RUNTIME,
+  OLD_RUNTIME,
   ORIGIN,
   RECOVERED_CACHE,
   RECOVERY_DONE,
@@ -59,7 +66,7 @@ const DEATH = { id: '0f8fad5b-d9cb-469f-a165-70867728950e' };
 // The breaker as the loader writes it: what the worker reported, and when
 // this page was told. A report with no death id is held as `''`.
 const breaker = (cause, stage, { id = '', at = NOW } = {}) =>
-  JSON.stringify({ cause, stage: typeof stage === 'string' ? stage : '', id, at });
+  JSON.stringify({ cause, stage: typeof stage === 'string' ? stage : '', id, runtime: '', at });
 const left = (stage, at = NOW - 2_000, death = {}) => ({ reason: CAUSE, stage, at, ...death });
 const sessionOf = (shell) => Object.fromEntries(shell.session.map);
 
@@ -987,11 +994,29 @@ test('an erase is recorded as done only once it is', async () => {
 // replacement exists, so that the replacement never starts on what is being
 // erased. (The buttons' order is the other way round — the waiting screen's
 // test above says why.)
-test('the automatic recovery erases before it registers the replacement', async () => {
+// The worker is dead, so nothing can write the data back while it is
+// erased; but the replacement is registered first, so that one that cannot
+// be registered — a CDN serving a stale worker under the new URL — has
+// replaced nothing and erases nothing.
+test('the automatic recovery erases once its replacement is registered', async () => {
   const shell = loadShell({ stop: left('initialize'), now: NOW, wipe: true });
   await shell.booted;
 
-  assert.deepEqual(shell.events, ['erase app.sqlite', `register ${REPLACEMENT}`]);
+  assert.deepEqual(shell.events, [`register ${REPLACEMENT}`, 'erase app.sqlite']);
+});
+
+test('a replacement that cannot be registered erases nothing, even where the failure would erase', async () => {
+  const shell = loadShell({
+    stop: left('initialize'),
+    now: NOW,
+    wipe: true,
+    registerFails: new TypeError('Failed to register a ServiceWorker: ServiceWorker script evaluation failed')
+  });
+  await shell.booted;
+
+  assert.deepEqual(shell.opfs(), ['app.sqlite']);
+  assert.deepEqual(shell.events, []);
+  assert.ok(shell.stuck('impresspress-retry'));
 });
 
 test('a button’s erase that does not complete is shown, and the app is not entered as though it had', async () => {
@@ -1046,13 +1071,185 @@ test('a recovery that erases nothing never says it erased', async () => {
   assert.deepEqual(shell.written(RECOVERY_DONE), ['restarted']);
 });
 
-test('a replacement that cannot be installed is said, and the cause is not lost', async () => {
+// The dead worker is still the one in place when its replacement cannot be
+// brought in, so the app is not entered: the stopped screen shows the cause,
+// with the retry (another new script URL) and the reset.
+test('a replacement that cannot be installed ends on the stopped screen, with the cause', async () => {
   const shell = loadShell({ stop: left('request'), now: NOW, installs: false });
   await shell.booted;
 
-  assert.equal(shell.status.textContent, 'Error: the service worker could not be installed');
+  assert.equal(shell.stuck('impresspress-stopped-cause').textContent, STOPPED);
+  assert.ok(shell.stuck('impresspress-retry'));
+  assert.ok(shell.stuck('impresspress-reset'));
   assert.equal(shell.probes.length, 0);
   assert.equal(shell.session.getItem(RECOVERY_DONE), 'restarted');
+});
+
+// A CDN that answers `/sw.js?recovery=T` with the previous deployment's
+// worker: its import of a deleted glue file fails and `register()` rejects.
+test('a replacement that cannot be registered ends on the stopped screen too', async () => {
+  const shell = loadShell({
+    stop: left('request'),
+    now: NOW,
+    registerFails: new TypeError('Failed to register a ServiceWorker: ServiceWorker script evaluation failed')
+  });
+  await shell.booted;
+
+  assert.equal(shell.stuck('impresspress-stopped-cause').textContent, STOPPED);
+  assert.ok(shell.stuck('impresspress-retry'));
+  assert.equal(shell.probes.length, 0);
+});
+
+// ---------------------------------------------------------------------------
+// One owner of each transition: the recovery, or a deployment's update
+// ---------------------------------------------------------------------------
+
+// A deployment's update replaces a worker too, and the browser discards an
+// installing version when another is registered over it. A recovery that
+// registered its replacement while an update was installing raced it — the
+// `sw-update.spec.ts` timeout. The update, once it has installed, owns the
+// transition: nothing is replaced, and nothing erased (the new version may
+// start on the data the dead one could not).
+test('a dead worker an update is replacing is left to the update: nothing replaced or erased', async () => {
+  const shell = loadShell({
+    stop: left('initialize', NOW, DEATH),
+    registeredUrl: `${ORIGIN}/sw.js`,
+    update: 'installs',
+    now: NOW,
+    wipe: true
+  });
+  await shell.booted;
+
+  assert.ok(shell.updates() >= 1, 'the host was asked for an update');
+  assert.deepEqual(shell.registeredUrls, [], 'nothing was registered over the update');
+  assert.deepEqual(shell.opfs(), ['app.sqlite']);
+  assert.deepEqual(shell.written(RECOVERY_DONE), [], 'no recovery was spent');
+  assert.deepEqual(shell.cacheNames().sort(), ['assets-v1', RECOVERED_CACHE].sort());
+  // What it waited on, in turn: the check, then the new version's install.
+  const waits = shell.statusLines.filter((line) => !line.startsWith('The app') && line.endsWith('…'));
+  assert.deepEqual(waits.slice(0, 2), ['Checking for a new version…', 'Updating the app…']);
+  assert.ok(
+    shell.statusLines.includes(
+      `${STOPPED} — a new version is replacing it; the data stored locally in this browser is kept…`
+    ),
+    shell.statusLines
+  );
+  // Other tabs with the same death join it instead of recovering.
+  assert.deepEqual(shell.recovered(), [DEATH.id]);
+  // The page is the new version's, and was entered.
+  assert.equal(shell.controller().scriptURL, `${ORIGIN}/sw.js`);
+  assert.equal(shell.controller().state, 'activated');
+  assertEntered(shell);
+});
+
+test('…on the probe road too: a 503 to the boot probe ends in the update, not a recovery', async () => {
+  // The probe of an ordinary boot meets the dead worker: the breaker is set
+  // and the page reloads, which is all the probe road does by itself…
+  const probed = loadShell({
+    probe: () => stoppedResponse(CAUSE, 'initialize'),
+    registeredUrl: `${ORIGIN}/sw.js`,
+    now: NOW,
+    wipe: true
+  });
+  await probed.booted;
+  assert.equal(probed.location.reloads, 1);
+  assert.deepEqual(probed.registeredUrls, [`${ORIGIN}/sw.js`]);
+
+  // …and the load that acts on it finds the update and leaves it to it.
+  const next = loadShell({
+    session: sessionOf(probed),
+    registeredUrl: `${ORIGIN}/sw.js`,
+    update: 'installs',
+    now: NOW,
+    wipe: true
+  });
+  await next.booted;
+  assert.deepEqual(next.registeredUrls, []);
+  assert.deepEqual(next.opfs(), ['app.sqlite']);
+  assertEntered(next);
+});
+
+// "Already in place" is decided by VERSION — the runtime the death names
+// against the one the active worker answers with — never by which worker
+// controls this page: a shell opened fresh (a hard reload, a new tab) within
+// the minute a cause stays fresh has no controller at all, and one an
+// update's `clients.claim()` reached first is controlled by the new worker.
+// Either way the healthy new version must not be replaced, nor the data
+// erased under it.
+for (const [how, controlled] of [
+  ['a shell with no controller', false],
+  ['a shell the new version has already claimed', true]
+]) {
+  test(`an update already in place owns it as well — ${how}`, async () => {
+    const shell = loadShell({
+      stop: left('initialize', NOW, { ...DEATH, runtime: OLD_RUNTIME }),
+      registeredUrl: `${ORIGIN}/sw.js`,
+      update: 'active',
+      controlled,
+      now: NOW,
+      wipe: true
+    });
+    await shell.booted;
+
+    assert.deepEqual(shell.registeredUrls, []);
+    assert.deepEqual(shell.opfs(), ['app.sqlite']);
+    assert.deepEqual(shell.recovered(), [DEATH.id]);
+    assertEntered(shell);
+  });
+}
+
+// The same question about a death of the version that is still active: it
+// IS that worker, and the recovery replaces it. (A recovery's own
+// replacement, under `?recovery=`, is the same version too.)
+test('a death of the version still active is recovered from', async () => {
+  const shell = loadShell({
+    stop: left('request', NOW, { ...DEATH, runtime: OLD_RUNTIME }),
+    registeredUrl: `${ORIGIN}/sw.js`,
+    controlled: false,
+    now: NOW
+  });
+  await shell.booted;
+
+  assert.deepEqual(shell.registeredUrls, [REPLACEMENT]);
+  assert.ok(shell.statusLines.includes('Checking for a new version…'), shell.statusLines);
+  assert.ok(!shell.statusLines.includes('Updating the app…'), shell.statusLines);
+});
+
+// An update counts only once it has INSTALLED. One whose install fails —
+// the runtime binary it must keep is not there, the quota is exhausted —
+// replaces nothing, and the dead worker must still be replaced: left to an
+// update that never lands, the page would have no way out.
+test('an update that fails to install leaves the recovery to run', async () => {
+  const shell = loadShell({
+    stop: left('request', NOW, DEATH),
+    registeredUrl: `${ORIGIN}/sw.js`,
+    update: 'fails',
+    now: NOW
+  });
+  await shell.booted;
+
+  assert.deepEqual(shell.events, ['update discarded', `register ${REPLACEMENT}`]);
+  assertReplaced(shell, { erased: false, caches: [RECOVERED_CACHE] });
+  assertEntered(shell);
+});
+
+test('a button pressed while an update is installing leaves it to the update', async () => {
+  const shell = loadShell({
+    stop: left('request', NOW, DEATH),
+    session: { [RECOVERY_DONE]: 'restarted' },
+    registeredUrl: `${ORIGIN}/sw.js`,
+    update: 'installs',
+    now: NOW
+  });
+  await shell.booted;
+  assert.ok(shell.stuck('impresspress-retry'), 'the stopped screen is shown');
+
+  await shell.stuck('impresspress-retry').click();
+
+  assert.deepEqual(shell.registeredUrls, []);
+  assert.deepEqual(shell.recovered(), [DEATH.id]);
+  assert.equal(shell.controller().state, 'activated');
+  assert.equal(shell.probes.length, 1);
 });
 
 // ---------------------------------------------------------------------------
@@ -1092,4 +1289,91 @@ test('visible text names the app the page shows, not the build', async () => {
   const booting = loadShell({ now: NOW, title: 'Kiln & Co' });
   await booting.booted;
   assert.match(booting.status.textContent, /Loading Kiln & Co\.\.\.$/);
+});
+
+// With a full quota a version still installs — it keeps no runtime and loads
+// it from the host (`keepRuntime` in sw.js; `sw_runtime_kept.test.mjs`) —
+// so "Reset" keeps its order: the replacement is brought in and activated,
+// then the data is erased, which is what frees the space, then the app is
+// entered.
+test('a reset completes in its order: replacement in, then the erase, then the app', async () => {
+  const shell = loadShell({
+    stop: left('request', NOW, DEATH),
+    session: { [RECOVERY_DONE]: 'restarted' },
+    now: NOW
+  });
+  await shell.booted;
+
+  await shell.stuck('impresspress-reset').click();
+
+  assert.deepEqual(shell.events, [`register ${REPLACEMENT}`, 'erase app.sqlite']);
+  assert.deepEqual(shell.opfs(), []);
+  assert.equal(shell.probes.length, 1);
+  assert.equal(shell.location.reloads, 1);
+});
+
+// ---------------------------------------------------------------------------
+// The three bounds and the erase lock
+// ---------------------------------------------------------------------------
+
+// A deployment rolled back to a build from before versions were asked: its
+// worker never answers the question. That is not a hang — the answer is
+// waited for briefly (`RUNTIME_ANSWER_MS`) — and a worker that does not name
+// the version that died is not that version.
+test('an active worker that never says its version is another version than the one that died', async () => {
+  const shell = loadShell({
+    stop: left('initialize', NOW, { ...DEATH, runtime: NEW_RUNTIME }),
+    registeredUrl: `${ORIGIN}/sw.js`,
+    answersRuntime: false,
+    now: NOW,
+    wipe: true
+  });
+  await shell.booted;
+
+  assert.deepEqual(shell.registeredUrls, []);
+  assert.deepEqual(shell.opfs(), ['app.sqlite']);
+  assert.deepEqual(shell.recovered(), [DEATH.id]);
+  assertEntered(shell);
+});
+
+// The erase and the start of a worker that would open the data take turns
+// on one Web Lock (`ERASE_LOCK`; sw.js takes it around `initialize()`).
+test('every erase holds the erase lock — the automatic one and the reset', async () => {
+  const automatic = loadShell({ stop: left('initialize'), now: NOW, wipe: true });
+  await automatic.booted;
+  assert.ok(automatic.erasedHolding.length > 0);
+  for (const locks of automatic.erasedHolding) assert.ok(locks.includes('__impresspress_erase'), locks);
+
+  const reset = loadShell({
+    stop: left('request', NOW, DEATH),
+    session: { [RECOVERY_DONE]: 'restarted' },
+    now: NOW
+  });
+  await reset.booted;
+  await reset.stuck('impresspress-reset').click();
+  assert.ok(reset.erasedHolding.length > 0);
+  for (const locks of reset.erasedHolding) assert.ok(locks.includes('__impresspress_erase'), locks);
+});
+
+// A version can install and then not activate — Chromium has been seen to
+// leave one `installed` with nothing in its way. A shell does not wait on it
+// silently: after the control wait it says so and offers the choices.
+test('a new version that does not activate is waited for, then asked about', async () => {
+  const shell = loadShell({ installs: 'stalls', now: NOW });
+  await shell.booted;
+
+  assert.equal(shell.stuck('impresspress-stopped-title').textContent, 'Kiln & Co is taking a long time to start');
+  assert.equal(
+    shell.stuck('impresspress-stopped-cause').textContent,
+    'The new version has not started yet, after 10 seconds.'
+  );
+  assert.ok(shell.stuck('impresspress-restart'));
+  assert.ok(shell.stuck('impresspress-reset'));
+  assert.equal(shell.probes.length, 0, 'nothing was asked of a version that is not in place');
+
+  await shell.stuck('impresspress-wait').click();
+  assert.equal(
+    shell.stuck('impresspress-stopped-cause').textContent,
+    'The new version has not started yet, after 20 seconds.'
+  );
 });

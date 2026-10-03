@@ -87,7 +87,8 @@ test('a login the runtime dies on shows the cause, and keeps showing it', async 
   expect(response.fromServiceWorker(), 'answered by the worker, not the static host').toBe(true);
   expect(response.headers()['cache-control']).toBe('no-store');
   // `id` names the death, for the boot shells that may be told of it; it
-  // is the worker's to make.
+  // is the worker's to make. `runtime` names the version that died, which a
+  // boot shell compares with the version in place.
   expect(await response.json()).toEqual({
     error: 'Unavailable',
     message: stopped,
@@ -95,6 +96,7 @@ test('a login the runtime dies on shows the cause, and keeps showing it', async 
     cause,
     stage: 'request',
     id: expect.stringMatching(/^[0-9a-f-]{36}$/),
+    runtime: expect.stringMatching(/^\/impresspress_web_bg-[0-9a-f]{8}\.wasm$/),
   });
 
   const error = page.locator('#error');
