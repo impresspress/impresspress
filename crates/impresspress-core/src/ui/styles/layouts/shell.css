@@ -133,8 +133,8 @@
 	background:
 		linear-gradient(var(--bg-sidebar) 30%, transparent) top / 100% 32px no-repeat local,
 		linear-gradient(transparent, var(--bg-sidebar) 70%) bottom / 100% 32px no-repeat local,
-		linear-gradient(rgba(255, 255, 255, 0.16), transparent) top / 100% 14px no-repeat scroll,
-		linear-gradient(transparent, rgba(255, 255, 255, 0.16)) bottom / 100% 14px no-repeat scroll;
+		linear-gradient(var(--sidebar-scroll-edge), transparent) top / 100% 14px no-repeat scroll,
+		linear-gradient(transparent, var(--sidebar-scroll-edge)) bottom / 100% 14px no-repeat scroll;
 }
 .sidebar__group { display: flex; flex-direction: column; gap: 2px; }
 /* Foreground is --sidebar-text-muted (7.34:1 on navy), not --text-muted

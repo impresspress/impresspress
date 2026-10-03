@@ -209,7 +209,6 @@ pub async fn bucket_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream 
             }],
             subtitle: Some("Your buckets and their object counts."),
             actions: vec![new_bucket_btn],
-            body_layout: ui::BodyLayout::Padded,
         },
         body,
     )

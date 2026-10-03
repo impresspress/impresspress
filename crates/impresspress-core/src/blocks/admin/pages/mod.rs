@@ -62,7 +62,6 @@ pub(crate) async fn admin_page(
             crumbs: topbar.crumbs,
             subtitle: topbar.subtitle,
             actions: topbar.actions,
-            body_layout: ui::BodyLayout::Padded,
         },
         content,
     )

@@ -228,7 +228,6 @@ pub async fn index_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
             }],
             subtitle: Some("Per-index counts, model, dimensions"),
             actions,
-            body_layout: ui::BodyLayout::Padded,
         },
         body,
     )
@@ -327,7 +326,6 @@ pub async fn index_detail_page(ctx: &dyn Context, msg: &Message, name: &str) -> 
             ],
             subtitle: None,
             actions: Vec::new(),
-            body_layout: ui::BodyLayout::Padded,
         },
         body,
     )

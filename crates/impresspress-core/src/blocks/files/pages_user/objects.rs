@@ -285,7 +285,6 @@ pub async fn object_list_page(
             ],
             subtitle: Some("Drag files here to upload, or use the Upload button."),
             actions: vec![upload_btn],
-            body_layout: ui::BodyLayout::Padded,
         },
         body,
     )

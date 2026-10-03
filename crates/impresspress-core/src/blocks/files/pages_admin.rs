@@ -68,7 +68,6 @@ async fn files_page_with_action<'a>(
             }],
             subtitle,
             actions,
-            body_layout: ui::BodyLayout::Padded,
         },
         content,
     )

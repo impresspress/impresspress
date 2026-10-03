@@ -187,13 +187,19 @@ pub fn dashboard_page(
 /// to address it — the messages composer scrolls it after a post.
 pub const CHAT_MESSAGES_ID: &str = "chat-messages";
 
+/// The chat layout: thread list, messages + composer, optional right rail.
+///
+/// Full-bleed — it draws its own panes edge to edge — so it returns a
+/// [`PageBody`](super::PageBody) that carries that frame to the shell; a page
+/// passes it to `shell_page` as is (or [`append`](super::PageBody::append)s
+/// its own scripts) and never picks the frame itself.
 pub fn chat_page(
     thread_list: Markup,
     messages: Markup,
     composer: Markup,
     right_rail: Option<Markup>,
-) -> Markup {
-    html! {
+) -> super::PageBody {
+    super::PageBody::full_bleed(html! {
         div .page--chat {
             aside .chat-threads { (thread_list) }
             section .chat-main {
@@ -204,7 +210,7 @@ pub fn chat_page(
                 aside .chat-rail { (r) }
             }
         }
-    }
+    })
 }
 
 /// Inputs for [`account_card_page`] — the single-card layout used by
@@ -616,13 +622,18 @@ mod tests {
 
     #[test]
     fn chat_page_with_rail() {
-        let s = chat_page(
+        let body = chat_page(
             html! { div { "threads" } },
             html! { div { "messages" } },
             html! { textarea {} },
             Some(html! { div { "rail" } }),
-        )
-        .into_string();
+        );
+        assert_eq!(
+            body.layout(),
+            super::super::BodyLayout::Flush,
+            "chat is full-bleed"
+        );
+        let s = body.into_markup().into_string();
         assert!(s.contains("chat-threads"));
         assert!(s.contains("chat-main"));
         assert!(s.contains("chat-messages"));
@@ -639,6 +650,7 @@ mod tests {
             html! { textarea {} },
             None,
         )
+        .into_markup()
         .into_string();
         assert!(!s.contains("chat-rail"));
     }

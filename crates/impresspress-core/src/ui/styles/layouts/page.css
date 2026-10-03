@@ -34,9 +34,10 @@
 .detail-meta dd { margin: 0; color: var(--text-primary); word-break: break-word; }
 
 /* ===== Form page ===== */
-/* `.form-page` draws no box of its own: it sits directly in the shell's
-   content card (`.shell__body`), and a second bordered card inside that one
-   was the "double border" around every settings page. */
+/* The tabbed page (`templates::tabbed_page`) draws no box of its own: the
+   rail and sections sit directly in the shell's content card
+   (`.shell__body`). A second bordered card inside that one was the "double
+   border" around every settings page. */
 .form-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-6); }
 @media (min-width: 1024px) {
 	.form-grid--with-tabs { grid-template-columns: 220px minmax(0,1fr); }

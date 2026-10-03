@@ -43,7 +43,7 @@ fn render_page_body(
     default_model: &str,
     thread_id: Option<&str>,
     llm_chat_js_url: &str,
-) -> Markup {
+) -> crate::ui::PageBody {
     // Build messages JSON for the bootstrap carrier. Empty array when no thread.
     let messages_json: Vec<serde_json::Value> = entries
         .iter()
@@ -69,9 +69,7 @@ fn render_page_body(
     let chat_body =
         crate::ui::templates::chat_page(thread_list, messages_pane, composer, Some(right_rail));
 
-    html! {
-        (chat_body)
-
+    chat_body.append(html! {
         // Pulse animation for thinking indicator + blinking cursor.
         style { "@keyframes pulse{0%,100%{opacity:1}50%{opacity:.4}} @keyframes blink{0%,100%{opacity:1}50%{opacity:0}} .typing-cursor{display:inline-block;width:0.5em;height:1.1em;background:var(--text-primary,#333);vertical-align:text-bottom;margin-left:2px;animation:blink 0.8s step-end infinite}" }
         // DOMPurify must load before marked.js/llm-chat.js so `window.DOMPurify`
@@ -93,7 +91,7 @@ fn render_page_body(
         script {
             (maud::PreEscaped("window.addEventListener('DOMContentLoaded', function(){ if (window.impresspressLlmChat) window.impresspressLlmChat.init(); });"))
         }
-    }
+    })
 }
 
 /// What the model picker says when the remote model list could not be read.
@@ -199,8 +197,6 @@ pub async fn page(ctx: &dyn Context, msg: &Message) -> OutputStream {
             crumbs,
             subtitle: Some("Chat with a configured provider or local model"),
             actions: Vec::new(),
-            // `chat_page` draws its thread list / messages / rail edge to edge.
-            body_layout: ui::BodyLayout::Flush,
         },
         content,
     )
@@ -551,7 +547,6 @@ pub async fn settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
             }],
             subtitle: Some("LLM defaults and provider routing"),
             actions: Vec::new(),
-            body_layout: ui::BodyLayout::Padded,
         },
         content,
     )
@@ -855,6 +850,7 @@ mod tests {
     #[test]
     fn page_body_renders_empty_state_at_root() {
         let html = render_page_body(&[], &[], &[], false, "", None, "/b/static/llm-chat-test.js")
+            .into_markup()
             .into_string();
         assert!(html.contains(r#"id="no-thread-prompt""#));
         assert!(html.contains("Start a new conversation"));
@@ -879,6 +875,7 @@ mod tests {
             Some("some-id"),
             "/b/static/llm-chat-test.js",
         )
+        .into_markup()
         .into_string();
         assert!(html.contains(r#"value="some-id""#));
         assert!(!html.contains(r#"id="no-thread-prompt""#));
@@ -892,7 +889,9 @@ mod tests {
     #[test]
     fn page_body_includes_external_llm_chat_js_and_drops_inline_constants() {
         let url = "/b/static/llm-chat-deadbeef.js";
-        let html = render_page_body(&[], &[], &[], false, "", None, url).into_string();
+        let html = render_page_body(&[], &[], &[], false, "", None, url)
+            .into_markup()
+            .into_string();
         assert!(
             html.contains(&format!(r#"src="{url}""#)),
             "missing external llm-chat.js script tag (expected src={url}): {html}"
@@ -914,7 +913,9 @@ mod tests {
     #[test]
     fn page_body_loads_purify_before_marked_and_llm_chat_js() {
         let url = "/b/static/llm-chat-deadbeef.js";
-        let html = render_page_body(&[], &[], &[], false, "", None, url).into_string();
+        let html = render_page_body(&[], &[], &[], false, "", None, url)
+            .into_markup()
+            .into_string();
 
         let purify_url = crate::blocks::llm::assets::purify_js_url();
         let marked_url = crate::blocks::llm::assets::marked_js_url();
@@ -955,6 +956,7 @@ mod tests {
             Some("sel-test"),
             "/b/static/llm-chat-test.js",
         )
+        .into_markup()
         .into_string();
 
         let required_ids = [
@@ -1010,7 +1012,7 @@ mod tests {
         // element termination.
         let entries = vec![record_with_content("</script><img src=x onerror=alert(1)>")];
         let markup = render_page_body(&[], &entries, &[], false, "", None, "/x.js");
-        let html = markup.into_string();
+        let html = markup.into_markup().into_string();
         assert!(
             !html.contains("</script><img"),
             "raw </script> must not survive into the carrier: {html}"
@@ -1026,6 +1028,7 @@ mod tests {
     #[test]
     fn page_body_emits_chat_page_template_class() {
         let html = render_page_body(&[], &[], &[], false, "", None, "/b/static/llm-chat-test.js")
+            .into_markup()
             .into_string();
         assert!(
             html.contains(r#"class="page--chat""#),

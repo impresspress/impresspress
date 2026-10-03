@@ -71,22 +71,32 @@ pub async fn editor_page(ctx: &dyn Context, msg: &Message, doc_type: DocumentTyp
         None => ("", default_title, "", None, "", 1),
     };
 
-    let page_content = editor_markup_for_test(
+    let view = editor_view(
         doc_type, doc_id, title, content, status, updated_at, version,
     );
 
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::simple(default_title, ui::NavKind::Portal, default_title),
-        page_content,
+        ui::Shell {
+            actions: view.actions,
+            ..ui::Shell::simple(default_title, ui::NavKind::Portal, default_title)
+        },
+        view.body,
     )
     .await
 }
 
-/// Build the editor markup. Split out from `editor_page` so it can be
-/// unit-tested without a `Context`.
-pub(super) fn editor_markup_for_test(
+/// The editor page's two halves: the page-level actions (open, save,
+/// publish), which ride in the shell topbar, and the body.
+pub(super) struct EditorView {
+    pub actions: Vec<Markup>,
+    pub body: Markup,
+}
+
+/// Build the editor. Split out from `editor_page` so it can be unit-tested
+/// without a `Context`.
+pub(super) fn editor_view(
     doc_type: DocumentType,
     doc_id: &str,
     title: &str,
@@ -94,8 +104,7 @@ pub(super) fn editor_markup_for_test(
     status: Option<DocumentStatus>,
     updated_at: &str,
     version: i64,
-) -> Markup {
-    let default_title = doc_type.title();
+) -> EditorView {
     let (badge_class, badge_text) = match status {
         Some(DocumentStatus::Published) => ("badge-success", "Published"),
         Some(DocumentStatus::Draft) => ("badge-warning", "Draft"),
@@ -103,34 +112,42 @@ pub(super) fn editor_markup_for_test(
         None => ("badge-info", "No document"),
     };
 
-    html! {
-        // Status bar (compact, top of page)
-        div .flex .items-center .justify-between .mb-3 {
-            div .flex .items-center .gap-2 {
-                h2 .editor-status__title { (default_title) }
-                span #status-badge .badge .(badge_class) { (badge_text) }
-                span .badge .editor-status__version .text-xs .cursor-pointer
-                    title="Click to change version"
-                    data-action="legalpages-prompt-version"
-                { "v" span #version-display { (version) } }
-                @if !updated_at.is_empty() {
-                    span .text-muted .text-xs {
-                        " \u{00b7} " (updated_at.get(..10).unwrap_or(updated_at))
-                    }
-                }
+    // The page's actions live in the topbar (the page header); the
+    // delegated `legalpages-*` listener in EDITOR_JS finds them by id
+    // wherever they render. Primary action last.
+    let actions = vec![
+        html! {
+            a .btn .btn--sm .btn--ghost
+                href={"/b/legalpages/" (wire_str(&doc_type))}
+                target="_blank"
+            {
+                "Open public page"
             }
-            div .flex .gap-2 {
-                a .btn .btn--sm .btn--ghost
-                    href={"/b/legalpages/" (wire_str(&doc_type))}
-                    target="_blank"
-                {
-                    "Open public page"
-                }
-                button #btn-save .btn .btn--sm .btn--secondary data-action="legalpages-save" {
-                    "Save Draft"
-                }
-                button #btn-publish .btn .btn--sm .btn--primary data-action="legalpages-publish" {
-                    "Publish"
+        },
+        html! {
+            button #btn-save .btn .btn--sm .btn--secondary data-action="legalpages-save" {
+                "Save Draft"
+            }
+        },
+        html! {
+            button #btn-publish .btn .btn--sm .btn--primary data-action="legalpages-publish" {
+                "Publish"
+            }
+        },
+    ];
+
+    let body = html! {
+        // Status row: the document's state. The page title is the topbar's
+        // h1, so this row does not repeat it; it wraps on a narrow screen.
+        div .flex .flex-wrap .items-center .gap-2 .mb-3 {
+            span #status-badge .badge .(badge_class) { (badge_text) }
+            span .badge .editor-status__version .text-xs .cursor-pointer
+                title="Click to change version"
+                data-action="legalpages-prompt-version"
+            { "v" span #version-display { (version) } }
+            @if !updated_at.is_empty() {
+                span .text-muted .text-xs {
+                    "Updated " (updated_at.get(..10).unwrap_or(updated_at))
                 }
             }
         }
@@ -178,7 +195,8 @@ pub(super) fn editor_markup_for_test(
         }
 
         script { (PreEscaped(EDITOR_JS)) }
-    }
+    };
+    EditorView { actions, body }
 }
 
 const EDITOR_JS: &str = r#"
