@@ -665,21 +665,22 @@ mod outage_tests {
         );
 
         let at = (chrono::Utc::now() - chrono::Duration::days(40)).to_rfc3339();
-        let mut row = request_logs::NewRequestLog {
-            method: "GET",
-            path: "/",
-            status_code: 200,
-            error_message: "",
-            duration_ms: 1,
-            client_ip: "203.0.113.7",
-            user_id: "",
-        }
-        .to_data();
-        row.insert("created_at".into(), serde_json::json!(at));
-        row.insert("updated_at".into(), serde_json::json!(at));
-        wafer_core::clients::database::create(&ctx, request_logs::TABLE, row)
-            .await
-            .expect("seed an old request log row");
+        request_logs::insert_at(
+            &ctx,
+            "old",
+            &request_logs::NewRequestLog {
+                method: "GET",
+                path: "/",
+                status_code: 200,
+                error_message: "",
+                duration_ms: 1,
+                client_ip: "203.0.113.7",
+                user_id: "",
+            },
+            &at,
+        )
+        .await
+        .expect("seed an old request log row");
 
         let html = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
         assert_eq!(

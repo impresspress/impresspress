@@ -250,6 +250,22 @@ pub async fn list_recent_errors(
         .collect())
 }
 
+/// [`insert`] with a chosen `created_at` (and `updated_at`): a fixture for
+/// tests that need rows from a past day, which `insert` cannot write.
+#[cfg(test)]
+pub(crate) async fn insert_at(
+    ctx: &dyn Context,
+    id: &str,
+    row: &NewRequestLog<'_>,
+    at: &str,
+) -> Result<(), WaferError> {
+    let mut data = row.to_data();
+    data.insert("id".to_string(), json!(id));
+    data.insert("created_at".to_string(), json!(at));
+    data.insert("updated_at".to_string(), json!(at));
+    db::create(ctx, TABLE, data).await.map(|_| ())
+}
+
 /// When the oldest stored request was logged (its `created_at`), or `None`
 /// when the log is empty: how far back the dashboard's request and 4xx/5xx
 /// series actually go. One row, ascending, no count.
@@ -490,11 +506,7 @@ mod tests {
     /// codec, then pinning `id`/`created_at` on the map the owning module
     /// spells.
     async fn seed_at(ctx: &TestContext, id: &str, row: NewRequestLog<'_>, at: &str) {
-        let mut data = row.to_data();
-        data.insert("id".to_string(), serde_json::json!(id));
-        data.insert("created_at".to_string(), serde_json::json!(at));
-        data.insert("updated_at".to_string(), serde_json::json!(at));
-        db::create(ctx, TABLE, data)
+        insert_at(ctx, id, &row, at)
             .await
             .unwrap_or_else(|e| panic!("seed request_log {id}: {e}"));
     }
