@@ -123,6 +123,13 @@ function element() {
 ///                 installing; `'active'`, a newer version that had already
 ///                 activated before this page asked — and, where the page
 ///                 is `controlled`, already took it; nothing, by default
+/// - `answersRuntime` — whether the registered (older) worker answers the
+///                 shell's question about its version; `false` is a worker
+///                 from before the question existed, and the wait for its
+///                 answer runs out at once
+/// - `installs: 'stalls'` — a newly registered worker that installs and then
+///                 never activates (as Chromium has been seen to leave one);
+///                 the wait for it runs out at once
 export function loadShell({
   session = {},
   stop,
@@ -142,6 +149,7 @@ export function loadShell({
   registeredUrl,
   installs = true,
   update,
+  answersRuntime = true,
   opfsFiles = ['app.sqlite'],
   title = 'Kiln & Co',
   documentTitle = title
@@ -230,12 +238,12 @@ export function loadShell({
   const registeredUrls = [];
   const asked = [];
   const worker = {
-    state: installs ? 'activated' : 'redundant',
+    state: installs === 'stalls' ? 'installed' : installs ? 'activated' : 'redundant',
     addEventListener: () => {},
     removeEventListener: () => {},
     // The page asking the worker to take it.
     postMessage: (message, ports) => {
-      answerRuntime(message, ports, OLD_RUNTIME);
+      if (answersRuntime) answerRuntime(message, ports, OLD_RUNTIME);
       asked.push(message);
       if (!claims || message.type !== 'impresspress-claim') return;
       queueMicrotask(() => {
@@ -334,7 +342,9 @@ export function loadShell({
                   scriptURL,
                   addEventListener: () => {},
                   removeEventListener: () => {},
-                  postMessage: (message, ports) => answerRuntime(message, ports, OLD_RUNTIME)
+                  postMessage: (message, ports) => {
+                    if (answersRuntime) answerRuntime(message, ports, OLD_RUNTIME);
+                  }
                 }
         ])
       );
@@ -357,6 +367,8 @@ export function loadShell({
   };
   const opfs = new Set(opfsFiles);
   const lockRequests = [];
+  // The locks held at each OPFS removal.
+  const erasedHolding = [];
   const navigator = {
     serviceWorker,
     storage: {
@@ -366,6 +378,7 @@ export function loadShell({
         },
         removeEntry: async (name) => {
           events.push(`erase ${name}`);
+          erasedHolding.push([...held]);
           if (eraseFails.includes(name)) {
             throw new DOMException('the file is in use', 'NoModificationAllowedError');
           }
@@ -374,19 +387,23 @@ export function loadShell({
       })
     }
   };
+  // The Web Locks this tab holds now, by name.
+  const held = new Set();
   if (locks) {
-    // One tab, so the lock is always free: what a test reads is that the
-    // work was done holding it.
-    let held = false;
+    // One tab, so a lock is always free: what a test reads is that the
+    // work was done holding it. The recovery lock's requests are recorded
+    // with the state they were made in.
     navigator.locks = {
       request: async (name, act) => {
-        if (held) throw new Error('the recovery lock was requested while held');
-        lockRequests.push({ name, registrations: registered, unregistered, opfs: [...opfs] });
-        held = true;
+        if (held.has(name)) throw new Error(`the lock ${name} was requested while held`);
+        if (name === RECOVERY_LOCK) {
+          lockRequests.push({ name, registrations: registered, unregistered, opfs: [...opfs] });
+        }
+        held.add(name);
         try {
           return await act();
         } finally {
-          held = false;
+          held.delete(name);
         }
       }
     };
@@ -416,7 +433,13 @@ export function loadShell({
   // The 10 s wait for control runs out at once for a worker that never
   // claims.
   const setTimeoutStub = (fn, ms) => {
-    const now = ms === 0 || (ms === 10_000 ? !claims : probeTimesOut(probes.length));
+    const now =
+      ms === 0 ||
+      (ms === 10_000
+        ? !claims || installs === 'stalls'
+        : ms === 2_000
+          ? !answersRuntime
+          : probeTimesOut(probes.length));
     return now ? (fn(), 0) : setTimeout(fn, ms).unref();
   };
   const DateStub = { now: () => now };
@@ -468,6 +491,8 @@ export function loadShell({
       (cacheStore.get(RECOVERED_CACHE)?.get(RECOVERED_KEY)?.deaths ?? []).map((d) => d.id),
     /// Each request for the recovery lock, with the state it was made in.
     lockRequests,
+    /// The locks this tab held at each OPFS removal.
+    erasedHolding,
     /// What the page asked the registered worker.
     asked,
     /// Another tab recording, in the origin's Cache Storage, that it has

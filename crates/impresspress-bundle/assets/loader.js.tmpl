@@ -152,11 +152,27 @@ async function dropCaches() {
     }
 }
 
-// Erase the data this browser stores for the app (OPFS). Answers whether
-// the erase COMPLETED: `true` only if every entry was removed. An entry that
-// could not be removed (a file something still holds open) does not stop
-// the others being tried.
-async function eraseData() {
+// The Web Lock an erase holds, and that sw.js takes around the runtime's
+// `initialize()` (`ERASE_LOCK` there), which is what opens the data. A
+// replacement registered by a recovery can install, activate and be asked
+// by another tab for a page while this tab is still erasing; holding the
+// lock, the erase and that start take turns instead of the start opening a
+// database half erased. The same name is declared in sw.js.
+const ERASE_LOCK = '__impresspress_erase';
+
+// Erase the data this browser stores for the app (OPFS), holding
+// ERASE_LOCK where the browser has Web Locks. Answers whether the erase
+// COMPLETED: `true` only if every entry was removed. An entry that could not
+// be removed (a file something still holds open) does not stop the others
+// being tried.
+function eraseData() {
+    if (navigator.locks && navigator.locks.request) {
+        return navigator.locks.request(ERASE_LOCK, eraseEntries);
+    }
+    return eraseEntries();
+}
+
+async function eraseEntries() {
     try {
         const root = await navigator.storage.getDirectory();
         const names = [];
@@ -414,6 +430,52 @@ function registerWorker(url) {
 // The worker `registration` is bringing in — its newest version — once it
 // has activated. Fails if that version is discarded instead (its script
 // could not be fetched or evaluated).
+// The worker `registration` is bringing in, once activated (`activated`),
+// or `null` if it has not activated within CONTROL_WAIT_MS. A version can
+// install and then not activate for minutes — Chromium has been seen to
+// leave one `installed` with nothing in its way — and a page waiting on it
+// without a bound says "Loading…" forever.
+async function activatedWithin(registration) {
+    if (newest(registration).state === 'activated') return activated(registration);
+    const done = activated(registration);
+    done.catch(() => {});
+    let timer;
+    const late = new Promise((resolve) => {
+        timer = setTimeout(() => resolve(null), CONTROL_WAIT_MS);
+    });
+    try {
+        return await Promise.race([done, late]);
+    } finally {
+        clearTimeout(timer);
+    }
+}
+
+// Once `registration`'s newest version has activated, `go(worker)`. If it
+// has not within CONTROL_WAIT_MS the person is told and chooses
+// (`renderNotStartedUI`), and "Keep waiting" waits again. `fail(error)` is
+// called if the version cannot be installed, or `go` throws.
+async function whenActivated(registration, status, waitedMs, go, fail) {
+    let worker;
+    try {
+        worker = await activatedWithin(registration);
+    } catch (error) {
+        fail(error);
+        return;
+    }
+    if (worker === null) {
+        const waited = waitedMs + CONTROL_WAIT_MS;
+        renderNotStartedUI(status, waited, () =>
+            whenActivated(registration, status, waited, go, fail),
+        );
+        return;
+    }
+    try {
+        await go(worker);
+    } catch (error) {
+        fail(error);
+    }
+}
+
 async function activated(registration) {
     const sw = newest(registration);
     if (sw.state !== 'activated') {
@@ -449,15 +511,28 @@ function hasInstalled(worker) {
     });
 }
 
+// How long `runtimeOf` waits for a worker to say which version it is. It
+// times one message there and back, which a running worker answers at once
+// and a stopped one once the browser has started it — nothing of the app's
+// own start is in it.
+const RUNTIME_ANSWER_MS = 2_000;
+
 // The version `worker` is: the runtime binary it was built for, which it
 // answers whether or not its runtime is alive (`impresspress-runtime` in
-// sw.js). Asked only of a registration's active worker about a death that
-// named its own version — and every version that names it answers this;
-// the active worker is never older than one that died after it.
+// sw.js) — or `null` when it does not answer within RUNTIME_ANSWER_MS. A
+// worker from before versions were asked never answers, and the active
+// worker CAN be one: a deployment rolled back to such a build is newer on
+// the host and older in its code. Not answering is itself an answer, then:
+// it is not the version that died, which did name its own.
 function runtimeOf(worker) {
     return new Promise((resolve) => {
         const channel = new MessageChannel();
+        const timer = setTimeout(() => {
+            channel.port1.close();
+            resolve(null);
+        }, RUNTIME_ANSWER_MS);
         channel.port1.onmessage = (event) => {
+            clearTimeout(timer);
             channel.port1.close();
             resolve(typeof event.data?.runtime === 'string' ? event.data.runtime : '');
         };
@@ -575,24 +650,35 @@ async function recoverFromButton({ erase, forget, failure }, status) {
             }
             return replaceWorker({ eraseData: false, failure });
         });
-        const worker = await activated(registration);
-        if (erase && replaced) {
-            const erased = await underRecoveryLock(eraseData);
-            noteErase(erased);
-            if (!erased) {
-                renderEraseFailedUI({ erase, forget, failure }, worker, status);
-                return;
-            }
-        }
-        if (forget) {
-            try { localStorage.clear(); } catch (_) {}
-            try { sessionStorage.clear(); } catch (_) {}
-        }
-        await enterApp(bootUrl(), worker, status, 0);
+        await whenActivated(
+            registration,
+            status,
+            0,
+            async (worker) => {
+                if (erase && replaced) {
+                    const erased = await underRecoveryLock(eraseData);
+                    noteErase(erased);
+                    if (!erased) {
+                        renderEraseFailedUI({ erase, forget, failure }, worker, status);
+                        return;
+                    }
+                }
+                if (forget) {
+                    try { localStorage.clear(); } catch (_) {}
+                    try { sessionStorage.clear(); } catch (_) {}
+                }
+                await enterApp(bootUrl(), worker, status, 0);
+            },
+            (error) => recoveryError(error, status),
+        );
     } catch (error) {
-        status.textContent = 'Error: ' + error.message;
-        console.error('[__APP_NAME__] Recovery error:', error);
+        recoveryError(error, status);
     }
+}
+
+function recoveryError(error, status) {
+    status.textContent = 'Error: ' + error.message;
+    console.error('[__APP_NAME__] Recovery error:', error);
 }
 
 // The app's name, for text a PERSON reads — taken from the page this script
@@ -761,6 +847,39 @@ function renderWaitingUI(target, worker, status, waitedMs) {
                 busy: 'Waiting…',
                 style: 'primary',
                 act: () => enterApp(target, worker, status, waitedMs),
+            },
+            {
+                id: 'impresspress-restart',
+                label: 'Restart it',
+                busy: STOPPING,
+                style: 'plain',
+                act: () => recoverFromButton({ erase: false, forget: false, failure: null }, status),
+            },
+            resetButton(null, status, STOPPING),
+        ],
+    });
+}
+
+// Shown when the version the browser is bringing in has not activated
+// within CONTROL_WAIT_MS (`whenActivated`). Nothing has failed: the browser
+// has installed it, or is installing it, and has not yet put it in place —
+// usually a moment, sometimes, in Chromium, much longer. "Keep waiting"
+// waits again (`resume`); "Restart it" and the reset register a replacement
+// over it, as on the waiting screen.
+function renderNotStartedUI(status, waitedMs, resume) {
+    const name = appTitle();
+    const STOPPING = 'Waiting for the app to stop…';
+    renderChoices({
+        title: `${name} is taking a long time to start`,
+        said: `The new version has not started yet, after ${waitedMs / 1000} seconds.`,
+        next: 'The browser is still putting it in place. You can keep waiting. Or restart it, which keeps the data stored locally in this browser, or reset, which erases it; both start the app from its first page.',
+        buttons: [
+            {
+                id: 'impresspress-wait',
+                label: 'Keep waiting',
+                busy: 'Waiting…',
+                style: 'primary',
+                act: resume,
             },
             {
                 id: 'impresspress-restart',
@@ -1007,16 +1126,23 @@ async function boot() {
                 console.warn('[__APP_NAME__] SW update check failed:', e);
             }
         }
-        let worker;
-        try {
-            worker = await activated(registration);
-        } catch (error) {
-            if (recovery.kind !== 'recovered') throw error;
-            recoveryFailed(recovery.failure, error, status);
-            return;
-        }
-        status.textContent = `Loading ${appTitle()}...`;
-        await enterApp(destination(), worker, status, 0);
+        await whenActivated(
+            registration,
+            status,
+            0,
+            async (worker) => {
+                status.textContent = `Loading ${appTitle()}...`;
+                await enterApp(destination(), worker, status, 0);
+            },
+            (error) => {
+                if (recovery.kind === 'recovered') {
+                    recoveryFailed(recovery.failure, error, status);
+                    return;
+                }
+                status.textContent = 'Error: ' + error.message;
+                console.error('[__APP_NAME__] Boot error:', error);
+            },
+        );
     } catch (error) {
         status.textContent = 'Error: ' + error.message;
         console.error('[__APP_NAME__] Boot error:', error);

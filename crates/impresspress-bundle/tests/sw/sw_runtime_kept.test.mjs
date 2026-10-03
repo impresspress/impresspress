@@ -224,3 +224,16 @@ test('a worker says which runtime it was built for, dead or alive', async (t) =>
   }
 });
 
+
+// `initialize()` is what opens the app's data, and a recovering tab may still
+// be erasing it when a replacement worker is asked for a page by another tab:
+// the two take turns on one Web Lock (`ERASE_LOCK`, held by `loader.js`'s
+// erase too).
+test('the runtime starts holding the erase lock', async (t) => {
+  captureConsole(t);
+  const worker = await loadWorker();
+
+  await worker.request(LOGIN, { method: 'POST' });
+
+  assert.deepEqual(worker.initializeHeld, [['__impresspress_erase']]);
+});

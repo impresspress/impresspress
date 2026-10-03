@@ -82,6 +82,9 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
   const warnings = [];
   let unregistered = 0;
   let claimed = 0;
+  // The Web Locks held now, and those held when `initialize()` was called.
+  const heldLocks = new Set();
+  const initializeHeld = [];
 
   // What `init()` was handed, each time it was called.
   const inits = [];
@@ -141,7 +144,10 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
       inits.push(options);
       if (runtime.init) return runtime.init(options);
     },
-    initialize: runtime.initialize ?? (async () => {}),
+    initialize: async (options) => {
+      initializeHeld.push([...heldLocks]);
+      if (runtime.initialize) return runtime.initialize(options);
+    },
     handle_request:
       runtime.handle_request ??
       (async () => ({ response: new Response('from the runtime'), after: Promise.resolve() }))
@@ -152,6 +158,20 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
       listeners[type] = listener;
     },
     skipWaiting: async () => {},
+    // Web Locks, as a worker has them: one worker, so a lock is always free;
+    // what a test reads is which were held when.
+    navigator: {
+      locks: {
+        request: async (name, act) => {
+          heldLocks.add(name);
+          try {
+            return await act();
+          } finally {
+            heldLocks.delete(name);
+          }
+        }
+      }
+    },
     registration: {
       unregister: async () => {
         unregistered += 1;
@@ -224,6 +244,8 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
     request,
     message,
     lifecycle,
+    /// The locks held at each call of `initialize()`.
+    initializeHeld,
 
     /// What `init()` was handed on each call.
     inits,

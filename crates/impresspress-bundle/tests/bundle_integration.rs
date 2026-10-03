@@ -859,6 +859,8 @@ fn the_worker_and_the_loader_agree_on_where_the_stop_cause_is_left() {
         // The stage only an `initialize()` failure carries: the worker
         // states it, the loader's wipe gate asks for it.
         "const STAGE_INITIALIZE = 'initialize';",
+        // The Web Lock the erase and the runtime's start take turns on.
+        "const ERASE_LOCK = '__impresspress_erase';",
     ] {
         assert_eq!(sw.matches(declaration).count(), 1, "sw.js = {sw}");
         assert_eq!(

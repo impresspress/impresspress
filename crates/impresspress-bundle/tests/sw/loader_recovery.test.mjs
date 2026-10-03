@@ -1311,3 +1311,69 @@ test('a reset completes in its order: replacement in, then the erase, then the a
   assert.equal(shell.probes.length, 1);
   assert.equal(shell.location.reloads, 1);
 });
+
+// ---------------------------------------------------------------------------
+// The three bounds and the erase lock
+// ---------------------------------------------------------------------------
+
+// A deployment rolled back to a build from before versions were asked: its
+// worker never answers the question. That is not a hang — the answer is
+// waited for briefly (`RUNTIME_ANSWER_MS`) — and a worker that does not name
+// the version that died is not that version.
+test('an active worker that never says its version is another version than the one that died', async () => {
+  const shell = loadShell({
+    stop: left('initialize', NOW, { ...DEATH, runtime: NEW_RUNTIME }),
+    registeredUrl: `${ORIGIN}/sw.js`,
+    answersRuntime: false,
+    now: NOW,
+    wipe: true
+  });
+  await shell.booted;
+
+  assert.deepEqual(shell.registeredUrls, []);
+  assert.deepEqual(shell.opfs(), ['app.sqlite']);
+  assert.deepEqual(shell.recovered(), [DEATH.id]);
+  assertEntered(shell);
+});
+
+// The erase and the start of a worker that would open the data take turns
+// on one Web Lock (`ERASE_LOCK`; sw.js takes it around `initialize()`).
+test('every erase holds the erase lock — the automatic one and the reset', async () => {
+  const automatic = loadShell({ stop: left('initialize'), now: NOW, wipe: true });
+  await automatic.booted;
+  assert.ok(automatic.erasedHolding.length > 0);
+  for (const locks of automatic.erasedHolding) assert.ok(locks.includes('__impresspress_erase'), locks);
+
+  const reset = loadShell({
+    stop: left('request', NOW, DEATH),
+    session: { [RECOVERY_DONE]: 'restarted' },
+    now: NOW
+  });
+  await reset.booted;
+  await reset.stuck('impresspress-reset').click();
+  assert.ok(reset.erasedHolding.length > 0);
+  for (const locks of reset.erasedHolding) assert.ok(locks.includes('__impresspress_erase'), locks);
+});
+
+// A version can install and then not activate — Chromium has been seen to
+// leave one `installed` with nothing in its way. A shell does not wait on it
+// silently: after the control wait it says so and offers the choices.
+test('a new version that does not activate is waited for, then asked about', async () => {
+  const shell = loadShell({ installs: 'stalls', now: NOW });
+  await shell.booted;
+
+  assert.equal(shell.stuck('impresspress-stopped-title').textContent, 'Kiln & Co is taking a long time to start');
+  assert.equal(
+    shell.stuck('impresspress-stopped-cause').textContent,
+    'The new version has not started yet, after 10 seconds.'
+  );
+  assert.ok(shell.stuck('impresspress-restart'));
+  assert.ok(shell.stuck('impresspress-reset'));
+  assert.equal(shell.probes.length, 0, 'nothing was asked of a version that is not in place');
+
+  await shell.stuck('impresspress-wait').click();
+  assert.equal(
+    shell.stuck('impresspress-stopped-cause').textContent,
+    'The new version has not started yet, after 20 seconds.'
+  );
+});
