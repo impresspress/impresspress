@@ -502,6 +502,19 @@ pub struct AdminExtensionView {
 // POST /b/admin/api/database/query
 // ---------------------------------------------------------------------------
 
+/// `POST /b/admin/api/database/query` request body.
+#[derive(Debug, Clone, Serialize, Deserialize, schemars::JsonSchema)]
+pub struct AdminSqlQueryRequest {
+    /// One read-only statement: `SELECT`, `WITH`, `EXPLAIN` or a whitelisted
+    /// `PRAGMA`. Anything else, more than one statement, or a statement that
+    /// names a table holding credentials is refused.
+    pub query: String,
+    /// Positional bind values for the statement's `?` placeholders. Empty
+    /// when omitted.
+    #[serde(default)]
+    pub args: Vec<serde_json::Value>,
+}
+
 /// Response body of `POST /b/admin/api/database/query`: the result set of
 /// one read-only query.
 #[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
@@ -522,9 +535,12 @@ pub struct AdminSqlQueryRow {
     /// The row's `id` column as text; `""` when the query selected no `id`
     /// (or it held no string or integer).
     pub id: String,
-    /// Every column of the row, name → value, its keys in
-    /// [`AdminSqlQueryResponse::columns`] order. Two result columns with one
-    /// name collapse into one entry — alias them apart.
+    /// Every column of the row, name → value, its keys written in
+    /// [`AdminSqlQueryResponse::columns`] order. Read the order from
+    /// `columns`, not from this object: a JSON parser need not keep key order,
+    /// and JavaScript's `JSON.parse` enumerates integer-like names (`1`)
+    /// before the others. Two result columns with one name collapse into one
+    /// entry — alias them apart.
     #[schemars(with = "std::collections::BTreeMap<String, serde_json::Value>")]
     pub data: RecordData,
 }

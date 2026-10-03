@@ -391,17 +391,11 @@ pub(in crate::blocks::admin) fn validate_readonly_query(
 
 /// `POST /b/admin/api/database/query`.
 pub(super) async fn handle_query(ctx: &dyn Context, input: InputStream) -> OutputStream {
-    #[derive(serde::Deserialize)]
-    struct QueryReq {
-        query: String,
-        #[serde(default)]
-        args: Vec<serde_json::Value>,
-    }
     let raw = match input.collect_to_bytes().await {
         Ok(bytes) => bytes,
         Err(e) => return OutputStream::error(e),
     };
-    let body: QueryReq = match serde_json::from_slice(&raw) {
+    let body: contracts::AdminSqlQueryRequest = match serde_json::from_slice(&raw) {
         Ok(b) => b,
         Err(e) => return err_bad_request(&format!("Invalid body: {e}")),
     };

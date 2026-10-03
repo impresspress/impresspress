@@ -24,7 +24,7 @@
 //! module is pulled in there under `cfg(test)` — see `lib.rs`) and keeps its
 //! ordinary host-run `#[test]`s below.
 
-use wafer_core::interfaces::database::service::RecordData;
+use wafer_core::interfaces::database::{codec::rows_from_positional, service::RecordData};
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsValue;
 
@@ -92,24 +92,10 @@ pub(crate) struct QueryResult {
 
 impl QueryResult {
     /// Each row as its columns, name → value, in result-column order — the
-    /// shape `codec::record_from_columns` takes. A row with a different
-    /// number of values than there are columns is not what sql.js produces
-    /// and is refused rather than truncated.
+    /// shape `codec::record_from_columns` takes — paired by the shared
+    /// `codec::rows_from_positional` (D1 reads through the same pairing).
     pub(crate) fn into_rows(self) -> Result<Vec<RecordData>, String> {
-        let Self { columns, values } = self;
-        values
-            .into_iter()
-            .map(|row| {
-                if row.len() != columns.len() {
-                    return Err(format!(
-                        "decode rows: a row has {} values for {} columns",
-                        row.len(),
-                        columns.len()
-                    ));
-                }
-                Ok(columns.iter().cloned().zip(row).collect())
-            })
-            .collect()
+        rows_from_positional(&self.columns, self.values).map_err(|e| format!("decode rows: {e}"))
     }
 }
 

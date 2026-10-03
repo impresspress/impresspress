@@ -28,7 +28,24 @@ export interface paths {
                 path?: never;
                 cookie?: never;
             };
-            requestBody?: never;
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /**
+                         * @description Positional bind values for the statement's `?` placeholders. Empty
+                         *     when omitted.
+                         * @default []
+                         */
+                        args?: unknown[];
+                        /**
+                         * @description One read-only statement: `SELECT`, `WITH`, `EXPLAIN` or a whitelisted
+                         *     `PRAGMA`. Anything else, more than one statement, or a statement that
+                         *     names a table holding credentials is refused.
+                         */
+                        query: string;
+                    };
+                };
+            };
             responses: {
                 /** @description Successful response */
                 200: {
@@ -51,9 +68,12 @@ export interface paths {
                             /** @description The rows, in the order the query returned them. */
                             rows: {
                                 /**
-                                 * @description Every column of the row, name → value, its keys in
-                                 *     [`AdminSqlQueryResponse::columns`] order. Two result columns with one
-                                 *     name collapse into one entry — alias them apart.
+                                 * @description Every column of the row, name → value, its keys written in
+                                 *     [`AdminSqlQueryResponse::columns`] order. Read the order from
+                                 *     `columns`, not from this object: a JSON parser need not keep key order,
+                                 *     and JavaScript's `JSON.parse` enumerates integer-like names (`1`)
+                                 *     before the others. Two result columns with one name collapse into one
+                                 *     entry — alias them apart.
                                  */
                                 data: {
                                     [key: string]: unknown;

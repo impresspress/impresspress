@@ -1,6 +1,33 @@
 {
   "/b/admin/api/database/query": {
     "post": {
+      "requestBody": {
+        "content": {
+          "application/json": {
+            "schema": {
+              "description": "`POST /b/admin/api/database/query` request body.",
+              "properties": {
+                "args": {
+                  "default": [],
+                  "description": "Positional bind values for the statement's `?` placeholders. Empty\nwhen omitted.",
+                  "items": true,
+                  "type": "array"
+                },
+                "query": {
+                  "description": "One read-only statement: `SELECT`, `WITH`, `EXPLAIN` or a whitelisted\n`PRAGMA`. Anything else, more than one statement, or a statement that\nnames a table holding credentials is refused.",
+                  "type": "string"
+                }
+              },
+              "required": [
+                "query"
+              ],
+              "title": "AdminSqlQueryRequest",
+              "type": "object"
+            }
+          }
+        },
+        "required": true
+      },
       "responses": {
         "200": {
           "content": {
@@ -28,7 +55,7 @@
                       "properties": {
                         "data": {
                           "additionalProperties": true,
-                          "description": "Every column of the row, name → value, its keys in\n[`AdminSqlQueryResponse::columns`] order. Two result columns with one\nname collapse into one entry — alias them apart.",
+                          "description": "Every column of the row, name → value, its keys written in\n[`AdminSqlQueryResponse::columns`] order. Read the order from\n`columns`, not from this object: a JSON parser need not keep key order,\nand JavaScript's `JSON.parse` enumerates integer-like names (`1`)\nbefore the others. Two result columns with one name collapse into one\nentry — alias them apart.",
                           "type": "object"
                         },
                         "id": {
