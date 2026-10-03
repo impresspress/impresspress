@@ -368,7 +368,7 @@ mod tests {
             "the per-route average must carry the mask hook inside the cell: {html}"
         );
         assert!(
-            html.contains(r#"<time class="datetime" datetime="2026-01-01T00:00:00.000Z" title="2026-01-01T00:00:00.000Z">2026-01-01 00:00</time>"#),
+            html.contains(r#"<time class="datetime" datetime="2026-01-01T00:00:00.000Z" title="2026-01-01T00:00:00.000Z">2026-01-01 00:00 UTC</time>"#),
             "the last-seen stamp must be a <time>, which the suite's existing \
              `[data-relative-time], .relative-time, time` mask already matches: {html}"
         );
@@ -390,7 +390,7 @@ mod tests {
             "the per-request duration must carry the mask hook inside the cell: {html}"
         );
         assert!(
-            html.contains(r#"<time class="datetime" datetime="2026-01-01T00:00:00.000Z" title="2026-01-01T00:00:00.000Z">2026-01-01 00:00</time>"#),
+            html.contains(r#"<time class="datetime" datetime="2026-01-01T00:00:00.000Z" title="2026-01-01T00:00:00.000Z">2026-01-01 00:00 UTC</time>"#),
             "the per-request stamp must be a <time>: {html}"
         );
     }

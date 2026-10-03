@@ -366,11 +366,10 @@ fn render_sql_results(rows: &[db::Record], duration_ms: u128) -> Markup {
         };
     }
 
-    // The grid's columns are the query's, in the order it returned them.
+    // The grid's columns are the query's, in the order it returned them, so
+    // they are built per render rather than declared as a const the way the
+    // fixed tables are.
     let columns = result_columns(rows);
-
-    // The result grid's columns are the query's, so they are built per render
-    // rather than declared as a const the way the fixed tables are.
     let cols: Vec<components::TableCol<'_>> = columns
         .iter()
         .map(|c| components::TableCol::new(c.as_str()))
@@ -396,13 +395,12 @@ fn render_sql_results(rows: &[db::Record], duration_ms: u128) -> Markup {
     }
 }
 
-/// One result value. A date-time string goes through the shared
-/// `components::timestamp` (minute precision, the full UTC instant in its
-/// `datetime` and `title`); everything else prints as returned.
+/// One result value, as the query returned it: the explorer shows what is
+/// stored, so a date-time string is not reformatted the way the curated
+/// tables' `components::timestamp` does.
 fn format_cell(v: &serde_json::Value) -> Markup {
     match v {
         serde_json::Value::Null => html! {},
-        serde_json::Value::String(s) if components::is_timestamp(s) => components::timestamp(s),
         serde_json::Value::String(s) => html! { (s) },
         other => html! { (other.to_string()) },
     }

@@ -356,7 +356,7 @@ fn variable_cell(
 ) -> Markup {
     html! {
         div .var-cell {
-            code .var-cell__key { (components::breakable_id(key)) }
+            code .var-cell__key .data-table__title { (components::breakable_id(key)) }
             @if let Some(name) = name.filter(|name| !name.is_empty()) {
                 span .var-cell__name { (name) }
             }

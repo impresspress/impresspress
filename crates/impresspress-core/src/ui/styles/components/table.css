@@ -335,7 +335,12 @@ a.pagination__link:focus-visible { outline: none; box-shadow: var(--focus-ring);
 	.data-table:not(.data-table--scroll) td.data-table__cell--actions::before,
 	.data-table:not(.data-table--scroll) td.data-table__cell--select::before,
 	.data-table:not(.data-table--scroll) td.data-table__row-href::before { content: none; }
-	.data-table:not(.data-table--scroll) td.data-table__cell--primary { grid-column: title; font-weight: 600; font-size: var(--text-base); }
+	/* The title is the primary cell's text -- or, when the cell carries more
+	   than its title (a variable's key with its description and notes), the
+	   element it marks `.data-table__title`; the rest keeps its own weight. */
+	.data-table:not(.data-table--scroll) td.data-table__cell--primary { grid-column: title; font-size: var(--text-base); }
+	.data-table:not(.data-table--scroll) td.data-table__cell--primary:not(:has(.data-table__title)),
+	.data-table:not(.data-table--scroll) td.data-table__cell--primary .data-table__title { font-weight: 600; }
 	.data-table:not(.data-table--scroll) td.data-table__cell--select { grid-column: select; width: auto; margin-right: var(--space-3); }
 	.data-table:not(.data-table--scroll) td.data-table__cell--actions { grid-column: actions; margin-left: var(--space-3); }
 	.data-table:not(.data-table--scroll) td.data-table__row-href { grid-column: link; width: auto; margin-left: var(--space-1); }

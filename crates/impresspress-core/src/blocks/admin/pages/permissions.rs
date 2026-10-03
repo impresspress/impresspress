@@ -515,23 +515,18 @@ async fn permissions_all_tab(
                         "No permissions configured yet."
                     }
                 } @else {
+                    // The type is a category, not a status: one neutral
+                    // badge for all of them (D5) — status colours (amber,
+                    // green) read as "warning" and "OK".
                     @let rows: Vec<Vec<Markup>> = all_rows.iter().map(|row| {
-                        let variant = match row.type_label.as_str() {
-                            "DB" | "DB/Config" => BadgeVariant::Info,
-                            "Config" => BadgeVariant::Info,
-                            "Storage" => BadgeVariant::Warning,
-                            "Network" => BadgeVariant::Success,
-                            "Crypto" => BadgeVariant::Secondary,
-                            _ => BadgeVariant::Secondary,
-                        };
                         vec![
-                            Badge::new(variant).classes("text-11").render(html! { (row.type_label) }),
+                            Badge::new(BadgeVariant::Secondary).classes("text-11").render(html! { (row.type_label) }),
                             html! { span .text-13 { (row.sentence) } },
                             html! {
                                 @if row.origin == "code" {
                                     (Badge::new(BadgeVariant::Secondary).classes("text-10").render(html! { "code" }))
                                 } @else {
-                                    (Badge::new(BadgeVariant::Primary).classes("text-10").render(html! { "custom" }))
+                                    (Badge::new(BadgeVariant::Secondary).classes("text-10").render(html! { "custom" }))
                                 }
                             },
                         ]
@@ -568,14 +563,14 @@ async fn permissions_database_tab(
 /// the one that only carries the delete control.
 const CODE_GRANT_COLUMNS: [components::TableCol<'static>; 5] = [
     components::TableCol::new("Block (Owner)"),
-    components::TableCol::new("Grantee"),
+    components::TableCol::new("Grantee").primary(),
     components::TableCol::new("Type"),
     components::TableCol::new("Resource Pattern"),
     components::TableCol::new("Access"),
 ];
 
 const CUSTOM_GRANT_COLUMNS: [components::TableCol<'static>; 6] = [
-    components::TableCol::new("Grantee"),
+    components::TableCol::new("Grantee").primary(),
     components::TableCol::new("Type"),
     components::TableCol::new("Resource Pattern"),
     components::TableCol::new("Access"),
@@ -585,7 +580,7 @@ const CUSTOM_GRANT_COLUMNS: [components::TableCol<'static>; 6] = [
 
 const PERMISSION_COLUMNS: [components::TableCol<'static>; 3] = [
     components::TableCol::new("Type").width("110px"),
-    components::TableCol::new("Permission"),
+    components::TableCol::new("Permission").primary(),
     components::TableCol::new("Origin").width("80px"),
 ];
 

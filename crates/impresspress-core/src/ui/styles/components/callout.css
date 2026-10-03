@@ -2,9 +2,8 @@
    A boxed note inside a page's content. Info is neutral (slate surface and
    border, primary text); the brand colour is not used -- it is kept for
    primary actions, and a note that informs is not one. Warning is a pale
-   amber: #fff8e1/#f0d78c have no matching design tokens (--accent-warning,
-   #f59e0b, is too saturated for a banner tint); --accent-warning-text on
-   #fff8e1 is 6.67:1 (computed). */
+   tint of --accent-warning (10% fill, 40% border) with --accent-warning-text
+   on it: #92400e on that #fef5e7 fill is 6.56:1 (computed). */
 .callout {
 	display: flex; align-items: flex-start; justify-content: space-between;
 	gap: var(--space-4);
@@ -16,7 +15,7 @@
 	color: var(--text-primary);
 }
 .callout--info { background: var(--surface-2); border-color: var(--border-color); }
-.callout--warning { background: #fff8e1; border-color: #f0d78c; color: var(--accent-warning-text); }
+.callout--warning { background: color-mix(in srgb, var(--accent-warning) 10%, var(--surface-1)); border-color: color-mix(in srgb, var(--accent-warning) 40%, var(--surface-1)); color: var(--accent-warning-text); }
 .callout__copy { min-width: 0; max-width: 68ch; }
 .callout__title { display: block; margin-bottom: var(--space-1); }
 .callout__body { font-size: var(--text-sm); }

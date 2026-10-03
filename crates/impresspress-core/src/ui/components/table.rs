@@ -64,7 +64,10 @@ impl<'a> TableCol<'a> {
     }
 
     /// The row's name column: the card title in card mode. At most one per
-    /// table — a second is rendered as a second title.
+    /// table — a second is rendered as a second title. The whole cell is the
+    /// title unless it marks one element `.data-table__title` (a cell that
+    /// also carries a description or notes), in which case only that
+    /// element is set as the title.
     pub const fn primary(mut self) -> Self {
         self.kind = ColKind::Primary;
         self
@@ -117,11 +120,33 @@ impl<'a> TableCol<'a> {
     }
 }
 
-/// Whether a cell's markup renders nothing at all. Such a cell is hidden in
-/// card mode (an empty value under its label is noise) and is what an
-/// [`optional`](TableCol::optional) column is dropped for.
+/// The placeholder a cell shows for "no value" in a grid (an em dash). A
+/// card hides such a cell like an empty one: under its label it says
+/// nothing.
+pub const NO_VALUE: &str = "\u{2014}";
+
+/// Whether a cell has no value: its markup renders nothing at all, or its
+/// only text is the [`NO_VALUE`] placeholder (whatever elements wrap it).
+/// Such a cell is hidden in card mode — an empty value under its label is
+/// noise — and is what an [`optional`](TableCol::optional) column is dropped
+/// for. A cell that renders only an element (a checkbox, an icon) has a value
+/// and is never blank.
 fn is_blank(cell: &Markup) -> bool {
-    cell.0.trim().is_empty()
+    let html = cell.0.trim();
+    if html.is_empty() {
+        return true;
+    }
+    let mut text = String::new();
+    let mut in_tag = false;
+    for c in html.chars() {
+        match c {
+            '<' => in_tag = true,
+            '>' => in_tag = false,
+            c if !in_tag => text.push(c),
+            _ => {}
+        }
+    }
+    text.trim() == NO_VALUE
 }
 
 /// One row of a [`DataTable`].
@@ -220,25 +245,57 @@ impl TableRow {
             after,
         } = self;
         let row_class = row_class(&classes, href.is_some());
+        // A linked row with a visible primary cell names its link after it
+        // ("Open" + the row's title), so every row's link is distinct; the
+        // ids derive from the destination, which is what tells two rows'
+        // links apart. Without a primary cell the link is plain "Open".
+        let primary = (0..columns.len())
+            .find(|&j| {
+                columns[j].kind == ColKind::Primary && visible.get(j).copied().unwrap_or(true)
+            })
+            .filter(|&j| cells.get(j).is_some_and(|c| !is_blank(c)));
+        let link_id = href
+            .as_deref()
+            .filter(|_| primary.is_some())
+            .map(|h| format!("row-link-{:08x}", fnv1a(h)));
         html! {
             tr id=[id] class=(row_class) {
                 @for (j, cell) in cells.into_iter().enumerate() {
                     @if visible.get(j).copied().unwrap_or(true) {
                         @let col = columns.get(j);
                         @let class = cell_class(col.and_then(TableCol::cell_class), is_blank(&cell));
-                        td class=[class] data-label=(col.map(|c| c.label).unwrap_or("")) { (cell) }
+                        @let title_id = link_id.as_ref().filter(|_| primary == Some(j)).map(|l| format!("{l}-title"));
+                        td id=[title_id] class=[class] data-label=(col.map(|c| c.label).unwrap_or("")) { (cell) }
                     }
                 }
                 @if let Some(h) = href {
                     // The chevron is the row's link for keyboard and
                     // screen-reader users; pointer users can click anywhere
                     // on the row (`chrome.js` forwards the click here).
-                    td .data-table__row-href { a href=(h) aria-label="Open" { (icons::chevron_right()) } }
+                    td .data-table__row-href {
+                        @if let Some(l) = &link_id {
+                            a href=(h) aria-labelledby=(format!("{l}-open {l}-title")) {
+                                span .sr-only id=(format!("{l}-open")) { "Open" }
+                                (icons::chevron_right())
+                            }
+                        } @else {
+                            a href=(h) aria-label="Open" { (icons::chevron_right()) }
+                        }
+                    }
                 }
             }
             @if let Some(after) = after { (after) }
         }
     }
+}
+
+/// 32-bit FNV-1a of `s`: a short, stable id fragment for a row link, derived
+/// from its destination so a re-render (or a single-row htmx swap) emits the
+/// same ids.
+fn fnv1a(s: &str) -> u32 {
+    s.bytes().fold(0x811c_9dc5_u32, |h, b| {
+        (h ^ u32::from(b)).wrapping_mul(0x0100_0193)
+    })
 }
 
 /// A `<td>`'s class list: the column kind's class, then `--empty` for a cell
@@ -768,6 +825,17 @@ mod tests {
         );
     }
 
+    /// The em-dash placeholder counts as no value; an element-only cell
+    /// (a checkbox) does not.
+    #[test]
+    fn the_no_value_placeholder_is_blank_but_an_element_is_not() {
+        assert!(is_blank(&html! { span .text-muted { (NO_VALUE) } }));
+        assert!(is_blank(&html! { "  " }));
+        assert!(!is_blank(&html! { input type="checkbox"; }));
+        assert!(!is_blank(&html! { "admin" }));
+        assert!(!is_blank(&html! { "\u{2014} draft" }));
+    }
+
     /// An optional column nobody filled in is dropped — header and every
     /// cell — and kept as soon as one row fills it in.
     #[test]
@@ -857,11 +925,48 @@ mod tests {
         );
     }
 
-    /// The row link is a labelled anchor around the chevron icon.
+    /// A row link is named "Open" plus the row's primary cell, so two rows'
+    /// links are distinct; the ids come from the destination, so the same
+    /// row renders the same ids (in the table or swapped in alone).
     #[test]
-    fn row_link_is_a_labelled_chevron() {
+    fn row_link_is_labelled_by_open_and_the_primary_cell() {
+        let cols = [TableCol::new("Name").primary(), TableCol::new("Size")];
+        let s = DataTable::new(&cols)
+            .rows(vec![
+                TableRow::new(vec![html! { "alpha" }, html! { "1" }]),
+                TableRow::new(vec![html! { "beta" }, html! { "2" }]),
+            ])
+            .row_href(|i| Some(format!("/items/{i}")))
+            .render()
+            .into_string();
+        let id = |h: &str| format!("row-link-{:08x}", super::fnv1a(h));
+        let (a, b) = (id("/items/0"), id("/items/1"));
+        assert_ne!(a, b);
+        assert!(
+            s.contains(&format!(r#"<td id="{a}-title" class="data-table__cell--primary" data-label="Name">alpha</td>"#)),
+            "{s}"
+        );
+        assert!(
+            s.contains(&format!(
+                r#"<a href="/items/0" aria-labelledby="{a}-open {a}-title"><span class="sr-only" id="{a}-open">Open</span><svg"#
+            )),
+            "{s}"
+        );
+        assert!(
+            s.contains(&format!(r#"aria-labelledby="{b}-open {b}-title""#)),
+            "{s}"
+        );
+        let standalone = TableRow::new(vec![html! { "alpha" }, html! { "1" }])
+            .render(&cols, Some("/items/0".into()))
+            .into_string();
+        assert!(s.contains(&standalone), "{s} !⊇ {standalone}");
+    }
+
+    /// With no primary cell there is nothing to name the link after.
+    #[test]
+    fn row_link_without_a_primary_cell_is_plain_open() {
         let s = TableRow::new(vec![html! { "a" }])
-            .render(&[TableCol::new("Name").primary()], Some("/a".into()))
+            .render(&[TableCol::new("Name")], Some("/a".into()))
             .into_string();
         assert!(
             s.contains(r#"<td class="data-table__row-href"><a href="/a" aria-label="Open"><svg"#),

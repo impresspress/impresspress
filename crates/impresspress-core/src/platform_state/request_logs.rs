@@ -222,7 +222,7 @@ pub async fn paginated(
 }
 
 /// The `limit` most recent error rows ([`is_error_status`]). The dashboard's
-/// "Recent Errors" card.
+/// "Recent 4xx/5xx" card.
 pub async fn list_recent_errors(
     ctx: &dyn Context,
     limit: u32,
@@ -248,6 +248,27 @@ pub async fn list_recent_errors(
         .iter()
         .map(|r| RequestLogRow::from_record(&r.id, &r.data))
         .collect())
+}
+
+/// When the oldest stored request was logged (its `created_at`), or `None`
+/// when the log is empty: how far back the dashboard's request and 4xx/5xx
+/// series actually go. One row, ascending, no count.
+pub async fn first_logged_at(ctx: &dyn Context) -> Result<Option<String>, WaferError> {
+    let opts = ListOptions {
+        columns: Some(vec!["created_at".into()]),
+        sort: vec![SortField {
+            field: "created_at".into(),
+            desc: false,
+        }],
+        limit: Some(1),
+        skip_count: true,
+        ..Default::default()
+    };
+    let list = db::list(ctx, TABLE, &opts).await?;
+    Ok(list
+        .records
+        .first()
+        .map(|r| r.data.str_field("created_at").to_string()))
 }
 
 /// Rows for one `(method, path)`, newest first, from `offset`, at most
@@ -476,6 +497,21 @@ mod tests {
         db::create(ctx, TABLE, data)
             .await
             .unwrap_or_else(|e| panic!("seed request_log {id}: {e}"));
+    }
+
+    /// The oldest stored row, whatever its status; `None` on an empty log.
+    #[tokio::test]
+    async fn first_logged_at_is_the_oldest_row_or_none() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        assert_eq!(first_logged_at(&ctx).await.unwrap(), None);
+        seed_at(&ctx, "b", probe(200, 1), "2026-02-01T00:00:00Z").await;
+        seed_at(&ctx, "a", probe(404, 1), "2026-01-05T09:00:00Z").await;
+        assert_eq!(
+            first_logged_at(&ctx).await.unwrap().as_deref(),
+            Some("2026-01-05T09:00:00Z")
+        );
     }
 
     /// Seed a row whose stored `status` label is the caller's rather than the

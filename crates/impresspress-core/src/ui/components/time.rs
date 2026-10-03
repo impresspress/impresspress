@@ -2,17 +2,21 @@
 
 use maud::{html, Markup};
 
-/// A stored date-time as people read it: `2026-10-03 05:43` — UTC, minute
-/// precision, the same digits in every locale — in a `<time>` element whose
-/// `datetime` and `title` carry the full value
-/// (`2026-10-03T05:43:12.123Z`), so the precision the cell drops is one
-/// hover (or one screen-reader query) away.
+/// A stored date-time as people read it: `2026-10-03 05:43 UTC` — converted
+/// to UTC, minute precision, the same digits in every locale, and the zone
+/// stated in the text (one convention for every table: a suffix on the value,
+/// not a note in a column header a caller could forget). It sits in a
+/// `<time>` element whose `datetime` and `title` carry the instant in UTC to
+/// the millisecond (`2026-10-03T05:43:12.123Z`) — finer than the cell, though
+/// a stored value with more fractional digits is truncated to three, and one
+/// stored with an offset is shown converted.
 ///
-/// The one helper every table and card uses for a timestamp, rather than
-/// printing the stored ISO string or slicing it (`created.get(..19)`), which
-/// left a `T` in the middle and dropped the zone. The text is set in
+/// The one helper every curated table and card uses for a timestamp, rather
+/// than printing the stored ISO string or slicing it (`created.get(..19)`),
+/// which left a `T` in the middle and dropped the zone. The text is set in
 /// tabular figures on one line (`.datetime` in `table.css`), so a column of
-/// them aligns and never breaks between the date and the time.
+/// them aligns and never breaks between the date and the time. (The SQL
+/// explorer is not curated: it prints values as stored.)
 ///
 /// Accepts RFC 3339 (`2026-10-03T05:43:12.123456789Z`, any offset), and a
 /// zone-less `YYYY-MM-DD[T ]HH:MM[:SS[.f]]` read as UTC (what SQLite's own
@@ -26,17 +30,11 @@ pub fn timestamp(raw: &str) -> Markup {
         Some(dt) => {
             let iso = dt.to_rfc3339_opts(chrono::SecondsFormat::Millis, true);
             html! {
-                time .datetime datetime=(iso) title=(iso) { (dt.format("%Y-%m-%d %H:%M")) }
+                time .datetime datetime=(iso) title=(iso) { (dt.format("%Y-%m-%d %H:%M")) " UTC" }
             }
         }
         None => html! { span .datetime { (raw) } },
     }
-}
-
-/// Whether `raw` is a date-time [`timestamp`] can render — for a grid of
-/// arbitrary values (the SQL explorer) deciding per cell.
-pub fn is_timestamp(raw: &str) -> bool {
-    parse_utc(raw).is_some()
 }
 
 /// `raw` as a UTC date-time: RFC 3339 with any offset, or a zone-less
@@ -64,7 +62,7 @@ mod tests {
     fn timestamp_renders_minutes_with_the_full_iso_in_datetime_and_title() {
         assert_eq!(
             timestamp("2026-10-03T05:43:12.123456789Z").into_string(),
-            r#"<time class="datetime" datetime="2026-10-03T05:43:12.123Z" title="2026-10-03T05:43:12.123Z">2026-10-03 05:43</time>"#
+            r#"<time class="datetime" datetime="2026-10-03T05:43:12.123Z" title="2026-10-03T05:43:12.123Z">2026-10-03 05:43 UTC</time>"#
         );
     }
 
@@ -96,7 +94,9 @@ mod tests {
         for (raw, iso, text) in cases {
             assert_eq!(
                 timestamp(raw).into_string(),
-                format!(r#"<time class="datetime" datetime="{iso}" title="{iso}">{text}</time>"#),
+                format!(
+                    r#"<time class="datetime" datetime="{iso}" title="{iso}">{text} UTC</time>"#
+                ),
                 "{raw}"
             );
         }
@@ -108,11 +108,5 @@ mod tests {
             timestamp("not a date").into_string(),
             r#"<span class="datetime">not a date</span>"#
         );
-        assert!(!is_timestamp("not a date"));
-        assert!(
-            !is_timestamp("2026-05-06"),
-            "a bare date is not a date-time"
-        );
-        assert!(is_timestamp("2026-05-06T10:00:00Z"));
     }
 }

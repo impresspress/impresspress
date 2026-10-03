@@ -138,7 +138,7 @@ async fn system_logs_tab(ctx: &dyn Context, msg: &Message) -> Result<Markup, Waf
 
             @if errors_only {
                 div .flex .items-center .gap-2 .mb-2 .text-sm {
-                    span .text-muted { "Errors only (status " (request_logs::ERROR_STATUS_FLOOR) "+)" }
+                    span .text-muted { "4xx/5xx only (status " (request_logs::ERROR_STATUS_FLOOR) "+)" }
                     a .btn .btn--ghost .btn--sm
                         href=(all_rows_href)
                         hx-get=(all_rows_href)
@@ -150,7 +150,7 @@ async fn system_logs_tab(ctx: &dyn Context, msg: &Message) -> Result<Markup, Waf
                     href=(errors_href)
                     hx-get=(errors_href)
                     hx-target="#content"
-                { (icons::triangle_alert()) " Errors only" }
+                { (icons::triangle_alert()) " 4xx/5xx only" }
             }
         }
 
@@ -179,7 +179,7 @@ async fn system_logs_tab(ctx: &dyn Context, msg: &Message) -> Result<Markup, Waf
             None,
             html! {
                 p .text-center .text-muted {
-                    @if errors_only { "No error request logs" } @else { "No request logs yet" }
+                    @if errors_only { "No 4xx/5xx request logs" } @else { "No request logs yet" }
                 }
             },
         ))
@@ -363,7 +363,7 @@ mod tests {
     }
 
     /// The link the dashboard emits and the filter the Logs page reads are
-    /// one contract: whatever the dashboard's "Recent Errors" and error-chart
+    /// one contract: whatever the dashboard's "Recent 4xx/5xx" and error-chart
     /// cards link to must narrow the page. A link naming a parameter the page
     /// does not read is silent — it opens the unfiltered list — so nothing but
     /// a test that follows the link itself can catch the two drifting apart.
@@ -429,7 +429,7 @@ mod tests {
             "the page offers a way back to all rows, keeping the search: {html}"
         );
         assert!(
-            html.contains("Errors only"),
+            html.contains("4xx/5xx only"),
             "the active filter is named on the page: {html}"
         );
         // The search box's own Clear and the error filter's way out are two

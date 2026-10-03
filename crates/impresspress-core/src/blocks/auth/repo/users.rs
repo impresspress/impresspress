@@ -942,6 +942,32 @@ pub async fn list_recent_active(ctx: &dyn Context, limit: u32) -> Result<Vec<Use
     list.records.iter().map(row_from_record).collect()
 }
 
+/// When the oldest live account was created (its stored `created_at`), or
+/// `None` when there is none. The admin dashboard's signup chart uses it to
+/// say how far its series actually goes back — a day before the first
+/// account is not a day with no signups. One row, ascending on the indexed
+/// sort column, no count.
+pub async fn first_created_at(ctx: &dyn Context) -> Result<Option<String>, WaferError> {
+    let opts = ListOptions {
+        columns: Some(vec!["created_at".into()]),
+        filters: vec![active_filter()],
+        sort: vec![SortField {
+            field: "created_at".to_string(),
+            desc: false,
+        }],
+        limit: Some(1),
+        skip_count: true,
+        ..Default::default()
+    };
+    let list = db::list(ctx, TABLE, &opts)
+        .await
+        .map_err(|e| db_failed("first account date", e))?;
+    Ok(list
+        .records
+        .first()
+        .map(|r| r.data.str_field("created_at").to_string()))
+}
+
 #[cfg(test)]
 mod lifecycle_and_listing_tests {
     //! The functions the admin surfaces and the two login paths now reach
