@@ -287,19 +287,15 @@ pub async fn buckets(ctx: &dyn Context, msg: &Message) -> OutputStream {
         Err(e) => return crud::db_error_page(msg, e, "storage admin buckets"),
     };
 
-    // Admin can create buckets the same way users do — re-use the
-    // native <dialog> modal + JS from `pages_user`. The bootstrap
-    // script with empty bucket/prefix is needed for the JS to wire
-    // the "+ New bucket" trigger; without it the JS bails on init.
+    // Admin can create buckets the same way users do — the same modal, and
+    // the same `files-browser.js` handler for its form. No bootstrap carrier:
+    // that names a bucket to drop uploads into, and this list has none.
     let js_url = crate::blocks::files::assets::files_browser_js_url();
     let body = list_page(
         Some(admin_tabs("Buckets")),
         html! {
             (render_admin_buckets_table(&rows))
             (super::pages_user::buckets::render_new_bucket_modal())
-            script type="application/json" id="files-browser-bootstrap" {
-                "{}"
-            }
             script src=(js_url) defer {}
         },
         None,
@@ -314,7 +310,7 @@ pub async fn buckets(ctx: &dyn Context, msg: &Message) -> OutputStream {
             crate::ui::components::BtnVariant::Primary,
             crate::ui::components::CtrlSize::Sm,
             "+ New bucket",
-            maud::PreEscaped(r#"type="button" data-action="open-new-bucket""#.to_string()),
+            super::pages_user::buckets::new_bucket_trigger_attrs(),
         )],
         body,
         msg,

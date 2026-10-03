@@ -844,8 +844,8 @@ pub fn script_json_escape(json: &str) -> String {
     json.replace('<', "\\u003c")
 }
 
-/// An htmx fragment that is (or fills) a modal, plus the instruction to
-/// reveal that modal once it has been swapped in.
+/// An htmx fragment that is a modal, plus the instruction to open that modal
+/// once it has been swapped in.
 ///
 /// The four handlers that answer with modal contents used to append a
 /// `<script>` to the fragment that reached back out and cleared the overlay's
@@ -855,10 +855,11 @@ pub fn script_json_escape(json: &str) -> String {
 /// modal section of `ui/assets/chrome.js` listens for `openModal`, the mirror
 /// of the `closeModal` event handlers already emit through `HX-Trigger`.
 ///
-/// *After-swap* rather than plain `HX-Trigger` because the overlay is already
-/// in the page and opening it before its contents arrive shows an empty box.
-/// As in [`html_response_with_toast`], the payload goes through
-/// [`header_json`] so an id can neither malform the JSON nor inject a header.
+/// *After-swap* rather than plain `HX-Trigger` because the fragment IS the
+/// `<dialog>` (`components::modal`): before the swap there is nothing with
+/// that id to open. As in [`html_response_with_toast`], the payload goes
+/// through [`header_json`] so an id can neither malform the JSON nor inject a
+/// header.
 pub fn html_response_opening_modal(
     markup: maud::Markup,
     modal_id: &str,
@@ -866,6 +867,34 @@ pub fn html_response_opening_modal(
     let trigger = header_json(&serde_json::json!({ "openModal": { "id": modal_id } }));
     crate::http::ResponseBuilder::new()
         .set_header("HX-Trigger-After-Swap", &trigger)
+        .body(
+            markup.into_string().into_bytes(),
+            "text/html; charset=utf-8",
+        )
+}
+
+/// The answer to a form a modal submitted and the write landed: `markup` for
+/// the form's swap target, the modal `modal_id` closed, and a toast.
+///
+/// Plain `HX-Trigger`, so the modal closes BEFORE the swap. chrome.js hands
+/// focus back to the control that opened the modal then, and again once the
+/// swap has landed if that control was swapped out with the rest of the
+/// target (`ui/assets/chrome.js`, section 4).
+pub fn html_response_closing_modal(
+    markup: maud::Markup,
+    modal_id: &str,
+    toast_message: &str,
+    toast_type: &str,
+) -> wafer_run::OutputStream {
+    let trigger = header_json(&serde_json::json!({
+        "showToast": {
+            "message": toast_message,
+            "type": toast_type,
+        },
+        "closeModal": { "id": modal_id },
+    }));
+    crate::http::ResponseBuilder::new()
+        .set_header("HX-Trigger", &trigger)
         .body(
             markup.into_string().into_bytes(),
             "text/html; charset=utf-8",

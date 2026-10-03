@@ -235,6 +235,16 @@ document.body.addEventListener("showToast", function(e) {
     t.appendChild(message);
     t.appendChild(dismiss);
     c.appendChild(t);
+    // The container is a `popover="manual"` (`ui::layout::page`), shown into
+    // the top layer — the layer an open modal `<dialog>` lives in, above every
+    // z-index. Re-showing it moves it to the top of that layer, above a modal
+    // opened since, so the toast a modal's own request raises (a refusal, a
+    // "Role created") is drawn over the modal and its backdrop rather than
+    // under them.
+    if (typeof c.showPopover === "function") {
+        if (c.matches(":popover-open")) c.hidePopover();
+        c.showPopover();
+    }
     setTimeout(function() { t.remove(); }, 4000);
 });
 
@@ -435,7 +445,31 @@ document.body.addEventListener("showToast", function(e) {
 // Everything a modal does lives in this one IIFE, so `openModal`/`closeModal`
 // are no longer globals. They had to be, because pages spelled their controls
 // as `onclick="openModal('create-role')"` attributes. Those are gone; the only
-// other caller was the htmx `HX-Trigger` response-header channel, handled here.
+// other callers are the htmx `HX-Trigger` response-header channel and a
+// block's own script, both through the `openModal`/`closeModal` events below.
+//
+// ## Modals
+//
+// A modal is the native `<dialog class="modal">` `components::modal` renders
+// (`ui/components/modal.rs`), opened with `showModal()`. The browser makes the
+// page behind it inert, puts it in the top layer and closes it on Esc (the
+// `cancel` → `close` events). What this section adds:
+//
+// - Focus goes back where it came from. The opener is the focused control at
+//   the moment of opening — or, for a modal an htmx request answered with, the
+//   element that issued that request when nothing kept focus (a click on a
+//   card that is not itself focusable). When the modal closes, the opener gets
+//   focus back. When the opener is gone — the request the modal made
+//   re-rendered the page behind it, swapping out the very button that opened
+//   it — the replacement is found by the same `data-modal-target` operand.
+//   That re-render can also take the OPEN dialog out of the document (a form
+//   whose target is `#content`, which holds the modal), which closes it
+//   without a `close` event; `htmx:afterSwap` notices that too.
+// - Tab wraps. `showModal()` keeps the page inert but lets Tab leave the
+//   dialog for the browser's own UI; for a modal the APG pattern keeps it in.
+// - A click on the backdrop closes the modal — a click whose press AND release
+//   both landed on the dialog element itself outside its box, so a text
+//   selection dragged out of a field does not throw the form away.
 //
 // ## The delegated-action rule
 //
@@ -458,18 +492,18 @@ document.body.addEventListener("showToast", function(e) {
 //
 // Two known exceptions to the prefix rule, both pre-existing and both safe only
 // because of where they sit. `blocks/files/assets/files-browser.js` owns the
-// bare verbs share/copy/delete/revoke/create/cancel, but binds them with
-// `addEventListener` on the elements it built itself rather than reading them
-// back from a delegated listener, so nothing here or there can collide.
+// bare verbs share/copy/delete/revoke, but binds them with `addEventListener`
+// on the elements it built itself rather than reading them back from a
+// delegated listener, so nothing here or there can collide.
 // `blocks/tickets/public.rs` puts `data-action="ticket_submit"` on a Cloudflare
 // Turnstile widget — `data-action` is Turnstile's OWN attribute there, not a
 // verb of ours; the page renders without the shell, so this file is not loaded
 // on it. Give that page a shell and the two meanings meet.
 //
 // Chrome's verbs:
-//   modal-open    + data-modal-target="<id>"   reveal that modal overlay
-//   modal-close   + data-modal-target="<id>"   hide it (omit the operand to
-//                                              close the enclosing overlay)
+//   modal-open    + data-modal-target="<id>"   open that modal
+//   modal-close   [+ data-modal-target="<id>"] close that modal, or the one
+//                                              the control sits in
 //   reveal-toggle + data-reveal-target="<id>"  swap a password field between
 //                                              masked and plain, and swap the
 //                                              button's label when it carries
@@ -482,15 +516,21 @@ document.body.addEventListener("showToast", function(e) {
 //                                              the button for 1.5s
 //   drawer-open / drawer-close                 section 2 above
 //
-// Plus two attributes with no verb, because they describe the element rather
-// than a control acting on it:
-//   .modal-overlay[data-modal-dismiss]   a click on the backdrop closes it
+// Plus attributes with no verb, because they describe the element rather than
+// a control acting on it:
 //   [data-stop-propagation]              a click inside it reaches no ancestor
 //                                        listener — the escape hatch for a link
 //                                        nested in a clickable card
 //   [data-submit-on-enter]               a textarea where Enter submits the
 //                                        enclosing form and Shift+Enter keeps
 //                                        inserting a newline (chat composers)
+//
+// And two events on `document.body`, for the htmx `HX-Trigger` headers
+// (`ui::html_response_opening_modal`, `ui::html_response_closing_modal`) and
+// for a block's script that fills a modal before showing it:
+//   openModal  {id[, opener]}   open that modal; `opener` (an element, from a
+//                               script) is where focus returns
+//   closeModal {id}             close it
 (function () {
     if (window.__modalInit) return;
     window.__modalInit = true;
@@ -521,13 +561,93 @@ document.body.addEventListener("showToast", function(e) {
         });
     }, true);
 
-    function openModal(id) {
-        var m = document.getElementById(id);
-        if (m) m.removeAttribute("hidden");
+    // The modals this section opened and that are still open, oldest first:
+    // `{dialog, id, opener}`. The last one is the one Tab is kept inside.
+    var open = [];
+    // The element that issued the latest htmx request: a modal answered by a
+    // request opens after it, by which time a click on a non-focusable card
+    // has left nothing focused to return to.
+    var lastRequester = null;
+
+    function modalById(id) {
+        var el = id ? document.getElementById(id) : null;
+        return el && el.tagName === "DIALOG" ? el : null;
     }
+
+    function entryFor(dialog) {
+        for (var i = 0; i < open.length; i++) {
+            if (open[i].dialog === dialog) return open[i];
+        }
+        return null;
+    }
+
+    function usable(el) {
+        return !!el && el !== document.body && el.isConnected === true &&
+            typeof el.focus === "function";
+    }
+
+    function openModal(id, opener) {
+        var dialog = modalById(id);
+        if (!dialog || dialog.open) return;
+        var from = usable(opener) ? opener : document.activeElement;
+        if (!usable(from)) from = lastRequester;
+        open.push({ dialog: dialog, id: id, opener: usable(from) ? from : null });
+        dialog.showModal();
+    }
+
     function closeModal(id) {
-        var m = document.getElementById(id);
-        if (m) m.setAttribute("hidden", "");
+        var dialog = modalById(id);
+        if (dialog && dialog.open) dialog.close();
+    }
+
+    // The control that opens modal `id`, for when the one that did is gone.
+    function triggerFor(id) {
+        var all = document.querySelectorAll('[data-action="modal-open"][data-modal-target]');
+        for (var i = 0; i < all.length; i++) {
+            if (all[i].getAttribute("data-modal-target") === id) return all[i];
+        }
+        return null;
+    }
+
+    function focusOpenerOf(entry) {
+        var target = usable(entry.opener) ? entry.opener : triggerFor(entry.id);
+        if (usable(target)) target.focus();
+    }
+
+    // `close` does not bubble, so it is caught on the way down. The browser
+    // fires it from a queued task, so a `closeModal` trigger's `close` lands
+    // after htmx has finished the swap that came in the same response — by
+    // then a swapped-out opener has its replacement, which `focusOpenerOf`
+    // finds.
+    document.addEventListener("close", function (e) {
+        var entry = entryFor(e.target);
+        if (!entry) return;
+        open.splice(open.indexOf(entry), 1);
+        focusOpenerOf(entry);
+    }, true);
+
+    document.body.addEventListener("htmx:beforeRequest", function (e) {
+        var elt = e.detail && e.detail.elt;
+        if (elt instanceof Element) lastRequester = elt;
+    });
+    // An OPEN modal the swap took out of the document — a form whose target
+    // holds the modal it sits in — closed with no `close` event at all, and
+    // took focus with it: everything outside it was inert, so focus was in it.
+    document.body.addEventListener("htmx:afterSwap", function () {
+        var gone = null;
+        for (var i = open.length - 1; i >= 0; i--) {
+            if (open[i].dialog.isConnected !== true) gone = open.splice(i, 1)[0];
+        }
+        if (gone) focusOpenerOf(gone);
+    });
+
+    // The focusable controls inside a dialog, in tab order.
+    var FOCUSABLE = 'a[href], button:not([disabled]), input:not([disabled]):not([type="hidden"]), ' +
+        'select:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])';
+    function tabbable(dialog) {
+        return Array.prototype.filter.call(dialog.querySelectorAll(FOCUSABLE), function (el) {
+            return el.getClientRects().length > 0;
+        });
     }
 
     function revealToggle(btn) {
@@ -558,14 +678,23 @@ document.body.addEventListener("showToast", function(e) {
         });
     }
 
+    // Backdrop dismissal. The backdrop is not an element: a click on it is a
+    // click on the dialog itself at a point outside the dialog's box.
+    var pressedOn = null;
+    document.addEventListener("mousedown", function (e) { pressedOn = e.target; }, true);
+    function onBackdrop(e, dialog) {
+        if (pressedOn !== dialog) return false;
+        var box = dialog.getBoundingClientRect();
+        return e.clientX < box.left || e.clientX > box.right ||
+            e.clientY < box.top || e.clientY > box.bottom;
+    }
+
     document.addEventListener("click", function (e) {
         var t = e.target;
         if (!(t instanceof Element)) return;
 
-        // Backdrop dismissal: only a click that landed on the overlay itself,
-        // never one that bubbled out of the dialog inside it.
-        if (t.matches(".modal-overlay[data-modal-dismiss]")) {
-            closeModal(t.id);
+        if (t.tagName === "DIALOG" && t.open && entryFor(t) && onBackdrop(e, t)) {
+            t.close();
             return;
         }
 
@@ -573,16 +702,12 @@ document.body.addEventListener("showToast", function(e) {
         if (!el) return;
         var action = el.getAttribute("data-action");
         if (action === "modal-open") {
-            openModal(el.getAttribute("data-modal-target") || "");
+            openModal(el.getAttribute("data-modal-target") || "", el);
             e.preventDefault();
         } else if (action === "modal-close") {
             var target = el.getAttribute("data-modal-target");
-            if (target === null) {
-                var overlay = el.closest(".modal-overlay");
-                if (overlay) closeModal(overlay.id);
-            } else {
-                closeModal(target);
-            }
+            var dialog = target === null ? el.closest("dialog") : modalById(target);
+            if (dialog && dialog.open) dialog.close();
             e.preventDefault();
         } else if (action === "reveal-toggle") {
             revealToggle(el);
@@ -602,9 +727,21 @@ document.body.addEventListener("showToast", function(e) {
     });
 
     document.addEventListener("keydown", function (e) {
-        if (e.key === "Escape") {
-            var m = document.querySelector(".modal-overlay:not([hidden])");
-            if (m) m.setAttribute("hidden", "");
+        if (e.key === "Tab" && open.length) {
+            var dialog = open[open.length - 1].dialog;
+            var items = tabbable(dialog);
+            if (!items.length) { e.preventDefault(); return; }
+            var first = items[0];
+            var last = items[items.length - 1];
+            var active = document.activeElement;
+            var inside = dialog.contains(active);
+            if (e.shiftKey && (!inside || active === first || active === dialog)) {
+                last.focus();
+                e.preventDefault();
+            } else if (!e.shiftKey && (!inside || active === last)) {
+                first.focus();
+                e.preventDefault();
+            }
             return;
         }
         // Two chat composers had the same nine-word `onkeydown` attribute.
@@ -617,18 +754,18 @@ document.body.addEventListener("showToast", function(e) {
         form.requestSubmit();
     });
 
-    // The htmx response-header channel, both directions. A handler that
-    // answers with a modal's contents says so in `HX-Trigger-After-Swap`
-    // rather than appending a script that reveals the overlay itself — four
-    // copies of that script existed, one of them built by `format!` with a
-    // record id interpolated into JavaScript source.
+    // The htmx response-header channel, both directions, and the door a
+    // block's own script opens a modal through. A handler that answers with a
+    // modal says so in `HX-Trigger-After-Swap` rather than appending a script
+    // that opens it — four copies of that script existed, one of them built
+    // by `format!` with a record id interpolated into JavaScript source.
     document.body.addEventListener("closeModal", function (e) {
         var d = e.detail || {};
         if (d.id) closeModal(d.id);
     });
     document.body.addEventListener("openModal", function (e) {
         var d = e.detail || {};
-        if (d.id) openModal(d.id);
+        if (d.id) openModal(d.id, d.opener instanceof Element ? d.opener : null);
     });
 })();
 

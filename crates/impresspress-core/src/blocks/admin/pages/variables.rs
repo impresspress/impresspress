@@ -75,13 +75,9 @@ pub async fn settings_body(ctx: &dyn Context, msg: &Message) -> Result<Markup, W
         // Create variable modal
         (components::modal("create-var", "Add Variable", create_variable_form(&CreateVarForm::default())))
 
-        // Edit variable modal (content loaded dynamically via htmx)
-        div .modal-overlay #edit-var-modal-overlay hidden data-modal-dismiss
-        {
-            div .modal {
-                div #edit-var-modal {}
-            }
-        }
+        // Where a row's Edit button swaps the edit modal
+        // ([`handle_edit_variable_form`] answers with the whole `<dialog>`).
+        div #edit-var-slot {}
     })
 }
 
@@ -192,10 +188,10 @@ fn create_variable_form(form: &CreateVarForm<'_>) -> Markup {
                     " Sensitive (mask value in UI)"
                 }
             }
-            div .form-actions {
-                button .btn .btn--secondary .btn--block type="button" data-action="modal-close" data-modal-target="create-var" { "Cancel" }
+            (components::modal_footer(html! {
+                (components::modal_cancel())
                 button .btn .btn--primary .btn--block type="submit" { "Create" }
-            }
+            }))
         }
     }
 }
@@ -327,7 +323,7 @@ fn var_row(row: &VarRow) -> Vec<Markup> {
                 @if editable(row.key) {
                     button .btn .btn--sm .btn--ghost
                         hx-get={"/b/admin/variables/" (url_path_encode(row.key)) "/edit"}
-                        hx-target="#edit-var-modal"
+                        hx-target="#edit-var-slot"
                         hx-swap="innerHTML"
                         title="Edit"
                         aria-label=(format!("Edit {}", row.key))
@@ -701,7 +697,7 @@ fn config_all_tab(rows: &[variables::VariableRow], offer_reset: bool) -> Markup 
                         @if editable(key) {
                             button .btn .btn--sm .btn--ghost
                                 hx-get={"/b/admin/variables/" (url_path_encode(key)) "/edit"}
-                                hx-target="#edit-var-modal"
+                                hx-target="#edit-var-slot"
                                 hx-swap="innerHTML"
                                 title="Edit"
                                 aria-label=(format!("Edit {key}"))
@@ -1016,18 +1012,14 @@ pub async fn handle_edit_variable_form(ctx: &dyn Context, msg: &Message) -> Outp
         format!("{} (set)", ops::MASKED_VALUE)
     };
 
-    let markup = html! {
-        div .modal-header {
-            h3 .modal-title { "Edit Variable" }
-            button .modal-close data-action="modal-close" data-modal-target="edit-var-modal-overlay" {
-                (icons::x())
-            }
-        }
-        div .modal-body {
+    let markup = components::modal(
+        EDIT_MODAL_ID,
+        "Edit Variable",
+        html! {
             form hx-put={"/b/admin/variables/" (url_path_encode(&key))} hx-target="#content" {
                 div .form-group {
-                    label .form-label { "Key" }
-                    input .form-input type="text" value=(key) disabled;
+                    label .form-label for="edit-key" { "Key" }
+                    input .form-input #edit-key type="text" value=(key) disabled;
                 }
                 div .form-group {
                     label .form-label for="edit-value" { "Value" }
@@ -1124,16 +1116,20 @@ pub async fn handle_edit_variable_form(ctx: &dyn Context, msg: &Message) -> Outp
                         (ui::icons::triangle_alert()) (warning)
                     }
                 }
-                div .form-actions {
-                    button .btn .btn--secondary .btn--block type="button" data-action="modal-close" data-modal-target="edit-var-modal-overlay" { "Cancel" }
+                (components::modal_footer(html! {
+                    (components::modal_cancel())
                     button .btn .btn--primary .btn--block type="submit" { "Save" }
-                }
+                }))
             }
-        }
-    };
+        },
+    );
 
-    ui::html_response_opening_modal(markup, "edit-var-modal-overlay")
+    ui::html_response_opening_modal(markup, EDIT_MODAL_ID)
 }
+
+/// The edit modal's element id: what [`handle_edit_variable_form`] renders
+/// the `<dialog>` with and asks chrome.js to open.
+const EDIT_MODAL_ID: &str = "edit-var";
 
 /// `PUT`/`PATCH /b/admin/variables/{key}` -- update variable value (the row
 /// is declared `PATCH`; the edit form sends `PUT`, which maps to the same

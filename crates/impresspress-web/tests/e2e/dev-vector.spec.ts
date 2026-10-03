@@ -31,6 +31,10 @@ test('an index created from the admin page opens on its detail page', async ({ p
   await form.locator('input[name="keyword_search"]').check();
   await form.getByRole('button', { name: 'Create' }).click();
   await expect(page.locator(`tr[data-index-name="${NAME}"]`)).toBeVisible({ timeout: 30_000 });
+  // The `closeModal` trigger closed the modal, and the list the form swapped
+  // in did not bring a second copy of it along.
+  await expect(page.locator('dialog#create-vector-index')).toBeHidden();
+  await expect(page.locator('dialog#create-vector-index')).toHaveCount(1);
 
   const detail = await page.goto(`/b/vector/${NAME}/`, { waitUntil: 'commit' });
   expect(detail?.status()).toBe(200);

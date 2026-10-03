@@ -1482,9 +1482,12 @@ jobs:
       # stopped firing — or one that started firing twice. The tab-hop case is
       # the only one that issues a mutating request, and it intercepts it in
       # the browser and refuses it, so the shared database is untouched.
-      # admin-variables.spec.ts sorts first of all, and is harmless for the
+      # admin-variables.spec.ts sorts before both, and is harmless for the
       # same reason: every Add Variable submit it makes is one the server
       # refuses (a malformed key, a taken one), so it writes nothing.
+      # admin-modals.spec.ts sorts first of all and writes nothing either: it
+      # opens and closes every admin modal (keyboard, Esc, focus return, the
+      # 390px footer) without submitting one.
       - name: Run visual-baseline and WebMCP end-to-end tests (native server, port 8093)
         working-directory: crates/impresspress-web
         env:

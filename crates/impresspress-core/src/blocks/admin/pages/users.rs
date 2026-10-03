@@ -13,7 +13,7 @@ use crate::{
         },
         crud,
     },
-    http::{err_not_found, ResponseBuilder},
+    http::err_not_found,
     ui::{
         self,
         components::{self, badge, pagination, Badge, BadgeVariant},
@@ -367,13 +367,7 @@ pub async fn handle_create_role(
         Ok(content) => content,
         Err(e) => return reread_failed("Role created", "the role list", e),
     };
-    let trigger = r#"{"showToast":{"message":"Role created","type":"success"},"closeModal":{"id":"create-role"}}"#;
-    ResponseBuilder::new()
-        .set_header("HX-Trigger", trigger)
-        .body(
-            content.into_string().into_bytes(),
-            "text/html; charset=utf-8",
-        )
+    ui::html_response_closing_modal(content, "create-role", "Role created", "success")
 }
 
 /// `DELETE /b/admin/iam/roles/{id}` (from the roles tab). `{id}` is read only
@@ -534,16 +528,16 @@ async fn roles_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
             form hx-post="/b/admin/iam/roles" hx-target="#iam-content" {
                 div .form-group {
                     label .form-label .required for="role-name" { "Name" }
-                    input .form-input type="text" #role-name name="name" placeholder="e.g. editor" required;
+                    input .form-input type="text" #role-name name="name" placeholder="e.g. editor" required autofocus;
                 }
                 div .form-group {
                     label .form-label for="role-desc" { "Description" }
                     input .form-input type="text" #role-desc name="description" placeholder="Optional description";
                 }
-                div .form-actions {
-                    button .btn .btn--secondary .btn--block type="button" data-action="modal-close" data-modal-target="create-role" { "Cancel" }
+                (components::modal_footer(html! {
+                    (components::modal_cancel())
                     button .btn .btn--primary .btn--block type="submit" { "Create" }
-                }
+                }))
             }
         }))
     })
@@ -618,12 +612,12 @@ async fn api_keys_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
             form hx-post="/b/auth/api/api-keys" hx-target="#users-tab-content" {
                 div .form-group {
                     label .form-label for="key-name" { "Name" }
-                    input .form-input type="text" #key-name name="name" placeholder="e.g. CI/CD key" required;
+                    input .form-input type="text" #key-name name="name" placeholder="e.g. CI/CD key" required autofocus;
                 }
-                div .form-actions {
-                    button .btn .btn--secondary .btn--block type="button" data-action="modal-close" data-modal-target="create-api-key" { "Cancel" }
+                (components::modal_footer(html! {
+                    (components::modal_cancel())
                     button .btn .btn--primary .btn--block type="submit" { "Create" }
-                }
+                }))
             }
         }))
     })

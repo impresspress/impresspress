@@ -1297,7 +1297,10 @@ mod tests {
             assert!(js.contains(verb), "chrome must handle the {verb} verb");
         }
         for hook in [
-            ".modal-overlay[data-modal-dismiss]",
+            // Modals are native dialogs: opened modally, and noticed closing
+            // however they closed (Esc, Cancel, a trigger) so focus goes back.
+            "showModal()",
+            "addEventListener(\"close\"",
             "data-stop-propagation",
             "data-submit-on-enter",
         ] {

@@ -150,6 +150,34 @@ test.describe('htmx after-success effects under the served CSP', () => {
     await expect(page.locator('#create-var')).toBeHidden();
   });
 
+  /**
+   * The `closeModal` channel end to end: the Create Role form's answer carries
+   * `HX-Trigger: {"closeModal":…,"showToast":…}` and the re-rendered roles tab
+   * for `#iam-content` — which holds both the modal and the button that opened
+   * it. The modal closes, the toast is drawn (in the top layer, above where the
+   * modal was), the new row is there, and focus lands on the re-rendered
+   * Create Role button rather than on nothing.
+   */
+  test('creating a role closes its modal, toasts, and returns focus to the new trigger', async ({
+    page,
+  }) => {
+    await loginAsAdmin(page);
+    await gotoUnderCsp(page, '/b/admin/users?tab=roles');
+
+    const name = `e2e-role-${Date.now().toString(36)}`;
+    const trigger = page.locator('[data-action="modal-open"][data-modal-target="create-role"]');
+    await trigger.click();
+    const modal = page.locator('dialog#create-role');
+    await expect(modal).toBeVisible();
+    await page.locator('#role-name').fill(name);
+    await modal.getByRole('button', { name: 'Create' }).click();
+
+    await expect(page.locator('#toast-container .toast')).toContainText('Role created');
+    await expect(page.locator('#iam-content')).toContainText(name);
+    await expect(modal).toBeHidden();
+    await expect(trigger).toBeFocused();
+  });
+
   test('creating a messages context resets the form and prepends the row', async ({ page }) => {
     await loginAsAdmin(page);
     const refusals = watchEvalRefusals(page);

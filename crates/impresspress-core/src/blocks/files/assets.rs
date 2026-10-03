@@ -14,7 +14,7 @@
 //! asset.
 
 /// Vanilla-JS bundle for the file-browser surfaces — drag-drop upload, bulk
-/// select, kebab menus, share modal, upload modal, confirm-delete. Consumed
+/// select, kebab menus, the share and new-bucket modals' forms, confirm-delete. Consumed
 /// by [`super::pages_user::objects::object_list_page`],
 /// [`super::pages_user::cloudstorage::cloudstorage_page`] and the admin
 /// storage pages.
@@ -67,7 +67,16 @@ mod tests {
         );
         assert!(js.contains("data-bulk-toggle"), "bulk-select missing");
         assert!(js.contains("data-action-menu"), "kebab handler missing");
-        assert!(js.contains("dialog"), "modal uses <dialog>");
+        // The share modal is the shared, server-rendered dialog; the bundle
+        // opens it through chrome.js's `openModal` event, never builds one.
+        assert!(
+            js.contains("'openModal'"),
+            "share modal opens via chrome.js"
+        );
+        assert!(
+            !js.contains("createElement('dialog')"),
+            "the bundle must not build its own dialog"
+        );
     }
 
     #[test]
