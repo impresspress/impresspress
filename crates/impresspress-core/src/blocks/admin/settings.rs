@@ -110,7 +110,7 @@ pub(super) async fn handle_get(ctx: &dyn Context, msg: &Message) -> OutputStream
     // always published; it is declared without a schema until it is typed.
     ok_json(&db::Record {
         id: row.id.clone(),
-        data: row.to_data(),
+        data: row.to_data().into_iter().collect(),
     })
 }
 
@@ -223,7 +223,10 @@ pub(super) async fn handle_set(
             } else if ops::is_sensitive_key(&row.key, i64::from(row.sensitive)) {
                 data.insert("value".to_string(), serde_json::json!(MASKED_VALUE));
             }
-            ok_json(&db::Record { id: row.id, data })
+            ok_json(&db::Record {
+                id: row.id,
+                data: data.into_iter().collect(),
+            })
         }
         Err(out) => out,
     }
@@ -272,7 +275,7 @@ pub(super) async fn handle_create(
         // always published; declared without a schema until it is typed.
         Ok(row) => ok_json(&db::Record {
             id: row.id.clone(),
-            data: row.to_data(),
+            data: row.to_data().into_iter().collect(),
         }),
         Err(out) => out,
     }

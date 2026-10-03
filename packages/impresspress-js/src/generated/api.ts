@@ -11,6 +11,70 @@
  * from silently shrinking to "whatever already had one".
  */
 export interface paths {
+    "/b/admin/api/database/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Run read-only SQL API */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody?: never;
+            responses: {
+                /** @description Successful response */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /**
+                             * @description The result's column names in the order the query returned them —
+                             *     `SELECT b, a, c` answers `["b", "a", "c"]`. Empty when no row matched:
+                             *     the column list is read off the rows.
+                             */
+                            columns: string[];
+                            /**
+                             * Format: uint
+                             * @description Number of rows.
+                             */
+                            row_count: number;
+                            /** @description The rows, in the order the query returned them. */
+                            rows: {
+                                /**
+                                 * @description Every column of the row, name → value, its keys in
+                                 *     [`AdminSqlQueryResponse::columns`] order. Two result columns with one
+                                 *     name collapse into one entry — alias them apart.
+                                 */
+                                data: {
+                                    [key: string]: unknown;
+                                };
+                                /**
+                                 * @description The row's `id` column as text; `""` when the query selected no `id`
+                                 *     (or it held no string or integer).
+                                 */
+                                id: string;
+                            }[];
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/b/admin/api/extensions": {
         parameters: {
             query?: never;

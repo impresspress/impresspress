@@ -1,4 +1,71 @@
 {
+  "/b/admin/api/database/query": {
+    "post": {
+      "responses": {
+        "200": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "description": "Response body of `POST /b/admin/api/database/query`: the result set of\none read-only query.",
+                "properties": {
+                  "columns": {
+                    "description": "The result's column names in the order the query returned them —\n`SELECT b, a, c` answers `[\"b\", \"a\", \"c\"]`. Empty when no row matched:\nthe column list is read off the rows.",
+                    "items": {
+                      "type": "string"
+                    },
+                    "type": "array"
+                  },
+                  "row_count": {
+                    "description": "Number of rows.",
+                    "format": "uint",
+                    "minimum": 0,
+                    "type": "integer"
+                  },
+                  "rows": {
+                    "description": "The rows, in the order the query returned them.",
+                    "items": {
+                      "description": "One row of an [`AdminSqlQueryResponse`].",
+                      "properties": {
+                        "data": {
+                          "additionalProperties": true,
+                          "description": "Every column of the row, name → value, its keys in\n[`AdminSqlQueryResponse::columns`] order. Two result columns with one\nname collapse into one entry — alias them apart.",
+                          "type": "object"
+                        },
+                        "id": {
+                          "description": "The row's `id` column as text; `\"\"` when the query selected no `id`\n(or it held no string or integer).",
+                          "type": "string"
+                        }
+                      },
+                      "required": [
+                        "id",
+                        "data"
+                      ],
+                      "type": "object"
+                    },
+                    "type": "array"
+                  }
+                },
+                "required": [
+                  "columns",
+                  "rows",
+                  "row_count"
+                ],
+                "title": "AdminSqlQueryResponse",
+                "type": "object"
+              }
+            }
+          },
+          "description": "Successful response"
+        }
+      },
+      "security": [
+        {
+          "bearerAuth": []
+        }
+      ],
+      "summary": "Run read-only SQL API"
+    }
+  },
   "/b/admin/api/extensions": {
     "get": {
       "responses": {

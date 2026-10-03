@@ -45,7 +45,7 @@ fn wire<T: serde::Serialize>(value: T) -> String {
 fn record_with(column: &str, value: &str) -> Record {
     Record {
         id: "row_1".to_string(),
-        data: HashMap::from([(column.to_string(), json!(value))]),
+        data: FromIterator::from_iter([(column.to_string(), json!(value))]),
     }
 }
 

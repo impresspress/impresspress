@@ -17,7 +17,7 @@ use wafer_block::{
     db::{Filter, FilterOp, ListOptions, SortField},
     wire::database as wire,
 };
-use wafer_core::clients::database as db;
+use wafer_core::clients::database::{self as db, RecordData};
 use wafer_run::{context::Context, WaferError};
 
 use super::Page;
@@ -108,7 +108,7 @@ pub struct RequestLogRow {
 }
 
 impl RequestLogRow {
-    pub fn from_record(id: &str, data: &HashMap<String, Value>) -> Self {
+    pub fn from_record(id: &str, data: &RecordData) -> Self {
         Self {
             id: id.to_string(),
             flow_id: data.str_field("flow_id").to_string(),
@@ -519,7 +519,8 @@ mod tests {
         assert!(!row.created_at.is_empty());
         assert_eq!(row.created_at, row.updated_at);
 
-        let again = RequestLogRow::from_record(&row.id, &probe(500, 42).to_data());
+        let again =
+            RequestLogRow::from_record(&row.id, &probe(500, 42).to_data().into_iter().collect());
         assert_eq!(again.status_code, 500);
         assert_eq!(again.method, "GET");
     }

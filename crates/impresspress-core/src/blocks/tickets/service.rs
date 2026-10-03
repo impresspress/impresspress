@@ -296,7 +296,7 @@ pub async fn detail(ctx: &dyn Context, id: &str) -> Result<TicketDetail, WaferEr
     analyses.truncate(100);
     let untrusted_report = UntrustedReport::from_record(&ticket);
     for field in REPORT_COLUMNS {
-        ticket.data.remove(*field);
+        ticket.data.shift_remove(*field);
     }
     Ok(TicketDetail {
         ticket,

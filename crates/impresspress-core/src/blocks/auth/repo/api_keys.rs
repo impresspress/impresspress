@@ -10,7 +10,7 @@ use std::collections::HashMap;
 
 use serde_json::{json, Value};
 use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
-use wafer_core::clients::database as db;
+use wafer_core::clients::database::{self as db, RecordData};
 use wafer_run::{context::Context, WaferError};
 
 use super::{db_failed, internal_error, iso, map_opt_str, map_str, now_iso, parse_iso};
@@ -79,7 +79,7 @@ pub struct NewApiKey<'a> {
     pub expires_at: Option<chrono::DateTime<chrono::Utc>>,
 }
 
-fn row_from_map(m: &HashMap<String, Value>) -> Result<ApiKeyRow, WaferError> {
+fn row_from_map(m: &RecordData) -> Result<ApiKeyRow, WaferError> {
     Ok(ApiKeyRow {
         id: map_opt_str(m, "id").ok_or_else(|| internal_error("missing id"))?,
         user_id: map_str(m, "user_id"),

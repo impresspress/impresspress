@@ -20,7 +20,10 @@ use std::{collections::HashMap, sync::Arc};
 
 use serde_json::{json, Value};
 use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
-use wafer_core::{clients::database as db, interfaces::database::service::DatabaseService};
+use wafer_core::{
+    clients::database::{self as db, RecordData},
+    interfaces::database::service::DatabaseService,
+};
 use wafer_run::{context::Context, ErrorCode, WaferError};
 
 use crate::{
@@ -59,7 +62,7 @@ impl VariableRow {
     /// client's and the service's carry it); `data` is its column map. The
     /// only column that cannot be defaulted is `key`: a keyless row is
     /// corruption, not a variable.
-    pub fn from_record(id: &str, data: &HashMap<String, Value>) -> Result<Self, String> {
+    pub fn from_record(id: &str, data: &RecordData) -> Result<Self, String> {
         let key = data.str_field("key");
         if key.is_empty() {
             return Err(format!("{TABLE} row `{id}` has no key"));
@@ -1980,9 +1983,9 @@ fn stored_row(
     id: &str,
     as_read: &VariableRow,
     written: HashMap<String, Value>,
-    echoed: HashMap<String, Value>,
+    echoed: RecordData,
 ) -> VariableRow {
-    let mut merged = as_read.to_data();
+    let mut merged: RecordData = as_read.to_data().into_iter().collect();
     merged.extend(written);
     merged.extend(echoed);
     VariableRow::from_record(id, &merged).unwrap_or_else(|e| {
@@ -2244,7 +2247,8 @@ mod tests {
             .expect("the row exists");
         assert_eq!(read, inserted);
 
-        let again = VariableRow::from_record(&read.id, &read.to_data()).expect("decode");
+        let again = VariableRow::from_record(&read.id, &read.to_data().into_iter().collect())
+            .expect("decode");
         assert_eq!(again, read);
     }
 
@@ -2364,7 +2368,7 @@ mod tests {
 
     #[test]
     fn a_record_without_a_key_does_not_decode() {
-        let mut data = HashMap::new();
+        let mut data = RecordData::new();
         data.insert("value".to_string(), serde_json::json!("x"));
         let err = VariableRow::from_record("var_1", &data).expect_err("no key");
         assert!(err.contains(TABLE) && err.contains("var_1"), "{err}");
@@ -2381,7 +2385,7 @@ mod tests {
             (serde_json::json!("1"), true),
             (serde_json::json!("false"), false),
         ] {
-            let mut data = HashMap::new();
+            let mut data = RecordData::new();
             data.insert("key".to_string(), serde_json::json!("K"));
             data.insert("sensitive".to_string(), shape.clone());
             let row = VariableRow::from_record("var_1", &data).expect("decode");

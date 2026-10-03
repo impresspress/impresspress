@@ -15,9 +15,12 @@ use wafer_run::{context::Context, Message, OutputStream, WaferError};
 
 use super::{admin_page, crumb};
 use crate::{
-    blocks::admin::database::{
-        introspect_columns, introspect_table_summaries, validate_readonly_query, IntrospectError,
-        TableSummary,
+    blocks::admin::{
+        contracts::result_columns,
+        database::{
+            introspect_columns, introspect_table_summaries, validate_readonly_query,
+            IntrospectError, TableSummary,
+        },
     },
     ui::{
         components::{self, Badge, BadgeVariant},
@@ -363,18 +366,8 @@ fn render_sql_results(rows: &[db::Record], duration_ms: u128) -> Markup {
         };
     }
 
-    // Stable column ordering: union of keys, in first-row order then any new
-    // keys appended. A HashSet keeps membership lookup O(1) so the overall
-    // pass is O(rows × cols) instead of O(rows × cols²).
-    let mut columns: Vec<String> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for r in rows {
-        for k in r.data.keys() {
-            if seen.insert(k.clone()) {
-                columns.push(k.clone());
-            }
-        }
-    }
+    // The grid's columns are the query's, in the order it returned them.
+    let columns = result_columns(rows);
 
     // The result grid's columns are the query's, so they are built per render
     // rather than declared as a const the way the fixed tables are.

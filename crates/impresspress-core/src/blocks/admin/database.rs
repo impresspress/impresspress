@@ -2,6 +2,7 @@ use wafer_core::clients::database as db;
 use wafer_run::{context::Context, ErrorCode, InputStream, Message, OutputStream, WaferError};
 use wafer_sql_utils::{introspect, Backend};
 
+use super::contracts;
 use crate::{
     blocks::crud,
     http::{err_bad_request, err_forbidden, err_not_found, ok_json},
@@ -412,14 +413,11 @@ pub(super) async fn handle_query(ctx: &dyn Context, input: InputStream) -> Outpu
         };
     }
 
+    // Serialized from the typed response, never through `serde_json::json!`:
+    // a `serde_json::Value` object sorts its keys, which would put each row's
+    // columns back in name order.
     match db::query_raw(ctx, &body.query, &body.args).await {
-        Ok(records) => {
-            let row_count = records.len();
-            ok_json(&serde_json::json!({
-                "rows": records,
-                "row_count": row_count
-            }))
-        }
+        Ok(records) => ok_json(&contracts::AdminSqlQueryResponse::from_records(records)),
         Err(e) => err_bad_request(&format!("Query error: {e}")),
     }
 }

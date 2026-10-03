@@ -163,12 +163,12 @@ use std::{
 use impresspress_core::IdentityCache;
 use wafer_block::db::{Filter, ListOptions};
 use wafer_core::interfaces::database::{
-    codec::{record_from_json_row, scalar_f64, scalar_i64, JsonColumns},
+    codec::{record_from_columns, scalar_f64, scalar_i64, JsonColumns},
     exec::{BatchOp, BatchResult, DbExec, TxOp, TxResult},
     schema_cache::SchemaCache,
     service::{
         AggregateSpec, CapGuard, Column, DatabaseError, DatabaseService, GuardedInsert,
-        GuardedUpdate, Record, RecordList, StatementBudget, Table, UpsertSpec, WriteOp,
+        GuardedUpdate, Record, RecordData, RecordList, StatementBudget, Table, UpsertSpec, WriteOp,
         WriteOutcome,
     },
 };
@@ -489,10 +489,14 @@ impl DbExec for D1DatabaseService {
         let stmt = self.prepare_bind(sql, params)?;
         self.send(1)?;
         let results = stmt.all().await.map_err(db_err)?;
-        let rows: Vec<serde_json::Value> = results.results().map_err(db_err)?;
+        // D1 hands rows over as JS objects; decoding each into a `RecordData`
+        // keeps its own-key order, which is the result's column order except
+        // that JS enumerates integer-like names (`SELECT 1`) first and keeps
+        // one of two same-named columns (see `codec::record_from_columns`).
+        let rows: Vec<RecordData> = results.results().map_err(db_err)?;
         Ok(rows
             .into_iter()
-            .map(|row| record_from_json_row(row, json))
+            .map(|row| record_from_columns(row, json))
             .collect())
     }
 
@@ -508,11 +512,8 @@ impl DbExec for D1DatabaseService {
         // `db_err` like every other failure and comes back `Internal`, as it
         // does on native SQLite and PostgreSQL. `NotFound` is only a query
         // that ran and matched no row.
-        let row = stmt
-            .first::<serde_json::Value>(None)
-            .await
-            .map_err(db_err)?;
-        row.map(|row| record_from_json_row(row, json))
+        let row = stmt.first::<RecordData>(None).await.map_err(db_err)?;
+        row.map(|row| record_from_columns(row, json))
             .ok_or(DatabaseError::NotFound)
     }
 
@@ -536,7 +537,7 @@ impl DbExec for D1DatabaseService {
     /// as `run()` does while also handing back the `RETURNING` rows. (This
     /// adapter uses no D1 Sessions API, so no read-replica routing exists
     /// here either.) Delegating rather than repeating `prepare_bind` +
-    /// `all()` + `record_from_json_row` keeps the two decode paths identical
+    /// `all()` + `record_from_columns` keeps the two decode paths identical
     /// by construction.
     ///
     /// It stays a distinct trait method rather than riding on `run_fetch`
@@ -601,9 +602,9 @@ impl DbExec for D1DatabaseService {
     /// decoded positionally into the [`BatchResult`] variant its op names,
     /// reusing the very helpers the single-statement primitives use:
     ///
-    /// - [`BatchOp::Rows`] → `results()` → [`record_from_json_row`] per row (as
+    /// - [`BatchOp::Rows`] → `results()` → [`record_from_columns`] per row (as
     ///   [`run_fetch`](DbExec::run_fetch)).
-    /// - [`BatchOp::FetchOne`] → first of `results()` → `record_from_json_row`,
+    /// - [`BatchOp::FetchOne`] → first of `results()` → `record_from_columns`,
     ///   empty ⇒ [`DatabaseError::NotFound`] (as
     ///   [`run_fetch_one`](DbExec::run_fetch_one)).
     /// - [`BatchOp::Execute`] → `meta().changes` (as
@@ -667,17 +668,17 @@ impl DbExec for D1DatabaseService {
             check_statement_succeeded(result)?;
             let decoded = match op {
                 BatchOp::Rows { json, .. } => {
-                    let rows: Vec<serde_json::Value> = result.results().map_err(db_err)?;
+                    let rows: Vec<RecordData> = result.results().map_err(db_err)?;
                     BatchResult::Rows(
                         rows.into_iter()
-                            .map(|row| record_from_json_row(row, json))
+                            .map(|row| record_from_columns(row, json))
                             .collect(),
                     )
                 }
                 BatchOp::FetchOne { json, .. } => {
-                    let rows: Vec<serde_json::Value> = result.results().map_err(db_err)?;
+                    let rows: Vec<RecordData> = result.results().map_err(db_err)?;
                     let row = rows.into_iter().next().ok_or(DatabaseError::NotFound)?;
-                    BatchResult::FetchOne(record_from_json_row(row, json))
+                    BatchResult::FetchOne(record_from_columns(row, json))
                 }
                 // Same source as `run_execute`: D1Result meta's `changes`.
                 BatchOp::Execute { .. } => BatchResult::Execute(changes(result)?),
@@ -704,7 +705,7 @@ impl DbExec for D1DatabaseService {
     /// Decoded positionally, as [`run_batch`](DbExec::run_batch) is: a
     /// [`TxOp::Execute`] yields `meta().changes`, as
     /// [`run_execute`](DbExec::run_execute) does, and a [`TxOp::Returning`]
-    /// its `RETURNING` rows through [`record_from_json_row`], as
+    /// its `RETURNING` rows through [`record_from_columns`], as
     /// [`run_execute_returning`](DbExec::run_execute_returning) does.
     async fn run_transaction(&self, ops: &[TxOp<'_>]) -> Result<Vec<TxResult>, DatabaseError> {
         if ops.is_empty() {
@@ -731,10 +732,10 @@ impl DbExec for D1DatabaseService {
                 Ok(match op {
                     TxOp::Execute { .. } => TxResult::Execute(changes(result)?),
                     TxOp::Returning { json, .. } => {
-                        let rows: Vec<serde_json::Value> = result.results().map_err(db_err)?;
+                        let rows: Vec<RecordData> = result.results().map_err(db_err)?;
                         TxResult::Returning(
                             rows.into_iter()
-                                .map(|row| record_from_json_row(row, json))
+                                .map(|row| record_from_columns(row, json))
                                 .collect(),
                         )
                     }
@@ -1094,7 +1095,7 @@ mod tests {
     /// needs a workerd D1 binding CI does not have).
     #[wasm_bindgen_test]
     fn a_json_column_decodes_back_and_a_text_column_stays_text() {
-        let record = record_from_json_row(
+        let record = record_from_columns(
             serde_json::json!({
                 "id": "r1",
                 "meta": "{\"k\":[1,2],\"nested\":{\"b\":true}}",
@@ -1102,7 +1103,10 @@ mod tests {
                 "note": "hello world",
                 "braced_prose": "{not json at all",
                 "count": 3,
-            }),
+            })
+            .as_object()
+            .cloned()
+            .expect("a row object"),
             &JsonColumns::new(["meta", "braced_prose"]),
         );
 

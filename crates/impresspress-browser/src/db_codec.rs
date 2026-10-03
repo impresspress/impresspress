@@ -2,8 +2,8 @@
 //!
 //! Everything here is *bridge-local*: turning a `serde_json::Value` params
 //! slice into the `JsValue` array `bridge::db_exec_raw`/`bridge::db_query_raw`
-//! bind positionally, and turning the JS array those resolve back into plain
-//! `serde_json::Value` rows.
+//! bind positionally, and turning the `{ columns, values }` result those
+//! resolve back into rows that keep the statement's column order.
 //!
 //! What is deliberately NOT here any more is the row → [`Record`] decode
 //! policy. That used to be a private `build_records`/`first_scalar` pair —
@@ -14,7 +14,7 @@
 //! answering `Value::String` where the other two answered `Value::Object` for
 //! the same JSON-in-TEXT column.
 //!
-//! `params_to_js`/`rows_from_js`/`empty_params` sit right at the wasm-bindgen
+//! `params_to_js`/`ordered_rows_from_js`/`rows_from_js`/`empty_params` sit right at the wasm-bindgen
 //! boundary (they build/consume `JsValue`s via `serde_wasm_bindgen`) and are
 //! `#[cfg(target_arch = "wasm32")]`-gated: their only callers (`database.rs`,
 //! `vector/service.rs`) are themselves wasm32-only modules, and a `JsValue`
@@ -24,6 +24,7 @@
 //! module is pulled in there under `cfg(test)` — see `lib.rs`) and keeps its
 //! ordinary host-run `#[test]`s below.
 
+use wafer_core::interfaces::database::service::RecordData;
 #[cfg(target_arch = "wasm32")]
 use wasm_bindgen::JsValue;
 
@@ -78,22 +79,109 @@ pub(crate) fn empty_params() -> JsValue {
     js_sys::Array::new().into()
 }
 
-/// Decode the JS array of plain row objects `bridge::db_query_raw` resolves
-/// (NOT a JSON string) into `Vec<serde_json::Value>` — one JSON object per
-/// row, keyed by column name. This is the whole of the bridge's decode job:
-/// what a row object then *means* (`Record` id/data split, a JSON column's
-/// text parsed, single-column scalar extraction) is the shared codec's, not
-/// ours. Consumed by `database.rs` (which hands each row to
-/// `codec::record_from_json_row`) and by `vector/service.rs`'s raw-row
-/// callers, which want the plain per-column value shape.
+/// What `bridge::db_query_raw` resolves: sql.js's own result shape for one
+/// statement — the result's column names in `SELECT` order, and each row as
+/// the values in that order. Positional, rather than one JS object per row,
+/// so the column order is exact: a JS object enumerates integer-like keys
+/// (`SELECT 1`) before the others and keeps one of two same-named columns.
+#[derive(Debug, Default, serde::Deserialize)]
+pub(crate) struct QueryResult {
+    columns: Vec<String>,
+    values: Vec<Vec<serde_json::Value>>,
+}
+
+impl QueryResult {
+    /// Each row as its columns, name → value, in result-column order — the
+    /// shape `codec::record_from_columns` takes. A row with a different
+    /// number of values than there are columns is not what sql.js produces
+    /// and is refused rather than truncated.
+    pub(crate) fn into_rows(self) -> Result<Vec<RecordData>, String> {
+        let Self { columns, values } = self;
+        values
+            .into_iter()
+            .map(|row| {
+                if row.len() != columns.len() {
+                    return Err(format!(
+                        "decode rows: a row has {} values for {} columns",
+                        row.len(),
+                        columns.len()
+                    ));
+                }
+                Ok(columns.iter().cloned().zip(row).collect())
+            })
+            .collect()
+    }
+}
+
+/// Decode what `bridge::db_query_raw` resolves (a JS `{ columns, values }`,
+/// NOT a JSON string) into its rows, each in result-column order. This is
+/// the whole of the bridge's decode job: what a row *means* (`Record` id/data
+/// split, a JSON column's text parsed, single-column scalar extraction) is
+/// the shared codec's, not ours. `database.rs` hands each row to
+/// `codec::record_from_columns`.
+#[cfg(target_arch = "wasm32")]
+pub(crate) fn ordered_rows_from_js(value: JsValue) -> Result<Vec<RecordData>, String> {
+    let result: QueryResult =
+        serde_wasm_bindgen::from_value(value).map_err(|e| format!("decode rows: {e}"))?;
+    result.into_rows()
+}
+
+/// [`ordered_rows_from_js`], each row as a JSON object — for callers that
+/// only look columns up by name (`vector/service.rs`'s raw-row readers, the
+/// scalar accessors). A `serde_json` object does not keep the column order;
+/// anything that shows or forwards a row's columns uses
+/// [`ordered_rows_from_js`].
 #[cfg(target_arch = "wasm32")]
 pub(crate) fn rows_from_js(value: JsValue) -> Result<Vec<serde_json::Value>, String> {
-    serde_wasm_bindgen::from_value(value).map_err(|e| format!("decode rows: {e}"))
+    Ok(ordered_rows_from_js(value)?
+        .into_iter()
+        .map(|row| serde_json::Value::Object(row.into_iter().collect()))
+        .collect())
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    // ── QueryResult ───────────────────────────────────────────────────────────
+
+    fn result(columns: &[&str], values: Vec<Vec<serde_json::Value>>) -> QueryResult {
+        QueryResult {
+            columns: columns.iter().map(|c| (*c).to_string()).collect(),
+            values,
+        }
+    }
+
+    #[test]
+    fn rows_keep_the_select_column_order() {
+        // `SELECT b, 1, a`: an integer-like name stays where the SELECT put it.
+        let rows = result(
+            &["b", "1", "a"],
+            vec![vec![
+                serde_json::json!("x"),
+                serde_json::json!(1),
+                serde_json::json!(null),
+            ]],
+        )
+        .into_rows()
+        .unwrap();
+        let names: Vec<&str> = rows[0].keys().map(String::as_str).collect();
+        assert_eq!(names, ["b", "1", "a"]);
+        assert_eq!(rows[0]["b"], serde_json::json!("x"));
+    }
+
+    #[test]
+    fn an_empty_result_has_no_rows() {
+        assert!(QueryResult::default().into_rows().unwrap().is_empty());
+    }
+
+    #[test]
+    fn a_row_that_does_not_match_the_columns_is_refused() {
+        let err = result(&["a", "b"], vec![vec![serde_json::json!(1)]])
+            .into_rows()
+            .unwrap_err();
+        assert!(err.contains("1 values for 2 columns"), "{err}");
+    }
 
     // ── coerce_param ──────────────────────────────────────────────────────────
 

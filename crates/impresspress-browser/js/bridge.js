@@ -86,25 +86,22 @@ export function dbExecRaw(sql, params) {
  * Execute a SELECT SQL query.
  * @param {string} sql
  * @param {unknown[]} params - bind values, positional (see `dbExecRaw`)
- * @returns {Record<string, unknown>[]} row objects — a plain JS array, NOT a
- *   JSON string. Decoded on the Rust side with `serde_wasm_bindgen`
- *   (`db_codec::rows_from_js`) rather than `JSON.stringify` +
- *   `serde_json::from_str`, then mapped to `Record`s by the shared
- *   `wafer_core::interfaces::database::codec::record_from_json_row`.
+ * @returns {{ columns: string[], values: unknown[][] }} sql.js's own result
+ *   shape — the column names in `SELECT` order and each row's values in that
+ *   order — as a plain JS object, NOT a JSON string. Positional rather than
+ *   one object per row, because a JS object cannot keep a result's column
+ *   order (integer-like names such as `1` enumerate first) nor two columns of
+ *   one name. Decoded on the Rust side with `serde_wasm_bindgen`
+ *   (`db_codec::ordered_rows_from_js`), then mapped to `Record`s by the shared
+ *   `wafer_core::interfaces::database::codec::record_from_columns`.
  */
 export function dbQueryRaw(sql, params) {
     const results = _db.exec(sql, params);
     if (!results || results.length === 0) {
-        return [];
+        return { columns: [], values: [] };
     }
     const { columns, values } = results[0];
-    return values.map((row) => {
-        const obj = {};
-        columns.forEach((col, i) => {
-            obj[col] = row[i];
-        });
-        return obj;
-    });
+    return { columns, values };
 }
 
 /**

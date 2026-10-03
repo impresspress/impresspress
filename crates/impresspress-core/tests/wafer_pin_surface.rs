@@ -83,9 +83,19 @@ fn phase_four_producer_surface_is_pinned() {
         serde_json::json!("{\"a\":1}")
     );
     let _: fn(
-        serde_json::Value,
+        wafer_core::interfaces::database::service::RecordData,
         &codec::JsonColumns,
-    ) -> wafer_core::interfaces::database::service::Record = codec::record_from_json_row;
+    ) -> wafer_core::interfaces::database::service::Record =
+        codec::record_from_columns::<wafer_core::interfaces::database::service::RecordData>;
+    // A row keeps its result-column order (the SQL explorer renders by it).
+    let row = codec::record_from_columns(
+        [
+            ("b".to_string(), serde_json::json!(1)),
+            ("a".to_string(), serde_json::json!(2)),
+        ],
+        codec::JsonColumns::NONE,
+    );
+    assert_eq!(row.data.keys().collect::<Vec<_>>(), ["b", "a"]);
 
     // #328: the three defaulted `DbExec` operations. Named as function items
     // so the signatures resolve without an impl in this crate.

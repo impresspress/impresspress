@@ -16,7 +16,7 @@ use std::collections::HashMap;
 
 use serde_json::{json, Value};
 use wafer_block::db::{Filter, FilterOp};
-use wafer_core::clients::database as db;
+use wafer_core::clients::database::{self as db, RecordData};
 use wafer_run::{context::Context, ConfigVar, ErrorCode, InputType, WaferError};
 
 use crate::db_read::{self, Bound};
@@ -107,7 +107,7 @@ fn iso_plus_seconds(secs: i64) -> String {
         .to_string()
 }
 
-fn map_str(m: &HashMap<String, Value>, key: &str) -> String {
+fn map_str(m: &RecordData, key: &str) -> String {
     m.get(key)
         .and_then(Value::as_str)
         .map(str::to_owned)

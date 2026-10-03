@@ -26,7 +26,7 @@
 use std::collections::HashMap;
 
 use serde::{Deserialize, Serialize};
-use wafer_core::clients::database::{Record, RecordList};
+use wafer_core::clients::database::{Record, RecordData, RecordList};
 use wafer_run::Message;
 
 use crate::{
@@ -496,6 +496,67 @@ pub struct AdminExtensionView {
     /// the router answers "endpoint not found" for every one of this block's
     /// routes. A block with no stored row reports `true`.
     pub enabled: bool,
+}
+
+// ---------------------------------------------------------------------------
+// POST /b/admin/api/database/query
+// ---------------------------------------------------------------------------
+
+/// Response body of `POST /b/admin/api/database/query`: the result set of
+/// one read-only query.
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct AdminSqlQueryResponse {
+    /// The result's column names in the order the query returned them —
+    /// `SELECT b, a, c` answers `["b", "a", "c"]`. Empty when no row matched:
+    /// the column list is read off the rows.
+    pub columns: Vec<String>,
+    /// The rows, in the order the query returned them.
+    pub rows: Vec<AdminSqlQueryRow>,
+    /// Number of rows.
+    pub row_count: usize,
+}
+
+/// One row of an [`AdminSqlQueryResponse`].
+#[derive(Debug, Clone, Serialize, schemars::JsonSchema)]
+pub struct AdminSqlQueryRow {
+    /// The row's `id` column as text; `""` when the query selected no `id`
+    /// (or it held no string or integer).
+    pub id: String,
+    /// Every column of the row, name → value, its keys in
+    /// [`AdminSqlQueryResponse::columns`] order. Two result columns with one
+    /// name collapse into one entry — alias them apart.
+    #[schemars(with = "std::collections::BTreeMap<String, serde_json::Value>")]
+    pub data: RecordData,
+}
+
+impl AdminSqlQueryResponse {
+    /// The result set `query_raw` returned.
+    pub fn from_records(records: Vec<Record>) -> Self {
+        let columns = result_columns(&records);
+        let rows: Vec<AdminSqlQueryRow> = records
+            .into_iter()
+            .map(|r| AdminSqlQueryRow {
+                id: r.id,
+                data: r.data,
+            })
+            .collect();
+        Self {
+            columns,
+            row_count: rows.len(),
+            rows,
+        }
+    }
+}
+
+/// A query result's column names, in the order the query returned them.
+///
+/// Every row of one result has the same columns, and each record keeps them
+/// in result order (`RecordData`), so the first row's names are the
+/// result's. Shared by the JSON API and the SSR explorer's result grid.
+pub(in crate::blocks::admin) fn result_columns(rows: &[Record]) -> Vec<String> {
+    rows.first()
+        .map(|row| row.data.keys().cloned().collect())
+        .unwrap_or_default()
 }
 
 /// Default page size for `GET /b/admin/api/users`.

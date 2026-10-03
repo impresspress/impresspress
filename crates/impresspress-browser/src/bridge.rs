@@ -20,10 +20,11 @@ extern "C" {
     pub fn db_exec_raw(sql: &str, params: JsValue) -> Result<f64, JsValue>;
 
     /// Execute a SELECT SQL query. `params` as above.
-    /// Returns a JS array of plain row objects — NOT a JSON string. Decode
-    /// with `db_codec::rows_from_js` (`serde_wasm_bindgen::from_value`), then
+    /// Returns sql.js's `{ columns, values }` (column names in `SELECT`
+    /// order, positional rows) as a JS object — NOT a JSON string. Decode
+    /// with `db_codec::ordered_rows_from_js` (`serde_wasm_bindgen`), then
     /// turn each row into a `Record` with the shared
-    /// `wafer_core::interfaces::database::codec::record_from_json_row`.
+    /// `wafer_core::interfaces::database::codec::record_from_columns`.
     #[wasm_bindgen(catch, js_name = dbQueryRaw)]
     pub fn db_query_raw(sql: &str, params: JsValue) -> Result<JsValue, JsValue>;
 

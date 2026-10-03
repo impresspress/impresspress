@@ -88,7 +88,7 @@ mod tests {
         data.insert("manifest".to_string(), value);
         Record {
             id: String::new(),
-            data,
+            data: data.into_iter().collect(),
         }
     }
 
