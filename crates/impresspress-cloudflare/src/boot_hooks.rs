@@ -321,7 +321,7 @@ mod boot_hook_tests {
             self.note(format!("create {collection}"));
             Ok(Record {
                 id: "created".to_string(),
-                data: HashMap::new(),
+                data: Default::default(),
             })
         }
 
@@ -334,7 +334,7 @@ mod boot_hook_tests {
             self.note(format!("update {collection}/{id}"));
             Ok(Record {
                 id: id.to_string(),
-                data: HashMap::new(),
+                data: Default::default(),
             })
         }
 
@@ -358,6 +358,17 @@ mod boot_hook_tests {
             _filters: &[Filter],
         ) -> Result<f64, DatabaseError> {
             Ok(0.0)
+        }
+
+        async fn increment_field_where(
+            &self,
+            collection: &str,
+            _col: &str,
+            _delta: i64,
+            _filters: &[Filter],
+        ) -> Result<i64, DatabaseError> {
+            self.note(format!("increment_field_where {collection}"));
+            Ok(0)
         }
 
         async fn query_raw(
@@ -587,7 +598,7 @@ mod boot_hook_tests {
             data.insert("sensitive".to_string(), serde_json::json!(0));
             Record {
                 id: "var_legacy".to_string(),
-                data,
+                data: data.into_iter().collect(),
             }
         };
         let repair_write = format!("update {}/var_legacy", variables::TABLE);

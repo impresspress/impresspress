@@ -176,7 +176,7 @@ mod tests {
         data.insert("generation".to_string(), serde_json::json!(0));
         db::Record {
             id: String::new(),
-            data,
+            data: data.into_iter().collect(),
         }
     }
 

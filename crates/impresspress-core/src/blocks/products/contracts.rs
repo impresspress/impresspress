@@ -3627,8 +3627,6 @@ pub struct AdminSellerDetail {
 
 #[cfg(test)]
 mod tests {
-    use std::collections::HashMap;
-
     use wafer_core::clients::database::Record;
     use wafer_run::ErrorCode;
 
@@ -3646,7 +3644,7 @@ mod tests {
         fn order(id: &str, status: &str) -> Record {
             Record {
                 id: id.to_string(),
-                data: HashMap::from([
+                data: FromIterator::from_iter([
                     ("status".to_string(), serde_json::json!(status)),
                     (
                         "reconciliation_status".to_string(),
@@ -3697,7 +3695,7 @@ mod tests {
             assert_eq!(serde_json::to_value(variant).unwrap(), stored);
             let record = Record {
                 id: "pur_1".to_string(),
-                data: HashMap::from([("status".to_string(), serde_json::json!(stored))]),
+                data: FromIterator::from_iter([("status".to_string(), serde_json::json!(stored))]),
             };
             assert_eq!(OrderStatus::from_record(&record).unwrap(), variant);
             assert_eq!(variant.is_paid(), paid, "{stored}");
@@ -3706,7 +3704,7 @@ mod tests {
         }
         let record = Record {
             id: "pur_1".to_string(),
-            data: HashMap::from([("status".to_string(), serde_json::json!("shipped"))]),
+            data: FromIterator::from_iter([("status".to_string(), serde_json::json!("shipped"))]),
         };
         let error = OrderStatus::from_record(&record).unwrap_err();
         assert_eq!(error.code, ErrorCode::Internal);
@@ -3744,7 +3742,7 @@ mod tests {
             assert_eq!(serde_json::to_value(variant).unwrap(), stored);
             let record = Record {
                 id: "pur_1".to_string(),
-                data: HashMap::from([(
+                data: FromIterator::from_iter([(
                     "reconciliation_status".to_string(),
                     serde_json::json!(stored),
                 )]),
@@ -3757,7 +3755,7 @@ mod tests {
     fn a_state_column_outside_the_contract_is_an_internal_error_naming_the_row() {
         let record = Record {
             id: "pur_1".to_string(),
-            data: HashMap::from([(
+            data: FromIterator::from_iter([(
                 "reconciliation_status".to_string(),
                 serde_json::json!("half_done"),
             )]),

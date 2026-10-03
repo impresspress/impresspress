@@ -21,7 +21,7 @@
 //!
 //! The small row-decoding utilities every submodule needs — the ISO-8601
 //! timestamp writer ([`now_iso`]/[`iso`]) and reader ([`parse_iso`]), hex
-//! decoding ([`decode_hex`]), and the `&HashMap<String, Value>` map accessors
+//! decoding ([`decode_hex`]), and the `&RecordData` row accessors
 //! ([`map_str`]/[`map_opt_str`]/[`map_bool`]) — live here so all auth tables
 //! share one implementation. In particular [`iso`] is **the** timestamp
 //! writer for auth-table rows, including for a timestamp a caller supplied:
@@ -30,9 +30,8 @@
 //! is read back with [`parse_iso`] rather than compared as text — string
 //! order is time order only within one format and one offset.
 
-use std::collections::HashMap;
-
 use serde_json::Value;
+use wafer_core::clients::database::RecordData;
 use wafer_run::{ErrorCode, WaferError};
 
 pub mod api_keys;
@@ -129,26 +128,32 @@ pub(crate) fn decode_hex(s: &str) -> Option<Vec<u8>> {
         .collect()
 }
 
-/// Map accessor: owned `String` for a TEXT column, or `None` when the key is
+/// Row accessor: owned `String` for a TEXT column, or `None` when the key is
 /// absent / not a JSON string. Mirrors `RecordExt::str_field`'s "absent → empty"
 /// intent but preserves the `Option` so callers can distinguish missing.
-pub(crate) fn map_opt_str(m: &HashMap<String, Value>, key: &str) -> Option<String> {
+pub(crate) fn map_opt_str(m: &RecordData, key: &str) -> Option<String> {
     m.get(key).and_then(Value::as_str).map(str::to_owned)
 }
 
-/// Map accessor: owned `String` for a TEXT column, defaulting to empty.
-pub(crate) fn map_str(m: &HashMap<String, Value>, key: &str) -> String {
+/// Row accessor: owned `String` for a TEXT column, defaulting to empty.
+pub(crate) fn map_str(m: &RecordData, key: &str) -> String {
     map_opt_str(m, key).unwrap_or_default()
 }
 
-/// Map accessor: bool for a column, tolerant of the shapes the different
+/// Row accessor: bool for a column ([`value_bool`]), `false` when absent.
+/// Mirrors `RecordExt::bool_field`.
+pub(crate) fn map_bool(m: &RecordData, key: &str) -> bool {
+    m.get(key).is_some_and(value_bool)
+}
+
+/// A boolean-ish value as a bool, tolerant of the shapes the different
 /// backends return (JSON bool, SQLite TEXT-int `0`/`1`, Postgres BOOLEAN,
-/// string `'true'`/`'false'`). Mirrors `RecordExt::bool_field`.
-pub(crate) fn map_bool(m: &HashMap<String, Value>, key: &str) -> bool {
-    match m.get(key) {
-        Some(Value::Bool(b)) => *b,
-        Some(Value::Number(n)) => n.as_i64().unwrap_or(0) != 0,
-        Some(Value::String(s)) => s == "1" || s.eq_ignore_ascii_case("true"),
+/// string `'true'`/`'false'`); anything else is `false`.
+pub(crate) fn value_bool(value: &Value) -> bool {
+    match value {
+        Value::Bool(b) => *b,
+        Value::Number(n) => n.as_i64().unwrap_or(0) != 0,
+        Value::String(s) => s == "1" || s.eq_ignore_ascii_case("true"),
         _ => false,
     }
 }

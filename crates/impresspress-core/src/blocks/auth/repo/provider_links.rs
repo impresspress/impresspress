@@ -22,7 +22,7 @@ use wafer_block::{
     db::{Filter, FilterOp, SortField},
     wire::database::BatchWrite,
 };
-use wafer_core::clients::database as db;
+use wafer_core::clients::database::{self as db, RecordData};
 use wafer_run::{context::Context, WaferError};
 
 use super::{db_failed, internal_error, map_opt_str, map_str, now_iso};
@@ -51,7 +51,7 @@ pub struct NewLink<'a> {
     pub provider_login: &'a str,
 }
 
-fn row_from_map(m: &HashMap<String, Value>) -> Result<ProviderLink, WaferError> {
+fn row_from_map(m: &RecordData) -> Result<ProviderLink, WaferError> {
     Ok(ProviderLink {
         provider: map_opt_str(m, "provider").ok_or_else(|| internal_error("missing provider"))?,
         provider_ref: map_opt_str(m, "provider_ref")

@@ -500,7 +500,7 @@ pub(super) async fn handle_list_user_roles(ctx: &dyn Context, msg: &Message) -> 
         .iter()
         .map(|row| db::Record {
             id: row.id.clone(),
-            data: row.to_data(),
+            data: row.to_data().into_iter().collect(),
         })
         .collect();
     let page_size = records.len() as i64;
@@ -580,7 +580,7 @@ pub(super) async fn handle_assign_role(
             // always published; declared without a schema until it is typed.
             ok_json(&db::Record {
                 id: row.id.clone(),
-                data: row.to_data(),
+                data: row.to_data().into_iter().collect(),
             })
         }
         Err(e) => crud::db_error_internal(e, "Database error"),
