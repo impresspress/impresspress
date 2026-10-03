@@ -1467,57 +1467,70 @@ jobs:
             exit 1
           fi
 
-      # Playwright runs the files it is given in PATH order, not argument
-      # order. webmcp.spec.ts runs AFTER the visual baselines only because `w`
-      # sorts after `v`, and it must: it seeds a product into the same
-      # database, and a product that exists before the admin pages are
-      # screenshotted would show up in them.
+      # Two servers, two databases, so no spec's writes can reach a
+      # screenshot whatever order the files run in.
       #
-      # delegated-actions.spec.ts sorts first, which is harmless because it
-      # writes nothing — it filters a list, opens and closes a modal, toggles
-      # a password field, and hops between two products admin tabs, all of
-      # which are the browser-side half of the `data-action` rule that
-      # `ui::tests::pages_carry_no_event_handler_attributes` enforces on the
-      # markup. Neither that test nor a screenshot can see a listener that
-      # stopped firing — or one that started firing twice. The tab-hop case is
-      # the only one that issues a mutating request, and it intercepts it in
-      # the browser and refuses it, so the shared database is untouched.
-      # admin-variables.spec.ts sorts before both, and is harmless for the
-      # same reason: every Add Variable submit it makes is one the server
-      # refuses (a malformed key, a taken one), so it writes nothing.
-      # admin-modals.spec.ts sorts first of all and writes nothing either: it
-      # opens and closes every admin modal (keyboard, Esc, focus return, the
-      # 390px footer) without submitting one.
-      - name: Run visual-baseline and WebMCP end-to-end tests (native server, port 8093)
+      # `e2e:visual` (this server) is the baselines plus specs that leave no
+      # trace a page shows — no write, no refused request:
+      # - delegated-actions filters a list, opens a modal, toggles fields and
+      #   hops between two products admin tabs, refusing that hop's one
+      #   mutating request in the browser;
+      # - admin-modals opens and closes every admin modal (keyboard, Esc,
+      #   focus return, the 390px footer); its one submit is answered in the
+      #   browser and the bucket form stops at its own client-side check.
+      # The file lists live in package.json because
+      # `regen-visual-baselines.yml` must run exactly this set.
+      #
+      # `e2e:writes` runs on a second, fresh server below: everything that
+      # writes or is refused (a 4xx is an error on the admin dashboard) —
+      # admin-variables submits keys the server refuses, webmcp seeds a
+      # product, htmx-success-effects writes providers/messages/products,
+      # auth-forms signs in with a wrong password, settings-form drives a
+      # settings save.
+      - name: Run visual-baseline end-to-end tests (native server, port 8093)
         working-directory: crates/impresspress-web
         env:
           TEST_PORT: 8093
-        # The file list lives in the `e2e:visual` package script because
-        # `regen-visual-baselines.yml` must run exactly this set: the specs
-        # share one server and one database, and what an earlier spec writes
-        # shows up in a later screenshot. See that workflow's header.
         run: npm run e2e:visual
 
-      # A step of its own, not one more file on the line above: Playwright
-      # orders the files it is given by path, not by argument order, so on
-      # that line this spec would run BEFORE visual-baseline.spec.ts. It
-      # writes — an LLM provider, messages contexts and entries, a
-      # deleted-then-restored product — because what it proves is that a
-      # control's after-success effect (reload, reset, drop the empty line,
-      # scroll) runs under the CSP this server really sends, and those effects
-      # only follow a real write. Those rows would show up in the screenshots.
-      - name: Run htmx after-success effects end-to-end tests (native server, port 8093)
+      - name: Start a second, fresh native server (state-writing tests, port 8094)
+        run: |
+          mkdir -p /tmp/impresspress-writes
+          cd /tmp/impresspress-writes
+          IMPRESSPRESS_LISTEN="127.0.0.1:8094" \
+          IMPRESSPRESS_DB_PATH="/tmp/impresspress-writes/writes.db" \
+          IMPRESSPRESS_STORAGE_ROOT="/tmp/impresspress-writes/storage" \
+          WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_EMAIL="admin@example.com" \
+          WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_PASSWORD="admin123" \
+            impresspress > /tmp/impresspress-writes.log 2>&1 &
+          echo $! > /tmp/impresspress-writes-pid
+          for i in $(seq 1 60); do
+            if curl -sf http://127.0.0.1:8094/b/auth/login -o /dev/null; then
+              echo "server ready after ${i}s"
+              break
+            fi
+            sleep 1
+          done
+          if ! curl -sf http://127.0.0.1:8094/b/auth/login -o /dev/null; then
+            echo "::error::second native impresspress did not start within 60s"
+            tail -50 /tmp/impresspress-writes.log
+            exit 1
+          fi
+
+      - name: Run state-writing end-to-end tests (native server, port 8094)
         working-directory: crates/impresspress-web
         env:
-          TEST_PORT: 8093
-        run: npx playwright test --config=tests/playwright.visual-baseline.config.ts tests/e2e/htmx-success-effects.spec.ts
+          TEST_PORT: 8094
+        run: npm run e2e:writes
 
-      - name: Stop server
+      - name: Stop servers
         if: always()
         run: |
-          if [ -f /tmp/impresspress-pid ]; then
-            kill "$(cat /tmp/impresspress-pid)" 2>/dev/null || true
-          fi
+          for pid in /tmp/impresspress-pid /tmp/impresspress-writes-pid; do
+            if [ -f "$pid" ]; then
+              kill "$(cat "$pid")" 2>/dev/null || true
+            fi
+          done
 
       - name: Upload Playwright report on failure
         if: failure()

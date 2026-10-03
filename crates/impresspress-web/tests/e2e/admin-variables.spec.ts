@@ -11,8 +11,9 @@ import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
  * prove that lands where a person sees it: under the field, announced, with
  * the field marked invalid, the modal still open, and no toast instead.
  *
- * Writes nothing: every submit here is refused, so the shared database the
- * visual baselines are taken from is untouched (see `e2e:visual`).
+ * Writes nothing, but every submit is a refused (4xx) request, which the
+ * admin dashboard counts as an error — so it is part of `e2e:writes`, which
+ * CI runs on its own server, not the one the visual baselines are taken on.
  */
 test.describe('admin variables', () => {
   test.use({ storageState: ADMIN_STATE_PATH });

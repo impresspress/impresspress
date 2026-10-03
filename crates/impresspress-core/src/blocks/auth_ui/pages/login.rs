@@ -5,7 +5,7 @@ use wafer_run::{context::Context, Message, OutputStream};
 
 use super::{
     api_post_script, login_script, oauth_button_script, oauth_provider_configured,
-    oauth_provider_icon, oauth_provider_label, pw_field, site_config,
+    oauth_provider_icon, oauth_provider_label, pw_field, site_config, PasswordPurpose,
 };
 use crate::{
     blocks::auth_ui::redirect::is_safe_local_redirect,
@@ -116,12 +116,12 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
 
                         div .form-group {
                             label .form-label for="email" { "Email" }
-                            input .form-input type="email" #email placeholder="you@example.com" value=(prefill_email) required;
+                            input .form-input type="email" #email placeholder="you@example.com" value=(prefill_email) autocomplete="username" required;
                         }
 
                         div .form-group {
                             label .form-label for="password" { "Password" }
-                            (pw_field("password", "Enter your password", None))
+                            (pw_field("password", "Enter your password", PasswordPurpose::Current))
                         }
 
                         div .auth-actions {
@@ -386,7 +386,7 @@ mod tests {
         let msg = login_msg(&[]);
         let html = output_html(handle(&ctx, &msg).await).await;
 
-        let marker = "class=\"pw-toggle\"";
+        let marker = "class=\"reveal-toggle\"";
         let idx = html
             .find(marker)
             .expect("password toggle button must be present");
@@ -400,5 +400,35 @@ mod tests {
             button_tag.contains("aria-label=\"") && !button_tag.contains("aria-label=\"\""),
             "password toggle button must have a non-empty aria-label: {button_tag}"
         );
+    }
+
+    /// The sign-in error box is an assertive live region from the start
+    /// (hidden and empty until a refusal fills it), so the message a failed
+    /// sign-in reveals is announced; the info box is polite. The password is
+    /// the account's current one: managers fill it, and no length rule.
+    #[tokio::test]
+    async fn the_error_box_is_an_alert_and_the_password_is_the_current_one() {
+        let ctx = TestContext::new()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
+        let html = output_html(handle(&ctx, &login_msg(&[])).await).await;
+        assert!(
+            html.contains(
+                r#"<div id="error" class="alert alert--error" role="alert" hidden></div>"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(
+                r#"<div id="info" class="alert alert--success" role="status" hidden></div>"#
+            ),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"autocomplete="current-password""#),
+            "{html}"
+        );
+        assert!(html.contains(r#"autocomplete="username""#), "{html}");
+        assert!(!html.contains("minlength"), "{html}");
     }
 }

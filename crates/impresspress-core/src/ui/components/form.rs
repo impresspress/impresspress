@@ -1,4 +1,4 @@
-//! Search Input
+//! Form controls: the search input and the password reveal toggle.
 
 use maud::{html, Markup};
 
@@ -11,6 +11,11 @@ pub fn search_input(name: &str, placeholder: &str, hx_get: &str, hx_target: &str
 }
 
 /// Search input with a pre-filled value and results banner.
+///
+/// The banner is one wrapping row: the sentence "Results for "…"" is a
+/// single item that wraps inside itself, and Clear follows it. It used to be
+/// three flex items that each shrank to their own column on a phone
+/// ("Results / for" stacked beside the term beside Clear).
 pub fn search_input_with_value(
     name: &str,
     placeholder: &str,
@@ -20,9 +25,11 @@ pub fn search_input_with_value(
 ) -> Markup {
     html! {
         @if !current_value.is_empty() {
-            div .flex .items-center .gap-2 .mb-2 .text-sm {
-                span .text-muted { "Results for " }
-                span .font-semibold { "\"" (current_value) "\"" }
+            div .search-summary {
+                span .search-summary__text {
+                    span .text-muted { "Results for " }
+                    strong { "\"" (current_value) "\"" }
+                }
                 a .btn .btn--ghost .btn--sm
                     href=(hx_get)
                     hx-get=(hx_get)
@@ -48,5 +55,60 @@ pub fn search_input_with_value(
                 hx-target=(hx_target)
                 autocomplete="off";
         }
+    }
+}
+
+/// The show/hide button for the password field `target_id`. Place both in a
+/// `.value-reveal-wrapper`, input first.
+///
+/// A toggle button: `label` is its one constant name ("Show password") and
+/// `aria-pressed` says whether the value is showing, so the name never has
+/// to be swapped. chrome.js's `reveal-toggle` verb flips the field's `type`
+/// and `aria-pressed`; CSS shows the eye while masked and the eye-off while
+/// shown, keyed off `aria-pressed`, so the icon cannot disagree with the
+/// state a screen reader hears.
+///
+/// While the field is empty the button is hidden (`form.css`): there is
+/// nothing to show, and an eye on a blank secret field reads as "reveal the
+/// stored value", which the field never holds. That rule keys off
+/// `:placeholder-shown`, so the input MUST carry a placeholder.
+pub fn reveal_toggle(target_id: &str, label: &str) -> Markup {
+    html! {
+        button type="button" .reveal-toggle
+            aria-label=(label)
+            aria-pressed="false"
+            data-action="reveal-toggle"
+            data-reveal-target=(target_id)
+        {
+            span .reveal-toggle__show aria-hidden="true" { (icons::eye()) }
+            span .reveal-toggle__hide aria-hidden="true" { (icons::eye_off()) }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reveal_toggle_is_an_unpressed_toggle_button_with_a_constant_name() {
+        let s = reveal_toggle("pw", "Show password").into_string();
+        assert!(s.contains(r#"type="button""#), "{s}");
+        assert!(s.contains(r#"aria-label="Show password""#), "{s}");
+        assert!(s.contains(r#"aria-pressed="false""#), "{s}");
+        assert!(s.contains(r#"data-reveal-target="pw""#), "{s}");
+        // Both icons ship; CSS picks one from aria-pressed.
+        assert!(s.contains("reveal-toggle__show") && s.contains("reveal-toggle__hide"));
+        assert!(!s.contains("data-reveal-show") && !s.contains("data-reveal-hide"));
+    }
+
+    #[test]
+    fn search_summary_is_one_text_item_plus_clear() {
+        let s = search_input_with_value("q", "Search", "/x", "#t", "bob").into_string();
+        assert!(s.contains(r#"<div class="search-summary"><span class="search-summary__text">"#));
+        assert!(s.contains("<strong>&quot;bob&quot;</strong>"), "{s}");
+        assert!(s.contains("Clear"));
+        let none = search_input("q", "Search", "/x", "#t").into_string();
+        assert!(!none.contains("search-summary"));
     }
 }

@@ -592,17 +592,13 @@ pub async fn handle_publish(ctx: &dyn Context, msg: &Message, input: InputStream
 
 pub async fn settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let vars = super::config_vars();
-    let sections = [settings_form::SettingsSection::new(
-        "Appearance",
-        icons::settings(),
-        &vars,
-    )];
+    let sections = [settings_form::SettingsSection::new("Appearance", &vars)];
 
     // The live-preview links ride in the form's `extra` slot so they stay
     // inside the settings form (above the Save button), as before.
     let preview = html! {
-        div .card .mb-5 .p-4 {
-            h4 .text-sm .font-semibold .mb-2 { "Preview" }
+        section .card .mt-6 .mb-5 .p-4 {
+            (components::section_header("Preview", None))
             p .text-muted .text-xs .mb-3 {
                 "See how your changes look on the public pages."
             }
@@ -633,8 +629,6 @@ pub async fn settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         };
 
     let content = html! {
-        (components::page_header("Settings", Some("Customize the public legal pages appearance"), None))
-
         @if saved {
             div .alert .alert--success .mb-4 {
                 span aria-hidden="true" { (icons::check()) }
@@ -648,7 +642,10 @@ pub async fn settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::simple("Settings", ui::NavKind::Portal, "Settings"),
+        ui::Shell {
+            subtitle: Some("Customize the public legal pages appearance"),
+            ..ui::Shell::simple("Legal settings", ui::NavKind::Portal, "Legal settings")
+        },
         content,
     )
     .await

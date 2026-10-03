@@ -15,7 +15,7 @@ use crate::{
     },
     endpoint_match::{self, EndpointRoute},
     http::{err_bad_request, err_forbidden, err_not_found, err_unauthenticated, ok_json},
-    ui::{self, components, icons, settings_form},
+    ui::{self, settings_form},
     util::parse_form_body,
 };
 
@@ -515,11 +515,7 @@ fn branding_vars() -> Vec<wafer_run::ConfigVar> {
 
 async fn admin_settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let vars = branding_vars();
-    let sections = [settings_form::SettingsSection::new(
-        "Branding",
-        icons::settings(),
-        &vars,
-    )];
+    let sections = [settings_form::SettingsSection::new("Branding", &vars)];
     let form = match settings_form::settings_form(
         ctx,
         "/b/userportal/admin/settings",
@@ -537,15 +533,18 @@ async fn admin_settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
             )
         }
     };
-    let content = html! {
-        (components::page_header("Branding Settings", Some("Customize your application appearance"), None))
-        (form)
-    };
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::simple("Settings", ui::NavKind::Portal, "Settings"),
-        content,
+        ui::Shell {
+            subtitle: Some("Customize your application appearance"),
+            ..ui::Shell::simple(
+                "Branding settings",
+                ui::NavKind::Portal,
+                "Branding settings",
+            )
+        },
+        form,
     )
     .await
 }

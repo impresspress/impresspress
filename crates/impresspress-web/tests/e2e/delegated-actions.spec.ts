@@ -21,8 +21,11 @@ import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
  *    on the account-security page);
  * 2. `modal-open` / `modal-close`, which replaced 16 `openModal('…')` /
  *    `closeModal('…')` attribute strings;
- * 3. `reveal-toggle` with its label operands, which replaced two copies of a
- *    hand-written password-reveal handler;
+ * 3. `reveal-toggle` (a toggle button: `aria-pressed` and its icon follow the
+ *    field), which replaced two copies of a hand-written password-reveal
+ *    handler — plus the settings form's CSS-only behaviours beside it: a
+ *    gated section following its switch, and the colour swatch's
+ *    `mirror-value` pair;
  * 4. that a delegated listener is bound ONCE no matter how many times its page
  *    is swapped in, which the first three cannot see because each of them does
  *    a fresh navigation.
@@ -92,25 +95,88 @@ test.describe('delegated actions', () => {
     await expect(modal).toBeHidden();
   });
 
-  test('reveal-toggle unmasks a secret field and swaps its accessible name', async ({ page }) => {
+  test('reveal-toggle unmasks a typed secret and reports it through aria-pressed', async ({
+    page,
+  }) => {
     await loginAsAdmin(page);
     await page.goto('/b/admin/email', { waitUntil: 'networkidle' });
 
     const field = page.locator('#IMPRESSPRESS__EMAIL__MAILGUN_API_KEY');
-    const toggle = page.locator(
-      '[data-action="reveal-toggle"][data-reveal-target="IMPRESSPRESS__EMAIL__MAILGUN_API_KEY"]',
-    );
+    const toggle = page.getByRole('button', { name: 'Show Mailgun API Key' });
 
+    // A sensitive field renders blank: nothing to show, so no eye.
     await expect(field).toHaveAttribute('type', 'password');
-    await expect(toggle).toHaveAttribute('aria-label', 'Reveal value');
+    await expect(field).toHaveValue('');
+    await expect(toggle).toBeHidden();
 
+    // Typed into (never saved — this spec writes nothing), it can be shown.
+    await field.fill('typed-not-saved');
+    await expect(toggle).toBeVisible();
+    await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+
+    // One constant name; the pressed state and the icon carry the change.
     await toggle.click();
     await expect(field).toHaveAttribute('type', 'text');
-    await expect(toggle).toHaveAttribute('aria-label', 'Hide value');
+    await expect(toggle).toHaveAttribute('aria-pressed', 'true');
+    await expect(toggle.locator('.reveal-toggle__hide')).toBeVisible();
+    await expect(toggle.locator('.reveal-toggle__show')).toBeHidden();
 
     await toggle.click();
     await expect(field).toHaveAttribute('type', 'password');
-    await expect(toggle).toHaveAttribute('aria-label', 'Reveal value');
+    await expect(toggle).toHaveAttribute('aria-pressed', 'false');
+    await expect(toggle.locator('.reveal-toggle__show')).toBeVisible();
+  });
+
+  test('a gated settings section follows its switch, and hints describe their fields', async ({
+    page,
+  }) => {
+    await loginAsAdmin(page);
+    await page.goto('/b/auth/admin/settings', { waitUntil: 'networkidle' });
+
+    const oauth = page.getByRole('switch', { name: 'Enable OAuth' });
+    const clientId = page.getByLabel('GitHub Client ID');
+
+    // Off on a fresh server: the provider fields are out of the way.
+    await expect(oauth).not.toBeChecked();
+    await expect(clientId).toBeHidden();
+    await expect(oauth).toHaveAccessibleDescription('Enable third-party OAuth login');
+
+    // The switch's whole label row is its hit area.
+    await page.locator('label.form-switch', { has: oauth }).getByText('Enable OAuth').click();
+    await expect(oauth).toBeChecked();
+    await expect(clientId).toBeVisible();
+    await expect(clientId).toHaveAccessibleDescription('GitHub OAuth client ID');
+
+    await oauth.press('Space');
+    await expect(oauth).not.toBeChecked();
+    await expect(clientId).toBeHidden();
+    // Nothing is saved: the page is left without submitting.
+  });
+
+  test('the colour swatch and its hex box mirror each other, and an empty box is unset', async ({
+    page,
+  }) => {
+    await loginAsAdmin(page);
+    await page.goto('/b/legalpages/admin/settings', { waitUntil: 'networkidle' });
+
+    const box = page.getByRole('textbox', { name: 'Background Color', exact: true });
+    const swatch = page.getByLabel('Background Color picker', { exact: true });
+
+    // Nothing set: the swatch says so instead of showing black.
+    await expect(box).toHaveValue('');
+    await expect(swatch).toHaveAttribute('data-unset', '');
+
+    await box.fill('#3366cc');
+    await expect(swatch).toHaveValue('#3366cc');
+    await expect(swatch).not.toHaveAttribute('data-unset', '');
+
+    await box.fill('');
+    await expect(swatch).toHaveAttribute('data-unset', '');
+
+    // Picking on the swatch fills the box (and clears the unset mark).
+    await swatch.fill('#112233');
+    await expect(box).toHaveValue('#112233');
+    await expect(swatch).not.toHaveAttribute('data-unset', '');
   });
 
   /**

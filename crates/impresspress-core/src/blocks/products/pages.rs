@@ -3299,25 +3299,25 @@ pub async fn settings(ctx: &dyn Context, msg: &Message) -> OutputStream {
         }
     };
     let sections = [
-        SettingsSection::new("Stripe credentials", icons::dollar_sign(), &vars.stripe)
+        SettingsSection::new("Stripe credentials", &vars.stripe)
             .description(
                 "Add the keys from your Stripe Dashboard. Saved secret values stay masked.",
             ),
-        SettingsSection::new("Store defaults", icons::shopping_cart(), &vars.checkout)
+        SettingsSection::new("Store defaults", &vars.checkout)
             .description("Preselected for new products. You can still change them on each product."),
-        SettingsSection::new("Seller products (optional)", icons::users(), &vars.features)
+        SettingsSection::new("Seller products (optional)", &vars.features)
             .description("Turn this on only if customers should be able to create and sell their own products.")
             .collapsible(),
-        SettingsSection::new("Advanced checkout security", icons::settings(), &vars.checkout_advanced)
+        SettingsSection::new("Advanced checkout security", &vars.checkout_advanced)
             .description("Restrict which website origins can be used as checkout return and cancel destinations.")
             .collapsible(),
-        SettingsSection::new("Seller rules (optional)", icons::users(), &vars.sellers)
+        SettingsSection::new("Seller rules (optional)", &vars.sellers)
             .description("Set fees, approval rules, currencies, templates, and listing limits for sellers.")
             .collapsible(),
-        SettingsSection::new("Advanced Stripe options", icons::settings(), &vars.stripe_advanced)
+        SettingsSection::new("Advanced Stripe options", &vars.stripe_advanced)
             .description("Provider endpoint and API version overrides. The defaults are right for most stores.")
             .collapsible(),
-        SettingsSection::new("Developer webhooks (optional)", icons::globe(), &vars.webhooks)
+        SettingsSection::new("Developer webhooks (optional)", &vars.webhooks)
             .description("Send signed billing events to another system you control.")
             .collapsible(),
     ];
