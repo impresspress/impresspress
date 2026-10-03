@@ -150,6 +150,9 @@ const DECLARES_A_CONFIG_KEY: &[&str] = &[
 /// Every file whose ONLY key declarations are test fixtures, inside a
 /// `#[cfg(test)]` module, for keys no block declares.
 ///
+/// * `blocks/admin/mod.rs` — its `fixture_keys` module: the well-formed,
+///   undeclared keys the admin tests (and `config.rs`'s and
+///   `data_snapshot.rs`'s) store ad hoc, and the admin pages' probe rows.
 /// * `blocks/admin/ops.rs` — a retired shared key an operator must be able
 ///   to delete.
 /// * `blocks/config.rs` — undeclared keys `CONFIG_SET` stores ad hoc, one of
@@ -164,6 +167,7 @@ const DECLARES_A_CONFIG_KEY: &[&str] = &[
 /// retired keys pinned as absent, a block-scoped row's key and prefix) and are
 /// listed above because they also declare production keys.
 const DECLARES_A_TEST_FIXTURE_KEY: &[&str] = &[
+    "blocks/admin/mod.rs",
     "blocks/admin/ops.rs",
     "blocks/config.rs",
     "blocks/llm/routes/providers.rs",

@@ -708,7 +708,7 @@ pub fn is_declared_key(key: &str) -> bool {
 /// This is the rule `admin::settings::handle_create` already applies to a POST
 /// that omits the field ("Absent means sensitive. A caller that does not say is
 /// protected"). It lives here so the PUT path gets it too: a
-/// `PATCH /b/admin/api/settings/MY_SERVICE_TOKEN` on a key with no row takes
+/// `PATCH /b/admin/api/settings/WAFER_RUN_SHARED__MY_SERVICE_TOKEN` on a key with no row takes
 /// `upsert_by_key`'s create branch, whose patch carries no `sensitive`, and
 /// used to store the row unflagged — so the same ad hoc key was protected
 /// through POST and published through PUT.
@@ -743,7 +743,7 @@ pub fn is_sensitive_by_default_when_created(key: &str) -> bool {
 /// applies on top, so an undeclared key that SPELLS itself a secret is caught,
 /// and so is a declared `*_SECRET` var whose `input_type` was left `Text`.
 ///
-/// An undeclared key that does neither — `MY_SERVICE_TOKEN` — is false here,
+/// An undeclared key that does neither — `WAFER_RUN_SHARED__MY_SERVICE_TOKEN` — is false here,
 /// and deliberately: this answers "what does the build know this key to be",
 /// and about that key it knows nothing. Protecting it is a different question,
 /// answered at creation by [`is_sensitive_by_default_when_created`].
@@ -831,6 +831,90 @@ pub fn is_internal_key(key: &str) -> bool {
 /// caller that assembles its own batch.
 pub fn is_runtime_owned_key(key: &str) -> bool {
     is_infrastructure_key(key) || is_internal_key(key)
+}
+
+/// What a valid variable key looks like, in the words every refusal of one
+/// uses.
+pub const VARIABLE_KEY_FORMAT: &str = "Use UPPER_SNAKE_CASE parts joined by a double \
+     underscore: WAFER_RUN_SHARED__<NAME> for shared config, or <ORG>__<BLOCK>__<NAME> for \
+     one block's config (for example IMPRESSPRESS__EMAIL__FROM_ADDRESS). Each part is \
+     letters A-Z, digits and single underscores.";
+
+/// [`check_variable_key`] as an HTML `pattern` (implicitly anchored; valid
+/// under the `v` flag browsers compile it with). The first branch is the
+/// shared namespace, the second the block-scoped one. Kept beside the check it
+/// mirrors; `variable_key_pattern_tests` holds the two to the same verdicts.
+pub const VARIABLE_KEY_HTML_PATTERN: &str = "WAFER_RUN_SHARED(__[A-Z0-9]+(_[A-Z0-9]+)*)+|\
+     [A-Z][A-Z0-9]*(_[A-Z0-9]+)*(__[A-Z0-9]+(_[A-Z0-9]+)*){2,}";
+
+/// Whether `key` may name a row in the variables table, by the naming rule in
+/// `CLAUDE.md`. `Err` carries the sentence a refusal shows: what is wrong and
+/// what a valid key looks like.
+///
+/// A key is UPPER_SNAKE_CASE parts joined by `__` and is NAMESPACED, one of:
+///
+/// - `WAFER_RUN_SHARED__<NAME>` — shared config, which any block reads; and
+/// - `<ORG>__<BLOCK>__<NAME>` — config owned by the block `{org}/{block}`
+///   (`WAFER_RUN__AUTH__JWT_SECRET`, `IMPRESSPRESS__EMAIL__MAILGUN_API_KEY`).
+///
+/// `<NAME>` may itself contain `__`
+/// (`WAFER_RUN_SHARED__AUTH__BOOTSTRAP_ADMIN_PASSWORD`).
+///
+/// Namespacing is not cosmetic. WRAP decides who may read a config key from
+/// its spelling (`wafer_block::wrap::check_access`): a shared key is readable
+/// by every block, a block-scoped one by its owner, and an UNNAMESPACED key
+/// (`MY_SETTING`, `bad key!`) by no block at all — so a row like that is a
+/// setting nothing can honour. Each part is `[A-Z0-9]+` joined by single
+/// underscores because that is the inverse of `resource_prefix`
+/// (`my-org/auth` → `MY_ORG__AUTH__`) over the block names the runtime
+/// accepts; a part with a leading, trailing or doubled underscore would read
+/// back as a different block.
+///
+/// Runtime-owned keys ([`is_runtime_owned_key`]) fail this rule on their own
+/// (`IMPRESSPRESS_RUN_MIGRATIONS` has one part, `__…__` empty ones); the write
+/// surfaces still refuse them first, with the sentence that says why.
+///
+/// Every declared `ConfigVar` passes — `every_declared_key_is_a_valid_variable_key`
+/// holds that, so the rule cannot refuse a key the build itself uses.
+pub fn check_variable_key(key: &str) -> Result<(), String> {
+    let refuse = |what: &str| {
+        Err(format!(
+            "\"{key}\" is not a valid variable key: {what}. {VARIABLE_KEY_FORMAT}"
+        ))
+    };
+    if key.is_empty() {
+        return Err(format!("A variable key is required. {VARIABLE_KEY_FORMAT}"));
+    }
+    if !key.starts_with(|c: char| c.is_ascii_uppercase()) {
+        return refuse("it must start with a letter A-Z");
+    }
+    if let Some(c) = key
+        .chars()
+        .find(|c| !(c.is_ascii_uppercase() || c.is_ascii_digit() || *c == '_'))
+    {
+        let what = if c.is_ascii_lowercase() {
+            "it contains lowercase letters".to_string()
+        } else {
+            format!("it contains {c:?}")
+        };
+        return refuse(&what);
+    }
+    let parts: Vec<&str> = key.split("__").collect();
+    if parts
+        .iter()
+        .any(|part| part.is_empty() || part.starts_with('_') || part.ends_with('_'))
+    {
+        return refuse("parts are joined by exactly two underscores, and none is empty");
+    }
+    let shared = parts[0] == "WAFER_RUN_SHARED";
+    let required = if shared { 2 } else { 3 };
+    if parts.len() == 1 {
+        return refuse("it has no namespace, so no block could read it");
+    }
+    if parts.len() < required {
+        return refuse("it names an org and a block but no setting");
+    }
+    Ok(())
 }
 
 /// Whether `key`'s value must come from THIS instance rather than from stored
@@ -1299,5 +1383,82 @@ mod d1_queries_per_invocation_tests {
                 "{raw:?}: {err}"
             );
         }
+    }
+}
+
+#[cfg(test)]
+mod variable_key_tests {
+    use super::{check_variable_key, collect_all_config_vars, VARIABLE_KEY_FORMAT};
+
+    /// The rule refuses no key the build itself uses: every declared
+    /// `ConfigVar` — shared, block-declared and the identity vars that belong
+    /// to no `BlockInfo` — and the stored keys no `ConfigVar` declares.
+    #[test]
+    fn every_declared_key_is_a_valid_variable_key() {
+        let declared = collect_all_config_vars(&crate::blocks::all_block_infos());
+        assert!(
+            declared.len() > 20,
+            "the declared set came back nearly empty ({}), so this proves nothing",
+            declared.len()
+        );
+        let undeclared_but_stored = [
+            crate::blocks::auth::JWT_SECRET_KEY,
+            #[cfg(feature = "block-dev")]
+            crate::blocks::dev::seed::SEED_ERROR_KEY,
+        ];
+        for key in declared
+            .iter()
+            .map(|var| var.key.as_str())
+            .chain(undeclared_but_stored)
+        {
+            if let Err(e) = check_variable_key(key) {
+                panic!("{key} is used by this build but the key rule refuses it: {e}");
+            }
+        }
+    }
+
+    #[test]
+    fn namespaced_upper_snake_keys_are_accepted() {
+        for key in [
+            super::APP_NAME_KEY,
+            crate::blocks::auth::config::BOOTSTRAP_ADMIN_PASSWORD_KEY,
+            crate::blocks::auth::JWT_SECRET_KEY,
+            crate::blocks::email::MAILGUN_API_KEY,
+            "MY_ORG__MY_BLOCK__SETTING_2",
+            "ACME__S3__2FA_REQUIRED",
+        ] {
+            assert_eq!(check_variable_key(key), Ok(()), "{key}");
+        }
+    }
+
+    #[test]
+    fn malformed_and_unnamespaced_keys_are_refused_saying_what_is_valid() {
+        for (key, why) in [
+            ("bad key!", "start with a letter"),
+            ("BAD KEY!", "' '"),
+            ("IMPRESSPRESS__EMAIL__from", "lowercase"),
+            ("IMPRESSPRESS__EMAIL__FROM-ADDRESS", "'-'"),
+            ("1ACME__BLOCK__NAME", "start with a letter"),
+            ("_ACME__BLOCK__NAME", "start with a letter"),
+            ("MY_SETTING", "no namespace"),
+            ("WAFER_RUN_SHARED", "no namespace"),
+            ("IMPRESSPRESS__EMAIL", "no setting"),
+            ("ACME___BLOCK__NAME", "exactly two underscores"),
+            ("ACME__BLOCK__NAME_", "exactly two underscores"),
+            ("ACME____NAME", "exactly two underscores"),
+            ("WAFER_RUN_SHARED__", "exactly two underscores"),
+            // Runtime-owned keys fail the shape on their own.
+            (crate::migration_helper::RUN_MIGRATIONS_KEY, "no namespace"),
+            ("__IMPRESSPRESS_RUNTIME_KIND__", "start with a letter"),
+        ] {
+            let e = check_variable_key(key).expect_err(key);
+            assert!(e.contains(why), "{key}: {e:?} should say {why:?}");
+            assert!(
+                e.contains(VARIABLE_KEY_FORMAT),
+                "{key}: {e:?} should say what is valid"
+            );
+        }
+        let e = check_variable_key("").expect_err("empty");
+        assert!(e.starts_with("A variable key is required"), "{e}");
     }
 }

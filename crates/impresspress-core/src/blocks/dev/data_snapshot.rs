@@ -311,7 +311,13 @@ pub fn variable_is_exportable(row: &serde_json::Map<String, Value>) -> bool {
     // `__IMPRESSPRESS_RUNTIME_KIND__` starts with `__`, so it clears
     // `starts_with("IMPRESSPRESS_")`, and ends with `__` rather than a
     // `_SECRET`/`_KEY` suffix, so it clears `is_sensitive_key` too.
-    !crate::config_vars::is_instance_owned_key(key) && !key.starts_with("IMPRESSPRESS_")
+    //
+    // A row stored under a malformed key before the key rule existed stays
+    // home too: [`import`] refuses it, and an export its own importer rejects
+    // would be a bundle nobody can load.
+    !crate::config_vars::is_instance_owned_key(key)
+        && !key.starts_with("IMPRESSPRESS_")
+        && crate::config_vars::check_variable_key(key).is_ok()
 }
 
 #[cfg(test)]
@@ -359,11 +365,11 @@ mod variable_is_exportable_tests {
     #[test]
     fn a_suffix_flagged_key_never_exports_even_when_the_flag_is_clear() {
         assert!(!variable_is_exportable(&row(serde_json::json!({
-            "key": "STRIPE_SECRET",
+            "key": crate::blocks::admin::fixture_keys::STRIPE_SECRET,
             "sensitive": false,
         }))));
         assert!(!variable_is_exportable(&row(serde_json::json!({
-            "key": "JWT_KEY",
+            "key": crate::blocks::admin::fixture_keys::JWT_KEY,
             "sensitive": 0,
         }))));
     }
@@ -868,6 +874,16 @@ pub async fn import(
                         "the data snapshot carries the variable {key:?}, whose value this \
                          instance owns; a seed bundle may not set it"
                     ),
+                ));
+            }
+            // The key rule the admin surfaces and `CONFIG_SET` apply: an import
+            // creates rows, and a malformed key is one no block can read.
+            // [`variable_is_exportable`] holds such a row back, so a bundle
+            // this build exported never trips it.
+            if let Err(message) = crate::config_vars::check_variable_key(key) {
+                return Err(WaferError::new(
+                    ErrorCode::InvalidArgument,
+                    format!("the data snapshot carries a variable this build refuses: {message}"),
                 ));
             }
         }

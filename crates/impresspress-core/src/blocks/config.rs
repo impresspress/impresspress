@@ -670,6 +670,15 @@ impl Block for VariablesConfigBlock {
                         ),
                     ));
                 }
+                // The key rule every variables-table writer applies: this
+                // operation creates a row for a key it has not seen, and a
+                // malformed or unnamespaced one is a row no block can read.
+                if let Err(message) = crate::config_vars::check_variable_key(&req.key) {
+                    return OutputStream::error(WaferError::new(
+                        ErrorCode::InvalidArgument,
+                        message,
+                    ));
+                }
                 match self.write(&req.key, &req.value).await {
                     Ok(()) => OutputStream::respond(vec![]),
                     Err(out) => out,
@@ -1157,6 +1166,25 @@ mod boot_owned_key_tests {
         );
     }
 
+    /// `CONFIG_SET` creates a row for a key it has not seen, so it applies
+    /// the variable naming rule like every other writer of the table: a
+    /// malformed or unnamespaced key is refused and nothing is stored.
+    #[tokio::test]
+    async fn config_set_refuses_a_malformed_key() {
+        let ctx = booted_with(&[]).await;
+        for key in ["bad key!", "MY_SETTING", "X__NOTE"] {
+            let result = wafer_core::clients::config::set(&ctx, key, "v").await;
+            assert!(result.is_err(), "CONFIG_SET of {key:?} must fail");
+            assert!(
+                variables::get_by_key(&ctx.fixture(), key)
+                    .await
+                    .expect("read back")
+                    .is_none(),
+                "a refused write must not leave a row behind"
+            );
+        }
+    }
+
     /// `CONFIG_SET` refuses a session lifetime past its bound, like the admin
     /// write surfaces: the value would fail every login
     /// (`auth::helpers::session_lifetime_days`).
@@ -1251,7 +1279,7 @@ mod boot_owned_key_tests {
     /// created through the admin API and published when created here.
     #[tokio::test]
     async fn config_set_creating_an_undeclared_key_stores_it_sensitive() {
-        const KEY: &str = "WAFER_RUN_SHARED__MY_SERVICE_TOKEN";
+        const KEY: &str = crate::blocks::admin::fixture_keys::MY_SERVICE_TOKEN;
         let ctx = booted_with(&[]).await;
 
         wafer_core::clients::config::set(&ctx, KEY, "ad-hoc-value")

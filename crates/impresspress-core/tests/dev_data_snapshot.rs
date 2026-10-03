@@ -939,6 +939,60 @@ async fn import_refuses_a_planted_jwt_secret() {
     );
 }
 
+/// A bundle row whose key the variable naming rule refuses is refused in
+/// pre-flight, like a reserved one: an import creates rows, and every other
+/// writer of this table refuses such a key
+/// (`config_vars::check_variable_key`). The exporter holds such a row back, so
+/// only a hand-authored bundle can carry one — and a malformed legacy row
+/// stays home rather than producing a bundle its own importer rejects.
+#[tokio::test]
+async fn import_refuses_a_malformed_variable_key_and_export_holds_one_back() {
+    for key in ["bad key!", "MY_SETTING"] {
+        let row: serde_json::Map<String, serde_json::Value> = json_map(json!({
+            "id": "var_malformed",
+            "key": key,
+            "value": "v",
+            "sensitive": false,
+            "created_at": STAMP,
+            "updated_at": STAMP,
+        }))
+        .into_iter()
+        .collect();
+        assert!(
+            !data_snapshot::variable_is_exportable(&row),
+            "{key}: a malformed legacy row must not be exported"
+        );
+
+        let ctx = TestContext::with_products().await.fixture();
+        let mut tables = std::collections::BTreeMap::new();
+        tables.insert(
+            variables::TABLE.to_string(),
+            vec![row.into_iter().collect()],
+        );
+        let snap = DataSnapshot {
+            schema_version: data_snapshot::SCHEMA_VERSION,
+            tables,
+        };
+        let err = data_snapshot::import(&as_dev(&ctx), &snap)
+            .await
+            .unwrap_err();
+        assert_eq!(err.code, wafer_run::ErrorCode::InvalidArgument, "{key}");
+        assert!(
+            err.message
+                .contains(impresspress_core::config_vars::VARIABLE_KEY_FORMAT),
+            "{key}: {}",
+            err.message
+        );
+        let vars = db::list_all(&ctx, variables::TABLE, Vec::new())
+            .await
+            .unwrap();
+        assert!(
+            !vars.iter().any(|v| v.data["key"] == json!(key)),
+            "a refused import must not have written {key}: {vars:?}",
+        );
+    }
+}
+
 /// The env-precedence transition's gate row never travels in a bundle.
 ///
 /// It records that a one-time upgrade pass has run on THIS database. Exported
