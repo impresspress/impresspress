@@ -893,11 +893,11 @@ fn the_rendered_worker_answers_for_a_stopped_runtime() {
     );
 }
 
-/// A worker keeps its own runtime binary at install and boots from it, so a
-/// worker the browser restarts after a deploy has deleted that binary from the
-/// host still starts; and a dead worker that a newer version is coming to
-/// replace leaves the transition to that update — driven in Node against the
-/// rendered file, `tests/sw/sw_runtime_kept.test.mjs`.
+/// A worker keeps its own runtime binary at install — only a WebAssembly
+/// module, never a host's fallback page — and boots from it, so a worker the
+/// browser restarts after a deploy has deleted that binary from the host
+/// still starts — driven in Node against the rendered file,
+/// `tests/sw/sw_runtime_kept.test.mjs`.
 #[test]
 fn the_rendered_worker_keeps_its_own_runtime() {
     node_test("sw_runtime_kept.test.mjs", "sw.js", "SW_JS", "SW_JS_WIPE");

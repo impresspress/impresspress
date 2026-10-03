@@ -114,25 +114,39 @@ const registrationOf = (page: Page) =>
   });
 
 /**
- * The runtime binaries the origin's workers keep for themselves
- * (`RUNTIME_CACHE` in `sw.js.tmpl`), as URL paths — read from the page, since
- * Cache Storage is the origin's.
+ * Which worker answers the page, and which runtime it was installed with:
+ * the active worker's script URL (path and query), whether that worker
+ * controls the page, and the runtime binaries the origin's workers keep for
+ * themselves (`RUNTIME_CACHE` in `sw.js.tmpl`) as URL paths.
  *
- * This is how a test tells which runtime the active worker runs. A version
- * keeps its own binary at `install`, loads it from there, and drops every
- * other version's at `activate`: once the registration has settled, the one
- * binary kept is the active worker's. (Asking a worker what it FETCHED does
- * not say it: a worker loads its runtime from what it kept, and the browser
- * may have stopped and restarted the instance a test holds, which then
- * reports nothing: the recovery case below asked that way and intermittently
- * read an empty list.)
+ * A version keeps its own binary at `install`, loads it from there, and
+ * drops every other version's at `activate`; so once the registration has
+ * settled, the one binary kept is the active worker's, and the active worker
+ * is the one answering the page. Read together — the kept binary alone says
+ * what the last version to activate kept, not who answers. (Asking a worker
+ * what it FETCHED does not say it either: a worker loads its runtime from
+ * what it kept, and the browser may have stopped and restarted the instance
+ * a test holds, which then reports nothing — the recovery case below asked
+ * that way and intermittently read an empty list.)
  */
-const runtimesKept = (page: Page) =>
+const answering = (page: Page) =>
   page.evaluate(async () => {
-    if (!(await caches.has('__impresspress_runtime'))) return [];
-    const cache = await caches.open('__impresspress_runtime');
-    return (await cache.keys()).map((request) => new URL(request.url).pathname);
+    const active = (await navigator.serviceWorker.getRegistration())?.active ?? null;
+    const script = active ? new URL(active.scriptURL) : null;
+    let kept: string[] = [];
+    if (await caches.has('__impresspress_runtime')) {
+      const cache = await caches.open('__impresspress_runtime');
+      kept = (await cache.keys()).map((request) => new URL(request.url).pathname);
+    }
+    return {
+      script: script ? script.pathname + script.search : null,
+      controls: active !== null && navigator.serviceWorker.controller === active,
+      kept,
+    };
   });
+
+/** What `answering` reads when the plain `/sw.js` worker with `runtime` answers. */
+const plainWorkerWith = (runtime: string) => ({ script: '/sw.js', controls: true, kept: [runtime] });
 
 /**
  * Every death a worker of `context` reports from here on — the console line
@@ -192,7 +206,7 @@ test('a returning browser moves to the new deployment’s worker and runtime, wi
     // ---- the first deployment, used --------------------------------------
     await bootServiceWorker(page);
     expect(workers).toHaveLength(1);
-    expect(await runtimesKept(page)).toEqual([first]);
+    expect(await answering(page)).toEqual(plainWorkerWith(first));
     expect(await registrationOf(page)).toEqual(SETTLED);
 
     // Something only this browser has: a page written into the workspace and
@@ -248,7 +262,7 @@ test('a returning browser moves to the new deployment’s worker and runtime, wi
     // its runtime — the new deployment's, over the storage the old one left.
     // The previous one's binary is gone from the host and from the origin.
     expect(await viaWorker(page, '/kept.html')).toEqual({ status: 200, text: KEPT });
-    expect(await runtimesKept(page)).toEqual([next]);
+    expect(await answering(page)).toEqual(plainWorkerWith(next));
 
     // Still the same person's sandbox: the session is kept, the workspace has
     // the file, and a write through the new runtime is published.
@@ -324,7 +338,7 @@ test('a returning browser whose worker was stopped moves to the new deployment, 
 
     // The browser's update check after that navigation brings the new
     // deployment's worker in: once it is active, its runtime is the one kept.
-    await expect.poll(() => runtimesKept(page), { timeout: 60_000 }).toEqual([next]);
+    await expect.poll(() => answering(page), { timeout: 60_000 }).toEqual(plainWorkerWith(next));
     await expect.poll(() => registrationOf(page), { timeout: 60_000 }).toEqual(SETTLED);
     expect(workers.length).toBeGreaterThan(booted);
 
@@ -401,8 +415,11 @@ test('a new deployment replaces a worker that a recovery registered', async ({ b
     // The new deployment's runtime answers, under the same script URL: the
     // deploy changed the bytes behind it, not the registration.
     expect((await viaWorker(page, '/b/auth/login')).status).toBe(200);
-    expect(await runtimesKept(page)).toEqual([next]);
-    expect(await scriptUrl()).toBe(recovered);
+    expect(await answering(page)).toEqual({
+      script: new URL(recovered).pathname + new URL(recovered).search,
+      controls: true,
+      kept: [next],
+    });
   } finally {
     await context.close();
     await stop(server);
@@ -466,7 +483,7 @@ test('a new deployment replaces a worker whose runtime has died', async ({ brows
     // The same page, never reloaded, is now answered by a live runtime — the
     // new deployment's.
     expect((await viaWorker(page, '/b/auth/login')).status).toBe(200);
-    expect(await runtimesKept(page)).toEqual([next]);
+    expect(await answering(page)).toEqual(plainWorkerWith(next));
     expect(await page.evaluate(() => (window as any).__sameDocument)).toBe(true);
     expect(workers).toHaveLength(2);
   } finally {
@@ -479,10 +496,10 @@ test('a new deployment replaces a worker whose runtime has died', async ({ brows
 // update check: the worker answers it with the boot shell, and the browser's
 // update check after it is installing the new deployment's worker at the
 // same time. Both the shell's recovery and the update could replace the
-// dead worker here, and only one may: a dead worker that a newer version is
-// coming to replace reports no death (`beingReplaced` in `sw.js.tmpl`), so
-// the shell does an ordinary boot onto the new version — no recovery, no
-// `?recovery=` worker, nothing erased.
+// dead worker here, and only one may: the shell asks first whether an update
+// owns the transition (`updateUnderway` in `loader.js.tmpl`), finds the new
+// version installed, and boots onto it — no recovery, no `?recovery=`
+// worker, nothing erased.
 test('a navigation to a dead worker after a deployment is the update’s, not a recovery’s', async ({ browser }) => {
   test.setTimeout(300_000);
   const next = runtimeOf(UPDATE_DIST);
@@ -514,8 +531,12 @@ test('a navigation to a dead worker after a deployment is the update’s, not a 
       async () => (await navigator.serviceWorker.getRegistration())!.active!.scriptURL,
     );
     expect(active).toBe(`${ORIGIN}/sw.js`);
-    expect(await runtimesKept(page)).toEqual([next]);
-    expect(shellSaid.filter((line) => line.includes('runtime stopped'))).toEqual([]);
+    expect(await answering(page)).toEqual(plainWorkerWith(next));
+    // The shell said why it was waiting, and never that it restarted or
+    // recovered the worker itself.
+    const said = shellSaid.filter((line) => line.includes('runtime stopped'));
+    expect(said.length, JSON.stringify(shellSaid)).toBeGreaterThan(0);
+    for (const line of said) expect(line).toContain('a new version is replacing it');
   } finally {
     await context.close();
     await stop(server);

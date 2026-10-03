@@ -106,6 +106,13 @@ function element() {
 /// - `onProbe`   — called when the probe is made, with `post` (sw.js posting a
 ///                 message to this page), before the probe is answered
 /// - `registerFails` — `navigator.serviceWorker.register` rejects with this
+/// - `update`    — what the registration's update check finds: `'installs'`,
+///                 a newer version that installs and then activates (taking
+///                 the page); `'fails'`, one the browser discards while
+///                 installing; `'active'`, a newer version that had already
+///                 activated before this page asked (the registration's
+///                 active worker is not the one that controls the page);
+///                 nothing, by default
 export function loadShell({
   session = {},
   stop,
@@ -124,6 +131,7 @@ export function loadShell({
   eraseFails = [],
   registeredUrl,
   installs = true,
+  update,
   opfsFiles = ['app.sqlite'],
   title = 'Kiln & Co',
   documentTitle = title
@@ -214,6 +222,7 @@ export function loadShell({
   const worker = {
     state: installs ? 'activated' : 'redundant',
     addEventListener: () => {},
+    removeEventListener: () => {},
     // The page asking the worker to take it.
     postMessage: (message) => {
       asked.push(message);
@@ -225,6 +234,56 @@ export function loadShell({
     }
   };
   let controller = null;
+  let registration = null;
+  let updates = 0;
+  // The newer version an update check finds (`update`): `installing` at
+  // first, then — a turn later — installed and activated, taking the page;
+  // or discarded.
+  // A version of the registration other than the stub `worker`: it keeps
+  // its own state, tells its listeners when that changes, and takes the page
+  // when asked to.
+  const version = (state) => {
+    const listeners = new Set();
+    const next = {
+      state,
+      fire: () => [...listeners].forEach((l) => l({})),
+      scriptURL: `${ORIGIN}/sw.js`,
+      addEventListener: (type, l) => type === 'statechange' && listeners.add(l),
+      removeEventListener: (type, l) => listeners.delete(l),
+      postMessage: (message) => {
+        asked.push(message);
+        if (message.type !== 'impresspress-claim') return;
+        queueMicrotask(() => {
+          controller = next;
+          controlListeners.forEach((l) => l({}));
+        });
+      }
+    };
+    return next;
+  };
+  const incoming = () => {
+    const next = version('installing');
+    const fire = next.fire;
+    setTimeout(() => {
+      events.push(update === 'installs' ? 'update installed' : 'update discarded');
+      registration.installing = null;
+      if (update !== 'installs') {
+        next.state = 'redundant';
+        fire();
+        return;
+      }
+      next.state = 'installed';
+      registration.waiting = next;
+      fire();
+      setTimeout(() => {
+        registration.waiting = null;
+        registration.active = next;
+        next.state = 'activated';
+        fire();
+      }, 1);
+    }, 1);
+    return next;
+  };
   if (controlled === true) controller = worker;
   if (controlled === 'dead') controller = { state: 'activated', scriptURL: `${ORIGIN}/sw.js` };
   const serviceWorker = {
@@ -243,13 +302,29 @@ export function loadShell({
       return { active: worker, update: async () => {} };
     },
     // The registration the origin already has, if any: `registeredUrl` is
-    // its worker's script URL.
+    // its worker's script URL. Its active worker is the one that controls
+    // the page, unless `update` is `'active'`.
     getRegistration: async () => {
       if (registeredUrl === undefined) return undefined;
+      if (registration) return registration;
       const urls = typeof registeredUrl === 'string' ? { active: registeredUrl } : registeredUrl;
-      return Object.fromEntries(
-        Object.entries(urls).map(([slot, scriptURL]) => [slot, { scriptURL }])
+      registration = Object.fromEntries(
+        Object.entries(urls).map(([slot, scriptURL]) => [
+          slot,
+          slot === 'active' && update === 'active'
+            ? version('activated')
+            : slot === 'active' && controlled === true
+              ? Object.assign(worker, { scriptURL })
+              : { scriptURL, addEventListener: () => {}, removeEventListener: () => {} }
+        ])
       );
+      registration.installing ??= null;
+      registration.waiting ??= null;
+      registration.update = async () => {
+        updates += 1;
+        if (update === 'installs' || update === 'fails') registration.installing = incoming();
+      };
+      return registration;
     },
     getRegistrations: async () => [
       {
@@ -386,6 +461,10 @@ export function loadShell({
     events,
     /// The script URLs this load registered.
     registeredUrls,
+    /// How many update checks were asked of the existing registration.
+    updates: () => updates,
+    /// The worker that controls the page now.
+    controller: () => controller,
     /// The record of deaths recovered from, whole.
     recoveryRecord: () => cacheStore.get(RECOVERED_CACHE)?.get(RECOVERED_KEY)?.deaths ?? [],
     opfs: () => [...opfs],

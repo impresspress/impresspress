@@ -51,9 +51,13 @@ const RUNTIME_URL = '__WASM_BIN__';
 //
 // One binary per version, and one version kept once a new one activates —
 // a few megabytes of the origin's quota, which it shares with the app's
-// local data. A version that cannot keep its binary (the host no longer has
-// it, the quota is exhausted) fails to install: a browser keeps the worker
-// it has rather than switch to one that cannot start.
+// local data. A version that cannot keep its binary fails to install, and a
+// browser keeps the worker it has rather than switch to one that cannot
+// start: the host no longer has the binary, the quota is exhausted, or what
+// the host answered is not a WebAssembly module at all — a host that falls
+// back to its app shell for unknown paths (the dev sandbox's
+// `not_found_handling = "single-page-application"`) answers a deleted binary
+// with a 200 and an HTML page (`keepRuntime`).
 //
 // `loader.js`'s recovery drops this cache with every other one, so the
 // replacement it registers fetches its runtime afresh; `runtimeBinary`
@@ -157,9 +161,6 @@ const SHELL_URL = '__SHELL_URL__';
  *   for the shell (`leaveCauseForBootShell`), each page is told and
  *   re-navigated to its own address — which this worker answers with the
  *   shell — and `loader.js` runs its recovery path with the cause on screen.
- *   Unless a newer version is already coming to replace this worker
- *   (`beingReplaced`): then none of that happens, and the update owns the
- *   transition.
  * - `false` — a request FROM a page failed (an API call, a form post) after
  *   the runtime had started. The page is left exactly where it is: the
  *   request gets `runtimeStopped`'s 503 and the page shows the cause.
@@ -178,7 +179,6 @@ async function selfDestruct(reason, stage, toBootShell) {
     }
     console.error('[__APP_NAME__] SW self-destructing:', reason);
     if (!toBootShell) return;
-    if (await beingReplaced()) return;
     await leaveCauseForBootShell();
     try {
         const clients = await self.clients.matchAll({ type: 'window' });
@@ -216,38 +216,6 @@ async function selfDestruct(reason, stage, toBootShell) {
     } catch (e) {
         console.error('[__APP_NAME__] self-destruct cleanup failed:', e);
     }
-}
-
-/**
- * Whether a newer version of this worker is already on its way in — a new
- * deployment's, or a replacement another tab's recovery registered. Asks
- * the host first (`registration.update()`, which joins a check the browser
- * already has in flight rather than starting a second one), so a deployment
- * this worker has not heard of yet counts.
- *
- * This is what keeps the recovery and the update from both replacing a dead
- * worker. Each brings in a version of its own, and the browser installs one
- * at a time, discarding an installing version when another is registered
- * over it — so what the page ends on depended on which came first, and in
- * CI it was sometimes nothing at all (`sw-update.spec.ts` timed out waiting
- * for the new worker). So exactly ONE of them owns the transition, decided
- * here, by the worker that died, before it tells anyone: if a newer version
- * is coming it reports no death — no message, no navigation, no cause for
- * the shell — and the update replaces it the way it replaces a live worker;
- * the boot shell a navigation still gets from it does an ordinary boot,
- * which waits for that version to activate. Only a dead worker that nothing
- * is replacing sends the shell into its recovery.
- *
- * A check that cannot reach the host is not a newer version.
- */
-async function beingReplaced() {
-    const registration = self.registration;
-    try {
-        await registration.update();
-    } catch (e) {
-        console.warn('[__APP_NAME__] update check failed:', e);
-    }
-    return Boolean(registration.installing || registration.waiting);
 }
 
 /**
@@ -318,9 +286,22 @@ async function runtimeBinary() {
     return fetch(RUNTIME_URL);
 }
 
+// The first four bytes of every WebAssembly binary: `\0asm`.
+const WASM_MAGIC = [0x00, 0x61, 0x73, 0x6d];
+
 /**
  * Keep this version's runtime binary (RUNTIME_CACHE says why). Throws when
  * it cannot be kept, which fails the install.
+ *
+ * What is kept must be a WebAssembly module, not merely a 200: a host that
+ * answers unknown paths with its app shell answers a binary it no longer
+ * has with an HTML page, and keeping that would install a version whose
+ * runtime can never load — and, at its `activate`, drop the binary of the
+ * version that worked. So the bytes are read and must begin with the wasm
+ * magic number; they are kept with the wasm media type whatever the host
+ * labelled them, which is what lets `init()` compile them as they stream.
+ * (A module that starts right and is still broken is not caught here; it
+ * fails `init()` at stage `load`, like any other.)
  */
 async function keepRuntime() {
     const cache = await caches.open(RUNTIME_CACHE);
@@ -329,7 +310,17 @@ async function keepRuntime() {
     if (!response.ok) {
         throw new Error(`the runtime ${RUNTIME_URL} could not be fetched: HTTP ${response.status}`);
     }
-    await cache.put(RUNTIME_URL, response);
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (!WASM_MAGIC.every((byte, i) => bytes[i] === byte)) {
+        throw new Error(
+            `the runtime ${RUNTIME_URL} is not a WebAssembly module ` +
+                `(the host answered ${response.headers.get('Content-Type') || 'no content type'})`
+        );
+    }
+    await cache.put(
+        RUNTIME_URL,
+        new Response(bytes, { headers: { 'Content-Type': 'application/wasm' } })
+    );
 }
 
 /**
@@ -629,10 +620,7 @@ function recoveryErases() {
  */
 async function runtimeStopped(request) {
     if (request.mode === 'navigate') {
-        // Unless a newer version is coming to replace this worker: then the
-        // shell is given no cause, and boots onto that version
-        // (`beingReplaced`).
-        if (!(await beingReplaced())) await leaveCauseForBootShell();
+        await leaveCauseForBootShell();
         return bootShell();
     }
     const next = recoveryErases()
