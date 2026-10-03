@@ -307,8 +307,8 @@ pub async fn overview(ctx: &dyn Context, msg: &Message) -> OutputStream {
 ///     (`/b/products/api/admin/products`) is NOT gated by this flag, so no
 ///     CTA is withheld here — this state is purely informational.
 ///   - Otherwise: an "Add your first product" CTA straight to the Manage
-///     Products page, which owns the "+ New Product" create modal (the
-///     real create path, wired to that same admin route).
+///     Products page, whose "+ New Product" action opens the product
+///     wizard (the real create path, wired to that same admin route).
 fn render_overview_empty_state(products_count: i64, user_products_enabled: bool) -> maud::Markup {
     if products_count > 0 {
         return html! {};

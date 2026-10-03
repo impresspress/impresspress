@@ -15,12 +15,16 @@ use crate::ui::{
 };
 
 /// htmx-friendly success render for `POST /b/vector/api/indexes` — re-loads
-/// the index list so the modal swap shows the new row.
+/// the index list so the modal's swap shows the new row.
+///
+/// The list alone: the create form swaps this over `#vector-index-list`
+/// (`outerHTML`), and the modal it was submitted from lives next to that list,
+/// not in it. It used to carry the modal too, so every index created added
+/// one more `<dialog id="create-vector-index">` to the page.
 pub async fn render_index_list_fragment(ctx: &dyn Context) -> Result<Markup, WaferError> {
     let rows = super::service::list_index_rows(ctx).await?;
     Ok(html! {
         div #vector-index-list { (render_index_list_table(&rows)) }
-        (render_create_index_modal())
     })
 }
 
@@ -36,7 +40,7 @@ pub fn render_create_index_modal() -> Markup {
             form hx-post="/b/vector/api/indexes" hx-target="#vector-index-list" hx-swap="outerHTML" {
                 div .form-group {
                     label .form-label .required for="vec-name" { "Name" }
-                    input .form-input type="text" #vec-name name="name" placeholder="e.g. docs" required;
+                    input .form-input type="text" #vec-name name="name" placeholder="e.g. docs" required autofocus;
                 }
                 div .form-group {
                     label .form-label for="vec-model" { "Embedding model" }
@@ -48,10 +52,10 @@ pub fn render_create_index_modal() -> Markup {
                         " Enable keyword (full-text) search alongside vectors"
                     }
                 }
-                div .form-actions {
-                    button .btn .btn--secondary .btn--block type="button" data-action="modal-close" data-modal-target="create-vector-index" { "Cancel" }
+                (crate::ui::components::modal_footer(html! {
+                    (crate::ui::components::modal_cancel())
                     button .btn .btn--primary .btn--block type="submit" { "Create" }
-                }
+                }))
             }
         },
     )

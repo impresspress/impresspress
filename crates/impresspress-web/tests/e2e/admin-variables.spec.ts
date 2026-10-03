@@ -118,7 +118,7 @@ test.describe('admin variables', () => {
     await expect(page.locator('#toast-container .toast')).toHaveCount(0);
 
     // The page behind the modal gained no row.
-    await modal.locator('button.modal-close').click();
+    await modal.getByRole('button', { name: 'Close' }).click();
     await page.goto('/b/admin/variables?tab=all', { waitUntil: 'networkidle' });
     await expect(page.getByText('e2e bad key!', { exact: true })).toHaveCount(0);
   });

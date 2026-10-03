@@ -192,7 +192,7 @@
         '<button type="button" data-action="copy">Copy link</button>' +
         '<button type="button" data-action="delete">Delete</button>';
       popup.querySelector('[data-action="share"]').addEventListener('click', () => {
-        shareModal(trigger.dataset.bucket, trigger.dataset.key);
+        shareModal(trigger.dataset.bucket, trigger.dataset.key, trigger);
       });
       popup.querySelector('[data-action="copy"]').addEventListener('click', () => {
         const url =
@@ -235,40 +235,34 @@
     }
   }
 
-  function shareModal(bucket, key) {
-    const dlg = document.createElement('dialog');
-    dlg.className = 'share-modal';
-    dlg.innerHTML =
-      '<form method="dialog">' +
-      '<h3>Create share link</h3>' +
-      '<p><code></code></p>' +
-      // Values are HOURS — the unit POST /b/cloudstorage/shares takes in
-      // `expires_in_hours`. The labels are the days the user thinks in.
-      // There is no "never": a share link is a bearer credential, so every
-      // one of them ends. The longest option is the deployment's default
-      // ceiling (IMPRESSPRESS__FILES__MAX_SHARE_EXPIRY_HOURS), which the
-      // server applies to a request that names no expiry at all.
-      '<label>Expires in <select name="expires">' +
-      '<option value="24">1 day</option>' +
-      '<option value="168" selected>7 days</option>' +
-      '<option value="720">30 days</option>' +
-      '<option value="8760">365 days</option>' +
-      '</select></label>' +
-      '<label>Max accesses <input name="max" type="number" min="0" placeholder="∞" /></label>' +
-      '<div class="modal-actions">' +
-      '<button type="button" data-action="cancel">Cancel</button>' +
-      '<button type="button" data-action="create">Create</button>' +
-      '</div>' +
-      '</form>';
-    // Set the source code element via textContent (avoids innerHTML XSS on bucket/key).
-    dlg.querySelector('code').textContent = bucket + '/' + key;
-    document.body.appendChild(dlg);
-    dlg.showModal();
-    dlg.querySelector('[data-action="cancel"]').addEventListener('click', () => {
-      dlg.close();
-      dlg.remove();
-    });
-    dlg.querySelector('[data-action="create"]').addEventListener('click', async () => {
+  // The share modal is server-rendered next to the object table
+  // (`pages_user::objects::render_share_modal`) as the shared
+  // `components::modal` <dialog>. This fills in which object it is about and
+  // asks chrome.js to open it — through the same `openModal` event the htmx
+  // trigger header uses — with the kebab trigger as the control focus returns
+  // to (the menu item that was clicked is gone by the time the modal closes).
+  let shareTarget = null;
+
+  function shareModal(bucket, key, opener) {
+    const dlg = document.getElementById('share-link');
+    if (!dlg) return;
+    shareTarget = { bucket: bucket, key: key };
+    dlg.querySelector('form').reset();
+    // textContent, never innerHTML: bucket and key are user-chosen names.
+    dlg.querySelector('#share-object').textContent = bucket + '/' + key;
+    document.body.dispatchEvent(
+      new CustomEvent('openModal', { detail: { id: 'share-link', opener: opener } })
+    );
+  }
+
+  function shareForm() {
+    const dlg = document.getElementById('share-link');
+    if (!dlg) return;
+    dlg.querySelector('form').addEventListener('submit', async (e) => {
+      e.preventDefault();
+      if (!shareTarget) return;
+      const bucket = shareTarget.bucket;
+      const key = shareTarget.key;
       const hours = dlg.querySelector('select[name="expires"]').value;
       const max = dlg.querySelector('input[name="max"]').value;
       // Only the fields the endpoint declares: it rejects unknown ones
@@ -288,11 +282,10 @@
           await navigator.clipboard.writeText(url);
           showToast('Share link copied', 'success');
           dlg.close();
-          dlg.remove();
         } else {
           showToast('Share creation failed', 'error');
         }
-      } catch (e) {
+      } catch (err) {
         showToast('Share creation failed', 'error');
       }
     });
@@ -336,17 +329,20 @@
     return null;
   }
 
-  function bucketCreateModal() {
-    const trigger = document.querySelector('[data-action="open-new-bucket"]');
-    const dlg = document.getElementById('new-bucket-modal');
-    if (!trigger || !dlg) return;
+  // The "New bucket" modal is the shared `components::modal` <dialog>
+  // (`pages_user::buckets::render_new_bucket_modal`), opened and closed by
+  // chrome.js through `data-action="modal-open"` / `"modal-close"`. What is
+  // left here is what is particular to it: validating the name, POSTing it,
+  // and starting the next opening with an empty form.
+  function bucketCreateForm() {
+    const dlg = document.getElementById('new-bucket');
+    if (!dlg) return;
 
     const form = dlg.querySelector('form');
     const nameInput = dlg.querySelector('input[name="name"]');
     const publicInput = dlg.querySelector('input[name="public"]');
-    const errEl = dlg.querySelector('.modal-error');
-    const cancelBtn = dlg.querySelector('[data-action="cancel"]');
-    const submitBtn = dlg.querySelector('[data-action="create"]');
+    const errEl = dlg.querySelector('#new-bucket-error');
+    const submitBtn = dlg.querySelector('button[type="submit"]');
 
     function showError(msg) {
       if (!errEl) return;
@@ -354,25 +350,12 @@
       errEl.hidden = !msg;
     }
 
-    function resetForm() {
-      if (form) form.reset();
+    // However it closed — Cancel, the close button, Esc, the backdrop.
+    dlg.addEventListener('close', () => {
+      form.reset();
       showError('');
-    }
-
-    trigger.addEventListener('click', (e) => {
-      e.preventDefault();
-      resetForm();
-      dlg.showModal();
-      // Focus the name input on open.
-      if (nameInput) nameInput.focus();
+      submitBtn.disabled = false;
     });
-
-    cancelBtn.addEventListener('click', () => {
-      dlg.close();
-    });
-
-    // Native <dialog> already handles ESC-to-close; clear error on close.
-    dlg.addEventListener('close', resetForm);
 
     form.addEventListener('submit', async (e) => {
       e.preventDefault();
@@ -415,10 +398,12 @@
   window.impresspressFilesBrowser = {
     init: function () {
       const boot = readBootstrap();
-      // shareModal/kebab still useful even without bootstrap (e.g., shares page).
+      // The kebab works without bootstrap too (the shares page).
       kebabMenu();
-      // bucket-create modal lives on the bucket-list page (no boot bucket).
-      bucketCreateModal();
+      // The share modal lives on the object list; the bucket-create modal on
+      // the bucket lists (no boot bucket). Each binds only where it is.
+      shareForm();
+      bucketCreateForm();
       if (!boot) return;
       dragDropHandler(boot);
       bulkSelect();

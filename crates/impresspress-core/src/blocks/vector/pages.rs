@@ -209,13 +209,12 @@ pub(super) async fn create_index(
             Ok(m) => m,
             Err(e) => return crud::db_error_internal(e, "Failed to refresh"),
         };
-        let trigger = r#"{"showToast":{"message":"Index created","type":"success"},"closeModal":{"id":"create-vector-index"}}"#;
-        return crate::http::ResponseBuilder::new()
-            .set_header("HX-Trigger", trigger)
-            .body(
-                body_html.into_string().into_bytes(),
-                "text/html; charset=utf-8",
-            );
+        return crate::ui::html_response_closing_modal(
+            body_html,
+            "create-vector-index",
+            "Index created",
+            "success",
+        );
     }
     ok_json(&CreateIndexResponse {
         name: body.name,
