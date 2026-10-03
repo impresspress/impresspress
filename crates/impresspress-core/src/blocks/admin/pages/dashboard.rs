@@ -227,11 +227,14 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let errors_spark = spark(&errors_daily, "var(--accent-danger)");
 
     let stats = vec![
+        // A running total has no daily series of its own; the signup
+        // sparkline beside it would draw "new per day" under a cumulative
+        // figure and read as the total's trend. No sparkline.
         components::stat_card(
             "Total Users",
             tile_value(&user_count_str),
             icons::users(),
-            new_users_spark.clone(),
+            None,
         ),
         components::stat_card(
             "New Today",
@@ -245,8 +248,13 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
             icons::file_text(),
             requests_spark,
         ),
+        // Every 4xx and 5xx response (`request_logs::ERROR_STATUS_FLOOR`), so
+        // the label says so: "Errors" read as server failures while most of
+        // the count is clients' 404s and 401s. The same definition feeds the
+        // chart below, the Recent Errors card and the logs page's "Errors
+        // only" filter the tile's chart links to, so all four keep agreeing.
         components::stat_card(
-            "Errors Today",
+            "4xx/5xx Today",
             tile_value(&errors_str),
             icons::triangle_alert(),
             errors_spark,
@@ -276,7 +284,7 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
                             html! { (record.email) },
                             // `.text-right` needs a block box to align against,
                             // and the component owns the `<td>`.
-                            html! { div .text-muted .text-right { time datetime=(created) { (created.get(..10).unwrap_or(created)) } } },
+                            html! { div .text-muted .text-right { (components::timestamp(created)) } },
                         ])
                     }).collect();
                     (components::DataTable::new(&RECENT_USERS_COLUMNS).rows(rows).headless().render())
@@ -305,8 +313,8 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
                         vec![
                             Badge::new(status_code_badge_variant(code)).render(html! { (code) }),
                             html! { span .font-medium { (row.method.to_uppercase()) } },
-                            html! { (row.path) },
-                            html! { span .text-muted { (created.get(..19).unwrap_or(created)) } },
+                            html! { (components::breakable_id(&row.path)) },
+                            html! { span .text-muted { (components::timestamp(created)) } },
                         ]
                     }).collect();
                     (components::data_table::<fn(usize) -> Option<String>>(
@@ -345,13 +353,17 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
     };
     let errors_chart = match &errors_daily {
         Some(series) => components::line_chart_card(
-            "Errors",
+            "4xx/5xx responses",
             "Last 30 days",
             series,
             "var(--accent-danger)",
             "/b/admin/logs?errors=1",
         ),
-        None => chart_unavailable_card("Errors", "Last 30 days", "/b/admin/logs?errors=1"),
+        None => chart_unavailable_card(
+            "4xx/5xx responses",
+            "Last 30 days",
+            "/b/admin/logs?errors=1",
+        ),
     };
 
     let charts_section = html! {
@@ -390,33 +402,15 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
 /// because the `data-label` the component stamps on every `<td>` is what names
 /// the cells when the table collapses to cards on a narrow viewport.
 const RECENT_USERS_COLUMNS: [components::TableCol<'static>; 2] = [
-    components::TableCol {
-        label: "Email",
-        width: None,
-    },
-    components::TableCol {
-        label: "Created",
-        width: None,
-    },
+    components::TableCol::new("Email").primary(),
+    components::TableCol::new("Created"),
 ];
 
 const RECENT_ERRORS_COLUMNS: [components::TableCol<'static>; 4] = [
-    components::TableCol {
-        label: "Status",
-        width: None,
-    },
-    components::TableCol {
-        label: "Method",
-        width: None,
-    },
-    components::TableCol {
-        label: "Path",
-        width: None,
-    },
-    components::TableCol {
-        label: "Time",
-        width: None,
-    },
+    components::TableCol::new("Status"),
+    components::TableCol::new("Method"),
+    components::TableCol::new("Path").primary(),
+    components::TableCol::new("Time"),
 ];
 
 #[cfg(test)]
@@ -560,7 +554,7 @@ mod outage_tests {
             "two recent-row cards and three chart cards each carry a marker"
         );
         assert!(
-            !html.contains("chart__plot") && !html.contains("charts-css"),
+            !html.contains("chart__plot") && !html.contains("chart__bar"),
             "a chart whose series could not be read must not be plotted at all — a \
              zero-filled 30-day series draws a flat line along the axis, which is a \
              picture of 'nothing happened': {html}"
@@ -595,9 +589,30 @@ mod outage_tests {
             "all three chart cards render"
         );
         assert!(
-            html.contains("chart__plot") && html.contains("charts-css"),
+            html.contains("chart__plot") && html.contains("chart__bar"),
             "both the line charts and the bar chart are plotted: {html}"
         );
+    }
+
+    /// "Total Users" is cumulative: no per-day sparkline under it. The error
+    /// tile says what it counts.
+    #[tokio::test]
+    async fn the_cumulative_tile_has_no_sparkline_and_the_error_tile_says_4xx_5xx() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        let html = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
+        let tile = |label: &str| {
+            let at = html
+                .find(&format!(r#"<div class="stat-label">{label}</div>"#))
+                .unwrap_or_else(|| panic!("no {label} tile: {html}"));
+            let start = html[..at].rfind(r#"<div class="stat-card">"#).unwrap();
+            html[start..at].to_string()
+        };
+        assert!(!tile("Total Users").contains("stat-spark"), "{html}");
+        assert!(tile("New Today").contains("stat-spark"), "{html}");
+        assert!(tile("4xx/5xx Today").contains("stat-spark"), "{html}");
+        assert!(!html.contains("Errors Today"), "{html}");
     }
 
     /// A recent user's creation date is a per-run value in the visual-baseline
@@ -611,7 +626,7 @@ mod outage_tests {
         let html = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
 
         assert!(
-            html.contains(r#"datetime="2026-01-01T00:00:00Z">2026-01-01</time>"#),
+            html.contains(r#"datetime="2026-01-01T00:00:00.000Z" title="2026-01-01T00:00:00.000Z">2026-01-01 00:00</time>"#),
             "the Recent Users date must be a <time>: {html}"
         );
     }

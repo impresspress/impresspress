@@ -400,22 +400,6 @@ pub fn format_count(count: i64) -> String {
     out
 }
 
-/// Humanize an RFC 3339 timestamp for visible table text: `"2026-07-11 19:13"`
-/// (UTC, minute precision) instead of the raw nanosecond-resolution string
-/// [`now_rfc3339`] produces. Returns the input unchanged when it doesn't
-/// parse, so a malformed stored value degrades to what we have rather than
-/// hiding the row's timestamp. `ui::components::timestamp` pairs this text
-/// with the machine-readable instant in a `<time datetime=...>`.
-pub fn format_timestamp(rfc3339: &str) -> String {
-    match chrono::DateTime::parse_from_rfc3339(rfc3339) {
-        Ok(dt) => dt
-            .with_timezone(&chrono::Utc)
-            .format("%Y-%m-%d %H:%M")
-            .to_string(),
-        Err(_) => rfc3339.to_string(),
-    }
-}
-
 /// Insert created_at + updated_at timestamps into a data map.
 pub fn stamp_created(data: &mut std::collections::HashMap<String, serde_json::Value>) {
     let now = now_rfc3339();
@@ -1193,27 +1177,6 @@ mod tests {
         assert_eq!(format_bytes(1_234), "1.2 KB");
         assert_eq!(format_bytes(5 * 1_048_576), "5.0 MB");
         assert_eq!(format_bytes(2_500_000_000), "2.3 GB");
-    }
-
-    #[test]
-    fn format_timestamp_humanizes_rfc3339_to_utc_minutes() {
-        // Nanosecond-resolution output of `now_rfc3339` (chrono to_rfc3339).
-        assert_eq!(
-            format_timestamp("2026-07-11T19:13:45.123456789+00:00"),
-            "2026-07-11 19:13"
-        );
-        // Z-suffixed and offset forms normalize to UTC.
-        assert_eq!(format_timestamp("2026-05-06T10:00:00Z"), "2026-05-06 10:00");
-        assert_eq!(
-            format_timestamp("2026-05-06T12:30:00+02:00"),
-            "2026-05-06 10:30"
-        );
-    }
-
-    #[test]
-    fn format_timestamp_passes_unparseable_values_through() {
-        assert_eq!(format_timestamp("not a date"), "not a date");
-        assert_eq!(format_timestamp(""), "");
     }
 
     #[test]

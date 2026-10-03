@@ -771,15 +771,6 @@
 .ticket-form-grid--type-create { margin: var(--space-4) 0; max-width: 50rem; }
 .ticket-form-grid--type-edit { margin-top: var(--space-4); }
 
-/* ===== Vector backend-unavailable callout (blocks/vector/pages_ui.rs) =====
-   #fff8e1/#f0d78c/#92400e have no matching design tokens (--accent-warning
-   is #f59e0b, too saturated for a pale banner tint) -- same pattern as
-   auth-split.css's #ecfdf5/#a7f3d0/#059669 pair. 6.67:1 computed (#92400e
-   on #fff8e1), clears the 4.5:1 AA text floor. */
-.callout { margin-bottom: var(--space-4); padding: var(--space-4); border-radius: var(--radius-md); }
-.callout--warning { background: #fff8e1; border: 1px solid #f0d78c; color: #92400e; }
-.callout__code { font-size: 12px; padding: 1px var(--space-1); background: rgba(0,0,0,0.05); border-radius: 3px; }
-
 /* ===== API key reveal card (blocks/auth_ui/api/api_keys.rs) ===== */
 .api-key-card { margin-bottom: var(--space-4); }
 .api-key-copy-hint { margin: 0 0 var(--space-2); color: var(--text-secondary); }
@@ -849,11 +840,6 @@
 /* Match the 14px label rather than the icon set's 18px default. */
 .products-guide__link svg { width: 14px; height: 14px; }
 .products-guide__item p { margin: 0; line-height: 1.55; }
-.products-callout { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); padding: var(--space-4) var(--space-4); margin: 0 0 var(--space-5); border: 1px solid color-mix(in srgb, var(--primary-color) 28%, var(--border-color)); border-radius: 14px; background: color-mix(in srgb, var(--primary-color) 6%, var(--surface-1)); }
-.products-callout__copy { max-width: 68ch; }
-.products-callout__copy strong { display: block; margin-bottom: var(--space-1); }
-.products-callout__copy p { margin: 0; }
-.products-callout__actions { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; flex: none; }
 .product-template-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); }
 .product-template-card { display: grid; grid-template-columns: auto 1fr; gap: var(--space-1) var(--space-3); align-items: start; padding: var(--space-4); border: 1px solid var(--border-color); border-radius: 14px; cursor: pointer; transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease; }
 .product-template-card:hover { border-color: var(--primary-color); box-shadow: 0 8px 22px rgba(15, 23, 42, .08); transform: translateY(-1px); }
@@ -866,9 +852,6 @@
 body:has(.products-tabs) .card { border-radius: 14px; box-shadow: 0 8px 26px rgba(15, 23, 42, .045); }
 @media (max-width: 760px) {
 	.products-guide { grid-template-columns: 1fr; }
-	.products-callout { flex-direction: column; }
-	.products-callout__actions { width: 100%; }
-	.products-callout__actions .btn { flex: 1; }
 	.product-template-grid { grid-template-columns: 1fr; }
 }
 

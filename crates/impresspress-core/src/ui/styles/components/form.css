@@ -221,7 +221,6 @@
 .products-payment-link-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
 .products-payment-link-url { word-break: break-all; }
 .products-code-block { display: block; width: 100%; padding: var(--space-3) var(--space-3); border: 1px solid var(--border-color); border-radius: 10px; background: var(--surface-2); overflow-wrap: anywhere; }
-.products-settings-note { margin-bottom: var(--space-4); }
 body:has(.products-tabs) .filter-bar { margin: var(--space-4) 0; padding: var(--space-3); border: 1px solid var(--border-color); border-radius: 14px; background: var(--surface-1); }
 .product-wizard-progress { margin: 0 0 var(--space-5); }
 .product-wizard-progress ol { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--space-2); list-style: none; padding: 0; margin: 0; }

@@ -1,116 +1,98 @@
-/* charts.css — minimal column bar chart styles.
- *
- * API (charts.css-compatible subset):
- *   <table class="charts-css column">
- *     <tbody>
- *       <tr><td style="--size: 0.5" data-label="Mon" data-value="5">5</td></tr>
- *       ...
- *     </tbody>
- *   </table>
- *
- * `--size` is a 0..1 fraction (bar height / max). Numeric value text is
- * visually hidden but kept in the DOM for accessibility / screen readers.
- * `data-value` shows in a tooltip on hover.
- */
+/* Dashboard charts (ui/components/chart.rs). The line and bar chart cards
+ * share one structure: a y-axis, a plot (SVG gridlines, plus the line or the
+ * bars), one transparent column per day carrying its tooltip, the first/last
+ * date row, and a "Show values" disclosure with the accessible table. */
 
-.charts-css {
-	width: 100%;
-	height: 180px;
-	border-collapse: collapse;
-	border-spacing: 0;
-	display: grid;
-	grid-template-rows: 1fr auto;
-}
-
-.charts-css caption {
-	font-size: var(--text-sm);
-	color: var(--text-muted);
-	text-align: left;
-	padding-bottom: var(--space-2);
-}
-
-.charts-css.column {
-	--chart-color: var(--primary-color);
-}
-
-.charts-css.column tbody {
-	display: flex;
-	align-items: flex-end;
-	gap: 2px;
-	height: 100%;
-}
-
-.charts-css.column tr {
-	display: flex;
-	flex-direction: column;
-	flex: 1;
-	height: 100%;
-	justify-content: flex-end;
-	min-width: 0;
-	position: relative;
-}
-
-.charts-css.column td {
-	display: block;
-	height: calc(var(--size, 0) * 100%);
-	min-height: 1px;
-	background: var(--chart-color);
-	border-radius: 2px 2px 0 0;
-	color: transparent;
-	font-size: 0;
-	line-height: 0;
-	padding: 0;
-	border: 0;
-	transition: opacity 0.15s;
-}
-
-.charts-css.column tr:hover td { opacity: 0.78; }
-
-.charts-css.column tr::after {
-	content: attr(data-tooltip);
-	position: absolute;
-	bottom: calc(100% + 4px);
-	left: 50%;
-	transform: translateX(-50%);
-	background: #1e293b;
-	color: white;
-	padding: var(--space-1) var(--space-2);
-	font-size: 12px;
-	border-radius: 4px;
-	white-space: nowrap;
-	opacity: 0;
-	pointer-events: none;
-	transition: opacity 0.15s;
-	z-index: 10;
-}
-
-.charts-css.column tr:hover::after { opacity: 1; }
-
-/* Optional tick row beneath the bars */
-.charts-css.column tfoot {
-	display: flex;
-	gap: 2px;
+/* "Collecting data — N days recorded", above a series too young to read as
+ * a trend. */
+.chart__note {
+	margin: 0 0 var(--space-2);
 	font-size: var(--text-xs);
 	color: var(--text-muted);
-	padding-top: var(--space-1);
-}
-.charts-css.column tfoot td {
-	flex: 1;
-	min-width: 0;
-	text-align: center;
-	overflow: hidden;
-	white-space: nowrap;
-	text-overflow: ellipsis;
 }
 
-/* First / last date labels under the chart */
-.charts-css__range {
+/* First / last date labels under the chart. */
+.chart__range {
 	display: flex;
 	justify-content: space-between;
 	font-size: var(--text-xs);
 	color: var(--text-muted);
 	margin-top: var(--space-1);
 }
+
+/* One column per day, over the whole plot. A bar chart draws its bar inside
+ * the column (`--size` is the value's fraction of the axis top); a line
+ * chart's columns are empty hit targets. */
+.chart__cols {
+	position: absolute;
+	inset: 0;
+	display: flex;
+	align-items: stretch;
+	gap: 2px;
+}
+.chart__col {
+	position: relative;
+	flex: 1;
+	min-width: 0;
+	display: flex;
+	align-items: flex-end;
+	outline: none;
+}
+.chart__bar {
+	width: 100%;
+	/* No minimum height: a zero day draws nothing, as on the line chart's
+	   baseline, rather than a 1px stub that reads as a dashed series. */
+	height: calc(var(--size, 0) * 100%);
+	background: var(--chart-color);
+	border-radius: 2px 2px 0 0;
+	transition: opacity 0.15s;
+}
+.chart__col:hover .chart__bar, .chart__col:focus .chart__bar { opacity: 0.78; }
+.chart__col:hover, .chart__col:focus { background: color-mix(in srgb, var(--chart-color) 8%, transparent); }
+
+/* The tooltip is out of layout until shown: `display: none`, not
+ * `opacity: 0`. An invisible absolutely-positioned box still counts toward
+ * the scrollable overflow, and the last column's centred tooltip used to
+ * widen the dashboard by 8px at 390px. It shows on hover and on focus (a tap
+ * focuses the column), centred on its column, or anchored to the column's
+ * own edge in the outer fifths so it stays inside the card. */
+.chart__col::after {
+	content: attr(data-tooltip);
+	display: none;
+	position: absolute;
+	bottom: calc(100% + 4px);
+	left: 50%;
+	transform: translateX(-50%);
+	background: var(--text-primary);
+	color: var(--surface-1);
+	padding: var(--space-1) var(--space-2);
+	font-size: var(--text-xs);
+	border-radius: var(--radius-sm);
+	white-space: nowrap;
+	pointer-events: none;
+	z-index: 10;
+}
+.chart__col--start::after { left: 0; transform: none; }
+.chart__col--end::after { left: auto; right: 0; transform: none; }
+.chart__col:hover::after, .chart__col:focus::after { display: block; }
+
+/* The values, as a table, for keyboard, touch and screen-reader users. */
+.chart__values { margin-top: var(--space-2); font-size: var(--text-sm); }
+.chart__values summary {
+	display: inline-flex;
+	align-items: center;
+	min-height: 44px;
+	cursor: pointer;
+	color: var(--text-secondary);
+	font-size: var(--text-xs);
+}
+.chart__values summary:focus-visible { outline: none; box-shadow: var(--focus-ring); border-radius: var(--radius-sm); }
+.chart__table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nums; }
+.chart__table caption { text-align: left; font-size: var(--text-xs); color: var(--text-muted); padding-bottom: var(--space-1); }
+.chart__table th, .chart__table td { padding: 2px var(--space-2); border-bottom: 1px solid var(--border-light); text-align: left; font-weight: 400; }
+.chart__table td { text-align: right; }
+.chart__table thead th { font-size: var(--text-xs); color: var(--text-muted); text-transform: uppercase; }
+.chart__table thead th:last-child { text-align: right; }
 
 /* Line + area chart — gridlines, y-axis ticks, endpoint dot.
  *

@@ -154,7 +154,7 @@ async function expectPageScreenshot(page: Page, name: string, mask?: ReturnType<
 //   Users, both bucket lists).
 // - The dashboard charts' first/last-day labels, which move daily because the
 //   window ends today (`ui/components/chart.rs`). The whole
-//   `.charts-css__range` row is masked, not its two `<time>` spans: a span is
+//   `.chart__range` row is masked, not its two `<time>` spans: a span is
 //   as wide as its text, so "Aug 31" and "Sep 1" would paint different mask
 //   boxes, while the row is as wide as the chart and the mask box stays put.
 //   Masking the spans let a baseline captured with a two-digit first day
@@ -194,7 +194,7 @@ async function expectPageScreenshot(page: Page, name: string, mask?: ReturnType<
 function volatileMasks(page: Page) {
   return [
     page.locator('[data-relative-time], .relative-time, time'),
-    page.locator('.charts-css__range'),
+    page.locator('.chart__range'),
     page.locator('tr[data-bucket] td[data-label="Owner"]'),
     page.locator('td:has([data-volatile-metric]), .stat-card:has-text("Avg Response") .stat-value'),
     page.locator('.stat-card:has-text("Requests Today") .stat-value'),

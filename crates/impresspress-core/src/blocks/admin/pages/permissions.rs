@@ -567,68 +567,26 @@ async fn permissions_database_tab(
 /// `.w-110` utility classes gave those headers, and the unlabelled column is
 /// the one that only carries the delete control.
 const CODE_GRANT_COLUMNS: [components::TableCol<'static>; 5] = [
-    components::TableCol {
-        label: "Block (Owner)",
-        width: None,
-    },
-    components::TableCol {
-        label: "Grantee",
-        width: None,
-    },
-    components::TableCol {
-        label: "Type",
-        width: None,
-    },
-    components::TableCol {
-        label: "Resource Pattern",
-        width: None,
-    },
-    components::TableCol {
-        label: "Access",
-        width: None,
-    },
+    components::TableCol::new("Block (Owner)"),
+    components::TableCol::new("Grantee"),
+    components::TableCol::new("Type"),
+    components::TableCol::new("Resource Pattern"),
+    components::TableCol::new("Access"),
 ];
 
 const CUSTOM_GRANT_COLUMNS: [components::TableCol<'static>; 6] = [
-    components::TableCol {
-        label: "Grantee",
-        width: None,
-    },
-    components::TableCol {
-        label: "Type",
-        width: None,
-    },
-    components::TableCol {
-        label: "Resource Pattern",
-        width: None,
-    },
-    components::TableCol {
-        label: "Access",
-        width: None,
-    },
-    components::TableCol {
-        label: "Description",
-        width: None,
-    },
-    components::TableCol {
-        label: "",
-        width: Some("60px"),
-    },
+    components::TableCol::new("Grantee"),
+    components::TableCol::new("Type"),
+    components::TableCol::new("Resource Pattern"),
+    components::TableCol::new("Access"),
+    components::TableCol::new("Description").optional(),
+    components::TableCol::new("Actions").actions().width("60px"),
 ];
 
 const PERMISSION_COLUMNS: [components::TableCol<'static>; 3] = [
-    components::TableCol {
-        label: "Type",
-        width: Some("110px"),
-    },
-    components::TableCol {
-        label: "Permission",
-        width: None,
-    },
-    components::TableCol {
-        label: "Origin",
-        width: Some("80px"),
-    },
+    components::TableCol::new("Type").width("110px"),
+    components::TableCol::new("Permission"),
+    components::TableCol::new("Origin").width("80px"),
 ];
 
 #[cfg(test)]

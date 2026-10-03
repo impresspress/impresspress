@@ -79,9 +79,9 @@ fn analytics_section(analytics: &[CommerceAnalytics], title: &str, seller_view: 
                             @if !currency.top_products.is_empty() {
                                 h4 { "Top products by gross sales" }
                                 @let cols = [
-                                    components::TableCol { label: "Product", width: None },
-                                    components::TableCol { label: "Quantity", width: None },
-                                    components::TableCol { label: "Gross", width: None },
+                                    components::TableCol::new("Product"),
+                                    components::TableCol::new("Quantity"),
+                                    components::TableCol::new("Gross"),
                                 ];
                                 @let rows: Vec<Vec<Markup>> = currency.top_products.iter().map(|product| vec![
                                     html! { span .font-medium { (product.name) } },
@@ -108,10 +108,10 @@ fn seller_failures_section(failures: &[SellerFailureSummary]) -> Markup {
             } @else {
                 @let row_hrefs: Vec<String> = failures.iter().map(|failure| format!("/b/products/selling/orders/{}", failure.order_id)).collect();
                 @let cols = [
-                    components::TableCol { label: "Order", width: None },
-                    components::TableCol { label: "Amount", width: None },
-                    components::TableCol { label: "Last result", width: None },
-                    components::TableCol { label: "Date", width: None },
+                    components::TableCol::new("Order"),
+                    components::TableCol::new("Amount"),
+                    components::TableCol::new("Last result"),
+                    components::TableCol::new("Date"),
                 ];
                 @let rows: Vec<Vec<Markup>> = failures.iter().map(|failure| vec![
                     html! { code { (&failure.order_id) } },
@@ -431,11 +431,11 @@ pub async fn manage_products(ctx: &dyn Context, msg: &Message) -> OutputStream {
         div #products-content {
                 @if deleted_view {
                     @let cols = [
-                        components::TableCol { label: "Name", width: None },
-                        components::TableCol { label: "Owner", width: None },
-                        components::TableCol { label: "Currency", width: None },
-                        components::TableCol { label: "Deleted", width: None },
-                        components::TableCol { label: "", width: None },
+                        components::TableCol::new("Name"),
+                        components::TableCol::new("Owner"),
+                        components::TableCol::new("Currency"),
+                        components::TableCol::new("Deleted"),
+                        components::TableCol::new(""),
                     ];
                     @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|record| {
                         let deleted_at = record.str_field("deleted_at");
@@ -490,11 +490,11 @@ pub async fn manage_products(ctx: &dyn Context, msg: &Message) -> OutputStream {
                 } @else {
                     @let row_hrefs: Vec<String> = list.records.iter().map(|record| format!("/b/products/admin/products/{}", crate::util::url_path_encode(&record.id))).collect();
                     @let cols = [
-                        components::TableCol { label: "Name", width: None },
-                        components::TableCol { label: "Availability", width: None },
-                        components::TableCol { label: "Owner", width: None },
-                        components::TableCol { label: "Currency", width: None },
-                        components::TableCol { label: "Updated", width: None },
+                        components::TableCol::new("Name"),
+                        components::TableCol::new("Availability"),
+                        components::TableCol::new("Owner"),
+                        components::TableCol::new("Currency"),
+                        components::TableCol::new("Updated"),
                     ];
                     @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|record| {
                         let updated = record.str_field("updated_at");
@@ -752,15 +752,12 @@ pub async fn admin_sellers(ctx: &dyn Context, msg: &Message) -> OutputStream {
         (admin_tabs("sellers"))
         (components::page_header("Sellers", Some("Approve listings and help sellers get ready to take payments"), None))
         @if !selling_enabled {
-            section .products-callout {
-                div .products-callout__copy {
-                    strong { "Seller products are turned off" }
-                    p .text-muted .text-sm { "Existing sellers remain visible, but new seller listings cannot be created." }
-                }
-                div .products-callout__actions {
-                    a .btn .btn--secondary .btn--sm href="/b/products/admin/settings" { "Open settings" }
-                }
-            }
+            (components::callout(
+                components::CalloutTone::Info,
+                "Seller products are turned off",
+                html! { p { "Existing sellers remain visible, but new seller listings cannot be created." } },
+                Some(html! { a .btn .btn--secondary .btn--sm href="/b/products/admin/settings" { "Open settings" } }),
+            ))
         }
         section .products-section {
             div .products-section__head {
@@ -777,10 +774,10 @@ pub async fn admin_sellers(ctx: &dyn Context, msg: &Message) -> OutputStream {
             } @else {
                 @let row_hrefs: Vec<String> = pending.rows.iter().map(|product| format!("/b/products/admin/products/{}", crate::util::url_path_encode(&product.id))).collect();
                 @let cols = [
-                    components::TableCol { label: "Product", width: None },
-                    components::TableCol { label: "Seller", width: None },
-                    components::TableCol { label: "Submitted", width: None },
-                    components::TableCol { label: "Status", width: None },
+                    components::TableCol::new("Product"),
+                    components::TableCol::new("Seller"),
+                    components::TableCol::new("Submitted"),
+                    components::TableCol::new("Status"),
                 ];
                 @let rows: Vec<Vec<Markup>> = pending.rows.iter().map(|product| vec![
                     html! { span .font-medium { (product.str_field("name")) } },
@@ -806,12 +803,12 @@ pub async fn admin_sellers(ctx: &dyn Context, msg: &Message) -> OutputStream {
             } @else {
                 @let row_hrefs: Vec<String> = sellers.rows.iter().map(|seller| format!("/b/products/admin/sellers/{}", seller.id)).collect();
                 @let cols = [
-                    components::TableCol { label: "Seller", width: None },
-                    components::TableCol { label: "Selling", width: None },
-                    components::TableCol { label: "Payments", width: None },
-                    components::TableCol { label: "Payouts", width: None },
-                    components::TableCol { label: "Listings", width: None },
-                    components::TableCol { label: "Needs action", width: None },
+                    components::TableCol::new("Seller"),
+                    components::TableCol::new("Selling"),
+                    components::TableCol::new("Payments"),
+                    components::TableCol::new("Payouts"),
+                    components::TableCol::new("Listings"),
+                    components::TableCol::new("Needs action"),
                 ];
                 @let rows: Vec<Vec<Markup>> = sellers.rows.iter().map(|seller| vec![
                     html! { span .font-medium { (&seller.user_id) } },
@@ -923,10 +920,10 @@ pub async fn admin_seller_detail(
             } @else {
                 @let row_hrefs: Vec<String> = products.rows.iter().map(|product| format!("/b/products/admin/products/{}", crate::util::url_path_encode(&product.id))).collect();
                 @let cols = [
-                    components::TableCol { label: "Product", width: None },
-                    components::TableCol { label: "Status", width: None },
-                    components::TableCol { label: "Approval", width: None },
-                    components::TableCol { label: "Updated", width: None },
+                    components::TableCol::new("Product"),
+                    components::TableCol::new("Status"),
+                    components::TableCol::new("Approval"),
+                    components::TableCol::new("Updated"),
                 ];
                 @let rows: Vec<Vec<Markup>> = products.rows.iter().map(|product| vec![
                     html! { span .font-medium { (product.str_field("name")) } },
@@ -1944,11 +1941,11 @@ pub async fn groups(ctx: &dyn Context, msg: &Message) -> OutputStream {
 
         div #groups-content {
                 @let cols = [
-                    components::TableCol { label: "Name", width: None },
-                    components::TableCol { label: "Description", width: None },
-                    components::TableCol { label: "Status", width: None },
-                    components::TableCol { label: "Created", width: None },
-                    components::TableCol { label: "Actions", width: None },
+                    components::TableCol::new("Name"),
+                    components::TableCol::new("Description"),
+                    components::TableCol::new("Status"),
+                    components::TableCol::new("Created"),
+                    components::TableCol::new("Actions"),
                 ];
                 @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|r| vec![
                     html! { span .font-medium { (r.str_field("name")) } },
@@ -2020,11 +2017,11 @@ pub async fn purchases(ctx: &dyn Context, msg: &Message) -> OutputStream {
         div #purchases-content {
                 @let row_hrefs: Vec<String> = list.records.iter().map(|record| format!("/b/products/admin/purchases/{}", record.id)).collect();
                 @let cols = [
-                    components::TableCol { label: "Order", width: None },
-                    components::TableCol { label: "Customer", width: None },
-                    components::TableCol { label: "Status", width: None },
-                    components::TableCol { label: "Total", width: None },
-                    components::TableCol { label: "Placed", width: None },
+                    components::TableCol::new("Order"),
+                    components::TableCol::new("Customer"),
+                    components::TableCol::new("Status"),
+                    components::TableCol::new("Total"),
+                    components::TableCol::new("Placed"),
                 ];
                 @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|r| {
                     let amount = display_money(r.i64_field("total_cents"), r.str_field("currency"));
@@ -2435,13 +2432,12 @@ pub async fn portal_home(ctx: &dyn Context, msg: &Message) -> OutputStream {
             None,
         ))
         div #commerce-portal-error .text-sm hidden .text-danger .mb-4 {}
-        div .products-callout {
-            div .products-callout__copy {
-                strong { "One commerce workspace" }
-                p .text-muted .text-sm { "Purchases stay separate from products you sell, so it is always clear whether you are buying or managing a storefront." }
-            }
-            a .btn .btn--secondary .btn--sm href="/b/products/my-purchases" { "View order history" }
-        }
+        (components::callout(
+            components::CalloutTone::Info,
+            "One commerce workspace",
+            html! { p { "Purchases stay separate from products you sell, so it is always clear whether you are buying or managing a storefront." } },
+            Some(html! { a .btn .btn--secondary .btn--sm href="/b/products/my-purchases" { "View order history" } }),
+        ))
         div .stats-grid {
             (components::stat_card("Purchases", &purchases_count.to_string(), icons::shopping_cart(), None))
             @if seller_enabled {
@@ -2602,11 +2598,11 @@ pub async fn seller_orders(ctx: &dyn Context, msg: &Message) -> OutputStream {
         }
             @let row_hrefs: Vec<String> = list.records.iter().map(|record| format!("/b/products/selling/orders/{}", record.id)).collect();
             @let cols = [
-                components::TableCol { label: "Buyer", width: None },
-                components::TableCol { label: "Status", width: None },
-                components::TableCol { label: "Total", width: None },
-                components::TableCol { label: "Subscription", width: None },
-                components::TableCol { label: "Date", width: None },
+                components::TableCol::new("Buyer"),
+                components::TableCol::new("Status"),
+                components::TableCol::new("Total"),
+                components::TableCol::new("Subscription"),
+                components::TableCol::new("Date"),
             ];
             @let rows: Vec<Vec<Markup>> = list.records.iter().map(|order| vec![
                 html! { span .text-sm { (if order.str_field("buyer_email").is_empty() { order.str_field("buyer_user_id") } else { order.str_field("buyer_email") }) } },
@@ -2818,11 +2814,11 @@ async fn order_detail(
                     p .text-muted { "No line-item snapshot is available for this order." }
                 } @else {
                     @let cols = [
-                        components::TableCol { label: "Item", width: None },
-                        components::TableCol { label: "Quantity", width: None },
-                        components::TableCol { label: "Unit", width: None },
-                        components::TableCol { label: "Total", width: None },
-                        components::TableCol { label: "Configuration", width: None },
+                        components::TableCol::new("Item"),
+                        components::TableCol::new("Quantity"),
+                        components::TableCol::new("Unit"),
+                        components::TableCol::new("Total"),
+                        components::TableCol::new("Configuration"),
                     ];
                     @let rows: Vec<Vec<Markup>> = line_items.iter().map(|item| {
                         // `input_snapshot` is a JSON object encoded into a
@@ -2905,11 +2901,11 @@ async fn order_detail(
                 header .card__head { h2 .card__title { "Refund history" } }
                 div .card__body {
                     @let cols = [
-                        components::TableCol { label: "Status", width: None },
-                        components::TableCol { label: "Amount", width: None },
-                        components::TableCol { label: "Provider refund", width: None },
-                        components::TableCol { label: "Note", width: None },
-                        components::TableCol { label: "Date", width: None },
+                        components::TableCol::new("Status"),
+                        components::TableCol::new("Amount"),
+                        components::TableCol::new("Provider refund"),
+                        components::TableCol::new("Note"),
+                        components::TableCol::new("Date"),
                     ];
                     @let rows: Vec<Vec<Markup>> = refunds.iter().map(|refund| vec![
                         components::status_badge(refund.str_field("status")),
@@ -2934,11 +2930,11 @@ async fn order_detail(
                 }
                 div .card__body {
                     @let cols = [
-                        components::TableCol { label: "Status", width: None },
-                        components::TableCol { label: "Amount", width: None },
-                        components::TableCol { label: "Reason", width: None },
-                        components::TableCol { label: "Evidence due", width: None },
-                        components::TableCol { label: "Provider dispute", width: None },
+                        components::TableCol::new("Status"),
+                        components::TableCol::new("Amount"),
+                        components::TableCol::new("Reason"),
+                        components::TableCol::new("Evidence due"),
+                        components::TableCol::new("Provider dispute"),
                     ];
                     @let rows: Vec<Vec<Markup>> = disputes.iter().map(|dispute| vec![
                         components::status_badge(dispute.str_field("status")),
@@ -3083,10 +3079,10 @@ pub async fn my_products(ctx: &dyn Context, msg: &Message) -> OutputStream {
         div #my-products-content {
                 @if deleted_view {
                     @let cols = [
-                        components::TableCol { label: "Name", width: None },
-                        components::TableCol { label: "Currency", width: None },
-                        components::TableCol { label: "Deleted", width: None },
-                        components::TableCol { label: "", width: None },
+                        components::TableCol::new("Name"),
+                        components::TableCol::new("Currency"),
+                        components::TableCol::new("Deleted"),
+                        components::TableCol::new(""),
                     ];
                     @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|record| {
                         // Percent-encoded for the same reason the admin
@@ -3127,10 +3123,10 @@ pub async fn my_products(ctx: &dyn Context, msg: &Message) -> OutputStream {
                 } @else {
                     @let row_hrefs: Vec<String> = list.records.iter().map(|record| format!("/b/products/my-products/{}", crate::util::url_path_encode(&record.id))).collect();
                     @let cols = [
-                        components::TableCol { label: "Name", width: None },
-                        components::TableCol { label: "Status", width: None },
-                        components::TableCol { label: "Currency", width: None },
-                        components::TableCol { label: "Created", width: None },
+                        components::TableCol::new("Name"),
+                        components::TableCol::new("Status"),
+                        components::TableCol::new("Currency"),
+                        components::TableCol::new("Created"),
                     ];
                     @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|r| vec![
                         html! { span .font-medium { (r.str_field("name")) } },
@@ -3185,10 +3181,10 @@ pub async fn my_purchases(ctx: &dyn Context, msg: &Message) -> OutputStream {
         div #my-purchases-content {
                 @let row_hrefs: Vec<String> = list.records.iter().map(|record| format!("/b/products/my-purchases/{}", record.id)).collect();
                 @let cols = [
-                    components::TableCol { label: "Status", width: None },
-                    components::TableCol { label: "Total", width: None },
-                    components::TableCol { label: "Provider", width: None },
-                    components::TableCol { label: "Date", width: None },
+                    components::TableCol::new("Status"),
+                    components::TableCol::new("Total"),
+                    components::TableCol::new("Provider"),
+                    components::TableCol::new("Date"),
                 ];
                 @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|r| {
                     let amount = display_money(r.i64_field("total_cents"), r.str_field("currency"));
@@ -3337,15 +3333,12 @@ pub async fn settings(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let content = html! {
         (admin_tabs("settings"))
         (components::page_header("Settings", Some("Set up payments and choose sensible defaults for new products"), None))
-        section .products-callout .products-settings-note {
-            div .products-callout__copy {
-                strong { "Start with Stripe credentials and store defaults" }
-                p .text-muted .text-sm { "Seller tools, provider overrides, and developer webhooks are optional and stay tucked away until you need them." }
-            }
-            div .products-callout__actions {
-                a .btn .btn--secondary .btn--sm href="/b/products/admin/stripe" { "Check Stripe status" }
-            }
-        }
+        (components::callout(
+            components::CalloutTone::Info,
+            "Start with Stripe credentials and store defaults",
+            html! { p { "Seller tools, provider overrides, and developer webhooks are optional and stay tucked away until you need them." } },
+            Some(html! { a .btn .btn--secondary .btn--sm href="/b/products/admin/stripe" { "Check Stripe status" } }),
+        ))
         @if !trusted_server {
             section .card .card--warning .mb-4 {
                 div .card__body {

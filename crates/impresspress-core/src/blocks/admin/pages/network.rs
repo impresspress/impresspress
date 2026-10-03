@@ -157,7 +157,7 @@ fn inbound_row(
         },
         html! {
             span .text-muted {
-                time datetime=(last_seen) { (last_seen.get(..19).unwrap_or(last_seen)) }
+                (components::timestamp(last_seen))
             }
         },
     ])
@@ -197,7 +197,7 @@ fn detail_row(
         },
         html! {
             span .text-muted {
-                time datetime=(created) { (created.get(..19).unwrap_or(created)) }
+                (components::timestamp(created))
             }
         },
     ]
@@ -208,57 +208,21 @@ fn detail_row(
 /// its header does. The summary's first column is the chevron and has no
 /// label; it keeps the 30px width the old `th .w-30` gave it.
 const INBOUND_COLUMNS: [components::TableCol<'static>; 7] = [
-    components::TableCol {
-        label: "",
-        width: Some("30px"),
-    },
-    components::TableCol {
-        label: "Method",
-        width: None,
-    },
-    components::TableCol {
-        label: "Path",
-        width: None,
-    },
-    components::TableCol {
-        label: "Requests",
-        width: None,
-    },
-    components::TableCol {
-        label: "Avg Duration",
-        width: None,
-    },
-    components::TableCol {
-        label: "Errors",
-        width: None,
-    },
-    components::TableCol {
-        label: "Last Seen",
-        width: None,
-    },
+    components::TableCol::new("Details").actions().width("30px"),
+    components::TableCol::new("Method"),
+    components::TableCol::new("Path").primary(),
+    components::TableCol::new("Requests"),
+    components::TableCol::new("Avg Duration"),
+    components::TableCol::new("Errors"),
+    components::TableCol::new("Last Seen"),
 ];
 
 const DETAIL_COLUMNS: [components::TableCol<'static>; 5] = [
-    components::TableCol {
-        label: "Status",
-        width: None,
-    },
-    components::TableCol {
-        label: "Duration",
-        width: None,
-    },
-    components::TableCol {
-        label: "IP",
-        width: None,
-    },
-    components::TableCol {
-        label: "User",
-        width: None,
-    },
-    components::TableCol {
-        label: "Time",
-        width: None,
-    },
+    components::TableCol::new("Status"),
+    components::TableCol::new("Duration"),
+    components::TableCol::new("IP"),
+    components::TableCol::new("User").optional(),
+    components::TableCol::new("Time"),
 ];
 
 /// Htmx fragment: individual requests for a given inbound path.
@@ -404,7 +368,7 @@ mod tests {
             "the per-route average must carry the mask hook inside the cell: {html}"
         );
         assert!(
-            html.contains("<time datetime=\"2026-01-01T00:00:00Z\">2026-01-01T00:00:00</time>"),
+            html.contains(r#"<time class="datetime" datetime="2026-01-01T00:00:00.000Z" title="2026-01-01T00:00:00.000Z">2026-01-01 00:00</time>"#),
             "the last-seen stamp must be a <time>, which the suite's existing \
              `[data-relative-time], .relative-time, time` mask already matches: {html}"
         );
@@ -426,7 +390,7 @@ mod tests {
             "the per-request duration must carry the mask hook inside the cell: {html}"
         );
         assert!(
-            html.contains("<time datetime=\"2026-01-01T00:00:00Z\">2026-01-01T00:00:00</time>"),
+            html.contains(r#"<time class="datetime" datetime="2026-01-01T00:00:00.000Z" title="2026-01-01T00:00:00.000Z">2026-01-01 00:00</time>"#),
             "the per-request stamp must be a <time>: {html}"
         );
     }
