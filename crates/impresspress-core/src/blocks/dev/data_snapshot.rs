@@ -311,12 +311,22 @@ pub fn variable_is_exportable(row: &serde_json::Map<String, Value>) -> bool {
     // `__IMPRESSPRESS_RUNTIME_KIND__` starts with `__`, so it clears
     // `starts_with("IMPRESSPRESS_")`, and ends with `__` rather than a
     // `_SECRET`/`_KEY` suffix, so it clears `is_sensitive_key` too.
-    !crate::config_vars::is_instance_owned_key(key) && !key.starts_with("IMPRESSPRESS_")
+    //
+    // A row stored under a malformed key before the key rule existed stays
+    // home too: [`import`] refuses it, and an export its own importer rejects
+    // would be a bundle nobody can load.
+    !crate::config_vars::is_instance_owned_key(key)
+        && !key.starts_with("IMPRESSPRESS_")
+        && crate::config_vars::check_variable_key(key).is_ok()
 }
 
 #[cfg(test)]
 mod variable_is_exportable_tests {
     use super::*;
+
+    /// A well-formed, undeclared key that is sensitive by its `_KEY` suffix
+    /// alone. Only this module stores it, so it is declared here.
+    const SUFFIX_SENSITIVE_KEY: &str = "WAFER_RUN_SHARED__JWT_KEY";
     use crate::{
         blocks::{
             email::MAILGUN_DOMAIN,
@@ -359,11 +369,11 @@ mod variable_is_exportable_tests {
     #[test]
     fn a_suffix_flagged_key_never_exports_even_when_the_flag_is_clear() {
         assert!(!variable_is_exportable(&row(serde_json::json!({
-            "key": "STRIPE_SECRET",
+            "key": crate::blocks::admin::fixture_keys::STRIPE_SECRET,
             "sensitive": false,
         }))));
         assert!(!variable_is_exportable(&row(serde_json::json!({
-            "key": "JWT_KEY",
+            "key": SUFFIX_SENSITIVE_KEY,
             "sensitive": 0,
         }))));
     }
@@ -541,12 +551,23 @@ pub async fn export(ctx: &dyn Context) -> Result<DataSnapshot, WaferError> {
                         .get("key")
                         .and_then(serde_json::Value::as_str)
                         .unwrap_or("<no key>");
-                    tracing::info!(
-                        key = %key,
-                        "not exporting this config variable: it is sensitive, or names \
-                         instance-scoped infrastructure. The imported site will need it set \
-                         there"
-                    );
+                    // A malformed key gets its own reason: the remedy is a
+                    // rename here, not setting it on the importing site.
+                    match crate::config_vars::check_variable_key(key) {
+                        Err(reason) => tracing::warn!(
+                            key = %key,
+                            reason = %reason,
+                            "not exporting this config variable: malformed key — no block can \
+                             read it, and an import would refuse it. Rename it: delete the row \
+                             and add the setting again under a valid key"
+                        ),
+                        Ok(()) => tracing::info!(
+                            key = %key,
+                            "not exporting this config variable: it is sensitive, or names \
+                             instance-scoped infrastructure. The imported site will need it set \
+                             there"
+                        ),
+                    }
                     return false;
                 }
                 true
@@ -867,6 +888,19 @@ pub async fn import(
                     format!(
                         "the data snapshot carries the variable {key:?}, whose value this \
                          instance owns; a seed bundle may not set it"
+                    ),
+                ));
+            }
+            // The key rule the admin surfaces and `CONFIG_SET` apply: an import
+            // creates rows, and a malformed key is one no block can read.
+            // [`variable_is_exportable`] holds such a row back, so a bundle
+            // this build exported never trips it.
+            if let Err(message) = crate::config_vars::check_variable_key(key) {
+                return Err(WaferError::new(
+                    ErrorCode::InvalidArgument,
+                    format!(
+                        "the data snapshot carries a variable whose key this build refuses, so \
+                         nothing was imported: {message}"
                     ),
                 ));
             }

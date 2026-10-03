@@ -2,6 +2,39 @@ mod contracts;
 mod database;
 #[cfg(test)]
 mod error_mapping_tests;
+/// Variable keys the admin tests store ad hoc: well-formed (they pass
+/// `config_vars::check_variable_key`, as every key a writer accepts must) and
+/// declared by no block, so each test is about an UNDECLARED key, which is
+/// what these fixtures were before the key rule existed. Spelled once here
+/// for every admin test module and the other modules' tests that need the
+/// same kind of key, as `tests/config_key_door.rs` requires.
+#[cfg(test)]
+pub(crate) mod fixture_keys {
+    pub(crate) const SITE_NAME: &str = "WAFER_RUN_SHARED__SITE_NAME";
+    pub(crate) const SITE_MOTTO: &str = "WAFER_RUN_SHARED__SITE_MOTTO";
+    pub(crate) const SITE_TAGLINE: &str = "WAFER_RUN_SHARED__SITE_TAGLINE";
+    pub(crate) const NEW_SITE_TAGLINE: &str = "WAFER_RUN_SHARED__NEW_SITE_TAGLINE";
+    pub(crate) const SITE_NOTES: &str = "WAFER_RUN_SHARED__SITE_NOTES";
+    pub(crate) const MY_SETTING: &str = "WAFER_RUN_SHARED__MY_SETTING";
+    pub(crate) const OTHER_SETTING: &str = "WAFER_RUN_SHARED__OTHER_SETTING";
+    pub(crate) const PROBE_TYPED_SETTING: &str = "WAFER_RUN_SHARED__PROBE_TYPED_SETTING";
+    pub(crate) const NOT_STORED_YET: &str = "WAFER_RUN_SHARED__NOT_STORED_YET";
+    pub(crate) const PASSWORD_PLACEHOLDER_TEXT: &str =
+        "WAFER_RUN_SHARED__PASSWORD_PLACEHOLDER_TEXT";
+    pub(crate) const LEGACY_THING: &str = "WAFER_RUN_SHARED__LEGACY_THING";
+    pub(crate) const MY_LEGACY_THING: &str = "WAFER_RUN_SHARED__MY_LEGACY_THING";
+    pub(crate) const MY_SERVICE_HANDLE: &str = "WAFER_RUN_SHARED__MY_SERVICE_HANDLE";
+    pub(crate) const WEBHOOK_URL: &str = "WAFER_RUN_SHARED__WEBHOOK_URL";
+    /// Sensitive by suffix (`_SECRET`/`_KEY`), not by declaration.
+    pub(crate) const STRIPE_SECRET: &str = "WAFER_RUN_SHARED__STRIPE_SECRET";
+    pub(crate) const JWT_SECRET: &str = "WAFER_RUN_SHARED__JWT_SECRET";
+    pub(crate) const MAILER_API_KEY: &str = "WAFER_RUN_SHARED__MAILER_API_KEY";
+    pub(crate) const MAILGUN_API_KEY: &str = "WAFER_RUN_SHARED__MAILGUN_API_KEY";
+    /// Neither suffix nor declaration: sensitive only by the stored flag.
+    pub(crate) const BOOTSTRAP_ADMIN_PASSWORD: &str = "WAFER_RUN_SHARED__BOOTSTRAP_ADMIN_PASSWORD";
+    pub(crate) const MAILER_TOKEN: &str = "WAFER_RUN_SHARED__MAILER_TOKEN";
+    pub(crate) const MY_SERVICE_TOKEN: &str = "WAFER_RUN_SHARED__MY_SERVICE_TOKEN";
+}
 mod iam;
 pub(crate) mod logs;
 pub mod migrations;
@@ -1785,15 +1818,15 @@ mod table_tests {
             ),
             (
                 "delete",
-                "/b/admin/api/settings/MY_SETTING",
+                "/b/admin/api/settings/WAFER_RUN_SHARED__MY_SETTING",
                 Route::DeleteSettingApi,
-                &[("key", "MY_SETTING")],
+                &[("key", crate::blocks::admin::fixture_keys::MY_SETTING)],
             ),
             (
                 "create",
-                "/b/admin/api/settings/MY_SETTING/reset-to-environment",
+                "/b/admin/api/settings/WAFER_RUN_SHARED__MY_SETTING/reset-to-environment",
                 Route::ResetSettingToEnvironmentApi,
-                &[("key", "MY_SETTING")],
+                &[("key", crate::blocks::admin::fixture_keys::MY_SETTING)],
             ),
             (
                 "retrieve",
@@ -1891,9 +1924,9 @@ mod table_tests {
             ),
             (
                 "delete",
-                "/b/admin/variables/LEGACY_THING",
+                "/b/admin/variables/WAFER_RUN_SHARED__LEGACY_THING",
                 Route::DeleteVariable,
-                &[("key", "LEGACY_THING")],
+                &[("key", crate::blocks::admin::fixture_keys::LEGACY_THING)],
             ),
             (
                 "create",
@@ -2135,7 +2168,7 @@ pub(crate) mod page_link_tests {
     }
 
     const PROBE_BLOCK: &str = "impresspress/probe";
-    pub(crate) const PROBE_VARIABLE: &str = "PROBE_SETTING";
+    pub(crate) const PROBE_VARIABLE: &str = "WAFER_RUN_SHARED__PROBE_SETTING";
 
     /// A variables row an admin surface has PINNED, so the pages render the
     /// "Reset to environment" control for it. Separate from [`PROBE_VARIABLE`]
@@ -2407,7 +2440,11 @@ pub(crate) mod page_link_tests {
             &[("method", "GET"), ("path", "/probe")],
         ),
         ("retrieve", "/b/admin/settings/variables", &[]),
-        ("retrieve", "/b/admin/variables/PROBE_SETTING/edit", &[]),
+        (
+            "retrieve",
+            "/b/admin/variables/WAFER_RUN_SHARED__PROBE_SETTING/edit",
+            &[],
+        ),
         ("retrieve", "/b/admin/settings/permissions", &[]),
         ("retrieve", "/b/admin/grants", &[]),
     ];

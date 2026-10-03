@@ -49,7 +49,7 @@ use crate::{
             bump_auth_version,
             repo::users::{self, AdminUserPatch, UserRow},
         },
-        crud::{db_error, db_error_internal, taken_key_or_db_error, TakenKey},
+        crud::{db_error, db_error_internal, is_duplicate_key, taken_key_or_db_error, TakenKey},
     },
     http::{err_bad_request, err_forbidden},
     platform_state::{
@@ -618,13 +618,78 @@ async fn bump_each(
 /// `ui::settings_form`'s `CONFIG_SET` path does refuse this key, because no
 /// caller there legitimately writes it: it saves declared block and shared
 /// vars only. See the note in `blocks::config::write`.
-fn reject_runtime_owned_key(key: &str) -> Result<(), OutputStream> {
+fn reject_runtime_owned_key(key: &str) -> Result<(), String> {
     if crate::config_vars::is_runtime_owned_key(key) {
-        return Err(err_bad_request(&format!(
+        return Err(format!(
             "{key} is set by the runtime, not stored configuration; it cannot be created or edited here"
-        )));
+        ));
     }
     Ok(())
+}
+
+/// The key rule both variable writers apply before anything else: not a key
+/// the runtime owns ([`reject_runtime_owned_key`], whose sentence says why),
+/// and a well-formed, namespaced key
+/// ([`crate::config_vars::check_variable_key`], whose sentence says what a
+/// valid one looks like). `Err` is that sentence, answered as a 400.
+///
+/// [`update_variable`] applies it too, and not only on its upsert-create
+/// branch: a row stored under a malformed key before the rule existed is one
+/// no block can read, so it is listed and deletable but not edited — the
+/// Variables page offers it no Edit control, and says why.
+fn check_writable_key(key: &str) -> Result<(), String> {
+    reject_runtime_owned_key(key)?;
+    crate::config_vars::check_variable_key(key)
+}
+
+/// Why [`create_variable`] refused, kept apart by FIELD so each surface can
+/// answer in its own shape: the JSON API with the status
+/// ([`CreateRefusal::into_response`]), the Add Variable modal with the
+/// sentence under the field it is about.
+pub(super) enum CreateRefusal {
+    /// The key is missing, malformed or runtime-owned: a 400.
+    Key(String),
+    /// A variable with this key is already stored: a 409.
+    KeyTaken(String),
+    /// The value is refused for this key: a 400.
+    Value(String),
+    /// A failure the request cannot fix (the database could not be read or
+    /// written), already classified.
+    Failed(OutputStream),
+}
+
+/// The Add Variable field a [`CreateRefusal`] is about.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum CreateField {
+    Key,
+    Value,
+}
+
+impl CreateRefusal {
+    fn taken(key: &str) -> TakenKey<'_> {
+        TakenKey::new("variable", "key", key)
+    }
+
+    /// The field this refusal is about and the sentence to show under it —
+    /// the same sentence the API's 400 or 409 carries. `None` for a failure
+    /// no field caused.
+    pub(super) fn field_error(&self) -> Option<(CreateField, String)> {
+        match self {
+            Self::Key(message) => Some((CreateField::Key, message.clone())),
+            Self::KeyTaken(key) => Some((CreateField::Key, Self::taken(key).conflict_message())),
+            Self::Value(message) => Some((CreateField::Value, message.clone())),
+            Self::Failed(_) => None,
+        }
+    }
+
+    /// The refusal as the API answers it.
+    pub(super) fn into_response(self) -> OutputStream {
+        match self {
+            Self::Key(message) | Self::Value(message) => err_bad_request(&message),
+            Self::KeyTaken(key) => Self::taken(&key).conflict(),
+            Self::Failed(out) => out,
+        }
+    }
 }
 
 /// Whether `key` is a provisioning credential that has already been SPENT, and
@@ -972,8 +1037,9 @@ pub(super) async fn delete_variable(
 
 /// Create a config variable, writing an audit-log row. Validates the value
 /// with [`validate_config_value`] (SSRF for `_URL` keys, bounded lifetimes).
-/// `key` must be non-empty, and must not name a key the runtime owns
-/// ([`reject_runtime_owned_key`]).
+/// `key` must pass [`check_writable_key`]: well-formed and namespaced, and not
+/// a key the runtime owns. Every refusal is a [`CreateRefusal`] naming the
+/// field it is about.
 ///
 /// `value` must also be non-empty for a key something MASKS — judged on the
 /// key alone, not on the `sensitive` argument, for the reason spelled out at
@@ -987,11 +1053,8 @@ pub(super) async fn create_variable(
     name: Option<&str>,
     description: Option<&str>,
     sensitive: bool,
-) -> Result<VariableRow, OutputStream> {
-    if key.is_empty() {
-        return Err(err_bad_request("Key is required"));
-    }
-    reject_runtime_owned_key(key)?;
+) -> Result<VariableRow, CreateRefusal> {
+    check_writable_key(key).map_err(CreateRefusal::Key)?;
     let admin_id = msg.user_id().to_string();
 
     // A key something MASKS may not be created holding nothing. This path had
@@ -1015,14 +1078,16 @@ pub(super) async fn create_variable(
         && !is_clearable_provisioning_credential(ctx, key).await
         && is_sensitive_key(key, 0)
     {
-        return Err(err_bad_request(&format!(
+        return Err(CreateRefusal::Value(format!(
             "Cannot create {key} with an empty value"
         )));
     }
 
     // The per-key value rule (URL/SSRF, bounded lifetimes) on both surfaces.
     if let Err(e) = validate_config_value(key, value) {
-        return Err(err_bad_request(&format!("Invalid value for {key}: {e}")));
+        return Err(CreateRefusal::Value(format!(
+            "Invalid value for {key}: {e}"
+        )));
     }
 
     let new = NewVariable {
@@ -1038,13 +1103,13 @@ pub(super) async fn create_variable(
     let record = match variables::insert(ctx, new).await {
         Ok(row) => row,
         // `variables.key` is UNIQUE: creating a key that is already stored is a
-        // 409, not a 500. See [`taken_key_or_db_error`].
+        // 409, not a 500. See [`crate::blocks::crud::taken_key_or`].
+        Err(e) if is_duplicate_key(&e) => return Err(CreateRefusal::KeyTaken(key.to_string())),
         Err(e) => {
-            return Err(taken_key_or_db_error(
+            return Err(CreateRefusal::Failed(db_error_internal(
                 e,
-                TakenKey::new("variable", "key", key),
                 "Database error",
-            ))
+            )))
         }
     };
 
@@ -1116,10 +1181,7 @@ pub(super) async fn update_variable(
     key: &str,
     update: VariableUpdate<'_>,
 ) -> Result<VariableRow, OutputStream> {
-    if key.is_empty() {
-        return Err(err_bad_request("Missing setting key"));
-    }
-    reject_runtime_owned_key(key)?;
+    check_writable_key(key).map_err(|message| err_bad_request(&message))?;
     let admin_id = msg.user_id().to_string();
 
     if let Some(value) = update.value {
@@ -1235,7 +1297,7 @@ pub(super) async fn update_variable(
     //     it raises from the declaration, and there is none — so
     //     `VariablePatch::into_new` defaults it through
     //     `config_vars::is_sensitive_by_default_when_created`. Without that,
-    //     `PATCH /b/admin/api/settings/MY_SERVICE_TOKEN` on a key with no row
+    //     `PATCH /b/admin/api/settings/WAFER_RUN_SHARED__MY_SERVICE_TOKEN` on a key with no row
     //     stored it unflagged and the next GET published it, while the same
     //     key through POST was protected by `handle_create`'s "absent means
     //     sensitive" rule. The two surfaces now agree.
@@ -1302,6 +1364,22 @@ mod tests {
         }
     }
 
+    /// [`super::create_variable`] answered as the JSON API answers it, which
+    /// is what most of these tests assert on. Shadows the glob import.
+    async fn create_variable(
+        ctx: &dyn Context,
+        msg: &Message,
+        key: &str,
+        value: &str,
+        name: Option<&str>,
+        description: Option<&str>,
+        sensitive: bool,
+    ) -> Result<VariableRow, OutputStream> {
+        super::create_variable(ctx, msg, key, value, name, description, sensitive)
+            .await
+            .map_err(CreateRefusal::into_response)
+    }
+
     /// Set up a context with the admin schema (variables, roles, audit_logs).
     async fn admin_ctx() -> TestContext {
         let ctx = TestContext::new()
@@ -1332,24 +1410,106 @@ mod tests {
     async fn deleting_a_variable_removes_the_row_and_audits() {
         let ctx = admin_ctx().await;
         let msg = admin_msg("create", "/admin/settings");
-        create_variable(&ctx, &msg, "LEGACY_THING", "v", None, None, false)
-            .await
-            .map_err(|_| "seed")
-            .expect("seed the variable");
+        create_variable(
+            &ctx,
+            &msg,
+            crate::blocks::admin::fixture_keys::LEGACY_THING,
+            "v",
+            None,
+            None,
+            false,
+        )
+        .await
+        .map_err(|_| "seed")
+        .expect("seed the variable");
 
-        delete_variable(&ctx, &msg, "LEGACY_THING")
+        delete_variable(&ctx, &msg, crate::blocks::admin::fixture_keys::LEGACY_THING)
             .await
             .map_err(|_| "delete")
             .expect("delete must succeed");
 
         assert!(
-            variables::get_by_key(&ctx, "LEGACY_THING")
+            variables::get_by_key(&ctx, crate::blocks::admin::fixture_keys::LEGACY_THING)
                 .await
                 .expect("read back")
                 .is_none(),
             "the row must be gone",
         );
         assert_eq!(audit_count(&ctx, "variable.delete").await, 1);
+    }
+
+    /// Neither writer stores a key the naming rule refuses: create answers
+    /// [`CreateRefusal::Key`], and an update — which upserts, so it is a
+    /// create path too — answers a 400.
+    #[tokio::test]
+    async fn neither_writer_stores_a_malformed_key() {
+        let ctx = admin_ctx().await;
+        let msg = admin_msg("create", "/admin/settings");
+        for key in ["bad key!", "MY_SETTING", "WAFER_RUN_SHARED__lower"] {
+            match super::create_variable(&ctx, &msg, key, "v", None, None, false).await {
+                Err(CreateRefusal::Key(message)) => assert!(
+                    message.contains(crate::config_vars::VARIABLE_KEY_FORMAT),
+                    "{key}: {message}"
+                ),
+                Err(_) => panic!("{key}: refused, but not as a key refusal"),
+                Ok(_) => panic!("{key}: a malformed key was stored"),
+            }
+            let Err(out) = update_variable(
+                &ctx,
+                &msg,
+                key,
+                VariableUpdate {
+                    value: Some("v"),
+                    ..Default::default()
+                },
+            )
+            .await
+            else {
+                panic!("{key}: an update created a malformed key");
+            };
+            assert_eq!(
+                crate::test_support::output_http_status(out).await,
+                400,
+                "{key}"
+            );
+            assert!(variables::get_by_key(&ctx, key)
+                .await
+                .expect("read")
+                .is_none());
+        }
+        assert_eq!(audit_count(&ctx, "variable.create").await, 0);
+        assert_eq!(audit_count(&ctx, "variable.update").await, 0);
+    }
+
+    /// A row stored under a malformed key before the rule existed can still
+    /// be deleted — the one thing left to do with a row no block can read.
+    #[tokio::test]
+    async fn a_legacy_malformed_row_can_still_be_deleted() {
+        let ctx = admin_ctx().await;
+        let msg = admin_msg("delete", "/admin/settings");
+        variables::insert(
+            &ctx,
+            NewVariable {
+                key: "bad key!".to_string(),
+                value: "v".to_string(),
+                name: String::new(),
+                description: String::new(),
+                warning: String::new(),
+                sensitive: false,
+                updated_by: String::new(),
+                block: None,
+            },
+        )
+        .await
+        .expect("seed a legacy row");
+        delete_variable(&ctx, &msg, "bad key!")
+            .await
+            .map_err(|_| "delete")
+            .expect("a legacy malformed row is deletable");
+        assert!(variables::get_by_key(&ctx, "bad key!")
+            .await
+            .expect("read")
+            .is_none());
     }
 
     /// The JWT signing secret is not deletable.
@@ -1443,9 +1603,29 @@ mod tests {
     async fn creating_a_variable_whose_key_is_taken_is_a_conflict() {
         let ctx = admin_ctx().await;
         let msg = admin_msg("create", "/admin/settings");
-        expect_ok(create_variable(&ctx, &msg, "SITE_NAME", "Acme", None, None, false).await);
+        expect_ok(
+            create_variable(
+                &ctx,
+                &msg,
+                crate::blocks::admin::fixture_keys::SITE_NAME,
+                "Acme",
+                None,
+                None,
+                false,
+            )
+            .await,
+        );
 
-        let Err(out) = create_variable(&ctx, &msg, "SITE_NAME", "Other", None, None, false).await
+        let Err(out) = create_variable(
+            &ctx,
+            &msg,
+            crate::blocks::admin::fixture_keys::SITE_NAME,
+            "Other",
+            None,
+            None,
+            false,
+        )
+        .await
         else {
             panic!("the duplicate key must not be created");
         };
@@ -1455,7 +1635,7 @@ mod tests {
             "a taken key is a conflict, not an internal error",
         );
 
-        let row = variables::get_by_key(&ctx, "SITE_NAME")
+        let row = variables::get_by_key(&ctx, crate::blocks::admin::fixture_keys::SITE_NAME)
             .await
             .expect("read back")
             .expect("the first row must still be there");
@@ -1483,10 +1663,21 @@ mod tests {
         let ctx = crate::test_support::EcholessWriteContext::new(admin_ctx().await);
         let msg = admin_msg("create", "/admin/settings");
 
-        let row =
-            expect_ok(create_variable(&ctx, &msg, "SITE_NAME", "Acme", None, None, false).await);
+        let row = expect_ok(
+            create_variable(
+                &ctx,
+                &msg,
+                crate::blocks::admin::fixture_keys::SITE_NAME,
+                "Acme",
+                None,
+                None,
+                false,
+            )
+            .await,
+        );
         assert_eq!(
-            row.key, "SITE_NAME",
+            row.key,
+            crate::blocks::admin::fixture_keys::SITE_NAME,
             "the row as written is what the caller gets back",
         );
         assert_eq!(row.value, "Acme");
@@ -1496,7 +1687,7 @@ mod tests {
             1,
             "a create that landed must not go untracked",
         );
-        let stored = variables::get_by_key(&ctx, "SITE_NAME")
+        let stored = variables::get_by_key(&ctx, crate::blocks::admin::fixture_keys::SITE_NAME)
             .await
             .expect("read back")
             .expect("the row really is in the table");
@@ -1517,14 +1708,25 @@ mod tests {
     async fn an_update_whose_echo_is_empty_is_audited_and_returns_the_new_value() {
         let seeded = admin_ctx().await;
         let msg = admin_msg("update", "/admin/settings");
-        expect_ok(create_variable(&seeded, &msg, "SITE_NAME", "Acme", None, None, false).await);
+        expect_ok(
+            create_variable(
+                &seeded,
+                &msg,
+                crate::blocks::admin::fixture_keys::SITE_NAME,
+                "Acme",
+                None,
+                None,
+                false,
+            )
+            .await,
+        );
 
         let ctx = crate::test_support::EcholessWriteContext::new(seeded);
         let row = expect_ok(
             update_variable(
                 &ctx,
                 &msg,
-                "SITE_NAME",
+                crate::blocks::admin::fixture_keys::SITE_NAME,
                 VariableUpdate {
                     value: Some("Acme Two"),
                     description: None,
@@ -1539,7 +1741,8 @@ mod tests {
             "the columns just written win over the row that was read",
         );
         assert_eq!(
-            row.key, "SITE_NAME",
+            row.key,
+            crate::blocks::admin::fixture_keys::SITE_NAME,
             "and every column the update did not touch is carried over",
         );
         assert_eq!(
@@ -1548,7 +1751,7 @@ mod tests {
             "an edit that landed must not go unrecorded",
         );
         assert_eq!(
-            variables::get_by_key(&ctx, "SITE_NAME")
+            variables::get_by_key(&ctx, crate::blocks::admin::fixture_keys::SITE_NAME)
                 .await
                 .expect("read back")
                 .expect("still there")
@@ -1574,7 +1777,7 @@ mod tests {
             create_variable(
                 &seeded,
                 &msg,
-                "MAILER_TOKEN",
+                crate::blocks::admin::fixture_keys::MAILER_TOKEN,
                 "tok-1",
                 Some("Mailer token"),
                 None,
@@ -1589,7 +1792,7 @@ mod tests {
             update_variable(
                 &ctx,
                 &msg,
-                "MAILER_TOKEN",
+                crate::blocks::admin::fixture_keys::MAILER_TOKEN,
                 VariableUpdate {
                     value: Some("tok-2"),
                     description: None,
@@ -1640,7 +1843,16 @@ mod tests {
         let ctx = admin_ctx().await.break_writes();
         let msg = admin_msg("create", "/admin/settings");
 
-        let Err(out) = create_variable(&ctx, &msg, "SITE_NAME", "Acme", None, None, false).await
+        let Err(out) = create_variable(
+            &ctx,
+            &msg,
+            crate::blocks::admin::fixture_keys::SITE_NAME,
+            "Acme",
+            None,
+            None,
+            false,
+        )
+        .await
         else {
             panic!("the write is broken, so the create must fail");
         };
@@ -1658,14 +1870,25 @@ mod tests {
         let ctx = admin_ctx().await;
         let msg = admin_msg("create", "/admin/settings");
 
-        expect_ok(create_variable(&ctx, &msg, "SITE_NAME", "Acme", None, None, false).await);
+        expect_ok(
+            create_variable(
+                &ctx,
+                &msg,
+                crate::blocks::admin::fixture_keys::SITE_NAME,
+                "Acme",
+                None,
+                None,
+                false,
+            )
+            .await,
+        );
         assert_eq!(audit_count(&ctx, "variable.create").await, 1);
 
         expect_ok(
             update_variable(
                 &ctx,
                 &msg,
-                "SITE_NAME",
+                crate::blocks::admin::fixture_keys::SITE_NAME,
                 VariableUpdate {
                     value: Some("Acme Two"),
                     description: None,
@@ -1691,7 +1914,7 @@ mod tests {
             update_variable(
                 &ctx,
                 &msg,
-                "NEW_SITE_TAGLINE",
+                crate::blocks::admin::fixture_keys::NEW_SITE_TAGLINE,
                 VariableUpdate {
                     value: Some("Hello"),
                     description: Some("a fresh key"),
@@ -1701,15 +1924,17 @@ mod tests {
             .await,
         );
         assert_eq!(
-            record.key, "NEW_SITE_TAGLINE",
+            record.key,
+            crate::blocks::admin::fixture_keys::NEW_SITE_TAGLINE,
             "the created row must persist its key column"
         );
 
         // The row is now findable by `key` (proves the NOT NULL row landed).
-        let found = variables::get_by_key(&ctx, "NEW_SITE_TAGLINE")
-            .await
-            .expect("get variable")
-            .expect("the upserted variable is findable by key");
+        let found =
+            variables::get_by_key(&ctx, crate::blocks::admin::fixture_keys::NEW_SITE_TAGLINE)
+                .await
+                .expect("get variable")
+                .expect("the upserted variable is findable by key");
         assert_eq!(found.value, "Hello");
 
         // A second update on the same key takes the update branch (no
@@ -1718,7 +1943,7 @@ mod tests {
             update_variable(
                 &ctx,
                 &msg,
-                "NEW_SITE_TAGLINE",
+                crate::blocks::admin::fixture_keys::NEW_SITE_TAGLINE,
                 VariableUpdate {
                     value: Some("Goodbye"),
                     description: None,
@@ -1731,7 +1956,7 @@ mod tests {
             .await
             .expect("list variables")
             .into_iter()
-            .filter(|row| row.key == "NEW_SITE_TAGLINE")
+            .filter(|row| row.key == crate::blocks::admin::fixture_keys::NEW_SITE_TAGLINE)
             .collect();
         assert_eq!(rows.len(), 1, "update must not create a second row");
         assert_eq!(rows[0].value, "Goodbye");
@@ -1748,7 +1973,7 @@ mod tests {
         assert!(create_variable(
             &ctx,
             &msg,
-            "WEBHOOK_URL",
+            crate::blocks::admin::fixture_keys::WEBHOOK_URL,
             "https://10.0.0.1/x",
             None,
             None,
@@ -1760,7 +1985,7 @@ mod tests {
         assert!(update_variable(
             &ctx,
             &msg,
-            "WEBHOOK_URL",
+            crate::blocks::admin::fixture_keys::WEBHOOK_URL,
             VariableUpdate {
                 value: Some("https://192.168.1.1"),
                 description: None,
@@ -1773,7 +1998,7 @@ mod tests {
         assert!(create_variable(
             &ctx,
             &msg,
-            "WEBHOOK_URL",
+            crate::blocks::admin::fixture_keys::WEBHOOK_URL,
             "https://example.com/hook",
             None,
             None,
@@ -1792,7 +2017,7 @@ mod tests {
         assert!(update_variable(
             &ctx,
             &msg,
-            "JWT_SECRET",
+            crate::blocks::admin::fixture_keys::JWT_SECRET,
             VariableUpdate {
                 value: Some(""),
                 description: None,
@@ -2043,14 +2268,14 @@ mod tests {
     /// runs `VariablePatch::into_new`. That defaulted to `false`, and
     /// `NewVariable::into_row`'s funnel cannot save it — the funnel raises from
     /// the declaration or the `_SECRET`/`_KEY` suffix, and an ad hoc key is
-    /// neither. So `MY_SERVICE_TOKEN` was stored unflagged and published by the
+    /// neither. So `WAFER_RUN_SHARED__MY_SERVICE_TOKEN` was stored unflagged and published by the
     /// next GET, while the identical key through POST was flagged by
     /// `handle_create`'s "absent means sensitive" rule.
     #[tokio::test]
     async fn a_put_created_ad_hoc_key_is_protected_like_a_post_created_one() {
         let ctx = admin_ctx().await;
         let msg = admin_msg("update", "/admin/settings");
-        const KEY: &str = "MY_SERVICE_TOKEN";
+        const KEY: &str = crate::blocks::admin::fixture_keys::MY_SERVICE_TOKEN;
         assert!(
             !crate::config_vars::is_declared_key(KEY)
                 && !crate::config_vars::has_sensitive_suffix(KEY),
@@ -2493,7 +2718,7 @@ mod tests {
             create_variable(
                 &ctx,
                 &msg,
-                "BOOTSTRAP_ADMIN_PASSWORD",
+                crate::blocks::admin::fixture_keys::BOOTSTRAP_ADMIN_PASSWORD,
                 "hunter2",
                 None,
                 None,
@@ -2506,7 +2731,7 @@ mod tests {
         assert!(update_variable(
             &ctx,
             &msg,
-            "BOOTSTRAP_ADMIN_PASSWORD",
+            crate::blocks::admin::fixture_keys::BOOTSTRAP_ADMIN_PASSWORD,
             VariableUpdate {
                 value: Some(""),
                 description: None,
@@ -2517,10 +2742,13 @@ mod tests {
         .is_err());
 
         // ...leaving the stored value untouched.
-        let row = variables::get_by_key(&ctx, "BOOTSTRAP_ADMIN_PASSWORD")
-            .await
-            .expect("get variable")
-            .expect("seeded row still present");
+        let row = variables::get_by_key(
+            &ctx,
+            crate::blocks::admin::fixture_keys::BOOTSTRAP_ADMIN_PASSWORD,
+        )
+        .await
+        .expect("get variable")
+        .expect("seeded row still present");
         assert_eq!(
             row.value, "hunter2",
             "rejected clear must not overwrite the stored secret"
@@ -2528,12 +2756,23 @@ mod tests {
 
         // A var that is neither suffix-sensitive nor flagged can still be
         // cleared (the guard is a union, not a blanket empty-value ban).
-        expect_ok(create_variable(&ctx, &msg, "SITE_TAGLINE", "x", None, None, false).await);
+        expect_ok(
+            create_variable(
+                &ctx,
+                &msg,
+                crate::blocks::admin::fixture_keys::SITE_TAGLINE,
+                "x",
+                None,
+                None,
+                false,
+            )
+            .await,
+        );
         expect_ok(
             update_variable(
                 &ctx,
                 &msg,
-                "SITE_TAGLINE",
+                crate::blocks::admin::fixture_keys::SITE_TAGLINE,
                 VariableUpdate {
                     value: Some(""),
                     description: None,

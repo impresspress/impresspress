@@ -234,7 +234,7 @@ impl VariablePatch {
     /// unset flag takes [`crate::config_vars::is_sensitive_by_default_when_created`],
     /// which protects an undeclared ad hoc key, because `false` here was a real
     /// hole: `admin::ops::update_variable` builds a patch that never sets
-    /// `sensitive`, so a `PATCH /b/admin/api/settings/MY_SERVICE_TOKEN` on a key
+    /// `sensitive`, so a `PATCH /b/admin/api/settings/WAFER_RUN_SHARED__MY_SERVICE_TOKEN` on a key
     /// with no row stored it unflagged and the next GET published it — while the
     /// same key through POST was protected by `handle_create`'s "absent means
     /// sensitive" rule. `NewVariable::into_row` could not save it either: that
