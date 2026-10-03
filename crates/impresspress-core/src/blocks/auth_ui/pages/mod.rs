@@ -132,26 +132,41 @@ document.addEventListener('click',function(e){
 "#
 }
 
-/// Password field with visibility toggle.
-pub(super) fn pw_field(id: &str, placeholder: &str, minlength: Option<&str>) -> Markup {
+/// What a password field holds, which decides what the browser and password
+/// managers do with it.
+pub(super) enum PasswordPurpose {
+    /// The account's existing password (sign-in, confirming a change):
+    /// `autocomplete="current-password"`, so a manager fills it, and no
+    /// length rule — an old password predating the policy must still fit.
+    Current,
+    /// A password being chosen (signup, reset, change, bootstrap, and its
+    /// confirmation): `autocomplete="new-password"`, so a manager offers to
+    /// generate one, and `minlength` = the length the server enforces
+    /// (`auth::helpers::password_min_length`), so the browser stops a short one before the
+    /// round trip with the same number the API would refuse it for.
+    New { min_length: usize },
+}
+
+/// Password field `id` (also its `name`) with its show/hide toggle
+/// (`components::reveal_toggle`: a toggle button whose eye / eye-off icon and
+/// `aria-pressed` follow the field).
+pub(super) fn pw_field(id: &str, placeholder: &str, purpose: PasswordPurpose) -> Markup {
+    let (autocomplete, minlength) = match purpose {
+        PasswordPurpose::Current => ("current-password", None),
+        PasswordPurpose::New { min_length } => ("new-password", Some(min_length)),
+    };
     html! {
-        div .pw-wrap {
+        div .value-reveal-wrapper {
             input
                 type="password"
                 class="form-input"
                 id=(id)
+                name=(id)
                 placeholder=(placeholder)
+                autocomplete=(autocomplete)
                 required
                 minlength=[minlength];
-            // The reveal is chrome's shared `reveal-toggle` verb (the modal
-            // section of `ui/assets/chrome.js`), which every auth page loads
-            // through `ui::layout::page`. With no `data-reveal-show`/`-hide`
-            // operands the button keeps its one static label for both states,
-            // which is what the `togglePw(this)` helper this replaced did.
-            button type="button" class="pw-toggle" aria-label="Toggle password visibility"
-                data-action="reveal-toggle" data-reveal-target=(id) {
-                (ui::icons::eye_off())
-            }
+            (ui::components::reveal_toggle(id, "Show password"))
         }
     }
 }
@@ -391,6 +406,29 @@ mod tests {
         },
         test_support::TestContext,
     };
+
+    #[test]
+    fn a_current_password_field_is_filled_by_managers_and_has_no_length_rule() {
+        let s = pw_field("password", "Enter your password", PasswordPurpose::Current).into_string();
+        assert!(s.contains(r#"autocomplete="current-password""#), "{s}");
+        assert!(!s.contains("minlength"), "{s}");
+        assert!(s.contains(r#"name="password""#), "{s}");
+        assert!(s.contains(r#"aria-label="Show password""#), "{s}");
+        assert!(s.contains(r#"aria-pressed="false""#), "{s}");
+        assert!(s.contains(r#"data-reveal-target="password""#), "{s}");
+    }
+
+    #[test]
+    fn a_new_password_field_carries_the_enforced_minimum() {
+        let s = pw_field(
+            "newpw",
+            "Min 12 characters",
+            PasswordPurpose::New { min_length: 12 },
+        )
+        .into_string();
+        assert!(s.contains(r#"autocomplete="new-password""#), "{s}");
+        assert!(s.contains(r#"minlength="12""#), "{s}");
+    }
 
     /// Every form script posts through `apiPost` and reports what it threw.
     /// What `apiPost` says is `assets/test/api_post.test.mjs`'s subject; this

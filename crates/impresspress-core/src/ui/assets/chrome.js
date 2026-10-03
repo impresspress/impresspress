@@ -471,12 +471,13 @@ document.body.addEventListener("showToast", function(e) {
 //   modal-close   + data-modal-target="<id>"   hide it (omit the operand to
 //                                              close the enclosing overlay)
 //   reveal-toggle + data-reveal-target="<id>"  swap a password field between
-//                                              masked and plain, and swap the
-//                                              button's label when it carries
-//                                              data-reveal-show/-hide
-//   mirror-value  + data-mirror-target="<id>"  on change, copy this control's
-//                                              value into that field (the
-//                                              colour swatch beside its hex box)
+//                                              masked and plain and set the
+//                                              button's aria-pressed to match
+//                                              (components::reveal_toggle)
+//   mirror-value  + data-mirror-target="<id>"  as this control is edited, copy
+//                                              its value into that field — the
+//                                              colour swatch and its hex box
+//                                              each name the other
 //   copy-text     + data-copy-source="<id>"    put that element's text on the
 //                                              clipboard and flash "Copied" on
 //                                              the button for 1.5s
@@ -530,18 +531,46 @@ document.body.addEventListener("showToast", function(e) {
         if (m) m.setAttribute("hidden", "");
     }
 
+    // A toggle button: its name ("Show password") never changes, and
+    // `aria-pressed` says whether the value is showing. The eye / eye-off icon
+    // is CSS keyed off that same attribute, so it cannot disagree with it.
     function revealToggle(btn) {
         var input = document.getElementById(btn.getAttribute("data-reveal-target") || "");
         if (!input) return;
-        var masked = input.type === "password";
-        input.type = masked ? "text" : "password";
-        // A button with no label operands keeps the label it was rendered with
-        // — the auth pages use one static "Toggle password visibility" for both
-        // states, and did before this was delegated.
-        var label = btn.getAttribute(masked ? "data-reveal-hide" : "data-reveal-show");
-        if (label === null) return;
-        btn.title = label;
-        btn.setAttribute("aria-label", label + " value");
+        var show = input.type === "password";
+        input.type = show ? "text" : "password";
+        btn.setAttribute("aria-pressed", show ? "true" : "false");
+    }
+
+    // `value` as the #rrggbb a colour input can hold, or null — the same rule
+    // as `swatch_hex` in ui/settings_form.rs, which renders the first state.
+    function hex6(value) {
+        var m = /^#([0-9a-f]{3}|[0-9a-f]{6})$/i.exec(value.trim());
+        if (!m) return null;
+        var h = m[1].toLowerCase();
+        if (h.length === 3) h = h[0] + h[0] + h[1] + h[1] + h[2] + h[2];
+        return "#" + h;
+    }
+
+    // A colour swatch shows what its box means — the typed value, else the
+    // default the box's placeholder names — and is marked `data-unset` (drawn
+    // as "no colour", not the black a value-less colour input paints) when
+    // that is not a hex colour. Picking on the swatch fills the box.
+    function mirrorValue(el) {
+        var target = document.getElementById(el.getAttribute("data-mirror-target") || "");
+        if (!target) return;
+        if (target.type === "color") {
+            var hex = hex6(el.value) || (el.value.trim() === "" ? hex6(el.placeholder || "") : null);
+            if (hex) {
+                target.value = hex;
+                target.removeAttribute("data-unset");
+            } else {
+                target.setAttribute("data-unset", "");
+            }
+        } else {
+            target.value = el.value;
+            if (el.type === "color") el.removeAttribute("data-unset");
+        }
     }
 
     // The text is read out of the DOM rather than carried in the operand: a
@@ -593,12 +622,11 @@ document.body.addEventListener("showToast", function(e) {
         }
     });
 
-    document.addEventListener("change", function (e) {
+    document.addEventListener("input", function (e) {
         var el = e.target;
         if (!(el instanceof Element)) return;
         if (el.getAttribute("data-action") !== "mirror-value") return;
-        var target = document.getElementById(el.getAttribute("data-mirror-target") || "");
-        if (target) target.value = el.value;
+        mirrorValue(el);
     });
 
     document.addEventListener("keydown", function (e) {

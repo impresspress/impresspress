@@ -12,9 +12,12 @@
 //!
 //! This module is the single renderer + the single save handler, driven
 //! directly by [`ConfigVar`] metadata — the declared single source of truth.
-//! The widget is derived from [`InputType`]: `Password` → masked field with an
-//! eye toggle, `Color` → text input paired with a color picker, `Toggle` →
-//! checkbox, `Url`/`Text` → plain text input. Each block's settings page becomes
+//! The widget is derived from [`InputType`]: `Password` → masked field with a
+//! show/hide toggle button, `Color` → text input paired with a colour swatch
+//! (each mirrors the other; no colour shows as unset, not black), `Toggle` →
+//! a switch (`role="switch"` checkbox, ≥44px row), `Url`/`Text` → plain text
+//! input. Every control names its hint with `aria-describedby`. Each block's
+//! settings page becomes
 //! "pick the ConfigVars to show, group them into sections, render".
 
 use std::collections::HashMap;
@@ -32,11 +35,14 @@ use crate::{
 };
 
 /// One titled group of settings within a form (e.g. "Stripe", "OAuth Providers").
+///
+/// Its heading is the shared in-body heading, an `h2`
+/// (`components::section_header`): the page's title is the topbar's `h1`,
+/// so a settings page is h1 → one h2 per section, with no icon (no other
+/// section heading has one).
 pub struct SettingsSection<'a> {
     /// Section heading text.
     pub title: &'a str,
-    /// Section heading icon (a maud fragment, e.g. `icons::settings()`).
-    pub icon: Markup,
     /// The config variables rendered in this section, in order.
     pub vars: &'a [ConfigVar],
     /// One-line explanation rendered under the heading; empty renders
@@ -45,18 +51,46 @@ pub struct SettingsSection<'a> {
     /// Whether this optional section starts behind a native disclosure
     /// control. Existing pages remain expanded unless they opt in.
     pub collapsible: bool,
+    /// The key of a [`InputType::Toggle`] var in `vars` that switches the
+    /// rest of the section on — see [`SettingsSection::gated_by`].
+    pub gate: Option<&'a str>,
 }
 
 impl<'a> SettingsSection<'a> {
-    /// Construct a section from a title, icon, and its variables.
-    pub fn new(title: &'a str, icon: Markup, vars: &'a [ConfigVar]) -> Self {
+    /// Construct a section from a title and its variables.
+    pub fn new(title: &'a str, vars: &'a [ConfigVar]) -> Self {
         Self {
             title,
-            icon,
             vars,
             description: "",
             collapsible: false,
+            gate: None,
         }
+    }
+
+    /// Show the section's other fields only while the toggle `key` is on —
+    /// e.g. the OAuth provider credentials under "Enable OAuth". The toggle
+    /// renders first, whatever its position in `vars`, and the rest follow
+    /// in a region it names with `aria-controls`.
+    ///
+    /// Hiding is CSS (`.settings-section--gated:has(...)` in `form.css`), so
+    /// it follows the checkbox on first paint and on every click with no
+    /// script, and the hidden fields are still in the form: turning the
+    /// toggle off and saving keeps the credentials that were entered.
+    ///
+    /// # Panics
+    /// When `key` is not a `Toggle` var of this section — a page wiring bug
+    /// its first render surfaces, never a runtime condition.
+    pub fn gated_by(mut self, key: &'a str) -> Self {
+        assert!(
+            self.vars
+                .iter()
+                .any(|var| var.key == key && var.input_type == InputType::Toggle),
+            "settings section `{}` is gated by `{key}`, which is not one of its Toggle vars",
+            self.title
+        );
+        self.gate = Some(key);
+        self
     }
 
     /// Set the one-line explanation rendered under the section heading.
@@ -70,6 +104,11 @@ impl<'a> SettingsSection<'a> {
     pub fn collapsible(mut self) -> Self {
         self.collapsible = true;
         self
+    }
+
+    /// The id of the region a gated section's toggle shows and hides.
+    fn gated_region_id(gate: &str) -> String {
+        format!("{gate}-section")
     }
 }
 
@@ -109,13 +148,60 @@ async fn load_values(
     current_values(ctx, sections.iter().flat_map(|section| section.vars)).await
 }
 
+/// The id of `var`'s hint paragraph, which its control names in
+/// `aria-describedby` so a screen reader reads the hint with the field.
+/// `None` when the var declares no description, so no hint renders and no
+/// control points at a missing id. Keys are unique within a form, so this
+/// id is unique on the page, like the control's own `#{key}`.
+fn hint_id(var: &ConfigVar) -> Option<String> {
+    (!var.description.is_empty()).then(|| format!("{}-hint", var.key))
+}
+
+/// The hint paragraph under a field, carrying [`hint_id`].
+fn hint(var: &ConfigVar, id: Option<&str>) -> Markup {
+    html! {
+        @if let Some(id) = id {
+            p .form-hint id=(id) { (var.description) }
+        }
+    }
+}
+
+/// `value` as the `#rrggbb` an `<input type="color">` can hold, or `None`
+/// when it is not a `#rgb`/`#rrggbb` hex colour (blank, a named colour, a
+/// typo). The same rule as `hex6` in chrome.js's `mirror-value` verb, which
+/// keeps the swatch in step while the box is edited.
+fn swatch_hex(value: &str) -> Option<String> {
+    let hex = value.trim().strip_prefix('#')?;
+    if !hex.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    match hex.len() {
+        6 => Some(format!("#{}", hex.to_ascii_lowercase())),
+        3 => Some(
+            hex.chars()
+                .flat_map(|c| [c, c])
+                .fold(String::from("#"), |mut s, c| {
+                    s.push(c.to_ascii_lowercase());
+                    s
+                }),
+        ),
+        _ => None,
+    }
+}
+
 /// Render one field, deriving the widget from the var's [`InputType`].
-fn render_field(var: &ConfigVar, value: &str) -> Markup {
+///
+/// Every control names its hint with `aria-describedby` ([`hint_id`]).
+/// `controls` is the id of the region a gating toggle shows and hides
+/// ([`SettingsSection::gated_by`]); only a `Toggle` uses it.
+fn render_field(var: &ConfigVar, value: &str, controls: Option<&str>) -> Markup {
     let label = if var.name.is_empty() {
         var.key.as_str()
     } else {
         var.name.as_str()
     };
+    let hint_id = hint_id(var);
+    let hint_id = hint_id.as_deref();
     // SEC-060: a sensitive field's raw value must never reach the rendered
     // HTML — masking it only via `type="password"` still leaves the secret
     // readable in page source / devtools. `is_sensitive_key` is the single
@@ -133,15 +219,21 @@ fn render_field(var: &ConfigVar, value: &str) -> Markup {
     let has_value = !value.is_empty();
     let value = if is_sensitive { "" } else { value };
     match var.input_type {
+        // A switch, not a bare 16px checkbox: `role="switch"` on the native
+        // checkbox (so it still submits and still toggles on Space), drawn
+        // as a track by `.form-switch__input`, inside a label whose whole
+        // ≥44px row is the hit area.
         InputType::Toggle => html! {
             div .form-group {
-                label .form-checkbox {
-                    input type="checkbox" name=(var.key) checked[is_truthy(value)];
-                    (label)
+                label .form-switch {
+                    input .form-switch__input #(var.key) type="checkbox" role="switch"
+                        name=(var.key)
+                        checked[is_truthy(value)]
+                        aria-describedby=[hint_id]
+                        aria-controls=[controls];
+                    span { (label) }
                 }
-                @if !var.description.is_empty() {
-                    p .form-hint { (var.description) }
-                }
+                (hint(var, hint_id))
             }
         },
         InputType::Password => {
@@ -157,46 +249,60 @@ fn render_field(var: &ConfigVar, value: &str) -> Markup {
             html! {
                 div .form-group {
                     label .form-label for=(var.key) { (label) }
+                    // The field always renders blank (the secret never reaches
+                    // the page), so the toggle shows what the operator TYPES;
+                    // it stays hidden until there is something to show (see
+                    // `components::reveal_toggle`, which needs the placeholder).
                     div .value-reveal-wrapper {
                         input .form-input #(var.key) name=(var.key) type="password" value=(value)
-                            placeholder=(placeholder);
-                        button type="button" .btn .btn--ghost .btn--icon .btn-icon-right
-                            data-action="reveal-toggle"
-                            data-reveal-target=(var.key)
-                            data-reveal-show="Reveal"
-                            data-reveal-hide="Hide"
-                            title="Reveal"
-                            aria-label="Reveal value"
-                        { (super::icons::eye()) }
+                            placeholder=(placeholder)
+                            autocomplete="off"
+                            aria-describedby=[hint_id];
+                        (super::components::reveal_toggle(&var.key, &format!("Show {label}")))
                     }
-                    @if !var.description.is_empty() {
-                        p .form-hint { (var.description) }
-                    }
+                    (hint(var, hint_id))
                 }
             }
         }
-        InputType::Color => html! {
-            div .form-group {
-                label .form-label for=(var.key) { (label) }
-                div .color-picker-row {
-                    input .form-input #(var.key) name=(var.key) type="text" value=(value)
-                        placeholder=(var.default);
-                    input .color-swatch-input type="color" value=(value)
-                        data-action="mirror-value" data-mirror-target=(var.key);
-                }
-                @if !var.description.is_empty() {
-                    p .form-hint { (var.description) }
+        // The swatch shows the colour the box means: its value, else the
+        // default an empty box falls back to. With neither (or a value no
+        // swatch can show, like `red`) it is marked `data-unset` and drawn as
+        // "no colour" — a value-less colour input otherwise paints black,
+        // which claimed a black background nobody set.
+        InputType::Color => {
+            let swatch_id = format!("{}-swatch", var.key);
+            let effective = if value.is_empty() {
+                var.default.as_str()
+            } else {
+                value
+            };
+            let swatch = swatch_hex(effective);
+            html! {
+                div .form-group {
+                    label .form-label for=(var.key) { (label) }
+                    div .color-picker-row {
+                        input .form-input #(var.key) name=(var.key) type="text" value=(value)
+                            placeholder=(var.default)
+                            aria-describedby=[hint_id]
+                            data-action="mirror-value" data-mirror-target=(swatch_id);
+                        input .color-swatch-input #(swatch_id) type="color"
+                            value=[swatch.as_deref()]
+                            data-unset[swatch.is_none()]
+                            aria-label=(format!("{label} picker"))
+                            aria-describedby=[hint_id]
+                            data-action="mirror-value" data-mirror-target=(var.key);
+                    }
+                    (hint(var, hint_id))
                 }
             }
-        },
+        }
         InputType::Textarea => html! {
             div .form-group {
                 label .form-label for=(var.key) { (label) }
                 textarea .form-input #(var.key) name=(var.key) rows="4"
-                    placeholder=(var.default) { (value) }
-                @if !var.description.is_empty() {
-                    p .form-hint { (var.description) }
-                }
+                    placeholder=(var.default)
+                    aria-describedby=[hint_id] { (value) }
+                (hint(var, hint_id))
             }
         },
         // A Select without declared options degrades to the plain text
@@ -204,7 +310,7 @@ fn render_field(var: &ConfigVar, value: &str) -> Markup {
         InputType::Select if !var.options.is_empty() => html! {
             div .form-group {
                 label .form-label for=(var.key) { (label) }
-                select .form-select #(var.key) name=(var.key) {
+                select .form-select #(var.key) name=(var.key) aria-describedby=[hint_id] {
                     @for option in &var.options {
                         option value=(option.value)
                             selected[option.value == value
@@ -212,29 +318,25 @@ fn render_field(var: &ConfigVar, value: &str) -> Markup {
                         { (option.label) }
                     }
                 }
-                @if !var.description.is_empty() {
-                    p .form-hint { (var.description) }
-                }
+                (hint(var, hint_id))
             }
         },
         InputType::Number => html! {
             div .form-group {
                 label .form-label for=(var.key) { (label) }
                 input .form-input #(var.key) name=(var.key) type="number" value=(value)
-                    placeholder=(var.default);
-                @if !var.description.is_empty() {
-                    p .form-hint { (var.description) }
-                }
+                    placeholder=(var.default)
+                    aria-describedby=[hint_id];
+                (hint(var, hint_id))
             }
         },
         InputType::Url | InputType::Text | InputType::Select => html! {
             div .form-group {
                 label .form-label for=(var.key) { (label) }
                 input .form-input #(var.key) name=(var.key) type="text" value=(value)
-                    placeholder=(var.default);
-                @if !var.description.is_empty() {
-                    p .form-hint { (var.description) }
-                }
+                    placeholder=(var.default)
+                    aria-describedby=[hint_id];
+                (hint(var, hint_id))
             }
         },
     }
@@ -280,6 +382,36 @@ function submitSettings(e) {{
     )
 }
 
+/// One section's fields. A gated section renders its toggle first and the
+/// rest inside the region the toggle controls.
+fn render_section_fields(
+    section: &SettingsSection<'_>,
+    values: &HashMap<String, String>,
+) -> Markup {
+    let empty = String::new();
+    let value = |var: &ConfigVar| values.get(&var.key).unwrap_or(&empty).as_str();
+    match section.gate {
+        None => html! {
+            @for var in section.vars {
+                (render_field(var, value(var), None))
+            }
+        },
+        Some(gate) => {
+            let region = SettingsSection::gated_region_id(gate);
+            html! {
+                @for var in section.vars.iter().filter(|var| var.key == gate) {
+                    (render_field(var, value(var), Some(&region)))
+                }
+                div .settings-section__gated #(region) {
+                    @for var in section.vars.iter().filter(|var| var.key != gate) {
+                        (render_field(var, value(var), None))
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// Render just the field groups for each [`SettingsSection`] — a heading
 /// plus its inputs, values loaded from the config client — with NO enclosing
 /// `<form>`, submit button, or submit script.
@@ -295,6 +427,10 @@ function submitSettings(e) {{
 /// tabbed_page` — precisely so every tab can render a complete
 /// [`settings_form`] instead.)
 ///
+/// Each section is a `<section>` headed by `components::section_header`; a
+/// collapsible one is a `<details>` whose summary holds the same `h2`, so
+/// the outline is the same whether it is open or not.
+///
 /// `Err` when the current values could not be read: the caller answers with
 /// an error page, never with fields filled from defaults.
 pub async fn render_sections(
@@ -302,32 +438,28 @@ pub async fn render_sections(
     sections: &[SettingsSection<'_>],
 ) -> Result<Markup, WaferError> {
     let values = load_values(ctx, sections).await?;
-    let empty = String::new();
     Ok(html! {
-        @for (i, section) in sections.iter().enumerate() {
+        @for section in sections {
+            @let class = if section.gate.is_some() {
+                "settings-section settings-section--gated"
+            } else {
+                "settings-section"
+            };
             @if section.collapsible {
-                details .card .mt-4 {
-                    summary .summary-strong { (section.icon) " " (section.title) }
+                details class={ (class) " settings-section--collapsible" } {
+                    summary { h2 .section-header__title { (section.title) } }
                     @if !section.description.is_empty() {
                         p .settings-section-desc { (section.description) }
                     }
-                    @for var in section.vars {
-                        (render_field(var, values.get(&var.key).unwrap_or(&empty)))
-                    }
+                    (render_section_fields(section, &values))
                 }
             } @else {
-                h3 class={
-                    "settings-section-heading"
-                    @if i == 0 { " settings-section-heading--first" }
-                    @if !section.description.is_empty() { " settings-section-heading--with-desc" }
-                } {
-                    (section.icon) " " (section.title)
-                }
-                @if !section.description.is_empty() {
-                    p .settings-section-desc { (section.description) }
-                }
-                @for var in section.vars {
-                    (render_field(var, values.get(&var.key).unwrap_or(&empty)))
+                section class=(class) {
+                    (super::components::section_header(section.title, None))
+                    @if !section.description.is_empty() {
+                        p .settings-section-desc { (section.description) }
+                    }
+                    (render_section_fields(section, &values))
                 }
             }
         }
@@ -354,7 +486,10 @@ pub async fn settings_form(
 ) -> Result<Markup, WaferError> {
     let fields = render_sections(ctx, sections).await?;
     Ok(html! {
-        form #settings-form {
+        // `.settings-form` caps the form at a readable measure on wide
+        // screens; a 1,100px text box for a six-character value read as
+        // broken.
+        form #settings-form .settings-form {
             (fields)
             (extra)
             button .btn .btn--primary .btn--block .mt-4 type="submit" { "Save settings" }
@@ -594,10 +729,9 @@ mod tests {
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         let vars = [var("X__A", "A", InputType::Text)];
-        let sections = [
-            SettingsSection::new("Checkout", super::super::icons::settings(), &vars)
-                .description("Defaults applied to new offers."),
-        ];
+        let sections =
+            [SettingsSection::new("Checkout", &vars)
+                .description("Defaults applied to new offers.")];
         let s = render_sections(&ctx, &sections)
             .await
             .expect("the current values are readable")
@@ -609,7 +743,7 @@ mod tests {
     fn select_field_renders_options_with_current_value_selected() {
         let v = var("X__CCY", "Default Currency", InputType::Select)
             .options(&[("USD", "USD — US Dollar"), ("NZD", "NZD — NZ Dollar")]);
-        let s = render_field(&v, "NZD").into_string();
+        let s = render_field(&v, "NZD", None).into_string();
         assert!(s.contains("<select"), "renders a select: {s}");
         assert!(s.contains(r#"name="X__CCY""#));
         assert!(s.contains(r#"value="USD""#));
@@ -623,7 +757,7 @@ mod tests {
     #[test]
     fn select_without_options_falls_back_to_text_input() {
         let v = var("X__MODE", "Mode", InputType::Select);
-        let s = render_field(&v, "live").into_string();
+        let s = render_field(&v, "live", None).into_string();
         assert!(!s.contains("<select"), "no options, no select: {s}");
         assert!(s.contains(r#"type="text""#));
         assert!(s.contains(r#"value="live""#));
@@ -632,7 +766,7 @@ mod tests {
     #[test]
     fn number_field_renders_number_input() {
         let v = var("X__FEE", "Fee (bps)", InputType::Number);
-        let s = render_field(&v, "250").into_string();
+        let s = render_field(&v, "250", None).into_string();
         assert!(s.contains(r#"type="number""#), "number widget: {s}");
         assert!(s.contains(r#"value="250""#));
     }
@@ -640,7 +774,7 @@ mod tests {
     #[test]
     fn text_field_renders_text_input_with_label_and_help() {
         let v = var(APP_NAME_KEY, "App Name", InputType::Text);
-        let s = render_field(&v, "MyApp").into_string();
+        let s = render_field(&v, "MyApp", None).into_string();
         assert!(s.contains(&format!(r#"name="{APP_NAME_KEY}""#)));
         assert!(s.contains(r#"type="text""#));
         assert!(s.contains(r#"value="MyApp""#));
@@ -655,7 +789,7 @@ mod tests {
         // page source / devtools. The rendered markup must never contain the
         // secret at all, regardless of the visual widget.
         let v = var("X__PW", "Secret", InputType::Password);
-        let set = render_field(&v, "hunter2").into_string();
+        let set = render_field(&v, "hunter2", None).into_string();
         assert!(
             !set.contains("hunter2"),
             "the raw secret must never reach the rendered HTML: {set}"
@@ -666,18 +800,16 @@ mod tests {
             "value must render empty: {set}"
         );
         assert!(set.contains("(set)"));
-        // Eye toggle present, with an accessible name that the handler keeps
-        // in sync with the shown/hidden state (2026-07-11 a11y review).
-        assert!(set.contains(r#"aria-label="Reveal value""#));
-        // The two labels are operands now, not a hand-written `onclick`
-        // string: `reveal-toggle` in the modal section of
-        // `ui/assets/chrome.js` swaps `title` and `aria-label` from them.
+        // The shared reveal toggle: a toggle button with one constant name
+        // and `aria-pressed` for the state (`components::reveal_toggle`).
+        assert!(set.contains(r#"aria-label="Show Secret""#), "{set}");
+        assert!(set.contains(r#"aria-pressed="false""#), "{set}");
         assert!(set.contains(r#"data-action="reveal-toggle""#));
         assert!(set.contains(r#"data-reveal-target="X__PW""#));
-        assert!(set.contains(r#"data-reveal-show="Reveal""#));
-        assert!(set.contains(r#"data-reveal-hide="Hide""#));
+        // ... which CSS hides on an empty field, keyed off the placeholder.
+        assert!(set.contains("placeholder="), "{set}");
 
-        let empty = render_field(&v, "").into_string();
+        let empty = render_field(&v, "", None).into_string();
         assert!(empty.contains("Not configured"));
     }
 
@@ -693,7 +825,7 @@ mod tests {
             "Webhook Secret",
             InputType::Text,
         );
-        let s = render_field(&v, "shh-dont-tell").into_string();
+        let s = render_field(&v, "shh-dont-tell", None).into_string();
         assert!(
             !s.contains("shh-dont-tell"),
             "a `_SECRET`-suffixed key must be redacted regardless of input_type: {s}"
@@ -703,26 +835,167 @@ mod tests {
     #[test]
     fn color_field_pairs_text_input_with_color_picker() {
         let v = var("X__COLOR", "Brand", InputType::Color);
-        let s = render_field(&v, "#abcdef").into_string();
+        let s = render_field(&v, "#ABCDEF", None).into_string();
         assert!(s.contains(r#"type="color""#));
-        assert!(s.contains("value=\"#abcdef\""));
+        assert!(s.contains("value=\"#abcdef\""), "{s}");
+        assert!(!s.contains("data-unset"), "{s}");
+        // Each half mirrors into the other.
         assert!(s.contains(r#"data-action="mirror-value" data-mirror-target="X__COLOR""#));
+        assert!(s.contains(r#"data-action="mirror-value" data-mirror-target="X__COLOR-swatch""#));
+        // The swatch has a name of its own and the hint, like the box.
+        assert!(s.contains(r#"aria-label="Brand picker""#), "{s}");
+        assert_eq!(
+            s.matches(r#"aria-describedby="X__COLOR-hint""#).count(),
+            2,
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn color_field_without_a_colour_is_unset_not_black() {
+        // No value and no default: a value-less colour input paints black,
+        // so the swatch carries no value and is marked unset instead.
+        let v = ConfigVar::new("X__BG", "Background", "")
+            .name("Background")
+            .input_type(InputType::Color);
+        let s = render_field(&v, "", None).into_string();
+        let swatch = &s[s.find(r#"type="color""#).expect("swatch")..];
+        let swatch = &swatch[..swatch.find('>').unwrap()];
+        assert!(swatch.contains("data-unset"), "{swatch}");
+        assert!(!swatch.contains("value="), "{swatch}");
+        assert!(!s.contains("#000000"), "{s}");
+        // A value no swatch can hold is not shown as some other colour.
+        let named = render_field(&v, "rebeccapurple", None).into_string();
+        assert!(named.contains("data-unset"), "{named}");
+        // An empty box with a hex default shows the default it falls back to.
+        let d = ConfigVar::new("X__BG", "", "#fff").input_type(InputType::Color);
+        let s = render_field(&d, "", None).into_string();
+        assert!(s.contains("value=\"#ffffff\""), "{s}");
+        assert!(!s.contains("data-unset"), "{s}");
+    }
+
+    #[test]
+    fn swatch_hex_accepts_only_hex_colours() {
+        assert_eq!(swatch_hex("#AbC"), Some("#aabbcc".to_string()));
+        assert_eq!(swatch_hex(" #a1b2c3 "), Some("#a1b2c3".to_string()));
+        assert_eq!(swatch_hex(""), None);
+        assert_eq!(swatch_hex("a1b2c3"), None);
+        assert_eq!(swatch_hex("#12345"), None);
+        assert_eq!(swatch_hex("#ggg"), None);
+    }
+
+    #[test]
+    fn every_widget_names_its_hint_with_aria_describedby() {
+        for input_type in [
+            InputType::Text,
+            InputType::Url,
+            InputType::Number,
+            InputType::Textarea,
+            InputType::Password,
+            InputType::Color,
+            InputType::Toggle,
+            InputType::Select,
+        ] {
+            let v = var("X__F", "Field", input_type).options(&[("a", "A")]);
+            let s = render_field(&v, "", None).into_string();
+            assert!(
+                s.contains(r#"<p class="form-hint" id="X__F-hint">desc text</p>"#),
+                "{s}"
+            );
+            assert!(
+                s.contains(r#"aria-describedby="X__F-hint""#),
+                "{input_type:?}: {s}"
+            );
+        }
+        // No description: no hint, and no control pointing at a missing id.
+        let bare = ConfigVar::new("X__G", "", "").input_type(InputType::Text);
+        let s = render_field(&bare, "", None).into_string();
+        assert!(
+            !s.contains("aria-describedby") && !s.contains("form-hint"),
+            "{s}"
+        );
     }
 
     #[test]
     fn toggle_field_renders_checkbox_checked_for_true() {
         let v = var("X__FLAG", "Flag", InputType::Toggle);
-        let on = render_field(&v, "true").into_string();
-        assert!(on.contains(r#"type="checkbox""#));
+        let on = render_field(&v, "true", None).into_string();
+        assert!(on.contains(r#"type="checkbox" role="switch""#), "{on}");
         assert!(on.contains("checked"));
-        let off = render_field(&v, "false").into_string();
+        // The label wraps the switch, so the whole row is its hit area and
+        // its name; the id is there for aria and the hint.
+        assert!(
+            on.contains(
+                r#"<label class="form-switch"><input class="form-switch__input" id="X__FLAG""#
+            ),
+            "{on}"
+        );
+        assert!(on.contains(r#"<span>Flag</span></label>"#), "{on}");
+        assert!(!on.contains("aria-controls"), "{on}");
+        let off = render_field(&v, "false", None).into_string();
         assert!(!off.contains("checked"));
+        let gate = render_field(&v, "false", Some("X__FLAG-section")).into_string();
+        assert!(
+            gate.contains(r#"aria-controls="X__FLAG-section""#),
+            "{gate}"
+        );
+    }
+
+    #[tokio::test]
+    async fn sections_are_h2_section_headers_and_a_gated_section_wraps_its_dependents() {
+        let ctx = crate::test_support::TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        let plain = [var("X__A", "A", InputType::Text)];
+        let gated = [
+            var("X__ID", "Client ID", InputType::Text),
+            var("X__ON", "Enable", InputType::Toggle),
+        ];
+        let sections = [
+            SettingsSection::new("Basics", &plain),
+            SettingsSection::new("Providers", &gated).gated_by("X__ON"),
+            SettingsSection::new("Advanced", &plain).collapsible(),
+        ];
+        let s = render_sections(&ctx, &sections)
+            .await
+            .expect("readable")
+            .into_string();
+        assert!(
+            s.contains(r#"<h2 class="section-header__title">Basics</h2>"#),
+            "{s}"
+        );
+        assert!(!s.contains("<h3"), "{s}");
+        // Collapsible: the same h2, inside the summary.
+        assert!(
+            s.contains(r#"<summary><h2 class="section-header__title">Advanced</h2></summary>"#),
+            "{s}"
+        );
+        // Gated: the toggle first (declared second), controlling the region
+        // that holds the rest.
+        let toggle = s.find(r#"id="X__ON""#).expect("toggle");
+        let region = s
+            .find(r#"<div class="settings-section__gated" id="X__ON-section">"#)
+            .expect("region");
+        let dependent = s.find(r#"id="X__ID""#).expect("dependent");
+        assert!(toggle < region && region < dependent, "{s}");
+        assert!(s.contains(r#"aria-controls="X__ON-section""#), "{s}");
+        assert!(
+            s.contains(r#"class="settings-section settings-section--gated""#),
+            "{s}"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "not one of its Toggle vars")]
+    fn gating_by_a_var_that_is_not_a_toggle_of_the_section_is_refused() {
+        let vars = [var("X__A", "A", InputType::Text)];
+        let _ = SettingsSection::new("S", &vars).gated_by("X__A");
     }
 
     #[test]
     fn textarea_field_renders_multiline_with_value_as_content() {
         let v = var("X__FOOTER", "Footer Text", InputType::Textarea);
-        let s = render_field(&v, "© 2026 Me").into_string();
+        let s = render_field(&v, "© 2026 Me", None).into_string();
         assert!(s.contains("<textarea"), "should render a textarea: {s}");
         assert!(s.contains(r#"name="X__FOOTER""#));
         // A textarea carries its value as element content, not a value= attr.
@@ -737,7 +1010,7 @@ mod tests {
     #[test]
     fn field_falls_back_to_key_when_name_empty() {
         let v = ConfigVar::new("X__NONAME", "", "").input_type(InputType::Text);
-        let s = render_field(&v, "").into_string();
+        let s = render_field(&v, "", None).into_string();
         assert!(s.contains(">X__NONAME<"));
     }
 
@@ -820,11 +1093,7 @@ mod tests {
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         ctx.set_config(MAILGUN_API_KEY, "key-abcdef0123456789");
         let v = var(MAILGUN_API_KEY, "Mailgun API Key", InputType::Password);
-        let sections = [SettingsSection::new(
-            "Email",
-            html! {},
-            std::slice::from_ref(&v),
-        )];
+        let sections = [SettingsSection::new("Email", std::slice::from_ref(&v))];
         let out = render_sections(&ctx, &sections)
             .await
             .expect("the current values are readable")
@@ -1354,7 +1623,7 @@ mod tests {
         // The page really does hand the mask back to the browser: this is what
         // makes the save below the form's own unedited submission, not a
         // hand-built request.
-        let sections = [SettingsSection::new("Settings", html! {}, &allowed)];
+        let sections = [SettingsSection::new("Settings", &allowed)];
         let rendered = render_sections(&ctx, &sections)
             .await
             .expect("the current values are readable")

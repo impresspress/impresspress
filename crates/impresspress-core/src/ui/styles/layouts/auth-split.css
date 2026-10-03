@@ -141,11 +141,11 @@
 .auth-status__action { display: inline-block; width: auto; padding: var(--space-3) var(--space-5); text-decoration: none; }
 
 /* ===== Bootstrap-admin page hint (auth_ui/pages/bootstrap.rs) =====
- * #6b7280/#f3f4f6 have no matching design token; carried over unchanged
- * (#6b7280 already appears as a literal elsewhere -- see
- * .form-input-wrapper .input-icon in components/form.css). */
-.bootstrap-hint { font-size: 0.875rem; color: #6b7280; margin-bottom: var(--space-6); text-align: center; }
-.bootstrap-hint code { background: #f3f4f6; padding: 0.125rem var(--space-2); border-radius: 0.25rem; font-size: 0.813rem; }
+ * Tokens, not the old #6b7280-on-#f3f4f6 literals, which put the `<code>`
+ * env-var name at 4.39:1 (axe color-contrast). --text-secondary on
+ * --surface-2 is 5.1:1, and the hint itself is 5.3:1 on the form's #fdfdfd. */
+.bootstrap-hint { font-size: 0.875rem; color: var(--text-secondary); margin-bottom: var(--space-6); text-align: center; }
+.bootstrap-hint code { background: var(--surface-2); padding: 0.125rem var(--space-2); border-radius: var(--radius-sm); font-size: 0.813rem; }
 
 @keyframes shake {
 	0%, 100% { transform: translateX(0); }
@@ -155,19 +155,8 @@
 
 .login-form { margin-bottom: var(--space-6); }
 
-.pw-wrap { position: relative; }
-.pw-wrap input { padding-right: 2.5rem; }
-
-.pw-toggle {
-	position: absolute; right: 0.5rem; top: 50%;
-	transform: translateY(-50%);
-	background: none; border: none; cursor: pointer;
-	padding: var(--space-1); color: var(--text-muted);
-	display: flex; align-items: center;
-}
-
-.pw-toggle:hover { color: var(--text-primary); }
-.pw-toggle svg { width: 1.125rem; height: 1.125rem; }
+/* The password fields' wrapper and reveal button are the shared
+   `.value-reveal-wrapper` / `.reveal-toggle` (components/form.css). */
 
 .login-button {
 	width: 100%; padding: var(--space-4) var(--space-6);

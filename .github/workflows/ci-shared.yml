@@ -1503,11 +1503,15 @@ jobs:
       # control's after-success effect (reload, reset, drop the empty line,
       # scroll) runs under the CSP this server really sends, and those effects
       # only follow a real write. Those rows would show up in the screenshots.
-      - name: Run htmx after-success effects end-to-end tests (native server, port 8093)
+      #
+      # auth-forms.spec.ts rides along for a reason of its own: it signs in with
+      # a wrong password to prove the error is announced, and that 401 is an
+      # error the admin dashboard's baseline expects not to see.
+      - name: Run htmx after-success effects and auth forms end-to-end tests (native server, port 8093)
         working-directory: crates/impresspress-web
         env:
           TEST_PORT: 8093
-        run: npx playwright test --config=tests/playwright.visual-baseline.config.ts tests/e2e/htmx-success-effects.spec.ts
+        run: npx playwright test --config=tests/playwright.visual-baseline.config.ts tests/e2e/htmx-success-effects.spec.ts tests/e2e/auth-forms.spec.ts
 
       - name: Stop server
         if: always()

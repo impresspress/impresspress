@@ -1057,15 +1057,7 @@ pub async fn handle_edit_variable_form(ctx: &dyn Context, msg: &Message) -> Outp
                                 name="value"
                                 value=""
                                 placeholder=(masked_placeholder);
-                            button .btn .btn--ghost .btn--icon .btn-icon-right
-                                type="button"
-                                data-action="reveal-toggle"
-                                data-reveal-target="edit-value"
-                                data-reveal-show="Reveal"
-                                data-reveal-hide="Hide"
-                                title="Reveal"
-                                aria-label="Reveal value"
-                            { (icons::eye()) }
+                            (components::reveal_toggle("edit-value", "Show value"))
                         }
                         p .form-hint {
                             "Leave blank to keep the stored value. Typing a new one replaces it."

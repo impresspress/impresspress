@@ -23,7 +23,7 @@ pub use button::{button, tab_navigation, BtnVariant, Tab};
 pub use card::page_header;
 pub use chart::{bar_chart_card, line_chart_card, sparkline};
 pub use empty::empty_state;
-pub use form::{search_input, search_input_with_value};
+pub use form::{reveal_toggle, search_input, search_input_with_value};
 pub use modal::modal;
 pub use pagination::pagination;
 pub use section::section_header;

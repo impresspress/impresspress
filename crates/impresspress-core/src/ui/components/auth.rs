@@ -71,6 +71,17 @@ impl AlertVariant {
             AlertVariant::Success => "alert--success",
         }
     }
+
+    /// The live-region role a screen reader announces the message through:
+    /// an error interrupts (`alert`, assertive) — the form did not do what
+    /// was asked — while information and success wait their turn (`status`,
+    /// polite).
+    fn role(&self) -> &'static str {
+        match self {
+            AlertVariant::Error => "alert",
+            AlertVariant::Info | AlertVariant::Success => "status",
+        }
+    }
 }
 
 /// Inline page-level message. Rendered with the `hidden` attribute; the
@@ -78,9 +89,14 @@ impl AlertVariant {
 /// `style.display` — `base.css`'s `[hidden] { display: none !important; }`
 /// always wins over a plain inline `style.display`). Replaces the
 /// hand-inlined `#error` / `#info` divs.
+///
+/// Carries the variant's live-region role ([`AlertVariant::role`]), so the
+/// message a script reveals is announced, not only painted: a failed
+/// sign-in used to appear silently above a form the screen-reader user was
+/// still focused in.
 pub fn alert(variant: AlertVariant, id: &str, message: &str) -> Markup {
     html! {
-        div id=(id) class={ "alert " (variant.class()) } hidden { (message) }
+        div id=(id) class={ "alert " (variant.class()) } role=(variant.role()) hidden { (message) }
     }
 }
 
@@ -241,6 +257,17 @@ mod tests {
             !m.contains(&style_attr),
             "alert must not carry inline styles"
         );
+    }
+
+    #[test]
+    fn an_error_alert_is_assertive_and_the_others_are_polite() {
+        use super::{alert, AlertVariant};
+        let error = alert(AlertVariant::Error, "error", "").into_string();
+        assert!(error.contains(r#"role="alert""#), "{error}");
+        for variant in [AlertVariant::Info, AlertVariant::Success] {
+            let m = alert(variant, "info", "").into_string();
+            assert!(m.contains(r#"role="status""#), "{m}");
+        }
     }
 
     #[test]

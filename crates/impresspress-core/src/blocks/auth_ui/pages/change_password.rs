@@ -3,7 +3,7 @@
 use maud::{html, PreEscaped};
 use wafer_run::{context::Context, Message, OutputStream};
 
-use super::{api_post_script, pw_field, site_config};
+use super::{api_post_script, pw_field, site_config, PasswordPurpose};
 use crate::ui::{self, components::auth_panel, templates::auth_split};
 
 /// JS that drives the change-password form. Posts through
@@ -41,6 +41,15 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
         }
     };
 
+    // The minimum the API enforces, so the field's `minlength` and the
+    // placeholder state the same number (see `PasswordPurpose::New`).
+    let min_length = match crate::blocks::auth::helpers::password_min_length(ctx).await {
+        Ok(n) => n,
+        Err(e) => {
+            return crate::blocks::crud::db_error_page(msg, e, "page: password policy read failed")
+        }
+    };
+
     let markup = ui::layout::page(
         "Change Password",
         &config,
@@ -62,17 +71,17 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     form #form .login-form {
                         div .form-group {
                             label .form-label for="current" { "Current Password" }
-                            (pw_field("current", "Enter your current password", None))
+                            (pw_field("current", "Enter your current password", PasswordPurpose::Current))
                         }
 
                         div .form-group {
                             label .form-label for="newpw" { "New Password" }
-                            (pw_field("newpw", "Min 8 characters", Some("8")))
+                            (pw_field("newpw", &format!("Min {min_length} characters"), PasswordPurpose::New { min_length }))
                         }
 
                         div .form-group {
                             label .form-label for="confirm" { "Confirm New Password" }
-                            (pw_field("confirm", "Repeat new password", Some("8")))
+                            (pw_field("confirm", "Repeat new password", PasswordPurpose::New { min_length }))
                         }
 
                         button .login-button type="submit" #btn { "Change Password" }

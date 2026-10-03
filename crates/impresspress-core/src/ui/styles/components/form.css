@@ -11,6 +11,17 @@
 	transform: translateY(-50%); color: var(--text-muted);
 }
 
+/* "Results for "…" ✕ Clear" above a search box (`search_input_with_value`).
+ * The sentence is ONE item that wraps inside itself (a long term breaks
+ * anywhere rather than widening the page) and Clear wraps under it when
+ * the row is too narrow -- never three shrunken columns. */
+.search-summary {
+	display: flex; flex-wrap: wrap; align-items: center;
+	gap: 0 var(--space-2); margin-bottom: var(--space-2);
+	font-size: var(--text-sm);
+}
+.search-summary__text { min-width: 0; overflow-wrap: anywhere; }
+
 /* Toggle */
 .toggle {
 	position: relative; display: inline-block;
@@ -129,23 +140,32 @@
 	transform: translateY(-50%); color: #6b7280; pointer-events: none;
 }
 
-/* Right-side icon variant (e.g. the reveal/hide button on a sensitive
- * variable's value field) — a standalone wrapper, deliberately NOT composed
- * with `.form-input-wrapper` above: that class's `.form-input` rule adds
- * `padding-left: 2.5rem` unconditionally for its left-icon case, which has
- * no "off" switch and no left icon exists here, so composing the two left
- * this field with ~26px of dead space on its left edge (caught in review —
- * see task-12c-report.md). `.form-input-wrapper` has no other caller
- * (`grep -rln "form-input-wrapper" src --include=*.rs` returns only the one
- * site this serves), so there's no reuse benefit to composing rather than
- * standing alone. The button stays clickable (`.input-icon` above is
- * `pointer-events: none`, which a reveal button can't be). */
+/* A password field and its `components::reveal_toggle` -- every masked
+ * field (settings forms, the variables edit modal, the auth pages). A
+ * standalone wrapper, deliberately NOT composed with `.form-input-wrapper`
+ * above, whose unconditional `padding-left` is for a left icon this has
+ * not got. The input keeps room on the right for the 44px button. */
 .value-reveal-wrapper { position: relative; }
-.value-reveal-wrapper .form-input { padding-right: var(--space-12); }
-.value-reveal-wrapper .btn-icon-right {
-	position: absolute; right: 0.25rem; top: 50%;
-	transform: translateY(-50%);
+.value-reveal-wrapper > .form-input { padding-right: 2.75rem; }
+.reveal-toggle {
+	position: absolute; right: 0; top: 50%; transform: translateY(-50%);
+	display: inline-flex; align-items: center; justify-content: center;
+	width: 2.75rem; height: 2.75rem; padding: 0;
+	background: none; border: 0; border-radius: var(--radius-md);
+	color: var(--text-muted); cursor: pointer;
 }
+.reveal-toggle:hover { color: var(--text-primary); }
+.reveal-toggle:focus-visible { outline: 2px solid var(--primary-color); outline-offset: -2px; }
+/* The icon follows the state a screen reader hears: an eye while masked
+ * (press to show), an eye-off while showing (press to hide). */
+.reveal-toggle[aria-pressed="true"] .reveal-toggle__show,
+.reveal-toggle[aria-pressed="false"] .reveal-toggle__hide { display: none; }
+.reveal-toggle > span { display: inline-flex; }
+/* Nothing typed, nothing to show: a sensitive field always renders blank
+ * (the stored secret never reaches the page), and an eye on that blank
+ * field read as "reveal the stored value". `:placeholder-shown` is the
+ * live "empty" test, which is why `reveal_toggle` requires a placeholder. */
+.value-reveal-wrapper:has(> .form-input:placeholder-shown) > .reveal-toggle { display: none; }
 
 .form-hint {
 	display: block; margin-top: var(--space-2);
@@ -160,9 +180,43 @@
 	font-size: 0.75rem; color: var(--accent-danger-text);
 }
 
+/* The label is the hit area of the 16px box it wraps, so it is the one
+ * that is ≥44px tall (WCAG 2.5.5 target size). */
 .form-checkbox, .form-radio {
 	display: inline-flex; align-items: center; gap: var(--space-2);
+	min-height: 44px;
 	cursor: pointer; font-size: 0.875rem; color: #374151;
+}
+
+/* On/off switch (`settings_form`'s Toggle widget): a native checkbox with
+ * `role="switch"`, drawn as a track. The wrapping label is the hit area, a
+ * ≥44px row. Off is --secondary-color (4.76:1 on white, the 3:1 a
+ * control's boundary needs); on is --primary-button. */
+.form-switch {
+	display: inline-flex; align-items: center; gap: var(--space-3);
+	min-height: 44px; cursor: pointer;
+	font-size: 0.875rem; font-weight: 500; color: var(--text-primary);
+}
+.form-switch__input {
+	appearance: none; flex: none; position: relative;
+	width: 2.5rem; height: 1.5rem; margin: 0;
+	border-radius: var(--radius-full); background: var(--secondary-color);
+	cursor: pointer; transition: background var(--transition-fast);
+}
+.form-switch__input::before {
+	content: ""; position: absolute; top: 0.125rem; left: 0.125rem;
+	width: 1.25rem; height: 1.25rem; border-radius: 50%;
+	background: var(--surface-1); box-shadow: var(--shadow-sm);
+	transition: transform var(--transition-fast);
+}
+.form-switch__input:checked { background: var(--primary-button); }
+.form-switch__input:checked::before { transform: translateX(1rem); }
+.form-switch__input:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
+/* The hint sits under the label text, not under the track, and is pulled
+ * up into the 44px row's slack so it reads as the switch's own line. */
+.form-switch + .form-hint { margin-top: calc(-1 * var(--space-2)); padding-left: calc(2.5rem + var(--space-3)); }
+@media (prefers-reduced-motion: reduce) {
+	.form-switch__input, .form-switch__input::before { transition: none; }
 }
 
 .form-checkbox input, .form-radio input {
@@ -407,42 +461,56 @@ body:has(.products-tabs) .filter-bar { margin: var(--space-4) 0; padding: var(--
 .details-heading { font-size: 1rem; margin-top: 0; }
 
 /* ===== Settings form (ui/settings_form.rs) =====
- * Section heading between one ConfigVar group and the next. The first
- * section in a form sits flush against the top of its container
- * (`--first`); a section with a description tightens its own bottom margin
- * so the description reads as attached to the heading, not the next one
- * (`--with-desc`). A collapsible section skips this heading entirely and
- * uses a bordered `.card` (see below) instead, so it doesn't need either
- * modifier. */
-.settings-section-heading {
-	font-size: 1rem; font-weight: 600;
-	margin: var(--space-6) 0 var(--space-4);
-	padding-bottom: var(--space-2);
-	border-bottom: 1px solid var(--border-color);
+ * A readable measure: label, hint and a 40rem box read as one field; a
+ * 1,100px box for a six-character value read as broken. Narrower screens
+ * are unaffected. */
+.settings-form { max-width: 40rem; }
+/* One `<section>` per `SettingsSection`, headed by the shared
+ * `.section-header` (h2); consecutive sections are divided by a rule. */
+.settings-section + .settings-section {
+	margin-top: var(--space-8); padding-top: var(--space-6);
+	border-top: 1px solid var(--border-color);
 }
-.settings-section-heading--first { margin-top: 0; }
-.settings-section-heading--with-desc { margin-bottom: var(--space-2); }
-/* One-line explanation under a section heading or a collapsible section's
- * summary — smaller and lighter than `.form-hint` (a per-field hint), since
- * it introduces a whole group of fields rather than one. */
-.settings-section-desc { color: var(--text-muted); font-size: 0.85rem; margin: 0 0 var(--space-4); }
+/* One-line explanation under a section heading -- it introduces a group of
+ * fields, so it sits tight under the heading and above them. */
+.section-header:has(+ .settings-section-desc) { margin-bottom: var(--space-1); }
+.settings-section-desc { color: var(--text-muted); font-size: var(--text-sm); margin: 0 0 var(--space-4); }
+/* `SettingsSection::collapsible`: a bordered disclosure whose summary holds
+ * the section's h2 (inline, so it sits beside the disclosure marker). */
+.settings-section--collapsible,
+.settings-section + .settings-section--collapsible {
+	margin-top: var(--space-4); padding: 0 var(--space-4);
+	border: 1px solid var(--border-color); border-radius: var(--radius-lg);
+}
+.settings-section--collapsible > summary {
+	display: list-item; min-height: 44px; padding: var(--space-3) 0;
+}
+.settings-section--collapsible > summary > .section-header__title { display: inline; font-size: var(--text-base); }
+.settings-section--collapsible[open] { padding-bottom: var(--space-4); }
+/* `SettingsSection::gated_by`: the fields after the gating switch show only
+ * while it is on. The switch is the only field group directly in the
+ * section; the rest live in `.settings-section__gated`. Hidden fields stay
+ * in the form, so a save with the switch off keeps what they hold. */
+.settings-section--gated:has(> .form-group [role="switch"]:not(:checked)) > .settings-section__gated { display: none; }
+.settings-section__gated { margin-top: var(--space-5); }
 
-/* A collapsible settings section (`SettingsSection::collapsible`) renders as
- * `details.card`, matching the bordered-box disclosure pattern already used
- * by the tickets admin (`details .card .p-4 .mt-3`) — `.card`'s own padding
- * wraps summary + fields uniformly, so no separate body wrapper is needed. */
-
-/* The reveal/hide password field pairs a text input with a color swatch —
- * only ConfigVar's Color widget renders this shape, so it's a settings-form-
- * specific row rather than a general-purpose utility. */
+/* The Color widget: the hex box and its swatch side by side. */
 .color-picker-row { display: flex; align-items: center; gap: var(--space-3); }
 .color-picker-row .form-input { flex: 1; }
 .color-swatch-input {
-	width: 40px; height: 36px;
+	flex: none; width: 2.75rem; height: 2.75rem;
 	border: 1px solid var(--border-color);
-	border-radius: 6px;
+	border-radius: var(--radius-md);
 	cursor: pointer;
 	padding: 2px;
+}
+/* No colour to show (`data-unset`: box empty with no default, or not a hex
+ * colour): "none" stripes, not the black a value-less colour input paints. */
+.color-swatch-input[data-unset]::-webkit-color-swatch {
+	background: repeating-linear-gradient(135deg, var(--surface-1) 0 4px, var(--border-color) 4px 8px) !important;
+}
+.color-swatch-input[data-unset]::-moz-color-swatch {
+	background: repeating-linear-gradient(135deg, var(--surface-1) 0 4px, var(--border-color) 4px 8px) !important;
 }
 
 @media (max-width: 720px) {

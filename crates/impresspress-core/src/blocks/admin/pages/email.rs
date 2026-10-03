@@ -9,10 +9,7 @@ use crate::{
         },
     },
     config_vars,
-    ui::{
-        icons,
-        settings_form::{self, SettingsSection},
-    },
+    ui::settings_form::{self, SettingsSection},
 };
 
 /// The Mailgun settings surfaced on the admin Email settings tab — a named
@@ -49,7 +46,7 @@ fn mailgun_vars() -> Vec<ConfigVar> {
 /// auth_ui). `Err` when the current values could not be read.
 pub async fn settings_body(ctx: &dyn Context, _msg: &Message) -> Result<Markup, WaferError> {
     let vars = mailgun_vars();
-    let section = SettingsSection::new("Mailgun Configuration", icons::globe(), &vars);
+    let section = SettingsSection::new("Mailgun Configuration", &vars);
     settings_form::settings_form(ctx, "/b/admin/email", &[section], maud::html! {}).await
 }
 
@@ -202,9 +199,9 @@ mod tests {
             "the API key field must render as a masked password input: {html}"
         );
         assert!(
-            html.contains(r#"aria-label="Reveal value""#)
-                && html.contains(r#"data-action="reveal-toggle""#)
-                && html.contains(r#"data-reveal-hide="Hide""#),
+            html.contains(r#"aria-label="Show Mailgun API Key""#)
+                && html.contains(r#"aria-pressed="false""#)
+                && html.contains(r#"data-action="reveal-toggle""#),
             "the reveal/edit eye toggle must be present, with an accessible name: {html}"
         );
         assert!(

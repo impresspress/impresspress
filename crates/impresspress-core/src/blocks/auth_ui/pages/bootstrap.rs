@@ -10,7 +10,7 @@
 use maud::html;
 use wafer_run::{context::Context, Message, OutputStream};
 
-use super::site_config;
+use super::{pw_field, site_config, PasswordPurpose};
 use crate::ui::{self, components::auth_panel, templates::auth_split};
 
 pub async fn handle_get(ctx: &dyn Context, msg: &Message) -> OutputStream {
@@ -18,6 +18,15 @@ pub async fn handle_get(ctx: &dyn Context, msg: &Message) -> OutputStream {
         Ok(site) => site,
         Err(e) => {
             return crate::blocks::crud::db_error_page(msg, e, "page: site config read failed")
+        }
+    };
+
+    // The minimum the API enforces, so the field's `minlength` and the
+    // placeholder state the same number (see `PasswordPurpose::New`).
+    let min_length = match crate::blocks::auth::helpers::password_min_length(ctx).await {
+        Ok(n) => n,
+        Err(e) => {
+            return crate::blocks::crud::db_error_page(msg, e, "page: password policy read failed")
         }
     };
 
@@ -61,19 +70,13 @@ pub async fn handle_get(ctx: &dyn Context, msg: &Message) -> OutputStream {
                                 id="email"
                                 name="email"
                                 placeholder="admin@example.com"
+                                autocomplete="email"
                                 required;
                         }
 
                         div .form-group {
                             label .form-label for="password" { "Admin Password" }
-                            input
-                                .form-input
-                                type="password"
-                                id="password"
-                                name="password"
-                                placeholder="Min 8 characters"
-                                minlength="8"
-                                required;
+                            (pw_field("password", &format!("Min {min_length} characters"), PasswordPurpose::New { min_length }))
                         }
 
                         button .login-button type="submit" { "Redeem" }

@@ -3,11 +3,15 @@
 use maud::{html, PreEscaped};
 use wafer_run::{context::Context, Message, OutputStream};
 
-use super::{api_post_script, pw_field, signup_script, site_config};
+use super::{api_post_script, pw_field, signup_script, site_config, PasswordPurpose};
 use crate::{
     blocks::auth_ui::redirect::is_safe_local_redirect,
     config_vars::ALLOW_SIGNUP_KEY,
-    ui::{self, components::auth_panel, templates::auth_split},
+    ui::{
+        self,
+        components::{alert, auth_panel, AlertVariant},
+        templates::auth_split,
+    },
 };
 
 pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
@@ -21,6 +25,14 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
         Ok(allowed) => allowed,
         Err(e) => {
             return crate::blocks::crud::db_error_page(msg, e, "Could not read the signup switch")
+        }
+    };
+    // The minimum the API enforces, so the field's `minlength` and the
+    // placeholder state the same number (see `PasswordPurpose::New`).
+    let min_length = match crate::blocks::auth::helpers::password_min_length(ctx).await {
+        Ok(n) => n,
+        Err(e) => {
+            return crate::blocks::crud::db_error_page(msg, e, "page: password policy read failed")
         }
     };
     let raw_redirect = msg.get_meta("req.query.redirect").to_string();
@@ -47,7 +59,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
             auth_panel(&config, Some("Create your account.")),
             html! {
                 div .login-container {
-                    div #error .login-error hidden {}
+                    (alert(AlertVariant::Error, "error", ""))
 
                     div #success .auth-status hidden {
                         div .auth-status__icon .auth-status__icon--success aria-hidden="true" { (ui::icons::check()) }
@@ -63,12 +75,12 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
 
                         div .form-group {
                             label .form-label for="email" { "Email" }
-                            input .form-input type="email" #email placeholder="you@example.com" required;
+                            input .form-input type="email" #email placeholder="you@example.com" autocomplete="email" required;
                         }
 
                         div .form-group {
                             label .form-label for="password" { "Password" }
-                            (pw_field("password", "Min 8 characters", Some("8")))
+                            (pw_field("password", &format!("Min {min_length} characters"), PasswordPurpose::New { min_length }))
                         }
 
                         button .login-button type="submit" #btn { "Create Account" }
@@ -136,7 +148,7 @@ mod tests {
         let msg = Message::new("http.request");
         let html = output_html(handle(&ctx, &msg).await).await;
 
-        let marker = "class=\"pw-toggle\"";
+        let marker = "class=\"reveal-toggle\"";
         let idx = html
             .find(marker)
             .expect("password toggle button must be present");
