@@ -1,142 +1,135 @@
-/* Modal */
-.modal-overlay {
-	position: fixed; top: 0; left: 0; right: 0; bottom: 0;
-	background: rgba(0,0,0,0.5); z-index: var(--z-modal);
-	display: flex; align-items: center; justify-content: center;
-	padding: var(--space-4);
-	animation: fadeIn 0.15s ease-out;
+/* Modal — `components::modal` (ui/components/modal.rs): a native <dialog>
+   opened with showModal(), driven by the modal section of chrome.js.
+
+   The dialog is a column: header, then a body that scrolls on its own. Its
+   height is capped at the DYNAMIC viewport height less a gutter, so on a phone
+   whose address bar comes and goes the cap follows the visible area rather
+   than the largest one (`vh` is the largest, which is how the Add Access Grant
+   modal's buttons ended up below the fold at 390px). A form's action row
+   (`.modal__footer`) is the last child of the form inside the body and sticks
+   to the bottom of the body's scrollport, so the submit button stays on screen
+   however long the form is. */
+dialog.modal {
+	/* The UA sheet gives a dialog padding, a border, a `max-*` of the viewport
+	   less 2em, and `color: CanvasText`; all four are set here. Its centring is
+	   `margin: auto`, which base.css's `* { margin: 0 }` reset takes away, so
+	   it is put back. */
+	margin: auto;
+	padding: 0;
+	border: 0;
+	border-radius: var(--radius-lg);
+	background: var(--surface-1);
+	color: var(--text-primary);
+	box-shadow: 0 20px 60px rgba(15, 23, 42, 0.18);
+	width: calc(100vw - 2 * var(--space-4));
+	max-width: 500px;
+	max-height: calc(100vh - 2 * var(--space-4));
+	max-height: calc(100dvh - 2 * var(--space-4));
+	overflow: hidden;
 }
 
-.modal-overlay[hidden] { display: none; }
+/* Only while open: a `display` on the closed dialog would override the UA's
+   `dialog:not([open]) { display: none }` and draw it in the page. */
+dialog.modal[open] {
+	display: flex;
+	flex-direction: column;
+	animation: modalIn 0.18s ease-out;
+}
 
-@keyframes fadeIn {
+dialog.modal::backdrop {
+	background: rgba(15, 23, 42, 0.5);
+}
+
+/* Reference content with tables in it — the block detail modal. */
+dialog.modal.modal--lg { max-width: 720px; }
+
+/* Opacity only: a transform, even mid-animation, would make the dialog the
+   containing block of the `position: fixed` toast container chrome.js moves
+   into it while it is open, pinning the toasts to the dialog's box. */
+@keyframes modalIn {
 	from { opacity: 0; }
 	to { opacity: 1; }
 }
 
-.modal {
-	background: white; border-radius: 12px;
-	width: 100%; max-width: 500px; max-height: 90vh;
-	overflow-y: auto;
-	box-shadow: 0 20px 60px rgba(0,0,0,0.15);
-	animation: modalSlideUp 0.2s ease-out;
+@media (prefers-reduced-motion: reduce) {
+	dialog.modal[open] { animation: none; }
 }
 
-/* Wider variant — block detail modal (blocks/admin/pages/blocks.rs) needs
-   room for endpoint/config-key tables. */
-.modal--lg { max-width: 700px; max-height: 85vh; overflow-y: auto; }
-
-@keyframes modalSlideUp {
-	from { opacity: 0; transform: translateY(20px); }
-	to { opacity: 1; transform: translateY(0); }
-}
-
-.modal-header {
+.modal__header {
+	flex: none;
 	display: flex; align-items: center; justify-content: space-between;
-	padding: var(--space-5) var(--space-6);
+	gap: var(--space-3);
+	padding: var(--space-3) var(--space-3) var(--space-3) var(--space-6);
 	border-bottom: 1px solid var(--border-color);
 }
 
-.modal-title { font-size: 1.125rem; font-weight: 600; }
-
-.modal-close {
-	background: none; border: none; cursor: pointer;
-	color: var(--text-muted); padding: var(--space-1);
-	border-radius: 4px; transition: all 0.2s;
-	display: flex; align-items: center; justify-content: center;
-}
-
-.modal-close:hover { background: var(--bg-hover); color: var(--text-primary); }
-
-.modal-body { padding: var(--space-6); }
-
-/* Native <dialog> modals (used by the files browser's "New bucket" form,
-   etc). The .modal box rules above target the htmx-driven overlay/box
-   pattern; this block re-centers and pads the native-dialog variant,
-   draws a ::backdrop scrim, and gives the inner form sensible spacing.
-   The screenshot of the bucket modal landing in the top-left corner
-   without backdrop dimming is the symptom that motivated this block. */
-dialog.modal {
-	position: fixed;
-	inset: 0;
-	margin: auto;
-	height: fit-content;
-	padding: var(--space-6);
-	border: 1px solid var(--border-color);
-}
-dialog.modal::backdrop {
-	background: rgba(0, 0, 0, 0.5);
-	backdrop-filter: blur(2px);
-}
-dialog.modal h3 {
-	margin: 0 0 var(--space-4);
-	font-size: 1.125rem;
-	font-weight: 600;
-}
-dialog.modal label {
-	display: block;
-	margin-bottom: var(--space-2);
-}
-dialog.modal label > span {
-	display: block;
-	margin-bottom: var(--space-2);
-	font-size: 0.875rem;
-	font-weight: 500;
-	color: var(--text-primary);
-}
-dialog.modal input[type="text"],
-dialog.modal input[type="email"],
-dialog.modal input[type="number"],
-dialog.modal input[type="password"] {
-	width: 100%;
-	padding: var(--space-2) var(--space-3);
-	border: 1px solid var(--border-color);
-	border-radius: 6px;
-	font-size: 0.875rem;
-	color: var(--text-primary);
-	background: var(--surface-1);
-}
-/* Focus ring comes from the global :where(...):focus-visible rule in
-   base.css (the old `outline: var(--focus-ring)` here was an invalid
-   outline value — --focus-ring is box-shadow syntax — and got dropped). */
-dialog.modal input:focus-visible {
-	border-color: var(--primary-color);
-}
-dialog.modal .form-hint {
-	margin: var(--space-2) 0 var(--space-4);
-}
-dialog.modal .checkbox-label {
-	display: flex;
-	align-items: flex-start;
+.modal__heading {
+	display: flex; align-items: center; flex-wrap: wrap;
 	gap: var(--space-2);
-	margin: var(--space-2) 0 var(--space-5);
-	font-size: 0.875rem;
-	font-weight: normal;
-	color: var(--text-primary);
+	min-width: 0;
 }
-dialog.modal .checkbox-label > span {
-	display: inline;
+
+.modal__title {
 	margin: 0;
-	font-weight: normal;
+	font-size: var(--text-lg);
+	font-weight: 600;
+	line-height: 1.3;
+	overflow-wrap: anywhere;
 }
-dialog.modal .checkbox-label input[type="checkbox"] {
-	margin-top: 0.2em;
-	accent-color: var(--primary-color);
+
+/* 44px: the touch-target floor, on every width. */
+.modal__close {
+	flex: none;
+	display: inline-flex; align-items: center; justify-content: center;
+	width: 44px; height: 44px;
+	padding: 0;
+	background: none; border: none; border-radius: var(--radius-md);
+	color: var(--text-muted);
+	cursor: pointer;
+	transition: background var(--transition-fast), color var(--transition-fast);
 }
-dialog.modal .modal-actions {
-	display: flex;
-	justify-content: flex-end;
-	gap: var(--space-2);
-	margin-top: var(--space-4);
+
+.modal__close:hover { background: var(--bg-hover); color: var(--text-primary); }
+
+.modal__body {
+	flex: 1 1 auto;
+	min-height: 0;
+	overflow-y: auto;
+	overscroll-behavior: contain;
+	padding: var(--space-6);
 }
-dialog.modal .modal-error {
-	display: block;
-	margin: 0 0 var(--space-3);
-	padding: var(--space-2) var(--space-3);
-	border-radius: 6px;
-	background: #fee2e2;
-	color: #991b1b;
-	font-size: 0.875rem;
+
+/* With a footer, the footer's own padding closes the body. */
+.modal__body:has(.modal__footer) { padding-bottom: 0; }
+
+.modal__footer {
+	position: sticky;
+	bottom: 0;
+	z-index: 1;
+	display: flex; justify-content: flex-end; flex-wrap: wrap;
+	gap: var(--space-3);
+	margin: var(--space-6) calc(-1 * var(--space-6)) 0;
+	padding: var(--space-4) var(--space-6);
+	background: var(--surface-1);
+	border-top: 1px solid var(--border-color);
+}
+
+/* chrome.js's "Press Esc again to discard changes", first in the footer row. */
+.modal__discard {
+	flex: 1 0 100%;
+	margin: 0;
+	font-size: var(--text-sm);
+	color: var(--accent-warning-text);
+}
+.modal__discard:empty { display: none; }
+
+@media (max-width: 720px) {
+	.modal__header { padding-left: var(--space-4); }
+	.modal__body { padding: var(--space-4); }
+	.modal__footer {
+		margin: var(--space-4) calc(-1 * var(--space-4)) 0;
+		padding: var(--space-3) var(--space-4);
+	}
 }
 
 /* ===== Block detail modal (blocks/admin/pages/blocks.rs) ===== */
@@ -144,5 +137,3 @@ dialog.modal .modal-error {
 .modal-description { font-size: var(--text-sm); color: var(--text-muted); line-height: 1.6; margin-bottom: var(--space-4); }
 .modal-section-title { font-size: var(--text-sm); font-weight: 600; margin: var(--space-4) 0 var(--space-2); }
 .modal-tech { font-size: 13px; color: var(--text-muted); }
-dialog.modal .modal-error[hidden] { display: none; }
-

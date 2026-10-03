@@ -318,7 +318,7 @@ pub(crate) async fn grants_custom_tab(
             form hx-post="/b/admin/grants/rules" hx-target="#content" {
                 div .form-group {
                     label .form-label for="grantee" { "Which block needs access?" }
-                    select .form-input #grantee name="grantee" required {
+                    select .form-input #grantee name="grantee" required autofocus {
                         option value="" disabled selected { "Select a block..." }
                         option value="*" { "All blocks" }
                         @for name in &block_names {
@@ -389,10 +389,10 @@ pub(crate) async fn grants_custom_tab(
                     input .form-input type="text" #description name="description"
                         placeholder="e.g. Analytics block needs to read user profiles";
                 }
-                div .form-actions {
-                    button .btn .btn--secondary .btn--block type="button" data-action="modal-close" data-modal-target="add-grant-modal" { "Cancel" }
+                (components::modal_footer(html! {
+                    (components::modal_cancel())
                     button .btn .btn--primary .btn--block type="submit" { "Add Grant" }
-                }
+                }))
             }
         }))
     })

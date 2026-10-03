@@ -404,8 +404,10 @@
 	padding: var(--space-4);
 	cursor: pointer;
 	transition: border-color 0.15s, box-shadow 0.15s;
+	position: relative;
 }
-.block-card:hover { border-color: var(--primary-color); box-shadow: var(--shadow-sm); }
+.block-card:hover,
+.block-card:focus-within { border-color: var(--primary-color); box-shadow: var(--shadow-sm); }
 .block-card--disabled { opacity: 0.6; }
 .block-card__head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-2); }
 .block-card__title {
@@ -413,6 +415,15 @@
 	margin: 0; color: var(--text-primary);
 	word-break: break-word;
 }
+/* The card's control (blocks.rs): a button that reads as the title, its
+   ::after stretched over the card so the whole card stays clickable. */
+.block-card__title-button {
+	all: unset;
+	cursor: pointer;
+	border-radius: var(--radius-sm);
+}
+.block-card__title-button::after { content: ""; position: absolute; inset: 0; border-radius: var(--radius-lg); }
+.block-card__title-button:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
 /* `font-size` here used to size the "\u{2713}"/"\u{2717}" text glyphs; the
    marks are now `icons::check()`/`icons::x()`, so the size moves to the svg
    rule below (16px to sit with the card title rather than the icon set's
@@ -450,6 +461,8 @@
 .block-card__version { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .block-card__open {
 	margin-left: auto;
+	/* Above the title button's card-wide ::after, so it is its own target. */
+	position: relative; z-index: 1;
 	/* Match the meta-row baseline; no absolute positioning so the Open
 	   button can never overlap the next card's title (the previous bug). */
 }
