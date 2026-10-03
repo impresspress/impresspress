@@ -36,6 +36,17 @@ export const RECOVERY_DONE = '__impresspress_recovery_done';
 export const RECOVERY_LOCK = '__impresspress_recovery';
 export const RECOVERED_CACHE = '__impresspress_recovered';
 export const RECOVERED_KEY = '/__impresspress_recovered';
+/// The runtime binary the registered worker was built for — the version a
+/// death in these tests is a death of — and the one a newer version an update
+/// brings in was built for. Each worker answers its own when asked
+/// (`impresspress-runtime`).
+export const OLD_RUNTIME = '/app_bg-aaaaaaaa.wasm';
+export const NEW_RUNTIME = '/app_bg-bbbbbbbb.wasm';
+
+/// A worker answering the shell's `impresspress-runtime` question.
+function answerRuntime(message, ports, runtime) {
+  if (message.type === 'impresspress-runtime') ports[0].postMessage({ runtime });
+}
 
 function storage(initial = {}) {
   const map = new Map(Object.entries(initial));
@@ -110,9 +121,8 @@ function element() {
 ///                 a newer version that installs and then activates (taking
 ///                 the page); `'fails'`, one the browser discards while
 ///                 installing; `'active'`, a newer version that had already
-///                 activated before this page asked (the registration's
-///                 active worker is not the one that controls the page);
-///                 nothing, by default
+///                 activated before this page asked — and, where the page
+///                 is `controlled`, already took it; nothing, by default
 export function loadShell({
   session = {},
   stop,
@@ -224,7 +234,8 @@ export function loadShell({
     addEventListener: () => {},
     removeEventListener: () => {},
     // The page asking the worker to take it.
-    postMessage: (message) => {
+    postMessage: (message, ports) => {
+      answerRuntime(message, ports, OLD_RUNTIME);
       asked.push(message);
       if (!claims || message.type !== 'impresspress-claim') return;
       queueMicrotask(() => {
@@ -236,9 +247,6 @@ export function loadShell({
   let controller = null;
   let registration = null;
   let updates = 0;
-  // The newer version an update check finds (`update`): `installing` at
-  // first, then — a turn later — installed and activated, taking the page;
-  // or discarded.
   // A version of the registration other than the stub `worker`: it keeps
   // its own state, tells its listeners when that changes, and takes the page
   // when asked to.
@@ -250,7 +258,8 @@ export function loadShell({
       scriptURL: `${ORIGIN}/sw.js`,
       addEventListener: (type, l) => type === 'statechange' && listeners.add(l),
       removeEventListener: (type, l) => listeners.delete(l),
-      postMessage: (message) => {
+      postMessage: (message, ports) => {
+        answerRuntime(message, ports, NEW_RUNTIME);
         asked.push(message);
         if (message.type !== 'impresspress-claim') return;
         queueMicrotask(() => {
@@ -261,6 +270,12 @@ export function loadShell({
     };
     return next;
   };
+  // The newer version already in place (`update: 'active'`), and the page
+  // it took, if any.
+  const already = update === 'active' ? version('activated') : null;
+  // The newer version an update check finds (`update`): `installing` at
+  // first, then — a turn later — installed and activated, taking the page;
+  // or discarded.
   const incoming = () => {
     const next = version('installing');
     const fire = next.fire;
@@ -284,7 +299,7 @@ export function loadShell({
     }, 1);
     return next;
   };
-  if (controlled === true) controller = worker;
+  if (controlled === true) controller = already ?? worker;
   if (controlled === 'dead') controller = { state: 'activated', scriptURL: `${ORIGIN}/sw.js` };
   const serviceWorker = {
     get controller() {
@@ -312,10 +327,15 @@ export function loadShell({
         Object.entries(urls).map(([slot, scriptURL]) => [
           slot,
           slot === 'active' && update === 'active'
-            ? version('activated')
+            ? already
             : slot === 'active' && controlled === true
               ? Object.assign(worker, { scriptURL })
-              : { scriptURL, addEventListener: () => {}, removeEventListener: () => {} }
+              : {
+                  scriptURL,
+                  addEventListener: () => {},
+                  removeEventListener: () => {},
+                  postMessage: (message, ports) => answerRuntime(message, ports, OLD_RUNTIME)
+                }
         ])
       );
       registration.installing ??= null;

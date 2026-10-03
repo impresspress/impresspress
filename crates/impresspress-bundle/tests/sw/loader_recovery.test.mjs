@@ -44,6 +44,8 @@ import assert from 'node:assert/strict';
 import {
   BREAKER,
   loadShell,
+  NEW_RUNTIME,
+  OLD_RUNTIME,
   ORIGIN,
   RECOVERED_CACHE,
   RECOVERY_DONE,
@@ -64,7 +66,7 @@ const DEATH = { id: '0f8fad5b-d9cb-469f-a165-70867728950e' };
 // The breaker as the loader writes it: what the worker reported, and when
 // this page was told. A report with no death id is held as `''`.
 const breaker = (cause, stage, { id = '', at = NOW } = {}) =>
-  JSON.stringify({ cause, stage: typeof stage === 'string' ? stage : '', id, at });
+  JSON.stringify({ cause, stage: typeof stage === 'string' ? stage : '', id, runtime: '', at });
 const left = (stage, at = NOW - 2_000, death = {}) => ({ reason: CAUSE, stage, at, ...death });
 const sessionOf = (shell) => Object.fromEntries(shell.session.map);
 
@@ -992,11 +994,29 @@ test('an erase is recorded as done only once it is', async () => {
 // replacement exists, so that the replacement never starts on what is being
 // erased. (The buttons' order is the other way round — the waiting screen's
 // test above says why.)
-test('the automatic recovery erases before it registers the replacement', async () => {
+// The worker is dead, so nothing can write the data back while it is
+// erased; but the replacement is registered first, so that one that cannot
+// be registered — a CDN serving a stale worker under the new URL — has
+// replaced nothing and erases nothing.
+test('the automatic recovery erases once its replacement is registered', async () => {
   const shell = loadShell({ stop: left('initialize'), now: NOW, wipe: true });
   await shell.booted;
 
-  assert.deepEqual(shell.events, ['erase app.sqlite', `register ${REPLACEMENT}`]);
+  assert.deepEqual(shell.events, [`register ${REPLACEMENT}`, 'erase app.sqlite']);
+});
+
+test('a replacement that cannot be registered erases nothing, even where the failure would erase', async () => {
+  const shell = loadShell({
+    stop: left('initialize'),
+    now: NOW,
+    wipe: true,
+    registerFails: new TypeError('Failed to register a ServiceWorker: ServiceWorker script evaluation failed')
+  });
+  await shell.booted;
+
+  assert.deepEqual(shell.opfs(), ['app.sqlite']);
+  assert.deepEqual(shell.events, []);
+  assert.ok(shell.stuck('impresspress-retry'));
 });
 
 test('a button’s erase that does not complete is shown, and the app is not entered as though it had', async () => {
@@ -1105,6 +1125,9 @@ test('a dead worker an update is replacing is left to the update: nothing replac
   assert.deepEqual(shell.opfs(), ['app.sqlite']);
   assert.deepEqual(shell.written(RECOVERY_DONE), [], 'no recovery was spent');
   assert.deepEqual(shell.cacheNames().sort(), ['assets-v1', RECOVERED_CACHE].sort());
+  // What it waited on, in turn: the check, then the new version's install.
+  const waits = shell.statusLines.filter((line) => !line.startsWith('The app') && line.endsWith('…'));
+  assert.deepEqual(waits.slice(0, 2), ['Checking for a new version…', 'Updating the app…']);
   assert.ok(
     shell.statusLines.includes(
       `${STOPPED} — a new version is replacing it; the data stored locally in this browser is kept…`
@@ -1146,18 +1169,50 @@ test('…on the probe road too: a 503 to the boot probe ends in the update, not 
   assertEntered(next);
 });
 
-test('an update already in place when the shell looks owns it as well', async () => {
+// "Already in place" is decided by VERSION — the runtime the death names
+// against the one the active worker answers with — never by which worker
+// controls this page: a shell opened fresh (a hard reload, a new tab) within
+// the minute a cause stays fresh has no controller at all, and one an
+// update's `clients.claim()` reached first is controlled by the new worker.
+// Either way the healthy new version must not be replaced, nor the data
+// erased under it.
+for (const [how, controlled] of [
+  ['a shell with no controller', false],
+  ['a shell the new version has already claimed', true]
+]) {
+  test(`an update already in place owns it as well — ${how}`, async () => {
+    const shell = loadShell({
+      stop: left('initialize', NOW, { ...DEATH, runtime: OLD_RUNTIME }),
+      registeredUrl: `${ORIGIN}/sw.js`,
+      update: 'active',
+      controlled,
+      now: NOW,
+      wipe: true
+    });
+    await shell.booted;
+
+    assert.deepEqual(shell.registeredUrls, []);
+    assert.deepEqual(shell.opfs(), ['app.sqlite']);
+    assert.deepEqual(shell.recovered(), [DEATH.id]);
+    assertEntered(shell);
+  });
+}
+
+// The same question about a death of the version that is still active: it
+// IS that worker, and the recovery replaces it. (A recovery's own
+// replacement, under `?recovery=`, is the same version too.)
+test('a death of the version still active is recovered from', async () => {
   const shell = loadShell({
-    stop: left('initialize', NOW, DEATH),
+    stop: left('request', NOW, { ...DEATH, runtime: OLD_RUNTIME }),
     registeredUrl: `${ORIGIN}/sw.js`,
-    update: 'active',
-    now: NOW,
-    wipe: true
+    controlled: false,
+    now: NOW
   });
   await shell.booted;
 
-  assert.deepEqual(shell.registeredUrls, []);
-  assert.deepEqual(shell.opfs(), ['app.sqlite']);
+  assert.deepEqual(shell.registeredUrls, [REPLACEMENT]);
+  assert.ok(shell.statusLines.includes('Checking for a new version…'), shell.statusLines);
+  assert.ok(!shell.statusLines.includes('Updating the app…'), shell.statusLines);
 });
 
 // An update counts only once it has INSTALLED. One whose install fails —
@@ -1234,4 +1289,25 @@ test('visible text names the app the page shows, not the build', async () => {
   const booting = loadShell({ now: NOW, title: 'Kiln & Co' });
   await booting.booted;
   assert.match(booting.status.textContent, /Loading Kiln & Co\.\.\.$/);
+});
+
+// With a full quota a version still installs — it keeps no runtime and loads
+// it from the host (`keepRuntime` in sw.js; `sw_runtime_kept.test.mjs`) —
+// so "Reset" keeps its order: the replacement is brought in and activated,
+// then the data is erased, which is what frees the space, then the app is
+// entered.
+test('a reset completes in its order: replacement in, then the erase, then the app', async () => {
+  const shell = loadShell({
+    stop: left('request', NOW, DEATH),
+    session: { [RECOVERY_DONE]: 'restarted' },
+    now: NOW
+  });
+  await shell.booted;
+
+  await shell.stuck('impresspress-reset').click();
+
+  assert.deepEqual(shell.events, [`register ${REPLACEMENT}`, 'erase app.sqlite']);
+  assert.deepEqual(shell.opfs(), []);
+  assert.equal(shell.probes.length, 1);
+  assert.equal(shell.location.reloads, 1);
 });

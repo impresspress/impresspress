@@ -51,13 +51,15 @@ const RUNTIME_URL = '__WASM_BIN__';
 //
 // One binary per version, and one version kept once a new one activates —
 // a few megabytes of the origin's quota, which it shares with the app's
-// local data. A version that cannot keep its binary fails to install, and a
-// browser keeps the worker it has rather than switch to one that cannot
-// start: the host no longer has the binary, the quota is exhausted, or what
-// the host answered is not a WebAssembly module at all — a host that falls
+// local data. A version whose binary the host does not have fails to install,
+// and a browser keeps the worker it has rather than switch to one that
+// cannot start: the host no longer has the binary, or what it answered is
+// not a WebAssembly module at all — a host that falls
 // back to its app shell for unknown paths (the dev sandbox's
 // `not_found_handling = "single-page-application"`) answers a deleted binary
-// with a 200 and an HTML page (`keepRuntime`).
+// with a 200 and an HTML page (`keepRuntime`). A full quota does NOT fail
+// the install: the version keeps nothing and loads its runtime from the
+// host, as every version did before this cache.
 //
 // `loader.js`'s recovery drops this cache with every other one, so the
 // replacement it registers fetches its runtime afresh; `runtimeBinary`
@@ -192,7 +194,8 @@ async function selfDestruct(reason, stage, toBootShell) {
                     type: 'sw-self-destruct',
                     reason: poisonReason,
                     stage: poisonStage,
-                    id: poisonId
+                    id: poisonId,
+                    runtime: RUNTIME_URL
                 });
             } catch (e) {
                 console.warn('[__APP_NAME__] postMessage failed:', e);
@@ -236,6 +239,7 @@ async function leaveCauseForBootShell() {
                     reason: poisonReason,
                     stage: poisonStage,
                     id: poisonId,
+                    runtime: RUNTIME_URL,
                     at: Date.now()
                 }),
                 { headers: { 'Content-Type': 'application/json' } }
@@ -291,7 +295,8 @@ const WASM_MAGIC = [0x00, 0x61, 0x73, 0x6d];
 
 /**
  * Keep this version's runtime binary (RUNTIME_CACHE says why). Throws when
- * it cannot be kept, which fails the install.
+ * the host has no valid binary for it, which fails the install; a binary
+ * there is no room to keep is left on the host.
  *
  * What is kept must be a WebAssembly module, not merely a 200: a host that
  * answers unknown paths with its app shell answers a binary it no longer
@@ -317,10 +322,22 @@ async function keepRuntime() {
                 `(the host answered ${response.headers.get('Content-Type') || 'no content type'})`
         );
     }
-    await cache.put(
-        RUNTIME_URL,
-        new Response(bytes, { headers: { 'Content-Type': 'application/wasm' } })
-    );
+    try {
+        await cache.put(
+            RUNTIME_URL,
+            new Response(bytes, { headers: { 'Content-Type': 'application/wasm' } })
+        );
+    } catch (e) {
+        // A full quota is not a reason to refuse the version: the binary is
+        // on the host, and `runtimeBinary` loads it from there. Refusing would
+        // also leave no way to free the space — "Reset" erases only once its
+        // replacement worker is in.
+        if (e && e.name === 'QuotaExceededError') {
+            console.warn('[__APP_NAME__] no room to keep the runtime; it will be loaded from the host:', e);
+            return;
+        }
+        throw e;
+    }
 }
 
 /**
@@ -343,9 +360,21 @@ self.addEventListener('install', (event) => {
     event.waitUntil(Promise.all([keepRuntime(), self.skipWaiting()]));
 });
 
+// Once this version is active, a death some earlier version left for the
+// boot shell (`STOP_CAUSE_CACHE`) is no longer anyone's to recover from: the
+// worker that died has been replaced. Left there, a shell loading within the
+// minute it stays fresh would recover from it — and replace this worker.
+async function dropStaleCause() {
+    try {
+        await caches.delete(STOP_CAUSE_CACHE);
+    } catch (e) {
+        console.warn('[__APP_NAME__] could not drop a replaced worker’s cause:', e);
+    }
+}
+
 self.addEventListener('activate', (event) => {
     console.log('[__APP_NAME__] Service Worker activating...');
-    event.waitUntil(Promise.all([dropOtherRuntimes(), self.clients.claim()]));
+    event.waitUntil(Promise.all([dropOtherRuntimes(), dropStaleCause(), self.clients.claim()]));
 });
 
 // ---------------------------------------------------------------------------
@@ -363,6 +392,16 @@ self.addEventListener('message', (event) => {
     // `takeControl` in `loader.js`.
     if (msg.type === 'impresspress-claim') {
         event.waitUntil(self.clients.claim());
+        return;
+    }
+
+    // The boot shell asking which version this is — the runtime binary it
+    // was built for, the same `runtime` every report of a death carries.
+    // Answered whether or not the runtime is alive: it is how the shell
+    // tells a dead version from the one that has replaced it
+    // (`updateUnderway` in `loader.js`).
+    if (msg.type === 'impresspress-runtime') {
+        if (event.ports && event.ports[0]) event.ports[0].postMessage({ runtime: RUNTIME_URL });
         return;
     }
 
@@ -626,9 +665,9 @@ async function runtimeStopped(request) {
     const next = recoveryErases()
         ? 'Reloading the page may run a recovery that erases the data this browser stores for the app.'
         : 'Reload the page to restart it; the data this browser stores for the app is kept.';
-    // `cause`, `stage` and `id` are the fields the runtime's shape does not
-    // have: the bare reason, where it failed and which death this
-    // is, for `loader.js`, whose boot probe is a request like any other and
+    // `cause`, `stage`, `id` and `runtime` are the fields the runtime's
+    // shape does not have: the bare reason, where it failed, which death
+    // this is and which version died (`reportedRuntime`), for `loader.js`, whose boot probe is a request like any other and
     // which words the sentence around them itself.
     const body = {
         error: 'Unavailable',
@@ -636,7 +675,8 @@ async function runtimeStopped(request) {
         code: 'runtime_stopped',
         cause: poisonReason,
         stage: poisonStage,
-        id: poisonId
+        id: poisonId,
+        runtime: RUNTIME_URL
     };
     return new Response(JSON.stringify(body), {
         status: 503,

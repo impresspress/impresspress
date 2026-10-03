@@ -250,16 +250,18 @@ function stoppedText(cause) {
 }
 
 // What sw.js reported, as this shell holds it: `cause` is its reason,
-// `stage` where it failed, `id` which death it was. Each is
+// `stage` where it failed, `id` which death it was, `runtime` which version
+// died (the runtime binary it was built for, `RUNTIME_URL` there). Each is
 // whatever arrived, held as the type it should be; a stage that is missing
 // or unknown (a worker from an older build) is one that does not erase,
 // because `erasesFor` asks for exactly one value, and a missing id is one
 // that matches no recorded death.
-function reported(cause, stage, id) {
+function reported(cause, stage, id, runtime) {
     return {
         cause: String(cause),
         stage: typeof stage === 'string' ? stage : '',
         id: typeof id === 'string' ? id : '',
+        runtime: typeof runtime === 'string' ? runtime : '',
     };
 }
 
@@ -294,7 +296,7 @@ async function takeStopCause() {
     try {
         const breaker = JSON.parse(sessionStorage.getItem(SW_RECOVER_KEY));
         if (breaker && typeof breaker.cause === 'string' && isFresh(breaker.at)) {
-            told = reported(breaker.cause, breaker.stage, breaker.id);
+            told = reported(breaker.cause, breaker.stage, breaker.id, breaker.runtime);
         }
     } catch (_) {
         // Not something this script wrote; there is no cause in it.
@@ -308,7 +310,7 @@ async function takeStopCause() {
             const stop = entry ? await entry.json() : null;
             await caches.delete(STOP_CAUSE_CACHE);
             if (stop && isFresh(stop.at)) {
-                left = reported(stop.reason, stop.stage, stop.id);
+                left = reported(stop.reason, stop.stage, stop.id, stop.runtime);
             }
         }
     } catch (e) {
@@ -326,6 +328,7 @@ function setBreaker(failure) {
             cause: failure.cause,
             stage: failure.stage,
             id: failure.id,
+            runtime: failure.runtime,
             at: Date.now(),
         }),
     );
@@ -338,7 +341,7 @@ async function stoppedCauseOf(response) {
     try {
         const body = await response.json();
         if (body.code !== 'runtime_stopped') return null;
-        return reported(body.cause, body.stage, body.id);
+        return reported(body.cause, body.stage, body.id, body.runtime);
     } catch (_) {
         return null;
     }
@@ -446,10 +449,26 @@ function hasInstalled(worker) {
     });
 }
 
+// The version `worker` is: the runtime binary it was built for, which it
+// answers whether or not its runtime is alive (`impresspress-runtime` in
+// sw.js). Asked only of a registration's active worker about a death that
+// named its own version — and every version that names it answers this;
+// the active worker is never older than one that died after it.
+function runtimeOf(worker) {
+    return new Promise((resolve) => {
+        const channel = new MessageChannel();
+        channel.port1.onmessage = (event) => {
+            channel.port1.close();
+            resolve(typeof event.data?.runtime === 'string' ? event.data.runtime : '');
+        };
+        worker.postMessage({ type: 'impresspress-runtime' }, [channel.port2]);
+    });
+}
+
 // Whether an update owns the transition away from the worker that died:
 // `true` when a version newer than it is installed and on its way in, or has
-// already taken its place. `servedBy` is the worker that controlled this
-// page when it loaded — the one that answered with this shell — or `null`.
+// already taken its place. `failure` is the death, or `null` (a button with
+// no failure behind it).
 //
 // Asked of the host first (`registration.update()`, which joins a check the
 // browser already has in flight rather than starting a second), so a
@@ -457,13 +476,23 @@ function hasInstalled(worker) {
 // INSTALLING is waited for: if its install fails, nothing is replacing the
 // dead worker after all, and the recovery must — a dead worker left to an
 // update that never lands would leave this page with no way out. A check
-// that cannot reach the host finds nothing.
+// that cannot reach the host finds nothing. `status` says which of the two
+// waits this is; there is no timer here — a browser settles an install.
+//
+// "Already taken its place" is a question about VERSIONS, not about which
+// worker controls this page: a shell opened fresh, or one an update's
+// `clients.claim()` reached first, has no dead worker to compare with. The
+// death names the runtime the dying version was built for; an active worker
+// built for another one has replaced it. (Two versions with the same runtime
+// — a recovery's replacement, a deployment that changed only the shell — are
+// the same version here, and a death of one is a death of the other.)
 //
 // Every automatic recovery and every button asks this, holding
 // RECOVERY_LOCK, and only where it answers `false` registers a replacement:
 // one owner of each transition, whichever road — the worker's message, the
 // cause it left, its 503 to a boot probe, a button — led here.
-async function updateUnderway(registration, servedBy) {
+async function updateUnderway(registration, failure, status) {
+    status.textContent = 'Checking for a new version…';
     try {
         await registration.update();
     } catch (e) {
@@ -472,12 +501,12 @@ async function updateUnderway(registration, servedBy) {
     for (;;) {
         const incoming = registration.installing || registration.waiting;
         if (!incoming) break;
+        status.textContent = 'Updating the app…';
         if (await hasInstalled(incoming)) return true;
         if ((registration.installing || registration.waiting) === incoming) break;
     }
-    // Already in: the worker that answered with this shell is no longer the
-    // registration's active one.
-    return Boolean(servedBy && registration.active && registration.active !== servedBy);
+    if (failure === null || failure.runtime === '' || !registration.active) return false;
+    return (await runtimeOf(registration.active)) !== failure.runtime;
 }
 
 // Replace the worker in place (WORKER_URL says how and why): drop the
@@ -487,15 +516,21 @@ async function updateUnderway(registration, servedBy) {
 // nothing was reported. Answers the registration, whose newest version is
 // the replacement.
 //
-// `eraseFirst` erases the local data BEFORE the replacement is registered,
-// and is for a worker that is DEAD: a poisoned worker never touches the data
-// again, and the replacement must not start on what is being erased. A
-// worker that may still be running is a different matter — `recoverFromButton`.
-async function replaceWorker({ eraseFirst, failure }) {
+// `eraseData` erases the local data once the replacement is REGISTERED and
+// before it has been asked for anything, and is for a worker that is DEAD: a
+// poisoned worker never touches the data again. Not before registering: a
+// replacement that cannot be registered (WORKER_URL's CDN case) replaces
+// nothing, and must erase nothing either. `register()` answers as the
+// replacement starts installing, so the erase runs while it fetches its
+// runtime, well before it can activate and be asked to open the data; a
+// request another tab makes of it meanwhile can hold a file open, and the
+// erase is then noted as not done. A worker that may still be running is a
+// different matter — `recoverFromButton`.
+async function replaceWorker({ eraseData: erase, failure }) {
     sessionStorage.setItem(RECOVERY_DONE_KEY, RECOVERY_RESTARTED);
     await dropCaches();
-    if (eraseFirst) noteErase(await eraseData());
     const registration = await registerWorker(replacementWorkerUrl());
+    if (erase) noteErase(await eraseData());
     if (failure !== null) await recordRecovered(failure);
     return registration;
 }
@@ -533,12 +568,12 @@ async function recoverFromButton({ erase, forget, failure }, status) {
             // An update already bringing a new worker in is that
             // replacement: registering another over it would discard it.
             const current = await navigator.serviceWorker.getRegistration();
-            if (current && (await updateUnderway(current, null))) {
+            if (current && (await updateUnderway(current, failure, status))) {
                 sessionStorage.setItem(RECOVERY_DONE_KEY, RECOVERY_RESTARTED);
                 if (failure !== null) await recordRecovered(failure);
                 return current;
             }
-            return replaceWorker({ eraseFirst: false, failure });
+            return replaceWorker({ eraseData: false, failure });
         });
         const worker = await activated(registration);
         if (erase && replaced) {
@@ -761,8 +796,7 @@ function renderWaitingUI(target, worker, status, waitedMs) {
 // - `unreplaced` the replacement could not be registered (`error`): the
 //               stopped screen is shown, `recoveryFailed`.
 //
-// `servedBy` is the worker that controlled this page when it loaded.
-async function recoverIfStopped(status, servedBy) {
+async function recoverIfStopped(status) {
     return underRecoveryLock(async () => {
         const failure = await takeStopCause();
         if (failure === null) return { kind: 'none' };
@@ -770,7 +804,7 @@ async function recoverIfStopped(status, servedBy) {
         const spent = sessionStorage.getItem(RECOVERY_DONE_KEY);
         if (spent) return { kind: 'spent', failure, spent };
         const current = await navigator.serviceWorker.getRegistration();
-        if (current && (await updateUnderway(current, servedBy))) {
+        if (current && (await updateUnderway(current, failure, status))) {
             status.textContent =
                 stoppedText(failure.cause) +
                 ' — a new version is replacing it; the data stored locally in this browser is kept…';
@@ -784,7 +818,7 @@ async function recoverIfStopped(status, servedBy) {
                 ? ' — recovering; the data stored locally in this browser is being erased…'
                 : ' — restarting it; the data stored locally in this browser is kept…');
         try {
-            const registration = await replaceWorker({ eraseFirst: erase, failure });
+            const registration = await replaceWorker({ eraseData: erase, failure });
             return { kind: 'recovered', registration, failure };
         } catch (error) {
             return { kind: 'unreplaced', failure, error };
@@ -922,10 +956,6 @@ async function boot() {
         return;
     }
 
-    // The worker that answered with this shell, if one did — before anything
-    // here can change which worker controls the page (`updateUnderway`).
-    const servedBy = navigator.serviceWorker.controller;
-
     try {
         // Recovery path: a SW self-destructed and left its cause, for this
         // page (the breaker) or for whichever boot shell loaded next (the
@@ -939,7 +969,7 @@ async function boot() {
         // scenario). For a browser-local demo this costs the user's local
         // rows but breaks the loop; that trade-off is what
         // OPFS_WIPE_ON_RECOVERY opts into.
-        const recovery = await recoverIfStopped(status, servedBy);
+        const recovery = await recoverIfStopped(status);
         if (recovery.kind === 'spent') {
             renderStoppedUI(recovery.failure, recovery.spent, status);
             return;
@@ -955,7 +985,7 @@ async function boot() {
         // recovery path above runs.
         navigator.serviceWorker.addEventListener('message', (event) => {
             if (event.data?.type === 'sw-self-destruct') {
-                setBreaker(reported(event.data.reason, event.data.stage, event.data.id));
+                setBreaker(reported(event.data.reason, event.data.stage, event.data.id, event.data.runtime));
             }
         });
 

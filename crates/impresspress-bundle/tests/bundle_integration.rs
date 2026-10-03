@@ -867,13 +867,19 @@ fn the_worker_and_the_loader_agree_on_where_the_stop_cause_is_left() {
             "loader.js = {loader}"
         );
     }
-    // The worker's answer carries `cause`, `stage` and the death's stamp,
-    // which is what the loader's boot probe reads back.
-    for field in ["cause: poisonReason", "stage: poisonStage", "id: poisonId"] {
+    // The worker's answer carries `cause`, `stage`, the death's stamp and
+    // the version that died, which is what the loader's boot probe reads
+    // back.
+    for field in [
+        "cause: poisonReason",
+        "stage: poisonStage",
+        "id: poisonId",
+        "runtime: RUNTIME_URL",
+    ] {
         assert!(sw.contains(field), "sw.js = {sw}");
     }
     assert!(
-        loader.contains("return reported(body.cause, body.stage, body.id);"),
+        loader.contains("return reported(body.cause, body.stage, body.id, body.runtime);"),
         "loader.js = {loader}"
     );
 }

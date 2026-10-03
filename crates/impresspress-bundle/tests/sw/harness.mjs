@@ -71,7 +71,8 @@ let instances = 0;
 ///
 /// The worker starts as an INSTALLED one: its runtime binary is already kept
 /// in Cache Storage, as `install` left it — unless `runtime.kept` is
-/// `false`, a worker whose kept binary has gone.
+/// `false`, a worker whose kept binary has gone. `runtime.quotaFull` makes
+/// every put into the runtime cache fail as a full quota does.
 export async function loadWorker(runtime = {}, { wipe = false } = {}) {
   const source = SOURCES[wipe ? 'wipe' : 'plain'];
   const listeners = {};
@@ -81,6 +82,7 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
   const warnings = [];
   let unregistered = 0;
   let claimed = 0;
+
   // What `init()` was handed, each time it was called.
   const inits = [];
   const client = {
@@ -103,10 +105,14 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
     return stores.get(name);
   };
   globalThis.caches = {
+    delete: async (name) => stores.delete(name),
     open: async (name) => {
       const entries = store(name);
       return {
         put: async (key, response) => {
+          if (runtime.quotaFull && name === RUNTIME_CACHE) {
+            throw new DOMException('The quota has been exceeded.', 'QuotaExceededError');
+          }
           entries.set(keyOf(key), {
             body: new Uint8Array(await response.arrayBuffer()),
             status: response.status,
@@ -199,9 +205,9 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
 
   /// A page posting `data` to the worker; resolves once whatever the worker
   /// asked to be kept alive for has finished.
-  async function message(data) {
+  async function message(data, ports = []) {
     const kept = [];
-    listeners.message({ data, waitUntil: (promise) => kept.push(promise) });
+    listeners.message({ data, ports, waitUntil: (promise) => kept.push(promise) });
     await Promise.all(kept);
   }
 
@@ -218,6 +224,7 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
     request,
     message,
     lifecycle,
+
     /// What `init()` was handed on each call.
     inits,
     /// The entry kept for `url` in the runtime cache: its bytes and headers.

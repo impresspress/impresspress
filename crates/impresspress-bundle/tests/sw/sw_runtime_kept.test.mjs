@@ -172,3 +172,55 @@ test('the binary is kept as WebAssembly, whatever the host labelled it', async (
   assert.deepEqual([...kept.body], [...RUNTIME_BYTES]);
   assert.deepEqual(kept.headers, [['content-type', 'application/wasm']]);
 });
+
+// A full quota must not refuse the version: the binary is on the host, and
+// refusing would leave "Reset" — which erases only once its replacement is
+// in — no way to free the space.
+test('a full quota does not fail the install: the runtime is loaded from the host', async (t) => {
+  captureConsole(t);
+  const worker = await loadWorker({ kept: false, quotaFull: true, init: compiles });
+
+  await worker.lifecycle('install');
+  assert.deepEqual(worker.runtimesKept(), []);
+
+  worker.network.length = 0;
+  const { response } = await worker.request(LOGIN, { method: 'POST' });
+  assert.equal(await response.text(), 'from the runtime');
+  assert.deepEqual(await handed(worker), RUNTIME_BYTES);
+  assert.deepEqual(worker.network, [RUNTIME_URL]);
+});
+
+// Once a version is active, a death an earlier version left for the boot
+// shell is no longer anyone's to recover from: a shell opened within the
+// minute it stays fresh would otherwise replace the version now in place.
+test('activating drops the cause a replaced worker left for the boot shell', async (t) => {
+  captureConsole(t);
+  const worker = await loadWorker();
+  const cache = await caches.open('__impresspress_sw_stopped');
+  await cache.put('/__impresspress_sw_stopped', new Response(JSON.stringify({ reason: 'x', at: 1 })));
+  assert.ok(worker.leftForBootShell());
+
+  await worker.lifecycle('activate');
+
+  assert.equal(worker.leftForBootShell(), undefined);
+});
+
+// Which version a worker is — dead or alive — is what the boot shell
+// compares a death with (`updateUnderway` in `loader.js`).
+test('a worker says which runtime it was built for, dead or alive', async (t) => {
+  captureConsole(t);
+  for (const runtime of [{}, { initialize: async () => { throw new Error('dead'); } }]) {
+    const worker = await loadWorker(runtime);
+    await worker.request('/', { method: 'GET' });
+    const { port1, port2 } = new MessageChannel();
+    const answer = new Promise((resolve) => {
+      port1.onmessage = (event) => {
+        port1.close();
+        resolve(event.data);
+      };
+    });
+    await worker.message({ type: 'impresspress-runtime' }, [port2]);
+    assert.deepEqual(await answer, { runtime: RUNTIME_URL });
+  }
+});
+

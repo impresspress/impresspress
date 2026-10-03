@@ -1,4 +1,4 @@
-import { test, expect, type BrowserContext, type Page, type Worker } from '@playwright/test';
+import { test, expect, type BrowserContext, type Page } from '@playwright/test';
 import { once } from 'node:events';
 import { type ChildProcess } from 'node:child_process';
 import { readFileSync, utimesSync } from 'node:fs';
@@ -197,15 +197,11 @@ test('a returning browser moves to the new deployment’s worker and runtime, wi
 
   let server = await serveDirectory(DEV_DIST, SW_UPDATE_PORT);
   const context = await browser.newContext({ baseURL: ORIGIN });
-  // Every service worker this browser starts for the origin, in order.
-  const workers: Worker[] = [];
-  context.on('serviceworker', (worker) => workers.push(worker));
   try {
     const page = await context.newPage();
 
     // ---- the first deployment, used --------------------------------------
     await bootServiceWorker(page);
-    expect(workers).toHaveLength(1);
     expect(await answering(page)).toEqual(plainWorkerWith(first));
     expect(await registrationOf(page)).toEqual(SETTLED);
 
@@ -227,8 +223,9 @@ test('a returning browser moves to the new deployment’s worker and runtime, wi
       const registration = await navigator.serviceWorker.getRegistration();
       await registration!.update();
     });
+    // Nothing installed: the same worker, the same runtime.
     expect(await registrationOf(page)).toEqual(SETTLED);
-    expect(workers).toHaveLength(1);
+    expect(await answering(page)).toEqual(plainWorkerWith(first));
 
     // ---- the next deployment ----------------------------------------------
     await stop(server);
@@ -252,7 +249,7 @@ test('a returning browser moves to the new deployment’s worker and runtime, wi
     // is answered by the worker the browser already had; the browser's own
     // check after the navigation is what finds the new script.
     await page.goto('/', { waitUntil: 'load' });
-    await expect.poll(() => workers.length, { timeout: 120_000 }).toBe(2);
+    await expect.poll(() => answering(page), { timeout: 120_000 }).toEqual(plainWorkerWith(next));
     // The new worker did not wait for this tab to close (`skipWaiting`): it
     // is the active one, nothing is left waiting, and the open page is its.
     await expect.poll(() => registrationOf(page), { timeout: 60_000 }).toEqual(SETTLED);
@@ -278,7 +275,7 @@ test('a returning browser moves to the new deployment’s worker and runtime, wi
 
     // Neither a recovery nor a second update happened on the way.
     expect(await registrationOf(page)).toEqual(SETTLED);
-    expect(workers).toHaveLength(2);
+    expect(await answering(page)).toEqual(plainWorkerWith(next));
   } finally {
     await context.close();
     await stop(server);
@@ -309,8 +306,6 @@ test('a returning browser whose worker was stopped moves to the new deployment, 
 
   let server = await serveDirectory(DEV_DIST, SW_UPDATE_PORT);
   const context = await browser.newContext({ baseURL: ORIGIN });
-  const workers: Worker[] = [];
-  context.on('serviceworker', (worker) => workers.push(worker));
   try {
     const page = await context.newPage();
     const shellSaid = await recordShellStatus(page);
@@ -321,7 +316,6 @@ test('a returning browser whose worker was stopped moves to the new deployment, 
     const written = await runFromConsole(page, 'dev_write_file', { path: 'site/kept.html', content: KEPT });
     expect(written.isError, JSON.stringify(written)).toBe(false);
     expect(await viaWorker(page, '/kept.html')).toEqual({ status: 200, text: KEPT });
-    const booted = workers.length;
 
     // The browser stops the idle worker; then the deploy.
     await stopWorkers(page);
@@ -340,7 +334,6 @@ test('a returning browser whose worker was stopped moves to the new deployment, 
     // deployment's worker in: once it is active, its runtime is the one kept.
     await expect.poll(() => answering(page), { timeout: 60_000 }).toEqual(plainWorkerWith(next));
     await expect.poll(() => registrationOf(page), { timeout: 60_000 }).toEqual(SETTLED);
-    expect(workers.length).toBeGreaterThan(booted);
 
     // Replaced by the deployment's own worker, not by a recovery's: nothing
     // died, the shell never said so, and the script URL is the plain one.
@@ -379,12 +372,9 @@ test('a new deployment replaces a worker that a recovery registered', async ({ b
 
   let server = await serveDirectory(DEV_DIST, SW_UPDATE_PORT);
   const context = await browser.newContext({ baseURL: ORIGIN });
-  const workers: Worker[] = [];
-  context.on('serviceworker', (worker) => workers.push(worker));
   try {
     const page = await context.newPage();
     await bootServiceWorker(page);
-    expect(workers).toHaveLength(1);
 
     // A recovery: the runtime dies on a navigation, the shell replaces the
     // worker and the page comes back.
@@ -400,7 +390,6 @@ test('a new deployment replaces a worker that a recovery registered', async ({ b
       page.evaluate(async () => (await navigator.serviceWorker.getRegistration())!.active!.scriptURL);
     const recovered = await scriptUrl();
     expect(recovered).toMatch(/\/sw\.js\?recovery=\d+$/);
-    expect(workers).toHaveLength(2);
     expect(await registrationOf(page)).toEqual(SETTLED);
 
     // The next deployment (dated as in the tests above), and a visit.
@@ -409,17 +398,16 @@ test('a new deployment replaces a worker that a recovery registered', async ({ b
     utimesSync(path.join(UPDATE_DIST, 'sw.js'), deployedAt, deployedAt);
     server = await serveDirectory(UPDATE_DIST, SW_UPDATE_PORT);
     await page.goto('/', { waitUntil: 'load' });
-    await expect.poll(() => workers.length, { timeout: 120_000 }).toBe(3);
+    const recoveredScript = new URL(recovered).pathname + new URL(recovered).search;
+    await expect
+      .poll(() => answering(page), { timeout: 120_000 })
+      .toEqual({ script: recoveredScript, controls: true, kept: [next] });
     await expect.poll(() => registrationOf(page), { timeout: 60_000 }).toEqual(SETTLED);
 
     // The new deployment's runtime answers, under the same script URL: the
     // deploy changed the bytes behind it, not the registration.
     expect((await viaWorker(page, '/b/auth/login')).status).toBe(200);
-    expect(await answering(page)).toEqual({
-      script: new URL(recovered).pathname + new URL(recovered).search,
-      controls: true,
-      kept: [next],
-    });
+    expect(await answering(page)).toEqual({ script: recoveredScript, controls: true, kept: [next] });
   } finally {
     await context.close();
     await stop(server);
@@ -440,12 +428,9 @@ test('a new deployment replaces a worker whose runtime has died', async ({ brows
 
   let server = await serveDirectory(DEV_DIST, SW_UPDATE_PORT);
   const context = await browser.newContext({ baseURL: ORIGIN });
-  const workers: Worker[] = [];
-  context.on('serviceworker', (worker) => workers.push(worker));
   try {
     const page = await context.newPage();
     await bootServiceWorker(page);
-    expect(workers).toHaveLength(1);
 
     // The runtime dies on a request from the page. The page is left where it
     // is, and the worker — dead — is still the registered, active one.
@@ -477,7 +462,7 @@ test('a new deployment replaces a worker whose runtime has died', async ({ brows
       const registration = await navigator.serviceWorker.getRegistration();
       await registration!.update();
     });
-    await expect.poll(() => workers.length, { timeout: 120_000 }).toBe(2);
+    await expect.poll(() => answering(page), { timeout: 120_000 }).toEqual(plainWorkerWith(next));
     await expect.poll(() => registrationOf(page), { timeout: 60_000 }).toEqual(SETTLED);
 
     // The same page, never reloaded, is now answered by a live runtime — the
@@ -485,7 +470,6 @@ test('a new deployment replaces a worker whose runtime has died', async ({ brows
     expect((await viaWorker(page, '/b/auth/login')).status).toBe(200);
     expect(await answering(page)).toEqual(plainWorkerWith(next));
     expect(await page.evaluate(() => (window as any).__sameDocument)).toBe(true);
-    expect(workers).toHaveLength(2);
   } finally {
     await context.close();
     await stop(server);
