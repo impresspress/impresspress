@@ -41,7 +41,7 @@ pub async fn settings_body(ctx: &dyn Context, msg: &Message) -> Result<Markup, W
 
     Ok(html! {
         div .mb-3 .flex .gap-1 {
-            button .btn .btn--primary .btn--sm data-action="modal-open" data-modal-target="create-var" {
+            button .btn .btn--primary .btn--sm data-action="modal-open" data-modal-target=(CREATE_MODAL_ID) {
                 (icons::plus()) " Add Variable"
             }
             @if upgrade_pins > 0 {
@@ -73,7 +73,7 @@ pub async fn settings_body(ctx: &dyn Context, msg: &Message) -> Result<Markup, W
         }
 
         // Create variable modal
-        (components::modal("create-var", "Add Variable", create_variable_form(&CreateVarForm::default())))
+        (components::modal(CREATE_MODAL_ID, "Add Variable", create_variable_form(&CreateVarForm::default())))
 
         // Where a row's Edit button swaps the edit modal
         // ([`handle_edit_variable_form`] answers with the whole `<dialog>`).
@@ -194,15 +194,6 @@ fn create_variable_form(form: &CreateVarForm<'_>) -> Markup {
             }))
         }
     }
-}
-
-/// Full settings page for variables — used by mutation handlers that need to
-/// re-render the complete page after a create/update that landed (`done`).
-/// Delegates to the canonical settings page so both call paths share one
-/// composition; see [`super::settings::settings_page_after_write`] for what a
-/// failed re-read answers.
-async fn variables_page(ctx: &dyn Context, msg: &Message, done: &str) -> OutputStream {
-    super::settings::settings_page_after_write(ctx, msg, "variables", done).await
 }
 
 /// How a variable's value cell should render. SEC-060: the masking decision
@@ -975,7 +966,14 @@ pub async fn handle_create_variable(
     // form used to target `#variables-content`, one tab's table, so a created
     // variable drew the settings page — nav, tabs, modal and all — inside its
     // own table.
-    variables_page(ctx, msg, "Variable created").await
+    super::settings::settings_page_closing_modal(
+        ctx,
+        msg,
+        "variables",
+        "Variable created",
+        CREATE_MODAL_ID,
+    )
+    .await
 }
 
 /// `GET /b/admin/variables/{key}/edit` -- return modal edit form content.
@@ -1131,6 +1129,10 @@ pub async fn handle_edit_variable_form(ctx: &dyn Context, msg: &Message) -> Outp
     ui::html_response_opening_modal(markup, EDIT_MODAL_ID)
 }
 
+/// The Add Variable modal's element id: its trigger's `data-modal-target`,
+/// and what a landed create closes.
+const CREATE_MODAL_ID: &str = "create-var";
+
 /// The edit modal's element id: what [`handle_edit_variable_form`] renders
 /// the `<dialog>` with and asks chrome.js to open.
 const EDIT_MODAL_ID: &str = "edit-var";
@@ -1208,7 +1210,14 @@ pub async fn handle_update_variable(
         return out;
     }
 
-    variables_page(ctx, msg, "Variable updated").await
+    super::settings::settings_page_closing_modal(
+        ctx,
+        msg,
+        "variables",
+        "Variable updated",
+        EDIT_MODAL_ID,
+    )
+    .await
 }
 
 /// `POST /b/admin/variables/{key}/reset-to-environment` — the Variables page's

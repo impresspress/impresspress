@@ -201,16 +201,24 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     @for block in &filtered {
                         @let is_enabled = block_enabled.get(&block.name).copied().unwrap_or(true);
                         @let encoded_name = encode_block_name(&block.name);
-                        div class={ "block-card" @if !is_enabled { " block-card--disabled" } }
-                            // Stable across a re-render of `#content` (the
-                            // detail modal's toggle), so focus can return.
-                            id={"block-card-" (encoded_name)}
-                            hx-get={"/b/admin/blocks/" (encoded_name) "/detail"}
-                            hx-target="#block-detail-slot"
-                            hx-swap="innerHTML"
-                        {
+                        // The title is the card's one control: a button that
+                        // opens the detail modal, stretched over the whole
+                        // card (`.block-card__title-button::after`) so a click
+                        // anywhere on it still opens it, and reachable with
+                        // Tab and Enter. Its id is stable across a re-render
+                        // of `#content` (the modal's toggle), so focus can
+                        // come back to it.
+                        div class={ "block-card" @if !is_enabled { " block-card--disabled" } } {
                             div .block-card__head {
-                                h2 .block-card__title { (block.name) }
+                                h2 .block-card__title {
+                                    button .block-card__title-button
+                                        type="button"
+                                        id={"block-card-" (encoded_name)}
+                                        hx-get={"/b/admin/blocks/" (encoded_name) "/detail"}
+                                        hx-target="#block-detail-slot"
+                                        hx-swap="innerHTML"
+                                    { (block.name) }
+                                }
                                 @if is_enabled {
                                     span .block-card__check title="Enabled" { (ui::icons::check()) }
                                 } @else {
@@ -228,7 +236,6 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
                                 @if is_enabled && !block.admin_url.is_empty() {
                                     a .btn .btn--sm .btn--primary .block-card__open
                                         href=(block.admin_url)
-                                        data-stop-propagation
                                     { "Open" }
                                 }
                             }

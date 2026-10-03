@@ -148,6 +148,12 @@ test.describe('htmx after-success effects under the served CSP', () => {
     await expect(page.locator('#variables-content')).toHaveCount(1);
     await expect(page.locator('#create-var-form')).toHaveCount(1);
     await expect(page.locator('#create-var')).toBeHidden();
+    // The response closed the modal (`closeModal`) rather than only swapping
+    // it away: the toast says what landed, and focus is back on the trigger.
+    await expect(page.locator('body > #toast-container .toast')).toContainText('Variable created');
+    await expect(
+      page.locator('[data-action="modal-open"][data-modal-target="create-var"]'),
+    ).toBeFocused();
   });
 
   /**
@@ -226,6 +232,27 @@ test.describe('htmx after-success effects under the served CSP', () => {
     await expect(page.locator('dialog.modal[open]')).toHaveCount(0);
     await expect(page.locator('#buttons-table')).toContainText(`${label} saved`);
     await expect(page.getByRole('button', { name: `Edit ${label} saved` })).toBeFocused();
+  });
+
+  /**
+   * The block detail's Enabled toggle re-renders `#content`, modal and card
+   * with it. Focus comes back to that card's title button, found again by its
+   * id. Toggled twice, so the block ends as it started.
+   */
+  test('toggling a block in its detail modal returns focus to its card', async ({ page }) => {
+    await loginAsAdmin(page);
+    await gotoUnderCsp(page, '/b/admin/blocks');
+
+    const card = page.locator('#block-card-impresspress--legalpages');
+    for (let i = 0; i < 2; i++) {
+      await card.click();
+      const modal = page.locator('dialog#block-detail');
+      await expect(modal).toBeVisible();
+      await expect(modal.getByRole('checkbox', { name: 'Enable impresspress/legalpages' })).toHaveCount(1);
+      await modal.locator('label.toggle').click();
+      await expect(page.locator('dialog#block-detail')).toHaveCount(0);
+      await expect(page.locator('#block-card-impresspress--legalpages')).toBeFocused();
+    }
   });
 
   test('creating a messages context resets the form and prepends the row', async ({ page }) => {

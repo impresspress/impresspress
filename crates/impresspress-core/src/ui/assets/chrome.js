@@ -529,11 +529,8 @@ document.body.addEventListener("showToast", function(e) {
 //                                              the button for 1.5s
 //   drawer-open / drawer-close                 section 2 above
 //
-// Plus attributes with no verb, because they describe the element rather than
-// a control acting on it:
-//   [data-stop-propagation]              a click inside it reaches no ancestor
-//                                        listener — the escape hatch for a link
-//                                        nested in a clickable card
+// Plus an attribute with no verb, because it describes the element rather
+// than a control acting on it:
 //   [data-submit-on-enter]               a textarea where Enter submits the
 //                                        enclosing form and Shift+Enter keeps
 //                                        inserting a newline (chat composers)
@@ -547,32 +544,6 @@ document.body.addEventListener("showToast", function(e) {
 (function () {
     if (window.__modalInit) return;
     window.__modalInit = true;
-
-    // `data-stop-propagation` reproduces exactly what the inline
-    // `onclick="event.stopPropagation()"` it replaced did: a BUBBLE-phase
-    // listener ON THE MARKED ELEMENT, so everything at or below that element
-    // still fires and nothing above it does — the listener it exists to
-    // silence (htmx's, bound on the enclosing card) is above it.
-    //
-    // That cannot be done by stopping the event in a document listener.
-    // A bubbling one at `document` fires after the card, too late; a capturing
-    // one at `document` fires before anything and aborts the WHOLE dispatch,
-    // which would also silence the marked element's own listeners and every
-    // other delegated behaviour inside it — a trap for the next element that
-    // gets this attribute. So the capture pass only ARMS the real listener,
-    // on the element, for this one dispatch, and it removes itself again.
-    // Stopping propagation does not cancel the default action, so the link
-    // still navigates.
-    document.addEventListener("click", function (e) {
-        var t = e.target;
-        if (!(t instanceof Element)) return;
-        var marked = t.closest("[data-stop-propagation]");
-        if (!marked) return;
-        marked.addEventListener("click", function stopOnce(inner) {
-            marked.removeEventListener("click", stopOnce);
-            inner.stopPropagation();
-        });
-    }, true);
 
     // The modals this section opened and that are still open, oldest first:
     // `{dialog, id, opener}`. The last one is the one Tab is kept inside.
@@ -624,6 +595,14 @@ document.body.addEventListener("showToast", function(e) {
     }
 
     // Put the toast container in the topmost open modal, or back in <body>.
+    //
+    // Every toast is announced once, when it is added: an error as
+    // `role="alert"`, the rest through the container's polite status region.
+    // Moving the container must not announce them again. An element with
+    // `role="alert"` is announced when it is INSERTED, and moving is removal
+    // plus insertion, so the role comes off every toast already shown before
+    // the move; a polite region is announced on what is added to it, not on
+    // what it arrives with, so those need nothing.
     function homeToasts() {
         if (!toasts) return;
         var home = document.body;
@@ -631,8 +610,90 @@ document.body.addEventListener("showToast", function(e) {
             var d = open[i].dialog;
             if (d.open && d.isConnected === true) { home = d; break; }
         }
-        if (toasts.parentNode !== home) home.appendChild(toasts);
+        if (toasts.parentNode === home) return;
+        Array.prototype.forEach.call(toasts.querySelectorAll('[role="alert"]'), function (shown) {
+            shown.removeAttribute("role");
+        });
+        home.appendChild(toasts);
     }
+
+    // ## Esc on a form with unsaved changes
+    //
+    // The first Esc on a modal whose form has been changed is cancelled and
+    // the modal says so ("Press Esc again to discard changes", announced
+    // politely); the second Esc closes it. A keystroke is how a modal is most
+    // easily closed by accident — mid-typing, aiming for something else — and
+    // what it throws away is the operator's input. Close and Cancel stay
+    // one-step: they are aimed at. Typing again after the warning withdraws
+    // it, so the next Esc warns again rather than discarding what was just
+    // typed. The browser may not let `cancel` be cancelled (without user
+    // activation since the last one it closes anyway); then it closes, which
+    // is the outcome the operator asked for twice.
+    function formDirty(dialog) {
+        var fields = dialog.querySelectorAll("input, select, textarea");
+        for (var i = 0; i < fields.length; i++) {
+            var f = fields[i];
+            if (f.tagName === "SELECT") {
+                var opts = f.options || [];
+                for (var j = 0; j < opts.length; j++) {
+                    if (opts[j].selected !== opts[j].defaultSelected) return true;
+                }
+                continue;
+            }
+            var type = f.type;
+            if (type === "hidden" || type === "submit" || type === "button" || type === "reset") continue;
+            if (type === "checkbox" || type === "radio") {
+                if (f.checked !== f.defaultChecked) return true;
+            } else if (f.value !== f.defaultValue) {
+                return true;
+            }
+        }
+        return false;
+    }
+
+    var DISCARD_NOTE = "Press Esc again to discard changes";
+    // The dialogs whose first Esc has been cancelled with the note showing.
+    var warned = new WeakSet();
+    function discardNote(dialog, show) {
+        var note = dialog.querySelector(".modal__discard");
+        if (!note) {
+            if (!show) return;
+            // Inserted empty and filled after: a status region announces what
+            // is added to it.
+            note = document.createElement("p");
+            note.className = "modal__discard";
+            note.setAttribute("role", "status");
+            var footer = dialog.querySelector(".modal__footer");
+            if (footer) footer.insertBefore(note, footer.firstChild);
+            else (dialog.querySelector(".modal__body") || dialog).appendChild(note);
+        }
+        if (show) {
+            setTimeout(function () {
+                if (warned.has(dialog)) note.textContent = DISCARD_NOTE;
+            }, 50);
+        } else {
+            note.textContent = "";
+        }
+        if (show) warned.add(dialog);
+        else warned.delete(dialog);
+    }
+
+    // `cancel` does not bubble either.
+    document.addEventListener("cancel", function (e) {
+        var dialog = e.target;
+        var entry = entryFor(dialog);
+        if (!entry) return;
+        if (!warned.has(dialog) && dialog.querySelector("form") && formDirty(dialog)) {
+            e.preventDefault();
+            discardNote(dialog, true);
+        }
+    }, true);
+    document.addEventListener("input", function (e) {
+        var t = e.target;
+        if (!(t instanceof Element)) return;
+        var dialog = t.closest("dialog");
+        if (dialog && warned.has(dialog)) discardNote(dialog, false);
+    });
 
     // The control that opens modal `id`, for when the one that did is gone.
     function triggerFor(id) {
@@ -667,6 +728,7 @@ document.body.addEventListener("showToast", function(e) {
         var entry = entryFor(e.target);
         if (!entry) return;
         open.splice(open.indexOf(entry), 1);
+        discardNote(e.target, false);
         homeToasts();
         focusOpenerOf(entry);
     }, true);

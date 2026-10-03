@@ -1301,7 +1301,7 @@ mod tests {
             // however they closed (Esc, Cancel, a trigger) so focus goes back.
             "showModal()",
             "addEventListener(\"close\"",
-            "data-stop-propagation",
+            "addEventListener(\"cancel\"",
             "data-submit-on-enter",
         ] {
             assert!(js.contains(hook), "chrome must handle {hook}");

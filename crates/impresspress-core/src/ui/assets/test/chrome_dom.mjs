@@ -161,6 +161,18 @@ class StubNode {
     return child;
   }
 
+  insertBefore(child, ref) {
+    if (!ref) return this.appendChild(child);
+    if (child.parentNode) child.parentNode.removeChild(child);
+    child.parentNode = this;
+    this.children.splice(this.children.indexOf(ref), 0, child);
+    return child;
+  }
+
+  get firstChild() {
+    return this.children[0] || null;
+  }
+
   removeChild(child) {
     const at = this.children.indexOf(child);
     if (at >= 0) this.children.splice(at, 1);
@@ -207,14 +219,22 @@ class StubElement extends StubNode {
     this.attributes = {};
     for (const [k, v] of Object.entries(attributes)) this.setAttribute(k, v);
     this.textContent = '';
-    this.className = attributes.class || '';
     this.value = attributes.value || '';
+    this.defaultValue = this.value;
+    this.defaultChecked = this.hasAttribute('checked');
     this.type = attributes.type || '';
     // Rendered unless a test says otherwise: `getClientRects()` is what the
     // section reads to skip controls that are not displayed.
     this.displayed = true;
     // `getBoundingClientRect()`; a test sets it where geometry matters.
     this.box = { left: 0, top: 0, right: 100, bottom: 100 };
+  }
+
+  get className() {
+    return this.getAttribute('class') || '';
+  }
+  set className(value) {
+    this.setAttribute('class', value);
   }
 
   get id() {
@@ -411,6 +431,22 @@ export function loadChromeDom() {
     /** A DOM event to dispatch by hand; `bubbles` defaults to true. */
     event(type, init = {}) {
       return new StubEvent(type, init);
+    },
+    /**
+     * Esc on an open dialog, as the browser handles it: a cancelable,
+     * non-bubbling `cancel`, and the dialog closes unless that was cancelled.
+     */
+    escape(dialog) {
+      const e = new StubEvent('cancel', { bubbles: false });
+      e.cancelable = true;
+      dialog.dispatchEvent(e);
+      if (!e.defaultPrevented) dialog.close();
+      return e;
+    },
+    /** Typing into `field`: its value changes and `input` bubbles. */
+    type(field, value) {
+      field.value = value;
+      field.dispatchEvent(new StubEvent('input'));
     },
     /** A press and release on `target`, as a user's click is. */
     click(target, at = {}) {

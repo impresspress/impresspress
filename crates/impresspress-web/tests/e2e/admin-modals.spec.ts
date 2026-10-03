@@ -110,7 +110,7 @@ test.describe('admin modals', () => {
     await loginAsAdmin(page);
     await page.goto('/b/admin/blocks', { waitUntil: 'networkidle' });
     const card = page.locator('.block-card').first();
-    const dialog = await openVia(page, card.locator('.block-card__summary'), 'block-detail');
+    const dialog = await openVia(page, card.locator('.block-card__title-button'), 'block-detail');
 
     await dialog.locator('.modal__body').click({ position: { x: 5, y: 5 } });
     await expect(dialog).toBeVisible();
@@ -155,7 +155,9 @@ test.describe('admin modals', () => {
     await expect(dialog).toBeVisible();
     await expect(page.locator('#role-name')).toHaveValue('editor');
 
-    // Closed, the container goes back to the page.
+    // Closed (twice: the form holds unsaved input), the container goes back
+    // to the page.
+    await page.keyboard.press('Escape');
     await page.keyboard.press('Escape');
     await expect(dialog).toBeHidden();
     await expect(page.locator('body > #toast-container')).toHaveCount(1);
@@ -193,6 +195,48 @@ test.describe('admin modals', () => {
     await expect(page.locator('dialog#edit-var')).toHaveCount(1);
   });
 
+  test('Esc on a changed form warns once, politely, then discards', async ({ page }) => {
+    await loginAsAdmin(page);
+    await page.goto('/b/admin/users?tab=roles', { waitUntil: 'networkidle' });
+    const trigger = page.locator('[data-action="modal-open"][data-modal-target="create-role"]');
+    const dialog = await openVia(page, trigger, 'create-role');
+    await page.locator('#role-name').fill('half-typed');
+
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeVisible();
+    const note = dialog.getByRole('status').filter({ hasText: 'Press Esc again to discard changes' });
+    await expect(note).toBeVisible();
+    await expect(page.locator('#role-name')).toHaveValue('half-typed');
+
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeHidden();
+    await expect(trigger).toBeFocused();
+  });
+
+  test('a block card is reachable with Tab, opens with Enter, and gets focus back', async ({
+    page,
+  }) => {
+    await loginAsAdmin(page);
+    await page.goto('/b/admin/blocks', { waitUntil: 'networkidle' });
+
+    const first = page.locator('.block-card__title-button').first();
+    const id = await first.getAttribute('id');
+    expect(id).toBeTruthy();
+    let reached = false;
+    for (let i = 0; i < 80 && !reached; i++) {
+      await page.keyboard.press('Tab');
+      reached = await first.evaluate((el) => el === document.activeElement);
+    }
+    expect(reached, 'Tab reaches the first block card').toBe(true);
+
+    await page.keyboard.press('Enter');
+    const dialog = page.locator('dialog#block-detail');
+    await expect(dialog).toBeVisible();
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeHidden();
+    await expect(page.locator(`#${id}`)).toBeFocused();
+  });
+
   test('the block detail modal opens from its card', async ({ page }) => {
     await loginAsAdmin(page);
     await page.goto('/b/admin/blocks', { waitUntil: 'networkidle' });
@@ -200,7 +244,7 @@ test.describe('admin modals', () => {
     const card = page.locator('.block-card').first();
     const name = (await card.locator('.block-card__title').textContent())?.trim() ?? '';
     expect(name).not.toBe('');
-    const dialog = await openVia(page, card.locator('.block-card__summary'), 'block-detail');
+    const dialog = await openVia(page, card.locator('.block-card__title-button'), 'block-detail');
     await expectModal(dialog);
     await expect(dialog.getByRole('heading', { level: 2 })).toHaveText(name);
 

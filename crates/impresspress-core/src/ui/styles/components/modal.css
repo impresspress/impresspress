@@ -114,6 +114,15 @@ dialog.modal.modal--lg { max-width: 720px; }
 	border-top: 1px solid var(--border-color);
 }
 
+/* chrome.js's "Press Esc again to discard changes", first in the footer row. */
+.modal__discard {
+	flex: 1 0 100%;
+	margin: 0;
+	font-size: var(--text-sm);
+	color: var(--accent-warning-text);
+}
+.modal__discard:empty { display: none; }
+
 @media (max-width: 720px) {
 	.modal__header { padding-left: var(--space-4); }
 	.modal__body { padding: var(--space-4); }

@@ -533,3 +533,80 @@ test('a radio group is one Tab stop: its checked radio', () => {
   page.key('Tab', { shiftKey: true });
   assert.equal(page.doc.activeElement, checked);
 });
+
+test('Esc on an unchanged form closes the modal at once', async () => {
+  const page = loadChromeDom();
+  const { trigger, dialog } = pageWithModal(page);
+  page.click(trigger);
+
+  page.escape(dialog);
+  await tick();
+
+  assert.equal(dialog.open, false);
+});
+
+test('Esc on a changed form warns first, politely, and closes on the second Esc', async () => {
+  const page = loadChromeDom();
+  const { trigger, dialog, name } = pageWithModal(page);
+  page.click(trigger);
+  page.type(name, 'half-typed');
+
+  const first = page.escape(dialog);
+  // The note's text lands a moment after the empty status region does.
+  await new Promise((resolve) => setTimeout(resolve, 80));
+  assert.equal(first.defaultPrevented, true);
+  assert.equal(dialog.open, true);
+  const note = dialog.querySelector('.modal__discard');
+  assert.equal(note.getAttribute('role'), 'status');
+  assert.equal(note.textContent, 'Press Esc again to discard changes');
+  assert.equal(note.parentNode, dialog.querySelector('.modal__footer'), 'shown beside the actions');
+
+  page.escape(dialog);
+  await tick();
+  assert.equal(dialog.open, false);
+  assert.equal(note.textContent, '', 'and the note is gone for the next opening');
+});
+
+test('typing after the warning withdraws it: the next Esc warns again', async () => {
+  const page = loadChromeDom();
+  const { trigger, dialog, name } = pageWithModal(page);
+  page.click(trigger);
+  page.type(name, 'one');
+  page.escape(dialog);
+  await new Promise((resolve) => setTimeout(resolve, 80));
+
+  page.type(name, 'one more');
+  assert.equal(dialog.querySelector('.modal__discard').textContent, '');
+  assert.equal(page.escape(dialog).defaultPrevented, true);
+  assert.equal(dialog.open, true);
+});
+
+test('Esc on a reference modal (no form) closes it at once, even after a toggle in it changed', async () => {
+  const page = loadChromeDom();
+  const { trigger, dialog } = pageWithReferenceModal(page);
+  // The block detail's Enabled toggle posts on change: nothing is pending.
+  const toggle = page.el('input', { type: 'checkbox', checked: '' });
+  dialog.querySelector('.modal__body').appendChild(toggle);
+  page.click(trigger);
+  toggle.removeAttribute('checked');
+
+  page.escape(dialog);
+  await tick();
+  assert.equal(dialog.open, false);
+});
+
+test('moving the toast container never re-inserts an announced alert', async () => {
+  const page = loadChromeDom();
+  const { trigger, dialog } = pageWithModal(page);
+  page.click(trigger);
+  page.htmx.trigger(null, 'showToast', { message: 'Refused', type: 'error' });
+  const toast = page.toastContainer.children.at(-1);
+  assert.equal(toast.getAttribute('role'), 'alert');
+
+  dialog.close();
+  await tick();
+
+  assert.equal(page.toastContainer.parentNode, page.body);
+  assert.equal(toast.parentNode, page.toastContainer, 'still shown');
+  assert.equal(toast.getAttribute('role'), null, 'but not announced a second time');
+});
