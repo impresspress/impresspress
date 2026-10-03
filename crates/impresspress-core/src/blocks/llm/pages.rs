@@ -198,7 +198,9 @@ pub async fn page(ctx: &dyn Context, msg: &Message) -> OutputStream {
             nav: ui::NavKind::Admin,
             crumbs,
             subtitle: Some("Chat with a configured provider or local model"),
-            primary_action: None,
+            actions: Vec::new(),
+            // `chat_page` draws its thread list / messages / rail edge to edge.
+            body_layout: ui::BodyLayout::Flush,
         },
         content,
     )
@@ -548,7 +550,8 @@ pub async fn settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
                 href: None,
             }],
             subtitle: Some("LLM defaults and provider routing"),
-            primary_action: None,
+            actions: Vec::new(),
+            body_layout: ui::BodyLayout::Padded,
         },
         content,
     )

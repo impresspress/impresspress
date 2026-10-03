@@ -56,7 +56,7 @@ pub async fn storage_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         "Storage",
         Topbar {
             crumbs: crumb("Storage"),
-            primary_action: Some(refresh_action),
+            actions: vec![refresh_action],
             subtitle: Some("Per-block storage isolation and access logs"),
             show_palette: true,
         },

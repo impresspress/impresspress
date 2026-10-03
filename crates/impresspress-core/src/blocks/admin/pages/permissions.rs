@@ -390,8 +390,8 @@ pub(crate) async fn grants_custom_tab(
                         placeholder="e.g. Analytics block needs to read user profiles";
                 }
                 div .form-actions {
-                    button .btn .btn--secondary type="button" data-action="modal-close" data-modal-target="add-grant-modal" { "Cancel" }
-                    button .btn .btn--primary type="submit" { "Add Grant" }
+                    button .btn .btn--secondary .btn--block type="button" data-action="modal-close" data-modal-target="add-grant-modal" { "Cancel" }
+                    button .btn .btn--primary .btn--block type="submit" { "Add Grant" }
                 }
             }
         }))

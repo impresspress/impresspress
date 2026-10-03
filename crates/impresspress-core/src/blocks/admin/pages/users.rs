@@ -87,7 +87,7 @@ pub async fn users_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         "Users",
         Topbar {
             crumbs: crumb("Users"),
-            primary_action: None,
+            actions: Vec::new(),
             subtitle: Some("Manage accounts, roles, and API keys"),
             show_palette: true,
         },
@@ -491,12 +491,11 @@ async fn roles_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
     let list = db::list(ctx, ROLES_TABLE, &opts).await?;
 
     Ok(html! {
-        div .flex .items-center .justify-between .mb-4 {
-            h3 .font-semibold { "Roles" }
+        (components::section_header("Roles", Some(html! {
             button .btn .btn--primary .btn--sm data-action="modal-open" data-modal-target="create-role" {
                 (icons::plus()) " Create Role"
             }
-        }
+        })))
 
         @let rows: Vec<Vec<Markup>> = list.records.iter().map(|record| {
             let name = record.str_field("name");
@@ -542,8 +541,8 @@ async fn roles_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
                     input .form-input type="text" #role-desc name="description" placeholder="Optional description";
                 }
                 div .form-actions {
-                    button .btn .btn--secondary type="button" data-action="modal-close" data-modal-target="create-role" { "Cancel" }
-                    button .btn .btn--primary type="submit" { "Create" }
+                    button .btn .btn--secondary .btn--block type="button" data-action="modal-close" data-modal-target="create-role" { "Cancel" }
+                    button .btn .btn--primary .btn--block type="submit" { "Create" }
                 }
             }
         }))
@@ -559,12 +558,11 @@ async fn api_keys_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
     let now = chrono::Utc::now();
 
     Ok(html! {
-        div .flex .items-center .justify-between .mb-4 {
-            h3 .font-semibold { "API Keys" }
+        (components::section_header("API Keys", Some(html! {
             button .btn .btn--primary .btn--sm data-action="modal-open" data-modal-target="create-api-key" {
                 (icons::plus()) " Create API Key"
             }
-        }
+        })))
 
         @let rows: Vec<Vec<Markup>> = list.iter().map(|record| {
             let user_id = record.user_id.as_str();
@@ -623,8 +621,8 @@ async fn api_keys_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
                     input .form-input type="text" #key-name name="name" placeholder="e.g. CI/CD key" required;
                 }
                 div .form-actions {
-                    button .btn .btn--secondary type="button" data-action="modal-close" data-modal-target="create-api-key" { "Cancel" }
-                    button .btn .btn--primary type="submit" { "Create" }
+                    button .btn .btn--secondary .btn--block type="button" data-action="modal-close" data-modal-target="create-api-key" { "Cancel" }
+                    button .btn .btn--primary .btn--block type="submit" { "Create" }
                 }
             }
         }))

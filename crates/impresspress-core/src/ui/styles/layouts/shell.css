@@ -125,6 +125,16 @@
 	display: flex; flex-direction: column; gap: var(--space-4);
 	flex: 1; overflow-y: auto;
 	padding: var(--space-2) var(--space-2) var(--space-12);
+	/* Scroll hint: a faint light edge at the top/bottom while there is more
+	   nav in that direction (the drawer on a phone, a short desktop window),
+	   so a cut-off list reads as scrollable. The two `local` navy layers
+	   scroll with the content and cover the `scroll` edges once the list
+	   reaches that end -- pure CSS, no listener. */
+	background:
+		linear-gradient(var(--bg-sidebar) 30%, transparent) top / 100% 32px no-repeat local,
+		linear-gradient(transparent, var(--bg-sidebar) 70%) bottom / 100% 32px no-repeat local,
+		linear-gradient(rgba(255, 255, 255, 0.16), transparent) top / 100% 14px no-repeat scroll,
+		linear-gradient(transparent, rgba(255, 255, 255, 0.16)) bottom / 100% 14px no-repeat scroll;
 }
 .sidebar__group { display: flex; flex-direction: column; gap: 2px; }
 /* Foreground is --sidebar-text-muted (7.34:1 on navy), not --text-muted
@@ -303,60 +313,77 @@
 /* ===== Shell + topbar (Phase 1) ===== */
 /* No gap/padding on the grid itself -- the sidebar must be flush to the
    viewport edges (left/top/bottom). Only the main content column gets the
-   padded/gapped treatment, on .shell__main below. */
+   padded/gapped treatment, on .shell__main below.
+
+   Every track that holds page content is `minmax(0, 1fr)` and every box on
+   the way down to the body is `min-width: 0`: a bare `1fr` track (and a flex
+   item's default `min-width: auto`) grows to its widest unbreakable child,
+   so one long table or code line used to widen the whole page past the
+   viewport instead of scrolling inside its own container. */
 .shell { display: grid; grid-template-columns: var(--sidebar-width) minmax(0, 1fr); height: 100vh; background: var(--surface-2); }
 @media (max-width: 720px) {
 	/* One column, two rows: the mobile header, then the main column taking
 	   the rest of the viewport. Left to implicit `auto` rows, the grid split
 	   its spare height evenly between them whenever the page was shorter than
 	   the screen, so a short page (the one-bucket file list) opened with a
-	   ~225px blank band under the header. */
-	.shell { grid-template-columns: 1fr; grid-template-rows: auto minmax(0, 1fr); }
+	   ~225px blank band under the header. The `:has(.collapsed)` selector is
+	   repeated so a desktop-collapsed sidebar (remembered in localStorage)
+	   cannot put its 64px rail column back on a phone, where the sidebar is
+	   an off-canvas drawer. */
+	.shell, .shell:has(.sidebar.collapsed) { grid-template-columns: minmax(0, 1fr); grid-template-rows: auto minmax(0, 1fr); }
 }
-.shell__main { display: flex; flex-direction: column; min-height: 0; gap: var(--space-4); padding: var(--space-4); }
-.shell__body { flex: 1; background: var(--surface-1); border: 1px solid var(--border-color); border-radius: var(--radius-lg); overflow-y: auto; }
-
-/* ===== Products admin =====
- * Migrated from `blocks/products/pages.rs`'s page-local `PRODUCTS_UI_CSS`
- * `<style>` block (task 12e). The products tabs strip needs its own
- * padding rhythm on `.shell__body`; compound selectors, so file load order
- * doesn't matter. */
-body:has(.products-tabs) .shell__main, body:has(.products-tabs) .shell__body { min-width: 0; }
-body:has(.products-tabs) .shell__body { padding: var(--space-4) var(--space-6); }
-@media (max-width: 760px) {
-	body:has(.products-tabs) .shell__body { padding: var(--space-3) var(--space-4); }
+.shell__main { display: flex; flex-direction: column; min-width: 0; min-height: 0; gap: var(--space-4); padding: var(--space-4); }
+/* The content card, and the page's `main` landmark. It owns the padding
+   around every page body, so no template or block pads itself against the
+   card's edge. `--flush` (`ui::shell::BodyLayout::Flush`) is for a
+   full-bleed template that draws its own panes edge to edge. */
+.shell__body {
+	flex: 1; min-width: 0;
+	background: var(--surface-1); border: 1px solid var(--border-color); border-radius: var(--radius-lg);
+	overflow-y: auto;
+	padding: var(--space-6);
 }
+.shell__body--flush { padding: 0; }
+.shell__body:focus { outline: none; }
 
-.topbar { background: var(--surface-1); border: 1px solid var(--border-color); border-radius: var(--radius-lg); padding: var(--space-2) var(--space-4); display: flex; align-items: center; min-height: 56px; }
-.topbar__crumbs ol { display: flex; gap: var(--space-2); align-items: center; list-style: none; padding: 0; margin: 0; font-size: 16px; color: var(--text-secondary); }
-.topbar__sep { color: var(--text-muted); font-size: 16px; padding: 0 var(--space-2); }
-.topbar__subtitle { color: var(--text-secondary); font-size: 14px; }
+/* The page header (`ui::shell::Topbar`): crumbs + title + subtitle on the
+   left, the page's actions and the palette trigger on the right. */
+.topbar {
+	background: var(--surface-1); border: 1px solid var(--border-color); border-radius: var(--radius-lg);
+	padding: var(--space-3) var(--space-5);
+	display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-3) var(--space-4);
+	min-height: 64px;
+}
+.topbar__heading { flex: 1 1 16rem; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.topbar__crumbs ol { display: flex; flex-wrap: wrap; gap: var(--space-1); align-items: center; list-style: none; padding: 0; margin: 0; font-size: var(--text-sm); color: var(--text-secondary); }
 .topbar__crumbs li + li::before { content: "›"; padding: 0 var(--space-1); color: var(--text-muted); }
+/* The trail points at the title on the line below it. */
+.topbar__crumbs li:last-child::after { content: "›"; padding: 0 0 0 var(--space-2); color: var(--text-muted); }
 .topbar__crumbs a { color: var(--text-secondary); text-decoration: none; }
 /* --primary-color is 3.66:1 on white (.topbar's background) -- below the
-   4.5:1 AA floor for this 16px hover-state link text; --primary-button
+   4.5:1 AA floor for this hover-state link text; --primary-button
    (4.99:1, computed) is the text-safe sibling. */
 .topbar__crumbs a:hover { color: var(--primary-button); text-decoration: underline; }
-/* Current page — an `h1` rendered AFTER the breadcrumb nav. Font copies what
-   the last crumb used to get (16px from the ol rule, normal weight,
-   text-primary from the old [aria-current="page"] rule) so the visual output
-   is unchanged. */
-.topbar__title { font-size: 16px; font-weight: 400; color: var(--text-primary); margin: 0; }
-/* Separator between the last ancestor crumb and the h1 (was li+li::before
-   when the current page still lived inside the nav; the extra 0.4rem on the
-   left stands in for the ol's flex gap the old li got). */
-.topbar__crumbs li:last-child::after { content: "›"; padding: 0 var(--space-1) 0 var(--space-3); color: var(--text-muted); }
-.topbar__right { margin-left: auto; display: flex; align-items: center; gap: var(--space-2); }
+/* The page's one `h1`, rendered AFTER the breadcrumb nav. */
+.topbar__title {
+	font-size: var(--text-xl); font-weight: 600; line-height: 1.25;
+	color: var(--text-primary); margin: 0;
+	overflow-wrap: anywhere;
+}
+.topbar__subtitle { font-size: var(--text-sm); color: var(--text-secondary); margin: 0; }
+.topbar__actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
 .topbar__palette {
 	display: inline-flex; align-items: center; gap: var(--space-2);
+	min-height: 36px;
 	background: var(--surface-3); border: 1px solid var(--border-color);
-	border-radius: var(--radius-md); padding: var(--space-1) var(--space-2); font-size: var(--text-xs);
+	border-radius: var(--radius-md); padding: var(--space-1) var(--space-3); font-size: var(--text-sm);
 	color: var(--text-secondary); cursor: pointer;
 }
+.topbar__palette svg { width: 16px; height: 16px; }
 .topbar__palette:hover { background: var(--bg-hover); }
+.topbar__palette:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .topbar__palette kbd { background: var(--bg-secondary); padding: 1px var(--space-1); border-radius: 4px; font-size: 0.7rem; font-family: ui-monospace, Menlo, monospace; display: inline-flex; align-items: center; gap: var(--space-1); }
 .topbar__palette-cmd { font-size: 0.95rem; line-height: 1; margin-top: 1px; }
-.topbar__action { display: flex; align-items: center; }
 
 /* ===== Phase 4 PR-3: Mobile shell chrome (< 720px) ===== */
 
@@ -382,6 +409,7 @@ body:has(.products-tabs) .shell__body { padding: var(--space-4) var(--space-6); 
 	.shell__palette-icon {
 		background: none;
 		border: none;
+		border-radius: var(--radius-md);
 		cursor: pointer;
 		font-size: 18px;
 		min-width: 44px;
@@ -435,10 +463,29 @@ body:has(.products-tabs) .shell__body { padding: var(--space-4) var(--space-6); 
 		overflow: hidden;
 	}
 
-	/* Compact crumbs at narrow widths. */
-	.topbar__crumbs { font-size: var(--text-xs); }
-	/* The desktop ⌘K button takes too much space; the mobile header has
-	   its own icon-only trigger. */
+	.shell__drawer-toggle:focus-visible,
+	.shell__palette-icon:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+
+	/* The drawer is always the full, labelled nav: the desktop collapse
+	   toggle has no meaning here, and a collapsed state remembered from a
+	   desktop visit must not strip the drawer down to bare icons. */
+	.shell .sidebar__collapse-toggle { display: none; }
+	.shell .sidebar.collapsed .sidebar__brand-name,
+	.shell .sidebar.collapsed .sidebar__nav-label,
+	.shell .sidebar.collapsed .sidebar__user-text { display: inline; }
+	.shell .sidebar.collapsed .sidebar__group-label { visibility: visible; }
+
+	.shell__main { gap: var(--space-3); padding: var(--space-3); }
+	.shell__body { padding: var(--space-4); }
+	.shell__body--flush { padding: 0; }
+
+	/* The topbar stacks: title, then the actions on a row of their own.
+	   The subtitle is desktop-only (`Topbar::subtitle`'s contract), and the
+	   desktop palette button gives way to the mobile header's icon. */
+	.topbar { padding: var(--space-3) var(--space-4); min-height: 0; }
+	.topbar__title { font-size: var(--text-lg); }
+	.topbar__subtitle { display: none; }
+	.topbar__actions { flex-basis: 100%; }
 	.topbar__palette { display: none; }
 }
 

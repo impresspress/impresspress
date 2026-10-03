@@ -7,7 +7,6 @@
 .palette__list { list-style: none; padding: 0; margin: 0; max-height: 50vh; overflow-y: auto; }
 .palette__item { display: flex; justify-content: space-between; align-items: center; padding: var(--space-2) var(--space-4); cursor: pointer; font-size: var(--text-sm); color: var(--text-primary); }
 .palette__item:hover, .palette__item[aria-selected="true"] { background: var(--bg-hover); }
-.palette__item-kind { color: var(--text-muted); font-size: var(--text-xs); }
 .palette__item.is-hidden { display: none; }
 .palette__hint { padding: var(--space-2) var(--space-4); border-top: 1px solid var(--border-light); font-size: var(--text-xs); color: var(--text-muted); background: var(--surface-3); }
 

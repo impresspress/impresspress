@@ -127,7 +127,7 @@ fn form_grid(tabs: Vec<(String, String, bool)>, sections: Vec<FormSection<'_>>) 
 }
 
 /// `tabbed_page` template — a tab rail over section bodies, form-LESS: the
-/// `div.form-page` groups the sections but is not itself a `<form>`, and the
+/// `div.page--form` groups the sections but is not itself a `<form>`, and the
 /// page carries no save bar of its own.
 ///
 /// For tabbed shells whose tab bodies own their submission story. HTML forms
@@ -143,9 +143,7 @@ pub fn tabbed_page(
 ) -> Markup {
     html! {
         div .page .page--form {
-            div .form-page {
-                (form_grid(tabs, sections))
-            }
+            (form_grid(tabs, sections))
         }
     }
 }
@@ -562,7 +560,6 @@ mod tests {
         assert!(s.contains("Outbound requests"));
         // Form-LESS by construction: the tab body owns the only <form>.
         assert_eq!(s.matches("<form").count(), 1);
-        assert!(!s.contains(r#"<form class="form-page""#));
     }
 
     #[test]

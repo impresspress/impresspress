@@ -357,7 +357,7 @@ pub async fn settings_form(
         form #settings-form {
             (fields)
             (extra)
-            button .btn .btn--primary .mt-4 type="submit" { "Save settings" }
+            button .btn .btn--primary .btn--block .mt-4 type="submit" { "Save settings" }
         }
         script { (PreEscaped(submit_js(post_url))) }
     })

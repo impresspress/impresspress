@@ -13,6 +13,7 @@ pub mod nav_groups;
 pub mod palette;
 pub mod settings_form;
 pub mod shell;
+pub use shell::BodyLayout;
 pub mod sidebar;
 pub mod templates;
 
@@ -150,6 +151,17 @@ impl UserInfo {
         self.roles.iter().any(|r| r == "admin")
     }
 
+    /// The account's role as the chrome shows it — the sidebar's user row
+    /// and the profile menu header use this one label, so the two can never
+    /// describe the same account differently.
+    pub fn role_label(&self) -> &'static str {
+        if self.is_admin() {
+            "Admin"
+        } else {
+            "User"
+        }
+    }
+
     /// First letter of email, uppercased, for avatar.
     pub fn avatar_initial(&self) -> char {
         self.email
@@ -231,6 +243,7 @@ pub struct Page<'a> {
     pub user: Option<&'a UserInfo>,
     pub current_path: &'a str,
     pub topbar: shell::Topbar<'a>,
+    pub body_layout: shell::BodyLayout,
     pub body: maud::Markup,
 }
 
@@ -256,6 +269,7 @@ impl<'a> Page<'a> {
                     &self.config.logo_icon_url,
                     &self.config.app_name,
                     self.topbar,
+                    self.body_layout,
                     self.body,
                 ))
                 (palette_markup)
@@ -310,12 +324,17 @@ pub struct Shell<'a> {
     pub title: &'a str,
     /// Which sidebar to render.
     pub nav: NavKind,
-    /// Breadcrumb trail. A single `Crumb { label, href: None }` is the common case.
+    /// Breadcrumb trail; the LAST crumb is the page title (the page's only
+    /// `h1`). A single `Crumb { label, href: None }` is the common case; a
+    /// detail page passes its ancestors first. See [`shell::Topbar`].
     pub crumbs: Vec<shell::Crumb<'a>>,
-    /// Optional subtitle shown after the crumbs.
+    /// One-line page description, on its own line under the title.
     pub subtitle: Option<&'a str>,
-    /// Optional primary action button in the topbar.
-    pub primary_action: Option<maud::Markup>,
+    /// Page-level actions in the topbar, left to right — primary action last.
+    pub actions: Vec<maud::Markup>,
+    /// How the content card frames the body ([`shell::BodyLayout::Flush`]
+    /// only for full-bleed templates such as `templates::chat_page`).
+    pub body_layout: shell::BodyLayout,
 }
 
 impl<'a> Shell<'a> {
@@ -329,7 +348,8 @@ impl<'a> Shell<'a> {
                 href: None,
             }],
             subtitle: None,
-            primary_action: None,
+            actions: Vec::new(),
+            body_layout: shell::BodyLayout::Padded,
         }
     }
 }
@@ -410,9 +430,10 @@ pub async fn shell_document(
         topbar: shell::Topbar {
             crumbs: shell.crumbs,
             subtitle: shell.subtitle,
-            primary_action: shell.primary_action,
+            actions: shell.actions,
             show_palette: true,
         },
+        body_layout: shell.body_layout,
         body,
     }
     .document(msg))
@@ -964,10 +985,11 @@ mod tests {
                     label: "Dashboard",
                     href: None,
                 }],
-                primary_action: None,
+                actions: Vec::new(),
                 subtitle: None,
                 show_palette: true,
             },
+            body_layout: shell::BodyLayout::Padded,
             body,
         }
     }
@@ -2800,8 +2822,6 @@ mod tests {
             "page--detail",
             "page--form",
             "page--list",
-            "pagination__page",
-            "palette__item-label",
             "quota-card",
             "quota-warning",
             "section",

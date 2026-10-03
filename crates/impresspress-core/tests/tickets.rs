@@ -476,21 +476,42 @@ async fn admin_inbox_renders_all_filters_age_and_filter_preserving_pagination() 
     let kind = service::create_type(&ctx, ticket_type("admin-inbox"))
         .await
         .expect("create type");
-    service::create_ticket(
-        &ctx,
-        ticket(&kind.id),
-        TicketSource::Admin,
-        ActorType::Admin,
-        "admin-1",
-        None,
-    )
-    .await
-    .expect("create ticket");
+    // Two tickets the filters below all match, one per page at
+    // `page_size=1`: the pagination bar (and so its filter-carrying links)
+    // renders only when the result spans more than one page.
+    for _ in 0..2 {
+        let created = service::create_ticket(
+            &ctx,
+            ticket(&kind.id),
+            TicketSource::Admin,
+            ActorType::Admin,
+            "admin-1",
+            None,
+        )
+        .await
+        .expect("create ticket");
+        service::update_workflow(
+            &ctx,
+            &created.id,
+            WorkflowUpdate {
+                status: None,
+                priority: None,
+                assignee_id: Some("admin:one".into()),
+                duplicate_of: None,
+                legal_hold: None,
+                reason: "Assign for the inbox filter.".into(),
+            },
+            ActorType::Admin,
+            "admin-1",
+        )
+        .await
+        .expect("assign ticket");
+    }
 
     let mut msg = admin_msg("retrieve", "/b/tickets/admin/tickets");
     msg.set_meta("req.query.status", "new");
     msg.set_meta("req.query.source", "admin");
-    msg.set_meta("req.query.assignee_id", "admin&one");
+    msg.set_meta("req.query.assignee_id", "admin:one");
     msg.set_meta("req.query.page_size", "1");
     let html = output_html(
         TicketsBlock::new()
@@ -515,7 +536,9 @@ async fn admin_inbox_renders_all_filters_age_and_filter_preserving_pagination() 
         "pagination controls missing: {html}"
     );
     assert!(
-        html.contains("status=new&source=admin&assignee_id=admin%26one&page_size=1&page="),
+        html.contains(
+            "status=new&amp;source=admin&amp;assignee_id=admin%3Aone&amp;page_size=1&amp;page="
+        ),
         "pagination must retain encoded filters: {html}"
     );
 }

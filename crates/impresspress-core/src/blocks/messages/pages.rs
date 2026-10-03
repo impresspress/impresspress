@@ -178,7 +178,8 @@ pub async fn context_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream
                 href: None,
             }],
             subtitle: Some("Conversations, tasks, and notifications"),
-            primary_action: None,
+            actions: Vec::new(),
+            body_layout: ui::BodyLayout::Padded,
         },
         content,
     )
@@ -257,7 +258,11 @@ pub async fn context_detail_page(ctx: &dyn Context, msg: &Message) -> OutputStre
     // single crumb (matches its inline "← Back" affordance in
     // render_default_view). `shell_page` supports a full `Vec<Crumb>`, so
     // the variable crumb shape rides through without a bespoke wrapper.
-    let crumbs = if context.str_field("type") == "conversation" {
+    // A conversation renders through the full-bleed `chat_page` template
+    // (see `render_context_detail_body`), which draws its own panes edge to
+    // edge; the other types are ordinary padded pages.
+    let is_conversation = context.str_field("type") == "conversation";
+    let crumbs = if is_conversation {
         vec![
             Crumb {
                 label: "Messages",
@@ -282,7 +287,12 @@ pub async fn context_detail_page(ctx: &dyn Context, msg: &Message) -> OutputStre
             nav: ui::NavKind::Admin,
             crumbs,
             subtitle: None,
-            primary_action: None,
+            actions: Vec::new(),
+            body_layout: if is_conversation {
+                ui::BodyLayout::Flush
+            } else {
+                ui::BodyLayout::Padded
+            },
         },
         body,
     )

@@ -107,7 +107,7 @@ pub async fn logs_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         "Logs",
         Topbar {
             crumbs: crumb("Logs"),
-            primary_action: Some(refresh_action),
+            actions: vec![refresh_action],
             subtitle: Some("System telemetry and admin audit trail"),
             show_palette: true,
         },
@@ -386,9 +386,12 @@ mod tests {
             filtered.contains("/served-boom") && filtered.contains("/served-missing"),
             "both error rows must still be listed: {filtered}"
         );
+        // The total rides on the pagination bar, which renders only when the
+        // rows span more than one page.
+        let counted = logs_html(&[("errors", "1"), ("page_size", "1")]).await;
         assert!(
-            filtered.contains("2 total"),
-            "the count is of the filtered set: {filtered}"
+            counted.contains("2 total"),
+            "the count is of the filtered set: {counted}"
         );
     }
 
@@ -475,9 +478,12 @@ mod tests {
         );
 
         // A search the URL must encode rides along the same way.
-        let encoded = logs_html(&[("errors", "1"), ("search", "a b")]).await;
+        // (It has to match rows across two pages: a one-page result renders
+        // no pagination links at all.)
+        let encoded =
+            logs_html(&[("errors", "1"), ("search", "/served"), ("page_size", "1")]).await;
         assert!(
-            encoded.contains("/b/admin/logs?errors=1&search=a+b&page="),
+            encoded.contains("/b/admin/logs?errors=1&search=%2Fserved&page="),
             "the search is form-encoded in the links: {encoded}"
         );
     }
@@ -485,7 +491,7 @@ mod tests {
     /// Without the parameter the page lists every row and offers the filter.
     #[tokio::test]
     async fn the_unfiltered_page_offers_the_filter() {
-        let html = logs_html(&[]).await;
+        let html = logs_html(&[("page_size", "1")]).await;
         assert!(
             html.contains("/b/admin/logs?errors=1"),
             "the filter must be reachable from the page: {html}"

@@ -100,8 +100,8 @@ pub async fn settings_body(ctx: &dyn Context, msg: &Message) -> Result<Markup, W
                     }
                 }
                 div .form-actions {
-                    button .btn .btn--secondary type="button" data-action="modal-close" data-modal-target="create-var" { "Cancel" }
-                    button .btn .btn--primary type="submit" { "Create" }
+                    button .btn .btn--secondary .btn--block type="button" data-action="modal-close" data-modal-target="create-var" { "Cancel" }
+                    button .btn .btn--primary .btn--block type="submit" { "Create" }
                 }
             }
         }))
@@ -997,8 +997,8 @@ pub async fn handle_edit_variable_form(ctx: &dyn Context, msg: &Message) -> Outp
                     }
                 }
                 div .form-actions {
-                    button .btn .btn--secondary type="button" data-action="modal-close" data-modal-target="edit-var-modal-overlay" { "Cancel" }
-                    button .btn .btn--primary type="submit" { "Save" }
+                    button .btn .btn--secondary .btn--block type="button" data-action="modal-close" data-modal-target="edit-var-modal-overlay" { "Cancel" }
+                    button .btn .btn--primary .btn--block type="submit" { "Save" }
                 }
             }
         }

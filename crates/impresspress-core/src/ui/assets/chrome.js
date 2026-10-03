@@ -49,6 +49,19 @@
   const items = () => Array.from(list.querySelectorAll('.palette__item'));
   let selected = 0;
 
+  // The input is an ARIA combobox (see `ui/palette.rs`): focus never leaves
+  // it, so the selected option is announced through `aria-activedescendant`,
+  // which must name the option that carries `aria-selected="true"` -- or be
+  // absent when the filter leaves nothing to select.
+  function select(option) {
+    if (option) {
+      option.setAttribute('aria-selected', 'true');
+      input.setAttribute('aria-activedescendant', option.id);
+    } else {
+      input.removeAttribute('aria-activedescendant');
+    }
+  }
+
   function open() {
     el.dataset.open = 'true';
     el.setAttribute('aria-hidden', 'false');
@@ -72,7 +85,7 @@
     });
     const vis = visibleItems();
     selected = 0;
-    if (vis[0]) vis[0].setAttribute('aria-selected', 'true');
+    select(vis[0]);
   }
 
   function move(delta) {
@@ -80,7 +93,7 @@
     if (!vis.length) return;
     vis[selected]?.setAttribute('aria-selected', 'false');
     selected = (selected + delta + vis.length) % vis.length;
-    vis[selected].setAttribute('aria-selected', 'true');
+    select(vis[selected]);
     vis[selected].scrollIntoView({ block: 'nearest' });
   }
 
@@ -114,22 +127,15 @@
     if (t.dataset.action === 'palette-close') { e.preventDefault(); close(); }
   });
 
-  // The shortcut hint defaults to the Mac glyph; swap to Ctrl elsewhere so
-  // the advertised key matches what the keydown handler above accepts.
-  //
-  // This is the one thing in this file a visitor can see happen. It used to
-  // run during parse; it now waits on this file's fetch, so a non-Mac visitor
-  // on a cold cache sees the server-rendered `⌘` painted and then replaced.
-  // The string grows from one glyph to four characters, so on a narrow
-  // viewport the topbar re-lays out rather than merely re-texting. Rendering
-  // the label server-side would trade that for either a wrong glyph on Mac or
-  // a changed rendered output on every shelled page; the flash is on a
-  // once-per-deploy cold cache only, and the button works throughout, so it
-  // is documented rather than designed away. If it ever needs to go, the fix
-  // is a platform-neutral server-rendered label, not an inline script.
+  // The desktop trigger's shortcut hint defaults to the Mac glyph; swap to
+  // Ctrl elsewhere so the advertised key matches what the keydown handler
+  // above accepts. Only that decorative `kbd` hint changes: the button's
+  // label ("Search" + icon) and the mobile header's trigger (an icon) are
+  // platform-neutral and server-rendered, so nothing a visitor reads or
+  // taps depends on this script having run. The hint sits at the end of a
+  // desktop-only button, so the swap can at most widen that button.
   if (!/Mac|iPhone|iPad|iPod/.test(navigator.platform || '')) {
     document.querySelectorAll('.topbar__palette-cmd').forEach((n) => { n.textContent = 'Ctrl'; });
-    document.querySelectorAll('.shell__palette-icon').forEach((n) => { n.textContent = 'Ctrl K'; });
   }
 
   // Linked table rows (`.data-table__row--linked`) style as clickable; make

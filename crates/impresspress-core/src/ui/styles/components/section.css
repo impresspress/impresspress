@@ -1,0 +1,15 @@
+/* ===== Section header (ui/components/section.rs) =====
+ * The one in-body heading: an h2 under the topbar's h1, with an optional
+ * trailing slot. The slot wraps under the title when the row is too narrow
+ * rather than squeezing the title. */
+.section-header {
+	display: flex; align-items: center; justify-content: space-between;
+	flex-wrap: wrap; gap: var(--space-2) var(--space-4);
+	margin: 0 0 var(--space-4);
+}
+.section-header__title {
+	font-size: var(--text-lg); font-weight: 600; line-height: 1.3;
+	color: var(--text-primary); margin: 0;
+	min-width: 0; overflow-wrap: anywhere;
+}
+.section-header__action { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
