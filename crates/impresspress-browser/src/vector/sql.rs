@@ -226,10 +226,53 @@ pub fn parse_registry_row(row: &serde_json::Value) -> Result<(u32, DistanceMetri
 pub fn index_tables(prefixed_name: &str, keyword_search: bool) -> Vec<String> {
     let mut out = vec![format!("{prefixed_name}_vectors")];
     if keyword_search {
-        out.push(format!("{prefixed_name}_fts"));
+        out.push(fts_table(prefixed_name));
     }
-    out.push(format!("{prefixed_name}_meta"));
+    out.push(meta_table(prefixed_name));
     out
+}
+
+/// The index's `_meta` table: one row per entry, `id`/`rowid`/`metadata`
+/// (and `text` with keyword search). What `describe_index` reports on and
+/// what `count`/`list_ids` read.
+pub fn meta_table(prefixed_name: &str) -> String {
+    format!("{prefixed_name}_meta")
+}
+
+/// The index's FTS5 table, present exactly when the index was created with
+/// keyword search.
+pub fn fts_table(prefixed_name: &str) -> String {
+    format!("{prefixed_name}_fts")
+}
+
+/// `(sql, params)` returning one row when a table (FTS5 virtual tables
+/// included — the catalog lists them as `table` too) is named exactly
+/// `table`, and none otherwise. Exact, not SQLite's case-insensitive name
+/// resolution: a legacy `Docs_meta` is not `docs_meta`'s table.
+pub fn build_table_exists_sql(table: &str) -> (String, Vec<serde_json::Value>) {
+    (
+        "SELECT name FROM sqlite_master WHERE type = 'table' AND name = ?".to_string(),
+        vec![serde_json::json!(table)],
+    )
+}
+
+/// `(sql, params)` listing `table`'s columns as `name`/`type` rows, in
+/// declaration order.
+pub fn build_table_columns_sql(table: &str) -> (String, Vec<serde_json::Value>) {
+    (
+        "SELECT name, type FROM pragma_table_info(?) ORDER BY cid".to_string(),
+        vec![serde_json::json!(table)],
+    )
+}
+
+/// Every entry's `id` and raw `metadata` JSON text, from the `_meta` table.
+/// `list_ids` filters these with `MetadataFilter::matches`, the filter's one
+/// meaning, the same way `query` filters its candidates.
+pub fn build_select_meta_sql(prefixed_name: &str) -> String {
+    format!(
+        r#"SELECT id, metadata FROM "{}""#,
+        meta_table(prefixed_name)
+    )
 }
 
 pub fn build_delete_index_sql(prefixed_name: &str, keyword_search: bool) -> Vec<String> {
@@ -242,7 +285,10 @@ pub fn build_delete_index_sql(prefixed_name: &str, keyword_search: bool) -> Vec<
 }
 
 pub fn build_count_sql(prefixed_name: &str) -> String {
-    format!(r#"SELECT COUNT(*) AS n FROM "{prefixed_name}_meta""#)
+    format!(
+        r#"SELECT COUNT(*) AS n FROM "{}""#,
+        meta_table(prefixed_name)
+    )
 }
 
 /// Returns `(statements, params)`. Statements share the same parameter list.
@@ -1048,6 +1094,114 @@ mod tests {
                 "impresspress__vector__Notes".to_string(),
                 "impresspress__vector__docs".to_string(),
             ]
+        );
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn table_exists(conn: &rusqlite::Connection, table: &str) -> bool {
+        let (sql, params) = build_table_exists_sql(table);
+        conn.prepare(&sql)
+            .unwrap()
+            .exists(rusqlite::params![params[0].as_str().unwrap()])
+            .unwrap()
+    }
+
+    #[cfg(not(target_arch = "wasm32"))]
+    fn table_columns(conn: &rusqlite::Connection, table: &str) -> Vec<(String, String)> {
+        let (sql, params) = build_table_columns_sql(table);
+        conn.prepare(&sql)
+            .unwrap()
+            .query_map(rusqlite::params![params[0].as_str().unwrap()], |r| {
+                Ok((r.get(0)?, r.get(1)?))
+            })
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    }
+
+    /// The describe probes, on the tables this module's own DDL creates: the
+    /// meta table's columns in declaration order, and the FTS table present
+    /// exactly when keyword search is on. Same columns the native backend
+    /// reports for its meta table (`id`, `rowid`, `metadata`, `text`).
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_describe_probes_report_the_meta_columns_and_keyword_search() {
+        let conn = rusqlite::Connection::open_in_memory().expect("sqlite");
+        let kw = "impresspress__vector__docs";
+        let plain = "impresspress__vector__plain";
+        for stmt in build_create_index_sql(kw, true)
+            .into_iter()
+            .chain(build_create_index_sql(plain, false))
+        {
+            conn.execute_batch(&stmt).expect("create");
+        }
+
+        assert!(table_exists(&conn, &meta_table(kw)));
+        assert!(
+            table_exists(&conn, &fts_table(kw)),
+            "FTS5 is a catalog table"
+        );
+        assert_eq!(
+            table_columns(&conn, &meta_table(kw)),
+            [
+                ("id", "TEXT"),
+                ("rowid", "INTEGER"),
+                ("metadata", "TEXT"),
+                ("text", "TEXT"),
+            ]
+            .map(|(n, t)| (n.to_string(), t.to_string()))
+        );
+
+        assert!(table_exists(&conn, &meta_table(plain)));
+        assert!(!table_exists(&conn, &fts_table(plain)));
+        assert_eq!(
+            table_columns(&conn, &meta_table(plain)),
+            [("id", "TEXT"), ("rowid", "INTEGER"), ("metadata", "TEXT")]
+                .map(|(n, t)| (n.to_string(), t.to_string()))
+        );
+
+        assert!(!table_exists(
+            &conn,
+            &meta_table("impresspress__vector__nope")
+        ));
+    }
+
+    /// Existence is the exact name, not SQLite's case-insensitive resolution:
+    /// a legacy mixed-case index's tables are not the lowercase index's.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_exists_probe_matches_the_name_exactly() {
+        let conn = rusqlite::Connection::open_in_memory().expect("sqlite");
+        for stmt in build_create_index_sql("impresspress__vector__Docs", false) {
+            conn.execute_batch(&stmt).expect("legacy create");
+        }
+        assert!(table_exists(&conn, "impresspress__vector__Docs_meta"));
+        assert!(!table_exists(&conn, "impresspress__vector__docs_meta"));
+    }
+
+    /// `list_ids` reads every entry's id and metadata text from the meta table.
+    #[cfg(not(target_arch = "wasm32"))]
+    #[test]
+    fn the_meta_select_reads_ids_and_metadata() {
+        let conn = rusqlite::Connection::open_in_memory().expect("sqlite");
+        let name = "impresspress__vector__docs";
+        for stmt in build_create_index_sql(name, false) {
+            conn.execute_batch(&stmt).expect("create");
+        }
+        conn.execute_batch(&format!(
+            r#"INSERT INTO "{name}_meta" (id, rowid, metadata) VALUES ('a', NULL, '{{"k":1}}');"#
+        ))
+        .unwrap();
+        let rows: Vec<(String, Option<String>)> = conn
+            .prepare(&build_select_meta_sql(name))
+            .unwrap()
+            .query_map([], |r| Ok((r.get("id")?, r.get("metadata")?)))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        assert_eq!(
+            rows,
+            vec![("a".to_string(), Some(r#"{"k":1}"#.to_string()))]
         );
     }
 }

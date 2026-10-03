@@ -9,8 +9,9 @@ use std::{collections::HashMap, sync::Mutex};
 use wafer_core::interfaces::vector::{
     self as vector_rrf,
     service::{
-        check_rename, DistanceMetric, MetadataFilter, Result as VResult, SearchMode, VectorEntry,
-        VectorError, VectorIndexConfig, VectorMatch, VectorService,
+        check_rename, ColumnInfo, DescribeIndexResponse, DistanceMetric, MetadataFilter,
+        Result as VResult, SearchMode, VectorEntry, VectorError, VectorIndexConfig, VectorMatch,
+        VectorService,
     },
 };
 
@@ -457,6 +458,71 @@ impl VectorService for BrowserVectorService {
         .await
     }
 
+    /// The meta table's real state: whether it exists, its columns in
+    /// declaration order, and whether the index has an FTS table. Absence is
+    /// `exists: false`, not an error. The same probe the native backend runs,
+    /// keyed on the tables rather than on the registry row, because what this
+    /// op promises is what is on disk.
+    async fn describe_index(&self, index: &str) -> VResult<DescribeIndexResponse> {
+        check_index_name(index)?;
+        let meta = sql::meta_table(index);
+        if !table_exists(&meta)? {
+            return Ok(DescribeIndexResponse {
+                exists: false,
+                columns: Vec::new(),
+                keyword_search: false,
+            });
+        }
+        let (query, params) = sql::build_table_columns_sql(&meta);
+        let columns = query_rows(&query, &params)?
+            .iter()
+            .map(|row| {
+                let text = |key: &str| {
+                    row.get(key)
+                        .and_then(|v| v.as_str())
+                        .map(str::to_string)
+                        .ok_or_else(|| {
+                            VectorError::Internal(format!("{meta} column row has no {key}: {row}"))
+                        })
+                };
+                Ok(ColumnInfo {
+                    name: text("name")?,
+                    sql_type: text("type")?,
+                })
+            })
+            .collect::<VResult<Vec<_>>>()?;
+        let keyword_search = table_exists(&sql::fts_table(index))?;
+        Ok(DescribeIndexResponse {
+            exists: true,
+            columns,
+            keyword_search,
+        })
+    }
+
+    /// Ids of the entries whose metadata satisfies every `filter.equals`
+    /// condition, as [`MetadataFilter::matches`] defines it — the same
+    /// predicate `query` filters its candidates with here. The filter must be
+    /// non-empty and its values JSON strings or numbers, as the trait
+    /// requires of every backend.
+    async fn list_ids(&self, index: &str, filter: MetadataFilter) -> VResult<Vec<String>> {
+        check_list_ids_filter(&filter)?;
+        check_index_name(index)?;
+        if self.lookup(index)?.is_none() {
+            return Err(VectorError::IndexNotFound(index.into()));
+        }
+        Ok(query_rows(&sql::build_select_meta_sql(index), &[])?
+            .into_iter()
+            .filter_map(|row| {
+                let id = row.get("id")?.as_str()?.to_string();
+                let metadata: Option<serde_json::Value> = row
+                    .get("metadata")
+                    .and_then(|v| v.as_str())
+                    .and_then(|s| serde_json::from_str(s).ok());
+                filter.matches(metadata.as_ref()).then_some(id)
+            })
+            .collect())
+    }
+
     async fn count(&self, index: &str) -> VResult<u64> {
         if self.lookup(index)?.is_none() {
             return Err(VectorError::IndexNotFound(index.into()));
@@ -578,6 +644,49 @@ fn exec_ddl(statements: &[String], tables: &[String]) -> VResult<()> {
         database::forget_table_schema(table);
     }
     ran
+}
+
+/// Refuse an index name that is not a plain identifier, as the native
+/// backend does for the ops that introspect the catalog by name.
+fn check_index_name(index: &str) -> VResult<()> {
+    if wafer_block::db::is_plain_ident(index) {
+        Ok(())
+    } else {
+        Err(VectorError::InvalidIndexName(index.to_string()))
+    }
+}
+
+/// The `list_ids` filter rule every backend applies: at least one condition,
+/// and every value a JSON string or number. An unconditioned id dump is not a
+/// supported query shape.
+fn check_list_ids_filter(filter: &MetadataFilter) -> VResult<()> {
+    if filter.equals.is_empty() {
+        return Err(VectorError::InvalidMetadataFilter(
+            "filter.equals must contain at least one condition".into(),
+        ));
+    }
+    for (path, value) in &filter.equals {
+        if !(value.is_string() || value.is_number()) {
+            return Err(VectorError::InvalidMetadataFilter(format!(
+                "value for path {path:?} must be a JSON string or number, got {value}"
+            )));
+        }
+    }
+    Ok(())
+}
+
+/// Run a read through the bridge and decode its rows as plain JSON objects.
+fn query_rows(query: &str, params: &[serde_json::Value]) -> VResult<Vec<serde_json::Value>> {
+    let params_js = db_codec::params_to_js(params).map_err(VectorError::Internal)?;
+    let value =
+        bridge::db_query_raw(query, params_js).map_err(|e| VectorError::Internal(js_err(e)))?;
+    db_codec::rows_from_js(value).map_err(VectorError::Internal)
+}
+
+/// Whether a table is named exactly `table`.
+fn table_exists(table: &str) -> VResult<bool> {
+    let (query, params) = sql::build_table_exists_sql(table);
+    Ok(!query_rows(&query, &params)?.is_empty())
 }
 
 /// Run `statements` as one transaction — the crate's one framing,
@@ -775,6 +884,260 @@ mod schema_invalidation {
             .delete_index("vec_delete_idx")
             .await;
         assert_eq!(cache.primary_key(sql::REGISTRY_TABLE), None);
+    }
+}
+
+/// `describe_index` and `list_ids` on the real service over real sql.js
+/// (`database::test_support`'s in-memory OPFS and fresh database). The trait's
+/// defaults for these two answer `Internal("not implemented")`, which is what
+/// the admin index detail page and ingest got here before this backend
+/// implemented them — so these drive `BrowserVectorService` itself, not a
+/// stand-in.
+#[cfg(all(test, target_arch = "wasm32"))]
+mod introspection {
+    use wasm_bindgen_test::wasm_bindgen_test;
+
+    use super::{
+        BrowserVectorService, DistanceMetric, MetadataFilter, VectorEntry, VectorError,
+        VectorIndexConfig, VectorService,
+    };
+    use crate::database::test_support::fresh_db;
+
+    fn config(name: &str, keyword_search: bool) -> VectorIndexConfig {
+        VectorIndexConfig {
+            name: name.to_string(),
+            model: "test-model".to_string(),
+            dimensions: 3,
+            metric: DistanceMetric::Cosine,
+            keyword_search,
+        }
+    }
+
+    fn entry(id: &str, metadata: serde_json::Value, keyword_search: bool) -> VectorEntry {
+        VectorEntry {
+            id: id.to_string(),
+            vector: vec![1.0, 0.0, 0.0],
+            metadata: Some(metadata),
+            text: keyword_search.then(|| format!("text of {id}")),
+        }
+    }
+
+    fn filter(conditions: &[(&str, serde_json::Value)]) -> MetadataFilter {
+        let mut f = MetadataFilter::default();
+        for (path, value) in conditions {
+            f.equals.insert((*path).to_string(), value.clone());
+        }
+        f
+    }
+
+    fn column_names(desc: &super::DescribeIndexResponse) -> Vec<&str> {
+        desc.columns.iter().map(|c| c.name.as_str()).collect()
+    }
+
+    #[wasm_bindgen_test]
+    async fn describe_reports_a_created_index_and_absence_is_data() {
+        fresh_db().await;
+        let svc = BrowserVectorService::new();
+        svc.create_index(config("describe_kw", true))
+            .await
+            .expect("create");
+        svc.create_index(config("describe_plain", false))
+            .await
+            .expect("create");
+
+        let kw = svc.describe_index("describe_kw").await.expect("describe");
+        assert!(kw.exists);
+        assert!(kw.keyword_search);
+        assert_eq!(column_names(&kw), ["id", "rowid", "metadata", "text"]);
+        assert_eq!(kw.columns[0].sql_type, "TEXT");
+        assert_eq!(kw.columns[1].sql_type, "INTEGER");
+
+        let plain = svc
+            .describe_index("describe_plain")
+            .await
+            .expect("describe");
+        assert!(plain.exists);
+        assert!(!plain.keyword_search);
+        assert_eq!(column_names(&plain), ["id", "rowid", "metadata"]);
+
+        let missing = svc.describe_index("describe_nope").await.expect("describe");
+        assert!(!missing.exists);
+        assert!(missing.columns.is_empty());
+        assert!(!missing.keyword_search);
+
+        svc.delete_index("describe_plain").await.expect("delete");
+        let deleted = svc
+            .describe_index("describe_plain")
+            .await
+            .expect("describe");
+        assert!(!deleted.exists, "a deleted index describes as absent");
+    }
+
+    /// The describe probe reads the database, not this instance's cache: a
+    /// fresh service — a restarted Service Worker — describes an index it
+    /// never created.
+    #[wasm_bindgen_test]
+    async fn describe_reads_the_database_not_the_cache() {
+        fresh_db().await;
+        BrowserVectorService::new()
+            .create_index(config("describe_cold", true))
+            .await
+            .expect("create");
+        let desc = BrowserVectorService::new()
+            .describe_index("describe_cold")
+            .await
+            .expect("describe");
+        assert!(desc.exists);
+        assert!(desc.keyword_search);
+    }
+
+    #[wasm_bindgen_test]
+    async fn describe_refuses_a_name_that_is_not_a_plain_identifier() {
+        fresh_db().await;
+        let err = BrowserVectorService::new()
+            .describe_index(r#"x" OR 1"#)
+            .await
+            .expect_err("refused");
+        assert!(matches!(err, VectorError::InvalidIndexName(_)), "{err:?}");
+    }
+
+    #[wasm_bindgen_test]
+    async fn list_ids_filters_by_metadata_equality() {
+        fresh_db().await;
+        let svc = BrowserVectorService::new();
+        for (name, kw) in [("list_ids_kw", true), ("list_ids_plain", false)] {
+            svc.create_index(config(name, kw)).await.expect("create");
+            svc.upsert(
+                name,
+                vec![
+                    entry(
+                        "a",
+                        serde_json::json!({ "document_id": "d1", "page": 1 }),
+                        kw,
+                    ),
+                    entry(
+                        "b",
+                        serde_json::json!({ "document_id": "d1", "page": 2 }),
+                        kw,
+                    ),
+                    entry(
+                        "c",
+                        serde_json::json!({ "document_id": "d2", "page": 1 }),
+                        kw,
+                    ),
+                ],
+            )
+            .await
+            .expect("upsert");
+
+            let mut ids = svc
+                .list_ids(name, filter(&[("document_id", serde_json::json!("d1"))]))
+                .await
+                .expect("list_ids");
+            ids.sort();
+            assert_eq!(ids, ["a", "b"], "{name}");
+
+            // Numbers compare as numbers, and conditions AND.
+            let ids = svc
+                .list_ids(
+                    name,
+                    filter(&[
+                        ("document_id", serde_json::json!("d1")),
+                        ("page", serde_json::json!(2)),
+                    ]),
+                )
+                .await
+                .expect("list_ids");
+            assert_eq!(ids, ["b"], "{name}");
+
+            // Typed: the string "1" is not the number 1.
+            let ids = svc
+                .list_ids(name, filter(&[("page", serde_json::json!("1"))]))
+                .await
+                .expect("list_ids");
+            assert!(ids.is_empty(), "{name}: {ids:?}");
+
+            let ids = svc
+                .list_ids(name, filter(&[("document_id", serde_json::json!("d9"))]))
+                .await
+                .expect("list_ids");
+            assert!(ids.is_empty(), "{name}: {ids:?}");
+        }
+    }
+
+    /// The re-ingest path deletes what `list_ids` found: the two together
+    /// leave only the other document's entries.
+    #[wasm_bindgen_test]
+    async fn list_ids_then_delete_clears_one_document() {
+        fresh_db().await;
+        let svc = BrowserVectorService::new();
+        svc.create_index(config("list_ids_reingest", false))
+            .await
+            .expect("create");
+        svc.upsert(
+            "list_ids_reingest",
+            vec![
+                entry("a", serde_json::json!({ "document_id": "d1" }), false),
+                entry("b", serde_json::json!({ "document_id": "d2" }), false),
+            ],
+        )
+        .await
+        .expect("upsert");
+        let prior = svc
+            .list_ids(
+                "list_ids_reingest",
+                filter(&[("document_id", serde_json::json!("d1"))]),
+            )
+            .await
+            .expect("list_ids");
+        svc.delete("list_ids_reingest", prior)
+            .await
+            .expect("delete");
+        assert_eq!(svc.count("list_ids_reingest").await.expect("count"), 1);
+    }
+
+    #[wasm_bindgen_test]
+    async fn list_ids_on_a_missing_index_is_not_found() {
+        fresh_db().await;
+        let err = BrowserVectorService::new()
+            .list_ids("list_ids_nope", filter(&[("k", serde_json::json!("v"))]))
+            .await
+            .expect_err("missing");
+        assert!(matches!(err, VectorError::IndexNotFound(_)), "{err:?}");
+    }
+
+    #[wasm_bindgen_test]
+    async fn list_ids_refuses_an_empty_or_non_scalar_filter_and_a_bad_name() {
+        fresh_db().await;
+        let svc = BrowserVectorService::new();
+        svc.create_index(config("list_ids_refusals", false))
+            .await
+            .expect("create");
+
+        for bad in [
+            MetadataFilter::default(),
+            filter(&[("flag", serde_json::json!(true))]),
+            filter(&[("nested", serde_json::json!({ "a": 1 }))]),
+            filter(&[("none", serde_json::Value::Null)]),
+        ] {
+            let err = svc
+                .list_ids("list_ids_refusals", bad.clone())
+                .await
+                .expect_err("refused");
+            assert!(
+                matches!(err, VectorError::InvalidMetadataFilter(_)),
+                "{bad:?}: {err:?}"
+            );
+        }
+
+        let err = svc
+            .list_ids(
+                "List_Ids_Refusals",
+                filter(&[("k", serde_json::json!("v"))]),
+            )
+            .await
+            .expect_err("refused");
+        assert!(matches!(err, VectorError::InvalidIndexName(_)), "{err:?}");
     }
 }
 
