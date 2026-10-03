@@ -893,6 +893,45 @@ fn the_rendered_worker_answers_for_a_stopped_runtime() {
     );
 }
 
+/// A worker keeps its own runtime binary at install and boots from it, so a
+/// worker the browser restarts after a deploy has deleted that binary from the
+/// host still starts; and a dead worker that a newer version is coming to
+/// replace leaves the transition to that update — driven in Node against the
+/// rendered file, `tests/sw/sw_runtime_kept.test.mjs`.
+#[test]
+fn the_rendered_worker_keeps_its_own_runtime() {
+    node_test("sw_runtime_kept.test.mjs", "sw.js", "SW_JS", "SW_JS_WIPE");
+}
+
+/// The binary the worker keeps is the one its glue was built for: `sw.js`
+/// names the hashed wasm the manifest lists, and the glue `sw.js` imports
+/// names the same file. A worker that kept another binary than the one the
+/// glue expects would keep nothing useful.
+#[test]
+fn the_worker_keeps_the_runtime_its_glue_loads() {
+    let tmp = production_pkg_copy();
+    run(tmp.path(), tmp.path(), AppConfig::default()).expect("bundler ok");
+    let sw = fs::read_to_string(tmp.path().join("sw.js")).unwrap();
+    let manifest: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string(tmp.path().join("asset-manifest.json")).unwrap())
+            .unwrap();
+    let wasm = manifest["assets"]["app_bg.wasm"].as_str().unwrap();
+    let glue = manifest["assets"]["app.js"].as_str().unwrap();
+
+    assert_eq!(
+        sw.matches(&format!("const RUNTIME_URL = '{wasm}';"))
+            .count(),
+        1,
+        "sw.js = {sw}"
+    );
+    assert!(sw.contains(&format!("from '{glue}';")), "sw.js = {sw}");
+    let glue_source = fs::read_to_string(tmp.path().join(glue.trim_start_matches('/'))).unwrap();
+    assert!(
+        glue_source.contains(&format!("'{}'", wasm.trim_start_matches('/'))),
+        "the glue does not name {wasm}"
+    );
+}
+
 /// The boot shell acts on a cause only when it is about this load, erases
 /// local data only for a failure of the runtime's `initialize()`, never
 /// restarts a boot that is merely slow, recovers automatically

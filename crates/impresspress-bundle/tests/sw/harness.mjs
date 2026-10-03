@@ -39,6 +39,18 @@ function source(variable) {
 // `opfs_wipe_on_recovery`, whose answers say what a reload erases.
 const SOURCES = { plain: source('SW_JS'), wipe: source('SW_JS_WIPE') };
 
+/// The runtime binary the rendered worker keeps (`RUNTIME_URL` there): the
+/// bundler's hashed `.wasm` name, read out of what was rendered.
+export const RUNTIME_URL = (() => {
+  const declared = SOURCES.plain.match(/^const RUNTIME_URL = '([^']+)';$/m);
+  if (!declared) throw new Error('the rendered sw.js no longer declares RUNTIME_URL');
+  return declared[1];
+})();
+/// The Cache Storage cache the worker keeps it in.
+export const RUNTIME_CACHE = '__impresspress_runtime';
+/// The bytes the harness's host serves at RUNTIME_URL.
+export const RUNTIME_BYTES = 'the runtime binary';
+
 export const ORIGIN = 'https://app.example';
 /// The address of the page the harness's one client is on: a path only the
 /// runtime serves.
@@ -53,8 +65,15 @@ let instances = 0;
 /// each defaults to succeeding. `runtime.host(url)` is the static host's
 /// answer to a request the worker makes; by default it has the boot shell at
 /// `/` and nothing else — a plain file server, with no fallback for the paths
-/// only the runtime serves. `wipe` picks the `opfs_wipe_on_recovery`
-/// rendering.
+/// only the runtime serves, and the runtime binary at RUNTIME_URL. `wipe`
+/// picks the `opfs_wipe_on_recovery` rendering.
+///
+/// The worker starts as an INSTALLED one: its runtime binary is already kept
+/// in Cache Storage, as `install` left it — unless `runtime.kept` is
+/// `false`, a worker whose kept binary has gone. `runtime.update()` is what
+/// the registration's update check finds: it resolves to `'installing'` or
+/// `'waiting'` for a newer version coming in, to anything else for none, or
+/// rejects for a check that could not reach the host.
 export async function loadWorker(runtime = {}, { wipe = false } = {}) {
   const source = SOURCES[wipe ? 'wipe' : 'plain'];
   const listeners = {};
@@ -64,6 +83,10 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
   const warnings = [];
   let unregistered = 0;
   let claimed = 0;
+  let updates = 0;
+  let registration;
+  // What `init()` was handed, each time it was called.
+  const inits = [];
   const client = {
     url: CLIENT_URL,
     postMessage: (message) => posted.push(message),
@@ -74,18 +97,44 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
       return runtime.navigate ? runtime.navigate(url) : Promise.resolve(client);
     }
   };
-  // Cache Storage, as far as the worker uses it: `open(name).put(key, response)`.
-  const stored = new Map();
-  globalThis.caches = {
-    open: async (name) => ({
-      put: async (key, response) => {
-        stored.set(`${name} ${key}`, await response.json());
-      }
-    })
+  // Cache Storage, as far as the worker uses it: each cache a map from the
+  // absolute URL of a key to what was put there — its body as text, its
+  // status and headers — handed back as a fresh `Response` by `match`.
+  const stores = new Map();
+  const keyOf = (key) => new URL(typeof key === 'string' ? key : key.url, ORIGIN).href;
+  const store = (name) => {
+    if (!stores.has(name)) stores.set(name, new Map());
+    return stores.get(name);
   };
+  globalThis.caches = {
+    open: async (name) => {
+      const entries = store(name);
+      return {
+        put: async (key, response) => {
+          entries.set(keyOf(key), {
+            text: await response.text(),
+            status: response.status,
+            headers: [...response.headers]
+          });
+        },
+        match: async (key) => {
+          const entry = entries.get(keyOf(key));
+          return entry && new Response(entry.text, { status: entry.status, headers: entry.headers });
+        },
+        keys: async () => [...entries.keys()].map((url) => ({ url })),
+        delete: async (key) => entries.delete(keyOf(key))
+      };
+    }
+  };
+  if (runtime.kept !== false) {
+    store(RUNTIME_CACHE).set(keyOf(RUNTIME_URL), { text: RUNTIME_BYTES, status: 200, headers: [] });
+  }
 
   globalThis.__swRuntimeStubs = {
-    init: runtime.init ?? (async () => {}),
+    init: async (options) => {
+      inits.push(options);
+      if (runtime.init) return runtime.init(options);
+    },
     initialize: runtime.initialize ?? (async () => {}),
     handle_request:
       runtime.handle_request ??
@@ -97,13 +146,20 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
       listeners[type] = listener;
     },
     skipWaiting: async () => {},
-    registration: {
+    registration: (registration = {
+      installing: null,
+      waiting: null,
+      update: async () => {
+        updates += 1;
+        const found = runtime.update ? await runtime.update() : null;
+        if (found === 'installing' || found === 'waiting') registration[found] = { state: found };
+      },
       unregister: async () => {
         unregistered += 1;
         if (typeof runtime.unregisters === 'function') return runtime.unregisters();
         return runtime.unregisters ?? true;
       }
-    },
+    }),
     clients: {
       claim: async () => {
         claimed += 1;
@@ -116,9 +172,13 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
   globalThis.fetch = async (request) => {
     network.push(request);
     if (runtime.host) return runtime.host(request);
-    return request === '/'
-      ? new Response(SHELL_HTML, { status: 200, headers: { 'Content-Type': 'text/html' } })
-      : new Response('no such file', { status: 404 });
+    if (request === '/') {
+      return new Response(SHELL_HTML, { status: 200, headers: { 'Content-Type': 'text/html' } });
+    }
+    if (request === RUNTIME_URL) {
+      return new Response(RUNTIME_BYTES, { status: 200, headers: { 'Content-Type': 'application/wasm' } });
+    }
+    return new Response('no such file', { status: 404 });
   };
 
   // A distinct URL per call, so each call evaluates the module afresh.
@@ -152,16 +212,35 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
     await Promise.all(kept);
   }
 
+  /// Dispatch a lifecycle event (`install`, `activate`) and resolve once
+  /// what the worker asked to be kept alive for has settled — rejecting as
+  /// it did, which for `install` is the browser discarding the version.
+  async function lifecycle(type) {
+    const kept = [];
+    listeners[type]({ waitUntil: (promise) => kept.push(promise) });
+    await Promise.all(kept);
+  }
+
   return {
     request,
     message,
+    lifecycle,
+    /// What `init()` was handed on each call.
+    inits,
+    /// How many update checks the worker asked its registration for.
+    updates: () => updates,
+    /// The URLs kept in the runtime cache, as paths.
+    runtimesKept: () => [...store(RUNTIME_CACHE).keys()].map((url) => new URL(url).pathname),
     /// How many times the worker claimed its clients.
     claimed: () => claimed,
     network,
     posted,
     navigated,
     /// What the worker left for the boot shell, or `undefined`.
-    leftForBootShell: () => stored.get('__impresspress_sw_stopped /__impresspress_sw_stopped'),
+    leftForBootShell: () => {
+      const entry = store('__impresspress_sw_stopped').get(keyOf('/__impresspress_sw_stopped'));
+      return entry && JSON.parse(entry.text);
+    },
     /// How many times the worker unregistered itself. It never should: a
     /// dead worker stays registered so that it can answer navigations.
     unregistered: () => unregistered

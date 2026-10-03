@@ -84,11 +84,18 @@ const CONTROL_WAIT_MS = 10_000;
 // registration already has, so a healthy worker is not replaced for
 // nothing; with no registration, WORKER_URL.
 //
+// A recovery is never one of two replacements at once: a dead worker that a
+// newer version is already coming to replace reports no death, so no shell
+// recovers from it (`beingReplaced` in sw.js) — the update owns that
+// transition, and the recovery the ones nothing else is making.
+//
 // One known cost of the query: a CDN that keys its cache on the query string
 // and is purged of `/sw.js` only could answer `/sw.js?recovery=T` with the
-// previous deployment's worker once. That worker imports a glue file the new
-// deployment no longer has, fails at stage `load`, and is replaced again —
-// under another new URL, which the CDN has never cached — without erasing.
+// previous deployment's worker once. That worker cannot install — the
+// runtime binary it keeps at install (`RUNTIME_CACHE` in sw.js) is gone from
+// the host — so it replaces nothing, and the shell says the worker could not
+// be installed, and a reload's ordinary boot asks for an update under the
+// registration's own script URL. Nothing is erased.
 const WORKER_URL = '/sw.js';
 // Whether the recovery may wipe OPFS. Set per-build via the
 // `opfs_wipe_on_recovery` field on the bundle config (CLI flag
@@ -127,8 +134,10 @@ const BOOT_PROBE_TIMEOUT_MS = 60_000;
 const SHELL_URL = '__SHELL_URL__';
 
 // Drop Cache Storage. RECOVERED_CACHE is not dropped: it is this script's
-// own record, not the app's state. No worker is unregistered —
-// `replaceWorker` says how a dead one is replaced.
+// own record, not the app's state. The runtime binary the worker keeps
+// (`RUNTIME_CACHE` in sw.js) goes with the rest, so the replacement fetches
+// its own afresh at install. No worker is unregistered — `replaceWorker`
+// says how a dead one is replaced.
 async function dropCaches() {
     try {
         const keys = await caches.keys();

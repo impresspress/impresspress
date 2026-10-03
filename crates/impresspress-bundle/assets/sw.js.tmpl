@@ -28,6 +28,38 @@ const DEV_ENABLED = __DEV_ENABLED__;
 // the ones a newer deployment may already be serving.
 const BYPASS_RULES = __BYPASS_RULES__;
 
+// The runtime binary this worker runs: the hashed `.wasm` the glue above was
+// built for, rendered from the same name the bundler wrote into the glue.
+// Content-addressed, so this URL is this version's runtime and no other's.
+const RUNTIME_URL = '__WASM_BIN__';
+// Where every version of this worker keeps its own runtime binary, keyed by
+// RUNTIME_URL: put there at `install`, read from there by `init()`, and the
+// other versions' entries dropped at `activate`.
+//
+// Why it is kept and not fetched when needed: the browser keeps a worker's
+// SCRIPTS (this file and the glue it imports) with the installed version,
+// but not what the worker fetches at runtime — and `init()` fetches the
+// binary. A deployment deletes the previous binary from the host, and a
+// returning visitor's worker is usually one the browser stopped while idle.
+// The visit after a deploy starts that OLD worker again to answer it, before
+// the browser's update check has installed the new one; fetching its runtime
+// from the host then gets a 404, the worker dies at stage `load`, and the
+// boot shell's recovery starts replacing it while the browser is installing
+// the update. Kept here, the old worker boots the runtime it was installed
+// with, answers the visit, and is replaced by the update like any live
+// worker (`sw-update.spec.ts` stops the worker before the deploy visit).
+//
+// One binary per version, and one version kept once a new one activates —
+// a few megabytes of the origin's quota, which it shares with the app's
+// local data. A version that cannot keep its binary (the host no longer has
+// it, the quota is exhausted) fails to install: a browser keeps the worker
+// it has rather than switch to one that cannot start.
+//
+// `loader.js`'s recovery drops this cache with every other one, so the
+// replacement it registers fetches its runtime afresh; `runtimeBinary`
+// falls back to the host for a worker whose entry has gone.
+const RUNTIME_CACHE = '__impresspress_runtime';
+
 let initialized = false;
 let initPromise = null;
 // Set after a fatal wasm error (init failure or runtime trap). A poisoned
@@ -68,9 +100,10 @@ let poisonStage = '';
 // and none of them recovers — or erases — a second time.
 let poisonId = '';
 
-// The wasm module could not be fetched or instantiated (`init()`): a network
-// failure, a deploy that replaced the hashed file mid-load, a stale module
-// cache. Says nothing about the data this browser stores for the app.
+// The wasm module could not be fetched or instantiated (`init()`): a kept
+// binary that is gone and a host that no longer has it either, a network
+// failure, a module the browser cannot compile. Says nothing about the data
+// this browser stores for the app.
 const STAGE_LOAD = 'load';
 // The runtime's `initialize()` failed: opening the database, migrating it,
 // importing the seed. The one failure that can mean the stored data is not
@@ -124,6 +157,9 @@ const SHELL_URL = '__SHELL_URL__';
  *   for the shell (`leaveCauseForBootShell`), each page is told and
  *   re-navigated to its own address — which this worker answers with the
  *   shell — and `loader.js` runs its recovery path with the cause on screen.
+ *   Unless a newer version is already coming to replace this worker
+ *   (`beingReplaced`): then none of that happens, and the update owns the
+ *   transition.
  * - `false` — a request FROM a page failed (an API call, a form post) after
  *   the runtime had started. The page is left exactly where it is: the
  *   request gets `runtimeStopped`'s 503 and the page shows the cause.
@@ -142,6 +178,7 @@ async function selfDestruct(reason, stage, toBootShell) {
     }
     console.error('[__APP_NAME__] SW self-destructing:', reason);
     if (!toBootShell) return;
+    if (await beingReplaced()) return;
     await leaveCauseForBootShell();
     try {
         const clients = await self.clients.matchAll({ type: 'window' });
@@ -182,6 +219,38 @@ async function selfDestruct(reason, stage, toBootShell) {
 }
 
 /**
+ * Whether a newer version of this worker is already on its way in — a new
+ * deployment's, or a replacement another tab's recovery registered. Asks
+ * the host first (`registration.update()`, which joins a check the browser
+ * already has in flight rather than starting a second one), so a deployment
+ * this worker has not heard of yet counts.
+ *
+ * This is what keeps the recovery and the update from both replacing a dead
+ * worker. Each brings in a version of its own, and the browser installs one
+ * at a time, discarding an installing version when another is registered
+ * over it — so what the page ends on depended on which came first, and in
+ * CI it was sometimes nothing at all (`sw-update.spec.ts` timed out waiting
+ * for the new worker). So exactly ONE of them owns the transition, decided
+ * here, by the worker that died, before it tells anyone: if a newer version
+ * is coming it reports no death — no message, no navigation, no cause for
+ * the shell — and the update replaces it the way it replaces a live worker;
+ * the boot shell a navigation still gets from it does an ordinary boot,
+ * which waits for that version to activate. Only a dead worker that nothing
+ * is replacing sends the shell into its recovery.
+ *
+ * A check that cannot reach the host is not a newer version.
+ */
+async function beingReplaced() {
+    const registration = self.registration;
+    try {
+        await registration.update();
+    } catch (e) {
+        console.warn('[__APP_NAME__] update check failed:', e);
+    }
+    return Boolean(registration.installing || registration.waiting);
+}
+
+/**
  * Leave what this worker reports where the boot shell will find it — see
  * `STOP_CAUSE_CACHE`. `id` is the death's own and the same on every leave.
  * `at` is when THIS entry was left: it lets the shell tell a cause left for
@@ -215,7 +284,7 @@ async function ensureInitialized() {
     initPromise = (async () => {
         console.log('[__APP_NAME__] Loading WASM module...');
         try {
-            await init();
+            await init({ module_or_path: runtimeBinary() });
         } catch (e) {
             await selfDestruct(`wasm module load failed: ${e}`, STAGE_LOAD, true);
             throw e;
@@ -233,14 +302,59 @@ async function ensureInitialized() {
     await initPromise;
 }
 
+/**
+ * This version's runtime binary, as a `Response` for `init()`: the one kept
+ * in RUNTIME_CACHE, or — where that entry has gone (a recovery dropped the
+ * caches, the browser evicted them) — the host's answer.
+ */
+async function runtimeBinary() {
+    try {
+        const cache = await caches.open(RUNTIME_CACHE);
+        const kept = await cache.match(RUNTIME_URL);
+        if (kept) return kept;
+    } catch (e) {
+        console.warn('[__APP_NAME__] could not read the kept runtime:', e);
+    }
+    return fetch(RUNTIME_URL);
+}
+
+/**
+ * Keep this version's runtime binary (RUNTIME_CACHE says why). Throws when
+ * it cannot be kept, which fails the install.
+ */
+async function keepRuntime() {
+    const cache = await caches.open(RUNTIME_CACHE);
+    if (await cache.match(RUNTIME_URL)) return;
+    const response = await fetch(RUNTIME_URL);
+    if (!response.ok) {
+        throw new Error(`the runtime ${RUNTIME_URL} could not be fetched: HTTP ${response.status}`);
+    }
+    await cache.put(RUNTIME_URL, response);
+}
+
+/**
+ * Drop the runtime binaries kept by every other version: once this one is
+ * active, no other version of this worker runs again.
+ */
+async function dropOtherRuntimes() {
+    try {
+        const cache = await caches.open(RUNTIME_CACHE);
+        for (const request of await cache.keys()) {
+            if (new URL(request.url).pathname !== RUNTIME_URL) await cache.delete(request);
+        }
+    } catch (e) {
+        console.warn('[__APP_NAME__] could not drop the other runtimes:', e);
+    }
+}
+
 self.addEventListener('install', (event) => {
     console.log('[__APP_NAME__] Service Worker installing...');
-    event.waitUntil(self.skipWaiting());
+    event.waitUntil(Promise.all([keepRuntime(), self.skipWaiting()]));
 });
 
 self.addEventListener('activate', (event) => {
     console.log('[__APP_NAME__] Service Worker activating...');
-    event.waitUntil(self.clients.claim());
+    event.waitUntil(Promise.all([dropOtherRuntimes(), self.clients.claim()]));
 });
 
 // ---------------------------------------------------------------------------
@@ -515,7 +629,10 @@ function recoveryErases() {
  */
 async function runtimeStopped(request) {
     if (request.mode === 'navigate') {
-        await leaveCauseForBootShell();
+        // Unless a newer version is coming to replace this worker: then the
+        // shell is given no cause, and boots onto that version
+        // (`beingReplaced`).
+        if (!(await beingReplaced())) await leaveCauseForBootShell();
         return bootShell();
     }
     const next = recoveryErases()
