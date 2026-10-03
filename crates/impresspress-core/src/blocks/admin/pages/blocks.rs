@@ -202,6 +202,9 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
                         @let is_enabled = block_enabled.get(&block.name).copied().unwrap_or(true);
                         @let encoded_name = encode_block_name(&block.name);
                         div class={ "block-card" @if !is_enabled { " block-card--disabled" } }
+                            // Stable across a re-render of `#content` (the
+                            // detail modal's toggle), so focus can return.
+                            id={"block-card-" (encoded_name)}
                             hx-get={"/b/admin/blocks/" (encoded_name) "/detail"}
                             hx-target="#block-detail-slot"
                             hx-swap="innerHTML"

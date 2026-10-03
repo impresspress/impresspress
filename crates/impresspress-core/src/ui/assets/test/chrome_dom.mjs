@@ -220,6 +220,16 @@ class StubElement extends StubNode {
   get id() {
     return this.getAttribute('id') || '';
   }
+  // Reflected boolean/string attributes the section reads as properties.
+  get disabled() {
+    return this.hasAttribute('disabled');
+  }
+  get checked() {
+    return this.hasAttribute('checked');
+  }
+  get name() {
+    return this.getAttribute('name') || '';
+  }
 
   setAttribute(name, value) {
     this.attributes[name] = String(value);
@@ -341,19 +351,11 @@ export function tick() {
  */
 export function loadChromeDom() {
   const doc = new StubDocument();
-  const toastContainer = new StubElement(doc, 'div', { id: 'toast-container', popover: 'manual' });
-  toastContainer.popoverOpen = false;
-  toastContainer.popoverShows = 0;
-  toastContainer.showPopover = function () {
-    this.popoverOpen = true;
-    this.popoverShows += 1;
-  };
-  toastContainer.hidePopover = function () {
-    this.popoverOpen = false;
-  };
-  const baseMatches = toastContainer.matches.bind(toastContainer);
-  toastContainer.matches = (selector) =>
-    selector === ':popover-open' ? toastContainer.popoverOpen : baseMatches(selector);
+  const toastContainer = new StubElement(doc, 'div', {
+    id: 'toast-container',
+    role: 'status',
+    'aria-live': 'polite',
+  });
   doc.body.appendChild(toastContainer);
 
   const window = {

@@ -104,18 +104,73 @@ test.describe('admin modals', () => {
     await expect(trigger).toBeFocused();
   });
 
-  test('a click on the backdrop closes the modal; a click inside does not', async ({ page }) => {
+  test('a click on the backdrop closes a reference modal; a click inside does not', async ({
+    page,
+  }) => {
     await loginAsAdmin(page);
-    await page.goto('/b/admin/users?tab=roles', { waitUntil: 'networkidle' });
-    const trigger = page.locator('[data-action="modal-open"][data-modal-target="create-role"]');
-    const dialog = await openVia(page, trigger, 'create-role');
+    await page.goto('/b/admin/blocks', { waitUntil: 'networkidle' });
+    const card = page.locator('.block-card').first();
+    const dialog = await openVia(page, card.locator('.block-card__summary'), 'block-detail');
 
     await dialog.locator('.modal__body').click({ position: { x: 5, y: 5 } });
     await expect(dialog).toBeVisible();
 
     await page.mouse.click(5, 5);
     await expect(dialog).toBeHidden();
-    await expect(trigger).toBeFocused();
+  });
+
+  /**
+   * A refusal of a modal's form comes back as a toast, and the page behind a
+   * modal is inert — so the toast must be drawn INSIDE the open modal to be
+   * announced or clickable at all. The refusal is answered in the browser
+   * (409), so nothing is written.
+   */
+  test('a refusal toast over an open modal is announced, and its × dismisses only the toast', async ({
+    page,
+  }) => {
+    await loginAsAdmin(page);
+    await page.goto('/b/admin/users?tab=roles', { waitUntil: 'networkidle' });
+    await page.route('**/b/admin/iam/roles', (route) =>
+      route.request().method() === 'POST'
+        ? route.fulfill({
+            status: 409,
+            contentType: 'application/json',
+            body: JSON.stringify({ error: 'Conflict', message: 'A role named "editor" already exists.' }),
+          })
+        : route.continue(),
+    );
+    const trigger = page.locator('[data-action="modal-open"][data-modal-target="create-role"]');
+    const dialog = await openVia(page, trigger, 'create-role');
+    await page.locator('#role-name').fill('editor');
+    await dialog.getByRole('button', { name: 'Create' }).click();
+
+    // In the accessibility tree (an inert toast is not), as an alert, inside
+    // the modal.
+    const alert = page.getByRole('alert').filter({ hasText: 'already exists' });
+    await expect(alert).toBeVisible();
+    await expect(dialog.locator('#toast-container')).toHaveCount(1);
+
+    await alert.getByRole('button', { name: 'Dismiss' }).click();
+    await expect(alert).toHaveCount(0);
+    await expect(dialog).toBeVisible();
+    await expect(page.locator('#role-name')).toHaveValue('editor');
+
+    // Closed, the container goes back to the page.
+    await page.keyboard.press('Escape');
+    await expect(dialog).toBeHidden();
+    await expect(page.locator('body > #toast-container')).toHaveCount(1);
+  });
+
+  test('a click beside a form modal does not close it or lose what was typed', async ({ page }) => {
+    await loginAsAdmin(page);
+    await page.goto('/b/admin/users?tab=roles', { waitUntil: 'networkidle' });
+    const trigger = page.locator('[data-action="modal-open"][data-modal-target="create-role"]');
+    const dialog = await openVia(page, trigger, 'create-role');
+    await page.locator('#role-name').fill('half-typed');
+
+    await page.mouse.click(5, 5);
+    await expect(dialog).toBeVisible();
+    await expect(page.locator('#role-name')).toHaveValue('half-typed');
   });
 
   test('an htmx-loaded modal (variable edit) opens and returns focus to its row button', async ({

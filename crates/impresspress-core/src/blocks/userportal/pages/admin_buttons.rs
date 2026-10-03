@@ -164,6 +164,10 @@ fn render_buttons_table(buttons: &[db::Record]) -> maud::Markup {
                                             button .btn .btn--ghost .btn--sm
                                                 hx-get=(format!("/b/userportal/admin/buttons/{}/edit", btn.id))
                                                 hx-target="#edit-button-slot"
+                                                // Stable across the table's
+                                                // re-render, so focus can come
+                                                // back to it after a save.
+                                                id=(format!("edit-btn-open-{}", btn.id))
                                                 hx-swap="innerHTML"
                                                 title="Edit"
                                                 aria-label={"Edit " (btn.str_field("label"))}
@@ -200,9 +204,27 @@ fn render_buttons_table(buttons: &[db::Record]) -> maud::Markup {
 /// button"): the target becomes an error notice saying the change was
 /// `applied`, why the list could not be loaded (classified by
 /// [`crud::db_error_notice`]), and that it needs a reload.
-async fn buttons_table_response(ctx: &dyn Context, applied: &str) -> OutputStream {
+///
+/// `closing` names the modal the mutation was submitted from (the Edit
+/// modal): its `<dialog>` lives outside `#buttons-table`, so the swap does not
+/// take it away, and a landed save closes it with an `applied` toast. A
+/// failed re-read leaves it open over the error notice — the save landed, and
+/// the toast says the list needs a reload.
+async fn buttons_table_response(
+    ctx: &dyn Context,
+    applied: &str,
+    closing: Option<&str>,
+) -> OutputStream {
     match load_buttons(ctx).await {
-        Ok(buttons) => ui::html_response(render_buttons_table(&buttons)),
+        Ok(buttons) => match closing {
+            Some(modal_id) => ui::html_response_closing_modal(
+                render_buttons_table(&buttons),
+                modal_id,
+                applied,
+                "success",
+            ),
+            None => ui::html_response(render_buttons_table(&buttons)),
+        },
         Err(e) => {
             let reason = crud::db_error_notice(e, "userportal admin buttons: table re-read failed");
             ui::swap_error_response(
@@ -275,7 +297,7 @@ pub async fn handle_create_button(
     )
     .await;
 
-    buttons_table_response(ctx, "Button added").await
+    buttons_table_response(ctx, "Button added", None).await
 }
 
 /// Validate that `id` is safe to interpolate into inline HTML/JS strings
@@ -291,6 +313,13 @@ fn is_safe_dom_id(id: &str) -> bool {
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// The Edit modal's element id for button `id`: what
+/// [`handle_edit_button_form`] renders the `<dialog>` with, and what a landed
+/// [`handle_update_button`] closes.
+fn edit_modal_id(id: &str) -> String {
+    format!("edit-btn-{id}")
 }
 
 pub async fn handle_edit_button_form(ctx: &dyn Context, id: &str) -> OutputStream {
@@ -317,7 +346,7 @@ pub async fn handle_edit_button_form(ctx: &dyn Context, id: &str) -> OutputStrea
     };
 
     let current_icon = record.str_field("icon");
-    let modal_id = format!("edit-btn-{id}");
+    let modal_id = edit_modal_id(id);
 
     let markup = html! {
         (components::modal(&modal_id, "Edit Button", html! {
@@ -392,7 +421,7 @@ pub async fn handle_update_button(
     )
     .await;
 
-    buttons_table_response(ctx, "Button saved").await
+    buttons_table_response(ctx, "Button saved", Some(&edit_modal_id(id))).await
 }
 
 pub async fn handle_delete_button(ctx: &dyn Context, msg: &Message, id: &str) -> OutputStream {
@@ -411,7 +440,7 @@ pub async fn handle_delete_button(ctx: &dyn Context, msg: &Message, id: &str) ->
     )
     .await;
 
-    buttons_table_response(ctx, "Button deleted").await
+    buttons_table_response(ctx, "Button deleted", None).await
 }
 
 #[cfg(test)]
@@ -511,6 +540,37 @@ mod tests {
             )),
             "the fragment must ask chrome.js to open the modal after the swap"
         );
+    }
+
+    /// A landed save closes the Edit modal and toasts. The modal's `<dialog>`
+    /// lives outside `#buttons-table`, so the table swap alone leaves it open
+    /// over the saved row.
+    #[tokio::test]
+    async fn saving_the_edit_modal_closes_it() {
+        let ctx = ctx_with_userportal().await;
+        let record = db::create(&ctx, TABLE, button_data("Files", "folder", "/b/storage/"))
+            .await
+            .unwrap();
+        let msg = admin_msg(
+            "update",
+            &format!("/b/userportal/admin/buttons/{}", record.id),
+        );
+        let resp = handle_update_button(
+            &ctx,
+            &msg,
+            InputStream::from_bytes(
+                b"label=Docs&path=%2Fb%2Fstorage%2F&icon=folder&sort_order=0".to_vec(),
+            ),
+            &record.id,
+        )
+        .await;
+        let trigger = output_header(resp, "HX-Trigger").await.unwrap_or_default();
+        let trigger: serde_json::Value = serde_json::from_str(&trigger).expect("JSON trigger");
+        assert_eq!(
+            trigger["closeModal"]["id"],
+            json!(format!("edit-btn-{}", record.id))
+        );
+        assert_eq!(trigger["showToast"]["message"], json!("Button saved"));
     }
 
     /// A read that could not run is not a deleted button. The `let Ok(record)

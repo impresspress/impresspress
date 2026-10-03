@@ -876,10 +876,11 @@ pub fn html_response_opening_modal(
 /// The answer to a form a modal submitted and the write landed: `markup` for
 /// the form's swap target, the modal `modal_id` closed, and a toast.
 ///
-/// Plain `HX-Trigger`, so the modal closes BEFORE the swap. chrome.js hands
-/// focus back to the control that opened the modal then, and again once the
-/// swap has landed if that control was swapped out with the rest of the
-/// target (`ui/assets/chrome.js`, section 4).
+/// Plain `HX-Trigger`, so the modal closes BEFORE the swap. The dialog's
+/// `close` event is a queued task, so it arrives once the swap has landed, and
+/// chrome.js hands focus back then, once — to the control that opened the
+/// modal, or to its replacement when the swap re-rendered it
+/// (`ui/assets/chrome.js`, section 4).
 pub fn html_response_closing_modal(
     markup: maud::Markup,
     modal_id: &str,

@@ -325,6 +325,9 @@ fn var_row(row: &VarRow) -> Vec<Markup> {
                         hx-get={"/b/admin/variables/" (url_path_encode(row.key)) "/edit"}
                         hx-target="#edit-var-slot"
                         hx-swap="innerHTML"
+                        // Stable across a re-render of `#content`, so focus
+                        // comes back to it after the modal's Save.
+                        id=(edit_opener_id(row.key))
                         title="Edit"
                         aria-label=(format!("Edit {}", row.key))
                     { (icons::edit()) }
@@ -699,6 +702,7 @@ fn config_all_tab(rows: &[variables::VariableRow], offer_reset: bool) -> Markup 
                                 hx-get={"/b/admin/variables/" (url_path_encode(key)) "/edit"}
                                 hx-target="#edit-var-slot"
                                 hx-swap="innerHTML"
+                                id=(edit_opener_id(key))
                                 title="Edit"
                                 aria-label=(format!("Edit {key}"))
                             { (icons::edit()) }
@@ -1130,6 +1134,14 @@ pub async fn handle_edit_variable_form(ctx: &dyn Context, msg: &Message) -> Outp
 /// The edit modal's element id: what [`handle_edit_variable_form`] renders
 /// the `<dialog>` with and asks chrome.js to open.
 const EDIT_MODAL_ID: &str = "edit-var";
+
+/// The element id of the Edit button on `key`'s row: chrome.js finds the
+/// opener again by it once the Save has re-rendered `#content`. Only an
+/// [`editable`] key gets the button, and an editable key is uppercase letters,
+/// digits and underscores, so it is a valid id as it stands.
+fn edit_opener_id(key: &str) -> String {
+    format!("edit-var-open-{key}")
+}
 
 /// `PUT`/`PATCH /b/admin/variables/{key}` -- update variable value (the row
 /// is declared `PATCH`; the edit form sends `PUT`, which maps to the same

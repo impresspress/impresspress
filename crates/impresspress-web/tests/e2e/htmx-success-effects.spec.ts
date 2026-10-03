@@ -178,6 +178,56 @@ test.describe('htmx after-success effects under the served CSP', () => {
     await expect(trigger).toBeFocused();
   });
 
+  /**
+   * Edit Variable is an htmx-loaded modal opened from a row's `hx-get` button,
+   * and its Save re-renders `#content` — row, button and all. Focus must come
+   * back to that row's (re-rendered) Edit button, found again by its id.
+   * Saves the value it already holds.
+   */
+  test('saving Edit Variable returns focus to the row it was opened from', async ({ page }) => {
+    await loginAsAdmin(page);
+    await gotoUnderCsp(page, '/b/admin/settings/variables?tab=all');
+
+    const edit = page.locator('#edit-var-open-WAFER_RUN_SHARED__APP_NAME');
+    await edit.click();
+    const modal = page.locator('dialog#edit-var');
+    await expect(modal).toBeVisible();
+    await modal.getByRole('button', { name: 'Save' }).click();
+
+    await expect(modal).toHaveCount(0);
+    await expect(page.locator('#edit-var-open-WAFER_RUN_SHARED__APP_NAME')).toBeFocused();
+  });
+
+  /**
+   * The portal button Edit modal lives outside `#buttons-table`, which its
+   * Save re-renders — so the save must close it (`closeModal`), not leave it
+   * open over the saved row.
+   */
+  test('saving a portal button closes its modal, toasts, and shows the new label', async ({
+    page,
+  }) => {
+    await loginAsAdmin(page);
+    await gotoUnderCsp(page, '/b/userportal/admin/buttons');
+
+    const label = `E2E ${Date.now().toString(36)}`;
+    await page.locator('#label').fill(label);
+    await page.locator('#path').fill('/b/storage/');
+    await page.getByRole('button', { name: 'Add' }).click();
+    const edit = page.getByRole('button', { name: `Edit ${label}` });
+    await expect(edit).toBeVisible();
+
+    await edit.click();
+    const modal = page.locator('dialog.modal[open]');
+    await expect(modal).toBeVisible();
+    await modal.getByLabel('Label').fill(`${label} saved`);
+    await modal.getByRole('button', { name: 'Save' }).click();
+
+    await expect(page.locator('#toast-container .toast')).toContainText('Button saved');
+    await expect(page.locator('dialog.modal[open]')).toHaveCount(0);
+    await expect(page.locator('#buttons-table')).toContainText(`${label} saved`);
+    await expect(page.getByRole('button', { name: `Edit ${label} saved` })).toBeFocused();
+  });
+
   test('creating a messages context resets the form and prepends the row', async ({ page }) => {
     await loginAsAdmin(page);
     const refusals = watchEvalRefusals(page);

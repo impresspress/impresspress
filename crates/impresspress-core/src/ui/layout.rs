@@ -69,7 +69,7 @@ pub fn page(title: &str, config: &SiteConfig, body: Markup) -> Markup {
             }
             body {
                 (body)
-                div #toast-container .toast-container popover="manual" {}
+                div #toast-container .toast-container role="status" aria-live="polite" {}
                 script src=(assets::webmcp_js_url()) defer {}
                 @for src in &config.embedded_scripts {
                     script type="module" src=(src) {}

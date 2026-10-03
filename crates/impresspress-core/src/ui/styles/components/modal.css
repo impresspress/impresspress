@@ -43,9 +43,12 @@ dialog.modal::backdrop {
 /* Reference content with tables in it — the block detail modal. */
 dialog.modal.modal--lg { max-width: 720px; }
 
+/* Opacity only: a transform, even mid-animation, would make the dialog the
+   containing block of the `position: fixed` toast container chrome.js moves
+   into it while it is open, pinning the toasts to the dialog's box. */
 @keyframes modalIn {
-	from { opacity: 0; transform: translateY(12px); }
-	to { opacity: 1; transform: none; }
+	from { opacity: 0; }
+	to { opacity: 1; }
 }
 
 @media (prefers-reduced-motion: reduce) {

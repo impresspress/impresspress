@@ -1,18 +1,9 @@
 /* Toast Notifications */
-/* A `popover="manual"` (ui/layout.rs), so chrome.js can show it into the top
-   layer above an open modal <dialog>. The UA's popover sheet centres the
-   element in the viewport with a border, padding and a Canvas background;
-   all of that is undone here. Hidden (`display: none`, from the UA) until the
-   first toast shows it. */
 .toast-container {
-	position: fixed; inset: auto 1rem 1rem auto;
-	margin: 0; padding: 0; border: 0;
-	width: auto; height: auto; overflow: visible;
-	background: transparent; color: inherit;
+	position: fixed; bottom: 1rem; right: 1rem;
 	z-index: var(--z-notification);
-	flex-direction: column; gap: var(--space-2);
+	display: flex; flex-direction: column; gap: var(--space-2);
 }
-.toast-container:popover-open { display: flex; }
 
 .toast {
 	padding: var(--space-3) var(--space-4);

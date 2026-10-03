@@ -159,14 +159,25 @@ test('Tab skips controls that are not displayed and disabled ones', () => {
   assert.equal(page.doc.activeElement, dialog.querySelector('.modal__close'));
 });
 
-test('a click on the backdrop closes the modal; a click inside does not', async () => {
+/** A page with a trigger for a modal of reference content: no form in it. */
+function pageWithReferenceModal(page, id = 'block-detail') {
+  const trigger = page.el('button', { 'data-action': 'modal-open', 'data-modal-target': id });
+  const link = page.el('a', { href: '/b/x/admin' });
+  const dialog = page.modal(id, [page.el('p'), link]);
+  page.body.appendChild(trigger);
+  page.body.appendChild(dialog);
+  return { trigger, dialog, link };
+}
+
+test('a click on the backdrop closes a reference modal; a click inside does not', async () => {
   const page = loadChromeDom();
-  const { trigger, dialog, name } = pageWithModal(page);
+  const { trigger, dialog, link } = pageWithReferenceModal(page);
   dialog.box = { left: 100, top: 100, right: 600, bottom: 400 };
+  trigger.focus();
   page.click(trigger);
 
-  page.click(name, { clientX: 200, clientY: 200 });
-  assert.equal(dialog.open, true, 'a click on a field');
+  page.click(link, { clientX: 200, clientY: 200 });
+  assert.equal(dialog.open, true, 'a click on a link inside');
   // The dialog element's own padding is inside its box.
   page.click(dialog, { clientX: 150, clientY: 150 });
   assert.equal(dialog.open, true, 'a click on the dialog inside its box');
@@ -174,11 +185,25 @@ test('a click on the backdrop closes the modal; a click inside does not', async 
   page.click(dialog, { clientX: 20, clientY: 20 });
   await tick();
   assert.equal(dialog.open, false, 'a click outside the box, on the backdrop');
+  assert.equal(page.doc.activeElement, trigger);
 });
 
-test('a drag that starts in a field and ends on the backdrop keeps the modal open', () => {
+test('a modal with a form is never closed from the backdrop', () => {
   const page = loadChromeDom();
   const { trigger, dialog, name } = pageWithModal(page);
+  dialog.box = { left: 100, top: 100, right: 600, bottom: 400 };
+  page.click(trigger);
+  name.value = 'typed';
+
+  page.click(dialog, { clientX: 20, clientY: 20 });
+
+  assert.equal(dialog.open, true);
+  assert.equal(name.value, 'typed');
+});
+
+test('a drag that starts inside and ends on the backdrop keeps a reference modal open', () => {
+  const page = loadChromeDom();
+  const { trigger, dialog, link: name } = pageWithReferenceModal(page);
   dialog.box = { left: 100, top: 100, right: 600, bottom: 400 };
   page.click(trigger);
 
@@ -353,14 +378,158 @@ test('a script opens a modal through openModal with its own opener', async () =>
   assert.equal(page.doc.activeElement, kebab);
 });
 
-test('a toast is shown into the top layer, above a modal opened before it', () => {
+test('while a modal is open, toasts live inside it; they go back to <body> when it closes', async () => {
   const page = loadChromeDom();
-  const { trigger } = pageWithModal(page);
-  page.htmx.trigger(null, 'showToast', { message: 'first', type: 'info' });
+  const { trigger, dialog } = pageWithModal(page);
+  assert.equal(page.toastContainer.parentNode, page.body);
+  assert.equal(page.toastContainer.getAttribute('role'), 'status');
+
+  page.click(trigger);
+  assert.equal(page.toastContainer.parentNode, dialog, 'out of the inert page, into the modal');
+
+  // A refusal of the modal's form: an error toast, announced as an alert.
+  page.htmx.trigger(null, 'showToast', { message: 'Role exists', type: 'error' });
+  const toast = page.toastContainer.children.at(-1);
+  assert.equal(toast.getAttribute('role'), 'alert');
+
+  // Its × dismisses the toast and only the toast.
+  page.click(toast.children[1]);
+  assert.equal(toast.parentNode, null, 'the toast is gone');
+  assert.equal(dialog.open, true, 'the modal is still open');
+
+  dialog.close();
+  await tick();
+  assert.equal(page.toastContainer.parentNode, page.body);
+});
+
+test('a non-error toast does not interrupt: it relies on the polite status region', () => {
+  const page = loadChromeDom();
+  page.htmx.trigger(null, 'showToast', { message: 'Saved', type: 'success' });
+  assert.equal(page.toastContainer.children.at(-1).getAttribute('role'), null);
+});
+
+test('a toast raised by the response that swaps the modal away survives the swap', async () => {
+  const page = loadChromeDom();
+  const { content, trigger, submit } = pageWithModal(page, 'create-var');
+  page.click(trigger);
+  submit.focus();
+
+  // Add Variable: the answer replaces `#content`, which holds the open modal
+  // and so the toast container; its `showToast` arrives before the swap.
+  page.htmx.beforeRequest(submit);
+  page.htmx.trigger(submit, 'showToast', { message: 'Variable created', type: 'success' });
+  for (const child of [...content.children]) content.removeChild(child);
+  content.appendChild(page.el('button', { 'data-action': 'modal-open', 'data-modal-target': 'create-var' }));
+  page.htmx.afterSwap(content);
+  page.htmx.afterRequest(submit);
+  await tick();
+
+  assert.equal(page.toastContainer.isConnected, true);
+  assert.equal(page.toastContainer.parentNode, page.body);
+  assert.equal(page.toastContainer.children.length, 1);
+});
+
+test('closeModal moves the toasts out at once, so the swap that follows cannot take them', () => {
+  const page = loadChromeDom();
+  const { content, trigger, submit } = pageWithModal(page);
   page.click(trigger);
 
-  page.htmx.trigger(null, 'showToast', { message: 'over the modal', type: 'error' });
+  page.htmx.trigger(submit, 'showToast', { message: 'Role created', type: 'success' });
+  page.htmx.trigger(submit, 'closeModal', { id: 'create-role' });
 
-  assert.equal(page.toastContainer.popoverOpen, true);
-  assert.equal(page.toastContainer.popoverShows, 2, 're-shown, so it is the newest in the top layer');
+  assert.equal(page.toastContainer.parentNode, page.body);
+  assert.equal(content.contains(page.toastContainer), false);
+});
+
+test('after an htmx-loaded modal saves, focus returns to the re-rendered opener with the same id', async () => {
+  const page = loadChromeDom();
+  // Edit Variable: the row's Edit button (an `hx-get`, not a modal-open
+  // trigger) opens it; Save re-renders `#content`, row button and all.
+  const content = page.el('div', { id: 'content-region' });
+  const edit = page.el('button', { id: 'edit-var-open-APP', 'hx-get': '/b/admin/variables/APP/edit' });
+  const slot = page.el('div', { id: 'edit-var-slot' });
+  content.appendChild(edit);
+  content.appendChild(slot);
+  page.body.appendChild(content);
+  edit.focus();
+  page.htmx.beforeRequest(edit);
+  const save = page.el('button', { type: 'submit' });
+  const dialog = page.modal('edit-var', [page.el('form', {}, [save])]);
+  slot.appendChild(dialog);
+  page.htmx.trigger(edit, 'openModal', { id: 'edit-var' });
+  save.focus();
+
+  page.htmx.beforeRequest(save);
+  for (const child of [...content.children]) content.removeChild(child);
+  const again = page.el('button', { id: 'edit-var-open-APP', 'hx-get': '/b/admin/variables/APP/edit' });
+  content.appendChild(again);
+  content.appendChild(page.el('div', { id: 'edit-var-slot' }));
+  page.htmx.afterSwap(content);
+  page.htmx.afterRequest(save);
+  await tick();
+
+  assert.equal(page.doc.activeElement, again);
+});
+
+test('with no opener left to find, focus goes to main#content rather than nowhere', async () => {
+  const page = loadChromeDom();
+  const main = page.el('main', { id: 'content', tabindex: '-1' });
+  page.body.appendChild(main);
+  // A block card: an `hx-get` div with no id that survives, and no trigger.
+  const card = page.el('div', { 'hx-get': '/b/admin/blocks/x/detail' });
+  main.appendChild(card);
+  page.htmx.beforeRequest(card);
+  const toggle = page.el('input', { type: 'checkbox' });
+  const dialog = page.modal('block-detail', [toggle]);
+  main.appendChild(dialog);
+  page.htmx.trigger(card, 'openModal', { id: 'block-detail' });
+
+  // The toggle re-renders `#content`'s children, the modal included.
+  page.htmx.beforeRequest(toggle);
+  for (const child of [...main.children]) main.removeChild(child);
+  page.htmx.afterSwap(main);
+  page.htmx.afterRequest(toggle);
+  await tick();
+
+  assert.equal(page.doc.activeElement, main);
+});
+
+test('Tab stops once per radio group, skips tabindex=-1 links, and stops on a details summary', () => {
+  const page = loadChromeDom();
+  const first = page.el('input', { type: 'radio', name: 'scope', value: 'all', autofocus: '' });
+  const second = page.el('input', { type: 'radio', name: 'scope', value: 'one', checked: '' });
+  const third = page.el('input', { type: 'radio', name: 'scope', value: 'none' });
+  const skipped = page.el('a', { href: '#', tabindex: '-1' });
+  const summary = page.el('summary');
+  const details = page.el('details', {}, [summary, page.el('p')]);
+  const { trigger, dialog } = pageWithModal(page, 'radios', [first, second, third, details, skipped]);
+  page.click(trigger);
+  const close = dialog.querySelector('.modal__close');
+
+  // Last stop is the summary — the `tabindex="-1"` link after it is none:
+  // Tab wraps from it to the close button.
+  summary.focus();
+  page.key('Tab');
+  assert.equal(page.doc.activeElement, close);
+  // Shift+Tab from the close button wraps to the summary, not the link.
+  page.key('Tab', { shiftKey: true });
+  assert.equal(page.doc.activeElement, summary);
+});
+
+test('a radio group is one Tab stop: its checked radio', () => {
+  const page = loadChromeDom();
+  const first = page.el('input', { type: 'radio', name: 'scope', value: 'all' });
+  const checked = page.el('input', { type: 'radio', name: 'scope', value: 'one', checked: '' });
+  const last = page.el('input', { type: 'radio', name: 'scope', value: 'none' });
+  const { trigger, dialog } = pageWithModal(page, 'radios', [first, checked, last]);
+  page.click(trigger);
+
+  // The checked radio is the dialog's last stop, so Tab from it wraps.
+  checked.focus();
+  const e = page.key('Tab');
+  assert.equal(e.defaultPrevented, true);
+  assert.equal(page.doc.activeElement, dialog.querySelector('.modal__close'));
+  // And Shift+Tab from the first stop lands on it, not on the last radio.
+  page.key('Tab', { shiftKey: true });
+  assert.equal(page.doc.activeElement, checked);
 });
