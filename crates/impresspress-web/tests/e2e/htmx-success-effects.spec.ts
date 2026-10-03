@@ -124,6 +124,32 @@ async function scrolledToBottom(page: Page, selector: string): Promise<boolean> 
 test.describe('htmx after-success effects under the served CSP', () => {
   test.use({ storageState: ADMIN_STATE_PATH });
 
+  /**
+   * A created variable redraws the settings body ONCE. The Add Variable form
+   * used to target `#variables-content` (one tab's table) while its handler
+   * answers the whole settings body for `#content`, so a successful create
+   * drew the settings page — nav, tabs, modal — inside its own table.
+   */
+  test('creating a variable redraws the settings page once, not inside itself', async ({ page }) => {
+    await loginAsAdmin(page);
+    await gotoUnderCsp(page, '/b/admin/settings/variables');
+
+    const key = `WAFER_RUN_SHARED__E2E_CREATED_${Date.now()}`;
+    await page.locator('[data-action="modal-open"][data-modal-target="create-var"]').click();
+    const modal = page.locator('#create-var');
+    await expect(modal).toBeVisible();
+    await page.locator('#var-key').fill(key);
+    await page.locator('#var-value').fill('created by the e2e');
+    await modal.getByRole('button', { name: 'Create' }).click();
+
+    await expect(page.locator('#content')).toContainText(key);
+    await expect(page.locator('.shell')).toHaveCount(1);
+    await expect(page.locator('#content')).toHaveCount(1);
+    await expect(page.locator('#variables-content')).toHaveCount(1);
+    await expect(page.locator('#create-var-form')).toHaveCount(1);
+    await expect(page.locator('#create-var')).toBeHidden();
+  });
+
   test('creating a messages context resets the form and prepends the row', async ({ page }) => {
     await loginAsAdmin(page);
     const refusals = watchEvalRefusals(page);

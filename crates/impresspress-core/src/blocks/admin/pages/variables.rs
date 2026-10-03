@@ -139,7 +139,7 @@ fn create_variable_form(form: &CreateVarForm<'_>) -> Markup {
         "var-key-hint"
     };
     html! {
-        form #create-var-form hx-post="/b/admin/variables" hx-target="#variables-content" {
+        form #create-var-form hx-post="/b/admin/variables" hx-target="#content" {
             div .form-group {
                 label .form-label .required for="var-key" { "Key" }
                 input .form-input type="text" #var-key name="key" value=(form.key)
@@ -969,7 +969,12 @@ pub async fn handle_create_variable(
         };
     }
 
-    // Re-render the variables page (htmx will swap #content)
+    // The whole settings body, for the form's `hx-target="#content"` — the
+    // shell's body, which is what an htmx request to a shelled page answers
+    // (the edit modal's form swaps the same answer into the same target). The
+    // form used to target `#variables-content`, one tab's table, so a created
+    // variable drew the settings page — nav, tabs, modal and all — inside its
+    // own table.
     variables_page(ctx, msg, "Variable created").await
 }
 
@@ -2839,6 +2844,55 @@ mod create_form_tests {
                 .contains(crate::config_vars::VARIABLE_KEY_FORMAT),
             "{body}"
         );
+    }
+
+    /// A create that lands answers the settings body for `#content`, which is
+    /// where the form swaps it: no retarget (that is the refusal's), no shell
+    /// (`#content` is the shell's own body), and exactly one variables table,
+    /// now holding the new key. The form used to target `#variables-content`,
+    /// and the same answer drew the page inside its own table.
+    #[tokio::test]
+    async fn a_created_variable_redraws_the_settings_body_once() {
+        let ctx = admin_ctx().await;
+        let html = settings_body(&ctx, &admin_msg("retrieve", "/admin/settings"))
+            .await
+            .expect("the variables read succeeds")
+            .into_string();
+        assert!(
+            html.contains(
+                r##"<form id="create-var-form" hx-post="/b/admin/variables" hx-target="#content">"##
+            ),
+            "{html}"
+        );
+
+        const KEY: &str = crate::blocks::admin::fixture_keys::SITE_MOTTO;
+        let buf =
+            collect_or_panic(post_from_modal(&ctx, &format!("key={KEY}&value=v")).await).await;
+        let header = |name: &str| {
+            let key = format!("resp.header.{name}");
+            buf.meta.iter().any(|m| m.key == key)
+        };
+        assert!(
+            !header("HX-Retarget") && !header("HX-Reswap"),
+            "a success keeps the form's own target"
+        );
+        assert_eq!(wafer_block::http_codec::resolve_status(&buf.meta, 200), 200);
+        let body = String::from_utf8(buf.body).expect("utf-8");
+        assert!(
+            !body.contains(r#"class="shell"#),
+            "an htmx answer carries no shell: {body}"
+        );
+        assert!(
+            !body.contains(r#"id="content""#),
+            "the answer is swapped INTO #content: {body}"
+        );
+        assert_eq!(
+            body.matches(r#"id="variables-content""#).count(),
+            1,
+            "{body}"
+        );
+        assert_eq!(body.matches(r#"id="create-var-form""#).count(), 1, "{body}");
+        assert!(body.contains(KEY), "the new row is listed: {body}");
     }
 
     /// The Key field carries the browser's copy of the key rule and the hint
