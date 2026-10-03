@@ -114,8 +114,8 @@ pub fn render_new_bucket_modal() -> Markup {
                     span { "Public (objects can be accessed by anonymous URL)" }
                 }
                 div .modal-actions {
-                    button type="button" data-action="cancel" .btn.btn--ghost.btn--md { "Cancel" }
-                    button type="submit" data-action="create" .btn.btn--primary.btn--md { "Create bucket" }
+                    button type="button" data-action="cancel" .btn.btn--ghost.btn--md.btn--block { "Cancel" }
+                    button type="submit" data-action="create" .btn.btn--primary.btn--md.btn--block { "Create bucket" }
                 }
             }
         }
@@ -208,7 +208,7 @@ pub async fn bucket_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream 
                 href: None,
             }],
             subtitle: Some("Your buckets and their object counts."),
-            primary_action: Some(new_bucket_btn),
+            actions: vec![new_bucket_btn],
         },
         body,
     )
@@ -365,7 +365,7 @@ mod integration_tests {
         // Primary-action lives in the Topbar slot now (see ui(pages) commit
         // that moved page-header content into the topbar).
         assert!(
-            body.contains("topbar__action"),
+            body.contains("topbar__actions"),
             "topbar action slot missing: {body}"
         );
         assert!(

@@ -6,43 +6,59 @@
 
 use maud::{html, Markup};
 
-/// One palette entry. Either a route (path + label) or an action verb.
+/// One palette entry: a page reachable from the sidebar.
 pub struct PaletteEntry {
     pub label: String,
-    pub kind_label: String, // "Page", "Action", etc.
-    pub href: String,       // for route entries
-    pub keywords: String,   // space-separated, for fuzzy match
-    pub external: bool,     // open in a new tab (e.g. Inspector)
+    pub href: String,
+    pub keywords: String, // space-separated, for fuzzy match
+    pub external: bool,   // open in a new tab (e.g. Inspector)
+}
+
+/// The `id` of entry `i`'s option, which the input names in
+/// `aria-activedescendant` while that entry is selected.
+fn option_id(i: usize) -> String {
+    format!("cmdk-opt-{i}")
 }
 
 /// Render the palette markup. Hidden by default; CSS class controls
 /// visibility, JS controls focus + filter + selection.
+///
+/// ARIA combobox pattern: focus stays in the input (`role="combobox"`), which
+/// owns the listbox through `aria-controls` and points at the selected option
+/// with `aria-activedescendant` — chrome.js keeps that attribute in step with
+/// the arrow keys and the filter, so a screen reader announces each option as
+/// it is selected without focus ever leaving the text field.
 pub fn palette(entries: Vec<PaletteEntry>) -> Markup {
+    let first = (!entries.is_empty()).then(|| option_id(0));
     html! {
         div #cmdk .palette aria-hidden="true" role="dialog" aria-modal="true" aria-label="Command palette" {
             div .palette__backdrop data-action="palette-close" {}
             div .palette__panel {
                 input #cmdk-input .palette__input type="text"
+                    role="combobox"
                     placeholder="Type to search…"
                     // Placeholder-only leaves the field with no accessible
                     // name once it has a value; this is the palette's only
                     // control, so it needs one of its own.
-                    aria-label="Search commands and pages"
+                    aria-label="Search pages"
+                    aria-autocomplete="list"
+                    aria-expanded="true"
+                    aria-controls="cmdk-list"
+                    aria-activedescendant=[first]
                     autocomplete="off"
-                    aria-controls="cmdk-list" {}
-                ul #cmdk-list .palette__list role="listbox" {
+                    spellcheck="false" {}
+                ul #cmdk-list .palette__list role="listbox" aria-label="Pages" {
                     @for (i, e) in entries.iter().enumerate() {
-                        li .palette__item role="option"
+                        li .palette__item role="option" id=(option_id(i))
                            data-href=(e.href)
                            data-external=[e.external.then_some("true")]
                            data-keywords=(e.keywords)
-                           aria-selected=[(i == 0).then_some("true")] {
-                            span .palette__item-label { (e.label) }
-                            span .palette__item-kind { (e.kind_label) }
+                           aria-selected=(if i == 0 { "true" } else { "false" }) {
+                            (e.label)
                         }
                     }
                 }
-                div .palette__hint { "↑↓ navigate · ↵ open · Esc close" }
+                div .palette__hint aria-hidden="true" { "↑↓ navigate · ↵ open · Esc close" }
             }
         }
     }
@@ -55,7 +71,6 @@ mod tests {
     fn entry(label: &str, href: &str) -> PaletteEntry {
         PaletteEntry {
             label: label.to_string(),
-            kind_label: "Page".to_string(),
             href: href.to_string(),
             keywords: format!("{} {}", label.to_lowercase(), href),
             external: false,
@@ -73,6 +88,13 @@ mod tests {
         assert!(s.contains(r#"data-href="/b/admin/users""#));
         assert!(s.contains(r#"data-keywords="users /b/admin/users""#));
         assert!(s.contains(r#"aria-selected="true""#)); // first entry
+                                                        // Combobox wiring: the input names the listbox and the selected option.
+        assert!(s.contains(r#"role="combobox""#));
+        assert!(s.contains(r#"aria-activedescendant="cmdk-opt-0""#));
+        assert!(s.contains(r#"<li class="palette__item" role="option" id="cmdk-opt-1""#));
+        assert!(s.contains(r#"role="listbox" aria-label="Pages""#));
+        // No per-entry kind tag: every entry is a page.
+        assert!(!s.contains("palette__item-kind"));
         assert!(s.contains(">Users<"));
         assert!(s.contains(">Logs<"));
     }
@@ -82,5 +104,7 @@ mod tests {
         let s = palette(Vec::new()).into_string();
         assert!(s.contains(r#"role="dialog""#));
         assert!(s.contains("cmdk-list"));
+        // Nothing to point at: no dangling activedescendant.
+        assert!(!s.contains("aria-activedescendant"));
     }
 }

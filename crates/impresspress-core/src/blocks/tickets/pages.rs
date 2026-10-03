@@ -717,3 +717,30 @@ mod denial_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod pagination_base_tests {
+    use super::*;
+    use crate::test_support::admin_msg;
+
+    /// Filter values are query-encoded into the pagination base: an `&` in a
+    /// value is `%26`, so it cannot split into a parameter of its own, and
+    /// the parameters themselves join with a bare `&`.
+    #[test]
+    fn filter_values_are_encoded_into_the_pagination_base() {
+        let mut msg = admin_msg("retrieve", "/b/tickets/admin/tickets");
+        msg.set_meta("req.query.status", "new");
+        msg.set_meta("req.query.assignee_id", "admin&one");
+        msg.set_meta("req.query.page_size", "1");
+        assert_eq!(
+            inbox_pagination_base(&msg),
+            "/b/tickets/admin/tickets?status=new&assignee_id=admin%26one&page_size=1"
+        );
+    }
+
+    #[test]
+    fn no_filters_is_the_bare_inbox_path() {
+        let msg = admin_msg("retrieve", "/b/tickets/admin/tickets");
+        assert_eq!(inbox_pagination_base(&msg), "/b/tickets/admin/tickets");
+    }
+}

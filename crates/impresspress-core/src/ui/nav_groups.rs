@@ -221,7 +221,6 @@ pub fn palette_entries_from_groups(groups: &[NavGroup]) -> Vec<crate::ui::palett
         .map(|item| PaletteEntry {
             keywords: format!("{} {}", item.label.to_lowercase(), item.href),
             label: item.label.clone(),
-            kind_label: "Page".to_string(),
             href: item.href.clone(),
             external: item.external,
         })
@@ -529,6 +528,5 @@ mod tests {
         let users = entries.iter().find(|e| e.label == "Users").unwrap();
         assert!(users.keywords.contains("users"));
         assert!(users.keywords.contains("/b/admin/users"));
-        assert_eq!(users.kind_label, "Page");
     }
 }

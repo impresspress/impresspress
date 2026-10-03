@@ -13,6 +13,7 @@ pub mod nav_groups;
 pub mod palette;
 pub mod settings_form;
 pub mod shell;
+pub use shell::BodyLayout;
 pub mod sidebar;
 pub mod templates;
 
@@ -150,6 +151,17 @@ impl UserInfo {
         self.roles.iter().any(|r| r == "admin")
     }
 
+    /// The account's role as the chrome shows it — the sidebar's user row
+    /// and the profile menu header use this one label, so the two can never
+    /// describe the same account differently.
+    pub fn role_label(&self) -> &'static str {
+        if self.is_admin() {
+            "Admin"
+        } else {
+            "User"
+        }
+    }
+
     /// First letter of email, uppercased, for avatar.
     pub fn avatar_initial(&self) -> char {
         self.email
@@ -231,7 +243,59 @@ pub struct Page<'a> {
     pub user: Option<&'a UserInfo>,
     pub current_path: &'a str,
     pub topbar: shell::Topbar<'a>,
-    pub body: maud::Markup,
+    pub body: PageBody,
+}
+
+/// A shelled page's body, and how the shell's content card frames it.
+///
+/// The frame belongs to the body's TEMPLATE, not to the page that calls it:
+/// a full-bleed template (`templates::chat_page`) returns a `PageBody` that
+/// already says so, and every other body — any plain `Markup` — converts to
+/// the padded default. So a page cannot render a chat layout and forget to
+/// drop the padding, because it never chooses.
+pub struct PageBody {
+    layout: shell::BodyLayout,
+    markup: maud::Markup,
+}
+
+impl PageBody {
+    /// A body that draws its own panes edge to edge. Only full-bleed
+    /// templates construct one.
+    pub(crate) fn full_bleed(markup: maud::Markup) -> Self {
+        Self {
+            layout: shell::BodyLayout::Flush,
+            markup,
+        }
+    }
+
+    /// The same body, with `extra` rendered after it (a page's own scripts
+    /// or styles), keeping the template's frame.
+    pub fn append(self, extra: maud::Markup) -> Self {
+        let markup = self.markup;
+        Self {
+            layout: self.layout,
+            markup: maud::html! { (markup) (extra) },
+        }
+    }
+
+    /// How the content card frames this body.
+    pub fn layout(&self) -> shell::BodyLayout {
+        self.layout
+    }
+
+    /// The body's markup, without the frame.
+    pub fn into_markup(self) -> maud::Markup {
+        self.markup
+    }
+}
+
+impl From<maud::Markup> for PageBody {
+    fn from(markup: maud::Markup) -> Self {
+        Self {
+            layout: shell::BodyLayout::Padded,
+            markup,
+        }
+    }
 }
 
 impl<'a> Page<'a> {
@@ -256,7 +320,8 @@ impl<'a> Page<'a> {
                     &self.config.logo_icon_url,
                     &self.config.app_name,
                     self.topbar,
-                    self.body,
+                    self.body.layout,
+                    self.body.markup,
                 ))
                 (palette_markup)
             },
@@ -273,7 +338,7 @@ impl<'a> Page<'a> {
     /// instead. See [`shell_document`].
     pub fn document(self, msg: &wafer_run::Message) -> maud::Markup {
         if is_htmx(msg) {
-            return self.body;
+            return self.body.markup;
         }
         self.render()
     }
@@ -310,12 +375,14 @@ pub struct Shell<'a> {
     pub title: &'a str,
     /// Which sidebar to render.
     pub nav: NavKind,
-    /// Breadcrumb trail. A single `Crumb { label, href: None }` is the common case.
+    /// Breadcrumb trail; the LAST crumb is the page title (the page's only
+    /// `h1`). A single `Crumb { label, href: None }` is the common case; a
+    /// detail page passes its ancestors first. See [`shell::Topbar`].
     pub crumbs: Vec<shell::Crumb<'a>>,
-    /// Optional subtitle shown after the crumbs.
+    /// One-line page description, on its own line under the title.
     pub subtitle: Option<&'a str>,
-    /// Optional primary action button in the topbar.
-    pub primary_action: Option<maud::Markup>,
+    /// Page-level actions in the topbar, left to right — primary action last.
+    pub actions: Vec<maud::Markup>,
 }
 
 impl<'a> Shell<'a> {
@@ -329,7 +396,7 @@ impl<'a> Shell<'a> {
                 href: None,
             }],
             subtitle: None,
-            primary_action: None,
+            actions: Vec::new(),
         }
     }
 }
@@ -347,7 +414,7 @@ pub async fn shell_page(
     ctx: &dyn wafer_run::context::Context,
     msg: &wafer_run::Message,
     shell: Shell<'_>,
-    body: maud::Markup,
+    body: impl Into<PageBody>,
 ) -> wafer_run::OutputStream {
     match shell_document(ctx, msg, shell, body).await {
         Ok(document) => html_response(document),
@@ -371,7 +438,7 @@ pub async fn shell_document(
     ctx: &dyn wafer_run::context::Context,
     msg: &wafer_run::Message,
     shell: Shell<'_>,
-    body: maud::Markup,
+    body: impl Into<PageBody>,
 ) -> Result<maud::Markup, wafer_run::WaferError> {
     let config = SiteConfig::load(ctx).await?;
     let user = UserInfo::from_message(msg);
@@ -410,10 +477,10 @@ pub async fn shell_document(
         topbar: shell::Topbar {
             crumbs: shell.crumbs,
             subtitle: shell.subtitle,
-            primary_action: shell.primary_action,
+            actions: shell.actions,
             show_palette: true,
         },
-        body,
+        body: body.into(),
     }
     .document(msg))
 }
@@ -964,11 +1031,11 @@ mod tests {
                     label: "Dashboard",
                     href: None,
                 }],
-                primary_action: None,
+                actions: Vec::new(),
                 subtitle: None,
                 show_palette: true,
             },
-            body,
+            body: body.into(),
         }
     }
 
@@ -983,6 +1050,26 @@ mod tests {
         assert!(s.contains(r#"class="shell""#));
         assert!(s.contains(r#"id="cmdk""#)); // palette mounted
         assert!(s.contains("hello"));
+    }
+
+    /// The frame comes from the body's template: a chat body renders the
+    /// content card flush, any plain markup renders it padded.
+    #[test]
+    fn the_body_template_chooses_the_content_card_frame() {
+        let config = site_config();
+        let groups = nav_groups::admin();
+        let chat = templates::chat_page(html! {}, html! {}, html! {}, None);
+        let flush = Page {
+            body: chat,
+            ..dashboard_page(&config, &groups, html! {})
+        }
+        .render()
+        .into_string();
+        assert!(flush.contains(r#"<main class="shell__body shell__body--flush""#));
+        let padded = dashboard_page(&config, &groups, html! { p { "x" } })
+            .render()
+            .into_string();
+        assert!(padded.contains(r#"<main class="shell__body" id="content""#));
     }
 
     #[tokio::test]
@@ -2800,8 +2887,6 @@ mod tests {
             "page--detail",
             "page--form",
             "page--list",
-            "pagination__page",
-            "palette__item-label",
             "quota-card",
             "quota-warning",
             "section",

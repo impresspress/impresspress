@@ -49,8 +49,8 @@ pub fn render_create_index_modal() -> Markup {
                     }
                 }
                 div .form-actions {
-                    button .btn .btn--secondary type="button" data-action="modal-close" data-modal-target="create-vector-index" { "Cancel" }
-                    button .btn .btn--primary type="submit" { "Create" }
+                    button .btn .btn--secondary .btn--block type="button" data-action="modal-close" data-modal-target="create-vector-index" { "Cancel" }
+                    button .btn .btn--primary .btn--block type="submit" { "Create" }
                 }
             }
         },
@@ -203,8 +203,8 @@ pub async fn index_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         None,
     );
 
-    let primary_action = if backend_available {
-        Some(crate::ui::components::button(
+    let actions = if backend_available {
+        vec![crate::ui::components::button(
             crate::ui::components::BtnVariant::Primary,
             crate::ui::components::CtrlSize::Sm,
             "+ Create index",
@@ -212,9 +212,9 @@ pub async fn index_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
                 r#"type="button" data-action="modal-open" data-modal-target="create-vector-index""#
                     .to_string(),
             ),
-        ))
+        )]
     } else {
-        None
+        Vec::new()
     };
     ui::shell_page(
         ctx,
@@ -227,7 +227,7 @@ pub async fn index_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
                 href: None,
             }],
             subtitle: Some("Per-index counts, model, dimensions"),
-            primary_action,
+            actions,
         },
         body,
     )
@@ -325,7 +325,7 @@ pub async fn index_detail_page(ctx: &dyn Context, msg: &Message, name: &str) -> 
                 },
             ],
             subtitle: None,
-            primary_action: None,
+            actions: Vec::new(),
         },
         body,
     )

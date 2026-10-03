@@ -20,6 +20,7 @@ const CSS_ORDER: &[&str] = &[
     "styles/base.css",
     "styles/components/button.css",
     "styles/components/card.css",
+    "styles/components/section.css",
     "styles/components/table.css",
     "styles/components/form.css",
     "styles/components/badge.css",

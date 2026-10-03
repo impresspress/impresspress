@@ -1,25 +1,17 @@
-/* ===== Dashboard page — default rules ===== */
-/* Declared BEFORE the @media (max-width: 720px) block below so the mobile
- * 1-col override (line ~358) wins at equal specificity. Companion
- * @media (min-width: 1024px) widening rule lives next to the default. */
-.stats-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); }
-@media (min-width: 1024px) { .stats-grid { grid-template-columns: repeat(5, minmax(0, 1fr)); } }
-
 /* ===== Responsive ===== */
-/* Live mobile rules migrated from former (max-width: 767px) block — Phase 5c. */
+/* Live mobile rules migrated from former (max-width: 767px) block — Phase 5c.
+ * No rule here widens buttons: a button is as wide as its label at every
+ * width, and a row that wants full-width buttons on a phone opts in with
+ * `.btn--block` (components/button.css). */
 @media (max-width: 720px) {
 	.card { padding: var(--space-4); margin-bottom: var(--space-4); }
-	.stats-grid { grid-template-columns: 1fr; gap: var(--space-4); }
-	.stat-card { padding: var(--space-4); }
-	.stat-value { font-size: 1.5rem; }
-	.btn { width: 100%; justify-content: center; }
-	.pagination { flex-direction: column; align-items: stretch; gap: var(--space-4); }
 	.tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; }
 	.tab { flex-shrink: 0; }
 }
 
 /* ===== Page templates — Phase 1 ===== */
-.page { display: flex; flex-direction: column; gap: var(--space-4); padding: var(--space-4); }
+/* No padding: `.shell__body` (layouts/shell.css) pads every page body. */
+.page { display: flex; flex-direction: column; gap: var(--space-4); }
 .page-filters { display: flex; flex-wrap: wrap; gap: var(--space-2); }
 .page-body { min-height: 100px; }
 .page-pagination { padding-top: var(--space-2); }
@@ -42,13 +34,32 @@
 .detail-meta dd { margin: 0; color: var(--text-primary); word-break: break-word; }
 
 /* ===== Form page ===== */
-.form-page { background: var(--surface-1); border: 1px solid var(--border-light); border-radius: var(--radius-lg); }
-.form-grid { display: grid; grid-template-columns: 1fr; gap: var(--space-6); padding: var(--space-6); }
+/* The tabbed page (`templates::tabbed_page`) draws no box of its own: the
+   rail and sections sit directly in the shell's content card
+   (`.shell__body`). A second bordered card inside that one was the "double
+   border" around every settings page. */
+.form-grid { display: grid; grid-template-columns: minmax(0, 1fr); gap: var(--space-6); }
 @media (min-width: 1024px) {
 	.form-grid--with-tabs { grid-template-columns: 220px minmax(0,1fr); }
 }
 .form-tabs ul { list-style: none; padding: 0; margin: 0; display: flex; flex-direction: column; gap: 2px; }
 .form-tabs li a { display: block; padding: var(--space-2) var(--space-3); border-radius: var(--radius-md); color: var(--text-secondary); text-decoration: none; font-size: var(--text-sm); }
+/* Below 720px the section rail becomes one horizontally scrolling row of
+   tabs (the `.tabs` look), instead of a stack of four full-width rows above
+   the form. */
+@media (max-width: 720px) {
+	.form-grid { gap: var(--space-4); }
+	.form-tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; scrollbar-width: none; border-bottom: 1px solid var(--border-color); }
+	.form-tabs::-webkit-scrollbar { display: none; }
+	.form-tabs ul { flex-direction: row; gap: 0; width: max-content; }
+	.form-tabs li a {
+		display: flex; align-items: center; min-height: 44px;
+		padding: 0 var(--space-4); border-radius: 0; white-space: nowrap;
+		font-weight: 500;
+		box-shadow: inset 0 -2px 0 transparent;
+	}
+	.form-tabs li.is-active a { background: none; box-shadow: inset 0 -2px 0 var(--primary-color); }
+}
 /* --primary-color text on this tint is 3.31:1 -- below the 4.5:1 AA floor
  * for normal-size text (caught auditing the tabbed/form templates during the
  * 12d design pass). --primary-button (4.99:1 on white, 4.51:1 on this tint)
@@ -62,8 +73,8 @@
 .form-section__body { padding-top: var(--space-2); }
 
 /* ===== Dashboard page ===== */
-/* .stats-grid default + min-width:1024px rules live above the @media (max-width: 720px) block (cascade order).
- * Stat tiles themselves render via `components::stat_card` — see `.stat-card` and friends in components/stat.css. */
+/* `.stats-grid` and the tiles in it (`components::stat_card`) are defined
+ * once, in components/stat.css. */
 
 .dashboard-charts { display: grid; grid-template-columns: 1fr; gap: var(--space-4); }
 @media (min-width: 1024px) { .dashboard-charts { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
@@ -126,7 +137,6 @@
 .products-section__head { display: flex; align-items: end; justify-content: space-between; gap: var(--space-4); flex-wrap: wrap; margin-bottom: var(--space-3); }
 .products-section__head h2, .products-section__head h3, .products-section__head p { margin: 0; }
 .products-section__head p { margin-top: var(--space-1); }
-body:has(.products-tabs) .stats-grid { gap: var(--space-4); margin-top: var(--space-4); }
 
 /* ===== Status page ===== */
 .status-page { min-height: 100vh; display: flex; align-items: center; justify-content: center; padding: var(--space-8); background: var(--surface-2); }

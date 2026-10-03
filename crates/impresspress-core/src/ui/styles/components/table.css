@@ -20,18 +20,6 @@
 
 .table tbody tr:hover { background: var(--bg-hover); }
 
-/* Pagination — the base rule only. The `.pagination-info`/`-controls`/`-btn`
-   family that stood here belonged to a hand-written pagination nobody renders
-   any more; `components::pagination` emits `.pagination__*` (further down this
-   file) instead.
-   This block stays, and deleting it is not a tidy-up: `.pagination` is defined
-   TWICE at equal specificity, and the second definition sets `padding`, not
-   `margin`. `margin-top: var(--space-6)` below is the only source of the live
-   nav's top margin, so removing this rule moves every page that paginates. */
-.pagination {
-	display: flex; align-items: center; gap: var(--space-2); margin-top: var(--space-6);
-}
-
 /* Empty State */
 /* The bare-text empty state, for a list that just needs one line ("No
    buckets", "No active shares"). Its richer sibling -- `.empty` below, built
@@ -112,12 +100,23 @@
 .empty__body { font-size: var(--text-base); margin: 0 0 var(--space-4); }
 
 /* ===== Pagination ===== */
-.pagination { display: flex; align-items: center; gap: var(--space-4); padding: var(--space-4) 0; font-size: var(--text-sm); color: var(--text-secondary); }
-.pagination__count { margin-right: auto; }
+/* One row at every width: the total on the left, the controls on the right.
+   Each control is a 44px target. */
+.pagination { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-top: var(--space-4); font-size: var(--text-sm); color: var(--text-secondary); }
+.pagination__count { min-width: 0; font-variant-numeric: tabular-nums; }
+.pagination__controls { display: flex; align-items: center; gap: var(--space-1); flex-shrink: 0; }
+.pagination__page { padding: 0 var(--space-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pagination__link {
+	display: inline-flex; align-items: center; justify-content: center;
+	min-width: 44px; min-height: 44px; padding: 0 var(--space-3);
+	border-radius: var(--radius-md); white-space: nowrap; text-decoration: none;
+}
 /* --primary-color is 3.66:1 on white -- below the 4.5:1 AA floor for this
    text link; --primary-button (4.99:1, computed) is the text-safe sibling. */
-.pagination__prev, .pagination__next { color: var(--primary-button); text-decoration: none; }
-.pagination__prev.is-disabled, .pagination__next.is-disabled { color: var(--text-muted); pointer-events: none; }
+a.pagination__link { color: var(--primary-button); }
+a.pagination__link:hover { background: var(--bg-hover); }
+a.pagination__link:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.pagination__link.is-disabled { color: var(--text-muted); }
 
 /* ── Database admin ─────────────────────────────────────── */
 .db-layout {
@@ -228,8 +227,6 @@
   padding: var(--space-1) var(--space-2);
 }
 .db-panel { padding: var(--space-1) 0; }
-.db-panel__head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-3); }
-.db-panel__head h3 { font-size: 14px; margin: 0; word-break: break-all; }
 .db-panel-body { padding-top: var(--space-2); }
 .db-sql { display: flex; flex-direction: column; gap: var(--space-2); margin-bottom: var(--space-3); }
 .db-sql__input {

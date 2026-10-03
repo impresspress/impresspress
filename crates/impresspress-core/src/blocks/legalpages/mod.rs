@@ -1492,7 +1492,7 @@ mod tests {
 
     #[test]
     fn editor_page_uses_textarea_not_contenteditable() {
-        let markup = super::pages::editor_markup_for_test(
+        let view = super::pages::editor_view(
             DocumentType::Terms,
             "doc-123",
             "Terms of Service",
@@ -1501,7 +1501,7 @@ mod tests {
             "2026-05-19T00:00:00Z",
             1,
         );
-        let s = markup.into_string();
+        let s = view.body.into_string();
         assert!(s.contains("<textarea"), "editor must use <textarea>");
         assert!(!s.contains("contenteditable"), "no contenteditable allowed");
         assert!(s.contains(r#"data-tab="edit""#));
@@ -1509,6 +1509,10 @@ mod tests {
         // Vanilla JS fetch path — the URL lives in EDITOR_JS, reached
         // through the delegated `legalpages-editor-tab` action
         assert!(s.contains("/b/legalpages/admin/render-preview"));
+        // The page actions ride in the topbar, not in a body header row.
+        let actions: String = view.actions.into_iter().map(|a| a.into_string()).collect();
+        assert!(actions.contains(r#"id="btn-save""#) && actions.contains(r#"id="btn-publish""#));
+        assert!(!s.contains(r#"id="btn-publish""#));
     }
 }
 

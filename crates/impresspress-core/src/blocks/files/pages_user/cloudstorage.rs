@@ -188,7 +188,7 @@ pub async fn cloudstorage_page(ctx: &dyn Context, msg: &Message) -> OutputStream
                 href: None,
             }],
             subtitle: Some("Public links you've created and your storage quota."),
-            primary_action: None,
+            actions: Vec::new(),
         },
         body,
     )

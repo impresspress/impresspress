@@ -26,6 +26,8 @@ import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
  * 4. that a delegated listener is bound ONCE no matter how many times its page
  *    is swapped in, which the first three cannot see because each of them does
  *    a fresh navigation.
+ * 5. the command palette's combobox wiring (`aria-activedescendant` following
+ *    the selection), which has no visible effect at all.
  *
  * They also prove the load-order assumption: `chrome.js` is `defer`red from
  * `<head>`, so its listeners must be installed before a user can click.
@@ -162,5 +164,49 @@ test.describe('delegated actions', () => {
     // The refusal is painted once, from one request.
     await expect(page.locator('#catalog-admin-error')).toBeVisible();
     expect(groupPosts).toEqual(['POST']);
+  });
+
+  /**
+   * The command palette is an ARIA combobox (`ui/palette.rs`): focus stays in
+   * the input, and the selected option is announced through the input's
+   * `aria-activedescendant`, which chrome.js keeps in step with the arrow
+   * keys and the filter. Nothing on screen shows the attribute, so a broken
+   * wiring is invisible to a screenshot.
+   */
+  test('the palette input tracks the selected option in aria-activedescendant', async ({
+    page,
+  }) => {
+    await loginAsAdmin(page);
+    await page.goto('/b/admin/', { waitUntil: 'networkidle' });
+
+    await page.keyboard.press('Control+k');
+    const input = page.locator('#cmdk-input');
+    await expect(input).toBeFocused();
+    await expect(input).toHaveAttribute('role', 'combobox');
+
+    // The active descendant is always the one option marked selected.
+    const selectedId = () =>
+      page.locator('#cmdk-list [role="option"][aria-selected="true"]').getAttribute('id');
+    const first = await selectedId();
+    expect(first).toBeTruthy();
+    await expect(input).toHaveAttribute('aria-activedescendant', first!);
+
+    await page.keyboard.press('ArrowDown');
+    const second = await selectedId();
+    expect(second).not.toBe(first);
+    await expect(input).toHaveAttribute('aria-activedescendant', second!);
+    await expect(input).toBeFocused();
+
+    await page.keyboard.press('ArrowUp');
+    await expect(input).toHaveAttribute('aria-activedescendant', first!);
+
+    // A filter that matches nothing leaves nothing to point at.
+    await input.fill('zzz-no-such-page');
+    await expect(page.locator('#cmdk-list [role="option"][aria-selected="true"]')).toHaveCount(0);
+    await expect(input).not.toHaveAttribute('aria-activedescendant', /.*/);
+
+    // Clearing the filter selects the first option again.
+    await input.fill('');
+    await expect(input).toHaveAttribute('aria-activedescendant', first!);
   });
 });

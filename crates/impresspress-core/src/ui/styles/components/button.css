@@ -90,8 +90,11 @@
 	.quick-actions__grid { grid-template-columns: repeat(2, 1fr); }
 }
 
+/* ── Block (opt-in full width on narrow screens) ───────── */
+/* A button is as wide as its label at every width; nothing widens buttons
+   globally. A row whose buttons should span the screen on a phone -- a form's
+   submit row, a modal's footer -- marks them `.btn--block`. Two block buttons
+   in one flex row share it equally. */
 @media (max-width: 720px) {
-	.btn--block,
-	.btn--primary,
-	.btn--secondary { width: 100%; }
+	.btn--block { width: 100%; flex: 1 1 0; }
 }
