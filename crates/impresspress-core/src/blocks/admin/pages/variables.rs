@@ -16,7 +16,7 @@ use crate::{
         components::{self, Badge, BadgeVariant},
         icons,
     },
-    util::parse_form_body,
+    util::{parse_form_body, url_path_encode},
 };
 
 /// Render JUST the variables settings body. The parent `settings_page`
@@ -73,38 +73,7 @@ pub async fn settings_body(ctx: &dyn Context, msg: &Message) -> Result<Markup, W
         }
 
         // Create variable modal
-        (components::modal("create-var", "Add Variable", html! {
-            form hx-post="/b/admin/variables" hx-target="#variables-content" {
-                div .form-group {
-                    label .form-label .required for="var-key" { "Key" }
-                    input .form-input type="text" #var-key name="key" placeholder="e.g. MY_SETTING" required;
-                }
-                div .form-group {
-                    label .form-label for="var-value" { "Value" }
-                    input .form-input type="text" #var-value name="value" placeholder="Value";
-                }
-                div .form-group {
-                    label .form-label for="var-desc" { "Description" }
-                    input .form-input type="text" #var-desc name="description" placeholder="Optional description";
-                }
-                div .form-group {
-                    label .form-checkbox {
-                        // Hidden first, checkbox second: `parse_form_body` keeps
-                        // the last value for a repeated key, so a checked box
-                        // posts `1` and an unchecked one still posts an explicit
-                        // `0` rather than nothing. Checked by default — masking
-                        // is the safe side to be wrong on.
-                        input type="hidden" name="sensitive" value="0";
-                        input type="checkbox" name="sensitive" value="1" checked;
-                        " Sensitive (mask value in UI)"
-                    }
-                }
-                div .form-actions {
-                    button .btn .btn--secondary .btn--block type="button" data-action="modal-close" data-modal-target="create-var" { "Cancel" }
-                    button .btn .btn--primary .btn--block type="submit" { "Create" }
-                }
-            }
-        }))
+        (components::modal("create-var", "Add Variable", create_variable_form(&CreateVarForm::default())))
 
         // Edit variable modal (content loaded dynamically via htmx)
         div .modal-overlay #edit-var-modal-overlay hidden data-modal-dismiss
@@ -114,6 +83,121 @@ pub async fn settings_body(ctx: &dyn Context, msg: &Message) -> Result<Markup, W
             }
         }
     })
+}
+
+/// What the Add Variable form holds: empty on the page, and what the operator
+/// submitted, plus the refusal, when [`handle_create_variable`] answers with
+/// the form again.
+struct CreateVarForm<'a> {
+    key: &'a str,
+    value: &'a str,
+    description: &'a str,
+    sensitive: bool,
+    error: Option<(ops::CreateField, String)>,
+}
+
+impl Default for CreateVarForm<'_> {
+    fn default() -> Self {
+        Self {
+            key: "",
+            value: "",
+            description: "",
+            // Checked by default: masking is the safe side to be wrong on.
+            sensitive: true,
+            error: None,
+        }
+    }
+}
+
+/// The Add Variable form. Rendered into the modal by [`settings_body`], and
+/// by [`handle_create_variable`] in place of itself when the create is
+/// refused for one of its fields: htmx 2 swaps only a 2xx, so a refusal that
+/// is to appear under the field it is about comes back as this form, carrying
+/// it (the convention `auth_ui::api::change_password::refused` and
+/// `userportal::pages::security::handle_unlink` follow).
+///
+/// The error sits under its field as `role="alert"`, and the field carries
+/// `aria-invalid` and names the error in `aria-describedby` beside its hint,
+/// and takes focus (`autofocus`, which htmx honours on a swap).
+///
+/// `pattern` is [`crate::config_vars::VARIABLE_KEY_HTML_PATTERN`], the browser's
+/// copy of the rule the server applies, so a malformed key is caught before it
+/// is sent; the server's refusal is what a request that skips the browser
+/// meets.
+fn create_variable_form(form: &CreateVarForm<'_>) -> Markup {
+    let error_for = |field: ops::CreateField| {
+        form.error
+            .as_ref()
+            .filter(|(at, _)| *at == field)
+            .map(|(_, message)| message.as_str())
+    };
+    let key_error = error_for(ops::CreateField::Key);
+    let value_error = error_for(ops::CreateField::Value);
+    let key_describedby = if key_error.is_some() {
+        "var-key-hint var-key-error"
+    } else {
+        "var-key-hint"
+    };
+    html! {
+        form #create-var-form hx-post="/b/admin/variables" hx-target="#content" {
+            div .form-group {
+                label .form-label .required for="var-key" { "Key" }
+                input .form-input type="text" #var-key name="key" value=(form.key)
+                    placeholder="e.g. IMPRESSPRESS__MY_BLOCK__SETTING"
+                    required
+                    pattern=(crate::config_vars::VARIABLE_KEY_HTML_PATTERN)
+                    title="Uppercase parts joined by a double underscore: WAFER_RUN_SHARED__<NAME>, or <ORG>__<BLOCK>__<NAME>"
+                    autocapitalize="characters"
+                    autocomplete="off"
+                    spellcheck="false"
+                    aria-invalid=[key_error.map(|_| "true")]
+                    aria-describedby=(key_describedby)
+                    autofocus[key_error.is_some()];
+                p .form-hint #var-key-hint {
+                    "Uppercase letters, digits and underscores, with "
+                    code { "__" }
+                    " between parts: "
+                    code { "WAFER_RUN_SHARED__<NAME>" }
+                    " for shared config, or "
+                    code { "<ORG>__<BLOCK>__<NAME>" }
+                    " for one block's."
+                }
+                @if let Some(message) = key_error {
+                    p .form-error #var-key-error role="alert" { (message) }
+                }
+            }
+            div .form-group {
+                label .form-label for="var-value" { "Value" }
+                input .form-input type="text" #var-value name="value" value=(form.value)
+                    placeholder="Value"
+                    aria-invalid=[value_error.map(|_| "true")]
+                    aria-describedby=[value_error.map(|_| "var-value-error")]
+                    autofocus[value_error.is_some()];
+                @if let Some(message) = value_error {
+                    p .form-error #var-value-error role="alert" { (message) }
+                }
+            }
+            div .form-group {
+                label .form-label for="var-desc" { "Description" }
+                input .form-input type="text" #var-desc name="description" value=(form.description) placeholder="Optional description";
+            }
+            div .form-group {
+                label .form-checkbox {
+                    // Hidden first, checkbox second: `parse_form_body` keeps
+                    // the last value for a repeated key, so a checked box
+                    // posts `1` and an unchecked one still posts an explicit
+                    // `0` rather than nothing.
+                    input type="hidden" name="sensitive" value="0";
+                    input type="checkbox" name="sensitive" value="1" checked[form.sensitive];
+                    " Sensitive (mask value in UI)"
+                }
+            }
+            div .form-actions {
+                button .btn .btn--secondary .btn--block type="button" data-action="modal-close" data-modal-target="create-var" { "Cancel" }
+                button .btn .btn--primary .btn--block type="submit" { "Create" }
+            }
+        }
+    }
 }
 
 /// Full settings page for variables — used by mutation handlers that need to
@@ -240,13 +324,15 @@ fn var_row(row: &VarRow) -> Vec<Markup> {
         // every row that has no delete control against every row that does.
         html! {
             div .flex .gap-1 {
-                button .btn .btn--sm .btn--ghost
-                    hx-get={"/b/admin/variables/" (row.key) "/edit"}
-                    hx-target="#edit-var-modal"
-                    hx-swap="innerHTML"
-                    title="Edit"
-                    aria-label=(format!("Edit {}", row.key))
-                { (icons::edit()) }
+                @if editable(row.key) {
+                    button .btn .btn--sm .btn--ghost
+                        hx-get={"/b/admin/variables/" (url_path_encode(row.key)) "/edit"}
+                        hx-target="#edit-var-modal"
+                        hx-swap="innerHTML"
+                        title="Edit"
+                        aria-label=(format!("Edit {}", row.key))
+                    { (icons::edit()) }
+                }
                 @if row.pin.is_some() && row.offer_reset && key_can_be_seeded_from_env(row.key) {
                     (reset_to_environment_button(row.key))
                 }
@@ -283,8 +369,23 @@ fn variable_cell(
             @if !warning.is_empty() {
                 span .var-warning-note { "Warning: " (warning) }
             }
+            @if !editable(key) {
+                span .var-warning-note {
+                    "Not a valid variable key, so no block reads it and it cannot be edited. \
+                     Delete it, and add the setting again under a valid key."
+                }
+            }
         }
     }
+}
+
+/// Whether a stored row's key may be edited: whether it passes the key rule
+/// ([`crate::config_vars::check_variable_key`]) every writer applies. A row
+/// stored under a malformed key before that rule existed is listed, with
+/// [`variable_cell`]'s note saying why, and deletable, but offers no Edit
+/// control — `ops::update_variable` would refuse the save.
+fn editable(key: &str) -> bool {
+    crate::config_vars::check_variable_key(key).is_ok()
 }
 
 /// What the per-block tables need from a stored row: the columns they render
@@ -400,7 +501,7 @@ const ALL_VAR_COLUMNS: [components::TableCol<'static>; 3] = [
 fn delete_button(key: &str) -> Markup {
     html! {
         button .btn .btn--sm .btn--danger
-            hx-delete={"/b/admin/variables/" (key)}
+            hx-delete={"/b/admin/variables/" (url_path_encode(key))}
             hx-target="closest tr"
             hx-swap="outerHTML"
             hx-confirm={"Delete " (key) "? This cannot be undone."}
@@ -429,7 +530,7 @@ fn delete_button(key: &str) -> Markup {
 fn reset_to_environment_button(key: &str) -> Markup {
     html! {
         button .btn .btn--sm .btn--ghost type="button"
-            hx-post={"/b/admin/variables/" (key) "/reset-to-environment"}
+            hx-post={"/b/admin/variables/" (url_path_encode(key)) "/reset-to-environment"}
             hx-swap="none"
             hx-confirm={
                 "Hand " (key) " back to the environment? The stored value stops taking \
@@ -597,13 +698,15 @@ fn config_all_tab(rows: &[variables::VariableRow], offer_reset: bool) -> Markup 
                 },
                 html! {
                     div .flex .gap-1 {
-                        button .btn .btn--sm .btn--ghost
-                            hx-get={"/b/admin/variables/" (key) "/edit"}
-                            hx-target="#edit-var-modal"
-                            hx-swap="innerHTML"
-                            title="Edit"
-                            aria-label=(format!("Edit {key}"))
-                        { (icons::edit()) }
+                        @if editable(key) {
+                            button .btn .btn--sm .btn--ghost
+                                hx-get={"/b/admin/variables/" (url_path_encode(key)) "/edit"}
+                                hx-target="#edit-var-modal"
+                                hx-swap="innerHTML"
+                                title="Edit"
+                                aria-label=(format!("Edit {key}"))
+                            { (icons::edit()) }
+                        }
                         // Same reasoning as the delete control below:
                         // the flat listing is where an operator sent
                         // here by a boot WARN naming one key actually
@@ -839,14 +942,39 @@ pub async fn handle_create_variable(
         .map(|value| crate::config_vars::is_truthy(value))
         .unwrap_or(true);
 
-    // Key-required guard, URL/SSRF validation (the SSR path previously had
-    // none), audit-log write, and the create live in the shared ops layer.
-    if let Err(out) = ops::create_variable(ctx, msg, key, value, None, description, sensitive).await
+    // Key rule, URL/SSRF validation (the SSR path previously had none),
+    // audit-log write, and the create live in the shared ops layer.
+    if let Err(refusal) =
+        ops::create_variable(ctx, msg, key, value, None, description, sensitive).await
     {
-        return out;
+        // From the modal, a refusal about a field is the form again with the
+        // sentence under that field, swapped over the form that was sent. A
+        // request from anywhere else, or a failure no field caused, gets the
+        // status the JSON API answers.
+        return match refusal.field_error() {
+            Some(error) if ui::is_htmx(msg) => {
+                let form = create_variable_form(&CreateVarForm {
+                    key,
+                    value,
+                    description: description.unwrap_or_default(),
+                    sensitive,
+                    error: Some(error),
+                });
+                crate::http::ResponseBuilder::new()
+                    .set_header("HX-Retarget", "#create-var-form")
+                    .set_header("HX-Reswap", "outerHTML")
+                    .body(form.into_string().into_bytes(), "text/html; charset=utf-8")
+            }
+            _ => refusal.into_response(),
+        };
     }
 
-    // Re-render the variables page (htmx will swap #content)
+    // The whole settings body, for the form's `hx-target="#content"` — the
+    // shell's body, which is what an htmx request to a shelled page answers
+    // (the edit modal's form swaps the same answer into the same target). The
+    // form used to target `#variables-content`, one tab's table, so a created
+    // variable drew the settings page — nav, tabs, modal and all — inside its
+    // own table.
     variables_page(ctx, msg, "Variable created").await
 }
 
@@ -896,7 +1024,7 @@ pub async fn handle_edit_variable_form(ctx: &dyn Context, msg: &Message) -> Outp
             }
         }
         div .modal-body {
-            form hx-put={"/b/admin/variables/" (key)} hx-target="#content" {
+            form hx-put={"/b/admin/variables/" (url_path_encode(&key))} hx-target="#content" {
                 div .form-group {
                     label .form-label { "Key" }
                     input .form-input type="text" value=(key) disabled;
@@ -1566,7 +1694,10 @@ mod tests {
     /// inert.
     #[tokio::test]
     async fn a_key_the_environment_cannot_set_offers_no_reset_control() {
-        for key in ["MY_LEGACY_THING", crate::blocks::auth::JWT_SECRET_KEY] {
+        for key in [
+            crate::blocks::admin::fixture_keys::MY_LEGACY_THING,
+            crate::blocks::auth::JWT_SECRET_KEY,
+        ] {
             assert!(
                 !key_can_be_seeded_from_env(key),
                 "{key} must be one the env batch cannot carry, or this proves nothing"
@@ -1663,14 +1794,74 @@ mod tests {
     /// name for the same reason the edit button does.
     #[test]
     fn a_deletable_row_offers_a_labelled_delete_control() {
-        let s = row_html("LEGACY_THING", true);
+        let s = row_html(crate::blocks::admin::fixture_keys::LEGACY_THING, true);
         assert!(
-            s.contains(r#"hx-delete="/b/admin/variables/LEGACY_THING""#),
+            s.contains(r#"hx-delete="/b/admin/variables/WAFER_RUN_SHARED__LEGACY_THING""#),
             "delete control must post to the row's own key: {s}"
         );
         assert!(
-            s.contains(r#"aria-label="Delete LEGACY_THING""#),
+            s.contains(r#"aria-label="Delete WAFER_RUN_SHARED__LEGACY_THING""#),
             "icon-only delete button must expose an aria-label: {s}"
+        );
+    }
+
+    /// A row stored under a malformed key before the key rule existed is
+    /// listed and deletable, says why it cannot be edited, and offers no Edit
+    /// control (`ops::update_variable` would refuse the save). Its key is
+    /// percent-encoded into the control's URL, not interpolated raw.
+    #[test]
+    fn a_legacy_malformed_row_is_deletable_but_not_editable() {
+        let s = row_html("bad key!", true);
+        assert!(
+            s.contains(r#"hx-delete="/b/admin/variables/bad%20key%21""#),
+            "the key must be percent-encoded into the URL: {s}"
+        );
+        assert!(
+            !s.contains("/edit"),
+            "no Edit control for a key no writer accepts: {s}"
+        );
+        assert!(
+            s.contains("Not a valid variable key"),
+            "the row must say why: {s}"
+        );
+
+        let valid = row_html(crate::blocks::admin::fixture_keys::LEGACY_THING, true);
+        assert!(
+            valid.contains(r#"hx-get="/b/admin/variables/WAFER_RUN_SHARED__LEGACY_THING/edit""#)
+        );
+        assert!(!valid.contains("Not a valid variable key"), "{valid}");
+    }
+
+    /// The edit modal's form PUTs to the key percent-encoded.
+    #[tokio::test]
+    async fn the_edit_modal_encodes_the_key_into_its_url() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        let key = "bad key!";
+        variables::insert(
+            &ctx,
+            variables::NewVariable {
+                key: key.to_string(),
+                value: "v".to_string(),
+                name: String::new(),
+                description: String::new(),
+                warning: String::new(),
+                sensitive: false,
+                updated_by: String::new(),
+                block: None,
+            },
+        )
+        .await
+        .expect("seed a legacy row");
+        let msg = crate::blocks::admin::test_support::routed(admin_msg(
+            "retrieve",
+            "/b/admin/variables/bad%20key%21/edit",
+        ));
+        let html = output_html(handle_edit_variable_form(&ctx, &msg).await).await;
+        assert!(
+            html.contains(r#"hx-put="/b/admin/variables/bad%20key%21""#),
+            "{html}"
         );
     }
 
@@ -1733,7 +1924,7 @@ mod tests {
         let ctx = TestContext::with_admin()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
-        let key = "MAILER_API_KEY";
+        let key = crate::blocks::admin::fixture_keys::MAILER_API_KEY;
         let html = sensitive_row_modal(&ctx, key, "sk-live-realsecret").await;
 
         assert!(
@@ -1770,7 +1961,7 @@ mod tests {
         let ctx = TestContext::with_admin()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
-        let key = "MAILER_API_KEY";
+        let key = crate::blocks::admin::fixture_keys::MAILER_API_KEY;
         let html = sensitive_row_modal(&ctx, key, "sk-live-realsecret").await;
 
         let mut fields = serialize_form(&html);
@@ -1797,7 +1988,7 @@ mod tests {
         let ctx = TestContext::with_admin()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
-        let key = "MAILER_API_KEY";
+        let key = crate::blocks::admin::fixture_keys::MAILER_API_KEY;
         let html = sensitive_row_modal(&ctx, key, "sk-live-realsecret").await;
 
         let mut fields = serialize_form(&html);
@@ -1830,7 +2021,7 @@ mod tests {
         let ctx = TestContext::with_admin()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
-        let key = "MY_SERVICE_HANDLE";
+        let key = crate::blocks::admin::fixture_keys::MY_SERVICE_HANDLE;
         assert!(
             !crate::config_vars::is_sensitive_for_storage(key),
             "the point of this test is a key the declaration/suffix rule cannot catch"
@@ -1864,7 +2055,7 @@ mod tests {
         let ctx = TestContext::with_admin()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
-        let key = "SITE_MOTTO";
+        let key = crate::blocks::admin::fixture_keys::SITE_MOTTO;
         variables::insert(
             &ctx,
             variables::NewVariable {
@@ -2287,7 +2478,7 @@ mod tests {
     /// single-key one.
     #[tokio::test]
     async fn a_key_the_environment_cannot_set_is_not_part_of_the_bulk_release() {
-        let key = "MY_LEGACY_THING";
+        let key = crate::blocks::admin::fixture_keys::MY_LEGACY_THING;
         assert!(
             !key_can_be_seeded_from_env(key),
             "the fixture's key must be one no env batch can carry, or this proves nothing"
@@ -2385,7 +2576,7 @@ mod create_form_tests {
     use wafer_run::InputStream;
 
     use super::*;
-    use crate::test_support::{admin_msg, collect_or_panic, TestContext};
+    use crate::test_support::{admin_msg, collect_or_panic, output_html, TestContext};
 
     async fn admin_ctx() -> TestContext {
         let ctx = TestContext::new()
@@ -2415,30 +2606,22 @@ mod create_form_tests {
         collect_or_panic(out).await;
     }
 
-    /// The Variables page's create form answers the SAME 409 the JSON API
-    /// does for a key that is already stored, AND the operator learns why.
-    ///
-    /// Both halves matter. Both surfaces drive `ops::create_variable`, so the
-    /// status is the half that would notice if this page started reshaping the
-    /// refusal into a re-render (an htmx swap of the full page reads as
-    /// "created"). The body is the half that makes the 409 worth having: htmx
-    /// does not swap a 4xx, so the only thing the operator can see is what the
-    /// global `htmx:responseError` listener in `ui/assets/chrome.js` raises as
-    /// a toast — and that listener reads `message` out of exactly this
-    /// envelope. A 409 whose body said nothing useful would look, to the person
-    /// in front of the modal, precisely like the 500 this all started as.
-    /// `ui/assets/test/chrome_error_toast.test.mjs` is the listener's half.
+    /// A create POSTED WITHOUT htmx answers the SAME 409 the JSON API does
+    /// for a key that is already stored, with the sentence naming the key.
+    /// (The modal's own request carries `HX-Request` and gets the form back
+    /// with that sentence under Key — see
+    /// `the_modal_shows_a_taken_key_under_the_key_field`.)
     #[tokio::test]
     async fn form_post_with_an_existing_key_answers_conflict() {
         let ctx = admin_ctx().await;
-        post_form(&ctx, "key=SITE_MOTTO&value=one").await;
+        post_form(&ctx, "key=WAFER_RUN_SHARED__SITE_MOTTO&value=one").await;
 
         let msg = admin_msg("create", "/admin/variables");
         let refused = || {
             handle_create_variable(
                 &ctx,
                 &msg,
-                InputStream::from_bytes(b"key=SITE_MOTTO&value=two".to_vec()),
+                InputStream::from_bytes(b"key=WAFER_RUN_SHARED__SITE_MOTTO&value=two".to_vec()),
             )
         };
         assert_eq!(
@@ -2451,7 +2634,10 @@ mod create_form_tests {
         let message = body["message"].as_str().unwrap_or_default();
         assert_eq!(
             message,
-            "A variable with the key \"SITE_MOTTO\" already exists. Choose a different key.",
+            format!(
+                "A variable with the key \"{}\" already exists. Choose a different key.",
+                crate::blocks::admin::fixture_keys::SITE_MOTTO
+            ),
             "the toast has only this to show the operator",
         );
     }
@@ -2461,15 +2647,19 @@ mod create_form_tests {
     #[tokio::test]
     async fn form_post_without_the_flag_defaults_to_sensitive() {
         let ctx = admin_ctx().await;
-        post_form(&ctx, "key=SITE_MOTTO&value=move+fast").await;
-        assert!(sensitive_flag(&ctx, "SITE_MOTTO").await);
+        post_form(&ctx, "key=WAFER_RUN_SHARED__SITE_MOTTO&value=move+fast").await;
+        assert!(sensitive_flag(&ctx, crate::blocks::admin::fixture_keys::SITE_MOTTO).await);
     }
 
     #[tokio::test]
     async fn form_post_with_an_explicit_zero_is_not_sensitive() {
         let ctx = admin_ctx().await;
-        post_form(&ctx, "key=SITE_MOTTO&value=move+fast&sensitive=0").await;
-        assert!(!sensitive_flag(&ctx, "SITE_MOTTO").await);
+        post_form(
+            &ctx,
+            "key=WAFER_RUN_SHARED__SITE_MOTTO&value=move+fast&sensitive=0",
+        )
+        .await;
+        assert!(!sensitive_flag(&ctx, crate::blocks::admin::fixture_keys::SITE_MOTTO).await);
     }
 
     /// The modal posts a hidden `sensitive=0` followed by the checkbox's
@@ -2481,10 +2671,10 @@ mod create_form_tests {
         let ctx = admin_ctx().await;
         post_form(
             &ctx,
-            "key=SITE_MOTTO&value=move+fast&sensitive=0&sensitive=1",
+            "key=WAFER_RUN_SHARED__SITE_MOTTO&value=move+fast&sensitive=0&sensitive=1",
         )
         .await;
-        assert!(sensitive_flag(&ctx, "SITE_MOTTO").await);
+        assert!(sensitive_flag(&ctx, crate::blocks::admin::fixture_keys::SITE_MOTTO).await);
     }
 
     /// The create modal is checked by default and always posts an explicit
@@ -2504,6 +2694,230 @@ mod create_form_tests {
         assert!(
             html.contains(r#"type="checkbox" name="sensitive" value="1" checked"#),
             "the modal's checkbox must be checked by default: {html}"
+        );
+    }
+
+    /// The modal's request: `handle_create_variable` with `HX-Request` set.
+    async fn post_from_modal(ctx: &dyn Context, body: &str) -> OutputStream {
+        let mut msg = admin_msg("create", "/admin/variables");
+        msg.set_meta("http.header.hx-request", "true");
+        handle_create_variable(ctx, &msg, InputStream::from_bytes(body.as_bytes().to_vec())).await
+    }
+
+    /// What a refused modal submit must come back as: a 2xx (htmx swaps
+    /// nothing else) that replaces the form it was sent from, carrying the
+    /// sentence under Key as an alert the field points at, with what the
+    /// operator typed still in the fields. Returns the form's HTML.
+    async fn assert_key_refused_in_place(out: OutputStream, sentence: &str, typed: &str) -> String {
+        let buf = collect_or_panic(out).await;
+        let header = |name: &str| {
+            let key = format!("resp.header.{name}");
+            buf.meta
+                .iter()
+                .find(|m| m.key == key)
+                .map(|m| m.value.clone())
+        };
+        assert_eq!(
+            wafer_block::http_codec::resolve_status(&buf.meta, 200),
+            200,
+            "htmx 2 swaps only a 2xx"
+        );
+        assert_eq!(header("HX-Retarget").as_deref(), Some("#create-var-form"));
+        assert_eq!(header("HX-Reswap").as_deref(), Some("outerHTML"));
+        assert_eq!(
+            header("HX-Trigger"),
+            None,
+            "the error is under the field, not in a toast"
+        );
+        let html = String::from_utf8(buf.body).expect("utf-8");
+        assert!(html.starts_with(r#"<form id="create-var-form""#), "{html}");
+        let error = format!(
+            r#"<p class="form-error" id="var-key-error" role="alert">{}</p>"#,
+            maud::html! { (sentence) }.into_string()
+        );
+        assert!(html.contains(&error), "expected {error} in {html}");
+        assert!(html.contains(r#"aria-invalid="true""#), "{html}");
+        assert!(
+            html.contains(r#"aria-describedby="var-key-hint var-key-error""#),
+            "{html}"
+        );
+        assert!(
+            html.contains("autofocus"),
+            "the refused field takes focus: {html}"
+        );
+        assert!(
+            html.contains(&format!(
+                r#"name="key" value="{}""#,
+                maud::html! { (typed) }.into_string()
+            )),
+            "what the operator typed stays in the field: {html}"
+        );
+        html
+    }
+
+    /// A malformed key is refused under the Key field, saying what a valid
+    /// key looks like, and nothing is stored.
+    #[tokio::test]
+    async fn the_modal_shows_a_malformed_key_under_the_key_field() {
+        let ctx = admin_ctx().await;
+        let out = post_from_modal(&ctx, "key=bad+key%21&value=v&description=d&sensitive=0").await;
+        let sentence = crate::config_vars::check_variable_key("bad key!").expect_err("malformed");
+        let html = assert_key_refused_in_place(out, &sentence, "bad key!").await;
+        assert!(html.contains(r#"name="value" value="v""#), "{html}");
+        assert!(html.contains(r#"name="description" value="d""#), "{html}");
+        assert!(
+            !html.contains(r#"value="1" checked"#),
+            "the unchecked box stays unchecked: {html}"
+        );
+        assert!(
+            variables::get_by_key(&ctx, "bad key!")
+                .await
+                .expect("read")
+                .is_none(),
+            "a refused key must not be stored"
+        );
+    }
+
+    /// A key that is already stored is refused under the Key field with the
+    /// 409's own sentence, and the stored row keeps its value.
+    #[tokio::test]
+    async fn the_modal_shows_a_taken_key_under_the_key_field() {
+        let ctx = admin_ctx().await;
+        const KEY: &str = crate::blocks::admin::fixture_keys::SITE_MOTTO;
+        post_form(&ctx, &format!("key={KEY}&value=one")).await;
+
+        let out = post_from_modal(&ctx, &format!("key={KEY}&value=two")).await;
+        assert_key_refused_in_place(
+            out,
+            &format!("A variable with the key \"{KEY}\" already exists. Choose a different key."),
+            KEY,
+        )
+        .await;
+        assert_eq!(
+            variables::get_by_key(&ctx, KEY)
+                .await
+                .expect("read")
+                .expect("stored")
+                .value,
+            "one"
+        );
+    }
+
+    /// A refused VALUE is shown under Value, not under Key.
+    #[tokio::test]
+    async fn the_modal_shows_a_refused_value_under_the_value_field() {
+        let ctx = admin_ctx().await;
+        let out = post_from_modal(
+            &ctx,
+            "key=WAFER_RUN_SHARED__STRIPE_SECRET&value=&sensitive=1",
+        )
+        .await;
+        let html = output_html(out).await;
+        assert!(
+            html.contains(r#"<p class="form-error" id="var-value-error" role="alert">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"aria-describedby="var-value-error""#),
+            "{html}"
+        );
+        assert!(!html.contains("var-key-error"), "{html}");
+    }
+
+    /// The same refusals reach a non-htmx post as the JSON API's statuses: a
+    /// malformed key is a 400 saying what a valid key looks like.
+    #[tokio::test]
+    async fn a_malformed_key_posted_without_htmx_is_a_400() {
+        let ctx = admin_ctx().await;
+        let out = handle_create_variable(
+            &ctx,
+            &admin_msg("create", "/admin/variables"),
+            InputStream::from_bytes(b"key=bad+key%21&value=v".to_vec()),
+        )
+        .await;
+        let body = crate::test_support::output_http_json(out).await;
+        assert_eq!(body["error"], serde_json::json!("InvalidArgument"));
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(crate::config_vars::VARIABLE_KEY_FORMAT),
+            "{body}"
+        );
+    }
+
+    /// A create that lands answers the settings body for `#content`, which is
+    /// where the form swaps it: no retarget (that is the refusal's), no shell
+    /// (`#content` is the shell's own body), and exactly one variables table,
+    /// now holding the new key. The form used to target `#variables-content`,
+    /// and the same answer drew the page inside its own table.
+    #[tokio::test]
+    async fn a_created_variable_redraws_the_settings_body_once() {
+        let ctx = admin_ctx().await;
+        let html = settings_body(&ctx, &admin_msg("retrieve", "/admin/settings"))
+            .await
+            .expect("the variables read succeeds")
+            .into_string();
+        assert!(
+            html.contains(
+                r##"<form id="create-var-form" hx-post="/b/admin/variables" hx-target="#content">"##
+            ),
+            "{html}"
+        );
+
+        const KEY: &str = crate::blocks::admin::fixture_keys::SITE_MOTTO;
+        let buf =
+            collect_or_panic(post_from_modal(&ctx, &format!("key={KEY}&value=v")).await).await;
+        let header = |name: &str| {
+            let key = format!("resp.header.{name}");
+            buf.meta.iter().any(|m| m.key == key)
+        };
+        assert!(
+            !header("HX-Retarget") && !header("HX-Reswap"),
+            "a success keeps the form's own target"
+        );
+        assert_eq!(wafer_block::http_codec::resolve_status(&buf.meta, 200), 200);
+        let body = String::from_utf8(buf.body).expect("utf-8");
+        assert!(
+            !body.contains(r#"class="shell"#),
+            "an htmx answer carries no shell: {body}"
+        );
+        assert!(
+            !body.contains(r#"id="content""#),
+            "the answer is swapped INTO #content: {body}"
+        );
+        assert_eq!(
+            body.matches(r#"id="variables-content""#).count(),
+            1,
+            "{body}"
+        );
+        assert_eq!(body.matches(r#"id="create-var-form""#).count(), 1, "{body}");
+        assert!(body.contains(KEY), "the new row is listed: {body}");
+    }
+
+    /// The Key field carries the browser's copy of the key rule and the hint
+    /// it is described by.
+    #[tokio::test]
+    async fn the_key_field_carries_the_pattern_and_its_hint() {
+        let ctx = admin_ctx().await;
+        let html = settings_body(&ctx, &admin_msg("retrieve", "/admin/settings"))
+            .await
+            .expect("the variables read succeeds")
+            .into_string();
+        let pattern = maud::html! { (crate::config_vars::VARIABLE_KEY_HTML_PATTERN) }.into_string();
+        assert!(html.contains(&format!(r#"pattern="{pattern}""#)), "{html}");
+        assert!(html.contains(r#"autocapitalize="characters""#), "{html}");
+        assert!(
+            html.contains(r#"aria-describedby="var-key-hint""#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<p class="form-hint" id="var-key-hint">"#),
+            "{html}"
+        );
+        assert!(
+            !html.contains("aria-invalid"),
+            "nothing is invalid yet: {html}"
         );
     }
 }

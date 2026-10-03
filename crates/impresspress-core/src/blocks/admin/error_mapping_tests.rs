@@ -364,12 +364,13 @@ async fn variable_release_denials_are_403() {
             &ctx,
             "create",
             "/b/admin/api/settings",
-            r#"{"key":"MY_SETTING","value":"x"}"#,
+            &serde_json::json!({"key": crate::blocks::admin::fixture_keys::MY_SETTING, "value": "x"})
+                .to_string(),
         )
         .await,
     )
     .await;
-    let path = "/b/admin/api/settings/MY_SETTING/reset-to-environment";
+    let path = "/b/admin/api/settings/WAFER_RUN_SHARED__MY_SETTING/reset-to-environment";
     // The row read, then the release write after it.
     for (failing, step) in [
         (denied(&ctx, every_op_on(variables::TABLE)), "read"),
@@ -511,7 +512,7 @@ async fn variable_edit_form_denial_is_403() {
     let mut misses = Vec::new();
     let (ctx, _) = fixture().await;
     let failing = denied(&ctx, every_op_on(variables::TABLE));
-    let path = "/b/admin/variables/MY_SETTING/edit";
+    let path = "/b/admin/variables/WAFER_RUN_SHARED__MY_SETTING/edit";
     assert_wrap_denial(&mut misses, api(&failing, "retrieve", path, "").await, path).await;
     report(misses);
 }
@@ -575,7 +576,8 @@ async fn reread_denials_after_a_write_are_the_classified_notice() {
             &ctx,
             "create",
             "/b/admin/api/settings",
-            r#"{"key":"MY_SETTING","value":"x"}"#,
+            &serde_json::json!({"key": crate::blocks::admin::fixture_keys::MY_SETTING, "value": "x"})
+                .to_string(),
         )
         .await,
     )
@@ -594,6 +596,10 @@ async fn reread_denials_after_a_write_are_the_classified_notice() {
 
     let revoke = format!("/b/admin/api-keys/{}/revoke", key.id);
     let delete_role = format!("/b/admin/iam/roles/{editor}");
+    let create_variable = format!(
+        "key={}&value=y&sensitive=0",
+        crate::blocks::admin::fixture_keys::OTHER_SETTING
+    );
     // (action, path, form, refused ops, reads of them the write makes first,
     // what the notice says landed)
     type Case<'a> = (
@@ -632,14 +638,14 @@ async fn reread_denials_after_a_write_are_the_classified_notice() {
         (
             "create",
             "/b/admin/variables".to_string(),
-            "key=OTHER_SETTING&value=y&sensitive=0",
+            &create_variable,
             vec![("database.list", variables::TABLE)],
             0,
             "Variable created",
         ),
         (
             "update",
-            "/b/admin/variables/MY_SETTING".to_string(),
+            "/b/admin/variables/WAFER_RUN_SHARED__MY_SETTING".to_string(),
             "value=z&sensitive=0",
             vec![("database.list", variables::TABLE)],
             // The update reads the row's stored flag and its pin first.
@@ -786,11 +792,12 @@ async fn every_taken_name_or_key_is_a_409_naming_it() {
     )
     .await;
 
-    let variable = r#"{"key":"SITE_MOTTO","value":"one"}"#;
+    let motto = crate::blocks::admin::fixture_keys::SITE_MOTTO;
+    let variable = &serde_json::json!({"key": motto, "value": "one"}).to_string();
     output_json(api(&ctx, "create", "/b/admin/api/settings", variable).await).await;
     expect_named_conflict(
         api(&ctx, "create", "/b/admin/api/settings", variable).await,
-        "A variable with the key \"SITE_MOTTO\" already exists. Choose a different key.",
+        &format!("A variable with the key \"{motto}\" already exists. Choose a different key."),
         "POST /b/admin/api/settings",
     )
     .await;

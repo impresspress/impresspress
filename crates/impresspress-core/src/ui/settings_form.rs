@@ -1167,7 +1167,7 @@ mod tests {
     async fn a_boot_map_value_equal_to_the_mask_is_not_a_half_applied_save() {
         use crate::platform_state::variables::{self, NewVariable};
 
-        const BOOT_ONLY: &str = "X__THING_SECRET";
+        const BOOT_ONLY: &str = "X__TEST__THING_SECRET";
 
         let mut ctx = TestContext::new()
             .await
@@ -1329,7 +1329,7 @@ mod tests {
             .expect("apply admin migrations");
         ctx.boot_config_service().await;
 
-        for (key, value) in [(APP_NAME_KEY, "MyApp"), ("X__NOTE", MASKED_VALUE)] {
+        for (key, value) in [(APP_NAME_KEY, "MyApp"), ("X__TEST__NOTE", MASKED_VALUE)] {
             variables::insert(
                 &ctx,
                 NewVariable {
@@ -1349,7 +1349,7 @@ mod tests {
 
         let allowed = [
             var(APP_NAME_KEY, "App Name", InputType::Text),
-            var("X__NOTE", "Note", InputType::Text),
+            var("X__TEST__NOTE", "Note", InputType::Text),
         ];
         // The page really does hand the mask back to the browser: this is what
         // makes the save below the form's own unedited submission, not a
@@ -1369,7 +1369,7 @@ mod tests {
             &allowed,
             serde_json::json!({
                 APP_NAME_KEY: "Renamed",
-                "X__NOTE": MASKED_VALUE,
+                "X__TEST__NOTE": MASKED_VALUE,
             }),
         )
         .await;
@@ -1387,7 +1387,7 @@ mod tests {
             "and the edit the operator actually made must land"
         );
         assert_eq!(
-            config::get_default(&ctx, "X__NOTE", "")
+            config::get_default(&ctx, "X__TEST__NOTE", "")
                 .await
                 .expect("config read"),
             MASKED_VALUE,

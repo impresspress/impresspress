@@ -381,7 +381,13 @@ impl<'a> TakenKey<'a> {
     /// The 409 for a write that tried to set the value itself: the fact, and
     /// the remedy that every such write shares.
     pub fn conflict(&self) -> OutputStream {
-        self.conflict_with(&format!("Choose a different {}.", self.field))
+        err_conflict(&self.conflict_message())
+    }
+
+    /// The sentence [`TakenKey::conflict`] carries, for a caller that shows
+    /// it in place rather than as the 409's body.
+    pub fn conflict_message(&self) -> String {
+        format!("{} Choose a different {}.", self.taken(), self.field)
     }
 }
 
@@ -410,7 +416,7 @@ pub fn taken_key_or(
     key: TakenKey<'_>,
     otherwise: impl FnOnce(wafer_run::WaferError) -> OutputStream,
 ) -> OutputStream {
-    if error.code == ErrorCode::AlreadyExists {
+    if is_duplicate_key(&error) {
         tracing::info!(
             error = %error,
             "database refused a write that duplicates a unique key",
@@ -418,6 +424,14 @@ pub fn taken_key_or(
         return key.conflict();
     }
     otherwise(error)
+}
+
+/// Whether a failed write was the database refusing a duplicate of a primary
+/// or unique key — the test [`taken_key_or`] answers a 409 on, for a caller
+/// that answers it in a shape of its own (a form re-rendered with the error
+/// under the field).
+pub fn is_duplicate_key(error: &wafer_run::WaferError) -> bool {
+    error.code == ErrorCode::AlreadyExists
 }
 
 /// [`taken_key_or`] for a write with no failure of its own to classify: any
