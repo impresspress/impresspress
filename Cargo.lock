@@ -2674,6 +2674,7 @@ dependencies = [
  "percent-encoding",
  "proc-macro2",
  "pulldown-cmark",
+ "regex",
  "reqwest",
  "rusqlite",
  "schemars",

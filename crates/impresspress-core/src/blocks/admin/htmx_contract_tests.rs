@@ -27,7 +27,10 @@ use crate::{
 /// the value that script produces for "the probe block's `things` table".
 const OPERATOR_INPUT: &[(&str, &str)] = &[
     ("name", "probe-typed-name"),
-    ("key", "PROBE_TYPED_SETTING"),
+    (
+        "key",
+        crate::blocks::admin::fixture_keys::PROBE_TYPED_SETTING,
+    ),
     ("grantee", "impresspress/probe"),
     ("resource", "impresspress__probe__things"),
 ];
