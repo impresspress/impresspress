@@ -44,8 +44,8 @@
 /* ===== Data table ===== */
 /* `.data-table` is the wrapper `ui/components/table.rs` emits around its
    `<table>`. A few pages still hand-write the class on the `<table>` itself
-   (files, vector, userportal sessions, products-stripe-setup.js -- moved onto
-   the component in wave 4); `table.data-table` gets the same full width and
+   (files, vector, userportal sessions, products-stripe-setup.js);
+   `table.data-table` gets the same full width and
    chrome so it does not shrink-wrap to its content. */
 .data-table { overflow-x: auto; border: 1px solid var(--border-light); border-radius: var(--radius-md); background: var(--surface-1); }
 .data-table table, table.data-table { width: 100%; border-collapse: collapse; }
