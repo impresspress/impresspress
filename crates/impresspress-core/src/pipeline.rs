@@ -64,7 +64,9 @@ fn caller_auth_level(msg: &Message) -> AuthLevel {
 fn enabled_infos(block_infos: &[BlockInfo], features: &dyn FeatureConfig) -> Vec<BlockInfo> {
     block_infos
         .iter()
-        .filter(|b| features.is_block_enabled(routing::feature_gate_name(&b.name)))
+        .filter(|b| {
+            crate::features::is_enabled(features, block_infos, routing::feature_gate_name(&b.name))
+        })
         .cloned()
         .collect()
 }
