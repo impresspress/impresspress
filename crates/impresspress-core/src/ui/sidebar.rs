@@ -2,7 +2,22 @@
 
 use maud::Markup;
 
-use super::{icons, NavItem};
+use super::{icons, NavItem, UserInfo};
+
+/// The signed-in viewer as the sidebar shows them: who they are, and the
+/// account links of their profile menu.
+///
+/// `account_links` is [`crate::ui::nav_groups::account_menu`] after the same
+/// [`crate::ui::nav_groups::retain_reachable`] filter the nav goes through,
+/// so the menu never offers a link this deployment would answer with "block
+/// not found" — the menu's "Change Password" is the only way to the
+/// change-password form, and a dead one leaves the account no way to change
+/// its password at all.
+#[derive(Clone, Copy)]
+pub struct SignedIn<'a> {
+    pub user: &'a UserInfo,
+    pub account_links: &'a [NavItem],
+}
 
 /// Resolve a *user-supplied* icon-name string (stored in the DB by the
 /// userportal admin-button editor, chosen from a fixed `ICON_OPTIONS`
@@ -90,7 +105,7 @@ pub fn active_item<'a>(groups: &'a [NavGroup], path: &str) -> Option<&'a NavItem
 
 /// Grouped sidebar — same layout as `sidebar(...)`, but items are
 /// partitioned into labeled groups. The brand at top, the user pinned
-/// at bottom (when `user` is `Some`).
+/// at bottom (when `signed_in` is `Some`, with its profile menu).
 /// `logo_url` (the header/email wordmark, `WAFER_RUN_SHARED__LOGO_URL`) is
 /// accepted but intentionally unused here: the navy sidebar always renders
 /// the icon + white text brand, never an `<img>` of that wordmark PNG (see
@@ -106,7 +121,7 @@ pub fn active_item<'a>(groups: &'a [NavGroup], path: &str) -> Option<&'a NavItem
 /// icon) are ported from origin/main during the main merge — 2026-09-02.
 pub fn sidebar_grouped(
     groups: &[NavGroup],
-    user: Option<&crate::ui::UserInfo>,
+    signed_in: Option<SignedIn<'_>>,
     current_path: &str,
     _logo_url: &str,
     logo_icon_url: &str,
@@ -161,7 +176,7 @@ pub fn sidebar_grouped(
                     span .sidebar__collapse-icon-collapsed { (icons::chevron_right()) }
                 }
             }
-            @if let Some(u) = user {
+            @if let Some(SignedIn { user: u, account_links }) = signed_in {
                 div .sidebar__user-container {
                     button .sidebar__user id="user-menu-btn" type="button" data-action="profile-menu-toggle" {
                         (crate::ui::components::avatar(&u.email, crate::ui::components::CtrlSize::Sm))
@@ -179,15 +194,15 @@ pub fn sidebar_grouped(
                             }
                         }
                         div .profile-menu-divider {}
-                        a .profile-menu-item href="/b/userportal/" {
-                            (icons::user())
-                            span { "My Account" }
+                        @if !account_links.is_empty() {
+                            @for link in account_links {
+                                a .profile-menu-item href=(link.href) {
+                                    ((link.icon)())
+                                    span { (link.label) }
+                                }
+                            }
+                            div .profile-menu-divider {}
                         }
-                        a .profile-menu-item href="/b/auth/change-password" {
-                            (icons::settings())
-                            span { "Change Password" }
-                        }
-                        div .profile-menu-divider {}
                         form action="/b/auth/api/logout" method="post" {
                             button .profile-menu-item .profile-menu-item-danger type="submit" {
                                 (icons::log_out())
@@ -491,6 +506,49 @@ mod tests {
         assert!(
             s.contains("M7 11V7a5 5 0 0 1 10 0v4"),
             "Security nav must render the lock icon (shackle path), got: {s}"
+        );
+    }
+
+    /// The profile menu renders the account links it is given — the
+    /// reachable ones, `shell_document` having run `nav_groups::account_menu`
+    /// through `retain_reachable` — and none when there are none.
+    #[test]
+    fn the_profile_menu_renders_the_account_links_it_is_given() {
+        let user = crate::ui::UserInfo {
+            id: "u".to_string(),
+            email: "a@example.com".to_string(),
+            roles: Vec::new(),
+        };
+        let links: Vec<NavItem> = crate::ui::nav_groups::account_menu()
+            .into_iter()
+            .flat_map(|g| g.items)
+            .collect();
+        let render = |account_links: &[NavItem]| {
+            sidebar_grouped(
+                &[],
+                Some(SignedIn {
+                    user: &user,
+                    account_links,
+                }),
+                "/",
+                "",
+                "",
+                "Impresspress",
+            )
+            .into_string()
+        };
+
+        let with = render(&links);
+        assert!(with.contains(r#"href="/b/userportal/security""#), "{with}");
+        assert!(with.contains(">Change Password<"), "{with}");
+        assert!(with.contains("/b/auth/api/logout"), "{with}");
+
+        let without = render(&[]);
+        assert!(!without.contains("/b/userportal/"), "{without}");
+        assert_eq!(without.matches("profile-menu-divider").count(), 1);
+        assert!(
+            without.contains("/b/auth/api/logout"),
+            "sign out stays: {without}"
         );
     }
 }

@@ -188,8 +188,9 @@ pub enum SignupResponse {
 /// this struct would publish five schemas that must be kept identical by
 /// hand.
 // Which HTML, and where the branch is: `api::change_password`'s
-// `changed_response` and `refused` answer an htmx caller with markup for the
-// `#change-pw-result` slot it posts from, success and refusal alike. That
+// `changed_response` and `refused` answer an htmx caller with markup — a
+// refusal for the Security form's result slot, a success in place of the
+// form itself. That
 // detail stays out of the doc comment above because schemars publishes it as
 // this schema's `description`, inlined at all five endpoints — the same
 // reason the note on `MeUser` below is not a doc comment either.

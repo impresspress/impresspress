@@ -26,11 +26,12 @@ const USER: &str = "portal-user";
 const PASSWORD: &str = "portal-password-2026";
 
 /// What the user types into the portal forms: their current password and a
-/// new one on the security page, and a label and path for a new portal
-/// button.
+/// new one, twice, on the security page, and a label and path for a new
+/// portal button.
 const OPERATOR_INPUT: &[(&str, &str)] = &[
     ("current_password", PASSWORD),
     ("new_password", "portal-password-2027"),
+    ("confirm_password", "portal-password-2027"),
     ("label", "Probe link"),
     ("path", "/b/probe"),
 ];

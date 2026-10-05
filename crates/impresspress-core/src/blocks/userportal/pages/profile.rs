@@ -1,6 +1,6 @@
-//! `/b/userportal/profile` — profile info + display-name edit form, in
-//! the shared single-card layout. Sign Out lives in the card footer;
-//! Change Password lives on the security page.
+//! `/b/userportal/profile` — profile info + display-name edit form, in the
+//! portal shell. Sign Out is the shell's profile menu; Change Password lives
+//! on the security page.
 
 use maud::html;
 use wafer_run::{context::Context, Message, OutputStream};
@@ -8,7 +8,7 @@ use wafer_run::{context::Context, Message, OutputStream};
 use crate::{
     blocks::{auth::repo::users, crud},
     http::redirect,
-    ui::{self, components, SiteConfig, UserInfo},
+    ui::{self, components, shell::Crumb, NavKind, Shell, UserInfo},
 };
 
 pub async fn profile_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
@@ -17,12 +17,6 @@ pub async fn profile_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         return redirect(302, "/b/auth/login");
     }
 
-    let site_config = match SiteConfig::load(ctx).await {
-        Ok(site) => site,
-        Err(e) => {
-            return crate::blocks::crud::db_error_page(msg, e, "page: site config read failed")
-        }
-    };
     let user = UserInfo::from_message(msg);
     // `UserRow.display_name`, not the `name` alias this page used to read:
     // both are written together by `users::insert` and
@@ -47,7 +41,7 @@ pub async fn profile_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let email = user.as_ref().map(|u| u.email.as_str()).unwrap_or("");
 
     let body = html! {
-        section .account-section {
+        section .account-sections {
             div .profile-header {
                 div .user-avatar .user-avatar--lg {
                     @if !avatar_url.is_empty() {
@@ -81,12 +75,29 @@ pub async fn profile_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
                         value=(display_name) placeholder="Enter your name" required
                         pattern=".*\\S.*" title="Enter a name that is not just spaces";
                 }
-                button .btn .btn--primary type="submit" .w-full { "Save" }
+                div .account-form__actions {
+                    button .btn .btn--primary .btn--block type="submit" { "Save" }
+                }
             }
         }
     };
 
-    super::account_page(&site_config, "Profile", Some("/b/userportal/"), body)
+    ui::shell_page(
+        ctx,
+        msg,
+        Shell {
+            title: "Profile",
+            nav: NavKind::Portal,
+            crumbs: vec![Crumb {
+                label: "Profile",
+                href: None,
+            }],
+            subtitle: Some("How your name appears across the site."),
+            actions: Vec::new(),
+        },
+        body,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -124,19 +135,22 @@ mod tests {
         );
     }
 
+    /// The portal shell frames the page: its sidebar (whose Account links
+    /// replace the account card's Back link) and the topbar's one `h1`.
     #[tokio::test]
-    async fn renders_back_link_to_dashboard() {
+    async fn renders_inside_the_portal_shell() {
         let ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::userportal::UserPortalBlock::BLOCK_NAME);
         ctx.seed_auth_user("user-a").await;
         let msg = auth_msg("retrieve", "/b/userportal/profile", "user-a");
-        let resp = profile_page(&ctx, &msg).await;
-        let html = output_html(resp).await;
+        let html = output_html(profile_page(&ctx, &msg).await).await;
+        assert!(html.contains(r#"<nav class="sidebar""#), "{html}");
         assert!(
-            html.contains(r#"href="/b/userportal/""#) && html.contains("account-card__back"),
-            "missing back link to dashboard"
+            html.contains(r#"<h1 class="topbar__title">Profile</h1>"#),
+            "{html}"
         );
+        assert!(!html.contains("account-card"), "{html}");
     }
 
     /// A failed user read is the 500 page, never the form. The form is
@@ -182,20 +196,5 @@ mod tests {
 
         assert_eq!(status, 500);
         assert!(!html.contains(r#"name="name""#), "{html}");
-    }
-
-    #[tokio::test]
-    async fn shell_chrome_is_absent() {
-        let ctx = TestContext::with_auth()
-            .await
-            .running_as(crate::blocks::userportal::UserPortalBlock::BLOCK_NAME);
-        ctx.seed_auth_user("user-a").await;
-        let msg = auth_msg("retrieve", "/b/userportal/profile", "user-a");
-        let resp = profile_page(&ctx, &msg).await;
-        let html = output_html(resp).await;
-        assert!(
-            !html.contains(r#"class="sidebar""#) && !html.contains(r#"class="topbar""#),
-            "single-card layout must not render shell sidebar/topbar"
-        );
     }
 }

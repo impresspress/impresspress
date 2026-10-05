@@ -565,7 +565,7 @@ fn disabled_blocks_json(features: &dyn FeatureConfig, block_infos: &[BlockInfo])
     let disabled: Vec<&str> = block_infos
         .iter()
         .map(|b| feature_gate_name(&b.name))
-        .filter(|gate| !features.is_block_enabled(gate))
+        .filter(|gate| !crate::features::is_enabled(features, block_infos, gate))
         .collect();
     serde_json::to_string(&disabled).unwrap_or_else(|_| "[]".to_string())
 }
@@ -587,10 +587,20 @@ fn disabled_blocks_json(features: &dyn FeatureConfig, block_infos: &[BlockInfo])
 pub fn gate_from_request(ctx: &dyn Context, msg: &Message) -> crate::features::BlockSettings {
     let raw = msg.get_meta(META_DISABLED_BLOCKS);
     if raw.is_empty() {
-        return crate::features::BlockSettings::from_config_json(
+        // The snapshot, read through the same rule the router applies
+        // (`features::is_enabled`): a registered block that cannot be
+        // disabled is enabled whatever its row says.
+        let mut snapshot = crate::features::BlockSettings::from_config_json(
             ctx.config_get(crate::features::BLOCK_SETTINGS_CONFIG_KEY)
                 .unwrap_or("{}"),
         );
+        for info in ctx.registered_blocks().iter().filter(|b| !b.can_disable) {
+            let gate = feature_gate_name(&info.name);
+            if !crate::features::FeatureConfig::is_block_enabled(&snapshot, gate) {
+                snapshot.set_block_enabled(gate, true);
+            }
+        }
+        return snapshot;
     }
     let disabled: Vec<String> = serde_json::from_str(raw).unwrap_or_default();
     crate::features::BlockSettings::from_map(disabled.into_iter().map(|n| (n, false)).collect())
@@ -702,8 +712,8 @@ pub async fn route_to_block(
             continue;
         }
 
-        // Feature gate
-        if !features.is_block_enabled(route.block) {
+        // Feature gate — `features::is_enabled`, the one enablement rule.
+        if !crate::features::is_enabled(features, block_infos, route.block) {
             return crate::http::err_not_found("endpoint not found");
         }
 
@@ -744,7 +754,7 @@ pub async fn route_to_block(
         // Feature gate — downstream-registered routes honor the admin disable
         // toggle exactly like the built-in `ROUTES` loop above (which they
         // bypassed before). Keep this gate in sync with that one.
-        if !features.is_block_enabled(&route.block_name) {
+        if !crate::features::is_enabled(features, block_infos, &route.block_name) {
             return crate::http::err_not_found("endpoint not found");
         }
 
@@ -1060,6 +1070,97 @@ mod tests {
             !dispatched(&NoneEnabled).await,
             "disabled extra route must be feature-gated, not dispatched"
         );
+    }
+
+    /// A block that cannot be disabled is served whatever a stored row says
+    /// (`features::is_enabled`). `impresspress/userportal` was disableable
+    /// until it became the account surface, so a deployment can hold an "off"
+    /// row for it that nothing can turn back on; `impresspress/auth-ui`
+    /// never was, and the one rule covers both. A disableable block's "off"
+    /// row still 404s, through the same gate.
+    #[cfg(feature = "block-userportal")]
+    #[tokio::test]
+    async fn a_stored_off_row_cannot_disable_a_block_that_cannot_be_disabled() {
+        use wafer_run::Block as _;
+
+        use crate::{
+            features::BlockSettings,
+            test_support::{anon_msg, auth_msg, TestContext},
+        };
+
+        // The fixture's own frame, as the router runs: `call_block` from a
+        // block's frame is limited to what that block `requires`.
+        let mut ctx = TestContext::with_userportal().await.fixture();
+        ctx.seed_auth_user("user-a").await;
+        let userportal = crate::blocks::userportal::UserPortalBlock::new();
+        let auth_ui = crate::blocks::auth_ui::AuthUiBlock::new();
+        let infos = vec![userportal.info(), auth_ui.info()];
+        assert!(infos.iter().all(|i| !i.can_disable), "{infos:?}");
+        ctx.register_block("impresspress/userportal", std::sync::Arc::new(userportal));
+        ctx.register_block("impresspress/auth-ui", std::sync::Arc::new(auth_ui));
+
+        let stored_off = BlockSettings::from_map(
+            [
+                ("impresspress/userportal".to_string(), false),
+                ("impresspress/auth-ui".to_string(), false),
+                ("impresspress/files".to_string(), false),
+            ]
+            .into(),
+        );
+        let status = |out: OutputStream| async move {
+            wafer_block::http_codec::collect_http_response(out)
+                .await
+                .status
+        };
+
+        let portal = route_to_block(
+            &ctx,
+            auth_msg("retrieve", "/b/userportal/", "user-a"),
+            InputStream::empty(),
+            &stored_off,
+            &infos,
+            &[],
+        )
+        .await;
+        assert_eq!(status(portal).await, 200, "userportal is served");
+
+        let login = route_to_block(
+            &ctx,
+            anon_msg("retrieve", "/b/auth/login"),
+            InputStream::empty(),
+            &stored_off,
+            &infos,
+            &[],
+        )
+        .await;
+        assert_eq!(status(login).await, 200, "auth-ui is served");
+
+        // The gate published to the page agrees: neither is reported off.
+        let mut published = auth_msg("retrieve", "/b/userportal/", "user-a");
+        published.set_meta(
+            META_DISABLED_BLOCKS,
+            disabled_blocks_json(&stored_off, &infos),
+        );
+        let gate = gate_from_request(&ctx, &published);
+        assert!(gate.is_block_enabled("impresspress/userportal"));
+        assert!(gate.is_block_enabled("impresspress/auth-ui"));
+
+        // A disableable block's stored "off" still gates it.
+        let mut files_info = infos.clone();
+        files_info.push(
+            BlockInfo::new("impresspress/files", "0.0.1", "http.handler", "files")
+                .can_disable(true),
+        );
+        let files = route_to_block(
+            &ctx,
+            auth_msg("retrieve", "/b/storage/", "user-a"),
+            InputStream::empty(),
+            &stored_off,
+            &files_info,
+            &[],
+        )
+        .await;
+        assert_eq!(status(files).await, 404, "a disableable block stays off");
     }
 
     #[test]
@@ -1624,12 +1725,15 @@ mod tests {
 
         let infos = vec![
             wafer_run::BlockInfo::new("impresspress/files", "0.0.1", "http-handler@v1", "files"),
+            // Disableable, as the real tickets block is
+            // (`features::is_enabled`).
             wafer_run::BlockInfo::new(
                 "impresspress/tickets",
                 "0.0.1",
                 "http-handler@v1",
                 "tickets",
-            ),
+            )
+            .can_disable(true),
         ];
         let mut ctx = TestContext::new().await;
         ctx.register_block("impresspress/files", std::sync::Arc::new(GateEchoBlock));
@@ -1697,6 +1801,27 @@ mod tests {
             !gate.is_block_enabled("impresspress/tickets"),
             "an unrouted message must fall back to the snapshot, not to all-enabled",
         );
+    }
+
+    /// The fallback applies the router's rule: a registered block that
+    /// cannot be disabled reads as enabled even when the snapshot holds an
+    /// old "off" row for it.
+    #[tokio::test]
+    async fn gate_from_request_fallback_keeps_a_block_that_cannot_be_disabled_on() {
+        use crate::test_support::{anon_msg, TestContext};
+
+        let mut ctx = TestContext::new().await;
+        ctx.register_block_info(
+            "org/always",
+            wafer_run::BlockInfo::new("org/always", "0.0.1", "http.handler", "x"),
+        );
+        ctx.set_config(
+            crate::features::BLOCK_SETTINGS_CONFIG_KEY,
+            &serde_json::json!({ "org/always": { "enabled": false } }).to_string(),
+        );
+
+        let gate = gate_from_request(&ctx, &anon_msg("retrieve", "/b/admin/"));
+        assert!(gate.is_block_enabled("org/always"));
     }
 
     #[tokio::test]

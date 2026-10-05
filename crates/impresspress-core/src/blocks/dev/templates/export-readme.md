@@ -98,8 +98,8 @@ you would treat any export of an account table: do not publish it anywhere you
 would not publish a password database.
 
 **Change the admin password before serving this anywhere but localhost.** Sign
-in at `/b/auth/login` as `{{ADMIN_EMAIL}}`, then change it at
-`/b/auth/change-password`. The sandbox seeds every instance with the same
+in at `/b/auth/login` as `{{ADMIN_EMAIL}}`, then change it on
+`/b/userportal/security`. The sandbox seeds every instance with the same
 starter password and the documentation prints it, so until you change it,
 anyone who gets this folder — or who can reach the host you serve it from — is
 an admin of this site. That was fine in the sandbox, which is a throwaway

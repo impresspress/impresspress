@@ -1,10 +1,10 @@
-//! `/b/userportal/` — portal home, single-card layout.
+//! `/b/userportal/` — the portal's Overview page, in the portal shell.
 //!
-//! Anonymous → 302 to `/b/auth/login`. Authenticated → renders a centered
-//! account card with: logo + "Account" header, fixed account-management
-//! links (Profile / Security / Sessions / Organizations), the configured
-//! app tiles from this block's `buttons` collection, and a Sign Out
-//! footer. No shell, no sidebar — mobile-first.
+//! Anonymous → 302 to `/b/auth/login`. Authenticated → the account pages
+//! (Profile / Security / Sessions / Organizations), each with one line on what
+//! it holds, then the app links configured in this block's `buttons`
+//! collection. An admin also gets "Open admin panel" in the topbar. Sign Out
+//! is the shell's profile menu, as on every shelled page.
 
 use maud::{html, Markup};
 use wafer_core::clients::database::Record;
@@ -13,7 +13,10 @@ use wafer_run::{context::Context, Message, OutputStream};
 use crate::{
     blocks::crud,
     http::redirect,
-    ui::{icons, sidebar::nav_icon, SiteConfig, UserInfo},
+    ui::{
+        self, components::section_header, icons, shell::Crumb, sidebar::nav_icon, NavKind, Shell,
+        UserInfo,
+    },
     util::RecordExt,
 };
 
@@ -30,51 +33,82 @@ pub async fn dashboard_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         return redirect(302, "/b/auth/login");
     }
 
-    // The app tiles are this page's one read. Rendering without them would
+    // The app links are this page's one read. Rendering without them would
     // look like "no apps configured", so a failed read is an error page.
     let buttons = match load_buttons(ctx).await {
         Ok(buttons) => buttons,
         Err(e) => return crud::db_error_page(msg, e, "userportal dashboard: buttons read failed"),
     };
-    let config = match SiteConfig::load(ctx).await {
-        Ok(site) => site,
-        Err(e) => {
-            return crate::blocks::crud::db_error_page(msg, e, "page: site config read failed")
-        }
-    };
     let is_admin = UserInfo::from_message(msg).is_some_and(|u| u.is_admin());
 
+    // Two lists, each under its own heading: an `hr` between the account
+    // links and the app links inside one `ul` was not a list item (axe
+    // `list`).
     let body = html! {
-        @if is_admin {
-            a .account-admin-link href="/b/admin/" {
-                (icons::layout_dashboard())
-                span { "Open admin panel" }
+        div .account-sections {
+            section .account-section {
+                (section_header("Account", None))
+                ul .account-nav {
+                    (nav_link("/b/userportal/profile", icons::user(), "Profile", Some("Your name and avatar")))
+                    (nav_link("/b/userportal/security", icons::lock(), "Security", Some("Password, email verification and linked accounts")))
+                    (nav_link("/b/userportal/sessions", icons::shield(), "Sessions", Some("Devices signed in to your account")))
+                    (nav_link("/b/auth/orgs", icons::users(), "Organizations", Some("Organizations you have claimed")))
+                }
             }
-        }
-        ul .account-nav {
-            (nav_link("/b/userportal/profile", icons::user(), "Profile"))
-            (nav_link("/b/userportal/security", icons::lock(), "Security"))
-            (nav_link("/b/userportal/sessions", icons::shield(), "Sessions"))
-            (nav_link("/b/auth/orgs", icons::users(), "Organizations"))
             @if !buttons.is_empty() {
-                hr .account-nav__divider;
-                @for b in &buttons {
-                    (nav_link(&b.path, nav_icon(&b.icon), &b.label))
+                section .account-section {
+                    (section_header("Apps", None))
+                    ul .account-nav {
+                        @for b in &buttons {
+                            (nav_link(&b.path, nav_icon(&b.icon), &b.label, None))
+                        }
+                    }
                 }
             }
         }
     };
 
-    super::account_page(&config, "Account", None, body)
+    let actions = if is_admin {
+        vec![html! {
+            a .btn .btn--secondary href="/b/admin/" {
+                (icons::layout_dashboard())
+                span { "Open admin panel" }
+            }
+        }]
+    } else {
+        Vec::new()
+    };
+
+    ui::shell_page(
+        ctx,
+        msg,
+        Shell {
+            title: "Overview",
+            nav: NavKind::Portal,
+            crumbs: vec![Crumb {
+                label: "Overview",
+                href: None,
+            }],
+            subtitle: Some("Your account and apps."),
+            actions,
+        },
+        body,
+    )
+    .await
 }
 
-fn nav_link(href: &str, icon: Markup, label: &str) -> Markup {
+fn nav_link(href: &str, icon: Markup, label: &str, description: Option<&str>) -> Markup {
     html! {
         li {
             a .account-nav__item href=(href) {
-                span .account-nav__icon { (icon) }
-                span .account-nav__label { (label) }
-                span .account-nav__chev aria-hidden="true" { "›" }
+                span .account-nav__icon aria-hidden="true" { (icon) }
+                span .account-nav__text {
+                    span .account-nav__label { (label) }
+                    @if let Some(d) = description {
+                        span .account-nav__desc { (d) }
+                    }
+                }
+                span .account-nav__chev aria-hidden="true" { (icons::chevron_right()) }
             }
         }
     }
@@ -102,7 +136,6 @@ mod tests {
     use super::*;
     use crate::{
         blocks::userportal::UserPortalBlock,
-        config_vars::DEFAULT_APP_NAME,
         test_support::{
             anon_msg, auth_msg, output_header, output_html, output_status, TestContext,
         },
@@ -210,8 +243,8 @@ mod tests {
         assert!(html.contains("Files") && html.contains("/b/storage/"));
     }
 
-    /// An unreadable buttons table is the 500 page, not an account card
-    /// with the app tiles silently missing.
+    /// An unreadable buttons table is the 500 page, not an overview with
+    /// the app links silently missing.
     #[tokio::test]
     async fn a_failed_buttons_read_is_a_500_not_a_card_without_tiles() {
         let ctx = ctx_with_userportal().await;
@@ -236,65 +269,63 @@ mod tests {
         assert!(!html.contains("account-nav"), "{html}");
     }
 
+    /// The account links and the app links are two lists under their own
+    /// headings; nothing but `li` sits inside either `ul` (axe `list`).
     #[tokio::test]
-    async fn no_apps_omits_divider() {
+    async fn account_and_app_links_are_two_lists_with_no_hr() {
         let ctx = ctx_with_userportal().await;
         seed_user(&ctx, "user-a").await;
+        db::create(
+            &ctx,
+            "impresspress__userportal__buttons",
+            button_data("Files", "folder", "/b/storage/", 0),
+        )
+        .await
+        .unwrap();
         let msg = auth_msg("retrieve", "/b/userportal/", "user-a");
-        let resp = dashboard_page(&ctx, &msg).await;
-        let html = output_html(resp).await;
-        assert!(
-            !html.contains("account-nav__divider"),
-            "divider must only render when apps are configured"
-        );
+        let html = output_html(dashboard_page(&ctx, &msg).await).await;
+        assert!(!html.contains("<hr"), "{html}");
+        assert_eq!(html.matches(r#"<ul class="account-nav">"#).count(), 2);
+        assert!(html.contains(r#"<h2 class="section-header__title">Apps</h2>"#));
     }
 
     #[tokio::test]
-    async fn shell_chrome_is_absent() {
+    async fn no_apps_omits_the_apps_section() {
         let ctx = ctx_with_userportal().await;
         seed_user(&ctx, "user-a").await;
         let msg = auth_msg("retrieve", "/b/userportal/", "user-a");
-        let resp = dashboard_page(&ctx, &msg).await;
-        let html = output_html(resp).await;
-        assert!(
-            !html.contains(r#"class="sidebar""#) && !html.contains(r#"class="topbar""#),
-            "single-card layout must not render shell sidebar/topbar"
-        );
+        let html = output_html(dashboard_page(&ctx, &msg).await).await;
+        assert!(!html.contains(">Apps</h2>"), "{html}");
     }
 
-    /// `WAFER_RUN_SHARED__LOGO_URL` defaults to blank (there is no built-in
-    /// raster wordmark any more), so the account card's header must fall
-    /// back to the same icon + app-name lockup every auth card uses. Without
-    /// it the card renders with no branding at all.
-    ///
-    /// Asserting on `login-app-name` rather than on the app name alone is
-    /// deliberate: `layout::page` already puts `config.app_name` in the
-    /// document `<title>`, so a bare substring check would pass even with an
-    /// unbranded card.
+    /// The portal shell frames the page, as on every account page: the
+    /// sidebar, the topbar with the page's one `h1`, and no account card.
     #[tokio::test]
-    async fn blank_logo_url_falls_back_to_app_name_lockup() {
+    async fn renders_inside_the_portal_shell() {
         let ctx = ctx_with_userportal().await;
         seed_user(&ctx, "user-a").await;
         let msg = auth_msg("retrieve", "/b/userportal/", "user-a");
-        let resp = dashboard_page(&ctx, &msg).await;
-        let html = output_html(resp).await;
-
-        let head_start = html
-            .find("account-card__head")
-            .expect("account card header must render");
-        let head = &html[head_start..];
-        let head_end = head
-            .find("account-card__body")
-            .expect("account card body must follow the header");
-        let head = &head[..head_end];
-
+        let html = output_html(dashboard_page(&ctx, &msg).await).await;
+        assert!(html.contains(r#"<nav class="sidebar""#), "{html}");
         assert!(
-            head.contains("login-app-name"),
-            "blank LOGO_URL must fall back to the app-name lockup; header was: {head}"
+            html.contains(r#"<h1 class="topbar__title">Overview</h1>"#),
+            "{html}"
         );
-        assert!(
-            head.contains(DEFAULT_APP_NAME),
-            "the fallback must name the site; header was: {head}"
-        );
+        assert_eq!(html.matches("<h1").count(), 1);
+        assert!(!html.contains("account-card"), "{html}");
+    }
+
+    #[tokio::test]
+    async fn an_admin_gets_the_admin_panel_action() {
+        let ctx = ctx_with_userportal().await;
+        seed_user(&ctx, "user-a").await;
+        let mut msg = auth_msg("retrieve", "/b/userportal/", "user-a");
+        msg.set_meta("auth.user_roles", "admin");
+        let html = output_html(dashboard_page(&ctx, &msg).await).await;
+        assert!(html.contains("Open admin panel"), "{html}");
+
+        let msg = auth_msg("retrieve", "/b/userportal/", "user-a");
+        let html = output_html(dashboard_page(&ctx, &msg).await).await;
+        assert!(!html.contains("Open admin panel"), "{html}");
     }
 }

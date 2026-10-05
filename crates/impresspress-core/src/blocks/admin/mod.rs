@@ -823,8 +823,6 @@ crate::impresspress_feature_block! {
 /// `default_enabled(false)` — as enabled on every default install while the
 /// router 404'd all of its routes.
 fn handle_extensions(ctx: &dyn Context, features: &Arc<RwLock<BlockSettings>>) -> OutputStream {
-    use crate::features::FeatureConfig;
-
     // Straight off the router's own handle — this block holds the same `Arc`
     // the router gates on, so no snapshot, no request meta and no read stand
     // between this answer and the one the router will give. Other blocks need
@@ -833,8 +831,8 @@ fn handle_extensions(ctx: &dyn Context, features: &Arc<RwLock<BlockSettings>>) -
         .read()
         .map(|settings| settings.clone())
         .unwrap_or_default();
-    let blocks: Vec<contracts::AdminExtensionView> = ctx
-        .registered_blocks()
+    let registered = ctx.registered_blocks();
+    let blocks: Vec<contracts::AdminExtensionView> = registered
         .iter()
         .map(|b| contracts::AdminExtensionView {
             name: b.name.clone(),
@@ -853,7 +851,11 @@ fn handle_extensions(ctx: &dyn Context, features: &Arc<RwLock<BlockSettings>>) -
             // it. Moot in practice — `can_disable` defaults to false and the
             // inspector never declares otherwise, so it is seeded no row and
             // rendered no toggle.
-            enabled: features.is_block_enabled(crate::routing::feature_gate_name(&b.name)),
+            enabled: crate::features::is_enabled(
+                &features,
+                registered,
+                crate::routing::feature_gate_name(&b.name),
+            ),
         })
         .collect();
     ok_json(&blocks)
@@ -1070,7 +1072,11 @@ mod tests {
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         ctx.register_block_info(
             "impresspress/tickets",
-            wafer_run::BlockInfo::new("impresspress/tickets", "1.0.0", "http.handler", "tickets"),
+            // Disableable, as the real tickets block is: a block that cannot
+            // be disabled is enabled whatever its row says
+            // (`features::is_enabled`).
+            wafer_run::BlockInfo::new("impresspress/tickets", "1.0.0", "http.handler", "tickets")
+                .can_disable(true),
         );
         // Synthetic on purpose: this entry exists only to pin the
         // "no stored row ⇒ enabled" branch, and naming a real block here

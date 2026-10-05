@@ -151,10 +151,23 @@ pub fn portal() -> Vec<NavGroup> {
         NavGroup {
             label: Some("Account".to_string()),
             items: vec![
-                // `/b/userportal` is gated on `impresspress/userportal`,
-                // which is `can_disable(true)`. Organizations is NOT: it
-                // lives under `/b/auth/`, gated on `impresspress/auth-ui`,
-                // which is always on.
+                // `/b/userportal` is served by `impresspress/userportal`.
+                // It cannot be disabled (it is the account surface: the
+                // change-password form lives there), but it is a feature-gated
+                // build, so its items still name the block for
+                // `retain_reachable`'s registration check. Organizations
+                // lives under `/b/auth/`, served by the always-built
+                // `impresspress/auth-ui`.
+                //
+                // Overview is `/b/userportal/` — with its trailing slash it
+                // stands for that page alone, so it is not highlighted on the
+                // pages below it (`sidebar::active_item`).
+                block_item(
+                    "Overview",
+                    "/b/userportal/",
+                    icons::house,
+                    "impresspress/userportal",
+                ),
                 block_item(
                     "Profile",
                     "/b/userportal/profile",
@@ -208,6 +221,30 @@ pub fn portal() -> Vec<NavGroup> {
             ],
         },
     ]
+}
+
+/// The signed-in viewer's account links, in the sidebar's profile menu:
+/// the account overview and the Security page, whose Password section is the
+/// account's one change-password form. Rendered only after
+/// [`retain_reachable`], like the nav (see [`crate::ui::sidebar::SignedIn`]).
+pub fn account_menu() -> Vec<NavGroup> {
+    vec![NavGroup {
+        label: None,
+        items: vec![
+            block_item(
+                "My Account",
+                "/b/userportal/",
+                icons::user,
+                "impresspress/userportal",
+            ),
+            block_item(
+                "Change Password",
+                "/b/userportal/security",
+                icons::lock,
+                "impresspress/userportal",
+            ),
+        ],
+    }]
 }
 
 /// Flatten a slice of `NavGroup`s into palette entries. Same items the
@@ -316,19 +353,34 @@ mod tests {
     }
 
     #[test]
-    fn portal_account_includes_profile_orgs_sessions_security() {
+    fn portal_account_includes_overview_profile_orgs_sessions_security() {
         let groups = portal();
         let account = &groups[0];
         let hrefs: Vec<&str> = account.items.iter().map(|i| i.href.as_str()).collect();
         assert_eq!(
             hrefs,
             vec![
+                "/b/userportal/",
                 "/b/userportal/profile",
                 "/b/auth/orgs",
                 "/b/userportal/sessions",
                 "/b/userportal/security"
             ]
         );
+    }
+
+    /// Overview stands for `/b/userportal/` alone: every account page
+    /// highlights its own item, and the overview highlights Overview.
+    #[test]
+    fn portal_overview_is_active_only_on_the_overview() {
+        let groups = portal();
+        let active =
+            |path: &str| crate::ui::sidebar::active_item(&groups, path).map(|i| i.label.as_str());
+        assert_eq!(active("/b/userportal/"), Some("Overview"));
+        assert_eq!(active("/b/userportal/profile"), Some("Profile"));
+        assert_eq!(active("/b/userportal/security"), Some("Security"));
+        assert_eq!(active("/b/userportal/sessions"), Some("Sessions"));
+        assert_eq!(active("/b/auth/orgs"), Some("Organizations"));
     }
 
     #[test]
@@ -409,27 +461,63 @@ mod tests {
         retain_reachable(
             &mut portal_groups,
             &registered,
-            &with_disabled("impresspress/userportal"),
+            &with_disabled("impresspress/files"),
         );
         let portal_labels: Vec<&str> = portal_groups
             .iter()
             .flat_map(|g| g.items.iter())
             .map(|i| i.label.as_str())
             .collect();
-        for dead in ["Profile", "Sessions", "Security"] {
+        for dead in ["Files", "Shares"] {
             assert!(
                 !portal_labels.contains(&dead),
-                "/b/userportal is gated on impresspress/userportal; {dead} must go",
+                "/b/storage and /b/cloudstorage are served by impresspress/files; {dead} must go",
             );
         }
-        assert!(
-            portal_labels.contains(&"Organizations"),
-            "Organizations is /b/auth/, gated on the always-on auth-ui block",
-        );
-        assert!(
-            portal_labels.contains(&"Files"),
-            "files is still enabled here, so its portal link stays",
-        );
+        for live in [
+            "Overview",
+            "Profile",
+            "Organizations",
+            "Sessions",
+            "Security",
+        ] {
+            assert!(portal_labels.contains(&live), "{live} stays");
+        }
+    }
+
+    /// A build without the userportal block has no account pages: the
+    /// portal's Account items and the profile menu's links go, leaving
+    /// Organizations (auth-ui). With it, the profile menu keeps both links —
+    /// they are the account's way to its change-password form.
+    #[test]
+    fn account_links_follow_the_userportal_block() {
+        let labels = |groups: &[NavGroup]| -> Vec<String> {
+            groups
+                .iter()
+                .flat_map(|g| g.items.iter())
+                .map(|i| i.label.clone())
+                .collect()
+        };
+        let without: std::collections::HashSet<&str> = ["impresspress/files"].into();
+        let with: std::collections::HashSet<&str> =
+            ["impresspress/files", "impresspress/userportal"].into();
+
+        let mut portal_groups = portal();
+        retain_reachable(&mut portal_groups, &without, &all_enabled());
+        let portal_labels = labels(&portal_groups);
+        for dead in ["Overview", "Profile", "Sessions", "Security"] {
+            assert!(!portal_labels.iter().any(|l| l == dead), "{dead} must go");
+        }
+        assert!(portal_labels.iter().any(|l| l == "Organizations"));
+
+        let mut menu = account_menu();
+        retain_reachable(&mut menu, &without, &all_enabled());
+        assert!(menu.is_empty(), "no userportal, no account links");
+
+        let mut menu = account_menu();
+        retain_reachable(&mut menu, &with, &all_enabled());
+        assert_eq!(labels(&menu), vec!["My Account", "Change Password"]);
+        assert_eq!(menu[0].items[1].href, "/b/userportal/security");
     }
 
     #[test]

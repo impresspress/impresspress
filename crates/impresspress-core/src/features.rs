@@ -21,6 +21,35 @@ pub trait FeatureConfig: wafer_run::MaybeSend + wafer_run::MaybeSync {
     fn is_block_enabled(&self, full_name: &str) -> bool;
 }
 
+/// THE enablement rule: whether the block the router gates as `gate_name`
+/// serves, given the stored settings `features` and the registered blocks.
+///
+/// A registered block that declares it cannot be disabled
+/// (`BlockInfo::can_disable == false` — `impresspress/admin`,
+/// `impresspress/auth-ui`, `impresspress/system`, `impresspress/userportal`,
+/// …) is enabled whatever a stored row says. Such a block is seeded no row
+/// and offered no toggle (`blocks::block_enabled_defaults`), but a row can
+/// predate the declaration: `impresspress/userportal` was disableable until it
+/// became the account surface, so a deployment may hold an "off" row for it
+/// that nothing could ever turn back on. Reading the declaration here, rather
+/// than trusting the row, is what makes "cannot be disabled" true.
+///
+/// Every reader of enablement goes through this: the router's gate (built-in
+/// and extra routes), the gate it publishes to handlers
+/// (`routing::META_DISABLED_BLOCKS`, and `routing::gate_from_request`'s
+/// fallback), the API documents (`pipeline`) and the admin Blocks page. A
+/// name no registered block gates as falls back to the stored settings.
+pub fn is_enabled(
+    features: &dyn FeatureConfig,
+    registered: &[wafer_run::BlockInfo],
+    gate_name: &str,
+) -> bool {
+    let always_on = registered
+        .iter()
+        .any(|b| !b.can_disable && crate::routing::feature_gate_name(&b.name) == gate_name);
+    always_on || features.is_block_enabled(gate_name)
+}
+
 /// Per-block runtime state stored in `impresspress__admin__block_settings`.
 /// Both `enabled`, `migration`, and `seed_defaults_hash` live on the same
 /// row, loaded together by the per-isolate cache.
@@ -335,6 +364,34 @@ impl FeatureConfig for AllEnabled {
 #[cfg(test)]
 mod block_settings_tests {
     use super::*;
+
+    /// The one enablement rule: a registered block that cannot be disabled
+    /// is enabled whatever its stored row says; a disableable one follows
+    /// its row; a name no registered block gates as follows the settings.
+    #[test]
+    fn is_enabled_ignores_a_stored_off_for_a_block_that_cannot_be_disabled() {
+        let registered = vec![
+            wafer_run::BlockInfo::new("org/always", "0.0.1", "http.handler", "x"),
+            wafer_run::BlockInfo::new("org/optional", "0.0.1", "http.handler", "x")
+                .can_disable(true),
+        ];
+        let off = BlockSettings::from_map(
+            [
+                ("org/always".to_string(), false),
+                ("org/optional".to_string(), false),
+                ("org/unregistered".to_string(), false),
+            ]
+            .into(),
+        );
+        assert!(is_enabled(&off, &registered, "org/always"));
+        assert!(!is_enabled(&off, &registered, "org/optional"));
+        assert!(!is_enabled(&off, &registered, "org/unregistered"));
+        assert!(is_enabled(
+            &BlockSettings::default(),
+            &registered,
+            "org/optional"
+        ));
+    }
 
     /// Creating the entry when absent is the common case: most blocks hold no
     /// `block_settings` row until someone toggles them, and the toggle has to
