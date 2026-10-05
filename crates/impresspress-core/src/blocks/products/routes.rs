@@ -161,7 +161,6 @@ pub(super) enum Route {
     AdminSellerPage,
     AdminStripePage,
     AdminSettingsPage,
-    AdminSaveSettings,
 }
 
 // ---------------------------------------------------------------------------
@@ -578,13 +577,10 @@ pub(super) const ROUTES: &[EndpointRoute<Route>] = &[
         "/b/products/admin/settings",
         Route::AdminSettingsPage,
     )
+    // The page saves through the admin block (`POST
+    // /b/admin/settings/products`): it shows shared keys, which only the
+    // admin block may write.
     .summary("Product settings"),
-    EndpointRoute::admin(
-        HttpMethod::Post,
-        "/b/products/admin/settings",
-        Route::AdminSaveSettings,
-    )
-    .summary("Save product settings"),
     // ── JSON admin API — products ──
     EndpointRoute::admin(
         HttpMethod::Get,
@@ -1657,8 +1653,7 @@ pub(super) const fn user_products_refusal(route: Route) -> Option<&'static str> 
         | Route::AdminSellersPage
         | Route::AdminSellerPage
         | Route::AdminStripePage
-        | Route::AdminSettingsPage
-        | Route::AdminSaveSettings => None,
+        | Route::AdminSettingsPage => None,
     }
 }
 
@@ -1838,8 +1833,7 @@ pub(super) const fn rate_limit_for(route: Route) -> Option<(LimitKey, &'static s
         | Route::AdminSellersPage
         | Route::AdminSellerPage
         | Route::AdminStripePage
-        | Route::AdminSettingsPage
-        | Route::AdminSaveSettings => None,
+        | Route::AdminSettingsPage => None,
     }
 }
 
@@ -2578,12 +2572,6 @@ mod table_tests {
                 Route::AdminSettingsPage,
                 &[],
             ),
-            (
-                "create",
-                "/b/products/admin/settings",
-                Route::AdminSaveSettings,
-                &[],
-            ),
         ]
     }
 
@@ -2595,7 +2583,7 @@ mod table_tests {
     #[test]
     fn every_path_the_block_served_resolves_to_a_row() {
         let cases = served_paths();
-        assert_eq!(cases.len(), 123, "one entry per declared row");
+        assert_eq!(cases.len(), 122, "one entry per declared row");
         for (action, path, expected, vars) in &cases {
             let (route, msg) = resolve(action, path);
             assert_eq!(route, Some(*expected), "{action} {path}");
@@ -2927,7 +2915,6 @@ mod rate_limit_tests {
         (Get, "/b/products/admin/sellers/{id}"),
         (Get, "/b/products/admin/stripe"),
         (Get, "/b/products/admin/settings"),
-        (Post, "/b/products/admin/settings"),
     ];
 
     /// Every row spends the bucket the old two-step check gave it: the three
@@ -2937,7 +2924,7 @@ mod rate_limit_tests {
     /// `api_write`/`API_WRITE`, keyed by user.
     #[test]
     fn rate_limits_are_the_old_assignments() {
-        assert_eq!(OLD_UNLIMITED.len(), 26);
+        assert_eq!(OLD_UNLIMITED.len(), 25);
         for (method, path, _) in OLD_IP_BUCKETS {
             assert!(
                 ROUTES

@@ -9,7 +9,7 @@
 //! that refuses the one call the site under test makes.
 //!
 //! A JSON route must end in the door's own "Access denied"; a full page must
-//! be the styled 403 `ui::refused_response` draws ("Go home"), with none of
+//! be the 403 drawn inside the shell (`ui::shell_error_page`), with none of
 //! the denial's own text in it.
 
 use std::sync::Arc;
@@ -179,7 +179,10 @@ async fn expect_refused_page(misses: &mut Vec<String>, ctx: &dyn Context, path: 
         .await;
     let parts = wafer_block::http_codec::collect_http_response(out).await;
     let html = String::from_utf8_lossy(&parts.body);
-    if parts.status != 403 || !html.contains("Go home") || html.contains("holds no grant") {
+    if parts.status != 403
+        || !html.contains("status-page--in-shell")
+        || html.contains("holds no grant")
+    {
         misses.push(format!("{path}: {} {html}", parts.status));
     }
 }

@@ -63,7 +63,7 @@ use wafer_run::{
 use crate::{
     endpoint_match::{self, request_schema_of, response_schema_of, EndpointRoute},
     features::BlockSettings,
-    http::{err_bad_request, err_not_found, ok_json},
+    http::{err_bad_request, ok_json},
     platform_state::{block_settings, request_logs, user_roles, variables, wrap_grants},
 };
 
@@ -121,6 +121,14 @@ enum Route {
     // ── Consolidated settings pages, `/b/admin/settings/...` ──
     SettingsRedirect,
     SettingsEmailPage,
+    SettingsAuthenticationPage,
+    SaveAuthenticationSettings,
+    SettingsBrandingPage,
+    SaveBrandingSettings,
+    /// The products settings page's save: it shows shared keys, so it saves
+    /// through this block (see `pages::products_settings`).
+    #[cfg(feature = "block-products")]
+    SaveProductsSettings,
     SettingsNetworkPage,
     SettingsVariablesPage,
     SettingsPermissionsPage,
@@ -147,7 +155,7 @@ enum Route {
     // ── SSR pages, `/b/admin/...` ──
     Dashboard,
     UsersPage,
-    StoragePage,
+    StorageRedirect,
     BlocksPage,
     DatabasePage,
     LogsPage,
@@ -155,7 +163,7 @@ enum Route {
     NetworkRedirect,
     VariablesRedirect,
     PermissionsRedirect,
-    GrantsPage,
+    GrantsRedirect,
 }
 
 /// The block's HTTP surface: what `handle()` dispatches on and what
@@ -407,6 +415,40 @@ const ROUTES: &[EndpointRoute<Route>] = &[
         Route::SettingsEmailPage,
     )
     .summary("Email settings tab"),
+    // Settings pages that show `WAFER_RUN_SHARED__*` keys save through this
+    // block: WRAP lets only the admin block write them. Each page's form
+    // posts to its own path.
+    EndpointRoute::admin(
+        HttpMethod::Get,
+        "/b/admin/settings/authentication",
+        Route::SettingsAuthenticationPage,
+    )
+    .summary("Authentication settings tab"),
+    EndpointRoute::admin(
+        HttpMethod::Post,
+        "/b/admin/settings/authentication",
+        Route::SaveAuthenticationSettings,
+    )
+    .summary("Save authentication settings"),
+    EndpointRoute::admin(
+        HttpMethod::Get,
+        "/b/admin/settings/branding",
+        Route::SettingsBrandingPage,
+    )
+    .summary("Branding settings tab"),
+    EndpointRoute::admin(
+        HttpMethod::Post,
+        "/b/admin/settings/branding",
+        Route::SaveBrandingSettings,
+    )
+    .summary("Save branding settings"),
+    #[cfg(feature = "block-products")]
+    EndpointRoute::admin(
+        HttpMethod::Post,
+        "/b/admin/settings/products",
+        Route::SaveProductsSettings,
+    )
+    .summary("Save products settings"),
     EndpointRoute::admin(
         HttpMethod::Get,
         "/b/admin/settings/network",
@@ -552,8 +594,8 @@ const ROUTES: &[EndpointRoute<Route>] = &[
         .summary("Block management"),
     EndpointRoute::admin(HttpMethod::Get, "/b/admin/network", Route::NetworkRedirect)
         .summary("Network monitoring"),
-    EndpointRoute::admin(HttpMethod::Get, "/b/admin/storage", Route::StoragePage)
-        .summary("Storage isolation and access logs"),
+    EndpointRoute::admin(HttpMethod::Get, "/b/admin/storage", Route::StorageRedirect)
+        .summary("Storage access logs (redirects to the Logs page's tab)"),
     EndpointRoute::admin(HttpMethod::Get, "/b/admin/logs", Route::LogsPage)
         .summary("System and audit logs"),
     EndpointRoute::admin(HttpMethod::Get, "/b/admin/email", Route::EmailRedirect)
@@ -564,8 +606,8 @@ const ROUTES: &[EndpointRoute<Route>] = &[
         Route::PermissionsRedirect,
     )
     .summary("Permissions management"),
-    EndpointRoute::admin(HttpMethod::Get, "/b/admin/grants", Route::GrantsPage)
-        .summary("WRAP grants management"),
+    EndpointRoute::admin(HttpMethod::Get, "/b/admin/grants", Route::GrantsRedirect)
+        .summary("WRAP grants (redirects to the Permissions settings tab)"),
     EndpointRoute::admin(HttpMethod::Get, "/b/admin/database", Route::DatabasePage)
         .summary("Database admin page"),
 ];
@@ -696,8 +738,9 @@ crate::impresspress_feature_block! {
         // matcher binds `{id}`, `{key}` and `{name}` into `req.param.*` for
         // the handlers' `msg.var` readers; nothing else in this block reads
         // a path.
-        let Some(route) = endpoint_match::dispatch(&mut msg, ROUTES) else {
-            return err_not_found("not found");
+        let route = match endpoint_match::resolve(&mut msg, ROUTES) {
+            Ok(route) => route,
+            Err(not_found) => return not_found,
         };
         match route {
             // ── JSON API ──
@@ -734,6 +777,20 @@ crate::impresspress_feature_block! {
             // ── Consolidated settings pages ──
             Route::SettingsRedirect => redirect_308("/b/admin/settings/email"),
             Route::SettingsEmailPage => pages::settings_page(ctx, &msg, "email").await,
+            Route::SettingsAuthenticationPage => {
+                pages::settings_page(ctx, &msg, "authentication").await
+            }
+            Route::SaveAuthenticationSettings => {
+                pages::handle_save_authentication_settings(ctx, &msg, input).await
+            }
+            Route::SettingsBrandingPage => pages::settings_page(ctx, &msg, "branding").await,
+            Route::SaveBrandingSettings => {
+                pages::handle_save_branding_settings(ctx, &msg, input).await
+            }
+            #[cfg(feature = "block-products")]
+            Route::SaveProductsSettings => {
+                pages::handle_save_products_settings(ctx, &msg, input).await
+            }
             Route::SettingsNetworkPage => pages::settings_page(ctx, &msg, "network").await,
             Route::SettingsVariablesPage => pages::settings_page(ctx, &msg, "variables").await,
             Route::SettingsPermissionsPage => {
@@ -770,7 +827,7 @@ crate::impresspress_feature_block! {
             // ── SSR pages ──
             Route::Dashboard => pages::dashboard(ctx, &msg).await,
             Route::UsersPage => pages::users_page(ctx, &msg).await,
-            Route::StoragePage => pages::storage_page(ctx, &msg).await,
+            Route::StorageRedirect => redirect_308(pages::STORAGE_LOGS_HREF),
             Route::BlocksPage => pages::blocks_page(ctx, &msg).await,
             Route::DatabasePage => pages::database_page(ctx, &msg).await,
             Route::LogsPage => pages::logs_page(ctx, &msg).await,
@@ -791,7 +848,7 @@ crate::impresspress_feature_block! {
                     ))
                 }
             }
-            Route::GrantsPage => pages::grants_page(ctx, &msg).await,
+            Route::GrantsRedirect => redirect_308("/b/admin/settings/permissions"),
         }
     },
     lifecycle: |_this, ctx, event| {
@@ -999,6 +1056,56 @@ mod tests {
     use wafer_run::HttpMethod;
 
     use super::*;
+
+    /// A mistyped admin URL is the styled 404 page in a browser and the JSON
+    /// 404 to an API caller.
+    #[tokio::test]
+    async fn an_unknown_admin_path_is_the_html_404_page_and_json_for_the_api() {
+        let ctx = crate::test_support::TestContext::with_admin()
+            .await
+            .running_as(ADMIN_BLOCK_ID);
+        let page = test_support::browser_request(
+            &ctx,
+            crate::test_support::admin_msg("retrieve", "/b/admin/nope"),
+        )
+        .await;
+        assert_eq!(page.status, 404);
+        let body = String::from_utf8(page.body).unwrap();
+        assert!(body.contains("<!DOCTYPE html>"), "{body}");
+        let api = test_support::browser_request(
+            &ctx,
+            crate::test_support::admin_msg("retrieve", "/b/admin/api/nope"),
+        )
+        .await;
+        assert_eq!(api.status, 404);
+        assert!(!String::from_utf8(api.body).unwrap().contains("<html"));
+    }
+
+    /// `/b/admin/grants` is the Permissions settings tab and
+    /// `/b/admin/storage` a tab of the Logs page; both URLs redirect there.
+    #[tokio::test]
+    async fn grants_and_storage_redirect_to_where_they_live_now() {
+        let ctx = crate::test_support::TestContext::with_admin()
+            .await
+            .running_as(ADMIN_BLOCK_ID);
+        for (from, to) in [
+            ("/b/admin/grants", "/b/admin/settings/permissions"),
+            ("/b/admin/storage", "/b/admin/logs?tab=storage"),
+        ] {
+            let parts = test_support::browser_request(
+                &ctx,
+                crate::test_support::admin_msg("retrieve", from),
+            )
+            .await;
+            assert_eq!(parts.status, 308, "{from}");
+            let location = parts
+                .headers
+                .iter()
+                .find(|(k, _)| k.eq_ignore_ascii_case("location"))
+                .map(|(_, v)| v.as_str());
+            assert_eq!(location, Some(to), "{from}");
+        }
+    }
 
     #[tokio::test]
     async fn redirect_308_sets_location_and_status() {
@@ -1855,6 +1962,37 @@ mod table_tests {
             ),
             (
                 "retrieve",
+                "/b/admin/settings/authentication",
+                Route::SettingsAuthenticationPage,
+                &[],
+            ),
+            (
+                "create",
+                "/b/admin/settings/authentication",
+                Route::SaveAuthenticationSettings,
+                &[],
+            ),
+            (
+                "retrieve",
+                "/b/admin/settings/branding",
+                Route::SettingsBrandingPage,
+                &[],
+            ),
+            (
+                "create",
+                "/b/admin/settings/branding",
+                Route::SaveBrandingSettings,
+                &[],
+            ),
+            #[cfg(feature = "block-products")]
+            (
+                "create",
+                "/b/admin/settings/products",
+                Route::SaveProductsSettings,
+                &[],
+            ),
+            (
+                "retrieve",
                 "/b/admin/settings/network",
                 Route::SettingsNetworkPage,
                 &[],
@@ -1979,7 +2117,7 @@ mod table_tests {
             ("retrieve", "/b/admin", Route::Dashboard, &[]),
             ("retrieve", "/b/admin/", Route::Dashboard, &[]),
             ("retrieve", "/b/admin/users", Route::UsersPage, &[]),
-            ("retrieve", "/b/admin/storage", Route::StoragePage, &[]),
+            ("retrieve", "/b/admin/storage", Route::StorageRedirect, &[]),
             ("retrieve", "/b/admin/blocks", Route::BlocksPage, &[]),
             ("retrieve", "/b/admin/database", Route::DatabasePage, &[]),
             ("retrieve", "/b/admin/logs", Route::LogsPage, &[]),
@@ -1997,7 +2135,7 @@ mod table_tests {
                 Route::PermissionsRedirect,
                 &[],
             ),
-            ("retrieve", "/b/admin/grants", Route::GrantsPage, &[]),
+            ("retrieve", "/b/admin/grants", Route::GrantsRedirect, &[]),
         ]
     }
 
@@ -2422,7 +2560,6 @@ pub(crate) mod page_link_tests {
     pub(crate) const PAGES: &[Page] = &[
         ("retrieve", "/b/admin/", &[]),
         ("retrieve", "/b/admin/users", &[]),
-        ("retrieve", "/b/admin/storage", &[]),
         ("retrieve", "/b/admin/blocks", &[]),
         (
             "retrieve",
@@ -2433,6 +2570,8 @@ pub(crate) mod page_link_tests {
         ("retrieve", "/b/admin/logs", &[]),
         ("retrieve", "/b/admin/logs", &[("errors", "1")]),
         ("retrieve", "/b/admin/settings/email", &[]),
+        ("retrieve", "/b/admin/settings/authentication", &[]),
+        ("retrieve", "/b/admin/settings/branding", &[]),
         ("retrieve", "/b/admin/settings/network", &[]),
         (
             "retrieve",
@@ -2446,7 +2585,6 @@ pub(crate) mod page_link_tests {
             &[],
         ),
         ("retrieve", "/b/admin/settings/permissions", &[]),
-        ("retrieve", "/b/admin/grants", &[]),
     ];
 
     #[tokio::test]
@@ -2497,7 +2635,8 @@ pub(crate) mod page_link_tests {
                 "create",
                 format!("/b/admin/api-keys/{}/revoke", seeds.key_id),
             ),
-            ("retrieve", "/b/admin/storage".to_string()),
+            // The Logs page's Refresh, on every tab (storage access included).
+            ("retrieve", "/b/admin/logs".to_string()),
             (
                 "retrieve",
                 "/b/admin/blocks/impresspress--probe/detail".to_string(),

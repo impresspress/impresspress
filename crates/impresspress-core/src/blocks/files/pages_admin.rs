@@ -5,8 +5,7 @@ use wafer_run::{context::Context, Message, OutputStream};
 
 use super::{models::QuotaConfig, repo};
 use crate::{
-    blocks::crud,
-    ui::{self, components, icons, shell::Crumb},
+    ui::{self, components, icons},
     util::format_bytes,
 };
 
@@ -59,17 +58,33 @@ async fn files_page_with_action<'a>(
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell {
-            title,
-            nav: ui::NavKind::Admin,
-            crumbs: vec![Crumb {
-                label: crumb_label,
-                href: None,
-            }],
-            subtitle,
-            actions,
+        match subtitle {
+            Some(subtitle) => ui::Shell::admin(title, crumb_label)
+                .subtitle(subtitle)
+                .actions(actions),
+            None => ui::Shell::admin(title, crumb_label).actions(actions),
         },
         content,
+    )
+    .await
+}
+
+/// A storage admin page whose read failed: drawn in the admin shell, with a
+/// link back to the dashboard.
+async fn error_page(
+    ctx: &dyn Context,
+    msg: &Message,
+    error: wafer_run::WaferError,
+    context: &str,
+) -> OutputStream {
+    ui::shell_error_page(
+        ctx,
+        msg,
+        ui::Shell::admin("Storage", "Storage"),
+        None,
+        ui::BackLink::ADMIN_DASHBOARD,
+        error,
+        context,
     )
     .await
 }
@@ -140,7 +155,7 @@ pub async fn overview(ctx: &dyn Context, msg: &Message) -> OutputStream {
 
     let stats = match load_admin_stats(ctx).await {
         Ok(stats) => stats,
-        Err(e) => return crud::db_error_page(msg, e, "storage admin overview: stats read"),
+        Err(e) => return error_page(ctx, msg, e, "storage admin overview: stats read").await,
     };
 
     // Tabs go in the `filters` slot (their padding gutter matches
@@ -284,7 +299,7 @@ pub async fn buckets(ctx: &dyn Context, msg: &Message) -> OutputStream {
 
     let rows: Vec<AdminBucketRow> = match repo::buckets::list_recent(ctx, 100).await {
         Ok(page) => page.rows.iter().map(AdminBucketRow::from).collect(),
-        Err(e) => return crud::db_error_page(msg, e, "storage admin buckets"),
+        Err(e) => return error_page(ctx, msg, e, "storage admin buckets").await,
     };
 
     // Admin can create buckets the same way users do — the same modal, and
@@ -403,7 +418,7 @@ pub async fn shares(ctx: &dyn Context, msg: &Message) -> OutputStream {
 
     let rows: Vec<AdminShareRow> = match repo::shares::list_recent(ctx, 100, 0).await {
         Ok(page) => page.rows.iter().map(AdminShareRow::from).collect(),
-        Err(e) => return crud::db_error_page(msg, e, "storage admin shares"),
+        Err(e) => return error_page(ctx, msg, e, "storage admin shares").await,
     };
 
     let body = list_page(
@@ -520,7 +535,7 @@ pub async fn quotas(ctx: &dyn Context, msg: &Message) -> OutputStream {
 
     let rows: Vec<AdminQuotaRow> = match repo::quota::list_recent(ctx, 100).await {
         Ok(page) => page.rows.iter().map(AdminQuotaRow::from).collect(),
-        Err(e) => return crud::db_error_page(msg, e, "storage admin quotas"),
+        Err(e) => return error_page(ctx, msg, e, "storage admin quotas").await,
     };
 
     let body = list_page(

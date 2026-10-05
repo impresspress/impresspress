@@ -21,7 +21,7 @@ use crate::{
     config_vars::PRIMARY_COLOR_KEY,
     endpoint_match::{self, request_schema_of, EndpointRoute},
     http::{err_bad_request, ok_json, require_row, ResponseBuilder},
-    ui::{self, templates, SiteConfig},
+    ui::{templates, SiteConfig},
 };
 
 /// In-block dispatch targets, one per declared HTTP endpoint.
@@ -697,8 +697,9 @@ crate::impresspress_feature_block! {
         // endpoint `AuthLevel` (public reads, admin everything else) — the
         // block holds no `is_admin` preamble. Dispatch matches the same
         // declared templates, extracting `{id}` into `req.param.id`.
-        let Some(route) = endpoint_match::dispatch(&mut msg, ROUTES) else {
-            return ui::not_found_response(&msg);
+        let route = match endpoint_match::resolve(&mut msg, ROUTES) {
+            Ok(route) => route,
+            Err(not_found) => return not_found,
         };
         match route {
             Route::PublicTerms => this.handle_get_public(ctx, DocumentType::Terms).await,

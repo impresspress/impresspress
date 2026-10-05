@@ -25,7 +25,6 @@ use crate::{
         check_rate_limit, ip_identity, RateLimit, RateLimitOutcome, UserRateLimiter,
     },
     endpoint_match::{self, EndpointRoute},
-    http::err_not_found,
 };
 
 /// In-block dispatch targets, one per declared HTTP endpoint.
@@ -229,8 +228,9 @@ crate::impresspress_feature_block! {
         {
             return out;
         }
-        let Some(route) = endpoint_match::dispatch(&mut msg, ROUTES) else {
-            return err_not_found("not found");
+        let route = match endpoint_match::resolve(&mut msg, ROUTES) {
+            Ok(route) => route,
+            Err(not_found) => return not_found,
         };
         match route {
             Route::Config => rest::get_config(ctx).await,

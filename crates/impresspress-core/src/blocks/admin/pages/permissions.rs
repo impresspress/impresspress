@@ -62,7 +62,7 @@ pub async fn settings_body(
 }
 
 /// Full settings page for permissions — used by WRAP grant mutation handlers
-/// (and by the legacy `/b/admin/grants` route) that need to re-render the
+/// that need to re-render the
 /// complete page after a create/delete. Delegates to the canonical
 /// `settings_page` so both call paths share one composition.
 pub async fn permissions_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
@@ -92,10 +92,6 @@ fn access_verb(write: GrantWrite) -> &'static str {
         GrantWrite::Append => "can only add rows to",
         GrantWrite::None => "can read",
     }
-}
-
-pub async fn grants_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    permissions_page(ctx, msg).await
 }
 
 fn grants_code_tab(ctx: &dyn Context) -> Markup {

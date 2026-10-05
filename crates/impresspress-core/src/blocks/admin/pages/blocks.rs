@@ -79,7 +79,14 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let block_settings_rows = match block_settings::list_all(ctx).await {
         Ok(rows) => rows,
         Err(e) => {
-            return crud::db_error_page(msg, e, "admin blocks page: block-settings read failed")
+            return super::admin_error_page(
+                ctx,
+                msg,
+                "Blocks",
+                e,
+                "admin blocks page: block-settings read failed",
+            )
+            .await
         }
     };
 

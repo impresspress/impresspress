@@ -30,6 +30,10 @@ pub(super) fn entry() -> Entry {
         fixture: Some(fixture),
         exempt: &[
             ("/b/auth/api/api-keys", Exempt::JsonApi),
+            (
+                "/b/auth/admin/settings",
+                Exempt::MovedTo("/b/admin/settings/authentication"),
+            ),
             ("/b/auth/api/oauth/providers", Exempt::JsonApi),
             (
                 "/b/auth/oauth/login",
@@ -100,7 +104,6 @@ fn fixture() -> std::pin::Pin<Box<dyn std::future::Future<Output = Fixture>>> {
                 Page::at("/b/auth/bootstrap"),
                 Page::at("/b/auth/change-password"),
                 Page::at("/b/auth/orgs"),
-                Page::at("/b/auth/admin/settings"),
                 Page::at("/b/auth/api/verify").with("token", VERIFY_TOKEN),
             ],
             probes: vec![(

@@ -50,19 +50,28 @@ fn block_item(label: &str, href: &str, icon: fn() -> Markup, block: &'static str
 /// inspector declares no `can_disable`, so it has neither a row nor a
 /// toggle.)
 ///
-/// Called by [`super::shell_document`] with `ctx.registered_blocks()` and the
-/// boot config snapshot — the same source the router's gate consults.
+/// A third reason applies to every item, gated block or not: the VIEWER'S
+/// ROLE. `admits` answers whether the router would let this request's caller
+/// open an item's `href` ([`crate::routing::admits_page`]: the route's tier,
+/// raised by the page's declared `AuthLevel`, against the caller's identity),
+/// so a non-admin is never offered a link that answers 403.
+///
+/// Called by [`super::shell_document`] with `ctx.registered_blocks()`, the
+/// gate decision the router published for this request, and the router's
+/// access check for this request's caller.
 pub fn retain_reachable(
     groups: &mut Vec<NavGroup>,
     registered: &std::collections::HashSet<&str>,
     features: &dyn crate::features::FeatureConfig,
+    admits: &dyn Fn(&str) -> bool,
 ) {
     for g in groups.iter_mut() {
         g.items.retain(|i| {
-            i.block.is_none_or(|b| {
-                registered.contains(b)
-                    && features.is_block_enabled(crate::routing::feature_gate_name(b))
-            })
+            admits(&i.href)
+                && i.block.is_none_or(|b| {
+                    registered.contains(b)
+                        && features.is_block_enabled(crate::routing::feature_gate_name(b))
+                })
         });
     }
     groups.retain(|g| !g.items.is_empty());
@@ -119,6 +128,15 @@ pub fn admin() -> Vec<NavGroup> {
                 )
                 .in_section("/b/tickets/admin"),
                 block_item("LLM", "/b/llm/", icons::robot, "impresspress/llm").in_section("/b/llm"),
+                // The privacy and terms editors: admin-only pages, so they
+                // sit here and not in the portal's Apps.
+                block_item(
+                    "Legal",
+                    "/b/legalpages/admin/privacy",
+                    icons::file_text,
+                    "impresspress/legalpages",
+                )
+                .in_section("/b/legalpages/admin"),
             ],
         },
         NavGroup {
@@ -198,13 +216,6 @@ pub fn portal() -> Vec<NavGroup> {
                     "impresspress/files",
                 )
                 .in_section("/b/cloudstorage"),
-                block_item(
-                    "Legal",
-                    "/b/legalpages/admin/privacy",
-                    icons::file_text,
-                    "impresspress/legalpages",
-                )
-                .in_section("/b/legalpages/admin"),
             ],
         },
     ]
@@ -332,11 +343,24 @@ mod tests {
     }
 
     #[test]
-    fn portal_apps_includes_products_files_legal() {
+    fn portal_apps_includes_products_files_shares() {
         let groups = portal();
         let apps = &groups[1];
         let labels: Vec<&str> = apps.items.iter().map(|i| i.label.as_str()).collect();
-        assert_eq!(labels, vec!["Products", "Files", "Shares", "Legal"]);
+        assert_eq!(labels, vec!["Products", "Files", "Shares"]);
+    }
+
+    /// The legal editors are admin pages: they belong to the admin sidebar.
+    #[test]
+    fn legal_is_an_admin_item_not_a_portal_one() {
+        let in_groups = |groups: Vec<NavGroup>| {
+            groups
+                .iter()
+                .flat_map(|g| g.items.iter())
+                .any(|i| i.href.starts_with("/b/legalpages/admin"))
+        };
+        assert!(in_groups(admin()));
+        assert!(!in_groups(portal()));
     }
 
     #[test]
@@ -390,6 +414,7 @@ mod tests {
             &mut admin_groups,
             &registered,
             &with_disabled("impresspress/files"),
+            &|_| true,
         );
         let admin_labels: Vec<&str> = admin_groups
             .iter()
@@ -410,6 +435,7 @@ mod tests {
             &mut portal_groups,
             &registered,
             &with_disabled("impresspress/userportal"),
+            &|_| true,
         );
         let portal_labels: Vec<&str> = portal_groups
             .iter()
@@ -441,6 +467,7 @@ mod tests {
             &mut groups,
             &registered,
             &with_disabled("impresspress/tickets"),
+            &|_| true,
         );
 
         let labels: Vec<&str> = groups
@@ -466,7 +493,7 @@ mod tests {
         let mut groups = admin();
         let registered: std::collections::HashSet<&str> =
             ["impresspress/admin", "impresspress/files"].into();
-        retain_reachable(&mut groups, &registered, &all_enabled());
+        retain_reachable(&mut groups, &registered, &all_enabled(), &|_| true);
 
         let labels: Vec<&str> = groups
             .iter()
@@ -497,12 +524,53 @@ mod tests {
             "impresspress/products",
             "impresspress/tickets",
             "impresspress/files",
+            "impresspress/legalpages",
         ]
         .into();
         let before: usize = groups.iter().map(|g| g.items.len()).sum();
-        retain_reachable(&mut groups, &registered, &all_enabled());
+        retain_reachable(&mut groups, &registered, &all_enabled(), &|_| true);
         let after: usize = groups.iter().map(|g| g.items.len()).sum();
         assert_eq!(before, after, "fully-featured deployment keeps every item");
+    }
+
+    /// The viewer's role filters the links, through the router's own access
+    /// decision over the real blocks' declared endpoints: a signed-in
+    /// non-admin keeps every portal link and is offered no admin page.
+    #[test]
+    fn retain_reachable_drops_links_the_viewers_role_is_refused() {
+        let infos = crate::blocks::all_block_infos();
+        let registered: std::collections::HashSet<&str> =
+            infos.iter().map(|b| b.name.as_str()).collect();
+        let labels = |groups: Vec<NavGroup>, msg: &wafer_run::Message| -> Vec<String> {
+            let mut groups = groups;
+            let admits = |href: &str| crate::routing::admits_page(&infos, msg, href);
+            retain_reachable(&mut groups, &registered, &all_enabled(), &admits);
+            groups
+                .iter()
+                .flat_map(|g| g.items.iter())
+                .map(|i| i.label.clone())
+                .collect()
+        };
+        let user = crate::test_support::auth_msg("retrieve", "/b/userportal/", "user-1");
+        let operator = crate::test_support::admin_msg("retrieve", "/b/admin/");
+
+        let every_portal_link: Vec<String> = portal()
+            .iter()
+            .flat_map(|g| g.items.iter())
+            .map(|i| i.label.clone())
+            .collect();
+        assert_eq!(labels(portal(), &user), every_portal_link);
+        assert!(
+            labels(admin(), &user).is_empty(),
+            "a non-admin is offered no admin page: {:?}",
+            labels(admin(), &user)
+        );
+        let every_admin_link: Vec<String> = admin()
+            .iter()
+            .flat_map(|g| g.items.iter())
+            .map(|i| i.label.clone())
+            .collect();
+        assert_eq!(labels(admin(), &operator), every_admin_link);
     }
 
     #[test]

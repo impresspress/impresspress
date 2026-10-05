@@ -73,7 +73,16 @@ pub async fn users_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     };
     let tab = match tab {
         Ok(tab) => tab,
-        Err(e) => return crud::db_error_page(msg, e, "admin users page: tab read failed"),
+        Err(e) => {
+            return super::admin_error_page(
+                ctx,
+                msg,
+                "Users",
+                e,
+                "admin users page: tab read failed",
+            )
+            .await
+        }
     };
     let tab_content = html! {
         div #users-tab-content { (tab) }

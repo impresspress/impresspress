@@ -42,7 +42,10 @@ async fn expect_refused_page(
         .await;
     let parts = wafer_block::http_codec::collect_http_response(out).await;
     let html = String::from_utf8_lossy(&parts.body);
-    if parts.status != 403 || !html.contains("Go home") || html.contains("holds no grant") {
+    if parts.status != 403
+        || !html.contains("status-page--in-shell")
+        || html.contains("holds no grant")
+    {
         misses.push(format!("{path}: {} {html}", parts.status));
     }
 }

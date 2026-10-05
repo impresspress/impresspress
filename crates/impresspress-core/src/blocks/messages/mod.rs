@@ -14,10 +14,7 @@ pub mod service;
 
 use wafer_run::{BlockInfo, HttpMethod, InstanceMode};
 
-use crate::{
-    endpoint_match::{self, request_schema_of, EndpointRoute},
-    http::err_not_found,
-};
+use crate::endpoint_match::{self, request_schema_of, EndpointRoute};
 
 /// In-block dispatch targets, one per declared HTTP endpoint.
 #[derive(Clone, Copy)]
@@ -277,8 +274,9 @@ crate::impresspress_feature_block! {
         // per-handler `user_id`/`is_admin` preamble is needed here. Dispatch
         // matches the same declared endpoint templates, extracting `{id}` into
         // `req.param.id` for the sub-handlers.
-        let Some(route) = endpoint_match::dispatch(&mut msg, ROUTES) else {
-            return err_not_found("not found");
+        let route = match endpoint_match::resolve(&mut msg, ROUTES) {
+            Ok(route) => route,
+            Err(not_found) => return not_found,
         };
         match route {
             Route::ContextListPage => pages::context_list_page(ctx, &msg).await,

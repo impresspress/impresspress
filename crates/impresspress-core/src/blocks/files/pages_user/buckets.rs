@@ -10,7 +10,6 @@ use crate::{
     ui::{
         self,
         components::{self, button, BtnVariant, CtrlSize},
-        shell::Crumb,
         templates::list_page,
     },
     util::url_path_encode,
@@ -219,16 +218,9 @@ pub async fn bucket_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream 
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell {
-            title: "Files",
-            nav: ui::NavKind::Portal,
-            crumbs: vec![Crumb {
-                label: "Files",
-                href: None,
-            }],
-            subtitle: Some("Your buckets and their object counts."),
-            actions: vec![new_bucket_btn],
-        },
+        ui::Shell::portal("Files", "Files")
+            .subtitle("Your buckets and their object counts.")
+            .actions(vec![new_bucket_btn]),
         body,
     )
     .await

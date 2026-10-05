@@ -55,6 +55,6 @@ async fn a_refused_settings_read_is_the_403_page() {
     let parts = wafer_block::http_codec::collect_http_response(dispatch(&ctx, msg).await).await;
     let html = String::from_utf8_lossy(&parts.body);
     assert_eq!(parts.status, 403, "{html}");
-    assert!(html.contains("Go home"), "{html}");
+    assert!(html.contains("status-page--in-shell"), "{html}");
     assert!(!html.contains("WRAP"), "{html}");
 }

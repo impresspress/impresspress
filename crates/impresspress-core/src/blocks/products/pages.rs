@@ -2,7 +2,7 @@
 
 use maud::{html, Markup};
 use wafer_block::db::{Filter, FilterOp, SortField};
-use wafer_run::{context::Context, InputStream, Message, OutputStream};
+use wafer_run::{context::Context, Message, OutputStream};
 
 use super::{
     assets,
@@ -285,13 +285,7 @@ pub async fn overview(ctx: &dyn Context, msg: &Message) -> OutputStream {
         (analytics_section(&analytics, "Sales and subscriptions", false))
     };
 
-    ui::shell_page(
-        ctx,
-        msg,
-        ui::Shell::simple("Products", ui::NavKind::Admin, "Products"),
-        content,
-    )
-    .await
+    ui::shell_page(ctx, msg, ui::Shell::admin("Products", "Products"), content).await
 }
 
 /// Render the Products Overview empty-state guidance in place of a bare,
@@ -517,13 +511,7 @@ pub async fn manage_products(ctx: &dyn Context, msg: &Message) -> OutputStream {
         }
     };
 
-    ui::shell_page(
-        ctx,
-        msg,
-        ui::Shell::simple("Products", ui::NavKind::Admin, "Products"),
-        content,
-    )
-    .await
+    ui::shell_page(ctx, msg, ui::Shell::admin("Products", "Products"), content).await
 }
 
 /// Close-only manager for a soft-deleted product: archive its offers,
@@ -699,9 +687,9 @@ pub async fn deleted_product_close(
     };
 
     let shell = if admin {
-        ui::Shell::simple("Products", ui::NavKind::Admin, "Products")
+        ui::Shell::admin("Products", "Products")
     } else {
-        ui::Shell::simple("My Products", ui::NavKind::Portal, "My Products")
+        ui::Shell::portal("My Products", "My Products")
     };
     ui::shell_page(ctx, msg, shell, content).await
 }
@@ -822,13 +810,7 @@ pub async fn admin_sellers(ctx: &dyn Context, msg: &Message) -> OutputStream {
             }
         }
     };
-    ui::shell_page(
-        ctx,
-        msg,
-        ui::Shell::simple("Sellers", ui::NavKind::Admin, "Products"),
-        content,
-    )
-    .await
+    ui::shell_page(ctx, msg, ui::Shell::admin("Sellers", "Products"), content).await
 }
 
 pub async fn admin_seller_detail(
@@ -937,13 +919,7 @@ pub async fn admin_seller_detail(
         script { (maud::PreEscaped(format!("window.__sellerAdminConfig={config};"))) }
         script src=(assets::seller_admin_js_url()) {}
     };
-    ui::shell_page(
-        ctx,
-        msg,
-        ui::Shell::simple("Seller", ui::NavKind::Admin, "Products"),
-        content,
-    )
-    .await
+    ui::shell_page(ctx, msg, ui::Shell::admin("Seller", "Products"), content).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1288,15 +1264,11 @@ pub async fn product_wizard(ctx: &dyn Context, msg: &Message, admin: bool) -> Ou
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::simple(
-            "Create product",
-            if admin {
-                ui::NavKind::Admin
-            } else {
-                ui::NavKind::Portal
-            },
-            "Products",
-        ),
+        if admin {
+            ui::Shell::admin("Create product", "Products")
+        } else {
+            ui::Shell::portal("Create product", "Products")
+        },
         content,
     )
     .await
@@ -1878,15 +1850,11 @@ pub async fn product_manager(
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::simple(
-            product.str_field("name"),
-            if admin {
-                ui::NavKind::Admin
-            } else {
-                ui::NavKind::Portal
-            },
-            "Products",
-        ),
+        if admin {
+            ui::Shell::admin(product.str_field("name"), "Products")
+        } else {
+            ui::Shell::portal(product.str_field("name"), "Products")
+        },
         content,
     )
     .await
@@ -1964,13 +1932,7 @@ pub async fn groups(ctx: &dyn Context, msg: &Message) -> OutputStream {
         script src=(assets::catalog_admin_js_url()) {}
     };
 
-    ui::shell_page(
-        ctx,
-        msg,
-        ui::Shell::simple("Groups", ui::NavKind::Admin, "Products"),
-        content,
-    )
-    .await
+    ui::shell_page(ctx, msg, ui::Shell::admin("Groups", "Products"), content).await
 }
 
 // ---------------------------------------------------------------------------
@@ -2039,13 +2001,7 @@ pub async fn purchases(ctx: &dyn Context, msg: &Message) -> OutputStream {
         }
     };
 
-    ui::shell_page(
-        ctx,
-        msg,
-        ui::Shell::simple("Orders", ui::NavKind::Admin, "Products"),
-        content,
-    )
-    .await
+    ui::shell_page(ctx, msg, ui::Shell::admin("Orders", "Products"), content).await
 }
 
 // ---------------------------------------------------------------------------
@@ -2266,7 +2222,7 @@ pub async fn stripe_setup(ctx: &dyn Context, msg: &Message) -> OutputStream {
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::simple("Stripe setup", ui::NavKind::Admin, "Products"),
+        ui::Shell::admin("Stripe setup", "Products"),
         content,
     )
     .await
@@ -2465,13 +2421,7 @@ pub async fn portal_home(ctx: &dyn Context, msg: &Message) -> OutputStream {
         }
         script src=(assets::commerce_portal_js_url()) {}
     };
-    ui::shell_page(
-        ctx,
-        msg,
-        ui::Shell::simple("Commerce", ui::NavKind::Portal, "Products"),
-        content,
-    )
-    .await
+    ui::shell_page(ctx, msg, ui::Shell::portal("Commerce", "Products"), content).await
 }
 
 // ---------------------------------------------------------------------------
@@ -2535,7 +2485,7 @@ pub async fn seller_dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream 
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::simple("Seller dashboard", ui::NavKind::Portal, "Products"),
+        ui::Shell::portal("Seller dashboard", "Products"),
         content,
     )
     .await
@@ -2558,7 +2508,7 @@ pub async fn seller_orders(ctx: &dyn Context, msg: &Message) -> OutputStream {
             return ui::shell_page(
                 ctx,
                 msg,
-                ui::Shell::simple("Seller orders", ui::NavKind::Portal, "Products"),
+                ui::Shell::portal("Seller orders", "Products"),
                 content,
             )
             .await;
@@ -2617,7 +2567,7 @@ pub async fn seller_orders(ctx: &dyn Context, msg: &Message) -> OutputStream {
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::simple("Seller orders", ui::NavKind::Portal, "Products"),
+        ui::Shell::portal("Seller orders", "Products"),
         content,
     )
     .await
@@ -2967,15 +2917,11 @@ async fn order_detail(
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::simple(
-            "Order detail",
-            if matches!(access, OrderPageAccess::Admin) {
-                ui::NavKind::Admin
-            } else {
-                ui::NavKind::Portal
-            },
-            "Products",
-        ),
+        if matches!(access, OrderPageAccess::Admin) {
+            ui::Shell::admin("Order detail", "Products")
+        } else {
+            ui::Shell::portal("Order detail", "Products")
+        },
         content,
     )
     .await
@@ -3143,7 +3089,7 @@ pub async fn my_products(ctx: &dyn Context, msg: &Message) -> OutputStream {
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::simple("My Products", ui::NavKind::Portal, "My Products"),
+        ui::Shell::portal("My Products", "My Products"),
         content,
     )
     .await
@@ -3203,7 +3149,7 @@ pub async fn my_purchases(ctx: &dyn Context, msg: &Message) -> OutputStream {
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::simple("My Purchases", ui::NavKind::Portal, "My Purchases"),
+        ui::Shell::portal("My Purchases", "My Purchases"),
         content,
     )
     .await
@@ -3322,9 +3268,7 @@ pub async fn settings(ctx: &dyn Context, msg: &Message) -> OutputStream {
             .collapsible(),
     ];
     let form =
-        match settings_form::settings_form(ctx, "/b/products/admin/settings", &sections, html! {})
-            .await
-        {
+        match settings_form::settings_form(ctx, SETTINGS_SAVE_PATH, &sections, html! {}).await {
             Ok(form) => form,
             Err(e) => {
                 return crud::db_error_page(msg, e, "products settings: current values read failed")
@@ -3351,23 +3295,22 @@ pub async fn settings(ctx: &dyn Context, msg: &Message) -> OutputStream {
         }
         (form)
     };
-    ui::shell_page(
-        ctx,
-        msg,
-        ui::Shell::simple("Settings", ui::NavKind::Admin, "Products"),
-        content,
-    )
-    .await
+    ui::shell_page(ctx, msg, ui::Shell::admin("Settings", "Products"), content).await
 }
 
-pub async fn handle_save_settings(
+/// Where the settings form posts: the admin block, because the page shows
+/// `WAFER_RUN_SHARED__*` keys (`FRONTEND_URL`, `ALLOW_USER_PRODUCTS`) and
+/// WRAP lets only the admin block write those. The products block's own
+/// keys on the same form save in the same request — see
+/// `admin::pages::products_settings`.
+pub(crate) const SETTINGS_SAVE_PATH: &str = "/b/admin/settings/products";
+
+/// Every var the settings page shows — the save's allowlist, for the admin
+/// block's handler. The same list the page renders, so the save accepts
+/// exactly the fields the page offers (the Stripe secrets only on a trusted
+/// server).
+pub(crate) async fn settings_allowlist(
     ctx: &dyn Context,
-    msg: &Message,
-    input: InputStream,
-) -> OutputStream {
-    let vars = match settings_vars(ctx).await {
-        Ok(vars) => vars,
-        Err(e) => return crud::db_error_internal(e, "Could not read the products runtime"),
-    };
-    settings_form::save_settings(ctx, msg, input, &vars.all(), "products").await
+) -> Result<Vec<wafer_run::ConfigVar>, wafer_run::WaferError> {
+    Ok(settings_vars(ctx).await?.all())
 }

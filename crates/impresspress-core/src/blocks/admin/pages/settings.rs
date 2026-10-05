@@ -12,13 +12,17 @@
 //! Routes (rows of the admin block's `ROUTES`, one literal row per tab):
 //!   /b/admin/settings/             → 308 redirect to /b/admin/settings/email
 //!   /b/admin/settings/email        → email::settings_body
+//!   /b/admin/settings/authentication → authentication::settings_body
+//!   /b/admin/settings/branding     → branding::settings_body
 //!   /b/admin/settings/network      → network::settings_body
 //!   /b/admin/settings/variables    → variables::settings_body
 //!   /b/admin/settings/permissions  → permissions::settings_body
 
 use wafer_run::{context::Context, Message, OutputStream, WaferError};
 
-use super::{admin_document, crumb, email, network, permissions, variables};
+use super::{
+    admin_document, authentication, branding, crumb, email, network, permissions, variables,
+};
 use crate::ui::{
     shell::Topbar,
     templates::{tabbed_page, FormSection},
@@ -29,7 +33,7 @@ use crate::ui::{
 /// fall back to "email".
 ///
 /// Every tab body hands back a `Result`, and a failed read fails the whole
-/// page through `crud::db_error_page`. `network` and `permissions` used to
+/// page through `admin_error_page`. `network` and `permissions` used to
 /// swallow one into the empty table a healthy deployment with nothing
 /// configured renders — "no inbound requests", "no custom grants". `email` is
 /// a form, and a form filled from defaults because the stored values could
@@ -38,7 +42,14 @@ pub async fn settings_page(ctx: &dyn Context, msg: &Message, tab: &str) -> Outpu
     match render(ctx, msg, tab).await {
         Ok(page) => page,
         Err(e) => {
-            crate::blocks::crud::db_error_page(msg, e, "admin settings page: tab read failed")
+            super::admin_error_page(
+                ctx,
+                msg,
+                "Settings",
+                e,
+                "admin settings page: tab read failed",
+            )
+            .await
         }
     }
 }
@@ -113,7 +124,7 @@ async fn render_document(
     tab: &str,
 ) -> Result<maud::Markup, WaferError> {
     let active = match tab {
-        "email" | "network" | "variables" | "permissions" => tab,
+        "email" | "authentication" | "branding" | "network" | "variables" | "permissions" => tab,
         _ => "email",
     };
 
@@ -122,6 +133,16 @@ async fn render_document(
             "Email".to_string(),
             "/b/admin/settings/email".to_string(),
             active == "email",
+        ),
+        (
+            "Authentication".to_string(),
+            authentication::AUTHENTICATION_PATH.to_string(),
+            active == "authentication",
+        ),
+        (
+            "Branding".to_string(),
+            branding::BRANDING_PATH.to_string(),
+            active == "branding",
         ),
         (
             "Network".to_string(),
@@ -141,6 +162,8 @@ async fn render_document(
     ];
 
     let body_markup = match active {
+        "authentication" => authentication::settings_body(ctx, msg).await,
+        "branding" => branding::settings_body(ctx, msg).await,
         "network" => network::settings_body(ctx, msg).await,
         "variables" => variables::settings_body(ctx, msg).await,
         "permissions" => permissions::settings_body(ctx, msg).await,
@@ -177,6 +200,8 @@ async fn render_document(
 fn tab_title(active: &str) -> &'static str {
     match active {
         "email" => "Email",
+        "authentication" => "Authentication",
+        "branding" => "Branding",
         "network" => "Network",
         "variables" => "Variables",
         "permissions" => "Permissions",
@@ -187,6 +212,8 @@ fn tab_title(active: &str) -> &'static str {
 fn tab_description(active: &str) -> Option<&'static str> {
     match active {
         "email" => Some("Configure email delivery via Mailgun."),
+        "authentication" => Some("Registration, the bootstrap admin, and OAuth sign-in."),
+        "branding" => Some("The app name, logos, favicon and accent colour."),
         "network" => Some("Manage network access rules for blocks."),
         "variables" => Some("Configure environment variables and shared config."),
         "permissions" => {
@@ -220,7 +247,8 @@ mod tests {
 
         assert_eq!(parts.status, 500);
         let html = String::from_utf8(parts.body).expect("UTF-8 body");
-        assert!(!html.contains("<form"), "{html}");
+        assert!(!html.contains("settings-form"), "{html}");
+        assert!(html.contains("status-page--in-shell"), "{html}");
     }
 
     /// Maximum `<form>` nesting depth in `html`. HTML forms cannot nest —

@@ -416,6 +416,21 @@ pub fn dispatch<H: Copy>(msg: &mut Message, table: &[EndpointRoute<H>]) -> Optio
     None
 }
 
+/// [`dispatch`] as a block's `handle()` uses it: the matched handler key, or
+/// the answer to a request no row matches.
+///
+/// That answer is decided here, once, for every block —
+/// [`crate::ui::not_found_response`]: the styled 404 page for a browser
+/// navigating to a page path, the JSON `NotFound` for an API caller. Every
+/// block's `handle()` resolves through here, so no block answers a browser's
+/// mistyped URL with a JSON error body.
+pub fn resolve<H: Copy>(
+    msg: &mut Message,
+    table: &[EndpointRoute<H>],
+) -> Result<H, wafer_run::OutputStream> {
+    dispatch(msg, table).ok_or_else(|| crate::ui::not_found_response(msg))
+}
+
 /// The access policy a path resolves to for a single block, combining its
 /// declared endpoint [`AuthLevel`]s. Used by the central router to enforce the
 /// declared level before dispatch.
@@ -505,6 +520,46 @@ mod tests {
             .iter()
             .map(|(k, v)| (k.clone(), v.to_string()))
             .collect()
+    }
+
+    /// A request no row matches answers the 404 PAGE to a browser navigating
+    /// to a page path, and JSON to an API caller — by `Accept`, and by path:
+    /// an `/api/` path is the API whatever the client accepts. Decided once,
+    /// here, for every block.
+    #[tokio::test]
+    async fn resolve_answers_an_unmatched_page_path_with_the_html_404_and_api_with_json() {
+        const TABLE: &[EndpointRoute<u8>] = &[EndpointRoute::admin(HttpMethod::Get, "/b/x/", 1)];
+        let answer = |path: &str, accept: &str| {
+            let mut msg = crate::test_support::admin_msg("retrieve", path);
+            msg.set_meta("http.header.accept", accept);
+            let out = resolve(&mut msg, TABLE).expect_err("no row matches");
+            async move { wafer_block::http_codec::collect_http_response(out).await }
+        };
+        let html = "text/html,application/xhtml+xml,*/*;q=0.8";
+
+        let page = answer("/b/x/nope", html).await;
+        assert_eq!(page.status, 404);
+        let body = String::from_utf8(page.body).unwrap();
+        assert!(
+            body.contains("<!DOCTYPE html>") && body.contains("Not found"),
+            "{body}"
+        );
+
+        for (path, accept) in [
+            ("/b/x/nope", "application/json"),
+            ("/b/x/nope", "*/*"),
+            ("/b/x/api/nope", html),
+        ] {
+            let api = answer(path, accept).await;
+            assert_eq!(api.status, 404, "{path} {accept}");
+            let body = String::from_utf8(api.body).unwrap();
+            assert!(
+                serde_json::from_str::<serde_json::Value>(&body).is_ok(),
+                "{path} {accept}: JSON, not a page: {body}"
+            );
+        }
+        let mut msg = crate::test_support::admin_msg("retrieve", "/b/x/");
+        assert_eq!(resolve(&mut msg, TABLE).ok(), Some(1));
     }
 
     #[test]

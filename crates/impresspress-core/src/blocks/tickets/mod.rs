@@ -19,7 +19,6 @@ use crate::{
     blocks::rate_limit::UserRateLimiter,
     endpoint_match::{self, request_schema_of, response_schema_of, EndpointRoute},
     http::{ok_json, redirect},
-    ui,
 };
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -325,8 +324,9 @@ crate::impresspress_feature_block! {
         if msg.kind == "tickets.maintenance" {
             return ok_json(&maintenance::prune(ctx, chrono::Utc::now()).await);
         }
-        let Some(route) = endpoint_match::dispatch(&mut msg, ROUTES) else {
-            return ui::not_found_response(&msg);
+        let route = match endpoint_match::resolve(&mut msg, ROUTES) {
+            Ok(route) => route,
+            Err(not_found) => return not_found,
         };
         match route {
             Route::PublicSubmit => public::form(ctx, &msg).await,

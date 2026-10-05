@@ -13,10 +13,7 @@ use super::{
     messages_list, messages_list_contexts, record_field, repo, ContextView, DEFAULT_MODEL_VAR,
     DEFAULT_PROVIDER, DEFAULT_PROVIDER_VAR,
 };
-use crate::{
-    blocks::crud,
-    ui::{self, components, icons, shell::Crumb},
-};
+use crate::ui::{self, components, icons, shell::Crumb};
 
 // ---------------------------------------------------------------------------
 // Unified chat page (handles `/b/llm/` and `/b/llm/threads/{id}`)
@@ -123,7 +120,17 @@ pub async fn page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     // exactly because these two lines swallowed it.
     let threads = match messages_list_contexts(ctx, msg).await {
         Ok(threads) => threads,
-        Err(e) => return crud::db_error_page(msg, e, "llm chat page: thread list failed"),
+        Err(e) => {
+            return error_page(
+                ctx,
+                msg,
+                Section::Chat,
+                "Chat",
+                e,
+                "llm chat page: thread list failed",
+            )
+            .await
+        }
     };
 
     // Entries for the selected thread, if any. Empty when no thread is
@@ -131,7 +138,17 @@ pub async fn page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let entries = match thread_id {
         Some(tid) => match messages_list(ctx, msg, tid).await {
             Ok(entries) => entries,
-            Err(e) => return crud::db_error_page(msg, e, "llm chat page: entry list failed"),
+            Err(e) => {
+                return error_page(
+                    ctx,
+                    msg,
+                    Section::Chat,
+                    "Chat",
+                    e,
+                    "llm chat page: entry list failed",
+                )
+                .await
+            }
         },
         None => Vec::new(),
     };
@@ -154,7 +171,17 @@ pub async fn page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     };
     let default_model = match config::get_default(ctx, DEFAULT_MODEL_VAR, "").await {
         Ok(model) => model,
-        Err(e) => return crud::db_error_page(msg, e, "llm chat page: default model read failed"),
+        Err(e) => {
+            return error_page(
+                ctx,
+                msg,
+                Section::Chat,
+                "Chat",
+                e,
+                "llm chat page: default model read failed",
+            )
+            .await
+        }
     };
 
     let llm_chat_js_url = super::assets::llm_chat_js_url();
@@ -191,14 +218,10 @@ pub async fn page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell {
-            title: display_title,
-            nav: ui::NavKind::Admin,
-            crumbs,
-            subtitle: Some("Chat with a configured provider or local model"),
-            actions: Vec::new(),
-        },
-        content,
+        ui::Shell::admin(display_title, display_title)
+            .trail(crumbs)
+            .subtitle("Chat with a configured provider or local model"),
+        content.with_subnav(sections(Section::Chat)),
     )
     .await
 }
@@ -396,18 +419,33 @@ fn render_right_rail(
 // ---------------------------------------------------------------------------
 
 pub async fn settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let default_provider = match config::get_default(ctx, DEFAULT_PROVIDER_VAR, DEFAULT_PROVIDER)
-        .await
-    {
-        Ok(provider) => provider,
-        Err(e) => {
-            return crud::db_error_page(msg, e, "llm settings page: default provider read failed")
-        }
-    };
+    let default_provider =
+        match config::get_default(ctx, DEFAULT_PROVIDER_VAR, DEFAULT_PROVIDER).await {
+            Ok(provider) => provider,
+            Err(e) => {
+                return error_page(
+                    ctx,
+                    msg,
+                    Section::Settings,
+                    "Settings",
+                    e,
+                    "llm settings page: default provider read failed",
+                )
+                .await
+            }
+        };
     let default_model = match config::get_default(ctx, DEFAULT_MODEL_VAR, "").await {
         Ok(model) => model,
         Err(e) => {
-            return crud::db_error_page(msg, e, "llm settings page: default model read failed")
+            return error_page(
+                ctx,
+                msg,
+                Section::Settings,
+                "Settings",
+                e,
+                "llm settings page: default model read failed",
+            )
+            .await
         }
     };
 
@@ -416,7 +454,17 @@ pub async fn settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     // settings table fails the page rather than borrowing that sentence.
     let overrides = match repo::settings::list_all(ctx).await {
         Ok(rows) => rows,
-        Err(e) => return crud::db_error_page(msg, e, "llm settings page: override read failed"),
+        Err(e) => {
+            return error_page(
+                ctx,
+                msg,
+                Section::Settings,
+                "Settings",
+                e,
+                "llm settings page: override read failed",
+            )
+            .await
+        }
     };
 
     let content = html! {
@@ -538,19 +586,72 @@ pub async fn settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell {
-            title: "LLM Settings",
-            nav: ui::NavKind::Admin,
-            crumbs: vec![Crumb {
-                label: "Settings",
-                href: None,
-            }],
-            subtitle: Some("LLM defaults and provider routing"),
-            actions: Vec::new(),
-        },
-        content,
+        ui::Shell::admin("LLM Settings", "Settings").subtitle("LLM defaults and provider routing"),
+        ui::PageBody::from(content).with_subnav(sections(Section::Settings)),
     )
     .await
+}
+
+// ---------------------------------------------------------------------------
+// Section links
+// ---------------------------------------------------------------------------
+
+/// The block's admin sections, one link each above every LLM admin page.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(super) enum Section {
+    Chat,
+    Providers,
+    Models,
+    Settings,
+}
+
+/// An LLM page whose read failed: drawn in the shell under the block's
+/// section links, titled `title`. The chat links back to the dashboard;
+/// every other section back to the chat.
+pub(super) async fn error_page(
+    ctx: &dyn Context,
+    msg: &Message,
+    section: Section,
+    title: &str,
+    error: wafer_run::WaferError,
+    context: &str,
+) -> OutputStream {
+    let back = if section == Section::Chat {
+        ui::BackLink::ADMIN_DASHBOARD
+    } else {
+        ui::BackLink {
+            label: "Back to the chat",
+            href: "/b/llm/",
+        }
+    };
+    ui::shell_error_page(
+        ctx,
+        msg,
+        ui::Shell::admin(title, title),
+        Some(sections(section)),
+        back,
+        error,
+        context,
+    )
+    .await
+}
+
+pub(super) fn sections(active: Section) -> Markup {
+    let tab = |section: Section, href: &'static str, label: &'static str| components::Tab {
+        active: section == active,
+        href,
+        label,
+        icon: None,
+    };
+    components::subnav(
+        "LLM sections",
+        vec![
+            tab(Section::Chat, "/b/llm/", "Chat"),
+            tab(Section::Providers, "/b/llm/providers", "Providers"),
+            tab(Section::Models, "/b/llm/models", "Models"),
+            tab(Section::Settings, "/b/llm/settings", "Settings"),
+        ],
+    )
 }
 
 // ---------------------------------------------------------------------------

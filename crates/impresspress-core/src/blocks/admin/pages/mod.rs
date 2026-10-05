@@ -3,20 +3,26 @@
 //! Each page queries the database directly (same patterns as the JSON handlers)
 //! and renders HTML via maud.
 
+pub(super) mod authentication;
 mod blocks;
+pub(super) mod branding;
 mod dashboard;
 mod database;
 pub(super) mod email;
 mod logs;
 pub(super) mod network;
 pub(super) mod permissions;
+#[cfg(feature = "block-products")]
+mod products_settings;
 pub(super) mod settings;
 mod storage;
 mod users;
 pub(super) mod variables;
 
 // Re-export all public functions so callers can use `pages::dashboard(...)` etc.
+pub use authentication::*;
 pub use blocks::*;
+pub use branding::*;
 pub use dashboard::*;
 pub use database::*;
 pub use email::*;
@@ -24,8 +30,9 @@ pub use logs::*;
 use maud::Markup;
 pub use network::*;
 pub use permissions::*;
+#[cfg(feature = "block-products")]
+pub use products_settings::*;
 pub use settings::*;
-pub use storage::*;
 pub use users::*;
 pub use variables::*;
 use wafer_run::{context::Context, Message, OutputStream};
@@ -36,9 +43,20 @@ use crate::{
         self,
         components::BadgeVariant,
         shell::{Crumb, Topbar},
-        NavKind, Shell,
+        Shell,
     },
 };
+
+/// The admin [`Shell`] a page's [`Topbar`] describes.
+fn admin_shell<'a>(title: &'a str, topbar: Topbar<'a>) -> Shell<'a> {
+    let shell = Shell::admin(title, title)
+        .trail(topbar.crumbs)
+        .actions(topbar.actions);
+    match topbar.subtitle {
+        Some(subtitle) => shell.subtitle(subtitle),
+        None => shell,
+    }
+}
 
 /// Wrap content in the admin shell: the shared [`ui::shell_page`] with the
 /// admin sidebar. The caller passes a `Topbar` describing the page's
@@ -53,19 +71,7 @@ pub(crate) async fn admin_page(
     topbar: Topbar<'_>,
     content: Markup,
 ) -> OutputStream {
-    ui::shell_page(
-        ctx,
-        msg,
-        Shell {
-            title,
-            nav: NavKind::Admin,
-            crumbs: topbar.crumbs,
-            subtitle: topbar.subtitle,
-            actions: topbar.actions,
-        },
-        content,
-    )
-    .await
+    ui::shell_page(ctx, msg, admin_shell(title, topbar), content).await
 }
 
 /// [`admin_page`]'s markup, before it becomes a response — for a handler
@@ -78,17 +84,27 @@ pub(crate) async fn admin_document(
     topbar: Topbar<'_>,
     content: Markup,
 ) -> Result<Markup, wafer_run::WaferError> {
-    ui::shell_document(
+    ui::shell_document(ctx, msg, admin_shell(title, topbar), content).await
+}
+
+/// The error page of a top-level admin page whose read failed: drawn inside
+/// the admin shell under the page's own title, with a link back to the
+/// dashboard ([`ui::shell_error_page`]).
+pub(crate) async fn admin_error_page(
+    ctx: &dyn Context,
+    msg: &Message,
+    title: &'static str,
+    error: wafer_run::WaferError,
+    context: &str,
+) -> OutputStream {
+    ui::shell_error_page(
         ctx,
         msg,
-        Shell {
-            title,
-            nav: NavKind::Admin,
-            crumbs: topbar.crumbs,
-            subtitle: topbar.subtitle,
-            actions: topbar.actions,
-        },
-        content,
+        Shell::admin(title, title),
+        None,
+        ui::BackLink::ADMIN_DASHBOARD,
+        error,
+        context,
     )
     .await
 }

@@ -8,7 +8,6 @@ pub mod change_password;
 pub mod login;
 pub mod orgs;
 pub mod reset_password;
-pub mod settings;
 pub mod signup;
 
 use maud::{html, Markup};

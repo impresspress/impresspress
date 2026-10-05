@@ -24,7 +24,6 @@ use super::{
     LlmBlock, EXAMPLE_KEY_VAR,
 };
 use crate::{
-    blocks::crud,
     db_read::{self, Bound},
     ui::{self, components},
 };
@@ -69,7 +68,17 @@ pub(super) async fn providers_page(
             .into_iter()
             .filter_map(|rec| row_to_config(&rec).ok().map(|cfg| (rec.id, cfg)))
             .collect(),
-        Err(e) => return crud::db_error_page(msg, e, "llm providers page: provider read failed"),
+        Err(e) => {
+            return super::pages::error_page(
+                ctx,
+                msg,
+                super::pages::Section::Providers,
+                "Providers",
+                e,
+                "llm providers page: provider read failed",
+            )
+            .await
+        }
     };
 
     let manages = block.provider_admin.manages_providers();
@@ -105,8 +114,9 @@ pub(super) async fn providers_page(
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::simple("LLM Providers", ui::NavKind::Admin, "Providers"),
-        content,
+        ui::Shell::admin("LLM Providers", "Providers"),
+        ui::PageBody::from(content)
+            .with_subnav(super::pages::sections(super::pages::Section::Providers)),
     )
     .await
 }
@@ -395,7 +405,17 @@ pub(super) async fn models_page(
 
     let models = match wafer_core::clients::llm::list_models(ctx).await {
         Ok(m) => m,
-        Err(e) => return crud::db_error_page(msg, e, "llm models page: list_models failed"),
+        Err(e) => {
+            return super::pages::error_page(
+                ctx,
+                msg,
+                super::pages::Section::Models,
+                "Models",
+                e,
+                "llm models page: list_models failed",
+            )
+            .await
+        }
     };
 
     let content = html! {
@@ -411,8 +431,9 @@ pub(super) async fn models_page(
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::simple("LLM Models", ui::NavKind::Admin, "Models"),
-        content,
+        ui::Shell::admin("LLM Models", "Models"),
+        ui::PageBody::from(content)
+            .with_subnav(super::pages::sections(super::pages::Section::Models)),
     )
     .await
 }

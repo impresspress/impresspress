@@ -365,6 +365,23 @@ pub fn status_page(
     }
 }
 
+/// [`status_page`] inside the shell ([`crate::ui::shell_error_page`]): the
+/// same panel, but its title is an `h2` — the shell's topbar holds the page's
+/// one `h1` — and it fills the content card rather than the viewport. The
+/// action is required: an error inside a page always says where to go back.
+pub fn status_panel(code: &str, title: &str, body: &str, action: (&str, &str)) -> Markup {
+    html! {
+        div .status-page .status-page--in-shell {
+            div .status-page__inner {
+                div .status-page__code { (code) }
+                h2 .status-page__title { (title) }
+                p .status-page__body { (body) }
+                a .btn .btn--primary .btn--md href=(action.1) { (action.0) }
+            }
+        }
+    }
+}
+
 /// Inputs for [`public_page`] — anonymous full-page chrome shared by all
 /// public-facing surfaces (legal pages, marketing, etc.). No sidebar, no
 /// admin chrome, no auth-aware bits. Returns the *full* HTML document
