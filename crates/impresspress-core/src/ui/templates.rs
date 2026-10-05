@@ -342,9 +342,9 @@ pub fn auth_split(brand: BrandPanel<'_>, form: Markup) -> Markup {
     }
 }
 
-/// Tiny template for `/`, 404, 403, 500 — auth-split-shaped, just an
-/// illustrated message + primary action. Replaces the inline 404/403
-/// markup currently in `ui/mod.rs`.
+/// Tiny template for `/`, 404, 403, 500 — a full page of its own (no shell),
+/// just the message and a primary action. The panel is the page's `main`
+/// landmark, so a page with nothing else still has one.
 pub fn status_page(
     code: &str, // "404", "403", "500", or "" for "/"
     title: &str,
@@ -352,7 +352,7 @@ pub fn status_page(
     primary_action: Option<(String, String)>, // (label, href)
 ) -> Markup {
     html! {
-        div .status-page {
+        main .status-page {
             div .status-page__inner {
                 @if !code.is_empty() { div .status-page__code { (code) } }
                 h1 .status-page__title { (title) }
