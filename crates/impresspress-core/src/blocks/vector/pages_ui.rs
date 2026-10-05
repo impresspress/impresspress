@@ -728,7 +728,9 @@ mod integration_tests {
         )
         .await;
         assert_eq!(parts.status, 500);
-        assert!(!String::from_utf8_lossy(&parts.body).contains("<html"));
+        assert!(!crate::ui::layout::is_document(&String::from_utf8_lossy(
+            &parts.body
+        )));
     }
 
     #[tokio::test]

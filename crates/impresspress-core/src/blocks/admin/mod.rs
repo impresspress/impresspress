@@ -1085,14 +1085,16 @@ mod tests {
         .await;
         assert_eq!(page.status, 404);
         let body = String::from_utf8(page.body).unwrap();
-        assert!(body.contains("<!DOCTYPE html>"), "{body}");
+        assert!(crate::ui::layout::is_document(&body), "{body}");
         let api = test_support::browser_request(
             &ctx,
             crate::test_support::admin_msg("retrieve", "/b/admin/api/nope"),
         )
         .await;
         assert_eq!(api.status, 404);
-        assert!(!String::from_utf8(api.body).unwrap().contains("<html"));
+        assert!(!crate::ui::layout::is_document(
+            &String::from_utf8(api.body).unwrap()
+        ));
     }
 
     /// `/b/admin/grants` is the Permissions settings tab and

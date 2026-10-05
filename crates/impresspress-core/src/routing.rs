@@ -1135,7 +1135,7 @@ mod tests {
                 let body = String::from_utf8_lossy(&parts.body);
                 assert_eq!(parts.status, 404, "{path} {accept}: {body}");
                 assert_eq!(
-                    body.contains("<!DOCTYPE html>"),
+                    crate::ui::layout::is_document(&body),
                     page,
                     "{path} {accept}: {body}"
                 );

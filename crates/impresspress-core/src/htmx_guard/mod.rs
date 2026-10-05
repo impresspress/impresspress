@@ -574,7 +574,7 @@ async fn every_admin_page_renders_the_admin_sidebar() {
                 continue;
             }
             let html = crate::test_support::htmx::render(&fixture, &page).await;
-            if !html.contains("<html") {
+            if !crate::ui::layout::is_document(&html) {
                 // An htmx fragment (a modal's body, a row): no chrome to check.
                 continue;
             }

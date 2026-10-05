@@ -541,7 +541,7 @@ mod tests {
         assert_eq!(page.status, 404);
         let body = String::from_utf8(page.body).unwrap();
         assert!(
-            body.contains("<!DOCTYPE html>") && body.contains("Not found"),
+            crate::ui::layout::is_document(&body) && body.contains("Not found"),
             "{body}"
         );
 
