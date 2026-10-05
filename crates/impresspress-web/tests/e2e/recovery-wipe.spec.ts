@@ -587,6 +587,31 @@ test('a reset whose replacement may not activate always leaves a way into the ap
   });
 });
 
+// The way out, taken deterministically: the old worker is kept in the
+// middle of an event (its start, held at the host), so the reset's
+// replacement cannot activate. After the control wait the person is told
+// the new version has not started; "Restart it" gives up the reset — and
+// its erase — and once the old worker's event ends, the app is reached with
+// the data as it was.
+test('"Restart it" on a reset that cannot activate yet reaches the app, erasing nothing', async ({ browser }) => {
+  await withSlowStart(browser, async ({ page, server }) => {
+    await page.getByRole('button', { name: 'Reset local data and reload' }).click();
+    // Held: the old worker's start, and the replacement's install.
+    await expect.poll(() => server.held(), { timeout: 30_000 }).toBe(2);
+
+    await page.clock.fastForward(10_000);
+    await expect(page.locator('#impresspress-stopped-cause')).toHaveText(
+      'The new version has not started yet, after 10 seconds.',
+    );
+    await page.getByRole('button', { name: 'Restart it' }).click();
+    server.release();
+
+    await page.waitForURL(/\/b\/auth\/login/, { timeout: 60_000 });
+    await expect(page.locator('input#email')).toBeVisible();
+    expect(await stored(page)).toEqual(expect.arrayContaining([DATABASE, WITNESS]));
+  });
+});
+
 // An erase the browser refuses — here because another tab has one of the
 // files open — is not passed off as done: the screen says so, and the app
 // is not entered until the person has chosen.

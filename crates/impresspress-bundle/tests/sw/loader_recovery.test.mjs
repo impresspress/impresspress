@@ -1559,3 +1559,31 @@ test('a probe told the app is being reset waits and asks again, leaving the reco
   assert.equal(shell.session.getItem(RECOVERY_DONE), null, 'and cleared by the real one');
   assert.equal(shell.location.reloads, 1);
 });
+
+// The automatic recovery erases only once its replacement has ACTIVATED,
+// holding the erase lock from before registering until then: the version
+// that died can be started again by the browser, unpoisoned, for some tab's
+// request, load the data and write it back at its next flush — and
+// activation is when the old version is done with events for good.
+test('the automatic erase waits for the replacement to activate, holding the locks until then', async () => {
+  const shell = loadShell({ stop: left('initialize', NOW, DEATH), now: NOW, wipe: true, installs: 'late' });
+  await shown(shell, 'impresspress-wait');
+  assert.deepEqual(shell.opfs(), ['app.sqlite'], 'nothing erased before activation');
+  assert.ok(shell.heldNow().includes('__impresspress_erase') && shell.heldNow().includes('__impresspress_reset'));
+  assert.deepEqual(shell.lockRequests.length, 1, 'the recovery lock was let go meanwhile');
+
+  while (shell.location.reloads === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.deepEqual(shell.events, [`register ${REPLACEMENT}`, 'activated late', 'erase app.sqlite']);
+  assert.deepEqual(shell.opfs(), []);
+  assert.deepEqual(shell.heldNow(), []);
+  assert.deepEqual(shell.written(RECOVERY_DONE).slice(-1), ['erased']);
+});
+
+test('an automatic replacement that is discarded erases nothing and lets the locks go', async () => {
+  const shell = loadShell({ stop: left('initialize'), now: NOW, wipe: true, installs: false });
+  await shell.booted;
+
+  assert.deepEqual(shell.opfs(), ['app.sqlite']);
+  assert.deepEqual(shell.heldNow(), []);
+  assert.ok(shell.stuck('impresspress-retry'));
+});
