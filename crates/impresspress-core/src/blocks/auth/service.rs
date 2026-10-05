@@ -311,6 +311,15 @@ pub fn auth_grants() -> Vec<wafer_block::types::ResourceGrant> {
         // ownership check that precedes it reads the session row, not this
         // table.
         wafer_run::ResourceGrant::read_write("impresspress/userportal", "wafer_run__auth__tokens"),
+        // Revoking the session the request itself belongs to also ends the
+        // access token it presented (`auth::helpers::end_presented_access_token`),
+        // or the page would say "signed out on this device" while that token
+        // kept working until its expiry. Append-only: the helper only ever
+        // adds a blocklist row.
+        wafer_run::ResourceGrant::append(
+            "impresspress/userportal",
+            "wafer_run__auth__jwt_blocklist",
+        ),
         // Userportal `/b/userportal/security` lists the caller's linked OAuth
         // providers and removes individual ones. Read+write because the
         // unlink deletes the row; both the list and the delete are scoped to

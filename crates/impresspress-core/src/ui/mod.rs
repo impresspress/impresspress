@@ -240,7 +240,9 @@ pub struct Page<'a> {
     pub title: &'a str,
     /// The audience's sidebar groups (admin or portal).
     pub nav: &'a [NavGroup],
-    pub user: Option<&'a UserInfo>,
+    /// The signed-in viewer and their profile menu; `None` renders no user
+    /// row.
+    pub signed_in: Option<sidebar::SignedIn<'a>>,
     pub current_path: &'a str,
     pub topbar: shell::Topbar<'a>,
     pub body: PageBody,
@@ -314,7 +316,7 @@ impl<'a> Page<'a> {
             html! {
                 (shell::shell(
                     self.nav,
-                    self.user,
+                    self.signed_in,
                     self.current_path,
                     &self.config.logo_url,
                     &self.config.logo_icon_url,
@@ -467,12 +469,20 @@ pub async fn shell_document(
         .collect();
     let features = crate::routing::gate_from_request(ctx, msg);
     nav_groups::retain_reachable(&mut groups, &registered, &features);
+    // The profile menu's account links go through the same filter: a link
+    // the router would refuse is no way to change a password.
+    let mut account_menu = nav_groups::account_menu();
+    nav_groups::retain_reachable(&mut account_menu, &registered, &features);
+    let account_links: Vec<NavItem> = account_menu.into_iter().flat_map(|g| g.items).collect();
     let path = msg.path().to_string();
     Ok(Page {
         config: &config,
         title: shell.title,
         nav: &groups,
-        user: user.as_ref(),
+        signed_in: user.as_ref().map(|user| sidebar::SignedIn {
+            user,
+            account_links: &account_links,
+        }),
         current_path: &path,
         topbar: shell::Topbar {
             crumbs: shell.crumbs,
@@ -1052,7 +1062,7 @@ mod tests {
             config,
             title: "Dashboard",
             nav: groups,
-            user: None,
+            signed_in: None,
             current_path: "/b/admin/",
             topbar: Topbar {
                 crumbs: vec![Crumb {

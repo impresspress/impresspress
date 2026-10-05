@@ -12,7 +12,10 @@ use wafer_run::{context::Context, Message, OutputStream};
 
 use crate::{
     blocks::{
-        auth::repo::{sessions, tokens},
+        auth::{
+            helpers::{build_auth_cookie, end_presented_access_token},
+            repo::{sessions, tokens},
+        },
         crud,
     },
     crypto::META_AUTH_FAMILY,
@@ -149,7 +152,7 @@ fn render_table(rows: &[sessions::SessionRow], current_family: Option<&str>) -> 
 
 /// DELETE `/b/userportal/sessions/{family}` — sign one device out.
 ///
-/// [B12] Three steps, in this order and all of them load-bearing:
+/// [B12] These steps, in this order and all of them load-bearing:
 ///
 /// 1. Resolve the family *scoped to the caller*. `tokens::revoke_family` takes
 ///    a family and no user, so ownership has to be established before it is
@@ -161,8 +164,10 @@ fn render_table(rows: &[sessions::SessionRow], current_family: Option<&str>) -> 
 ///    entry while the device kept rotating tokens and re-appeared on the next
 ///    refresh.
 /// 3. Delete the session row.
+/// 4. When that was the session the request itself belongs to, end the access
+///    token it presented and clear the cookie, and send the page to sign in.
 ///
-/// Steps 2 and 3 propagate their errors (a WRAP denial as 403, a quota as
+/// Steps 2 to 4 propagate their errors (a WRAP denial as 403, a quota as
 /// 429, anything else as 500). "Revoked" that silently did
 /// not revoke is the failure mode this whole change exists to remove, so a
 /// user must not be told a device is signed out when it is not. Returns 401 if
@@ -199,6 +204,26 @@ pub async fn handle_revoke(ctx: &dyn Context, msg: &Message) -> OutputStream {
     }
     if let Err(e) = sessions::delete(ctx, &family).await {
         return crud::db_error_internal(e, "Could not remove the session");
+    }
+
+    // Revoking the session this request belongs to signs the reader out
+    // here and now, as the confirmation said: burning the refresh family
+    // alone left the access token in the cookie working until its expiry.
+    // So that token is ended too, the cookie cleared, and the page sent to
+    // sign in (`HX-Redirect`, a full navigation).
+    if current_session_family(msg) == Some(family.as_str()) {
+        if let Err(e) = end_presented_access_token(ctx, msg).await {
+            return crud::db_error_internal(e, "Could not end the current session");
+        }
+        let cookie = match build_auth_cookie("", 0, ctx).await {
+            Ok(cookie) => cookie,
+            Err(e) => return crud::db_error_internal(e, "Could not clear the session cookie"),
+        };
+        return ResponseBuilder::new()
+            .status(200)
+            .set_cookie(&cookie)
+            .set_header("HX-Redirect", "/b/auth/login")
+            .body(Vec::new(), "text/html");
     }
 
     // Empty 200 — htmx swaps the row out via outerHTML.
@@ -392,6 +417,106 @@ mod tests {
             .await
             .unwrap()
             .is_empty());
+    }
+
+    /// Revoking the session the request belongs to signs the reader out at
+    /// once, as the confirmation says: the presented access token is
+    /// blocklisted (so the next request with it is refused), the cookie is
+    /// cleared, and the page is sent to sign in. Run as the userportal, so
+    /// the blocklist write is proved to be within its grants.
+    #[tokio::test]
+    async fn revoking_the_current_session_ends_the_presented_token() {
+        use crate::{
+            blocks::auth::repo::jwt_blocklist,
+            crypto::{META_AUTH_EXP, META_AUTH_JTI},
+        };
+
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::userportal::UserPortalBlock::BLOCK_NAME);
+        seed_user(&ctx, "user-a").await;
+        insert(&ctx, fake_session("user-a", "fam-here"))
+            .await
+            .unwrap();
+        seed_refresh_row(&ctx, "user-a", "fam-here").await;
+
+        let mut msg = with_family(
+            routed(auth_msg(
+                "delete",
+                "/b/userportal/sessions/fam-here",
+                "user-a",
+            )),
+            "fam-here",
+        );
+        msg.set_meta(META_AUTH_JTI, "jti-here");
+        msg.set_meta(META_AUTH_EXP, "4102444800");
+        let parts =
+            wafer_block::http_codec::collect_http_response(handle_revoke(&ctx, &msg).await).await;
+
+        assert_eq!(parts.status, 200);
+        let header = |name: &str| {
+            parts
+                .headers
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(name))
+                .map(|(_, v)| v.clone())
+        };
+        assert_eq!(header("HX-Redirect").as_deref(), Some("/b/auth/login"));
+        let cookie = header("Set-Cookie").expect("the session cookie is cleared");
+        assert!(
+            cookie.starts_with("auth_token=;") && cookie.contains("Max-Age=0"),
+            "{cookie}"
+        );
+        assert!(
+            jwt_blocklist::contains(&ctx.fixture(), "jti-here")
+                .await
+                .unwrap(),
+            "the presented access token must stop working now, not at its expiry"
+        );
+        assert!(!tokens::family_has_live_row(&ctx, "fam-here").await.unwrap());
+    }
+
+    /// Revoking ANOTHER device leaves the reader signed in: no blocklist
+    /// row for their token, no cookie, no redirect.
+    #[tokio::test]
+    async fn revoking_another_session_leaves_the_reader_signed_in() {
+        use crate::{
+            blocks::auth::repo::jwt_blocklist,
+            crypto::{META_AUTH_EXP, META_AUTH_JTI},
+        };
+
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::userportal::UserPortalBlock::BLOCK_NAME);
+        seed_user(&ctx, "user-a").await;
+        insert(&ctx, fake_session("user-a", "fam-other"))
+            .await
+            .unwrap();
+
+        let mut msg = with_family(
+            routed(auth_msg(
+                "delete",
+                "/b/userportal/sessions/fam-other",
+                "user-a",
+            )),
+            "fam-here",
+        );
+        msg.set_meta(META_AUTH_JTI, "jti-here");
+        msg.set_meta(META_AUTH_EXP, "4102444800");
+        let parts =
+            wafer_block::http_codec::collect_http_response(handle_revoke(&ctx, &msg).await).await;
+
+        assert_eq!(parts.status, 200);
+        assert!(
+            !parts.headers.iter().any(|(n, _)| {
+                n.eq_ignore_ascii_case("HX-Redirect") || n.eq_ignore_ascii_case("Set-Cookie")
+            }),
+            "{:?}",
+            parts.headers
+        );
+        assert!(!jwt_blocklist::contains(&ctx.fixture(), "jti-here")
+            .await
+            .unwrap());
     }
 
     /// `handle_revoke` reads `{family}` only as the route table bound it: the

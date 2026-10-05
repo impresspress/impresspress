@@ -243,6 +243,28 @@ document.body.addEventListener("showToast", function(e) {
     setTimeout(function() { t.remove(); }, 4000);
 });
 
+// --- 3b. focus a field (htmx HX-Trigger channel) ---
+// A form whose refusal is swapped into a result slot beside its fields names
+// the field the refusal is about: `HX-Trigger: {"focusField": {"id": "…"}}`.
+// The field gets focus (and its text is selected, so retyping replaces it)
+// and `aria-invalid`, which the field drops again the next time it is edited.
+// The refusal itself is the slot's `role="alert"`, announced on insertion.
+// Used by `auth_ui::api::change_password::refused`.
+document.body.addEventListener("focusField", function (e) {
+    var d = e.detail || {};
+    var field = document.getElementById(String(d.id || ""));
+    if (!field || typeof field.focus !== "function") return;
+    field.setAttribute("aria-invalid", "true");
+    field.focus();
+    if (typeof field.select === "function") field.select();
+});
+document.addEventListener("input", function (e) {
+    var t = e.target;
+    if (t instanceof Element && t.getAttribute("aria-invalid") === "true") {
+        t.removeAttribute("aria-invalid");
+    }
+});
+
 // A refused htmx request must not be SILENT.
 //
 // htmx 2.0.4's default `responseHandling` is

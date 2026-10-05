@@ -17,7 +17,7 @@ use crate::{
     http::{err_bad_request, err_internal, err_not_found, ok_json, ResponseBuilder},
     ui::{
         components::{alert_message, AlertVariant},
-        html_response, is_htmx,
+        is_htmx,
     },
     util::parse_body_value,
 };
@@ -59,7 +59,9 @@ fn changed_response(msg: &Message) -> OutputStream {
                     AlertVariant::Success,
                     "Password changed. You have been signed out everywhere — sign in again with your new password.",
                 ))
-                a .btn .btn--primary .btn--block href="/b/auth/login?redirect=%2Fb%2Fuserportal%2Fsecurity" {
+                // `autofocus`: htmx focuses it once swapped in, so focus is
+                // not left on the submit button the swap just removed.
+                a .btn .btn--primary .btn--block autofocus href="/b/auth/login?redirect=%2Fb%2Fuserportal%2Fsecurity" {
                     "Sign in again"
                 }
             }
@@ -98,11 +100,44 @@ fn changed_response(msg: &Message) -> OutputStream {
 /// JSON callers are untouched: they read the status, so they keep the
 /// refusal codes [`error_response`] maps (`401` for a wrong current password,
 /// `400` for a password the policy declines or a confirmation that differs).
-fn refused(msg: &Message, code: ErrorCode, reason: &str) -> OutputStream {
+///
+/// The htmx answer also names the field the refusal is about, as an
+/// `HX-Trigger: {"focusField": {"id": …}}` that `ui/assets/chrome.js` answers
+/// by focusing that field and marking it `aria-invalid` — so the caller lands
+/// on what to retype rather than on the submit button. The ids are the
+/// form's field names, which are this endpoint's own body fields.
+fn refused(msg: &Message, field: Field, code: ErrorCode, reason: &str) -> OutputStream {
     if is_htmx(msg) {
-        return html_response(alert_message(AlertVariant::Error, reason));
+        let trigger = serde_json::json!({ "focusField": { "id": field.name() } });
+        return ResponseBuilder::new()
+            .set_header("HX-Trigger", &trigger.to_string())
+            .body(
+                alert_message(AlertVariant::Error, reason)
+                    .into_string()
+                    .into_bytes(),
+                "text/html; charset=utf-8",
+            );
     }
     error_response(code, reason)
+}
+
+/// The body field — and the Security form's field of that name and id — a
+/// refusal is about.
+#[derive(Clone, Copy)]
+enum Field {
+    Current,
+    New,
+    Confirm,
+}
+
+impl Field {
+    fn name(self) -> &'static str {
+        match self {
+            Field::Current => "current_password",
+            Field::New => "new_password",
+            Field::Confirm => "confirm_password",
+        }
+    }
 }
 
 pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> OutputStream {
@@ -145,12 +180,12 @@ pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> Out
         .as_deref()
         .is_some_and(|confirm| confirm != body.new_password)
     {
-        return refused(msg, ErrorCode::InvalidInput, MISMATCH);
+        return refused(msg, Field::Confirm, ErrorCode::InvalidInput, MISMATCH);
     }
 
     match super::password_policy::validate_new_password(ctx, &body.new_password).await {
         Ok(Ok(())) => {}
-        Ok(Err((code, reason))) => return refused(msg, code, &reason),
+        Ok(Err((code, reason))) => return refused(msg, Field::New, code, &reason),
         Err(response) => return response,
     }
 
@@ -170,6 +205,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> Out
         Ok(None) => {
             return refused(
                 msg,
+                Field::Current,
                 ErrorCode::InvalidCredentials,
                 "No password set for this account",
             )
@@ -188,6 +224,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> Out
         Ok(PasswordCheck::DoesNotMatch) => {
             return refused(
                 msg,
+                Field::Current,
                 ErrorCode::InvalidCredentials,
                 "Current password is incorrect",
             );
@@ -270,6 +307,15 @@ mod tests {
         let mut msg = auth_msg("update", "/b/auth/api/change-password", user_id);
         msg.set_meta("http.header.hx-request", "true");
         msg
+    }
+
+    /// The `HX-Trigger` header of a collected response.
+    fn hx_trigger(parts: &wafer_block::http_codec::HttpResponseParts) -> Option<String> {
+        parts
+            .headers
+            .iter()
+            .find(|(name, _)| name.eq_ignore_ascii_case("HX-Trigger"))
+            .map(|(_, value)| value.clone())
     }
 
     fn credentials(email: &str, password: &str) -> InputStream {
@@ -371,6 +417,10 @@ mod tests {
             "the session is gone, so it offers the way back in, got {html:?}"
         );
         assert!(
+            html.contains(" autofocus "),
+            "focus moves to the way back in, not onto nothing, got {html:?}"
+        );
+        assert!(
             serde_json::from_str::<serde_json::Value>(&html).is_err(),
             "a JSON body would be swapped into the page as text, got {html:?}"
         );
@@ -381,7 +431,7 @@ mod tests {
     /// malformed request instead.
     ///
     /// It comes back as markup, not as an error terminal: htmx does not swap
-    /// a non-2xx, so a refusal answered as one leaves `#change-pw-result`
+    /// a non-2xx, so a refusal answered as one leaves the form's result slot ([`RESULT_ID`])
     /// empty and says its piece only in a toast that expires. The sibling
     /// handler on that page (`userportal::pages::security::handle_unlink`)
     /// already answers a refusal as 200 markup.
@@ -403,6 +453,11 @@ mod tests {
         assert_eq!(
             parts.status, 200,
             "a refusal htmx will not swap never reaches the page"
+        );
+        assert_eq!(
+            hx_trigger(&parts).as_deref(),
+            Some(r#"{"focusField":{"id":"current_password"}}"#),
+            "focus goes to the field the refusal is about"
         );
         let html = String::from_utf8(parts.body).expect("body was not valid UTF-8");
         assert_eq!(
@@ -446,6 +501,10 @@ mod tests {
         .await;
 
         assert_eq!(parts.status, 200);
+        assert_eq!(
+            hx_trigger(&parts).as_deref(),
+            Some(r#"{"focusField":{"id":"new_password"}}"#)
+        );
         let html = String::from_utf8(parts.body).expect("body was not valid UTF-8");
         assert!(
             html.contains("at least") && html.contains(r#"role="alert""#),
@@ -485,6 +544,10 @@ mod tests {
         )
         .await;
         assert_eq!(parts.status, 200);
+        assert_eq!(
+            hx_trigger(&parts).as_deref(),
+            Some(r#"{"focusField":{"id":"confirm_password"}}"#)
+        );
         let html = String::from_utf8(parts.body).expect("body was not valid UTF-8");
         assert!(
             html.contains("New passwords do not match.") && html.contains(r#"role="alert""#),

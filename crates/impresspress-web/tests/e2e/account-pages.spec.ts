@@ -88,12 +88,15 @@ test.describe('account pages', () => {
     await confirm.fill('account-pages-horse-3');
     await submit.click();
     await expect(result.getByRole('alert')).toHaveText('New passwords do not match.');
+    await expect(confirm).toBeFocused();
+    await expect(confirm).toHaveAttribute('aria-invalid', 'true');
 
     // A wrong current password.
     await current.fill('not-the-password-at-all');
     await confirm.fill('account-pages-horse-2');
     await submit.click();
     await expect(result.getByRole('alert')).toHaveText('Current password is incorrect');
+    await expect(current).toBeFocused();
 
     // Success: the form is replaced by the confirmation and the way back in.
     await current.fill(PASSWORD);
@@ -101,7 +104,13 @@ test.describe('account pages', () => {
     const done = page.locator('#change-password-form');
     await expect(done.getByRole('status')).toContainText('Password changed.');
     await expect(page.locator('form#change-password-form')).toHaveCount(0);
-    await expect(page.getByRole('link', { name: 'Sign in again' })).toBeVisible();
+    const signInAgain = page.getByRole('link', { name: 'Sign in again' });
+    await expect(signInAgain).toBeVisible();
+    await expect(signInAgain).toBeFocused();
+
+    // Signed out for real: the page's own session no longer opens Security.
+    await page.reload({ waitUntil: 'networkidle' });
+    await expect(page).toHaveURL(/\/b\/auth\/login/);
 
     // The new password is the one that signs in now.
     const fresh = await apiRequest.newContext({ baseURL });
@@ -144,5 +153,23 @@ test.describe('account pages', () => {
     // Revoked for real: the list after a reload agrees.
     await page.reload({ waitUntil: 'networkidle' });
     await expect(rows).toHaveCount(before - 1);
+  });
+
+  test('revoking your own session signs you out on this device', async ({ page, request }) => {
+    await signUpAndSignIn(page, request);
+    await page.goto('/b/userportal/sessions', { waitUntil: 'networkidle' });
+    const current = page.locator('.data-table tbody tr').filter({ hasText: 'Current session' });
+    await expect(current).toHaveCount(1);
+
+    page.once('dialog', (dialog) => {
+      expect(dialog.message()).toContain('You will be signed out on this device');
+      void dialog.accept();
+    });
+    await current.getByRole('button', { name: 'Revoke' }).click();
+    await expect(page).toHaveURL(/\/b\/auth\/login/);
+
+    // And it stays that way: the account pages send this browser to sign in.
+    await page.goto('/b/userportal/sessions', { waitUntil: 'networkidle' });
+    await expect(page).toHaveURL(/\/b\/auth\/login/);
   });
 });
