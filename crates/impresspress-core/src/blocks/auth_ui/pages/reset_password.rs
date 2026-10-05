@@ -7,7 +7,11 @@ use wafer_run::{context::Context, Message, OutputStream};
 use super::api_post_script;
 use crate::{
     ui,
-    ui::{components::auth_panel, icons, templates::auth_split},
+    ui::{
+        components::{alert, auth_panel, password_field, AlertVariant, PasswordPurpose},
+        icons,
+        templates::auth_split,
+    },
 };
 
 /// JS that drives the reset-password form. Posts through
@@ -21,7 +25,6 @@ async function handleReset(e){
   var token=$('reset-token').value;
   err.hidden=true;suc.hidden=true;
   if(pw!==cf){err.textContent='Passwords do not match.';err.hidden=false;return false;}
-  if(pw.length<8){err.textContent='Password must be at least 8 characters.';err.hidden=false;return false;}
   btn.disabled=true;btn.textContent='Resetting...';
   try{
     await apiPost('/b/auth/api/reset-password',{token:token,new_password:pw});
@@ -62,6 +65,17 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
         );
     }
 
+    // The minimum the API enforces, so the fields' `minlength` and the
+    // placeholder state the same number (see `PasswordPurpose::New`). The
+    // script no longer repeats the check with its own literal 8: the
+    // browser applies `minlength` before submit, and the API answers the rest.
+    let min_length = match crate::blocks::auth::helpers::password_min_length(ctx).await {
+        Ok(n) => n,
+        Err(e) => {
+            return crate::blocks::crud::db_error_page(msg, e, "page: password policy read failed")
+        }
+    };
+
     // Deliberately NOT `site` wholesale: this page has always rendered with a
     // blank icon/primary colour and the stock favicon, and adopting the real
     // ones here would be a visual change rather than the read-surface
@@ -84,19 +98,19 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
             auth_panel(&config, Some("Reset your password.")),
             html! {
                 div .login-container {
-                    div #error .login-error hidden {}
-                    div #success .login-success hidden {}
+                    (alert(AlertVariant::Error, "error", ""))
+                    (alert(AlertVariant::Success, "success", ""))
 
                     form #form .login-form {
                         input type="hidden" #reset-token name="token" value=(token);
 
                         div .form-group {
                             label .form-label for="password" { "New Password" }
-                            input .form-input type="password" #password required minlength="8" placeholder="Min 8 characters";
+                            (password_field("password", &format!("Min {min_length} characters"), PasswordPurpose::New { min_length }))
                         }
                         div .form-group {
                             label .form-label for="confirm" { "Confirm Password" }
-                            input .form-input type="password" #confirm required minlength="8" placeholder="Repeat password";
+                            (password_field("confirm", "Repeat password", PasswordPurpose::New { min_length }))
                         }
 
                         button .login-button type="submit" #btn { "Reset Password" }

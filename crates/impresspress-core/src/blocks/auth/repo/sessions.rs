@@ -26,9 +26,9 @@
 
 use std::collections::HashMap;
 
-use serde_json::{json, Value};
+use serde_json::json;
 use wafer_block::db::{Filter, FilterOp, SortField};
-use wafer_core::clients::database as db;
+use wafer_core::clients::database::{self as db, RecordData};
 use wafer_run::{context::Context, WaferError};
 
 use super::{db_failed, internal_error, map_str, now_iso};
@@ -64,7 +64,7 @@ pub struct NewSession {
     pub expires_at: String,
 }
 
-fn row_from_map(m: &HashMap<String, Value>) -> Result<SessionRow, WaferError> {
+fn row_from_map(m: &RecordData) -> Result<SessionRow, WaferError> {
     Ok(SessionRow {
         family: super::map_opt_str(m, "family").ok_or_else(|| internal_error("missing family"))?,
         user_id: super::map_opt_str(m, "user_id")

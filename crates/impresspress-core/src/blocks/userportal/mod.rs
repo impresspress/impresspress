@@ -15,7 +15,7 @@ use crate::{
     },
     endpoint_match::{self, EndpointRoute},
     http::{err_bad_request, err_forbidden, err_not_found, err_unauthenticated, ok_json},
-    ui::{self, components, icons, settings_form},
+    ui::{self, settings_form},
     util::parse_form_body,
 };
 
@@ -152,11 +152,14 @@ crate::impresspress_feature_block! {
         .endpoints(endpoint_match::declare(ROUTES))
         .config_keys(vec![])
         .admin_url("/b/userportal/admin/settings")
-        .can_disable(true)
-        // Ships enabled — see the note on `legalpages`. Same divergence, same
-        // resolution: the declaration is corrected to the value production has
-        // been running, not the other way round.
-        .default_enabled(true)
+        // Not disableable, like `impresspress/auth-ui`: this block is the
+        // signed-in account surface — profile, sessions, and the Security
+        // page that holds the account's one change-password form
+        // (`/b/auth/change-password` redirects there). Turning it off would
+        // leave no way to change a password. A block that cannot be disabled
+        // gets no enablement row (`blocks::block_enabled_defaults`) and the
+        // admin Blocks page offers it no toggle; the router reads an absent
+        // row as enabled.
     },
     handle: |this, ctx, mut msg, input| {
         // Auth is enforced centrally by `route_to_block` from each row's
@@ -515,11 +518,7 @@ fn branding_vars() -> Vec<wafer_run::ConfigVar> {
 
 async fn admin_settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let vars = branding_vars();
-    let sections = [settings_form::SettingsSection::new(
-        "Branding",
-        icons::settings(),
-        &vars,
-    )];
+    let sections = [settings_form::SettingsSection::new("Branding", &vars)];
     let form = match settings_form::settings_form(
         ctx,
         "/b/userportal/admin/settings",
@@ -537,15 +536,18 @@ async fn admin_settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
             )
         }
     };
-    let content = html! {
-        (components::page_header("Branding Settings", Some("Customize your application appearance"), None))
-        (form)
-    };
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::simple("Settings", ui::NavKind::Portal, "Settings"),
-        content,
+        ui::Shell {
+            subtitle: Some("Customize your application appearance"),
+            ..ui::Shell::simple(
+                "Branding settings",
+                ui::NavKind::Portal,
+                "Branding settings",
+            )
+        },
+        form,
     )
     .await
 }

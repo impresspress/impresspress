@@ -59,7 +59,7 @@ enum Exempt {
     /// reads it and it renders no page, so there is nothing on it for the
     /// guard to fire. It must succeed, and not with HTML.
     JsonApi,
-    /// Answered with a redirect to a page the guard renders.
+    /// Answered with a redirect to a page the guard renders (for any block).
     Redirect,
     /// A static asset (script, stylesheet), not a page. It must succeed, and
     /// not with HTML.
@@ -297,11 +297,16 @@ fn is_row_of(template: &str, path: &str) -> bool {
 /// answering a page. A route whose handler renders HTML under a response
 /// schema (or under a JSON / asset / download exemption) would otherwise be
 /// accepted on its label, and one that answers 401 or 500 would pass for
-/// answering JSON. A redirect must land on a page the crawl renders.
+/// answering JSON. A redirect must land on a page the guard renders — any
+/// block's: `/b/auth/change-password` (auth-ui) lands on the portal's
+/// Security page (userportal), which the userportal entry renders.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn every_get_row_that_is_not_a_page_succeeds_without_answering_a_page() {
     let infos = registered();
     let mut wrong: Vec<String> = Vec::new();
+    // Every entry's fixture and crawl first, so a redirect's target is
+    // checked against every page the guard renders, not only its own block's.
+    let mut crawled = Vec::new();
     for entry in entries() {
         let Some(info) = infos.iter().find(|i| i.name == entry.block) else {
             continue;
@@ -310,11 +315,18 @@ async fn every_get_row_that_is_not_a_page_succeeds_without_answering_a_page() {
             continue;
         };
         let fixture = make().await;
-        let rendered: Vec<String> = crawl(&fixture)
+        let pages: Vec<String> = crawl(&fixture)
             .await
             .iter()
             .map(|view| view.page(&fixture).url())
             .collect();
+        crawled.push((entry, info, fixture, pages));
+    }
+    let rendered: BTreeSet<String> = crawled
+        .iter()
+        .flat_map(|(_, _, _, pages)| pages.iter().cloned())
+        .collect();
+    for (entry, info, fixture, _) in crawled {
         let mut probed: BTreeSet<&str> = BTreeSet::new();
         for row in info
             .endpoints
@@ -368,11 +380,9 @@ async fn every_get_row_that_is_not_a_page_succeeds_without_answering_a_page() {
             let redirect = (300..400).contains(&answer.status);
             let to = answer.location.as_deref().unwrap_or_default();
             let problem = match exempt {
-                Some(Exempt::Redirect) if !redirect || !rendered.iter().any(|page| page == to) => {
-                    Some(format!(
-                        "must redirect to a page the crawl renders ({rendered:?}); location {to:?}"
-                    ))
-                }
+                Some(Exempt::Redirect) if !redirect || !rendered.contains(to) => Some(format!(
+                    "must redirect to a page the crawl renders ({rendered:?}); location {to:?}"
+                )),
                 Some(Exempt::Redirect) => None,
                 Some(Exempt::NotAPage(_)) if redirect && !to.starts_with("https://") => {
                     Some(format!(

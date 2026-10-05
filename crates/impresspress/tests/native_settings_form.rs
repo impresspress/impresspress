@@ -99,7 +99,10 @@ async fn the_admin_email_settings_page_renders_its_form_on_the_real_runtime() {
 
     assert_eq!(parts.status, 200, "{html}");
     assert!(
-        html.contains(r#"<form id="settings-form""#),
+        // The whole start tag `ui::settings_form::settings_form` renders
+        // (maud writes `class` before `id`), so a page that merely mentions
+        // the id cannot pass for the form.
+        html.contains(r#"<form class="settings-form" id="settings-form">"#),
         "the settings form must render: {html}"
     );
     assert!(

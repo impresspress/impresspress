@@ -136,10 +136,10 @@ jobs:
         env:
           TEST_PORT: 8093
         # The same package script CI's `e2e-visual` job runs, so the same specs
-        # run in the same order against the same database. The specs share
-        # that database, so whatever an earlier spec leaves behind reaches a
-        # later capture unless the suite masks it; running visual-baseline.spec.ts
-        # alone would render baselines from a database CI never sees. The
+        # run against the same kind of database. No spec in it writes or makes
+        # a request the server refuses (those are `e2e:writes`, which CI runs
+        # on a second server), so what the baselines see does not depend on
+        # order. The
         # counts that follow the suite's own traffic (request-log figures on
         # the admin dashboard, database and network pages) are masked or
         # seeded in the spec — see `volatileMasks` there.

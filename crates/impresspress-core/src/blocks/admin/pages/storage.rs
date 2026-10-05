@@ -56,7 +56,7 @@ pub async fn storage_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         "Storage",
         Topbar {
             crumbs: crumb("Storage"),
-            primary_action: Some(refresh_action),
+            actions: vec![refresh_action],
             subtitle: Some("Per-block storage isolation and access logs"),
             show_palette: true,
         },
@@ -114,7 +114,7 @@ async fn storage_logs_tab(
                     }
                 },
                 html! { span .font-mono { (op) } },
-                html! { span .font-mono { (path) } },
+                html! { span .font-mono { (components::breakable_id(&path)) } },
                 html! {
                     @if status.starts_with("BLOCKED") {
                         (badge(BadgeVariant::Danger, &status))
@@ -124,7 +124,7 @@ async fn storage_logs_tab(
                         span .text-muted { (status) }
                     }
                 },
-                html! { span .text-muted { (created.get(..19).unwrap_or(&created)) } },
+                html! { span .text-muted { (components::timestamp(&created)) } },
             ]
         })
         .collect();
@@ -148,26 +148,11 @@ async fn storage_logs_tab(
 /// The access-log table's columns. Declared once so the `<td data-label>` the
 /// component stamps on every cell names the same column the header does.
 const STORAGE_LOG_COLUMNS: [components::TableCol<'static>; 5] = [
-    components::TableCol {
-        label: "Block",
-        width: None,
-    },
-    components::TableCol {
-        label: "Operation",
-        width: None,
-    },
-    components::TableCol {
-        label: "Path",
-        width: None,
-    },
-    components::TableCol {
-        label: "Status",
-        width: None,
-    },
-    components::TableCol {
-        label: "Time",
-        width: None,
-    },
+    components::TableCol::new("Block"),
+    components::TableCol::new("Operation"),
+    components::TableCol::new("Path").primary(),
+    components::TableCol::new("Status"),
+    components::TableCol::new("Time"),
 ];
 
 #[cfg(test)]

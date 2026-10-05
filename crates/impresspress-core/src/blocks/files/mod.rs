@@ -900,12 +900,13 @@ mod test_support {
         &js[var_at..end]
     }
 
-    /// Every option the share modal's expiry dropdown offers, in order.
+    /// Every option the share modal's expiry dropdown offers, in order, read
+    /// off the rendered modal.
     pub(super) fn share_modal_expiry_options() -> Vec<ShareModalOption> {
-        let js = super::assets::SOURCE;
+        let html = super::pages_user::objects::render_share_modal().into_string();
         let select = between(
-            js,
-            "<select name=\"expires\">",
+            &html,
+            "name=\"expires\"",
             "</select>",
             "the share modal's expiry select",
         );

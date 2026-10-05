@@ -6,10 +6,9 @@
 //! partial unique index over `(verified_via, verified_ref) WHERE is_reserved
 //! = 0` are the constraints that write will meet.
 
-use std::collections::HashMap;
-
-use serde_json::{json, Value};
+use serde_json::json;
 use wafer_block::db::{Filter, FilterOp, SortField};
+use wafer_core::clients::database::RecordData;
 use wafer_run::{context::Context, WaferError};
 
 use super::{db_failed, internal_error, map_bool, map_opt_str, map_str};
@@ -29,7 +28,7 @@ pub struct OrgRow {
     pub created_at: String,
 }
 
-fn row_from_map(m: &HashMap<String, Value>) -> Result<OrgRow, WaferError> {
+fn row_from_map(m: &RecordData) -> Result<OrgRow, WaferError> {
     Ok(OrgRow {
         id: map_opt_str(m, "id").ok_or_else(|| internal_error("missing id"))?,
         name: map_opt_str(m, "name").ok_or_else(|| internal_error("missing name"))?,

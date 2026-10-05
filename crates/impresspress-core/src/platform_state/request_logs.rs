@@ -17,7 +17,7 @@ use wafer_block::{
     db::{Filter, FilterOp, ListOptions, SortField},
     wire::database as wire,
 };
-use wafer_core::clients::database as db;
+use wafer_core::clients::database::{self as db, RecordData};
 use wafer_run::{context::Context, WaferError};
 
 use super::Page;
@@ -108,7 +108,7 @@ pub struct RequestLogRow {
 }
 
 impl RequestLogRow {
-    pub fn from_record(id: &str, data: &HashMap<String, Value>) -> Self {
+    pub fn from_record(id: &str, data: &RecordData) -> Self {
         Self {
             id: id.to_string(),
             flow_id: data.str_field("flow_id").to_string(),
@@ -222,7 +222,7 @@ pub async fn paginated(
 }
 
 /// The `limit` most recent error rows ([`is_error_status`]). The dashboard's
-/// "Recent Errors" card.
+/// "Recent 4xx/5xx" card.
 pub async fn list_recent_errors(
     ctx: &dyn Context,
     limit: u32,
@@ -248,6 +248,43 @@ pub async fn list_recent_errors(
         .iter()
         .map(|r| RequestLogRow::from_record(&r.id, &r.data))
         .collect())
+}
+
+/// [`insert`] with a chosen `created_at` (and `updated_at`): a fixture for
+/// tests that need rows from a past day, which `insert` cannot write.
+#[cfg(test)]
+pub(crate) async fn insert_at(
+    ctx: &dyn Context,
+    id: &str,
+    row: &NewRequestLog<'_>,
+    at: &str,
+) -> Result<(), WaferError> {
+    let mut data = row.to_data();
+    data.insert("id".to_string(), json!(id));
+    data.insert("created_at".to_string(), json!(at));
+    data.insert("updated_at".to_string(), json!(at));
+    db::create(ctx, TABLE, data).await.map(|_| ())
+}
+
+/// When the oldest stored request was logged (its `created_at`), or `None`
+/// when the log is empty: how far back the dashboard's request and 4xx/5xx
+/// series actually go. One row, ascending, no count.
+pub async fn first_logged_at(ctx: &dyn Context) -> Result<Option<String>, WaferError> {
+    let opts = ListOptions {
+        columns: Some(vec!["created_at".into()]),
+        sort: vec![SortField {
+            field: "created_at".into(),
+            desc: false,
+        }],
+        limit: Some(1),
+        skip_count: true,
+        ..Default::default()
+    };
+    let list = db::list(ctx, TABLE, &opts).await?;
+    Ok(list
+        .records
+        .first()
+        .map(|r| r.data.str_field("created_at").to_string()))
 }
 
 /// Rows for one `(method, path)`, newest first, from `offset`, at most
@@ -469,13 +506,24 @@ mod tests {
     /// codec, then pinning `id`/`created_at` on the map the owning module
     /// spells.
     async fn seed_at(ctx: &TestContext, id: &str, row: NewRequestLog<'_>, at: &str) {
-        let mut data = row.to_data();
-        data.insert("id".to_string(), serde_json::json!(id));
-        data.insert("created_at".to_string(), serde_json::json!(at));
-        data.insert("updated_at".to_string(), serde_json::json!(at));
-        db::create(ctx, TABLE, data)
+        insert_at(ctx, id, &row, at)
             .await
             .unwrap_or_else(|e| panic!("seed request_log {id}: {e}"));
+    }
+
+    /// The oldest stored row, whatever its status; `None` on an empty log.
+    #[tokio::test]
+    async fn first_logged_at_is_the_oldest_row_or_none() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        assert_eq!(first_logged_at(&ctx).await.unwrap(), None);
+        seed_at(&ctx, "b", probe(200, 1), "2026-02-01T00:00:00Z").await;
+        seed_at(&ctx, "a", probe(404, 1), "2026-01-05T09:00:00Z").await;
+        assert_eq!(
+            first_logged_at(&ctx).await.unwrap().as_deref(),
+            Some("2026-01-05T09:00:00Z")
+        );
     }
 
     /// Seed a row whose stored `status` label is the caller's rather than the
@@ -519,7 +567,8 @@ mod tests {
         assert!(!row.created_at.is_empty());
         assert_eq!(row.created_at, row.updated_at);
 
-        let again = RequestLogRow::from_record(&row.id, &probe(500, 42).to_data());
+        let again =
+            RequestLogRow::from_record(&row.id, &probe(500, 42).to_data().into_iter().collect());
         assert_eq!(again.status_code, 500);
         assert_eq!(again.method, "GET");
     }

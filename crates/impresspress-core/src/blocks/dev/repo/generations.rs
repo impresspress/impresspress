@@ -583,7 +583,7 @@ mod tests {
         data.insert("failure_message".to_string(), serde_json::Value::Null);
         db::Record {
             id: "g1".to_string(),
-            data,
+            data: data.into_iter().collect(),
         }
     }
 

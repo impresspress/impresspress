@@ -5,8 +5,7 @@ use maud::{html, Markup};
 
 use super::{
     icons,
-    sidebar::{sidebar_grouped, NavGroup},
-    UserInfo,
+    sidebar::{sidebar_grouped, NavGroup, SignedIn},
 };
 
 /// One breadcrumb segment.
@@ -15,12 +14,31 @@ pub struct Crumb<'a> {
     pub href: Option<&'a str>,
 }
 
-/// Topbar inputs declared by each page.
+/// The page header every shelled page declares. The topbar is the page's
+/// header: blocks put their title, trail, description and page-level actions
+/// here and render NO header of their own in the body (in-body headings are
+/// `components::section_header`, an `h2`).
+///
+/// - **Title and trail** — `crumbs` is the full trail, and its LAST entry is
+///   the current page: it renders as the page's one and only `h1`, styled as
+///   a title. Earlier entries are the ancestors (a detail page passes
+///   `[Products → /b/products/admin/manage, Widget]`, giving
+///   "Products ›" above the "Widget" title); they render as a breadcrumb
+///   `nav` above the title. A top-level page passes one crumb.
+/// - **Subtitle** — one short sentence describing the page, on its own line
+///   under the title. Hidden below 720px, so it must never carry anything
+///   the page needs to be usable.
+/// - **Actions** — the page's own buttons (create, upload, refresh, a status
+///   badge), rendered right-aligned in order, so put the primary action LAST.
+///   They wrap onto their own row below 720px, so any number fits.
+/// - **Palette** — the ⌘K / Ctrl+K command-palette trigger.
 pub struct Topbar<'a> {
+    /// The trail; the last crumb is the page title (the `h1`).
     pub crumbs: Vec<Crumb<'a>>,
-    /// Subtitle shown after the crumbs separated by a vertical bar.
+    /// One-line page description under the title (hidden below 720px).
     pub subtitle: Option<&'a str>,
-    pub primary_action: Option<Markup>,
+    /// Page-level actions, left to right — primary action last.
+    pub actions: Vec<Markup>,
     /// Whether to render the ⌘K palette trigger (every shelled page = true).
     pub show_palette: bool,
 }
@@ -30,17 +48,27 @@ impl<'a> Default for Topbar<'a> {
         Self {
             crumbs: Vec::new(),
             subtitle: None,
-            primary_action: None,
+            actions: Vec::new(),
             show_palette: true,
         }
     }
 }
 
+/// How the shell's content region (`main.shell__body`) frames the page body.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub enum BodyLayout {
+    /// The standard page: the body sits inside the content card's padding.
+    #[default]
+    Padded,
+    /// A full-bleed layout that draws its own panes edge to edge (the chat
+    /// template's thread list / messages / rail), so the card adds no padding.
+    Flush,
+}
+
 fn render_topbar(t: &Topbar<'_>) -> Markup {
     // Skip rendering entirely when nothing was declared — avoids an empty
     // stripe on pages that don't need a topbar.
-    if t.crumbs.is_empty() && t.subtitle.is_none() && t.primary_action.is_none() && !t.show_palette
-    {
+    if t.crumbs.is_empty() && t.subtitle.is_none() && t.actions.is_empty() && !t.show_palette {
         return html! {};
     }
     // The current page (last crumb) renders as the page's single `h1` AFTER
@@ -52,41 +80,46 @@ fn render_topbar(t: &Topbar<'_>) -> Markup {
     };
     html! {
         header .topbar {
-            @if !ancestors.is_empty() {
-                nav .topbar__crumbs aria-label="Breadcrumb" {
-                    ol {
-                        @for c in ancestors {
-                            li {
-                                @match c.href {
-                                    Some(h) => a href=(h) { (c.label) },
-                                    None => span { (c.label) },
+            div .topbar__heading {
+                @if !ancestors.is_empty() {
+                    nav .topbar__crumbs aria-label="Breadcrumb" {
+                        ol {
+                            @for c in ancestors {
+                                li {
+                                    @match c.href {
+                                        Some(h) => a href=(h) { (c.label) },
+                                        None => span { (c.label) },
+                                    }
                                 }
                             }
                         }
                     }
                 }
-            }
-            @if let Some(c) = current {
-                h1 .topbar__title { (c.label) }
-            }
-            @if let Some(s) = t.subtitle {
-                span .topbar__sep aria-hidden="true" { "|" }
-                span .topbar__subtitle { (s) }
-            }
-            div .topbar__right {
-                @if let Some(a) = &t.primary_action {
-                    div .topbar__action { (a.clone()) }
+                @if let Some(c) = current {
+                    h1 .topbar__title { (c.label) }
                 }
-                @if t.show_palette {
-                    button .topbar__palette type="button"
-                        data-action="palette-open"
-                        aria-keyshortcuts="Meta+K Control+K"
-                        aria-label="Open command palette" {
-                        span { "Quick jump" }
-                        kbd {
-                            span .topbar__palette-cmd { "⌘" }
-                            span { "K" }
-                        }
+                @if let Some(s) = t.subtitle {
+                    p .topbar__subtitle { (s) }
+                }
+            }
+            @if !t.actions.is_empty() {
+                div .topbar__actions {
+                    @for a in &t.actions { (a.clone()) }
+                }
+            }
+            @if t.show_palette {
+                // The visible label is platform-neutral; the platform's
+                // shortcut is in the `kbd` (swapped to Ctrl off-Mac by
+                // chrome.js) and in `aria-keyshortcuts`.
+                button .topbar__palette type="button"
+                    data-action="palette-open"
+                    aria-keyshortcuts="Meta+K Control+K"
+                    aria-label="Search pages (command palette)" {
+                    (icons::search())
+                    span { "Search" }
+                    kbd aria-hidden="true" {
+                        span .topbar__palette-cmd { "⌘" }
+                        span { "K" }
                     }
                 }
             }
@@ -97,7 +130,9 @@ fn render_topbar(t: &Topbar<'_>) -> Markup {
 /// Renders sidebar + topbar + body in the standard 12-col grid.
 ///
 /// `nav_groups` partitions the sidebar (Workspace / Data / System for admin,
-/// Account / Apps for portal). `user` is pinned at the sidebar bottom.
+/// Account / Apps for portal). `signed_in` (the viewer and their profile menu) is pinned at the sidebar bottom. The
+/// body renders inside `main#content` — the page's one `main` landmark and
+/// the skip link's target.
 #[expect(
     clippy::too_many_arguments,
     reason = "every argument is an independent slot in the page chrome; a struct \
@@ -105,14 +140,16 @@ fn render_topbar(t: &Topbar<'_>) -> Markup {
 )]
 pub fn shell(
     nav_groups: &[NavGroup],
-    user: Option<&UserInfo>,
+    signed_in: Option<SignedIn<'_>>,
     current_path: &str,
     logo_url: &str,
     logo_icon_url: &str,
     app_name: &str,
     topbar: Topbar<'_>,
+    body_layout: BodyLayout,
     body: Markup,
 ) -> Markup {
+    let flush = body_layout == BodyLayout::Flush;
     html! {
         div .shell {
             a .skip-link href="#content" { "Skip to content" }
@@ -128,17 +165,19 @@ pub fn shell(
                     button .shell__palette-icon type="button"
                         data-action="palette-open"
                         aria-keyshortcuts="Meta+K Control+K"
-                        aria-label="Open command palette"
+                        aria-label="Search pages (command palette)"
                     {
-                        "⌘K"
+                        (icons::search())
                     }
                 }
             }
             div .shell__overlay data-action="drawer-close" {}
-            (sidebar_grouped(nav_groups, user, current_path, logo_url, logo_icon_url, app_name))
+            (sidebar_grouped(nav_groups, signed_in, current_path, logo_url, logo_icon_url, app_name))
             div .shell__main {
                 (render_topbar(&topbar))
-                div .shell__body #content { (body) }
+                // `tabindex="-1"`: the skip link moves focus here, and a
+                // focused scroller is what PageDown/arrow keys scroll.
+                main .shell__body .shell__body--flush[flush] #content tabindex="-1" { (body) }
             }
         }
     }
@@ -183,7 +222,7 @@ mod tests {
                     href: None,
                 },
             ],
-            primary_action: None,
+            actions: Vec::new(),
             subtitle: None,
             show_palette: true,
         };
@@ -196,6 +235,7 @@ mod tests {
             "",
             "Impresspress",
             topbar,
+            BodyLayout::Padded,
             body,
         )
         .into_string();
@@ -221,7 +261,7 @@ mod tests {
                     href: None,
                 },
             ],
-            primary_action: None,
+            actions: Vec::new(),
             subtitle: None,
             show_palette: true,
         };
@@ -233,6 +273,7 @@ mod tests {
             "",
             "Impresspress",
             topbar,
+            BodyLayout::Padded,
             html! { p { "body" } },
         )
         .into_string();
@@ -263,7 +304,18 @@ mod tests {
             }],
             ..Topbar::default()
         };
-        let s = shell(&groups, None, "/x", "", "", "Impresspress", tb, html! {}).into_string();
+        let s = shell(
+            &groups,
+            None,
+            "/x",
+            "",
+            "",
+            "Impresspress",
+            tb,
+            BodyLayout::Padded,
+            html! {},
+        )
+        .into_string();
         assert!(s.contains(r#"<h1 class="topbar__title">Dashboard</h1>"#));
         // No ancestors -> no empty breadcrumb nav.
         assert!(!s.contains("topbar__crumbs"));
@@ -296,6 +348,7 @@ mod tests {
             "",
             "Impresspress",
             tb,
+            BodyLayout::Padded,
             body,
         )
         .into_string();
@@ -320,7 +373,18 @@ mod tests {
             }],
             ..Default::default()
         };
-        let s = shell(&groups, None, "/x", "", "", "Impresspress", tb, html! {}).into_string();
+        let s = shell(
+            &groups,
+            None,
+            "/x",
+            "",
+            "",
+            "Impresspress",
+            tb,
+            BodyLayout::Padded,
+            html! {},
+        )
+        .into_string();
         assert!(!s.contains("topbar__palette"));
         // The single crumb renders as the page h1 (no ancestor nav needed).
         assert!(s.contains(r#"<h1 class="topbar__title">X</h1>"#));
@@ -337,6 +401,7 @@ mod tests {
             "",
             "Impresspress",
             Topbar::default(),
+            BodyLayout::Padded,
             html! { "body" },
         )
         .into_string();
@@ -359,7 +424,18 @@ mod tests {
             show_palette: false,
             ..Default::default()
         };
-        let s = shell(&groups, None, "/x", "", "", "Impresspress", tb, html! {}).into_string();
+        let s = shell(
+            &groups,
+            None,
+            "/x",
+            "",
+            "",
+            "Impresspress",
+            tb,
+            BodyLayout::Padded,
+            html! {},
+        )
+        .into_string();
         // Mobile header itself is always rendered…
         assert!(s.contains("shell__mobile-header"));
         // …but the ⌘K icon-button inside it isn't, when the page disables the palette.
@@ -381,11 +457,80 @@ mod tests {
             "",
             "Impresspress",
             tb,
+            BodyLayout::Padded,
             html! { "body" },
         )
         .into_string();
         // No topbar element at all when there's nothing to render in it.
         assert!(!s.contains(r#"class="topbar""#));
         assert!(s.contains(">body<") || s.contains(">body</"));
+    }
+
+    /// The body is the page's one `main` landmark and the skip link's
+    /// target; a flush body (chat) drops only the padding modifier.
+    #[test]
+    fn body_renders_as_the_main_landmark() {
+        let groups = one_group(vec![item("X", "/x")]);
+        let render = |layout| {
+            shell(
+                &groups,
+                None,
+                "/x",
+                "",
+                "",
+                "Impresspress",
+                Topbar::default(),
+                layout,
+                html! { "body" },
+            )
+            .into_string()
+        };
+        let padded = render(BodyLayout::Padded);
+        assert_eq!(padded.matches("<main").count(), 1);
+        assert!(padded.contains(r#"<main class="shell__body" id="content" tabindex="-1">"#));
+        let flush = render(BodyLayout::Flush);
+        assert!(flush.contains(r#"<main class="shell__body shell__body--flush" id="content""#));
+    }
+
+    /// The subtitle sits on its own line under the title (no "|" separator)
+    /// and every declared action renders, in order, in the actions slot.
+    #[test]
+    fn topbar_renders_subtitle_line_and_every_action_in_order() {
+        let groups = one_group(vec![item("X", "/x")]);
+        let tb = Topbar {
+            crumbs: vec![
+                Crumb {
+                    label: "Products",
+                    href: Some("/b/products/admin/manage"),
+                },
+                Crumb {
+                    label: "Widget",
+                    href: None,
+                },
+            ],
+            subtitle: Some("Edit the product"),
+            actions: vec![html! { a { "Preview" } }, html! { button { "Publish" } }],
+            show_palette: true,
+        };
+        let s = shell(
+            &groups,
+            None,
+            "/x",
+            "",
+            "",
+            "Impresspress",
+            tb,
+            BodyLayout::Padded,
+            html! {},
+        )
+        .into_string();
+        assert!(s.contains(r#"<h1 class="topbar__title">Widget</h1><p class="topbar__subtitle">Edit the product</p>"#));
+        assert!(!s.contains("topbar__sep"));
+        assert!(s.contains(
+            r#"<div class="topbar__actions"><a>Preview</a><button>Publish</button></div>"#
+        ));
+        // The palette trigger is labelled by a platform-neutral name.
+        assert!(s.contains(r#"aria-label="Search pages (command palette)""#));
+        assert!(!s.contains("Ctrl K"));
     }
 }

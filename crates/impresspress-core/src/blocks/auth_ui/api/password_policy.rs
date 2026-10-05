@@ -28,15 +28,26 @@ pub(crate) async fn validate_new_password(
     Ok(check_new_password(pw, min_len))
 }
 
+/// A password's length as the policy counts it: characters (Unicode scalar
+/// values), the unit its messages name and an operator means by "at least
+/// 8 characters". It was bytes, so "éééééé" (6 characters, 12 bytes) passed
+/// a minimum of 8 and a non-ASCII password read as twice its length. The
+/// pages' `minlength` counts UTF-16 code units, which is never fewer than
+/// this, so the browser never blocks a password the server accepts.
+fn password_length(pw: &str) -> usize {
+    pw.chars().count()
+}
+
 /// [`validate_new_password`] once the minimum length is known.
 fn check_new_password(pw: &str, min_len: usize) -> Result<(), PasswordRefusal> {
-    if pw.len() < min_len {
+    let length = password_length(pw);
+    if length < min_len {
         return Err((
             ErrorCode::PasswordTooShort,
             format!("Password must be at least {min_len} characters"),
         ));
     }
-    if pw.len() > 1024 {
+    if length > 1024 {
         return Err((
             ErrorCode::PasswordTooLong,
             "Password must not exceed 1024 characters".to_string(),
@@ -130,5 +141,25 @@ mod tests {
 
         // Strong, uncommon passphrase → Ok.
         assert!(check(&ctx, "correct-horse-battery-staple-9").await.is_ok());
+    }
+
+    /// Length is counted in characters, not bytes: six two-byte characters
+    /// are six, below the minimum of 8 though they are 12 bytes; eight are
+    /// enough.
+    #[tokio::test]
+    async fn length_counts_characters_not_bytes() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::auth_ui::AUTH_UI_BLOCK_ID);
+        let six = "ñéüöåç";
+        assert_eq!(six.len(), 12);
+        assert_eq!(super::password_length(six), 6);
+        let e = check(&ctx, six).await.unwrap_err();
+        assert_eq!(e.0, ErrorCode::PasswordTooShort);
+        assert!(check(&ctx, "ñéüöåçßø").await.is_ok());
+        // The ceiling is characters too: 1024 three-byte characters fit.
+        assert!(check(&ctx, &"€".repeat(1024)).await.is_ok());
+        let e = check(&ctx, &"€".repeat(1025)).await.unwrap_err();
+        assert_eq!(e.0, ErrorCode::PasswordTooLong);
     }
 }

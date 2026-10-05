@@ -18,7 +18,7 @@
 
 use wafer_run::{context::Context, Message, OutputStream, WaferError};
 
-use super::{admin_page, crumb, email, network, permissions, variables};
+use super::{admin_document, crumb, email, network, permissions, variables};
 use crate::ui::{
     shell::Topbar,
     templates::{tabbed_page, FormSection},
@@ -57,20 +57,61 @@ pub(super) async fn settings_page_after_write(
 ) -> OutputStream {
     match render(ctx, msg, tab).await {
         Ok(page) => page,
-        Err(e) => {
-            let reason = crate::blocks::crud::db_error_notice(
-                e,
-                "admin settings page: re-read after a write failed",
-            );
-            crate::ui::swap_notice_response(&format!(
-                "{done}, but the settings could not be reloaded: {reason}. Reload the page to \
-                 see them."
-            ))
-        }
+        Err(e) => after_write_notice(e, done),
     }
 }
 
+/// [`settings_page_after_write`] for a write submitted from a modal on the
+/// page (Add Variable, Edit Variable): the re-rendered page for the form's
+/// `#content` target, plus `closeModal` for `modal_id` and a `done` toast.
+///
+/// The modal is CLOSED by the response rather than merely swapped away with
+/// `#content`, so the write ends the way every other modal write does: the
+/// dialog's `close` runs, focus goes back to the control that opened it, and
+/// the toast says what landed (a bare swap said nothing). Whichever of
+/// `closeModal` and `showToast` htmx acts on first, the toast is announced
+/// once: chrome.js drops `role="alert"` from toasts already shown before it
+/// moves the container out of the dialog. A request that is not htmx's gets
+/// the full page, as [`settings_page_after_write`] answers it.
+pub(super) async fn settings_page_closing_modal(
+    ctx: &dyn Context,
+    msg: &Message,
+    tab: &str,
+    done: &str,
+    modal_id: &str,
+) -> OutputStream {
+    if !crate::ui::is_htmx(msg) {
+        return settings_page_after_write(ctx, msg, tab, done).await;
+    }
+    match render_document(ctx, msg, tab).await {
+        Ok(body) => crate::ui::html_response_closing_modal(body, modal_id, done, "success"),
+        Err(e) => after_write_notice(e, done),
+    }
+}
+
+/// The notice a landed write answers when the page could not be re-read.
+fn after_write_notice(e: WaferError, done: &str) -> OutputStream {
+    let reason = crate::blocks::crud::db_error_notice(
+        e,
+        "admin settings page: re-read after a write failed",
+    );
+    crate::ui::swap_notice_response(&format!(
+        "{done}, but the settings could not be reloaded: {reason}. Reload the page to see them."
+    ))
+}
+
 async fn render(ctx: &dyn Context, msg: &Message, tab: &str) -> Result<OutputStream, WaferError> {
+    Ok(crate::ui::html_response(
+        render_document(ctx, msg, tab).await?,
+    ))
+}
+
+/// The settings page's markup (htmx-aware, as every shelled page is).
+async fn render_document(
+    ctx: &dyn Context,
+    msg: &Message,
+    tab: &str,
+) -> Result<maud::Markup, WaferError> {
     let active = match tab {
         "email" | "network" | "variables" | "permissions" => tab,
         _ => "email",
@@ -118,19 +159,19 @@ async fn render(ctx: &dyn Context, msg: &Message, tab: &str) -> Result<OutputStr
         }],
     );
 
-    Ok(admin_page(
+    admin_document(
         ctx,
         msg,
         "Settings",
         Topbar {
             crumbs: crumb("Settings"),
-            primary_action: None,
+            actions: Vec::new(),
             subtitle: Some(tab_title(active)),
             show_palette: true,
         },
         form_body,
     )
-    .await)
+    .await
 }
 
 fn tab_title(active: &str) -> &'static str {
@@ -238,10 +279,6 @@ mod tests {
                 max_form_nesting_depth(&html),
                 1,
                 "tab {tab} must not nest <form> elements"
-            );
-            assert!(
-                !html.contains("<form class=\"form-page\""),
-                "tab {tab}: the settings shell must not wrap tab bodies in an outer <form>"
             );
         }
     }

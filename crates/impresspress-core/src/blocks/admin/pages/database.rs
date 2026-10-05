@@ -15,9 +15,12 @@ use wafer_run::{context::Context, Message, OutputStream, WaferError};
 
 use super::{admin_page, crumb};
 use crate::{
-    blocks::admin::database::{
-        introspect_columns, introspect_table_summaries, validate_readonly_query, IntrospectError,
-        TableSummary,
+    blocks::admin::{
+        contracts::result_columns,
+        database::{
+            introspect_columns, introspect_table_summaries, validate_readonly_query,
+            IntrospectError, TableSummary,
+        },
     },
     ui::{
         components::{self, Badge, BadgeVariant},
@@ -281,10 +284,10 @@ async fn schema_panel(ctx: &dyn Context, table: Option<&str>) -> Result<Markup, 
 
     Ok(html! {
         div .db-panel {
-            header .db-panel__head {
-                h3 { (name) }
-                span .text-muted .text-sm { (row_count) " rows" }
-            }
+            (components::section_header(
+                name,
+                Some(html! { span .text-muted .text-sm { (row_count) " rows" } }),
+            ))
             (components::data_table::<fn(usize) -> Option<String>>(
                 &SCHEMA_COLUMNS,
                 rows,
@@ -363,49 +366,43 @@ fn render_sql_results(rows: &[db::Record], duration_ms: u128) -> Markup {
         };
     }
 
-    // Stable column ordering: union of keys, in first-row order then any new
-    // keys appended. A HashSet keeps membership lookup O(1) so the overall
-    // pass is O(rows × cols) instead of O(rows × cols²).
-    let mut columns: Vec<String> = Vec::new();
-    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
-    for r in rows {
-        for k in r.data.keys() {
-            if seen.insert(k.clone()) {
-                columns.push(k.clone());
-            }
-        }
-    }
-
-    // The result grid's columns are the query's, so they are built per render
-    // rather than declared as a const the way the fixed tables are.
+    // The grid's columns are the query's, in the order it returned them, so
+    // they are built per render rather than declared as a const the way the
+    // fixed tables are.
+    let columns = result_columns(rows);
     let cols: Vec<components::TableCol<'_>> = columns
         .iter()
-        .map(|c| components::TableCol {
-            label: c.as_str(),
-            width: None,
-        })
+        .map(|c| components::TableCol::new(c.as_str()))
         .collect();
-    let cells: Vec<Vec<Markup>> = rows
+    let cells: Vec<components::TableRow> = rows
         .iter()
         .map(|r| {
-            columns
-                .iter()
-                .map(|c| html! { @if let Some(v) = r.data.get(c) { (format_cell(v)) } })
-                .collect()
+            components::TableRow::new(
+                columns
+                    .iter()
+                    .map(|c| html! { @if let Some(v) = r.data.get(c) { (format_cell(v)) } })
+                    .collect(),
+            )
         })
         .collect();
 
+    // A query's columns are arbitrary and can be many: the result stays a
+    // grid at every width, in a labelled, focusable horizontal scroller,
+    // rather than collapsing each row into a card.
     html! {
         p .text-muted .text-sm { (rows.len()) " rows in " (duration_ms) "ms" }
-        (components::data_table::<fn(usize) -> Option<String>>(&cols, cells, None, html! {}))
+        (components::DataTable::new(&cols).rows(cells).scroll("Query results").render())
     }
 }
 
-fn format_cell(v: &serde_json::Value) -> String {
+/// One result value, as the query returned it: the explorer shows what is
+/// stored, so a date-time string is not reformatted the way the curated
+/// tables' `components::timestamp` does.
+fn format_cell(v: &serde_json::Value) -> Markup {
     match v {
-        serde_json::Value::Null => "".to_string(),
-        serde_json::Value::String(s) => s.clone(),
-        other => other.to_string(),
+        serde_json::Value::Null => html! {},
+        serde_json::Value::String(s) => html! { (s) },
+        other => html! { (other.to_string()) },
     }
 }
 
@@ -461,7 +458,7 @@ pub async fn database_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         "Database",
         Topbar {
             crumbs: crumb("Database"),
-            primary_action: Some(backend_badge(backend, tables.len())),
+            actions: vec![backend_badge(backend, tables.len())],
             subtitle: Some("Browse tables, view schema, run read-only SQL"),
             show_palette: true,
         },
@@ -502,26 +499,11 @@ pub async fn handle_database_query(
 /// The schema panel's columns. Declared once so the `<td data-label>` the
 /// component stamps on every cell names the same column the header does.
 const SCHEMA_COLUMNS: [components::TableCol<'static>; 5] = [
-    components::TableCol {
-        label: "Column",
-        width: None,
-    },
-    components::TableCol {
-        label: "Type",
-        width: None,
-    },
-    components::TableCol {
-        label: "Not null",
-        width: None,
-    },
-    components::TableCol {
-        label: "PK",
-        width: None,
-    },
-    components::TableCol {
-        label: "Default",
-        width: None,
-    },
+    components::TableCol::new("Column").primary(),
+    components::TableCol::new("Type"),
+    components::TableCol::new("Not null"),
+    components::TableCol::new("PK"),
+    components::TableCol::new("Default").optional(),
 ];
 
 #[cfg(test)]

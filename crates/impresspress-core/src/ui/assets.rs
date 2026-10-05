@@ -150,7 +150,7 @@ fn shared_bytes(logical: &str) -> Option<&'static [u8]> {
         // grid stays 32 cells either way, so this carries no detail the 32
         // lacks; it spares the browser the scale step, nothing more.
         // There is no raster wordmark: brand text is rendered
-        // as text next to the mark (see `templates::brand_lockup`) -- the
+        // as text next to the mark (the sidebar and `components::auth_panel`) -- the
         // old `impresspress-logo-long.png` wordmark was dark-ink artwork
         // illegible on the navy chrome and has been removed outright; rows
         // still pointing at it are repaired by `seed_defaults` via
@@ -1297,8 +1297,11 @@ mod tests {
             assert!(js.contains(verb), "chrome must handle the {verb} verb");
         }
         for hook in [
-            ".modal-overlay[data-modal-dismiss]",
-            "data-stop-propagation",
+            // Modals are native dialogs: opened modally, and noticed closing
+            // however they closed (Esc, Cancel, a trigger) so focus goes back.
+            "showModal()",
+            "addEventListener(\"close\"",
+            "addEventListener(\"cancel\"",
             "data-submit-on-enter",
         ] {
             assert!(js.contains(hook), "chrome must handle {hook}");
@@ -1390,7 +1393,8 @@ mod tests {
             ".toast",
             ".palette",
             ".stat-",
-            ".charts-css",
+            ".chart__plot",
+            ".callout",
             ".auth-split",
         ] {
             assert!(s.contains(marker), "missing layer marker: {marker}");

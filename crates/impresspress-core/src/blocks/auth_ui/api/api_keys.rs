@@ -172,13 +172,12 @@ pub async fn handle_create(ctx: &dyn Context, msg: &Message, input: InputStream)
                         }
                     }
                 };
-                let trigger = r#"{"showToast":{"message":"API key created","type":"success"},"closeModal":{"id":"create-api-key"}}"#;
-                crate::http::ResponseBuilder::new()
-                    .set_header("HX-Trigger", trigger)
-                    .body(
-                        markup.into_string().into_bytes(),
-                        "text/html; charset=utf-8",
-                    )
+                crate::ui::html_response_closing_modal(
+                    markup,
+                    "create-api-key",
+                    "API key created",
+                    "success",
+                )
             } else {
                 ok_json(&serde_json::json!({
                     "id": record.id,

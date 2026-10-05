@@ -78,21 +78,36 @@ pub fn render_buckets_table(rows: &[BucketRow]) -> Markup {
     }
 }
 
-/// Render the "+ New bucket" `<dialog>` modal. The form is wired by the
-/// `bucketCreateModal()` handler in `files-browser.js`: it intercepts
-/// submit, POSTs to `/b/storage/api/buckets`, and on success redirects to
-/// `/b/storage/{name}/`. Markup is rendered server-side so the page works
-/// even before the JS bundle finishes loading (the trigger is a no-op
-/// without JS — accepted v1 trade-off; the JSON API is still callable).
+/// The "+ New bucket" modal's element id, which its triggers name in
+/// `data-modal-target`.
+pub const NEW_BUCKET_MODAL_ID: &str = "new-bucket";
+
+/// The attributes of a "+ New bucket" trigger: it opens the modal through
+/// chrome.js's `modal-open` verb.
+pub fn new_bucket_trigger_attrs() -> PreEscaped<String> {
+    PreEscaped(format!(
+        r#"type="button" data-action="modal-open" data-modal-target="{NEW_BUCKET_MODAL_ID}""#
+    ))
+}
+
+/// Render the "+ New bucket" modal: the shared `components::modal` dialog,
+/// which chrome.js opens and closes. The form is wired by
+/// `bucketCreateForm()` in `files-browser.js`: it intercepts submit, checks
+/// the name, POSTs to `/b/storage/api/buckets`, and on success redirects to
+/// `/b/storage/{name}/`; a refusal lands in the alert at the top of the form.
+/// `method="dialog"` is what a submit does if that script never loaded:
+/// it closes the modal rather than navigating.
 pub fn render_new_bucket_modal() -> Markup {
-    html! {
-        dialog #new-bucket-modal .modal.modal--bucket-create {
+    components::modal(
+        NEW_BUCKET_MODAL_ID,
+        "New bucket",
+        html! {
             form method="dialog" {
-                h3 { "New bucket" }
-                p .modal-error role="alert" hidden {}
-                label {
-                    span { "Name" }
-                    input
+                p .alert .alert--error #new-bucket-error role="alert" hidden {}
+                div .form-group {
+                    label .form-label .required for="new-bucket-name" { "Name" }
+                    input .form-input
+                        #new-bucket-name
                         type="text"
                         name="name"
                         required
@@ -104,22 +119,26 @@ pub fn render_new_bucket_modal() -> Markup {
                         pattern=(crate::blocks::files::storage::BUCKET_NAME_PATTERN)
                         autocomplete="off"
                         spellcheck="false"
-                        placeholder="my-bucket";
+                        placeholder="my-bucket"
+                        aria-describedby="new-bucket-hint"
+                        autofocus;
+                    p .form-hint #new-bucket-hint {
+                        "3–63 characters. Lowercase letters, digits, and hyphens. Must start and end with a letter or digit."
+                    }
                 }
-                small .form-hint {
-                    "3–63 characters. Lowercase letters, digits, and hyphens. Must start and end with a letter or digit."
+                div .form-group {
+                    label .form-checkbox {
+                        input type="checkbox" name="public" value="1";
+                        " Public (objects can be accessed by anonymous URL)"
+                    }
                 }
-                label .checkbox-label {
-                    input type="checkbox" name="public" value="1";
-                    span { "Public (objects can be accessed by anonymous URL)" }
-                }
-                div .modal-actions {
-                    button type="button" data-action="cancel" .btn.btn--ghost.btn--md { "Cancel" }
-                    button type="submit" data-action="create" .btn.btn--primary.btn--md { "Create bucket" }
-                }
+                (components::modal_footer(html! {
+                    (components::modal_cancel())
+                    button .btn .btn--primary .btn--block type="submit" { "Create bucket" }
+                }))
             }
-        }
-    }
+        },
+    )
 }
 
 /// Load the calling user's buckets, decorated with live object counts.
@@ -180,7 +199,7 @@ pub async fn bucket_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream 
         BtnVariant::Primary,
         CtrlSize::Md,
         "+ New bucket",
-        PreEscaped(r#"type="button" data-action="open-new-bucket""#.to_string()),
+        new_bucket_trigger_attrs(),
     );
 
     // The table cell carries the modal markup + JS so it lives inside the
@@ -208,7 +227,7 @@ pub async fn bucket_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream 
                 href: None,
             }],
             subtitle: Some("Your buckets and their object counts."),
-            primary_action: Some(new_bucket_btn),
+            actions: vec![new_bucket_btn],
         },
         body,
     )
@@ -255,7 +274,7 @@ mod tests {
     fn render_buckets_table_renders_the_created_timestamp_as_a_time_element() {
         let html = render_buckets_table(&[sample("photos", false, 0)]).into_string();
         assert!(
-            html.contains(r#"<time datetime="2026-05-06T10:00:00.000Z">2026-05-06 10:00</time>"#),
+            html.contains(r#"<time class="datetime" datetime="2026-05-06T10:00:00.000Z" title="2026-05-06T10:00:00.000Z">2026-05-06 10:00 UTC</time>"#),
             "{html}"
         );
     }
@@ -365,7 +384,7 @@ mod integration_tests {
         // Primary-action lives in the Topbar slot now (see ui(pages) commit
         // that moved page-header content into the topbar).
         assert!(
-            body.contains("topbar__action"),
+            body.contains("topbar__actions"),
             "topbar action slot missing: {body}"
         );
         assert!(
@@ -373,7 +392,7 @@ mod integration_tests {
             "new-bucket button label missing: {body}"
         );
         assert!(
-            body.contains(r#"data-action="open-new-bucket""#),
+            body.contains(r#"data-action="modal-open" data-modal-target="new-bucket""#),
             "new-bucket trigger attribute missing: {body}"
         );
     }
@@ -386,7 +405,7 @@ mod integration_tests {
 
         // Modal markup is server-rendered next to the table.
         assert!(
-            body.contains(r#"id="new-bucket-modal""#),
+            body.contains(r#"<dialog class="modal" id="new-bucket""#),
             "modal element missing: {body}"
         );
         assert!(

@@ -6,7 +6,7 @@
 
 use std::collections::HashMap;
 
-use wafer_core::clients::database::Record;
+use wafer_core::clients::database::{Record, RecordData};
 /// Hashing/hex helpers re-exported from `wafer_block` (the single canonical
 /// implementation). Re-exported here so the many `util::{hex_encode, sha256,
 /// sha256_hex}` call sites across the blocks keep one import path.
@@ -162,10 +162,10 @@ pub trait RecordExt {
 /// The one implementation: every `Record` shape the runtime hands out —
 /// `wafer_core::clients::database::Record` under WRAP and
 /// `wafer_core::interfaces::database::service::Record` at boot — carries a
-/// `data: HashMap<String, Value>` column map, and the platform-state codecs
-/// decode that map for both. Implemented on the map so the two flavours
-/// share one accessor set; the `Record` impl below forwards to it.
-impl RecordExt for HashMap<String, serde_json::Value> {
+/// `data: RecordData` column map, and the platform-state codecs decode that
+/// map for both. Implemented on the map so the two flavours share one
+/// accessor set; the `Record` impl below forwards to it.
+impl RecordExt for RecordData {
     fn str_field(&self, key: &str) -> &str {
         self.get(key).and_then(|v| v.as_str()).unwrap_or("")
     }
@@ -398,22 +398,6 @@ pub fn format_count(count: i64) -> String {
         out.push(ch);
     }
     out
-}
-
-/// Humanize an RFC 3339 timestamp for visible table text: `"2026-07-11 19:13"`
-/// (UTC, minute precision) instead of the raw nanosecond-resolution string
-/// [`now_rfc3339`] produces. Returns the input unchanged when it doesn't
-/// parse, so a malformed stored value degrades to what we have rather than
-/// hiding the row's timestamp. `ui::components::timestamp` pairs this text
-/// with the machine-readable instant in a `<time datetime=...>`.
-pub fn format_timestamp(rfc3339: &str) -> String {
-    match chrono::DateTime::parse_from_rfc3339(rfc3339) {
-        Ok(dt) => dt
-            .with_timezone(&chrono::Utc)
-            .format("%Y-%m-%d %H:%M")
-            .to_string(),
-        Err(_) => rfc3339.to_string(),
-    }
 }
 
 /// Insert created_at + updated_at timestamps into a data map.
@@ -1007,7 +991,7 @@ mod tests {
         assert!(enum_column::<Colour>(
             &Record {
                 id: "row-7".to_string(),
-                data: HashMap::new(),
+                data: Default::default(),
             },
             "colour"
         )
@@ -1196,27 +1180,6 @@ mod tests {
     }
 
     #[test]
-    fn format_timestamp_humanizes_rfc3339_to_utc_minutes() {
-        // Nanosecond-resolution output of `now_rfc3339` (chrono to_rfc3339).
-        assert_eq!(
-            format_timestamp("2026-07-11T19:13:45.123456789+00:00"),
-            "2026-07-11 19:13"
-        );
-        // Z-suffixed and offset forms normalize to UTC.
-        assert_eq!(format_timestamp("2026-05-06T10:00:00Z"), "2026-05-06 10:00");
-        assert_eq!(
-            format_timestamp("2026-05-06T12:30:00+02:00"),
-            "2026-05-06 10:30"
-        );
-    }
-
-    #[test]
-    fn format_timestamp_passes_unparseable_values_through() {
-        assert_eq!(format_timestamp("not a date"), "not a date");
-        assert_eq!(format_timestamp(""), "");
-    }
-
-    #[test]
     fn urlencode_space_becomes_plus() {
         assert_eq!(urlencode("a b"), "a+b");
     }
@@ -1224,7 +1187,7 @@ mod tests {
     fn record(data: serde_json::Value) -> Record {
         Record {
             id: "r1".to_string(),
-            data: json_map(data),
+            data: json_map(data).into_iter().collect(),
         }
     }
 
@@ -1363,7 +1326,7 @@ mod tests {
         data.insert("count".to_string(), serde_json::json!(42));
         let record = Record {
             id: "1".to_string(),
-            data,
+            data: data.into_iter().collect(),
         };
 
         assert_eq!(record.str_field("name"), "Alice");
@@ -1378,7 +1341,7 @@ mod tests {
         data.insert("name".to_string(), serde_json::json!("Alice"));
         let record = Record {
             id: "1".to_string(),
-            data,
+            data: data.into_iter().collect(),
         };
 
         assert_eq!(record.i64_field("count"), 42);
@@ -1398,7 +1361,7 @@ mod tests {
         data.insert("not_a_number".to_string(), serde_json::json!("abc"));
         let record = Record {
             id: "1".to_string(),
-            data,
+            data: data.into_iter().collect(),
         };
 
         assert_eq!(
@@ -1418,7 +1381,7 @@ mod tests {
         data.insert("junk".to_string(), serde_json::json!("x"));
         let record = Record {
             id: "1".to_string(),
-            data,
+            data: data.into_iter().collect(),
         };
 
         assert_eq!(record.opt_i64_field("num"), Some(7));
@@ -1440,7 +1403,7 @@ mod tests {
         data.insert("text_negative".to_string(), serde_json::json!("-2"));
         let record = Record {
             id: "1".to_string(),
-            data,
+            data: data.into_iter().collect(),
         };
 
         assert_eq!(record.u64_field("dims"), 384);
@@ -1470,7 +1433,7 @@ mod tests {
         data.insert("disabled".to_string(), serde_json::json!(false));
         let record = Record {
             id: "1".to_string(),
-            data,
+            data: data.into_iter().collect(),
         };
 
         assert!(record.bool_field("active"));
@@ -1486,7 +1449,7 @@ mod tests {
         data.insert("bool".to_string(), serde_json::json!(true));
         let record = Record {
             id: "1".to_string(),
-            data,
+            data: data.into_iter().collect(),
         };
 
         assert_eq!(field_as_string(&record, "str"), "hello");

@@ -104,26 +104,6 @@
 	color: var(--primary-button);
 	text-decoration: none;
 }
-.orgs-list { list-style: none; padding: 0; margin: 0; }
-.orgs-list-row {
-	display: flex;
-	gap: var(--space-4);
-	align-items: center;
-	padding: var(--space-2) var(--space-4);
-	border-top: 1px solid var(--border-light);
-}
-.orgs-list-row:first-child { border-top: none; }
-.orgs-list-row__provider {
-	font-size: var(--text-xs);
-	text-transform: uppercase;
-	background: var(--surface-3);
-	padding: 2px var(--space-2);
-	border-radius: var(--radius-sm);
-	color: var(--text-muted);
-}
-.orgs-list-row__name { flex: 1; font-weight: 500; }
-.orgs-list-row__date { font-size: var(--text-xs); color: var(--text-muted); }
-
 /* ===== Security page (Phase 4 PR-2) ===== */
 .security-section { margin-bottom: var(--space-6); }
 .linked-providers-list { list-style: none; padding: 0; margin: 0; }
@@ -374,9 +354,6 @@
 @media (max-width: 720px) {
 	/* Dashboard: apps grid stacks single-column. */
 	.dashboard-apps-grid { grid-template-columns: 1fr; }
-	/* Orgs list rows: provider/name/date stack tightly. */
-	.orgs-list-row { flex-wrap: wrap; gap: var(--space-1); }
-	.orgs-list-row__date { width: 100%; font-size: var(--text-xs); }
 	/* Linked providers list: stack tightly on narrow screens. */
 	.linked-provider { flex-wrap: wrap; gap: var(--space-1); }
 	.linked-provider__date { width: 100%; }
@@ -404,8 +381,10 @@
 	padding: var(--space-4);
 	cursor: pointer;
 	transition: border-color 0.15s, box-shadow 0.15s;
+	position: relative;
 }
-.block-card:hover { border-color: var(--primary-color); box-shadow: var(--shadow-sm); }
+.block-card:hover,
+.block-card:focus-within { border-color: var(--primary-color); box-shadow: var(--shadow-sm); }
 .block-card--disabled { opacity: 0.6; }
 .block-card__head { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-2); }
 .block-card__title {
@@ -413,6 +392,15 @@
 	margin: 0; color: var(--text-primary);
 	word-break: break-word;
 }
+/* The card's control (blocks.rs): a button that reads as the title, its
+   ::after stretched over the card so the whole card stays clickable. */
+.block-card__title-button {
+	all: unset;
+	cursor: pointer;
+	border-radius: var(--radius-sm);
+}
+.block-card__title-button::after { content: ""; position: absolute; inset: 0; border-radius: var(--radius-lg); }
+.block-card__title-button:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
 /* `font-size` here used to size the "\u{2713}"/"\u{2717}" text glyphs; the
    marks are now `icons::check()`/`icons::x()`, so the size moves to the svg
    rule below (16px to sit with the card title rather than the icon set's
@@ -450,6 +438,8 @@
 .block-card__version { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .block-card__open {
 	margin-left: auto;
+	/* Above the title button's card-wide ::after, so it is its own target. */
+	position: relative; z-index: 1;
 	/* Match the meta-row baseline; no absolute positioning so the Open
 	   button can never overlap the next card's title (the previous bug). */
 }
@@ -526,143 +516,22 @@
 	.messages-list__status { grid-area: status; justify-self: end; }
 }
 
-/* ===== Account card (userportal single-card layout) ===== */
-
-.account-page {
-	min-height: 100dvh;
-	background: var(--bg-secondary);
-	display: flex;
-	align-items: center;
-	justify-content: center;
-	padding: var(--space-4);
-	box-sizing: border-box;
+/* ===== Account pages (userportal + /b/auth/orgs, in the portal shell) =====
+   The body of an account page is a readable column of sections, each headed
+   by the shared `.section-header` (h2) and divided by a rule -- the same
+   measure and rhythm as `.settings-form`. */
+.account-sections { max-width: 40rem; }
+.account-section + .account-section {
+	margin-top: var(--space-8); padding-top: var(--space-6);
+	border-top: 1px solid var(--border-color);
 }
-
-.account-card {
-	width: 100%;
-	max-width: 480px;
-	background: var(--bg-primary);
-	border: 1px solid var(--border-color);
-	border-radius: var(--radius-lg);
-	box-shadow: var(--shadow-sm);
-	margin: var(--space-4) 0 var(--space-8);
-	overflow: hidden;
-	display: flex;
-	flex-direction: column;
-}
-
-.account-card__head {
-	display: flex;
-	flex-direction: column;
-	align-items: center;
-	gap: var(--space-2);
-	padding: var(--space-8) var(--space-6) var(--space-5);
-	border-bottom: 1px solid var(--border-light);
-	position: relative;
-}
-
-.account-card__back {
-	position: absolute;
-	top: 0.875rem;
-	left: 0.875rem;
-	display: inline-flex;
-	align-items: center;
-	gap: var(--space-1);
-	color: var(--text-secondary);
-	font-size: 0.875rem;
-	text-decoration: none;
-	padding: var(--space-1) var(--space-2);
-	border-radius: var(--radius-md);
-	transition: background var(--transition-fast), color var(--transition-fast);
-}
-
-.account-card__back:hover {
-	background: var(--bg-hover);
-	color: var(--text-primary);
-}
-
-.account-card__back svg {
-	width: 16px;
-	height: 16px;
-}
-
-/* Ported from origin/main (ui/assets/components.css) during the main merge
-   -- 2026-09-02. The card header's brand comes from `templates::brand_lockup`,
-   shared with the auth cards. Only the wordmark case needs scoping to this
-   card: cap its width so a wide white-label wordmark can't outgrow the card,
-   and drop the auth-card bottom margin (this header is a flex column with
-   its own gap). The icon lockup keeps its natural 64px -- the built-in mark
-   is pixel art and must not be scaled off a whole multiple of its cell size.
-   Replaces the old `.account-card__logo` rule, which targeted a class
-   `brand_lockup` never renders (it renders `.logo-image`) -- that mismatch
-   predates this merge on both sides. */
-.account-card__head .logo-image {
-	max-width: 220px;
-	margin-bottom: 0;
-}
-
-.account-card__title {
-	margin: 0;
-	font-size: 1.25rem;
-	font-weight: 600;
-	color: var(--text-primary);
-	text-align: center;
-}
-
-.account-card__body {
-	padding: var(--space-4);
-}
-
-.account-card__body > .account-section + .account-section {
-	margin-top: var(--space-6);
-	padding-top: var(--space-6);
-	border-top: 1px solid var(--border-light);
-}
-
-.account-section__title {
-	margin: 0 0 var(--space-3);
-	font-size: 0.95rem;
-	font-weight: 600;
-	color: var(--text-primary);
-}
-
-.account-card__foot {
-	padding: var(--space-4) var(--space-6) var(--space-6);
-	border-top: 1px solid var(--border-light);
-}
-
-.account-card__signout {
-	width: 100%;
-	padding: var(--space-3) var(--space-4);
-	background: var(--bg-primary);
-	/* --accent-danger text on white is 3.76:1 -- below the 4.5:1 AA floor
-	 * (caught driving account_card_page during the 12d design pass).
-	 * --accent-danger stays elsewhere (badges, alerts, borders -- none of
-	 * them pair it with white text at normal size); --primary-button
-	 * (4.99:1) is this app's one AA-safe red for text and reused here
-	 * rather than inventing a new token for a single site. */
-	color: var(--primary-button);
-	border: 1px solid var(--border-color);
-	border-radius: var(--radius-md);
-	font-size: 0.95rem;
-	font-weight: 500;
-	cursor: pointer;
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	gap: var(--space-2);
-	transition: background var(--transition-fast), border-color var(--transition-fast);
-}
-
-.account-card__signout:hover {
-	background: var(--bg-hover);
-	border-color: var(--accent-danger);
-}
-
-.account-card__signout svg {
-	width: 18px;
-	height: 18px;
-}
+/* A form's htmx answer (the shared alert) lands here, between the fields
+   and the submit button. */
+.account-form__result:not(:empty) { margin-top: var(--space-4); }
+.account-form__actions { margin-top: var(--space-5); }
+/* What replaces the change-password form once it succeeded: the success
+   alert above the "Sign in again" link. */
+.change-password-done { display: flex; flex-direction: column; align-items: flex-start; gap: var(--space-4); }
 
 /* ===== Message card (Messages block entry_card) =====
    Three accent variants keyed off entry kind/role — neutral (default/
@@ -748,8 +617,7 @@
 /* ===== Messages block: task/notification single-pane entries list ===== */
 .entries-list--scroll { max-height: 60vh; overflow-y: auto; }
 
-/* ===== Legal pages editor status bar (blocks/legalpages/pages.rs) ===== */
-.editor-status__title { font-size: 1.25rem; font-weight: 600; margin: 0; }
+/* ===== Legal pages editor status row (blocks/legalpages/pages.rs) ===== */
 .editor-status__version { background: var(--bg-hover); color: var(--text-muted); }
 
 /* ===== Tickets admin (blocks/tickets/pages.rs) =====
@@ -771,15 +639,6 @@
 .ticket-form-grid--create { margin-top: var(--space-4); max-width: 48rem; }
 .ticket-form-grid--type-create { margin: var(--space-4) 0; max-width: 50rem; }
 .ticket-form-grid--type-edit { margin-top: var(--space-4); }
-
-/* ===== Vector backend-unavailable callout (blocks/vector/pages_ui.rs) =====
-   #fff8e1/#f0d78c/#92400e have no matching design tokens (--accent-warning
-   is #f59e0b, too saturated for a pale banner tint) -- same pattern as
-   auth-split.css's #ecfdf5/#a7f3d0/#059669 pair. 6.67:1 computed (#92400e
-   on #fff8e1), clears the 4.5:1 AA text floor. */
-.callout { margin-bottom: var(--space-4); padding: var(--space-4); border-radius: var(--radius-md); }
-.callout--warning { background: #fff8e1; border: 1px solid #f0d78c; color: #92400e; }
-.callout__code { font-size: 12px; padding: 1px var(--space-1); background: rgba(0,0,0,0.05); border-radius: 3px; }
 
 /* ===== API key reveal card (blocks/auth_ui/api/api_keys.rs) ===== */
 .api-key-card { margin-bottom: var(--space-4); }
@@ -850,11 +709,6 @@
 /* Match the 14px label rather than the icon set's 18px default. */
 .products-guide__link svg { width: 14px; height: 14px; }
 .products-guide__item p { margin: 0; line-height: 1.55; }
-.products-callout { display: flex; align-items: flex-start; justify-content: space-between; gap: var(--space-4); padding: var(--space-4) var(--space-4); margin: 0 0 var(--space-5); border: 1px solid color-mix(in srgb, var(--primary-color) 28%, var(--border-color)); border-radius: 14px; background: color-mix(in srgb, var(--primary-color) 6%, var(--surface-1)); }
-.products-callout__copy { max-width: 68ch; }
-.products-callout__copy strong { display: block; margin-bottom: var(--space-1); }
-.products-callout__copy p { margin: 0; }
-.products-callout__actions { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; flex: none; }
 .product-template-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: var(--space-4); }
 .product-template-card { display: grid; grid-template-columns: auto 1fr; gap: var(--space-1) var(--space-3); align-items: start; padding: var(--space-4); border: 1px solid var(--border-color); border-radius: 14px; cursor: pointer; transition: border-color .15s ease, box-shadow .15s ease, transform .15s ease; }
 .product-template-card:hover { border-color: var(--primary-color); box-shadow: 0 8px 22px rgba(15, 23, 42, .08); transform: translateY(-1px); }
@@ -867,9 +721,6 @@
 body:has(.products-tabs) .card { border-radius: 14px; box-shadow: 0 8px 26px rgba(15, 23, 42, .045); }
 @media (max-width: 760px) {
 	.products-guide { grid-template-columns: 1fr; }
-	.products-callout { flex-direction: column; }
-	.products-callout__actions { width: 100%; }
-	.products-callout__actions .btn { flex: 1; }
 	.product-template-grid { grid-template-columns: 1fr; }
 }
 

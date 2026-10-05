@@ -61,7 +61,32 @@ pub(crate) async fn admin_page(
             nav: NavKind::Admin,
             crumbs: topbar.crumbs,
             subtitle: topbar.subtitle,
-            primary_action: topbar.primary_action,
+            actions: topbar.actions,
+        },
+        content,
+    )
+    .await
+}
+
+/// [`admin_page`]'s markup, before it becomes a response — for a handler
+/// that has to put headers of its own on the answer (a modal's form whose
+/// landed write re-renders the page AND closes the modal).
+pub(crate) async fn admin_document(
+    ctx: &dyn Context,
+    msg: &Message,
+    title: &str,
+    topbar: Topbar<'_>,
+    content: Markup,
+) -> Result<Markup, wafer_run::WaferError> {
+    ui::shell_document(
+        ctx,
+        msg,
+        Shell {
+            title,
+            nav: NavKind::Admin,
+            crumbs: topbar.crumbs,
+            subtitle: topbar.subtitle,
+            actions: topbar.actions,
         },
         content,
     )

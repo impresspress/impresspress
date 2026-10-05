@@ -5,8 +5,9 @@ import { SHOP_OFFER, uniqueShopProduct } from './fixtures/shop-fixture';
 import { execute, registeredTools } from './fixtures/webmcp-helpers';
 
 /**
- * WebMCP end-to-end against the real native server (visual-baseline config:
- * port 8093 in CI, admin session via globalSetup).
+ * WebMCP end-to-end against the real native server (visual-baseline config,
+ * admin session via globalSetup). It seeds a product, so it is part of
+ * `e2e:writes` (its own fresh server in CI, port 8094), not `e2e:visual`.
  *
  * `MODEL_CONTEXT_POLYFILL` (shared with `smoke.spec.ts`) is the smallest
  * `document.modelContext` shim `ui/assets/webmcp.js` and `webmcp-core.js`

@@ -143,6 +143,14 @@ class StubElement {
   remove() {
     this.removed = true;
   }
+
+  setAttribute(name, value) {
+    this.attributes[name] = String(value);
+  }
+
+  removeAttribute(name) {
+    delete this.attributes[name];
+  }
 }
 
 /**
@@ -267,6 +275,10 @@ export function loadChrome({ toastContainer = true } = {}) {
      */
     finishRequest(elt, successful) {
       body.dispatchEvent(new StubCustomEvent('htmx:afterRequest', { detail: { elt, successful } }));
+    },
+    /** Fire an `HX-Trigger` event on the body, as htmx does for a response header. */
+    trigger(type, detail) {
+      body.dispatchEvent(new StubCustomEvent(type, { detail }));
     },
     /** How many times the page asked to reload. */
     reloads: () => reloads,

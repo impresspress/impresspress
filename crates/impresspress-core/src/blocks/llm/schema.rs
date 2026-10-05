@@ -314,7 +314,7 @@ mod tests {
         let row = config_to_row(&cfg);
         let record = Record {
             id: "abc123".into(),
-            data: row,
+            data: row.into_iter().collect(),
         };
         let decoded = row_to_config(&record).expect("decode");
         assert_eq!(decoded.name, cfg.name);
@@ -345,7 +345,7 @@ mod tests {
         );
         let decoded = row_to_config(&Record {
             id: "r1".into(),
-            data: row,
+            data: row.into_iter().collect(),
         })
         .expect("decode");
         assert_eq!(decoded.max_tokens_field, cfg.max_tokens_field);
@@ -362,7 +362,7 @@ mod tests {
                 d.insert("name".into(), serde_json::json!("x"));
                 d.insert("protocol".into(), serde_json::json!("open_ai_compatible"));
                 d.insert("endpoint".into(), serde_json::json!("https://x"));
-                d
+                d.into_iter().collect()
             },
         };
         assert!(row_to_config(&record)
@@ -385,7 +385,7 @@ mod tests {
                 d.insert("protocol".into(), serde_json::json!("open_ai"));
                 d.insert("endpoint".into(), serde_json::json!("https://x"));
                 d.insert("max_tokens_field".into(), serde_json::json!("maxTokens"));
-                d
+                d.into_iter().collect()
             },
         };
         let err = row_to_config(&record).expect_err("must reject an unknown token");
@@ -423,7 +423,7 @@ mod tests {
                 d.insert("name".into(), serde_json::json!("x"));
                 d.insert("protocol".into(), serde_json::json!("openai")); // non-canonical
                 d.insert("endpoint".into(), serde_json::json!("https://x"));
-                d
+                d.into_iter().collect()
             },
         };
         let err = row_to_config(&record).expect_err("must reject alias");
@@ -440,7 +440,7 @@ mod tests {
                 d.insert("protocol".into(), serde_json::json!("open_ai"));
                 d.insert("endpoint".into(), serde_json::json!("https://x"));
                 // no api_key_encrypted, no key_var, no models, no enabled
-                d
+                d.into_iter().collect()
             },
         };
         let cfg = row_to_config(&record).expect("decode");
@@ -462,7 +462,7 @@ mod tests {
                 d.insert("protocol".into(), serde_json::json!("open_ai"));
                 d.insert("endpoint".into(), serde_json::json!("https://x"));
                 d.insert("models".into(), serde_json::json!(r#"["a","b"]"#));
-                d
+                d.into_iter().collect()
             },
         };
         let cfg = row_to_config(&record).expect("decode");
@@ -481,7 +481,7 @@ mod tests {
                 d.insert("protocol".into(), serde_json::json!("open_ai"));
                 d.insert("endpoint".into(), serde_json::json!("https://x"));
                 d.insert("models".into(), serde_json::json!("this is not json"));
-                d
+                d.into_iter().collect()
             },
         };
         let cfg = row_to_config(&record).expect("decode");
@@ -498,7 +498,7 @@ mod tests {
                 d.insert("protocol".into(), serde_json::json!("open_ai"));
                 d.insert("endpoint".into(), serde_json::json!("https://x"));
                 d.insert("enabled".into(), serde_json::json!(0));
-                d
+                d.into_iter().collect()
             },
         };
         let cfg = row_to_config(&record).expect("decode");

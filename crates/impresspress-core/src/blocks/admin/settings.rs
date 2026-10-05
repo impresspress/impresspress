@@ -110,7 +110,7 @@ pub(super) async fn handle_get(ctx: &dyn Context, msg: &Message) -> OutputStream
     // always published; it is declared without a schema until it is typed.
     ok_json(&db::Record {
         id: row.id.clone(),
-        data: row.to_data(),
+        data: row.to_data().into_iter().collect(),
     })
 }
 
@@ -223,7 +223,10 @@ pub(super) async fn handle_set(
             } else if ops::is_sensitive_key(&row.key, i64::from(row.sensitive)) {
                 data.insert("value".to_string(), serde_json::json!(MASKED_VALUE));
             }
-            ok_json(&db::Record { id: row.id, data })
+            ok_json(&db::Record {
+                id: row.id,
+                data: data.into_iter().collect(),
+            })
         }
         Err(out) => out,
     }
@@ -272,9 +275,9 @@ pub(super) async fn handle_create(
         // always published; declared without a schema until it is typed.
         Ok(row) => ok_json(&db::Record {
             id: row.id.clone(),
-            data: row.to_data(),
+            data: row.to_data().into_iter().collect(),
         }),
-        Err(out) => out,
+        Err(refusal) => refusal.into_response(),
     }
 }
 
@@ -605,13 +608,37 @@ mod tests {
             .expect("apply admin migrations");
 
         // Not sensitive: no flag, no suffix.
-        seed_var(&ctx, "SITE_NAME", "Acme", false).await;
+        seed_var(
+            &ctx,
+            crate::blocks::admin::fixture_keys::SITE_NAME,
+            "Acme",
+            false,
+        )
+        .await;
         // Sensitive by suffix alone (SEC-060): the flag is clear.
-        seed_var(&ctx, "STRIPE_SECRET", "sk_live_realsecret", false).await;
-        seed_var(&ctx, "MAILGUN_API_KEY", "key-realsecret", false).await;
+        seed_var(
+            &ctx,
+            crate::blocks::admin::fixture_keys::STRIPE_SECRET,
+            "sk_live_realsecret",
+            false,
+        )
+        .await;
+        seed_var(
+            &ctx,
+            crate::blocks::admin::fixture_keys::MAILGUN_API_KEY,
+            "key-realsecret",
+            false,
+        )
+        .await;
         // Sensitive by flag alone: `InputType::Password` vars carry neither
         // suffix, and `seed_defaults` is what sets their flag.
-        seed_var(&ctx, "BOOTSTRAP_ADMIN_PASSWORD", "hunter2", true).await;
+        seed_var(
+            &ctx,
+            crate::blocks::admin::fixture_keys::BOOTSTRAP_ADMIN_PASSWORD,
+            "hunter2",
+            true,
+        )
+        .await;
 
         let body = crate::test_support::output_json(handle_list(&ctx).await).await;
         let by_key: std::collections::HashMap<&str, &serde_json::Value> = body["settings"]
@@ -622,19 +649,19 @@ mod tests {
             .collect();
 
         assert_eq!(
-            by_key["SITE_NAME"]["value"],
+            by_key[crate::blocks::admin::fixture_keys::SITE_NAME]["value"],
             serde_json::json!("Acme"),
             "a non-sensitive value must be published unchanged"
         );
         assert_eq!(
-            by_key["SITE_NAME"]["sensitive"],
+            by_key[crate::blocks::admin::fixture_keys::SITE_NAME]["sensitive"],
             serde_json::json!(false),
             "a non-sensitive variable must say so"
         );
         for masked in [
-            "STRIPE_SECRET",
-            "MAILGUN_API_KEY",
-            "BOOTSTRAP_ADMIN_PASSWORD",
+            crate::blocks::admin::fixture_keys::STRIPE_SECRET,
+            crate::blocks::admin::fixture_keys::MAILGUN_API_KEY,
+            crate::blocks::admin::fixture_keys::BOOTSTRAP_ADMIN_PASSWORD,
         ] {
             assert_eq!(
                 by_key[masked]["value"],
@@ -942,11 +969,17 @@ mod tests {
             .expect("apply admin migrations");
 
         // Insert a *_SECRET row with the sensitive flag explicitly unset.
-        seed_var(&ctx, "STRIPE_SECRET", "sk_live_supersecret", false).await;
+        seed_var(
+            &ctx,
+            crate::blocks::admin::fixture_keys::STRIPE_SECRET,
+            "sk_live_supersecret",
+            false,
+        )
+        .await;
 
         let msg = crate::blocks::admin::test_support::routed(admin_msg(
             "retrieve",
-            "/b/admin/api/settings/STRIPE_SECRET",
+            "/b/admin/api/settings/WAFER_RUN_SHARED__STRIPE_SECRET",
         ));
         let body = output_json(handle_get(&ctx, &msg).await).await;
         // `Record` serializes as `{ id, data: { value, ... } }`.
@@ -1241,11 +1274,17 @@ mod tests {
 
         // An ad hoc row: sensitive by the operator's flag alone, so the flag is
         // a thing that can legitimately be turned off.
-        seed_var(&ctx, "MY_SERVICE_HANDLE", "acme-prod", true).await;
+        seed_var(
+            &ctx,
+            crate::blocks::admin::fixture_keys::MY_SERVICE_HANDLE,
+            "acme-prod",
+            true,
+        )
+        .await;
 
         let put = crate::blocks::admin::test_support::routed(admin_msg(
             "update",
-            "/b/admin/api/settings/MY_SERVICE_HANDLE",
+            "/b/admin/api/settings/WAFER_RUN_SHARED__MY_SERVICE_HANDLE",
         ));
         let body = serde_json::to_vec(&serde_json::json!({ "sensitive": false }))
             .expect("serialize request body");
@@ -1253,10 +1292,11 @@ mod tests {
             output_http_status(handle_set(&ctx, &put, InputStream::from_bytes(body)).await).await;
         assert_eq!(status, 200, "a value-less PATCH is a valid partial update");
 
-        let row = variables::get_by_key(&ctx, "MY_SERVICE_HANDLE")
-            .await
-            .expect("read the row back")
-            .expect("the row is still there");
+        let row =
+            variables::get_by_key(&ctx, crate::blocks::admin::fixture_keys::MY_SERVICE_HANDLE)
+                .await
+                .expect("read the row back")
+                .expect("the row is still there");
         assert_eq!(row.value, "acme-prod", "the value column is untouched");
         assert!(!row.sensitive, "and the field that was sent did change");
     }
@@ -1280,11 +1320,17 @@ mod tests {
         crate::blocks::admin::migrations::apply(&ctx)
             .await
             .expect("apply admin migrations");
-        seed_var(&ctx, "MY_SERVICE_HANDLE", "acme-prod", true).await;
+        seed_var(
+            &ctx,
+            crate::blocks::admin::fixture_keys::MY_SERVICE_HANDLE,
+            "acme-prod",
+            true,
+        )
+        .await;
 
         let put = crate::blocks::admin::test_support::routed(admin_msg(
             "update",
-            "/b/admin/api/settings/MY_SERVICE_HANDLE",
+            "/b/admin/api/settings/WAFER_RUN_SHARED__MY_SERVICE_HANDLE",
         ));
         let body = serde_json::to_vec(&serde_json::json!({ "sensitive": false }))
             .expect("serialize request body");
@@ -1323,11 +1369,17 @@ mod tests {
         crate::blocks::admin::migrations::apply(&ctx)
             .await
             .expect("apply admin migrations");
-        seed_var(&ctx, "SITE_MOTTO", "move fast", false).await;
+        seed_var(
+            &ctx,
+            crate::blocks::admin::fixture_keys::SITE_MOTTO,
+            "move fast",
+            false,
+        )
+        .await;
 
         let msg = crate::blocks::admin::test_support::routed(admin_msg(
             "update",
-            "/b/admin/api/settings/SITE_MOTTO",
+            "/b/admin/api/settings/WAFER_RUN_SHARED__SITE_MOTTO",
         ));
         let body = serde_json::to_vec(&serde_json::json!({ "sensitive": false }))
             .expect("serialize request body");
@@ -1346,7 +1398,7 @@ mod tests {
         replay.insert("sensitive".to_string(), serde_json::json!(false));
         let msg = crate::blocks::admin::test_support::routed(admin_msg(
             "update",
-            "/b/admin/api/settings/SITE_MOTTO",
+            "/b/admin/api/settings/WAFER_RUN_SHARED__SITE_MOTTO",
         ));
         let body =
             serde_json::to_vec(&serde_json::Value::Object(replay)).expect("serialize request body");
@@ -1356,7 +1408,7 @@ mod tests {
         .await;
 
         assert_eq!(
-            variables::get_by_key(&ctx, "SITE_MOTTO")
+            variables::get_by_key(&ctx, crate::blocks::admin::fixture_keys::SITE_MOTTO)
                 .await
                 .expect("read back")
                 .expect("row")
@@ -1458,7 +1510,7 @@ mod tests {
             "/b/admin/api/settings",
         ));
         let body = serde_json::to_vec(&serde_json::json!({
-            "key": "SITE_NOTES", "value": "", "sensitive": false
+            "key": crate::blocks::admin::fixture_keys::SITE_NOTES, "value": "", "sensitive": false
         }))
         .expect("serialize request body");
         assert_eq!(
@@ -1499,7 +1551,7 @@ mod tests {
             "/b/admin/api/settings",
         ));
         let body = serde_json::to_vec(&serde_json::json!({
-            "key": "SITE_NOTES", "value": "", "sensitive": true
+            "key": crate::blocks::admin::fixture_keys::SITE_NOTES, "value": "", "sensitive": true
         }))
         .expect("serialize request body");
         assert_eq!(
@@ -1508,10 +1560,12 @@ mod tests {
             200,
             "the Add Variable modal's default flow must not be refused",
         );
-        assert!(variables::get_by_key(&ctx, "SITE_NOTES")
-            .await
-            .expect("read back")
-            .is_some());
+        assert!(
+            variables::get_by_key(&ctx, crate::blocks::admin::fixture_keys::SITE_NOTES)
+                .await
+                .expect("read back")
+                .is_some()
+        );
     }
 
     /// Making both fields optional must not make an empty body a way to
@@ -1530,7 +1584,7 @@ mod tests {
 
         let put = crate::blocks::admin::test_support::routed(admin_msg(
             "update",
-            "/b/admin/api/settings/NOT_STORED_YET",
+            "/b/admin/api/settings/WAFER_RUN_SHARED__NOT_STORED_YET",
         ));
         let status = output_http_status(
             handle_set(&ctx, &put, InputStream::from_bytes(b"{}".to_vec())).await,
@@ -1538,7 +1592,7 @@ mod tests {
         .await;
         assert_eq!(status, 400);
         assert!(
-            variables::get_by_key(&ctx, "NOT_STORED_YET")
+            variables::get_by_key(&ctx, crate::blocks::admin::fixture_keys::NOT_STORED_YET)
                 .await
                 .expect("read back")
                 .is_none(),
@@ -1559,11 +1613,17 @@ mod tests {
         crate::blocks::admin::migrations::apply(&ctx)
             .await
             .expect("apply admin migrations");
-        seed_var(&ctx, "PASSWORD_PLACEHOLDER_TEXT", "type here", false).await;
+        seed_var(
+            &ctx,
+            crate::blocks::admin::fixture_keys::PASSWORD_PLACEHOLDER_TEXT,
+            "type here",
+            false,
+        )
+        .await;
 
         let put = crate::blocks::admin::test_support::routed(admin_msg(
             "update",
-            "/b/admin/api/settings/PASSWORD_PLACEHOLDER_TEXT",
+            "/b/admin/api/settings/WAFER_RUN_SHARED__PASSWORD_PLACEHOLDER_TEXT",
         ));
         let body = serde_json::to_vec(&serde_json::json!({ "value": MASKED_VALUE }))
             .expect("serialize request body");
@@ -1572,11 +1632,14 @@ mod tests {
             200,
         );
         assert_eq!(
-            variables::get_by_key(&ctx, "PASSWORD_PLACEHOLDER_TEXT")
-                .await
-                .expect("read the row back")
-                .expect("the row is still there")
-                .value,
+            variables::get_by_key(
+                &ctx,
+                crate::blocks::admin::fixture_keys::PASSWORD_PLACEHOLDER_TEXT
+            )
+            .await
+            .expect("read the row back")
+            .expect("the row is still there")
+            .value,
             MASKED_VALUE,
         );
     }
@@ -1825,7 +1888,7 @@ mod create_tests {
         let ctx = admin_ctx().await;
         create(
             &ctx,
-            serde_json::json!({"key": "SITE_MOTTO", "value": "one"}),
+            serde_json::json!({"key": crate::blocks::admin::fixture_keys::SITE_MOTTO, "value": "one"}),
         )
         .await;
 
@@ -1833,12 +1896,89 @@ mod create_tests {
             &ctx,
             &admin_msg("create", "/b/admin/api/settings"),
             InputStream::from_bytes(
-                serde_json::to_vec(&serde_json::json!({"key": "SITE_MOTTO", "value": "two"}))
+                serde_json::to_vec(&serde_json::json!({"key": crate::blocks::admin::fixture_keys::SITE_MOTTO, "value": "two"}))
                     .unwrap(),
             ),
         )
         .await;
         assert_eq!(crate::test_support::output_http_status(out).await, 409);
+    }
+
+    /// `POST /b/admin/api/settings` with a key the naming rule refuses
+    /// answers **400** saying what a valid key looks like, and stores
+    /// nothing. "bad key!" is the key the 2026-10 admin review found stored.
+    #[tokio::test]
+    async fn creating_a_malformed_key_is_a_400_that_says_what_is_valid() {
+        let ctx = admin_ctx().await;
+        for key in [
+            "bad key!",
+            "MY_SETTING",
+            "impresspress__email__from",
+            "IMPRESSPRESS__EMAIL",
+        ] {
+            let out = handle_create(
+                &ctx,
+                &admin_msg("create", "/b/admin/api/settings"),
+                InputStream::from_bytes(
+                    serde_json::to_vec(&serde_json::json!({"key": key, "value": "v"})).unwrap(),
+                ),
+            )
+            .await;
+            let body = crate::test_support::output_http_json(out).await;
+            assert_eq!(
+                body["error"],
+                serde_json::json!("InvalidArgument"),
+                "{key}: {body}"
+            );
+            let message = body["message"].as_str().unwrap_or_default();
+            assert!(
+                message.contains(crate::config_vars::VARIABLE_KEY_FORMAT),
+                "{key}: the 400 must say what a valid key looks like: {message}"
+            );
+            assert!(
+                variables::get_by_key(&ctx, key)
+                    .await
+                    .expect("read")
+                    .is_none(),
+                "{key} must not be stored"
+            );
+        }
+    }
+
+    /// `PATCH /b/admin/api/settings/{key}` upserts, so it is a create path
+    /// too, and refuses a malformed key with the same 400.
+    #[tokio::test]
+    async fn a_patch_cannot_create_a_malformed_key() {
+        let ctx = admin_ctx().await;
+        let msg = crate::blocks::admin::test_support::routed(admin_msg(
+            "update",
+            "/b/admin/api/settings/bad%20key!",
+        ));
+        let out = handle_set(
+            &ctx,
+            &msg,
+            InputStream::from_bytes(
+                serde_json::to_vec(&serde_json::json!({"value": "v"})).unwrap(),
+            ),
+        )
+        .await;
+        let body = crate::test_support::output_http_json(out).await;
+        assert_eq!(
+            body["error"],
+            serde_json::json!("InvalidArgument"),
+            "{body}"
+        );
+        assert!(
+            body["message"]
+                .as_str()
+                .unwrap_or_default()
+                .contains(crate::config_vars::VARIABLE_KEY_FORMAT),
+            "{body}"
+        );
+        assert!(variables::get_by_key(&ctx, "bad key!")
+            .await
+            .expect("read")
+            .is_none());
     }
 
     /// An ad hoc variable created without saying whether it is sensitive is
@@ -1851,10 +1991,10 @@ mod create_tests {
         let ctx = admin_ctx().await;
         create(
             &ctx,
-            serde_json::json!({"key": "SITE_MOTTO", "value": "move fast"}),
+            serde_json::json!({"key": crate::blocks::admin::fixture_keys::SITE_MOTTO, "value": "move fast"}),
         )
         .await;
-        assert!(sensitive_flag(&ctx, "SITE_MOTTO").await);
+        assert!(sensitive_flag(&ctx, crate::blocks::admin::fixture_keys::SITE_MOTTO).await);
     }
 
     #[tokio::test]
@@ -1862,10 +2002,10 @@ mod create_tests {
         let ctx = admin_ctx().await;
         create(
             &ctx,
-            serde_json::json!({"key": "SITE_MOTTO", "value": "move fast", "sensitive": false}),
+            serde_json::json!({"key": crate::blocks::admin::fixture_keys::SITE_MOTTO, "value": "move fast", "sensitive": false}),
         )
         .await;
-        assert!(!sensitive_flag(&ctx, "SITE_MOTTO").await);
+        assert!(!sensitive_flag(&ctx, crate::blocks::admin::fixture_keys::SITE_MOTTO).await);
     }
 }
 

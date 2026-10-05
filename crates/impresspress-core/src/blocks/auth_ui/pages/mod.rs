@@ -14,10 +14,7 @@ pub mod signup;
 use maud::{html, Markup};
 use wafer_run::context::Context;
 
-use crate::{
-    blocks::auth_ui::OAUTH_REDIRECT_URI_KEY,
-    ui::{self, SiteConfig},
-};
+use crate::{blocks::auth_ui::OAUTH_REDIRECT_URI_KEY, ui::SiteConfig};
 
 /// The auth pages' site config.
 ///
@@ -130,30 +127,6 @@ document.addEventListener('click',function(e){
   window.location.href='/b/auth/oauth/login?provider='+encodeURIComponent(provider);
 });
 "#
-}
-
-/// Password field with visibility toggle.
-pub(super) fn pw_field(id: &str, placeholder: &str, minlength: Option<&str>) -> Markup {
-    html! {
-        div .pw-wrap {
-            input
-                type="password"
-                class="form-input"
-                id=(id)
-                placeholder=(placeholder)
-                required
-                minlength=[minlength];
-            // The reveal is chrome's shared `reveal-toggle` verb (the modal
-            // section of `ui/assets/chrome.js`), which every auth page loads
-            // through `ui::layout::page`. With no `data-reveal-show`/`-hide`
-            // operands the button keeps its one static label for both states,
-            // which is what the `togglePw(this)` helper this replaced did.
-            button type="button" class="pw-toggle" aria-label="Toggle password visibility"
-                data-action="reveal-toggle" data-reveal-target=(id) {
-                (ui::icons::eye_off())
-            }
-        }
-    }
 }
 
 /// JS every auth form posts through: `apiPost(path, body)` resolves to the
@@ -397,12 +370,7 @@ mod tests {
     /// is that no form still has a path around it.
     #[test]
     fn every_form_script_reports_what_api_post_threw() {
-        for script in [
-            login_script(),
-            signup_script(),
-            change_password::SCRIPT,
-            reset_password::SCRIPT,
-        ] {
+        for script in [login_script(), signup_script(), reset_password::SCRIPT] {
             assert!(script.contains("await apiPost('/b/auth/api/"), "{script}");
             assert!(!script.contains("fetch("), "{script}");
             assert!(
@@ -417,12 +385,7 @@ mod tests {
         // …and none writes the session cookie itself: `keepSession` in the
         // shared script is the only writer, so the cookie's attributes cannot
         // drift between the pages that set it.
-        for script in [
-            login_script(),
-            signup_script(),
-            change_password::SCRIPT,
-            reset_password::SCRIPT,
-        ] {
+        for script in [login_script(), signup_script(), reset_password::SCRIPT] {
             assert!(!script.contains("document.cookie"), "{script}");
         }
         assert_eq!(api_post_script().matches("document.cookie=").count(), 1);

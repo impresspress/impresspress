@@ -41,7 +41,7 @@ async fn files_page<'a>(
     content: Markup,
     msg: &Message,
 ) -> OutputStream {
-    files_page_with_action(ctx, title, crumb_label, subtitle, None, content, msg).await
+    files_page_with_action(ctx, title, crumb_label, subtitle, Vec::new(), content, msg).await
 }
 
 /// Admin storage shell. Thin wrapper over [`ui::shell_page`] that fixes the
@@ -52,7 +52,7 @@ async fn files_page_with_action<'a>(
     title: &'a str,
     crumb_label: &'a str,
     subtitle: Option<&'a str>,
-    primary_action: Option<Markup>,
+    actions: Vec<Markup>,
     content: Markup,
     msg: &Message,
 ) -> OutputStream {
@@ -67,7 +67,7 @@ async fn files_page_with_action<'a>(
                 href: None,
             }],
             subtitle,
-            primary_action,
+            actions,
         },
         content,
     )
@@ -287,19 +287,15 @@ pub async fn buckets(ctx: &dyn Context, msg: &Message) -> OutputStream {
         Err(e) => return crud::db_error_page(msg, e, "storage admin buckets"),
     };
 
-    // Admin can create buckets the same way users do — re-use the
-    // native <dialog> modal + JS from `pages_user`. The bootstrap
-    // script with empty bucket/prefix is needed for the JS to wire
-    // the "+ New bucket" trigger; without it the JS bails on init.
+    // Admin can create buckets the same way users do — the same modal, and
+    // the same `files-browser.js` handler for its form. No bootstrap carrier:
+    // that names a bucket to drop uploads into, and this list has none.
     let js_url = crate::blocks::files::assets::files_browser_js_url();
     let body = list_page(
         Some(admin_tabs("Buckets")),
         html! {
             (render_admin_buckets_table(&rows))
             (super::pages_user::buckets::render_new_bucket_modal())
-            script type="application/json" id="files-browser-bootstrap" {
-                "{}"
-            }
             script src=(js_url) defer {}
         },
         None,
@@ -310,12 +306,12 @@ pub async fn buckets(ctx: &dyn Context, msg: &Message) -> OutputStream {
         "Buckets",
         "Buckets",
         Some("All storage buckets"),
-        Some(crate::ui::components::button(
+        vec![crate::ui::components::button(
             crate::ui::components::BtnVariant::Primary,
             crate::ui::components::CtrlSize::Sm,
             "+ New bucket",
-            maud::PreEscaped(r#"type="button" data-action="open-new-bucket""#.to_string()),
-        )),
+            super::pages_user::buckets::new_bucket_trigger_attrs(),
+        )],
         body,
         msg,
     )

@@ -94,12 +94,12 @@ use std::{
 // name in their own signatures are imported here.
 use wafer_block::db::Filter;
 use wafer_core::interfaces::database::{
-    codec::{record_from_json_row, scalar_f64, scalar_i64, JsonColumns},
+    codec::{record_from_columns, scalar_f64, scalar_i64, JsonColumns},
     exec::{DbExec, TxOp, TxResult},
     schema_cache::SchemaCache,
     service::{
         CapGuard, Column, DatabaseError, DatabaseService, GuardedInsert, GuardedUpdate, Record,
-        Table, UpsertSpec, WriteOp, WriteOutcome,
+        RecordData, Table, UpsertSpec, WriteOp, WriteOutcome,
     },
 };
 use wafer_sql_utils::{introspect, Backend};
@@ -341,14 +341,28 @@ impl BrowserDatabaseService {
     /// a row *means* is [`wafer_core::interfaces::database::codec`]'s job, and
     /// every caller below feeds these rows straight into it. `bridge::
     /// db_query_raw` is synchronous, so this is not `async`.
-    fn query_json_rows(
+    fn query_rows(
         &self,
         sql: &str,
         params: &[serde_json::Value],
-    ) -> Result<Vec<serde_json::Value>, DatabaseError> {
+    ) -> Result<Vec<RecordData>, DatabaseError> {
         let params_js = db_codec::params_to_js(params).map_err(DatabaseError::Internal)?;
         let value = bridge::db_query_raw(sql, params_js).map_err(|e| statement_failed(&e))?;
-        db_codec::rows_from_js(value).map_err(DatabaseError::Internal)
+        db_codec::ordered_rows_from_js(value).map_err(DatabaseError::Internal)
+    }
+
+    /// Each row of `sql` as a [`Record`], its columns in result order.
+    fn query_records(
+        &self,
+        sql: &str,
+        params: &[serde_json::Value],
+        json: &JsonColumns,
+    ) -> Result<Vec<Record>, DatabaseError> {
+        Ok(self
+            .query_rows(sql, params)?
+            .into_iter()
+            .map(|row| record_from_columns(row, json))
+            .collect())
     }
 
     /// The first row of a single-row query (the scalar-aggregate shape), or
@@ -359,7 +373,11 @@ impl BrowserDatabaseService {
         sql: &str,
         params: &[serde_json::Value],
     ) -> Result<Option<serde_json::Value>, DatabaseError> {
-        Ok(self.query_json_rows(sql, params)?.into_iter().next())
+        Ok(self
+            .query_rows(sql, params)?
+            .into_iter()
+            .next()
+            .map(|row| serde_json::Value::Object(row.into_iter().collect())))
     }
 }
 
@@ -391,34 +409,18 @@ impl DbExec for BrowserDatabaseService {
         Ok(wafer_core::interfaces::database::service::StatementBudget::Unbounded)
     }
 
-    /// Decoding is [`record_from_json_row`], the one policy every SQL-family
-    /// backend now shares — the private `db_codec::build_records` this
-    /// replaced was the last of the three copies.
-    ///
-    /// **Behaviour difference, taken deliberately:** `build_records` returned
-    /// `Err("expected row object")` for a row that was not a JSON object,
-    /// where `record_from_json_row` returns an empty `Record`. The shared
-    /// answer is the right one. The bridge cannot produce a non-object row —
-    /// `bridge.js`'s `dbQueryRaw` builds every row from sql.js's column-name
-    /// array, so the error arm was unreachable in production and only ever
-    /// diverged the browser from the other two adapters. Where it *could*
-    /// fire it is also the worse answer: it fails the whole query (every row,
-    /// including the well-formed ones) with a message that names no table, no
-    /// column and no row, and it makes one platform report a hard error for a
-    /// shape the other two report as an empty record. A decode policy that
-    /// three backends share is only worth anything if all three answer the
-    /// same; keeping a fourth answer here is what unification is for.
+    /// Decoding is [`record_from_columns`], the one policy every SQL-family
+    /// backend shares. The bridge answers sql.js's positional
+    /// `{ columns, values }` ([`db_codec::ordered_rows_from_js`]), so each
+    /// record keeps the statement's column order exactly — `SELECT b, a, c`
+    /// iterates `b`, `a`, `c`.
     async fn run_fetch(
         &self,
         sql: &str,
         params: &[serde_json::Value],
         json: &JsonColumns,
     ) -> Result<Vec<Record>, DatabaseError> {
-        Ok(self
-            .query_json_rows(sql, params)?
-            .into_iter()
-            .map(|row| record_from_json_row(row, json))
-            .collect())
+        self.query_records(sql, params, json)
     }
 
     async fn run_fetch_one(
@@ -510,12 +512,9 @@ impl BrowserDatabaseService {
                 let rows = bridge::db_exec_raw(sql, params_js).map_err(|e| statement_failed(&e))?;
                 Ok(TxResult::Execute(rows as i64))
             }
-            TxOp::Returning { sql, params, json } => Ok(TxResult::Returning(
-                self.query_json_rows(sql, params)?
-                    .into_iter()
-                    .map(|row| record_from_json_row(row, json))
-                    .collect(),
-            )),
+            TxOp::Returning { sql, params, json } => {
+                Ok(TxResult::Returning(self.query_records(sql, params, json)?))
+            }
         }
     }
 }
@@ -1148,15 +1147,32 @@ mod sql_js_conformance {
 mod codec_policy {
     use wasm_bindgen_test::wasm_bindgen_test;
 
-    use super::{record_from_json_row, scalar_f64, scalar_i64, JsonColumns};
+    use super::{record_from_columns, scalar_f64, scalar_i64, JsonColumns};
+
+    /// A row from a JSON object, for checks that look columns up by name only
+    /// (a `serde_json` object sorts its keys).
+    fn by_name(row: serde_json::Value) -> serde_json::Map<String, serde_json::Value> {
+        match row {
+            serde_json::Value::Object(map) => map,
+            other => panic!("a row is an object, not {other}"),
+        }
+    }
+
+    /// A row as the bridge decodes it: name → value pairs in column order.
+    fn row(pairs: &[(&str, serde_json::Value)]) -> Vec<(String, serde_json::Value)> {
+        pairs
+            .iter()
+            .map(|(name, value)| ((*name).to_string(), value.clone()))
+            .collect()
+    }
 
     /// sql.js stores JSON columns as TEXT; the shared codec restores the
     /// structure the writer put in for a column declared JSON, so a block
     /// reading it sees a `Value::Object` on all three adapters.
     #[wasm_bindgen_test]
     fn json_declared_columns_are_reparsed() {
-        let rec = record_from_json_row(
-            serde_json::json!({"id": "1", "meta": "{\"k\":\"v\"}", "tags": "[1,2]"}),
+        let rec = record_from_columns(
+            by_name(serde_json::json!({"id": "1", "meta": "{\"k\":\"v\"}", "tags": "[1,2]"})),
             &JsonColumns::new(["meta", "tags"]),
         );
         assert_eq!(rec.id, "1");
@@ -1168,8 +1184,8 @@ mod codec_policy {
     /// however much it looks like JSON.
     #[wasm_bindgen_test]
     fn json_looking_text_in_a_text_column_stays_a_string() {
-        let rec = record_from_json_row(
-            serde_json::json!({"id": "1", "title": "{\"k\":\"v\"}", "tags": "[1,2]"}),
+        let rec = record_from_columns(
+            by_name(serde_json::json!({"id": "1", "title": "{\"k\":\"v\"}", "tags": "[1,2]"})),
             JsonColumns::NONE,
         );
         assert_eq!(
@@ -1183,8 +1199,8 @@ mod codec_policy {
     /// that does not parse stays a string even in a JSON column.
     #[wasm_bindgen_test]
     fn non_json_text_is_left_alone() {
-        let rec = record_from_json_row(
-            serde_json::json!({"id": "1", "note": "hello world", "broken": "{not json"}),
+        let rec = record_from_columns(
+            by_name(serde_json::json!({"id": "1", "note": "hello world", "broken": "{not json"})),
             &JsonColumns::new(["broken"]),
         );
         assert_eq!(
@@ -1202,21 +1218,27 @@ mod codec_policy {
     /// map.
     #[wasm_bindgen_test]
     fn numeric_id_is_stringified_and_retained() {
-        let rec = record_from_json_row(serde_json::json!({"id": 7, "v": "x"}), JsonColumns::NONE);
+        let rec = record_from_columns(
+            by_name(serde_json::json!({"id": 7, "v": "x"})),
+            JsonColumns::NONE,
+        );
         assert_eq!(rec.id, "7");
         assert_eq!(rec.data.get("id").unwrap(), &serde_json::json!(7));
     }
 
-    /// The one behaviour the private copy did differently: a non-object row.
-    /// `db_codec::build_records` returned `Err("expected row object")`, which
-    /// failed the whole query on one platform for a shape the other two
-    /// report as an empty record. See `run_fetch`'s doc for why the shared
-    /// answer wins. This fails against the pre-unification tree.
+    /// A row keeps the order the statement returned its columns in.
     #[wasm_bindgen_test]
-    fn a_non_object_row_is_an_empty_record_not_an_error() {
-        let rec = record_from_json_row(serde_json::json!(42), JsonColumns::NONE);
-        assert_eq!(rec.id, "");
-        assert!(rec.data.is_empty());
+    fn a_row_keeps_its_column_order() {
+        let rec = record_from_columns(
+            row(&[
+                ("b", serde_json::json!(2)),
+                ("id", serde_json::json!("1")),
+                ("a", serde_json::json!(1)),
+            ]),
+            JsonColumns::NONE,
+        );
+        let names: Vec<&str> = rec.data.keys().map(String::as_str).collect();
+        assert_eq!(names, ["b", "id", "a"]);
     }
 
     /// `SELECT COUNT(*) AS "cnt"` — the shared builders alias their scalar

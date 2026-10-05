@@ -1,97 +1,57 @@
-//! GET /b/auth/change-password — relocated from auth/pages/mod.rs::change_password_page in Task 5.
+//! GET /b/auth/change-password — the address of the page that used to change
+//! a password, kept so links and bookmarks to it still land somewhere.
+//!
+//! A signed-in account has ONE change-password form: the Password section of
+//! the portal's Security page (`blocks/userportal/pages/security.rs`), inside
+//! the portal shell with every other account page. This page was a second,
+//! different form in the signed-out marketing frame (`auth_split`), with a
+//! private script that enforced its own 8-character minimum instead of the
+//! configured one. It now redirects there.
 
-use maud::{html, PreEscaped};
-use wafer_run::{context::Context, Message, OutputStream};
+use wafer_run::OutputStream;
 
-use super::{api_post_script, pw_field, site_config};
-use crate::ui::{self, components::auth_panel, templates::auth_split};
+use crate::http::redirect;
 
-/// JS that drives the change-password form. Posts through
-/// [`api_post_script`]'s `apiPost`, which the page emits first.
-pub(super) const SCRIPT: &str = r#"
-var $=function(id){return document.getElementById(id)};
-function showErr(m){var e=$('error');e.textContent=m;e.hidden=false}
-async function handleChange(ev){
-  ev.preventDefault();
-  var btn=$('btn');$('error').hidden=true;
-  var pw=$('newpw').value,cf=$('confirm').value;
-  if(pw!==cf){showErr('New passwords do not match.');return false}
-  if(pw.length<8){showErr('Password must be at least 8 characters.');return false}
-  btn.disabled=true;btn.textContent='Changing...';
-  try{
-    await apiPost('/b/auth/api/change-password',{current_password:$('current').value,new_password:pw});
-    $('form').hidden=true;$('success').hidden=false;
-  }catch(ex){showErr(ex.message);btn.disabled=false;btn.textContent='Change Password'}
-  return false;
+/// Where a password is changed. The userportal block's Security page; spelled
+/// out rather than imported because `impresspress/userportal` is a feature-gated
+/// block and this one is not.
+pub const SECURITY_PAGE: &str = "/b/userportal/security";
+
+/// Redirect to [`SECURITY_PAGE`]. A signed-out caller is sent on by that page
+/// to sign in, the same as for any other account page.
+pub fn handle() -> OutputStream {
+    redirect(302, SECURITY_PAGE)
 }
-document.addEventListener('submit',function(e){if(e.target&&e.target.id==='form')handleChange(e)});
-document.addEventListener('click',function(e){
-  if(!(e.target instanceof Element))return;
-  if(!e.target.closest('[data-action="history-back"]'))return;
-  e.preventDefault();
-  history.back();
-});
-"#;
 
-pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let config = match site_config(ctx).await {
-        Ok(site) => site,
-        Err(e) => {
-            return crate::blocks::crud::db_error_page(msg, e, "page: site config read failed")
-        }
+#[cfg(test)]
+mod tests {
+    use wafer_run::{Block, InputStream};
+
+    use crate::{
+        blocks::auth_ui::{AuthUiBlock, AUTH_UI_BLOCK_ID},
+        test_support::{anon_msg, auth_msg, output_header, output_status, TestContext},
     };
 
-    let markup = ui::layout::page(
-        "Change Password",
-        &config,
-        auth_split(
-            auth_panel(&config, Some("Update your password.")),
-            html! {
-                div .login-container {
-                    div #error .login-error hidden {}
-
-                    div #success .login-success .login-success--centered hidden {
-                        p .change-password-success-text {
-                            "Password changed successfully!"
-                        }
-                        button .login-button .auth-status__action data-action="history-back" {
-                            "Go Back"
-                        }
-                    }
-
-                    form #form .login-form {
-                        div .form-group {
-                            label .form-label for="current" { "Current Password" }
-                            (pw_field("current", "Enter your current password", None))
-                        }
-
-                        div .form-group {
-                            label .form-label for="newpw" { "New Password" }
-                            (pw_field("newpw", "Min 8 characters", Some("8")))
-                        }
-
-                        div .form-group {
-                            label .form-label for="confirm" { "Confirm New Password" }
-                            (pw_field("confirm", "Repeat new password", Some("8")))
-                        }
-
-                        button .login-button type="submit" #btn { "Change Password" }
-                    }
-
-                    div .text-center .mt-4 {
-                        // The one `javascript:` URL in the tree, and the same
-                        // hazard class as the `on*=` attributes this change
-                        // removes: it goes back, which is an action, so it is
-                        // a button that declares `history-back`.
-                        button .btn .btn--ghost type="button" data-action="history-back" { "Cancel" }
-                    }
-                }
-
-                script { (PreEscaped(api_post_script())) }
-                script { (PreEscaped(SCRIPT)) }
-            },
-        ),
-    );
-
-    ui::html_response(markup)
+    /// Through the block's router, the path a browser's GET takes: signed in
+    /// or not, the old address answers with the Security page's.
+    #[tokio::test]
+    async fn the_old_page_redirects_to_the_security_page() {
+        let ctx = TestContext::with_auth().await.running_as(AUTH_UI_BLOCK_ID);
+        ctx.seed_auth_user("user-a").await;
+        for msg in [
+            auth_msg("retrieve", "/b/auth/change-password", "user-a"),
+            anon_msg("retrieve", "/b/auth/change-password"),
+        ] {
+            let block = AuthUiBlock::default();
+            let status =
+                output_status(block.handle(&ctx, msg.clone(), InputStream::empty()).await).await;
+            assert_eq!(status, 302);
+            let location = output_header(
+                block.handle(&ctx, msg, InputStream::empty()).await,
+                "Location",
+            )
+            .await;
+            assert_eq!(location.as_deref(), Some(super::SECURITY_PAGE));
+        }
+    }
 }

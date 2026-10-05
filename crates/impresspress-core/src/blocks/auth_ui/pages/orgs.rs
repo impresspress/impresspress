@@ -1,6 +1,5 @@
-//! `/b/auth/orgs` — read-only list of orgs claimed by the current user.
-//! Rendered through the shared userportal account-card layout so it
-//! visually matches profile / sessions / security.
+//! `/b/auth/orgs` — read-only list of orgs claimed by the current user, in
+//! the portal shell with the userportal's other account pages.
 
 use maud::{html, Markup};
 use wafer_run::{context::Context, Message, OutputStream};
@@ -8,8 +7,20 @@ use wafer_run::{context::Context, Message, OutputStream};
 use crate::{
     blocks::{auth::repo::orgs, crud},
     http::redirect,
-    ui::{self, SiteConfig},
+    ui::{
+        self,
+        components::{timestamp, DataTable, TableCol, TableRow},
+        shell::Crumb,
+        NavKind, Shell,
+    },
 };
+
+/// The orgs table: the org's name is the row (the card title on a phone).
+const COLUMNS: [TableCol<'static>; 3] = [
+    TableCol::new("Name").primary(),
+    TableCol::new("Verified via"),
+    TableCol::new("Claimed"),
+];
 
 /// GET `/b/auth/orgs`. Anonymous users redirected to login.
 pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
@@ -24,57 +35,44 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
         Ok(list) => list,
         Err(e) => return crud::db_error_page(msg, e, "orgs page: list_for_user failed"),
     };
-    let body = html! {
-        p .text-muted .m-0 .mb-4 .text-sm {
-            "Orgs you've claimed via GitHub, Google, or Microsoft sign-in."
-        }
-        (render_orgs_body(&orgs_list))
-    };
 
-    let config = match SiteConfig::load(ctx).await {
-        Ok(site) => site,
-        Err(e) => {
-            return crate::blocks::crud::db_error_page(msg, e, "page: site config read failed")
-        }
-    };
-    let markup = ui::layout::page(
-        "Organizations",
-        &config,
-        ui::templates::account_card_page(
-            ui::templates::AccountCard {
-                logo_url: &config.logo_url,
-                logo_icon_url: &config.logo_icon_url,
-                app_name: &config.app_name,
-                title: "Organizations",
-                back_href: Some("/b/userportal/"),
-            },
-            body,
-        ),
-    );
-    ui::html_response(markup)
+    ui::shell_page(
+        ctx,
+        msg,
+        Shell {
+            title: "Organizations",
+            nav: NavKind::Portal,
+            crumbs: vec![Crumb {
+                label: "Organizations",
+                href: None,
+            }],
+            subtitle: Some("Orgs you've claimed via GitHub, Google, or Microsoft sign-in."),
+            actions: Vec::new(),
+        },
+        render_orgs_body(&orgs_list),
+    )
+    .await
 }
 
 fn render_orgs_body(orgs: &[orgs::OrgRow]) -> Markup {
-    if orgs.is_empty() {
-        return html! {
-            p .text-muted .m-0 {
-                "No claimed organizations. Sign in with GitHub, Google, or Microsoft to claim one."
-            }
-        };
-    }
-    html! {
-        ul .orgs-list {
-            @for o in orgs {
-                li .orgs-list-row {
-                    span .orgs-list-row__provider {
-                        (o.verified_via.as_deref().unwrap_or("manual"))
-                    }
-                    span .orgs-list-row__name { (o.name) }
-                    span .orgs-list-row__date { "claimed " (o.created_at) }
-                }
-            }
-        }
-    }
+    let rows = orgs
+        .iter()
+        .map(|o| {
+            TableRow::new(vec![
+                html! { (o.name) },
+                html! { (o.verified_via.as_deref().unwrap_or("manual")) },
+                timestamp(&o.created_at),
+            ])
+        })
+        .collect();
+    DataTable::new(&COLUMNS)
+        .rows(rows)
+        .empty_state(
+            "No claimed organizations",
+            "Sign in with GitHub, Google, or Microsoft to claim one.",
+            None,
+        )
+        .render()
 }
 
 #[cfg(test)]
@@ -126,6 +124,18 @@ mod tests {
         let html = output_html(resp).await;
         assert!(html.contains("No claimed organizations"));
         assert!(html.contains("Sign in with GitHub"));
+        assert!(
+            html.contains(r#"class="empty__title""#),
+            "the empty list is the shared empty state: {html}"
+        );
+        assert!(
+            html.contains(r#"<nav class="sidebar""#),
+            "portal shell: {html}"
+        );
+        assert!(
+            html.contains(r#"<h1 class="topbar__title">Organizations</h1>"#),
+            "{html}"
+        );
     }
 
     #[tokio::test]

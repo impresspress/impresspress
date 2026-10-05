@@ -2,6 +2,39 @@ mod contracts;
 mod database;
 #[cfg(test)]
 mod error_mapping_tests;
+/// Variable keys the admin tests store ad hoc: well-formed (they pass
+/// `config_vars::check_variable_key`, as every key a writer accepts must) and
+/// declared by no block, so each test is about an UNDECLARED key, which is
+/// what these fixtures were before the key rule existed. Spelled once here
+/// for every admin test module and the other modules' tests that need the
+/// same kind of key, as `tests/config_key_door.rs` requires.
+#[cfg(test)]
+pub(crate) mod fixture_keys {
+    pub(crate) const SITE_NAME: &str = "WAFER_RUN_SHARED__SITE_NAME";
+    pub(crate) const SITE_MOTTO: &str = "WAFER_RUN_SHARED__SITE_MOTTO";
+    pub(crate) const SITE_TAGLINE: &str = "WAFER_RUN_SHARED__SITE_TAGLINE";
+    pub(crate) const NEW_SITE_TAGLINE: &str = "WAFER_RUN_SHARED__NEW_SITE_TAGLINE";
+    pub(crate) const SITE_NOTES: &str = "WAFER_RUN_SHARED__SITE_NOTES";
+    pub(crate) const MY_SETTING: &str = "WAFER_RUN_SHARED__MY_SETTING";
+    pub(crate) const OTHER_SETTING: &str = "WAFER_RUN_SHARED__OTHER_SETTING";
+    pub(crate) const PROBE_TYPED_SETTING: &str = "WAFER_RUN_SHARED__PROBE_TYPED_SETTING";
+    pub(crate) const NOT_STORED_YET: &str = "WAFER_RUN_SHARED__NOT_STORED_YET";
+    pub(crate) const PASSWORD_PLACEHOLDER_TEXT: &str =
+        "WAFER_RUN_SHARED__PASSWORD_PLACEHOLDER_TEXT";
+    pub(crate) const LEGACY_THING: &str = "WAFER_RUN_SHARED__LEGACY_THING";
+    pub(crate) const MY_LEGACY_THING: &str = "WAFER_RUN_SHARED__MY_LEGACY_THING";
+    pub(crate) const MY_SERVICE_HANDLE: &str = "WAFER_RUN_SHARED__MY_SERVICE_HANDLE";
+    pub(crate) const WEBHOOK_URL: &str = "WAFER_RUN_SHARED__WEBHOOK_URL";
+    /// Sensitive by suffix (`_SECRET`/`_KEY`), not by declaration.
+    pub(crate) const STRIPE_SECRET: &str = "WAFER_RUN_SHARED__STRIPE_SECRET";
+    pub(crate) const JWT_SECRET: &str = "WAFER_RUN_SHARED__JWT_SECRET";
+    pub(crate) const MAILER_API_KEY: &str = "WAFER_RUN_SHARED__MAILER_API_KEY";
+    pub(crate) const MAILGUN_API_KEY: &str = "WAFER_RUN_SHARED__MAILGUN_API_KEY";
+    /// Neither suffix nor declaration: sensitive only by the stored flag.
+    pub(crate) const BOOTSTRAP_ADMIN_PASSWORD: &str = "WAFER_RUN_SHARED__BOOTSTRAP_ADMIN_PASSWORD";
+    pub(crate) const MAILER_TOKEN: &str = "WAFER_RUN_SHARED__MAILER_TOKEN";
+    pub(crate) const MY_SERVICE_TOKEN: &str = "WAFER_RUN_SHARED__MY_SERVICE_TOKEN";
+}
 mod iam;
 pub(crate) mod logs;
 pub mod migrations;
@@ -203,7 +236,9 @@ const ROUTES: &[EndpointRoute<Route>] = &[
         "/b/admin/api/database/query",
         Route::DatabaseQueryApi,
     )
-    .summary("Run read-only SQL API"),
+    .summary("Run read-only SQL API")
+    .input(request_schema_of::<contracts::AdminSqlQueryRequest>)
+    .output(response_schema_of::<contracts::AdminSqlQueryResponse>),
     EndpointRoute::admin(
         HttpMethod::Get,
         "/b/admin/api/iam/roles",
@@ -788,8 +823,6 @@ crate::impresspress_feature_block! {
 /// `default_enabled(false)` — as enabled on every default install while the
 /// router 404'd all of its routes.
 fn handle_extensions(ctx: &dyn Context, features: &Arc<RwLock<BlockSettings>>) -> OutputStream {
-    use crate::features::FeatureConfig;
-
     // Straight off the router's own handle — this block holds the same `Arc`
     // the router gates on, so no snapshot, no request meta and no read stand
     // between this answer and the one the router will give. Other blocks need
@@ -798,8 +831,8 @@ fn handle_extensions(ctx: &dyn Context, features: &Arc<RwLock<BlockSettings>>) -
         .read()
         .map(|settings| settings.clone())
         .unwrap_or_default();
-    let blocks: Vec<contracts::AdminExtensionView> = ctx
-        .registered_blocks()
+    let registered = ctx.registered_blocks();
+    let blocks: Vec<contracts::AdminExtensionView> = registered
         .iter()
         .map(|b| contracts::AdminExtensionView {
             name: b.name.clone(),
@@ -818,7 +851,11 @@ fn handle_extensions(ctx: &dyn Context, features: &Arc<RwLock<BlockSettings>>) -
             // it. Moot in practice — `can_disable` defaults to false and the
             // inspector never declares otherwise, so it is seeded no row and
             // rendered no toggle.
-            enabled: features.is_block_enabled(crate::routing::feature_gate_name(&b.name)),
+            enabled: crate::features::is_enabled(
+                &features,
+                registered,
+                crate::routing::feature_gate_name(&b.name),
+            ),
         })
         .collect();
     ok_json(&blocks)
@@ -1035,7 +1072,11 @@ mod tests {
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         ctx.register_block_info(
             "impresspress/tickets",
-            wafer_run::BlockInfo::new("impresspress/tickets", "1.0.0", "http.handler", "tickets"),
+            // Disableable, as the real tickets block is: a block that cannot
+            // be disabled is enabled whatever its row says
+            // (`features::is_enabled`).
+            wafer_run::BlockInfo::new("impresspress/tickets", "1.0.0", "http.handler", "tickets")
+                .can_disable(true),
         );
         // Synthetic on purpose: this entry exists only to pin the
         // "no stored row ⇒ enabled" branch, and naming a real block here
@@ -1783,15 +1824,15 @@ mod table_tests {
             ),
             (
                 "delete",
-                "/b/admin/api/settings/MY_SETTING",
+                "/b/admin/api/settings/WAFER_RUN_SHARED__MY_SETTING",
                 Route::DeleteSettingApi,
-                &[("key", "MY_SETTING")],
+                &[("key", crate::blocks::admin::fixture_keys::MY_SETTING)],
             ),
             (
                 "create",
-                "/b/admin/api/settings/MY_SETTING/reset-to-environment",
+                "/b/admin/api/settings/WAFER_RUN_SHARED__MY_SETTING/reset-to-environment",
                 Route::ResetSettingToEnvironmentApi,
-                &[("key", "MY_SETTING")],
+                &[("key", crate::blocks::admin::fixture_keys::MY_SETTING)],
             ),
             (
                 "retrieve",
@@ -1889,9 +1930,9 @@ mod table_tests {
             ),
             (
                 "delete",
-                "/b/admin/variables/LEGACY_THING",
+                "/b/admin/variables/WAFER_RUN_SHARED__LEGACY_THING",
                 Route::DeleteVariable,
-                &[("key", "LEGACY_THING")],
+                &[("key", crate::blocks::admin::fixture_keys::LEGACY_THING)],
             ),
             (
                 "create",
@@ -2133,7 +2174,7 @@ pub(crate) mod page_link_tests {
     }
 
     const PROBE_BLOCK: &str = "impresspress/probe";
-    pub(crate) const PROBE_VARIABLE: &str = "PROBE_SETTING";
+    pub(crate) const PROBE_VARIABLE: &str = "WAFER_RUN_SHARED__PROBE_SETTING";
 
     /// A variables row an admin surface has PINNED, so the pages render the
     /// "Reset to environment" control for it. Separate from [`PROBE_VARIABLE`]
@@ -2313,7 +2354,7 @@ pub(crate) mod page_link_tests {
         .await
         .expect("seed request log");
         // A failing request as well as a succeeding one: the dashboard's
-        // "Recent Errors" card reads `list_recent_errors`, whose filter is
+        // "Recent 4xx/5xx" card reads `list_recent_errors`, whose filter is
         // `status_code >= 400`, so the 200 above
         // renders that card's empty state and nothing else. Without this row
         // no render test ever exercises that card's table.
@@ -2405,7 +2446,11 @@ pub(crate) mod page_link_tests {
             &[("method", "GET"), ("path", "/probe")],
         ),
         ("retrieve", "/b/admin/settings/variables", &[]),
-        ("retrieve", "/b/admin/variables/PROBE_SETTING/edit", &[]),
+        (
+            "retrieve",
+            "/b/admin/variables/WAFER_RUN_SHARED__PROBE_SETTING/edit",
+            &[],
+        ),
         ("retrieve", "/b/admin/settings/permissions", &[]),
         ("retrieve", "/b/admin/grants", &[]),
     ];

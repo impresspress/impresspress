@@ -10,7 +10,9 @@ use crate::{
     platform_state::block_settings,
     ui::{
         self,
-        components::{self, empty_state, tab_navigation, Badge, BadgeVariant, Tab},
+        components::{
+            self, empty_state, tab_navigation, Badge, BadgeVariant, Modal, ModalSize, Tab,
+        },
         icons,
         shell::Topbar,
         templates::list_page,
@@ -85,6 +87,12 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         .iter()
         .map(|row| (row.block_name.clone(), row.enabled))
         .collect();
+    // The rows, read through `features::is_enabled`: a block that cannot be
+    // disabled shows as enabled whatever an old row says, as the router
+    // serves it.
+    let stored = crate::features::BlockSettings::from_map(
+        block_enabled.iter().map(|(n, e)| (n.clone(), *e)).collect(),
+    );
 
     // Append unloaded blocks (in block_settings but not in the runtime) as
     // placeholder BlockInfo. Iteration order is deterministic because the
@@ -112,17 +120,21 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     // entries breaks that invariant.
     all_blocks.sort_by(|a, b| a.name.cmp(&b.name));
 
-    let page_action = html! {
-        div .flex .gap-2 {
+    // Two separate topbar actions, so the topbar can wrap them one per row
+    // on a narrow screen.
+    let page_actions = vec![
+        html! {
             a .btn .btn--sm .btn--secondary .gap-1 href="https://wafer.run/registry" target="_blank"
             {
                 (icons::arrow_up_right()) " Explore WASM blocks"
             }
+        },
+        html! {
             a .btn .btn--secondary .btn--sm href="/b/inspector/ui" target="_blank" {
                 (icons::globe()) " Open Inspector"
             }
-        }
-    };
+        },
+    ];
 
     let tabs_and_body = html! {
         (tab_navigation(vec![
@@ -193,15 +205,26 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
 
                 div .block-cards {
                     @for block in &filtered {
-                        @let is_enabled = block_enabled.get(&block.name).copied().unwrap_or(true);
+                        @let is_enabled = crate::features::is_enabled(&stored, &all_blocks, &block.name);
                         @let encoded_name = encode_block_name(&block.name);
-                        div class={ "block-card" @if !is_enabled { " block-card--disabled" } }
-                            hx-get={"/b/admin/blocks/" (encoded_name) "/detail"}
-                            hx-target="#block-detail-modal"
-                            hx-swap="innerHTML"
-                        {
+                        // The title is the card's one control: a button that
+                        // opens the detail modal, stretched over the whole
+                        // card (`.block-card__title-button::after`) so a click
+                        // anywhere on it still opens it, and reachable with
+                        // Tab and Enter. Its id is stable across a re-render
+                        // of `#content` (the modal's toggle), so focus can
+                        // come back to it.
+                        div class={ "block-card" @if !is_enabled { " block-card--disabled" } } {
                             div .block-card__head {
-                                h2 .block-card__title { (block.name) }
+                                h2 .block-card__title {
+                                    button .block-card__title-button
+                                        type="button"
+                                        id={"block-card-" (encoded_name)}
+                                        hx-get={"/b/admin/blocks/" (encoded_name) "/detail"}
+                                        hx-target="#block-detail-slot"
+                                        hx-swap="innerHTML"
+                                    { (block.name) }
+                                }
                                 @if is_enabled {
                                     span .block-card__check title="Enabled" { (ui::icons::check()) }
                                 } @else {
@@ -219,7 +242,6 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
                                 @if is_enabled && !block.admin_url.is_empty() {
                                     a .btn .btn--sm .btn--primary .block-card__open
                                         href=(block.admin_url)
-                                        data-stop-propagation
                                     { "Open" }
                                 }
                             }
@@ -229,13 +251,9 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
             }
         }
 
-        // Block detail modal (content loaded via htmx)
-        div .modal-overlay #block-detail-modal-overlay hidden data-modal-dismiss
-        {
-            div .modal .modal--lg {
-                div #block-detail-modal {}
-            }
-        }
+        // Where a card swaps its detail modal ([`handle_block_detail`]
+        // answers with the whole `<dialog>`).
+        div #block-detail-slot {}
 
         script { (maud::PreEscaped(RUNTIME_FILTER_JS)) }
     };
@@ -248,7 +266,7 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         "Blocks",
         Topbar {
             crumbs: crumb("Blocks"),
-            primary_action: Some(page_action),
+            actions: page_actions,
             subtitle: Some("Registered WAFER blocks"),
             show_palette: true,
         },
@@ -391,14 +409,10 @@ pub async fn handle_block_detail(ctx: &dyn Context, msg: &Message) -> OutputStre
 
     // Disabled block not in runtime -- show minimal modal with toggle.
     let Some(block) = block_opt else {
-        let markup = html! {
-            div .modal-header {
-                h3 .modal-title { (block_name) }
-                button .modal-close data-action="modal-close" data-modal-target="block-detail-modal-overlay" {
-                    (icons::x())
-                }
-            }
-            div .modal-body {
+        let markup = Modal::new(DETAIL_MODAL_ID, block_name)
+            .size(ModalSize::Large)
+            .focusable_body()
+            .render(html! {
                 div .flex .items-center .justify-between .mb-4 {
                     span .text-muted {
                         @if is_enabled {
@@ -409,6 +423,7 @@ pub async fn handle_block_detail(ctx: &dyn Context, msg: &Message) -> OutputStre
                     }
                     label .toggle {
                         input type="checkbox"
+                            aria-label={"Enable " (block_name)}
                             checked[is_enabled]
                             hx-post={"/b/admin/blocks/" (encoded) "/toggle"}
                             hx-target="#content";
@@ -422,120 +437,114 @@ pub async fn handle_block_detail(ctx: &dyn Context, msg: &Message) -> OutputStre
                         "Enable and restart the server to load this block and see its full details."
                     }
                 }
-            }
-        };
-        return ui::html_response_opening_modal(markup, "block-detail-modal-overlay");
+            });
+        return ui::html_response_opening_modal(markup, DETAIL_MODAL_ID);
     };
 
-    let markup = html! {
-        div .modal-header {
-            div {
-                div .flex .items-center .gap-2 {
-                    h3 .modal-title { (block.name) }
-                    (Badge::new(BadgeVariant::Info).classes("text-11").render(html! { "v" (block.version) }))
-                    (Badge::new(BadgeVariant::ToneSlate).classes("text-11").render(html! { (format!("{:?}", block.category)) }))
+    let meta = html! {
+        (Badge::new(BadgeVariant::Info).classes("text-11").render(html! { "v" (block.version) }))
+        (Badge::new(BadgeVariant::ToneSlate).classes("text-11").render(html! { (format!("{:?}", block.category)) }))
+    };
+    let markup = Modal::new(DETAIL_MODAL_ID, &block.name).size(ModalSize::Large).focusable_body().render_with_meta(meta, html! {
+        // Admin UI link + Block toggle (above description)
+        div .flex .items-center .justify-between .mb-4 {
+            div .flex .items-center .gap-2 {
+                @if is_enabled && !block.admin_url.is_empty() {
+                    a .btn .btn--sm .btn--primary href=(block.admin_url) {
+                        (icons::settings()) " Open Admin UI"
+                    }
                 }
             }
-            button .modal-close data-action="modal-close" data-modal-target="block-detail-modal-overlay" {
-                (icons::x())
+            @if block.can_disable {
+                div .flex .items-center .gap-2 {
+                    span .text-sm .text-muted { "Enabled" }
+                    label .toggle {
+                        @let encoded = encode_block_name(&block.name);
+                        input type="checkbox"
+                            aria-label={"Enable " (block.name)}
+                            checked[is_enabled]
+                            hx-post={"/b/admin/blocks/" (encoded) "/toggle"}
+                            hx-target="#content";
+                        span .toggle-slider {}
+                    }
+                }
+            } @else {
+                span .text-sm .text-muted { "Always enabled (core block)" }
             }
         }
-        div .modal-body {
-            // Admin UI link + Block toggle (above description)
-            div .flex .items-center .justify-between .mb-4 {
-                div .flex .items-center .gap-2 {
-                    @if is_enabled && !block.admin_url.is_empty() {
-                        a .btn .btn--sm .btn--primary href=(block.admin_url) {
-                            (icons::settings()) " Open Admin UI"
-                        }
-                    }
-                }
-                @if block.can_disable {
-                    div .flex .items-center .gap-2 {
-                        span .text-sm .text-muted { "Enabled" }
-                        label .toggle {
-                            @let encoded = encode_block_name(&block.name);
-                            input type="checkbox"
-                                checked[is_enabled]
-                                hx-post={"/b/admin/blocks/" (encoded) "/toggle"}
-                                hx-target="#content";
-                            span .toggle-slider {}
-                        }
-                    }
-                } @else {
-                    span .text-sm .text-muted { "Always enabled (core block)" }
-                }
+
+        // Description
+        @if !block.description.is_empty() {
+            p .modal-description { (block.description) }
+        }
+
+        // Endpoints
+        @if !block.endpoints.is_empty() {
+            h3 .modal-section-title { "Endpoints" }
+            @let rows: Vec<Vec<Markup>> = block.endpoints.iter().map(|ep| vec![
+                Badge::new(method_badge_tone(ep.method)).classes("text-11").render(html! { (ep.method) }),
+                html! { code .text-xs { (ep.path) } },
+                html! { span .text-muted { (ep.summary) } },
+                Badge::new(auth_badge_tone(ep.auth)).classes("text-10").render(html! { (ep.auth) }),
+            ]).collect();
+
+            (components::data_table::<fn(usize) -> Option<String>>(
+                &ENDPOINT_COLUMNS,
+                rows,
+                None,
+                html! {},
+            ))
+        }
+
+        // Config Keys
+        @if !block.config_keys.is_empty() {
+            h3 .modal-section-title { "Configuration" }
+            @let rows: Vec<Vec<Markup>> = block.config_keys.iter().map(|ck| vec![
+                html! { code .text-xs { (ck.key) } },
+                html! { span .text-muted { (ck.description) } },
+                html! { code .text-11 { @if ck.default.is_empty() { "\u{2014}" } @else { (ck.default) } } },
+            ]).collect();
+
+            (components::data_table::<fn(usize) -> Option<String>>(
+                &CONFIG_KEY_COLUMNS,
+                rows,
+                None,
+                html! {},
+            ))
+        }
+
+        // Technical details
+        h3 .modal-section-title { "Technical" }
+        div .modal-tech {
+            div .mb-2 {
+                b { "Interface: " }
+                (Badge::new(BadgeVariant::ToneSlate).classes("text-11").render(html! { (block.interface) }))
             }
-
-            // Description
-            @if !block.description.is_empty() {
-                p .modal-description { (block.description) }
-            }
-
-            // Endpoints
-            @if !block.endpoints.is_empty() {
-                h4 .modal-section-title { "Endpoints" }
-                @let rows: Vec<Vec<Markup>> = block.endpoints.iter().map(|ep| vec![
-                    Badge::new(method_badge_tone(ep.method)).classes("text-11").render(html! { (ep.method) }),
-                    html! { code .text-xs { (ep.path) } },
-                    html! { span .text-muted { (ep.summary) } },
-                    Badge::new(auth_badge_tone(ep.auth)).classes("text-10").render(html! { (ep.auth) }),
-                ]).collect();
-
-                (components::data_table::<fn(usize) -> Option<String>>(
-                    &ENDPOINT_COLUMNS,
-                    rows,
-                    None,
-                    html! {},
-                ))
-            }
-
-            // Config Keys
-            @if !block.config_keys.is_empty() {
-                h4 .modal-section-title { "Configuration" }
-                @let rows: Vec<Vec<Markup>> = block.config_keys.iter().map(|ck| vec![
-                    html! { code .text-xs { (ck.key) } },
-                    html! { span .text-muted { (ck.description) } },
-                    html! { code .text-11 { @if ck.default.is_empty() { "\u{2014}" } @else { (ck.default) } } },
-                ]).collect();
-
-                (components::data_table::<fn(usize) -> Option<String>>(
-                    &CONFIG_KEY_COLUMNS,
-                    rows,
-                    None,
-                    html! {},
-                ))
-            }
-
-            // Technical details
-            h4 .modal-section-title { "Technical" }
-            div .modal-tech {
+            @if !block.requires.is_empty() {
                 div .mb-2 {
-                    b { "Interface: " }
-                    (Badge::new(BadgeVariant::ToneSlate).classes("text-11").render(html! { (block.interface) }))
-                }
-                @if !block.requires.is_empty() {
-                    div .mb-2 {
-                        b { "Requires: " }
-                        @for req in &block.requires {
-                            (Badge::new(BadgeVariant::Primary).classes("text-11 mr-1").render(html! { (req) }))
-                        }
+                    b { "Requires: " }
+                    @for req in &block.requires {
+                        (Badge::new(BadgeVariant::Primary).classes("text-11 mr-1").render(html! { (req) }))
                     }
                 }
-                @if !block.collections.is_empty() {
-                    div .mb-2 {
-                        b { "Database tables: " }
-                        @for col in &block.collections {
-                            (Badge::new(BadgeVariant::ToneSlate).classes("text-11 mr-1").render(html! { (col.name) }))
-                        }
+            }
+            @if !block.collections.is_empty() {
+                div .mb-2 {
+                    b { "Database tables: " }
+                    @for col in &block.collections {
+                        (Badge::new(BadgeVariant::ToneSlate).classes("text-11 mr-1").render(html! { (col.name) }))
                     }
                 }
             }
         }
-    };
+    });
 
-    ui::html_response_opening_modal(markup, "block-detail-modal-overlay")
+    ui::html_response_opening_modal(markup, DETAIL_MODAL_ID)
 }
+
+/// The block detail modal's element id: what [`handle_block_detail`] renders
+/// the `<dialog>` with and asks chrome.js to open.
+const DETAIL_MODAL_ID: &str = "block-detail";
 
 /// Tone variant for an endpoint's HTTP-method badge. Shares its colour set with
 /// [`auth_badge_tone`] — `Post`/`Public` and `Patch`/`Authenticated` render
@@ -594,37 +603,16 @@ fn custom_tab_content() -> maud::Markup {
 /// its header does; the two widths are the ones the old `th .w-70` / `.w-80`
 /// utility classes gave those headers.
 const ENDPOINT_COLUMNS: [components::TableCol<'static>; 4] = [
-    components::TableCol {
-        label: "Method",
-        width: Some("70px"),
-    },
-    components::TableCol {
-        label: "Path",
-        width: None,
-    },
-    components::TableCol {
-        label: "Description",
-        width: None,
-    },
-    components::TableCol {
-        label: "Auth",
-        width: Some("80px"),
-    },
+    components::TableCol::new("Method").width("70px"),
+    components::TableCol::new("Path"),
+    components::TableCol::new("Description"),
+    components::TableCol::new("Auth").width("80px"),
 ];
 
 const CONFIG_KEY_COLUMNS: [components::TableCol<'static>; 3] = [
-    components::TableCol {
-        label: "Key",
-        width: None,
-    },
-    components::TableCol {
-        label: "Description",
-        width: None,
-    },
-    components::TableCol {
-        label: "Default",
-        width: None,
-    },
+    components::TableCol::new("Key"),
+    components::TableCol::new("Description"),
+    components::TableCol::new("Default"),
 ];
 
 /// Regression coverage for the swallowed-failure finding: block enable/disable

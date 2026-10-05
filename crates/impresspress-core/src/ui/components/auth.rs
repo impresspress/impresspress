@@ -71,6 +71,17 @@ impl AlertVariant {
             AlertVariant::Success => "alert--success",
         }
     }
+
+    /// The live-region role a screen reader announces the message through:
+    /// an error interrupts (`alert`, assertive) — the form did not do what
+    /// was asked — while information and success wait their turn (`status`,
+    /// polite).
+    fn role(&self) -> &'static str {
+        match self {
+            AlertVariant::Error => "alert",
+            AlertVariant::Info | AlertVariant::Success => "status",
+        }
+    }
 }
 
 /// Inline page-level message. Rendered with the `hidden` attribute; the
@@ -78,9 +89,25 @@ impl AlertVariant {
 /// `style.display` — `base.css`'s `[hidden] { display: none !important; }`
 /// always wins over a plain inline `style.display`). Replaces the
 /// hand-inlined `#error` / `#info` divs.
+///
+/// Carries the variant's live-region role ([`AlertVariant::role`]), so the
+/// message a script reveals is announced, not only painted: a failed
+/// sign-in used to appear silently above a form the screen-reader user was
+/// still focused in.
 pub fn alert(variant: AlertVariant, id: &str, message: &str) -> Markup {
     html! {
-        div id=(id) class={ "alert " (variant.class()) } hidden { (message) }
+        div id=(id) class={ "alert " (variant.class()) } role=(variant.role()) hidden { (message) }
+    }
+}
+
+/// [`alert`] as the server sends it, already showing: the same box and the
+/// same live-region role, without the `id` and the `hidden` a script would
+/// clear. For a message that arrives as markup — an htmx answer swapped into
+/// a form's result slot — where there is no script to reveal it, and where
+/// inserting an element with `role="alert"` is itself what announces it.
+pub fn alert_message(variant: AlertVariant, message: &str) -> Markup {
+    html! {
+        div class={ "alert " (variant.class()) } role=(variant.role()) { (message) }
     }
 }
 
@@ -99,7 +126,7 @@ pub fn oauth_button(provider: &str, label: &str, icon: Markup) -> Markup {
 
 #[cfg(test)]
 mod tests {
-    use super::auth_panel;
+    use super::{alert_message, auth_panel, AlertVariant};
     use crate::ui::SiteConfig;
 
     fn config_with(auth_headline: &str, auth_tagline: &str) -> SiteConfig {
@@ -113,6 +140,22 @@ mod tests {
             auth_headline: auth_headline.to_string(),
             auth_tagline: auth_tagline.to_string(),
         }
+    }
+
+    /// A server-sent message is showing and announced: no `hidden` for a
+    /// script to clear, and the variant's live-region role.
+    #[test]
+    fn an_alert_message_is_shown_with_its_role() {
+        let error = alert_message(AlertVariant::Error, "Nope").into_string();
+        assert_eq!(
+            error,
+            r#"<div class="alert alert--error" role="alert">Nope</div>"#
+        );
+        let ok = alert_message(AlertVariant::Success, "Done").into_string();
+        assert_eq!(
+            ok,
+            r#"<div class="alert alert--success" role="status">Done</div>"#
+        );
     }
 
     /// Headline always comes from config, never `config.app_name` — matches
@@ -241,6 +284,17 @@ mod tests {
             !m.contains(&style_attr),
             "alert must not carry inline styles"
         );
+    }
+
+    #[test]
+    fn an_error_alert_is_assertive_and_the_others_are_polite() {
+        use super::{alert, AlertVariant};
+        let error = alert(AlertVariant::Error, "error", "").into_string();
+        assert!(error.contains(r#"role="alert""#), "{error}");
+        for variant in [AlertVariant::Info, AlertVariant::Success] {
+            let m = alert(variant, "info", "").into_string();
+            assert!(m.contains(r#"role="status""#), "{m}");
+        }
     }
 
     #[test]

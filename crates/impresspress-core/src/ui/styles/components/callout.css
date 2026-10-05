@@ -1,0 +1,29 @@
+/* ===== Callout (ui/components/callout.rs) =====
+   A boxed note inside a page's content. Info is neutral (slate surface and
+   border, primary text); the brand colour is not used -- it is kept for
+   primary actions, and a note that informs is not one. Warning is a pale
+   tint of --accent-warning (10% fill, 40% border) with --accent-warning-text
+   on it: #92400e on that #fef5e7 fill is 6.56:1 (computed). */
+.callout {
+	display: flex; align-items: flex-start; justify-content: space-between;
+	gap: var(--space-4);
+	padding: var(--space-4);
+	margin: 0 0 var(--space-5);
+	border: 1px solid var(--border-color);
+	border-radius: var(--radius-lg);
+	background: var(--surface-2);
+	color: var(--text-primary);
+}
+.callout--info { background: var(--surface-2); border-color: var(--border-color); }
+.callout--warning { background: color-mix(in srgb, var(--accent-warning) 10%, var(--surface-1)); border-color: color-mix(in srgb, var(--accent-warning) 40%, var(--surface-1)); color: var(--accent-warning-text); }
+.callout__copy { min-width: 0; max-width: 68ch; }
+.callout__title { display: block; margin-bottom: var(--space-1); }
+.callout__body { font-size: var(--text-sm); }
+.callout--info .callout__body { color: var(--text-secondary); }
+.callout__body > :first-child { margin-top: 0; }
+.callout__body > :last-child { margin-bottom: 0; }
+.callout__actions { display: flex; gap: var(--space-2); align-items: center; flex-wrap: wrap; flex: none; }
+.callout__code { font-size: 12px; padding: 1px var(--space-1); background: rgba(0,0,0,0.05); border-radius: 3px; }
+@media (max-width: 760px) {
+	.callout { flex-direction: column; }
+}

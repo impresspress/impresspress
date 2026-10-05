@@ -407,7 +407,7 @@ mod tests {
         }
         Record {
             id: "doc-1".to_string(),
-            data,
+            data: data.into_iter().collect(),
         }
     }
 
@@ -445,7 +445,7 @@ mod tests {
     #[test]
     fn an_unpublished_row_has_no_published_at() {
         let mut absent = record(&[]);
-        absent.data.remove("published_at");
+        absent.data.shift_remove("published_at");
         assert_eq!(
             DocumentRow::from_record(&absent)
                 .expect("the row decodes")

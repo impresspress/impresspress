@@ -5,16 +5,12 @@ use wafer_run::{context::Context, Message, OutputStream};
 use crate::{
     blocks::{
         auth::{
-            helpers::build_auth_cookie,
-            repo::{
-                jwt_blocklist::{self, NewBlocklistEntry},
-                sessions, tokens,
-            },
+            helpers::{build_auth_cookie, end_presented_access_token},
+            repo::{sessions, tokens},
         },
         auth_ui::contracts::MessageResponse,
         crud,
     },
-    crypto::{META_AUTH_EXP, META_AUTH_JTI},
     http::ResponseBuilder,
 };
 
@@ -54,61 +50,15 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
         }
 
         // SEC-042: the currently-presented access JWT stays structurally
-        // valid until its natural exp. Blocklist its `jti` so subsequent
-        // requests with the same token are rejected by `extract_auth_meta`.
-        //
-        // Only the in-flight JWT is blocklisted (per-jti, not per-user) so
-        // other live sessions for the same user are unaffected.
-        let jti = msg.get_meta(META_AUTH_JTI);
-        let exp_str = msg.get_meta(META_AUTH_EXP);
-        if !jti.is_empty() {
-            // Convert exp (UNIX seconds) to ISO-8601 so we can prune by
-            // string comparison consistent with other auth tables. Fall
-            // back to "now + access_token_lifetime" if exp is missing or
-            // unparseable. A fixed 1-day fallback would evict the row
-            // while the JWT was still valid when the configured access
-            // lifetime is extended past 24h, silently re-enabling a
-            // logged-out token.
-            let access_lifetime =
-                match crate::blocks::auth::helpers::access_token_lifetime_secs(ctx).await {
-                    Ok(secs) => secs,
-                    Err(e) => {
-                        return crud::db_error_internal(
-                            e,
-                            "Logout could not read the access-token lifetime",
-                        )
-                    }
-                };
-            let expires_at = exp_str
-                .parse::<i64>()
-                .ok()
-                .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
-                .unwrap_or_else(|| {
-                    chrono::Utc::now() + chrono::Duration::seconds(access_lifetime as i64)
-                });
-            let expires_at_iso = expires_at.format("%Y-%m-%dT%H:%M:%SZ").to_string();
-            // Same fail-closed treatment as the refresh-token revocation
-            // above: if the currently-presented JWT can't be blocklisted,
-            // it stays valid until its natural exp — logout must not claim
-            // success in that case.
-            if let Err(e) = jwt_blocklist::insert(
-                ctx,
-                NewBlocklistEntry {
-                    jti,
-                    user_id,
-                    expires_at: &expires_at_iso,
-                },
-            )
-            .await
-            {
-                tracing::error!(
-                    user_id = %user_id,
-                    jti = %jti,
-                    error = %e,
-                    "logout: jwt blocklist insert failed"
-                );
-                return crud::db_error_internal(e, "Logout could not fully revoke the session");
-            }
+        // valid until its natural exp; blocklist its `jti`. Same fail-closed
+        // treatment as the refresh-token revocation above.
+        if let Err(e) = end_presented_access_token(ctx, msg).await {
+            tracing::error!(
+                user_id = %user_id,
+                error = %e,
+                "logout: jwt blocklist insert failed"
+            );
+            return crud::db_error_internal(e, "Logout could not fully revoke the session");
         }
     }
 
@@ -128,8 +78,10 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::test_support::{
-        auth_msg, output_is_error, output_status, FailingDbOpContext, TestContext,
+    use crate::{
+        blocks::auth::repo::jwt_blocklist,
+        crypto::{META_AUTH_EXP, META_AUTH_JTI},
+        test_support::{auth_msg, output_is_error, output_status, FailingDbOpContext, TestContext},
     };
 
     #[tokio::test]

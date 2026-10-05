@@ -18,7 +18,7 @@ use std::{collections::HashMap, sync::Arc};
 use serde_json::{json, Value};
 use wafer_block::db::{Filter, FilterOp, ListOptions, SortField};
 use wafer_core::{
-    clients::database as db,
+    clients::database::{self as db, RecordData},
     interfaces::database::service::{DatabaseError, DatabaseService},
 };
 use wafer_run::{context::Context, ErrorCode, WaferError};
@@ -56,7 +56,7 @@ pub struct BlockSettingsRow {
 impl BlockSettingsRow {
     /// Decode one row. `block_name` and `enabled` are required (both `NOT
     /// NULL`); a row without them is not a block setting.
-    pub fn from_record(id: &str, data: &HashMap<String, Value>) -> Result<Self, String> {
+    pub fn from_record(id: &str, data: &RecordData) -> Result<Self, String> {
         let block_name = data.str_field("block_name");
         if block_name.is_empty() {
             return Err(format!("{TABLE} row `{id}` has no block_name"));
@@ -162,7 +162,7 @@ fn decode_error(e: String) -> WaferError {
 /// Decode every record, warning about and skipping the ones that do not
 /// decode (the policy the loaders have always applied to a malformed row).
 fn decode_rows<'a>(
-    records: impl IntoIterator<Item = (&'a str, &'a HashMap<String, Value>)>,
+    records: impl IntoIterator<Item = (&'a str, &'a RecordData)>,
 ) -> Vec<BlockSettingsRow> {
     records
         .into_iter()
@@ -516,7 +516,8 @@ mod tests {
         assert!(!row.created_at.is_empty());
         assert_eq!(row.created_at, row.updated_at);
 
-        let again = BlockSettingsRow::from_record(&row.id, &row.to_data()).expect("decode");
+        let again = BlockSettingsRow::from_record(&row.id, &row.to_data().into_iter().collect())
+            .expect("decode");
         assert_eq!(&again, row);
 
         let state = row.state();
@@ -652,12 +653,12 @@ mod tests {
 
     #[test]
     fn a_record_without_a_block_name_or_enabled_does_not_decode() {
-        let mut data = HashMap::new();
+        let mut data = RecordData::new();
         data.insert("enabled".to_string(), serde_json::json!(1));
         let err = BlockSettingsRow::from_record("bs_1", &data).expect_err("no block_name");
         assert!(err.contains(TABLE) && err.contains("bs_1"), "{err}");
 
-        let mut data = HashMap::new();
+        let mut data = RecordData::new();
         data.insert("block_name".to_string(), serde_json::json!("x/y"));
         let err = BlockSettingsRow::from_record("bs_1", &data).expect_err("no enabled");
         assert!(err.contains("enabled"), "{err}");
@@ -950,6 +951,16 @@ mod operational_error_tests {
             _field: &str,
             _filters: &[Filter],
         ) -> Result<f64, DatabaseError> {
+            unreachable!()
+        }
+
+        async fn increment_field_where(
+            &self,
+            _collection: &str,
+            _col: &str,
+            _delta: i64,
+            _filters: &[Filter],
+        ) -> Result<i64, DatabaseError> {
             unreachable!()
         }
 

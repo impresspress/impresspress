@@ -13,6 +13,7 @@ pub mod nav_groups;
 pub mod palette;
 pub mod settings_form;
 pub mod shell;
+pub use shell::BodyLayout;
 pub mod sidebar;
 pub mod templates;
 
@@ -150,6 +151,17 @@ impl UserInfo {
         self.roles.iter().any(|r| r == "admin")
     }
 
+    /// The account's role as the chrome shows it — the sidebar's user row
+    /// and the profile menu header use this one label, so the two can never
+    /// describe the same account differently.
+    pub fn role_label(&self) -> &'static str {
+        if self.is_admin() {
+            "Admin"
+        } else {
+            "User"
+        }
+    }
+
     /// First letter of email, uppercased, for avatar.
     pub fn avatar_initial(&self) -> char {
         self.email
@@ -228,10 +240,64 @@ pub struct Page<'a> {
     pub title: &'a str,
     /// The audience's sidebar groups (admin or portal).
     pub nav: &'a [NavGroup],
-    pub user: Option<&'a UserInfo>,
+    /// The signed-in viewer and their profile menu; `None` renders no user
+    /// row.
+    pub signed_in: Option<sidebar::SignedIn<'a>>,
     pub current_path: &'a str,
     pub topbar: shell::Topbar<'a>,
-    pub body: maud::Markup,
+    pub body: PageBody,
+}
+
+/// A shelled page's body, and how the shell's content card frames it.
+///
+/// The frame belongs to the body's TEMPLATE, not to the page that calls it:
+/// a full-bleed template (`templates::chat_page`) returns a `PageBody` that
+/// already says so, and every other body — any plain `Markup` — converts to
+/// the padded default. So a page cannot render a chat layout and forget to
+/// drop the padding, because it never chooses.
+pub struct PageBody {
+    layout: shell::BodyLayout,
+    markup: maud::Markup,
+}
+
+impl PageBody {
+    /// A body that draws its own panes edge to edge. Only full-bleed
+    /// templates construct one.
+    pub(crate) fn full_bleed(markup: maud::Markup) -> Self {
+        Self {
+            layout: shell::BodyLayout::Flush,
+            markup,
+        }
+    }
+
+    /// The same body, with `extra` rendered after it (a page's own scripts
+    /// or styles), keeping the template's frame.
+    pub fn append(self, extra: maud::Markup) -> Self {
+        let markup = self.markup;
+        Self {
+            layout: self.layout,
+            markup: maud::html! { (markup) (extra) },
+        }
+    }
+
+    /// How the content card frames this body.
+    pub fn layout(&self) -> shell::BodyLayout {
+        self.layout
+    }
+
+    /// The body's markup, without the frame.
+    pub fn into_markup(self) -> maud::Markup {
+        self.markup
+    }
+}
+
+impl From<maud::Markup> for PageBody {
+    fn from(markup: maud::Markup) -> Self {
+        Self {
+            layout: shell::BodyLayout::Padded,
+            markup,
+        }
+    }
 }
 
 impl<'a> Page<'a> {
@@ -250,13 +316,14 @@ impl<'a> Page<'a> {
             html! {
                 (shell::shell(
                     self.nav,
-                    self.user,
+                    self.signed_in,
                     self.current_path,
                     &self.config.logo_url,
                     &self.config.logo_icon_url,
                     &self.config.app_name,
                     self.topbar,
-                    self.body,
+                    self.body.layout,
+                    self.body.markup,
                 ))
                 (palette_markup)
             },
@@ -273,7 +340,7 @@ impl<'a> Page<'a> {
     /// instead. See [`shell_document`].
     pub fn document(self, msg: &wafer_run::Message) -> maud::Markup {
         if is_htmx(msg) {
-            return self.body;
+            return self.body.markup;
         }
         self.render()
     }
@@ -310,12 +377,14 @@ pub struct Shell<'a> {
     pub title: &'a str,
     /// Which sidebar to render.
     pub nav: NavKind,
-    /// Breadcrumb trail. A single `Crumb { label, href: None }` is the common case.
+    /// Breadcrumb trail; the LAST crumb is the page title (the page's only
+    /// `h1`). A single `Crumb { label, href: None }` is the common case; a
+    /// detail page passes its ancestors first. See [`shell::Topbar`].
     pub crumbs: Vec<shell::Crumb<'a>>,
-    /// Optional subtitle shown after the crumbs.
+    /// One-line page description, on its own line under the title.
     pub subtitle: Option<&'a str>,
-    /// Optional primary action button in the topbar.
-    pub primary_action: Option<maud::Markup>,
+    /// Page-level actions in the topbar, left to right — primary action last.
+    pub actions: Vec<maud::Markup>,
 }
 
 impl<'a> Shell<'a> {
@@ -329,7 +398,7 @@ impl<'a> Shell<'a> {
                 href: None,
             }],
             subtitle: None,
-            primary_action: None,
+            actions: Vec::new(),
         }
     }
 }
@@ -347,7 +416,7 @@ pub async fn shell_page(
     ctx: &dyn wafer_run::context::Context,
     msg: &wafer_run::Message,
     shell: Shell<'_>,
-    body: maud::Markup,
+    body: impl Into<PageBody>,
 ) -> wafer_run::OutputStream {
     match shell_document(ctx, msg, shell, body).await {
         Ok(document) => html_response(document),
@@ -371,7 +440,7 @@ pub async fn shell_document(
     ctx: &dyn wafer_run::context::Context,
     msg: &wafer_run::Message,
     shell: Shell<'_>,
-    body: maud::Markup,
+    body: impl Into<PageBody>,
 ) -> Result<maud::Markup, wafer_run::WaferError> {
     let config = SiteConfig::load(ctx).await?;
     let user = UserInfo::from_message(msg);
@@ -400,20 +469,28 @@ pub async fn shell_document(
         .collect();
     let features = crate::routing::gate_from_request(ctx, msg);
     nav_groups::retain_reachable(&mut groups, &registered, &features);
+    // The profile menu's account links go through the same filter: a link
+    // the router would refuse is no way to change a password.
+    let mut account_menu = nav_groups::account_menu();
+    nav_groups::retain_reachable(&mut account_menu, &registered, &features);
+    let account_links: Vec<NavItem> = account_menu.into_iter().flat_map(|g| g.items).collect();
     let path = msg.path().to_string();
     Ok(Page {
         config: &config,
         title: shell.title,
         nav: &groups,
-        user: user.as_ref(),
+        signed_in: user.as_ref().map(|user| sidebar::SignedIn {
+            user,
+            account_links: &account_links,
+        }),
         current_path: &path,
         topbar: shell::Topbar {
             crumbs: shell.crumbs,
             subtitle: shell.subtitle,
-            primary_action: shell.primary_action,
+            actions: shell.actions,
             show_palette: true,
         },
-        body,
+        body: body.into(),
     }
     .document(msg))
 }
@@ -657,7 +734,7 @@ pub fn refused_response(
 pub fn swap_error_response(target_id: &str, message: &str) -> wafer_run::OutputStream {
     let markup = maud::html! {
         div id=(target_id) {
-            div class="alert alert--error" role="alert" { (message) }
+            (components::alert_message(components::AlertVariant::Error, message))
         }
     };
     html_response_with_toast(markup, message, "error")
@@ -678,7 +755,7 @@ pub fn swap_error_row_response(
     let markup = maud::html! {
         tr id=(target_id) {
             td colspan=(colspan) {
-                div class="alert alert--error" role="alert" { (message) }
+                (components::alert_message(components::AlertVariant::Error, message))
             }
         }
     };
@@ -691,9 +768,7 @@ pub fn swap_error_row_response(
 ///
 /// Same status and toast as [`swap_error_response`], for the same reason.
 pub fn swap_notice_response(message: &str) -> wafer_run::OutputStream {
-    let markup = maud::html! {
-        div class="alert alert--error" role="alert" { (message) }
-    };
+    let markup = components::alert_message(components::AlertVariant::Error, message);
     html_response_with_toast(markup, message, "error")
 }
 
@@ -777,8 +852,8 @@ pub fn script_json_escape(json: &str) -> String {
     json.replace('<', "\\u003c")
 }
 
-/// An htmx fragment that is (or fills) a modal, plus the instruction to
-/// reveal that modal once it has been swapped in.
+/// An htmx fragment that is a modal, plus the instruction to open that modal
+/// once it has been swapped in.
 ///
 /// The four handlers that answer with modal contents used to append a
 /// `<script>` to the fragment that reached back out and cleared the overlay's
@@ -788,10 +863,11 @@ pub fn script_json_escape(json: &str) -> String {
 /// modal section of `ui/assets/chrome.js` listens for `openModal`, the mirror
 /// of the `closeModal` event handlers already emit through `HX-Trigger`.
 ///
-/// *After-swap* rather than plain `HX-Trigger` because the overlay is already
-/// in the page and opening it before its contents arrive shows an empty box.
-/// As in [`html_response_with_toast`], the payload goes through
-/// [`header_json`] so an id can neither malform the JSON nor inject a header.
+/// *After-swap* rather than plain `HX-Trigger` because the fragment IS the
+/// `<dialog>` (`components::modal`): before the swap there is nothing with
+/// that id to open. As in [`html_response_with_toast`], the payload goes
+/// through [`header_json`] so an id can neither malform the JSON nor inject a
+/// header.
 pub fn html_response_opening_modal(
     markup: maud::Markup,
     modal_id: &str,
@@ -799,6 +875,35 @@ pub fn html_response_opening_modal(
     let trigger = header_json(&serde_json::json!({ "openModal": { "id": modal_id } }));
     crate::http::ResponseBuilder::new()
         .set_header("HX-Trigger-After-Swap", &trigger)
+        .body(
+            markup.into_string().into_bytes(),
+            "text/html; charset=utf-8",
+        )
+}
+
+/// The answer to a form a modal submitted and the write landed: `markup` for
+/// the form's swap target, the modal `modal_id` closed, and a toast.
+///
+/// Plain `HX-Trigger`, so the modal closes BEFORE the swap. The dialog's
+/// `close` event is a queued task, so it arrives once the swap has landed, and
+/// chrome.js hands focus back then, once — to the control that opened the
+/// modal, or to its replacement when the swap re-rendered it
+/// (`ui/assets/chrome.js`, section 4).
+pub fn html_response_closing_modal(
+    markup: maud::Markup,
+    modal_id: &str,
+    toast_message: &str,
+    toast_type: &str,
+) -> wafer_run::OutputStream {
+    let trigger = header_json(&serde_json::json!({
+        "showToast": {
+            "message": toast_message,
+            "type": toast_type,
+        },
+        "closeModal": { "id": modal_id },
+    }));
+    crate::http::ResponseBuilder::new()
+        .set_header("HX-Trigger", &trigger)
         .body(
             markup.into_string().into_bytes(),
             "text/html; charset=utf-8",
@@ -957,18 +1062,18 @@ mod tests {
             config,
             title: "Dashboard",
             nav: groups,
-            user: None,
+            signed_in: None,
             current_path: "/b/admin/",
             topbar: Topbar {
                 crumbs: vec![Crumb {
                     label: "Dashboard",
                     href: None,
                 }],
-                primary_action: None,
+                actions: Vec::new(),
                 subtitle: None,
                 show_palette: true,
             },
-            body,
+            body: body.into(),
         }
     }
 
@@ -983,6 +1088,26 @@ mod tests {
         assert!(s.contains(r#"class="shell""#));
         assert!(s.contains(r#"id="cmdk""#)); // palette mounted
         assert!(s.contains("hello"));
+    }
+
+    /// The frame comes from the body's template: a chat body renders the
+    /// content card flush, any plain markup renders it padded.
+    #[test]
+    fn the_body_template_chooses_the_content_card_frame() {
+        let config = site_config();
+        let groups = nav_groups::admin();
+        let chat = templates::chat_page(html! {}, html! {}, html! {}, None);
+        let flush = Page {
+            body: chat,
+            ..dashboard_page(&config, &groups, html! {})
+        }
+        .render()
+        .into_string();
+        assert!(flush.contains(r#"<main class="shell__body shell__body--flush""#));
+        let padded = dashboard_page(&config, &groups, html! { p { "x" } })
+            .render()
+            .into_string();
+        assert!(padded.contains(r#"<main class="shell__body" id="content""#));
     }
 
     #[tokio::test]
@@ -2800,8 +2925,6 @@ mod tests {
             "page--detail",
             "page--form",
             "page--list",
-            "pagination__page",
-            "palette__item-label",
             "quota-card",
             "quota-warning",
             "section",

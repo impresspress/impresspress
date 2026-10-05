@@ -20,18 +20,6 @@
 
 .table tbody tr:hover { background: var(--bg-hover); }
 
-/* Pagination — the base rule only. The `.pagination-info`/`-controls`/`-btn`
-   family that stood here belonged to a hand-written pagination nobody renders
-   any more; `components::pagination` emits `.pagination__*` (further down this
-   file) instead.
-   This block stays, and deleting it is not a tidy-up: `.pagination` is defined
-   TWICE at equal specificity, and the second definition sets `padding`, not
-   `margin`. `margin-top: var(--space-6)` below is the only source of the live
-   nav's top margin, so removing this rule moves every page that paginates. */
-.pagination {
-	display: flex; align-items: center; gap: var(--space-2); margin-top: var(--space-6);
-}
-
 /* Empty State */
 /* The bare-text empty state, for a list that just needs one line ("No
    buckets", "No active shares"). Its richer sibling -- `.empty` below, built
@@ -54,12 +42,24 @@
 }
 
 /* ===== Data table ===== */
+/* `.data-table` is the wrapper `ui/components/table.rs` emits around its
+   `<table>`. A few pages still hand-write the class on the `<table>` itself
+   (files, vector, userportal sessions, products-stripe-setup.js);
+   `table.data-table` gets the same full width and
+   chrome so it does not shrink-wrap to its content. */
 .data-table { overflow-x: auto; border: 1px solid var(--border-light); border-radius: var(--radius-md); background: var(--surface-1); }
-.data-table table { width: 100%; border-collapse: collapse; }
+.data-table table, table.data-table { width: 100%; border-collapse: collapse; }
+/* A collapsed-border table ignores border-radius; the hand-written form
+   keeps separate borders so its rounded frame still shows. */
+table.data-table { border-collapse: separate; border-spacing: 0; }
 .data-table thead th { position: sticky; top: 0; background: var(--surface-3); text-align: left; padding: var(--space-2) var(--space-3); font-size: var(--text-xs); text-transform: uppercase; letter-spacing: 0.04em; color: var(--text-muted); border-bottom: 1px solid var(--border-color); font-weight: 500; }
-.data-table tbody td { padding: var(--space-2) var(--space-3); font-size: var(--text-sm); border-bottom: 1px dashed var(--border-light); color: var(--text-primary); }
+.data-table tbody td { padding: var(--space-2) var(--space-3); font-size: var(--text-sm); border-bottom: 1px dashed var(--border-light); color: var(--text-primary); vertical-align: middle; }
 .data-table tbody tr:last-child td { border-bottom: none; }
 .data-table__row--linked:hover { background: var(--bg-hover); cursor: pointer; }
+/* Controls sit at the end of their cell, on one line. */
+.data-table__cell--actions { text-align: right; white-space: nowrap; }
+.data-table__cell--actions > * + * { margin-left: var(--space-2); }
+.data-table__cell--select { width: 2.75rem; }
 /* A text link in a cell -- a bucket, a file, a folder. With no rule of its
    own it rendered in the browser's default blue and underline, the one
    unstyled element in the table. The row-link chevron (below) and a `.btn`
@@ -68,9 +68,9 @@
 .data-table td:not(.data-table__row-href) a:not(.btn) { color: var(--primary-button); font-weight: 500; text-decoration: none; }
 .data-table td:not(.data-table__row-href) a:not(.btn):hover { text-decoration: underline; }
 .data-table__row-href { width: 3rem; text-align: right; color: var(--text-muted); }
-/* The chevron is the row's accessible link; give it a real touch target
-   (~44px) — the rest of the row is made clickable by the delegated handler
-   in assets.rs, which routes clicks to this anchor. */
+/* The chevron is the row's accessible link (aria-label "Open"); give it a
+   real 44px touch target -- the rest of the row is made clickable by the
+   delegated handler in assets/chrome.js, which routes clicks to it. */
 .data-table__row-href a {
     display: inline-flex;
     align-items: center;
@@ -78,8 +78,10 @@
     min-width: 2.75rem;
     min-height: 2.75rem;
     margin: -0.75rem -0.5rem;
-    border-radius: 8px;
+    border-radius: var(--radius-md);
+    color: inherit;
 }
+.data-table__row-href a:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .data-table__empty { padding: var(--space-8); }
 /* Caller-declared per-column width (ui/components/table.rs's `TableCol`) --
    a genuine runtime value, handed to CSS as `--col-width`. */
@@ -99,6 +101,23 @@
    two lines. */
 .data-table .cell-wrap { overflow-wrap: anywhere; }
 
+/* Scrolling grid (`DataTable::scroll`): a wide grid of data, e.g. the SQL
+   explorer's results, stays a grid at every width. The wrapper is a
+   labelled, focusable region (keyboard users scroll it with the arrow
+   keys) whose scrollbar is always shown, so it is visibly scrollable. Header
+   names stay on one line; values wrap only past a readable width. */
+.data-table--scroll { overflow-x: scroll; scrollbar-width: thin; scrollbar-color: var(--border-color) transparent; }
+.data-table--scroll:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.data-table--scroll table { width: max-content; min-width: 100%; }
+/* Query column names are identifiers: shown as written, on one line. */
+.data-table--scroll thead th { white-space: nowrap; text-transform: none; letter-spacing: 0; }
+.data-table--scroll tbody td { max-width: 40ch; overflow-wrap: anywhere; }
+
+/* A date-time (`components::timestamp`): tabular figures so a column of
+   them aligns, and one line -- "2026-10-03 05:43" never splits between the
+   date and the time. */
+.datetime { font-variant-numeric: tabular-nums; white-space: nowrap; }
+
 /* ===== Empty state ===== */
 .empty { text-align: center; padding: var(--space-8) var(--space-4); color: var(--text-secondary); }
 /* `font-size: 2.4rem` used to size a text/emoji glyph here. Every call site
@@ -112,12 +131,23 @@
 .empty__body { font-size: var(--text-base); margin: 0 0 var(--space-4); }
 
 /* ===== Pagination ===== */
-.pagination { display: flex; align-items: center; gap: var(--space-4); padding: var(--space-4) 0; font-size: var(--text-sm); color: var(--text-secondary); }
-.pagination__count { margin-right: auto; }
+/* One row at every width: the total on the left, the controls on the right.
+   Each control is a 44px target. */
+.pagination { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-top: var(--space-4); font-size: var(--text-sm); color: var(--text-secondary); }
+.pagination__count { min-width: 0; font-variant-numeric: tabular-nums; }
+.pagination__controls { display: flex; align-items: center; gap: var(--space-1); flex-shrink: 0; }
+.pagination__page { padding: 0 var(--space-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
+.pagination__link {
+	display: inline-flex; align-items: center; justify-content: center;
+	min-width: 44px; min-height: 44px; padding: 0 var(--space-3);
+	border-radius: var(--radius-md); white-space: nowrap; text-decoration: none;
+}
 /* --primary-color is 3.66:1 on white -- below the 4.5:1 AA floor for this
    text link; --primary-button (4.99:1, computed) is the text-safe sibling. */
-.pagination__prev, .pagination__next { color: var(--primary-button); text-decoration: none; }
-.pagination__prev.is-disabled, .pagination__next.is-disabled { color: var(--text-muted); pointer-events: none; }
+a.pagination__link { color: var(--primary-button); }
+a.pagination__link:hover { background: var(--bg-hover); }
+a.pagination__link:focus-visible { outline: none; box-shadow: var(--focus-ring); }
+.pagination__link.is-disabled { color: var(--text-muted); }
 
 /* ── Database admin ─────────────────────────────────────── */
 .db-layout {
@@ -154,7 +184,7 @@
   font-size: 13px;
 }
 .db-table-list__item:hover { background: var(--bg-secondary, #f8f9fa); }
-.db-table-list__item.is-active { background: #fef9e7; border: 1px solid #f0d78c; }
+.db-table-list__item.is-active { background: var(--bg-hover); box-shadow: inset 3px 0 0 var(--primary-color); font-weight: 600; }
 .db-table-list__name { font-weight: 500; word-break: break-all; }
 .db-table-list__empty { padding: var(--space-2); }
 
@@ -217,10 +247,12 @@
   height: 20px;
   padding: 0 var(--space-2);
   border-radius: 999px;
-  background: var(--primary-button);
-  color: #fff;
+  /* A count, not a call to action: neutral, like `.badge`. */
+  background: var(--border-color);
+  color: var(--text-primary);
   font-size: 11px;
   font-weight: 600;
+  font-variant-numeric: tabular-nums;
 }
 .db-table-group__list {
   list-style: none;
@@ -228,8 +260,6 @@
   padding: var(--space-1) var(--space-2);
 }
 .db-panel { padding: var(--space-1) 0; }
-.db-panel__head { display: flex; align-items: baseline; justify-content: space-between; gap: var(--space-3); margin-bottom: var(--space-3); }
-.db-panel__head h3 { font-size: 14px; margin: 0; word-break: break-all; }
 .db-panel-body { padding-top: var(--space-2); }
 .db-sql { display: flex; flex-direction: column; gap: var(--space-2); margin-bottom: var(--space-3); }
 .db-sql__input {
@@ -249,49 +279,69 @@
   .db-layout { grid-template-columns: 1fr; }
 }
 
-/* ===== Sessions page (Phase 4 PR-2) ===== */
-.session-row td:last-child { text-align: right; white-space: nowrap; }
-
+/* ===== Card mode (below 720px) =====
+   Each row becomes a card. The table's own frame goes (the cards are the
+   frame); a card's header row holds the select checkbox, the primary cell
+   as its title and the row's actions / link chevron; every other cell
+   stacks its label (`data-label`) above its value, left-aligned. Empty
+   cells are hidden. `.data-table--scroll` keeps its grid. */
 @media (max-width: 720px) {
-	/* Sessions / orgs tables → card list. The data-table doesn't fit at
-	   360px; collapse rows to stacked cards using ::before from data-label. */
-	.data-table { display: block; }
-	.data-table thead { display: none; }
-	.data-table tbody, .data-table tr { display: block; }
-	.data-table tr {
+	.data-table:not(.data-table--scroll) { display: block; border: none; background: none; border-radius: 0; overflow: visible; }
+	.data-table:not(.data-table--scroll) thead { display: none; }
+	.data-table:not(.data-table--scroll) tbody { display: block; }
+	.data-table:not(.data-table--scroll) tr {
+		display: grid;
+		grid-template-columns: [select] auto [title] minmax(0, 1fr) [actions] auto [link] auto;
+		align-items: center;
+		row-gap: var(--space-2);
 		border: 1px solid var(--border-light);
 		border-radius: var(--radius-md);
 		margin-bottom: var(--space-2);
-		padding: var(--space-2);
+		padding: var(--space-3);
 		background: var(--surface-1);
 	}
-	.data-table td {
-		display: flex;
-		justify-content: space-between;
-		align-items: center;
-		gap: var(--space-2);
+	.data-table:not(.data-table--scroll) td {
+		display: block;
+		grid-column: 1 / -1;
 		border: none;
-		padding: var(--space-1) 0;
-		text-align: right;
-		/* min-width: 0 lets the value shrink below its intrinsic content width;
-		   overflow-wrap: anywhere allows long unbroken values (ISO timestamps,
-		   share-tokens, file keys) to wrap rather than push the parent card
-		   past the viewport edge. Without this, seeded data with long
-		   non-wrapping strings (e.g. /b/storage/photos/) overflowed the 375px
-		   mobile viewport by ~20px, causing horizontal scroll on real mobile
-		   and width-drift in CI baselines. */
+		padding: 0;
+		text-align: left;
+		/* min-width: 0 lets the value shrink below its intrinsic content
+		   width; overflow-wrap: anywhere lets a long unbroken value (a
+		   share token, a file key) wrap rather than push the card past the
+		   viewport edge. */
 		min-width: 0;
 		overflow-wrap: anywhere;
 	}
-	.data-table td::before {
+	.data-table:not(.data-table--scroll) td::before {
 		content: attr(data-label);
+		display: block;
+		margin-bottom: 2px;
 		color: var(--text-muted);
 		font-size: var(--text-xs);
 		text-transform: uppercase;
-		text-align: left;
-		flex-shrink: 0;
+		letter-spacing: 0.04em;
 	}
-	.data-table td:last-child { padding-top: var(--space-2); }
+	.data-table:not(.data-table--scroll) td.data-table__cell--empty { display: none; }
+	/* The header row: no labels. */
+	.data-table:not(.data-table--scroll) td.data-table__cell--primary,
+	.data-table:not(.data-table--scroll) td.data-table__cell--actions,
+	.data-table:not(.data-table--scroll) td.data-table__cell--select,
+	.data-table:not(.data-table--scroll) td.data-table__row-href { grid-row: 1; }
+	.data-table:not(.data-table--scroll) td.data-table__cell--primary::before,
+	.data-table:not(.data-table--scroll) td.data-table__cell--actions::before,
+	.data-table:not(.data-table--scroll) td.data-table__cell--select::before,
+	.data-table:not(.data-table--scroll) td.data-table__row-href::before { content: none; }
+	/* The title is the primary cell's text -- or, when the cell carries more
+	   than its title (a variable's key with its description and notes), the
+	   element it marks `.data-table__title`; the rest keeps its own weight. */
+	.data-table:not(.data-table--scroll) td.data-table__cell--primary { grid-column: title; font-size: var(--text-base); }
+	.data-table:not(.data-table--scroll) td.data-table__cell--primary:not(:has(.data-table__title)),
+	.data-table:not(.data-table--scroll) td.data-table__cell--primary .data-table__title { font-weight: 600; }
+	.data-table:not(.data-table--scroll) td.data-table__cell--select { grid-column: select; width: auto; margin-right: var(--space-3); }
+	.data-table:not(.data-table--scroll) td.data-table__cell--actions { grid-column: actions; margin-left: var(--space-3); }
+	.data-table:not(.data-table--scroll) td.data-table__row-href { grid-column: link; width: auto; margin-left: var(--space-1); }
+	.data-table:not(.data-table--scroll) .data-table__row-href a { margin: -0.5rem -0.5rem -0.5rem 0; }
 }
 /* ===== Mobile table fallback =====
    This block used to also give an unwrapped `.table` its own horizontal
@@ -306,15 +356,3 @@
 @media (max-width: 720px) {
 	.table th, .table td { white-space: nowrap; }
 }
-
-/* ===== Sessions row (userportal) — less cramped =====
-   The data-table → card collapse on mobile leaves a row that's tight.
-   Give each cell breathing room and a clear value alignment. */
-.session-row td { padding: var(--space-2) 0; }
-@media (max-width: 720px) {
-	.session-row { padding: var(--space-4) !important; row-gap: var(--space-1); }
-	.session-row td { padding: var(--space-1) 0; }
-	.session-row td:last-child { padding-top: var(--space-2); }
-	.session-row .btn { width: auto; min-width: 88px; }
-}
-

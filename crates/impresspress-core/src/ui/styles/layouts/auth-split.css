@@ -24,46 +24,12 @@
 }
 
 /* `.login-logo` (the per-page auth-card header wrapper) was retired here --
-   no login/signup/reset/verify/bootstrap/change-password page renders a
-   per-page logo header any more (the navy `.auth-split__brand` panel is the
-   only place those pages' logo appears; see `components::auth_panel`).
-   `.login-subtitle` survives on its own (no `.login-logo` wrapper) on the
-   verify/reset-password result pages.
-
-   `.logo-image`/`.login-app-name`/`.login-brand`/`.login-brand__icon`
-   restored/ported from origin/main during the main merge -- 2026-09-02.
-   These are NOT dead: `templates::brand_lockup` (main's helper, shared by
-   every auth card AND `templates::account_card_page` -- the userportal/orgs
-   header) renders exactly these classes, and `WAFER_RUN_SHARED__LOGO_URL`
-   defaults to blank (no bundled wordmark; see `config_vars::LOGO_URL_KEY`),
-   so the blank-fallback branch (`.login-brand` icon + `.login-app-name`
-   text) is account-card pages' default rendering, not an edge case. */
+   no login/signup/reset/verify/bootstrap page renders a per-page logo header
+   any more (the navy `.auth-split__brand` panel is the only place those
+   pages' logo appears; see `components::auth_panel`). `.login-subtitle`
+   survives on its own on the verify/reset-password result pages. */
 .login-subtitle {
 	color: var(--text-secondary); font-size: 0.875rem; margin: 0;
-}
-
-/* `brand_lockup`'s configured-wordmark branch (`img .logo-image`) -- used
-   by account-card pages (userportal/orgs) when a deployment sets a custom
-   `WAFER_RUN_SHARED__LOGO_URL`. `components/card.css`'s
-   `.account-card__head .logo-image` narrows `max-width`/`margin-bottom` for
-   that specific context; this is the shared base. */
-.logo-image {
-	height: 48px; width: auto;
-	margin: 0 auto var(--space-4) auto; display: block;
-}
-
-/* `brand_lockup`'s blank-`logo_url` branch (the default): icon + app-name
-   lockup. 64px = the 64-cell pixel-art mark at 1:1 -- must stay a whole
-   multiple of the mark's native cell size or `.pixel-art` (styles/base.css)
-   nearest-neighbour scaling misaligns (same rule as the sidebar icon, see
-   `styles/layouts/shell.css`). */
-.login-brand { display: flex; flex-direction: column; align-items: center; gap: var(--space-3); margin-bottom: var(--space-2); }
-.login-brand__icon { width: 64px; height: 64px; display: block; }
-.login-brand .login-app-name { margin-bottom: 0; }
-
-.login-app-name {
-	font-size: 1.5rem; font-weight: 700; display: block; margin-bottom: var(--space-2);
-	color: var(--text-primary);
 }
 
 /* #dc2626 was only 3.95:1 on this box's #fee2e2 background (computed) --
@@ -79,31 +45,6 @@
 	display: flex; align-items: center; gap: var(--space-2);
 	animation: shake 0.3s ease-in-out;
 }
-
-/* Success box (signup/reset-password result). No `display` here
-   deliberately: the element starts `hidden` (native attribute, see
-   base.css's `[hidden]` rule) and the shown state is the default block
-   flow — the same shape the `#success` div had when it carried an inline
-   `display:block`. #ecfdf5/#a7f3d0 have no matching design token; carried
-   over unchanged from the original inline styles. #059669 was only 3.58:1
-   on #ecfdf5 (computed) -- below the 4.5:1 AA floor. #166534 (6.77:1 on
-   #ecfdf5, computed) replaces it -- same literal already used two rules
-   down by `.change-password-success-text` (and by `.badge--tone-green`'s
-   text in components/badge.css), so this box's own text now clears AA
-   too instead of being the one sibling left failing. */
-.login-success {
-	background: #ecfdf5; border: 1px solid #a7f3d0; border-radius: 8px;
-	padding: var(--space-3); margin-bottom: var(--space-4); font-size: 0.813rem; color: var(--accent-success-text);
-}
-/* change-password's success box: same box, centered content, larger padding,
-   and its own message styling (child overrides the box's font-size/color,
-   so the two don't need to agree). #16a34a has no matching design token and
-   was only 3.13:1 on the box's #ecfdf5 background (computed, Task 12c) --
-   below the 4.5:1 AA floor. #166534 (6.77:1 on #ecfdf5, computed) replaces
-   it -- same literal already used for .badge--tone-green's text in
-   components/badge.css. */
-.login-success--centered { padding: var(--space-4); text-align: center; }
-.change-password-success-text { font-size: 0.875rem; color: var(--accent-success-text); margin: 0 0 var(--space-4); font-weight: 500; }
 
 /* ===== Auth status result page (reset-password/verify success-or-failure,
    signup's "check your email") =====
@@ -141,11 +82,11 @@
 .auth-status__action { display: inline-block; width: auto; padding: var(--space-3) var(--space-5); text-decoration: none; }
 
 /* ===== Bootstrap-admin page hint (auth_ui/pages/bootstrap.rs) =====
- * #6b7280/#f3f4f6 have no matching design token; carried over unchanged
- * (#6b7280 already appears as a literal elsewhere -- see
- * .form-input-wrapper .input-icon in components/form.css). */
-.bootstrap-hint { font-size: 0.875rem; color: #6b7280; margin-bottom: var(--space-6); text-align: center; }
-.bootstrap-hint code { background: #f3f4f6; padding: 0.125rem var(--space-2); border-radius: 0.25rem; font-size: 0.813rem; }
+ * Tokens, not the old #6b7280-on-#f3f4f6 literals, which put the `<code>`
+ * env-var name at 4.39:1 (axe color-contrast). --text-secondary on
+ * --surface-2 is 5.1:1, and the hint itself is 5.3:1 on the form's #fdfdfd. */
+.bootstrap-hint { font-size: 0.875rem; color: var(--text-secondary); margin-bottom: var(--space-6); text-align: center; }
+.bootstrap-hint code { background: var(--surface-2); padding: 0.125rem var(--space-2); border-radius: var(--radius-sm); font-size: 0.813rem; }
 
 @keyframes shake {
 	0%, 100% { transform: translateX(0); }
@@ -155,19 +96,8 @@
 
 .login-form { margin-bottom: var(--space-6); }
 
-.pw-wrap { position: relative; }
-.pw-wrap input { padding-right: 2.5rem; }
-
-.pw-toggle {
-	position: absolute; right: 0.5rem; top: 50%;
-	transform: translateY(-50%);
-	background: none; border: none; cursor: pointer;
-	padding: var(--space-1); color: var(--text-muted);
-	display: flex; align-items: center;
-}
-
-.pw-toggle:hover { color: var(--text-primary); }
-.pw-toggle svg { width: 1.125rem; height: 1.125rem; }
+/* The password fields' wrapper and reveal button are the shared
+   `.value-reveal-wrapper` / `.reveal-toggle` (components/form.css). */
 
 .login-button {
 	width: 100%; padding: var(--space-4) var(--space-6);

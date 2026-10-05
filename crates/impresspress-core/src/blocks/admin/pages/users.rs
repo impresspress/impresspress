@@ -13,7 +13,7 @@ use crate::{
         },
         crud,
     },
-    http::{err_not_found, ResponseBuilder},
+    http::err_not_found,
     ui::{
         self,
         components::{self, badge, pagination, Badge, BadgeVariant},
@@ -87,7 +87,7 @@ pub async fn users_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         "Users",
         Topbar {
             crumbs: crumb("Users"),
-            primary_action: None,
+            actions: Vec::new(),
             subtitle: Some("Manage accounts, roles, and API keys"),
             show_palette: true,
         },
@@ -167,26 +167,11 @@ async fn users_table(
 /// so the single-row htmx swap in [`user_row_fragment`] renders against the
 /// same list the table did.
 const USER_COLUMNS: [components::TableCol<'static>; 5] = [
-    components::TableCol {
-        label: "Email",
-        width: None,
-    },
-    components::TableCol {
-        label: "Roles",
-        width: None,
-    },
-    components::TableCol {
-        label: "Status",
-        width: None,
-    },
-    components::TableCol {
-        label: "Created",
-        width: None,
-    },
-    components::TableCol {
-        label: "Actions",
-        width: None,
-    },
+    components::TableCol::new("Email").primary(),
+    components::TableCol::new("Roles"),
+    components::TableCol::new("Status"),
+    components::TableCol::new("Created"),
+    components::TableCol::new("Actions").actions(),
 ];
 
 /// Render one row of the users table. Shared between the multi-row table
@@ -205,10 +190,10 @@ fn single_user_row(record: &UserRow, roles: &[String], current_uid: &str) -> com
         html! { (email) },
         html! {
             @for role in roles {
-                (Badge::new(BadgeVariant::Primary).classes("mr-1").render(html! { (role) }))
+                (Badge::new(BadgeVariant::Secondary).classes("mr-1").render(html! { (role) }))
             }
             @if roles.is_empty() {
-                span .text-muted { "\u{2014}" }
+                span .text-muted { (components::NO_VALUE) }
             }
         },
         html! {
@@ -218,7 +203,7 @@ fn single_user_row(record: &UserRow, roles: &[String], current_uid: &str) -> com
                 (components::status_badge("active"))
             }
         },
-        html! { time .text-muted datetime=(created) { (created.get(..10).unwrap_or(created)) } },
+        html! { span .text-muted { (components::timestamp(created)) } },
         html! {
                 @if is_self {
                     span .text-muted { "(you)" }
@@ -367,13 +352,7 @@ pub async fn handle_create_role(
         Ok(content) => content,
         Err(e) => return reread_failed("Role created", "the role list", e),
     };
-    let trigger = r#"{"showToast":{"message":"Role created","type":"success"},"closeModal":{"id":"create-role"}}"#;
-    ResponseBuilder::new()
-        .set_header("HX-Trigger", trigger)
-        .body(
-            content.into_string().into_bytes(),
-            "text/html; charset=utf-8",
-        )
+    ui::html_response_closing_modal(content, "create-role", "Role created", "success")
 }
 
 /// `DELETE /b/admin/iam/roles/{id}` (from the roles tab). `{id}` is read only
@@ -491,24 +470,26 @@ async fn roles_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
     let list = db::list(ctx, ROLES_TABLE, &opts).await?;
 
     Ok(html! {
-        div .flex .items-center .justify-between .mb-4 {
-            h3 .font-semibold { "Roles" }
+        (components::section_header("Roles", Some(html! {
             button .btn .btn--primary .btn--sm data-action="modal-open" data-modal-target="create-role" {
                 (icons::plus()) " Create Role"
             }
-        }
+        })))
 
         @let rows: Vec<Vec<Markup>> = list.records.iter().map(|record| {
             let name = record.str_field("name");
             let is_system = record.bool_field("is_system");
             vec![
-                html! { span .font-medium { (name) } },
-                html! { span .text-muted { (record.str_field("description")) } },
+                html! { (name) },
+                html! {
+                    @let description = record.str_field("description");
+                    @if !description.is_empty() { span .text-muted { (description) } }
+                },
                 html! {
                     @if is_system {
-                        (badge(BadgeVariant::Info, "System"))
+                        (badge(BadgeVariant::Secondary, "System"))
                     } @else {
-                        (badge(BadgeVariant::Primary, "Custom"))
+                        (badge(BadgeVariant::Secondary, "Custom"))
                     }
                 },
                 html! {
@@ -535,16 +516,16 @@ async fn roles_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
             form hx-post="/b/admin/iam/roles" hx-target="#iam-content" {
                 div .form-group {
                     label .form-label .required for="role-name" { "Name" }
-                    input .form-input type="text" #role-name name="name" placeholder="e.g. editor" required;
+                    input .form-input type="text" #role-name name="name" placeholder="e.g. editor" required autofocus;
                 }
                 div .form-group {
                     label .form-label for="role-desc" { "Description" }
                     input .form-input type="text" #role-desc name="description" placeholder="Optional description";
                 }
-                div .form-actions {
-                    button .btn .btn--secondary type="button" data-action="modal-close" data-modal-target="create-role" { "Cancel" }
-                    button .btn .btn--primary type="submit" { "Create" }
-                }
+                (components::modal_footer(html! {
+                    (components::modal_cancel())
+                    button .btn .btn--primary .btn--block type="submit" { "Create" }
+                }))
             }
         }))
     })
@@ -559,12 +540,11 @@ async fn api_keys_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
     let now = chrono::Utc::now();
 
     Ok(html! {
-        div .flex .items-center .justify-between .mb-4 {
-            h3 .font-semibold { "API Keys" }
+        (components::section_header("API Keys", Some(html! {
             button .btn .btn--primary .btn--sm data-action="modal-open" data-modal-target="create-api-key" {
                 (icons::plus()) " Create API Key"
             }
-        }
+        })))
 
         @let rows: Vec<Vec<Markup>> = list.iter().map(|record| {
             let user_id = record.user_id.as_str();
@@ -583,7 +563,7 @@ async fn api_keys_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
                 html! { code { (record.key_prefix) "..." } },
                 html! { (record.name) },
                 html! { span .text-muted { (user_id.get(..8).unwrap_or(user_id)) } },
-                html! { span .text-muted { (created.get(..10).unwrap_or(created)) } },
+                html! { span .text-muted { (components::timestamp(created)) } },
                 html! {
                     @if let Some(reason) = retired {
                         (components::badge(components::BadgeVariant::Danger, reason))
@@ -620,12 +600,12 @@ async fn api_keys_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
             form hx-post="/b/auth/api/api-keys" hx-target="#users-tab-content" {
                 div .form-group {
                     label .form-label for="key-name" { "Name" }
-                    input .form-input type="text" #key-name name="name" placeholder="e.g. CI/CD key" required;
+                    input .form-input type="text" #key-name name="name" placeholder="e.g. CI/CD key" required autofocus;
                 }
-                div .form-actions {
-                    button .btn .btn--secondary type="button" data-action="modal-close" data-modal-target="create-api-key" { "Cancel" }
-                    button .btn .btn--primary type="submit" { "Create" }
-                }
+                (components::modal_footer(html! {
+                    (components::modal_cancel())
+                    button .btn .btn--primary .btn--block type="submit" { "Create" }
+                }))
             }
         }))
     })
@@ -635,49 +615,19 @@ async fn api_keys_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
 /// `<td data-label>` the component stamps on every cell names the same column
 /// its header does.
 const ROLE_COLUMNS: [components::TableCol<'static>; 4] = [
-    components::TableCol {
-        label: "Name",
-        width: None,
-    },
-    components::TableCol {
-        label: "Description",
-        width: None,
-    },
-    components::TableCol {
-        label: "Type",
-        width: None,
-    },
-    components::TableCol {
-        label: "Actions",
-        width: None,
-    },
+    components::TableCol::new("Name").primary(),
+    components::TableCol::new("Description").optional(),
+    components::TableCol::new("Type"),
+    components::TableCol::new("Actions").actions(),
 ];
 
 const API_KEY_COLUMNS: [components::TableCol<'static>; 6] = [
-    components::TableCol {
-        label: "Prefix",
-        width: None,
-    },
-    components::TableCol {
-        label: "Name",
-        width: None,
-    },
-    components::TableCol {
-        label: "User",
-        width: None,
-    },
-    components::TableCol {
-        label: "Created",
-        width: None,
-    },
-    components::TableCol {
-        label: "Status",
-        width: None,
-    },
-    components::TableCol {
-        label: "Actions",
-        width: None,
-    },
+    components::TableCol::new("Prefix"),
+    components::TableCol::new("Name").primary(),
+    components::TableCol::new("User"),
+    components::TableCol::new("Created"),
+    components::TableCol::new("Status"),
+    components::TableCol::new("Actions").actions(),
 ];
 
 #[cfg(test)]
@@ -705,7 +655,7 @@ mod tests {
 
         assert_eq!(parts.status, 200, "{html}");
         assert!(
-            html.contains(r#"datetime="2026-01-01T00:00:00Z">2026-01-01</time>"#),
+            html.contains(r#"datetime="2026-01-01T00:00:00.000Z" title="2026-01-01T00:00:00.000Z">2026-01-01 00:00 UTC</time>"#),
             "the Created cell must be a <time>: {html}"
         );
     }

@@ -11,6 +11,90 @@
  * from silently shrinking to "whatever already had one".
  */
 export interface paths {
+    "/b/admin/api/database/query": {
+        parameters: {
+            query?: never;
+            header?: never;
+            path?: never;
+            cookie?: never;
+        };
+        get?: never;
+        put?: never;
+        /** Run read-only SQL API */
+        post: {
+            parameters: {
+                query?: never;
+                header?: never;
+                path?: never;
+                cookie?: never;
+            };
+            requestBody: {
+                content: {
+                    "application/json": {
+                        /**
+                         * @description Positional bind values for the statement's `?` placeholders. Empty
+                         *     when omitted.
+                         * @default []
+                         */
+                        args?: unknown[];
+                        /**
+                         * @description One read-only statement: `SELECT`, `WITH`, `EXPLAIN` or a whitelisted
+                         *     `PRAGMA`. Anything else, more than one statement, or a statement that
+                         *     names a table holding credentials is refused.
+                         */
+                        query: string;
+                    };
+                };
+            };
+            responses: {
+                /** @description Successful response */
+                200: {
+                    headers: {
+                        [name: string]: unknown;
+                    };
+                    content: {
+                        "application/json": {
+                            /**
+                             * @description The result's column names in the order the query returned them —
+                             *     `SELECT b, a, c` answers `["b", "a", "c"]`. Empty when no row matched:
+                             *     the column list is read off the rows.
+                             */
+                            columns: string[];
+                            /**
+                             * Format: uint
+                             * @description Number of rows.
+                             */
+                            row_count: number;
+                            /** @description The rows, in the order the query returned them. */
+                            rows: {
+                                /**
+                                 * @description Every column of the row, name → value, its keys written in
+                                 *     [`AdminSqlQueryResponse::columns`] order. Read the order from
+                                 *     `columns`, not from this object: a JSON parser need not keep key order,
+                                 *     and JavaScript's `JSON.parse` enumerates integer-like names (`1`)
+                                 *     before the others. Two result columns with one name collapse into one
+                                 *     entry — alias them apart.
+                                 */
+                                data: {
+                                    [key: string]: unknown;
+                                };
+                                /**
+                                 * @description The row's `id` column as text; `""` when the query selected no `id`
+                                 *     (or it held no string or integer).
+                                 */
+                                id: string;
+                            }[];
+                        };
+                    };
+                };
+            };
+        };
+        delete?: never;
+        options?: never;
+        head?: never;
+        patch?: never;
+        trace?: never;
+    };
     "/b/admin/api/extensions": {
         parameters: {
             query?: never;

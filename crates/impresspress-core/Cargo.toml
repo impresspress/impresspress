@@ -277,6 +277,9 @@ impresspress-core = { path = ".", default-features = false, features = [
 # exercise the streaming client's truncation and read-timeout handling.
 tokio = { workspace = true, features = ["macros", "rt", "time", "net", "io-util"] }
 tempfile = "3"
+# `config_vars::variable_key_tests` compiles the variable-key HTML `pattern`
+# the way a browser does, to hold it to `check_variable_key`'s verdicts.
+regex = "1"
 # The bundler, for `tests/dev_export.rs` only: the export edits the boot shell
 # the bundler rendered, and the test that says "nothing of the sandbox is in
 # an export" has to say it about that shell, not about a page the test wrote

@@ -108,6 +108,11 @@ pub async fn admin_buttons_page(ctx: &dyn Context, msg: &Message) -> OutputStrea
 
         // Buttons table
         (render_buttons_table(&buttons))
+
+        // Where a row's Edit button swaps the edit modal
+        // ([`handle_edit_button_form`] answers with the whole `<dialog>`).
+        // Outside `#buttons-table`, which every mutation re-renders.
+        div #edit-button-slot {}
     };
 
     ui::shell_page(
@@ -158,9 +163,14 @@ fn render_buttons_table(buttons: &[db::Record]) -> maud::Markup {
                                         div .flex .gap-1 {
                                             button .btn .btn--ghost .btn--sm
                                                 hx-get=(format!("/b/userportal/admin/buttons/{}/edit", btn.id))
-                                                hx-target=(format!("#edit-modal-{}", btn.id))
+                                                hx-target="#edit-button-slot"
+                                                // Stable across the table's
+                                                // re-render, so focus can come
+                                                // back to it after a save.
+                                                id=(format!("edit-btn-open-{}", btn.id))
                                                 hx-swap="innerHTML"
                                                 title="Edit"
+                                                aria-label={"Edit " (btn.str_field("label"))}
                                             {
                                                 (icons::edit())
                                             }
@@ -170,11 +180,11 @@ fn render_buttons_table(buttons: &[db::Record]) -> maud::Markup {
                                                 hx-swap="outerHTML"
                                                 hx-confirm="Delete this button?"
                                                 title="Delete"
+                                                aria-label={"Delete " (btn.str_field("label"))}
                                             {
                                                 (icons::trash())
                                             }
                                         }
-                                        div id=(format!("edit-modal-{}", btn.id)) {}
                                     }
                                 }
                             }
@@ -194,9 +204,27 @@ fn render_buttons_table(buttons: &[db::Record]) -> maud::Markup {
 /// button"): the target becomes an error notice saying the change was
 /// `applied`, why the list could not be loaded (classified by
 /// [`crud::db_error_notice`]), and that it needs a reload.
-async fn buttons_table_response(ctx: &dyn Context, applied: &str) -> OutputStream {
+///
+/// `closing` names the modal the mutation was submitted from (the Edit
+/// modal): its `<dialog>` lives outside `#buttons-table`, so the swap does not
+/// take it away, and a landed save closes it with an `applied` toast. A
+/// failed re-read leaves it open over the error notice — the save landed, and
+/// the toast says the list needs a reload.
+async fn buttons_table_response(
+    ctx: &dyn Context,
+    applied: &str,
+    closing: Option<&str>,
+) -> OutputStream {
     match load_buttons(ctx).await {
-        Ok(buttons) => ui::html_response(render_buttons_table(&buttons)),
+        Ok(buttons) => match closing {
+            Some(modal_id) => ui::html_response_closing_modal(
+                render_buttons_table(&buttons),
+                modal_id,
+                applied,
+                "success",
+            ),
+            None => ui::html_response(render_buttons_table(&buttons)),
+        },
         Err(e) => {
             let reason = crud::db_error_notice(e, "userportal admin buttons: table re-read failed");
             ui::swap_error_response(
@@ -269,7 +297,7 @@ pub async fn handle_create_button(
     )
     .await;
 
-    buttons_table_response(ctx, "Button added").await
+    buttons_table_response(ctx, "Button added", None).await
 }
 
 /// Validate that `id` is safe to interpolate into inline HTML/JS strings
@@ -285,6 +313,13 @@ fn is_safe_dom_id(id: &str) -> bool {
         && id
             .chars()
             .all(|c| c.is_ascii_alphanumeric() || c == '_' || c == '-')
+}
+
+/// The Edit modal's element id for button `id`: what
+/// [`handle_edit_button_form`] renders the `<dialog>` with, and what a landed
+/// [`handle_update_button`] closes.
+fn edit_modal_id(id: &str) -> String {
+    format!("edit-btn-{id}")
 }
 
 pub async fn handle_edit_button_form(ctx: &dyn Context, id: &str) -> OutputStream {
@@ -311,7 +346,7 @@ pub async fn handle_edit_button_form(ctx: &dyn Context, id: &str) -> OutputStrea
     };
 
     let current_icon = record.str_field("icon");
-    let modal_id = format!("edit-btn-{id}");
+    let modal_id = edit_modal_id(id);
 
     let markup = html! {
         (components::modal(&modal_id, "Edit Button", html! {
@@ -322,45 +357,39 @@ pub async fn handle_edit_button_form(ctx: &dyn Context, id: &str) -> OutputStrea
                 .flex .flex-col .gap-3
             {
                 div .form-group .m-0 {
-                    label .form-label { "Label" }
-                    input .form-input type="text" name="label"
-                        value=(record.str_field("label")) required;
+                    label .form-label for="edit-btn-label" { "Label" }
+                    input .form-input #edit-btn-label type="text" name="label"
+                        value=(record.str_field("label")) required autofocus;
                 }
                 div .form-group .m-0 {
-                    label .form-label { "Path" }
-                    input .form-input type="text" name="path"
+                    label .form-label for="edit-btn-path" { "Path" }
+                    input .form-input #edit-btn-path type="text" name="path"
                         value=(record.str_field("path")) required;
                 }
                 div .form-group .m-0 {
-                    label .form-label { "Icon" }
-                    select .form-input name="icon" {
+                    label .form-label for="edit-btn-icon" { "Icon" }
+                    select .form-input #edit-btn-icon name="icon" {
                         @for &(value, display) in ICON_OPTIONS {
                             option value=(value) selected[value == current_icon] { (display) }
                         }
                     }
                 }
                 div .form-group .m-0 {
-                    label .form-label { "Order" }
-                    input .form-input type="number" name="sort_order"
+                    label .form-label for="edit-btn-order" { "Order" }
+                    input .form-input #edit-btn-order type="number" name="sort_order"
                         value=(record.i64_field("sort_order"));
                 }
-                div .flex .gap-2 .justify-end {
-                    button .btn .btn--secondary type="button"
-                        data-action="modal-close" data-modal-target=(&modal_id)
-                    { "Cancel" }
-                    button .btn .btn--primary type="submit" { "Save" }
-                }
+                (components::modal_footer(html! {
+                    (components::modal_cancel())
+                    button .btn .btn--primary .btn--block type="submit" { "Save" }
+                }))
             }
         }))
     };
 
-    // Reveal the modal once htmx has swapped it in. `components::modal()`
-    // renders the boolean `hidden` attribute (base.css:
-    // `[hidden] { display: none !important; }`), so revealing it means clearing
-    // `hidden` — a `style.display` assignment loses to that `!important` and
-    // the modal never opens. This used to be a `<script>` appended to the
-    // fragment with the record id interpolated into JavaScript source; it is
-    // now the `openModal` response-header channel.
+    // Open the modal once htmx has swapped it in. This used to be a
+    // `<script>` appended to the fragment with the record id interpolated into
+    // JavaScript source; it is now the `openModal` response-header channel.
     ui::html_response_opening_modal(markup, &modal_id)
 }
 
@@ -392,7 +421,7 @@ pub async fn handle_update_button(
     )
     .await;
 
-    buttons_table_response(ctx, "Button saved").await
+    buttons_table_response(ctx, "Button saved", Some(&edit_modal_id(id))).await
 }
 
 pub async fn handle_delete_button(ctx: &dyn Context, msg: &Message, id: &str) -> OutputStream {
@@ -411,7 +440,7 @@ pub async fn handle_delete_button(ctx: &dyn Context, msg: &Message, id: &str) ->
     )
     .await;
 
-    buttons_table_response(ctx, "Button deleted").await
+    buttons_table_response(ctx, "Button deleted", None).await
 }
 
 #[cfg(test)]
@@ -453,21 +482,18 @@ mod tests {
         m
     }
 
-    /// Regression test for the six-week-silent bug (task 12e): the edit
-    /// modal is `components::modal()`, which renders the boolean `hidden`
-    /// attribute (`[hidden] { display: none !important; }` in base.css).
-    /// A plain `el.style.display='flex'` inline-style toggle can never beat
-    /// that `!important`, so the modal could never actually open even
-    /// though the fragment rendered "successfully". This asserts the
-    /// fragment routes through the shared modal machinery in
-    /// `ui/assets/chrome.js` (which flips the `hidden` IDL property, not
-    /// `style.display`) instead of reintroducing a hand-rolled inline-style
-    /// toggle. The two controls used to be `onclick="openModal('…')"` /
-    /// `onclick="closeModal('…')"` strings with the record id interpolated
-    /// into JavaScript source; they are now a response header and a
-    /// `data-action` attribute, and the assertions below moved with them.
+    /// The edit modal is the shared `components::modal` `<dialog>`, opened by
+    /// chrome.js through the `openModal` response-header channel.
+    ///
+    /// History: this modal went six weeks unable to open (task 12e). It was a
+    /// `hidden` overlay toggled with an inline `style.display`, which always
+    /// lost to `[hidden] { display: none !important; }`; then it was revealed
+    /// by `onclick="openModal('…')"` / `onclick="closeModal('…')"` strings with
+    /// the record id interpolated into JavaScript source. It is now a native
+    /// dialog the browser shows with `showModal()`, a response header, and a
+    /// `data-action` on Cancel — and the assertions below pin all three.
     #[tokio::test]
-    async fn edit_button_form_opens_via_shared_modal_helpers_not_inline_style() {
+    async fn edit_button_form_is_the_shared_modal_opened_by_header() {
         let ctx = ctx_with_userportal().await;
         let record = db::create(&ctx, TABLE, button_data("Files", "folder", "/b/storage/"))
             .await
@@ -479,36 +505,31 @@ mod tests {
         let resp = handle_edit_button_form(&ctx, &record.id).await;
         let html = output_html(resp).await;
 
-        // The modal container itself must still start hidden via the real
-        // `hidden` attribute (not an inline style) -- `components::modal()`
-        // renders `id=(id) hidden` in that order.
+        // The whole fragment is the closed dialog, labelled by its title.
         assert!(
-            html.contains(&format!(r#"id="edit-btn-{}" hidden"#, record.id)),
-            "modal must render the boolean `hidden` attribute:\n{html}"
-        );
-        // Cancel closes it declaratively, with the id as inert attribute text.
-        assert!(
-            html.contains(&format!(
-                r#"data-action="modal-close" data-modal-target="edit-btn-{}""#,
-                record.id
+            html.starts_with(&format!(
+                r#"<dialog class="modal" id="edit-btn-{id}" aria-labelledby="edit-btn-{id}-title">"#,
+                id = record.id
             )),
+            "the fragment must be the shared modal dialog:\n{html}"
+        );
+        // Cancel closes the modal it sits in, declaratively.
+        assert!(
+            html.contains(r#"type="button" data-action="modal-close">Cancel</button>"#),
             "Cancel button must declare the shared modal-close action:\n{html}"
         );
-        // Nothing in the fragment is script at all any more.
+        // Nothing in the fragment is script, or an inline display toggle.
         assert!(
             !html.contains("<script"),
             "the fragment must carry no script:\n{html}"
         );
-        // The exact bug: a plain inline `style.display` toggle always loses
-        // to `[hidden] { display: none !important; }`, so the modal could
-        // never open. Any reintroduction of that pattern must fail this.
         assert!(
-            !html.contains("style.display"),
-            "modal must not be toggled via a plain inline style.display assignment:\n{html}"
+            !html.contains("style.display") && !html.contains("hidden"),
+            "the dialog is opened by showModal(), not by a display toggle:\n{html}"
         );
 
-        // Auto-show is the response-header channel, fired after the swap so
-        // the overlay is not revealed before its contents land.
+        // Opening is the response-header channel, fired after the swap: before
+        // it, there is no dialog with that id to open.
         let resp = handle_edit_button_form(&ctx, &record.id).await;
         let trigger = output_header(resp, "HX-Trigger-After-Swap").await;
         assert_eq!(
@@ -519,6 +540,37 @@ mod tests {
             )),
             "the fragment must ask chrome.js to open the modal after the swap"
         );
+    }
+
+    /// A landed save closes the Edit modal and toasts. The modal's `<dialog>`
+    /// lives outside `#buttons-table`, so the table swap alone leaves it open
+    /// over the saved row.
+    #[tokio::test]
+    async fn saving_the_edit_modal_closes_it() {
+        let ctx = ctx_with_userportal().await;
+        let record = db::create(&ctx, TABLE, button_data("Files", "folder", "/b/storage/"))
+            .await
+            .unwrap();
+        let msg = admin_msg(
+            "update",
+            &format!("/b/userportal/admin/buttons/{}", record.id),
+        );
+        let resp = handle_update_button(
+            &ctx,
+            &msg,
+            InputStream::from_bytes(
+                b"label=Docs&path=%2Fb%2Fstorage%2F&icon=folder&sort_order=0".to_vec(),
+            ),
+            &record.id,
+        )
+        .await;
+        let trigger = output_header(resp, "HX-Trigger").await.unwrap_or_default();
+        let trigger: serde_json::Value = serde_json::from_str(&trigger).expect("JSON trigger");
+        assert_eq!(
+            trigger["closeModal"]["id"],
+            json!(format!("edit-btn-{}", record.id))
+        );
+        assert_eq!(trigger["showToast"]["message"], json!("Button saved"));
     }
 
     /// A read that could not run is not a deleted button. The `let Ok(record)
