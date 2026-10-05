@@ -667,23 +667,21 @@ pub async fn settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     };
 
     let saved = msg.query("saved") == "1";
-    let form =
-        match settings_form::settings_form(ctx, "/b/legalpages/admin/settings", &sections, preview)
+    let form = match settings_form::settings_form(ctx, SETTINGS_SAVE_PATH, &sections, preview).await
+    {
+        Ok(form) => form,
+        Err(e) => {
+            return error_page(
+                ctx,
+                msg,
+                "Legal settings",
+                "settings",
+                e,
+                "legalpages settings: current values read failed",
+            )
             .await
-        {
-            Ok(form) => form,
-            Err(e) => {
-                return error_page(
-                    ctx,
-                    msg,
-                    "Legal settings",
-                    "settings",
-                    e,
-                    "legalpages settings: current values read failed",
-                )
-                .await
-            }
-        };
+        }
+    };
 
     let content = html! {
         @if saved {
@@ -706,13 +704,10 @@ pub async fn settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     .await
 }
 
-pub async fn handle_save_settings(
-    ctx: &dyn Context,
-    msg: &Message,
-    input: InputStream,
-) -> OutputStream {
-    settings_form::save_settings(ctx, msg, input, &super::config_vars(), "legalpages").await
-}
+/// Where the settings form posts: the admin block, which saves every
+/// settings form (`admin::pages::legal_settings`) — one save path, in the one
+/// frame WRAP lets write any key. The page stays in the Legal section.
+pub(crate) const SETTINGS_SAVE_PATH: &str = "/b/admin/settings/legal";
 
 // ---------------------------------------------------------------------------
 // Preview rendering (used by editor's Preview tab via htmx)

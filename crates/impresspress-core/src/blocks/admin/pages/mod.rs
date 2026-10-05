@@ -9,6 +9,8 @@ pub(super) mod branding;
 mod dashboard;
 mod database;
 pub(super) mod email;
+#[cfg(feature = "block-legalpages")]
+mod legal_settings;
 mod logs;
 pub(super) mod network;
 pub(super) mod permissions;
@@ -26,6 +28,8 @@ pub use branding::*;
 pub use dashboard::*;
 pub use database::*;
 pub use email::*;
+#[cfg(feature = "block-legalpages")]
+pub use legal_settings::*;
 pub use logs::*;
 use maud::Markup;
 pub use network::*;

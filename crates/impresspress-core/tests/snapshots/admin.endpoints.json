@@ -60,6 +60,7 @@
   "POST /b/admin/iam/roles admin",
   "POST /b/admin/settings/authentication admin",
   "POST /b/admin/settings/branding admin",
+  "POST /b/admin/settings/legal admin",
   "POST /b/admin/settings/products admin",
   "POST /b/admin/users/{id}/disable admin",
   "POST /b/admin/users/{id}/enable admin",

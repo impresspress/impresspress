@@ -36,7 +36,6 @@ enum Route {
     AdminSave,
     AdminRenderPreview,
     AdminPublish,
-    AdminSaveSettings,
     ApiList,
     ApiGet,
     ApiCreate,
@@ -115,12 +114,6 @@ const ROUTES: &[EndpointRoute<Route>] = &[
         Route::AdminPublish,
     )
     .summary("Publish from editor"),
-    EndpointRoute::admin(
-        HttpMethod::Post,
-        "/b/legalpages/admin/settings",
-        Route::AdminSaveSettings,
-    )
-    .summary("Save settings"),
     // JSON API (specific `{id}/publish` before the generic `{id}` rows)
     EndpointRoute::admin(
         HttpMethod::Get,
@@ -711,7 +704,6 @@ crate::impresspress_feature_block! {
             Route::AdminSave => pages::handle_save(ctx, &msg, input).await,
             Route::AdminRenderPreview => pages::handle_render_preview(ctx, input).await,
             Route::AdminPublish => pages::handle_publish(ctx, &msg, input).await,
-            Route::AdminSaveSettings => pages::handle_save_settings(ctx, &msg, input).await,
             Route::ApiList => this.handle_admin_list(ctx, &msg).await,
             Route::ApiGet => this.handle_admin_get(ctx, &msg).await,
             Route::ApiCreate => this.handle_admin_create(ctx, &msg, input).await,

@@ -469,7 +469,8 @@ async fn every_htmx_control_on_every_page_is_answered_the_way_it_swaps() {
     }
 }
 
-/// Every shared settings form (`ui::settings_form`) on every page saves:
+/// Every shared settings form (`ui::settings_form`) on every page posts to
+/// the admin block — the one save path — and saves:
 /// the body its submit script sends, unchanged, is posted to the URL it
 /// posts to, through the block that serves that URL and in that block's
 /// frame — so WRAP decides exactly as it does live — and must answer
@@ -493,6 +494,13 @@ async fn every_settings_form_saves_what_it_shows() {
             let Some((url, body)) = settings_form_submission(&html) else {
                 continue;
             };
+            // One save path: the admin block writes every settings form.
+            assert!(
+                url.starts_with("/b/admin/"),
+                "{}: the settings form on {} posts to {url}, not to the admin block",
+                entry.block,
+                page.url()
+            );
             let (_, answer) = send(&fixture, "create", &url, &body.to_string(), false).await;
             assert_eq!(
                 (answer.status, answer.body.contains("Settings saved")),
@@ -511,7 +519,8 @@ async fn every_settings_form_saves_what_it_shows() {
         "/b/admin/email",
         "/b/admin/settings/authentication",
         "/b/admin/settings/branding",
-        "/b/legalpages/admin/settings",
+        #[cfg(feature = "block-legalpages")]
+        "/b/admin/settings/legal",
         #[cfg(feature = "block-products")]
         "/b/admin/settings/products",
     ] {

@@ -737,9 +737,11 @@ pub async fn route_to_block(
             continue;
         }
 
-        // Feature gate
+        // Feature gate. A disabled block's routes do not exist: the same
+        // not-found every unmatched route gets — the HTML 404 page for a
+        // browser, JSON for an API caller (`ui::not_found_response`).
         if !features.is_block_enabled(route.block) {
-            return crate::http::err_not_found("endpoint not found");
+            return crate::ui::not_found_response(&msg);
         }
 
         // Access gate. The coarse prefix tier is a floor; if the target
@@ -780,7 +782,7 @@ pub async fn route_to_block(
         // toggle exactly like the built-in `ROUTES` loop above (which they
         // bypassed before). Keep this gate in sync with that one.
         if !features.is_block_enabled(&route.block_name) {
-            return crate::http::err_not_found("endpoint not found");
+            return crate::ui::not_found_response(&msg);
         }
 
         // Access gate, refined by the target block's own declarations exactly
@@ -1095,6 +1097,45 @@ mod tests {
             !dispatched(&NoneEnabled).await,
             "disabled extra route must be feature-gated, not dispatched"
         );
+    }
+
+    /// A disabled block's page is the same not-found as any unmatched route:
+    /// the HTML 404 page for a browser opening it, JSON for an API caller —
+    /// on the built-in routes and on a downstream-registered one.
+    #[tokio::test]
+    async fn a_disabled_blocks_page_is_the_html_404_for_a_browser_and_json_for_the_api() {
+        let ctx = crate::test_support::TestContext::new().await;
+        let extra = vec![ExtraRoute::new(
+            "/x/extra",
+            "test/extra",
+            RouteAccess::Public,
+        )];
+        for path in ["/b/tickets/admin/tickets", "/x/extra/thing"] {
+            for (accept, page) in [
+                ("text/html,application/xhtml+xml,*/*;q=0.8", true),
+                ("application/json", false),
+            ] {
+                let mut msg = crate::test_support::admin_msg("retrieve", path);
+                msg.set_meta("http.header.accept", accept);
+                let out =
+                    route_to_block(&ctx, msg, InputStream::empty(), &NoneEnabled, &[], &extra)
+                        .await;
+                let parts = wafer_block::http_codec::collect_http_response(out).await;
+                let body = String::from_utf8_lossy(&parts.body);
+                assert_eq!(parts.status, 404, "{path} {accept}: {body}");
+                assert_eq!(
+                    body.contains("<!DOCTYPE html>"),
+                    page,
+                    "{path} {accept}: {body}"
+                );
+                if !page {
+                    assert!(
+                        serde_json::from_str::<serde_json::Value>(&body).is_ok(),
+                        "{path} {accept}: JSON: {body}"
+                    );
+                }
+            }
+        }
     }
 
     #[test]

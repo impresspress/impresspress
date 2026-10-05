@@ -403,7 +403,7 @@ impl VariablesConfigBlock {
         // it looks. It concerns exactly one key — `BOOTSTRAP_ADMIN_TOKEN`,
         // which the admin path exempts once redeemed and this one never does —
         // and that key is in no `save_settings` allowlist at all. The only
-        // settings form carrying bootstrap keys is `auth_ui::pages::settings`,
+        // settings form carrying bootstrap keys is `admin::pages::authentication`,
         // whose "Admin" section is the bootstrap EMAIL and PASSWORD; nothing
         // renders the token. So this caller cannot submit a value for it,
         // empty or otherwise.
@@ -428,7 +428,7 @@ impl VariablesConfigBlock {
         // reachable by any block, and a key nothing declares is one nothing
         // here can vouch for. Note that "declared" has to mean what
         // `config_vars::collect_all_config_vars` says it means —
-        // `auth_ui::pages::settings` renders
+        // `admin::pages::authentication` renders
         // `auth::config::auth_identity_config_vars`, which belongs to no
         // `BlockInfo`, and an earlier version of that collector missed them and
         // so called two ordinary admin toggles ad hoc.

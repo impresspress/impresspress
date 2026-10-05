@@ -129,6 +129,9 @@ enum Route {
     /// through this block (see `pages::products_settings`).
     #[cfg(feature = "block-products")]
     SaveProductsSettings,
+    /// The legal pages settings page's save (see `pages::legal_settings`).
+    #[cfg(feature = "block-legalpages")]
+    SaveLegalSettings,
     SettingsNetworkPage,
     SettingsVariablesPage,
     SettingsPermissionsPage,
@@ -449,6 +452,13 @@ const ROUTES: &[EndpointRoute<Route>] = &[
         Route::SaveProductsSettings,
     )
     .summary("Save products settings"),
+    #[cfg(feature = "block-legalpages")]
+    EndpointRoute::admin(
+        HttpMethod::Post,
+        "/b/admin/settings/legal",
+        Route::SaveLegalSettings,
+    )
+    .summary("Save legal pages settings"),
     EndpointRoute::admin(
         HttpMethod::Get,
         "/b/admin/settings/network",
@@ -791,6 +801,8 @@ crate::impresspress_feature_block! {
             Route::SaveProductsSettings => {
                 pages::handle_save_products_settings(ctx, &msg, input).await
             }
+            #[cfg(feature = "block-legalpages")]
+            Route::SaveLegalSettings => pages::handle_save_legal_settings(ctx, &msg, input).await,
             Route::SettingsNetworkPage => pages::settings_page(ctx, &msg, "network").await,
             Route::SettingsVariablesPage => pages::settings_page(ctx, &msg, "variables").await,
             Route::SettingsPermissionsPage => {
@@ -1989,6 +2001,13 @@ mod table_tests {
                 "create",
                 "/b/admin/settings/products",
                 Route::SaveProductsSettings,
+                &[],
+            ),
+            #[cfg(feature = "block-legalpages")]
+            (
+                "create",
+                "/b/admin/settings/legal",
+                Route::SaveLegalSettings,
                 &[],
             ),
             (
