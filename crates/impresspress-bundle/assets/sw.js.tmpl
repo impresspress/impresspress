@@ -66,21 +66,20 @@ const RUNTIME_URL = '__WASM_BIN__';
 // falls back to the host for a worker whose entry has gone.
 const RUNTIME_CACHE = '__impresspress_runtime';
 
-// The Web Lock `loader.js` holds while it erases the app's local data
-// (`ERASE_LOCK` there; the same name). The runtime's `initialize()` is what
-// opens that data, so it runs holding the lock too: a worker a recovery has
-// just brought in, asked for a page by another tab while the recovering tab
-// is still erasing, waits for the erase instead of opening a database half
-// erased — and an erase that comes after waits for the start, then finds
-// the files open and says it could not complete.
+// The Web Lock `loader.js` holds from before it registers a replacement
+// worker until it has erased the app's local data (`ERASE_LOCK` there, which
+// says why; the same name). The runtime's `initialize()` loads that data —
+// into memory, to be written back on every flush — so it must not run while
+// an erase is pending: it waits for the lock, takes it and lets go at once
+// (`eraseSettled`), and then loads. It never holds the lock while loading,
+// so a slow start delays nobody's erase.
 const ERASE_LOCK = '__impresspress_erase';
 
-/** Run `act` holding ERASE_LOCK, where the worker has Web Locks. */
-function underEraseLock(act) {
+/** Resolves once no erase is pending, where the worker has Web Locks. */
+async function eraseSettled() {
     if (self.navigator && self.navigator.locks && self.navigator.locks.request) {
-        return self.navigator.locks.request(ERASE_LOCK, act);
+        await self.navigator.locks.request(ERASE_LOCK, () => {});
     }
-    return act();
 }
 
 let initialized = false;
@@ -280,9 +279,8 @@ async function ensureInitialized() {
         }
         console.log('[__APP_NAME__] Initializing runtime...');
         try {
-            await underEraseLock(async () => {
-                await initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES });
-            });
+            await eraseSettled();
+            await initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES });
         } catch (e) {
             await selfDestruct(`runtime initialize() failed: ${e}`, STAGE_INITIALIZE, true);
             throw e;

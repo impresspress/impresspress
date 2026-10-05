@@ -127,6 +127,8 @@ function element() {
 ///                 shell's question about its version; `false` is a worker
 ///                 from before the question existed, and the wait for its
 ///                 answer runs out at once
+/// - `heldElsewhere` — the Web Locks another tab holds: a request for one
+///                 asked only if available gets `null`
 /// - `installs: 'stalls'` — a newly registered worker that installs and then
 ///                 never activates (as Chromium has been seen to leave one);
 ///                 the wait for it runs out at once
@@ -150,6 +152,7 @@ export function loadShell({
   installs = true,
   update,
   answersRuntime = true,
+  heldElsewhere = [],
   opfsFiles = ['app.sqlite'],
   title = 'Kiln & Co',
   documentTitle = title
@@ -318,6 +321,7 @@ export function loadShell({
       if (type === 'controllerchange') controlListeners.push(listener);
     },
     register: async (url) => {
+      registeredHolding.push([...held]);
       if (registerFails) throw registerFails;
       registered += 1;
       registeredUrls.push(url);
@@ -367,8 +371,9 @@ export function loadShell({
   };
   const opfs = new Set(opfsFiles);
   const lockRequests = [];
-  // The locks held at each OPFS removal.
+  // The locks held at each OPFS removal, and at each registration.
   const erasedHolding = [];
+  const registeredHolding = [];
   const navigator = {
     serviceWorker,
     storage: {
@@ -394,14 +399,19 @@ export function loadShell({
     // work was done holding it. The recovery lock's requests are recorded
     // with the state they were made in.
     navigator.locks = {
-      request: async (name, act) => {
-        if (held.has(name)) throw new Error(`the lock ${name} was requested while held`);
+      request: async (name, options, callback) => {
+        const act = typeof options === 'function' ? options : callback;
+        const ifAvailable = typeof options === 'object' && options.ifAvailable;
+        if (heldElsewhere.includes(name) || held.has(name)) {
+          if (ifAvailable) return act(null);
+          throw new Error(`the lock ${name} was requested while held`);
+        }
         if (name === RECOVERY_LOCK) {
           lockRequests.push({ name, registrations: registered, unregistered, opfs: [...opfs] });
         }
         held.add(name);
         try {
-          return await act();
+          return await act({ name });
         } finally {
           held.delete(name);
         }
@@ -491,8 +501,11 @@ export function loadShell({
       (cacheStore.get(RECOVERED_CACHE)?.get(RECOVERED_KEY)?.deaths ?? []).map((d) => d.id),
     /// Each request for the recovery lock, with the state it was made in.
     lockRequests,
-    /// The locks this tab held at each OPFS removal.
+    /// The locks this tab held at each OPFS removal, and at each
+    /// registration (made or refused), and those it holds now.
     erasedHolding,
+    registeredHolding,
+    heldNow: () => [...held],
     /// What the page asked the registered worker.
     asked,
     /// Another tab recording, in the origin's Cache Storage, that it has

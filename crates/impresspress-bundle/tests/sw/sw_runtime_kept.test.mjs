@@ -225,15 +225,43 @@ test('a worker says which runtime it was built for, dead or alive', async (t) =>
 });
 
 
-// `initialize()` is what opens the app's data, and a recovering tab may still
-// be erasing it when a replacement worker is asked for a page by another tab:
-// the two take turns on one Web Lock (`ERASE_LOCK`, held by `loader.js`'s
-// erase too).
-test('the runtime starts holding the erase lock', async (t) => {
+// The runtime loads the app's database into memory and writes it back on
+// every flush, so an erase must come BEFORE it loads, never after: the
+// erase holds ERASE_LOCK from before the worker even exists until it is
+// done, and the runtime waits for that lock before it loads anything.
+test('the runtime waits for a pending erase before it loads the data', async (t) => {
   captureConsole(t);
-  const worker = await loadWorker();
+  let finishErase;
+  const erasePending = new Promise((resolve) => {
+    finishErase = resolve;
+  });
+  const worker = await loadWorker({ erasePending });
 
-  await worker.request(LOGIN, { method: 'POST' });
+  const answered = worker.request(LOGIN, { method: 'POST' });
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(worker.timeline, ['lock __impresspress_erase'], 'nothing loaded while the erase is pending');
 
-  assert.deepEqual(worker.initializeHeld, [['__impresspress_erase']]);
+  finishErase();
+  assert.equal(await (await answered).response.text(), 'from the runtime');
+  assert.deepEqual(worker.timeline, ['lock __impresspress_erase', 'initialize']);
+  assert.deepEqual(worker.initializeHeld, [[]], 'the lock is let go before loading');
+});
+
+// …and it never holds the lock while it starts, so a start that takes long
+// holds up no tab's erase or recovery.
+test('a slow start holds no lock: an erase elsewhere is not held up', async (t) => {
+  captureConsole(t);
+  let finishStart;
+  const started = new Promise((resolve) => {
+    finishStart = resolve;
+  });
+  const worker = await loadWorker({ initialize: () => started });
+
+  const answered = worker.request(LOGIN, { method: 'POST' });
+  while (!worker.timeline.includes('initialize')) await new Promise((resolve) => setImmediate(resolve));
+
+  assert.equal(await worker.requestLock('__impresspress_erase', async () => 'erased'), 'erased');
+
+  finishStart();
+  assert.equal(await (await answered).response.text(), 'from the runtime');
 });

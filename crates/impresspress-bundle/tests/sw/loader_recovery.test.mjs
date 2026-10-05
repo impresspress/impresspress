@@ -844,8 +844,10 @@ test('the buttons do not redo a recovery another tab has done', async () => {
   await alone.booted;
   await alone.stuck('impresspress-reset').click();
   assert.deepEqual(alone.recovered(), [DEATH.id]);
-  // The boot's, the replacement's, and the erase's that follows it.
-  assert.equal(alone.lockRequests.length, 3);
+  // The boot's and the replacement's. The erase that follows holds the
+  // erase lock, taken before the replacement was registered.
+  assert.equal(alone.lockRequests.length, 2);
+  assert.ok(alone.erasedHolding[0].includes('__impresspress_erase'));
 });
 
 // Without Web Locks two tabs cannot be kept from recovering at once, so the
@@ -1376,4 +1378,81 @@ test('a new version that does not activate is waited for, then asked about', asy
     shell.stuck('impresspress-stopped-cause').textContent,
     'The new version has not started yet, after 20 seconds.'
   );
+});
+
+// The erase comes BEFORE the replacement loads anything: the runtime holds
+// the database in memory and writes it back on every flush, so an erase
+// after it has loaded would be undone. ERASE_LOCK is taken before the
+// replacement is registered (no worker that could load the data exists
+// before then) and let go once the erase is done; sw.js waits for it before
+// loading.
+test('the automatic erase holds the erase lock from before the replacement is registered', async () => {
+  const shell = loadShell({ stop: left('initialize'), now: NOW, wipe: true });
+  await shell.booted;
+
+  assert.deepEqual(shell.events, [`register ${REPLACEMENT}`, 'erase app.sqlite']);
+  assert.ok(shell.registeredHolding[0].includes('__impresspress_erase'), shell.registeredHolding);
+  assert.ok(shell.erasedHolding[0].includes('__impresspress_erase'), shell.erasedHolding);
+  assert.deepEqual(shell.heldNow(), [], 'and let go once the erase is done');
+});
+
+test('a replacement that cannot be registered erases nothing and lets the lock go', async () => {
+  const shell = loadShell({
+    stop: left('initialize'),
+    now: NOW,
+    wipe: true,
+    registerFails: new TypeError('Failed to register a ServiceWorker: ServiceWorker script evaluation failed')
+  });
+  await shell.booted;
+
+  assert.ok(shell.registeredHolding[0].includes('__impresspress_erase'));
+  assert.deepEqual(shell.opfs(), ['app.sqlite']);
+  assert.deepEqual(shell.heldNow(), []);
+});
+
+// A button may find the old worker ALIVE: it erases only once its
+// replacement has activated (the old worker is then done writing), and
+// holds the erase lock from before registering until then, so the
+// replacement cannot load the data first.
+test('a reset holds the erase lock from before registering until its erase, after activation', async () => {
+  const shell = loadShell({
+    stop: left('request', NOW, DEATH),
+    session: { [RECOVERY_DONE]: 'restarted' },
+    now: NOW
+  });
+  await shell.booted;
+
+  await shell.stuck('impresspress-reset').click();
+
+  assert.deepEqual(shell.events, [`register ${REPLACEMENT}`, 'erase app.sqlite']);
+  for (const locks of [shell.registeredHolding[0], shell.erasedHolding[0]]) {
+    assert.ok(locks.includes('__impresspress_erase') && locks.includes('__impresspress_reset'), locks);
+  }
+  assert.deepEqual(shell.heldNow(), []);
+  assert.deepEqual(shell.opfs(), []);
+});
+
+test('"Restart it" takes no erase lock', async () => {
+  const shell = loadShell({ installs: 'stalls', now: NOW });
+  await shell.booted;
+
+  await shell.stuck('impresspress-restart').click();
+
+  assert.ok(shell.registeredHolding.slice(1).every((locks) => !locks.includes('__impresspress_erase')));
+});
+
+// A reset under way in another tab owns the transition: an automatic
+// recovery that would erase leaves it to that reset — no replacement over
+// the reset's, no second erase, and no wait holding the recovery lock.
+test('an automatic erase leaves the transition to a reset under way in another tab', async () => {
+  const shell = loadShell({
+    stop: left('initialize', NOW, DEATH),
+    now: NOW,
+    wipe: true,
+    heldElsewhere: ['__impresspress_reset']
+  });
+  await shell.booted;
+
+  assert.ok(!shell.registeredUrls.includes(REPLACEMENT));
+  assert.deepEqual(shell.opfs(), ['app.sqlite']);
 });

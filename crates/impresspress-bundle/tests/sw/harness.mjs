@@ -84,7 +84,10 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
   let claimed = 0;
   // The Web Locks held now, and those held when `initialize()` was called.
   const heldLocks = new Set();
+  const queues = new Map();
   const initializeHeld = [];
+  // Lock requests and `initialize()` calls, in order.
+  const timeline = [];
 
   // What `init()` was handed, each time it was called.
   const inits = [];
@@ -145,6 +148,7 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
       if (runtime.init) return runtime.init(options);
     },
     initialize: async (options) => {
+      timeline.push('initialize');
       initializeHeld.push([...heldLocks]);
       if (runtime.initialize) return runtime.initialize(options);
     },
@@ -162,12 +166,23 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
     // what a test reads is which were held when.
     navigator: {
       locks: {
+        // Exclusive, as Web Locks are: a request waits for the holder
+        // before it, in the order the requests were made.
         request: async (name, act) => {
+          timeline.push(`lock ${name}`);
+          const before = queues.get(name) ?? Promise.resolve();
+          let done;
+          queues.set(name, new Promise((resolve) => (done = resolve)));
+          await before;
+          // An erase another tab is in the middle of: the lock is granted
+          // once it is over.
+          if (runtime.erasePending) await runtime.erasePending;
           heldLocks.add(name);
           try {
             return await act();
           } finally {
             heldLocks.delete(name);
+            done();
           }
         }
       }
@@ -246,6 +261,9 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
     lifecycle,
     /// The locks held at each call of `initialize()`.
     initializeHeld,
+    timeline,
+    /// Request a Web Lock as another party on the origin would.
+    requestLock: (name, act) => self.navigator.locks.request(name, act),
 
     /// What `init()` was handed on each call.
     inits,

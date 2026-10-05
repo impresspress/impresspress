@@ -152,27 +152,69 @@ async function dropCaches() {
     }
 }
 
-// The Web Lock an erase holds, and that sw.js takes around the runtime's
-// `initialize()` (`ERASE_LOCK` there), which is what opens the data. A
-// replacement registered by a recovery can install, activate and be asked
-// by another tab for a page while this tab is still erasing; holding the
-// lock, the erase and that start take turns instead of the start opening a
-// database half erased. The same name is declared in sw.js.
+// The Web Lock that keeps an erase BEFORE any worker loads the data it
+// erases. The runtime holds the app's database in memory and writes it back
+// when it flushes; it keeps no file open at rest, so an erase that runs
+// after a runtime has loaded the data "succeeds" — and the runtime's next
+// flush writes the old database back. So:
+//
+// - whoever erases takes this lock BEFORE registering the replacement that
+//   will load the data next, and keeps it until the erase is done (or, when
+//   the replacement cannot be registered, until it lets go having erased
+//   nothing);
+// - sw.js waits for it — takes it and lets go at once — before its runtime's
+//   `initialize()` loads the data (`ERASE_LOCK` there; the same name). It
+//   never holds it while loading, so a slow start delays no one's erase.
+//
+// No worker can load the data before its registration exists, so a lock
+// taken before registering is held before any loader of the data could ask
+// for it.
 const ERASE_LOCK = '__impresspress_erase';
+// Held by whoever is erasing, for as long as its erase is pending: a
+// button's reset across the wait for its replacement to activate, an
+// automatic recovery across its register-and-erase. It is how an automatic
+// recovery that would erase sees, without waiting, that another tab is
+// already doing it (`unlessErasingElsewhere`) — and the order of the three
+// locks is what keeps them from waiting on each other: a button takes
+// RESET_LOCK and ERASE_LOCK before RECOVERY_LOCK, an automatic recovery
+// takes RECOVERY_LOCK, then RESET_LOCK only if it is free, then ERASE_LOCK,
+// which nobody can then be holding but sw.js for a moment.
+const RESET_LOCK = '__impresspress_reset';
 
-// Erase the data this browser stores for the app (OPFS), holding
-// ERASE_LOCK where the browser has Web Locks. Answers whether the erase
-// COMPLETED: `true` only if every entry was removed. An entry that could not
-// be removed (a file something still holds open) does not stop the others
-// being tried.
-function eraseData() {
-    if (navigator.locks && navigator.locks.request) {
-        return navigator.locks.request(ERASE_LOCK, eraseEntries);
-    }
-    return eraseEntries();
+// Take `names`, one after another, and keep them until the returned
+// `release()` is called — a lock request whose callback would otherwise
+// have to span a wait for activation and a person's choice. Resolves once
+// all are held. In a browser with no Web Locks there is nothing to take.
+function holdLocks(names) {
+    if (!(navigator.locks && navigator.locks.request)) return Promise.resolve(() => {});
+    const releases = [];
+    const take = (name) =>
+        new Promise((held) => {
+            navigator.locks.request(name, () => new Promise((release) => held(release)));
+        });
+    return (async () => {
+        for (const name of names) releases.push(await take(name));
+        return () => {
+            for (const release of releases.reverse()) release();
+            releases.length = 0;
+        };
+    })();
 }
 
-async function eraseEntries() {
+// `act()` holding RESET_LOCK — or `null`, without waiting and without
+// running it, when another tab holds it (an erase is under way there).
+function unlessErasingElsewhere(act) {
+    if (!(navigator.locks && navigator.locks.request)) return act();
+    return navigator.locks.request(RESET_LOCK, { ifAvailable: true }, (lock) =>
+        lock === null ? null : act(),
+    );
+}
+
+// Erase the data this browser stores for the app (OPFS). Called holding
+// ERASE_LOCK. Answers whether the erase COMPLETED: `true` only if every
+// entry was removed. An entry that could not be removed (a file something
+// still holds open) does not stop the others being tried.
+async function eraseData() {
     try {
         const root = await navigator.storage.getDirectory();
         const names = [];
@@ -454,7 +496,7 @@ async function activatedWithin(registration) {
 // has not within CONTROL_WAIT_MS the person is told and chooses
 // (`renderNotStartedUI`), and "Keep waiting" waits again. `fail(error)` is
 // called if the version cannot be installed, or `go` throws.
-async function whenActivated(registration, status, waitedMs, go, fail) {
+async function whenActivated(registration, status, waitedMs, go, fail, leave = () => {}) {
     let worker;
     try {
         worker = await activatedWithin(registration);
@@ -464,8 +506,11 @@ async function whenActivated(registration, status, waitedMs, go, fail) {
     }
     if (worker === null) {
         const waited = waitedMs + CONTROL_WAIT_MS;
-        renderNotStartedUI(status, waited, () =>
-            whenActivated(registration, status, waited, go, fail),
+        renderNotStartedUI(
+            status,
+            waited,
+            () => whenActivated(registration, status, waited, go, fail, leave),
+            leave,
         );
         return;
     }
@@ -591,21 +636,26 @@ async function updateUnderway(registration, failure, status) {
 // nothing was reported. Answers the registration, whose newest version is
 // the replacement.
 //
-// `eraseData` erases the local data once the replacement is REGISTERED and
-// before it has been asked for anything, and is for a worker that is DEAD: a
-// poisoned worker never touches the data again. Not before registering: a
-// replacement that cannot be registered (WORKER_URL's CDN case) replaces
-// nothing, and must erase nothing either. `register()` answers as the
-// replacement starts installing, so the erase runs while it fetches its
-// runtime, well before it can activate and be asked to open the data; a
-// request another tab makes of it meanwhile can hold a file open, and the
-// erase is then noted as not done. A worker that may still be running is a
+// `erase` erases the local data as well, and is for a worker that is DEAD:
+// a poisoned worker never loads or writes the data again. ERASE_LOCK is
+// taken before the replacement is registered and let go once the erase is
+// done, so the replacement — which waits for that lock before its runtime
+// loads anything — starts on the erased data, however fast it installs and
+// whoever asks it for a page. A replacement that cannot be registered
+// (WORKER_URL's CDN case) replaces nothing and erases nothing: the lock is
+// let go without erasing. A worker that may still be running is a
 // different matter — `recoverFromButton`.
-async function replaceWorker({ eraseData: erase, failure }) {
+async function replaceWorker({ erase, failure }) {
     sessionStorage.setItem(RECOVERY_DONE_KEY, RECOVERY_RESTARTED);
     await dropCaches();
-    const registration = await registerWorker(replacementWorkerUrl());
-    if (erase) noteErase(await eraseData());
+    const release = erase ? await holdLocks([ERASE_LOCK]) : () => {};
+    let registration;
+    try {
+        registration = await registerWorker(replacementWorkerUrl());
+        if (erase) noteErase(await eraseData());
+    } finally {
+        release();
+    }
     if (failure !== null) await recordRecovered(failure);
     return registration;
 }
@@ -616,27 +666,48 @@ async function replaceWorker({ eraseData: erase, failure }) {
 // app. If another tab has meanwhile recovered from the same death, nothing
 // is replaced or erased again: this tab boots onto what that tab left.
 //
-// The order differs from the automatic recovery's. A button can be pressed
-// while the worker is ALIVE — slow, on the waiting screen — and a running
-// worker holds its own copy of the data: erased under it, the data comes
-// back when it next writes, or the erase fails on a file it has open. So the
-// replacement is registered and ACTIVATED first, which discards the old
-// worker; then the data is erased, before the replacement has been asked
-// for anything; then the app is entered. And an erase that did not complete
-// is shown (`renderEraseFailedUI`) instead of the app being entered as
-// though it had.
+// When it erases, the erase has two runtimes to stay clear of, and each
+// holds the database in memory and writes it back when it flushes:
 //
-// "Activated first" can take a while under a worker that is alive: a browser
-// does not activate a new version while the old one is in the middle of an
-// event (measured in Chromium — `skipWaiting()` notwithstanding), so the
-// replacement takes over when the old worker finishes what it was doing, or
-// when the browser gives up on it. Until then the button stays on its busy
-// label and nothing has been erased.
+// - the OLD worker, which a button may find ALIVE (slow, on the waiting
+//   screen): erased under it, the data comes back the next time it writes.
+//   So the erase waits until the replacement has ACTIVATED — a browser
+//   activates a new version only once the old one is between events, and
+//   sends it none after — which is when the old worker is done writing.
+// - the REPLACEMENT, which must not load the data before it is erased. So
+//   ERASE_LOCK (and RESET_LOCK, which tells other tabs a reset is under
+//   way) is taken BEFORE the replacement is registered — and before
+//   RECOVERY_LOCK, as RESET_LOCK explains — and held across the
+//   wait for it to activate, until the erase is done; the replacement's
+//   runtime waits for the lock before it loads anything.
+//
+// Then the app is entered. An erase that did not complete is shown
+// (`renderEraseFailedUI`) instead of the app being entered as though it
+// had.
+//
+// "Activated" can take a while under a worker that is alive: a browser does
+// not activate a new version while the old one is in the middle of an event
+// (measured in Chromium — `skipWaiting()` notwithstanding). Until then
+// nothing has been erased; after CONTROL_WAIT_MS the person is asked
+// (`renderNotStartedUI`), and the locks are let go only if they start over.
+// Holding them blocks no other tab's boot: an automatic recovery that would
+// erase sees RESET_LOCK held and leaves the transition to this reset.
 async function recoverFromButton({ erase, forget, failure }, status) {
+    // The erase's locks, while this button holds them (see below).
+    let release = () => {};
+    const letGo = () => {
+        release();
+        release = () => {};
+    };
     try {
         let replaced = false;
+        // Before any replacement exists — this button's own, or an update's
+        // — so none can load the data before the erase; and before
+        // RECOVERY_LOCK (RESET_LOCK says why).
+        if (erase) release = await holdLocks([RESET_LOCK, ERASE_LOCK]);
         const registration = await underRecoveryLock(async () => {
             if (failure !== null && (await recoveryOf(failure)) !== null) {
+                letGo();
                 return registerWorker((await registeredWorkerUrl()) ?? WORKER_URL);
             }
             replaced = true;
@@ -648,7 +719,7 @@ async function recoverFromButton({ erase, forget, failure }, status) {
                 if (failure !== null) await recordRecovered(failure);
                 return current;
             }
-            return replaceWorker({ eraseData: false, failure });
+            return replaceWorker({ erase: false, failure });
         });
         await whenActivated(
             registration,
@@ -656,7 +727,8 @@ async function recoverFromButton({ erase, forget, failure }, status) {
             0,
             async (worker) => {
                 if (erase && replaced) {
-                    const erased = await underRecoveryLock(eraseData);
+                    const erased = await eraseData();
+                    letGo();
                     noteErase(erased);
                     if (!erased) {
                         renderEraseFailedUI({ erase, forget, failure }, worker, status);
@@ -669,9 +741,14 @@ async function recoverFromButton({ erase, forget, failure }, status) {
                 }
                 await enterApp(bootUrl(), worker, status, 0);
             },
-            (error) => recoveryError(error, status),
+            (error) => {
+                letGo();
+                recoveryError(error, status);
+            },
+            letGo,
         );
     } catch (error) {
+        letGo();
         recoveryError(error, status);
     }
 }
@@ -866,7 +943,11 @@ function renderWaitingUI(target, worker, status, waitedMs) {
 // usually a moment, sometimes, in Chromium, much longer. "Keep waiting"
 // waits again (`resume`); "Restart it" and the reset register a replacement
 // over it, as on the waiting screen.
-function renderNotStartedUI(status, waitedMs, resume) {
+//
+// `leave` lets go of what the wait was holding — a reset's erase locks —
+// before "Restart it" or the reset starts over: a reset held up behind its
+// own predecessor's locks would wait for ever. "Keep waiting" keeps them.
+function renderNotStartedUI(status, waitedMs, resume, leave) {
     const name = appTitle();
     const STOPPING = 'Waiting for the app to stop…';
     renderChoices({
@@ -886,9 +967,18 @@ function renderNotStartedUI(status, waitedMs, resume) {
                 label: 'Restart it',
                 busy: STOPPING,
                 style: 'plain',
-                act: () => recoverFromButton({ erase: false, forget: false, failure: null }, status),
+                act: () => {
+                    leave();
+                    return recoverFromButton({ erase: false, forget: false, failure: null }, status);
+                },
             },
-            resetButton(null, status, STOPPING),
+            {
+                ...resetButton(null, status, STOPPING),
+                act: () => {
+                    leave();
+                    return recoverFromButton({ erase: true, forget: true, failure: null }, status);
+                },
+            },
         ],
     });
 }
@@ -931,17 +1021,27 @@ async function recoverIfStopped(status) {
             return { kind: 'updating', registration: current };
         }
         const erase = erasesFor(failure) && mayEraseAutomatically();
-        status.textContent =
-            stoppedText(failure.cause) +
-            (erase
-                ? ' — recovering; the data stored locally in this browser is being erased…'
-                : ' — restarting it; the data stored locally in this browser is kept…');
-        try {
-            const registration = await replaceWorker({ eraseData: erase, failure });
-            return { kind: 'recovered', registration, failure };
-        } catch (error) {
-            return { kind: 'unreplaced', failure, error };
-        }
+        const recover = async () => {
+            status.textContent =
+                stoppedText(failure.cause) +
+                (erase
+                    ? ' — recovering; the data stored locally in this browser is being erased…'
+                    : ' — restarting it; the data stored locally in this browser is kept…');
+            try {
+                const registration = await replaceWorker({ erase, failure });
+                return { kind: 'recovered', registration, failure };
+            } catch (error) {
+                return { kind: 'unreplaced', failure, error };
+            }
+        };
+        if (!erase) return recover();
+        // A reset in another tab already owns this transition: it is
+        // bringing in a replacement and will erase before that replacement
+        // loads anything. Replacing over it would discard its replacement,
+        // and waiting for it here, holding RECOVERY_LOCK, would hold up every
+        // tab's boot for as long as its replacement takes to activate. This
+        // tab boots onto what that reset brings in.
+        return (await unlessErasingElsewhere(recover)) ?? { kind: 'joined', failure };
     });
 }
 
