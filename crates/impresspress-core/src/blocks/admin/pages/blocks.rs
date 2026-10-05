@@ -94,6 +94,12 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         .iter()
         .map(|row| (row.block_name.clone(), row.enabled))
         .collect();
+    // The rows, read through `features::is_enabled`: a block that cannot be
+    // disabled shows as enabled whatever an old row says, as the router
+    // serves it.
+    let stored = crate::features::BlockSettings::from_map(
+        block_enabled.iter().map(|(n, e)| (n.clone(), *e)).collect(),
+    );
 
     // Append unloaded blocks (in block_settings but not in the runtime) as
     // placeholder BlockInfo. Iteration order is deterministic because the
@@ -206,7 +212,7 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
 
                 div .block-cards {
                     @for block in &filtered {
-                        @let is_enabled = block_enabled.get(&block.name).copied().unwrap_or(true);
+                        @let is_enabled = crate::features::is_enabled(&stored, &all_blocks, &block.name);
                         @let encoded_name = encode_block_name(&block.name);
                         // The title is the card's one control: a button that
                         // opens the detail modal, stretched over the whole

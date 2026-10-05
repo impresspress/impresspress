@@ -146,11 +146,14 @@ crate::impresspress_feature_block! {
         .endpoints(endpoint_match::declare(ROUTES))
         .config_keys(vec![])
         .admin_url("/b/userportal/admin/buttons")
-        .can_disable(true)
-        // Ships enabled — see the note on `legalpages`. Same divergence, same
-        // resolution: the declaration is corrected to the value production has
-        // been running, not the other way round.
-        .default_enabled(true)
+        // Not disableable, like `impresspress/auth-ui`: this block is the
+        // signed-in account surface — profile, sessions, and the Security
+        // page that holds the account's one change-password form
+        // (`/b/auth/change-password` redirects there). Turning it off would
+        // leave no way to change a password. A block that cannot be disabled
+        // gets no enablement row (`blocks::block_enabled_defaults`) and the
+        // admin Blocks page offers it no toggle; the router reads an absent
+        // row as enabled.
     },
     handle: |this, ctx, mut msg, input| {
         // Auth is enforced centrally by `route_to_block` from each row's

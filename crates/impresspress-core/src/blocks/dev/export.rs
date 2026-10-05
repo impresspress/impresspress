@@ -1226,8 +1226,8 @@ mod tests {
             "the README must tell its holder to change the admin password"
         );
         assert!(
-            README_TEMPLATE.contains("/b/auth/change-password"),
-            "…and where: the auth block's own change-password page"
+            README_TEMPLATE.contains("/b/userportal/security"),
+            "…and where: the account's Security page, which holds the change-password form"
         );
     }
 

@@ -187,7 +187,7 @@ const ROUTES: &[EndpointRoute<Route>] = &[
         "/b/auth/change-password",
         Route::ChangePasswordPage,
     )
-    .summary("Change password page"),
+    .summary("Redirect to the Security page's change-password form"),
     EndpointRoute::authenticated(HttpMethod::Get, "/b/auth/orgs", Route::OrgsPage)
         .summary("Claimed organizations"),
     // Public: logged-out by definition. `pages/reset_password.rs` renders the
@@ -524,12 +524,7 @@ crate::impresspress_feature_block! {
             }
             Route::LoginPage => pages::login::handle(ctx, &msg).await,
             Route::SignupPage => pages::signup::handle(ctx, &msg).await,
-            Route::ChangePasswordPage => {
-                if msg.user_id().is_empty() {
-                    return pages::login::handle(ctx, &msg).await;
-                }
-                pages::change_password::handle(ctx, &msg).await
-            }
+            Route::ChangePasswordPage => pages::change_password::handle(),
             Route::OrgsPage => pages::orgs::handle(ctx, &msg).await,
             Route::ResetPasswordPage => pages::reset_password::handle(ctx, &msg).await,
             Route::BootstrapPage => pages::bootstrap::handle_get(ctx, &msg).await,

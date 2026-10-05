@@ -279,9 +279,6 @@ a.pagination__link:focus-visible { outline: none; box-shadow: var(--focus-ring);
   .db-layout { grid-template-columns: 1fr; }
 }
 
-/* ===== Sessions page (Phase 4 PR-2) ===== */
-.session-row td:last-child { text-align: right; white-space: nowrap; }
-
 /* ===== Card mode (below 720px) =====
    Each row becomes a card. The table's own frame goes (the cards are the
    frame); a card's header row holds the select checkbox, the primary cell
@@ -359,15 +356,3 @@ a.pagination__link:focus-visible { outline: none; box-shadow: var(--focus-ring);
 @media (max-width: 720px) {
 	.table th, .table td { white-space: nowrap; }
 }
-
-/* ===== Sessions row (userportal) — less cramped =====
-   The data-table → card collapse on mobile leaves a row that's tight.
-   Give each cell breathing room and a clear value alignment. */
-.session-row td { padding: var(--space-2) 0; }
-@media (max-width: 720px) {
-	.session-row { padding: var(--space-4) !important; row-gap: var(--space-1); }
-	.session-row td { padding: var(--space-1) 0; }
-	.session-row td:last-child { padding-top: var(--space-2); }
-	.session-row .btn { width: auto; min-width: 88px; }
-}
-

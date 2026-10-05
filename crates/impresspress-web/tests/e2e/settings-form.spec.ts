@@ -4,9 +4,10 @@ import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
 /**
  * Saving the shared settings forms (`ui::settings_form`) for real, end to end.
  *
- * Authentication and Branding show `WAFER_RUN_SHARED__*` keys, which WRAP
- * lets only the admin block write, so both are admin Settings tabs whose
- * forms post to the admin block. Each test saves through the live server,
+ * Every settings form saves through the admin block — the one WRAP lets
+ * write shared (`WAFER_RUN_SHARED__*`) and block-scoped keys alike.
+ * Authentication and Branding are admin Settings tabs; Legal's settings page
+ * stays in the Legal section and posts to `/b/admin/settings/legal`. Each test saves through the live server,
  * reloads, and reads the stored value back off the page — then puts the
  * original value back, so the rest of `e2e:writes` sees the defaults.
  *
@@ -106,6 +107,24 @@ test.describe('settings form', () => {
 
     await name.fill(original);
     saved = await save(page, BRANDING);
+    expect(saved.response.status()).toBe(200);
+  });
+
+  test('Legal settings save through the admin block', async ({ page }) => {
+    await loginAsAdmin(page);
+    await page.goto('/b/legalpages/admin/settings', { waitUntil: 'networkidle' });
+    const back = page.getByLabel('Back Button URL');
+    const original = await back.inputValue();
+    await back.fill('/b/userportal/');
+    let saved = await save(page, '/b/admin/settings/legal');
+    expect(saved.response.status()).toBe(200);
+    expect((await saved.response.json()).message).toBe('Settings saved');
+
+    await page.reload({ waitUntil: 'networkidle' });
+    await expect(back).toHaveValue('/b/userportal/');
+
+    await back.fill(original);
+    saved = await save(page, '/b/admin/settings/legal');
     expect(saved.response.status()).toBe(200);
   });
 });

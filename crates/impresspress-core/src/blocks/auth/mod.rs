@@ -1101,6 +1101,58 @@ pub(crate) mod helpers {
             .min(ACCESS_TOKEN_LIFETIME_SECS_MAX))
     }
 
+    /// End the access token the request presented: put its `jti` on the
+    /// blocklist until the token's own expiry, so `extract_auth_meta` refuses
+    /// it from the next request on (SEC-042). An access JWT is otherwise
+    /// structurally valid until its `exp`, whatever happened to its refresh
+    /// family, so this is what makes "you are signed out on this device"
+    /// true at once. Per-`jti`: the account's other sessions are untouched.
+    ///
+    /// No-op for a request that presented no verified token. The expiry is
+    /// the token's own `exp` (`META_AUTH_EXP`), which `extract_auth_meta`
+    /// sets for every token it accepts; only when that is missing does it
+    /// fall back to now + the configured access lifetime, the longest the
+    /// token could live. A failed write is returned — a token that stays
+    /// valid must not be reported as ended.
+    ///
+    /// Callers: `POST /b/auth/api/logout`, and the userportal's revoke of the
+    /// session the request itself belongs to.
+    pub(crate) async fn end_presented_access_token(
+        ctx: &dyn wafer_run::context::Context,
+        msg: &wafer_run::Message,
+    ) -> Result<(), WaferError> {
+        use crate::{
+            blocks::auth::repo::jwt_blocklist::{self, NewBlocklistEntry},
+            crypto::{META_AUTH_EXP, META_AUTH_JTI},
+        };
+        let jti = msg.get_meta(META_AUTH_JTI);
+        let user_id = msg.user_id();
+        if jti.is_empty() || user_id.is_empty() {
+            return Ok(());
+        }
+        let expires_at = match msg
+            .get_meta(META_AUTH_EXP)
+            .parse::<i64>()
+            .ok()
+            .and_then(|secs| chrono::DateTime::from_timestamp(secs, 0))
+        {
+            Some(exp) => exp,
+            None => {
+                chrono::Utc::now()
+                    + chrono::Duration::seconds(access_token_lifetime_secs(ctx).await? as i64)
+            }
+        };
+        jwt_blocklist::insert(
+            ctx,
+            NewBlocklistEntry {
+                jti,
+                user_id,
+                expires_at: &expires_at.format("%Y-%m-%dT%H:%M:%SZ").to_string(),
+            },
+        )
+        .await
+    }
+
     /// Returns (access_token, refresh_token, family).
     ///
     /// `auth_method` records *how* the user authenticated for this token —

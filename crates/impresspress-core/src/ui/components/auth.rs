@@ -100,6 +100,17 @@ pub fn alert(variant: AlertVariant, id: &str, message: &str) -> Markup {
     }
 }
 
+/// [`alert`] as the server sends it, already showing: the same box and the
+/// same live-region role, without the `id` and the `hidden` a script would
+/// clear. For a message that arrives as markup — an htmx answer swapped into
+/// a form's result slot — where there is no script to reveal it, and where
+/// inserting an element with `role="alert"` is itself what announces it.
+pub fn alert_message(variant: AlertVariant, message: &str) -> Markup {
+    html! {
+        div class={ "alert " (variant.class()) } role=(variant.role()) { (message) }
+    }
+}
+
 /// Third-party sign-in button. Only rendered for providers whose full
 /// credential triple is configured, so it never 4xxs on click.
 pub fn oauth_button(provider: &str, label: &str, icon: Markup) -> Markup {
@@ -115,7 +126,7 @@ pub fn oauth_button(provider: &str, label: &str, icon: Markup) -> Markup {
 
 #[cfg(test)]
 mod tests {
-    use super::auth_panel;
+    use super::{alert_message, auth_panel, AlertVariant};
     use crate::ui::SiteConfig;
 
     fn config_with(auth_headline: &str, auth_tagline: &str) -> SiteConfig {
@@ -129,6 +140,22 @@ mod tests {
             auth_headline: auth_headline.to_string(),
             auth_tagline: auth_tagline.to_string(),
         }
+    }
+
+    /// A server-sent message is showing and announced: no `hidden` for a
+    /// script to clear, and the variant's live-region role.
+    #[test]
+    fn an_alert_message_is_shown_with_its_role() {
+        let error = alert_message(AlertVariant::Error, "Nope").into_string();
+        assert_eq!(
+            error,
+            r#"<div class="alert alert--error" role="alert">Nope</div>"#
+        );
+        let ok = alert_message(AlertVariant::Success, "Done").into_string();
+        assert_eq!(
+            ok,
+            r#"<div class="alert alert--success" role="status">Done</div>"#
+        );
     }
 
     /// Headline always comes from config, never `config.app_name` — matches

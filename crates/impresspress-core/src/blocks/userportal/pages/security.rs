@@ -1,5 +1,9 @@
 //! `/b/userportal/security` — change password + linked OAuth providers
-//! + email verification status.
+//! + email verification status, in the portal shell.
+//!
+//! The Password section is the account's ONE change-password form:
+//! `/b/auth/change-password` redirects here
+//! (`auth_ui::pages::change_password`).
 
 use maud::{html, Markup};
 use wafer_run::{context::Context, Message, OutputStream};
@@ -7,10 +11,15 @@ use wafer_run::{context::Context, Message, OutputStream};
 use crate::{
     blocks::{
         auth::repo::{local_credentials, provider_links, users},
+        auth_ui::api::change_password::{FORM_ID, RESULT_ID},
         crud,
     },
     http::{redirect, ResponseBuilder},
-    ui::SiteConfig,
+    ui::{
+        self,
+        components::{empty_state, password_field, section_header, timestamp, PasswordPurpose},
+        icons, Shell,
+    },
 };
 
 /// The resend-verification button's behaviour, delegated.
@@ -71,90 +80,123 @@ pub async fn security_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         }
     };
     let user_email = msg.get_meta("auth.user_email").to_string();
+    // The minimum the API enforces, so the new-password fields' `minlength`
+    // and placeholder state the same number (see `PasswordPurpose::New`).
+    let min_length = match crate::blocks::auth::helpers::password_min_length(ctx).await {
+        Ok(n) => n,
+        Err(e) => {
+            return crud::db_error_page(msg, e, "userportal security: password policy read failed")
+        }
+    };
 
     let body = html! {
-        section .account-section {
-            h2 .account-section__title { "Password" }
-            // A refusal comes back as markup for `#change-pw-result`
-            // (`auth_ui::api::change_password::refused`), so the only
-            // responses that reach the `htmx:responseError` listener are the
-            // ones with no sentence of their own — a dead session, an outage.
-            // `data-error-label` is what stops those from being toasted as
-            // "Request failed (401)"; see the label rule in
-            // `ui/assets/chrome.js`.
-            form
-                hx-post="/b/auth/api/change-password"
-                hx-target="#change-pw-result"
-                hx-swap="innerHTML"
-                data-error-label="Could not change your password"
-            {
-                div .form-group {
-                    label .form-label for="current-password" { "Current password" }
-                    input .form-input #current-password type="password"
-                        name="current_password" required;
-                }
-                div .form-group {
-                    label .form-label for="new-password" { "New password" }
-                    input .form-input #new-password type="password"
-                        name="new_password" required;
-                }
-                div #change-pw-result {}
-                button .btn .btn--primary type="submit" .w-full { "Change password" }
+        div .account-sections {
+            section .account-section {
+                (section_header("Password", None))
+                (change_password_form(min_length))
             }
-        }
-        section .account-section {
-            h2 .account-section__title { "Email verification" }
-            @if email_verified {
-                p .text-muted .m-0 {
-                    "Email verified"
-                    @if !user_email.is_empty() { " — " (user_email) }
+            section .account-section {
+                (section_header("Email verification", None))
+                @if email_verified {
+                    p .text-muted .m-0 {
+                        "Email verified"
+                        @if !user_email.is_empty() { " — " (user_email) }
+                    }
+                } @else {
+                    p .text-muted .m-0 .mb-3 {
+                        "Email not verified"
+                        @if !user_email.is_empty() { " — " (user_email) }
+                    }
+                    div #resend-verification-result {}
+                    // The address travels as an attribute the script reads back
+                    // with `getAttribute`, not as a `serde_json`-escaped literal
+                    // spliced into JavaScript source. See the delegated-action
+                    // rule in `ui/assets/chrome.js`.
+                    button .btn .btn--secondary
+                        type="button"
+                        data-action="resend-verification"
+                        data-verify-email=(user_email)
+                    { "Resend verification email" }
+                    script { (maud::PreEscaped(RESEND_VERIFICATION_JS)) }
                 }
-            } @else {
-                p .text-muted .m-0 .mb-3 {
-                    "Email not verified"
-                    @if !user_email.is_empty() { " — " (user_email) }
-                }
-                div #resend-verification-result {}
-                // The address travels as an attribute the script reads back
-                // with `getAttribute`, not as a `serde_json`-escaped literal
-                // spliced into JavaScript source. See the delegated-action
-                // rule in `ui/assets/chrome.js`.
-                button .btn .btn--secondary
-                    type="button"
-                    .w-full
-                    data-action="resend-verification"
-                    data-verify-email=(user_email)
-                { "Resend verification email" }
-                script { (maud::PreEscaped(RESEND_VERIFICATION_JS)) }
             }
-        }
-        section .account-section {
-            h2 .account-section__title { "Linked accounts" }
-            @if links.is_empty() {
-                p .text-muted .m-0 {
-                    "No external accounts linked. Sign in with GitHub, Google, or Microsoft to link one."
-                }
-            } @else {
-                p .text-muted .m-0 .mb-3 .text-sm {
-                    "Anyone who can sign in to one of these can sign in to this \
-                     account. Unlink any you do not recognize."
-                }
-                ul .linked-providers-list {
-                    @for l in &links {
-                        (linked_provider_row(l, None))
+            section .account-section {
+                (section_header("Linked accounts", None))
+                @if links.is_empty() {
+                    (empty_state(
+                        icons::link(),
+                        "No linked accounts",
+                        "Sign in with GitHub, Google, or Microsoft to link one.",
+                        None,
+                    ))
+                } @else {
+                    p .text-muted .m-0 .mb-3 .text-sm {
+                        "Anyone who can sign in to one of these can sign in to this \
+                         account. Unlink any you do not recognize."
+                    }
+                    ul .linked-providers-list {
+                        @for l in &links {
+                            (linked_provider_row(l, None))
+                        }
                     }
                 }
             }
         }
     };
 
-    let config = match SiteConfig::load(ctx).await {
-        Ok(site) => site,
-        Err(e) => {
-            return crate::blocks::crud::db_error_page(msg, e, "page: site config read failed")
+    ui::shell_page(
+        ctx,
+        msg,
+        Shell::portal("Security", "Security")
+            .subtitle("Your password, email verification and linked sign-in accounts."),
+        body,
+    )
+    .await
+}
+
+/// The account's change-password form: current password, new password and
+/// its confirmation, each the shared [`password_field`] (reveal toggle,
+/// `autocomplete`, and `minlength` = the configured minimum on the new ones).
+///
+/// No script of its own. htmx posts it (`hx-post`, which runs the browser's
+/// own validation first, so `required` and `minlength` stop an empty or short
+/// password before the round trip) and the endpoint answers with markup: a
+/// refusal — wrong current password, a confirmation that differs, a password
+/// the policy declines — is the shared alert, swapped into [`RESULT_ID`]
+/// beside the fields; a success replaces the whole form ([`FORM_ID`]), since
+/// the change signs the account out. See
+/// `auth_ui::api::change_password::{refused, changed_response}`.
+///
+/// The responses that reach the `htmx:responseError` listener are the ones
+/// with no sentence of their own — a dead session, an outage.
+/// `data-error-label` is what stops those from being toasted as "Request
+/// failed (401)"; see the label rule in `ui/assets/chrome.js`.
+fn change_password_form(min_length: usize) -> Markup {
+    html! {
+        form #(FORM_ID)
+            hx-post="/b/auth/api/change-password"
+            hx-target=(format!("#{RESULT_ID}"))
+            hx-swap="innerHTML"
+            data-error-label="Could not change your password"
+        {
+            div .form-group {
+                label .form-label for="current_password" { "Current password" }
+                (password_field("current_password", "Enter your current password", PasswordPurpose::Current))
+            }
+            div .form-group {
+                label .form-label for="new_password" { "New password" }
+                (password_field("new_password", &format!("Min {min_length} characters"), PasswordPurpose::New { min_length }))
+            }
+            div .form-group {
+                label .form-label for="confirm_password" { "Confirm new password" }
+                (password_field("confirm_password", "Repeat new password", PasswordPurpose::New { min_length }))
+            }
+            div #(RESULT_ID) .account-form__result {}
+            div .account-form__actions {
+                button .btn .btn--primary .btn--block type="submit" { "Change password" }
+            }
         }
-    };
-    super::account_page(&config, "Security", Some("/b/userportal/"), body)
+    }
 }
 
 /// One linked-provider row, optionally carrying the reason its last unlink was
@@ -168,7 +210,7 @@ fn linked_provider_row(link: &provider_links::ProviderLink, error: Option<&str>)
         li .linked-provider {
             span .linked-provider__name { (link.provider) }
             span .linked-provider__login { (link.provider_login) }
-            span .linked-provider__date { "linked " (link.linked_at) }
+            span .linked-provider__date { "linked " (timestamp(&link.linked_at)) }
             button .btn .btn--ghost .btn--sm
                 type="button"
                 hx-delete=(format!("/b/userportal/security/providers/{}", link.provider))
@@ -364,6 +406,71 @@ mod tests {
         );
     }
 
+    /// The one change-password form: current, new and confirm, each the
+    /// shared password field — a reveal toggle, the autocomplete hint a
+    /// password manager reads, and the configured minimum (not a literal 8)
+    /// on the two new-password fields — with a result slot for the endpoint's
+    /// answer and no script of its own.
+    #[tokio::test]
+    async fn the_change_password_form_is_the_shared_password_fields() {
+        let mut ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::userportal::UserPortalBlock::BLOCK_NAME);
+        ctx.set_config(crate::blocks::auth::config::PASSWORD_MIN_LENGTH_KEY, "14");
+        seed_user(&ctx, "user-a").await;
+        let html = output_html(
+            security_page(
+                &ctx,
+                &auth_msg("retrieve", "/b/userportal/security", "user-a"),
+            )
+            .await,
+        )
+        .await;
+
+        let form_start = html
+            .find(r#"<form id="change-password-form""#)
+            .expect("the form carries the id a success replaces");
+        let form = &html[form_start..form_start + html[form_start..].find("</form>").unwrap()];
+        for (name, autocomplete) in [
+            ("current_password", "current-password"),
+            ("new_password", "new-password"),
+            ("confirm_password", "new-password"),
+        ] {
+            let at = form
+                .find(&format!(r#"name="{name}""#))
+                .unwrap_or_else(|| panic!("missing {name}: {form}"));
+            let input = &form[form[..at].rfind("<input").unwrap()..];
+            let input = &input[..input.find('>').unwrap()];
+            assert!(
+                input.contains(&format!(r#"autocomplete="{autocomplete}""#)),
+                "{name}: {input}"
+            );
+            assert_eq!(
+                input.contains(r#"minlength="14""#),
+                name != "current_password",
+                "only a new password carries the configured minimum: {input}"
+            );
+            assert!(
+                form.contains(&format!(r#"data-reveal-target="{name}""#)),
+                "{name} has its reveal toggle"
+            );
+            assert!(
+                form.contains(&format!(r#"<label class="form-label" for="{name}">"#)),
+                "{name} is labelled"
+            );
+        }
+        assert!(
+            form.contains(r##"hx-target="#change-password-result""##),
+            "{form}"
+        );
+        assert!(form.contains(r#"id="change-password-result""#), "{form}");
+        assert!(
+            !form.contains("<script"),
+            "the form has no script of its own"
+        );
+        assert!(!html.contains("login-error"), "{html}");
+    }
+
     /// The form and the endpoint it posts to are one surface, and asserting
     /// on the rendered strings alone does not check that they still meet:
     /// this form is htmx, so it sends `application/x-www-form-urlencoded`
@@ -457,7 +564,11 @@ mod tests {
         let msg = auth_msg("retrieve", "/b/userportal/security", "user-a");
         let resp = security_page(&ctx, &msg).await;
         let html = output_html(resp).await;
-        assert!(html.contains("No external accounts linked"));
+        assert!(html.contains("No linked accounts"));
+        assert!(
+            html.contains(r#"class="empty__title""#),
+            "the empty list is the shared empty state: {html}"
+        );
     }
 
     #[tokio::test]
@@ -504,7 +615,7 @@ mod tests {
         .await;
 
         assert_eq!(status, 500);
-        assert!(!html.contains("No external accounts linked"), "{html}");
+        assert!(!html.contains("No linked accounts"), "{html}");
     }
 
     /// An unreadable verification flag is the 500 page. Defaulting it to

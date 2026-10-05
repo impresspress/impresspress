@@ -964,7 +964,7 @@ mod tests {
     /// which is what makes this expressible at all.
     ///
     /// Asserted through `SiteConfig::load_for_auth` — what the login, signup,
-    /// bootstrap, change-password, reset-password and verify pages all build
+    /// bootstrap, reset-password and verify pages all build
     /// their chrome from — rather than by rendering one page, so it covers
     /// every one of them.
     #[tokio::test]

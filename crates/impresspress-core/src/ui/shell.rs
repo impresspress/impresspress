@@ -5,8 +5,8 @@ use maud::{html, Markup};
 
 use super::{
     icons,
-    sidebar::{sidebar_grouped, NavGroup},
-    NavKind, UserInfo,
+    sidebar::{sidebar_grouped, NavGroup, SignedIn},
+    NavKind,
 };
 
 /// One breadcrumb segment.
@@ -131,7 +131,7 @@ fn render_topbar(t: &Topbar<'_>) -> Markup {
 /// Renders sidebar + topbar + body in the standard 12-col grid.
 ///
 /// `nav_groups` partitions the sidebar (Workspace / Data / System for admin,
-/// Account / Apps for portal). `user` is pinned at the sidebar bottom. The
+/// Account / Apps for portal). `signed_in` (the viewer and their profile menu) is pinned at the sidebar bottom. The
 /// body renders inside `main#content` — the page's one `main` landmark and
 /// the skip link's target.
 #[expect(
@@ -142,7 +142,7 @@ fn render_topbar(t: &Topbar<'_>) -> Markup {
 pub fn shell(
     nav_kind: NavKind,
     nav_groups: &[NavGroup],
-    user: Option<&UserInfo>,
+    signed_in: Option<SignedIn<'_>>,
     current_path: &str,
     logo_url: &str,
     logo_icon_url: &str,
@@ -175,7 +175,7 @@ pub fn shell(
                 }
             }
             div .shell__overlay data-action="drawer-close" {}
-            (sidebar_grouped(nav_kind, nav_groups, user, current_path, logo_url, logo_icon_url, app_name))
+            (sidebar_grouped(nav_kind, nav_groups, signed_in, current_path, logo_url, logo_icon_url, app_name))
             div .shell__main {
                 (render_topbar(&topbar))
                 // A block's own sections (`PageBody::with_subnav`): a row of

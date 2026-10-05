@@ -41,6 +41,14 @@ pub fn layout_dashboard() -> Markup {
     )
 }
 
+/// A house: "home" — the portal's Overview, kept distinct from
+/// [`layout_dashboard`], which stands for the admin dashboard.
+pub fn house() -> Markup {
+    icon(
+        r#"<path d="M15 21v-8a1 1 0 0 0-1-1h-4a1 1 0 0 0-1 1v8"/><path d="M3 10a2 2 0 0 1 .709-1.528l7-5.999a2 2 0 0 1 2.582 0l7 5.999A2 2 0 0 1 21 10v9a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"/>"#,
+    )
+}
+
 pub fn file_text() -> Markup {
     icon(
         r#"<path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/>"#,

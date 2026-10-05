@@ -5,14 +5,16 @@ use wafer_run::{context::Context, Message, OutputStream};
 
 use super::{
     api_post_script, login_script, oauth_button_script, oauth_provider_configured,
-    oauth_provider_icon, oauth_provider_label, pw_field, site_config, PasswordPurpose,
+    oauth_provider_icon, oauth_provider_label, site_config,
 };
 use crate::{
     blocks::auth_ui::redirect::is_safe_local_redirect,
     config_vars::{ALLOW_SIGNUP_KEY, ENABLE_OAUTH_KEY},
     ui::{
         self,
-        components::{alert, auth_panel, oauth_button, AlertVariant},
+        components::{
+            alert, auth_panel, oauth_button, password_field, AlertVariant, PasswordPurpose,
+        },
         templates::auth_split,
     },
 };
@@ -121,7 +123,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
 
                         div .form-group {
                             label .form-label for="password" { "Password" }
-                            (pw_field("password", "Enter your password", PasswordPurpose::Current))
+                            (password_field("password", "Enter your password", PasswordPurpose::Current))
                         }
 
                         div .auth-actions {

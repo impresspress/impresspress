@@ -318,7 +318,7 @@ localhost.** Every sandbox is seeded with the same starter admin account
 (its email and password are shown on the workspace page), and the export
 carries that account — so until you change it, anyone who gets the folder, or who can
 reach the host you serve it from, is an admin of the exported site. Sign in
-as that admin and change it at `/b/auth/change-password`. The
+as that admin and change it on `/b/userportal/security`. The
 "they're throwaway because this is a per-browser instance with nothing of
 consequence behind it" premise stops holding the moment a copy of the
 instance leaves the browser.

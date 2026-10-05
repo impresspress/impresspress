@@ -243,7 +243,9 @@ pub struct Page<'a> {
     /// The audience's sidebar groups (admin or portal), already filtered to
     /// what this viewer can reach.
     pub nav: &'a [NavGroup],
-    pub user: Option<&'a UserInfo>,
+    /// The signed-in viewer and their profile menu; `None` renders no user
+    /// row.
+    pub signed_in: Option<sidebar::SignedIn<'a>>,
     pub current_path: &'a str,
     pub topbar: shell::Topbar<'a>,
     pub body: PageBody,
@@ -334,7 +336,7 @@ impl<'a> Page<'a> {
                 (shell::shell(
                     self.nav_kind,
                     self.nav,
-                    self.user,
+                    self.signed_in,
                     self.current_path,
                     &self.config.logo_url,
                     &self.config.logo_icon_url,
@@ -536,13 +538,21 @@ pub async fn shell_document(
     // identity, so a non-admin is never shown an admin-only link.
     let admits = |href: &str| crate::routing::admits_page(ctx.registered_blocks(), msg, href);
     nav_groups::retain_reachable(&mut groups, &registered, &features, &admits);
+    // The profile menu's account links go through the same filter: a link
+    // the router would refuse is no way to change a password.
+    let mut account_menu = nav_groups::account_menu();
+    nav_groups::retain_reachable(&mut account_menu, &registered, &features, &admits);
+    let account_links: Vec<NavItem> = account_menu.into_iter().flat_map(|g| g.items).collect();
     let path = msg.path().to_string();
     Ok(Page {
         config: &config,
         title: shell.title,
         nav_kind: shell.nav,
         nav: &groups,
-        user: user.as_ref(),
+        signed_in: user.as_ref().map(|user| sidebar::SignedIn {
+            user,
+            account_links: &account_links,
+        }),
         current_path: &path,
         topbar: shell::Topbar {
             crumbs: shell.crumbs,
@@ -913,7 +923,7 @@ pub async fn shell_error_page(
 pub fn swap_error_response(target_id: &str, message: &str) -> wafer_run::OutputStream {
     let markup = maud::html! {
         div id=(target_id) {
-            div class="alert alert--error" role="alert" { (message) }
+            (components::alert_message(components::AlertVariant::Error, message))
         }
     };
     html_response_with_toast(markup, message, "error")
@@ -934,7 +944,7 @@ pub fn swap_error_row_response(
     let markup = maud::html! {
         tr id=(target_id) {
             td colspan=(colspan) {
-                div class="alert alert--error" role="alert" { (message) }
+                (components::alert_message(components::AlertVariant::Error, message))
             }
         }
     };
@@ -947,9 +957,7 @@ pub fn swap_error_row_response(
 ///
 /// Same status and toast as [`swap_error_response`], for the same reason.
 pub fn swap_notice_response(message: &str) -> wafer_run::OutputStream {
-    let markup = maud::html! {
-        div class="alert alert--error" role="alert" { (message) }
-    };
+    let markup = components::alert_message(components::AlertVariant::Error, message);
     html_response_with_toast(markup, message, "error")
 }
 
@@ -1244,7 +1252,7 @@ mod tests {
             title: "Dashboard",
             nav_kind: NavKind::Admin,
             nav: groups,
-            user: None,
+            signed_in: None,
             current_path: "/b/admin/",
             topbar: Topbar {
                 crumbs: vec![Crumb {
