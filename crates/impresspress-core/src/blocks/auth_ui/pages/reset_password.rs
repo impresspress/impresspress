@@ -4,11 +4,11 @@
 use maud::{html, PreEscaped};
 use wafer_run::{context::Context, Message, OutputStream};
 
-use super::{api_post_script, pw_field, PasswordPurpose};
+use super::api_post_script;
 use crate::{
     ui,
     ui::{
-        components::{alert, auth_panel, AlertVariant},
+        components::{alert, auth_panel, password_field, AlertVariant, PasswordPurpose},
         icons,
         templates::auth_split,
     },
@@ -106,11 +106,11 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
 
                         div .form-group {
                             label .form-label for="password" { "New Password" }
-                            (pw_field("password", &format!("Min {min_length} characters"), PasswordPurpose::New { min_length }))
+                            (password_field("password", &format!("Min {min_length} characters"), PasswordPurpose::New { min_length }))
                         }
                         div .form-group {
                             label .form-label for="confirm" { "Confirm Password" }
-                            (pw_field("confirm", "Repeat password", PasswordPurpose::New { min_length }))
+                            (password_field("confirm", "Repeat password", PasswordPurpose::New { min_length }))
                         }
 
                         button .login-button type="submit" #btn { "Reset Password" }

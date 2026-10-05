@@ -150,7 +150,7 @@ fn shared_bytes(logical: &str) -> Option<&'static [u8]> {
         // grid stays 32 cells either way, so this carries no detail the 32
         // lacks; it spares the browser the scale step, nothing more.
         // There is no raster wordmark: brand text is rendered
-        // as text next to the mark (see `templates::brand_lockup`) -- the
+        // as text next to the mark (the sidebar and `components::auth_panel`) -- the
         // old `impresspress-logo-long.png` wordmark was dark-ink artwork
         // illegible on the navy chrome and has been removed outright; rows
         // still pointing at it are repaired by `seed_defaults` via

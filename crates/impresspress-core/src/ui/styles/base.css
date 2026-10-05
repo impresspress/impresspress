@@ -18,7 +18,7 @@ html, body {
  * apply their own UA form-control stack instead (most visibly, `textarea`'s
  * UA default is `monospace`, which reads as a jarring mismatch next to a
  * `.form-input` sibling in the same section, and a plain `<button>` renders
- * in the system UI font -- the portal's `.account-card__signout` did). This
+ * in the system UI font). This
  * rule is the one place every native control, `button` included, takes the
  * UI font; component rules do not restate it. */
 button, input, textarea, select {

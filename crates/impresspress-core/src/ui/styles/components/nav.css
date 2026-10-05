@@ -107,85 +107,33 @@
 .editor-tab:hover { background: var(--bg-hover); color: var(--text-primary); }
 .editor-tab--active { background: var(--surface-1); border-color: var(--border-color); color: var(--text-primary); font-weight: 600; }
 
-/* ===== Account card admin shortcut =====
-   When the portal user is also an admin, dashboard renders an "Open admin"
-   call-to-action above the nav list. Visually distinct from the regular nav
-   items so it reads as a special link, not a peer of Profile/Sessions. */
-.account-admin-link {
-	display: inline-flex; align-items: center; gap: var(--space-2);
-	padding: var(--space-2) var(--space-4);
-	margin-bottom: var(--space-4);
-	background: #fff1e6;
-	/* --primary-color text on this tint is 3.31:1 -- below the 4.5:1 AA floor
-	 * for normal-size text (caught driving account_card_page during the 12d
-	 * design pass; same fix as .form-tabs li.is-active a). */
-	color: var(--primary-button);
-	border: 1px solid #ffd2b5;
-	border-radius: var(--radius-md);
-	text-decoration: none;
-	font-weight: 500; font-size: var(--text-sm);
-	transition: background 0.15s;
-}
-.account-admin-link:hover { background: #ffe1cc; }
-
-/* Nav button list — used by the dashboard variant of the card. */
+/* ===== Portal overview links (userportal dashboard) =====
+   One bordered list per section (Account, Apps): each item a full-width
+   link -- icon, label with an optional one-line description, chevron --
+   at least 44px tall. */
 .account-nav {
-	list-style: none;
-	margin: 0;
-	padding: 0;
-	display: flex;
-	flex-direction: column;
-	gap: 0.125rem;
+	list-style: none; margin: 0; padding: 0;
+	border: 1px solid var(--border-light); border-radius: var(--radius-md);
+	background: var(--surface-1);
 }
-
-.account-nav__divider {
-	height: 1px;
-	background: var(--border-light);
-	border: 0;
-	margin: var(--space-2) var(--space-3);
-}
-
+.account-nav > li + li { border-top: 1px solid var(--border-light); }
 .account-nav__item {
-	display: flex;
-	align-items: center;
-	gap: var(--space-4);
-	padding: var(--space-4) var(--space-4);
-	color: var(--text-primary);
-	text-decoration: none;
-	border-radius: var(--radius-md);
+	display: flex; align-items: center; gap: var(--space-4);
+	min-height: 44px; padding: var(--space-3) var(--space-4);
+	color: var(--text-primary); text-decoration: none;
 	transition: background var(--transition-fast);
 }
-
-.account-nav__item:hover,
-.account-nav__item:focus-visible {
-	background: var(--bg-hover);
-	outline: none;
-}
-
+.account-nav > li:first-child .account-nav__item { border-radius: var(--radius-md) var(--radius-md) 0 0; }
+.account-nav > li:last-child .account-nav__item { border-radius: 0 0 var(--radius-md) var(--radius-md); }
+.account-nav__item:hover { background: var(--bg-hover); }
+.account-nav__item:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .account-nav__icon {
-	display: inline-flex;
-	align-items: center;
-	justify-content: center;
-	width: 24px;
-	height: 24px;
-	color: var(--text-secondary);
-	flex-shrink: 0;
+	display: inline-flex; align-items: center; justify-content: center;
+	width: 24px; height: 24px; flex-shrink: 0; color: var(--text-secondary);
 }
-
-.account-nav__icon svg {
-	width: 20px;
-	height: 20px;
-}
-
-.account-nav__label {
-	flex: 1;
-	font-size: 0.95rem;
-	font-weight: 500;
-}
-
-.account-nav__chev {
-	color: var(--text-muted);
-	font-size: 1.125rem;
-	line-height: 1;
-}
+.account-nav__icon svg { width: 20px; height: 20px; }
+.account-nav__text { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
+.account-nav__label { font-size: var(--text-base); font-weight: 500; }
+.account-nav__desc { font-size: var(--text-sm); color: var(--text-muted); }
+.account-nav__chev { display: inline-flex; color: var(--text-muted); flex-shrink: 0; }
 

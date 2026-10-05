@@ -14,32 +14,63 @@ use crate::{
         crud,
         errors::{error_response, ErrorCode},
     },
-    http::{err_bad_request, err_internal, err_not_found, ok_json},
-    ui::{html_response, is_htmx},
+    http::{err_bad_request, err_internal, err_not_found, ok_json, ResponseBuilder},
+    ui::{
+        components::{alert_message, AlertVariant},
+        html_response, is_htmx,
+    },
     util::parse_body_value,
 };
 
+/// The `id` of the change-password form on the portal's Security page
+/// (`blocks/userportal/pages/security.rs`), the one form that posts here with
+/// htmx. A successful change replaces it — see [`changed_response`].
+pub const FORM_ID: &str = "change-password-form";
+
+/// The `id` of that form's result slot: its `hx-target`, where a refusal is
+/// swapped in beside the fields the caller is about to correct.
+pub const RESULT_ID: &str = "change-password-result";
+
+/// The sentence a confirmation that differs from the new password is refused
+/// with.
+const MISMATCH: &str = "New passwords do not match.";
+
 /// The answer to a change that happened, in the shape its caller can use.
 ///
-/// The user portal's Security page posts this form with htmx
-/// (`blocks/userportal/pages/security.rs`) and swaps the response into
-/// `#change-pw-result`, so a JSON body would be rendered into the page as
-/// text. `/b/auth/change-password` posts JSON with `fetch` and parses the
-/// answer as JSON, as does every programmatic caller, so they keep the
-/// [`MessageResponse`] envelope. Same split as
+/// The user portal's Security page posts this form with htmx and swaps the
+/// response into [`RESULT_ID`], so a JSON body would be rendered into the page
+/// as text. Programmatic callers post JSON and parse the answer as JSON, so
+/// they keep the [`MessageResponse`] envelope. Same split as
 /// [`super::api_keys::handle_create`].
 ///
-/// The htmx wording names the consequence, because the caller is about to
-/// meet it: the change revokes every refresh token AND bumps the user's
-/// `auth_version`, which retires the access token the page itself is holding
-/// (see the `auth_version` check in [`crate::crypto::verify_access_token`]).
+/// The htmx answer replaces the whole form ([`FORM_ID`], `HX-Retarget` +
+/// `HX-Reswap: outerHTML`) rather than landing in the result slot. The change
+/// revokes every refresh token AND bumps the user's `auth_version`, which
+/// retires the access token the page itself is holding (see the
+/// `auth_version` check in [`crate::crypto::verify_access_token`]) — so the
+/// form, still filled in with the old and new password, has nothing left to
+/// submit. What replaces it says so and offers the way back in, landing on
+/// the page they were on.
 fn changed_response(msg: &Message) -> OutputStream {
     if is_htmx(msg) {
-        return html_response(html! {
-            p .text-success .m-0 {
-                "Password changed successfully — sign in again with your new password."
+        let markup = html! {
+            div id=(FORM_ID) .change-password-done {
+                (alert_message(
+                    AlertVariant::Success,
+                    "Password changed. You have been signed out everywhere — sign in again with your new password.",
+                ))
+                a .btn .btn--primary .btn--block href="/b/auth/login?redirect=%2Fb%2Fuserportal%2Fsecurity" {
+                    "Sign in again"
+                }
             }
-        });
+        };
+        return ResponseBuilder::new()
+            .set_header("HX-Retarget", &format!("#{FORM_ID}"))
+            .set_header("HX-Reswap", "outerHTML")
+            .body(
+                markup.into_string().into_bytes(),
+                "text/html; charset=utf-8",
+            );
     }
     ok_json(&MessageResponse {
         message: "Password changed successfully".to_string(),
@@ -50,12 +81,13 @@ fn changed_response(msg: &Message) -> OutputStream {
 ///
 /// htmx does not swap a non-2xx response, so an error terminal reaches an
 /// htmx caller only as a toast — `ui/assets/chrome.js`'s `htmx:responseError`
-/// listener — and leaves `#change-pw-result`, the slot the form declares for
+/// listener — and leaves [`RESULT_ID`], the slot the form declares for
 /// exactly this answer, empty. The sibling handler on that same page,
 /// [`crate::blocks::userportal::pages::security::handle_unlink`], already
 /// answers its refusal as 200 markup carrying the reason, so this one does
 /// too: one page, one convention, and the sentence naming a wrong password
-/// stays on screen instead of expiring with a four-second toast.
+/// stays on screen instead of expiring with a four-second toast. It is the
+/// shared [`alert_message`] (`role="alert"`), so swapping it in announces it.
 ///
 /// Only refusals travel this way. A read that could not run or a write that
 /// did not land is not a sentence the caller can act on, and stays an error
@@ -63,13 +95,12 @@ fn changed_response(msg: &Message) -> OutputStream {
 /// WRAP denial, 429 for a quota, and otherwise the 500 whose correlation id
 /// reaches the logs — the same split `handle_unlink` makes.
 ///
-/// JSON callers are untouched: `/b/auth/change-password`'s `fetch` reads
-/// `r.ok` and the SDK reads the status, so they keep the refusal codes
-/// [`error_response`] maps (`401` for a wrong current password, `400` for a
-/// password the policy declines).
+/// JSON callers are untouched: they read the status, so they keep the
+/// refusal codes [`error_response`] maps (`401` for a wrong current password,
+/// `400` for a password the policy declines or a confirmation that differs).
 fn refused(msg: &Message, code: ErrorCode, reason: &str) -> OutputStream {
     if is_htmx(msg) {
-        return html_response(html! { p .form-error .m-0 { (reason) } });
+        return html_response(alert_message(AlertVariant::Error, reason));
     }
     error_response(code, reason)
 }
@@ -84,6 +115,12 @@ pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> Out
     struct ChangePwReq {
         current_password: String,
         new_password: String,
+        /// The new password typed a second time. The Security form always
+        /// sends it, and a mismatch is refused here rather than by a script
+        /// on the page, so the form needs none. Optional for programmatic
+        /// callers, which have no typo to catch.
+        #[serde(default)]
+        confirm_password: Option<String>,
     }
     let raw = match input.collect_to_bytes().await {
         Ok(bytes) => bytes,
@@ -91,7 +128,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> Out
     };
     // Two callers, two wire formats: the portal's Security page is an htmx
     // form, so it sends `application/x-www-form-urlencoded`, while
-    // `/b/auth/change-password` and programmatic clients send JSON.
+    // programmatic clients send JSON.
     // `parse_body_value` reads either, as `api_keys::handle_create` does for
     // the admin block's key form.
     let parsed = match parse_body_value(&raw) {
@@ -102,6 +139,14 @@ pub async fn handle(ctx: &dyn Context, msg: &Message, input: InputStream) -> Out
         Ok(b) => b,
         Err(e) => return err_bad_request(&format!("Invalid body: {e}")),
     };
+
+    if body
+        .confirm_password
+        .as_deref()
+        .is_some_and(|confirm| confirm != body.new_password)
+    {
+        return refused(msg, ErrorCode::InvalidInput, MISMATCH);
+    }
 
     match super::password_policy::validate_new_password(ctx, &body.new_password).await {
         Ok(Ok(())) => {}
@@ -273,9 +318,11 @@ mod tests {
         );
     }
 
-    /// The form swaps whatever comes back into `#change-pw-result`, so the
-    /// success answer to an htmx caller has to be markup — a JSON envelope
-    /// would be rendered into the page as its own text.
+    /// The form swaps what comes back into the page, so the success answer to
+    /// an htmx caller has to be markup — a JSON envelope would be rendered
+    /// into the page as its own text — and it replaces the whole form: the
+    /// change ended the session the page holds, so the filled-in form has
+    /// nothing left to submit.
     #[tokio::test]
     async fn an_htmx_caller_is_answered_with_markup() {
         let ctx = TestContext::with_auth_and_crypto().await;
@@ -299,10 +346,29 @@ mod tests {
             content_type.starts_with("text/html"),
             "an htmx caller must be answered as HTML, got {content_type:?}"
         );
+        let header = |name: &str| {
+            buf.meta
+                .iter()
+                .find(|m| m.key == format!("resp.header.{name}"))
+                .map(|m| m.value.clone())
+        };
+        assert_eq!(
+            header("HX-Retarget").as_deref(),
+            Some("#change-password-form")
+        );
+        assert_eq!(header("HX-Reswap").as_deref(), Some("outerHTML"));
         let html = String::from_utf8(buf.body).expect("body was not valid UTF-8");
         assert!(
-            html.contains("Password changed successfully"),
+            html.contains(r#"id="change-password-form""#),
+            "the replacement keeps the form's id, got {html:?}"
+        );
+        assert!(
+            html.contains("Password changed.") && html.contains(r#"role="status""#),
             "the fragment must say the change happened, got {html:?}"
+        );
+        assert!(
+            html.contains("/b/auth/login?redirect=%2Fb%2Fuserportal%2Fsecurity"),
+            "the session is gone, so it offers the way back in, got {html:?}"
         );
         assert!(
             serde_json::from_str::<serde_json::Value>(&html).is_err(),
@@ -339,9 +405,10 @@ mod tests {
             "a refusal htmx will not swap never reaches the page"
         );
         let html = String::from_utf8(parts.body).expect("body was not valid UTF-8");
-        assert!(
-            html.contains("Current password is incorrect") && html.contains("form-error"),
-            "the fragment must name the refusal, got {html:?}"
+        assert_eq!(
+            html,
+            r#"<div class="alert alert--error" role="alert">Current password is incorrect</div>"#,
+            "the fragment must name the refusal in the shared alert"
         );
 
         // The credential is untouched: the account still signs in with what
@@ -381,13 +448,108 @@ mod tests {
         assert_eq!(parts.status, 200);
         let html = String::from_utf8(parts.body).expect("body was not valid UTF-8");
         assert!(
-            html.contains("at least") && html.contains("form-error"),
+            html.contains("at least") && html.contains(r#"role="alert""#),
             "the fragment must name the length rule, got {html:?}"
         );
     }
 
+    /// The form's three fields as htmx serialises them.
+    fn form_body_confirmed(current: &str, new: &str, confirm: &str) -> InputStream {
+        let encoded = url::form_urlencoded::Serializer::new(String::new())
+            .append_pair("current_password", current)
+            .append_pair("new_password", new)
+            .append_pair("confirm_password", confirm)
+            .finish();
+        InputStream::from_bytes(encoded.into_bytes())
+    }
+
+    /// A confirmation that differs from the new password is refused before
+    /// anything is checked or written — the server's check, so the form needs
+    /// no script of its own — and the password is left as it was.
+    #[tokio::test]
+    async fn a_confirmation_that_differs_is_refused_and_changes_nothing() {
+        let ctx = TestContext::with_auth_and_crypto().await;
+        let user_id = signup_user(&ctx, "kim@example.com", "original-horse-battery1").await;
+
+        let parts = wafer_block::http_codec::collect_http_response(
+            handle(
+                &ctx,
+                &htmx_msg(&user_id),
+                form_body_confirmed(
+                    "original-horse-battery1",
+                    "new-horse-battery-2026",
+                    "new-horse-battery-2027",
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(parts.status, 200);
+        let html = String::from_utf8(parts.body).expect("body was not valid UTF-8");
+        assert!(
+            html.contains("New passwords do not match.") && html.contains(r#"role="alert""#),
+            "{html:?}"
+        );
+        assert!(
+            output_json(
+                login::handle(
+                    &ctx,
+                    credentials("kim@example.com", "original-horse-battery1")
+                )
+                .await
+            )
+            .await["access_token"]
+                .as_str()
+                .is_some(),
+            "a refused change must leave the password alone"
+        );
+
+        // A JSON caller that sends a confirmation gets the same check, as a 400.
+        let json = wafer_block::http_codec::collect_http_response(
+            handle(
+                &ctx,
+                &auth_msg("update", "/b/auth/api/change-password", &user_id),
+                InputStream::from_bytes(
+                    serde_json::json!({
+                        "current_password": "original-horse-battery1",
+                        "new_password": "new-horse-battery-2026",
+                        "confirm_password": "something-else",
+                    })
+                    .to_string()
+                    .into_bytes(),
+                ),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(json.status, 400);
+    }
+
+    /// A matching confirmation is accepted: the form's normal case.
+    #[tokio::test]
+    async fn a_matching_confirmation_changes_the_password() {
+        const NEW: &str = "new-horse-battery-2026";
+        let ctx = TestContext::with_auth_and_crypto().await;
+        let user_id = signup_user(&ctx, "lee@example.com", "original-horse-battery1").await;
+
+        let out = handle(
+            &ctx,
+            &htmx_msg(&user_id),
+            form_body_confirmed("original-horse-battery1", NEW, NEW),
+        )
+        .await;
+        assert_eq!(output_status(out).await, 200);
+        assert!(
+            output_json(login::handle(&ctx, credentials("lee@example.com", NEW)).await).await
+                ["access_token"]
+                .as_str()
+                .is_some(),
+            "the new password must authenticate"
+        );
+    }
+
     /// The markup branch is the htmx caller's alone. A JSON client — the
-    /// `fetch` on `/b/auth/change-password`, the SDK — reads the status, so
+    /// SDK, a script — reads the status, so
     /// its refusals keep the codes and the envelope they have always had.
     #[tokio::test]
     async fn a_json_caller_still_receives_the_refusal_codes() {

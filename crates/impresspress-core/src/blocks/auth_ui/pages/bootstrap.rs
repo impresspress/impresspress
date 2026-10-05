@@ -10,8 +10,12 @@
 use maud::html;
 use wafer_run::{context::Context, Message, OutputStream};
 
-use super::{pw_field, site_config, PasswordPurpose};
-use crate::ui::{self, components::auth_panel, templates::auth_split};
+use super::site_config;
+use crate::ui::{
+    self,
+    components::{auth_panel, password_field, PasswordPurpose},
+    templates::auth_split,
+};
 
 pub async fn handle_get(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let config = match site_config(ctx).await {
@@ -76,7 +80,7 @@ pub async fn handle_get(ctx: &dyn Context, msg: &Message) -> OutputStream {
 
                         div .form-group {
                             label .form-label for="password" { "Admin Password" }
-                            (pw_field("password", &format!("Min {min_length} characters"), PasswordPurpose::New { min_length }))
+                            (password_field("password", &format!("Min {min_length} characters"), PasswordPurpose::New { min_length }))
                         }
 
                         button .login-button type="submit" { "Redeem" }

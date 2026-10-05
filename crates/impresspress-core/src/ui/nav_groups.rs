@@ -155,6 +155,16 @@ pub fn portal() -> Vec<NavGroup> {
                 // which is `can_disable(true)`. Organizations is NOT: it
                 // lives under `/b/auth/`, gated on `impresspress/auth-ui`,
                 // which is always on.
+                //
+                // Overview is `/b/userportal/` — with its trailing slash it
+                // stands for that page alone, so it is not highlighted on the
+                // pages below it (`sidebar::active_item`).
+                block_item(
+                    "Overview",
+                    "/b/userportal/",
+                    icons::layout_dashboard,
+                    "impresspress/userportal",
+                ),
                 block_item(
                     "Profile",
                     "/b/userportal/profile",
@@ -316,19 +326,34 @@ mod tests {
     }
 
     #[test]
-    fn portal_account_includes_profile_orgs_sessions_security() {
+    fn portal_account_includes_overview_profile_orgs_sessions_security() {
         let groups = portal();
         let account = &groups[0];
         let hrefs: Vec<&str> = account.items.iter().map(|i| i.href.as_str()).collect();
         assert_eq!(
             hrefs,
             vec![
+                "/b/userportal/",
                 "/b/userportal/profile",
                 "/b/auth/orgs",
                 "/b/userportal/sessions",
                 "/b/userportal/security"
             ]
         );
+    }
+
+    /// Overview stands for `/b/userportal/` alone: every account page
+    /// highlights its own item, and the overview highlights Overview.
+    #[test]
+    fn portal_overview_is_active_only_on_the_overview() {
+        let groups = portal();
+        let active =
+            |path: &str| crate::ui::sidebar::active_item(&groups, path).map(|i| i.label.as_str());
+        assert_eq!(active("/b/userportal/"), Some("Overview"));
+        assert_eq!(active("/b/userportal/profile"), Some("Profile"));
+        assert_eq!(active("/b/userportal/security"), Some("Security"));
+        assert_eq!(active("/b/userportal/sessions"), Some("Sessions"));
+        assert_eq!(active("/b/auth/orgs"), Some("Organizations"));
     }
 
     #[test]
@@ -416,7 +441,7 @@ mod tests {
             .flat_map(|g| g.items.iter())
             .map(|i| i.label.as_str())
             .collect();
-        for dead in ["Profile", "Sessions", "Security"] {
+        for dead in ["Overview", "Profile", "Sessions", "Security"] {
             assert!(
                 !portal_labels.contains(&dead),
                 "/b/userportal is gated on impresspress/userportal; {dead} must go",

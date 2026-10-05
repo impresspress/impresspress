@@ -724,7 +724,7 @@ pub fn refused_response(
 pub fn swap_error_response(target_id: &str, message: &str) -> wafer_run::OutputStream {
     let markup = maud::html! {
         div id=(target_id) {
-            div class="alert alert--error" role="alert" { (message) }
+            (components::alert_message(components::AlertVariant::Error, message))
         }
     };
     html_response_with_toast(markup, message, "error")
@@ -745,7 +745,7 @@ pub fn swap_error_row_response(
     let markup = maud::html! {
         tr id=(target_id) {
             td colspan=(colspan) {
-                div class="alert alert--error" role="alert" { (message) }
+                (components::alert_message(components::AlertVariant::Error, message))
             }
         }
     };
@@ -758,9 +758,7 @@ pub fn swap_error_row_response(
 ///
 /// Same status and toast as [`swap_error_response`], for the same reason.
 pub fn swap_notice_response(message: &str) -> wafer_run::OutputStream {
-    let markup = maud::html! {
-        div class="alert alert--error" role="alert" { (message) }
-    };
+    let markup = components::alert_message(components::AlertVariant::Error, message);
     html_response_with_toast(markup, message, "error")
 }
 

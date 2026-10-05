@@ -1,4 +1,4 @@
-//! Form controls: the search input and the password reveal toggle.
+//! Form controls: the search input, the password field and its reveal toggle.
 
 use maud::{html, Markup};
 
@@ -86,9 +86,78 @@ pub fn reveal_toggle(target_id: &str, label: &str) -> Markup {
     }
 }
 
+/// What a password field holds, which decides what the browser and password
+/// managers do with it.
+pub enum PasswordPurpose {
+    /// The account's existing password (sign-in, confirming a change):
+    /// `autocomplete="current-password"`, so a manager fills it, and no
+    /// length rule — an old password predating the policy must still fit.
+    Current,
+    /// A password being chosen (signup, reset, change, bootstrap, and its
+    /// confirmation): `autocomplete="new-password"`, so a manager offers to
+    /// generate one, and `minlength` = the length the server enforces
+    /// (`auth::helpers::password_min_length`), so the browser stops a short
+    /// one before the round trip with the same number the API would refuse it
+    /// for.
+    New { min_length: usize },
+}
+
+/// The password field `id` (also its `name`) with its show/hide toggle
+/// ([`reveal_toggle`]: a toggle button whose eye / eye-off icon and
+/// `aria-pressed` follow the field). Every password field — the signed-out
+/// auth pages and the portal's Security page — is this one control, so
+/// `autocomplete`, `minlength` and the toggle cannot differ between them.
+///
+/// `placeholder` must not be empty: the toggle hides itself while the field
+/// is empty by keying off `:placeholder-shown` (see [`reveal_toggle`]).
+pub fn password_field(id: &str, placeholder: &str, purpose: PasswordPurpose) -> Markup {
+    let (autocomplete, minlength) = match purpose {
+        PasswordPurpose::Current => ("current-password", None),
+        PasswordPurpose::New { min_length } => ("new-password", Some(min_length)),
+    };
+    html! {
+        div .value-reveal-wrapper {
+            input
+                type="password"
+                class="form-input"
+                id=(id)
+                name=(id)
+                placeholder=(placeholder)
+                autocomplete=(autocomplete)
+                required
+                minlength=[minlength];
+            (reveal_toggle(id, "Show password"))
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_current_password_field_is_filled_by_managers_and_has_no_length_rule() {
+        let s = password_field("password", "Enter your password", PasswordPurpose::Current)
+            .into_string();
+        assert!(s.contains(r#"autocomplete="current-password""#), "{s}");
+        assert!(!s.contains("minlength"), "{s}");
+        assert!(s.contains(r#"name="password""#), "{s}");
+        assert!(s.contains(r#"aria-label="Show password""#), "{s}");
+        assert!(s.contains(r#"aria-pressed="false""#), "{s}");
+        assert!(s.contains(r#"data-reveal-target="password""#), "{s}");
+    }
+
+    #[test]
+    fn a_new_password_field_carries_the_enforced_minimum() {
+        let s = password_field(
+            "newpw",
+            "Min 12 characters",
+            PasswordPurpose::New { min_length: 12 },
+        )
+        .into_string();
+        assert!(s.contains(r#"autocomplete="new-password""#), "{s}");
+        assert!(s.contains(r#"minlength="12""#), "{s}");
+    }
 
     #[test]
     fn reveal_toggle_is_an_unpressed_toggle_button_with_a_constant_name() {

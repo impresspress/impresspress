@@ -213,55 +213,6 @@ pub fn chat_page(
     })
 }
 
-/// Inputs for [`account_card_page`] — the single-card layout used by
-/// `/b/userportal/` and its sub-pages (profile, sessions, security). No
-/// shell, no sidebar; mobile-first centered card with a brand + title
-/// header, page-specific body, and a sign-out footer.
-///
-/// The header brand goes through [`brand_lockup`], the same helper every
-/// auth card uses — a configured wordmark renders as before, and the blank
-/// default renders the icon above the app name instead of nothing.
-pub struct AccountCard<'a> {
-    pub logo_url: &'a str,
-    /// Feeds the same [`brand_lockup`] the auth cards use, so a blank
-    /// `logo_url` (the default) falls back to icon + app name rather than
-    /// leaving the card unbranded.
-    pub logo_icon_url: &'a str,
-    pub app_name: &'a str,
-    pub title: &'a str,
-    /// When `Some(href)`, render a "‹ Back" link in the top-left of the
-    /// header. Sub-pages use this to return to `/b/userportal/`; the
-    /// dashboard itself passes `None`.
-    pub back_href: Option<&'a str>,
-}
-
-pub fn account_card_page(opts: AccountCard<'_>, body: Markup) -> Markup {
-    html! {
-        div .account-page {
-            main .account-card {
-                header .account-card__head {
-                    @if let Some(href) = opts.back_href {
-                        a .account-card__back href=(href) aria-label="Back" {
-                            (crate::ui::icons::chevron_left()) " Back"
-                        }
-                    }
-                    (brand_lockup(opts.logo_url, opts.logo_icon_url, opts.app_name))
-                    h1 .account-card__title { (opts.title) }
-                }
-                div .account-card__body { (body) }
-                footer .account-card__foot {
-                    form action="/b/auth/api/logout" method="post" {
-                        button .account-card__signout type="submit" {
-                            (crate::ui::icons::log_out())
-                            span { "Sign Out" }
-                        }
-                    }
-                }
-            }
-        }
-    }
-}
-
 /// The brand icon. The built-in mark is pixel art (32- and 64-art-pixel
 /// renditions) and must only ever be drawn at a whole multiple of its size,
 /// so which file is used is decided here, deterministically:
@@ -291,25 +242,6 @@ pub fn brand_icon(logo_icon_url: &str, class: &str, size_px: u32) -> Markup {
             }
         } @else {
             img class=(class) src=(logo_icon_url) width=(size_px) height=(size_px) alt="";
-        }
-    }
-}
-
-/// The brand lockup on auth cards (login, signup, reset, verify, …): a
-/// configured wordmark image as before, otherwise the icon at 64px above the
-/// app name as text. Blank `logo_url` is the default — there is no built-in
-/// raster wordmark (brand text is text, only the art is pixel art).
-pub fn brand_lockup(logo_url: &str, logo_icon_url: &str, app_name: &str) -> Markup {
-    html! {
-        @if !logo_url.is_empty() {
-            img .logo-image src=(logo_url) alt=(app_name);
-        } @else {
-            div .login-brand {
-                @if !logo_icon_url.is_empty() {
-                    (brand_icon(logo_icon_url, "login-brand__icon", 64))
-                }
-                span .login-app-name { (app_name) }
-            }
         }
     }
 }
@@ -690,46 +622,6 @@ mod tests {
         let s = status_page("", "Hello", "Welcome.", None).into_string();
         assert!(!s.contains("status-page__code"));
         assert!(!s.contains(r#"class="btn"#));
-    }
-
-    fn account_card(logo_url: &str) -> String {
-        account_card_page(
-            AccountCard {
-                logo_url,
-                logo_icon_url: &crate::ui::assets::logo_icon_url(),
-                app_name: "Acme",
-                title: "Account",
-                back_href: None,
-            },
-            html! { p { "body" } },
-        )
-        .into_string()
-    }
-
-    /// Blank `logo_url` is the default (there is no built-in raster
-    /// wordmark), so the account card must fall back to the same icon +
-    /// app-name lockup the auth cards use. Rendering an unbranded header
-    /// instead is the bug this guards.
-    #[test]
-    fn account_card_falls_back_to_the_app_name_lockup_without_a_wordmark() {
-        let s = account_card("");
-        assert!(s.contains("login-brand"), "expected the brand lockup: {s}");
-        assert!(s.contains("Acme"), "expected the app name: {s}");
-        assert!(
-            s.contains("pixel-art"),
-            "the built-in mark must keep its nearest-neighbour class: {s}"
-        );
-    }
-
-    /// A configured wordmark still wins, exactly as on the auth cards.
-    #[test]
-    fn account_card_prefers_a_configured_wordmark() {
-        let s = account_card("https://acme.example/wordmark.png");
-        assert!(s.contains("https://acme.example/wordmark.png"));
-        assert!(
-            !s.contains("login-brand"),
-            "a configured wordmark must not also render the text lockup: {s}"
-        );
     }
 
     fn public_site_config() -> SiteConfig {

@@ -183,7 +183,7 @@ pub fn sidebar_grouped(
                             (icons::user())
                             span { "My Account" }
                         }
-                        a .profile-menu-item href="/b/auth/change-password" {
+                        a .profile-menu-item href="/b/userportal/security" {
                             (icons::settings())
                             span { "Change Password" }
                         }

@@ -18,10 +18,23 @@ use crate::{
     crypto::META_AUTH_FAMILY,
     http::{redirect, ResponseBuilder},
     ui::{
-        components::{self, badge, BadgeVariant},
-        SiteConfig,
+        self,
+        components::{self, badge, BadgeVariant, DataTable, TableCol, TableRow},
+        shell::Crumb,
+        NavKind, Shell,
     },
 };
+
+/// The sessions table: the sign-in method names the row (the card title on
+/// a phone), the three dates follow, and Revoke sits under a screen-reader-only
+/// "Actions" header.
+const COLUMNS: [TableCol<'static>; 5] = [
+    TableCol::new("Signed in with").primary(),
+    TableCol::new("Started"),
+    TableCol::new("Last used"),
+    TableCol::new("Expires"),
+    TableCol::new("Actions").actions(),
+];
 
 pub async fn sessions_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let user_id = msg.user_id().to_string();
@@ -39,20 +52,22 @@ pub async fn sessions_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
 
     let current_family = current_session_family(msg);
 
-    let body = html! {
-        p .text-muted .m-0 .mb-4 .text-sm {
-            "Sessions signed in to your account. Revoke any you don't recognize."
-        }
-        (render_table(&rows, current_family))
-    };
-
-    let config = match SiteConfig::load(ctx).await {
-        Ok(site) => site,
-        Err(e) => {
-            return crate::blocks::crud::db_error_page(msg, e, "page: site config read failed")
-        }
-    };
-    super::account_page(&config, "Sessions", Some("/b/userportal/"), body)
+    ui::shell_page(
+        ctx,
+        msg,
+        Shell {
+            title: "Sessions",
+            nav: NavKind::Portal,
+            crumbs: vec![Crumb {
+                label: "Sessions",
+                href: None,
+            }],
+            subtitle: Some("Devices signed in to your account. Revoke any you don't recognize."),
+            actions: Vec::new(),
+        },
+        render_table(&rows, current_family),
+    )
+    .await
 }
 
 /// The login family the request's own access token belongs to, or `None` when
@@ -68,51 +83,68 @@ fn current_session_family(msg: &Message) -> Option<&str> {
     (!family.is_empty()).then_some(family)
 }
 
+/// How a session was established (`SessionRow::auth_method`), as a person
+/// reads it: `password`, `oauth.<provider>` or `bootstrap`.
+fn sign_in_method(auth_method: &str) -> String {
+    match auth_method {
+        "password" => "Password".to_string(),
+        "bootstrap" => "Setup link".to_string(),
+        other => match other.strip_prefix("oauth.") {
+            Some("github") => "GitHub".to_string(),
+            Some("google") => "Google".to_string(),
+            Some("microsoft") => "Microsoft".to_string(),
+            Some(provider) => provider.to_string(),
+            None => other.to_string(),
+        },
+    }
+}
+
 fn render_table(rows: &[sessions::SessionRow], current_family: Option<&str>) -> Markup {
-    if rows.is_empty() {
-        return html! {
-            div .empty-state { p { "No active sessions." } }
-        };
-    }
-    html! {
-        table .data-table {
-            thead {
-                tr {
-                    th { "Started" }
-                    th { "Last used" }
-                    th { "Expires" }
-                    th { "" }
-                }
-            }
-            tbody {
-                @for r in rows {
-                    @let is_current = current_family == Some(r.family.as_str());
-                    tr .session-row {
-                        // Timestamps render as semantic <time> elements —
-                        // correct HTML for datetimes, and the visual-baseline
-                        // suite masks `time` so per-run session times don't
-                        // make the screenshots unreproducible.
-                        td data-label="Started" {
-                            (components::timestamp(&r.created_at))
-                            @if is_current {
-                                " "
-                                (badge(BadgeVariant::Success, "Current session"))
-                            }
-                        }
-                        td data-label="Last used" { (components::timestamp(&r.last_used_at)) }
-                        td data-label="Expires" { (components::timestamp(&r.expires_at)) }
-                        td data-label="" {
-                            button .btn .btn--ghost .btn--sm
-                                hx-delete=(format!("/b/userportal/sessions/{}", r.family))
-                                hx-target="closest tr"
-                                hx-swap="outerHTML"
-                            { "Revoke" }
-                        }
+    let table_rows = rows
+        .iter()
+        .map(|r| {
+            let is_current = current_family == Some(r.family.as_str());
+            // Revoking the session this page was loaded with signs the
+            // reader out, which the confirmation says.
+            let confirm = if is_current {
+                "Revoke your current session? You will be signed out on this device."
+            } else {
+                "Revoke this session? That device will be signed out."
+            };
+            TableRow::new(vec![
+                html! {
+                    span .data-table__title { (sign_in_method(&r.auth_method)) }
+                    @if is_current {
+                        " "
+                        (badge(BadgeVariant::Success, "Current session"))
                     }
-                }
-            }
-        }
-    }
+                },
+                // Timestamps render as `components::timestamp`'s `<time>`,
+                // which the visual-baseline suite masks, so per-run session
+                // times don't make the screenshots unreproducible.
+                components::timestamp(&r.created_at),
+                components::timestamp(&r.last_used_at),
+                components::timestamp(&r.expires_at),
+                html! {
+                    button .btn .btn--sm .btn--danger
+                        type="button"
+                        hx-delete=(format!("/b/userportal/sessions/{}", r.family))
+                        hx-target="closest tr"
+                        hx-swap="outerHTML"
+                        hx-confirm=(confirm)
+                    { "Revoke" }
+                },
+            ])
+        })
+        .collect();
+    DataTable::new(&COLUMNS)
+        .rows(table_rows)
+        .empty_state(
+            "No active sessions",
+            "Every device you sign in on is listed here.",
+            None,
+        )
+        .render()
 }
 
 /// DELETE `/b/userportal/sessions/{family}` — sign one device out.
@@ -263,6 +295,55 @@ mod tests {
         assert!(
             html.contains("/b/userportal/sessions/fam-1"),
             "the revoke URL must carry the family: {html}"
+        );
+    }
+
+    /// The list is the shared table: an `.data-table` wrapper, a
+    /// screen-reader-only header over the Revoke column (axe
+    /// `empty-table-header`), dates through `components::timestamp`, and
+    /// Revoke as a danger action behind a confirmation — worded for the
+    /// session the page itself is using, which revoking signs out.
+    #[tokio::test]
+    async fn the_list_is_the_shared_table_with_a_confirmed_danger_revoke() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::userportal::UserPortalBlock::BLOCK_NAME);
+        seed_user(&ctx, "user-a").await;
+        insert(&ctx, fake_session("user-a", "fam-here"))
+            .await
+            .unwrap();
+        insert(&ctx, fake_session("user-a", "fam-other"))
+            .await
+            .unwrap();
+
+        let msg = with_family(
+            auth_msg("retrieve", "/b/userportal/sessions", "user-a"),
+            "fam-here",
+        );
+        let html = output_html(sessions_page(&ctx, &msg).await).await;
+
+        assert!(html.contains(r#"<div class="data-table">"#), "{html}");
+        assert!(
+            html.contains(r#"<th><span class="sr-only">Actions</span></th>"#),
+            "the actions column has a screen-reader header: {html}"
+        );
+        assert!(!html.contains("<th></th>"), "no empty header: {html}");
+        assert!(html.contains(r#"<time class="datetime""#), "{html}");
+        assert!(
+            html.contains(">Password<"),
+            "the sign-in method names the row: {html}"
+        );
+        assert_eq!(html.matches("btn--danger").count(), 2, "{html}");
+        assert_eq!(
+            html.matches(r#"hx-confirm="Revoke your current session?"#)
+                .count(),
+            1,
+            "{html}"
+        );
+        assert_eq!(
+            html.matches(r#"hx-confirm="Revoke this session?"#).count(),
+            1,
+            "{html}"
         );
     }
 
