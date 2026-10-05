@@ -131,7 +131,8 @@ function element() {
 ///                 asked only if available gets `null`
 /// - `installs: 'stalls'` — a newly registered worker that installs and then
 ///                 never activates (as Chromium has been seen to leave one);
-///                 the wait for it runs out at once
+///                 the wait for it runs out at once. `'late'`: one that
+///                 activates a moment after that wait has run out
 export function loadShell({
   session = {},
   stop,
@@ -240,10 +241,12 @@ export function loadShell({
   const events = [];
   const registeredUrls = [];
   const asked = [];
+  const workerListeners = new Set();
   const worker = {
-    state: installs === 'stalls' ? 'installed' : installs ? 'activated' : 'redundant',
-    addEventListener: () => {},
-    removeEventListener: () => {},
+    state:
+      installs === 'stalls' || installs === 'late' ? 'installed' : installs ? 'activated' : 'redundant',
+    addEventListener: (type, l) => type === 'statechange' && workerListeners.add(l),
+    removeEventListener: (type, l) => workerListeners.delete(l),
     // The page asking the worker to take it.
     postMessage: (message, ports) => {
       if (answersRuntime) answerRuntime(message, ports, OLD_RUNTIME);
@@ -326,6 +329,14 @@ export function loadShell({
       registered += 1;
       registeredUrls.push(url);
       events.push(`register ${url}`);
+      if (installs === 'late') {
+        // Activates a moment after the wait for it has already run out.
+        setTimeout(() => {
+          events.push('activated late');
+          worker.state = 'activated';
+          [...workerListeners].forEach((l) => l({}));
+        }, 20);
+      }
       return { active: worker, update: async () => {} };
     },
     // The registration the origin already has, if any: `registeredUrl` is
@@ -446,7 +457,7 @@ export function loadShell({
     const now =
       ms === 0 ||
       (ms === 10_000
-        ? !claims || installs === 'stalls'
+        ? !claims || installs === 'stalls' || installs === 'late'
         : ms === 2_000
           ? !answersRuntime
           : probeTimesOut(probes.length));

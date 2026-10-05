@@ -70,16 +70,42 @@ const RUNTIME_CACHE = '__impresspress_runtime';
 // worker until it has erased the app's local data (`ERASE_LOCK` there, which
 // says why; the same name). The runtime's `initialize()` loads that data —
 // into memory, to be written back on every flush — so it must not run while
-// an erase is pending: it waits for the lock, takes it and lets go at once
-// (`eraseSettled`), and then loads. It never holds the lock while loading,
-// so a slow start delays nobody's erase.
+// an erase is pending: the newest version waits for the lock, takes it and
+// lets go at once, and then loads; a version being replaced does not wait
+// (`eraseSettled` says why). It never holds the lock while loading, so a
+// slow start delays nobody's erase.
 const ERASE_LOCK = '__impresspress_erase';
 
-/** Resolves once no erase is pending, where the worker has Web Locks. */
+// Thrown by `eraseSettled` in a worker that a newer version is replacing,
+// while an erase is pending: this worker must not load the data, and must
+// not wait for the erase either (see there). It is not a death — nothing is
+// poisoned — and the request is answered by `beingReset`.
+class ErasePending extends Error {}
+
+/**
+ * Resolves once no erase is pending, where the worker has Web Locks — for
+ * the NEWEST version only.
+ *
+ * The erase that is pending is a reset's, and the reset is waiting for its
+ * replacement to activate, holding ERASE_LOCK. A browser activates the
+ * replacement only once THIS worker, the one being replaced, is between
+ * events. So this worker — restarted by the browser for some tab's request,
+ * fresh and unpoisoned — must not wait for that lock inside the request's
+ * event: the reset would wait for an activation its own lock prevents. A
+ * worker that a newer version is installing over or waiting behind (it is
+ * superseded) only LOOKS at the lock: free, it loads as usual; held, it
+ * throws ErasePending without loading anything, and the event ends.
+ */
 async function eraseSettled() {
-    if (self.navigator && self.navigator.locks && self.navigator.locks.request) {
-        await self.navigator.locks.request(ERASE_LOCK, () => {});
+    const locks = self.navigator && self.navigator.locks;
+    if (!(locks && locks.request)) return;
+    const registration = self.registration;
+    if (registration.installing || registration.waiting) {
+        const pending = await locks.request(ERASE_LOCK, { ifAvailable: true }, (lock) => lock === null);
+        if (pending) throw new ErasePending('the app is being reset');
+        return;
     }
+    await locks.request(ERASE_LOCK, () => {});
 }
 
 let initialized = false;
@@ -278,8 +304,8 @@ async function ensureInitialized() {
             throw e;
         }
         console.log('[__APP_NAME__] Initializing runtime...');
+        await eraseSettled();
         try {
-            await eraseSettled();
             await initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES });
         } catch (e) {
             await selfDestruct(`runtime initialize() failed: ${e}`, STAGE_INITIALIZE, true);
@@ -288,7 +314,13 @@ async function ensureInitialized() {
         initialized = true;
         console.log('[__APP_NAME__] Runtime ready.');
     })();
-    await initPromise;
+    try {
+        await initPromise;
+    } catch (e) {
+        // Not a start that failed: the next request looks again.
+        if (e instanceof ErasePending) initPromise = null;
+        throw e;
+    }
 }
 
 /**
@@ -611,6 +643,7 @@ async function handleFetch(event) {
         event.waitUntil(after);
         return response;
     } catch (error) {
+        if (error instanceof ErasePending) return beingReset(request);
         console.error('[__APP_NAME__] Error handling request:', error);
         // wasm-bindgen surfaces a `RuntimeError` for an `unreachable` trap;
         // ensureInitialized() also throws for `init()` / `initialize()`
@@ -628,6 +661,30 @@ async function handleFetch(event) {
         );
         return runtimeStopped(request);
     }
+}
+
+/**
+ * The answer of a worker being replaced while a reset erases the data
+ * (`eraseSettled`): it has loaded nothing and is not dead.
+ *
+ * A navigation gets the boot shell, with no cause left for it: the shell's
+ * ordinary boot waits for the replacement to activate and then comes back to
+ * the page. Anything else gets a 503 in the runtime's error shape that is
+ * NOT the stopped-runtime answer (`runtimeStopped`) — no `stage`, no
+ * `cause`, another `code` — so no shell takes it for a death to recover
+ * from; its message says what is happening and what to do.
+ */
+async function beingReset(request) {
+    if (request.mode === 'navigate') return bootShell();
+    const body = {
+        error: 'Unavailable',
+        message: 'The app is being reset. Reload the page in a moment.',
+        code: 'app_resetting'
+    };
+    return new Response(JSON.stringify(body), {
+        status: 503,
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
+    });
 }
 
 /**

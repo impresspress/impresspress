@@ -1360,9 +1360,16 @@ test('every erase holds the erase lock — the automatic one and the reset', asy
 // A version can install and then not activate — Chromium has been seen to
 // leave one `installed` with nothing in its way. A shell does not wait on it
 // silently: after the control wait it says so and offers the choices.
+/// Resolve once `shell` shows the element `id` — for a boot that is still
+/// waiting (its `booted` does not settle while the version it waits for has
+/// not activated).
+async function shown(shell, id) {
+  while (!shell.stuck(id)) await new Promise((resolve) => setImmediate(resolve));
+}
+
 test('a new version that does not activate is waited for, then asked about', async () => {
   const shell = loadShell({ installs: 'stalls', now: NOW });
-  await shell.booted;
+  await shown(shell, 'impresspress-wait');
 
   assert.equal(shell.stuck('impresspress-stopped-title').textContent, 'Kiln & Co is taking a long time to start');
   assert.equal(
@@ -1373,7 +1380,10 @@ test('a new version that does not activate is waited for, then asked about', asy
   assert.ok(shell.stuck('impresspress-reset'));
   assert.equal(shell.probes.length, 0, 'nothing was asked of a version that is not in place');
 
-  await shell.stuck('impresspress-wait').click();
+  shell.stuck('impresspress-wait').click();
+  while (shell.stuck('impresspress-stopped-cause').textContent.includes('after 10 seconds')) {
+    await new Promise((resolve) => setImmediate(resolve));
+  }
   assert.equal(
     shell.stuck('impresspress-stopped-cause').textContent,
     'The new version has not started yet, after 20 seconds.'
@@ -1434,9 +1444,10 @@ test('a reset holds the erase lock from before registering until its erase, afte
 
 test('"Restart it" takes no erase lock', async () => {
   const shell = loadShell({ installs: 'stalls', now: NOW });
-  await shell.booted;
+  await shown(shell, 'impresspress-restart');
 
-  await shell.stuck('impresspress-restart').click();
+  shell.stuck('impresspress-restart').click();
+  while (shell.registeredHolding.length < 2) await new Promise((resolve) => setImmediate(resolve));
 
   assert.ok(shell.registeredHolding.slice(1).every((locks) => !locks.includes('__impresspress_erase')));
 });
@@ -1455,4 +1466,64 @@ test('an automatic erase leaves the transition to a reset under way in another t
 
   assert.ok(!shell.registeredUrls.includes(REPLACEMENT));
   assert.deepEqual(shell.opfs(), ['app.sqlite']);
+});
+
+// A button that ERASES does not leave the transition to a version already
+// in place: that version may have loaded the data — into memory, written
+// back on its next flush — and the erase after it would be undone. It brings
+// in its own replacement, which waits for the erase before it loads.
+test('an erasing button registers its own replacement even over a version already in place', async () => {
+  const shell = loadShell({
+    stop: left('initialize', NOW, { ...DEATH, runtime: OLD_RUNTIME }),
+    session: { [RECOVERY_DONE]: 'restarted' },
+    registeredUrl: `${ORIGIN}/sw.js`,
+    update: 'active',
+    now: NOW,
+    wipe: true
+  });
+  await shell.booted;
+  assert.equal(shell.stuck('impresspress-retry').textContent, 'Erase local data and try again');
+
+  await shell.stuck('impresspress-retry').click();
+
+  assert.deepEqual(shell.registeredUrls, [REPLACEMENT]);
+  assert.deepEqual(shell.opfs(), []);
+});
+
+// …while one that keeps the data still leaves it to that version.
+test('a button that keeps the data leaves the transition to a version already in place', async () => {
+  const shell = loadShell({
+    stop: left('request', NOW, { ...DEATH, runtime: OLD_RUNTIME }),
+    session: { [RECOVERY_DONE]: 'restarted' },
+    registeredUrl: `${ORIGIN}/sw.js`,
+    update: 'active',
+    now: NOW
+  });
+  await shell.booted;
+
+  await shell.stuck('impresspress-retry').click();
+
+  assert.deepEqual(shell.registeredUrls, []);
+  assert.deepEqual(shell.opfs(), ['app.sqlite']);
+});
+
+// The choice screen does not stop the wait under it. A reset waiting there
+// holds the erase lock its replacement waits for: when the replacement
+// activates, the reset erases and enters the app without anyone clicking.
+test('a reset whose replacement activates after the choice is shown carries on by itself', async () => {
+  const shell = loadShell({
+    stop: left('request', NOW, DEATH),
+    session: { [RECOVERY_DONE]: 'restarted' },
+    installs: 'late',
+    now: NOW
+  });
+  await shell.booted;
+
+  shell.stuck('impresspress-reset').click();
+  await shown(shell, 'impresspress-wait');
+  while (shell.location.reloads === 0) await new Promise((resolve) => setTimeout(resolve, 5));
+
+  assert.deepEqual(shell.events, [`register ${REPLACEMENT}`, 'activated late', 'erase app.sqlite']);
+  assert.deepEqual(shell.opfs(), []);
+  assert.deepEqual(shell.heldNow(), []);
 });

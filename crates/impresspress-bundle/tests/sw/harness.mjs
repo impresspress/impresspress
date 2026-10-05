@@ -71,7 +71,9 @@ let instances = 0;
 ///
 /// The worker starts as an INSTALLED one: its runtime binary is already kept
 /// in Cache Storage, as `install` left it — unless `runtime.kept` is
-/// `false`, a worker whose kept binary has gone. `runtime.quotaFull` makes
+/// `false`, a worker whose kept binary has gone. `runtime.erasePending` is a
+/// promise: an erase another tab holds ERASE_LOCK for until it settles.
+/// `runtime.superseded` gives the registration a newer version waiting. `runtime.quotaFull` makes
 /// every put into the runtime cache fail as a full quota does.
 export async function loadWorker(runtime = {}, { wipe = false } = {}) {
   const source = SOURCES[wipe ? 'wipe' : 'plain'];
@@ -85,6 +87,8 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
   // The Web Locks held now, and those held when `initialize()` was called.
   const heldLocks = new Set();
   const queues = new Map();
+  let eraseOver = false;
+  if (runtime.erasePending) runtime.erasePending.then(() => (eraseOver = true));
   const initializeHeld = [];
   // Lock requests and `initialize()` calls, in order.
   const timeline = [];
@@ -168,7 +172,14 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
       locks: {
         // Exclusive, as Web Locks are: a request waits for the holder
         // before it, in the order the requests were made.
-        request: async (name, act) => {
+        request: async (name, options, callback) => {
+          const act = typeof options === 'function' ? options : callback;
+          if (typeof options === 'object' && options.ifAvailable) {
+            timeline.push(`look ${name}`);
+            // Held by an erase another tab is in the middle of.
+            if (runtime.erasePending && !eraseOver) return act(null);
+            return act({ name });
+          }
           timeline.push(`lock ${name}`);
           const before = queues.get(name) ?? Promise.resolve();
           let done;
@@ -176,7 +187,10 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
           await before;
           // An erase another tab is in the middle of: the lock is granted
           // once it is over.
-          if (runtime.erasePending) await runtime.erasePending;
+          if (runtime.erasePending) {
+            await runtime.erasePending;
+            eraseOver = true;
+          }
           heldLocks.add(name);
           try {
             return await act();
@@ -188,6 +202,9 @@ export async function loadWorker(runtime = {}, { wipe = false } = {}) {
       }
     },
     registration: {
+      // A newer version coming in over this worker (`runtime.superseded`).
+      installing: null,
+      waiting: runtime.superseded ? { state: 'installed' } : null,
       unregister: async () => {
         unregistered += 1;
         if (typeof runtime.unregisters === 'function') return runtime.unregisters();

@@ -265,3 +265,50 @@ test('a slow start holds no lock: an erase elsewhere is not held up', async (t) 
   finishStart();
   assert.equal(await (await answered).response.text(), 'from the runtime');
 });
+
+// A worker that a newer version is replacing must not wait for a reset's
+// erase: the reset holds the erase lock until its replacement activates,
+// and the browser activates it only once THIS worker is between events. So
+// it only looks at the lock and, while an erase is pending, answers without
+// loading anything — and without dying: once the erase is over it loads as
+// usual.
+test('a superseded worker does not wait for a pending erase: it answers that the app is being reset', async (t) => {
+  captureConsole(t);
+  let finishErase;
+  const erasePending = new Promise((resolve) => {
+    finishErase = resolve;
+  });
+  const worker = await loadWorker({ erasePending, superseded: true });
+
+  const { response } = await worker.request(LOGIN, { method: 'POST' });
+  assert.equal(response.status, 503);
+  assert.deepEqual(await response.json(), {
+    error: 'Unavailable',
+    message: 'The app is being reset. Reload the page in a moment.',
+    code: 'app_resetting'
+  });
+  assert.deepEqual(worker.timeline, ['look __impresspress_erase'], 'it neither waited nor loaded');
+  assert.equal(worker.leftForBootShell(), undefined, 'no death was reported');
+
+  // A navigation gets the boot shell, with no cause for it.
+  const navigation = await worker.request('/b/auth/login', { mode: 'navigate' });
+  assert.equal(await navigation.response.text(), SHELL_HTML);
+  assert.equal(worker.leftForBootShell(), undefined);
+
+  // Not poisoned: once the erase is over, it starts as usual.
+  finishErase();
+  await erasePending;
+  const later = await worker.request(LOGIN, { method: 'POST' });
+  assert.equal(await later.response.text(), 'from the runtime');
+  assert.ok(worker.timeline.includes('initialize'));
+});
+
+test('a superseded worker with no erase pending starts as usual', async (t) => {
+  captureConsole(t);
+  const worker = await loadWorker({ superseded: true });
+
+  const { response } = await worker.request(LOGIN, { method: 'POST' });
+
+  assert.equal(await response.text(), 'from the runtime');
+  assert.deepEqual(worker.timeline, ['look __impresspress_erase', 'initialize']);
+});

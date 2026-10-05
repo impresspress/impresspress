@@ -472,48 +472,47 @@ function registerWorker(url) {
 // The worker `registration` is bringing in — its newest version — once it
 // has activated. Fails if that version is discarded instead (its script
 // could not be fetched or evaluated).
-// The worker `registration` is bringing in, once activated (`activated`),
-// or `null` if it has not activated within CONTROL_WAIT_MS. A version can
-// install and then not activate for minutes — Chromium has been seen to
-// leave one `installed` with nothing in its way — and a page waiting on it
-// without a bound says "Loading…" forever.
-async function activatedWithin(registration) {
-    if (newest(registration).state === 'activated') return activated(registration);
-    const done = activated(registration);
-    done.catch(() => {});
-    let timer;
-    const late = new Promise((resolve) => {
-        timer = setTimeout(() => resolve(null), CONTROL_WAIT_MS);
-    });
-    try {
-        return await Promise.race([done, late]);
-    } finally {
-        clearTimeout(timer);
-    }
-}
-
-// Once `registration`'s newest version has activated, `go(worker)`. If it
-// has not within CONTROL_WAIT_MS the person is told and chooses
-// (`renderNotStartedUI`), and "Keep waiting" waits again. `fail(error)` is
-// called if the version cannot be installed, or `go` throws.
-async function whenActivated(registration, status, waitedMs, go, fail, leave = () => {}) {
+// Once `registration`'s newest version has activated, `go(worker)`;
+// `fail(error)` if it cannot be installed, or `go` throws.
+//
+// A version can install and then not activate for a long time — Chromium
+// has been seen to leave one `installed` with nothing in its way — and a
+// page waiting on it without a word says "Loading…" for ever. So if it has
+// not activated within CONTROL_WAIT_MS the person is told and offered the
+// choice (`renderNotStartedUI`), again every CONTROL_WAIT_MS they keep
+// waiting. The wait itself goes on underneath: the moment the version
+// activates, `go` runs, whatever is on screen — a reset waiting here holds
+// the erase lock its replacement is waiting for, so nothing may depend on a
+// click to carry on. Only "Restart it" or the reset end it: `leave` lets go
+// of what the wait holds, and `go` and `fail` are not called.
+async function whenActivated(registration, status, go, fail, leave = () => {}) {
+    let abandoned = false;
+    let timer = null;
+    const ask = (waitedMs) => {
+        timer = setTimeout(() => {
+            const waited = waitedMs + CONTROL_WAIT_MS;
+            renderNotStartedUI(
+                status,
+                waited,
+                () => ask(waited),
+                () => {
+                    abandoned = true;
+                    leave();
+                },
+            );
+        }, CONTROL_WAIT_MS);
+    };
+    if (newest(registration).state !== 'activated') ask(0);
     let worker;
     try {
-        worker = await activatedWithin(registration);
+        worker = await activated(registration);
     } catch (error) {
-        fail(error);
+        clearTimeout(timer);
+        if (!abandoned) fail(error);
         return;
     }
-    if (worker === null) {
-        const waited = waitedMs + CONTROL_WAIT_MS;
-        renderNotStartedUI(
-            status,
-            waited,
-            () => whenActivated(registration, status, waited, go, fail, leave),
-            leave,
-        );
-        return;
-    }
+    clearTimeout(timer);
+    if (abandoned) return;
     try {
         await go(worker);
     } catch (error) {
@@ -611,7 +610,14 @@ function runtimeOf(worker) {
 // RECOVERY_LOCK, and only where it answers `false` registers a replacement:
 // one owner of each transition, whichever road — the worker's message, the
 // cause it left, its 503 to a boot probe, a button — led here.
-async function updateUnderway(registration, failure, status) {
+//
+// `alreadyIn: false` counts only a version that is still coming in. A button
+// that ERASES must not leave the transition to a version already in place:
+// that version may have loaded the data already — into memory, written back
+// on its next flush — and an erase after it would be undone. A version
+// still installing or waiting has loaded nothing, and the erase lock the
+// button holds keeps it from loading until the erase is done.
+async function updateUnderway(registration, failure, status, { alreadyIn = true } = {}) {
     status.textContent = 'Checking for a new version…';
     try {
         await registration.update();
@@ -625,6 +631,7 @@ async function updateUnderway(registration, failure, status) {
         if (await hasInstalled(incoming)) return true;
         if ((registration.installing || registration.waiting) === incoming) break;
     }
+    if (!alreadyIn) return false;
     if (failure === null || failure.runtime === '' || !registration.active) return false;
     return (await runtimeOf(registration.active)) !== failure.runtime;
 }
@@ -714,7 +721,7 @@ async function recoverFromButton({ erase, forget, failure }, status) {
             // An update already bringing a new worker in is that
             // replacement: registering another over it would discard it.
             const current = await navigator.serviceWorker.getRegistration();
-            if (current && (await updateUnderway(current, failure, status))) {
+            if (current && (await updateUnderway(current, failure, status, { alreadyIn: !erase }))) {
                 sessionStorage.setItem(RECOVERY_DONE_KEY, RECOVERY_RESTARTED);
                 if (failure !== null) await recordRecovered(failure);
                 return current;
@@ -724,7 +731,6 @@ async function recoverFromButton({ erase, forget, failure }, status) {
         await whenActivated(
             registration,
             status,
-            0,
             async (worker) => {
                 if (erase && replaced) {
                     const erased = await eraseData();
@@ -940,13 +946,15 @@ function renderWaitingUI(target, worker, status, waitedMs) {
 // Shown when the version the browser is bringing in has not activated
 // within CONTROL_WAIT_MS (`whenActivated`). Nothing has failed: the browser
 // has installed it, or is installing it, and has not yet put it in place —
-// usually a moment, sometimes, in Chromium, much longer. "Keep waiting"
-// waits again (`resume`); "Restart it" and the reset register a replacement
+// usually a moment, sometimes, in Chromium, much longer. The wait goes on
+// underneath whatever is chosen here; "Keep waiting" only asks to be told
+// again later (`resume`). "Restart it" and the reset register a replacement
 // over it, as on the waiting screen.
 //
-// `leave` lets go of what the wait was holding — a reset's erase locks —
-// before "Restart it" or the reset starts over: a reset held up behind its
-// own predecessor's locks would wait for ever. "Keep waiting" keeps them.
+// `leave` ends the wait and lets go of what it was holding — a reset's erase
+// locks — before "Restart it" or the reset starts over: a reset held up
+// behind its own predecessor's locks would wait for ever. "Keep waiting"
+// keeps them.
 function renderNotStartedUI(status, waitedMs, resume, leave) {
     const name = appTitle();
     const STOPPING = 'Waiting for the app to stop…';
@@ -1229,7 +1237,6 @@ async function boot() {
         await whenActivated(
             registration,
             status,
-            0,
             async (worker) => {
                 status.textContent = `Loading ${appTitle()}...`;
                 await enterApp(destination(), worker, status, 0);
