@@ -525,6 +525,68 @@ test('a reset completes when the browser restarts the old worker for another tab
   });
 });
 
+// The same restart, earlier: the reset has taken the erase lock and is
+// still checking for an update before it registers its replacement, so the
+// old worker is the only version there is. It must not wait for the lock
+// either — no worker does, inside an event — or the replacement registered
+// a moment later could never activate past that event.
+test('a reset completes when the old worker is restarted before the reset has registered its replacement', async ({
+  browser,
+}) => {
+  await withSlowStart(browser, async ({ page, context, server }) => {
+    // The reset's update check, between taking the erase lock and
+    // registering its replacement, waits on the worker script.
+    server.hold('sw.js');
+    await page.getByRole('button', { name: 'Reset local data and reload' }).click();
+    // Held: the old worker's start, and the reset's update check.
+    await expect.poll(() => server.held(), { timeout: 30_000 }).toBe(2);
+
+    await stopActiveWorker(page);
+    const other = await context.newPage();
+    // Answered, without loading anything: the app is being reset.
+    await other.goto('/b/auth/login', { waitUntil: 'commit', timeout: 30_000 });
+    server.release();
+
+    await page.waitForURL(/\/b\/auth\/login/, { timeout: 60_000 });
+    await expect(page.locator('input#email')).toBeVisible();
+    const after = await stored(page);
+    expect(after).toContain(DATABASE);
+    expect(after).not.toContain(WITNESS);
+    await served(other);
+    await expect(other.locator('input#email')).toBeVisible({ timeout: 60_000 });
+  });
+});
+
+// The way out of the Chromium stall (see `sw-update.spec.ts`): the old
+// worker's last event and the end of the replacement's install released at
+// the same moment, which Chromium has been seen to lose the activation on.
+// Whatever Chromium does, within moments the person is either in the app or
+// told that the new version has not started, and "Restart it" from there
+// ends in the app.
+test('a reset whose replacement may not activate always leaves a way into the app', async ({ browser }) => {
+  await withSlowStart(browser, async ({ page, context, server }) => {
+    await page.getByRole('button', { name: 'Reset local data and reload' }).click();
+    await expect.poll(() => server.held(), { timeout: 30_000 }).toBe(2);
+    await stopActiveWorker(page);
+    const other = await context.newPage();
+    const otherOpened = other.goto('/b/auth/login', { waitUntil: 'commit' });
+    await expect.poll(() => server.held(), { timeout: 30_000 }).toBe(3);
+    server.release();
+    await otherOpened;
+
+    const inApp = () => /\/b\/auth\/login/.test(page.url());
+    const notStarted = page.getByText(/^The new version has not started yet/);
+    await expect
+      .poll(async () => inApp() || (await notStarted.isVisible()), { timeout: 15_000 })
+      .toBe(true);
+    if (!inApp()) {
+      await page.getByRole('button', { name: 'Restart it' }).click();
+    }
+    await page.waitForURL(/\/b\/auth\/login/, { timeout: 60_000 });
+    await expect(page.locator('input#email')).toBeVisible();
+  });
+});
+
 // An erase the browser refuses — here because another tab has one of the
 // files open — is not passed off as done: the screen says so, and the app
 // is not entered until the person has chosen.

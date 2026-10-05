@@ -162,13 +162,15 @@ async function dropCaches() {
 //   will load the data next, and keeps it until the erase is done (or, when
 //   the replacement cannot be registered, until it lets go having erased
 //   nothing);
-// - sw.js waits for it — takes it and lets go at once — before its runtime's
-//   `initialize()` loads the data (`ERASE_LOCK` there; the same name). It
-//   never holds it while loading, so a slow start delays no one's erase.
+// - sw.js looks at it — never waits for it, inside an event — before its
+//   runtime's `initialize()` loads the data (`eraseSettled` there; the same
+//   name), and while it is held answers that the app is being reset
+//   without loading anything. A shell whose probe gets that answer waits
+//   for the lock itself, and asks again (`enterApp`).
 //
 // No worker can load the data before its registration exists, so a lock
-// taken before registering is held before any loader of the data could ask
-// for it.
+// taken before registering is held before any loader of the data could look
+// at it.
 const ERASE_LOCK = '__impresspress_erase';
 // Held by whoever is erasing, for as long as its erase is pending: a
 // button's reset across the wait for its replacement to activate, an
@@ -394,6 +396,17 @@ function setBreaker(failure) {
 
 // What sw.js's answer to a request for a dead runtime reports
 // (`runtimeStopped` there), or `null` for any other response.
+// Whether `response` is sw.js's answer while an erase of the app's data is
+// pending (`beingReset` there): no runtime was asked, and nothing failed.
+async function isBeingReset(response) {
+    if (response.status !== 503) return false;
+    try {
+        return (await response.clone().json()).code === 'app_resetting';
+    } catch (_) {
+        return false;
+    }
+}
+
 async function stoppedCauseOf(response) {
     if (response.status !== 503) return null;
     try {
@@ -646,9 +659,9 @@ async function updateUnderway(registration, failure, status, { alreadyIn = true 
 // `erase` erases the local data as well, and is for a worker that is DEAD:
 // a poisoned worker never loads or writes the data again. ERASE_LOCK is
 // taken before the replacement is registered and let go once the erase is
-// done, so the replacement — which waits for that lock before its runtime
-// loads anything — starts on the erased data, however fast it installs and
-// whoever asks it for a page. A replacement that cannot be registered
+// done, so the replacement — which loads nothing while that lock is held —
+// starts on the erased data, however fast it installs and whoever asks it
+// for a page. A replacement that cannot be registered
 // (WORKER_URL's CDN case) replaces nothing and erases nothing: the lock is
 // let go without erasing. A worker that may still be running is a
 // different matter — `recoverFromButton`.
@@ -685,8 +698,8 @@ async function replaceWorker({ erase, failure }) {
 //   ERASE_LOCK (and RESET_LOCK, which tells other tabs a reset is under
 //   way) is taken BEFORE the replacement is registered — and before
 //   RECOVERY_LOCK, as RESET_LOCK explains — and held across the
-//   wait for it to activate, until the erase is done; the replacement's
-//   runtime waits for the lock before it loads anything.
+//   wait for it to activate, until the erase is done; no worker loads the
+//   data while the lock is held.
 //
 // Then the app is entered. An erase that did not complete is shown
 // (`renderEraseFailedUI`) instead of the app being entered as though it
@@ -1157,6 +1170,29 @@ async function enterApp(target, worker, status, waitedMs) {
     // notice: set the breaker, and let the next load recover once and then
     // stop with the cause on screen. (The reload is answered by the dead
     // worker with this shell, whatever the static host has at this address.)
+    // An erase of the app's data was under way, so the worker loaded nothing
+    // and answered that (`isBeingReset`). That is not the app answering:
+    // the recovery flag is left as it is, and nothing navigates. Wait for
+    // the erase to be over — this page can wait for its lock, a worker may
+    // not (sw.js's `eraseSettled`) — and for the version the erase is for
+    // to be in place, then ask again.
+    if (probe && (await isBeingReset(probe))) {
+        status.textContent = 'The app is being reset…';
+        if (navigator.locks && navigator.locks.request) {
+            await navigator.locks.request(ERASE_LOCK, () => {});
+        }
+        const registration = await navigator.serviceWorker.getRegistration();
+        await whenActivated(
+            registration,
+            status,
+            (next) => enterApp(target, next, status, waitedMs),
+            (error) => {
+                status.textContent = 'Error: ' + error.message;
+                console.error('[__APP_NAME__] Boot error:', error);
+            },
+        );
+        return;
+    }
     const stopped = probe ? await stoppedCauseOf(probe) : null;
     if (stopped !== null) {
         setBreaker(stopped);

@@ -225,28 +225,6 @@ test('a worker says which runtime it was built for, dead or alive', async (t) =>
 });
 
 
-// The runtime loads the app's database into memory and writes it back on
-// every flush, so an erase must come BEFORE it loads, never after: the
-// erase holds ERASE_LOCK from before the worker even exists until it is
-// done, and the runtime waits for that lock before it loads anything.
-test('the runtime waits for a pending erase before it loads the data', async (t) => {
-  captureConsole(t);
-  let finishErase;
-  const erasePending = new Promise((resolve) => {
-    finishErase = resolve;
-  });
-  const worker = await loadWorker({ erasePending });
-
-  const answered = worker.request(LOGIN, { method: 'POST' });
-  await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(worker.timeline, ['lock __impresspress_erase'], 'nothing loaded while the erase is pending');
-
-  finishErase();
-  assert.equal(await (await answered).response.text(), 'from the runtime');
-  assert.deepEqual(worker.timeline, ['lock __impresspress_erase', 'initialize']);
-  assert.deepEqual(worker.initializeHeld, [[]], 'the lock is let go before loading');
-});
-
 // …and it never holds the lock while it starts, so a start that takes long
 // holds up no tab's erase or recovery.
 test('a slow start holds no lock: an erase elsewhere is not held up', async (t) => {
@@ -266,49 +244,56 @@ test('a slow start holds no lock: an erase elsewhere is not held up', async (t) 
   assert.equal(await (await answered).response.text(), 'from the runtime');
 });
 
-// A worker that a newer version is replacing must not wait for a reset's
-// erase: the reset holds the erase lock until its replacement activates,
-// and the browser activates it only once THIS worker is between events. So
-// it only looks at the lock and, while an erase is pending, answers without
-// loading anything — and without dying: once the erase is over it loads as
-// usual.
-test('a superseded worker does not wait for a pending erase: it answers that the app is being reset', async (t) => {
-  captureConsole(t);
-  let finishErase;
-  const erasePending = new Promise((resolve) => {
-    finishErase = resolve;
+// The runtime loads the app's database into memory and writes it back on
+// every flush, so an erase must come BEFORE it loads, never after: whoever
+// erases holds ERASE_LOCK from before the worker the erase is for even
+// exists until it is done. And no worker may WAIT for that lock inside a
+// request's event: the erase may be a reset's, waiting for its replacement
+// to activate — which the browser does only once the worker being replaced
+// is between events. So every version only looks at the lock and, while an
+// erase is pending, answers without loading anything — and without dying:
+// once the erase is over it loads as usual.
+for (const superseded of [false, true]) {
+  test(`while an erase is pending a worker loads nothing and answers that the app is being reset${superseded ? ' — a worker being replaced too' : ''}`, async (t) => {
+    captureConsole(t);
+    let finishErase;
+    const erasePending = new Promise((resolve) => {
+      finishErase = resolve;
+    });
+    const worker = await loadWorker({ erasePending, superseded });
+
+    const { response } = await worker.request(LOGIN, { method: 'POST' });
+    assert.equal(response.status, 503);
+    assert.deepEqual(await response.json(), {
+      error: 'Unavailable',
+      message: 'The app is being reset. Reload the page in a moment.',
+      code: 'app_resetting'
+    });
+    assert.deepEqual(worker.timeline, ['look __impresspress_erase'], 'it neither waited nor loaded');
+    assert.equal(worker.leftForBootShell(), undefined, 'no death was reported');
+
+    // A navigation gets the boot shell, with no cause for it.
+    const navigation = await worker.request('/b/auth/login', { mode: 'navigate' });
+    assert.equal(await navigation.response.text(), SHELL_HTML);
+    assert.equal(worker.leftForBootShell(), undefined);
+
+    // Not poisoned: once the erase is over, it starts as usual.
+    finishErase();
+    await erasePending;
+    const later = await worker.request(LOGIN, { method: 'POST' });
+    assert.equal(await later.response.text(), 'from the runtime');
+    assert.equal(worker.timeline.at(-1), 'initialize');
+    assert.ok(!worker.timeline.some((step) => step.startsWith('lock ')), 'it never waited for the lock');
   });
-  const worker = await loadWorker({ erasePending, superseded: true });
+}
 
-  const { response } = await worker.request(LOGIN, { method: 'POST' });
-  assert.equal(response.status, 503);
-  assert.deepEqual(await response.json(), {
-    error: 'Unavailable',
-    message: 'The app is being reset. Reload the page in a moment.',
-    code: 'app_resetting'
-  });
-  assert.deepEqual(worker.timeline, ['look __impresspress_erase'], 'it neither waited nor loaded');
-  assert.equal(worker.leftForBootShell(), undefined, 'no death was reported');
-
-  // A navigation gets the boot shell, with no cause for it.
-  const navigation = await worker.request('/b/auth/login', { mode: 'navigate' });
-  assert.equal(await navigation.response.text(), SHELL_HTML);
-  assert.equal(worker.leftForBootShell(), undefined);
-
-  // Not poisoned: once the erase is over, it starts as usual.
-  finishErase();
-  await erasePending;
-  const later = await worker.request(LOGIN, { method: 'POST' });
-  assert.equal(await later.response.text(), 'from the runtime');
-  assert.ok(worker.timeline.includes('initialize'));
-});
-
-test('a superseded worker with no erase pending starts as usual', async (t) => {
+test('with no erase pending a worker starts as usual, having only looked', async (t) => {
   captureConsole(t);
-  const worker = await loadWorker({ superseded: true });
+  const worker = await loadWorker();
 
   const { response } = await worker.request(LOGIN, { method: 'POST' });
 
   assert.equal(await response.text(), 'from the runtime');
   assert.deepEqual(worker.timeline, ['look __impresspress_erase', 'initialize']);
+  assert.deepEqual(worker.initializeHeld, [[]]);
 });

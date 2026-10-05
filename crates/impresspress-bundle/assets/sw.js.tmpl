@@ -70,42 +70,39 @@ const RUNTIME_CACHE = '__impresspress_runtime';
 // worker until it has erased the app's local data (`ERASE_LOCK` there, which
 // says why; the same name). The runtime's `initialize()` loads that data —
 // into memory, to be written back on every flush — so it must not run while
-// an erase is pending: the newest version waits for the lock, takes it and
-// lets go at once, and then loads; a version being replaced does not wait
-// (`eraseSettled` says why). It never holds the lock while loading, so a
-// slow start delays nobody's erase.
+// an erase is pending. No version WAITS for the lock, though (`eraseSettled`
+// says why): each one looks, and while it is held answers without loading.
 const ERASE_LOCK = '__impresspress_erase';
 
-// Thrown by `eraseSettled` in a worker that a newer version is replacing,
-// while an erase is pending: this worker must not load the data, and must
-// not wait for the erase either (see there). It is not a death — nothing is
-// poisoned — and the request is answered by `beingReset`.
+// Thrown by `eraseSettled` while an erase is pending: this worker must not
+// load the data, and must not wait for the erase either (see there). It is
+// not a death — nothing is poisoned — and the request is answered by
+// `beingReset`.
 class ErasePending extends Error {}
 
 /**
- * Resolves once no erase is pending, where the worker has Web Locks — for
- * the NEWEST version only.
+ * Throws ErasePending if an erase is pending (ERASE_LOCK is held), where the
+ * worker has Web Locks; otherwise resolves, and the runtime may load.
  *
- * The erase that is pending is a reset's, and the reset is waiting for its
- * replacement to activate, holding ERASE_LOCK. A browser activates the
- * replacement only once THIS worker, the one being replaced, is between
- * events. So this worker — restarted by the browser for some tab's request,
- * fresh and unpoisoned — must not wait for that lock inside the request's
- * event: the reset would wait for an activation its own lock prevents. A
- * worker that a newer version is installing over or waiting behind (it is
- * superseded) only LOOKS at the lock: free, it loads as usual; held, it
- * throws ErasePending without loading anything, and the event ends.
+ * It only LOOKS at the lock (`ifAvailable`), in every version, and never
+ * waits for it inside an event. The erase that holds it may be a reset's,
+ * waiting for its replacement to activate — which a browser does only once
+ * the worker being replaced is between events — or about to register that
+ * replacement. A worker waiting for the lock inside a request's event would
+ * make the reset wait for an activation its own lock prevents. Looking costs
+ * nothing of the kind: the request is answered that the app is being reset
+ * (`beingReset`), the event ends, and the next request looks again.
+ *
+ * And no version needs to wait: the replacement an erase is for exists only
+ * once registered, which the erase does holding the lock, and receives
+ * requests only once activated — so the first time it could load the data
+ * it looks, and loads only once the erase has let go of the lock.
  */
 async function eraseSettled() {
     const locks = self.navigator && self.navigator.locks;
     if (!(locks && locks.request)) return;
-    const registration = self.registration;
-    if (registration.installing || registration.waiting) {
-        const pending = await locks.request(ERASE_LOCK, { ifAvailable: true }, (lock) => lock === null);
-        if (pending) throw new ErasePending('the app is being reset');
-        return;
-    }
-    await locks.request(ERASE_LOCK, () => {});
+    const pending = await locks.request(ERASE_LOCK, { ifAvailable: true }, (lock) => lock === null);
+    if (pending) throw new ErasePending('the app is being reset');
 }
 
 let initialized = false;
@@ -664,12 +661,12 @@ async function handleFetch(event) {
 }
 
 /**
- * The answer of a worker being replaced while a reset erases the data
+ * The answer of a worker while an erase of the app's data is pending
  * (`eraseSettled`): it has loaded nothing and is not dead.
  *
  * A navigation gets the boot shell, with no cause left for it: the shell's
- * ordinary boot waits for the replacement to activate and then comes back to
- * the page. Anything else gets a 503 in the runtime's error shape that is
+ * ordinary boot waits for the version coming in to activate, asks again, and
+ * comes back to the page once the app answers (`enterApp` in `loader.js`). Anything else gets a 503 in the runtime's error shape that is
  * NOT the stopped-runtime answer (`runtimeStopped`) — no `stage`, no
  * `cause`, another `code` — so no shell takes it for a death to recover
  * from; its message says what is happening and what to do.

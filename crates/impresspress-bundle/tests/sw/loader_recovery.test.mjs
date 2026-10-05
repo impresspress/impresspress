@@ -1527,3 +1527,35 @@ test('a reset whose replacement activates after the choice is shown carries on b
   assert.deepEqual(shell.opfs(), []);
   assert.deepEqual(shell.heldNow(), []);
 });
+
+// A probe answered "the app is being reset" (sw.js's `beingReset`: an erase
+// is under way, so the worker loaded nothing) is not the app answering: the
+// recovery flag stays, nothing navigates, and the shell waits for the
+// erase and for the version it is for, then asks again.
+test('a probe told the app is being reset waits and asks again, leaving the recovery flag alone', async () => {
+  const resetting = () =>
+    new Response(
+      JSON.stringify({ error: 'Unavailable', message: 'x', code: 'app_resetting' }),
+      { status: 503, headers: { 'Content-Type': 'application/json' } }
+    );
+  let asked = 0;
+  let flagAtSecondProbe = null;
+  const shell = loadShell({
+    session: { [RECOVERY_DONE]: 'restarted' },
+    registeredUrl: `${ORIGIN}/sw.js`,
+    now: NOW,
+    probe: () => {
+      asked += 1;
+      if (asked === 1) return resetting();
+      flagAtSecondProbe = shell.session.getItem(RECOVERY_DONE);
+      return new Response('<html>', { status: 200 });
+    }
+  });
+  await shell.booted;
+
+  assert.equal(shell.probes.length, 2);
+  assert.ok(shell.statusLines.includes('The app is being reset…'), shell.statusLines);
+  assert.equal(flagAtSecondProbe, 'restarted', 'the flag was left alone by the first answer');
+  assert.equal(shell.session.getItem(RECOVERY_DONE), null, 'and cleared by the real one');
+  assert.equal(shell.location.reloads, 1);
+});
