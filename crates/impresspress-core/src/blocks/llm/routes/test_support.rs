@@ -426,3 +426,21 @@ impl Block for StubLlmServiceBlock {
         Ok(())
     }
 }
+
+/// `msg` as a JSON request: `Content-Type: application/json`, which the
+/// provider handlers require before they read a JSON body.
+pub(in crate::blocks::llm) fn json_request(mut msg: Message) -> Message {
+    msg.set_meta("http.header.content-type", "application/json");
+    msg
+}
+
+/// `msg` as the admin page's form submit:
+/// `Content-Type: application/x-www-form-urlencoded`, which is what htmx
+/// sends for the Add provider and Edit forms.
+pub(in crate::blocks::llm) fn form_request(mut msg: Message) -> Message {
+    msg.set_meta(
+        "http.header.content-type",
+        "application/x-www-form-urlencoded",
+    );
+    msg
+}

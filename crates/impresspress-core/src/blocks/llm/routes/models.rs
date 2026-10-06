@@ -22,7 +22,7 @@ use crate::{
             LlmBlock,
         },
     },
-    http::{err_bad_request, ok_json},
+    http::{err_bad_request, ok_json, ResponseBuilder},
     ui::components::{self, BadgeVariant},
 };
 
@@ -98,11 +98,18 @@ pub(in crate::blocks::llm) async fn model_status(
         model_id,
     };
     let htmx = crate::ui::is_htmx(msg);
+    // One URL, two representations chosen by `HX-Request`: a cache must key
+    // on it, or the page's badge and an API caller's JSON could be served to
+    // each other.
+    let response = ResponseBuilder::new().set_header("Vary", "HX-Request");
     match llm_client::status(ctx, &req).await {
-        Ok(status) if htmx => {
-            crate::ui::html_response(status_badge(&ModelStatusView::from(status)))
-        }
-        Ok(status) => ok_json(&ModelStatusResponse {
+        Ok(status) if htmx => response.body(
+            status_badge(&ModelStatusView::from(status))
+                .into_string()
+                .into_bytes(),
+            "text/html; charset=utf-8",
+        ),
+        Ok(status) => response.json(&ModelStatusResponse {
             status: ModelStatusView::from(status),
         }),
         // The models page's status cell asked. htmx swaps only a 2xx, and
@@ -111,9 +118,12 @@ pub(in crate::blocks::llm) async fn model_status(
         // the page.
         Err(e) if htmx => {
             tracing::warn!(error = %e, "llm status failed");
-            crate::ui::html_response(maud::html! {
-                (components::badge(BadgeVariant::Danger, "Unavailable"))
-            })
+            response.body(
+                components::badge(BadgeVariant::Danger, "Unavailable")
+                    .into_string()
+                    .into_bytes(),
+                "text/html; charset=utf-8",
+            )
         }
         Err(e) => llm_service_error("llm status failed", e),
     }
@@ -299,6 +309,97 @@ mod tests {
 
             assert_eq!(body, expected);
         }
+    }
+
+    /// The models page's status cell: an htmx request for the status, as
+    /// the cell's `hx-get` sends it.
+    fn htmx_status_msg() -> Message {
+        let mut msg = routed(user_msg(
+            "retrieve",
+            "/b/llm/api/models/openai-main/gpt-4o/status",
+        ));
+        msg.set_meta("http.header.hx-request", "true");
+        msg
+    }
+
+    /// The status the cell is answered with, and the `Vary` it carries.
+    async fn htmx_status(stub: StubLlmServiceBlock) -> (String, Option<String>) {
+        let ctx = ctx_with(stub).await;
+        let buf = model_status(&stub_block(), &ctx, &htmx_status_msg())
+            .await
+            .collect_buffered()
+            .await
+            .expect("the cell is answered with a body");
+        let vary = wafer_run::MetaGet::get(&buf.meta, "resp.header.Vary").map(str::to_string);
+        (String::from_utf8(buf.body).expect("utf-8"), vary)
+    }
+
+    /// Each state is a badge the cell swaps over itself — never the JSON
+    /// body as text — and every answer says it varies on `HX-Request`.
+    #[tokio::test]
+    async fn an_htmx_status_request_is_answered_with_a_badge_per_state() {
+        for (status, badge) in [
+            (
+                ModelStatus::ready(),
+                r#"<span class="badge badge-success">Ready</span>"#,
+            ),
+            (
+                ModelStatus::loading(0.42),
+                r#"<span class="badge badge-warning">Loading 42%</span>"#,
+            ),
+            (
+                ModelStatus::error("provider disabled"),
+                r#"<span class="badge badge-danger" title="provider disabled">Error</span>"#,
+            ),
+        ] {
+            let (body, vary) = htmx_status(StubLlmServiceBlock {
+                status,
+                ..Default::default()
+            })
+            .await;
+            assert_eq!(body, badge);
+            assert_eq!(vary.as_deref(), Some("HX-Request"));
+        }
+    }
+
+    /// A status the service refuses still answers the cell, with a badge
+    /// that says so: htmx swaps only a 2xx, and a refusal would leave it
+    /// reading "Checking…". The cause is logged, not put on the page.
+    #[tokio::test]
+    async fn a_refused_htmx_status_request_is_an_unavailable_badge() {
+        let (body, vary) = htmx_status(StubLlmServiceBlock {
+            error: Some((ErrorCode::InvalidArgument, "unknown backend: nope".into())),
+            ..Default::default()
+        })
+        .await;
+        assert_eq!(
+            body,
+            r#"<span class="badge badge-danger">Unavailable</span>"#
+        );
+        assert!(!body.contains("unknown backend"), "{body}");
+        assert_eq!(vary.as_deref(), Some("HX-Request"));
+    }
+
+    /// The JSON answer on the same URL varies on the same header.
+    #[tokio::test]
+    async fn the_json_status_answer_also_varies_on_hx_request() {
+        let ctx = ctx_with(StubLlmServiceBlock::default()).await;
+        let buf = model_status(
+            &stub_block(),
+            &ctx,
+            &routed(user_msg(
+                "retrieve",
+                "/b/llm/api/models/openai-main/gpt-4o/status",
+            )),
+        )
+        .await
+        .collect_buffered()
+        .await
+        .expect("a JSON body");
+        assert_eq!(
+            wafer_run::MetaGet::get(&buf.meta, "resp.header.Vary"),
+            Some("HX-Request")
+        );
     }
 
     #[tokio::test]

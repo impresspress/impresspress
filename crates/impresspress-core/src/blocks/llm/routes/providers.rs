@@ -250,14 +250,17 @@ pub(in crate::blocks::llm) async fn list_providers(
 }
 
 /// Parse a provider body — the create's or the patch's — as JSON or as the
-/// admin page's URL-encoded form.
+/// admin page's URL-encoded form, chosen by the request's `Content-Type`.
 ///
-/// A leading `{` is JSON and deserializes into the contract directly, with no
+/// `application/json` deserializes into the contract directly, with no
 /// coercions — a string where the schema says array or bool is a 400, as the
-/// published schema promises. Anything else is a form body: the Add provider
-/// and Edit forms are plain htmx requests (`hx-post`, `hx-patch`), so they
-/// send `application/x-www-form-urlencoded` and every field arrives as a
-/// string.
+/// published schema promises. `application/x-www-form-urlencoded` is the Add
+/// provider and Edit forms (plain htmx `hx-post` / `hx-patch`), where every
+/// field arrives as a string. Anything else — no type, `text/plain` — is a
+/// 400, and so is an empty body of either type. The choice is never guessed
+/// from the bytes: every patch field is optional and an unticked checkbox
+/// posts nothing, so a body read as a form by mistake would be a valid patch
+/// that disables the provider.
 ///
 /// The form values that are not strings in the contract are coerced here, and
 /// only here, the same way for both routes: `models` is one comma-separated
@@ -276,8 +279,30 @@ pub(in crate::blocks::llm) async fn list_providers(
 /// `deny_unknown_fields` still refuses an `api_key` by name on the form path
 /// too — which is the whole point of that attribute (see
 /// [`CreateProviderRequest`] and [`UpdateProviderRequest`]).
-fn parse_provider_body<T: serde::de::DeserializeOwned>(raw: &[u8]) -> Result<T, String> {
-    if raw.iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'{') {
+fn parse_provider_body<T: serde::de::DeserializeOwned>(
+    content_type: &str,
+    raw: &[u8],
+) -> Result<T, String> {
+    let media_type = content_type
+        .split(';')
+        .next()
+        .unwrap_or_default()
+        .trim()
+        .to_ascii_lowercase();
+    let is_form = match media_type.as_str() {
+        "application/json" => false,
+        "application/x-www-form-urlencoded" => true,
+        "" => return Err("Missing Content-Type: send application/json".to_string()),
+        other => {
+            return Err(format!(
+                "Unsupported Content-Type `{other}`: send application/json"
+            ))
+        }
+    };
+    if raw.iter().all(u8::is_ascii_whitespace) {
+        return Err("Empty body".to_string());
+    }
+    if !is_form {
         return serde_json::from_slice(raw).map_err(|e| format!("Invalid body: {e}"));
     }
     let form = crate::util::parse_form_body(raw);
@@ -345,7 +370,7 @@ fn check_max_tokens_field(cfg: &ProviderConfig) -> Result<(), String> {
 pub(in crate::blocks::llm) async fn create_provider(
     block: &LlmBlock,
     ctx: &dyn Context,
-    _msg: &Message,
+    msg: &Message,
     input: InputStream,
 ) -> OutputStream {
     // Before the body is even read: a runtime that cannot configure a
@@ -358,7 +383,7 @@ pub(in crate::blocks::llm) async fn create_provider(
         Ok(bytes) => bytes,
         Err(e) => return OutputStream::error(e),
     };
-    let body: CreateProviderRequest = match parse_provider_body(&raw) {
+    let body: CreateProviderRequest = match parse_provider_body(msg.header("content-type"), &raw) {
         Ok(b) => b,
         Err(e) => return err_bad_request(&e),
     };
@@ -443,7 +468,7 @@ pub(in crate::blocks::llm) async fn update_provider(
         Ok(bytes) => bytes,
         Err(e) => return OutputStream::error(e),
     };
-    let body: UpdateProviderRequest = match parse_provider_body(&raw) {
+    let body: UpdateProviderRequest = match parse_provider_body(msg.header("content-type"), &raw) {
         Ok(b) => b,
         Err(e) => return err_bad_request(&e),
     };
@@ -652,7 +677,8 @@ mod tests {
         blocks::llm::{
             providers::config::ProviderProtocol,
             routes::test_support::{
-                admin_msg, routed, stub_block, PanicCtx, RecordingProviderAdmin,
+                admin_msg, form_request, json_request, routed, stub_block, PanicCtx,
+                RecordingProviderAdmin,
             },
         },
         test_support::{output_json, TestContext},
@@ -662,7 +688,7 @@ mod tests {
     async fn create_provider_returns_bad_request_on_invalid_json() {
         let block = stub_block();
         let ctx = PanicCtx;
-        let msg = admin_msg("create", "/b/llm/api/providers");
+        let msg = json_request(admin_msg("create", "/b/llm/api/providers"));
         let input = InputStream::from_bytes(b"not json".to_vec());
 
         let out = create_provider(&block, &ctx, &msg, input).await;
@@ -683,7 +709,7 @@ mod tests {
     async fn create_provider_requires_name() {
         let block = stub_block();
         let ctx = PanicCtx;
-        let msg = admin_msg("create", "/b/llm/api/providers");
+        let msg = json_request(admin_msg("create", "/b/llm/api/providers"));
         let input =
             InputStream::from_bytes(br#"{"protocol":"open_ai","endpoint":"https://x"}"#.to_vec());
 
@@ -704,7 +730,7 @@ mod tests {
     async fn create_provider_rejects_unknown_protocol() {
         let block = stub_block();
         let ctx = PanicCtx;
-        let msg = admin_msg("create", "/b/llm/api/providers");
+        let msg = json_request(admin_msg("create", "/b/llm/api/providers"));
         let input = InputStream::from_bytes(
             br#"{"name":"x","protocol":"openai","endpoint":"https://x"}"#.to_vec(),
         );
@@ -730,7 +756,7 @@ mod tests {
     async fn update_provider_rejects_an_empty_protocol() {
         let block = stub_block();
         let ctx = PanicCtx;
-        let msg = routed(admin_msg("update", "/b/llm/api/providers/row-1"));
+        let msg = json_request(routed(admin_msg("update", "/b/llm/api/providers/row-1")));
         let input = InputStream::from_bytes(br#"{"protocol":""}"#.to_vec());
 
         let out = update_provider(&block, &ctx, &msg, input).await;
@@ -758,7 +784,7 @@ mod tests {
         let create = create_provider(
             &block,
             &PanicCtx,
-            &admin_msg("create", "/b/llm/api/providers"),
+            &json_request(admin_msg("create", "/b/llm/api/providers")),
             InputStream::from_bytes(
                 br#"{"name":"openai/x","protocol":"open_ai","endpoint":"https://x.example"}"#
                     .to_vec(),
@@ -768,7 +794,7 @@ mod tests {
         let rename = update_provider(
             &block,
             &PanicCtx,
-            &routed(admin_msg("update", "/b/llm/api/providers/row-1")),
+            &json_request(routed(admin_msg("update", "/b/llm/api/providers/row-1"))),
             InputStream::from_bytes(br#"{"name":"openai/x"}"#.to_vec()),
         )
         .await;
@@ -797,7 +823,7 @@ mod tests {
         ] {
             let block = stub_block();
             let ctx = PanicCtx;
-            let msg = admin_msg("create", "/b/llm/api/providers");
+            let msg = json_request(admin_msg("create", "/b/llm/api/providers"));
             let body = format!(r#"{{"name":"x","protocol":"open_ai","endpoint":"{endpoint}"}}"#);
             let input = InputStream::from_bytes(body.into_bytes());
 
@@ -824,7 +850,7 @@ mod tests {
     async fn create_provider_refuses_an_inline_api_key() {
         let block = stub_block();
         let ctx = PanicCtx;
-        let msg = admin_msg("create", "/b/llm/api/providers");
+        let msg = json_request(admin_msg("create", "/b/llm/api/providers"));
         let input = InputStream::from_bytes(
             br#"{"name":"x","protocol":"open_ai","endpoint":"https://api.openai.com/v1","api_key":"sk-inline"}"#
                 .to_vec(),
@@ -849,7 +875,7 @@ mod tests {
     async fn update_provider_refuses_an_inline_api_key() {
         let block = stub_block();
         let ctx = PanicCtx;
-        let msg = routed(admin_msg("update", "/b/llm/api/providers/row-1"));
+        let msg = json_request(routed(admin_msg("update", "/b/llm/api/providers/row-1")));
         let input = InputStream::from_bytes(br#"{"api_key":"sk-inline"}"#.to_vec());
 
         let out = update_provider(&block, &ctx, &msg, input).await;
@@ -871,7 +897,7 @@ mod tests {
         let block = stub_block();
         let ctx = PanicCtx;
         // Path has no id segment after the prefix.
-        let msg = admin_msg("update", "/b/llm/api/providers/");
+        let msg = json_request(admin_msg("update", "/b/llm/api/providers/"));
         let input = InputStream::from_bytes(b"{}".to_vec());
 
         let out = update_provider(&block, &ctx, &msg, input).await;
@@ -1014,7 +1040,7 @@ mod tests {
         let out = create_provider(
             &block,
             &ctx,
-            &admin_msg("create", "/b/llm/api/providers"),
+            &json_request(admin_msg("create", "/b/llm/api/providers")),
             json_input(serde_json::json!({
                 "name": "openai-main",
                 "protocol": "open_ai",
@@ -1040,7 +1066,7 @@ mod tests {
             create_provider(
                 &block,
                 &ctx,
-                &admin_msg("create", "/b/llm/api/providers"),
+                &json_request(admin_msg("create", "/b/llm/api/providers")),
                 create_body(),
             )
             .await,
@@ -1052,7 +1078,10 @@ mod tests {
         let out = update_provider(
             &block,
             &ctx,
-            &routed(admin_msg("update", &format!("/b/llm/api/providers/{id}"))),
+            &json_request(routed(admin_msg(
+                "update",
+                &format!("/b/llm/api/providers/{id}"),
+            ))),
             json_input(serde_json::json!({ "key_var": UNREADABLE_VAR })),
         )
         .await;
@@ -1087,7 +1116,10 @@ mod tests {
         let out = update_provider(
             &block,
             &ctx,
-            &routed(admin_msg("update", &format!("/b/llm/api/providers/{id}"))),
+            &json_request(routed(admin_msg(
+                "update",
+                &format!("/b/llm/api/providers/{id}"),
+            ))),
             json_input(serde_json::json!({ "enabled": false })),
         )
         .await;
@@ -1100,6 +1132,66 @@ mod tests {
         let stored = row_to_config(&stored).expect("stored row decodes");
         assert!(!stored.enabled, "the disable must be stored");
         assert_eq!(stored.key_var.as_deref(), Some(UNREADABLE_VAR));
+    }
+
+    /// Every patch field is optional and an unticked checkbox posts nothing,
+    /// so a body read as a form when it is not one is a valid patch that
+    /// disables the provider. The parser is chosen by `Content-Type` and
+    /// never guessed: an empty body, a `text/plain` body and a body with no
+    /// type at all are each refused, and the provider stays enabled.
+    #[tokio::test]
+    async fn a_patch_that_is_not_a_typed_body_is_refused_and_changes_nothing() {
+        let (ctx, _admin, block) = keyed_fixture().await;
+        let created = output_json(
+            create_provider(
+                &block,
+                &ctx,
+                &json_request(admin_msg("create", "/b/llm/api/providers")),
+                create_body(),
+            )
+            .await,
+        )
+        .await;
+        let id = created["id"].as_str().expect("created id").to_string();
+        let path = format!("/b/llm/api/providers/{id}");
+
+        let mut text_plain = routed(admin_msg("update", &path));
+        text_plain.set_meta("http.header.content-type", "text/plain");
+        let cases: [(&str, Message, &[u8]); 4] = [
+            (
+                "an empty JSON body",
+                json_request(routed(admin_msg("update", &path))),
+                b"",
+            ),
+            (
+                "an empty form body",
+                form_request(routed(admin_msg("update", &path))),
+                b"",
+            ),
+            ("a text/plain body", text_plain, b"name=renamed"),
+            (
+                "a body with no Content-Type",
+                routed(admin_msg("update", &path)),
+                b"name=renamed",
+            ),
+        ];
+        for (label, msg, body) in cases {
+            let out =
+                update_provider(&block, &ctx, &msg, InputStream::from_bytes(body.to_vec())).await;
+            match out.collect_buffered().await {
+                Err(wafer_run::streams::output::TerminalNotResponse::Error(e)) => {
+                    assert_eq!(e.code, ErrorCode::InvalidArgument, "{label}: {}", e.message)
+                }
+                other => panic!("{label} must be refused, got {other:?}"),
+            }
+        }
+
+        let stored = db::get(&ctx, PROVIDERS_TABLE, &id)
+            .await
+            .expect("row still there");
+        let stored = row_to_config(&stored).expect("stored row decodes");
+        assert!(stored.enabled, "no refused patch may disable the provider");
+        assert_eq!(stored.name, "openai-main");
     }
 
     /// The same row saved from the page's Edit form, which sends every field
@@ -1128,7 +1220,10 @@ mod tests {
         let out = update_provider(
             &block,
             &ctx,
-            &routed(admin_msg("update", &format!("/b/llm/api/providers/{id}"))),
+            &form_request(routed(admin_msg(
+                "update",
+                &format!("/b/llm/api/providers/{id}"),
+            ))),
             InputStream::from_bytes(form.into_bytes()),
         )
         .await;
@@ -1145,7 +1240,7 @@ mod tests {
             create_provider(
                 &block,
                 &ctx,
-                &admin_msg("create", "/b/llm/api/providers"),
+                &json_request(admin_msg("create", "/b/llm/api/providers")),
                 create_body(),
             )
             .await,
@@ -1161,7 +1256,10 @@ mod tests {
         let out = update_provider(
             &block,
             &ctx,
-            &routed(admin_msg("update", &format!("/b/llm/api/providers/{id}"))),
+            &form_request(routed(admin_msg(
+                "update",
+                &format!("/b/llm/api/providers/{id}"),
+            ))),
             InputStream::from_bytes(form.into_bytes()),
         )
         .await;
@@ -1218,7 +1316,7 @@ mod tests {
             create_provider(
                 &block,
                 &ctx,
-                &admin_msg("create", "/b/llm/api/providers"),
+                &json_request(admin_msg("create", "/b/llm/api/providers")),
                 create_body(),
             )
             .await,
@@ -1246,7 +1344,10 @@ mod tests {
             update_provider(
                 &block,
                 &ctx,
-                &routed(admin_msg("update", &format!("/b/llm/api/providers/{id}"))),
+                &json_request(routed(admin_msg(
+                    "update",
+                    &format!("/b/llm/api/providers/{id}"),
+                ))),
                 json_input(serde_json::json!({ "models": ["gpt-4o-mini"] })),
             )
             .await,
@@ -1317,7 +1418,7 @@ mod tests {
             create_provider(
                 block,
                 ctx,
-                &admin_msg("create", "/b/llm/api/providers"),
+                &json_request(admin_msg("create", "/b/llm/api/providers")),
                 json_input(serde_json::json!({
                     "name": "azure-reasoning",
                     "protocol": "open_ai_compatible",
@@ -1359,7 +1460,7 @@ mod tests {
             create_provider(
                 &block,
                 &ctx,
-                &admin_msg("create", "/b/llm/api/providers"),
+                &json_request(admin_msg("create", "/b/llm/api/providers")),
                 create_body(),
             )
             .await,
@@ -1385,7 +1486,10 @@ mod tests {
             update_provider(
                 &block,
                 &ctx,
-                &routed(admin_msg("update", &format!("/b/llm/api/providers/{id}"))),
+                &json_request(routed(admin_msg(
+                    "update",
+                    &format!("/b/llm/api/providers/{id}"),
+                ))),
                 json_input(serde_json::json!({ "enabled": false })),
             )
             .await,
@@ -1404,7 +1508,10 @@ mod tests {
             update_provider(
                 &block,
                 &ctx,
-                &routed(admin_msg("update", &format!("/b/llm/api/providers/{id}"))),
+                &json_request(routed(admin_msg(
+                    "update",
+                    &format!("/b/llm/api/providers/{id}"),
+                ))),
                 json_input(serde_json::json!({ "max_tokens_field": null })),
             )
             .await,
@@ -1430,7 +1537,7 @@ mod tests {
             create_provider(
                 &block,
                 &ctx,
-                &admin_msg("create", "/b/llm/api/providers"),
+                &json_request(admin_msg("create", "/b/llm/api/providers")),
                 create_body(),
             )
             .await,
@@ -1443,7 +1550,10 @@ mod tests {
             update_provider(
                 &block,
                 &ctx,
-                &routed(admin_msg("update", &format!("/b/llm/api/providers/{id}"))),
+                &json_request(routed(admin_msg(
+                    "update",
+                    &format!("/b/llm/api/providers/{id}"),
+                ))),
                 json_input(serde_json::json!({ "key_var": "" })),
             )
             .await,
@@ -1468,7 +1578,7 @@ mod tests {
             create_provider(
                 &block,
                 &ctx,
-                &admin_msg("create", "/b/llm/api/providers"),
+                &json_request(admin_msg("create", "/b/llm/api/providers")),
                 create_body(),
             )
             .await,
@@ -1481,7 +1591,10 @@ mod tests {
             update_provider(
                 &block,
                 &ctx,
-                &routed(admin_msg("update", &format!("/b/llm/api/providers/{id}"))),
+                &json_request(routed(admin_msg(
+                    "update",
+                    &format!("/b/llm/api/providers/{id}"),
+                ))),
                 json_input(serde_json::json!({ "enabled": false })),
             )
             .await,
@@ -1496,7 +1609,10 @@ mod tests {
             update_provider(
                 &block,
                 &ctx,
-                &routed(admin_msg("update", &format!("/b/llm/api/providers/{id}"))),
+                &json_request(routed(admin_msg(
+                    "update",
+                    &format!("/b/llm/api/providers/{id}"),
+                ))),
                 json_input(serde_json::json!({ "key_var": null })),
             )
             .await,
@@ -1584,7 +1700,7 @@ mod tests {
             create_provider(
                 &block,
                 &ctx,
-                &admin_msg("create", "/b/llm/api/providers"),
+                &json_request(admin_msg("create", "/b/llm/api/providers")),
                 create_body(),
             )
             .await,
@@ -1632,7 +1748,7 @@ mod tests {
         let out = create_provider(
             &block,
             &ctx,
-            &admin_msg("create", "/b/llm/api/providers"),
+            &json_request(admin_msg("create", "/b/llm/api/providers")),
             json_input(serde_json::json!({
                 "name": "anthropic-main",
                 "protocol": "anthropic",
@@ -1665,7 +1781,10 @@ mod tests {
         let out = update_provider(
             &block,
             &ctx,
-            &routed(admin_msg("update", &format!("/b/llm/api/providers/{id}"))),
+            &json_request(routed(admin_msg(
+                "update",
+                &format!("/b/llm/api/providers/{id}"),
+            ))),
             json_input(serde_json::json!({ "protocol": "anthropic" })),
         )
         .await;
@@ -1690,7 +1809,10 @@ mod tests {
             update_provider(
                 &block,
                 &ctx,
-                &routed(admin_msg("update", &format!("/b/llm/api/providers/{id}"))),
+                &json_request(routed(admin_msg(
+                    "update",
+                    &format!("/b/llm/api/providers/{id}"),
+                ))),
                 json_input(serde_json::json!({
                     "protocol": "anthropic",
                     "max_tokens_field": null,
@@ -1715,7 +1837,7 @@ mod tests {
             create_provider(
                 &block,
                 &ctx,
-                &admin_msg("create", "/b/llm/api/providers"),
+                &json_request(admin_msg("create", "/b/llm/api/providers")),
                 create_body(),
             )
             .await,
@@ -1746,7 +1868,10 @@ mod tests {
             update_provider(
                 &block,
                 &ctx,
-                &routed(admin_msg("update", &format!("/b/llm/api/providers/{id}"))),
+                &json_request(routed(admin_msg(
+                    "update",
+                    &format!("/b/llm/api/providers/{id}"),
+                ))),
                 json_input(serde_json::json!({
                     "models": ["gpt-4o-mini"],
                     "enabled": false,
@@ -1906,7 +2031,7 @@ mod inert_router_tests {
         blocks::llm::{
             provider_admin::NoopProviderAdmin,
             providers::config::ProviderProtocol,
-            routes::test_support::{admin_msg, routed},
+            routes::test_support::{admin_msg, json_request, routed},
             LlmBlock,
         },
         test_support::{output_json, TestContext},
@@ -1951,7 +2076,7 @@ mod inert_router_tests {
         let out = create_provider(
             &block,
             &ctx,
-            &admin_msg("create", "/b/llm/api/providers"),
+            &json_request(admin_msg("create", "/b/llm/api/providers")),
             create_body(),
         )
         .await;
@@ -1992,10 +2117,10 @@ mod inert_router_tests {
         let updated = update_provider(
             &block,
             &ctx,
-            &routed(admin_msg(
+            &json_request(routed(admin_msg(
                 "update",
                 &format!("/b/llm/api/providers/{}", seeded.id),
-            )),
+            ))),
             json_input(serde_json::json!({ "name": "renamed" })),
         )
         .await;
@@ -2253,7 +2378,10 @@ mod form_body_tests {
 
     use super::*;
     use crate::{
-        blocks::llm::{routes::test_support::admin_msg, LlmBlock, EXAMPLE_KEY_VAR},
+        blocks::llm::{
+            routes::test_support::{admin_msg, form_request},
+            LlmBlock, EXAMPLE_KEY_VAR,
+        },
         test_support::{output_json, TestContext},
     };
 
@@ -2289,7 +2417,7 @@ mod form_body_tests {
         create_provider(
             block,
             ctx,
-            &admin_msg("create", "/b/llm/api/providers"),
+            &form_request(admin_msg("create", "/b/llm/api/providers")),
             InputStream::from_bytes(body.as_bytes().to_vec()),
         )
         .await
@@ -2440,7 +2568,7 @@ mod form_body_tests {
             create_provider(
                 &block,
                 &ctx,
-                &admin_msg("create", "/b/llm/api/providers"),
+                &form_request(admin_msg("create", "/b/llm/api/providers")),
                 InputStream::from_bytes(TICKED_FORM.as_bytes().to_vec()),
             )
             .await,
@@ -2455,10 +2583,10 @@ mod form_body_tests {
             update_provider(
                 &block,
                 &ctx,
-                &crate::blocks::llm::routes::test_support::routed(admin_msg(
+                &form_request(crate::blocks::llm::routes::test_support::routed(admin_msg(
                     "update",
                     &format!("/b/llm/api/providers/{id}"),
-                )),
+                ))),
                 InputStream::from_bytes(edit.as_bytes().to_vec()),
             )
             .await,
@@ -2490,7 +2618,7 @@ mod form_body_tests {
             create_provider(
                 &block,
                 &ctx,
-                &admin_msg("create", "/b/llm/api/providers"),
+                &form_request(admin_msg("create", "/b/llm/api/providers")),
                 InputStream::from_bytes(body.into_bytes()),
             )
             .await,
@@ -2504,10 +2632,10 @@ mod form_body_tests {
             update_provider(
                 &block,
                 &ctx,
-                &crate::blocks::llm::routes::test_support::routed(admin_msg(
+                &form_request(crate::blocks::llm::routes::test_support::routed(admin_msg(
                     "update",
                     &format!("/b/llm/api/providers/{id}"),
-                )),
+                ))),
                 InputStream::from_bytes(edit.into_bytes()),
             )
             .await,
@@ -2525,10 +2653,10 @@ mod form_body_tests {
         let out = update_provider(
             &block,
             &ctx,
-            &crate::blocks::llm::routes::test_support::routed(admin_msg(
+            &form_request(crate::blocks::llm::routes::test_support::routed(admin_msg(
                 "update",
                 &format!("/b/llm/api/providers/{id}"),
-            )),
+            ))),
             InputStream::from_bytes(format!("{TICKED_FORM}&api_key=sk-live-x").into_bytes()),
         )
         .await;
