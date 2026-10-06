@@ -525,17 +525,13 @@ mod tests {
     /// forced-colors mode (Windows High Contrast drops box-shadows), so every
     /// rule that draws one also carries the transparent outline that mode
     /// paints, and no `:focus-visible` rule removes the outline. Covers the
-    /// shared bundle and the block stylesheet that draws its own ring.
+    /// shared bundle and every block-owned stylesheet (`all_stylesheets`).
     #[cfg(feature = "embed-assets")]
     #[test]
     fn every_box_shadow_focus_ring_keeps_a_forced_colors_outline() {
-        let sheets = [
-            ("app.css", super::css()),
-            ("dev.css", include_str!("../blocks/dev/assets/dev.css")),
-        ];
         let mut rings = 0;
-        for (name, sheet) in sheets {
-            for (selector, body) in css_leaf_blocks(sheet) {
+        for (name, sheet) in all_stylesheets() {
+            for (selector, body) in css_leaf_blocks(&sheet) {
                 let decls: Vec<String> = body
                     .split(';')
                     .map(|d| d.split_whitespace().collect::<Vec<_>>().join(" "))
@@ -985,8 +981,109 @@ mod tests {
         format!("#{:02x}{:02x}{:02x}", rgb.0, rgb.1, rgb.2)
     }
 
-    /// Every `var(--token)` referenced anywhere in the bundle must resolve to
-    /// a declaration in `:root`.
+    /// Every stylesheet a block ships beside its own code -- each
+    /// `src/blocks/**/*.css`, as `(path under src/blocks, contents)`, sorted.
+    ///
+    /// A block stylesheet (`blocks/dev/assets/dev.css` is one) is served by
+    /// its block rather than bundled into `app.css`, so a guard that only
+    /// reads `super::css()` never sees it: a token removed from tokens.css
+    /// but still referenced there silently zeroes every padding, gap and
+    /// margin that uses it. Discovered from the tree rather than listed, so
+    /// a new block stylesheet is checked without editing this module.
+    #[cfg(feature = "embed-assets")]
+    fn block_stylesheets() -> Vec<(String, String)> {
+        fn walk(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+            let entries = std::fs::read_dir(dir)
+                .unwrap_or_else(|e| panic!("cannot read {}: {e}", dir.display()));
+            for entry in entries {
+                let path = entry.expect("readable directory entry").path();
+                if path.is_dir() {
+                    walk(&path, out);
+                } else if path.extension().is_some_and(|ext| ext == "css") {
+                    out.push(path);
+                }
+            }
+        }
+        let root = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/blocks");
+        let mut paths = Vec::new();
+        walk(&root, &mut paths);
+        paths.sort();
+        let sheets: Vec<(String, String)> = paths
+            .into_iter()
+            .map(|path| {
+                let name = path
+                    .strip_prefix(&root)
+                    .expect("walked from root")
+                    .display()
+                    .to_string();
+                let css = std::fs::read_to_string(&path)
+                    .unwrap_or_else(|e| panic!("cannot read {}: {e}", path.display()));
+                (name, css)
+            })
+            .collect();
+        // A walk that found nothing would make every guard below vacuous for
+        // block CSS.
+        assert!(
+            sheets.iter().any(|(name, _)| name == "dev/assets/dev.css"),
+            "block stylesheet discovery did not find dev/assets/dev.css: {:?}",
+            sheets.iter().map(|(name, _)| name).collect::<Vec<_>>()
+        );
+        sheets
+    }
+
+    /// The shared bundle followed by every block stylesheet -- everything a
+    /// page can load whose `var()` references resolve against tokens.css.
+    #[cfg(feature = "embed-assets")]
+    fn all_stylesheets() -> Vec<(String, String)> {
+        let mut sheets = vec![("app.css".to_string(), super::css().to_string())];
+        sheets.extend(block_stylesheets());
+        sheets
+    }
+
+    /// Custom-property names referenced WITHOUT a fallback in `css`.
+    ///
+    /// Only these can break. `var(--x, #fff)` is valid whether or not `--x`
+    /// exists -- the fallback renders -- so it is not a defect, just an
+    /// undefined name. `var(--x)` with no fallback is the one that drops its
+    /// whole declaration.
+    #[cfg(feature = "embed-assets")]
+    fn fallbackless_var_references(css: &str) -> std::collections::BTreeSet<String> {
+        let css = strip_css_comments(css);
+        let mut referenced = std::collections::BTreeSet::new();
+        let mut rest = css.as_str();
+        while let Some(i) = rest.find("var(--") {
+            rest = &rest[i + "var(".len()..];
+            let name: String = rest
+                .chars()
+                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
+                .collect();
+            if name.is_empty() {
+                continue;
+            }
+            if rest[name.len()..].trim_start().starts_with(',') {
+                continue; // has a fallback -- renders fine
+            }
+            referenced.insert(name);
+        }
+        referenced
+    }
+
+    /// Custom properties a stylesheet declares itself, on any selector -- a
+    /// block may scope a property of its own to its own markup.
+    #[cfg(feature = "embed-assets")]
+    fn declared_custom_properties(css: &str) -> std::collections::BTreeSet<String> {
+        css_leaf_blocks(css)
+            .iter()
+            .flat_map(|(_, body)| body.split(';'))
+            .filter_map(|decl| decl.trim().split_once(':'))
+            .map(|(name, _)| name.trim())
+            .filter(|name| name.starts_with("--"))
+            .map(str::to_string)
+            .collect()
+    }
+
+    /// Every `var(--token)` referenced anywhere in the bundle, or in any
+    /// block-owned stylesheet, must resolve to a declaration in `:root`.
     ///
     /// An unresolvable `var()` does not fall back to something sensible -- the
     /// whole declaration becomes invalid at computed-value time and the
@@ -1019,31 +1116,7 @@ mod tests {
     #[cfg(feature = "embed-assets")]
     #[test]
     fn every_referenced_custom_property_is_defined_in_root() {
-        let s = super::css();
-        let tokens = parse_root_tokens(s);
-
-        // Only references WITHOUT a fallback can break. `var(--x, #fff)` is
-        // valid whether or not `--x` exists -- the fallback renders -- so it is
-        // not a defect, just an undefined name. `var(--x)` with no fallback is
-        // the one that drops its whole declaration.
-        let mut referenced: std::collections::BTreeSet<String> = Default::default();
-        let mut rest = s;
-        while let Some(i) = rest.find("var(--") {
-            rest = &rest[i + "var(".len()..];
-            let name: String = rest
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric() || *c == '-' || *c == '_')
-                .collect();
-            if name.is_empty() {
-                continue;
-            }
-            let after = rest[name.len()..].trim_start();
-            if after.starts_with(',') {
-                continue; // has a fallback -- renders fine
-            }
-            referenced.insert(name);
-        }
-
+        let tokens = parse_root_tokens(super::css());
         // Tokens a caller may legitimately supply per-deployment or per-render,
         // which therefore have no `:root` default. Each is set from Rust via an
         // inline custom property on the element that consumes it.
@@ -1064,17 +1137,36 @@ mod tests {
             "--public-page-bg",
         ];
 
-        let missing: Vec<&String> = referenced
-            .iter()
-            .filter(|n| !tokens.contains_key(n.as_str()))
-            .filter(|n| !CALLER_SUPPLIED.contains(&n.as_str()))
-            .collect();
+        let mut missing: Vec<String> = Vec::new();
+        let mut shared_references = 0;
+        for (sheet, css) in all_stylesheets() {
+            let referenced = fallbackless_var_references(&css);
+            // A block stylesheet may define a property of its own; the shared
+            // bundle defines tokens in `:root` only.
+            let own = if sheet == "app.css" {
+                Default::default()
+            } else {
+                declared_custom_properties(&css)
+            };
+            if sheet == "app.css" {
+                shared_references = referenced.len();
+            }
+            missing.extend(
+                referenced
+                    .iter()
+                    .filter(|n| !tokens.contains_key(n.as_str()))
+                    .filter(|n| !own.contains(n.as_str()))
+                    .filter(|n| !CALLER_SUPPLIED.contains(&n.as_str()))
+                    .map(|n| format!("{sheet}: {n}")),
+            );
+        }
 
         assert!(
             missing.is_empty(),
-            "these custom properties are referenced by the stylesheet but never \
-             defined in :root, so every declaration using them is dropped and \
-             the property falls back to the `*` reset (usually to 0): {missing:?}. \
+            "these custom properties are referenced by a stylesheet but never \
+             defined in tokens.css's :root (nor by the block stylesheet itself), \
+             so every declaration using them is dropped and the property falls \
+             back to the `*` reset (usually to 0): {missing:#?}. \
              If one is deliberately supplied by a caller at render time, add it \
              to CALLER_SUPPLIED with a note saying who sets it."
         );
@@ -1083,10 +1175,9 @@ mod tests {
         // refactor changed `var()` spelling, the assertion above would pass
         // vacuously on an empty set.
         assert!(
-            referenced.len() > 40,
-            "only {} var() references found -- the extractor has probably \
-             stopped matching, making the check above vacuous",
-            referenced.len()
+            shared_references > 40,
+            "only {shared_references} var() references found in app.css -- the \
+             extractor has probably stopped matching, making the check above vacuous"
         );
     }
 
@@ -1127,8 +1218,9 @@ mod tests {
         (".auth-split__", "--navy-900"),
     ];
 
-    /// Asserts every text/background pair the CSS bundle declares meets the
-    /// 4.5:1 WCAG AA floor for normal text, matching on RESOLVED COLOR VALUES
+    /// Asserts every text/background pair the CSS bundle -- and every
+    /// block-owned stylesheet (`all_stylesheets`) -- declares meets the 4.5:1
+    /// WCAG AA floor for normal text, matching on RESOLVED COLOR VALUES
     /// rather than token names.
     ///
     /// Value-matching is what closes the alias hole that let
@@ -1167,8 +1259,7 @@ mod tests {
     #[cfg(feature = "embed-assets")]
     #[test]
     fn text_and_background_pairs_meet_wcag_aa() {
-        let s = super::css();
-        let tokens = parse_root_tokens(s);
+        let tokens = parse_root_tokens(super::css());
 
         let exempt = |selector: &str| -> bool {
             selector
@@ -1192,7 +1283,13 @@ mod tests {
 
         let mut offenders: Vec<String> = Vec::new();
         let mut checked = 0usize;
-        for (selector, body) in css_leaf_blocks(s) {
+        let sheets = all_stylesheets();
+        let rules = sheets.iter().flat_map(|(sheet, css)| {
+            css_leaf_blocks(css)
+                .into_iter()
+                .map(move |(selector, body)| (sheet.as_str(), selector, body))
+        });
+        for (sheet, selector, body) in rules {
             if exempt(&selector) {
                 continue;
             }
@@ -1243,7 +1340,7 @@ mod tests {
             checked += 1;
             if ratio < 4.5 {
                 offenders.push(format!(
-                    "{}: {ratio:.2}:1 ({} text on {} background)",
+                    "{sheet}: {}: {ratio:.2}:1 ({} text on {} background)",
                     selector.split(',').next().unwrap_or(&selector).trim(),
                     hex_of(text_rgb),
                     hex_of(bg_rgb)
