@@ -1639,26 +1639,6 @@ pub(super) mod render_tests {
         assert!(empty.contains("No ticket types yet"), "{empty}");
     }
 
-    /// Store `key` = `value` in the variables table, flagged `sensitive` as
-    /// an administrator would.
-    async fn store(ctx: &TestContext, key: &str, value: &str, sensitive: bool) {
-        crate::platform_state::variables::insert(
-            &ctx.fixture(),
-            crate::platform_state::variables::NewVariable {
-                key: key.into(),
-                value: value.into(),
-                name: String::new(),
-                description: String::new(),
-                warning: String::new(),
-                sensitive,
-                updated_by: "test".into(),
-                block: None,
-            },
-        )
-        .await
-        .expect("store variable");
-    }
-
     /// Values come masked from the admin block: a secret, a `…_KEY`, and a
     /// plain-named setting an administrator flagged sensitive each say only
     /// whether they are set; a plain value is shown; an unset value says
@@ -1668,10 +1648,13 @@ pub(super) mod render_tests {
         use super::super::config;
 
         let ctx = TestContext::with_tickets().await;
-        store(&ctx, config::TURNSTILE_SECRET_KEY, "do-not-show-me", false).await;
-        store(&ctx, config::TURNSTILE_SITE_KEY, "site-key-value", false).await;
-        store(&ctx, config::SUPPORT_EMAIL, "flagged@example.test", true).await;
-        store(&ctx, config::BACK_URL, "/help", false).await;
+        ctx.store_variable(config::TURNSTILE_SECRET_KEY, "do-not-show-me", false)
+            .await;
+        ctx.store_variable(config::TURNSTILE_SITE_KEY, "site-key-value", false)
+            .await;
+        ctx.store_variable(config::SUPPORT_EMAIL, "flagged@example.test", true)
+            .await;
+        ctx.store_variable(config::BACK_URL, "/help", false).await;
         let html = page(&ctx, "/b/tickets/admin/settings").await;
         for hidden in ["do-not-show-me", "site-key-value", "flagged@example.test"] {
             assert!(!html.contains(hidden), "{hidden} shown: {html}");

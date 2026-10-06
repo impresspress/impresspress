@@ -688,6 +688,28 @@ impl TestContext {
         ctx.running_as("impresspress/tickets")
     }
 
+    /// Store `key` = `value` in the admin-owned variables table, flagged
+    /// `sensitive` as an administrator would set it, through the staging
+    /// frame ([`Self::fixture`]). A block's own test stages its settings
+    /// here rather than reaching the admin block's table from block code.
+    pub async fn store_variable(&self, key: &str, value: &str, sensitive: bool) {
+        crate::platform_state::variables::insert(
+            &self.fixture(),
+            crate::platform_state::variables::NewVariable {
+                key: key.into(),
+                value: value.into(),
+                name: String::new(),
+                description: String::new(),
+                warning: String::new(),
+                sensitive,
+                updated_by: "test".into(),
+                block: None,
+            },
+        )
+        .await
+        .expect("store variable");
+    }
+
     /// Build a `TestContext` with admin + auth + vector migrations applied,
     /// running as `impresspress/vector` (see [`Self::running_as`]); stage and
     /// assert through [`Self::fixture`].
