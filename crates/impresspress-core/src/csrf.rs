@@ -68,12 +68,31 @@ fn is_unsafe_method(action: &str) -> bool {
     matches!(action, "create" | "update" | "delete")
 }
 
+/// The reason a request the origin policy refuses is given: the JSON error
+/// message for an API caller, the body of the 403 page for a browser.
+pub const ORIGIN_BLOCKED_REASON: &str =
+    "This request couldn't be verified as coming from this site. Reload the page and try again.";
+
 /// Enforce the CSRF origin policy for one already-routed request.
 ///
 /// Called from `pipeline::handle_request`, after the auth-meta extraction
 /// step (so `msg.user_id()` reflects whether the cookie's JWT actually
 /// verified) and before `routing::route_to_block`. Returns `Some(response)`
-/// to short-circuit with a rejection, `None` to let the request proceed.
+/// to short-circuit with the 403 [`crate::ui::forbidden_response`] draws for
+/// [`ORIGIN_BLOCKED_REASON`], `None` to let the request proceed. The decision
+/// itself is [`origin_policy_refuses`].
+pub async fn enforce_origin_policy(
+    ctx: &dyn Context,
+    msg: &Message,
+    cookie_authenticated: bool,
+) -> Option<OutputStream> {
+    if !origin_policy_refuses(msg, cookie_authenticated) {
+        return None;
+    }
+    Some(crate::ui::forbidden_response(ctx, msg, ORIGIN_BLOCKED_REASON).await)
+}
+
+/// Whether the CSRF origin policy refuses this request.
 ///
 /// Only applies when ALL of:
 /// - `cookie_authenticated` — the credential came from the `auth_token`
@@ -86,9 +105,9 @@ fn is_unsafe_method(action: &str) -> bool {
 ///   public route (the Stripe webhook, OAuth callback, password-reset
 ///   endpoints) is not meant to require this check at all.
 /// - the method is unsafe (`is_unsafe_method`).
-pub fn enforce_origin_policy(msg: &Message, cookie_authenticated: bool) -> Option<OutputStream> {
+fn origin_policy_refuses(msg: &Message, cookie_authenticated: bool) -> bool {
     if !cookie_authenticated || msg.user_id().is_empty() || !is_unsafe_method(msg.action()) {
-        return None;
+        return false;
     }
 
     // Primary signal: Fetch Metadata. Sent by every modern browser for
@@ -111,11 +130,7 @@ pub fn enforce_origin_policy(msg: &Message, cookie_authenticated: bool) -> Optio
             sec_fetch_site.to_ascii_lowercase().as_str(),
             "same-origin" | "none"
         );
-        return if is_safe {
-            None
-        } else {
-            Some(crate::ui::csrf_blocked_response(msg))
-        };
+        return !is_safe;
     }
 
     // Fallback for clients that don't send Fetch Metadata (older browsers
@@ -132,14 +147,10 @@ pub fn enforce_origin_policy(msg: &Message, cookie_authenticated: bool) -> Optio
         }
         let authority = request_authority(value);
         let allowed = authority.is_some() && authority == self_authority;
-        return if allowed {
-            None
-        } else {
-            Some(crate::ui::csrf_blocked_response(msg))
-        };
+        return !allowed;
     }
 
-    Some(crate::ui::csrf_blocked_response(msg))
+    true
 }
 
 /// Extract the `host[:port]` authority from an absolute URL string (an
@@ -240,7 +251,7 @@ mod tests {
     fn safe_method_is_never_blocked_regardless_of_headers() {
         let mut msg = cookie_msg("retrieve", "/b/admin/users", "user-1");
         msg.set_meta("http.header.sec-fetch-site", "cross-site");
-        assert!(enforce_origin_policy(&msg, true).is_none());
+        assert!(!origin_policy_refuses(&msg, true));
     }
 
     #[test]
@@ -249,7 +260,7 @@ mod tests {
         // this credential, not the cookie fallback — never CSRF-able.
         let mut msg = cookie_msg("create", "/b/admin/users", "user-1");
         msg.set_meta("http.header.sec-fetch-site", "cross-site");
-        assert!(enforce_origin_policy(&msg, false).is_none());
+        assert!(!origin_policy_refuses(&msg, false));
     }
 
     #[test]
@@ -259,7 +270,7 @@ mod tests {
         // protected route, and a genuinely public route is untouched.
         let mut msg = cookie_msg("create", "/b/admin/users", "");
         msg.set_meta("http.header.sec-fetch-site", "cross-site");
-        assert!(enforce_origin_policy(&msg, true).is_none());
+        assert!(!origin_policy_refuses(&msg, true));
     }
 
     // -- enforce_origin_policy: Sec-Fetch-Site ------------------------------
@@ -268,7 +279,10 @@ mod tests {
     async fn cross_site_cookie_authenticated_post_is_rejected() {
         let mut msg = cookie_msg("create", "/b/admin/users", "user-1");
         msg.set_meta("http.header.sec-fetch-site", "cross-site");
-        let out = enforce_origin_policy(&msg, true).expect("must reject");
+        let ctx = TestContext::new().await;
+        let out = enforce_origin_policy(&ctx, &msg, true)
+            .await
+            .expect("must reject");
         assert!(crate::test_support::output_is_error(out, "PermissionDenied").await);
     }
 
@@ -276,7 +290,7 @@ mod tests {
     fn same_origin_cookie_authenticated_post_is_allowed() {
         let mut msg = cookie_msg("create", "/b/admin/users", "user-1");
         msg.set_meta("http.header.sec-fetch-site", "same-origin");
-        assert!(enforce_origin_policy(&msg, true).is_none());
+        assert!(!origin_policy_refuses(&msg, true));
     }
 
     #[test]
@@ -285,7 +299,7 @@ mod tests {
             let mut msg = cookie_msg("update", "/b/admin/users/1", "user-1");
             msg.set_meta("http.header.sec-fetch-site", value);
             assert!(
-                enforce_origin_policy(&msg, true).is_none(),
+                !origin_policy_refuses(&msg, true),
                 "{value} should be allowed"
             );
         }
@@ -302,7 +316,10 @@ mod tests {
         // `cross-site`.
         let mut msg = cookie_msg("update", "/b/admin/users/1", "user-1");
         msg.set_meta("http.header.sec-fetch-site", "same-site");
-        let out = enforce_origin_policy(&msg, true).expect("must reject");
+        let ctx = TestContext::new().await;
+        let out = enforce_origin_policy(&ctx, &msg, true)
+            .await
+            .expect("must reject");
         assert!(crate::test_support::output_is_error(out, "PermissionDenied").await);
     }
 
@@ -310,7 +327,10 @@ mod tests {
     async fn unrecognized_sec_fetch_site_value_is_rejected() {
         let mut msg = cookie_msg("delete", "/b/admin/users/1", "user-1");
         msg.set_meta("http.header.sec-fetch-site", "garbage");
-        let out = enforce_origin_policy(&msg, true).expect("must reject");
+        let ctx = TestContext::new().await;
+        let out = enforce_origin_policy(&ctx, &msg, true)
+            .await
+            .expect("must reject");
         assert!(crate::test_support::output_is_error(out, "PermissionDenied").await);
     }
 
@@ -320,14 +340,17 @@ mod tests {
     fn matching_origin_is_allowed_when_no_sec_fetch_site() {
         let mut msg = cookie_msg("create", "/b/admin/users", "user-1");
         msg.set_meta("http.header.origin", "https://impresspress.example.com");
-        assert!(enforce_origin_policy(&msg, true).is_none());
+        assert!(!origin_policy_refuses(&msg, true));
     }
 
     #[tokio::test]
     async fn mismatched_origin_is_rejected() {
         let mut msg = cookie_msg("create", "/b/admin/users", "user-1");
         msg.set_meta("http.header.origin", "https://evil.example");
-        let out = enforce_origin_policy(&msg, true).expect("must reject");
+        let ctx = TestContext::new().await;
+        let out = enforce_origin_policy(&ctx, &msg, true)
+            .await
+            .expect("must reject");
         assert!(crate::test_support::output_is_error(out, "PermissionDenied").await);
     }
 
@@ -338,13 +361,16 @@ mod tests {
             "http.header.referer",
             "https://impresspress.example.com/b/admin/users",
         );
-        assert!(enforce_origin_policy(&msg, true).is_none());
+        assert!(!origin_policy_refuses(&msg, true));
     }
 
     #[tokio::test]
     async fn no_fetch_metadata_no_origin_no_referer_is_rejected() {
         let msg = cookie_msg("create", "/b/admin/users", "user-1");
-        let out = enforce_origin_policy(&msg, true).expect("must reject fail-closed");
+        let ctx = TestContext::new().await;
+        let out = enforce_origin_policy(&ctx, &msg, true)
+            .await
+            .expect("must reject fail-closed");
         assert!(crate::test_support::output_is_error(out, "PermissionDenied").await);
     }
 
@@ -356,7 +382,7 @@ mod tests {
         // here: an attacker still needs control of the matching host.
         let mut msg = cookie_msg("create", "/b/admin/users", "user-1");
         msg.set_meta("http.header.origin", "http://impresspress.example.com");
-        assert!(enforce_origin_policy(&msg, true).is_none());
+        assert!(!origin_policy_refuses(&msg, true));
     }
 
     // -- token / hidden_field / verify ---------------------------------------

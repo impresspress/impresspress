@@ -21,7 +21,7 @@ use crate::{
         errors::{impresspress_error_code_to_wafer, ErrorCode},
     },
     config_vars::{ENABLE_OAUTH_KEY, FRONTEND_URL_KEY},
-    http::{err_bad_request, err_forbidden, err_internal, err_internal_no_cause, ResponseBuilder},
+    http::{err_bad_request, err_internal, err_internal_no_cause, ResponseBuilder},
 };
 
 /// A refusal that also expires this flow's binding cookie.
@@ -67,7 +67,7 @@ pub async fn handle(
         Err(e) => return crud::db_error_internal(e, "Could not read the OAuth switch"),
     };
     if !enable_oauth {
-        return err_forbidden("OAuth login is not enabled");
+        return crate::ui::forbidden_response(ctx, msg, "OAuth login is not enabled").await;
     }
 
     let code = msg.query("code");

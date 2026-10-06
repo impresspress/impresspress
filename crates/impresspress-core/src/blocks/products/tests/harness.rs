@@ -182,6 +182,23 @@ pub async fn output_to_html(out: OutputStream) -> String {
     }
 }
 
+/// A page response's HTTP status and HTML body, whatever the status (an error
+/// page is still a page). An error terminal — the JSON an API caller gets —
+/// is status 0 and an empty body.
+pub async fn output_status_and_html(out: OutputStream) -> (u16, String) {
+    match out.collect_buffered().await {
+        Ok(buf) => {
+            let status = buf
+                .meta
+                .iter()
+                .find(|e| e.key == "resp.status")
+                .map_or(200, |e| e.value.parse().unwrap_or(0));
+            (status, String::from_utf8(buf.body).unwrap_or_default())
+        }
+        Err(_) => (0, String::new()),
+    }
+}
+
 /// Assert that `html` loads the products bundle `logical`, and hand back that
 /// bundle's source.
 ///

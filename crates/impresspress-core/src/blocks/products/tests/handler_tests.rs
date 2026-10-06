@@ -3601,6 +3601,21 @@ async fn seller_page_is_forbidden_when_user_selling_is_disabled() {
     }
 }
 
+/// The same gate, met by a signed-in seller's browser: the 403 page inside
+/// the portal shell, saying why — not the JSON error, and not "Sign in".
+#[tokio::test]
+async fn seller_page_refusal_is_the_403_page_in_the_shell_for_a_browser() {
+    let ctx = ctx().await;
+    let (mut msg, input) = get_msg("/b/products/my-products", "seller_1");
+    msg.set_meta("http.header.accept", "text/html,application/xhtml+xml");
+    let (status, html) = output_status_and_html(dispatch(&ctx, msg, input).await).await;
+    assert_eq!(status, 403, "{html}");
+    assert!(html.contains(r#"data-nav="portal""#), "{html}");
+    assert!(html.contains("status-page--in-shell"), "{html}");
+    assert!(html.contains("User product selling is disabled"), "{html}");
+    assert!(!html.contains("Sign in"), "{html}");
+}
+
 #[test]
 fn commerce_ssr_routes_declare_their_auth_tiers() {
     use wafer_run::{AuthLevel, Block};
@@ -3934,6 +3949,34 @@ async fn order_pages_use_exact_currency_and_enforce_buyer_seller_actions() {
         )
         .await
     );
+
+    // The same refusals, met in a browser: the 403 page in the shell, with
+    // the reason.
+    for (path, user) in [
+        (
+            "/b/products/selling/orders/order_page_jpy",
+            "seller_other_user",
+        ),
+        (
+            "/b/products/my-purchases/order_page_jpy",
+            "seller_other_user",
+        ),
+    ] {
+        let (mut msg, _) = get_msg(path, user);
+        msg.set_meta("http.header.accept", "text/html");
+        let out = if path.starts_with("/b/products/selling/") {
+            super::super::pages::seller_order_detail(&ctx, &msg, "order_page_jpy").await
+        } else {
+            super::super::pages::my_purchase_detail(&ctx, &msg, "order_page_jpy").await
+        };
+        let (status, html) = output_status_and_html(out).await;
+        assert_eq!(status, 403, "{path}: {html}");
+        assert!(html.contains(r#"data-nav="portal""#), "{path}: {html}");
+        assert!(
+            html.contains("This order belongs to another account"),
+            "{path}: {html}"
+        );
+    }
 }
 
 /// A line item's `input_snapshot` is a JSON-object column: written by

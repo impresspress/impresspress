@@ -79,7 +79,7 @@ use self::config::{
     STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, WEBHOOK_SECRET, WEBHOOK_URL,
 };
 use super::rate_limit::{apply_route_limit, UserRateLimiter};
-use crate::{blocks::crud, endpoint_match, http::err_forbidden};
+use crate::{blocks::crud, endpoint_match};
 
 /// Adapter-injected runtime identity. The browser service-worker adapter sets
 /// this directly on its in-memory ConfigService after loading persisted
@@ -399,7 +399,7 @@ crate::impresspress_feature_block! {
         if let Some(refusal) = routes::user_products_refusal(route) {
             match handlers::user_products_enabled(ctx).await {
                 Ok(true) => {}
-                Ok(false) => return err_forbidden(refusal),
+                Ok(false) => return crate::ui::forbidden_response(ctx, &msg, refusal).await,
                 Err(e) => {
                     return crate::blocks::crud::db_error_internal(
                         e,
@@ -412,7 +412,10 @@ crate::impresspress_feature_block! {
         // their read-only catalog and order history available.
         if routes::requires_unsuspended_seller(route) {
             match repo::seller_accounts::is_suspended(ctx, msg.user_id()).await {
-                Ok(true) => return err_forbidden("Seller account is suspended"),
+                Ok(true) => {
+                    return crate::ui::forbidden_response(ctx, &msg, "Seller account is suspended")
+                        .await
+                }
                 Ok(false) => {}
                 Err(error) => return crud::db_error_internal(error, "Could not verify seller status"),
             }

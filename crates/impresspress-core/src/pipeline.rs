@@ -476,7 +476,8 @@ pub async fn handle_request(
     // below exactly like a dispatched response would.
     //
     // 3. Route to block.
-    let mut stream = match crate::csrf::enforce_origin_policy(&msg, cookie_authenticated) {
+    let mut stream = match crate::csrf::enforce_origin_policy(ctx, &msg, cookie_authenticated).await
+    {
         Some(denied) => denied,
         None => routing::route_to_block(ctx, msg, input, features, block_infos, extra_routes).await,
     };

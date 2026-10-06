@@ -605,48 +605,80 @@ fn status_response(
     )
 }
 
-/// Return styled 403 for browser requests, JSON for API requests.
-pub fn forbidden_response(msg: &wafer_run::Message) -> wafer_run::OutputStream {
-    let accept = msg.get_meta("http.header.accept");
-    if accept.contains("text/html") && !accept.contains("application/json") {
-        status_response(
-            403,
-            "Forbidden",
-            "403",
-            "Forbidden",
-            "You don't have access to this page.",
-            ("Sign in", "/b/auth/login"),
-        )
-    } else {
-        crate::http::err_forbidden("admin access required")
-    }
-}
+/// The heading every 403 page carries; the reason under it says why.
+const FORBIDDEN_TITLE: &str = "Access denied";
 
-/// A credentialed, state-changing request that failed the CSRF origin policy
-/// (see [`crate::csrf::enforce_origin_policy`]). Kept distinct from
-/// [`forbidden_response`] so the message names the actual cause — a request
-/// that couldn't be verified as same-origin — instead of the misleading
-/// "admin access required" (which belongs to genuine admin-role denials).
-pub fn csrf_blocked_response(msg: &wafer_run::Message) -> wafer_run::OutputStream {
-    let accept = msg.get_meta("http.header.accept");
-    if accept.contains("text/html") && !accept.contains("application/json") {
-        status_response(
+/// The 403 panel's heading inside the shell, where the topbar already says
+/// [`FORBIDDEN_TITLE`].
+const FORBIDDEN_PANEL_TITLE: &str = "You don't have access to this page";
+
+/// The 403 a request is refused with, for `reason`: one sentence the caller
+/// can act on ("Seller account is suspended"). It is the JSON error message
+/// for an API caller and the body of the page for a browser, decided by
+/// [`wants_page`] — the same decision the 404 makes.
+///
+/// A signed-in viewer sees the page inside the shell they normally work in
+/// (the admin sidebar for an administrator, the portal's for anyone else)
+/// with a link back to that shell's home; the denied page's own frame is not
+/// one this viewer is entitled to. A signed-out viewer gets the bare status
+/// page with a "Sign in" action, since signing in is the one way forward a
+/// visitor without an account has. The bare page is also the answer when the
+/// chrome cannot be drawn (its site-config read failed).
+pub async fn forbidden_response(
+    ctx: &dyn wafer_run::context::Context,
+    msg: &wafer_run::Message,
+    reason: &str,
+) -> wafer_run::OutputStream {
+    if !wants_page(msg) {
+        return crate::http::err_forbidden(reason);
+    }
+    let Some(user) = UserInfo::from_message(msg) else {
+        return status_response(
             403,
-            "Request Blocked",
+            FORBIDDEN_TITLE,
             "403",
-            "Request blocked",
-            "This request couldn't be verified as coming from this site. Reload the page and try again.",
-            ("Go to homepage", "/"),
+            FORBIDDEN_TITLE,
+            reason,
+            ("Sign in", "/b/auth/login"),
+        );
+    };
+    let (shell, back) = if user.is_admin() {
+        (
+            Shell::admin(FORBIDDEN_TITLE, FORBIDDEN_TITLE),
+            BackLink::ADMIN_DASHBOARD,
         )
     } else {
-        crate::http::err_forbidden("cross-origin request blocked")
+        (
+            Shell::portal(FORBIDDEN_TITLE, FORBIDDEN_TITLE),
+            BackLink::PORTAL_HOME,
+        )
+    };
+    let body = templates::status_panel(
+        "403",
+        FORBIDDEN_PANEL_TITLE,
+        reason,
+        (back.label, back.href),
+    );
+    match shell_document(ctx, msg, shell, body).await {
+        Ok(document) => crate::http::ResponseBuilder::new().status(403).body(
+            document.into_string().into_bytes(),
+            "text/html; charset=utf-8",
+        ),
+        Err(_) => status_response(
+            403,
+            FORBIDDEN_TITLE,
+            "403",
+            FORBIDDEN_TITLE,
+            reason,
+            ("Go home", "/"),
+        ),
     }
 }
 
 /// A request with no identity on a protected route — anonymous, or carrying a
 /// credential that did not verify (identical by the time enforcement runs).
 /// A browser page is sent to login with a return path, so the user lands back
-/// where they started after signing in. An API caller (non-HTML `Accept`)
+/// where they started after signing in. An API caller ([`wants_page`])
 /// gets the JSON `401` with its `WWW-Authenticate` challenge
 /// ([`crate::http::err_unauthenticated`]): the status every client reads as
 /// "sign in", which the `403` of [`forbidden_response`] is not.
@@ -656,8 +688,7 @@ pub fn csrf_blocked_response(msg: &wafer_run::Message) -> wafer_run::OutputStrea
 /// consumes (`is_safe_local_redirect` on the consumer side); the producer only
 /// needs to encode.
 pub fn unauthenticated_response(msg: &wafer_run::Message) -> wafer_run::OutputStream {
-    let accept = msg.get_meta("http.header.accept");
-    if accept.contains("text/html") && !accept.contains("application/json") {
+    if wants_page(msg) {
         let target = format!(
             "/b/auth/login?redirect={}",
             crate::util::urlencode(msg.path())
@@ -672,6 +703,9 @@ pub fn unauthenticated_response(msg: &wafer_run::Message) -> wafer_run::OutputSt
 /// accepts HTML and not JSON, and its path is not under an `/api/` segment.
 /// An API path answers JSON whatever the client accepts — a browser tab
 /// opened on `/b/admin/api/nope` is still talking to the API.
+///
+/// The one page-or-API decision every status answer here makes: the 401
+/// redirect, the 403, the 404, the 500 and a classified refusal.
 fn wants_page(msg: &wafer_run::Message) -> bool {
     let accept = msg.get_meta("http.header.accept");
     accept.contains("text/html")
@@ -698,7 +732,8 @@ pub fn not_found_response(msg: &wafer_run::Message) -> wafer_run::OutputStream {
     }
 }
 
-/// Return styled 500 for browser requests, JSON for API requests.
+/// Return styled 500 for browser requests, JSON for API requests (see
+/// [`wants_page`]).
 ///
 /// This is what a full page answers when a read it renders from fails: the
 /// page is never drawn from defaults, because an empty list or a blank form
@@ -711,8 +746,7 @@ pub fn not_found_response(msg: &wafer_run::Message) -> wafer_run::OutputStream {
 /// [`crate::blocks::crud::db_error_page`], which answers this only for an
 /// internal fault and [`refused_response`] for a denial or a quota.
 pub fn server_error_response(msg: &wafer_run::Message) -> wafer_run::OutputStream {
-    let accept = msg.get_meta("http.header.accept");
-    if accept.contains("text/html") && !accept.contains("application/json") {
+    if wants_page(msg) {
         status_response(
             SERVER_ERROR_COPY.status,
             "Server error",
@@ -740,8 +774,7 @@ pub fn refused_response(
     refusal: crate::blocks::crud::Refusal,
 ) -> wafer_run::OutputStream {
     let error = refusal.into_error();
-    let accept = msg.get_meta("http.header.accept");
-    if !accept.contains("text/html") || accept.contains("application/json") {
+    if !wants_page(msg) {
         return wafer_run::OutputStream::error(error);
     }
     match refusal_copy(&error) {
@@ -837,6 +870,12 @@ impl BackLink<'static> {
     pub const ADMIN_DASHBOARD: BackLink<'static> = BackLink {
         label: "Back to the dashboard",
         href: "/b/admin/",
+    };
+
+    /// The account overview: where a signed-in end user's error points.
+    pub const PORTAL_HOME: BackLink<'static> = BackLink {
+        label: "Back to your account",
+        href: "/b/userportal/",
     };
 }
 
@@ -1356,22 +1395,111 @@ mod tests {
         );
     }
 
+    /// [`forbidden_response`] for `msg`: its status and body.
+    async fn forbidden_page(msg: wafer_run::Message, reason: &str) -> (u16, String) {
+        // Run as a block that draws pages, as every caller does: the chrome
+        // reads the site config under the caller's grants.
+        let ctx = crate::test_support::TestContext::new()
+            .await
+            .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
+        let out = forbidden_response(&ctx, &msg, reason).await;
+        let buf = out
+            .collect_buffered()
+            .await
+            .expect("a 403 page is a response");
+        let status = buf
+            .meta
+            .iter()
+            .find(|e| e.key == "resp.status")
+            .map_or(0, |e| e.value.parse().unwrap_or(0));
+        (status, String::from_utf8(buf.body).unwrap_or_default())
+    }
+
+    fn browser(mut msg: wafer_run::Message) -> wafer_run::Message {
+        msg.set_meta("http.header.accept", "text/html,application/xhtml+xml");
+        msg
+    }
+
+    const REASON: &str = "Seller account is suspended";
+
+    /// An API caller gets the JSON 403 carrying the reason, by `Accept` and,
+    /// for a browser `Accept`, by an `/api/` path — the decision the 404
+    /// makes.
     #[tokio::test]
-    async fn forbidden_response_uses_status_template() {
-        let mut msg = Message::new("http.request");
-        msg.set_meta("http.header.accept", "text/html");
-        let out = forbidden_response(&msg);
-        let buf = out.collect_buffered().await.unwrap();
-        let body = String::from_utf8(buf.body).unwrap_or_default();
+    async fn forbidden_response_is_json_for_an_api_request() {
+        let ctx = crate::test_support::TestContext::new().await;
+        let mut json = crate::test_support::auth_msg("retrieve", "/b/products/my", "u1");
+        json.set_meta("http.header.accept", "application/json");
+        let api_path = browser(crate::test_support::auth_msg(
+            "retrieve",
+            "/b/products/api/own/products",
+            "u1",
+        ));
+        for msg in [json, api_path] {
+            let out = forbidden_response(&ctx, &msg, REASON).await;
+            match out.collect_buffered().await {
+                Err(wafer_run::streams::output::TerminalNotResponse::Error(error)) => {
+                    assert_eq!(error.code, wafer_run::ErrorCode::PermissionDenied);
+                    assert_eq!(error.message, REASON, "{}", msg.path());
+                }
+                _ => panic!("{} must answer the JSON error, not a page", msg.path()),
+            }
+        }
+    }
+
+    /// A signed-out browser gets the bare status page: the reason, and a way
+    /// to sign in.
+    #[tokio::test]
+    async fn forbidden_response_offers_sign_in_to_a_signed_out_browser() {
+        let msg = browser(crate::test_support::anon_msg(
+            "retrieve",
+            "/b/storage/direct/tok",
+        ));
+        let (status, body) = forbidden_page(msg, REASON).await;
+        assert_eq!(status, 403);
+        assert!(body.contains(">403<"), "{body}");
+        assert!(body.contains(REASON), "the reason must be shown: {body}");
+        assert!(body.contains(r#"href="/b/auth/login""#), "{body}");
+        assert!(body.contains("Sign in"), "{body}");
         assert!(
-            body.contains("status-page"),
-            "body should contain status-page class"
+            !body.contains(r#"class="shell""#),
+            "no shell when signed out: {body}"
         );
-        assert!(body.contains(">403<"), "body should contain 403 code");
-        assert!(
-            body.contains("Sign in"),
-            "body should contain Sign in action"
-        );
+    }
+
+    /// A signed-in end user gets the page inside the portal shell, with the
+    /// reason and a way back to their account — never "Sign in".
+    #[tokio::test]
+    async fn forbidden_response_renders_in_the_portal_shell_for_a_signed_in_user() {
+        let msg = browser(crate::test_support::auth_msg(
+            "retrieve",
+            "/b/products/my",
+            "u1",
+        ));
+        let (status, body) = forbidden_page(msg, REASON).await;
+        assert_eq!(status, 403);
+        assert!(body.contains(r#"data-nav="portal""#), "{body}");
+        assert!(body.contains("status-page--in-shell"), "{body}");
+        assert!(body.contains(REASON), "the reason must be shown: {body}");
+        assert!(body.contains(r#"href="/b/userportal/""#), "{body}");
+        assert!(body.contains("Back to your account"), "{body}");
+        assert!(!body.contains("Sign in"), "{body}");
+    }
+
+    /// An administrator's 403 is drawn in the admin shell, pointing back to
+    /// the dashboard.
+    #[tokio::test]
+    async fn forbidden_response_renders_in_the_admin_shell_for_an_admin() {
+        let msg = browser(crate::test_support::admin_msg(
+            "retrieve",
+            "/b/products/selling/orders/x",
+        ));
+        let (status, body) = forbidden_page(msg, REASON).await;
+        assert_eq!(status, 403);
+        assert!(body.contains(r#"data-nav="admin""#), "{body}");
+        assert!(body.contains(REASON), "{body}");
+        assert!(body.contains("Back to the dashboard"), "{body}");
+        assert!(!body.contains("Sign in"), "{body}");
     }
 
     #[tokio::test]

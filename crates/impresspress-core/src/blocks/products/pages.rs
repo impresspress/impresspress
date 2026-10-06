@@ -3339,6 +3339,9 @@ pub async fn seller_order_detail(
     order_detail(ctx, msg, purchase_id, OrderPageAccess::Seller).await
 }
 
+/// Why an order page refuses a buyer or seller the order is not theirs.
+const ORDER_OF_ANOTHER_ACCOUNT: &str = "This order belongs to another account";
+
 async fn order_detail(
     ctx: &dyn Context,
     msg: &Message,
@@ -3375,20 +3378,27 @@ async fn order_detail(
                 purchase.str_field("buyer_user_id")
             };
             if owner != msg.user_id() {
-                return crate::http::err_forbidden("Access denied");
+                return ui::forbidden_response(ctx, msg, ORDER_OF_ANOTHER_ACCOUNT).await;
             }
         }
         OrderPageAccess::Seller => {
             let account = match repo::seller_accounts::get_for_user(ctx, msg.user_id()).await {
                 Ok(Some(account)) => account,
-                Ok(None) => return crate::http::err_forbidden("Seller setup is required"),
+                Ok(None) => {
+                    return ui::forbidden_response(
+                        ctx,
+                        msg,
+                        "Complete seller setup before viewing seller orders",
+                    )
+                    .await
+                }
                 Err(error) => {
                     return error_page(ctx, msg, error_sections, "Order", error, "Database error")
                         .await
                 }
             };
             if purchase.str_field("seller_account_id") != account.id {
-                return crate::http::err_forbidden("Access denied");
+                return ui::forbidden_response(ctx, msg, ORDER_OF_ANOTHER_ACCOUNT).await;
             }
         }
     }

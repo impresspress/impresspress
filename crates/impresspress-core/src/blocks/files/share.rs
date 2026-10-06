@@ -7,7 +7,7 @@ use crate::{
         crud,
         rate_limit::{check_rate_limit, ip_identity, RateLimit, RateLimitOutcome, UserRateLimiter},
     },
-    http::{err_forbidden, err_internal, err_internal_no_cause, err_not_found},
+    http::{err_internal, err_internal_no_cause, err_not_found},
     util::hex_encode,
 };
 
@@ -29,6 +29,9 @@ pub async fn generate_share_token(ctx: &dyn Context) -> Result<String, OutputStr
         .map(|bytes| hex_encode(&bytes))
         .map_err(|e| err_internal("Token generation failed", e))
 }
+
+/// Why a share link that has been opened as often as it allows is refused.
+const SHARE_LIMIT_REACHED: &str = "Share link access limit reached";
 
 pub async fn handle_direct_access(
     ctx: &dyn Context,
@@ -92,7 +95,7 @@ pub async fn handle_direct_access(
         return err_internal_no_cause("Share link is unavailable");
     };
     if exp_time < chrono::Utc::now() {
-        return err_forbidden("Share link has expired");
+        return crate::ui::forbidden_response(ctx, msg, "Share link has expired").await;
     }
 
     // Refuse a share already at its cap before paying for the object. The
@@ -102,7 +105,7 @@ pub async fn handle_direct_access(
     // storage read per request for the rest of its life.
     if let Some(max) = share.max_access_count {
         if share.access_count >= max {
-            return err_forbidden("Share link access limit reached");
+            return crate::ui::forbidden_response(ctx, msg, SHARE_LIMIT_REACHED).await;
         }
     }
 
@@ -144,7 +147,7 @@ pub async fn handle_direct_access(
     let max = share.max_access_count.unwrap_or(0);
     match repo::shares::increment_access_count_capped(ctx, &share.id, max).await {
         Ok(true) => {}
-        Ok(false) => return err_forbidden("Share link access limit reached"),
+        Ok(false) => return crate::ui::forbidden_response(ctx, msg, SHARE_LIMIT_REACHED).await,
         Err(e) => return crud::db_error_internal(e, "Share access accounting failed"),
     }
 
