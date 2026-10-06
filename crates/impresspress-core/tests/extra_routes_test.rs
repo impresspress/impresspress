@@ -353,7 +353,13 @@ async fn authenticated_non_admin_html_request_on_admin_route_still_403s() {
         location, None,
         "role failure must not carry a login Location"
     );
-    assert!(ctx.calls().is_empty());
+    // The 403 page reads the site config to draw the viewer's shell; the
+    // refused block itself is never dispatched to.
+    assert!(
+        !ctx.calls().iter().any(|call| call == "gizza-ai/admin"),
+        "dispatch must NOT happen: {:?}",
+        ctx.calls()
+    );
 }
 
 #[tokio::test]

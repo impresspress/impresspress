@@ -29,7 +29,7 @@ use crate::{
         crud,
     },
     config_vars::ENABLE_OAUTH_KEY,
-    http::{err_bad_request, err_forbidden, err_internal, ResponseBuilder},
+    http::{err_bad_request, err_internal, ResponseBuilder},
     util::urlencode,
 };
 
@@ -66,7 +66,13 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
         Err(e) => return crud::db_error_internal(e, "Could not read the OAuth switch"),
     };
     if !enable_oauth {
-        return err_forbidden("OAuth login is not enabled");
+        return crate::ui::forbidden_response(
+            ctx,
+            msg,
+            "OAuth login is not enabled",
+            crate::ui::SignedOutAction::SignIn,
+        )
+        .await;
     }
 
     let provider = msg.query("provider");

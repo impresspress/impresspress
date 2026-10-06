@@ -9,8 +9,7 @@
 //!
 //! A JSON route must end in the door's own "Access denied": the status alone
 //! would also match a route gate's refusal, which carries its own message. A
-//! full page must be the 403 drawn inside the shell (`ui::shell_error_page`),
-//! not the sign-in 403 `ui::forbidden_response` draws for a missing role.
+//! full page must be the 403 drawn inside the shell (`ui::shell_error_page`).
 
 use wafer_run::{
     streams::output::TerminalNotResponse, Block, ErrorCode, InputStream, OutputStream, WaferError,

@@ -10,7 +10,7 @@
 //! An htmx fragment route must end in the door's own "Access denied": the
 //! status alone would also match a route gate's refusal, which carries its
 //! own message. A full page must be the styled 403 `ui::refused_response`
-//! draws ("Go home"), not the sign-in 403 `ui::forbidden_response` draws.
+//! draws ("Go home").
 
 use wafer_run::{
     streams::output::TerminalNotResponse, Block, ErrorCode, InputStream, Message, OutputStream,
