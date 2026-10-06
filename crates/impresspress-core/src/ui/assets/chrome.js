@@ -1014,8 +1014,8 @@ document.addEventListener("input", function (e) {
 // re-renders the page body, the box included. When the operator types on while
 // a request is in flight, that response is for a term the box no longer holds:
 // swapping it in would put the shorter term back in the box (eating what was
-// typed since) and push a URL the operator has already moved past. So it is
-// dropped — no swap, no history entry — and the box's own pending trigger
+// typed since) and put a URL the operator has already moved past in the address
+// bar. So it is dropped — no swap, no URL change — and the box's own pending trigger
 // searches the term it holds now. A response whose box is no longer on the
 // page (a later response already replaced it) is dropped for the same reason.
 document.body.addEventListener("htmx:beforeSwap", function (e) {

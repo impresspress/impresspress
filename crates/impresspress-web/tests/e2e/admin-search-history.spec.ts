@@ -11,9 +11,11 @@ import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
 /**
  * The shared list search box (`ui::components::SearchInput`) in a real
  * browser, on two of its pages: the operator can type through a search that
- * is in flight without losing focus or characters, the search is in the URL,
- * a reload keeps it, and Back returns to the unfiltered list with the box
- * empty.
+ * is in flight without losing focus or characters, the search is in the URL
+ * and a reload keeps it, and typing replaces the history entry rather than
+ * adding one per term — Back leaves the searched page in one step. htmx keeps
+ * no history snapshots (`ui::layout`'s htmx config), so admin lists never land
+ * in localStorage, and Back to an htmx-pushed URL loads it whole.
  *
  * Signs up accounts (users) and makes requests the request log records
  * (logs), so it is part of `e2e:writes`, which CI runs on its own server.
@@ -133,7 +135,7 @@ for (const target of PAGES) {
       await expect(box).toHaveValue(`${term}x`);
     });
 
-    test('the search is in the URL, survives a reload, and Back clears it', async ({
+    test('the search is in the URL, survives a reload, and Clear takes it out', async ({
       page,
       request,
     }) => {
@@ -152,17 +154,19 @@ for (const target of PAGES) {
       await expect(target.box(page)).toHaveValue(term);
       await expectOnlyMatches(page, term);
 
-      await page.goBack({ waitUntil: 'networkidle' });
+      await page.locator('.search-summary').getByRole('link', { name: 'Clear' }).click();
       await expectUnfiltered(page, target, term);
     });
 
-    test('Back steps through the searches typed on the page, then to the full list', async ({
+    test('Back after searching returns to the page before the search, in one step', async ({
       page,
       request,
     }) => {
       await loginAsAdmin(page);
       const term = `srch${Date.now()}`;
       await target.seed(request, term);
+      await page.goto('/b/admin/', { waitUntil: 'networkidle' });
+      const before = page.url();
       await page.goto(target.path, { waitUntil: 'networkidle' });
 
       const box = target.box(page);
@@ -172,35 +176,37 @@ for (const target of PAGES) {
       await expect(page).toHaveURL(searchedFor(`${term}none`));
       await expect(page.locator('.search-summary')).toContainText(`${term}none`);
 
-      // htmx restores each step from its snapshot, and the box in it holds
-      // the term its list was searched for.
-      await page.goBack();
-      await expect(page).toHaveURL(searchedFor(term));
-      await expect(target.box(page)).toHaveValue(term);
-      await expectOnlyMatches(page, term);
-
-      await page.goBack();
-      await expectUnfiltered(page, target, term);
-    });
-
-    test('Back to a search htmx no longer holds a snapshot of loads it as a whole page', async ({
-      page,
-      request,
-    }) => {
-      await loginAsAdmin(page);
-      const term = `srch${Date.now()}`;
-      await target.seed(request, term);
-      await page.goto(target.path, { waitUntil: 'networkidle' });
-      await target.box(page).fill(term);
-      await expect(page).toHaveURL(searchedFor(term));
-
-      // htmx keeps ten snapshots; a longer search session evicts the oldest.
-      await page.evaluate(() => localStorage.removeItem('htmx-history-cache'));
       await page.goBack({ waitUntil: 'networkidle' });
+      await expect(page).toHaveURL(before);
 
-      await expectUnfiltered(page, target, term);
-      await expect(page.locator('main#content')).toHaveCount(1);
-      await expect(page.getByRole('navigation', { name: 'Primary' })).toHaveCount(1);
+      // The entry the search replaced holds the last term, not the first.
+      await page.goForward({ waitUntil: 'networkidle' });
+      await expect(page).toHaveURL(searchedFor(`${term}none`));
+      await expect(target.box(page)).toHaveValue(`${term}none`);
+
+      const cached = await page.evaluate(() => localStorage.getItem('htmx-history-cache'));
+      expect(cached, 'htmx wrote no page snapshot to localStorage').toBeNull();
     });
   });
 }
+
+test.describe('htmx history', () => {
+  test.use({ storageState: ADMIN_STATE_PATH });
+
+  test('Back to an htmx-pushed page loads it whole, and nothing is cached', async ({ page }) => {
+    await loginAsAdmin(page);
+    await page.goto('/b/admin/logs', { waitUntil: 'networkidle' });
+    await page.getByRole('link', { name: 'Audit Logs' }).click();
+    await expect(page).toHaveURL(/tab=audit/);
+    await expect(page.getByRole('searchbox', { name: 'Search by resource...' })).toBeVisible();
+
+    await page.goBack({ waitUntil: 'networkidle' });
+    await expect(page).toHaveURL(/\/b\/admin\/logs$/);
+    await expect(page.getByRole('searchbox', { name: 'Search by path...' })).toBeVisible();
+    await expect(page.locator('main#content')).toHaveCount(1);
+    await expect(page.getByRole('navigation', { name: 'Primary' })).toHaveCount(1);
+
+    const cached = await page.evaluate(() => localStorage.getItem('htmx-history-cache'));
+    expect(cached, 'htmx wrote no page snapshot to localStorage').toBeNull();
+  });
+});

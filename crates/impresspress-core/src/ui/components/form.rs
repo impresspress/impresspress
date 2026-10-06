@@ -9,15 +9,15 @@ use crate::ui::icons;
 /// is part of the page's URL.
 ///
 /// Each settled term (a 300ms pause, or Enter) is a GET of `href` plus
-/// `name=<term>` that re-renders the page body (`main#content`) and pushes
-/// that URL into history. So the searched list can be linked and reloaded,
-/// Back steps to the previous term and finally to the unfiltered list, and
-/// every other control the server renders on the page — pagination, sort
+/// `name=<term>` that re-renders the page body (`main#content`) and
+/// REPLACES the current history entry's URL with it; Clear does the same.
+/// So the address bar always names the search on screen (a reload or a
+/// shared link shows that list), while typing adds no history entries: Back
+/// leaves the searched page in one step instead of walking back through
+/// partial terms. Paging, sort and filter links still push, as navigations.
+/// Every other control the server renders on the page — pagination, sort
 /// links, filter toggles, the "Results for" summary — is rendered from the
-/// same URL as the list, never left carrying the previous term. The swap
-/// replaces the box too, so the box htmx stores in its history snapshot
-/// holds the term its list was searched for (a snapshot keeps the `value`
-/// attribute, not what was typed since).
+/// same URL as the list, never left carrying the previous term.
 ///
 /// Replacing the box under the cursor costs nothing:
 /// - `id` is stable across renders, which is what htmx keys its focus
@@ -74,7 +74,7 @@ impl SearchInput<'_> {
                         href=(self.href)
                         hx-get=(self.href)
                         hx-target="#content"
-                        hx-push-url="true"
+                        hx-replace-url="true"
                     { (icons::x()) " Clear" }
                 }
             }
@@ -96,7 +96,7 @@ impl SearchInput<'_> {
                     hx-get=(self.href)
                     hx-trigger="input changed delay:300ms, search"
                     hx-target="#content"
-                    hx-push-url="true"
+                    hx-replace-url="true"
                     data-search-input
                     autocomplete="off";
             }
@@ -237,11 +237,12 @@ mod tests {
         assert!(!none.contains("search-summary"));
     }
 
-    /// The search is in the URL (Back, reload and links keep it), the box
-    /// keeps one id across renders (htmx restores focus and caret by id),
-    /// and it is marked for chrome.js's stale-response guard.
+    /// The search is in the URL (reload and links keep it) without a
+    /// history entry per term, the box keeps one id across renders (htmx
+    /// restores focus and caret by id), and it is marked for chrome.js's
+    /// stale-response guard.
     #[test]
-    fn the_search_box_pushes_its_url_and_keeps_its_id_across_renders() {
+    fn the_search_box_replaces_its_url_and_keeps_its_id_across_renders() {
         let s = search("bob", "/b/admin/users").render().into_string();
         let input = &s[s.find("<input").expect("an input")..];
         let input = &input[..input.find('>').expect("a closed tag")];
@@ -251,7 +252,7 @@ mod tests {
             r#"value="bob""#,
             r#"hx-get="/b/admin/users""#,
             r##"hx-target="#content""##,
-            r#"hx-push-url="true""#,
+            r#"hx-replace-url="true""#,
             "data-search-input",
         ] {
             assert!(input.contains(attr), "{attr} missing from {input}");
@@ -260,16 +261,16 @@ mod tests {
         assert!(empty.contains(r#"id="users-search""#), "{empty}");
     }
 
-    /// Clear is a navigation too: it leaves a history entry and the URL
-    /// loses the term, so Back returns to the search it cleared.
+    /// Clear takes the term out of the URL the same way typing put it in:
+    /// replacing the entry, so Back still leaves the page in one step.
     #[test]
-    fn clear_pushes_the_unsearched_url() {
+    fn clear_replaces_the_url_with_the_unsearched_one() {
         let s = search("bob", "/b/admin/logs?tab=audit")
             .render()
             .into_string();
         assert!(
             s.contains(
-                r##"href="/b/admin/logs?tab=audit" hx-get="/b/admin/logs?tab=audit" hx-target="#content" hx-push-url="true""##
+                r##"href="/b/admin/logs?tab=audit" hx-get="/b/admin/logs?tab=audit" hx-target="#content" hx-replace-url="true""##
             ),
             "{s}"
         );

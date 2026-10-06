@@ -9,7 +9,7 @@ use maud::{html, Markup, PreEscaped, DOCTYPE};
 use super::{assets, SiteConfig};
 
 /// The `htmx-config` every page carries. See the comment where it is emitted.
-const HTMX_CONFIG: &str = r#"{"allowEval":false,"refreshOnHistoryMiss":true}"#;
+const HTMX_CONFIG: &str = r#"{"allowEval":false,"historyCacheSize":0,"refreshOnHistoryMiss":true}"#;
 
 /// Render a full HTML page with head (CSS + htmx) and body.
 /// Whether a response body is a whole document — what [`page`] renders —
@@ -56,11 +56,14 @@ pub fn page(title: &str, config: &SiteConfig, body: Markup) -> Markup {
                 // browser anyway; with this off htmx refuses them first, with
                 // an `htmx:evalDisallowedError`, and never reaches the eval.
                 //
-                // `refreshOnHistoryMiss`: Back to an URL htmx pushed but no
-                // longer holds a snapshot of (its cache keeps ten) loads that
-                // URL as a page. Otherwise htmx re-requests it as an htmx
-                // request, which answers the body without the chrome, and
-                // swaps that into `body` — the sidebar and topbar vanish.
+                // `historyCacheSize: 0`: htmx keeps no page snapshots. Its
+                // cache lives in localStorage, which outlives sign-out, and
+                // the snapshots are admin pages — user emails, request paths.
+                // `refreshOnHistoryMiss`: so Back to an URL htmx pushed loads
+                // that URL as a page, from the server, with current data.
+                // Without it htmx re-requests the URL as an htmx request,
+                // which answers the body without the chrome, and swaps that
+                // into `body` — the sidebar and topbar vanish.
                 //
                 // Read at htmx's init, which waits for the document to be
                 // ready, so this tag only has to be in the head.
@@ -132,9 +135,9 @@ mod tests {
             auth_tagline: String::new(),
         };
         let rendered = page("Title", &config, maud::html! { p { "body" } }).into_string();
-        let meta = r#"<meta name="htmx-config" content="{&quot;allowEval&quot;:false,&quot;refreshOnHistoryMiss&quot;:true}">"#;
+        let meta = r#"<meta name="htmx-config" content="{&quot;allowEval&quot;:false,&quot;historyCacheSize&quot;:0,&quot;refreshOnHistoryMiss&quot;:true}">"#;
         let at = rendered.find(meta).unwrap_or_else(|| {
-            panic!("no allowEval=false, refreshOnHistoryMiss=true htmx-config: {rendered}")
+            panic!("no allowEval=false, no-history-cache htmx-config: {rendered}")
         });
         let htmx = rendered
             .find(&assets::htmx_js_url())
