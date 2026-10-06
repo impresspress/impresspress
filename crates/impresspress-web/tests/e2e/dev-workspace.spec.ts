@@ -786,7 +786,7 @@ test('the editor refuses to save a binary file over itself', async ({ page }) =>
   // exactly one write. This is what proves the button is wired to `save()`,
   // so that the binary file's "no write" below is `save()` refusing and not a
   // click that reaches nothing.
-  await page.locator('#dev-file-list a[data-path="site/index.html"]').click();
+  await page.locator('#dev-file-list button[data-path="site/index.html"]').click();
   await expect(page.locator('#dev-editor-title')).toHaveText('site/index.html');
   await expect(page.locator('#dev-editor-text')).toBeEnabled();
   const beforeControl = writes.length;
@@ -817,7 +817,7 @@ test('the editor refuses to save a binary file over itself', async ({ page }) =>
   // a mutating tool, so `withProgress`'s catch-up has already re-read the
   // file list before the call returned; the click auto-waits for the entry
   // regardless.
-  await page.locator(`#dev-file-list a[data-path="${PIXEL_PNG_PATH}"]`).click();
+  await page.locator(`#dev-file-list button[data-path="${PIXEL_PNG_PATH}"]`).click();
   await expect(page.locator('#dev-editor-title')).toHaveText(PIXEL_PNG_PATH);
 
   // The box holds a PLACEHOLDER, not the file. This is the whole hazard: the

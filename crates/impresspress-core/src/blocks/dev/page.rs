@@ -39,7 +39,7 @@ use super::{
     assets, no_store,
     repo::seed_info::{self, SeedInfo},
 };
-use crate::{http::ResponseBuilder, ui};
+use crate::{http::ResponseBuilder, ui, ui::components::section_header};
 
 /// Serve the workspace document.
 pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
@@ -95,25 +95,12 @@ fn body(seed: Option<&SeedInfo>, credentials: Option<(&str, &str)>) -> Markup {
     html! {
         div .dev-workspace {
             section #dev-guide .dev-pane {
-                h2 { "How this workspace works" }
-                @if let Some(seed) = seed {
-                    p {
-                        "This sandbox was seeded from the " strong { (seed.template) } " template. "
-                        code { "dev_read_reference" } " returns two guides: " code { "markdown" }
-                        " for backend blocks and " code { "site_markdown" } " for the site — read \
-                         the second before writing under " code { "site/" } "."
-                    }
-                }
+                (section_header("How this workspace works", None))
                 p {
                     "This page is a WebMCP workspace. An agent in your browser uses the tools \
                      published here to edit the site under " code { "site/" } ", write Rust \
                      backend blocks under " code { "blocks/<name>/" } ", stock the shop with the "
-                    code { "shop_*" } " tools, and export the result. Every successful change is \
-                     live at " a href="/" target="_blank" { "/" } " immediately; "
-                    code { "dev_rollback" } " undoes a generation. Include "
-                    code { "<script src=\"/b/webmcp/webmcp.js\" defer></script>" } " in every page \
-                     you write under " code { "site/" } ", so a visitor's agent gets the site's \
-                     public tools too."
+                    code { "shop_*" } " tools, and export the result."
                 }
                 // How an agent reaches the tools in THIS browser: through
                 // WebMCP, or — where the browser has none — through the Tool
@@ -121,16 +108,36 @@ fn body(seed: Option<&SeedInfo>, credentials: Option<(&str, &str)>) -> Markup {
                 // the sentence; the markup ships it empty rather than
                 // promising either.
                 p #dev-webmcp-status {}
-                p {
-                    "Start with " code { "dev_status" } "."
+                ul .dev-guide__facts {
+                    li { "Start with " code { "dev_status" } "." }
+                    @if let Some(seed) = seed {
+                        li {
+                            "This sandbox was seeded from the " strong { (seed.template) }
+                            " template. " code { "dev_read_reference" } " returns two guides: "
+                            code { "markdown" } " for backend blocks and " code { "site_markdown" }
+                            " for the site — read the second before writing under "
+                            code { "site/" } "."
+                        }
+                    }
+                    li {
+                        "Every successful change is live at " a href="/" target="_blank" { "/" }
+                        " immediately; " code { "dev_rollback" } " undoes a generation."
+                    }
+                    li {
+                        "Include " code { "<script src=\"/b/webmcp/webmcp.js\" defer></script>" }
+                        " in every page you write under " code { "site/" } ", so a visitor's \
+                         agent gets the site's public tools too."
+                    }
                     @if let Some((email, password)) = credentials {
-                        " Credentials for this browser-local instance: "
-                        code #dev-credentials-email { (email) } " / "
-                        code #dev-credentials-password { (password) } "."
+                        li {
+                            "Credentials for this browser-local instance: "
+                            code #dev-credentials-email { (email) } " / "
+                            code #dev-credentials-password { (password) } "."
+                        }
                     }
                 }
                 @if let Some(seed) = seed {
-                    details {
+                    details .dev-disclosure {
                         summary { "Suggested prompt" }
                         pre #dev-suggested-prompt { (seed.suggested_prompt) }
                     }
@@ -144,44 +151,79 @@ fn body(seed: Option<&SeedInfo>, credentials: Option<(&str, &str)>) -> Markup {
                 // calls the same function an agent's tool call would — so
                 // this pane cannot offer a tool the page does not have, or
                 // run one differently.
-                h2 { "Tool console" }
+                (section_header("Tool console", None))
                 p {
                     "Every tool this page publishes, runnable by hand. Choose a tool, edit its \
                      arguments as JSON, and press Run; the result appears below. A tool that \
                      changes the site refreshes this page exactly as an agent's call would."
                 }
-                label for="dev-console-tool" { "Tool" }
-                select #dev-console-tool {}
-                p #dev-console-description {}
-                details {
-                    summary { "Input schema" }
-                    pre #dev-console-schema {}
+                // Two columns from 900px: what the tool is (select,
+                // description, schema) beside what to call it with (the
+                // arguments, Run, the result).
+                div .dev-console__grid {
+                    div {
+                        div .form-group {
+                            label .form-label for="dev-console-tool" { "Tool" }
+                            select #dev-console-tool .form-select {}
+                        }
+                        p #dev-console-description {}
+                        details .dev-disclosure {
+                            summary { "Input schema" }
+                            pre #dev-console-schema {}
+                        }
+                    }
+                    div {
+                        div .form-group {
+                            label .form-label for="dev-console-args" { "Arguments (JSON)" }
+                            textarea #dev-console-args spellcheck="false" {}
+                        }
+                        div .dev-editor-actions {
+                            // Ships `disabled`: there is nothing to run until
+                            // `dev.js` has fetched the tools.
+                            button #dev-console-run .btn .btn--primary type="button" disabled { "Run" }
+                        }
+                        // What a screen reader hears when a run ends: one
+                        // short sentence ("Run finished: ok" / "…: error"),
+                        // written by `dev.js`. Always rendered — a live
+                        // region that only appears with its text is not
+                        // reliably announced.
+                        div #dev-console-status .sr-only role="status" {}
+                        // `output` rather than `pre` because it is labelable,
+                        // so the "Result" label names it. `aria-live="off"`
+                        // overrides the implicit status role an `output`
+                        // carries: the result can be pages of JSON, which is
+                        // for reading, not for announcing — the run's outcome
+                        // is announced by `#dev-console-status` above. The
+                        // block around it stays hidden while it is empty
+                        // (dev.css), so no "Result" label stands over nothing.
+                        div .dev-console__result {
+                            label .form-label for="dev-console-result" { "Result" }
+                            output #dev-console-result for="dev-console-args" aria-live="off" {}
+                        }
+                    }
                 }
-                label for="dev-console-args" { "Arguments (JSON)" }
-                textarea #dev-console-args spellcheck="false" {}
-                div .dev-editor-actions {
-                    // Ships `disabled`: there is nothing to run until
-                    // `dev.js` has fetched the tools.
-                    button #dev-console-run .btn .btn--primary type="button" disabled { "Run" }
-                }
-                label for="dev-console-result" { "Result" }
-                pre #dev-console-result {}
             }
             section #dev-files .dev-pane {
-                h2 { "Files" }
-                ul #dev-file-list {}
-                button #dev-new-file .btn .btn--secondary type="button" { "New file" }
+                (section_header("Files", Some(html! {
+                    button #dev-new-file .btn .btn--secondary type="button" { "New file" }
+                })))
+                // Each entry is a `button` (`dev.js`'s `loadFiles`): opening
+                // a file is an action on this page, not a navigation.
+                ul #dev-file-list aria-label="Workspace files" {}
             }
             section #dev-editor .dev-pane {
-                h2 #dev-editor-title { "Editor" }
+                (section_header("Editor", None))
+                // The open file's path, which `dev.js` writes here, is the
+                // textarea's label: "site/index.html" is what the box holds.
+                label #dev-editor-title .dev-editor__path for="dev-editor-text" { "No file open" }
                 textarea #dev-editor-text spellcheck="false" {}
                 div .dev-editor-actions {
                     button #dev-save .btn .btn--primary type="button" { "Save" }
-                    button #dev-delete .btn .btn--danger type="button" { "Delete" }
+                    button #dev-delete .btn .btn--ghost-danger type="button" { "Delete" }
                 }
             }
             section #dev-preview .dev-pane {
-                h2 { "Live site" }
+                (section_header("Live site", None))
                 // `sandbox` is NOT a prompt-injection boundary, and cannot
                 // be one while this frame carries `allow-same-origin` on
                 // same-origin content: the framed page can read and write
@@ -215,9 +257,12 @@ fn body(seed: Option<&SeedInfo>, credentials: Option<(&str, &str)>) -> Markup {
                     title="Live site" {}
             }
             section #dev-progress .dev-pane {
-                h2 { "Progress" }
+                (section_header("Progress", None))
                 ol #dev-progress-steps {}
-                pre #dev-log {}
+                // Focusable so its scroll can be driven from the keyboard;
+                // `role="log"` because new lines are appended at the end and
+                // only those are news.
+                pre #dev-log role="log" aria-label="Activity log" tabindex="0" {}
             }
             section #dev-actions .dev-pane {
                 // Both ship `disabled`, and that is the honest default: this
@@ -246,7 +291,7 @@ fn body(seed: Option<&SeedInfo>, credentials: Option<(&str, &str)>) -> Markup {
                 // pane is a row of buttons with no space for one, and a
                 // select whose only clue is its first option is
                 // unreachable by anything that is not looking at it.
-                select #dev-compile-block aria-label="Block to compile" {}
+                select #dev-compile-block .form-select aria-label="Block to compile" {}
                 button #dev-compile .btn .btn--secondary type="button" disabled { "Compile block" }
                 button #dev-export .btn .btn--secondary type="button" disabled { "Export" }
                 button #dev-refresh-tools .btn .btn--secondary type="button" { "Refresh tools" }
@@ -362,6 +407,7 @@ mod tests {
             "dev-console-args",
             "dev-console-run",
             "dev-console-result",
+            "dev-console-status",
         ] {
             assert!(
                 assets::dev_js().contains(&format!("'{id}'")),
@@ -372,6 +418,122 @@ mod tests {
                 "{id} missing from the document"
             );
         }
+    }
+
+    /// Every form control in the document has an accessible name, and every
+    /// `<label for>` names an element a label can actually label.
+    ///
+    /// A label whose `for` names a non-labelable element (a `<pre>`, say)
+    /// labels nothing and is announced as stray text, and an unlabelled
+    /// textarea is announced as "edit text" with no hint of what it holds.
+    #[test]
+    fn every_control_is_labelled_and_every_label_names_a_control() {
+        let seed = SeedInfo {
+            template: "blank".into(),
+            suggested_prompt: "Build a shop.".into(),
+            guide_markdown: String::new(),
+            llms_text: None,
+        };
+        let html = body(Some(&seed), Some(("a@example.com", "pw"))).into_string();
+        let element = regex::Regex::new(r#"<(\w+)\b([^>]*)>"#).unwrap();
+        let attr = |attrs: &str, name: &str| {
+            regex::Regex::new(&format!(r#"\b{name}="([^"]*)""#))
+                .unwrap()
+                .captures(attrs)
+                .map(|c| c[1].to_string())
+        };
+        let mut tags_by_id = std::collections::HashMap::new();
+        let mut label_targets = Vec::new();
+        let mut controls = Vec::new();
+        for c in element.captures_iter(&html) {
+            let (tag, attrs) = (c[1].to_string(), c[2].to_string());
+            if let Some(id) = attr(&attrs, "id") {
+                tags_by_id.insert(id, tag.clone());
+            }
+            if tag == "label" {
+                label_targets.push(attr(&attrs, "for").expect("a label in this page uses `for`"));
+            }
+            if matches!(tag.as_str(), "input" | "select" | "textarea" | "output") {
+                controls.push((tag, attrs));
+            }
+        }
+        for target in &label_targets {
+            let tag = tags_by_id
+                .get(target)
+                .unwrap_or_else(|| panic!("label for=\"{target}\" names no element"));
+            assert!(
+                matches!(
+                    tag.as_str(),
+                    "input" | "select" | "textarea" | "output" | "button" | "meter" | "progress"
+                ),
+                "label for=\"{target}\" names a <{tag}>, which a label cannot label"
+            );
+        }
+        assert!(
+            controls.len() >= 5,
+            "only {} controls found",
+            controls.len()
+        );
+        for (tag, attrs) in &controls {
+            let id = attr(attrs, "id").unwrap_or_default();
+            assert!(
+                label_targets.contains(&id)
+                    || attr(attrs, "aria-label").is_some()
+                    || attr(attrs, "aria-labelledby").is_some(),
+                "<{tag} id=\"{id}\"> has no label"
+            );
+        }
+        // The editor's label is the open file's path, which `dev.js` writes
+        // into `#dev-editor-title`.
+        assert!(
+            html.contains(
+                r#"<label class="dev-editor__path" id="dev-editor-title" for="dev-editor-text">"#
+            ),
+            "{html}"
+        );
+        assert!(assets::dev_js().contains("title.textContent = file.path;"));
+    }
+
+    /// The panes title themselves with the shared `section_header`, so every
+    /// in-body heading is one h2 style (PLAN D1), and the selects are the
+    /// shared 44px `.form-select`.
+    #[test]
+    fn panes_use_the_shared_heading_and_form_controls() {
+        let html = body(None, None).into_string();
+        for title in [
+            "How this workspace works",
+            "Tool console",
+            "Files",
+            "Editor",
+            "Live site",
+            "Progress",
+        ] {
+            assert!(
+                html.contains(&format!(
+                    r#"<h2 class="section-header__title">{title}</h2>"#
+                )),
+                "{title} is not a section_header; {html}"
+            );
+        }
+        assert!(!html.contains("<h2>"), "a bare h2 is left; {html}");
+        assert!(
+            html.contains(r#"<select class="form-select" id="dev-console-tool">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<select class="form-select" id="dev-compile-block""#),
+            "{html}"
+        );
+    }
+
+    /// Files open from buttons, not `href="#"` links: opening one swaps the
+    /// editor's contents and navigates nowhere.
+    #[test]
+    fn files_open_from_buttons() {
+        let js = assets::dev_js();
+        assert!(js.contains("var button = document.createElement('button');"));
+        assert!(js.contains("button.setAttribute('aria-current', 'true');"));
+        assert!(!js.contains("link.href = '#';"));
     }
 
     /// The guide prints the credentials it is GIVEN — the configured ones —
@@ -407,7 +569,10 @@ mod tests {
             html.contains(r#"<section class="dev-pane" id="dev-console">"#),
             "{html}"
         );
-        assert!(html.contains("<h2>Tool console</h2>"), "{html}");
+        assert!(
+            html.contains(r#"<h2 class="section-header__title">Tool console</h2>"#),
+            "{html}"
+        );
         assert!(
             html.contains(
                 r#"<button class="btn btn--primary" id="dev-console-run" type="button" disabled>"#

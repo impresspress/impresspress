@@ -303,6 +303,8 @@ test('arguments that are not a JSON object are refused without calling the tool'
   elements.get('dev-console-args').value = '   ';
   await handle.runConsoleTool();
   assert.equal(JSON.parse(elements.get('dev-console-result').textContent).isError, false);
+  // The run's outcome is announced in one short sentence, not as the JSON.
+  assert.equal(elements.get('dev-console-status').textContent, 'Run finished: ok');
 });
 
 test('a tool call that finds the session gone empties the console', async () => {
@@ -327,6 +329,7 @@ test('a tool call that finds the session gone empties the console', async () => 
   assert.equal(elements.get('dev-console-run').disabled, true);
   // The refusal itself is still what the result box shows.
   assert.equal(JSON.parse(elements.get('dev-console-result').textContent).isError, true);
+  assert.equal(elements.get('dev-console-status').textContent, 'Run finished: error');
 });
 
 test('a schema that refers to itself cannot stop the console from rendering', async () => {

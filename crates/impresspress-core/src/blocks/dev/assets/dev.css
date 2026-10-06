@@ -3,15 +3,22 @@
  * Served only on this page, so it is scoped to `.dev-workspace` and its
  * panes and adds no rule that could reach another page's markup. Every
  * colour, radius and space is a custom property from the shared
- * `ui/assets/tokens.css` bundle the page already links — the workspace is
- * part of the admin, not a second theme. */
+ * `ui/styles/tokens.css` bundle the page already links — the workspace is
+ * part of the admin, not a second theme. `ui/assets.rs`'s token and contrast
+ * guards read this file too, so a property tokens.css does not define, or a
+ * text colour under 4.5:1, fails the build's tests rather than shipping.
+ *
+ * Fixed-height boxes (the editor, the preview, the log, the file list) are
+ * sized with `clamp()` between pixel bounds: the page scrolls inside the
+ * admin shell's body, so a bare `vh` would make a box a few lines tall on a
+ * short window and absurdly tall on a large one. */
 
 .dev-workspace {
 	display: grid;
-	/* files | editor. The guide, the preview and the pane row below span
-	   both columns — the tree is a sidebar to the editor, not to the page. */
+	/* files | editor. Every other pane spans both columns — the tree is a
+	   sidebar to the editor, not to the page. */
 	grid-template-columns: minmax(220px, 1fr) 2fr;
-	gap: var(--spacing-lg);
+	gap: var(--space-6);
 	align-items: start;
 }
 
@@ -19,22 +26,25 @@
 	background: var(--surface-1);
 	border: 1px solid var(--border-color);
 	border-radius: var(--radius-md);
-	padding: var(--spacing-lg);
+	padding: var(--space-6);
 	min-width: 0; /* a grid item defaults to min-content: without this the
 	                 <pre> log and long file paths widen the whole column. */
 }
 
-.dev-pane h2 {
-	font-size: var(--text-lg);
-	margin: 0 0 var(--spacing-md);
-	color: var(--text-primary);
+#dev-guide,
+#dev-console,
+#dev-preview,
+#dev-progress,
+#dev-actions {
+	grid-column: 1 / -1;
 }
 
 .dev-pane p {
 	color: var(--text-secondary);
 	font-size: var(--text-sm);
 	line-height: 1.6;
-	margin: 0 0 var(--spacing-sm);
+	margin: 0 0 var(--space-3);
+	max-width: 75ch;
 }
 
 .dev-pane code {
@@ -43,66 +53,99 @@
 	background: var(--bg-secondary);
 	border-radius: var(--radius-sm);
 	padding: 1px 5px;
+	overflow-wrap: anywhere;
 }
 
-#dev-guide,
-#dev-console,
-#dev-preview {
-	grid-column: 1 / -1;
+/* Text the page writes later (`dev.js`) ships empty; an empty paragraph
+   would still hold its margin open. */
+.dev-pane p:empty {
+	display: none;
 }
 
-/* ---- the guide --------------------------------------------------------- */
+/* A disclosure: the suggested prompt, the input schema. The summary is the
+   whole hit area, padded to 44px tall; it stays a `list-item` because any
+   other display drops its disclosure triangle. */
+.dev-disclosure {
+	margin-top: var(--space-2);
+}
 
-#dev-suggested-prompt {
+.dev-disclosure summary {
+	display: list-item;
+	padding: var(--space-3) 0;
+	line-height: 1.4;
+	cursor: pointer;
+	font-size: var(--text-sm);
+	font-weight: 500;
+	/* --primary-color is 3.66:1 on white; the button red clears 4.5:1. */
+	color: var(--primary-button);
+}
+
+.dev-disclosure summary:hover {
+	text-decoration: underline;
+}
+
+/* A monospace block: the suggested prompt, the schema, the result, the log. */
+#dev-suggested-prompt,
+#dev-console-schema,
+#dev-console-result,
+#dev-log {
+	display: block;
 	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 	font-size: var(--text-xs);
 	line-height: 1.6;
 	white-space: pre-wrap;
+	overflow-wrap: anywhere;
+	overflow-y: auto;
+	margin: 0;
+	padding: var(--space-3);
 	background: var(--surface-3);
-	border: 1px solid var(--border-light);
+	border: 1px solid var(--border-color);
 	border-radius: var(--radius-sm);
-	padding: var(--spacing-md);
-	margin: var(--spacing-sm) 0 0;
 	color: var(--text-primary);
 }
 
-#dev-guide summary {
-	cursor: pointer;
+/* ---- the guide --------------------------------------------------------- */
+
+.dev-guide__facts {
+	margin: 0 0 var(--space-2);
+	padding-left: var(--space-6);
+	max-width: 75ch;
+	color: var(--text-secondary);
 	font-size: var(--text-sm);
-	color: var(--primary-color);
-	margin-top: var(--spacing-sm);
+	line-height: 1.6;
+}
+
+.dev-guide__facts li + li {
+	margin-top: var(--space-2);
 }
 
 /* ---- the tool console -------------------------------------------------- */
 
-#dev-console label {
-	display: block;
-	font-size: var(--text-xs);
-	color: var(--text-secondary);
-	margin: var(--spacing-sm) 0 var(--spacing-xs);
+.dev-console__grid {
+	display: grid;
+	grid-template-columns: 1fr;
+	gap: var(--space-6);
 }
 
+.dev-console__grid > * {
+	min-width: 0;
+}
+
+/* The tool names are identifiers, so they read in the monospace the rest of
+   the console uses. Its touch height is set in the pointer query below. */
 #dev-console-tool {
 	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-	font-size: var(--text-xs);
-	padding: 2px 6px;
-	max-width: 100%;
-	border: 1px solid var(--border-color);
-	border-radius: var(--radius-sm);
-	background: var(--surface-1);
-	color: var(--text-primary);
 }
 
-#dev-console summary {
-	cursor: pointer;
-	font-size: var(--text-xs);
-	color: var(--primary-color);
+#dev-console-schema,
+#dev-console-result {
+	max-height: clamp(240px, 40vh, 480px);
 }
 
 #dev-console-args {
 	display: block;
 	width: 100%;
-	height: 9rem;
+	height: clamp(144px, 25vh, 320px);
 	box-sizing: border-box;
 	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 	font-size: var(--text-xs);
@@ -111,7 +154,7 @@
 	background: var(--surface-1);
 	border: 1px solid var(--border-color);
 	border-radius: var(--radius-sm);
-	padding: var(--spacing-sm);
+	padding: var(--space-3);
 	resize: vertical;
 }
 
@@ -123,77 +166,80 @@
 	box-shadow: var(--focus-ring);
 }
 
-#dev-console-schema,
-#dev-console-result {
-	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-	font-size: var(--text-xs);
-	line-height: 1.6;
-	white-space: pre-wrap;
-	overflow-wrap: anywhere;
-	max-height: 30vh;
-	overflow-y: auto;
-	margin: 0;
-	padding: var(--spacing-sm);
-	background: var(--surface-3);
-	border: 1px solid var(--border-light);
-	border-radius: var(--radius-sm);
-	color: var(--text-primary);
-}
-
-/* Empty until the first run; a bordered empty box would read as a result. */
-#dev-console-result:empty {
+/* Nothing has run yet: no "Result" label standing over an empty box. */
+.dev-console__result:has(> #dev-console-result:empty) {
 	display: none;
 }
 
+.dev-console__result {
+	margin-top: var(--space-4);
+}
+
 #dev-console-result[data-is-error='true'] {
-	border-color: var(--accent-danger);
+	border-color: var(--accent-danger-text);
 }
 
 /* ---- files ------------------------------------------------------------- */
 
 #dev-file-list {
 	list-style: none;
-	margin: 0 0 var(--spacing-md);
+	margin: 0;
 	padding: 0;
-	max-height: 40vh;
+	max-height: clamp(320px, 55vh, 640px);
 	overflow-y: auto;
 }
 
-#dev-file-list a {
+.dev-file {
 	display: block;
-	padding: var(--spacing-xs) var(--spacing-sm);
+	width: 100%;
+	/* 24px is the floor for a fine pointer; a coarse one gets 44px below. */
+	min-height: 36px;
+	padding: var(--space-2) var(--space-3);
+	border: 0;
 	border-radius: var(--radius-sm);
+	background: transparent;
 	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 	font-size: var(--text-xs);
+	line-height: 1.4;
+	text-align: left;
 	color: var(--text-primary);
-	text-decoration: none;
+	cursor: pointer;
 	overflow-wrap: anywhere;
 }
 
-#dev-file-list a:hover {
+.dev-file:hover {
 	background: var(--bg-hover);
 }
 
-/* The file currently in the editor. Set by `dev.js` on the anchor rather
-   than by a class so the marker and the `data-path` it sits beside read as
-   one pair. */
-#dev-file-list a[data-open='true'] {
-	background: var(--accent-info-bg);
-	color: var(--primary-color);
+/* Inset, so the list's own scroll box does not clip the shared ring. */
+.dev-file:focus-visible {
+	outline-offset: -2px;
+}
+
+/* The file currently in the editor (`dev.js` sets `aria-current`): the
+   neutral tint the shared info badge uses, and weight rather than the brand
+   red, which is for primary actions. */
+.dev-file[aria-current='true'] {
+	background: var(--border-color);
+	color: var(--text-primary);
+	font-weight: 600;
 }
 
 /* ---- the editor -------------------------------------------------------- */
 
-#dev-editor-title {
+.dev-editor__path {
+	display: block;
+	margin: 0 0 var(--space-2);
 	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 	font-size: var(--text-sm);
+	color: var(--text-primary);
 	overflow-wrap: anywhere;
 }
 
 #dev-editor-text {
 	display: block;
 	width: 100%;
-	height: 40vh;
+	height: clamp(320px, 55vh, 640px);
 	box-sizing: border-box;
 	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 	font-size: var(--text-xs);
@@ -202,7 +248,7 @@
 	background: var(--surface-1);
 	border: 1px solid var(--border-color);
 	border-radius: var(--radius-sm);
-	padding: var(--spacing-sm);
+	padding: var(--space-3);
 	resize: vertical;
 }
 
@@ -214,15 +260,22 @@
 	box-shadow: var(--focus-ring);
 }
 
+/* A binary file, or no editable text: secondary text on the muted surface. */
 #dev-editor-text:disabled {
 	background: var(--surface-3);
-	color: var(--text-muted);
+	color: var(--text-secondary);
 }
 
 .dev-editor-actions {
 	display: flex;
-	gap: var(--spacing-sm);
-	margin-top: var(--spacing-md);
+	flex-wrap: wrap;
+	gap: var(--space-2);
+	margin-top: var(--space-4);
+}
+
+/* Delete stands apart from Save, at the far end of the row. */
+.dev-editor-actions #dev-delete {
+	margin-left: auto;
 }
 
 /* ---- the live site ----------------------------------------------------- */
@@ -230,7 +283,7 @@
 #dev-preview-frame {
 	display: block;
 	width: 100%;
-	height: 60vh;
+	height: clamp(360px, 60vh, 720px);
 	border: 1px solid var(--border-color);
 	border-radius: var(--radius-sm);
 	background: var(--surface-1);
@@ -242,54 +295,50 @@
 	list-style: none;
 	display: flex;
 	flex-wrap: wrap;
-	gap: var(--spacing-sm);
-	margin: 0 0 var(--spacing-md);
+	gap: var(--space-2);
+	margin: 0 0 var(--space-4);
 	padding: 0;
 }
 
 .dev-step {
 	font-size: var(--text-xs);
-	padding: 2px 10px;
+	padding: var(--space-1) var(--space-3);
 	border-radius: var(--radius-full);
 	border: 1px solid var(--border-color);
-	color: var(--text-muted);
+	color: var(--text-secondary);
 	background: var(--surface-3);
 }
 
 .dev-step[data-state='done'] {
-	color: var(--accent-success);
-	border-color: var(--accent-success);
+	color: var(--accent-success-text);
+	border-color: var(--accent-success-text);
 	background: transparent;
 }
 
 .dev-step[data-state='current'] {
-	color: var(--primary-color);
-	border-color: var(--primary-color);
-	background: var(--accent-info-bg);
+	color: var(--text-primary);
+	border-color: var(--text-primary);
+	background: var(--border-color);
+	font-weight: 600;
 }
 
 /* An abandoned activation reached some step, but the journal does not
    record which — so the failure is stated on the list, not guessed onto one
    of its steps. */
 #dev-progress-steps[data-phase='failed'] .dev-step {
-	color: var(--accent-danger);
-	border-color: var(--accent-danger);
+	color: var(--accent-danger-text);
+	border-color: var(--accent-danger-text);
 }
 
 #dev-log {
-	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
-	font-size: var(--text-xs);
-	line-height: 1.6;
-	white-space: pre-wrap;
-	overflow-wrap: anywhere;
-	height: 18vh;
-	overflow-y: auto;
-	margin: 0;
-	padding: var(--spacing-sm);
-	background: var(--surface-3);
-	border: 1px solid var(--border-light);
-	border-radius: var(--radius-sm);
+	height: clamp(160px, 20vh, 280px);
 	color: var(--text-secondary);
+}
+
+#dev-log:focus-visible {
+	outline: 2px solid transparent;
+	outline-offset: -2px;
+	box-shadow: var(--focus-ring);
 }
 
 /* ---- actions ----------------------------------------------------------- */
@@ -298,7 +347,7 @@
 	display: flex;
 	flex-wrap: wrap;
 	align-items: center;
-	gap: var(--spacing-sm);
+	gap: var(--space-2);
 }
 
 /* Which block Compile acts on. Sits immediately before the button it feeds,
@@ -306,13 +355,9 @@
    workspace has no options, and a select stretched across the pane to say so
    would read as a broken control rather than an unused one. */
 #dev-compile-block {
-	font-size: var(--text-xs);
-	padding: 2px 6px;
-	max-width: 12rem;
-	border: 1px solid var(--border-color);
-	border-radius: var(--radius-sm);
-	background: var(--surface-1);
-	color: var(--text-primary);
+	width: auto;
+	min-width: 10rem;
+	max-width: 16rem;
 }
 
 /* Which toolchain this build carries, written by `dev.js` from the compiler
@@ -321,17 +366,46 @@
    would otherwise leave a hole after the buttons. */
 #dev-compiler-version {
 	color: var(--text-secondary);
-	font-size: 0.85em;
+	font-size: var(--text-xs);
 }
 
 #dev-compiler-version:empty {
 	display: none;
 }
 
-/* One column below the admin's own breakpoint: the editor and the preview
-   are both full-width-or-useless, and the tree is short. */
-@media (max-width: 900px) {
+/* Two columns for the console from the admin's own breakpoint up: what the
+   tool is beside what to call it with. */
+@media (min-width: 900px) {
+	.dev-console__grid {
+		grid-template-columns: minmax(0, 2fr) minmax(0, 3fr);
+	}
+}
+
+/* One column below it: the editor and the preview are both
+   full-width-or-useless, and the tree is short. */
+@media (max-width: 899px) {
 	.dev-workspace {
 		grid-template-columns: 1fr;
+		gap: var(--space-4);
+	}
+
+	.dev-pane {
+		padding: var(--space-4);
+	}
+
+	#dev-file-list {
+		max-height: clamp(220px, 40vh, 400px);
+	}
+}
+
+/* Touch targets: 44px wherever a coarse pointer (a finger) is available,
+   whatever the window's width — a narrow desktop window has a mouse, and a
+   tablet in landscape is wide. Fine pointers keep the denser rows above,
+   none of them under 24px. */
+@media (any-pointer: coarse) {
+	.dev-file,
+	#dev-console-tool,
+	#dev-compile-block {
+		min-height: 44px;
 	}
 }
