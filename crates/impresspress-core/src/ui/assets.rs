@@ -610,10 +610,12 @@ mod tests {
         );
 
         let mut uses = 0;
+        let mut violations = Vec::new();
         for (name, sheet) in all_stylesheets() {
             let allowed_queries = usize::from(name == "app.css");
-            let violations = touch_size_violations(&sheet, allowed_queries);
-            assert!(violations.is_empty(), "{name}:\n{}", violations.join("\n"));
+            for v in touch_size_violations(&sheet, allowed_queries) {
+                violations.push(format!("{name}: {v}"));
+            }
             uses += strip_css_comments(&sheet)
                 .matches("var(--target-min)")
                 .count()
@@ -621,6 +623,7 @@ mod tests {
                     .matches("var(--control-height")
                     .count();
         }
+        assert!(violations.is_empty(), "{}", violations.join("\n"));
         assert!(
             uses >= 30,
             "expected the controls to use the target tokens, found {uses} uses"
@@ -639,6 +642,11 @@ mod tests {
             ".tab { block-size: 2.75rem; }",
             "a.link { min-width: max(1rem, 3rem); }",
             ".item { min-height: clamp(44px, 5vh, 60px); }",
+            ".btn { min-height: 44px !important; }",
+            ".btn { min-height: 44PX; }",
+            ".btn { min-height: 2.75REM; }",
+            ".btn { min-height: 44pt; }",
+            ".dev-file { min-height: 3rem; }",
             "@media (hover: none) { .btn { padding: 0; } }",
             "@media (any-pointer:coarse) { .btn { padding: 0; } }",
         ] {
@@ -654,7 +662,9 @@ mod tests {
             ".btn--lg { min-height: 2.5rem; }",
             ".dev-file { min-height: max(36px, var(--target-min)); }",
             ".btn:hover:not(:disabled) { background: red; }",
-            ".card { min-height: 360px; }",
+            ".btn { min-height: 0; }",
+            ".pane { min-height: calc(100dvh - 24rem); }",
+            ".btn { min-height: 2rem !important; }",
         ] {
             assert_eq!(
                 touch_size_violations(good, 0),
@@ -664,13 +674,14 @@ mod tests {
         }
     }
 
-    /// Every way a stylesheet can size a control to a touch target without
-    /// the tokens: a `min-height`, `height` or `block-size` of 44px or more,
-    /// or a 44-48px `min-width` (in
-    /// px, rem or em, bare or in `calc`/`max`/`min`/`clamp`) on a control
-    /// selector that does not go through `var(--target-min)` or
-    /// `var(--control-height*)`, and any `pointer`/`hover` media query beyond
-    /// `allowed_queries`.
+    /// Every way a stylesheet can size something to a touch target without
+    /// the tokens, on any selector: a `min-height`, `height` or `block-size`
+    /// of 44px or more (outside `TALL_BOXES`), or a 44-48px `min-width` (in
+    /// px, rem or em, any case, bare or in `calc`/`max`/`min`/`clamp`, with
+    /// or without `!important`) that does not go through `var(--target-min)`
+    /// or `var(--control-height*)`; a sizing value this cannot resolve that
+    /// is not relative (`var()`, %, a viewport unit, `auto`...); and any
+    /// `pointer`/`hover` media query beyond `allowed_queries`.
     #[cfg(feature = "embed-assets")]
     fn touch_size_violations(sheet: &str, allowed_queries: usize) -> Vec<String> {
         let sheet = strip_css_comments(sheet);
@@ -683,14 +694,13 @@ mod tests {
             ));
         }
         for (selector, body) in css_leaf_blocks(&sheet) {
-            if !is_control_selector(&selector) {
-                continue;
-            }
             for decl in body.split(';') {
                 let Some((prop, value)) = decl.split_once(':') else {
                     continue;
                 };
-                let (prop, value) = (prop.trim(), value.trim());
+                let prop = prop.trim().to_ascii_lowercase();
+                let value = value.trim().to_ascii_lowercase();
+                let value = value.trim_end_matches("!important").trim();
                 let sizing = prop.starts_with("min-") || prop == "height" || prop == "block-size";
                 if !sizing
                     || value.contains("var(--target-min)")
@@ -698,15 +708,43 @@ mod tests {
                 {
                     continue;
                 }
-                // Down: anything from 44px up is a touch floor in disguise
-                // (a control's height is its padding, line and the tokens).
-                // Across: a field's width legitimately runs to any size, so
-                // only a target-shaped 44-48px is.
+                let Some(px) = css_length_px(value) else {
+                    // What this cannot resolve must depend on the layout,
+                    // not hide a fixed size.
+                    let relative = value.contains("var(--")
+                        || value.contains('%')
+                        || ["vh", "vw", "vmin", "vmax"]
+                            .iter()
+                            .any(|u| value.contains(u))
+                        || matches!(
+                            value,
+                            "auto"
+                                | "none"
+                                | "max-content"
+                                | "min-content"
+                                | "fit-content"
+                                | "inherit"
+                                | "initial"
+                                | "unset"
+                        );
+                    if !relative {
+                        out.push(format!(
+                            "`{selector}`: cannot resolve `{prop}: {value}`; write a length, or size it with the target tokens"
+                        ));
+                    }
+                    continue;
+                };
+                // Down: anything from 44px up is a touch floor in disguise,
+                // bar the boxes in TALL_BOXES. Across: a field's width
+                // legitimately runs to any size, so only a target-shaped
+                // 44-48px is.
                 let across = prop == "min-width" || prop == "min-inline-size";
-                let px = css_length_px(value).unwrap_or(0.0);
-                if px >= 44.0 && (!across || px <= 48.0) {
+                let tall_box = TALL_BOXES
+                    .iter()
+                    .any(|(s, p, _)| *s == selector && *p == prop);
+                if px >= 44.0 && (if across { px <= 48.0 } else { !tall_box }) {
                     out.push(format!(
-                        "`{selector}` sizes a control to a touch target without the tokens: `{prop}: {value}`"
+                        "`{selector}` sets `{prop}: {value}` ({px}px) without the target tokens"
                     ));
                 }
             }
@@ -714,55 +752,71 @@ mod tests {
         out
     }
 
-    /// A selector whose subject is an interactive control: a native control
-    /// element, a `role`, or a class named for one (a button, toggle, tab,
-    /// link, item, summary, input, close/dismiss control...). Matched on the
-    /// last compound of each selector in the list, pseudo-classes removed.
+    /// The boxes allowed a fixed height of 44px or more: content, not
+    /// targets, each with the reason. (selector, property, why)
     #[cfg(feature = "embed-assets")]
-    fn is_control_selector(selector: &str) -> bool {
-        const ELEMENTS: [&str; 7] = [
-            "a", "button", "input", "select", "textarea", "summary", "label",
-        ];
-        const CLASS_WORDS: [&str; 22] = [
-            "btn", "button", "toggle", "tab", "link", "item", "summary", "input", "select",
-            "close", "dismiss", "checkbox", "radio", "switch", "chevron", "trigger", "palette",
-            "swatch", "submit", "control", "crumbs", "option",
-        ];
-        selector.split(',').any(|one| {
-            let subject = one
-                .rsplit([' ', '>', '+', '~'])
-                .find(|part| !part.trim().is_empty())
-                .unwrap_or("")
-                .trim();
-            let subject = subject.split("::").next().unwrap_or(subject);
-            let mut compound = String::new();
-            let mut depth = 0;
-            let mut skipping = false;
-            for c in subject.chars() {
-                match c {
-                    '(' => depth += 1,
-                    ')' => depth -= 1,
-                    ':' if depth == 0 => skipping = true,
-                    '.' | '[' | '#' if depth == 0 => skipping = false,
-                    _ => {}
-                }
-                if !skipping && depth == 0 && c != ')' {
-                    compound.push(c);
-                }
-            }
-            let element: String = compound
-                .chars()
-                .take_while(|c| c.is_ascii_alphanumeric())
-                .collect();
-            ELEMENTS.contains(&element.as_str())
-                || compound.contains("[role")
-                || compound.split(['.', '#', '[']).skip(1).any(|class| {
-                    CLASS_WORDS
-                        .iter()
-                        .any(|w| class.split(['-', '_']).any(|p| p == *w))
-                })
-        })
-    }
+    const TALL_BOXES: &[(&str, &str, &str)] = &[
+        (
+            ".db-pane--right",
+            "min-height",
+            "the database page's result pane, a panel",
+        ),
+        (
+            ".form-textarea",
+            "min-height",
+            "a multi-line field: room for lines of text",
+        ),
+        (
+            ".editor-textarea",
+            "min-height",
+            "the legal editor's page-height text field",
+        ),
+        (
+            ".preview-content",
+            "min-height",
+            "the legal editor's page-height preview",
+        ),
+        (".avatar--lg", "height", "a large avatar image"),
+        (".chart", "height", "a chart's plot area"),
+        (
+            ".user-avatar--lg",
+            "height",
+            "the profile header's avatar image",
+        ),
+        (
+            ".sidebar__brand",
+            "height",
+            "the sidebar header band holding the logo",
+        ),
+        (".topbar", "min-height", "the page header band"),
+        (".page-body", "min-height", "a page's content area"),
+        (
+            ".auth-status__icon",
+            "height",
+            "a status illustration on the auth pages",
+        ),
+        (
+            ".auth-split__brand",
+            "min-height",
+            "the auth pages' brand panel",
+        ),
+        (
+            "#dev-console-args",
+            "height",
+            "the dev console's arguments editor",
+        ),
+        (
+            "#dev-editor-text",
+            "height",
+            "the dev workspace's file editor",
+        ),
+        (
+            "#dev-preview-frame",
+            "height",
+            "the dev workspace's live preview",
+        ),
+        ("#dev-log", "height", "the dev workspace's activity log"),
+    ];
 
     /// The smallest a CSS length can resolve to, in px (1rem = 1em = 16px),
     /// through `calc`, `max`, `min` and `clamp`. `None` when it depends on
@@ -849,7 +903,11 @@ mod tests {
         fn atom(term: &str) -> Option<f64> {
             let term = term.trim();
             if term.contains('(') {
-                return eval(term);
+                // Any other function (`var`, `env`...) is not a length here.
+                let known = ["max(", "min(", "clamp(", "calc(", "("]
+                    .iter()
+                    .any(|f| term.starts_with(f));
+                return if known { eval(term) } else { None };
             }
             for (unit, scale) in [("px", 1.0), ("rem", 16.0), ("em", 16.0)] {
                 if let Some(n) = term.strip_suffix(unit) {
@@ -858,10 +916,10 @@ mod tests {
             }
             term.parse::<f64>().ok()
         }
-        // A bare number is a multiplier, not a length.
+        // A bare number is a multiplier, not a length -- except 0.
         let px = eval(value)?;
         let has_unit = ["px", "rem", "em"].iter().any(|u| value.contains(u));
-        has_unit.then_some(px)
+        (has_unit || px == 0.0).then_some(px)
     }
 
     /// Relative luminance per WCAG 2.1.
