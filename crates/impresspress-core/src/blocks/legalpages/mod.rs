@@ -145,6 +145,10 @@ const ROUTES: &[EndpointRoute<Route>] = &[
         Route::ApiUpdate,
     )
     .summary("Update document")
+    .description(
+        "Edits a draft in place. Published and archived versions are never changed: an edit to \
+         one is saved as a new draft of the same type, and the response is that draft.",
+    )
     .input(request_schema_of::<UpdateDocumentRequest>)
     .path_params(id_path_schema),
     EndpointRoute::admin(
@@ -397,7 +401,10 @@ impl LegalPagesBlock {
         }
     }
 
-    /// `PATCH /b/legalpages/api/documents/{id}`: the document's text.
+    /// `PATCH /b/legalpages/api/documents/{id}`: the document's text, by the
+    /// one edit rule ([`service::edit_text`]): a draft is edited in place, an
+    /// edit to a published or archived version becomes a new draft, and the
+    /// response is the draft that holds the edit.
     ///
     /// The body is a typed [`UpdateDocumentRequest`], not a column map. That
     /// is the B10 fix: the handler used to hand whatever arrived to
@@ -420,11 +427,25 @@ impl LegalPagesBlock {
             Ok(body) => body,
             Err(resp) => return resp,
         };
-        match documents::update_content(ctx, id, body.title.as_deref(), body.content.as_deref())
+        let row = match documents::get(ctx, id)
             .await
+            .map_err(|e| crud::db_error(e, "Document not found", "Database error"))
+            .and_then(|row| require_row(row, "Document not found"))
         {
-            Ok(row) => ok_json(&DocumentView::from_row(&row)),
-            Err(e) => crud::db_error(e, "Document not found", "Database error"),
+            Ok(row) => row,
+            Err(response) => return response,
+        };
+        match service::edit_text(
+            ctx,
+            &row,
+            body.title.as_deref(),
+            body.content.as_deref(),
+            msg.user_id(),
+        )
+        .await
+        {
+            Ok(draft) => ok_json(&DocumentView::from_row(&draft)),
+            Err(e) => edit_failed(e),
         }
     }
 
@@ -490,6 +511,16 @@ impl LegalPagesBlock {
             })?;
         }
         Ok(())
+    }
+}
+
+/// The response for an edit that did not happen, for both edit surfaces.
+fn edit_failed(error: service::EditError) -> OutputStream {
+    match error {
+        service::EditError::NoLongerADraft => crate::http::err_conflict(
+            "This draft was published meanwhile; reload to edit what is live",
+        ),
+        service::EditError::Db(e) => crud::db_error_internal(e, "Failed to save legal-page draft"),
     }
 }
 
@@ -1103,6 +1134,79 @@ mod write_loss_tests {
             .expect("read live")
             .expect("a live version");
         assert_eq!((live.id, live.version), (draft.id, 6));
+    }
+
+    /// A PATCH never changes a published or archived version: the edit lands
+    /// in a new draft of the same type, which is what the response is.
+    #[tokio::test]
+    async fn patch_on_a_published_or_archived_version_lands_in_a_new_draft() {
+        let ctx = test_ctx().await;
+        for (status, version) in [
+            (DocumentStatus::Published, 7),
+            (DocumentStatus::Archived, 6),
+        ] {
+            let kept = seed_doc(&ctx, DocumentType::Terms, "Kept Terms", status, version).await;
+
+            let out = LegalPagesBlock::new()
+                .handle(
+                    &ctx,
+                    admin_msg(
+                        "update",
+                        &format!("/b/legalpages/api/documents/{}", kept.id),
+                    ),
+                    InputStream::from_bytes(br#"{"content":"an edit"}"#.to_vec()),
+                )
+                .await;
+            let body = crate::test_support::output_json(out).await;
+
+            let draft_id = body["id"].as_str().expect("the response is a record");
+            assert_ne!(draft_id, kept.id, "{status:?}");
+            let draft = stored(&ctx, draft_id).await;
+            assert_eq!(draft.status, DocumentStatus::Draft);
+            assert_eq!(draft.version, 0);
+            assert_eq!(draft.doc_type, DocumentType::Terms);
+            assert_eq!(
+                draft.title, "Kept Terms",
+                "an absent field starts from the version"
+            );
+            assert_eq!(draft.content, "an edit");
+            assert_eq!(
+                stored(&ctx, &kept.id).await,
+                kept,
+                "{status:?} is unchanged"
+            );
+        }
+    }
+
+    /// The editor's Save follows the same rule for an archived version.
+    #[tokio::test]
+    async fn saving_an_archived_version_creates_a_draft() {
+        let ctx = test_ctx().await;
+        let old = seed_doc(
+            &ctx,
+            DocumentType::Terms,
+            "Old",
+            DocumentStatus::Archived,
+            1,
+        )
+        .await;
+
+        let body = serde_json::to_vec(&serde_json::json!({
+            "doc_type": "terms",
+            "title": "Old",
+            "content": "an edit",
+            "doc_id": old.id,
+        }))
+        .expect("serialize save body");
+        let out = pages::handle_save(
+            &ctx,
+            &admin_msg("create", "/b/legalpages/admin/save"),
+            InputStream::from_bytes(body),
+        )
+        .await;
+        assert_eq!(output_http_status(out).await, 200);
+        assert_eq!(stored(&ctx, &old.id).await, old);
+        assert_eq!(row_count(&ctx).await, 2);
     }
 
     /// The typed PATCH still does what a PATCH is for.

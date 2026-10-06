@@ -296,18 +296,19 @@ pub async fn insert_draft(ctx: &dyn Context, new: NewDraft<'_>) -> Result<Docume
     DocumentRow::from_record(&db::create(ctx, TABLE, data).await?)
 }
 
-/// Replace a document's text, stamping `updated_at`. A `None` field is left
-/// as stored.
+/// Replace a draft's text, stamping `updated_at`; a `None` field is left as
+/// stored. `None` when `id` is not a draft (any more): published and archived
+/// versions are never edited, and the update is conditional on the status so
+/// a draft published meanwhile is not rewritten either.
 ///
-/// This is the whole of what `PATCH /b/legalpages/api/documents/{id}` can
-/// do. `status` and `version` are not parameters, so no request body reaches
+/// `status` and `version` are not parameters, so no request body reaches
 /// them.
-pub async fn update_content(
+pub async fn update_draft_text(
     ctx: &dyn Context,
     id: &str,
     title: Option<&str>,
     content: Option<&str>,
-) -> Result<DocumentRow, WaferError> {
+) -> Result<Option<DocumentRow>, WaferError> {
     let mut data = json_map(serde_json::json!({ "updated_at": now_rfc3339() }));
     if let Some(title) = title {
         data.insert("title".to_string(), serde_json::json!(title));
@@ -315,7 +316,18 @@ pub async fn update_content(
     if let Some(content) = content {
         data.insert("content".to_string(), serde_json::json!(content));
     }
-    DocumentRow::from_record(&db::update(ctx, TABLE, id, data).await?)
+    let still_a_draft = vec![
+        filter("id", FilterOp::Equal, serde_json::json!(id)),
+        filter(
+            "status",
+            FilterOp::Equal,
+            serde_json::json!(DocumentStatus::Draft),
+        ),
+    ];
+    if db::update_by_filters_count(ctx, TABLE, still_a_draft, data).await? == 0 {
+        return Ok(None);
+    }
+    get(ctx, id).await
 }
 
 /// Make `source` live as `version` of `doc_type`, then archive every other

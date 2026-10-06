@@ -1,6 +1,7 @@
 {
   "/b/legalpages/api/documents/{id}": {
     "patch": {
+      "description": "Edits a draft in place. Published and archived versions are never changed: an edit to one is saved as a new draft of the same type, and the response is that draft.",
       "parameters": [
         {
           "in": "path",

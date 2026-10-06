@@ -398,8 +398,9 @@ struct SaveRequest {
     doc_id: String,
 }
 
-/// Save a draft document. If the current doc is published, creates a new draft
-/// so the live version stays untouched until the admin explicitly publishes.
+/// Save the editor's text as a draft, by the one edit rule
+/// (`service::edit_text`): a draft is edited in place; a published or
+/// archived version stays as it is and the text becomes a new draft.
 pub async fn handle_save(ctx: &dyn Context, msg: &Message, input: InputStream) -> OutputStream {
     let raw = match input.collect_to_bytes().await {
         Ok(bytes) => bytes,
@@ -427,16 +428,28 @@ pub async fn handle_save(ctx: &dyn Context, msg: &Message, input: InputStream) -
         }
     };
 
-    // Editing a published document creates a new draft instead of modifying
-    // the live version, so the published text stays untouched until the admin
-    // explicitly publishes again.
+    // An existing row goes through the one edit rule (a draft is edited in
+    // place, a published or archived version is never changed and the edit
+    // becomes a new draft); no row starts the type's first draft.
     let saved = match existing {
-        Some(doc) if doc.status != DocumentStatus::Published => {
-            documents::update_content(ctx, &doc.id, Some(&body.title), Some(&body.content))
-                .await
-                .map(|row| row.id)
+        Some(doc) if doc.doc_type != body.doc_type => {
+            return err_bad_request("The document is not of the type being saved")
         }
-        _ => documents::insert_draft(
+        Some(doc) => {
+            match service::edit_text(
+                ctx,
+                &doc,
+                Some(&body.title),
+                Some(&body.content),
+                msg.user_id(),
+            )
+            .await
+            {
+                Ok(draft) => draft,
+                Err(e) => return super::edit_failed(e),
+            }
+        }
+        None => match documents::insert_draft(
             ctx,
             NewDraft {
                 doc_type: body.doc_type,
@@ -446,17 +459,17 @@ pub async fn handle_save(ctx: &dyn Context, msg: &Message, input: InputStream) -
             },
         )
         .await
-        .map(|row| row.id),
+        {
+            Ok(draft) => draft,
+            Err(e) => return crud::db_error_internal(e, "Failed to save legal-page draft"),
+        },
     };
 
-    match saved {
-        Ok(doc_id) => ok_json(&serde_json::json!({
-            "doc_id": doc_id,
-            "status": DocumentStatus::Draft,
-            "message": "Draft saved"
-        })),
-        Err(e) => crud::db_error_internal(e, "Failed to save legal-page draft"),
-    }
+    ok_json(&serde_json::json!({
+        "doc_id": saved.id,
+        "status": DocumentStatus::Draft,
+        "message": "Draft saved"
+    }))
 }
 
 /// Save and publish a document as the next version of its type, archiving

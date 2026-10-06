@@ -17,7 +17,7 @@ use wafer_run::{context::Context, ErrorCode, WaferError};
 
 use super::{
     contracts::{DocumentStatus, DocumentType},
-    repo::documents::{self, DocumentRow, PublishOutcome, PublishSource},
+    repo::documents::{self, DocumentRow, NewDraft, PublishOutcome, PublishSource},
 };
 
 /// Inputs for [`publish_document`]. There is no version: the server numbers
@@ -64,6 +64,50 @@ impl From<WaferError> for PublishError {
     fn from(e: WaferError) -> Self {
         Self::Db(e)
     }
+}
+
+/// Why an edit did not happen.
+#[derive(Debug)]
+pub(super) enum EditError {
+    /// The draft was published meanwhile; reloading shows what is live now.
+    NoLongerADraft,
+    /// A database failure.
+    Db(WaferError),
+}
+
+impl From<WaferError> for EditError {
+    fn from(e: WaferError) -> Self {
+        Self::Db(e)
+    }
+}
+
+/// Apply an edit to `row`, the one rule for both edit surfaces (the editor's
+/// Save and `PATCH /b/legalpages/api/documents/{id}`): a draft is edited in
+/// place; a published or archived version is never changed — the edit is
+/// saved as a new draft of the same type, starting from that version's text
+/// (a `None` field keeps it). Returns the draft that holds the edit.
+pub(super) async fn edit_text(
+    ctx: &dyn Context,
+    row: &DocumentRow,
+    title: Option<&str>,
+    content: Option<&str>,
+    created_by: &str,
+) -> Result<DocumentRow, EditError> {
+    if row.status != DocumentStatus::Draft {
+        return Ok(documents::insert_draft(
+            ctx,
+            NewDraft {
+                doc_type: row.doc_type,
+                title: title.unwrap_or(&row.title),
+                content: content.unwrap_or(&row.content),
+                created_by,
+            },
+        )
+        .await?);
+    }
+    documents::update_draft_text(ctx, &row.id, title, content)
+        .await?
+        .ok_or(EditError::NoLongerADraft)
 }
 
 /// How many times a publish reads the next version and tries to take it
