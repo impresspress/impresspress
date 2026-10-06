@@ -1015,20 +1015,24 @@ async function loadFiles() {
   // a block an agent had just created or removed.
   renderBlockChoices(files);
   list.innerHTML = '';
+  // A button per file, not a link: opening a file swaps the editor's
+  // contents and goes nowhere, so a link (`href="#"`) would announce a
+  // navigation that never happens. `aria-current` marks the open file for a
+  // screen reader and is what dev.css highlights.
   files.forEach(function (file) {
     var li = document.createElement('li');
-    var link = document.createElement('a');
-    link.href = '#';
-    link.textContent = file.path;
-    link.setAttribute('data-path', file.path);
+    var button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'dev-file';
+    button.textContent = file.path;
+    button.setAttribute('data-path', file.path);
     if (current && current.path === file.path) {
-      link.setAttribute('data-open', 'true');
+      button.setAttribute('aria-current', 'true');
     }
-    link.addEventListener('click', function (event) {
-      event.preventDefault();
+    button.addEventListener('click', function () {
       openFile(file.path).catch(logError);
     });
-    li.appendChild(link);
+    li.appendChild(button);
     list.appendChild(li);
   });
 }
@@ -1177,7 +1181,9 @@ var deleteOpenFile = withProgress(async function () {
   }
   var deleted = await json(response);
   current = null;
-  title.textContent = 'Editor';
+  // The markup's own words for an editor with nothing in it (`page.rs`):
+  // this element labels the textarea, so it says what the box holds.
+  title.textContent = 'No file open';
   text.value = '';
   setEditorEnabled(true);
   log('deleted ' + path);

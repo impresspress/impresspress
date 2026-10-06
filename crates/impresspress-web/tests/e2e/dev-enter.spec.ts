@@ -184,7 +184,7 @@ test('without WebMCP, the Tool console lists the tools, reads the status and pub
   expect(await page.evaluate(async () => (await fetch('/console.html')).text())).toBe(CONTENT);
   // …and the page caught up exactly as it does after an agent's call: the
   // file tree shows the new file (the `MUTATING` catch-up in `dev.js`).
-  await expect(page.locator('#dev-file-list a[data-path="site/console.html"]')).toBeVisible({
+  await expect(page.locator('#dev-file-list button[data-path="site/console.html"]')).toBeVisible({
     timeout: 60_000,
   });
 
