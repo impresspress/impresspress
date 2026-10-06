@@ -86,7 +86,7 @@
 .chart__values summary {
 	display: inline-flex;
 	align-items: center;
-	min-height: 44px;
+	min-height: var(--target-min);
 	cursor: pointer;
 	color: var(--text-secondary);
 	font-size: var(--text-xs);

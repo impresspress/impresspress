@@ -496,7 +496,7 @@ mod tests {
 
     /// The panes title themselves with the shared `section_header`, so every
     /// in-body heading is one h2 style (PLAN D1), and the selects are the
-    /// shared 44px `.form-select`.
+    /// shared `.form-select`, which carries the target floor.
     #[test]
     fn panes_use_the_shared_heading_and_form_controls() {
         let html = body(None, None).into_string();

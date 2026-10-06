@@ -1,5 +1,6 @@
 import { expect, test, type Page } from '@playwright/test';
 import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
+import { PHONE, targetFloor } from './fixtures/targets';
 
 /**
  * The LLM block's admin pages, driven in a browser against the real server.
@@ -95,19 +96,21 @@ test.describe.serial('LLM providers and models', () => {
     await expect(model).not.toContainText('{');
   });
 
-  test('at 390px the providers list fits and its row actions are 44px targets', async ({
-    page,
-  }) => {
-    await loginAsAdmin(page);
-    await page.setViewportSize({ width: 390, height: 844 });
-    await page.goto('/b/llm/providers');
-    expect(await overflowX(page)).toBe(0);
-    for (const label of [`Edit ${name}`, `Delete ${name}`]) {
-      const box = await page.getByRole('button', { name: label }).boundingBox();
-      expect(box, label).not.toBeNull();
-      expect(box!.width, label).toBeGreaterThanOrEqual(44);
-      expect(box!.height, label).toBeGreaterThanOrEqual(44);
-    }
+  test.describe('on a phone', () => {
+    test.use(PHONE);
+
+    test('the providers list fits and its row actions are 44px targets', async ({ page }) => {
+      await loginAsAdmin(page);
+      await page.goto('/b/llm/providers');
+      expect(await overflowX(page)).toBe(0);
+      expect(await targetFloor(page)).toBe(44);
+      for (const label of [`Edit ${name}`, `Delete ${name}`]) {
+        const box = await page.getByRole('button', { name: label }).boundingBox();
+        expect(box, label).not.toBeNull();
+        expect(box!.width, label).toBeGreaterThan(43.5);
+        expect(box!.height, label).toBeGreaterThan(43.5);
+      }
+    });
   });
 
   test('Delete is a labelled icon, confirmed, and the row goes', async ({ page }) => {

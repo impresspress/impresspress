@@ -63,14 +63,15 @@
 }
 
 /* A disclosure: the suggested prompt, the input schema. The summary is the
-   whole hit area, padded to 44px tall; it stays a `list-item` because any
-   other display drops its disclosure triangle. */
+   whole hit area, padded and held to the target floor; it stays a
+   `list-item` because any other display drops its disclosure triangle. */
 .dev-disclosure {
 	margin-top: var(--space-2);
 }
 
 .dev-disclosure summary {
 	display: list-item;
+	min-height: var(--target-min);
 	padding: var(--space-3) 0;
 	line-height: 1.4;
 	cursor: pointer;
@@ -132,7 +133,8 @@
 }
 
 /* The tool names are identifiers, so they read in the monospace the rest of
-   the console uses. Its touch height is set in the pointer query below. */
+   the console uses. It is a `.form-select`, so it carries the shared target
+   floor. */
 #dev-console-tool {
 	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
@@ -192,8 +194,9 @@
 .dev-file {
 	display: block;
 	width: 100%;
-	/* 24px is the floor for a fine pointer; a coarse one gets 44px below. */
-	min-height: 36px;
+	/* 36px for a mouse, a list row a little under a `.btn`'s 40px; a
+	   finger's floor (--target-min, tokens.css) is higher and wins. */
+	min-height: max(36px, var(--target-min));
 	padding: var(--space-2) var(--space-3);
 	border: 0;
 	border-radius: var(--radius-sm);
@@ -395,17 +398,5 @@
 
 	#dev-file-list {
 		max-height: clamp(220px, 40vh, 400px);
-	}
-}
-
-/* Touch targets: 44px wherever a coarse pointer (a finger) is available,
-   whatever the window's width — a narrow desktop window has a mouse, and a
-   tablet in landscape is wide. Fine pointers keep the denser rows above,
-   none of them under 24px. */
-@media (any-pointer: coarse) {
-	.dev-file,
-	#dev-console-tool,
-	#dev-compile-block {
-		min-height: 44px;
 	}
 }

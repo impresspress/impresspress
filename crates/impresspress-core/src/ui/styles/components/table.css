@@ -37,24 +37,32 @@ table.data-table { border-collapse: separate; border-spacing: 0; }
 /* Controls sit at the end of their cell, on one line. */
 .data-table__cell--actions { text-align: right; white-space: nowrap; }
 .data-table__cell--actions > * + * { margin-left: var(--space-2); }
-.data-table__cell--select { width: 2.75rem; }
+.data-table__cell--select { width: var(--target-min); }
+/* Its box is the label's only visible content: centred in the target. */
+.data-table__cell--select .form-checkbox { justify-content: center; }
 /* A text link in a cell -- a bucket, a file, a folder. With no rule of its
    own it rendered in the browser's default blue and underline, the one
    unstyled element in the table. The row-link chevron (below) and a `.btn`
    in a cell keep their own treatment. --primary-button is the AA-safe text
-   red (4.99:1 on white, computed), as for every other text link here. */
-.data-table td:not(.data-table__row-href) a:not(.btn) { color: var(--primary-button); font-weight: 500; text-decoration: none; }
+   red (4.99:1 on white, computed), as for every other text link here. It is
+   a control of its own, so it is held to the target floor: a link's text
+   line is under 24px, short of even a mouse's minimum. */
+.data-table td:not(.data-table__row-href) a:not(.btn) {
+	display: inline-flex; align-items: center;
+	min-height: var(--target-min); min-width: var(--target-min);
+	color: var(--primary-button); font-weight: 500; text-decoration: none;
+}
 .data-table td:not(.data-table__row-href) a:not(.btn):hover { text-decoration: underline; }
 .data-table__row-href { width: 3rem; text-align: right; color: var(--text-muted); }
-/* The chevron is the row's accessible link (aria-label "Open"); give it a
-   real 44px touch target -- the rest of the row is made clickable by the
+/* The chevron is the row's accessible link (aria-label "Open"); it is held
+   to the target floor -- the rest of the row is made clickable by the
    delegated handler in assets/chrome.js, which routes clicks to it. */
 .data-table__row-href a {
     display: inline-flex;
     align-items: center;
     justify-content: center;
-    min-width: 2.75rem;
-    min-height: 2.75rem;
+    min-width: var(--target-min);
+    min-height: var(--target-min);
     margin: -0.75rem -0.5rem;
     border-radius: var(--radius-md);
     color: inherit;
@@ -70,7 +78,7 @@ table.data-table { border-collapse: separate; border-spacing: 0; }
 .row--folder__link { display: inline-flex; align-items: center; gap: var(--space-2); }
 /* A table row's "more actions" menu (`files-browser.js` opens it under the
    row's `.btn--icon` trigger): a floating list of full-width menu items, each
-   a 44px target. Placed with `position: fixed` against the trigger; the
+   at least the target floor tall. Placed with `position: fixed` against the trigger; the
    script sets `top`/`right`. */
 .row-menu {
 	position: fixed; z-index: var(--z-dropdown);
@@ -80,8 +88,8 @@ table.data-table { border-collapse: separate; border-spacing: 0; }
 	border-radius: var(--radius-md); box-shadow: var(--shadow-lg);
 }
 .row-menu__item {
-	display: flex; align-items: center; min-height: 44px; width: 100%;
-	padding: 0 var(--space-3); border: 0; border-radius: var(--radius-sm);
+	display: flex; align-items: center; min-height: var(--target-min); width: 100%;
+	padding: var(--space-2) var(--space-3); border: 0; border-radius: var(--radius-sm);
 	background: transparent; color: var(--text-primary);
 	font: inherit; font-size: var(--text-sm); text-align: left; cursor: pointer;
 }
@@ -93,7 +101,6 @@ table.data-table { border-collapse: separate; border-spacing: 0; }
    hides. */
 .bulk-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-4); margin-bottom: var(--space-2); }
 .bulk-bar__count { font-size: var(--text-sm); color: var(--text-secondary); }
-.bulk-bar__delete { min-height: 44px; }
 /* A long free-form value in a cell -- a URL, a stored setting. It may break
    at any character, so its column can be narrower than the whole value and
    the table fits the card instead of scrolling part of itself out of view.
@@ -134,14 +141,14 @@ table.data-table { border-collapse: separate; border-spacing: 0; }
 
 /* ===== Pagination ===== */
 /* One row at every width: the total on the left, the controls on the right.
-   Each control is a 44px target. */
+   Each control is held to the target floor. */
 .pagination { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); margin-top: var(--space-4); font-size: var(--text-sm); color: var(--text-secondary); }
 .pagination__count { min-width: 0; font-variant-numeric: tabular-nums; }
 .pagination__controls { display: flex; align-items: center; gap: var(--space-1); flex-shrink: 0; }
 .pagination__page { padding: 0 var(--space-2); font-variant-numeric: tabular-nums; white-space: nowrap; }
 .pagination__link {
 	display: inline-flex; align-items: center; justify-content: center;
-	min-width: 44px; min-height: 44px; padding: 0 var(--space-3);
+	min-width: var(--target-min); min-height: var(--target-min); padding: var(--space-1) var(--space-3);
 	border-radius: var(--radius-md); white-space: nowrap; text-decoration: none;
 }
 /* --primary-color is 3.66:1 on white -- below the 4.5:1 AA floor for this
@@ -168,6 +175,7 @@ a.pagination__link:hover { background: var(--bg-hover); }
 .db-pane__head { margin-bottom: var(--space-2); }
 .db-pane__head input {
   width: 100%;
+  min-height: var(--target-min);
   padding: var(--space-2) var(--space-3);
   font-size: 13px;
   border: 1px solid var(--border-color);
@@ -175,7 +183,8 @@ a.pagination__link:hover { background: var(--bg-hover); }
 }
 .db-table-list__item {
   display: flex;
-  align-items: baseline;
+  align-items: center;
+  min-height: var(--target-min);
   justify-content: space-between;
   gap: var(--space-2);
   padding: var(--space-2) var(--space-2);
@@ -349,10 +358,11 @@ a.pagination__link:hover { background: var(--bg-hover); }
 .network-summary { margin: var(--space-4) 0 var(--space-2); font-size: var(--text-sm); color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 .network-group { margin-top: var(--space-4); }
 .network-group__head { margin: 0; font-size: var(--text-base); }
-/* The group's collapse control: the heading's whole text, a 44px target. */
+/* The group's collapse control: the heading's whole text, held to the
+   target floor. */
 .network-group__toggle {
 	display: inline-flex; align-items: center; gap: var(--space-2);
-	min-height: 44px; padding: 0 var(--space-2) 0 0;
+	min-height: var(--target-min); padding: var(--space-1) var(--space-2) var(--space-1) 0;
 	background: none; border: none; border-radius: var(--radius-md);
 	font: inherit; font-weight: 600; color: var(--text-primary); cursor: pointer;
 }
@@ -387,7 +397,7 @@ a.pagination__link:hover { background: var(--bg-hover); }
    panel; the page folds it there itself once a panel is open. */
 .db-tables__summary {
 	display: flex; align-items: center; justify-content: space-between; gap: var(--space-2);
-	min-height: 44px; padding: 0 var(--space-1);
+	min-height: var(--target-min); padding: var(--space-2) var(--space-1);
 	font-weight: 600; cursor: pointer; border-radius: var(--radius-md);
 }
 .db-tables[open] > .db-tables__summary { margin-bottom: var(--space-2); }

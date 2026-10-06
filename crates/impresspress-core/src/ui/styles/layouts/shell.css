@@ -161,6 +161,9 @@
 	   the last icon 11.5px out of place on collapse. line-height: 1 makes
 	   the icon cell (24px) the tallest child in both states. */
 	line-height: 1;
+	/* The floor raises the row only under a finger (tokens.css), where it is
+	   the same in both states, so it moves nothing on collapse. */
+	min-height: var(--target-min);
 	/* The label must never wrap, at ANY width -- not just at the two end
 	   widths. `.sidebar__nav-label` is only hidden once `.collapsed` lands,
 	   so throughout the 0.3s width animation the labels are still laid out
@@ -257,6 +260,7 @@
 	   floating in the sidebar's empty space (which read as broken UI). */
 	position: absolute; top: 0.5rem; right: 0.5rem;
 	width: 28px; height: 28px;
+	min-width: var(--target-min); min-height: var(--target-min);
 	display: flex; align-items: center; justify-content: center;
 	background: transparent; color: var(--sidebar-text-muted);
 	border: 1px solid transparent; border-radius: var(--radius-md);
@@ -358,7 +362,7 @@
 .topbar__crumbs li + li::before { content: "›"; padding: 0 var(--space-1); color: var(--text-muted); }
 /* The trail points at the title on the line below it. */
 .topbar__crumbs li:last-child::after { content: "›"; padding: 0 0 0 var(--space-2); color: var(--text-muted); }
-.topbar__crumbs a { color: var(--text-secondary); text-decoration: none; }
+.topbar__crumbs a { display: inline-flex; align-items: center; min-height: var(--target-min); min-width: var(--target-min); color: var(--text-secondary); text-decoration: none; }
 /* --primary-color is 3.66:1 on white (.topbar's background) -- below the
    4.5:1 AA floor for this hover-state link text; --primary-button
    (4.99:1, computed) is the text-safe sibling. */
@@ -371,9 +375,14 @@
 }
 .topbar__subtitle { font-size: var(--text-sm); color: var(--text-secondary); margin: 0; }
 .topbar__actions { display: flex; align-items: center; flex-wrap: wrap; gap: var(--space-2); }
+/* The actions stand in one row with the palette button, so a small one
+   takes the row's height (and an icon one its width) -- its text stays
+   small. */
+.topbar__actions .btn--sm { min-height: var(--control-height); }
+.topbar__actions .btn--icon.btn--sm { min-width: var(--control-height); }
 .topbar__palette {
 	display: inline-flex; align-items: center; gap: var(--space-2);
-	min-height: 36px;
+	min-height: var(--control-height);
 	background: var(--surface-3); border: 1px solid var(--border-color);
 	border-radius: var(--radius-md); padding: var(--space-1) var(--space-3); font-size: var(--text-sm);
 	color: var(--text-secondary); cursor: pointer;
@@ -410,8 +419,8 @@
 		border-radius: var(--radius-md);
 		cursor: pointer;
 		font-size: 18px;
-		min-width: 44px;
-		min-height: 44px;
+		min-width: var(--target-min);
+		min-height: var(--target-min);
 		padding: var(--space-2);
 		display: inline-flex;
 		align-items: center;

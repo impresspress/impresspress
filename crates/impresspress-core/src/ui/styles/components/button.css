@@ -35,12 +35,15 @@
 	cursor: pointer;
 	transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
 	text-decoration: none; white-space: nowrap;
+	/* One height with the form controls a button stands beside (tokens.css):
+	   40px for a mouse, 44px under a finger, whatever the window's width. */
+	min-height: var(--control-height);
 }
 .btn:disabled { opacity: 0.55; cursor: not-allowed; }
 
 /* ── Sizes ─────────────────────────────────────────────── */
-.btn--sm { padding: var(--space-1) var(--space-3); font-size: var(--text-sm); }
-.btn--md { padding: var(--space-2) var(--space-4); font-size: var(--text-base); }
+.btn--sm { min-height: var(--control-height-sm); padding: var(--space-1) var(--space-3); font-size: var(--text-sm); }
+.btn--md { min-height: var(--control-height); padding: var(--space-2) var(--space-4); font-size: var(--text-base); }
 /* Vertical padding snaps to --space-3, not the nearer --space-2 (0.6rem is
    9.6px, 1.6px from --space-2's 8px vs 2.4px from --space-3's 12px) --
    nearest-neighbour would tie .btn--lg's vertical padding with .btn--md's
@@ -49,9 +52,10 @@
 .btn--lg { padding: var(--space-3) var(--space-6); font-size: var(--text-lg); }
 /* Square: an icon-only button, so the horizontal padding matches the
    vertical rather than the text-button ratio. It has no words to make it
-   wide, so it is held at the 44px touch target on every width; it always
-   carries an `aria-label`, its only name. */
-.btn--icon { padding: var(--space-2); min-width: 44px; min-height: 44px; }
+   wide, so it is as wide as its size is tall; it always carries an
+   `aria-label`, its only name. */
+.btn--icon { padding: var(--space-2); min-width: var(--control-height); }
+.btn--icon.btn--sm { min-width: var(--control-height-sm); }
 
 /* ── Variants ──────────────────────────────────────────── */
 .btn--primary { background: var(--primary-button); color: #fff; border-color: var(--primary-button); }
@@ -110,9 +114,8 @@
 /* ── Filter toggle (`components::filter_toggle`) ───────── */
 /* A list filter that is on or off. Off reads as a secondary button; on is
    filled with the neutral ink and carries a check, so the state is shape and
-   text as well as colour, and `aria-pressed` says it to a screen reader. */
-.filter-toggle { min-height: 44px; }
-/* The same look for the current one of a set of links that choose between
+   text as well as colour, and `aria-pressed` says it to a screen reader.
+   The same look serves the current one of a set of links that choose between
    orderings (`aria-current`), where only one can be on. */
 .filter-toggle[aria-pressed="true"],
 .filter-toggle[aria-current="true"] { background: var(--text-primary); color: var(--surface-1); border-color: var(--text-primary); }

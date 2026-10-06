@@ -476,10 +476,6 @@
 	align-items: end;
 }
 .messages-new__form .form-group { margin-bottom: 0; }
-/* The select, the text box and the button stand in one row: one 44px
-   height for all three (a select's native chrome otherwise sits 2-3px taller
-   than the text box, and the button shorter), so their edges line up. */
-.messages-new__form .form-input, .messages-new__submit { height: 44px; }
 @media (max-width: 720px) {
 	.messages-new__form { grid-template-columns: 1fr; }
 }
@@ -559,7 +555,7 @@
    bottom edge. */
 .composer { display: flex; align-items: flex-end; gap: var(--space-2); }
 .composer__input { flex: 1; min-width: 0; resize: none; }
-.composer__submit { flex: none; min-height: 44px; }
+.composer__submit { flex: none; }
 /* The "Add entry" form's kind and role pickers, side by side above the
    composer; stacked on a phone. */
 .entry-form__meta { display: grid; grid-template-columns: repeat(2, minmax(0, 12rem)); gap: var(--space-2) var(--space-4); margin-bottom: var(--space-3); }
@@ -676,7 +672,7 @@
 	.chat-options__model .form-input { flex: 1; min-width: 0; }
 	.chat-options__status { flex-basis: 100%; }
 	.chat-options__progress { flex-basis: 100%; order: 1; }
-	.chat-options__settings { align-self: center; min-width: 44px; }
+	.chat-options__settings { align-self: center; min-width: var(--target-min); }
 	.chat-options__settings-text {
 		position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px;
 		overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0;
@@ -694,7 +690,7 @@
 /* The filters' disclosure: a summary button below 720px, nothing above it
    (`::details-content` shows the closed details' content). */
 .ticket-filters-disclosure { width: 100%; }
-.ticket-filters-disclosure__summary { display: inline-flex; align-items: center; min-height: 44px; padding: 0 var(--space-4); border: 1px solid var(--border-color); border-radius: var(--radius-full); cursor: pointer; font-weight: 500; }
+.ticket-filters-disclosure__summary { display: inline-flex; align-items: center; min-height: var(--target-min); padding: var(--space-2) var(--space-4); border: 1px solid var(--border-color); border-radius: var(--radius-full); cursor: pointer; font-weight: 500; }
 .ticket-filters-disclosure[open] .ticket-filters-disclosure__summary { margin-bottom: var(--space-3); }
 @media (min-width: 721px) {
 	.ticket-filters-disclosure__summary { display: none; }
@@ -703,7 +699,6 @@
 .ticket-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: var(--space-3); align-items: end; width: 100%; }
 .ticket-filters .form-group { margin: 0; }
 .ticket-filters__actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
-.ticket-filters__actions .btn, .ticket-form-actions .btn { min-height: 44px; }
 .ticket-ref, .ticket-setting-key { display: block; margin-top: 2px; font-family: ui-monospace, Menlo, monospace; font-size: var(--text-xs); font-weight: 400; color: var(--text-muted); }
 .ticket-page { display: flex; flex-direction: column; gap: var(--space-6); }
 .ticket-section { margin: 0 0 var(--space-8); min-width: 0; }
@@ -712,8 +707,8 @@
 .ticket-workflow__grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 var(--space-4); align-items: start; }
 .ticket-workflow__grid .form-group, .ticket-workflow__grid .form-group:last-child { margin-bottom: var(--space-5); }
 @media (max-width: 720px) { .ticket-workflow__grid { grid-template-columns: minmax(0, 1fr); } }
-.ticket-link { display: inline-flex; align-items: center; min-height: 44px; color: var(--primary-button); font-weight: 500; text-decoration: none; }
-/* The legal-hold box: a 24px box in a 44px label row, all of it the target. */
+.ticket-link { display: inline-flex; align-items: center; min-height: var(--target-min); color: var(--primary-button); font-weight: 500; text-decoration: none; }
+/* The legal-hold box: a 24px box in its label row, all of it the target. */
 .ticket-section .form-checkbox input { width: 1.5rem; height: 1.5rem; flex: none; }
 /* Below the two-column width the metadata comes first, under the hero. */
 @media (max-width: 1023px) { .ticket-detail .detail-meta { order: -1; } }
@@ -775,11 +770,11 @@
 .var-cell__note { font-size: var(--text-xs); color: var(--text-muted); }
 
 /* One owner's variables, collapsible (`<details>`): the summary row is the
-   whole 44px-plus control, the title on the left and its counts beside it. */
+   whole control, the title on the left and its counts beside it. */
 .var-group { border: 1px solid var(--border-light); border-radius: var(--radius-lg); background: var(--surface-1); margin-top: var(--space-3); }
 .var-group__summary {
 	display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-3);
-	min-height: 44px; padding: var(--space-3) var(--space-4);
+	min-height: var(--target-min); padding: var(--space-3) var(--space-4);
 	cursor: pointer; list-style: none; border-radius: var(--radius-lg);
 }
 .var-group__summary::-webkit-details-marker { display: none; }

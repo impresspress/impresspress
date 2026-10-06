@@ -225,7 +225,7 @@ fn create_variable_form(form: &CreateVarForm<'_>) -> Markup {
                 // and an off one still posts an explicit `0` rather than
                 // nothing. The switch is the shared settings-form markup
                 // (`ui::settings_form`'s `Toggle`): a native checkbox with
-                // `role="switch"`, its whole ≥44px label row the hit area.
+                // `role="switch"`, its whole label row the hit area.
                 input type="hidden" name="sensitive" value="0";
                 label .form-switch {
                     input .form-switch__input #var-sensitive type="checkbox" role="switch"

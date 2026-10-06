@@ -22,31 +22,6 @@
 }
 .search-summary__text { min-width: 0; overflow-wrap: anywhere; }
 
-/* Toggle */
-.toggle {
-	position: relative; display: inline-block;
-	width: 44px; height: 24px;
-}
-
-.toggle input { opacity: 0; width: 0; height: 0; }
-
-.toggle-slider {
-	position: absolute; top: 0; left: 0; right: 0; bottom: 0;
-	background: var(--border-color); border-radius: 24px;
-	cursor: pointer; transition: background 0.2s;
-}
-
-.toggle-slider::before {
-	content: ''; position: absolute;
-	left: 2px; bottom: 2px;
-	width: 20px; height: 20px;
-	background: white; border-radius: 50%;
-	transition: transform 0.2s;
-}
-
-.toggle input:checked + .toggle-slider { background: var(--primary-color); }
-.toggle input:checked + .toggle-slider::before { transform: translateX(20px); }
-
 /* Filter Bar */
 .filter-bar {
 	display: flex; align-items: center; gap: var(--space-4);
@@ -84,7 +59,11 @@
 .form-input,
 .form-select,
 .form-textarea {
-	width: 100%; padding: var(--space-3) var(--space-4);
+	/* The padding leaves the natural height under --control-height, so the
+	   token alone sets it and a select, a text box and a button in one row
+	   are the same height. */
+	width: 100%; min-height: var(--control-height);
+	padding: var(--space-2) var(--space-4);
 	border: 1px solid #e8ecf1; border-radius: 10px;
 	background: #f8fafc; color: #111827;
 	font-size: 0.9rem; transition: all 0.2s ease;
@@ -144,13 +123,14 @@
  * field (settings forms, the variables edit modal, the auth pages). A
  * standalone wrapper, deliberately NOT composed with `.form-input-wrapper`
  * above, whose unconditional `padding-left` is for a left icon this has
- * not got. The input keeps room on the right for the 44px button. */
+ * not got. The input keeps room on the right for the button at its
+ * largest, a finger's 44px target (2.75rem). */
 .value-reveal-wrapper { position: relative; }
 .value-reveal-wrapper > .form-input { padding-right: 2.75rem; }
 .reveal-toggle {
 	position: absolute; right: 0; top: 50%; transform: translateY(-50%);
 	display: inline-flex; align-items: center; justify-content: center;
-	width: 2.75rem; height: 2.75rem; padding: 0;
+	min-width: var(--target-min); min-height: var(--target-min); padding: var(--space-2);
 	background: none; border: 0; border-radius: var(--radius-md);
 	color: var(--text-muted); cursor: pointer;
 }
@@ -181,20 +161,21 @@
 }
 
 /* The label is the hit area of the 16px box it wraps, so it is the one
- * that is ≥44px tall (WCAG 2.5.5 target size). */
+ * held to the target floor -- across as well as down, for a box whose only
+ * text is for screen readers (a table's row-select). */
 .form-checkbox, .form-radio {
 	display: inline-flex; align-items: center; gap: var(--space-2);
-	min-height: 44px;
+	min-height: var(--target-min); min-width: var(--target-min);
 	cursor: pointer; font-size: 0.875rem; color: #374151;
 }
 
 /* On/off switch (`settings_form`'s Toggle widget): a native checkbox with
  * `role="switch"`, drawn as a track. The wrapping label is the hit area, a
- * ≥44px row. Off is --secondary-color (4.76:1 on white, the 3:1 a
+ * row at least the target floor tall. Off is --secondary-color (4.76:1 on white, the 3:1 a
  * control's boundary needs); on is --primary-button. */
 .form-switch {
 	display: inline-flex; align-items: center; gap: var(--space-3);
-	min-height: 44px; cursor: pointer;
+	min-height: var(--target-min); min-width: var(--target-min); cursor: pointer;
 	font-size: 0.875rem; font-weight: 500; color: var(--text-primary);
 }
 .form-switch__input {
@@ -213,8 +194,9 @@
 .form-switch__input:checked::before { transform: translateX(1rem); }
 .form-switch__input:focus-visible { outline: 2px solid var(--primary-color); outline-offset: 2px; }
 /* The hint sits under the label text, not under the track, and is pulled
- * up into the 44px row's slack so it reads as the switch's own line. */
-.form-switch + .form-hint { margin-top: calc(-1 * var(--space-2)); padding-left: calc(2.5rem + var(--space-3)); }
+ * up into the row's slack below the 1.5rem track -- none for a mouse, 10px
+ * under a finger -- so it reads as the switch's own line. */
+.form-switch + .form-hint { margin-top: calc((1.5rem - var(--target-min)) / 2); padding-left: calc(2.5rem + var(--space-3)); }
 @media (prefers-reduced-motion: reduce) {
 	.form-switch__input, .form-switch__input::before { transition: none; }
 }
@@ -340,7 +322,7 @@
 .legal-editor__content-head .form-label { margin-bottom: var(--space-3); }
 /* The textarea fills the viewport below the editor's header rows (at least
  * 20rem) at every width -- it is a field of its own, not a `.form-input`,
- * whose 44px mobile minimum would otherwise win the cascade over this
+ * whose target-floor minimum would otherwise win the cascade over this
  * height. It keeps the shared focus outline (base.css), drawn inside the
  * pane's border. */
 .editor-pane { background: var(--surface-1); border: 1px solid var(--border-color); border-radius: 6px 0 6px 6px; }
@@ -522,7 +504,7 @@
 	border: 1px solid var(--border-color); border-radius: var(--radius-lg);
 }
 .settings-section--collapsible > summary {
-	display: list-item; min-height: 44px; padding: var(--space-3) 0;
+	display: list-item; min-height: var(--target-min); padding: var(--space-3) 0;
 }
 .settings-section--collapsible > summary > .section-header__title { display: inline; font-size: var(--text-base); }
 .settings-section--collapsible[open] { padding-bottom: var(--space-4); }
@@ -534,11 +516,12 @@
 .settings-section--gated:has(> .form-group [role="switch"]:not(:checked)) > .settings-section__gated { display: none; }
 .settings-section__gated { margin-top: var(--space-5); }
 
-/* The Color widget: the hex box and its swatch side by side. */
+/* The Color widget: the hex box and its swatch side by side, the swatch a
+ * square as tall as the box. */
 .color-picker-row { display: flex; align-items: center; gap: var(--space-3); }
 .color-picker-row .form-input { flex: 1; }
 .color-swatch-input {
-	flex: none; width: 2.75rem; height: 2.75rem;
+	flex: none; width: var(--control-height); height: var(--control-height);
 	border: 1px solid var(--border-color);
 	border-radius: var(--radius-md);
 	cursor: pointer;
@@ -556,9 +539,5 @@
 @media (max-width: 720px) {
 	/* Forms: two-column form rows stack on narrow screens. */
 	.form-row { grid-template-columns: 1fr; }
-	/* Form inputs / buttons: ≥44px touch target, full-width. */
-	.form-input,
-	.form-control,
-	.btn { min-height: 44px; }
 }
 

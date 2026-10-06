@@ -918,7 +918,7 @@ mod tests {
             m.contains(r#"aria-label="Discover models for openai-main""#),
             "got: {m}"
         );
-        // The delete control is an icon: a ghost-danger 44px button whose
+        // The delete control is an icon: a ghost-danger icon button whose
         // only name is its label.
         assert!(
             m.contains(r#"class="btn btn--sm btn--icon btn--ghost-danger""#),

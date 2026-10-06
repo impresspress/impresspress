@@ -77,12 +77,13 @@ dialog.modal.modal--lg { max-width: 720px; }
 	overflow-wrap: anywhere;
 }
 
-/* 44px: the touch-target floor, on every width. */
+/* Padded round its glyph like a `.btn--icon`, and held to the target floor
+   (tokens.css) across and down. */
 .modal__close {
 	flex: none;
 	display: inline-flex; align-items: center; justify-content: center;
-	width: 44px; height: 44px;
-	padding: 0;
+	min-width: var(--target-min); min-height: var(--target-min);
+	padding: var(--space-2);
 	background: none; border: none; border-radius: var(--radius-md);
 	color: var(--text-muted);
 	cursor: pointer;

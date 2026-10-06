@@ -113,7 +113,7 @@ pub(crate) fn upload_button() -> Markup {
     )
 }
 
-/// A file row's "more actions" trigger: the shared 44px icon button, named
+/// A file row's "more actions" trigger: the shared `.btn--icon` button, named
 /// after the file. `files-browser.js` opens the row's menu (Share / Copy link
 /// / Delete) from it and drives the menu from the keyboard.
 fn row_menu_trigger(bucket: &str, key: &str, filename: &str) -> Markup {
@@ -147,7 +147,7 @@ fn render_bulk_bar() -> Markup {
                 "Select all files"
             }
             span .bulk-bar__count aria-live="polite" data-bulk-count {}
-            button .btn .btn--ghost-danger .bulk-bar__delete type="button" data-bulk-delete hidden {
+            button .btn .btn--ghost-danger type="button" data-bulk-delete hidden {
                 (icons::trash()) "Delete selected"
             }
         }
@@ -198,7 +198,7 @@ pub fn render_objects_table(
                 .join("/"),
         );
         TableRow::new(vec![
-            // The label is the checkbox's 44px hit area and its name.
+            // The label is the checkbox's hit area and its name.
             html! {
                 label .form-checkbox {
                     input type="checkbox" .bulk-select data-key=(f.key);
@@ -669,7 +669,7 @@ mod tests {
     }
 
     /// Every control a file row carries is named after the file: the
-    /// selection checkbox, and the 44px icon button that opens its menu.
+    /// selection checkbox, and the icon button that opens its menu.
     /// Folder rows carry neither, and their empty cells are left empty so a
     /// card drops them.
     #[test]
@@ -731,7 +731,7 @@ mod tests {
         let html = render_objects_table("photos", "", &listing).into_string();
         assert!(html.starts_with(r#"<div id="object-listing">"#), "{html}");
         assert!(
-            html.contains(r#"<span class="bulk-bar__count" aria-live="polite" data-bulk-count></span><button class="btn btn--ghost-danger bulk-bar__delete" type="button" data-bulk-delete hidden>"#),
+            html.contains(r#"<span class="bulk-bar__count" aria-live="polite" data-bulk-count></span><button class="btn btn--ghost-danger" type="button" data-bulk-delete hidden>"#),
             "{html}"
         );
     }

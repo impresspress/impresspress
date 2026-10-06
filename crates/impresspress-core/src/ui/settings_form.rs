@@ -15,7 +15,7 @@
 //! The widget is derived from [`InputType`]: `Password` → masked field with a
 //! show/hide toggle button, `Color` → text input paired with a colour swatch
 //! (each mirrors the other; no colour shows as unset, not black), `Toggle` →
-//! a switch (`role="switch"` checkbox, ≥44px row), `Url`/`Text` → plain text
+//! a switch (`role="switch"` checkbox in a target-floor row), `Url`/`Text` → plain text
 //! input. Every control names its hint with `aria-describedby`. Each block's
 //! settings page becomes
 //! "pick the ConfigVars to show, group them into sections, render".
@@ -226,7 +226,7 @@ fn render_field(var: &ConfigVar, value: &str, controls: Option<&str>) -> Markup 
         // A switch, not a bare 16px checkbox: `role="switch"` on the native
         // checkbox (so it still submits and still toggles on Space), drawn
         // as a track by `.form-switch__input`, inside a label whose whole
-        // ≥44px row is the hit area.
+        // row, held to the target floor, is the hit area.
         InputType::Toggle => html! {
             div .form-group {
                 label .form-switch {

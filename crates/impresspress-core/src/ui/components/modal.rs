@@ -19,7 +19,7 @@
 //! [`crate::ui::html_response_closing_modal`]).
 //!
 //! Layout: a header (the `h2` title the dialog is labelled by, and a labelled
-//! 44px close button), then a body that scrolls on its own. A form's actions
+//! close button held to the touch-target floor), then a body that scrolls on its own. A form's actions
 //! go in [`modal_footer`], which sticks to the bottom of that scrolling body,
 //! so the submit button is on screen however tall the form is — the dialog is
 //! capped at the dynamic viewport height, which is what a phone's collapsing

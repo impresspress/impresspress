@@ -82,11 +82,11 @@ async fn manage_views_are_filter_links() {
     let ctx = ctx().await;
     let html = admin_page(&ctx, "/b/products/admin/manage?view=deleted").await;
     assert!(
-        html.contains(r#"<nav class="filter-toggles" aria-label="Product views"><a class="btn btn--secondary btn--sm filter-toggle" href="/b/products/admin/manage"><span"#),
+        html.contains(r#"<nav class="filter-toggles" aria-label="Product views"><a class="btn btn--secondary filter-toggle" href="/b/products/admin/manage"><span"#),
         "{html}"
     );
     assert!(
-        html.contains(r#"<a class="btn btn--secondary btn--sm filter-toggle" href="/b/products/admin/manage?view=deleted" aria-current="true">"#),
+        html.contains(r#"<a class="btn btn--secondary filter-toggle" href="/b/products/admin/manage?view=deleted" aria-current="true">"#),
         "{html}"
     );
     // The Deleted view has no create action: nothing to create there.

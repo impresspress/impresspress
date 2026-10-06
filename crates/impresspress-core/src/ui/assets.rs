@@ -558,6 +558,370 @@ mod tests {
         );
     }
 
+    /// Target sizes follow the pointer (PLAN D4, refined): a finger gets
+    /// 44px, a mouse keeps the compact controls with WCAG 2.5.8's 24px
+    /// floor. Both values live in ONE token, `--target-min`, which tokens.css
+    /// sets to 24px in `:root` and to 44px under `@media (any-pointer:
+    /// coarse)` -- the only pointer or hover query anywhere. A control states
+    /// its size through that token or the row heights built on it
+    /// (`--control-height`, `--control-height-sm`), never as a number: a
+    /// 44px floor written out (or behind a width query, where it misses a
+    /// tablet in landscape and burdens a narrow desktop window) is what this
+    /// replaced. Covers the shared bundle and every block stylesheet.
+    #[cfg(feature = "embed-assets")]
+    #[test]
+    fn touch_target_floors_come_from_the_pointer_token() {
+        let bundle = strip_css_comments(super::css());
+        let normalise = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        let tokens = parse_root_tokens(super::css());
+        for (token, value) in [
+            ("--target-min", "24px"),
+            ("--control-height", "max(2.5rem, var(--target-min))"),
+            ("--control-height-sm", "max(2rem, var(--target-min))"),
+        ] {
+            assert_eq!(
+                tokens.get(token).map(String::as_str),
+                Some(value),
+                "tokens.css :root must set {token}: {value}"
+            );
+        }
+        const QUERY: &str = "@media (any-pointer: coarse)";
+        let at = bundle
+            .find(QUERY)
+            .expect("tokens.css has no coarse-pointer query");
+        let open = at + bundle[at..].find('{').expect("query has a body");
+        let mut depth = 0;
+        let close = bundle[open..]
+            .char_indices()
+            .find_map(|(i, c)| {
+                match c {
+                    '{' => depth += 1,
+                    '}' => depth -= 1,
+                    _ => {}
+                }
+                (depth == 0).then_some(open + i)
+            })
+            .expect("query body closes");
+        assert_eq!(
+            normalise(&bundle[open + 1..close]),
+            ":root { --target-min: 44px; }",
+            "the coarse-pointer query sets the token and nothing else"
+        );
+
+        let mut uses = 0;
+        let mut violations = Vec::new();
+        for (name, sheet) in all_stylesheets() {
+            let allowed_queries = usize::from(name == "app.css");
+            for v in touch_size_violations(&sheet, allowed_queries) {
+                violations.push(format!("{name}: {v}"));
+            }
+            uses += strip_css_comments(&sheet)
+                .matches("var(--target-min)")
+                .count()
+                + strip_css_comments(&sheet)
+                    .matches("var(--control-height")
+                    .count();
+        }
+        assert!(violations.is_empty(), "{}", violations.join("\n"));
+        assert!(
+            uses >= 30,
+            "expected the controls to use the target tokens, found {uses} uses"
+        );
+    }
+
+    /// The checker above catches a 44px size however it is spelled, and a
+    /// pointer or hover query however it is spaced.
+    #[cfg(feature = "embed-assets")]
+    #[test]
+    fn touch_size_checker_sees_through_units_and_calc() {
+        for bad in [
+            ".btn { min-height: 2.75em; }",
+            ".btn { min-height: calc(22px * 2); }",
+            ".btn { height: 44px; }",
+            ".tab { block-size: 2.75rem; }",
+            "a.link { min-width: max(1rem, 3rem); }",
+            ".item { min-height: clamp(44px, 5vh, 60px); }",
+            ".btn { min-height: 44px !important; }",
+            ".btn { min-height: 44PX; }",
+            ".btn { min-height: 2.75REM; }",
+            ".btn { min-height: 44pt; }",
+            ".dev-file { min-height: 3rem; }",
+            "@media (hover: none) { .btn { padding: 0; } }",
+            "@media (any-pointer:coarse) { .btn { padding: 0; } }",
+        ] {
+            assert!(
+                !touch_size_violations(bad, 0).is_empty(),
+                "the checker passed `{bad}`"
+            );
+        }
+        for good in [
+            ".btn { min-height: var(--control-height); }",
+            ".btn--sm { min-height: var(--control-height-sm); }",
+            ".toast-dismiss { min-width: var(--target-min); }",
+            ".btn--lg { min-height: 2.5rem; }",
+            ".dev-file { min-height: max(36px, var(--target-min)); }",
+            ".btn:hover:not(:disabled) { background: red; }",
+            ".btn { min-height: 0; }",
+            ".pane { min-height: calc(100dvh - 24rem); }",
+            ".btn { min-height: 2rem !important; }",
+        ] {
+            assert_eq!(
+                touch_size_violations(good, 0),
+                Vec::<String>::new(),
+                "the checker refused `{good}`"
+            );
+        }
+    }
+
+    /// Every way a stylesheet can size something to a touch target without
+    /// the tokens, on any selector: a `min-height`, `height` or `block-size`
+    /// of 44px or more (outside `TALL_BOXES`), or a 44-48px `min-width` (in
+    /// px, rem or em, any case, bare or in `calc`/`max`/`min`/`clamp`, with
+    /// or without `!important`) that does not go through `var(--target-min)`
+    /// or `var(--control-height*)`; a sizing value this cannot resolve that
+    /// is not relative (`var()`, %, a viewport unit, `auto`...); and any
+    /// `pointer`/`hover` media query beyond `allowed_queries`.
+    #[cfg(feature = "embed-assets")]
+    fn touch_size_violations(sheet: &str, allowed_queries: usize) -> Vec<String> {
+        let sheet = strip_css_comments(sheet);
+        let mut out = Vec::new();
+        let query = regex::Regex::new(r"\(\s*(any-)?(pointer|hover)\s*:").expect("valid regex");
+        let queries = query.find_iter(&sheet).count();
+        if queries != allowed_queries {
+            out.push(format!(
+                "{queries} pointer/hover media queries (allowed: {allowed_queries}); size controls with var(--target-min)"
+            ));
+        }
+        for (selector, body) in css_leaf_blocks(&sheet) {
+            for decl in body.split(';') {
+                let Some((prop, value)) = decl.split_once(':') else {
+                    continue;
+                };
+                let prop = prop.trim().to_ascii_lowercase();
+                let value = value.trim().to_ascii_lowercase();
+                let value = value.trim_end_matches("!important").trim();
+                let sizing = prop.starts_with("min-") || prop == "height" || prop == "block-size";
+                if !sizing
+                    || value.contains("var(--target-min)")
+                    || value.contains("var(--control-height")
+                {
+                    continue;
+                }
+                let Some(px) = css_length_px(value) else {
+                    // What this cannot resolve must depend on the layout,
+                    // not hide a fixed size.
+                    let relative = value.contains("var(--")
+                        || value.contains('%')
+                        || ["vh", "vw", "vmin", "vmax"]
+                            .iter()
+                            .any(|u| value.contains(u))
+                        || matches!(
+                            value,
+                            "auto"
+                                | "none"
+                                | "max-content"
+                                | "min-content"
+                                | "fit-content"
+                                | "inherit"
+                                | "initial"
+                                | "unset"
+                        );
+                    if !relative {
+                        out.push(format!(
+                            "`{selector}`: cannot resolve `{prop}: {value}`; write a length, or size it with the target tokens"
+                        ));
+                    }
+                    continue;
+                };
+                // Down: anything from 44px up is a touch floor in disguise,
+                // bar the boxes in TALL_BOXES. Across: a field's width
+                // legitimately runs to any size, so only a target-shaped
+                // 44-48px is.
+                let across = prop == "min-width" || prop == "min-inline-size";
+                let tall_box = TALL_BOXES
+                    .iter()
+                    .any(|(s, p, _)| *s == selector && *p == prop);
+                if px >= 44.0 && (if across { px <= 48.0 } else { !tall_box }) {
+                    out.push(format!(
+                        "`{selector}` sets `{prop}: {value}` ({px}px) without the target tokens"
+                    ));
+                }
+            }
+        }
+        out
+    }
+
+    /// The boxes allowed a fixed height of 44px or more: content, not
+    /// targets, each with the reason. (selector, property, why)
+    #[cfg(feature = "embed-assets")]
+    const TALL_BOXES: &[(&str, &str, &str)] = &[
+        (
+            ".db-pane--right",
+            "min-height",
+            "the database page's result pane, a panel",
+        ),
+        (
+            ".form-textarea",
+            "min-height",
+            "a multi-line field: room for lines of text",
+        ),
+        (
+            ".editor-textarea",
+            "min-height",
+            "the legal editor's page-height text field",
+        ),
+        (
+            ".preview-content",
+            "min-height",
+            "the legal editor's page-height preview",
+        ),
+        (".avatar--lg", "height", "a large avatar image"),
+        (".chart", "height", "a chart's plot area"),
+        (
+            ".user-avatar--lg",
+            "height",
+            "the profile header's avatar image",
+        ),
+        (
+            ".sidebar__brand",
+            "height",
+            "the sidebar header band holding the logo",
+        ),
+        (".topbar", "min-height", "the page header band"),
+        (".page-body", "min-height", "a page's content area"),
+        (
+            ".auth-status__icon",
+            "height",
+            "a status illustration on the auth pages",
+        ),
+        (
+            ".auth-split__brand",
+            "min-height",
+            "the auth pages' brand panel",
+        ),
+        (
+            "#dev-console-args",
+            "height",
+            "the dev console's arguments editor",
+        ),
+        (
+            "#dev-editor-text",
+            "height",
+            "the dev workspace's file editor",
+        ),
+        (
+            "#dev-preview-frame",
+            "height",
+            "the dev workspace's live preview",
+        ),
+        ("#dev-log", "height", "the dev workspace's activity log"),
+    ];
+
+    /// The smallest a CSS length can resolve to, in px (1rem = 1em = 16px),
+    /// through `calc`, `max`, `min` and `clamp`. `None` when it depends on
+    /// something unknown here (%, viewport units, a custom property, auto).
+    #[cfg(feature = "embed-assets")]
+    fn css_length_px(value: &str) -> Option<f64> {
+        fn args(inner: &str) -> Vec<&str> {
+            split_top_level(inner)
+        }
+        fn eval(expr: &str) -> Option<f64> {
+            let expr = expr.trim();
+            for (func, combine) in [("max(", 0u8), ("min(", 1), ("clamp(", 2), ("calc(", 3)] {
+                if let Some(inner) = expr.strip_prefix(func).and_then(|r| r.strip_suffix(')')) {
+                    let parts = args(inner);
+                    return match combine {
+                        // At least as large as any argument that is known.
+                        0 => parts.iter().filter_map(|p| eval(p)).reduce(f64::max),
+                        1 => parts
+                            .iter()
+                            .map(|p| eval(p))
+                            .collect::<Option<Vec<_>>>()?
+                            .into_iter()
+                            .reduce(f64::min),
+                        2 => parts.first().and_then(|p| eval(p)),
+                        _ => arith(inner),
+                    };
+                }
+            }
+            if expr.starts_with('(') && expr.ends_with(')') {
+                return arith(&expr[1..expr.len() - 1]);
+            }
+            arith(expr)
+        }
+        // `a op b op c` with + - * /, left to right with * and / first.
+        fn arith(expr: &str) -> Option<f64> {
+            let mut terms = Vec::new();
+            let mut ops = Vec::new();
+            let mut depth = 0;
+            let mut start = 0;
+            let bytes: Vec<char> = expr.chars().collect();
+            for (i, c) in bytes.iter().enumerate() {
+                match c {
+                    '(' => depth += 1,
+                    ')' => depth -= 1,
+                    '+' | '-' | '*' | '/' if depth == 0 && i > start => {
+                        let prev = bytes[..i].iter().rev().find(|c| !c.is_whitespace());
+                        // A sign, not an operator, after another operator.
+                        if (*c == '-' || *c == '+') && matches!(prev, Some('*' | '/' | '+' | '-')) {
+                            continue;
+                        }
+                        // `-` inside a token like `1e-3` is not used here.
+                        terms.push(bytes[start..i].iter().collect::<String>());
+                        ops.push(*c);
+                        start = i + 1;
+                    }
+                    _ => {}
+                }
+            }
+            terms.push(bytes[start..].iter().collect::<String>());
+            let mut values: Vec<f64> = Vec::new();
+            let mut pending: Vec<char> = Vec::new();
+            for (i, term) in terms.iter().enumerate() {
+                let v = atom(term)?;
+                if i > 0 && matches!(ops[i - 1], '*' | '/') {
+                    let last = values.pop()?;
+                    values.push(if ops[i - 1] == '*' {
+                        last * v
+                    } else {
+                        last / v
+                    });
+                } else {
+                    if i > 0 {
+                        pending.push(ops[i - 1]);
+                    }
+                    values.push(v);
+                }
+            }
+            let mut total = values[0];
+            for (op, v) in pending.iter().zip(&values[1..]) {
+                total = if *op == '+' { total + v } else { total - v };
+            }
+            Some(total)
+        }
+        fn atom(term: &str) -> Option<f64> {
+            let term = term.trim();
+            if term.contains('(') {
+                // Any other function (`var`, `env`...) is not a length here.
+                let known = ["max(", "min(", "clamp(", "calc(", "("]
+                    .iter()
+                    .any(|f| term.starts_with(f));
+                return if known { eval(term) } else { None };
+            }
+            for (unit, scale) in [("px", 1.0), ("rem", 16.0), ("em", 16.0)] {
+                if let Some(n) = term.strip_suffix(unit) {
+                    return n.trim().parse::<f64>().ok().map(|n| n * scale);
+                }
+            }
+            term.parse::<f64>().ok()
+        }
+        // A bare number is a multiplier, not a length -- except 0.
+        let px = eval(value)?;
+        let has_unit = ["px", "rem", "em"].iter().any(|u| value.contains(u));
+        (has_unit || px == 0.0).then_some(px)
+    }
+
     /// Relative luminance per WCAG 2.1.
     #[cfg(feature = "embed-assets")]
     fn luminance(hex: &str) -> f64 {

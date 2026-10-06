@@ -1,5 +1,6 @@
 import { expect, request as playwrightRequest, test, type APIRequestContext, type Page } from '@playwright/test';
 import { ADMIN_STATE_PATH, adminBearer, loginAsAdmin } from './fixtures/auth';
+import { PHONE, targetFloor } from './fixtures/targets';
 
 /**
  * The tickets admin in a browser: create an internal ticket from the inbox's
@@ -77,84 +78,89 @@ test.describe('tickets admin', () => {
     await api.dispose();
   });
 
-  for (const [label, viewport] of [
-    ['1440', { width: 1440, height: 900 }],
-    ['390', { width: 390, height: 844 }],
+  for (const [label, device] of [
+    ['1440', { viewport: { width: 1440, height: 900 } }],
+    ['390', PHONE],
   ] as const) {
-    test(`create, note, move and filter a ticket at ${label}px`, async ({ page }) => {
-      await page.setViewportSize(viewport);
-      const subject = `Footer link is broken ${UNIQUE} ${label}`;
-      await page.goto('/b/tickets/admin/tickets', { waitUntil: 'networkidle' });
-      await loginAsAdmin(page);
-      await expect(page.getByRole('heading', { level: 1 })).toHaveText('Tickets');
+    test.describe(`at ${label}px`, () => {
+      test.use(device);
+      test(`create, note, move and filter a ticket`, async ({ page }) => {
+        const subject = `Footer link is broken ${UNIQUE} ${label}`;
+        await page.goto('/b/tickets/admin/tickets', { waitUntil: 'networkidle' });
+        await loginAsAdmin(page);
+        await expect(page.getByRole('heading', { level: 1 })).toHaveText('Tickets');
 
-      // The New ticket modal, opened from the topbar.
-      await page.getByRole('button', { name: 'New ticket' }).first().click();
-      const dialog = page.getByRole('dialog', { name: 'New internal ticket' });
-      await expect(dialog).toBeVisible();
-      await dialog.getByLabel('Type').selectOption({ label: typeTitle });
-      await dialog.getByLabel('Subject').fill(subject);
-      await dialog.getByLabel('Description').fill('The privacy link in the footer answers 404 on every page.');
-      await dialog.getByLabel('Priority').selectOption('high');
-      await dialog.getByRole('button', { name: 'Create ticket' }).click();
+        // The New ticket modal, opened from the topbar.
+        await page.getByRole('button', { name: 'New ticket' }).first().click();
+        const dialog = page.getByRole('dialog', { name: 'New internal ticket' });
+        await expect(dialog).toBeVisible();
+        await dialog.getByLabel('Type').selectOption({ label: typeTitle });
+        await dialog.getByLabel('Subject').fill(subject);
+        await dialog.getByLabel('Description').fill('The privacy link in the footer answers 404 on every page.');
+        await dialog.getByLabel('Priority').selectOption('high');
+        await dialog.getByRole('button', { name: 'Create ticket' }).click();
 
-      // A created ticket opens on its own page.
-      await expect(page).toHaveURL(/\/b\/tickets\/admin\/tickets\/[^/?]+$/);
-      await expect(page.getByRole('heading', { level: 1 })).toHaveText(/^TKT-/);
-      await expect(page.getByRole('heading', { level: 2, name: subject })).toBeVisible();
-      const hero = page.locator('.detail-hero');
-      await expect(hero.getByText('New', { exact: true })).toBeVisible();
-      await expect(hero.getByText('High', { exact: true })).toBeVisible();
+        // A created ticket opens on its own page.
+        await expect(page).toHaveURL(/\/b\/tickets\/admin\/tickets\/[^/?]+$/);
+        await expect(page.getByRole('heading', { level: 1 })).toHaveText(/^TKT-/);
+        await expect(page.getByRole('heading', { level: 2, name: subject })).toBeVisible();
+        const hero = page.locator('.detail-hero');
+        await expect(hero.getByText('New', { exact: true })).toBeVisible();
+        await expect(hero.getByText('High', { exact: true })).toBeVisible();
 
-      // An internal note lands on the timeline, with a toast.
-      await page.getByRole('textbox', { name: 'Internal note' }).fill('Checked the footer template.');
-      await page.getByRole('button', { name: 'Add note' }).click();
-      const noted = page.locator('.toast-success', { hasText: 'Note added' });
-      await expect(noted).toBeVisible();
-      // Its dismiss control is a 44px target, though the glyph is small.
-      const dismiss = await noted.getByRole('button', { name: 'Dismiss' }).boundingBox();
-      expect(dismiss?.width).toBeGreaterThanOrEqual(44);
-      expect(dismiss?.height).toBeGreaterThanOrEqual(44);
-      await expect(page.locator('.ticket-timeline')).toContainText('Checked the footer template.');
+        // An internal note lands on the timeline, with a toast.
+        await page.getByRole('textbox', { name: 'Internal note' }).fill('Checked the footer template.');
+        await page.getByRole('button', { name: 'Add note' }).click();
+        const noted = page.locator('.toast-success', { hasText: 'Note added' });
+        await expect(noted).toBeVisible();
+        // Its dismiss control is a full target for the pointer (44px under a
+        // finger), though the glyph is small.
+        const floor = await targetFloor(page);
+        expect(floor).toBe(label === '390' ? 44 : 24);
+        const dismiss = await noted.getByRole('button', { name: 'Dismiss' }).boundingBox();
+        expect(dismiss?.width).toBeGreaterThan(floor - 0.5);
+        expect(dismiss?.height).toBeGreaterThan(floor - 0.5);
+        await expect(page.locator('.ticket-timeline')).toContainText('Checked the footer template.');
 
-      // Moving to Investigating re-renders the ticket with its new badge.
-      await page.getByRole('combobox', { name: 'Status' }).selectOption('investigating');
-      await saveChanges(page);
-      await expect(page.locator('.toast-success', { hasText: 'Ticket updated' })).toBeVisible();
-      await expect(hero.getByText('Investigating', { exact: true })).toBeVisible();
-      await expect(page.locator('.ticket-timeline')).toContainText('Moved to Investigating');
+        // Moving to Investigating re-renders the ticket with its new badge.
+        await page.getByRole('combobox', { name: 'Status' }).selectOption('investigating');
+        await saveChanges(page);
+        await expect(page.locator('.toast-success', { hasText: 'Ticket updated' })).toBeVisible();
+        await expect(hero.getByText('Investigating', { exact: true })).toBeVisible();
+        await expect(page.locator('.ticket-timeline')).toContainText('Moved to Investigating');
 
-      // Closing without a reason is refused with the server's sentence, and
-      // nothing changes.
-      await page.getByRole('combobox', { name: 'Status' }).selectOption('resolved');
-      await saveChanges(page);
-      await expect(page.locator('.toast-error', { hasText: 'a reason is required' })).toBeVisible();
-      await expect(hero.getByText('Investigating', { exact: true })).toBeVisible();
+        // Closing without a reason is refused with the server's sentence, and
+        // nothing changes.
+        await page.getByRole('combobox', { name: 'Status' }).selectOption('resolved');
+        await saveChanges(page);
+        await expect(page.locator('.toast-error', { hasText: 'a reason is required' })).toBeVisible();
+        await expect(hero.getByText('Investigating', { exact: true })).toBeVisible();
 
-      await page.getByRole('textbox', { name: 'Reason' }).fill('Fixed the link.');
-      await saveChanges(page);
-      await expect(hero.getByText('Resolved', { exact: true })).toBeVisible();
+        await page.getByRole('textbox', { name: 'Reason' }).fill('Fixed the link.');
+        await saveChanges(page);
+        await expect(hero.getByText('Resolved', { exact: true })).toBeVisible();
 
-      // The inbox filters by the real status set.
-      await page.goto('/b/tickets/admin/tickets', { waitUntil: 'networkidle' });
-      await openFilters(page);
-      await page.getByRole('combobox', { name: 'Status' }).selectOption('resolved');
-      await page.getByRole('button', { name: 'Apply filters' }).click();
-      await expect(page).toHaveURL(/status=resolved/);
-      const row = page.locator('.data-table__row', { hasText: subject });
-      await expect(row).toBeVisible();
+        // The inbox filters by the real status set.
+        await page.goto('/b/tickets/admin/tickets', { waitUntil: 'networkidle' });
+        await openFilters(page);
+        await page.getByRole('combobox', { name: 'Status' }).selectOption('resolved');
+        await page.getByRole('button', { name: 'Apply filters' }).click();
+        await expect(page).toHaveURL(/status=resolved/);
+        const row = page.locator('.data-table__row', { hasText: subject });
+        await expect(row).toBeVisible();
 
-      await openFilters(page);
-      await page.getByRole('combobox', { name: 'Status' }).selectOption('spam');
-      await page.getByRole('combobox', { name: 'Type' }).selectOption({ label: typeTitle });
-      await page.getByRole('button', { name: 'Apply filters' }).click();
-      await expect(page.getByRole('heading', { name: 'No tickets match these filters' })).toBeVisible();
-      await page.getByRole('link', { name: 'Clear filters' }).click();
-      await expect(page).toHaveURL(/\/b\/tickets\/admin\/tickets$/);
+        await openFilters(page);
+        await page.getByRole('combobox', { name: 'Status' }).selectOption('spam');
+        await page.getByRole('combobox', { name: 'Type' }).selectOption({ label: typeTitle });
+        await page.getByRole('button', { name: 'Apply filters' }).click();
+        await expect(page.getByRole('heading', { name: 'No tickets match these filters' })).toBeVisible();
+        await page.getByRole('link', { name: 'Clear filters' }).click();
+        await expect(page).toHaveURL(/\/b\/tickets\/admin\/tickets$/);
 
-      // A row opens its ticket.
-      await page.locator('.data-table__row', { hasText: subject }).click();
-      await expect(page.getByRole('heading', { level: 2, name: subject })).toBeVisible();
+        // A row opens its ticket.
+        await page.locator('.data-table__row', { hasText: subject }).click();
+        await expect(page.getByRole('heading', { level: 2, name: subject })).toBeVisible();
+      });
     });
   }
 
