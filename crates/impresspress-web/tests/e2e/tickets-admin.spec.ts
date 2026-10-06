@@ -16,13 +16,30 @@ import { ADMIN_STATE_PATH, adminBearer, loginAsAdmin } from './fixtures/auth';
 
 const UNIQUE = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
 
-/** Open the inbox filters: a disclosure on a phone, always shown on a desktop. */
+/**
+ * Click Save changes, first proving it is not covered: a trial click fails
+ * when another element (a toast) would receive the pointer.
+ */
+async function saveChanges(page: Page): Promise<void> {
+  const save = page.getByRole('button', { name: 'Save changes' });
+  await save.scrollIntoViewIfNeeded();
+  await save.click({ trial: true, timeout: 2000 });
+  await save.click();
+}
+
+/**
+ * Open the inbox filters: a closed disclosure below 720px, always shown above
+ * it. Decided by the viewport, not by probing the page, and each step waits
+ * for the state it needs.
+ */
 async function openFilters(page: Page): Promise<void> {
-  const summary = page.locator('.ticket-filters-disclosure__summary');
-  if (await summary.isVisible()) {
-    const open = await page.locator('.ticket-filters-disclosure').getAttribute('open');
-    if (open === null) await summary.click();
+  const status = page.getByRole('combobox', { name: 'Status' });
+  if ((page.viewportSize()?.width ?? 1440) <= 720) {
+    const summary = page.locator('.ticket-filters-disclosure__summary');
+    await expect(summary).toBeVisible();
+    if (!(await status.isVisible())) await summary.click();
   }
+  await expect(status).toBeVisible();
 }
 
 async function seeder(baseURL: string | undefined): Promise<{
@@ -97,7 +114,7 @@ test.describe('tickets admin', () => {
 
       // Moving to Investigating re-renders the ticket with its new badge.
       await page.getByRole('combobox', { name: 'Status' }).selectOption('investigating');
-      await page.getByRole('button', { name: 'Save changes' }).click();
+      await saveChanges(page);
       await expect(page.locator('.toast-success', { hasText: 'Ticket updated' })).toBeVisible();
       await expect(hero.getByText('Investigating', { exact: true })).toBeVisible();
       await expect(page.locator('.ticket-timeline')).toContainText('Moved to Investigating');
@@ -105,12 +122,12 @@ test.describe('tickets admin', () => {
       // Closing without a reason is refused with the server's sentence, and
       // nothing changes.
       await page.getByRole('combobox', { name: 'Status' }).selectOption('resolved');
-      await page.getByRole('button', { name: 'Save changes' }).click();
+      await saveChanges(page);
       await expect(page.locator('.toast-error', { hasText: 'a reason is required' })).toBeVisible();
       await expect(hero.getByText('Investigating', { exact: true })).toBeVisible();
 
       await page.getByRole('textbox', { name: 'Reason' }).fill('Fixed the link.');
-      await page.getByRole('button', { name: 'Save changes' }).click();
+      await saveChanges(page);
       await expect(hero.getByText('Resolved', { exact: true })).toBeVisible();
 
       // The inbox filters by the real status set.

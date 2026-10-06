@@ -14,6 +14,15 @@
 	min-width: 250px; max-width: 400px;
 }
 
+/* On a phone a bottom-right toast sits over the lower part of the screen,
+   where a form's submit button usually is -- the one the operator taps again
+   after reading the toast. Below 720px the stack moves to the top, under the
+   56px mobile header, full width less the page gutter. */
+@media (max-width: 720px) {
+	.toast-container { top: calc(56px + var(--space-2)); bottom: auto; left: var(--space-4); right: var(--space-4); }
+	.toast { min-width: 0; max-width: none; }
+}
+
 @keyframes toastSlideIn {
 	from { opacity: 0; transform: translateX(100%); }
 	to { opacity: 1; transform: translateX(0); }
@@ -34,9 +43,10 @@
 /* --accent-info was #fd3534 -- byte-identical to --primary-color, so this
    was the white-on-red bug (Task 12a) hiding behind an alias name a
    token-name-based guard couldn't see. --accent-info/--accent-info-bg are
-   retired (see tokens.css); --primary-button (4.99:1, computed) is the
-   direct fix, matching every other "info == brand accent" surface. */
-.toast-info { background: var(--primary-button); color: white; }
+   retired (see tokens.css). An info toast informs; brand red is kept for
+   primary actions (D5), so it is the neutral slate of the primary text
+   colour (white on it is 14:1). */
+.toast-info { background: var(--text-primary); color: white; }
 
 .toast-dismiss {
 	margin-left: auto; background: none; border: none;

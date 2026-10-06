@@ -7,7 +7,15 @@
 //! [`read_own`] rather than reading values through the config client, which
 //! knows neither the flag nor the mask. No block is granted the table for
 //! this: the admin block answers the call in its own frame, and answers it
-//! only with the keys the calling block declares.
+//! only with keys the calling block both declares and could read itself.
+//!
+//! "Could read itself" is the config service's own rule: in the admin
+//! block's frame for this call, `Context::resource_access_admitted` judges
+//! the CALLER (the runtime's WRAP grant check plus the caller's
+//! capabilities), exactly as the config block judges a `config.get` from
+//! it. Declaring a key in `BlockInfo::config_keys` proves nothing: a block
+//! may declare another block's key, and the admin block's own privileges
+//! must not read it on the caller's behalf.
 
 use std::collections::HashMap;
 
@@ -58,7 +66,7 @@ pub async fn read_own(ctx: &dyn Context) -> Result<Vec<MaskedValue>, WaferError>
 }
 
 /// The admin block's answer to [`KIND`]: the declared settings of the block
-/// that called, and only those. A call with no calling block (a top-level
+/// that called that it is admitted to read as config, and only those. A call with no calling block (a top-level
 /// dispatch) or from a block the runtime does not know is refused.
 pub(super) async fn answer(ctx: &dyn Context) -> OutputStream {
     let Some(caller) = ctx.caller_id() else {
@@ -76,6 +84,13 @@ pub(super) async fn answer(ctx: &dyn Context) -> OutputStream {
     let values: Vec<MaskedValue> = info
         .config_keys
         .iter()
+        .filter(|var| {
+            ctx.resource_access_admitted(
+                &var.key,
+                wafer_run::ResourceType::Config,
+                wafer_block::ResourceAccess::Read,
+            )
+        })
         .map(|var| {
             let row = stored.get(var.key.as_str());
             let value = row
@@ -190,5 +205,169 @@ mod tests {
             .map(|_| ())
             .map_err(WaferError::from);
         assert_eq!(error.unwrap_err().code, ErrorCode::PermissionDenied);
+    }
+
+    /// The same answer through wafer-run's own `call_block` on a sealed
+    /// runtime: the real admin block, database and config blocks, and a
+    /// probe block standing in for the caller. The identity the admin block
+    /// reads and the WRAP check it runs are the runtime's, not a fixture's:
+    /// the probe's capabilities admit two of its three keys as config, so
+    /// the third is not answered although it declares it. And a block that
+    /// declares another block's key is not a caller at all: the runtime
+    /// refuses to register it.
+    #[tokio::test]
+    async fn the_real_runtime_answers_only_keys_the_caller_may_read() {
+        use wafer_core::interfaces::database::service::DatabaseService;
+
+        const PROBE: &str = "acme/widget";
+
+        struct Probe {
+            keys: Vec<&'static str>,
+        }
+
+        #[async_trait::async_trait]
+        impl wafer_run::Block for Probe {
+            fn info(&self) -> wafer_run::BlockInfo {
+                wafer_run::BlockInfo::new(PROBE, "0.0.1", "test/probe@v1", "masked config probe")
+                    .requires(vec![ADMIN_BLOCK_ID.into()])
+                    .config_keys(
+                        self.keys
+                            .iter()
+                            .map(|key| wafer_run::ConfigVar::new(*key, "A setting", "").optional())
+                            .collect(),
+                    )
+            }
+
+            fn block_capabilities(&self) -> Option<wafer_block::BlockCapabilities> {
+                Some(wafer_block::BlockCapabilities {
+                    config: wafer_block::Allowlist::Only(
+                        ["ACME__WIDGET__COLOUR", "ACME__WIDGET__API_KEY"]
+                            .into_iter()
+                            .map(String::from)
+                            .collect(),
+                    ),
+                    ..wafer_block::BlockCapabilities::unrestricted()
+                })
+            }
+
+            async fn lifecycle(
+                &self,
+                _ctx: &dyn Context,
+                _event: wafer_run::LifecycleEvent,
+            ) -> Result<(), WaferError> {
+                Ok(())
+            }
+
+            async fn handle(
+                &self,
+                ctx: &dyn Context,
+                _msg: Message,
+                _input: InputStream,
+            ) -> OutputStream {
+                match read_own(ctx).await {
+                    Ok(values) => OutputStream::respond(serde_json::to_vec(&values).unwrap()),
+                    Err(e) => OutputStream::error(e),
+                }
+            }
+        }
+
+        let sqlite: Arc<dyn DatabaseService> = Arc::new(
+            wafer_block_sqlite::service::SQLiteDatabaseService::open_in_memory()
+                .expect("open in-memory sqlite"),
+        );
+        crate::migration_helper::apply_ddl_via_service(
+            &sqlite,
+            crate::blocks::admin::migrations::ddl_files("sqlite"),
+        )
+        .await
+        .expect("apply admin migrations");
+        for (key, value) in [
+            ("ACME__WIDGET__COLOUR", "blue"),
+            ("ACME__WIDGET__API_KEY", "k-456"),
+            ("ACME__WIDGET__ACCOUNT", "acct-123"),
+        ] {
+            variables::set(&sqlite, key, value, "", "", Some(false))
+                .await
+                .expect("store variable");
+        }
+
+        let mut wafer = wafer_run::Wafer::builder()
+            .disable_inventory()
+            .disable_lockfile()
+            .build()
+            .expect("build a bare runtime");
+        wafer.set_admin_block(ADMIN_BLOCK_ID);
+        wafer_core::service_blocks::database::register_with_tables(
+            &mut wafer,
+            sqlite.clone(),
+            Vec::new(),
+        )
+        .expect("register the database block");
+        wafer_core::service_blocks::config::register_with(
+            &mut wafer,
+            Arc::new(wafer_core::service_blocks::config::EnvConfigService::new()),
+        )
+        .expect("register the config block");
+        wafer_core::service_blocks::crypto::register_with(
+            &mut wafer,
+            Arc::new(crate::test_support::real_crypto_service()),
+        )
+        .expect("register the crypto block");
+        wafer
+            .register_block(ADMIN_BLOCK_ID, Arc::new(super::super::AdminBlock::new()))
+            .expect("register the admin block");
+        let foreign = wafer.register_block(
+            PROBE,
+            Arc::new(Probe {
+                keys: vec![
+                    "ACME__WIDGET__COLOUR",
+                    "IMPRESSPRESS__TICKETS__SUPPORT_EMAIL",
+                ],
+            }),
+        );
+        assert!(
+            foreign.is_err(),
+            "a block declaring another block's key must not register"
+        );
+        wafer
+            .register_block(
+                PROBE,
+                Arc::new(Probe {
+                    keys: vec![
+                        "ACME__WIDGET__COLOUR",
+                        "ACME__WIDGET__API_KEY",
+                        "ACME__WIDGET__ACCOUNT",
+                    ],
+                }),
+            )
+            .expect("register the probe");
+        wafer.seal().await.expect("seal");
+
+        let body = wafer
+            .run_block(PROBE, Message::new("read"), InputStream::empty())
+            .await
+            .collect_buffered()
+            .await
+            .map(|r| r.body)
+            .map_err(WaferError::from)
+            .expect("the probe's masked read");
+        let values: Vec<MaskedValue> = serde_json::from_slice(&body).expect("decode");
+        assert_eq!(
+            values,
+            vec![
+                MaskedValue {
+                    key: "ACME__WIDGET__COLOUR".into(),
+                    set: true,
+                    sensitive: false,
+                    value: Some("blue".into()),
+                },
+                MaskedValue {
+                    key: "ACME__WIDGET__API_KEY".into(),
+                    set: true,
+                    sensitive: true,
+                    value: None,
+                },
+            ]
+        );
     }
 }
