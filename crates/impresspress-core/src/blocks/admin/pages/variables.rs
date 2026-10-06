@@ -27,14 +27,12 @@ use crate::{
 ///
 /// `Err` when the variables table could not be listed: the caller answers
 /// it, never a table drawn without the rows.
-pub async fn settings_body(ctx: &dyn Context, msg: &Message) -> Result<Markup, WaferError> {
-    let tab = msg.query("tab");
-    let active_tab = if tab == "all" { "all" } else { "blocks" };
+pub async fn settings_body(ctx: &dyn Context, _msg: &Message) -> Result<Markup, WaferError> {
     // ONE read of the table and one of the process-environment marker per
-    // render, here rather than inside each consumer. Both tabs and the bulk
-    // control's count want the same rows, and the tabs used to take them
-    // separately; a third read for the count would have made the page's answer
-    // to "how many keys are pinned" depend on which snapshot you asked.
+    // render, here rather than inside each consumer. The groups and the bulk
+    // control's count want the same rows; a second read for the count would
+    // have made the page's answer to "how many keys are pinned" depend on
+    // which snapshot you asked.
     let rows = variables::list_all(ctx).await?;
     let offer_reset = variables::deployment_seeds_from_process_env(ctx).await?;
     let upgrade_pins = bulk_release_count(&rows, offer_reset);
@@ -49,28 +47,25 @@ pub async fn settings_body(ctx: &dyn Context, msg: &Message) -> Result<Markup, W
             }
         }
 
-        (components::tab_navigation(vec![
-            components::Tab {
-                active: active_tab == "blocks",
-                href: "/b/admin/settings/variables",
-                label: "By Block",
-                icon: Some(icons::package()),
-            },
-            components::Tab {
-                active: active_tab == "all",
-                href: "/b/admin/settings/variables?tab=all",
-                label: "All Variables",
-                icon: Some(icons::file_text()),
-            },
-        ]))
-
-        div #variables-content {
-            @if active_tab == "all" {
-                (config_all_tab(&rows, offer_reset))
-            } @else {
-                (config_by_block_tab(ctx, &rows, offer_reset))
+        div .filter-bar {
+            div .search-input {
+                span .search-input-icon { (icons::search()) }
+                input .form-input
+                    type="search"
+                    data-action="var-filter"
+                    placeholder="Search by key, name or description"
+                    aria-label="Search variables by key, name or description"
+                    aria-controls="variables-content"
+                    autocomplete="off"
+                    spellcheck="false";
             }
         }
+
+        div #variables-content {
+            (variable_groups(ctx, &rows, offer_reset))
+            p #var-filter-empty .text-muted .text-sm role="status" hidden { "No variable matches." }
+        }
+        script { (maud::PreEscaped(VAR_FILTER_JS)) }
 
         // Create variable modal
         (components::modal(CREATE_MODAL_ID, "Add Variable", create_variable_form(&CreateVarForm::default())))
@@ -80,6 +75,53 @@ pub async fn settings_body(ctx: &dyn Context, msg: &Message) -> Result<Markup, W
         div #edit-var-slot {}
     })
 }
+
+/// The search box over the variable groups. A query hides the rows whose
+/// text does not contain it, hides the groups left with none, and opens the
+/// groups that still have one, so a key named in a boot warning is found
+/// whichever block owns it; clearing it puts every group back the way the
+/// page drew it (`data-default-open`). `#var-filter-empty` says when nothing
+/// matches. The query survives a row control's redraw of `#content`.
+const VAR_FILTER_JS: &str = r#"
+(function () {
+  if (window.__varFilterInit) return;
+  window.__varFilterInit = true;
+  document.addEventListener('input', function (e) {
+    var el = e.target;
+    if (!(el instanceof Element) || el.getAttribute('data-action') !== 'var-filter') return;
+    var query = el.value.trim().toLowerCase();
+    var matched = 0;
+    document.querySelectorAll('[data-var-group]').forEach(function (group) {
+      var rows = group.querySelectorAll('tbody > tr');
+      var hits = 0;
+      rows.forEach(function (row) {
+        var show = !query || row.textContent.toLowerCase().indexOf(query) >= 0;
+        row.hidden = !show;
+        if (show) hits++;
+      });
+      matched += hits;
+      group.hidden = query !== '' && hits === 0;
+      group.open = query ? hits > 0 : group.hasAttribute('data-default-open');
+    });
+    var empty = document.getElementById('var-filter-empty');
+    if (empty) empty.hidden = !query || matched !== 0;
+  });
+  // A row control's answer (Delete, an edit's Save) redraws `#content`,
+  // search box and all; the query carries over the swap and is applied to
+  // the redrawn groups.
+  var kept = '';
+  document.addEventListener('htmx:beforeSwap', function () {
+    var field = document.querySelector('[data-action="var-filter"]');
+    kept = field ? field.value : '';
+  });
+  document.addEventListener('htmx:afterSettle', function () {
+    var field = document.querySelector('[data-action="var-filter"]');
+    if (!field || !kept || field.value) return;
+    field.value = kept;
+    field.dispatchEvent(new Event('input', { bubbles: true }));
+  });
+})();
+"#;
 
 /// What the Add Variable form holds: empty on the page, and what the operator
 /// submitted, plus the refusal, when [`handle_create_variable`] answers with
@@ -178,14 +220,17 @@ fn create_variable_form(form: &CreateVarForm<'_>) -> Markup {
                 input .form-input type="text" #var-desc name="description" value=(form.description) placeholder="Optional description";
             }
             div .form-group {
-                label .form-checkbox {
-                    // Hidden first, checkbox second: `parse_form_body` keeps
-                    // the last value for a repeated key, so a checked box
-                    // posts `1` and an unchecked one still posts an explicit
-                    // `0` rather than nothing.
-                    input type="hidden" name="sensitive" value="0";
-                    input type="checkbox" name="sensitive" value="1" checked[form.sensitive];
-                    " Sensitive (mask value in UI)"
+                // Hidden first, switch second: `parse_form_body` keeps the
+                // last value for a repeated key, so an on switch posts `1`
+                // and an off one still posts an explicit `0` rather than
+                // nothing. The switch is the shared settings-form markup
+                // (`ui::settings_form`'s `Toggle`): a native checkbox with
+                // `role="switch"`, its whole ≥44px label row the hit area.
+                input type="hidden" name="sensitive" value="0";
+                label .form-switch {
+                    input .form-switch__input #var-sensitive type="checkbox" role="switch"
+                        name="sensitive" value="1" checked[form.sensitive];
+                    span { "Sensitive — mask the value in listings" }
                 }
             }
             (components::modal_footer(html! {
@@ -251,6 +296,9 @@ struct VarRow<'a> {
     /// `ops::delete_variable` refuses them, so a button there would only ever
     /// produce an error.
     deletable: bool,
+    /// Whether a block or the shared set declares the key, so its row stays
+    /// at its default when the stored value is deleted.
+    declared: bool,
     /// Why this row outranks the process environment, when it does.
     ///
     /// Rendered as a badge whatever the target, because a pin is a real
@@ -312,7 +360,8 @@ fn var_row(row: &VarRow) -> Vec<Markup> {
         html! {
             div .flex .gap-1 {
                 @if editable(row.key) {
-                    button .btn .btn--sm .btn--ghost
+                    button .btn .btn--ghost .btn--icon
+                        type="button"
                         hx-get={"/b/admin/variables/" (url_path_encode(row.key)) "/edit"}
                         hx-target="#edit-var-slot"
                         hx-swap="innerHTML"
@@ -327,7 +376,7 @@ fn var_row(row: &VarRow) -> Vec<Markup> {
                     (reset_to_environment_button(row.key))
                 }
                 @if row.deletable {
-                    (delete_button(row.key))
+                    (delete_button(row.key, row.declared))
                 }
             }
         },
@@ -401,6 +450,7 @@ fn config_var_row(
     var: &wafer_run::ConfigVar,
     var_map: &std::collections::HashMap<String, StoredVar>,
     offer_reset: bool,
+    declared_shared: &std::collections::HashSet<String>,
 ) -> Vec<Markup> {
     let stored = var_map.get(&var.key);
     let (db_value, sensitive_flag) = stored
@@ -417,34 +467,13 @@ fn config_var_row(
         description: &var.description,
         warning: &var.warning,
         show_default: true,
-        // Never, in the per-block tables. A row here exists because a block
-        // DECLARES the key, not because the database does — so removing the
-        // stored override must leave the row in place showing its default,
-        // and this control's `outerHTML` swap would instead delete the row
-        // from the table, stranding the declared key with nothing to edit
-        // until a reload. "Reset to default" is a different affordance and
-        // wants its own handler; the flat and unowned tables are where the
-        // rows that can really be removed live.
-        deletable: false,
+        // Only a stored override can be deleted, and only where
+        // `ops::delete_variable` would delete it. The row stays: it exists
+        // because a block DECLARES the key, and the page re-rendered after
+        // the delete shows it at its default.
+        deletable: stored.is_some() && key_is_deletable(&var.key, declared_shared),
+        declared: true,
     })
-}
-
-/// Render a titled card wrapping a variable table. `header` is the card's
-/// `.card__head` content: the title, and the access line beneath it.
-fn var_table(header: Markup, rows: Vec<Vec<Markup>>) -> Markup {
-    html! {
-        section .card .mt-4 {
-            header .card__head { (header) }
-            div .card__body {
-                (components::data_table::<fn(usize) -> Option<String>>(
-                    &VAR_COLUMNS,
-                    rows,
-                    None,
-                    html! {},
-                ))
-            }
-        }
-    }
 }
 
 /// The variable tables' columns, the three [`var_row`] emits. The last column
@@ -456,31 +485,50 @@ const VAR_COLUMNS: [components::TableCol<'static>; 3] = [
     components::TableCol::new("Actions").actions().width("50px"),
 ];
 
-/// The "All Variables" tab's columns — the same shape as [`VAR_COLUMNS`], with
-/// an explicitly labelled actions column.
-const ALL_VAR_COLUMNS: [components::TableCol<'static>; 3] = [
-    components::TableCol::new("Variable").primary(),
-    components::TableCol::new("Value"),
-    components::TableCol::new("Actions").actions(),
-];
-
-/// The delete control, shared by every table that offers one so the affordance
-/// and the confirm text cannot drift between them.
+/// The delete control, shared by every row that offers one so the affordance
+/// and the confirm text cannot drift between them: a quiet danger icon, with
+/// the confirm step as the guard.
 ///
-/// `closest tr` rather than a row id: these tables render through
-/// `components::TableRow`, and only the flat "All Variables" tab gives its
-/// rows ids. An empty response body is what removes the row.
-fn delete_button(key: &str) -> Markup {
+/// The answer is the whole settings body for `#content`
+/// ([`handle_delete_variable`]), not an empty swap of the row: a declared
+/// key's row stays after its stored override is deleted, showing its default.
+///
+/// A declared key is not deleted: its stored value is, and the key reads its
+/// default again — so the confirm says that, rather than "cannot be undone"
+/// about a row that stays.
+fn delete_button(key: &str, declared: bool) -> Markup {
+    let confirm = if declared {
+        format!("Remove the stored value of {key}? It goes back to its default.")
+    } else {
+        format!("Delete {key}? This cannot be undone.")
+    };
+    let label = if declared {
+        format!("Remove the stored value of {key}")
+    } else {
+        format!("Delete {key}")
+    };
     html! {
-        button .btn .btn--sm .btn--danger
+        button .btn .btn--ghost-danger .btn--icon
+            type="button"
             hx-delete={"/b/admin/variables/" (url_path_encode(key))}
-            hx-target="closest tr"
-            hx-swap="outerHTML"
-            hx-confirm={"Delete " (key) "? This cannot be undone."}
-            title="Delete"
-            aria-label=(format!("Delete {key}"))
+            hx-target="#content"
+            hx-confirm=(confirm)
+            title=(if declared { "Remove stored value" } else { "Delete" })
+            aria-label=(label)
         { (icons::trash()) }
     }
+}
+
+/// Whether a block or the shared set declares `key` — the keys whose row
+/// outlives a delete of its stored value.
+fn is_declared(ctx: &dyn Context, key: &str) -> bool {
+    crate::config_vars::shared_config_vars()
+        .iter()
+        .any(|var| var.key == key)
+        || ctx
+            .registered_blocks()
+            .iter()
+            .any(|block| block.config_keys.iter().any(|var| var.key == key))
 }
 
 /// The control that hands one key back to the process environment, shared by
@@ -493,7 +541,7 @@ fn delete_button(key: &str) -> Markup {
 /// re-stamps ownership on every write, so clearing the value would re-pin the
 /// row it was meant to release.
 ///
-/// `hx-swap="none"`, unlike [`delete_button`]'s `closest tr` / `outerHTML`:
+/// `hx-swap="none"`, unlike [`delete_button`]'s re-render of `#content`:
 /// nothing is removed and no row's identity changes, so the response body is
 /// empty and the toast its `HX-Trigger` carries is the whole result. The pin
 /// badge beside it goes stale until the next render, which is the honest cost
@@ -501,7 +549,7 @@ fn delete_button(key: &str) -> Markup {
 /// does not take effect until a restart either.
 fn reset_to_environment_button(key: &str) -> Markup {
     html! {
-        button .btn .btn--sm .btn--ghost type="button"
+        button .btn .btn--ghost .btn--icon type="button"
             hx-post={"/b/admin/variables/" (url_path_encode(key)) "/reset-to-environment"}
             hx-swap="none"
             hx-confirm={
@@ -642,91 +690,49 @@ fn declared_shared_keys() -> std::collections::HashSet<String> {
         .collect()
 }
 
-/// "All Variables" tab -- flat table of all config variables from the DB.
-///
-/// The rows and `offer_reset` are the caller's — see [`settings_body`], which
-/// takes each exactly once for the whole page.
-fn config_all_tab(rows: &[variables::VariableRow], offer_reset: bool) -> Markup {
-    let declared_shared = declared_shared_keys();
-
-    html! {
-        @let table_rows: Vec<components::TableRow> = rows.iter().map(|row| {
-            let key = row.key.as_str();
-            let description = row.description.as_str();
-            let warning = row.warning.as_str();
-            // SEC-060: mask via the shared rule, not the `sensitive`
-            // flag alone.
-            let masked = ops::is_sensitive_key(key, i64::from(row.sensitive));
-            components::TableRow::new(vec![
-                variable_cell(key, None, description, variables::pin_of(row), warning),
-                html! {
-                    span .text-13 .cell-wrap {
-                        @if masked {
-                            code { "********" }
-                        } @else {
-                            code { (row.value) }
-                        }
-                    }
-                },
-                html! {
-                    div .flex .gap-1 {
-                        @if editable(key) {
-                            button .btn .btn--sm .btn--ghost
-                                hx-get={"/b/admin/variables/" (url_path_encode(key)) "/edit"}
-                                hx-target="#edit-var-slot"
-                                hx-swap="innerHTML"
-                                id=(edit_opener_id(key))
-                                title="Edit"
-                                aria-label=(format!("Edit {key}"))
-                            { (icons::edit()) }
-                        }
-                        // Same reasoning as the delete control below:
-                        // the flat listing is where an operator sent
-                        // here by a boot WARN naming one key actually
-                        // looks for it, so it must offer what the By
-                        // Block tables offer.
-                        @if offer_reset
-                            && variables::pin_of(row).is_some()
-                            && key_can_be_seeded_from_env(key)
-                        {
-                            (reset_to_environment_button(key))
-                        }
-                        // The flat listing offers the same control as
-                        // the Unowned table: this is where an operator
-                        // scanning for a legacy key actually looks, and
-                        // two tabs disagreeing about whether a row can
-                        // be removed is its own defect.
-                        @if key_is_deletable(key, &declared_shared) {
-                            (delete_button(key))
-                        }
-                    }
-                },
-            ])
-            .id(format!("var-row-{key}"))
-        }).collect();
-
-        (components::DataTable::new(&ALL_VAR_COLUMNS)
-            .rows(table_rows)
-            .empty(html! { p .text-center .text-muted { "No variables are set." } })
-            .render())
-    }
+/// One collapsible group of variables: the shared platform config, one
+/// block's declared config, or the stored rows nothing declares.
+struct VarGroup {
+    /// The group's heading.
+    title: Markup,
+    /// Who may read and write these keys (WRAP), under the heading.
+    access: Markup,
+    /// Drawn open: the shared config, which every block reads, and the
+    /// unowned rows, which are there to be cleaned up.
+    open: bool,
+    rows: Vec<Vec<Markup>>,
+    /// How many of the rows an admin edited here, and how many the upgrade
+    /// pinned — the summary a closed group still shows.
+    edited: usize,
+    pinned: usize,
 }
 
-/// "By Block" tab -- groups config variables by owning block with WRAP access info.
+/// Every variable on one page, grouped by who owns it.
 ///
-/// `all_vars` and `offer_reset` are the caller's — see [`settings_body`]. The
-/// rows arrive already read: a failed read never reaches this tab, because
-/// [`settings_body`] answers it instead. It cannot fall back to the declared
-/// vars and their defaults: a declared var reads as "at its default, not
-/// pinned" here, so a failed read would tell the operator every value they
-/// set is gone.
-fn config_by_block_tab(
+/// Collapsible groups rather than one flat table, because the owner is what
+/// decides who may read and write a key (each group carries its WRAP access
+/// line once instead of on every row) and the shared config is what an
+/// operator edits most: it opens drawn open, and the per-block groups closed
+/// behind a one-line "N variables · M edited here" summary, which keeps the
+/// page a screen tall instead of ten. Finding one key whatever its owner — the
+/// job the flat "All Variables" tab did — is the search box's
+/// ([`VAR_FILTER_JS`]). Every stored row appears in exactly one group: a key
+/// no block or shared declaration names falls to "Unowned".
+///
+/// The rows and `offer_reset` are the caller's — see [`settings_body`],
+/// which takes each exactly once for the whole page. The rows arrive already
+/// read: a failed read never reaches here, because [`settings_body`] answers
+/// it instead. Nothing may fall back to the declared vars and their
+/// defaults: a declared var reads as "at its default, not pinned", so a failed
+/// read would tell the operator every value they set is gone.
+fn variable_groups(
     ctx: &dyn Context,
     all_vars: &[variables::VariableRow],
     offer_reset: bool,
 ) -> Markup {
     let blocks = ctx.registered_blocks();
     let shared_vars = crate::config_vars::shared_config_vars();
+    let declared_shared = declared_shared_keys();
 
     let var_map: std::collections::HashMap<String, StoredVar> = all_vars
         .iter()
@@ -742,27 +748,21 @@ fn config_by_block_tab(
         })
         .collect();
 
-    // Collect blocks that have config_keys
-    let blocks_with_config: Vec<_> = blocks
-        .iter()
-        .filter(|b| !b.config_keys.is_empty())
-        .collect();
-
-    // Collect all known keys (block-declared + shared) to detect unowned DB vars
-    let mut known_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
+    // Every key a block or the shared set declares; a stored row outside it
+    // is unowned.
+    let mut known_keys: std::collections::HashSet<&str> = std::collections::HashSet::new();
     for block in blocks {
         for ck in &block.config_keys {
-            known_keys.insert(ck.key.clone());
+            known_keys.insert(ck.key.as_str());
         }
     }
     for sv in &shared_vars {
-        known_keys.insert(sv.key.clone());
+        known_keys.insert(sv.key.as_str());
     }
 
-    // Precompute grants keyed by exact resource pattern. The per-block render
-    // below used to walk `blocks × grants × config_keys` looking for matches —
-    // a cubic loop for every page render. We build a single map up front so
-    // the inner template just does an O(1) lookup per config key.
+    // Grants keyed by exact resource pattern, built once, so each block's
+    // access line is an O(1) lookup per config key rather than a
+    // `blocks × grants × config_keys` walk per render.
     let mut grants_by_resource: std::collections::HashMap<
         String,
         Vec<(&str, wafer_block::GrantWrite)>,
@@ -776,88 +776,89 @@ fn config_by_block_tab(
         }
     }
 
-    html! {
-        // Shared variables section
-        @if !shared_vars.is_empty() {
-            (var_table(
-                html! {
-                    div {
-                        h3 .card__title {
-                            (Badge::new(BadgeVariant::Warning).classes("mr-2").render(html! { "shared" }))
-                            " Shared Platform Config"
-                        }
-                        p .card__subtitle {
-                            "Any block can read. Only admin can write."
-                        }
-                    }
-                },
-                shared_vars.iter().map(|var| config_var_row(var, &var_map, offer_reset)).collect(),
-            ))
+    let pins_of = |keys: &mut dyn Iterator<Item = &str>| {
+        let mut edited = 0;
+        let mut pinned = 0;
+        for key in keys {
+            match var_map.get(key).and_then(|v| v.pin) {
+                Some(variables::Pin::AdminEdit) => edited += 1,
+                Some(variables::Pin::PreUpgrade) => pinned += 1,
+                None => {}
+            }
         }
+        (edited, pinned)
+    };
 
-        // Per-block sections
-        @for block in &blocks_with_config {
-            (var_table(
-                html! {
-                    div {
-                        h3 .card__title {
-                            (Badge::new(BadgeVariant::Info).classes("mr-2").render(html! { (block.name) }))
-                            " Configuration"
-                        }
-                        // Show WRAP access info for this block's config. The
-                        // grants are looked up by exact resource pattern via the
-                        // `grants_by_resource` map built above — used to be a
-                        // cubic `blocks × grants × config_keys` loop per render.
-                        p .card__subtitle {
-                            "Owner: " code { (block.name) }
-                            " \u{2014} Admin can read/write all. "
-                            @for ck in &block.config_keys {
-                                @for resource in [ck.key.clone(), format!("{}*", ck.key)] {
-                                    @if let Some(matches) = grants_by_resource.get(&resource) {
-                                        @for (grantee, write) in matches {
-                                            @if *grantee != block.name {
-                                                (Badge::new(BadgeVariant::Secondary).classes("mr-1 text-11").render(html! {
-                                                    (grantee) ": "
-                                                    (match write {
-                                                        wafer_block::GrantWrite::Full => "read+write",
-                                                        wafer_block::GrantWrite::Append => "append",
-                                                        wafer_block::GrantWrite::None => "read",
-                                                    })
-                                                }))
-                                            }
-                                        }
-                                    }
+    let mut groups: Vec<VarGroup> = Vec::new();
+    if !shared_vars.is_empty() {
+        let (edited, pinned) = pins_of(&mut shared_vars.iter().map(|v| v.key.as_str()));
+        groups.push(VarGroup {
+            title: html! { "Shared platform config" },
+            access: html! { "Any block can read. Only admin can write." },
+            open: true,
+            rows: shared_vars
+                .iter()
+                .map(|var| config_var_row(var, &var_map, offer_reset, &declared_shared))
+                .collect(),
+            edited,
+            pinned,
+        });
+    }
+    for block in blocks.iter().filter(|b| !b.config_keys.is_empty()) {
+        let (edited, pinned) = pins_of(&mut block.config_keys.iter().map(|v| v.key.as_str()));
+        groups.push(VarGroup {
+            title: html! { code { (block.name) } },
+            access: html! {
+                "Owner: " code { (block.name) } " \u{2014} admin can read and write all."
+                @for ck in &block.config_keys {
+                    @for resource in [ck.key.clone(), format!("{}*", ck.key)] {
+                        @if let Some(matches) = grants_by_resource.get(&resource) {
+                            @for (grantee, write) in matches {
+                                @if *grantee != block.name {
+                                    " "
+                                    (Badge::new(BadgeVariant::Secondary).classes("text-11").render(html! {
+                                        (grantee) ": "
+                                        (match write {
+                                            wafer_block::GrantWrite::Full => "read+write",
+                                            wafer_block::GrantWrite::Append => "append",
+                                            wafer_block::GrantWrite::None => "read",
+                                        })
+                                    }))
                                 }
                             }
                         }
                     }
-                },
-                block.config_keys.iter().map(|var| config_var_row(var, &var_map, offer_reset)).collect(),
-            ))
-        }
-
-        // Unowned variables section -- keys in DB not declared by any block or shared
-        @let unowned_vars: Vec<_> = all_vars.iter()
-            .filter(|row| !known_keys.contains(row.key.as_str()))
-            .collect();
-        @if !unowned_vars.is_empty() {
-            (var_table(
-                html! {
-                    div {
-                        h3 .card__title {
-                            (Badge::new(BadgeVariant::Secondary).classes("mr-2").render(html! { "unowned" }))
-                            " Unowned Variables"
-                        }
-                        p .card__subtitle {
-                            "Variables in the database not declared by any block. These may be legacy or manually created."
-                        }
-                    }
-                },
-                unowned_vars.iter().map(|row| {
+                }
+            },
+            open: false,
+            rows: block
+                .config_keys
+                .iter()
+                .map(|var| config_var_row(var, &var_map, offer_reset, &declared_shared))
+                .collect(),
+            edited,
+            pinned,
+        });
+    }
+    let unowned: Vec<&variables::VariableRow> = all_vars
+        .iter()
+        .filter(|row| !known_keys.contains(row.key.as_str()))
+        .collect();
+    if !unowned.is_empty() {
+        let (edited, pinned) = pins_of(&mut unowned.iter().map(|row| row.key.as_str()));
+        groups.push(VarGroup {
+            title: html! { "Unowned variables" },
+            access: html! {
+                "Stored, but declared by no block: legacy or hand-made settings nothing reads."
+            },
+            open: true,
+            rows: unowned
+                .iter()
+                .map(|row| {
                     let key = row.key.as_str();
                     // SEC-060: mask via the shared rule. `track_unset` is
-                    // false here so an empty value renders as an empty
-                    // `code` cell, matching the prior flat layout.
+                    // false here so an empty value renders as an empty `code`
+                    // cell.
                     var_row(&VarRow {
                         key,
                         name: None,
@@ -870,24 +871,47 @@ fn config_by_block_tab(
                         default: None,
                         auto_generate: false,
                         description: &row.description,
-                        warning: "",
+                        warning: &row.warning,
                         show_default: false,
                         // Every row here exists in the database by definition
                         // — that is what "unowned" means — so these are the
-                        // rows an operator needs to be able to remove.
-                        //
-                        // Only the JWT secret is excluded. A declared shared
-                        // var cannot reach this table at all (`known_keys`
-                        // covers block-declared AND shared keys, and this
-                        // table is what is left over), so a
-                        // `WAFER_RUN_SHARED__*` row appearing here is stale by
-                        // construction and removable — which is the point.
+                        // rows an operator needs to be able to remove. A
+                        // declared shared var cannot reach this group
+                        // (`known_keys` covers it), so a
+                        // `WAFER_RUN_SHARED__*` row here is stale and
+                        // removable; only the JWT secret is kept.
                         deletable: key != crate::blocks::auth::JWT_SECRET_KEY,
+                        declared: false,
                         pin: variables::pin_of(row),
                         offer_reset,
                     })
-                }).collect(),
-            ))
+                })
+                .collect(),
+            edited,
+            pinned,
+        });
+    }
+
+    html! {
+        @if groups.is_empty() {
+            p .text-center .text-muted { "No variables are set." }
+        }
+        @for group in groups {
+            details .var-group data-var-group open[group.open] data-default-open[group.open] {
+                summary .var-group__summary {
+                    h3 .var-group__title { (group.title) }
+                    span .var-group__stats {
+                        (group.rows.len())
+                        @if group.rows.len() == 1 { " variable" } @else { " variables" }
+                        @if group.edited > 0 { " \u{b7} " (group.edited) " edited here" }
+                        @if group.pinned > 0 { " \u{b7} " (group.pinned) " pinned at upgrade" }
+                    }
+                }
+                div .var-group__body {
+                    p .var-group__access { (group.access) }
+                    (components::DataTable::new(&VAR_COLUMNS).rows(group.rows.into_iter().map(components::TableRow::new).collect()).render())
+                }
+            }
         }
     }
 }
@@ -1003,7 +1027,11 @@ pub async fn handle_edit_variable_form(ctx: &dyn Context, msg: &Message) -> Outp
             form hx-put={"/b/admin/variables/" (url_path_encode(&key))} hx-target="#content" {
                 div .form-group {
                     label .form-label for="edit-key" { "Key" }
-                    input .form-input #edit-key type="text" value=(key) disabled;
+                    // Read-only, not disabled: it stays focusable and
+                    // readable (a disabled field is skipped by the keyboard
+                    // and drawn below text contrast). It has no `name`, so it
+                    // is never posted; the key is the URL's.
+                    input .form-input #edit-key type="text" value=(key) readonly;
                 }
                 div .form-group {
                     label .form-label for="edit-value" { "Value" }
@@ -1270,27 +1298,36 @@ pub async fn handle_reset_variables_pinned_at_upgrade(
 /// `ops::delete_variable`, shared with that JSON surface, so the two cannot
 /// drift on what they refuse.
 ///
-/// Returns EMPTY markup rather than re-rendering the page the way
-/// [`handle_update_variable`] does: the control targets `closest tr` with
-/// `outerHTML`, so an empty body is what removes the row. Re-rendering the
-/// whole page into a `<tr>` would nest a document inside a table row.
+/// Answers the re-rendered settings body for the control's `#content`
+/// target, the way [`handle_update_variable`] does: a declared key's row
+/// outlives its stored override (it shows the default again), so an empty
+/// swap of the row would have removed a row that is still there.
 pub async fn handle_delete_variable(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let key = msg.var("key");
     if let Err(out) = ops::delete_variable(ctx, msg, key).await {
         return out;
     }
+    let boot_provided = ctx.config_get(key).is_some();
     // The row is gone — but an env-provided or auto-generated key is ALSO in
     // the boot map, which `blocks::config`'s read order falls back to when the
     // table holds no row. For those the value keeps being served and the row
     // is written again on the next boot, so reporting a flat "deleted" would
     // be untrue in exactly the case an operator is most likely to be trying to
     // turn something off.
-    let toast = if ctx.config_get(key).is_some() {
-        "Variable deleted — a boot-provided value is still in effect"
-    } else {
-        "Variable deleted"
+    //
+    // A declared key's row stays, so what went is its stored value, and the
+    // toast says what the key reads now.
+    let toast = match (is_declared(ctx, key), boot_provided) {
+        (true, true) => {
+            format!("Stored value of {key} removed — a boot-provided value is in effect")
+        }
+        (true, false) => format!("Stored value of {key} removed — it is back to its default"),
+        (false, true) => "Variable deleted — a boot-provided value is still in effect".to_string(),
+        (false, false) => "Variable deleted".to_string(),
     };
-    ui::html_response_with_toast(html! {}, toast, "success")
+    // The whole settings body, for the control's `hx-target="#content"`: a
+    // declared key's row stays, now at its default, and an unowned one goes.
+    super::settings::settings_page_with_toast(ctx, msg, "variables", &toast).await
 }
 
 #[cfg(test)]
@@ -1301,9 +1338,9 @@ mod tests {
         test_support::{admin_msg, output_html, TestContext},
     };
 
-    /// Both tabs answer a failed read with the error page, instead of the
-    /// "By Block" tab listing every declared var at its default, unpinned —
-    /// which tells the operator every value they set is gone.
+    /// The page answers a failed read with the error page, instead of listing
+    /// every declared var at its default, unpinned — which tells the operator
+    /// every value they set is gone.
     #[tokio::test]
     async fn a_failed_read_is_the_error_page_not_the_defaults() {
         let ctx = TestContext::with_admin()
@@ -1311,24 +1348,21 @@ mod tests {
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID)
             .break_reads();
 
-        for tab in ["", "all"] {
+        {
             let mut msg = crate::blocks::admin::test_support::routed(admin_msg(
                 "retrieve",
                 "/b/admin/settings/variables",
             ));
             msg.set_meta("http.header.accept", "text/html");
-            if !tab.is_empty() {
-                msg.set_meta("req.query.tab", tab);
-            }
             let parts = wafer_block::http_codec::collect_http_response(
                 crate::blocks::admin::pages::settings::settings_page(&ctx, &msg, "variables").await,
             )
             .await;
             let html = String::from_utf8_lossy(&parts.body);
-            assert_eq!(parts.status, 500, "tab {tab:?}: {html}");
+            assert_eq!(parts.status, 500, "{html}");
             assert!(
                 !html.contains(APP_NAME_KEY),
-                "tab {tab:?}: a declared var rendered from its default: {html}"
+                "a declared var rendered from its default: {html}"
             );
         }
     }
@@ -1546,14 +1580,11 @@ mod tests {
     /// dispatch arm calls, which is the point: a helper that emits a control
     /// proves nothing about whether the page ever calls that helper, and the
     /// missing markup this test exists for was exactly that gap.
-    async fn variables_page_html(ctx: &TestContext, tab: &str) -> String {
-        let mut msg = crate::blocks::admin::test_support::routed(admin_msg(
+    async fn variables_page_html(ctx: &TestContext) -> String {
+        let msg = crate::blocks::admin::test_support::routed(admin_msg(
             "retrieve",
             "/b/admin/settings/variables",
         ));
-        if !tab.is_empty() {
-            msg.set_meta("req.query.tab", tab);
-        }
         output_html(
             crate::blocks::admin::pages::settings::settings_page(ctx, &msg, "variables").await,
         )
@@ -1595,7 +1626,7 @@ mod tests {
     /// tests all existed; the button did not.
     ///
     /// Asserted on the page the operator actually lands on
-    /// (`/b/admin/settings/variables`, whose default tab is "By Block"), for a
+    /// (`/b/admin/settings/variables`), for a
     /// declared shared key, because that is where a pinned
     /// `WAFER_RUN_SHARED__*` row is shown.
     #[tokio::test]
@@ -1603,17 +1634,17 @@ mod tests {
         let key = APP_NAME_KEY;
         let ctx = ctx_with_a_pinned_key(key, true).await;
 
-        for tab in ["", "all"] {
-            let html = variables_page_html(&ctx, tab).await;
+        {
+            let html = variables_page_html(&ctx).await;
             assert!(
                 html.contains(key),
-                "the row must be on the {tab:?} tab at all, or this proves nothing: {html}"
+                "the row must be on the page at all, or this proves nothing: {html}"
             );
             assert!(
                 html.contains(&format!(
                     r#"hx-post="/b/admin/variables/{key}/reset-to-environment""#
                 )),
-                "the {tab:?} tab must offer the control the boot WARN names: {html}"
+                "the page must offer the control the boot WARN names: {html}"
             );
             assert!(
                 html.contains(&format!(r#"aria-label="Reset {key} to environment""#)),
@@ -1632,7 +1663,7 @@ mod tests {
         ctx.set_config(variables::HAS_PROCESS_ENV_CONFIG_KEY, "1");
         variables::seed_row_with_flag(&ctx, APP_NAME_KEY, "Seeded", 0).await;
 
-        let html = variables_page_html(&ctx, "all").await;
+        let html = variables_page_html(&ctx).await;
         assert!(
             html.contains(APP_NAME_KEY),
             "the row must be on the page: {html}"
@@ -1656,12 +1687,12 @@ mod tests {
         let key = APP_NAME_KEY;
         let ctx = ctx_with_a_pinned_key(key, false).await;
 
-        for tab in ["", "all"] {
-            let html = variables_page_html(&ctx, tab).await;
+        {
+            let html = variables_page_html(&ctx).await;
             assert!(html.contains(key), "the row must be on the page: {html}");
             assert!(
                 !html.contains("reset-to-environment"),
-                "the {tab:?} tab must not offer to hand a key back to an environment this \
+                "the page must not offer to hand a key back to an environment this \
                  deployment does not have: {html}"
             );
         }
@@ -1695,17 +1726,14 @@ mod tests {
             );
             let ctx = ctx_with_a_pinned_key(key, true).await;
 
-            for tab in ["", "all"] {
-                let html = variables_page_html(&ctx, tab).await;
-                assert!(
-                    html.contains(key),
-                    "the row must be on the {tab:?} tab: {html}"
-                );
+            {
+                let html = variables_page_html(&ctx).await;
+                assert!(html.contains(key), "the row must be on the page: {html}");
                 assert!(
                     !html.contains(&format!(
                         r#"hx-post="/b/admin/variables/{key}/reset-to-environment""#
                     )),
-                    "{key} cannot be seeded from the environment, so the {tab:?} tab must \
+                    "{key} cannot be seeded from the environment, so the page must \
                      not offer to hand it back: {html}"
                 );
             }
@@ -1724,7 +1752,7 @@ mod tests {
         variables::seed_row_with_owner(&ctx, key, "KeptAtUpgrade", variables::PRE_UPGRADE_SENTINEL)
             .await;
 
-        let html = variables_page_html(&ctx, "all").await;
+        let html = variables_page_html(&ctx).await;
         assert!(
             html.contains("Pinned at upgrade"),
             "an upgrade pin must not read as an admin edit: {html}"
@@ -1750,6 +1778,7 @@ mod tests {
             warning: "",
             show_default: false,
             deletable: false,
+            declared: false,
             pin: None,
             offer_reset: false,
         });
@@ -1773,6 +1802,7 @@ mod tests {
             warning: "",
             show_default: false,
             deletable,
+            declared: false,
             pin: None,
             offer_reset: false,
         });
@@ -1794,6 +1824,31 @@ mod tests {
             s.contains(r#"aria-label="Delete WAFER_RUN_SHARED__LEGACY_THING""#),
             "icon-only delete button must expose an aria-label: {s}"
         );
+    }
+
+    /// Deleting a declared key's stored value leaves the key at its default,
+    /// and the confirm says so; an undeclared row is deleted outright.
+    #[tokio::test]
+    async fn the_delete_confirm_says_what_a_declared_key_keeps() {
+        let declared = delete_button("ACME__WIDGET__COLOR", true).into_string();
+        assert!(
+            declared.contains(
+                "Remove the stored value of ACME__WIDGET__COLOR? It goes back to its default."
+            ),
+            "{declared}"
+        );
+        assert!(!declared.contains("cannot be undone"), "{declared}");
+        let undeclared = delete_button("ACME__WIDGET__COLOR", false).into_string();
+        assert!(
+            undeclared.contains("Delete ACME__WIDGET__COLOR? This cannot be undone."),
+            "{undeclared}"
+        );
+
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        assert!(is_declared(&ctx, APP_NAME_KEY));
+        assert!(!is_declared(&ctx, "ACME__NOBODY__DECLARES_THIS"));
     }
 
     /// A row stored under a malformed key before the key rule existed is
@@ -2356,11 +2411,11 @@ mod tests {
     async fn the_page_offers_the_bulk_release_when_a_key_is_pinned_at_upgrade() {
         let ctx = ctx_with_every_pin_state(true).await;
 
-        for tab in ["", "all"] {
-            let html = variables_page_html(&ctx, tab).await;
+        {
+            let html = variables_page_html(&ctx).await;
             assert!(
                 html.contains(r#"hx-post="/b/admin/variables/reset-pinned-at-upgrade""#),
-                "the {tab:?} tab must offer the bulk release: {html}"
+                "the page must offer the bulk release: {html}"
             );
             assert!(
                 html.contains("Reset all keys pinned at upgrade"),
@@ -2386,15 +2441,15 @@ mod tests {
             "the fixture's admin create must land"
         );
 
-        for tab in ["", "all"] {
-            let html = variables_page_html(&ctx, tab).await;
+        {
+            let html = variables_page_html(&ctx).await;
             assert!(
                 html.contains(ADMIN_EDITED),
-                "the row must be on the {tab:?} tab, or this proves nothing: {html}"
+                "the row must be on the page, or this proves nothing: {html}"
             );
             assert!(
                 !html.contains("reset-pinned-at-upgrade"),
-                "nothing is pinned at upgrade, so the {tab:?} tab must offer no bulk \
+                "nothing is pinned at upgrade, so the page must offer no bulk \
                  release: {html}"
             );
         }
@@ -2480,15 +2535,12 @@ mod tests {
         ctx.set_config(variables::HAS_PROCESS_ENV_CONFIG_KEY, "1");
         variables::seed_row_with_owner(&ctx, key, "legacy", variables::PRE_UPGRADE_SENTINEL).await;
 
-        for tab in ["", "all"] {
-            let html = variables_page_html(&ctx, tab).await;
-            assert!(
-                html.contains(key),
-                "the row must be on the {tab:?} tab: {html}"
-            );
+        {
+            let html = variables_page_html(&ctx).await;
+            assert!(html.contains(key), "the row must be on the page: {html}");
             assert!(
                 !html.contains("reset-pinned-at-upgrade"),
-                "no row on the {tab:?} tab can be handed back, so no bulk control: {html}"
+                "no row on the page can be handed back, so no bulk control: {html}"
             );
         }
 
@@ -2547,15 +2599,15 @@ mod tests {
     async fn a_target_without_a_process_environment_offers_no_bulk_release() {
         let ctx = ctx_with_every_pin_state(false).await;
 
-        for tab in ["", "all"] {
-            let html = variables_page_html(&ctx, tab).await;
+        {
+            let html = variables_page_html(&ctx).await;
             assert!(
                 html.contains(UPGRADE_PINNED[0]),
-                "the pinned row must be on the {tab:?} tab: {html}"
+                "the pinned row must be on the page: {html}"
             );
             assert!(
                 !html.contains("reset-pinned-at-upgrade"),
-                "the {tab:?} tab must not offer to hand keys back to an environment this \
+                "the page must not offer to hand keys back to an environment this \
                  deployment does not have: {html}"
             );
         }
@@ -2683,8 +2735,10 @@ mod create_form_tests {
             "the modal must post an explicit 0 when the box is unchecked: {html}"
         );
         assert!(
-            html.contains(r#"type="checkbox" name="sensitive" value="1" checked"#),
-            "the modal's checkbox must be checked by default: {html}"
+            html.contains(
+                r#"id="var-sensitive" type="checkbox" role="switch" name="sensitive" value="1" checked"#
+            ),
+            "the modal's switch must be on by default: {html}"
         );
     }
 

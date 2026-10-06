@@ -863,14 +863,20 @@ mod boot_tests {
     /// the whole list again (the next boot) changes nothing.
     #[tokio::test]
     async fn migration_005_moves_a_write_2_row_onto_the_append_column() {
-        use crate::blocks::admin::migrations::{ddl_files, WRAP_GRANTS_APPEND_COLUMN};
+        use crate::blocks::admin::migrations::{
+            ddl_files, SQLITE_MIGRATIONS, WRAP_GRANTS_APPEND_COLUMN,
+        };
 
         let db = bare_db().await;
         let all = ddl_files("sqlite");
-        let before_005 = &all[..all.len() - 1];
+        let at = SQLITE_MIGRATIONS
+            .iter()
+            .position(|(name, _)| *name == WRAP_GRANTS_APPEND_COLUMN)
+            .expect("005 is wired into SQLITE_MIGRATIONS");
+        let before_005 = &all[..at];
         assert!(
-            all[all.len() - 1].contains("ADD COLUMN append"),
-            "{WRAP_GRANTS_APPEND_COLUMN} is the last admin migration"
+            all[at].contains("ADD COLUMN append"),
+            "{WRAP_GRANTS_APPEND_COLUMN} is where the list says it is"
         );
         crate::migration_helper::apply_ddl_via_service(&db, before_005)
             .await

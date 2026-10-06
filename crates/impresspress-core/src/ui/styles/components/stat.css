@@ -41,7 +41,15 @@
 
 .stat-description {
 	font-size: 0.875rem; color: var(--text-secondary); margin-top: var(--space-2);
+	font-variant-numeric: tabular-nums;
 }
+
+/* A figure that is a problem whenever it is not zero (the dashboard's server
+   errors). The label names what is counted; the tone only draws the eye.
+   --accent-danger-text is the AA-safe red for text on white. */
+.stat-card--alert { border-color: var(--accent-danger); }
+.stat-card--alert .stat-value,
+.stat-card--alert .stat-icon { color: var(--accent-danger-text); }
 
 @media (max-width: 720px) {
 	.stat-card { padding: var(--space-4); min-width: 0; }

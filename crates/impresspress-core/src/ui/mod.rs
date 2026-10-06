@@ -3092,7 +3092,7 @@ mod tests {
         const KNOWN_PRE_EXISTING_GAPS: &[&str] = &[
             // Styled only in the page's own inline
             // `style { (PreEscaped("...")) }` block, not centrally --
-            // blocks/tickets/pages.rs and blocks/admin/pages/network.rs.
+            // blocks/tickets/pages.rs.
             "ticket-col-type",
             "ticket-col-source",
             "ticket-col-age",
@@ -3100,8 +3100,6 @@ mod tests {
             "tickets-table",
             "ticket-analysis-meta",
             "ticket-analysis-actions",
-            "detail-rows",
-            "expand-row",
             // No rule anywhere.
             "auth-form",
             "bulk-select-all",

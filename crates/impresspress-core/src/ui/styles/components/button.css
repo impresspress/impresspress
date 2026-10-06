@@ -106,3 +106,20 @@
 @media (max-width: 720px) {
 	.btn--block { width: 100%; flex: 1 1 0; }
 }
+
+/* ── Filter toggle (`components::filter_toggle`) ───────── */
+/* A list filter that is on or off. Off reads as a secondary button; on is
+   filled with the neutral ink and carries a check, so the state is shape and
+   text as well as colour, and `aria-pressed` says it to a screen reader. */
+.filter-toggle { min-height: 44px; }
+/* The same look for the current one of a set of links that choose between
+   orderings (`aria-current`), where only one can be on. */
+.filter-toggle[aria-pressed="true"],
+.filter-toggle[aria-current="true"] { background: var(--text-primary); color: var(--surface-1); border-color: var(--text-primary); }
+.filter-toggle[aria-pressed="true"]:hover:not(:disabled),
+.filter-toggle[aria-current="true"]:hover { background: var(--text-secondary); border-color: var(--text-secondary); }
+.filter-toggle__check { display: none; line-height: 0; }
+.filter-toggle[aria-pressed="true"] .filter-toggle__check,
+.filter-toggle[aria-current="true"] .filter-toggle__check { display: inline-flex; }
+.filter-toggle__check svg { width: 14px; height: 14px; }
+.filter-toggles { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }

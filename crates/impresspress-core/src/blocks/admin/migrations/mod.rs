@@ -129,6 +129,70 @@ const SQL_005_SQLITE: &str = include_str!("005_wrap_grants_append_column.sqlite.
 #[cfg(feature = "postgres")]
 const SQL_005_POSTGRES: &str = include_str!("005_wrap_grants_append_column.postgres.sql");
 
+// 006 gives a storage access its duration as a column of its own.
+//
+// The storage block wrote how long an access took into the status text
+// ("OK (10ms)"), so the logs page could only show the two run together or
+// parse one out of the other. The column is nullable: a request refused
+// before it reached a backend took no measurable time, and rows written
+// before this migration keep their old status text with no duration.
+//
+// Re-runnable, like the rest of admin's set: a second `ADD COLUMN` is
+// swallowed as a duplicate column by both migration runners.
+//
+// This reasoning lives here rather than in the .sql files for the reason 002's
+// note above gives.
+const SQL_006_SQLITE: &str = include_str!("006_storage_access_logs_duration.sqlite.sql");
+#[cfg(feature = "postgres")]
+const SQL_006_POSTGRES: &str = include_str!("006_storage_access_logs_duration.postgres.sql");
+
+// 007 names every logged request by its HTTP method.
+//
+// Rows used to store the router action (`retrieve`, `create`, `update`,
+// `delete`, `execute`); the pipeline now stores the method from the request
+// head (`GET`, `POST`, …). Left as they were, the network page listed
+// `RETRIEVE /x` beside `GET /x` as two routes, and a route's detail, matched
+// on the method, found only one of them.
+//
+// `create` is exactly `POST` and `delete` exactly `DELETE`, and are
+// rewritten. `retrieve` stood for `GET` and `HEAD`; it becomes `GET`, so an
+// old `HEAD` reads as a `GET` — acceptable for diagnostic rows, and the only
+// reading the row allows. `update` stood for `PUT` and `PATCH`, and `execute`
+// for every other method (`OPTIONS`, `TRACE`, anything unrecognised): no row
+// says which, so those rows are deleted rather than guessed at. They are
+// diagnostics, on deployments with no production users yet.
+//
+// Re-runnable: once no row holds an action name, every statement matches
+// nothing. That matters because the native CLI re-applies the admin DDL
+// files on every boot (`ddl_files`, before the gated runner exists); each
+// re-run is a scan of `method` that changes nothing.
+//
+// This reasoning lives here rather than in the .sql files for the reason 002's
+// note above gives.
+const SQL_007_SQLITE: &str = include_str!("007_request_logs_http_method.sqlite.sql");
+#[cfg(feature = "postgres")]
+const SQL_007_POSTGRES: &str = include_str!("007_request_logs_http_method.postgres.sql");
+
+// 008 stores the block each logged request was addressed to.
+//
+// The network page groups and totals routes by block, and pages them, in
+// SQL; that needs the block as a column rather than a prefix of `path`. New
+// rows get it from `request_logs::NewRequestLog::to_data`
+// (`request_logs::owning_block`); the `UPDATE` gives existing rows the same
+// value — the segment after `/b/`, up to the next `/` — and leaves every other
+// path (`/`, the unmatched-route label) at `''`.
+//
+// Re-runnable, as the native CLI's re-apply of the DDL files on every boot
+// needs: a second `ADD COLUMN` is swallowed as a duplicate column by both
+// migration runners, the `UPDATE` only touches `/b/` rows still at `''`, and
+// the index is `IF NOT EXISTS`.
+//
+// This reasoning lives here rather than in the .sql files for the reason 002's
+// note above gives.
+const SQL_008_SQLITE: &str = include_str!("008_request_logs_block.sqlite.sql");
+#[cfg(feature = "postgres")]
+const SQL_008_POSTGRES: &str = include_str!("008_request_logs_block.postgres.sql");
+
 /// Ordered SQLite migration scripts for this block, as `(basename, content)`
 /// pairs. Feeds the runtime `lifecycle_init` apply path.
 /// Order here is the apply order.
@@ -138,7 +202,18 @@ pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
     ("003_block_settings_seed_hash", SQL_003_SQLITE),
     (USER_ROLES_UNIQUE, SQL_004_SQLITE),
     (WRAP_GRANTS_APPEND_COLUMN, SQL_005_SQLITE),
+    ("006_storage_access_logs_duration", SQL_006_SQLITE),
+    (REQUEST_LOGS_HTTP_METHOD, SQL_007_SQLITE),
+    (REQUEST_LOGS_BLOCK, SQL_008_SQLITE),
 ];
+
+/// Basename of the request-log method rewrite, named once so the migration
+/// list and the test that re-applies it cannot drift apart.
+pub(crate) const REQUEST_LOGS_HTTP_METHOD: &str = "007_request_logs_http_method";
+
+/// Basename of the request-log `block` column, named once for the same
+/// reason.
+pub(crate) const REQUEST_LOGS_BLOCK: &str = "008_request_logs_block";
 
 /// Basename of the `variables.block` column + backfill, named once so the
 /// migration list and the test that slices it cannot drift apart.
@@ -164,6 +239,9 @@ pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[
     SQL_003_POSTGRES,
     SQL_004_POSTGRES,
     SQL_005_POSTGRES,
+    SQL_006_POSTGRES,
+    SQL_007_POSTGRES,
+    SQL_008_POSTGRES,
 ];
 #[cfg(not(feature = "postgres"))]
 pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[];
@@ -208,6 +286,9 @@ pub fn ddl_files(db_type: &str) -> &'static [&'static str] {
             SQL_003_SQLITE,
             SQL_004_SQLITE,
             SQL_005_SQLITE,
+            SQL_006_SQLITE,
+            SQL_007_SQLITE,
+            SQL_008_SQLITE,
         ]
     }
 }
@@ -219,6 +300,18 @@ mod tests {
         SQL_001_POSTGRES, SQL_002_POSTGRES, SQL_003_POSTGRES, SQL_004_POSTGRES, SQL_005_POSTGRES,
     };
     use super::{SQL_001_SQLITE, SQL_002_SQLITE, SQL_003_SQLITE, SQL_004_SQLITE, SQL_005_SQLITE};
+
+    /// The pre-wafer DDL list the native CLI applies is the gated runner's
+    /// list, file for file: a migration wired into one and not the other
+    /// would exist on some boots and not others.
+    #[test]
+    fn the_cli_ddl_list_is_the_migration_list() {
+        let gated: Vec<&str> = super::SQLITE_MIGRATIONS
+            .iter()
+            .map(|(_, sql)| *sql)
+            .collect();
+        assert_eq!(super::ddl_files("sqlite"), gated.as_slice());
+    }
 
     #[test]
     fn sqlite_migrations_contain_expected_ddl() {
