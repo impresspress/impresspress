@@ -50,6 +50,28 @@ pub fn tab_navigation(tabs: Vec<Tab<'_>>) -> Markup {
     }
 }
 
+/// A list filter that is either on or off ("Server errors", "Errors only"):
+/// a real `<button>` whose `aria-pressed` carries the state, and which swaps
+/// `#content` for `href` — the same list with this filter flipped — and
+/// pushes that URL, so the filter survives a reload and the back button.
+///
+/// `href` is the URL the page is at after the press, so the caller builds it
+/// with this filter's value inverted and every other filter kept.
+pub fn filter_toggle(label: &str, pressed: bool, href: &str) -> Markup {
+    html! {
+        button .btn .btn--secondary .btn--sm .filter-toggle
+            type="button"
+            aria-pressed=(if pressed { "true" } else { "false" })
+            hx-get=(href)
+            hx-target="#content"
+            hx-push-url="true"
+        {
+            span .filter-toggle__check aria-hidden="true" { (crate::ui::icons::check()) }
+            (label)
+        }
+    }
+}
+
 /// A block's own sections — separate pages of one block (Tickets' Inbox /
 /// Types / Settings / Endpoints) — as the same `.tabs` strip
 /// [`tab_navigation`] draws, but as plain links in a labelled `nav`, the

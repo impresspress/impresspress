@@ -140,7 +140,7 @@ impl Block for ImpresspressStorageBlock {
                 // No request to name a path from: the row records the op and
                 // the failure, so the refusal is still attributable.
                 let status = format!("ERROR: {}", e.message);
-                let _ = log_storage_access(ctx, &caller, &msg.kind, "", status).await;
+                let _ = log_storage_access(ctx, &caller, &msg.kind, "", status, None).await;
                 return OutputStream::error(e);
             }
         };
@@ -189,8 +189,14 @@ fn forward_logged(
 ) -> OutputStream {
     OutputStream::from_producer(move |sink, _cancel| async move {
         let mut inner = inner;
-        let log = |status: String| log_storage_access(ctx.as_ref(), &caller, &kind, &path, status);
-        let ok = || format!("OK ({}ms)", now_millis().saturating_sub(start));
+        // Every outcome after the backend was reached carries how long it
+        // took, in its own column: the status says what happened, the
+        // duration how long, so neither has to be parsed out of the other.
+        let log = |status: String| {
+            let elapsed = i64::try_from(now_millis().saturating_sub(start)).unwrap_or(i64::MAX);
+            log_storage_access(ctx.as_ref(), &caller, &kind, &path, status, Some(elapsed))
+        };
+        let ok = || STATUS_OK.to_string();
         let mut body_forwarded = false;
         while let Some(ev) = inner.next().await {
             match ev {
@@ -249,13 +255,18 @@ fn forward_logged(
     })
 }
 
-/// Log a storage access event (best-effort).
+/// The `status` of an access the backend served.
+const STATUS_OK: &str = "OK";
+
+/// Log a storage access event (best-effort). `duration_ms` is how long the
+/// backend took, or `None` for a request refused before it reached one.
 async fn log_storage_access(
     ctx: &dyn Context,
     source_block: &str,
     operation: &str,
     path: &str,
     status: String,
+    duration_ms: Option<i64>,
 ) -> Result<(), WaferError> {
     db::create(
         ctx,
@@ -265,6 +276,7 @@ async fn log_storage_access(
             "operation": operation,
             "path": path,
             "status": status,
+            "duration_ms": duration_ms,
         })),
     )
     .await
@@ -294,7 +306,7 @@ mod tests {
         ResourceType,
     };
 
-    use super::{create, ImpresspressStorageBlock, STORAGE_ACCESS_LOGS_TABLE};
+    use super::{create, ImpresspressStorageBlock, STATUS_OK, STORAGE_ACCESS_LOGS_TABLE};
     use crate::test_support::{InMemoryStorageService, TestContext};
 
     /// A context running as `caller`, over the admin schema (the audit
@@ -504,7 +516,20 @@ mod tests {
         let rows = audit_rows(&ctx).await;
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].0, "impresspress/files/uploads/a.txt");
-        assert!(rows[0].1.starts_with("OK ("), "{rows:?}");
+        assert_eq!(rows[0].1, STATUS_OK, "{rows:?}");
+        // How long it took is its own column, not part of the status.
+        let stored =
+            crate::db_read::list_every(&ctx.fixture(), STORAGE_ACCESS_LOGS_TABLE, Vec::new())
+                .await
+                .expect("read storage access logs");
+        assert!(
+            stored[0]
+                .data
+                .get("duration_ms")
+                .is_some_and(serde_json::Value::is_i64),
+            "{:?}",
+            stored[0].data
+        );
     }
 
     /// A store that records how `put_streaming` received its body.
@@ -619,7 +644,7 @@ mod tests {
         let rows = audit_rows(&ctx).await;
         assert_eq!(rows.len(), 1, "{rows:?}");
         assert_eq!(rows[0].0, "impresspress/files/uploads/big.bin");
-        assert!(rows[0].1.starts_with("OK ("), "{rows:?}");
+        assert_eq!(rows[0].1, STATUS_OK, "{rows:?}");
     }
 
     /// A streaming upload whose header frame fails — the connection dropped

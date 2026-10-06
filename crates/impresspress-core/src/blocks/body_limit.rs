@@ -167,10 +167,11 @@ mod tests {
             .await;
         let _ = out.collect_buffered().await;
 
-        let rows = request_logs::paginated(&ctx.fixture(), 1, 20, "", false)
-            .await
-            .expect("read request_logs")
-            .rows;
+        let rows =
+            request_logs::paginated(&ctx.fixture(), 1, 20, "", request_logs::ErrorFilter::NONE)
+                .await
+                .expect("read request_logs")
+                .rows;
         let row = rows
             .iter()
             .find(|r| r.path == "/b/storage/api/buckets/p/objects")

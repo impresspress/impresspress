@@ -21,7 +21,7 @@ mod time;
 pub use auth::{alert, alert_message, auth_panel, oauth_button, AlertVariant};
 pub use avatar::{avatar, CtrlSize};
 pub use badge::{badge, status_badge, Badge, BadgeVariant};
-pub use button::{button, subnav, tab_navigation, BtnVariant, Tab};
+pub use button::{button, filter_toggle, subnav, tab_navigation, BtnVariant, Tab};
 pub use callout::{callout, CalloutTone};
 pub use card::page_header;
 pub use chart::{bar_chart_card, line_chart_card, sparkline, ChartHistory};
@@ -33,6 +33,7 @@ pub use form::{
 pub use modal::{modal, modal_cancel, modal_footer, Modal, ModalSize};
 pub use pagination::pagination;
 pub use section::section_header;
-pub use stat::stat_card;
+pub use stat::{stat_card, StatCard};
+pub(crate) use table::fnv1a;
 pub use table::{breakable_id, data_table, DataTable, TableCol, TableRow, NO_VALUE};
 pub use time::timestamp;

@@ -3176,7 +3176,8 @@ impl FloatAggregateContext {
                 }
                 AggregateColumnDef::Count { .. }
                 | AggregateColumnDef::Max { .. }
-                | AggregateColumnDef::CaseWhenSum { .. } => None,
+                | AggregateColumnDef::CaseWhenSum { .. }
+                | AggregateColumnDef::CountGroups { .. } => None,
             })
             .collect()
     }

@@ -207,6 +207,8 @@ pub(crate) async fn live_counts_by_owner(
         group_by: vec![wire::GroupByDef::Column("owner_id".into())],
         sort: vec![],
         limit: 0,
+        having: vec![],
+        offset: 0,
     };
     db::aggregate(ctx, req)
         .await?

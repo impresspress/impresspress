@@ -95,7 +95,30 @@ pub(super) async fn settings_page_closing_modal(
         return settings_page_after_write(ctx, msg, tab, done).await;
     }
     match render_document(ctx, msg, tab).await {
-        Ok(body) => crate::ui::html_response_closing_modal(body, modal_id, done, "success"),
+        Ok(Rendered::Page(body)) => {
+            crate::ui::html_response_closing_modal(body, modal_id, done, "success")
+        }
+        Ok(Rendered::Moved(location)) => moved(msg, &location),
+        Err(e) => after_write_notice(e, done),
+    }
+}
+
+/// [`settings_page_after_write`] for a row control on the page (a
+/// variable's Delete): the re-rendered page for the control's `#content`
+/// target under a `done` toast. A request that is not htmx's gets the full
+/// page, as [`settings_page_after_write`] answers it.
+pub(super) async fn settings_page_with_toast(
+    ctx: &dyn Context,
+    msg: &Message,
+    tab: &str,
+    done: &str,
+) -> OutputStream {
+    if !crate::ui::is_htmx(msg) {
+        return settings_page_after_write(ctx, msg, tab, done).await;
+    }
+    match render_document(ctx, msg, tab).await {
+        Ok(Rendered::Page(body)) => crate::ui::html_response_with_toast(body, done, "success"),
+        Ok(Rendered::Moved(location)) => moved(msg, &location),
         Err(e) => after_write_notice(e, done),
     }
 }
@@ -112,17 +135,39 @@ fn after_write_notice(e: WaferError, done: &str) -> OutputStream {
 }
 
 async fn render(ctx: &dyn Context, msg: &Message, tab: &str) -> Result<OutputStream, WaferError> {
-    Ok(crate::ui::html_response(
-        render_document(ctx, msg, tab).await?,
-    ))
+    Ok(match render_document(ctx, msg, tab).await? {
+        Rendered::Page(page) => crate::ui::html_response(page),
+        Rendered::Moved(location) => moved(msg, &location),
+    })
 }
 
-/// The settings page's markup (htmx-aware, as every shelled page is).
+/// What rendering a settings URL comes to: the page, or the URL the request
+/// should have asked for (a network page number past the last page).
+enum Rendered {
+    Page(maud::Markup),
+    Moved(String),
+}
+
+/// Send the browser to `location`: a `303` for a page load, and for an htmx
+/// swap an `HX-Redirect`, because an XHR follows a redirect without telling
+/// htmx, which would then push the URL that was asked for, not the one shown.
+fn moved(msg: &Message, location: &str) -> OutputStream {
+    if crate::ui::is_htmx(msg) {
+        crate::http::ResponseBuilder::new()
+            .set_header("HX-Redirect", location)
+            .body(Vec::new(), "text/plain")
+    } else {
+        crate::http::redirect(303, location)
+    }
+}
+
+/// The settings page's markup (htmx-aware, as every shelled page is), or
+/// where the request belongs instead.
 async fn render_document(
     ctx: &dyn Context,
     msg: &Message,
     tab: &str,
-) -> Result<maud::Markup, WaferError> {
+) -> Result<Rendered, WaferError> {
     let active = match tab {
         "email" | "authentication" | "branding" | "network" | "variables" | "permissions" => tab,
         _ => "email",
@@ -164,7 +209,10 @@ async fn render_document(
     let body_markup = match active {
         "authentication" => authentication::settings_body(ctx, msg).await,
         "branding" => branding::settings_body(ctx, msg).await,
-        "network" => network::settings_body(ctx, msg).await,
+        "network" => match network::settings_body(ctx, msg).await? {
+            network::NetworkBody::Page(body) => Ok(body),
+            network::NetworkBody::Moved(location) => return Ok(Rendered::Moved(location)),
+        },
         "variables" => variables::settings_body(ctx, msg).await,
         "permissions" => permissions::settings_body(ctx, msg).await,
         // "email" and any unknown active (defensive — `active` is already
@@ -195,6 +243,7 @@ async fn render_document(
         form_body,
     )
     .await
+    .map(Rendered::Page)
 }
 
 fn tab_title(active: &str) -> &'static str {
@@ -214,7 +263,7 @@ fn tab_description(active: &str) -> Option<&'static str> {
         "email" => Some("Configure email delivery via Mailgun."),
         "authentication" => Some("Registration, the bootstrap admin, and OAuth sign-in."),
         "branding" => Some("The app name, logos, favicon and accent colour."),
-        "network" => Some("Manage network access rules for blocks."),
+        "network" => Some("Inbound requests by path, grouped by the block that serves them."),
         "variables" => Some("Configure environment variables and shared config."),
         "permissions" => {
             Some("Control which blocks can access other blocks' data, files, and services.")

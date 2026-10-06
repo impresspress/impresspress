@@ -2519,10 +2519,10 @@ pub(crate) mod page_link_tests {
         .await
         .expect("seed request log");
         // A failing request as well as a succeeding one: the dashboard's
-        // "Recent 4xx/5xx" card reads `list_recent_errors`, whose filter is
-        // `status_code >= 400`, so the 200 above
-        // renders that card's empty state and nothing else. Without this row
-        // no render test ever exercises that card's table.
+        // "Recent server errors" card reads `list_recent_server_errors`, whose
+        // filter is a 5xx `status_code`, so the 200 above renders that card's
+        // empty state and nothing else. Without this row no render test ever
+        // exercises that card's table.
         request_logs::insert(
             &ctx,
             &request_logs::NewRequestLog {

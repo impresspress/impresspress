@@ -336,6 +336,7 @@ body:has(.products-tabs) .filter-bar { margin: var(--space-4) 0; padding: var(--
 .text-warning-strong svg { width: 14px; height: 14px; flex-shrink: 0; }
 .text-sm { font-size: 0.875rem; }
 .text-xs { font-size: 0.75rem; }
+.tabular-nums { font-variant-numeric: tabular-nums; }
 .text-lg { font-size: var(--text-lg); }
 /* Off-scale small sizes for dense badges/cells (permissions grants table,
  * database admin panel) that predate the --text-* token scale and don't

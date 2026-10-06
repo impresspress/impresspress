@@ -3090,11 +3090,6 @@ mod tests {
         const NO_STYLESHEET_RULE_NEEDED: &[&str] = &["cf-turnstile", "bulk-select"];
 
         const KNOWN_PRE_EXISTING_GAPS: &[&str] = &[
-            // Styled only in the page's own inline
-            // `style { (PreEscaped("...")) }` block, not centrally --
-            // blocks/admin/pages/network.rs.
-            "detail-rows",
-            "expand-row",
             // No rule anywhere.
             "auth-form",
             "bulk-select-all",

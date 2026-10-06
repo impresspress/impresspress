@@ -188,9 +188,12 @@ async function expectPageScreenshot(page: Page, name: string, mask?: ReturnType<
 //   network page is captured against rows it seeds itself (see its test
 //   below).
 //
-// What stays unmasked, deliberately: the dashboard's error figures, error
-// chart and Recent 4xx/5xx card are zero and empty on a healthy run, so an
-// error there is a regression the capture should catch. The request chart,
+// What stays unmasked, deliberately: the dashboard's server-error figure,
+// charts and "Recent server errors" card are zero and empty on a healthy run,
+// so an error there is a regression the capture should catch. The client
+// errors under "Requests Today" and in their chart count the refused requests
+// the captures before the dashboard make (the anonymous 404 page among them):
+// fixed while the group's order is, so they are compared too. The request chart,
 // the request sparkline and the new-user chart plot everything on the last
 // day of the window whatever the count, and "Total Users" / "New Today" are
 // the one bootstrap admin, so none of them depends on what ran first. The
@@ -243,13 +246,13 @@ test.describe('visual baseline — admin', () => {
   test('admin admin-network', async ({ page }) => {
     const probe = '/b/admin/network/detail/inbound';
     for (let i = 0; i < 3; i++) {
-      const res = await page.request.get(`${probe}?method=retrieve&path=/visual-baseline`);
+      const res = await page.request.get(`${probe}?method=GET&path=/visual-baseline`);
       expect(res.status(), `probe request ${i + 1}`).toBe(200);
     }
     await page.goto(`/b/admin/settings/network?search=${encodeURIComponent(probe)}`, {
       waitUntil: 'networkidle',
     });
-    await expect(page.locator('tr.expand-row')).toHaveCount(1);
+    await expect(page.locator('tr.network-row')).toHaveCount(1);
     await expectPageScreenshot(page, 'admin-admin-network.png', volatileMasks(page));
   });
 });
@@ -267,7 +270,7 @@ const MOBILE_ADMIN_ROUTES = [
   // Portal pages — primary mobile audience. Admin is desktop-first per
   // master spec; the hint banner inside is the explicit accommodation.
   // Admin pages aren't mobile-snapshotted because the dashboard's
-  // "Recent 4xx/5xx" table is fed by the request_log accumulated during
+  // "Recent server errors" table is fed by the request_log accumulated during
   // the rest of the baseline run, so its content + width drift between
   // local and CI.
   { path: '/b/userportal/', name: 'portal-dashboard' },
