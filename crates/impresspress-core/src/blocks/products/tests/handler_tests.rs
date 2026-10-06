@@ -2341,9 +2341,8 @@ async fn overview_shows_disabled_notice_when_user_products_off() {
 }
 
 /// Enabled + empty catalog: the Overview page must show a working
-/// "Add your first product" CTA to the real admin create path (Manage
-/// Products, whose "+ New Product" opens the product wizard), and must not show the
-/// disabled-state notice.
+/// "Add your first product" CTA to the real admin create path (the product
+/// wizard), and must not show the disabled-state notice.
 #[tokio::test]
 async fn overview_shows_add_product_cta_when_enabled_and_empty() {
     let ctx = ctx_with(&[("WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS", "true")]).await;
@@ -2355,8 +2354,8 @@ async fn overview_shows_add_product_cta_when_enabled_and_empty() {
         "enabled+empty overview should show the add-product CTA: {html}"
     );
     assert!(
-        html.contains(r#"href="/b/products/admin/manage""#),
-        "CTA should link to the real create path (Manage Products): {html}"
+        html.contains(r#"<div class="empty__action"><a class="btn btn--sm btn--secondary" href="/b/products/admin/new">"#),
+        "CTA should link to the real create path (the wizard), as a secondary action: {html}"
     );
     assert!(
         !html.contains("WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS"),
@@ -2409,14 +2408,14 @@ async fn manage_products_page_links_to_product_wizard() {
     let (msg, _input) = admin_get_msg("/b/products/admin/manage");
     let html = output_to_html(super::super::pages::manage_products(&ctx, &msg).await).await;
 
+    // The page's one primary action, in the topbar — not a body header
+    // repeating the title — with a plus icon rather than a typed "+".
     assert!(
-        html.contains("+ New Product"),
-        "manage page should render the create-product trigger: {html}"
+        html.contains(r#"<div class="topbar__actions"><a class="btn btn--sm btn--primary" href="/b/products/admin/new"><svg"#),
+        "manage page should link to the full product wizard from the topbar: {html}"
     );
-    assert!(
-        html.contains(r#"href="/b/products/admin/new""#),
-        "manage page should link to the full product wizard: {html}"
-    );
+    assert!(html.contains("New product</a>"), "{html}");
+    assert!(!html.contains("+ New"), "no typed plus: {html}");
 }
 
 #[tokio::test]

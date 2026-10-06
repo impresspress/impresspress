@@ -271,7 +271,7 @@ mod tests {
     /// The rest are phase 5 §8 candidates and out of scope here.
     const HAND_WRITTEN_BADGES: &[(&str, usize)] = &[
         ("blocks/legalpages/pages.rs", 12),
-        ("blocks/products/pages.rs", 6),
+        ("blocks/products/pages.rs", 2),
     ];
 
     #[test]
