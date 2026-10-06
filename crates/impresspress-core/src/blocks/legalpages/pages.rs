@@ -1,22 +1,27 @@
 //! SSR admin pages for the legal pages block.
 //!
-//! Provides a tabbed admin UI with:
-//! - Privacy Policy editor (Quill rich text editor)
-//! - Terms of Service editor (Quill rich text editor)
-//! - API endpoints reference
+//! The Legal section of the admin: the Privacy Policy and Terms of Service
+//! Markdown editors, the public pages' settings, and the endpoints reference.
 
 use maud::{html, Markup, PreEscaped};
-use wafer_run::{context::Context, InputStream, Message, OutputStream, WaferError};
+use wafer_run::{
+    context::Context, AuthLevel, BlockEndpoint, InputStream, Message, OutputStream, WaferError,
+};
 
 use super::{
-    contracts::{DocumentStatus, DocumentType},
+    contracts::{DocumentStatus, DocumentType, DOCUMENT_FIELDS},
     repo::documents::{self, DocumentRow, NewDraft},
     service,
 };
 use crate::{
     blocks::crud,
+    endpoint_match,
     http::{err_bad_request, ok_json, ResponseBuilder},
-    ui::{self, components, icons, settings_form},
+    ui::{
+        self,
+        components::{self, BadgeVariant, DataTable, TableCol, TableRow},
+        icons, settings_form,
+    },
     util::wire_str,
 };
 
@@ -67,24 +72,42 @@ async fn error_page(
 }
 
 // ---------------------------------------------------------------------------
-// Document lookup
+// Editor state
 // ---------------------------------------------------------------------------
 
-/// Find the current document for a given type.
-/// Prefers the latest draft (so admin sees their in-progress edits),
-/// then falls back to the published version.
+/// What the editor shows for one document type.
+pub(super) struct EditorState {
+    /// The version being edited: the newest draft (so the admin sees their
+    /// in-progress edits), else the published version; `None` when the type
+    /// has no row at all.
+    pub current: Option<DocumentRow>,
+    /// The version number the public page shows, if one is published. A
+    /// draft has no number of its own: it is stored as version 0
+    /// until it is published.
+    pub live_version: Option<i64>,
+    /// What the next publish will be numbered: one past the highest version of
+    /// this type in any status — the number `service::publish_document`
+    /// would pick for an unnumbered publish.
+    pub next_version: i64,
+}
+
+/// Read the editor's state.
 ///
 /// A read failure is an `Err`, not an empty editor: rendering "no document"
 /// over a database error invites the admin to type a replacement into a form
 /// whose save then forks the document they could not see.
-async fn find_current_doc(
+pub(super) async fn load_editor_state(
     ctx: &dyn Context,
     doc_type: DocumentType,
-) -> Result<Option<DocumentRow>, WaferError> {
-    if let Some(draft) = documents::find_latest_draft(ctx, doc_type).await? {
-        return Ok(Some(draft));
-    }
-    documents::find_published(ctx, doc_type).await
+) -> Result<EditorState, WaferError> {
+    let published = documents::find_published(ctx, doc_type).await?;
+    let draft = documents::find_latest_draft(ctx, doc_type).await?;
+    let next_version = documents::latest_version(ctx, doc_type).await? + 1;
+    Ok(EditorState {
+        live_version: published.as_ref().map(|row| row.version),
+        current: draft.or(published),
+        next_version,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -92,8 +115,8 @@ async fn find_current_doc(
 // ---------------------------------------------------------------------------
 
 pub async fn editor_page(ctx: &dyn Context, msg: &Message, doc_type: DocumentType) -> OutputStream {
-    let doc = match find_current_doc(ctx, doc_type).await {
-        Ok(doc) => doc,
+    let state = match load_editor_state(ctx, doc_type).await {
+        Ok(state) => state,
         Err(e) => {
             return error_page(
                 ctx,
@@ -106,35 +129,11 @@ pub async fn editor_page(ctx: &dyn Context, msg: &Message, doc_type: DocumentTyp
             .await
         }
     };
-    let default_title = doc_type.title();
-
-    let (doc_id, title, content, status, updated_at, version) = match &doc {
-        Some(d) => (
-            d.id.as_str(),
-            if d.title.is_empty() {
-                default_title
-            } else {
-                d.title.as_str()
-            },
-            d.content.as_str(),
-            Some(d.status),
-            d.updated_at.as_str(),
-            d.version,
-        ),
-        // `None` is genuinely "this type has no row yet", which is not one of
-        // the three stored statuses — hence `Option` rather than a fourth
-        // variant nothing can ever be written as.
-        None => ("", default_title, "", None, "", 1),
-    };
-
-    let view = editor_view(
-        doc_type, doc_id, title, content, status, updated_at, version,
-    );
-
+    let view = editor_view(doc_type, &state);
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::admin(default_title, default_title).actions(view.actions),
+        ui::Shell::admin(doc_type.title(), doc_type.title()).actions(view.actions),
         ui::PageBody::from(view.body).with_subnav(section_links(wire_str(&doc_type).as_str())),
     )
     .await
@@ -147,103 +146,143 @@ pub(super) struct EditorView {
     pub body: Markup,
 }
 
+/// The editor's script: delegated listeners, each scoped to the editor being
+/// on screen (see the file's header).
+const EDITOR_JS: &str = include_str!("assets/editor.js");
+
 /// Build the editor. Split out from `editor_page` so it can be unit-tested
 /// without a `Context`.
-pub(super) fn editor_view(
-    doc_type: DocumentType,
-    doc_id: &str,
-    title: &str,
-    content: &str,
-    status: Option<DocumentStatus>,
-    updated_at: &str,
-    version: i64,
-) -> EditorView {
-    let (badge_class, badge_text) = match status {
-        Some(DocumentStatus::Published) => ("badge-success", "Published"),
-        Some(DocumentStatus::Draft) => ("badge-warning", "Draft"),
-        Some(DocumentStatus::Archived) => ("badge-info", "Archived"),
-        None => ("badge-info", "No document"),
+///
+/// The document's name is the topbar's `h1` and the Title field's value, and
+/// nowhere else: the status row says what state the document is in, not what
+/// it is called.
+pub(super) fn editor_view(doc_type: DocumentType, state: &EditorState) -> EditorView {
+    let doc = state.current.as_ref();
+    let started = doc.is_some();
+    let name = doc_type.title();
+    let lower = name.to_lowercase();
+    let title = doc
+        .map(|d| d.title.as_str())
+        .filter(|t| !t.is_empty())
+        .unwrap_or(name);
+
+    let (variant, status) = match doc.map(|d| d.status) {
+        Some(DocumentStatus::Published) => (BadgeVariant::Success, "Published"),
+        Some(DocumentStatus::Draft) => (BadgeVariant::Warning, "Draft"),
+        Some(DocumentStatus::Archived) => (BadgeVariant::Secondary, "Archived"),
+        None => (BadgeVariant::Secondary, "Not saved"),
     };
 
-    // The page's actions live in the topbar (the page header); the
-    // delegated `legalpages-*` listener in EDITOR_JS finds them by id
-    // wherever they render. Primary action last.
+    // The page's actions live in the topbar (the page header); the delegated
+    // listener in EDITOR_JS finds them by id wherever they render. Save and
+    // Publish wait for the empty state's "Write …" — there is nothing to
+    // save before it. Primary action last.
     let actions = vec![
         html! {
             a .btn .btn--sm .btn--ghost
                 href={"/b/legalpages/" (wire_str(&doc_type))}
-                target="_blank"
+                target="_blank" rel="noopener"
             {
                 "Open public page"
+                span .sr-only { " (opens in a new tab)" }
             }
         },
         html! {
-            button #btn-save .btn .btn--sm .btn--secondary data-action="legalpages-save" {
-                "Save Draft"
-            }
+            button #btn-save .btn .btn--sm .btn--secondary type="button"
+                data-action="legalpages-save"
+                data-legal-editor-action
+                hidden[!started]
+                aria-keyshortcuts="Control+S Meta+S"
+                title="Save draft (Ctrl+S)"
+            { "Save draft" }
         },
         html! {
-            button #btn-publish .btn .btn--sm .btn--primary data-action="legalpages-publish" {
-                "Publish"
-            }
+            button #btn-publish .btn .btn--sm .btn--primary type="button"
+                data-action="legalpages-publish"
+                data-legal-editor-action
+                hidden[!started]
+            { "Publish" }
         },
     ];
 
     let body = html! {
-        // Status row: the document's state. The page title is the topbar's
-        // h1, so this row does not repeat it; it wraps on a narrow screen.
-        div .flex .flex-wrap .items-center .gap-2 .mb-3 {
-            span #status-badge .badge .(badge_class) { (badge_text) }
-            span .badge .editor-status__version .text-xs .cursor-pointer
-                title="Click to change version"
-                data-action="legalpages-prompt-version"
-            { "v" span #version-display { (version) } }
-            @if !updated_at.is_empty() {
-                span .text-muted .text-xs {
-                    "Updated " (updated_at.get(..10).unwrap_or(updated_at))
-                }
+        @if !started {
+            div #legal-editor-empty {
+                (components::empty_state(
+                    icons::file_text(),
+                    &format!("No {lower} yet"),
+                    "Nothing has been saved or published yet, so the public page shows a \
+                     placeholder until you publish.",
+                    Some(html! {
+                        button .btn .btn--primary type="button" data-action="legalpages-start" {
+                            "Write the " (lower)
+                        }
+                    }),
+                ))
             }
         }
 
-        // Title input
-        input #title-input .form-input .text-lg .font-semibold .mb-2
-            type="text"
-            name="title"
-            value=(title)
-            placeholder="Document title";
+        div #legal-editor
+            hidden[!started]
+            data-doc-type=(wire_str(&doc_type))
+            data-doc-id=(doc.map(|d| d.id.as_str()).unwrap_or(""))
+            data-save-url="/b/legalpages/admin/save"
+            data-publish-url="/b/legalpages/admin/publish"
+            data-preview-url="/b/legalpages/admin/render-preview"
+        {
+            div .legal-editor__status {
+                span #document-status { (components::badge(variant, status)) }
+                span #live-version .legal-editor__meta {
+                    @match state.live_version {
+                        Some(v) => { "Live: v" (v) }
+                        None => "Not published yet",
+                    }
+                }
+                span #next-version .legal-editor__meta { "Publishes as v" (state.next_version) }
+                span #saved-at .legal-editor__meta {
+                    @if let Some(d) = doc {
+                        "Saved " (components::timestamp(&d.updated_at))
+                    }
+                }
+            }
 
-        // Hidden fields used by save handler JS
-        input #doc-type type="hidden" value=(wire_str(&doc_type));
-        input #doc-id type="hidden" value=(doc_id);
-        input #doc-version type="hidden" value=(version);
+            div .form-group {
+                label .form-label for="title-input" { "Title" }
+                input #title-input .form-input type="text" name="title"
+                    value=(title) required autocomplete="off"
+                    aria-describedby="title-input-hint";
+                p #title-input-hint .form-hint { "The heading of the public page." }
+            }
 
-        // Tab strip
-        div .editor-tabs {
-            // `data-tab` already names the pane; the delegated listener
-            // in EDITOR_JS reads it, so the tab needs no second spelling of
-            // its own name inside a JavaScript string.
-            button .editor-tab .editor-tab--active type="button"
-                data-tab="edit"
-                data-action="legalpages-editor-tab"
-            { "Edit" }
-            button .editor-tab type="button"
-                data-tab="preview"
-                data-action="legalpages-editor-tab"
-            { "Preview" }
-        }
+            div .legal-editor__content-head {
+                label .form-label for="editor" { "Content" }
+                div .editor-tabs role="tablist" aria-label="Content view" {
+                    button #editor-tab-edit .editor-tab .editor-tab--active type="button"
+                        role="tab" aria-selected="true" aria-controls="editor-edit-pane"
+                        data-tab="edit" data-action="legalpages-editor-tab"
+                    { "Edit" }
+                    button #editor-tab-preview .editor-tab type="button"
+                        role="tab" aria-selected="false" aria-controls="editor-preview-pane"
+                        tabindex="-1"
+                        data-tab="preview" data-action="legalpages-editor-tab"
+                    { "Preview" }
+                }
+            }
 
-        // Edit pane (textarea)
-        div #editor-edit-pane .editor-pane {
-            textarea #editor .form-input .editor-textarea
-                name="content"
-                placeholder="Write your legal document in Markdown..."
-            { (content) }
-        }
-
-        // Preview pane (vanilla JS fetch target)
-        div #editor-preview-pane .editor-pane .hidden {
-            div #editor-preview .preview-content {
-                p .text-muted { "Click Preview above to render." }
+            div #editor-edit-pane .editor-pane role="tabpanel" aria-labelledby="editor-tab-edit" {
+                textarea #editor .editor-textarea name="content"
+                    aria-describedby="editor-hint"
+                { (content_of(doc)) }
+            }
+            div #editor-preview-pane .editor-pane role="tabpanel"
+                aria-labelledby="editor-tab-preview" tabindex="0" hidden
+            {
+                div #editor-preview .preview-content aria-live="polite" {}
+            }
+            p #editor-hint .form-hint {
+                "Markdown: " code { "## Section" } ", " code { "**bold**" } ", "
+                code { "- item" } ", " code { "[text](https://…)" } ". The title is "
+                "already the page heading, so start with your first section."
             }
         }
 
@@ -252,271 +291,89 @@ pub(super) fn editor_view(
     EditorView { actions, body }
 }
 
-const EDITOR_JS: &str = r#"
-(function() {
-    // Guarded: the editor is a `ui::shell_page`, so navigating to it can be an
-    // htmx partial swap, which returns the body verbatim (`ui/mod.rs:226`) and
-    // re-executes this script against a `document` that outlived the swap.
-    // Everything below is declarations and two registrations, so running it
-    // once is enough. The keydown listener predates the delegated click one
-    // and had the same accumulation bug; both are covered now.
-    if (window.__legalpagesEditorInit) return;
-    window.__legalpagesEditorInit = true;
-    // Preview wiring: vanilla JS fetch (no json-enc htmx extension loaded)
-    function setEditorTab(name) {
-        document.querySelectorAll('.editor-tab').forEach(function(t) {
-            t.classList.toggle('editor-tab--active', t.dataset.tab === name);
-        });
-        document.getElementById('editor-edit-pane').classList.toggle('hidden', name !== 'edit');
-        document.getElementById('editor-preview-pane').classList.toggle('hidden', name !== 'preview');
-        if (name === 'preview') {
-            var content = document.getElementById('editor').value;
-            fetch('/b/legalpages/admin/render-preview', {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ content: content })
-            })
-            .then(function(r) {
-                if (!r.ok) { throw new Error('HTTP ' + r.status); }
-                return r.text();
-            })
-            .then(function(html) { document.getElementById('editor-preview').innerHTML = html; })
-            .catch(function(err) {
-                document.getElementById('editor-preview').innerHTML =
-                    '<p class="text-danger">Preview failed: ' + err.message + '</p>';
-            });
-        }
-    }
-
-    function promptVersion() {
-        var current = document.getElementById('doc-version').value;
-        var v = prompt('Set version number:', current);
-        if (v !== null && v.trim() !== '') {
-            var num = parseInt(v, 10);
-            if (num > 0) {
-                document.getElementById('doc-version').value = num;
-                document.getElementById('version-display').textContent = num;
-            }
-        }
-    }
-
-    // Ctrl+S / Cmd+S → save draft
-    document.addEventListener('keydown', function(e) {
-        if ((e.ctrlKey || e.metaKey) && e.key === 's') {
-            e.preventDefault();
-            saveDocument(false);
-        }
-    });
-
-    // Save handler (reads textarea .value)
-    function saveDocument(publish) {
-        var title = document.getElementById('title-input').value;
-        var content = document.getElementById('editor').value;
-        var docType = document.getElementById('doc-type').value;
-        var docId = document.getElementById('doc-id').value;
-        var version = parseInt(document.getElementById('doc-version').value, 10) || 0;
-        var url = publish ? '/b/legalpages/admin/publish' : '/b/legalpages/admin/save';
-
-        var btn = document.getElementById(publish ? 'btn-publish' : 'btn-save');
-        var origText = btn.textContent;
-        btn.disabled = true;
-        btn.textContent = publish ? 'Publishing...' : 'Saving...';
-
-        fetch(url, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ doc_type: docType, title: title, content: content, doc_id: docId, version: version })
-        })
-        .then(function(r) { return r.json(); })
-        .then(function(data) {
-            document.body.dispatchEvent(new CustomEvent('showToast', {
-                detail: { message: data.message || (data.error || 'Done'), type: data.error ? 'error' : 'success' }
-            }));
-            if (data.doc_id) document.getElementById('doc-id').value = data.doc_id;
-            if (data.version) {
-                document.getElementById('doc-version').value = data.version;
-                document.getElementById('version-display').textContent = data.version;
-            }
-            if (data.status) {
-                var badge = document.getElementById('status-badge');
-                if (badge) {
-                    badge.className = 'badge ' + (data.status === 'published' ? 'badge-success' : 'badge-warning');
-                    badge.textContent = data.status.charAt(0).toUpperCase() + data.status.slice(1);
-                }
-            }
-        })
-        .catch(function(err) {
-            document.body.dispatchEvent(new CustomEvent('showToast', {
-                detail: { message: 'Error: ' + err.message, type: 'error' }
-            }));
-        })
-        .finally(function() {
-            btn.disabled = false;
-            btn.textContent = origText;
-        });
-    }
-
-    // One delegated listener for the editor's four controls. They used to be
-    // `onclick` attributes, which is why the three helpers above had to be
-    // `window.*` globals; see the rule in `ui/assets/chrome.js`.
-    document.addEventListener('click', function(e) {
-        if (!(e.target instanceof Element)) return;
-        var el = e.target.closest('[data-action]');
-        if (!el) return;
-        var action = el.getAttribute('data-action');
-        if (action === 'legalpages-editor-tab') setEditorTab(el.dataset.tab);
-        else if (action === 'legalpages-save') saveDocument(false);
-        else if (action === 'legalpages-publish') saveDocument(true);
-        else if (action === 'legalpages-prompt-version') promptVersion();
-    });
-})();
-"#;
+/// The editor textarea's text: the current version's Markdown, or nothing.
+fn content_of(doc: Option<&DocumentRow>) -> &str {
+    doc.map(|d| d.content.as_str()).unwrap_or("")
+}
 
 // ---------------------------------------------------------------------------
 // Endpoints page
 // ---------------------------------------------------------------------------
 
 pub async fn endpoints_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let content = html! {
-        (components::page_header("API Endpoints", Some("Available endpoints for legal pages"), None))
-
-        // Public endpoints
-        h3 .card-title .mb-2 { "Public Endpoints" }
-        p .text-muted .text-sm .mb-3 {
-            "These endpoints are publicly accessible and return formatted HTML pages."
-        }
-        div .table-container .mb-8 {
-            table .table {
-                thead {
-                    tr {
-                        th .w-80 { "Method" }
-                        th { "Endpoint" }
-                        th { "Description" }
-                    }
-                }
-                tbody {
-                    tr {
-                        td { span .badge .badge-success { "GET" } }
-                        td { code { "/b/legalpages/terms" } }
-                        td { "View published Terms of Service page" }
-                    }
-                    tr {
-                        td { span .badge .badge-success { "GET" } }
-                        td { code { "/b/legalpages/privacy" } }
-                        td { "View published Privacy Policy page" }
-                    }
-                }
-            }
-        }
-
-        // Admin API
-        h3 .card-title .mb-2 { "Admin API Endpoints" }
-        p .text-muted .text-sm .mb-3 {
-            "These endpoints require admin authentication and return JSON responses."
-        }
-        div .table-container {
-            table .table {
-                thead {
-                    tr {
-                        th .w-80 { "Method" }
-                        th { "Endpoint" }
-                        th { "Description" }
-                    }
-                }
-                tbody {
-                    tr {
-                        td { span .badge .badge-success { "GET" } }
-                        td { code { "/b/legalpages/api/documents" } }
-                        td { "List all documents (supports " code { "?type=terms|privacy" } " filter)" }
-                    }
-                    tr {
-                        td { span .badge .badge-info { "POST" } }
-                        td { code { "/b/legalpages/api/documents" } }
-                        td { "Create a new document " span .text-muted { "(body: doc_type, title, content)" } }
-                    }
-                    tr {
-                        td { span .badge .badge-warning { "PATCH" } }
-                        td { code { "/b/legalpages/api/documents/:id" } }
-                        td { "Update a document" }
-                    }
-                    tr {
-                        td { span .badge .badge-info { "POST" } }
-                        td { code { "/b/legalpages/api/documents/:id/publish" } }
-                        td { "Publish a document (archives previous published version)" }
-                    }
-                    tr {
-                        td { span .badge .badge-danger { "DELETE" } }
-                        td { code { "/b/legalpages/api/documents/:id" } }
-                        td { "Delete a document" }
-                    }
-                }
-            }
-        }
-
-        // Document schema
-        h3 .card-title .mt-8 .mb-2 { "Document Schema" }
-        p .text-muted .text-sm .mb-3 {
-            "Each legal document has the following fields."
-        }
-        div .table-container {
-            table .table {
-                thead {
-                    tr {
-                        th { "Field" }
-                        th { "Type" }
-                        th { "Description" }
-                    }
-                }
-                tbody {
-                    tr {
-                        td { code { "doc_type" } }
-                        td { "string" }
-                        td { "Document type: " code { "terms" } " or " code { "privacy" } }
-                    }
-                    tr {
-                        td { code { "title" } }
-                        td { "string" }
-                        td { "Document title" }
-                    }
-                    tr {
-                        td { code { "content" } }
-                        td { "text" }
-                        td { "HTML content of the document" }
-                    }
-                    tr {
-                        td { code { "status" } }
-                        td { "string" }
-                        td {
-                            "Document status: "
-                            span .badge .badge-warning { "draft" }
-                            " "
-                            span .badge .badge-success { "published" }
-                            " "
-                            span .badge { "archived" }
-                        }
-                    }
-                    tr {
-                        td { code { "version" } }
-                        td { "int" }
-                        td { "Version number" }
-                    }
-                    tr {
-                        td { code { "published_at" } }
-                        td { "datetime" }
-                        td { "When the document was last published" }
-                    }
-                }
-            }
-        }
-    };
-
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::admin("Endpoints", "Endpoints"),
-        ui::PageBody::from(content).with_subnav(section_links("endpoints")),
+        ui::Shell::admin("Endpoints", "Endpoints")
+            .subtitle("Every HTTP endpoint the legal pages block serves"),
+        ui::PageBody::from(endpoints_view()).with_subnav(section_links("endpoints")),
     )
     .await
+}
+
+const FIELD_COLUMNS: [TableCol<'static>; 3] = [
+    TableCol::new("Field").primary().width("25%"),
+    TableCol::new("Type"),
+    TableCol::new("Description"),
+];
+
+/// The endpoints reference: what the block declares from `ROUTES` — the
+/// table `handle()` dispatches on — grouped by who may call it, each group in
+/// the shared [`components::endpoint_table`]. It cannot drift from what the
+/// block serves.
+pub(super) fn endpoints_view() -> Markup {
+    let declared = endpoint_match::declare(super::ROUTES);
+    let groups = [
+        (
+            AuthLevel::Public,
+            "Public",
+            "Anyone can open these; they return the published pages as HTML.",
+        ),
+        (
+            AuthLevel::Authenticated,
+            "Signed in",
+            "These need a signed-in user.",
+        ),
+        (
+            AuthLevel::Admin,
+            "Admin",
+            "These need an admin session or an admin bearer token.",
+        ),
+    ];
+    let fields: Vec<TableRow> = DOCUMENT_FIELDS
+        .iter()
+        .map(|(field, ty, description)| {
+            TableRow::new(vec![
+                html! { code { (field) } },
+                html! { (ty) },
+                html! { (description) },
+            ])
+        })
+        .collect();
+    html! {
+        @for (level, title, description) in groups {
+            @let endpoints: Vec<BlockEndpoint> = declared
+                .iter()
+                .filter(|ep| ep.auth == level)
+                .cloned()
+                .collect();
+            @if !endpoints.is_empty() {
+                section .legal-endpoints__group {
+                    (components::section_header(title, None))
+                    p .text-muted .text-sm .mb-3 { (description) }
+                    (components::endpoint_table(&format!("{title} endpoints"), &endpoints))
+                }
+            }
+        }
+        section .legal-endpoints__group {
+            (components::section_header("Document fields", None))
+            p .text-muted .text-sm .mb-3 {
+                "Each record the JSON API returns carries these fields in its "
+                code { "data" } "."
+            }
+            (DataTable::new(&FIELD_COLUMNS).rows(fields).render())
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -533,12 +390,11 @@ struct SaveRequest {
     content: String,
     #[serde(default)]
     doc_id: String,
-    #[serde(default)]
-    version: i64,
 }
 
-/// Save a draft document. If the current doc is published, creates a new draft
-/// so the live version stays untouched until the admin explicitly publishes.
+/// Save the editor's text as a draft, by the one edit rule
+/// (`service::edit_text`): a draft is edited in place; a published or
+/// archived version stays as it is and the text becomes a new draft.
 pub async fn handle_save(ctx: &dyn Context, msg: &Message, input: InputStream) -> OutputStream {
     let raw = match input.collect_to_bytes().await {
         Ok(bytes) => bytes,
@@ -566,16 +422,28 @@ pub async fn handle_save(ctx: &dyn Context, msg: &Message, input: InputStream) -
         }
     };
 
-    // Editing a published document creates a new draft instead of modifying
-    // the live version, so the published text stays untouched until the admin
-    // explicitly publishes again.
+    // An existing row goes through the one edit rule (a draft is edited in
+    // place, a published or archived version is never changed and the edit
+    // becomes a new draft); no row starts the type's first draft.
     let saved = match existing {
-        Some(doc) if doc.status != DocumentStatus::Published => {
-            documents::update_content(ctx, &doc.id, Some(&body.title), Some(&body.content))
-                .await
-                .map(|row| row.id)
+        Some(doc) if doc.doc_type != body.doc_type => {
+            return err_bad_request("The document is not of the type being saved")
         }
-        _ => documents::insert_draft(
+        Some(doc) => {
+            match service::edit_text(
+                ctx,
+                &doc,
+                Some(&body.title),
+                Some(&body.content),
+                msg.user_id(),
+            )
+            .await
+            {
+                Ok(draft) => draft,
+                Err(e) => return crud::db_error_internal(e, "Failed to save legal-page draft"),
+            }
+        }
+        None => match documents::insert_draft(
             ctx,
             NewDraft {
                 doc_type: body.doc_type,
@@ -585,22 +453,22 @@ pub async fn handle_save(ctx: &dyn Context, msg: &Message, input: InputStream) -
             },
         )
         .await
-        .map(|row| row.id),
+        {
+            Ok(draft) => draft,
+            Err(e) => return crud::db_error_internal(e, "Failed to save legal-page draft"),
+        },
     };
 
-    match saved {
-        Ok(doc_id) => ok_json(&serde_json::json!({
-            "doc_id": doc_id,
-            "status": DocumentStatus::Draft,
-            "message": "Draft saved"
-        })),
-        Err(e) => crud::db_error_internal(e, "Failed to save legal-page draft"),
-    }
+    ok_json(&serde_json::json!({
+        "doc_id": saved.id,
+        "status": DocumentStatus::Draft,
+        "message": "Draft saved"
+    }))
 }
 
-/// Save and publish a document. Archives any previously published document
-/// of the same type (publish-then-archive ordering lives in
-/// `service::publish_document`).
+/// Save and publish a document as the next version of its type, archiving
+/// the one it replaces (`service::publish_document` numbers it and decides
+/// whether the row is published in place or as a new row).
 pub async fn handle_publish(ctx: &dyn Context, msg: &Message, input: InputStream) -> OutputStream {
     let raw = match input.collect_to_bytes().await {
         Ok(bytes) => bytes,
@@ -621,14 +489,13 @@ pub async fn handle_publish(ctx: &dyn Context, msg: &Message, input: InputStream
             doc_id: &body.doc_id,
             title: Some(&body.title),
             content: Some(&body.content),
-            version: body.version,
             created_by: msg.user_id(),
         },
     )
     .await
     {
         Ok(p) => p,
-        Err(e) => return crud::db_error(e, "Document not found", "Failed to publish legal page"),
+        Err(e) => return super::publish_failed(e),
     };
 
     ok_json(&serde_json::json!({
@@ -656,11 +523,13 @@ pub async fn settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
                 "See how your changes look on the public pages."
             }
             div .flex .gap-2 {
-                a .btn .btn--sm .btn--ghost href="/b/legalpages/privacy" target="_blank" {
+                a .btn .btn--sm .btn--ghost href="/b/legalpages/privacy" target="_blank" rel="noopener" {
                     (icons::eye()) " Privacy Policy"
+                    span .sr-only { " (opens in a new tab)" }
                 }
-                a .btn .btn--sm .btn--ghost href="/b/legalpages/terms" target="_blank" {
+                a .btn .btn--sm .btn--ghost href="/b/legalpages/terms" target="_blank" rel="noopener" {
                     (icons::eye()) " Terms of Service"
+                    span .sr-only { " (opens in a new tab)" }
                 }
             }
         }

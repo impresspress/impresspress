@@ -137,6 +137,55 @@ impl DocumentListView {
     }
 }
 
+/// The fields of a document record's `data`, as the admin endpoints
+/// reference lists them: name, type, meaning. One row per [`DocumentRow`]
+/// field — a test serializes a row and compares the key sets, so a column
+/// added to the row without a line here fails.
+pub const DOCUMENT_FIELDS: &[(&str, &str, &str)] = &[
+    (
+        "id",
+        "string",
+        "The record id: the {id} in the document routes.",
+    ),
+    (
+        "doc_type",
+        "terms | privacy",
+        "Which document this is a version of.",
+    ),
+    ("title", "string", "The heading of the public page."),
+    (
+        "content",
+        "string (Markdown)",
+        "The body, rendered to HTML on the public page.",
+    ),
+    (
+        "status",
+        "draft | published | archived",
+        "Changed only by a publish, which archives the version it replaces.",
+    ),
+    (
+        "version",
+        "integer",
+        "0 for a draft; the number the server gave this version when it was published.",
+    ),
+    (
+        "created_by",
+        "string",
+        "The id of the user who created this version.",
+    ),
+    (
+        "published_at",
+        "RFC 3339 | null",
+        "When this version was published.",
+    ),
+    ("created_at", "RFC 3339", "When this version was created."),
+    (
+        "updated_at",
+        "RFC 3339",
+        "When this version was last saved.",
+    ),
+];
+
 #[cfg(test)]
 mod tests {
     use serde_json::json;
@@ -214,5 +263,26 @@ mod tests {
 
         let empty: UpdateDocumentRequest = serde_json::from_str("{}").expect("empty body");
         assert_eq!(empty, UpdateDocumentRequest::default());
+    }
+
+    /// The reference lists every field a record's `data` carries, and
+    /// nothing else.
+    #[test]
+    fn document_fields_name_every_serialized_column() {
+        let body = serde_json::to_value(row("doc-1", 2)).expect("a row serializes");
+        let keys: std::collections::BTreeSet<&str> = body
+            .as_object()
+            .expect("a row is an object")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        let listed: std::collections::BTreeSet<&str> =
+            DOCUMENT_FIELDS.iter().map(|(name, _, _)| *name).collect();
+        assert_eq!(
+            listed.len(),
+            DOCUMENT_FIELDS.len(),
+            "a field is listed twice"
+        );
+        assert_eq!(listed, keys);
     }
 }

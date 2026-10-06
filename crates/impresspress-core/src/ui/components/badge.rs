@@ -119,7 +119,8 @@ impl BadgeVariant {
 /// `<span class="badge …">`. Elsewhere in the crate the pill is still written
 /// out by hand: `HAND_WRITTEN_BADGES` names the files that do it and
 /// counts each one's pills, and `blocks/llm/assets/llm-chat.js` builds more in
-/// JavaScript, which no Rust-side scan sees at all.
+/// JavaScript (`blocks/legalpages/assets/editor.js` re-colours the editor's
+/// status pill), which no Rust-side scan sees at all.
 pub struct Badge<'a> {
     variant: BadgeVariant,
     classes: &'a str,
@@ -257,9 +258,7 @@ mod tests {
     /// in it), a `class={ "badge" … }` expression, and a bare colour class
     /// with no `.badge` beside it. A ratchet on the one syntax in use is a
     /// gate on the migration; extending it to syntaxes nothing writes would be
-    /// speculative. The counter is `test_support::count_bare_class_shorthand`,
-    /// shared with `components::table`'s first-generation-table ratchet rather
-    /// than copied a second time.
+    /// speculative. The counter is `test_support::count_bare_class_shorthand`.
     ///
     /// Comments are excluded, since a comment renders nothing — a doc comment
     /// naming `.badge` in an administration file would otherwise fail this
@@ -269,10 +268,7 @@ mod tests {
     ///
     /// `blocks/admin/` is absent because this pull request migrated its 39.
     /// The rest are phase 5 §8 candidates and out of scope here.
-    const HAND_WRITTEN_BADGES: &[(&str, usize)] = &[
-        ("blocks/legalpages/pages.rs", 12),
-        ("blocks/products/pages.rs", 2),
-    ];
+    const HAND_WRITTEN_BADGES: &[(&str, usize)] = &[("blocks/products/pages.rs", 2)];
 
     #[test]
     fn only_the_declared_files_still_hand_write_badge_markup() {

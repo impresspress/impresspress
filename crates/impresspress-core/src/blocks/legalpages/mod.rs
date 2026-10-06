@@ -145,6 +145,10 @@ const ROUTES: &[EndpointRoute<Route>] = &[
         Route::ApiUpdate,
     )
     .summary("Update document")
+    .description(
+        "Edits a draft in place. Published and archived versions are never changed: an edit to \
+         one is saved as a new draft of the same type, and the response is that draft.",
+    )
     .input(request_schema_of::<UpdateDocumentRequest>)
     .path_params(id_path_schema),
     EndpointRoute::admin(
@@ -371,14 +375,13 @@ impl LegalPagesBlock {
                 doc_id: id,
                 title: None,
                 content: None,
-                version: 0,
                 created_by: msg.user_id(),
             },
         )
         .await
         {
             Ok(published) => ok_json(&DocumentView::from_row(&published.row)),
-            Err(e) => crud::db_error_internal(e, "Database error"),
+            Err(e) => publish_failed(e),
         }
     }
 
@@ -398,7 +401,10 @@ impl LegalPagesBlock {
         }
     }
 
-    /// `PATCH /b/legalpages/api/documents/{id}`: the document's text.
+    /// `PATCH /b/legalpages/api/documents/{id}`: the document's text, by the
+    /// one edit rule ([`service::edit_text`]): a draft is edited in place, an
+    /// edit to a published or archived version becomes a new draft, and the
+    /// response is the draft that holds the edit.
     ///
     /// The body is a typed [`UpdateDocumentRequest`], not a column map. That
     /// is the B10 fix: the handler used to hand whatever arrived to
@@ -421,11 +427,25 @@ impl LegalPagesBlock {
             Ok(body) => body,
             Err(resp) => return resp,
         };
-        match documents::update_content(ctx, id, body.title.as_deref(), body.content.as_deref())
+        let row = match documents::get(ctx, id)
             .await
+            .map_err(|e| crud::db_error(e, "Document not found", "Database error"))
+            .and_then(|row| require_row(row, "Document not found"))
         {
-            Ok(row) => ok_json(&DocumentView::from_row(&row)),
-            Err(e) => crud::db_error(e, "Document not found", "Database error"),
+            Ok(row) => row,
+            Err(response) => return response,
+        };
+        match service::edit_text(
+            ctx,
+            &row,
+            body.title.as_deref(),
+            body.content.as_deref(),
+            msg.user_id(),
+        )
+        .await
+        {
+            Ok(draft) => ok_json(&DocumentView::from_row(&draft)),
+            Err(e) => crud::db_error_internal(e, "Failed to save legal-page draft"),
         }
     }
 
@@ -478,13 +498,48 @@ impl LegalPagesBlock {
                     doc_id: "",
                     title: Some(doc_type.title()),
                     content: Some(content),
-                    version: 1,
                     created_by: "system",
                 },
             )
-            .await?;
+            .await
+            .map_err(|e| match e {
+                service::PublishError::Db(e) => e,
+                other => WaferError::new(
+                    wafer_run::ErrorCode::Internal,
+                    format!("legalpages: seeding {doc_type:?} failed: {other:?}"),
+                ),
+            })?;
         }
         Ok(())
+    }
+}
+
+/// The response for a publish that did not happen, for both publish
+/// surfaces (the editor's and the JSON API's).
+fn publish_failed(error: service::PublishError) -> OutputStream {
+    use service::PublishError;
+    match error {
+        PublishError::NotFound => crate::http::err_not_found("Document not found"),
+        PublishError::WrongType => {
+            err_bad_request("The document is not of the type being published")
+        }
+        PublishError::AlreadyPublished => crate::http::err_conflict(
+            "This draft was published by someone else meanwhile; reload to see what is live",
+        ),
+        PublishError::AlreadyLive { version, draft } => crate::http::err_conflict(&match draft {
+            Some(id) => format!(
+                "This is the live version (v{version}) and the request carries no new text; \
+                 publish the draft {id} to make an edit live"
+            ),
+            None => format!(
+                "This is the live version (v{version}) and the request carries no new text, \
+                 so there is nothing to publish"
+            ),
+        }),
+        PublishError::Contended => crate::http::err_conflict(
+            "Other publishes of this document kept taking the next version; try again",
+        ),
+        PublishError::Db(e) => crud::db_error_internal(e, "Failed to publish legal page"),
     }
 }
 
@@ -752,8 +807,10 @@ pub(super) async fn test_ctx() -> crate::test_support::TestContext {
 }
 
 /// One stored document in whichever status the test needs, built the way the
-/// block builds one: a draft, optionally taken through a status transition.
-/// Nothing outside `repo::documents` spells the table.
+/// block builds one: a draft, optionally put straight into a published or
+/// archived state as `version` (a draft is unnumbered and ignores it), with
+/// nothing archived around it. Nothing outside `repo::documents` spells the
+/// table.
 #[cfg(test)]
 pub(super) async fn seed_doc(
     ctx: &dyn Context,
@@ -778,20 +835,10 @@ pub(super) async fn seed_doc(
 
     match status {
         DocumentStatus::Draft => draft,
-        DocumentStatus::Published => documents::mark_published(
-            ctx,
-            &draft.id,
-            version,
-            &crate::util::now_rfc3339(),
-            documents::PublishedContent::default(),
-        )
-        .await
-        .expect("seed published"),
-        DocumentStatus::Archived => {
-            documents::mark_archived(ctx, &draft.id)
+        DocumentStatus::Published | DocumentStatus::Archived => {
+            documents::set_state_for_test(ctx, &draft.id, status, version)
                 .await
-                .expect("seed archived");
-            stored(ctx, &draft.id).await
+                .expect("seed status")
         }
     }
 }
@@ -1019,7 +1066,6 @@ mod write_loss_tests {
                 doc_id: &draft.id,
                 title: None,
                 content: None,
-                version: 0,
                 created_by: "admin_1",
             },
         )
@@ -1035,14 +1081,15 @@ mod write_loss_tests {
         assert_eq!(stored(&ctx, &draft.id).await.status, DocumentStatus::Draft);
     }
 
-    /// The archive pass runs after the new document is live, so a failure
-    /// there leaves the type with two published rows. That used to be a
-    /// `warn` and a `200`; it is now the caller's error, because it is a
-    /// state an operator has to be told about.
+    /// The archive runs after the new version is live, so a failure there
+    /// leaves the type with two published rows. That is the caller's error —
+    /// an operator has to be told — and the newer one is still the live one,
+    /// because the archive only ever names lower numbers and every reader
+    /// takes the highest-numbered published row.
     #[tokio::test]
-    async fn a_failed_archive_pass_surfaces() {
+    async fn a_failed_archive_pass_surfaces_and_the_new_version_is_live() {
         let ctx = test_ctx().await;
-        seed_doc(
+        let old = seed_doc(
             &ctx,
             DocumentType::Terms,
             "Live Terms",
@@ -1055,15 +1102,16 @@ mod write_loss_tests {
             DocumentType::Terms,
             "Next Terms",
             DocumentStatus::Draft,
-            1,
+            0,
         )
         .await;
 
-        // The publish itself is the first update; the archive pass is the
-        // one that follows it.
-        let failing =
-            FailingDbOpContext::new(ctx.clone(), vec![("database.update", documents::TABLE)])
-                .after_passing(1);
+        // The draft's publish is `database.update_where_count`; the archive
+        // is the `database.update_where` that follows it.
+        let failing = FailingDbOpContext::new(
+            ctx.clone(),
+            vec![("database.update_where", documents::TABLE)],
+        );
         let result = service::publish_document(
             &failing,
             service::PublishRequest {
@@ -1071,7 +1119,6 @@ mod write_loss_tests {
                 doc_id: &draft.id,
                 title: None,
                 content: None,
-                version: 6,
                 created_by: "admin_1",
             },
         )
@@ -1082,9 +1129,87 @@ mod write_loss_tests {
             "an archive pass that failed must be reported, not logged and answered 200"
         );
         assert_eq!(
-            stored(&ctx, &draft.id).await.status,
+            stored(&ctx, &old.id).await.status,
             DocumentStatus::Published
         );
+        let live = documents::find_published(&ctx, DocumentType::Terms)
+            .await
+            .expect("read live")
+            .expect("a live version");
+        assert_eq!((live.id, live.version), (draft.id, 6));
+    }
+
+    /// A PATCH never changes a published or archived version: the edit lands
+    /// in a new draft of the same type, which is what the response is.
+    #[tokio::test]
+    async fn patch_on_a_published_or_archived_version_lands_in_a_new_draft() {
+        let ctx = test_ctx().await;
+        for (status, version) in [
+            (DocumentStatus::Published, 7),
+            (DocumentStatus::Archived, 6),
+        ] {
+            let kept = seed_doc(&ctx, DocumentType::Terms, "Kept Terms", status, version).await;
+
+            let out = LegalPagesBlock::new()
+                .handle(
+                    &ctx,
+                    admin_msg(
+                        "update",
+                        &format!("/b/legalpages/api/documents/{}", kept.id),
+                    ),
+                    InputStream::from_bytes(br#"{"content":"an edit"}"#.to_vec()),
+                )
+                .await;
+            let body = crate::test_support::output_json(out).await;
+
+            let draft_id = body["id"].as_str().expect("the response is a record");
+            assert_ne!(draft_id, kept.id, "{status:?}");
+            let draft = stored(&ctx, draft_id).await;
+            assert_eq!(draft.status, DocumentStatus::Draft);
+            assert_eq!(draft.version, 0);
+            assert_eq!(draft.doc_type, DocumentType::Terms);
+            assert_eq!(
+                draft.title, "Kept Terms",
+                "an absent field starts from the version"
+            );
+            assert_eq!(draft.content, "an edit");
+            assert_eq!(
+                stored(&ctx, &kept.id).await,
+                kept,
+                "{status:?} is unchanged"
+            );
+        }
+    }
+
+    /// The editor's Save follows the same rule for an archived version.
+    #[tokio::test]
+    async fn saving_an_archived_version_creates_a_draft() {
+        let ctx = test_ctx().await;
+        let old = seed_doc(
+            &ctx,
+            DocumentType::Terms,
+            "Old",
+            DocumentStatus::Archived,
+            1,
+        )
+        .await;
+
+        let body = serde_json::to_vec(&serde_json::json!({
+            "doc_type": "terms",
+            "title": "Old",
+            "content": "an edit",
+            "doc_id": old.id,
+        }))
+        .expect("serialize save body");
+        let out = pages::handle_save(
+            &ctx,
+            &admin_msg("create", "/b/legalpages/admin/save"),
+            InputStream::from_bytes(body),
+        )
+        .await;
+        assert_eq!(output_http_status(out).await, 200);
+        assert_eq!(stored(&ctx, &old.id).await, old);
+        assert_eq!(row_count(&ctx).await, 2);
     }
 
     /// The typed PATCH still does what a PATCH is for.
@@ -1145,7 +1270,7 @@ mod write_loss_tests {
             .await;
 
         assert_eq!(output_http_status(out).await, 400);
-        assert_eq!(stored(&ctx, &draft.id).await.version, 1);
+        assert_eq!(stored(&ctx, &draft.id).await.version, 0);
     }
 
     /// The editor's save handler on a *published* document still forks a new
@@ -1483,29 +1608,268 @@ mod tests {
         assert!(html.starts_with(r#"<div class="public-page__content">"#));
     }
 
+    fn draft_row(title: &str, content: &str) -> documents::DocumentRow {
+        documents::DocumentRow {
+            id: "doc-123".to_string(),
+            doc_type: DocumentType::Terms,
+            title: title.to_string(),
+            content: content.to_string(),
+            status: contracts::DocumentStatus::Draft,
+            version: 0,
+            created_by: "admin_1".to_string(),
+            published_at: None,
+            created_at: "2026-05-19T00:00:00Z".to_string(),
+            updated_at: "2026-05-19T00:00:00Z".to_string(),
+        }
+    }
+
+    fn editor(current: Option<documents::DocumentRow>) -> super::pages::EditorView {
+        super::pages::editor_view(
+            DocumentType::Terms,
+            &super::pages::EditorState {
+                current,
+                live_version: Some(3),
+                next_version: 4,
+            },
+        )
+    }
+
+    fn actions_html(view: &super::pages::EditorView) -> String {
+        view.actions
+            .iter()
+            .map(|a| a.clone().into_string())
+            .collect()
+    }
+
     #[test]
     fn editor_page_uses_textarea_not_contenteditable() {
-        let view = super::pages::editor_view(
-            DocumentType::Terms,
-            "doc-123",
-            "Terms of Service",
-            "# heading\n\nbody",
-            Some(contracts::DocumentStatus::Draft),
-            "2026-05-19T00:00:00Z",
-            1,
-        );
+        let view = editor(Some(draft_row("Terms of Service", "## Use\n\nbody")));
+        let actions = actions_html(&view);
         let s = view.body.into_string();
         assert!(s.contains("<textarea"), "editor must use <textarea>");
         assert!(!s.contains("contenteditable"), "no contenteditable allowed");
-        assert!(s.contains(r#"data-tab="edit""#));
-        assert!(s.contains(r#"data-tab="preview""#));
-        // Vanilla JS fetch path — the URL lives in EDITOR_JS, reached
-        // through the delegated `legalpages-editor-tab` action
         assert!(s.contains("/b/legalpages/admin/render-preview"));
         // The page actions ride in the topbar, not in a body header row.
-        let actions: String = view.actions.into_iter().map(|a| a.into_string()).collect();
         assert!(actions.contains(r#"id="btn-save""#) && actions.contains(r#"id="btn-publish""#));
         assert!(!s.contains(r#"id="btn-publish""#));
+    }
+
+    /// Every editor control has a visible `<label for>`; none relies on a
+    /// placeholder for its name.
+    #[test]
+    fn editor_fields_are_labelled() {
+        let s = editor(Some(draft_row("Terms of Service", "body")))
+            .body
+            .into_string();
+        for (id, label) in [("title-input", "Title"), ("editor", "Content")] {
+            assert!(
+                s.contains(&format!(
+                    r#"<label class="form-label" for="{id}">{label}</label>"#
+                )),
+                "{id} must be labelled {label:?}: {s}"
+            );
+            assert!(s.contains(&format!(r#"id="{id}""#)), "{id} must render");
+        }
+        assert!(!s.contains("placeholder="), "no placeholder-only field");
+        // The server numbers a publish; nothing on the page sets the version.
+        assert!(!s.contains(r#"name="version""#));
+        assert!(!s.contains("prompt("), "no prompt() version control");
+    }
+
+    /// The Edit/Preview strip is a WAI-ARIA tablist: each tab names the panel
+    /// it controls, the panels name their tab, and only the selected tab is
+    /// in the tab order.
+    #[test]
+    fn editor_tabs_follow_the_tabs_pattern() {
+        let s = editor(Some(draft_row("Terms of Service", "body")))
+            .body
+            .into_string();
+        assert!(s.contains(r#"role="tablist" aria-label="Content view""#));
+        assert!(s.contains(
+            r#"class="editor-tab editor-tab--active" id="editor-tab-edit" type="button" role="tab" aria-selected="true" aria-controls="editor-edit-pane""#
+        ));
+        assert!(s.contains(
+            r#"class="editor-tab" id="editor-tab-preview" type="button" role="tab" aria-selected="false" aria-controls="editor-preview-pane" tabindex="-1""#
+        ));
+        assert!(s.contains(
+            r#"class="editor-pane" id="editor-edit-pane" role="tabpanel" aria-labelledby="editor-tab-edit""#
+        ));
+        assert!(s.contains(
+            r#"class="editor-pane" id="editor-preview-pane" role="tabpanel" aria-labelledby="editor-tab-preview" tabindex="0" hidden"#
+        ));
+    }
+
+    /// The document's name is the topbar's `h1` and the Title field's value;
+    /// the body says it nowhere else.
+    #[test]
+    fn editor_body_names_the_document_once() {
+        let s = editor(Some(draft_row("Terms of Service", "## Use")))
+            .body
+            .into_string();
+        assert_eq!(s.matches("Terms of Service").count(), 1, "{s}");
+        assert!(s.contains(r#"value="Terms of Service""#));
+    }
+
+    /// A draft is unnumbered until it is published, so the status row shows
+    /// the LIVE version and, read-only, the number the server will give the
+    /// next publish.
+    #[test]
+    fn the_status_row_shows_the_live_and_the_next_version() {
+        let s = editor(Some(draft_row("Terms of Service", "body")))
+            .body
+            .into_string();
+        assert!(s.contains("Live: v3"), "{s}");
+        assert!(
+            s.contains(r#"id="next-version">Publishes as v4</span>"#),
+            "{s}"
+        );
+        assert!(s.contains(r#"<span class="badge badge-warning">Draft</span>"#));
+    }
+
+    /// No row yet: an empty state with the action that starts the first
+    /// version; the editor and its Save/Publish actions wait for it.
+    #[test]
+    fn a_missing_document_renders_the_empty_state() {
+        let view = super::pages::editor_view(
+            DocumentType::Privacy,
+            &super::pages::EditorState {
+                current: None,
+                live_version: None,
+                next_version: 1,
+            },
+        );
+        let actions = actions_html(&view);
+        let s = view.body.into_string();
+        assert!(
+            s.contains(r#"<h2 class="empty__title">No privacy policy yet</h2>"#),
+            "{s}"
+        );
+        assert!(s.contains(r#"data-action="legalpages-start">Write the privacy policy</button>"#));
+        assert!(s.contains(r#"id="legal-editor" hidden"#), "{s}");
+        assert!(s.contains("Not published yet"));
+        for id in ["btn-save", "btn-publish"] {
+            let at = actions
+                .find(&format!(r#"id="{id}""#))
+                .expect("action renders");
+            let tag = &actions[at..at + actions[at..].find('>').expect("tag closes")];
+            assert!(
+                tag.contains(" hidden"),
+                "{id} waits for the empty state: {tag}"
+            );
+        }
+    }
+
+    /// With a document, the empty state is absent and the editor is shown.
+    #[test]
+    fn an_existing_document_skips_the_empty_state() {
+        let view = editor(Some(draft_row("Terms", "body")));
+        let actions = actions_html(&view);
+        let s = view.body.into_string();
+        assert!(!s.contains(r#"id="legal-editor-empty""#));
+        assert!(
+            s.contains(r#"id="legal-editor" data-doc-type="terms" data-doc-id="doc-123""#),
+            "{s}"
+        );
+        assert!(!actions.contains(" hidden"), "{actions}");
+    }
+
+    /// The endpoints reference is generated from `ROUTES`: every route is a
+    /// row with its method badge and summary, and no row is invented.
+    #[test]
+    fn endpoints_reference_lists_every_route() {
+        let s = super::pages::endpoints_view().into_string();
+        let declared = endpoint_match::declare(ROUTES);
+        assert_eq!(declared.len(), ROUTES.len());
+        let mut listed = 0;
+        for (level, title) in [
+            (wafer_run::AuthLevel::Public, "Public"),
+            (wafer_run::AuthLevel::Authenticated, "Signed in"),
+            (wafer_run::AuthLevel::Admin, "Admin"),
+        ] {
+            let group: Vec<wafer_run::BlockEndpoint> = declared
+                .iter()
+                .filter(|ep| ep.auth == level)
+                .cloned()
+                .collect();
+            if group.is_empty() {
+                assert!(!s.contains(&format!("{title} endpoints")), "{title}");
+                continue;
+            }
+            listed += group.len();
+            let table =
+                crate::ui::components::endpoint_table(&format!("{title} endpoints"), &group)
+                    .into_string();
+            assert!(
+                s.contains(&table),
+                "the {title} group is the shared table\n{s}"
+            );
+        }
+        assert_eq!(listed, ROUTES.len(), "every route is listed once");
+        assert!(!s.contains("HTML content"), "content is Markdown");
+    }
+}
+
+#[cfg(test)]
+mod editor_state_tests {
+    use super::*;
+
+    /// The editor edits the newest draft, shows the published version as
+    /// live, and offers one past the highest version for the next publish.
+    #[tokio::test]
+    async fn the_editor_edits_the_draft_and_offers_the_next_version() {
+        let ctx = test_ctx().await;
+        seed_doc(
+            &ctx,
+            DocumentType::Terms,
+            "Old",
+            contracts::DocumentStatus::Archived,
+            1,
+        )
+        .await;
+        seed_doc(
+            &ctx,
+            DocumentType::Terms,
+            "Live",
+            contracts::DocumentStatus::Published,
+            3,
+        )
+        .await;
+        let draft = seed_doc(
+            &ctx,
+            DocumentType::Terms,
+            "Next",
+            contracts::DocumentStatus::Draft,
+            1,
+        )
+        .await;
+
+        let state = pages::load_editor_state(&ctx, DocumentType::Terms)
+            .await
+            .expect("state reads");
+        assert_eq!(state.current.map(|row| row.id), Some(draft.id));
+        assert_eq!(state.live_version, Some(3));
+        assert_eq!(state.next_version, 4);
+    }
+
+    /// No row of the type: nothing to edit, nothing live, version 1 next.
+    #[tokio::test]
+    async fn an_empty_type_starts_at_version_one() {
+        let ctx = test_ctx().await;
+        seed_doc(
+            &ctx,
+            DocumentType::Terms,
+            "Live",
+            contracts::DocumentStatus::Published,
+            5,
+        )
+        .await;
+
+        let state = pages::load_editor_state(&ctx, DocumentType::Privacy)
+            .await
+            .expect("state reads");
+        assert!(state.current.is_none());
+        assert_eq!(state.live_version, None);
+        assert_eq!(state.next_version, 1);
     }
 }
 

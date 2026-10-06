@@ -3214,7 +3214,10 @@ export interface paths {
         delete?: never;
         options?: never;
         head?: never;
-        /** Update document */
+        /**
+         * Update document
+         * @description Edits a draft in place. Published and archived versions are never changed: an edit to one is saved as a new draft of the same type, and the response is that draft.
+         */
         patch: {
             parameters: {
                 query?: never;

@@ -686,9 +686,6 @@
 /* ===== Messages block: task/notification single-pane entries list ===== */
 .entries-list--scroll { max-height: 60vh; overflow-y: auto; }
 
-/* ===== Legal pages editor status row (blocks/legalpages/pages.rs) ===== */
-.editor-status__version { background: var(--bg-hover); color: var(--text-muted); }
-
 /* ===== Tickets admin (blocks/tickets/pages.rs) =====
    The inbox filters, the ticket page's sections, timeline and analyses, and
    the type and settings tables' secondary lines. Everything else on these
