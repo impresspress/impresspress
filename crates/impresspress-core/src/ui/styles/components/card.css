@@ -688,8 +688,25 @@
 .api-key-value { flex: 1 1 auto; padding: var(--space-2); background: var(--bg-secondary); border-radius: var(--radius-md); font-family: ui-monospace, Menlo, monospace; word-break: break-all; user-select: all; }
 .api-key-name-hint { margin: var(--space-2) 0 0; font-size: var(--text-xs); color: var(--text-muted); }
 
-/* ===== Portal buttons admin (blocks/userportal/pages/admin_buttons.rs) ===== */
-.admin-buttons-form-grid { grid-template-columns: 1fr 1fr 1fr auto auto; }
+/* ===== Portal buttons admin (blocks/userportal/pages/admin_buttons.rs) =====
+ * The add form: one row on a wide screen (the submit button aligned with the
+ * inputs, not their labels), two columns on a tablet, one on a phone. */
+.admin-buttons-form-grid {
+	display: grid; gap: var(--space-3); align-items: end;
+	grid-template-columns: minmax(0, 2fr) minmax(0, 2fr) minmax(0, 1.5fr) minmax(5rem, 1fr) auto;
+}
+@media (max-width: 960px) {
+	.admin-buttons-form-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+	.admin-buttons-form-grid__submit { grid-column: 1 / -1; }
+}
+@media (max-width: 560px) {
+	.admin-buttons-form-grid { grid-template-columns: minmax(0, 1fr); }
+	.admin-buttons-form-grid__submit .btn { width: 100%; }
+}
+/* A button's icon beside its name, centred on one line. */
+.admin-buttons-icon { display: inline-flex; align-items: center; gap: var(--space-2); }
+.admin-buttons-icon__glyph { display: inline-flex; color: var(--text-secondary); }
+.admin-buttons-icon__glyph svg { width: 18px; height: 18px; }
 
 /* ===== Variables admin (blocks/admin/pages/variables.rs) =====
  * `.var-cell` stacks what one table cell says about a variable: the key (or
@@ -716,18 +733,15 @@
 
 /* ===== Products admin (cards) =====
  * Migrated from `blocks/products/pages.rs`'s page-local `PRODUCTS_UI_CSS`
- * `<style>` block (task 12e). The `body:has(.products-tabs) .card` override
- * below is a compound selector (0,2,0) so it always beats the plain `.card`
- * rule above regardless of which file loads first -- no source-order
- * dependency to preserve here, unlike `.products-advanced`/`.mt-0` in
- * form.css. */
+ * `<style>` block (task 12e). Products cards are the shared `.card`: the
+ * products-only radius and shadow went with the products tab strip. */
 /* Onboarding guide. The three tiles are cards and now look like cards: they
    used to carry a bespoke treatment -- 20px padding (--space-5, off the 24px
    every other card body uses), a 14px radius (the scale has 12px), a
    diagonal brand-tinted gradient and a 26px drop shadow no other surface in
    the admin has. Next to the plain white cards on every neighbouring page it
    read as a different design language rather than the same one. */
-.products-guide { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-4); margin: var(--space-6) 0; }
+.products-guide { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: var(--space-4); }
 .products-guide__item { position: relative; padding: var(--space-6); border: 1px solid var(--border-color); border-radius: var(--radius-lg); background: var(--surface-1); }
 /* At the original 14% mix, --primary-button on this background only reaches
    4.12:1 (computed) -- below the 4.5:1 AA floor for the "1"/"2"/"3" digit
@@ -759,7 +773,6 @@
 .product-template-card strong { margin: 0 !important; }
 [data-wizard-step] > .card__head { background: color-mix(in srgb, var(--surface-1) 94%, var(--primary-color) 6%); }
 [data-offer-card] > .card__head { align-items: flex-start; background: linear-gradient(120deg, color-mix(in srgb, var(--surface-1) 94%, var(--primary-color) 6%), var(--surface-1)); }
-body:has(.products-tabs) .card { border-radius: 14px; box-shadow: 0 8px 26px rgba(15, 23, 42, .045); }
 @media (max-width: 760px) {
 	.products-guide { grid-template-columns: 1fr; }
 	.product-template-grid { grid-template-columns: 1fr; }

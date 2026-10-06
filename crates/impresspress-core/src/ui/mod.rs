@@ -3119,7 +3119,6 @@ mod tests {
             "kv-list",
             "messages-new__title",
             "messages-new__type",
-            "nav-icon",
             "page--dashboard",
             "page--detail",
             "page--form",

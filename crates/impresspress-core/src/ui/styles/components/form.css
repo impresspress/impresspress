@@ -259,6 +259,9 @@
 .products-choice strong { display: block; font-size: .92rem; }
 .products-choice small { display: block; margin-top: .15rem; line-height: 1.45; }
 .products-actions { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; }
+/* A products form's submit row: set off from the collapsible section above
+   it, which otherwise sat flush against the button. */
+.products-form-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; margin-top: var(--space-5); }
 .products-status-stack { display: flex; align-items: center; gap: var(--space-1); flex-wrap: wrap; }
 .products-advanced { margin-top: var(--space-4); border: 1px solid var(--border-color); border-radius: 12px; background: color-mix(in srgb, var(--surface-1) 97%, var(--border-color) 3%); }
 .products-advanced > summary { cursor: pointer; padding: var(--space-3) var(--space-4); font-weight: 650; list-style-position: inside; }
@@ -267,19 +270,27 @@
 .products-plain-details { margin-top: var(--space-3); }
 .products-plain-details > summary { cursor: pointer; color: var(--text-muted); font-size: .875rem; font-weight: 600; }
 .products-filter-label { font-size: .78rem; font-weight: 700; text-transform: uppercase; letter-spacing: .04em; color: var(--text-muted); margin-right: .15rem; }
-.products-checklist { list-style: none; padding: 0; margin: 0; }
-.products-checklist li:last-child { margin-bottom: 0 !important; }
+.products-checklist { list-style: none; padding: 0; margin: 0; display: grid; gap: var(--space-4); }
+.products-checklist__item { display: grid; grid-template-columns: minmax(0, 1fr) auto; align-items: start; gap: var(--space-3); }
+.products-checklist__item p { margin: var(--space-1) 0 0; }
+/* A short list of states (Stripe's payments / payouts / currency): label
+   left, value right, one row each. */
+.products-status-list { display: grid; gap: 0; margin: var(--space-3) 0 0; }
+.products-status-list > div { display: flex; align-items: center; justify-content: space-between; gap: var(--space-3); padding: var(--space-2) 0; border-bottom: 1px solid var(--border-color); }
+.products-status-list > div:last-child { border-bottom: 0; }
+.products-status-list dt { color: var(--text-secondary); font-size: var(--text-sm); }
+.products-status-list dd { margin: 0; font-weight: 500; }
 /* Deleted-product "close manager" (blocks/products/pages.rs) -- ported from
    origin/main's inline `style="..."` attributes during the main merge,
    2026-09-02 (the guard `pages_carry_no_static_inline_styles` caught them). */
 .products-payment-link-list { list-style: none; margin: 0; padding: 0; display: grid; gap: var(--space-2); }
 .products-payment-link-url { word-break: break-all; }
 .products-code-block { display: block; width: 100%; padding: var(--space-3) var(--space-3); border: 1px solid var(--border-color); border-radius: 10px; background: var(--surface-2); overflow-wrap: anywhere; }
-body:has(.products-tabs) .filter-bar { margin: var(--space-4) 0; padding: var(--space-3); border: 1px solid var(--border-color); border-radius: 14px; background: var(--surface-1); }
 .product-wizard-progress { margin: 0 0 var(--space-5); }
 .product-wizard-progress ol { display: grid; grid-template-columns: repeat(5, minmax(0, 1fr)); gap: var(--space-2); list-style: none; padding: 0; margin: 0; }
-.product-wizard-progress li { min-height: 2.25rem; border-radius: 999px; }
-.wizard-step-check { display: inline-flex; margin-right: var(--space-1); }
+.product-wizard-progress li { position: relative; min-height: 2.25rem; border-radius: 999px; gap: var(--space-1); }
+.wizard-step__number::after { content: "."; }
+.wizard-step-check { display: inline-flex; }
 .wizard-step-check svg { width: .75rem; height: .75rem; }
 .product-wizard-actions { position: sticky; bottom: 0; z-index: 2; display: flex; justify-content: space-between; gap: var(--space-4); flex-wrap: wrap; margin-top: var(--space-4); padding: var(--space-3) 0; border-top: 1px solid var(--border-color); background: var(--surface-1); }
 .product-wizard-actions__buttons { display: flex; gap: var(--space-3); margin-left: auto; }
@@ -293,12 +304,23 @@ body:has(.products-tabs) .filter-bar { margin: var(--space-4) 0; padding: var(--
 .product-payment-link-row { display: flex; align-items: center; gap: var(--space-2); flex-wrap: wrap; margin-top: var(--space-2); }
 @media (max-width: 760px) {
 	.products-actions { width: 100%; }
-	.product-wizard-progress { overflow: visible; }
 	/* Five equal columns are ~52px each on a phone, narrower than "4.
-	   Checkout", so the labels ran into each other and off the card. Three
-	   columns fit every label; the steps continue on a second row. */
-	.product-wizard-progress ol { grid-template-columns: repeat(3, minmax(0, 1fr)); min-width: 0; gap: var(--space-1); }
-	.product-wizard-progress li { font-size: .72rem; white-space: nowrap; }
+	   Checkout", so the labels ran into each other -- and wrapping them onto
+	   a second row read as two progress bars. One row instead: the current
+	   step keeps its name and takes the spare width; the others show their
+	   number (and check), their names kept for screen readers. */
+	.product-wizard-progress ol { display: flex; gap: var(--space-1); }
+	.product-wizard-progress li { flex: 0 0 2.25rem; padding: 0; white-space: nowrap; }
+	.product-wizard-progress li[aria-current] { flex: 1 1 auto; padding: 0 var(--space-3); }
+	.product-wizard-progress li:not([aria-current]) .wizard-step__number::after { content: none; }
+	.product-wizard-progress li:not([aria-current]) .wizard-step__label {
+		position: absolute; width: 1px; height: 1px; overflow: hidden;
+		clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+	}
+	.product-wizard-progress li:not([aria-current]):has(.wizard-step-check:not([hidden])) .wizard-step__number {
+		position: absolute; width: 1px; height: 1px; overflow: hidden;
+		clip: rect(0 0 0 0); clip-path: inset(50%); white-space: nowrap;
+	}
 	.product-wizard-actions { display: grid; }
 	.product-wizard-actions > .btn { width: 100%; }
 	.product-wizard-actions__buttons { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; margin-left: 0; }

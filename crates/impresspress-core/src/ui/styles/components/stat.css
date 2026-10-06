@@ -48,9 +48,3 @@
 	.stat-value { font-size: 1.5rem; }
 }
 
-/* ===== Products admin =====
- * Migrated from `blocks/products/pages.rs`'s page-local `PRODUCTS_UI_CSS`
- * `<style>` block (task 12e). Compound selector -- always wins over the
- * plain `.stat-card` rule above regardless of file load order. */
-body:has(.products-tabs) .stat-card { border-radius: 14px; box-shadow: 0 8px 24px rgba(15, 23, 42, .045); }
-

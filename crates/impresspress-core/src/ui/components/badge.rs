@@ -250,7 +250,7 @@ mod tests {
         ("blocks/files/pages_user/buckets.rs", 2),
         ("blocks/legalpages/pages.rs", 12),
         ("blocks/messages/pages.rs", 6),
-        ("blocks/products/pages.rs", 6),
+        ("blocks/products/pages.rs", 2),
         ("blocks/tickets/pages.rs", 4),
         ("blocks/vector/pages_ui.rs", 4),
         // A unit-test fixture: the `DetailHero::badges` slot of

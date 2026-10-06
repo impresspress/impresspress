@@ -56,7 +56,7 @@ pub async fn admin_buttons_page(ctx: &dyn Context, msg: &Message) -> OutputStrea
             return ui::shell_error_page(
                 ctx,
                 msg,
-                ui::Shell::admin("Portal Buttons", "Portal Buttons"),
+                ui::Shell::admin("Portal buttons", "Portal buttons"),
                 None,
                 ui::BackLink::ADMIN_DASHBOARD,
                 e,
@@ -67,51 +67,51 @@ pub async fn admin_buttons_page(ctx: &dyn Context, msg: &Message) -> OutputStrea
     };
 
     let content = html! {
-        (components::page_header(
-            "Portal Buttons",
-            Some("Configure navigation buttons shown on the user profile page"),
-            None,
-        ))
-
-        // Add button form
-        div .card .mb-6 {
-            h3 .text-16 .m-0 .mb-4 { "Add Button" }
-            form
-                hx-post="/b/userportal/admin/buttons"
-                hx-target="#buttons-table"
-                hx-swap="outerHTML"
-                .grid .admin-buttons-form-grid .items-end .gap-3
-            {
-                div .form-group .m-0 {
-                    label .form-label for="label" { "Label" }
-                    input .form-input #label type="text" name="label"
-                        placeholder="e.g. My Products" required;
-                }
-                div .form-group .m-0 {
-                    label .form-label for="path" { "Path" }
-                    input .form-input #path type="text" name="path"
-                        placeholder="e.g. /b/products/mine" required;
-                }
-                div .form-group .m-0 {
-                    label .form-label for="icon" { "Icon" }
-                    select .form-input #icon name="icon" {
-                        @for &(value, display) in ICON_OPTIONS {
-                            option value=(value) { (display) }
+        section .card .mb-6 {
+            header .card__head {
+                h2 .card__title { "Add a button" }
+            }
+            div .card__body {
+                // One row on a wide screen, two columns on a tablet, one on a
+                // phone (`.admin-buttons-form-grid` in card.css) — the five
+                // fixed columns it had never collapsed.
+                form
+                    hx-post="/b/userportal/admin/buttons"
+                    hx-target="#buttons-table"
+                    hx-swap="outerHTML"
+                    .admin-buttons-form-grid
+                {
+                    div .form-group .m-0 {
+                        label .form-label for="label" { "Label" }
+                        input .form-input #label type="text" name="label"
+                            placeholder="e.g. My Products" required;
+                    }
+                    div .form-group .m-0 {
+                        label .form-label for="path" { "Path" }
+                        input .form-input #path type="text" name="path"
+                            placeholder="e.g. /b/products/mine" required;
+                    }
+                    div .form-group .m-0 {
+                        label .form-label for="icon" { "Icon" }
+                        select .form-select #icon name="icon" {
+                            @for &(value, display) in ICON_OPTIONS {
+                                option value=(value) { (display) }
+                            }
                         }
                     }
-                }
-                div .form-group .m-0 {
-                    label .form-label for="sort_order" { "Order" }
-                    input .form-input #sort_order type="number" name="sort_order"
-                        value="0" .w-80;
-                }
-                button .btn .btn--primary type="submit" .nowrap {
-                    (icons::plus()) " Add"
+                    div .form-group .m-0 {
+                        label .form-label for="sort_order" { "Order" }
+                        input .form-input #sort_order type="number" name="sort_order" value="0";
+                    }
+                    div .admin-buttons-form-grid__submit {
+                        button .btn .btn--primary type="submit" {
+                            (icons::plus()) " Add button"
+                        }
+                    }
                 }
             }
         }
 
-        // Buttons table
         (render_buttons_table(&buttons))
 
         // Where a row's Edit button swaps the edit modal
@@ -123,80 +123,80 @@ pub async fn admin_buttons_page(ctx: &dyn Context, msg: &Message) -> OutputStrea
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::admin("Portal Buttons", "Portal Buttons"),
+        ui::Shell::admin("Portal buttons", "Portal buttons")
+            .subtitle("Configure navigation buttons shown on the user profile page"),
         content,
     )
     .await
 }
 
+/// The buttons list's columns: the label is each card's title on a phone,
+/// the row's two icon actions sit beside it.
+const BUTTON_COLUMNS: [components::TableCol<'static>; 5] = [
+    components::TableCol::new("Label").primary(),
+    components::TableCol::new("Icon"),
+    components::TableCol::new("Path"),
+    components::TableCol::new("Order"),
+    components::TableCol::new("Actions").actions(),
+];
+
 fn render_buttons_table(buttons: &[db::Record]) -> maud::Markup {
+    let rows = buttons
+        .iter()
+        .map(|btn| {
+            let label = btn.str_field("label");
+            components::TableRow::new(vec![
+                html! { (label) },
+                html! {
+                    // Glyph and name centred on one line, not the icon on
+                    // the text's baseline.
+                    span .admin-buttons-icon {
+                        span .admin-buttons-icon__glyph aria-hidden="true" { (nav_icon(btn.str_field("icon"))) }
+                        span .text-muted .text-sm { (btn.str_field("icon")) }
+                    }
+                },
+                html! { code { (components::breakable_id(btn.str_field("path"))) } },
+                html! { (btn.i64_field("sort_order")) },
+                html! {
+                    div .flex .gap-1 {
+                        button .btn .btn--ghost .btn--sm .btn--icon type="button"
+                            hx-get=(format!("/b/userportal/admin/buttons/{}/edit", btn.id))
+                            hx-target="#edit-button-slot"
+                            // Stable across the table's re-render, so focus
+                            // can come back to it after a save.
+                            id=(format!("edit-btn-open-{}", btn.id))
+                            hx-swap="innerHTML"
+                            title="Edit"
+                            aria-label={"Edit " (label)}
+                        {
+                            (icons::edit())
+                        }
+                        button .btn .btn--ghost-danger .btn--sm .btn--icon type="button"
+                            hx-delete=(format!("/b/userportal/admin/buttons/{}", btn.id))
+                            hx-target="#buttons-table"
+                            hx-swap="outerHTML"
+                            hx-confirm={"Delete the " (label) " button?"}
+                            title="Delete"
+                            aria-label={"Delete " (label)}
+                        {
+                            (icons::trash())
+                        }
+                    }
+                },
+            ])
+        })
+        .collect();
     html! {
         div #buttons-table {
-            @if buttons.is_empty() {
-                (components::empty_state(
+            (components::DataTable::new(&BUTTON_COLUMNS)
+                .rows(rows)
+                .empty(components::empty_state(
                     icons::package(),
                     "No buttons configured",
                     "Add a button above to show navigation links on the user profile page.",
                     None,
                 ))
-            } @else {
-                div .table-container {
-                    table .table {
-                        thead {
-                            tr {
-                                th { "Label" }
-                                th { "Icon" }
-                                th { "Path" }
-                                th { "Order" }
-                                th .w-96 { "Actions" }
-                            }
-                        }
-                        tbody {
-                            @for btn in buttons {
-                                tr {
-                                    td .font-medium { (btn.str_field("label")) }
-                                    td {
-                                        span .nav-icon .d-inline-flex {
-                                            (nav_icon(btn.str_field("icon")))
-                                        }
-                                        " "
-                                        span .text-muted .text-sm { (btn.str_field("icon")) }
-                                    }
-                                    td { code { (btn.str_field("path")) } }
-                                    td { (btn.i64_field("sort_order")) }
-                                    td {
-                                        div .flex .gap-1 {
-                                            button .btn .btn--ghost .btn--sm
-                                                hx-get=(format!("/b/userportal/admin/buttons/{}/edit", btn.id))
-                                                hx-target="#edit-button-slot"
-                                                // Stable across the table's
-                                                // re-render, so focus can come
-                                                // back to it after a save.
-                                                id=(format!("edit-btn-open-{}", btn.id))
-                                                hx-swap="innerHTML"
-                                                title="Edit"
-                                                aria-label={"Edit " (btn.str_field("label"))}
-                                            {
-                                                (icons::edit())
-                                            }
-                                            button .btn .btn--ghost .btn--sm .text-danger
-                                                hx-delete=(format!("/b/userportal/admin/buttons/{}", btn.id))
-                                                hx-target="#buttons-table"
-                                                hx-swap="outerHTML"
-                                                hx-confirm="Delete this button?"
-                                                title="Delete"
-                                                aria-label={"Delete " (btn.str_field("label"))}
-                                            {
-                                                (icons::trash())
-                                            }
-                                        }
-                                    }
-                                }
-                            }
-                        }
-                    }
-                }
-            }
+                .render())
         }
     }
 }
@@ -485,6 +485,60 @@ mod tests {
         m.insert("path".to_string(), json!(path));
         m.insert("sort_order".to_string(), json!(0));
         m
+    }
+
+    /// The page: its title in the topbar only, the add form on the
+    /// responsive grid, and the list as the shared DataTable — each row's
+    /// label its card title, its icon centred beside its name, Edit and
+    /// Delete labelled icon buttons with Delete in the danger style.
+    #[tokio::test]
+    async fn the_buttons_page_is_a_data_table_under_a_responsive_form() {
+        let ctx = ctx_with_userportal().await;
+        db::create(&ctx, TABLE, button_data("Files", "folder", "/b/storage/"))
+            .await
+            .unwrap();
+        let (status, html) = crate::blocks::userportal::test_support::browser_request(
+            &ctx,
+            admin_msg("retrieve", "/b/userportal/admin/buttons"),
+            "",
+        )
+        .await;
+        assert_eq!(status, 200, "{html}");
+        assert_eq!(html.matches("<h1").count(), 1, "{html}");
+        assert!(
+            !html.contains("page-title"),
+            "no body header repeating the title: {html}"
+        );
+        assert!(
+            html.contains(r#"class="admin-buttons-form-grid""#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<select class="form-select" id="icon" name="icon">"#),
+            "{html}"
+        );
+        assert!(!html.contains(r#"class="table""#), "{html}");
+        assert!(
+            html.contains(r#"<div id="buttons-table"><div class="data-table"><table>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<td class="data-table__cell--primary" data-label="Label">Files</td>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"<span class="admin-buttons-icon"><span class="admin-buttons-icon__glyph" aria-hidden="true">"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"class="btn btn--ghost-danger btn--sm btn--icon" type="button""#)
+                && html.contains(r#"aria-label="Delete Files""#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"hx-confirm="Delete the Files button?""#),
+            "{html}"
+        );
     }
 
     /// The edit modal is the shared `components::modal` `<dialog>`, opened by

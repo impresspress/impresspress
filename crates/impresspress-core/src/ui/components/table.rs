@@ -997,7 +997,7 @@ mod tests {
     /// test. Migrating one is not free: `.data-table` is a different chrome
     /// (rounded, bordered, sticky `thead`, dashed row rules, a `data-label`
     /// per cell that collapses to cards below 720px), so each entry is a
-    /// rendered change. Six of the seven sit on pages with no visual baseline
+    /// rendered change. All six sit on pages with no visual baseline
     /// at all — `blocks/legalpages` and `blocks/tickets` have none — so the
     /// gate there is a Rust render test, not a screenshot.
     ///
@@ -1008,7 +1008,6 @@ mod tests {
     const HAND_WRITTEN_TABLES: &[(&str, usize)] = &[
         ("blocks/legalpages/pages.rs", 3),
         ("blocks/tickets/pages.rs", 3),
-        ("blocks/userportal/pages/admin_buttons.rs", 1),
     ];
 
     #[test]

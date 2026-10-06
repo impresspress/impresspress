@@ -82,6 +82,32 @@ pub fn subnav(label: &str, tabs: Vec<Tab<'_>>) -> Markup {
     }
 }
 
+/// One page's own views of the same list — Active / Deleted products, an
+/// order status — as a row of chips: plain links in a labelled `nav`, the
+/// current one `aria-current="page"`.
+///
+/// Not [`subnav`]: those are a block's separate pages, drawn above the
+/// content card; these narrow the list the page already shows, so they sit
+/// in the body beside its search box and must not read as a second section
+/// strip. Not an htmx swap either, for the reason [`subnav`] gives: a view
+/// changes the page's subtitle and actions, which live in the topbar. The
+/// current chip is marked by weight and border as well as fill, never by
+/// colour alone.
+pub fn filter_chips(label: &str, chips: Vec<Tab<'_>>) -> Markup {
+    html! {
+        nav .filter-chips aria-label=(label) {
+            @for chip in chips {
+                a .filter-chip href=(chip.href) aria-current=[chip.active.then_some("page")] {
+                    @if let Some(icon) = chip.icon {
+                        (icon)
+                    }
+                    (chip.label)
+                }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Canonical button (Phase 1)
 // ---------------------------------------------------------------------------
@@ -155,6 +181,34 @@ mod tests {
         assert!(s.contains("btn--primary"), "missing variant class: {s}");
         assert!(s.contains("btn--md"), "missing size class: {s}");
         assert!(s.contains(">Save</button>"), "missing label: {s}");
+    }
+
+    #[test]
+    fn filter_chips_are_labelled_links_with_the_current_one_marked() {
+        let s = filter_chips(
+            "Product views",
+            vec![
+                Tab {
+                    active: true,
+                    href: "/b/products/admin/manage",
+                    label: "Active",
+                    icon: None,
+                },
+                Tab {
+                    active: false,
+                    href: "/b/products/admin/manage?view=deleted",
+                    label: "Deleted",
+                    icon: None,
+                },
+            ],
+        )
+        .into_string();
+        assert_eq!(
+            s,
+            r#"<nav class="filter-chips" aria-label="Product views"><a class="filter-chip" href="/b/products/admin/manage" aria-current="page">Active</a><a class="filter-chip" href="/b/products/admin/manage?view=deleted">Deleted</a></nav>"#
+        );
+        // Plain links: a view changes the topbar, so it is never a swap.
+        assert!(!s.contains("hx-"), "{s}");
     }
 
     #[test]

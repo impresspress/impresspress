@@ -21,10 +21,7 @@ use super::{
     },
     money, repo, stripe_provider,
 };
-use crate::{
-    blocks::crud,
-    config_vars::{ALLOW_USER_PRODUCTS_KEY, FRONTEND_URL_KEY},
-};
+use crate::config_vars::{ALLOW_USER_PRODUCTS_KEY, FRONTEND_URL_KEY};
 
 fn display_money(amount_minor: i64, currency: &str) -> String {
     let currency = money::normalize_currency(currency).unwrap_or_else(|_| currency.to_uppercase());
@@ -37,8 +34,8 @@ fn display_money(amount_minor: i64, currency: &str) -> String {
 fn analytics_section(analytics: &[CommerceAnalytics], title: &str, seller_view: bool) -> Markup {
     html! {
         section .products-section {
-            h2 .mb-1 { (title) }
-            p .text-muted .text-sm .mt-0 {
+            (components::section_header(title, None))
+            p .section-desc {
                 "Money is reported separately for each currency. Gross values include orders that were later refunded; after-refund sales subtract customer refunds."
                 @if seller_view { " Proceeds shown here subtract recorded platform fees but are before Stripe fees, disputes, reserves, and payout adjustments; Stripe remains authoritative for available balance and payouts." }
             }
@@ -77,7 +74,7 @@ fn analytics_section(analytics: &[CommerceAnalytics], title: &str, seller_view: 
                                 @if currency.open_dispute_count > 0 { " Open disputes require attention in Stripe." }
                             }
                             @if !currency.top_products.is_empty() {
-                                h4 { "Top products by gross sales" }
+                                h3 .products-subheading { "Top products by gross sales" }
                                 @let cols = [
                                     components::TableCol::new("Product"),
                                     components::TableCol::new("Quantity"),
@@ -101,14 +98,14 @@ fn analytics_section(analytics: &[CommerceAnalytics], title: &str, seller_view: 
 fn seller_failures_section(failures: &[SellerFailureSummary]) -> Markup {
     html! {
         section .products-section {
-            h2 { "Recent payment failures" }
-            p .text-muted .text-sm { "Failed seller orders that may need customer follow-up. Stripe Dashboard provides provider-level payment details." }
+            (components::section_header("Recent payment failures", None))
+            p .section-desc { "Failed seller orders that may need customer follow-up. Stripe Dashboard provides provider-level payment details." }
             @if failures.is_empty() {
                 (components::empty_state(icons::info(), "No recent failures", "No failed seller orders need attention.", None))
             } @else {
                 @let row_hrefs: Vec<String> = failures.iter().map(|failure| format!("/b/products/selling/orders/{}", failure.order_id)).collect();
                 @let cols = [
-                    components::TableCol::new("Order"),
+                    components::TableCol::new("Order").primary(),
                     components::TableCol::new("Amount"),
                     components::TableCol::new("Last result"),
                     components::TableCol::new("Date"),
@@ -117,7 +114,7 @@ fn seller_failures_section(failures: &[SellerFailureSummary]) -> Markup {
                     html! { code { (&failure.order_id) } },
                     html! { (display_money(failure.total_minor, &failure.currency)) },
                     html! { span .text-sm { (if failure.error.is_empty() { "Payment did not complete" } else { &failure.error }) } },
-                    html! { span .text-muted .text-sm { (failure.created_at.get(..10).unwrap_or("—")) } },
+                    components::timestamp(&failure.created_at),
                 ]).collect();
                 (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), html! {}))
             }
@@ -130,82 +127,223 @@ use crate::{
     util::{self, RecordExt},
 };
 
-fn admin_tabs(active: &str) -> Markup {
-    html! {
-        div .products-tabs {
-            (components::tab_navigation(vec![
-        components::Tab {
-            active: active == "overview",
-            href: "/b/products/admin/",
-            label: "Overview",
-            icon: Some(icons::layout_dashboard()),
-        },
-        components::Tab {
-            active: active == "products",
-            href: "/b/products/admin/manage",
-            label: "Products",
-            icon: Some(icons::package()),
-        },
-        components::Tab {
-            active: active == "groups",
-            href: "/b/products/admin/groups",
-            label: "Groups",
-            icon: Some(icons::folder()),
-        },
-        components::Tab {
-            active: active == "orders",
-            href: "/b/products/admin/purchases",
-            label: "Orders",
-            icon: Some(icons::shopping_cart()),
-        },
-        components::Tab {
-            active: active == "sellers",
-            href: "/b/products/admin/sellers",
-            label: "Sellers",
-            icon: Some(icons::package()),
-        },
-        components::Tab {
-            active: active == "stripe",
-            href: "/b/products/admin/stripe",
-            label: "Stripe",
-            icon: Some(icons::credit_card()),
-        },
-        components::Tab {
-            active: active == "settings",
-            href: "/b/products/admin/settings",
-            label: "Settings",
-            icon: Some(icons::settings()),
-        },
-            ]))
+/// The products admin sections, one link each above every products admin
+/// page ([`components::subnav`]). Separate pages, so plain links: a tab that
+/// swapped only the body would leave the previous page's title and actions in
+/// the topbar.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum AdminSection {
+    Overview,
+    Products,
+    Groups,
+    Orders,
+    Sellers,
+    Stripe,
+    Settings,
+}
+
+fn admin_sections(active: AdminSection) -> Markup {
+    let tab = |section: AdminSection, href: &'static str, label: &'static str| components::Tab {
+        active: section == active,
+        href,
+        label,
+        icon: None,
+    };
+    components::subnav(
+        "Products sections",
+        vec![
+            tab(AdminSection::Overview, "/b/products/admin/", "Overview"),
+            tab(
+                AdminSection::Products,
+                "/b/products/admin/manage",
+                "Products",
+            ),
+            tab(AdminSection::Groups, "/b/products/admin/groups", "Groups"),
+            tab(
+                AdminSection::Orders,
+                "/b/products/admin/purchases",
+                "Orders",
+            ),
+            tab(
+                AdminSection::Sellers,
+                "/b/products/admin/sellers",
+                "Sellers",
+            ),
+            tab(AdminSection::Stripe, "/b/products/admin/stripe", "Stripe"),
+            tab(
+                AdminSection::Settings,
+                "/b/products/admin/settings",
+                "Settings",
+            ),
+        ],
+    )
+}
+
+/// A signed-in user's commerce sections: what they bought, and — when seller
+/// products are on — what they sell. One row of links rather than a second
+/// strip of seller links under the first.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum PortalSection {
+    Home,
+    Purchases,
+    SellerDashboard,
+    SellerProducts,
+    SellerOrders,
+}
+
+fn portal_sections(active: PortalSection, seller_enabled: bool) -> Markup {
+    let tab = |section: PortalSection, href: &'static str, label: &'static str| components::Tab {
+        active: section == active,
+        href,
+        label,
+        icon: None,
+    };
+    let mut tabs = vec![
+        tab(PortalSection::Home, "/b/products/", "Commerce"),
+        tab(
+            PortalSection::Purchases,
+            "/b/products/my-purchases",
+            "Purchases",
+        ),
+    ];
+    if seller_enabled {
+        tabs.extend([
+            tab(
+                PortalSection::SellerDashboard,
+                "/b/products/selling",
+                "Selling",
+            ),
+            tab(
+                PortalSection::SellerProducts,
+                "/b/products/my-products",
+                "My products",
+            ),
+            tab(
+                PortalSection::SellerOrders,
+                "/b/products/selling/orders",
+                "Seller orders",
+            ),
+        ]);
+    }
+    components::subnav("Commerce sections", tabs)
+}
+
+/// Which audience a products page serves, and so its sidebar and its
+/// section links.
+#[derive(Clone, Copy)]
+enum Sections {
+    Admin(AdminSection),
+    Portal(PortalSection, bool),
+}
+
+impl Sections {
+    fn markup(self) -> Markup {
+        match self {
+            Sections::Admin(section) => admin_sections(section),
+            Sections::Portal(section, seller_enabled) => portal_sections(section, seller_enabled),
+        }
+    }
+
+    /// The shell for this audience: `title` is the `<title>` and the page's
+    /// `h1`.
+    fn shell(self, title: &str) -> ui::Shell<'_> {
+        match self {
+            Sections::Admin(_) => ui::Shell::admin(title, title),
+            Sections::Portal(..) => ui::Shell::portal(title, title),
+        }
+    }
+
+    /// Where an error page in this section sends the reader back to.
+    fn back(self) -> ui::BackLink<'static> {
+        match self {
+            Sections::Admin(AdminSection::Overview) => ui::BackLink::ADMIN_DASHBOARD,
+            Sections::Admin(_) => ui::BackLink {
+                label: "Back to the products overview",
+                href: "/b/products/admin/",
+            },
+            Sections::Portal(PortalSection::Home, _) => ui::BackLink {
+                label: "Back to your account",
+                href: "/b/userportal/",
+            },
+            Sections::Portal(..) => ui::BackLink {
+                label: "Back to Commerce",
+                href: "/b/products/",
+            },
         }
     }
 }
 
-fn portal_tabs(active: &str, seller_enabled: bool) -> Markup {
-    let mut tabs = vec![
-        components::Tab {
-            active: active == "home",
-            href: "/b/products/",
-            label: "Commerce",
-            icon: Some(icons::layout_dashboard()),
-        },
-        components::Tab {
-            active: active == "purchases",
-            href: "/b/products/my-purchases",
-            label: "Purchases",
-            icon: Some(icons::shopping_cart()),
-        },
-    ];
-    if seller_enabled {
-        tabs.push(components::Tab {
-            active: active == "selling",
-            href: "/b/products/selling",
-            label: "Selling",
-            icon: Some(icons::package()),
-        });
+/// A products page: `content` in the shell under the section links.
+async fn products_page(
+    ctx: &dyn Context,
+    msg: &Message,
+    shell: ui::Shell<'_>,
+    sections: Sections,
+    content: Markup,
+) -> OutputStream {
+    ui::shell_page(
+        ctx,
+        msg,
+        shell,
+        ui::PageBody::from(content).with_subnav(sections.markup()),
+    )
+    .await
+}
+
+/// A products page whose read failed: the error drawn in the shell under the
+/// section links, titled `title`, with a link back
+/// ([`ui::shell_error_page`]). Classified like every other failed read: a
+/// denial is the 403, a quota the 429, anything else a logged 500.
+async fn error_page(
+    ctx: &dyn Context,
+    msg: &Message,
+    sections: Sections,
+    title: &str,
+    error: wafer_run::WaferError,
+    context: &str,
+) -> OutputStream {
+    ui::shell_error_page(
+        ctx,
+        msg,
+        sections.shell(title),
+        Some(sections.markup()),
+        sections.back(),
+        error,
+        context,
+    )
+    .await
+}
+
+/// [`error_page`] for the read of the one record a detail page is about: a
+/// record that is not there is the 404 page, not a 500.
+async fn record_error_page(
+    ctx: &dyn Context,
+    msg: &Message,
+    sections: Sections,
+    title: &str,
+    error: wafer_run::WaferError,
+    context: &str,
+) -> OutputStream {
+    if error.code == wafer_run::ErrorCode::NotFound {
+        return ui::not_found_response(msg);
     }
+    error_page(ctx, msg, sections, title, error, context).await
+}
+
+/// `count` followed by `noun`, pluralised with an `s` ("1 listing",
+/// "3 listings").
+fn count_noun(count: i64, noun: &str) -> String {
+    if count == 1 {
+        format!("1 {noun}")
+    } else {
+        format!("{count} {noun}s")
+    }
+}
+
+/// The "+" create action: a plus icon beside `label`, never a typed "+".
+fn create_link(href: &str, label: &str, class: &str) -> Markup {
     html! {
-        div .products-tabs { (components::tab_navigation(tabs)) }
+        a class={ "btn btn--sm " (class) } href=(href) { (icons::plus()) " " (label) }
     }
 }
 
@@ -221,71 +359,138 @@ pub async fn overview(ctx: &dyn Context, msg: &Message) -> OutputStream {
     // misleading, not just cosmetically wrong.
     let products_count = match repo::products::count(ctx, &[]).await {
         Ok(n) => n,
-        Err(e) => return crud::db_error_internal(e, "Database error"),
+        Err(e) => {
+            return error_page(
+                ctx,
+                msg,
+                Sections::Admin(AdminSection::Overview),
+                "Products",
+                e,
+                "Database error",
+            )
+            .await
+        }
     };
     let groups_count = match repo::groups::count(ctx, &[]).await {
         Ok(n) => n,
-        Err(e) => return crud::db_error_internal(e, "Database error"),
+        Err(e) => {
+            return error_page(
+                ctx,
+                msg,
+                Sections::Admin(AdminSection::Overview),
+                "Products",
+                e,
+                "Database error",
+            )
+            .await
+        }
     };
     let purchases_count = match repo::purchases::count_all(ctx).await {
         Ok(n) => n,
-        Err(e) => return crud::db_error_internal(e, "Database error"),
+        Err(e) => {
+            return error_page(
+                ctx,
+                msg,
+                Sections::Admin(AdminSection::Overview),
+                "Products",
+                e,
+                "Database error",
+            )
+            .await
+        }
     };
     let offers_count = match repo::offers::count(ctx, &[]).await {
         Ok(n) => n,
-        Err(e) => return crud::db_error_internal(e, "Database error"),
+        Err(e) => {
+            return error_page(
+                ctx,
+                msg,
+                Sections::Admin(AdminSection::Overview),
+                "Products",
+                e,
+                "Database error",
+            )
+            .await
+        }
     };
     let analytics = match repo::purchases::commerce_analytics(ctx, None).await {
         Ok(analytics) => analytics,
-        Err(error) => return crud::db_error_internal(error, "Database error"),
+        Err(error) => {
+            return error_page(
+                ctx,
+                msg,
+                Sections::Admin(AdminSection::Overview),
+                "Products",
+                error,
+                "Database error",
+            )
+            .await
+        }
     };
     let user_products_enabled = match super::handlers::user_products_enabled(ctx).await {
         Ok(value) => value,
-        Err(e) => return crud::db_error_page(msg, e, "products page: seller switch read failed"),
+        Err(e) => {
+            return error_page(
+                ctx,
+                msg,
+                Sections::Admin(AdminSection::Overview),
+                "Products",
+                e,
+                "products page: seller switch read failed",
+            )
+            .await
+        }
     };
 
     let content = html! {
-        (admin_tabs("overview"))
-        (components::page_header("Products", Some("Everything you need to set up your catalog and start taking payments"), Some(html! {
-            a .btn .btn--primary .btn--sm href="/b/products/admin/new" { "+ Create product" }
-        })))
         div .stats-grid {
             (components::stat_card("Products", &products_count.to_string(), icons::package(), None))
             (components::stat_card("Groups", &groups_count.to_string(), icons::folder(), None))
             (components::stat_card("Offers", &offers_count.to_string(), icons::dollar_sign(), None))
             (components::stat_card("Orders", &purchases_count.to_string(), icons::shopping_cart(), None))
         }
-        div .products-section__head .mt-6 {
-            div {
-                h2 { "Get selling in three steps" }
-                p .text-muted .text-sm { "Start with the essentials. You can refine every setting later." }
-            }
-        }
-        section .products-guide aria-label="Commerce setup" {
-            article .products-guide__item {
-                span .products-guide__number { "1" }
-                h3 { "Connect Stripe" }
-                p .text-muted .text-sm { "Add your Stripe keys and confirm that payments are ready." }
-                a .products-guide__link .text-sm href="/b/products/admin/stripe" { "Check Stripe setup" (icons::arrow_right()) }
-            }
-            article .products-guide__item {
-                span .products-guide__number { "2" }
-                h3 { "Create a product" }
-                p .text-muted .text-sm { "Choose a one-time product, subscription, or configurable checkout." }
-                a .products-guide__link .text-sm href="/b/products/admin/new" { "Create a product" (icons::arrow_right()) }
-            }
-            article .products-guide__item {
-                span .products-guide__number { "3" }
-                h3 { "Publish and share" }
-                p .text-muted .text-sm { "Publish the price, then copy a payment link or add checkout to your site." }
-                a .products-guide__link .text-sm href="/b/products/admin/manage" { "Manage products" (icons::arrow_right()) }
+        section .products-section {
+            (components::section_header("Get selling in three steps", None))
+            p .section-desc { "Start with the essentials. You can refine every setting later." }
+            div .products-guide {
+                article .products-guide__item {
+                    span .products-guide__number { "1" }
+                    h3 { "Connect Stripe" }
+                    p .text-muted .text-sm { "Add your Stripe keys and confirm that payments are ready." }
+                    a .products-guide__link .text-sm href="/b/products/admin/stripe" { "Check Stripe setup" (icons::arrow_right()) }
+                }
+                article .products-guide__item {
+                    span .products-guide__number { "2" }
+                    h3 { "Create a product" }
+                    p .text-muted .text-sm { "Choose a one-time product, subscription, or configurable checkout." }
+                    a .products-guide__link .text-sm href="/b/products/admin/new" { "Open the product wizard" (icons::arrow_right()) }
+                }
+                article .products-guide__item {
+                    span .products-guide__number { "3" }
+                    h3 { "Publish and share" }
+                    p .text-muted .text-sm { "Publish the price, then copy a payment link or add checkout to your site." }
+                    a .products-guide__link .text-sm href="/b/products/admin/manage" { "Manage products" (icons::arrow_right()) }
+                }
             }
         }
         (render_overview_empty_state(products_count, user_products_enabled))
         (analytics_section(&analytics, "Sales and subscriptions", false))
     };
 
-    ui::shell_page(ctx, msg, ui::Shell::admin("Products", "Products"), content).await
+    products_page(
+        ctx,
+        msg,
+        ui::Shell::admin("Products", "Products")
+            .subtitle("Everything you need to set up your catalog and start taking payments")
+            .actions(vec![create_link(
+                "/b/products/admin/new",
+                "Create product",
+                "btn--primary",
+            )]),
+        Sections::Admin(AdminSection::Overview),
+        content,
+    )
+    .await
 }
 
 /// Render the Products Overview empty-state guidance in place of a bare,
@@ -300,9 +505,10 @@ pub async fn overview(ctx: &dyn Context, msg: &Message) -> OutputStream {
 ///     the Features section. The admin JSON create route
 ///     (`/b/products/api/admin/products`) is NOT gated by this flag, so no
 ///     CTA is withheld here — this state is purely informational.
-///   - Otherwise: an "Add your first product" CTA straight to the Manage
-///     Products page, whose "+ New Product" action opens the product
-///     wizard (the real create path, wired to that same admin route).
+///   - Otherwise: an "Add your first product" prompt whose action opens the
+///     product wizard (the real create path, wired to that same admin
+///     route). A secondary button: the topbar's "Create product" is the
+///     page's one primary action.
 fn render_overview_empty_state(products_count: i64, user_products_enabled: bool) -> maud::Markup {
     if products_count > 0 {
         return html! {};
@@ -313,7 +519,7 @@ fn render_overview_empty_state(products_count: i64, user_products_enabled: bool)
             "Add your first product",
             "Your catalog is empty. Add a product to start selling.",
             Some(html! {
-                a .btn .btn--primary .btn--md href="/b/products/admin/manage" { "+ Add product" }
+                (create_link("/b/products/admin/new", "Create your first product", "btn--secondary"))
             }),
         )
     } else {
@@ -378,140 +584,195 @@ pub async fn manage_products(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let list = match result {
         Ok(list) => list,
         Err(e) => {
-            return crud::db_error_page(msg, e, "products admin list page: product read failed")
-        }
-    };
-
-    let new_product_button = html! {
-        a .btn .btn--primary .btn--sm href="/b/products/admin/new" { "+ New Product" }
-    };
-
-    let view_tabs = html! {
-        div .products-tabs {
-            (components::tab_navigation(vec![
-                components::Tab {
-                    active: !deleted_view,
-                    href: "/b/products/admin/manage",
-                    label: "Active",
-                    icon: None,
-                },
-                components::Tab {
-                    active: deleted_view,
-                    href: "/b/products/admin/manage?view=deleted",
-                    label: "Deleted",
-                    icon: Some(icons::trash()),
-                },
-            ]))
+            return error_page(
+                ctx,
+                msg,
+                Sections::Admin(AdminSection::Products),
+                "All products",
+                e,
+                "products admin list page: product read failed",
+            )
+            .await
         }
     };
 
     let content = html! {
-        (admin_tabs("products"))
-        (components::page_header(
-            "Products",
-            Some(if deleted_view {
-                "Restore a product to bring it back into your catalog — a deleted product cannot be edited until it is restored"
-            } else {
-                "Create, publish, and share the things you sell"
-            }),
-            if deleted_view { None } else { Some(new_product_button) },
-        ))
-        (view_tabs)
-
         div .filter-bar {
-            (components::search_input("search", "Search by product name", base_href, "#products-content"))
+            (product_views("/b/products/admin/manage", deleted_view))
+            (components::search_input_with_value("search", "Search by product name", base_href, "#content", &search))
         }
 
-        div #products-content {
-                @if deleted_view {
-                    @let cols = [
-                        components::TableCol::new("Name"),
-                        components::TableCol::new("Owner"),
-                        components::TableCol::new("Currency"),
-                        components::TableCol::new("Deleted"),
-                        components::TableCol::new(""),
-                    ];
-                    @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|record| {
-                        let deleted_at = record.str_field("deleted_at");
-                        let seller_owned = record.str_field("owner_kind") == "user";
-                        // Percent-encoded, like every `encodeURIComponent`
-                        // call in this file's browser-side URLs. A
-                        // product id is not guaranteed URL-safe: the
-                        // database layer synthesizes a UUID only when the
-                        // body omits `id`, and the admin create endpoint
-                        // forwarded the body verbatim until this branch
-                        // began refusing it — so an id holding `/`, `?` or
-                        // `#` exists wherever a seeding client ever chose
-                        // its own keys. Unencoded, such an id splits the
-                        // path and the Restore button posts somewhere
-                        // that matches no route, on the only door out of
-                        // soft delete. maud escapes HTML, not URLs.
-                        let encoded_id = crate::util::url_path_encode(&record.id);
-                        let restore_url =
-                            format!("/b/products/api/admin/products/{encoded_id}/restore");
-                        // Restore is the DANGEROUS half of what an admin
-                        // can do here: it puts an active, approved product
-                        // straight back into the public catalog. Soft
-                        // delete takes nothing down in Stripe, so the row
-                        // also needs the other half — a way to shut the
-                        // product's Prices and Payment Links down without
-                        // relisting it. That is what
-                        // `ProductState::LiveOrDeleted` exists for, and
-                        // until this link nothing reached it.
-                        let close_url =
-                            format!("/b/products/admin/products/{encoded_id}/close");
-                        vec![
-                            html! { div { span .font-medium { (record.str_field("name")) } br; span .text-muted .text-sm { "Restore to edit pricing and checkout again" } } },
-                            html! { span .text-muted .text-sm { @if seller_owned { "Seller" } @else { "Your store" } } },
-                            html! { span .font-medium { (record.str_field("currency")) } },
-                            html! { span .text-muted .text-sm { (deleted_at.get(..10).unwrap_or("—")) } },
-                            html! {
-                                div .products-actions {
-                                    a .btn .btn--secondary .btn--sm href=(close_url) { "Close Stripe surface" }
-                                    button .btn .btn--secondary .btn--sm type="button"
-                                        hx-post=(restore_url)
-                                        hx-swap="none"
-                                        data-error-label="Could not restore this product"
-                                        data-reload-on-success
-                                    { "Restore" }
-                                }
-                            },
-                        ]
-                    }).collect();
-                    (components::data_table(&cols, rows, None::<fn(usize) -> Option<String>>, html! {
-                        (components::empty_state(icons::trash(), "No deleted products", "Products stay here after deletion until you restore them.", None))
-                    }))
-                } @else {
-                    @let row_hrefs: Vec<String> = list.records.iter().map(|record| format!("/b/products/admin/products/{}", crate::util::url_path_encode(&record.id))).collect();
-                    @let cols = [
-                        components::TableCol::new("Name"),
-                        components::TableCol::new("Availability"),
-                        components::TableCol::new("Owner"),
-                        components::TableCol::new("Currency"),
-                        components::TableCol::new("Updated"),
-                    ];
-                    @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|record| {
-                        let updated = record.str_field("updated_at");
-                        let seller_owned = record.str_field("owner_kind") == "user";
-                        vec![
-                            html! { div { span .font-medium { (record.str_field("name")) } br; span .text-muted .text-sm { "Open to edit pricing and checkout" } } },
-                            html! { div .products-status-stack { (components::status_badge(record.str_field("status"))) @if seller_owned { (components::status_badge(record.str_field("approval_status"))) } } },
-                            html! { span .text-muted .text-sm { @if seller_owned { "Seller" } @else { "Your store" } } },
-                            html! { span .font-medium { (record.str_field("currency")) } },
-                            html! { span .text-muted .text-sm { (updated.get(..10).unwrap_or("—")) } },
-                        ]
-                    }).collect();
-                    (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), html! {
-                        (components::empty_state(icons::package(), "No products found", "Try a different search, or create your first product.", Some(html! {
-                            a .btn .btn--primary .btn--sm href="/b/products/admin/new" { "+ Create product" }
-                        })))
-                    }))
-                }
-                @if let Some(per_page) = std::num::NonZeroU32::new(page_size as u32) { (components::pagination(list.page as u32, per_page, list.total_count as u32, base_href)) }
+        @if deleted_view {
+            @let cols = [
+                components::TableCol::new("Name").primary(),
+                components::TableCol::new("Owner"),
+                components::TableCol::new("Currency"),
+                components::TableCol::new("Deleted"),
+                components::TableCol::new("Actions").actions(),
+            ];
+            @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|record| {
+                let seller_owned = record.str_field("owner_kind") == "user";
+                // Percent-encoded, like every `encodeURIComponent`
+                // call in this file's browser-side URLs. A
+                // product id is not guaranteed URL-safe: the
+                // database layer synthesizes a UUID only when the
+                // body omits `id`, and the admin create endpoint
+                // forwarded the body verbatim until this branch
+                // began refusing it — so an id holding `/`, `?` or
+                // `#` exists wherever a seeding client ever chose
+                // its own keys. Unencoded, such an id splits the
+                // path and the Restore button posts somewhere
+                // that matches no route, on the only door out of
+                // soft delete. maud escapes HTML, not URLs.
+                let encoded_id = crate::util::url_path_encode(&record.id);
+                let restore_url =
+                    format!("/b/products/api/admin/products/{encoded_id}/restore");
+                // Restore is the DANGEROUS half of what an admin
+                // can do here: it puts an active, approved product
+                // straight back into the public catalog. Soft
+                // delete takes nothing down in Stripe, so the row
+                // also needs the other half — a way to shut the
+                // product's Prices and Payment Links down without
+                // relisting it. That is what
+                // `ProductState::LiveOrDeleted` exists for, and
+                // until this link nothing reached it.
+                let close_url =
+                    format!("/b/products/admin/products/{encoded_id}/close");
+                vec![
+                    html! { (record.str_field("name")) },
+                    html! { span .text-muted .text-sm { @if seller_owned { "Seller" } @else { "Your store" } } },
+                    html! { (record.str_field("currency")) },
+                    components::timestamp(record.str_field("deleted_at")),
+                    deleted_row_actions(&close_url, &restore_url),
+                ]
+            }).collect();
+            (components::data_table(&cols, rows, None::<fn(usize) -> Option<String>>, html! {
+                (product_list_empty(&search, true, "/b/products/admin/new"))
+            }))
+        } @else {
+            @let row_hrefs: Vec<String> = list.records.iter().map(|record| format!("/b/products/admin/products/{}", crate::util::url_path_encode(&record.id))).collect();
+            @let cols = [
+                components::TableCol::new("Name").primary(),
+                components::TableCol::new("Availability"),
+                components::TableCol::new("Owner"),
+                components::TableCol::new("Currency"),
+                components::TableCol::new("Updated"),
+            ];
+            @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|record| {
+                let seller_owned = record.str_field("owner_kind") == "user";
+                vec![
+                    html! { (record.str_field("name")) },
+                    html! { div .products-status-stack { (components::status_badge(record.str_field("status"))) @if seller_owned { (components::status_badge(record.str_field("approval_status"))) } } },
+                    html! { span .text-muted .text-sm { @if seller_owned { "Seller" } @else { "Your store" } } },
+                    html! { (record.str_field("currency")) },
+                    components::timestamp(record.str_field("updated_at")),
+                ]
+            }).collect();
+            (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), html! {
+                (product_list_empty(&search, false, "/b/products/admin/new"))
+            }))
         }
+        @if let Some(per_page) = std::num::NonZeroU32::new(page_size as u32) { (components::pagination(list.page as u32, per_page, list.total_count as u32, &with_search(base_href, &search))) }
     };
 
-    ui::shell_page(ctx, msg, ui::Shell::admin("Products", "Products"), content).await
+    let mut shell = ui::Shell::admin("All products", "All products").subtitle(if deleted_view {
+        "Restore a product to bring it back into your catalog — a deleted product cannot be edited until it is restored"
+    } else {
+        "Create, publish, and share the things you sell"
+    });
+    if !deleted_view {
+        shell = shell.actions(vec![create_link(
+            "/b/products/admin/new",
+            "New product",
+            "btn--primary",
+        )]);
+    }
+    products_page(
+        ctx,
+        msg,
+        shell,
+        Sections::Admin(AdminSection::Products),
+        content,
+    )
+    .await
+}
+
+/// `href` with the list's `search` term carried along, so paging a search
+/// result does not silently drop the search.
+fn with_search(href: &str, search: &str) -> String {
+    if search.is_empty() {
+        return href.to_string();
+    }
+    let join = if href.contains('?') { '&' } else { '?' };
+    format!("{href}{join}search={}", crate::util::urlencode(search))
+}
+
+/// The Active / Deleted views of a product list (`base` is the list's own
+/// path), as filter chips: views of one list, not sections of the block.
+fn product_views(base: &str, deleted_view: bool) -> Markup {
+    let deleted = format!("{base}?view=deleted");
+    components::filter_chips(
+        "Product views",
+        vec![
+            components::Tab {
+                active: !deleted_view,
+                href: base,
+                label: "Active",
+                icon: None,
+            },
+            components::Tab {
+                active: deleted_view,
+                href: &deleted,
+                label: "Deleted",
+                icon: Some(icons::trash()),
+            },
+        ],
+    )
+}
+
+/// A deleted product row's two ways out: close its Stripe surface, or
+/// restore it.
+fn deleted_row_actions(close_url: &str, restore_url: &str) -> Markup {
+    html! {
+        div .products-actions {
+            a .btn .btn--secondary .btn--sm href=(close_url) { "Close Stripe surface" }
+            button .btn .btn--secondary .btn--sm type="button"
+                hx-post=(restore_url)
+                hx-swap="none"
+                data-error-label="Could not restore this product"
+                data-reload-on-success
+            { "Restore" }
+        }
+    }
+}
+
+/// What an empty product list says: a search that matched nothing says so
+/// (and nothing else), an empty Deleted view says what it is for, and an
+/// empty catalog points at the wizard — as a secondary action, since the
+/// topbar already holds the page's primary one.
+fn product_list_empty(search: &str, deleted_view: bool, new_href: &str) -> Markup {
+    if !search.is_empty() {
+        return components::empty_state(
+            icons::search(),
+            "No products match your search",
+            "Try a different name, or clear the search.",
+            None,
+        );
+    }
+    if deleted_view {
+        return components::empty_state(
+            icons::trash(),
+            "No deleted products",
+            "Products stay here after deletion until you restore them.",
+            None,
+        );
+    }
+    components::empty_state(
+        icons::package(),
+        "No products yet",
+        "Create your first product with the product wizard.",
+        Some(create_link(new_href, "Create product", "btn--secondary")),
+    )
 }
 
 /// Close-only manager for a soft-deleted product: archive its offers,
@@ -562,11 +823,19 @@ pub async fn deleted_product_close(
     let product = match repo::products::get_deleted(ctx, product_id).await {
         Ok(product) => product,
         Err(error) => {
-            return crate::blocks::crud::db_error(
+            return record_error_page(
+                ctx,
+                msg,
+                if admin {
+                    Sections::Admin(AdminSection::Products)
+                } else {
+                    Sections::Portal(PortalSection::SellerProducts, true)
+                },
+                "Product",
                 error,
-                "Product not found",
-                "Could not load product",
+                "products page: product read failed",
             )
+            .await
         }
     };
     if !admin && !super::handlers::is_owned_by(&product, msg.user_id()) {
@@ -574,11 +843,25 @@ pub async fn deleted_product_close(
         // seller API route use — and the ENTIRE authorization boundary on the
         // owner form, since its declared tier only says "logged in". 404
         // rather than 403: a non-owner must not learn the product exists.
-        return crate::http::err_not_found("Product not found");
+        return ui::not_found_response(msg);
     }
     let offers = match repo::offers::list_for_product(ctx, product_id).await {
         Ok(offers) => offers,
-        Err(error) => return crud::db_error_internal(error, "Could not load product pricing"),
+        Err(error) => {
+            return error_page(
+                ctx,
+                msg,
+                if admin {
+                    Sections::Admin(AdminSection::Products)
+                } else {
+                    Sections::Portal(PortalSection::SellerProducts, true)
+                },
+                "Product",
+                error,
+                "Could not load product pricing",
+            )
+            .await
+        }
     };
     // One listing per offer rather than a join: `list_links` is the same read
     // the API exposes, and there are as many of them as the offer list the
@@ -587,7 +870,21 @@ pub async fn deleted_product_close(
     for offer in &offers {
         match repo::payment_links::list_for_offer(ctx, &offer.offer.id).await {
             Ok(list) => links.push(list),
-            Err(error) => return crud::db_error_internal(error, "Could not load payment links"),
+            Err(error) => {
+                return error_page(
+                    ctx,
+                    msg,
+                    if admin {
+                        Sections::Admin(AdminSection::Products)
+                    } else {
+                        Sections::Portal(PortalSection::SellerProducts, true)
+                    },
+                    "Product",
+                    error,
+                    "Could not load payment links",
+                )
+                .await
+            }
         }
     }
 
@@ -606,24 +903,25 @@ pub async fn deleted_product_close(
         && match super::handlers::user_products_enabled(ctx).await {
             Ok(value) => value,
             Err(e) => {
-                return crud::db_error_page(msg, e, "products page: seller switch read failed")
+                return error_page(
+                    ctx,
+                    msg,
+                    if admin {
+                        Sections::Admin(AdminSection::Products)
+                    } else {
+                        Sections::Portal(PortalSection::SellerProducts, true)
+                    },
+                    "Product",
+                    e,
+                    "products page: seller switch read failed",
+                )
+                .await
             }
         };
     let deleted_at = product.str_field("deleted_at");
     let content = html! {
-        @if admin {
-            (admin_tabs("products"))
-        } @else {
-            (portal_tabs("selling", seller_enabled))
-            (seller_page_links("products"))
-        }
-        (components::page_header(
-            product.str_field("name"),
-            Some("This product is deleted. Archive its offers and deactivate its payment links so it stops taking money — deleting a product does none of that in Stripe."),
-            Some(html! { a .btn .btn--secondary .btn--sm href=(deleted_href) { "Back to deleted products" } }),
-        ))
         p .text-muted .text-sm {
-            "Deleted " (deleted_at.get(..10).unwrap_or("—"))
+            "Deleted " (components::timestamp(deleted_at))
             ". Restoring it is on the Deleted tab — a restored product returns to your catalog immediately, so close anything that should stop selling first."
         }
         p #close-manager-error .login-error role="alert" aria-live="assertive" hidden {}
@@ -686,12 +984,26 @@ pub async fn deleted_product_close(
         }
     };
 
-    let shell = if admin {
-        ui::Shell::admin("Products", "Products")
+    let sections = if admin {
+        Sections::Admin(AdminSection::Products)
     } else {
-        ui::Shell::portal("My Products", "My Products")
+        Sections::Portal(PortalSection::SellerProducts, seller_enabled)
     };
-    ui::shell_page(ctx, msg, shell, content).await
+    let name = product.str_field("name");
+    let shell = sections
+        .shell(name)
+        .trail(vec![
+            ui::shell::Crumb {
+                label: "Deleted products",
+                href: Some(deleted_href),
+            },
+            ui::shell::Crumb {
+                label: name,
+                href: None,
+            },
+        ])
+        .subtitle("Archive its offers and deactivate its payment links so it stops taking money — deleting a product does none of that in Stripe");
+    products_page(ctx, msg, shell, sections, content).await
 }
 
 // ---------------------------------------------------------------------------
@@ -701,12 +1013,32 @@ pub async fn deleted_product_close(
 pub async fn admin_sellers(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let sellers = match repo::seller_accounts::list_rows(ctx).await {
         Ok(sellers) => sellers,
-        Err(error) => return crud::db_error_internal(error, "Could not list sellers"),
+        Err(error) => {
+            return error_page(
+                ctx,
+                msg,
+                Sections::Admin(AdminSection::Sellers),
+                "Sellers",
+                error,
+                "Could not list sellers",
+            )
+            .await
+        }
     };
     let seller_total = if sellers.truncated {
         match repo::seller_accounts::count_all(ctx).await {
             Ok(total) => total,
-            Err(error) => return crud::db_error_internal(error, "Could not count sellers"),
+            Err(error) => {
+                return error_page(
+                    ctx,
+                    msg,
+                    Sections::Admin(AdminSection::Sellers),
+                    "Sellers",
+                    error,
+                    "Could not count sellers",
+                )
+                .await
+            }
         }
     } else {
         sellers.rows.len() as i64
@@ -716,7 +1048,17 @@ pub async fn admin_sellers(ctx: &dyn Context, msg: &Message) -> OutputStream {
     // bound.
     let product_counts = match repo::products::live_counts_by_owner(ctx, "user").await {
         Ok(counts) => counts,
-        Err(error) => return crud::db_error_internal(error, "Could not count seller products"),
+        Err(error) => {
+            return error_page(
+                ctx,
+                msg,
+                Sections::Admin(AdminSection::Sellers),
+                "Sellers",
+                error,
+                "Could not count seller products",
+            )
+            .await
+        }
     };
     // The queue's predicate goes into the query for the same reason. The
     // total comes from a COUNT so the heading states how many listings are
@@ -724,21 +1066,47 @@ pub async fn admin_sellers(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let pending_total = match repo::products::count_pending_review(ctx).await {
         Ok(total) => total,
         Err(error) => {
-            return crud::db_error_internal(error, "Could not count the moderation queue")
+            return error_page(
+                ctx,
+                msg,
+                Sections::Admin(AdminSection::Sellers),
+                "Sellers",
+                error,
+                "Could not count the moderation queue",
+            )
+            .await
         }
     };
     let pending = match repo::products::list_pending_review(ctx).await {
         Ok(pending) => pending,
-        Err(error) => return crud::db_error_internal(error, "Could not list seller products"),
+        Err(error) => {
+            return error_page(
+                ctx,
+                msg,
+                Sections::Admin(AdminSection::Sellers),
+                "Sellers",
+                error,
+                "Could not list seller products",
+            )
+            .await
+        }
     };
     let selling_enabled = match super::handlers::user_products_enabled(ctx).await {
         Ok(value) => value,
-        Err(e) => return crud::db_error_page(msg, e, "products page: seller switch read failed"),
+        Err(e) => {
+            return error_page(
+                ctx,
+                msg,
+                Sections::Admin(AdminSection::Sellers),
+                "Sellers",
+                e,
+                "products page: seller switch read failed",
+            )
+            .await
+        }
     };
 
     let content = html! {
-        (admin_tabs("sellers"))
-        (components::page_header("Sellers", Some("Approve listings and help sellers get ready to take payments"), None))
         @if !selling_enabled {
             (components::callout(
                 components::CalloutTone::Info,
@@ -748,50 +1116,46 @@ pub async fn admin_sellers(ctx: &dyn Context, msg: &Message) -> OutputStream {
             ))
         }
         section .products-section {
-            div .products-section__head {
-                div {
-                    h2 { "Moderation queue" }
-                    p .text-muted .text-sm {
-                        (pending_total) " listing(s) waiting for a decision."
-                        @if pending.truncated { " Showing the first " (pending.rows.len()) "." }
-                    }
+            (components::section_header("Moderation queue", None))
+            p .section-desc {
+                @if pending_total == 0 {
+                    "No listings are waiting for a decision."
+                } @else {
+                    (count_noun(pending_total, "listing")) " waiting for a decision."
                 }
+                @if pending.truncated { " Showing the first " (pending.rows.len()) "." }
             }
             @if pending.rows.is_empty() {
                 (components::empty_state(icons::info(), "Queue clear", "No seller listings are waiting for review.", None))
             } @else {
                 @let row_hrefs: Vec<String> = pending.rows.iter().map(|product| format!("/b/products/admin/products/{}", crate::util::url_path_encode(&product.id))).collect();
                 @let cols = [
-                    components::TableCol::new("Product"),
+                    components::TableCol::new("Product").primary(),
                     components::TableCol::new("Seller"),
                     components::TableCol::new("Submitted"),
                     components::TableCol::new("Status"),
                 ];
                 @let rows: Vec<Vec<Markup>> = pending.rows.iter().map(|product| vec![
-                    html! { span .font-medium { (product.str_field("name")) } },
+                    html! { (product.str_field("name")) },
                     html! { span .text-muted .text-sm { (product.str_field("owner_id")) } },
-                    html! { span .text-muted .text-sm { (product.str_field("submitted_at").get(..10).unwrap_or("—")) } },
+                    components::timestamp(product.str_field("submitted_at")),
                     components::status_badge("pending review"),
                 ]).collect();
                 (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), html! {}))
             }
         }
         section .products-section {
-            div .products-section__head {
-                div {
-                    h2 { "Seller accounts" }
-                    p .text-muted .text-sm {
-                        "Open a seller to review payment readiness and their products."
-                        @if sellers.truncated { " Showing the first " (sellers.rows.len()) " of " (seller_total) "." }
-                    }
-                }
+            (components::section_header("Seller accounts", None))
+            p .section-desc {
+                "Open a seller to review payment readiness and their products."
+                @if sellers.truncated { " Showing the first " (sellers.rows.len()) " of " (seller_total) "." }
             }
             @if sellers.rows.is_empty() {
                 (components::empty_state(icons::link(), "No sellers yet", "Seller accounts appear here after a user starts Stripe onboarding.", None))
             } @else {
                 @let row_hrefs: Vec<String> = sellers.rows.iter().map(|seller| format!("/b/products/admin/sellers/{}", seller.id)).collect();
                 @let cols = [
-                    components::TableCol::new("Seller"),
+                    components::TableCol::new("Seller").primary(),
                     components::TableCol::new("Selling"),
                     components::TableCol::new("Payments"),
                     components::TableCol::new("Payouts"),
@@ -799,7 +1163,7 @@ pub async fn admin_sellers(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     components::TableCol::new("Needs action"),
                 ];
                 @let rows: Vec<Vec<Markup>> = sellers.rows.iter().map(|seller| vec![
-                    html! { span .font-medium { (&seller.user_id) } },
+                    html! { (&seller.user_id) },
                     components::status_badge(&commerce_wire(&seller.status)),
                     components::status_badge(if seller.capabilities.charges_enabled { "enabled" } else { "disabled" }),
                     components::status_badge(if seller.capabilities.payouts_enabled { "enabled" } else { "disabled" }),
@@ -810,7 +1174,15 @@ pub async fn admin_sellers(ctx: &dyn Context, msg: &Message) -> OutputStream {
             }
         }
     };
-    ui::shell_page(ctx, msg, ui::Shell::admin("Sellers", "Products"), content).await
+    products_page(
+        ctx,
+        msg,
+        ui::Shell::admin("Sellers", "Sellers")
+            .subtitle("Approve listings and help sellers get ready to take payments"),
+        Sections::Admin(AdminSection::Sellers),
+        content,
+    )
+    .await
 }
 
 pub async fn admin_seller_detail(
@@ -826,12 +1198,32 @@ pub async fn admin_seller_detail(
     });
     let seller = match repo::seller_accounts::get_row(ctx, seller_id).await {
         Ok(Some(seller)) => seller,
-        Ok(None) => return crate::http::err_not_found("Seller not found"),
-        Err(error) => return crud::db_error_internal(error, "Could not load seller"),
+        Ok(None) => return ui::not_found_response(msg),
+        Err(error) => {
+            return error_page(
+                ctx,
+                msg,
+                Sections::Admin(AdminSection::Sellers),
+                "Seller",
+                error,
+                "Could not load seller",
+            )
+            .await
+        }
     };
     let products = match repo::products::list_owned_by(ctx, &seller.user_id).await {
         Ok(products) => products,
-        Err(error) => return crud::db_error_internal(error, "Could not list seller products"),
+        Err(error) => {
+            return error_page(
+                ctx,
+                msg,
+                Sections::Admin(AdminSection::Sellers),
+                "Seller",
+                error,
+                "Could not list seller products",
+            )
+            .await
+        }
     };
     let suspended = seller.status == SellerStatus::Suspended;
     let action = if suspended { "reactivate" } else { "suspend" };
@@ -850,12 +1242,6 @@ pub async fn admin_seller_detail(
         "action": action,
     }));
     let content = html! {
-        (admin_tabs("sellers"))
-        (components::page_header(
-            &seller.user_id,
-            Some("Review payment readiness, outstanding steps, and seller listings"),
-            Some(html! { a .btn .btn--secondary .btn--sm href="/b/products/admin/sellers" { "Back to sellers" } }),
-        ))
         p #seller-admin-error .login-error role="alert" aria-live="assertive" hidden {}
         section .card {
             header .card__head {
@@ -884,7 +1270,7 @@ pub async fn admin_seller_detail(
                     }
                 }
                 @if !seller.sync_error.is_empty() { p .login-error { "Stripe connection: " (&seller.sync_error) } }
-                h4 { "What this seller still needs to do" }
+                h3 .products-subheading { "What this seller still needs to do" }
                 @if seller.capabilities.requirements_due.is_empty() {
                     p .text-muted .text-sm { "Nothing — Stripe has no outstanding requirements." }
                 } @else {
@@ -893,25 +1279,25 @@ pub async fn admin_seller_detail(
             }
         }
         section .products-section {
-            h2 { "Owned products" }
+            (components::section_header("Owned products", None))
             @if products.truncated {
-                p .text-muted .text-sm { "Showing the first " (products.rows.len()) " of this seller's live products." }
+                p .section-desc { "Showing the first " (products.rows.len()) " of this seller's live products." }
             }
             @if products.rows.is_empty() {
                 (components::empty_state(icons::package(), "No products", "This seller has not created any products.", None))
             } @else {
                 @let row_hrefs: Vec<String> = products.rows.iter().map(|product| format!("/b/products/admin/products/{}", crate::util::url_path_encode(&product.id))).collect();
                 @let cols = [
-                    components::TableCol::new("Product"),
+                    components::TableCol::new("Product").primary(),
                     components::TableCol::new("Status"),
                     components::TableCol::new("Approval"),
                     components::TableCol::new("Updated"),
                 ];
                 @let rows: Vec<Vec<Markup>> = products.rows.iter().map(|product| vec![
-                    html! { span .font-medium { (product.str_field("name")) } },
+                    html! { (product.str_field("name")) },
                     components::status_badge(product.str_field("status")),
                     components::status_badge(product.str_field("approval_status")),
-                    html! { span .text-muted .text-sm { (product.str_field("updated_at").get(..10).unwrap_or("—")) } },
+                    components::timestamp(product.str_field("updated_at")),
                 ]).collect();
                 (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), html! {}))
             }
@@ -919,7 +1305,25 @@ pub async fn admin_seller_detail(
         script { (maud::PreEscaped(format!("window.__sellerAdminConfig={config};"))) }
         script src=(assets::seller_admin_js_url()) {}
     };
-    ui::shell_page(ctx, msg, ui::Shell::admin("Seller", "Products"), content).await
+    products_page(
+        ctx,
+        msg,
+        ui::Shell::admin(&seller.user_id, &seller.user_id)
+            .trail(vec![
+                ui::shell::Crumb {
+                    label: "Sellers",
+                    href: Some("/b/products/admin/sellers"),
+                },
+                ui::shell::Crumb {
+                    label: &seller.user_id,
+                    href: None,
+                },
+            ])
+            .subtitle("Review payment readiness, outstanding steps, and seller listings"),
+        Sections::Admin(AdminSection::Sellers),
+        content,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -931,7 +1335,19 @@ pub async fn product_wizard(ctx: &dyn Context, msg: &Message, admin: bool) -> Ou
         match wafer_core::clients::config::get_default(ctx, DEFAULT_CURRENCY, "USD").await {
             Ok(currency) => currency,
             Err(e) => {
-                return crud::db_error_page(msg, e, "product wizard: default currency read failed")
+                return error_page(
+                    ctx,
+                    msg,
+                    if admin {
+                        Sections::Admin(AdminSection::Products)
+                    } else {
+                        Sections::Portal(PortalSection::SellerProducts, true)
+                    },
+                    "Create product",
+                    e,
+                    "product wizard: default currency read failed",
+                )
+                .await
             }
         };
     let mut default_currency = super::money::normalize_currency(&configured_currency)
@@ -964,7 +1380,19 @@ pub async fn product_wizard(ctx: &dyn Context, msg: &Message, admin: bool) -> Ou
         match super::handlers::seller_policy::allowed_templates(ctx).await {
             Ok(templates) => templates,
             Err(e) => {
-                return crud::db_error_page(msg, e, "product wizard: seller policy read failed")
+                return error_page(
+                    ctx,
+                    msg,
+                    if admin {
+                        Sections::Admin(AdminSection::Products)
+                    } else {
+                        Sections::Portal(PortalSection::SellerProducts, true)
+                    },
+                    "Create product",
+                    e,
+                    "product wizard: seller policy read failed",
+                )
+                .await
             }
         }
     };
@@ -982,7 +1410,19 @@ pub async fn product_wizard(ctx: &dyn Context, msg: &Message, admin: bool) -> Ou
         match super::handlers::seller_policy::allowed_currencies(ctx).await {
             Ok(currencies) => currencies.into_iter().collect::<Vec<_>>(),
             Err(e) => {
-                return crud::db_error_page(msg, e, "product wizard: seller policy read failed")
+                return error_page(
+                    ctx,
+                    msg,
+                    if admin {
+                        Sections::Admin(AdminSection::Products)
+                    } else {
+                        Sections::Portal(PortalSection::SellerProducts, true)
+                    },
+                    "Create product",
+                    e,
+                    "product wizard: seller policy read failed",
+                )
+                .await
             }
         }
     };
@@ -992,7 +1432,21 @@ pub async fn product_wizard(ctx: &dyn Context, msg: &Message, admin: bool) -> Ou
     }
     let automatic_tax = match super::stripe::automatic_tax_enabled(ctx).await {
         Ok(enabled) => enabled,
-        Err(e) => return crud::db_error_page(msg, e, "product wizard: automatic tax read failed"),
+        Err(e) => {
+            return error_page(
+                ctx,
+                msg,
+                if admin {
+                    Sections::Admin(AdminSection::Products)
+                } else {
+                    Sections::Portal(PortalSection::SellerProducts, true)
+                },
+                "Create product",
+                e,
+                "product wizard: automatic tax read failed",
+            )
+            .await
+        }
     };
     // Blank when no platform country is configured: the field's placeholder
     // then asks for the list, which is the honest prompt. It used to prefill
@@ -1009,24 +1463,7 @@ pub async fn product_wizard(ctx: &dyn Context, msg: &Message, admin: bool) -> Ou
         "/b/products/my-products"
     };
     let content = html! {
-        @if admin { (admin_tabs("products")) } @else { (portal_tabs("products", true)) }
-        (components::page_header(
-            "Create product",
-            Some("Choose a starting point, add the essentials, and publish when you are ready"),
-            Some(html! { a .btn .btn--secondary .btn--sm href=(back_href) { "Cancel" } }),
-        ))
-        nav .product-wizard-progress aria-label="Product setup progress" {
-            ol {
-                @for (number, label) in [(1, "Type"), (2, "Basics"), (3, "Price"), (4, "Checkout"), (5, "Publish")] {
-                    li data-wizard-indicator=(number) .badge .(if number == 1 { "badge-primary" } else { "badge-secondary" }) .badge--center {
-                        // Completed steps get a check icon (revealed by the
-                        // wizard JS) so state is not conveyed by color alone.
-                        span .wizard-step-check aria-hidden="true" hidden { (icons::check()) }
-                        (number) ". " (label)
-                    }
-                }
-            }
-        }
+        (wizard_progress())
         form #product-wizard-form novalidate {
             p #product-wizard-error .text-sm role="alert" aria-live="assertive" hidden .text-danger .mt-0 {}
 
@@ -1163,20 +1600,20 @@ pub async fn product_wizard(ctx: &dyn Context, msg: &Message, admin: bool) -> Ou
                         section .mt-4 {
                             div .flex .items-center .justify-between .gap-4 {
                                 div {
-                                    h4 .m-0 { "Customer fields" }
+                                    h3 .products-subheading .m-0 { "Customer fields" }
                                     p .text-muted .text-sm { "Collect dates, quantities, choices, toggles, and notes from the customer." }
                                 }
-                                button .btn .btn--secondary .btn--sm type="button" data-action="pw-add-variable" { "+ Add input" }
+                                button .btn .btn--secondary .btn--sm type="button" data-action="pw-add-variable" { (icons::plus()) " Add input" }
                             }
                             div #wizard-variables {}
                         }
                         section .products-section {
                             div .flex .items-center .justify-between .gap-4 {
                                 div {
-                                    h4 .m-0 { "Itemized price rows" }
+                                    h3 .products-subheading .m-0 { "Itemized price rows" }
                                     p .text-muted .text-sm { "Build the total from clear rows such as base booking, nights, guests, and add-ons." }
                                 }
-                                button .btn .btn--secondary .btn--sm type="button" data-action="pw-add-component" { "+ Add row" }
+                                button .btn .btn--secondary .btn--sm type="button" data-action="pw-add-component" { (icons::plus()) " Add row" }
                             }
                             div #wizard-components {}
                         }
@@ -1211,7 +1648,7 @@ pub async fn product_wizard(ctx: &dyn Context, msg: &Message, admin: bool) -> Ou
                     }
                     div #wizard-shipping-settings .card hidden .mt-4 {
                         div .card__body {
-                            h4 .mt-0 { "Shipping destinations and rates" }
+                            h3 .products-subheading .mt-0 { "Shipping destinations and rates" }
                             div .grid .grid-shipping .gap-4 {
                                 div .form-group {
                                     label .form-label for="wizard-shipping-countries" { "Allowed countries" }
@@ -1261,17 +1698,53 @@ pub async fn product_wizard(ctx: &dyn Context, msg: &Message, admin: bool) -> Ou
         script { (maud::PreEscaped(product_wizard_bootstrap(admin))) }
         script src=(assets::wizard_js_url()) {}
     };
-    ui::shell_page(
-        ctx,
-        msg,
-        if admin {
-            ui::Shell::admin("Create product", "Products")
-        } else {
-            ui::Shell::portal("Create product", "Products")
-        },
-        content,
-    )
-    .await
+    let sections = if admin {
+        Sections::Admin(AdminSection::Products)
+    } else {
+        Sections::Portal(PortalSection::SellerProducts, true)
+    };
+    let shell = sections
+        .shell("Create product")
+        .trail(vec![
+            ui::shell::Crumb {
+                label: if admin { "All products" } else { "My products" },
+                href: Some(back_href),
+            },
+            ui::shell::Crumb {
+                label: "Create product",
+                href: None,
+            },
+        ])
+        .subtitle("Choose a starting point, add the essentials, and publish when you are ready")
+        .actions(vec![
+            html! { a .btn .btn--secondary .btn--sm href=(back_href) { "Cancel" } },
+        ]);
+    products_page(ctx, msg, shell, sections, content).await
+}
+
+/// The wizard's five steps, as an ordered list. The current step carries
+/// `aria-current="step"` and the brand pill; a finished one a check mark and
+/// the success pill; so the state is never colour alone. `products-wizard.js`
+/// moves all three as the user steps through. Below 560px only the current
+/// step shows its name — the others keep theirs for screen readers — so the
+/// five pills fit one row on a phone.
+fn wizard_progress() -> Markup {
+    html! {
+        nav .product-wizard-progress aria-label="Product setup progress" {
+            ol {
+                @for (number, label) in [(1, "Type"), (2, "Basics"), (3, "Price"), (4, "Checkout"), (5, "Publish")] {
+                    li data-wizard-indicator=(number)
+                        .badge .(if number == 1 { "badge-primary" } else { "badge-secondary" }) .badge--center
+                        aria-current=[(number == 1).then_some("step")]
+                    {
+                        span .wizard-step-check aria-hidden="true" hidden { (icons::check()) }
+                        span .wizard-step__number { (number) }
+                        span .wizard-step__label { (label) }
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn product_wizard_bootstrap(admin: bool) -> String {
@@ -1491,7 +1964,7 @@ fn render_managed_offer(managed: &ManagedOffer, product_api_url: &str) -> Markup
                     div .flex .items-center .gap-2 .flex-wrap {
                         h2 .card__title { (offer.name) }
                         (components::status_badge(&status))
-                        span .badge .badge-secondary { "v" (offer.version) }
+                        (components::badge(components::BadgeVariant::Secondary, &format!("v{}", offer.version)))
                     }
                     p .text-muted .text-sm .text-subtitle {
                         (charge_label) " · " (pricing_label) " pricing · " (offer.currency)
@@ -1504,8 +1977,7 @@ fn render_managed_offer(managed: &ManagedOffer, product_api_url: &str) -> Markup
                 }
                 div .products-actions {
                     @if managed.status == OfferStatus::Draft {
-                        button .btn .btn--primary .btn--sm type="button" data-action="pm-open-visual-editor" { "Edit visually" }
-                        button .btn .btn--primary .btn--sm type="button" data-action="pm-offer-action" data-offer-op="publish" { "Publish" }
+                        button .btn .btn--secondary .btn--sm type="button" data-action="pm-open-visual-editor" { "Edit visually" }
                     }
                     @if managed.status == OfferStatus::Active {
                         button .btn .btn--secondary .btn--sm type="button" data-action="pm-offer-action" data-offer-op="sync" {
@@ -1522,6 +1994,10 @@ fn render_managed_offer(managed: &ManagedOffer, product_api_url: &str) -> Markup
                     @if managed.status != OfferStatus::Archived {
                         button .btn .btn--secondary .btn--sm type="button" data-action="pm-offer-action" data-offer-op="archive" { "Archive" }
                     }
+                    // The offer's one primary action, last.
+                    @if managed.status == OfferStatus::Draft {
+                        button .btn .btn--primary .btn--sm type="button" data-action="pm-offer-action" data-offer-op="publish" { "Publish" }
+                    }
                 }
             }
             div .card__body {
@@ -1533,9 +2009,9 @@ fn render_managed_offer(managed: &ManagedOffer, product_api_url: &str) -> Markup
                     details .products-advanced {
                         summary { "Preview a customer price" }
                         div .products-advanced__body {
-                            div .products-section__head {
+                            div .flex .items-center .justify-between .gap-4 .flex-wrap {
                                 div {
-                                    h4 { "Test checkout price" }
+                                    h3 .products-subheading { "Test checkout price" }
                                     p .text-muted .text-sm { "Enter a typical order to confirm the amount customers will see." }
                                 }
                                 button .btn .btn--secondary .btn--sm type="button" data-action="pm-preview" { "Calculate preview" }
@@ -1553,7 +2029,7 @@ fn render_managed_offer(managed: &ManagedOffer, product_api_url: &str) -> Markup
                 }
                 div .grid .grid-auto-220 .gap-4 {
                     div {
-                        h4 .my-1 { "Customer fields" }
+                        h3 .products-subheading .my-1 { "Customer fields" }
                         @if offer.variables.is_empty() {
                             p .text-muted .text-sm { "No customer fields" }
                         } @else {
@@ -1565,7 +2041,7 @@ fn render_managed_offer(managed: &ManagedOffer, product_api_url: &str) -> Markup
                         }
                     }
                     div {
-                        h4 .my-1 { "Itemized price rows" }
+                        h3 .products-subheading .my-1 { "Itemized price rows" }
                         ul .list-compact {
                             @for component in &offer.components {
                                 li { strong { (component.label) } ": " (amount_rule_summary(&component.amount, &offer.currency)) }
@@ -1573,7 +2049,7 @@ fn render_managed_offer(managed: &ManagedOffer, product_api_url: &str) -> Markup
                         }
                     }
                     div {
-                        h4 .my-1 { "Checkout" }
+                        h3 .products-subheading .my-1 { "Checkout" }
                         p .text-muted .text-sm {
                             (offer.components.len()) " row(s), " (offer.variables.len()) " input(s)"
                             @if let Some(minimum) = offer.checkout.minimum_total_minor { ", minimum " (display_money(minimum, &offer.currency)) }
@@ -1588,43 +2064,43 @@ fn render_managed_offer(managed: &ManagedOffer, product_api_url: &str) -> Markup
                     details .mt-4 {
                         summary .summary-strong { "Advanced draft definition" }
                         p .text-muted .text-sm { "Edit the complete typed offer JSON. Published offers are immutable; duplicate one to create an editable draft." }
-                        textarea .form-textarea data-offer-definition rows="18" spellcheck="false" { (definition) }
-                        button .btn .btn--primary .btn--sm type="button" .mt-3 data-action="pm-save-offer" { "Save draft definition" }
+                        textarea .form-textarea aria-label="Offer definition (JSON)" data-offer-definition rows="18" spellcheck="false" { (definition) }
+                        button .btn .btn--secondary .btn--sm type="button" .mt-3 data-action="pm-save-offer" { "Save draft definition" }
                     }
                 }
                 @if managed.status == OfferStatus::Active {
                     section .details-block--divider {
-                        h4 .m-0 { "Shareable Stripe Payment Links" }
+                        h3 .products-subheading .m-0 { "Shareable Stripe Payment Links" }
                         p .text-muted .text-sm { "Create a hosted checkout link you can paste into an email, button, or social post. Products with choices save those choices as a reusable preset." }
                         @if !offer.variables.is_empty() {
                             div .grid .grid-auto-260 .gap-4 {
                                 div .form-group {
-                                    label .form-label { "Preset name" }
-                                    input .form-input data-preset-name type="text" value=(format!("{} share link", offer.name));
+                                    label .form-label for=(format!("preset-{}-name", offer.id)) { "Preset name" }
+                                    input .form-input id=(format!("preset-{}-name", offer.id)) data-preset-name type="text" value=(format!("{} share link", offer.name));
                                 }
                                 div .form-group {
-                                    label .form-label { "Preset slug (optional)" }
-                                    input .form-input data-preset-slug type="text" pattern="[a-z0-9]+(?:-[a-z0-9]+)*" placeholder="team-five";
+                                    label .form-label for=(format!("preset-{}-slug", offer.id)) { "Preset slug (optional)" }
+                                    input .form-input id=(format!("preset-{}-slug", offer.id)) data-preset-slug type="text" pattern="[a-z0-9]+(?:-[a-z0-9]+)*" placeholder="team-five";
                                 }
                                 @for variable in &offer.variables { (render_offer_variable_input(variable, &offer.id, "preset")) }
                             }
                             details .details-block--spaced {
                                 summary { "Advanced preset JSON" }
-                                textarea .form-textarea data-preset-values rows="5" spellcheck="false" { (preset_defaults) }
+                                textarea .form-textarea aria-label="Preset values (JSON)" data-preset-values rows="5" spellcheck="false" { (preset_defaults) }
                             }
                         }
                         div .form-group .form-group--narrow {
-                            label .form-label { "After-completion URL (optional)" }
-                            input .form-input data-link-completion-url type="url" placeholder="https://example.com/thank-you";
+                            label .form-label for=(format!("link-{}-completion-url", offer.id)) { "After-completion URL (optional)" }
+                            input .form-input id=(format!("link-{}-completion-url", offer.id)) data-link-completion-url type="url" placeholder="https://example.com/thank-you";
                         }
                         div .flex .gap-2 .flex-wrap {
-                            button .btn .btn--primary .btn--sm type="button" data-create-link data-action="pm-create-link" { "+ Create or reuse Payment Link" }
+                            button .btn .btn--primary .btn--sm type="button" data-create-link data-action="pm-create-link" { "Create or reuse Payment Link" }
                             @if !offer.variables.is_empty() {
                                 button .btn .btn--secondary .btn--sm type="button" data-action="pm-new-preset" { "New preset" }
                             }
                         }
                         @if !offer.variables.is_empty() {
-                            h5 .mb-1 { "Saved presets" }
+                            h4 .products-subheading .mb-1 { "Saved presets" }
                             div data-checkout-presets aria-live="polite" { p .text-muted .text-sm { "Loading presets…" } }
                         }
                         div data-payment-links .mt-4 { p .text-muted .text-sm { "Loading Payment Links…" } }
@@ -1633,13 +2109,13 @@ fn render_managed_offer(managed: &ManagedOffer, product_api_url: &str) -> Markup
                         summary .summary-strong { "Hosted, embedded, and static-site integration" }
                         p .text-muted .text-sm { "The browser sends inputs to Impresspress for authoritative pricing. Replace the placeholder domain with this Impresspress deployment; secret Stripe keys never belong in static HTML." }
                         div .form-group {
-                            label .form-label { "Hosted Checkout widget" }
-                            textarea .form-textarea data-integration-snippet readonly rows="4" spellcheck="false" { (hosted_snippet) }
+                            label .form-label for=(format!("snippet-{}-hosted", offer.id)) { "Hosted Checkout widget" }
+                            textarea .form-textarea id=(format!("snippet-{}-hosted", offer.id)) data-integration-snippet readonly rows="4" spellcheck="false" { (hosted_snippet) }
                             button .btn .btn--secondary .btn--sm type="button" .mt-2 data-action="pm-copy-field" { "Copy hosted snippet" }
                         }
                         div .form-group {
-                            label .form-label { "Embedded Checkout widget" }
-                            textarea .form-textarea data-integration-snippet readonly rows="4" spellcheck="false" { (embedded_snippet) }
+                            label .form-label for=(format!("snippet-{}-embedded", offer.id)) { "Embedded Checkout widget" }
+                            textarea .form-textarea id=(format!("snippet-{}-embedded", offer.id)) data-integration-snippet readonly rows="4" spellcheck="false" { (embedded_snippet) }
                             button .btn .btn--secondary .btn--sm type="button" .mt-2 data-action="pm-copy-field" { "Copy embedded snippet" }
                         }
                     }
@@ -1660,27 +2136,61 @@ pub async fn product_manager(
     let product = match repo::products::get(ctx, product_id).await {
         Ok(product) => product,
         Err(error) => {
-            return crate::blocks::crud::db_error(
+            return record_error_page(
+                ctx,
+                msg,
+                if admin {
+                    Sections::Admin(AdminSection::Products)
+                } else {
+                    Sections::Portal(PortalSection::SellerProducts, true)
+                },
+                "Product",
                 error,
-                "Product not found",
-                "Could not load product",
+                "products page: product read failed",
             )
+            .await
         }
     };
     if !admin && !super::handlers::is_owned_by(&product, msg.user_id()) {
         // The shared rule again — this page and the API that backs its
         // buttons must not disagree about who owns the product.
-        return crate::http::err_not_found("Product not found");
+        return ui::not_found_response(msg);
     }
     let offers = match repo::offers::list_for_product(ctx, product_id).await {
         Ok(offers) => offers,
-        Err(error) => return crud::db_error_internal(error, "Could not load product pricing"),
+        Err(error) => {
+            return error_page(
+                ctx,
+                msg,
+                if admin {
+                    Sections::Admin(AdminSection::Products)
+                } else {
+                    Sections::Portal(PortalSection::SellerProducts, true)
+                },
+                "Product",
+                error,
+                "Could not load product pricing",
+            )
+            .await
+        }
     };
     let seller_enabled = !admin
         && match super::handlers::user_products_enabled(ctx).await {
             Ok(value) => value,
             Err(e) => {
-                return crud::db_error_page(msg, e, "products page: seller switch read failed")
+                return error_page(
+                    ctx,
+                    msg,
+                    if admin {
+                        Sections::Admin(AdminSection::Products)
+                    } else {
+                        Sections::Portal(PortalSection::SellerProducts, true)
+                    },
+                    "Product",
+                    e,
+                    "products page: seller switch read failed",
+                )
+                .await
             }
         };
     let product_api_url = if admin {
@@ -1713,13 +2223,37 @@ pub async fn product_manager(
     let live = status == commerce_wire(&ProductStatus::Active)
         && approval == commerce_wire(&ApprovalStatus::Approved);
     let awaiting_moderation = pending_review && approval == commerce_wire(&ApprovalStatus::Pending);
+    // The product's lifecycle actions are the page's: they go in the
+    // topbar, the primary one (publish, or approve a listing under review)
+    // last. The details card below keeps one primary of its own, Save.
+    let owned_by_seller = product.str_field("owner_kind") == "user";
+    let mut actions = vec![html! {
+        button .btn .btn--secondary .btn--sm type="button" data-action="pm-duplicate" { "Duplicate product" }
+    }];
+    if !archived {
+        actions.push(html! {
+            button .btn .btn--secondary .btn--sm type="button" data-action="pm-set-status" data-product-status="archived" { "Archive product" }
+        });
+    }
+    if live {
+        actions.push(html! {
+            a .btn .btn--secondary .btn--sm href=(format!("/b/products/catalog/{product_id}")) target="_blank" rel="noopener" { "View storefront" }
+        });
+    }
+    let moderating = admin && owned_by_seller && awaiting_moderation;
+    if moderating {
+        actions.push(html! {
+            button .btn .btn--secondary .btn--sm type="button" data-moderation-action="reject" data-action="pm-moderate" { "Return to seller" }
+        });
+        actions.push(html! {
+            button .btn .btn--primary .btn--sm type="button" data-moderation-action="approve" data-action="pm-moderate" { "Approve listing" }
+        });
+    } else if publishable {
+        actions.push(html! {
+            button .btn .btn--primary .btn--sm type="button" data-action="pm-set-status" data-product-status="active" { @if admin { "Publish product" } @else { "Submit for publication" } }
+        });
+    }
     let content = html! {
-        @if admin { (admin_tabs("products")) } @else { (portal_tabs("products", seller_enabled)) }
-        (components::page_header(
-            product.str_field("name"),
-            Some("Update what customers see, manage pricing, and share checkout"),
-            Some(html! { a .btn .btn--secondary .btn--sm href=(back_href) { "Back to products" } }),
-        ))
         p #product-manager-error .login-error role="alert" aria-live="assertive" hidden {}
         section .card {
             header .card__head {
@@ -1727,31 +2261,15 @@ pub async fn product_manager(
                     div .products-status-stack {
                         h2 .card__title { "Product details" }
                         (components::status_badge(status))
-                        @if product.str_field("owner_kind") == "user" { span .badge .badge-secondary { "Review: " (approval) } }
+                        @if owned_by_seller { (components::badge(components::BadgeVariant::Secondary, &format!("Review: {approval}"))) }
                     }
                     @if !admin && pending_review {
                         p .text-muted .text-sm .text-subtitle { "This product is awaiting administrator review and is not public yet." }
                     }
                 }
-                div .products-actions {
-                    @if admin && product.str_field("owner_kind") == "user" && awaiting_moderation {
-                        button .btn .btn--primary .btn--sm type="button" data-moderation-action="approve" data-action="pm-moderate" { "Approve listing" }
-                        button .btn .btn--secondary .btn--sm type="button" data-moderation-action="reject" data-action="pm-moderate" { "Return to seller" }
-                    }
-                    button .btn .btn--secondary .btn--sm type="button" data-action="pm-duplicate" { "Duplicate product" }
-                    @if publishable {
-                        button .btn .btn--primary .btn--sm type="button" data-action="pm-set-status" data-product-status="active" { @if admin { "Publish product" } @else { "Submit for publication" } }
-                    }
-                    @if !archived {
-                        button .btn .btn--secondary .btn--sm type="button" data-action="pm-set-status" data-product-status="archived" { "Archive product" }
-                    }
-                    @if live {
-                        a .btn .btn--secondary .btn--sm href=(format!("/b/products/catalog/{product_id}")) target="_blank" rel="noopener" { "View storefront" }
-                    }
-                }
             }
             div .card__body {
-                form #product-manager-form {
+        form #product-manager-form {
                     div .form-group { label .form-label .required for="manager-product-name" { "Product name" } input #manager-product-name .form-input type="text" maxlength="160" required value=(product.str_field("name")); }
                     div .form-group { label .form-label for="manager-product-description" { "Customer-facing description" } textarea #manager-product-description .form-textarea maxlength="4000" { (product.str_field("description")) } }
                     details .products-advanced {
@@ -1775,14 +2293,16 @@ pub async fn product_manager(
                             }
                         }
                     }
-                    button .btn .btn--primary .btn--sm type="submit" { "Save product details" }
+                    div .products-form-actions {
+                        button .btn .btn--primary .btn--sm type="submit" { "Save product details" }
+                    }
                 }
             }
         }
         section #product-manager-visual-editor .card hidden .mt-6 {
             header .card__head {
                 div {
-                    h3 #manager-visual-title .card__title { "Edit pricing draft" }
+                    h2 #manager-visual-title .card__title { "Edit pricing draft" }
                     p .text-muted .text-sm .text-subtitle { "Manage customer inputs, itemized price rows, conditions, and recurring terms without editing JSON." }
                 }
                 button .btn .btn--secondary .btn--sm type="button" data-action="pm-close-visual-editor" { "Close editor" }
@@ -1812,15 +2332,15 @@ pub async fn product_manager(
                 }
                 section .mt-4 {
                     div .flex .items-center .justify-between .gap-4 .flex-wrap {
-                        div { h4 .m-0 { "Customer fields" } p .text-muted .text-sm { "Typed quantities, choices, flags, and text used by price rows." } }
-                        button .btn .btn--secondary .btn--sm type="button" data-action="pw-add-variable" { "+ Add input" }
+                        div { h3 .products-subheading .m-0 { "Customer fields" } p .text-muted .text-sm { "Typed quantities, choices, flags, and text used by price rows." } }
+                        button .btn .btn--secondary .btn--sm type="button" data-action="pw-add-variable" { (icons::plus()) " Add input" }
                     }
                     div #wizard-variables {}
                 }
                 section .products-section {
                     div .flex .items-center .justify-between .gap-4 .flex-wrap {
-                        div { h4 .m-0 { "Itemized price rows" } p .text-muted .text-sm { "Fixed, per-unit, lookup, tiered, package, and conditional rows are supported." } }
-                        button .btn .btn--secondary .btn--sm type="button" data-action="pw-add-component" { "+ Add row" }
+                        div { h3 .products-subheading .m-0 { "Itemized price rows" } p .text-muted .text-sm { "Fixed, per-unit, lookup, tiered, package, and conditional rows are supported." } }
+                        button .btn .btn--secondary .btn--sm type="button" data-action="pw-add-component" { (icons::plus()) " Add row" }
                     }
                     div #wizard-components {}
                 }
@@ -1832,13 +2352,10 @@ pub async fn product_manager(
             }
         }
         section .products-section {
-            div .products-section__head {
-                div { h2 { "Prices and checkout" } p .text-muted .text-sm { "Published offers are immutable so existing orders and links retain their exact terms." } }
-            }
+            (components::section_header("Prices and checkout", None))
+            p .section-desc { "Published offers are immutable so existing orders and links retain their exact terms." }
             @if offers.is_empty() {
-                (components::empty_state(icons::dollar_sign(), "No pricing offers", "This product does not have a checkout price yet.", Some(html! {
-                    a .btn .btn--primary .btn--sm href="/b/products/admin/new" { "Create a product with pricing" }
-                })))
+                (components::empty_state(icons::dollar_sign(), "No pricing offers", "This product has no checkout price yet, so customers cannot buy it.", None))
             } @else {
                 @for offer in &offers { (render_managed_offer(offer, &product_api_url)) }
             }
@@ -1847,17 +2364,27 @@ pub async fn product_manager(
         script src=(assets::wizard_js_url()) {}
         script src=(assets::manager_js_url()) {}
     };
-    ui::shell_page(
-        ctx,
-        msg,
-        if admin {
-            ui::Shell::admin(product.str_field("name"), "Products")
-        } else {
-            ui::Shell::portal(product.str_field("name"), "Products")
-        },
-        content,
-    )
-    .await
+    let sections = if admin {
+        Sections::Admin(AdminSection::Products)
+    } else {
+        Sections::Portal(PortalSection::SellerProducts, seller_enabled)
+    };
+    let name = product.str_field("name");
+    let shell = sections
+        .shell(name)
+        .trail(vec![
+            ui::shell::Crumb {
+                label: if admin { "All products" } else { "My products" },
+                href: Some(back_href),
+            },
+            ui::shell::Crumb {
+                label: name,
+                href: None,
+            },
+        ])
+        .subtitle("Update what customers see, manage pricing, and share checkout")
+        .actions(actions);
+    products_page(ctx, msg, shell, sections, content).await
 }
 
 // ---------------------------------------------------------------------------
@@ -1868,19 +2395,24 @@ pub async fn groups(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let result = repo::groups::list_by_name(ctx, vec![], 100).await;
     let list = match result {
         Ok(list) => list,
-        Err(e) => return crud::db_error_page(msg, e, "products groups page: group read failed"),
+        Err(e) => {
+            return error_page(
+                ctx,
+                msg,
+                Sections::Admin(AdminSection::Groups),
+                "Groups",
+                e,
+                "products groups page: group read failed",
+            )
+            .await
+        }
     };
 
     let content = html! {
-        (admin_tabs("groups"))
-        (components::page_header("Groups", Some("Keep related products together so your catalog is easier to browse"), Some(html! {
-            button .btn .btn--primary .btn--sm type="button" data-action="pc-new" { "+ New group" }
-        })))
-
         p #catalog-admin-error .login-error role="alert" aria-live="assertive" hidden {}
         section #group-editor .card hidden .mb-4 {
             header .card__head {
-                div { h3 #group-editor-title .card__title { "New group" } p .text-muted .text-sm .text-subtitle { "Give the group a clear name customers will recognize." } }
+                div { h2 #group-editor-title .card__title { "New group" } p .text-muted .text-sm .text-subtitle { "Give the group a clear name customers will recognize." } }
             }
             div .card__body {
                 form data-action="pc-save-group" {
@@ -1908,31 +2440,58 @@ pub async fn groups(ctx: &dyn Context, msg: &Message) -> OutputStream {
         }
 
         div #groups-content {
-                @let cols = [
-                    components::TableCol::new("Name"),
-                    components::TableCol::new("Description"),
-                    components::TableCol::new("Status"),
-                    components::TableCol::new("Created"),
-                    components::TableCol::new("Actions"),
-                ];
-                @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|r| vec![
-                    html! { span .font-medium { (r.str_field("name")) } },
-                    html! { span .text-muted .text-sm { (r.str_field("description")) } },
+            @let cols = [
+                components::TableCol::new("Name").primary(),
+                components::TableCol::new("Description").optional(),
+                components::TableCol::new("Status"),
+                components::TableCol::new("Created"),
+                components::TableCol::new("Actions").actions(),
+            ];
+            @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|r| {
+                let name = r.str_field("name");
+                let description = r.str_field("description");
+                vec![
+                    html! { (name) },
+                    html! { span .text-muted .text-sm { (if description.is_empty() { components::NO_VALUE } else { description }) } },
                     components::status_badge(r.str_field("status")),
-                    html! { span .text-muted .text-sm { (r.str_field("created_at").get(..10).unwrap_or("")) } },
-                    html! { div .flex .gap-2 .flex-wrap {
-                        button .btn .btn--secondary .btn--sm type="button" data-record-id=(r.id) data-record-name=(r.str_field("name")) data-record-description=(r.str_field("description")) data-record-status=(r.str_field("status")) data-action="pc-edit-group" { "Edit" }
-                        button .btn .btn--secondary .btn--sm type="button" data-record-id=(r.id) data-record-name=(r.str_field("name")) data-action="pc-delete" { "Delete" }
+                    components::timestamp(r.str_field("created_at")),
+                    html! { div .products-actions {
+                        button .btn .btn--ghost .btn--sm .btn--icon type="button"
+                            aria-label={ "Edit " (name) } title="Edit"
+                            data-record-id=(r.id) data-record-name=(name) data-record-description=(description) data-record-status=(r.str_field("status"))
+                            data-action="pc-edit-group"
+                        { (icons::edit()) }
+                        // Destructive, so set apart: the danger colour, and
+                        // the script asks before it deletes.
+                        button .btn .btn--ghost-danger .btn--sm .btn--icon type="button"
+                            aria-label={ "Delete " (name) } title="Delete"
+                            data-record-id=(r.id) data-record-name=(name)
+                            data-action="pc-delete"
+                        { (icons::trash()) }
                     } },
-                ]).collect();
-                (components::data_table(&cols, rows, None::<fn(usize) -> Option<String>>, html! {
-                    (components::empty_state(icons::folder(), "No groups yet", "Groups are optional. Add one when you want to organize related products.", Some(html! { button .btn .btn--primary .btn--sm type="button" data-action="pc-new" { "+ Create group" } })))
-                }))
+                ]
+            }).collect();
+            (components::data_table(&cols, rows, None::<fn(usize) -> Option<String>>, html! {
+                (components::empty_state(icons::folder(), "No groups yet", "Groups are optional. Add one when you want to organize related products.", Some(html! {
+                    button .btn .btn--secondary .btn--sm type="button" data-action="pc-new" { (icons::plus()) " Create group" }
+                })))
+            }))
         }
         script src=(assets::catalog_admin_js_url()) {}
     };
 
-    ui::shell_page(ctx, msg, ui::Shell::admin("Groups", "Products"), content).await
+    products_page(
+ctx,
+        msg,
+        ui::Shell::admin("Groups", "Groups")
+            .subtitle("Keep related products together so your catalog is easier to browse")
+            .actions(vec![html! {
+                button .btn .btn--primary .btn--sm type="button" data-action="pc-new" { (icons::plus()) " New group" }
+            }]),
+        Sections::Admin(AdminSection::Groups),
+        content,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
@@ -1955,70 +2514,144 @@ pub async fn purchases(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let result = repo::purchases::list_paginated(ctx, filters, page as i64, page_size as i64).await;
     let list = match result {
         Ok(list) => list,
-        Err(e) => return crud::db_error_page(msg, e, "products purchases page: order read failed"),
+        Err(e) => {
+            return error_page(
+                ctx,
+                msg,
+                Sections::Admin(AdminSection::Orders),
+                "Orders",
+                e,
+                "products purchases page: order read failed",
+            )
+            .await
+        }
     };
 
+    let base_href = order_list_href("/b/products/admin/purchases", &status_filter);
     let content = html! {
-        (admin_tabs("orders"))
-        (components::page_header("Orders", Some("Track payments, refunds, and customer orders"), None))
-
-        // Status filter
         div .filter-bar {
-            span .products-filter-label { "Show" }
-            @for (value, label) in [("all", "All"), ("pending", "Pending"), ("completed", "Completed"), ("partially_refunded", "Part-refunded"), ("refunded", "Refunded"), ("failed", "Failed")] {
-                a .btn .(if (status_filter.is_empty() && value == "all") || status_filter == value { "btn--primary" } else { "btn--secondary" })
-                    .btn--sm
-                    href={"/b/products/admin/purchases?status=" (value)}
-                    hx-get={"/b/products/admin/purchases?status=" (value)}
-                    hx-target="#content"
-                    hx-push-url="true"
-                { (label) }
-            }
+            (order_status_chips("/b/products/admin/purchases", &status_filter))
         }
-
-        div #purchases-content {
-                @let row_hrefs: Vec<String> = list.records.iter().map(|record| format!("/b/products/admin/purchases/{}", record.id)).collect();
-                @let cols = [
-                    components::TableCol::new("Order"),
-                    components::TableCol::new("Customer"),
-                    components::TableCol::new("Status"),
-                    components::TableCol::new("Total"),
-                    components::TableCol::new("Placed"),
-                ];
-                @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|r| {
-                    let amount = display_money(r.i64_field("total_cents"), r.str_field("currency"));
-                    let buyer = if !r.str_field("buyer_email").is_empty() { r.str_field("buyer_email") } else if !r.str_field("buyer_user_id").is_empty() { r.str_field("buyer_user_id") } else { r.str_field("user_id") };
-                    vec![
-                        html! { code .text-sm { (r.id.get(..8).unwrap_or(&r.id)) } },
-                        html! { span .text-sm { (if buyer.is_empty() { "Guest" } else { buyer }) } },
-                        components::status_badge(r.str_field("status")),
-                        html! { span .font-medium { (amount) } },
-                        html! { span .text-muted .text-sm { (r.str_field("created_at").get(..10).unwrap_or("—")) } },
-                    ]
-                }).collect();
-                (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), html! { (components::empty_state(icons::shopping_cart(), "No orders yet", "Customer orders will appear here after checkout starts.", None)) }))
-                @if let Some(per_page) = std::num::NonZeroU32::new(page_size as u32) { (components::pagination(list.page as u32, per_page, list.total_count as u32, "/b/products/admin/purchases")) }
-        }
+        @let row_hrefs: Vec<String> = list.records.iter().map(|record| format!("/b/products/admin/purchases/{}", crate::util::url_path_encode(&record.id))).collect();
+        @let cols = [
+            components::TableCol::new("Order").primary(),
+            components::TableCol::new("Customer"),
+            components::TableCol::new("Status"),
+            components::TableCol::new("Total"),
+            components::TableCol::new("Placed"),
+        ];
+        @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|r| {
+            let amount = display_money(r.i64_field("total_cents"), r.str_field("currency"));
+            let buyer = if !r.str_field("buyer_email").is_empty() { r.str_field("buyer_email") } else if !r.str_field("buyer_user_id").is_empty() { r.str_field("buyer_user_id") } else { r.str_field("user_id") };
+            vec![
+                html! { code .text-sm { (r.id.get(..8).unwrap_or(&r.id)) } },
+                html! { span .text-sm { @if buyer.is_empty() { "Guest" } @else { (components::breakable_id(buyer)) } } },
+                components::status_badge(r.str_field("status")),
+                html! { span .font-medium { (amount) } },
+                components::timestamp(r.str_field("created_at")),
+            ]
+        }).collect();
+        (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), order_list_empty(&status_filter, "Customer orders will appear here after checkout starts.")))
+        @if let Some(per_page) = std::num::NonZeroU32::new(page_size as u32) { (components::pagination(list.page as u32, per_page, list.total_count as u32, &base_href)) }
     };
 
-    ui::shell_page(ctx, msg, ui::Shell::admin("Orders", "Products"), content).await
+    products_page(
+        ctx,
+        msg,
+        ui::Shell::admin("Orders", "Orders")
+            .subtitle("Track payments, refunds, and customer orders"),
+        Sections::Admin(AdminSection::Orders),
+        content,
+    )
+    .await
+}
+
+/// The order statuses an order list can be narrowed to, with their labels.
+const ORDER_STATUSES: [(&str, &str); 6] = [
+    ("all", "All"),
+    ("pending", "Pending"),
+    ("completed", "Completed"),
+    ("partially_refunded", "Part-refunded"),
+    ("refunded", "Refunded"),
+    ("failed", "Failed"),
+];
+
+/// An order list at `base` narrowed to `status` ("" or "all" is every
+/// order).
+fn order_list_href(base: &str, status: &str) -> String {
+    if status.is_empty() || status == "all" {
+        base.to_string()
+    } else {
+        format!("{base}?status={}", crate::util::urlencode(status))
+    }
+}
+
+/// The status filter of an order list at `base`, as filter chips.
+fn order_status_chips(base: &str, current: &str) -> Markup {
+    let hrefs: Vec<String> = ORDER_STATUSES
+        .iter()
+        .map(|(value, _)| order_list_href(base, value))
+        .collect();
+    components::filter_chips(
+        "Order status",
+        ORDER_STATUSES
+            .iter()
+            .zip(&hrefs)
+            .map(|((value, label), href)| components::Tab {
+                active: (current.is_empty() && *value == "all") || current == *value,
+                href,
+                label,
+                icon: None,
+            })
+            .collect(),
+    )
+}
+
+/// An empty order list: under a status filter it says the filter matched
+/// nothing; unfiltered, `none_yet` says where orders come from.
+fn order_list_empty(status: &str, none_yet: &str) -> Markup {
+    if status.is_empty() || status == "all" {
+        components::empty_state(icons::shopping_cart(), "No orders yet", none_yet, None)
+    } else {
+        components::empty_state(
+            icons::shopping_cart(),
+            "No orders with this status",
+            "Choose another status, or All.",
+            None,
+        )
+    }
 }
 
 // ---------------------------------------------------------------------------
 // Admin: Stripe setup and connection health
 // ---------------------------------------------------------------------------
 
+/// One go-live checklist row: the item and what it is for, its state at the
+/// end of the row — so every title starts at the same edge whatever the
+/// state's width, and the state is a word as well as a colour.
 fn setup_check(label: &str, complete: bool, detail: &str) -> Markup {
     html! {
-        li .flex .items-start .gap-3 .mb-3 {
-            span .badge .(if complete { "badge-success" } else { "badge-warning" }) {
-                @if complete { "Ready" } @else { "Action needed" }
-            }
+        li .products-checklist__item {
             div {
                 strong { (label) }
                 p .text-muted .text-sm .text-subtitle { (detail) }
             }
+            @if complete {
+                (components::badge(components::BadgeVariant::Success, "Ready"))
+            } @else {
+                (components::badge(components::BadgeVariant::Warning, "Action needed"))
+            }
         }
+    }
+}
+
+/// A capability's state as a badge: a word in a pill sized to its text, not
+/// a headline stat ("Unavailable" in a stat tile overflowed it on a phone).
+fn capability_badge(enabled: bool) -> Markup {
+    if enabled {
+        components::badge(components::BadgeVariant::Success, "Enabled")
+    } else {
+        components::badge(components::BadgeVariant::Warning, "Unavailable")
     }
 }
 
@@ -2062,10 +2695,10 @@ fn stripe_connection_card(status: &StripeConnectionStatus) -> Markup {
                 } @else {
                     p #stripe-error .text-sm .text-muted .mt-0 {}
                 }
-                div .stats-grid {
-                    (components::stat_card("Payments", if status.charges_enabled { "Enabled" } else { "Unavailable" }, icons::credit_card(), None))
-                    (components::stat_card("Payouts", if status.payouts_enabled { "Enabled" } else { "Unavailable" }, icons::arrow_up_right(), None))
-                    (components::stat_card("Currency", if status.default_currency.is_empty() { "—" } else { &status.default_currency }, icons::dollar_sign(), None))
+                dl .products-status-list {
+                    div { dt { "Payments" } dd { (capability_badge(status.charges_enabled)) } }
+                    div { dt { "Payouts" } dd { (capability_badge(status.payouts_enabled)) } }
+                    div { dt { "Default currency" } dd { (if status.default_currency.is_empty() { components::NO_VALUE } else { &status.default_currency }) } }
                 }
                 details .products-plain-details {
                     summary { "Technical connection details" }
@@ -2075,11 +2708,10 @@ fn stripe_connection_card(status: &StripeConnectionStatus) -> Markup {
                         p { strong { "API version: " } code { (&status.api_version) } }
                     }
                 }
-                div .flex .gap-3 .flex-wrap .mt-5 {
-                    button #stripe-test-button .btn .btn--secondary .btn--md type="button" data-action="ps-test-connection" {
+                div .products-form-actions {
+                    button #stripe-test-button .btn .btn--secondary .btn--sm type="button" data-action="ps-test-connection" {
                         "Test connection"
                     }
-                    a .btn .btn--primary .btn--md href="/b/products/admin/settings" { "Configure Stripe" }
                 }
             }
         }
@@ -2089,28 +2721,30 @@ fn stripe_connection_card(status: &StripeConnectionStatus) -> Markup {
 pub async fn stripe_setup(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let status = match stripe_provider::connection_status(ctx).await {
         Ok(status) => status,
-        Err(e) => return crud::db_error_page(msg, e, "stripe setup page: settings read failed"),
+        Err(e) => {
+            return error_page(
+                ctx,
+                msg,
+                Sections::Admin(AdminSection::Stripe),
+                "Stripe setup",
+                e,
+                "stripe setup page: settings read failed",
+            )
+            .await
+        }
     };
     let connected = matches!(
         status.state,
         StripeConnectionState::ConnectedTest | StripeConnectionState::ConnectedLive
     );
     let content = html! {
-        (admin_tabs("stripe"))
-        (components::page_header(
-            "Stripe setup",
-            Some("Connect Stripe, confirm payment readiness, and review anything that needs attention"),
-            Some(html! { a .btn .btn--secondary .btn--sm href="/b/products/admin/settings" { "Edit Stripe settings" } }),
-        ))
         @if status.state == StripeConnectionState::ConnectedTest {
-            section .card .card--warning .mb-4 {
-                div .card__body {
-                    strong { "Test mode is active" }
-                    p .text-muted .text-sm .text-subtitle {
-                        "Checkout is safe to exercise, but no real funds will move. Replace both keys with matching live-mode keys only after the checklist below is complete."
-                    }
-                }
-            }
+            (components::callout(
+                components::CalloutTone::Warning,
+                "Test mode is active",
+                html! { p { "Checkout is safe to exercise, but no real funds will move. Replace both keys with matching live-mode keys only after the checklist below is complete." } },
+                None,
+            ))
         }
         (stripe_connection_card(&status))
         div .grid .grid-auto-320 .gap-4 .mt-4 {
@@ -2219,10 +2853,22 @@ pub async fn stripe_setup(ctx: &dyn Context, msg: &Message) -> OutputStream {
         }
         script src=(assets::stripe_setup_js_url()) {}
     };
-    ui::shell_page(
-        ctx,
+    // One way to the Stripe settings: the primary action while Stripe is
+    // not configured, a secondary one once it is.
+    let configure_class = if status.state == StripeConnectionState::NotConfigured {
+        "btn--primary"
+    } else {
+        "btn--secondary"
+    };
+    products_page(
+ctx,
         msg,
-        ui::Shell::admin("Stripe setup", "Products"),
+        ui::Shell::admin("Stripe setup", "Stripe setup")
+            .subtitle("Connect Stripe, confirm payment readiness, and review anything that needs attention")
+            .actions(vec![html! {
+                a class={ "btn btn--sm " (configure_class) } href="/b/products/admin/settings" { "Configure Stripe" }
+            }]),
+        Sections::Admin(AdminSection::Stripe),
         content,
     )
     .await
@@ -2277,28 +2923,22 @@ fn seller_status_card(account: Option<&SellerAccount>, fee_basis_points: u16) ->
                         "Stripe hosts identity verification, payouts, and the Express dashboard."
                     }
                 }
-                span .badge .(if suspended { "badge-danger" } else if ready { "badge-success" } else { "badge-warning" }) {
-                    @if suspended { "Suspended" } @else if ready { "Ready to sell" } @else if has_account { "Setup incomplete" } @else { "Not connected" }
+                @if suspended {
+                    (components::badge(components::BadgeVariant::Danger, "Suspended"))
+                } @else if ready {
+                    (components::badge(components::BadgeVariant::Success, "Ready to sell"))
+                } @else if has_account {
+                    (components::badge(components::BadgeVariant::Warning, "Setup incomplete"))
+                } @else {
+                    (components::badge(components::BadgeVariant::Warning, "Not connected"))
                 }
             }
             div .card__body {
-                div .grid .grid-auto-150 .gap-4 {
-                    div {
-                        p .text-muted .text-sm .m-0 { "Charges" }
-                        strong { @if account.is_some_and(|a| a.capabilities.charges_enabled) { "Enabled" } @else { "Unavailable" } }
-                    }
-                    div {
-                        p .text-muted .text-sm .m-0 { "Payouts" }
-                        strong { @if account.is_some_and(|a| a.capabilities.payouts_enabled) { "Enabled" } @else { "Unavailable" } }
-                    }
-                    div {
-                        p .text-muted .text-sm .m-0 { "Platform fee" }
-                        strong { (fee_percent(fee_basis_points.into())) }
-                    }
-                    div {
-                        p .text-muted .text-sm .m-0 { "Mode" }
-                        strong { @if account.is_some_and(|a| a.livemode) { "Live" } @else { "Test" } }
-                    }
+                dl .products-status-list {
+                    div { dt { "Charges" } dd { (capability_badge(account.is_some_and(|a| a.capabilities.charges_enabled))) } }
+                    div { dt { "Payouts" } dd { (capability_badge(account.is_some_and(|a| a.capabilities.payouts_enabled))) } }
+                    div { dt { "Platform fee" } dd { (fee_percent(fee_basis_points.into())) } }
+                    div { dt { "Mode" } dd { @if account.is_some_and(|a| a.livemode) { "Live" } @else { "Test" } } }
                 }
                 @if let Some(account) = account {
                     @if !account.capabilities.requirements_due.is_empty() {
@@ -2340,11 +2980,31 @@ pub async fn portal_home(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let user_id = msg.user_id().to_string();
     let seller_enabled = match super::handlers::user_products_enabled(ctx).await {
         Ok(value) => value,
-        Err(e) => return crud::db_error_page(msg, e, "products page: seller switch read failed"),
+        Err(e) => {
+            return error_page(
+                ctx,
+                msg,
+                Sections::Portal(PortalSection::Home, false),
+                "Commerce",
+                e,
+                "products page: seller switch read failed",
+            )
+            .await
+        }
     };
     let purchases_count = match repo::purchases::count_for_user(ctx, &user_id).await {
         Ok(count) => count,
-        Err(error) => return crud::db_error_internal(error, "Database error"),
+        Err(error) => {
+            return error_page(
+                ctx,
+                msg,
+                Sections::Portal(PortalSection::Home, false),
+                "Commerce",
+                error,
+                "Database error",
+            )
+            .await
+        }
     };
 
     let (product_count, seller_account, fee_basis_points) = if seller_enabled {
@@ -2365,7 +3025,17 @@ pub async fn portal_home(ctx: &dyn Context, msg: &Message) -> OutputStream {
         .await
         {
             Ok(count) => count,
-            Err(error) => return crud::db_error_internal(error, "Database error"),
+            Err(error) => {
+                return error_page(
+                    ctx,
+                    msg,
+                    Sections::Portal(PortalSection::Home, false),
+                    "Commerce",
+                    error,
+                    "Database error",
+                )
+                .await
+            }
         };
         let account = match repo::seller_accounts::get_for_user(ctx, &user_id).await {
             Ok(Some(record)) => match repo::seller_accounts::to_contract(&record, fee) {
@@ -2373,7 +3043,17 @@ pub async fn portal_home(ctx: &dyn Context, msg: &Message) -> OutputStream {
                 Err(error) => return crate::http::err_internal("Seller account error", error),
             },
             Ok(None) => None,
-            Err(error) => return crud::db_error_internal(error, "Database error"),
+            Err(error) => {
+                return error_page(
+                    ctx,
+                    msg,
+                    Sections::Portal(PortalSection::Home, false),
+                    "Commerce",
+                    error,
+                    "Database error",
+                )
+                .await
+            }
         };
         (count, account, fee)
     } else {
@@ -2381,12 +3061,6 @@ pub async fn portal_home(ctx: &dyn Context, msg: &Message) -> OutputStream {
     };
 
     let content = html! {
-        (portal_tabs("home", seller_enabled))
-        (components::page_header(
-            "Commerce",
-            Some("Review what you bought, manage billing, or start selling"),
-            None,
-        ))
         div #commerce-portal-error .text-sm hidden .text-danger .mb-4 {}
         (components::callout(
             components::CalloutTone::Info,
@@ -2421,22 +3095,20 @@ pub async fn portal_home(ctx: &dyn Context, msg: &Message) -> OutputStream {
         }
         script src=(assets::commerce_portal_js_url()) {}
     };
-    ui::shell_page(ctx, msg, ui::Shell::portal("Commerce", "Products"), content).await
+    products_page(
+        ctx,
+        msg,
+        ui::Shell::portal("Commerce", "Commerce")
+            .subtitle("Review what you bought, manage billing, or start selling"),
+        Sections::Portal(PortalSection::Home, seller_enabled),
+        content,
+    )
+    .await
 }
 
 // ---------------------------------------------------------------------------
 // Seller: dashboard and orders
 // ---------------------------------------------------------------------------
-
-fn seller_page_links(active: &str) -> Markup {
-    html! {
-        nav aria-label="Seller workspace" .flex .gap-3 .flex-wrap .mb-4 {
-            a .btn .(if active == "dashboard" { "btn--primary" } else { "btn--secondary" }) .btn--sm href="/b/products/selling" { "Dashboard" }
-            a .btn .(if active == "products" { "btn--primary" } else { "btn--secondary" }) .btn--sm href="/b/products/my-products" { "Products and links" }
-            a .btn .(if active == "orders" { "btn--primary" } else { "btn--secondary" }) .btn--sm href="/b/products/selling/orders" { "Orders and subscriptions" }
-        }
-    }
-}
 
 pub async fn seller_dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let fee_basis_points = match platform_fee(ctx).await {
@@ -2445,7 +3117,17 @@ pub async fn seller_dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream 
     };
     let account_record = match repo::seller_accounts::get_for_user(ctx, msg.user_id()).await {
         Ok(account) => account,
-        Err(error) => return crud::db_error_internal(error, "Database error"),
+        Err(error) => {
+            return error_page(
+                ctx,
+                msg,
+                Sections::Portal(PortalSection::SellerDashboard, true),
+                "Seller dashboard",
+                error,
+                "Database error",
+            )
+            .await
+        }
     };
     let account = match account_record.as_ref() {
         Some(record) => match repo::seller_accounts::to_contract(record, fee_basis_points) {
@@ -2457,35 +3139,64 @@ pub async fn seller_dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream 
     let analytics = match account_record.as_ref() {
         Some(record) => match repo::purchases::commerce_analytics(ctx, Some(&record.id)).await {
             Ok(analytics) => analytics,
-            Err(error) => return crud::db_error_internal(error, "Database error"),
+            Err(error) => {
+                return error_page(
+                    ctx,
+                    msg,
+                    Sections::Portal(PortalSection::SellerDashboard, true),
+                    "Seller dashboard",
+                    error,
+                    "Database error",
+                )
+                .await
+            }
         },
         None => Vec::new(),
     };
     let failures = match account_record.as_ref() {
         Some(record) => match repo::purchases::recent_seller_failures(ctx, &record.id, 5).await {
             Ok(failures) => failures,
-            Err(error) => return crud::db_error_internal(error, "Database error"),
+            Err(error) => {
+                return error_page(
+                    ctx,
+                    msg,
+                    Sections::Portal(PortalSection::SellerDashboard, true),
+                    "Seller dashboard",
+                    error,
+                    "Database error",
+                )
+                .await
+            }
         },
         None => Vec::new(),
     };
     let seller_enabled = match super::handlers::user_products_enabled(ctx).await {
         Ok(value) => value,
-        Err(e) => return crud::db_error_page(msg, e, "products page: seller switch read failed"),
+        Err(e) => {
+            return error_page(
+                ctx,
+                msg,
+                Sections::Portal(PortalSection::SellerDashboard, true),
+                "Seller dashboard",
+                e,
+                "products page: seller switch read failed",
+            )
+            .await
+        }
     };
     let content = html! {
-        (portal_tabs("selling", seller_enabled))
-        (seller_page_links("dashboard"))
-        (components::page_header("Seller dashboard", Some("Sales, subscriptions, Stripe readiness, and actions"), None))
         div #commerce-portal-error .text-sm hidden .text-danger .mb-4 {}
         (seller_status_card(account.as_ref(), fee_basis_points))
         (analytics_section(&analytics, "Your sales by currency", true))
         (seller_failures_section(&failures))
         script src=(assets::commerce_portal_js_url()) {}
     };
-    ui::shell_page(
+    products_page(
         ctx,
         msg,
-        ui::Shell::portal("Seller dashboard", "Products"),
+        ui::Shell::portal("Seller dashboard", "Seller dashboard")
+            .subtitle("Sales, subscriptions, Stripe readiness, and actions"),
+        Sections::Portal(PortalSection::SellerDashboard, seller_enabled),
         content,
     )
     .await
@@ -2494,26 +3205,45 @@ pub async fn seller_dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream 
 pub async fn seller_orders(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let seller_enabled = match super::handlers::user_products_enabled(ctx).await {
         Ok(value) => value,
-        Err(e) => return crud::db_error_page(msg, e, "products page: seller switch read failed"),
+        Err(e) => {
+            return error_page(
+                ctx,
+                msg,
+                Sections::Portal(PortalSection::SellerOrders, true),
+                "Seller orders",
+                e,
+                "products page: seller switch read failed",
+            )
+            .await
+        }
     };
     let account = match repo::seller_accounts::get_for_user(ctx, msg.user_id()).await {
         Ok(Some(account)) => account,
         Ok(None) => {
             let content = html! {
-                (portal_tabs("selling", seller_enabled))
-                (seller_page_links("orders"))
-                (components::page_header("Seller orders", Some("Orders and subscriptions sold through your Stripe account"), None))
                 (components::empty_state(icons::link(), "Connect Stripe first", "Complete seller setup before accepting and reviewing seller orders.", Some(html! { a .btn .btn--primary .btn--md href="/b/products/selling" { "Open seller setup" } })))
             };
-            return ui::shell_page(
+            return products_page(
                 ctx,
                 msg,
-                ui::Shell::portal("Seller orders", "Products"),
+                ui::Shell::portal("Seller orders", "Seller orders")
+                    .subtitle("Orders and subscriptions sold through your Stripe account"),
+                Sections::Portal(PortalSection::SellerOrders, seller_enabled),
                 content,
             )
             .await;
         }
-        Err(error) => return crud::db_error_internal(error, "Database error"),
+        Err(error) => {
+            return error_page(
+                ctx,
+                msg,
+                Sections::Portal(PortalSection::SellerOrders, true),
+                "Seller orders",
+                error,
+                "Database error",
+            )
+            .await
+        }
     };
     let (page, page_size, _) = msg.pagination_params(20);
     let status_filter = msg.query("status").to_string();
@@ -2533,41 +3263,46 @@ pub async fn seller_orders(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let list = match result {
         Ok(list) => list,
         Err(e) => {
-            return crud::db_error_page(msg, e, "products seller orders page: order read failed")
+            return error_page(
+                ctx,
+                msg,
+                Sections::Portal(PortalSection::SellerOrders, true),
+                "Seller orders",
+                e,
+                "products seller orders page: order read failed",
+            )
+            .await
         }
     };
+    let base_href = order_list_href("/b/products/selling/orders", &status_filter);
     let content = html! {
-        (portal_tabs("selling", seller_enabled))
-        (seller_page_links("orders"))
-        (components::page_header("Seller orders", Some("Orders, refunds, and subscription health for your products"), None))
         div .filter-bar {
-            @for status in &["all", "pending", "completed", "partially_refunded", "refunded", "failed"] {
-                a .btn .(if (status_filter.is_empty() && *status == "all") || status_filter == *status { "btn--primary" } else { "btn--secondary" }) .btn--sm
-                    href={"/b/products/selling/orders?status=" (*status)} { (status.replace('_', " ")) }
-            }
+            (order_status_chips("/b/products/selling/orders", &status_filter))
         }
-            @let row_hrefs: Vec<String> = list.records.iter().map(|record| format!("/b/products/selling/orders/{}", record.id)).collect();
-            @let cols = [
-                components::TableCol::new("Buyer"),
-                components::TableCol::new("Status"),
-                components::TableCol::new("Total"),
-                components::TableCol::new("Subscription"),
-                components::TableCol::new("Date"),
-            ];
-            @let rows: Vec<Vec<Markup>> = list.records.iter().map(|order| vec![
-                html! { span .text-sm { (if order.str_field("buyer_email").is_empty() { order.str_field("buyer_user_id") } else { order.str_field("buyer_email") }) } },
-                components::status_badge(order.str_field("status")),
-                html! { span .font-medium { (display_money(order.i64_field("total_cents"), order.str_field("currency"))) } },
-                html! { @if order.str_field("stripe_subscription_id").is_empty() { span .text-muted { "—" } } @else { (components::status_badge(order.str_field("subscription_status"))) } },
-                html! { span .text-muted .text-sm { (order.str_field("created_at").get(..10).unwrap_or("")) } },
-            ]).collect();
-            (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), html! { p .text-muted { "No seller orders yet" } }))
-            @if let Some(per_page) = std::num::NonZeroU32::new(page_size as u32) { (components::pagination(list.page as u32, per_page, list.total_count as u32, "/b/products/selling/orders")) }
+        @let row_hrefs: Vec<String> = list.records.iter().map(|record| format!("/b/products/selling/orders/{}", crate::util::url_path_encode(&record.id))).collect();
+        @let cols = [
+            components::TableCol::new("Buyer").primary(),
+            components::TableCol::new("Status"),
+            components::TableCol::new("Total"),
+            components::TableCol::new("Subscription"),
+            components::TableCol::new("Date"),
+        ];
+        @let rows: Vec<Vec<Markup>> = list.records.iter().map(|order| vec![
+            html! { (components::breakable_id(if order.str_field("buyer_email").is_empty() { order.str_field("buyer_user_id") } else { order.str_field("buyer_email") })) },
+            components::status_badge(order.str_field("status")),
+            html! { span .font-medium { (display_money(order.i64_field("total_cents"), order.str_field("currency"))) } },
+            html! { @if order.str_field("stripe_subscription_id").is_empty() { span .text-muted { (components::NO_VALUE) } } @else { (components::status_badge(order.str_field("subscription_status"))) } },
+            components::timestamp(order.str_field("created_at")),
+        ]).collect();
+        (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), order_list_empty(&status_filter, "Orders for your products will appear here after a customer checks out.")))
+        @if let Some(per_page) = std::num::NonZeroU32::new(page_size as u32) { (components::pagination(list.page as u32, per_page, list.total_count as u32, &base_href)) }
     };
-    ui::shell_page(
+    products_page(
         ctx,
         msg,
-        ui::Shell::portal("Seller orders", "Products"),
+        ui::Shell::portal("Seller orders", "Seller orders")
+            .subtitle("Orders, refunds, and subscription health for your products"),
+        Sections::Portal(PortalSection::SellerOrders, seller_enabled),
         content,
     )
     .await
@@ -2610,10 +3345,25 @@ async fn order_detail(
     purchase_id: &str,
     access: OrderPageAccess,
 ) -> OutputStream {
+    // Where an error on this page is drawn, before the seller switch is
+    // read: the buyer's sections then show without the seller links.
+    let error_sections = match access {
+        OrderPageAccess::Admin => Sections::Admin(AdminSection::Orders),
+        OrderPageAccess::Buyer => Sections::Portal(PortalSection::Purchases, false),
+        OrderPageAccess::Seller => Sections::Portal(PortalSection::SellerOrders, true),
+    };
     let purchase = match repo::purchases::get(ctx, purchase_id).await {
         Ok(purchase) => purchase,
         Err(error) => {
-            return crate::blocks::crud::db_error(error, "Purchase not found", "Database error")
+            return record_error_page(
+                ctx,
+                msg,
+                error_sections,
+                "Order",
+                error,
+                "order page: purchase read failed",
+            )
+            .await
         }
     };
     match access {
@@ -2632,7 +3382,10 @@ async fn order_detail(
             let account = match repo::seller_accounts::get_for_user(ctx, msg.user_id()).await {
                 Ok(Some(account)) => account,
                 Ok(None) => return crate::http::err_forbidden("Seller setup is required"),
-                Err(error) => return crud::db_error_internal(error, "Database error"),
+                Err(error) => {
+                    return error_page(ctx, msg, error_sections, "Order", error, "Database error")
+                        .await
+                }
             };
             if purchase.str_field("seller_account_id") != account.id {
                 return crate::http::err_forbidden("Access denied");
@@ -2641,15 +3394,45 @@ async fn order_detail(
     }
     let line_items = match repo::purchases::list_line_items(ctx, purchase_id).await {
         Ok(items) => items,
-        Err(error) => return crud::db_error_internal(error, "Could not load order items"),
+        Err(error) => {
+            return error_page(
+                ctx,
+                msg,
+                error_sections,
+                "Order",
+                error,
+                "Could not load order items",
+            )
+            .await
+        }
     };
     let refunds = match repo::refunds::list_for_purchase(ctx, purchase_id).await {
         Ok(refunds) => refunds,
-        Err(error) => return crud::db_error_internal(error, "Could not load refunds"),
+        Err(error) => {
+            return error_page(
+                ctx,
+                msg,
+                error_sections,
+                "Order",
+                error,
+                "Could not load refunds",
+            )
+            .await
+        }
     };
     let disputes = match repo::disputes::list_for_purchase(ctx, purchase_id).await {
         Ok(disputes) => disputes,
-        Err(error) => return crud::db_error_internal(error, "Could not load disputes"),
+        Err(error) => {
+            return error_page(
+                ctx,
+                msg,
+                error_sections,
+                "Order",
+                error,
+                "Could not load disputes",
+            )
+            .await
+        }
     };
     let currency = purchase.str_field("currency");
     let refunded_total = purchase.i64_field("refunded_total_cents");
@@ -2673,32 +3456,37 @@ async fn order_detail(
         "refunded_total": refunded_total,
         "currency_exponent": currency_exponent,
     }));
-    let (back_url, back_label, tabs) = match access {
+    let (back_url, back_label, sections) = match access {
         OrderPageAccess::Admin => (
             "/b/products/admin/purchases",
-            "Back to all orders",
-            admin_tabs("orders"),
+            "Orders",
+            Sections::Admin(AdminSection::Orders),
         ),
         OrderPageAccess::Buyer => (
             "/b/products/my-purchases",
-            "Back to my purchases",
-            portal_tabs(
-                "purchases",
+            "My purchases",
+            Sections::Portal(
+                PortalSection::Purchases,
                 match super::handlers::user_products_enabled(ctx).await {
                     Ok(enabled) => enabled,
                     Err(e) => {
-                        return crud::db_error_page(msg, e, "order page: seller switch read failed")
+                        return error_page(
+                            ctx,
+                            msg,
+                            error_sections,
+                            "Order",
+                            e,
+                            "order page: seller switch read failed",
+                        )
+                        .await
                     }
                 },
             ),
         ),
         OrderPageAccess::Seller => (
             "/b/products/selling/orders",
-            "Back to seller orders",
-            html! {
-                (portal_tabs("selling", true))
-                (seller_page_links("orders"))
-            },
+            "Seller orders",
+            Sections::Portal(PortalSection::SellerOrders, true),
         ),
     };
     let buyer = if purchase.str_field("buyer_email").is_empty() {
@@ -2706,23 +3494,9 @@ async fn order_detail(
     } else {
         purchase.str_field("buyer_email")
     };
+    let title = format!("Order #{}", purchase.id.get(..8).unwrap_or(&purchase.id));
     let content = html! {
-        (tabs)
-        a .text-sm href=(back_url) { (icons::arrow_left()) " " (back_label) }
-        div .flex .justify-between .gap-4 .items-start .flex-wrap .mt-4 {
-            div {
-                h1 .mb-1 { "Order #" (purchase.id.get(..8).unwrap_or(&purchase.id)) }
-                p .text-muted .mt-0 { "Placed " (purchase.str_field("created_at").get(..10).unwrap_or("—")) }
-            }
-            div .flex .gap-2 .items-center {
-                (components::status_badge(purchase.str_field("status")))
-                @if purchase.bool_field("livemode") {
-                    (components::status_badge("live"))
-                } @else {
-                    (components::status_badge("test"))
-                }
-            }
-        }
+        p .text-muted .mt-0 { "Placed " (components::timestamp(purchase.str_field("created_at"))) }
         div #order-detail-error .login-error hidden {}
         div .stats-grid {
             (components::stat_card("Total", &display_money(purchase.i64_field("total_cents"), currency), icons::dollar_sign(), None))
@@ -2752,7 +3526,7 @@ async fn order_detail(
                     ("Subscription canceled", purchase.str_field("subscription_canceled_at")),
                 ] {
                     @if !value.is_empty() {
-                        div { p .text-muted .text-sm .m-0 { (label) } strong .text-sm { (value) } }
+                        div { p .text-muted .text-sm .m-0 { (label) } strong .text-sm { (components::timestamp(value)) } }
                     }
                 }
             }
@@ -2837,9 +3611,9 @@ async fn order_detail(
                     (components::status_badge(purchase.str_field("subscription_status")))
                 }
                 div .card__body {
-                    p .text-sm { strong { "Current period ends: " } (if purchase.str_field("subscription_current_period_end").is_empty() { "Not reported yet" } else { purchase.str_field("subscription_current_period_end") }) }
+                    p .text-sm { strong { "Current period ends: " } @if purchase.str_field("subscription_current_period_end").is_empty() { "Not reported yet" } @else { (components::timestamp(purchase.str_field("subscription_current_period_end"))) } }
                     p .text-sm { strong { "Cancels at period end: " } (if purchase.bool_field("subscription_cancel_at_period_end") { "Yes" } else { "No" }) }
-                    @if !purchase.str_field("subscription_canceled_at").is_empty() { p .text-sm { strong { "Canceled: " } (purchase.str_field("subscription_canceled_at")) } }
+                    @if !purchase.str_field("subscription_canceled_at").is_empty() { p .text-sm { strong { "Canceled: " } (components::timestamp(purchase.str_field("subscription_canceled_at"))) } }
                     @if matches!(access, OrderPageAccess::Buyer) && !purchase.str_field("stripe_customer_id").is_empty() {
                         button .btn .btn--primary .btn--md type="button" data-action="pp-order-billing" { "Manage subscription and billing" }
                     }
@@ -2862,7 +3636,7 @@ async fn order_detail(
                         html! { (display_money(refund.i64_field("amount_minor"), currency)) },
                         html! { code .text-sm { (refund.str_field("provider_refund_id")) } },
                         html! { span .text-sm { (refund.str_field("note")) } },
-                        html! { span .text-muted .text-sm { (refund.str_field("created_at")) } },
+                        components::timestamp(refund.str_field("created_at")),
                     ]).collect();
                     (components::data_table(&cols, rows, None::<fn(usize) -> Option<String>>, html! {}))
                 }
@@ -2890,7 +3664,7 @@ async fn order_detail(
                         components::status_badge(dispute.str_field("status")),
                         html! { strong { (display_money(dispute.i64_field("amount_minor"), dispute.str_field("currency"))) } },
                         html! { span .text-sm { (if dispute.str_field("reason").is_empty() { "Not supplied" } else { dispute.str_field("reason") }) } },
-                        html! { span .text-sm { (if dispute.str_field("evidence_due_by").is_empty() { "—" } else { dispute.str_field("evidence_due_by") }) } },
+                        html! { @if dispute.str_field("evidence_due_by").is_empty() { (components::NO_VALUE) } @else { (components::timestamp(dispute.str_field("evidence_due_by"))) } },
                         html! { code .text-sm { (dispute.str_field("provider_dispute_id")) } },
                     ]).collect();
                     (components::data_table(&cols, rows, None::<fn(usize) -> Option<String>>, html! {}))
@@ -2914,17 +3688,28 @@ async fn order_detail(
         script src=(assets::commerce_portal_js_url()) {}
         script src=(assets::order_detail_js_url()) {}
     };
-    ui::shell_page(
-        ctx,
-        msg,
-        if matches!(access, OrderPageAccess::Admin) {
-            ui::Shell::admin("Order detail", "Products")
-        } else {
-            ui::Shell::portal("Order detail", "Products")
-        },
-        content,
-    )
-    .await
+    let livemode = if purchase.bool_field("livemode") {
+        "live"
+    } else {
+        "test"
+    };
+    let shell = sections
+        .shell(&title)
+        .trail(vec![
+            ui::shell::Crumb {
+                label: back_label,
+                href: Some(back_url),
+            },
+            ui::shell::Crumb {
+                label: &title,
+                href: None,
+            },
+        ])
+        .actions(vec![
+            components::status_badge(purchase.str_field("status")),
+            components::status_badge(livemode),
+        ]);
+    products_page(ctx, msg, shell, sections, content).await
 }
 
 // ---------------------------------------------------------------------------
@@ -2935,7 +3720,17 @@ pub async fn my_products(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let user_id = msg.user_id().to_string();
     let seller_enabled = match super::handlers::user_products_enabled(ctx).await {
         Ok(value) => value,
-        Err(e) => return crud::db_error_page(msg, e, "products page: seller switch read failed"),
+        Err(e) => {
+            return error_page(
+                ctx,
+                msg,
+                Sections::Portal(PortalSection::SellerProducts, true),
+                "My products",
+                e,
+                "products page: seller switch read failed",
+            )
+            .await
+        }
     };
     let (page, page_size, _) = msg.pagination_params(20);
 
@@ -2983,113 +3778,89 @@ pub async fn my_products(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let list = match result {
         Ok(list) => list,
         Err(e) => {
-            return crud::db_error_page(msg, e, "products my-products page: product read failed")
-        }
-    };
-
-    let view_tabs = html! {
-        div .products-tabs {
-            (components::tab_navigation(vec![
-                components::Tab {
-                    active: !deleted_view,
-                    href: "/b/products/my-products",
-                    label: "Active",
-                    icon: None,
-                },
-                components::Tab {
-                    active: deleted_view,
-                    href: "/b/products/my-products?view=deleted",
-                    label: "Deleted",
-                    icon: Some(icons::trash()),
-                },
-            ]))
+            return error_page(
+                ctx,
+                msg,
+                Sections::Portal(PortalSection::SellerProducts, true),
+                "My products",
+                e,
+                "products my-products page: product read failed",
+            )
+            .await
         }
     };
 
     let content = html! {
-        (portal_tabs("selling", seller_enabled))
-        (seller_page_links("products"))
-        (components::page_header(
-            "My Products",
-            Some(if deleted_view {
-                "Restore a product to bring it back into your catalog — a deleted product cannot be edited until it is restored"
-            } else {
-                "Create products and manage their offers, checkout links, and publication status"
-            }),
-            if deleted_view { None } else { Some(html! {
-                a .btn .btn--primary .btn--sm href="/b/products/my-products/new" { "+ New Product" }
-            }) },
-        ))
-        (view_tabs)
-
-        div #my-products-content {
-                @if deleted_view {
-                    @let cols = [
-                        components::TableCol::new("Name"),
-                        components::TableCol::new("Currency"),
-                        components::TableCol::new("Deleted"),
-                        components::TableCol::new(""),
-                    ];
-                    @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|record| {
-                        // Percent-encoded for the same reason the admin
-                        // Deleted view encodes: a product id is not
-                        // guaranteed URL-safe, and maud escapes HTML, not
-                        // URLs. Unencoded, an id holding `/`, `?` or `#`
-                        // splits the path and both buttons below aim at
-                        // nothing.
-                        let encoded_id = crate::util::url_path_encode(&record.id);
-                        let restore_url = format!("/b/products/api/products/{encoded_id}/restore");
-                        // Restore is the DANGEROUS half: it returns an
-                        // active, approved product to the public catalog
-                        // at once. Soft delete takes nothing down in
-                        // Stripe, so the row needs the other half too — a
-                        // way to shut this product's Prices and Payment
-                        // Links off WITHOUT relisting it.
-                        let close_url = format!("/b/products/my-products/{encoded_id}/close");
-                        vec![
-                            html! { div { span .font-medium { (record.str_field("name")) } br; span .text-muted .text-sm { "Restore to edit pricing and checkout again" } } },
-                            html! { span .font-medium { (record.str_field("currency")) } },
-                            html! { span .text-muted .text-sm { (record.str_field("deleted_at").get(..10).unwrap_or("—")) } },
-                            html! {
-                                div .products-actions {
-                                    a .btn .btn--secondary .btn--sm href=(close_url) { "Close Stripe surface" }
-                                    button .btn .btn--secondary .btn--sm type="button"
-                                        hx-post=(restore_url)
-                                        hx-swap="none"
-                                        data-error-label="Could not restore this product"
-                                        data-reload-on-success
-                                    { "Restore" }
-                                }
-                            },
-                        ]
-                    }).collect();
-                    (components::data_table(&cols, rows, None::<fn(usize) -> Option<String>>, html! {
-                        (components::empty_state(icons::trash(), "No deleted products", "Products stay here after deletion until you restore them.", None))
-                    }))
-                } @else {
-                    @let row_hrefs: Vec<String> = list.records.iter().map(|record| format!("/b/products/my-products/{}", crate::util::url_path_encode(&record.id))).collect();
-                    @let cols = [
-                        components::TableCol::new("Name"),
-                        components::TableCol::new("Status"),
-                        components::TableCol::new("Currency"),
-                        components::TableCol::new("Created"),
-                    ];
-                    @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|r| vec![
-                        html! { span .font-medium { (r.str_field("name")) } },
-                        components::status_badge(r.str_field("status")),
-                        html! { span .font-medium { (r.str_field("currency")) } },
-                        html! { span .text-muted .text-sm { (r.str_field("created_at").get(..10).unwrap_or("")) } },
-                    ]).collect();
-                    (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), html! { p .text-muted { "No products yet" } }))
-                }
-                @if let Some(per_page) = std::num::NonZeroU32::new(page_size as u32) { (components::pagination(list.page as u32, per_page, list.total_count as u32, base_href)) }
+        div .filter-bar {
+            (product_views("/b/products/my-products", deleted_view))
         }
+        @if deleted_view {
+            @let cols = [
+                components::TableCol::new("Name").primary(),
+                components::TableCol::new("Currency"),
+                components::TableCol::new("Deleted"),
+                components::TableCol::new("Actions").actions(),
+            ];
+            @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|record| {
+                // Percent-encoded for the same reason the admin
+                // Deleted view encodes: a product id is not
+                // guaranteed URL-safe, and maud escapes HTML, not
+                // URLs. Unencoded, an id holding `/`, `?` or `#`
+                // splits the path and both buttons below aim at
+                // nothing.
+                let encoded_id = crate::util::url_path_encode(&record.id);
+                let restore_url = format!("/b/products/api/products/{encoded_id}/restore");
+                // Restore is the DANGEROUS half: it returns an
+                // active, approved product to the public catalog
+                // at once. Soft delete takes nothing down in
+                // Stripe, so the row needs the other half too — a
+                // way to shut this product's Prices and Payment
+                // Links off WITHOUT relisting it.
+                let close_url = format!("/b/products/my-products/{encoded_id}/close");
+                vec![
+                    html! { (record.str_field("name")) },
+                    html! { (record.str_field("currency")) },
+                    components::timestamp(record.str_field("deleted_at")),
+                    deleted_row_actions(&close_url, &restore_url),
+                ]
+            }).collect();
+            (components::data_table(&cols, rows, None::<fn(usize) -> Option<String>>, product_list_empty("", true, "/b/products/my-products/new")))
+        } @else {
+            @let row_hrefs: Vec<String> = list.records.iter().map(|record| format!("/b/products/my-products/{}", crate::util::url_path_encode(&record.id))).collect();
+            @let cols = [
+                components::TableCol::new("Name").primary(),
+                components::TableCol::new("Status"),
+                components::TableCol::new("Currency"),
+                components::TableCol::new("Created"),
+            ];
+            @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|r| vec![
+                html! { (r.str_field("name")) },
+                components::status_badge(r.str_field("status")),
+                html! { (r.str_field("currency")) },
+                components::timestamp(r.str_field("created_at")),
+            ]).collect();
+            (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), product_list_empty("", false, "/b/products/my-products/new")))
+        }
+        @if let Some(per_page) = std::num::NonZeroU32::new(page_size as u32) { (components::pagination(list.page as u32, per_page, list.total_count as u32, base_href)) }
     };
 
-    ui::shell_page(
+    let mut shell = ui::Shell::portal("My products", "My products").subtitle(if deleted_view {
+        "Restore a product to bring it back into your catalog — a deleted product cannot be edited until it is restored"
+    } else {
+        "Create products and manage their offers, checkout links, and publication status"
+    });
+    if !deleted_view {
+        shell = shell.actions(vec![create_link(
+            "/b/products/my-products/new",
+            "New product",
+            "btn--primary",
+        )]);
+    }
+    products_page(
         ctx,
         msg,
-        ui::Shell::portal("My Products", "My Products"),
+        shell,
+        Sections::Portal(PortalSection::SellerProducts, seller_enabled),
         content,
     )
     .await
@@ -3103,7 +3874,17 @@ pub async fn my_purchases(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let user_id = msg.user_id().to_string();
     let seller_enabled = match super::handlers::user_products_enabled(ctx).await {
         Ok(value) => value,
-        Err(e) => return crud::db_error_page(msg, e, "products page: seller switch read failed"),
+        Err(e) => {
+            return error_page(
+                ctx,
+                msg,
+                Sections::Portal(PortalSection::Purchases, false),
+                "My purchases",
+                e,
+                "products page: seller switch read failed",
+            )
+            .await
+        }
     };
     let (page, page_size, _) = msg.pagination_params(20);
 
@@ -3116,40 +3897,45 @@ pub async fn my_purchases(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let list = match result {
         Ok(list) => list,
         Err(e) => {
-            return crud::db_error_page(msg, e, "products my-purchases page: order read failed")
+            return error_page(
+                ctx,
+                msg,
+                Sections::Portal(PortalSection::Purchases, false),
+                "My purchases",
+                e,
+                "products my-purchases page: order read failed",
+            )
+            .await
         }
     };
 
     let content = html! {
-        (portal_tabs("purchases", seller_enabled))
-        (components::page_header("My Purchases", Some("Receipts, payment status, and subscription details"), None))
-
-        div #my-purchases-content {
-                @let row_hrefs: Vec<String> = list.records.iter().map(|record| format!("/b/products/my-purchases/{}", record.id)).collect();
-                @let cols = [
-                    components::TableCol::new("Status"),
-                    components::TableCol::new("Total"),
-                    components::TableCol::new("Provider"),
-                    components::TableCol::new("Date"),
-                ];
-                @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|r| {
-                    let amount = display_money(r.i64_field("total_cents"), r.str_field("currency"));
-                    vec![
-                        components::status_badge(r.str_field("status")),
-                        html! { span .font-medium { (amount) } },
-                        html! { span .text-muted .text-sm { (r.str_field("provider")) } },
-                        html! { span .text-muted .text-sm { (r.str_field("created_at").get(..10).unwrap_or("")) } },
-                    ]
-                }).collect();
-                (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), html! { p .text-muted { "No purchases yet" } }))
-                @if let Some(per_page) = std::num::NonZeroU32::new(page_size as u32) { (components::pagination(list.page as u32, per_page, list.total_count as u32, "/b/products/my-purchases")) }
-        }
+        @let row_hrefs: Vec<String> = list.records.iter().map(|record| format!("/b/products/my-purchases/{}", crate::util::url_path_encode(&record.id))).collect();
+        @let cols = [
+            components::TableCol::new("Status"),
+            components::TableCol::new("Total"),
+            components::TableCol::new("Provider"),
+            components::TableCol::new("Date"),
+        ];
+        @let rows: Vec<Vec<maud::Markup>> = list.records.iter().map(|r| {
+            let amount = display_money(r.i64_field("total_cents"), r.str_field("currency"));
+            vec![
+                components::status_badge(r.str_field("status")),
+                html! { span .font-medium { (amount) } },
+                html! { span .text-muted .text-sm { (r.str_field("provider")) } },
+                components::timestamp(r.str_field("created_at")),
+            ]
+        }).collect();
+        (components::data_table(&cols, rows, Some(move |index| row_hrefs.get(index).cloned()), components::empty_state(icons::shopping_cart(), "No purchases yet", "Orders you place will appear here with their receipts.", None)))
+        @if let Some(per_page) = std::num::NonZeroU32::new(page_size as u32) { (components::pagination(list.page as u32, per_page, list.total_count as u32, "/b/products/my-purchases")) }
     };
 
-    ui::shell_page(
+    products_page(
         ctx,
         msg,
-        ui::Shell::portal("My Purchases", "My Purchases"),
+        ui::Shell::portal("My purchases", "My purchases")
+            .subtitle("Receipts, payment status, and subscription details"),
+        Sections::Portal(PortalSection::Purchases, seller_enabled),
         content,
     )
     .await
@@ -3241,7 +4027,15 @@ pub async fn settings(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let (trusted_server, vars) = match settings.await {
         Ok(settings) => settings,
         Err(e) => {
-            return crud::db_error_page(msg, e, "products settings page: runtime read failed")
+            return error_page(
+                ctx,
+                msg,
+                Sections::Admin(AdminSection::Settings),
+                "Products settings",
+                e,
+                "products settings page: runtime read failed",
+            )
+            .await
         }
     };
     let sections = [
@@ -3271,12 +4065,18 @@ pub async fn settings(ctx: &dyn Context, msg: &Message) -> OutputStream {
         match settings_form::settings_form(ctx, SETTINGS_SAVE_PATH, &sections, html! {}).await {
             Ok(form) => form,
             Err(e) => {
-                return crud::db_error_page(msg, e, "products settings: current values read failed")
+                return error_page(
+                    ctx,
+                    msg,
+                    Sections::Admin(AdminSection::Settings),
+                    "Products settings",
+                    e,
+                    "products settings: current values read failed",
+                )
+                .await
             }
         };
     let content = html! {
-        (admin_tabs("settings"))
-        (components::page_header("Settings", Some("Set up payments and choose sensible defaults for new products"), None))
         (components::callout(
             components::CalloutTone::Info,
             "Start with Stripe credentials and store defaults",
@@ -3284,18 +4084,24 @@ pub async fn settings(ctx: &dyn Context, msg: &Message) -> OutputStream {
             Some(html! { a .btn .btn--secondary .btn--sm href="/b/products/admin/stripe" { "Check Stripe status" } }),
         ))
         @if !trusted_server {
-            section .card .card--warning .mb-4 {
-                div .card__body {
-                    strong { "Browser runtime safety" }
-                    p .text-muted .text-sm .text-subtitle {
-                        "Stripe secret keys and signed webhooks are disabled here because browser storage is controlled by the visitor. Point the storefront widget at a trusted native or Cloudflare API, or use a pre-created Payment Link."
-                    }
-                }
-            }
+            (components::callout(
+                components::CalloutTone::Warning,
+                "Browser runtime safety",
+                html! { p { "Stripe secret keys and signed webhooks are disabled here because browser storage is controlled by the visitor. Point the storefront widget at a trusted native or Cloudflare API, or use a pre-created Payment Link." } },
+                None,
+            ))
         }
         (form)
     };
-    ui::shell_page(ctx, msg, ui::Shell::admin("Settings", "Products"), content).await
+    products_page(
+        ctx,
+        msg,
+        ui::Shell::admin("Products settings", "Settings")
+            .subtitle("Set up payments and choose sensible defaults for new products"),
+        Sections::Admin(AdminSection::Settings),
+        content,
+    )
+    .await
 }
 
 /// Where the settings form posts: the admin block, because the page shows
