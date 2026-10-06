@@ -21,11 +21,11 @@ pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
 ];
 
 #[cfg(feature = "postgres")]
-pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[
-    SQL_001_POSTGRES,
-    SQL_002_POSTGRES,
-    SQL_003_POSTGRES,
-    SQL_004_POSTGRES,
+pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[
+    ("001_dev_schema", SQL_001_POSTGRES),
+    ("002_build_artifact_bytes", SQL_002_POSTGRES),
+    ("003_seed_info", SQL_003_POSTGRES),
+    ("004_seed_llms_text", SQL_004_POSTGRES),
 ];
 #[cfg(not(feature = "postgres"))]
-pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[];
+pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];

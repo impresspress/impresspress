@@ -2767,6 +2767,7 @@ dependencies = [
  "impresspress-native",
  "impresspress-password",
  "reqwest",
+ "serde_json",
  "tempfile",
  "tokio",
  "tracing",

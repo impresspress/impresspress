@@ -490,9 +490,10 @@ fn structural_config_inputs(
 /// - `IMPRESSPRESS_RUN_MIGRATIONS`, on the deploy funnel only. Migrations on
 ///   CF run exclusively through `/_deploy/init` — a production deploy and
 ///   local `impresspress serve --target cloudflare` both POST it (see
-///   `cli/flows/embed_cloudflare.rs`). Request-path builds never migrate;
-///   there is no worker env var to honor here, unlike native `impresspress_server::build_native_runtime`'s
-///   `--run-migrations` flag, which is a real per-boot CLI choice.
+///   `cli/flows/embed_cloudflare.rs`). Request-path builds never migrate,
+///   and there is no worker env var to honor here: a deploy is what migrates
+///   a Worker, as a boot is what migrates a native server
+///   (`impresspress_server::build_native_runtime`).
 ///
 /// Both surfaces are assembled in ONE `RuntimeConfig`: the async
 /// `ConfigService` map and the synchronous `ctx.config_get` snapshot used to be

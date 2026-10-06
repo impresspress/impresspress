@@ -83,25 +83,25 @@ pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
 /// `postgres` feature is off — see `files::migrations`'s doc for the
 /// rationale (Cloudflare/D1 never selects postgres; don't embed dead SQL).
 #[cfg(feature = "postgres")]
-pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[
-    SQL_001_POSTGRES,
-    SQL_002_POSTGRES,
-    SQL_003_POSTGRES,
-    SQL_004_POSTGRES,
-    SQL_005_POSTGRES,
-    SQL_006_POSTGRES,
-    SQL_007_POSTGRES,
-    SQL_008_POSTGRES,
-    SQL_009_POSTGRES,
-    SQL_010_POSTGRES,
-    SQL_011_POSTGRES,
-    SQL_012_POSTGRES,
-    SQL_013_POSTGRES,
-    SQL_014_POSTGRES,
-    SQL_015_POSTGRES,
+pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[
+    ("001_auth_schema", SQL_001_POSTGRES),
+    ("002_reserved_orgs", SQL_002_POSTGRES),
+    ("003_oauth_pkce_states", SQL_003_POSTGRES),
+    ("004_refresh_tokens", SQL_004_POSTGRES),
+    ("005_jwt_blocklist", SQL_005_POSTGRES),
+    ("006_user_extended_fields", SQL_006_POSTGRES),
+    ("007_api_keys", SQL_007_POSTGRES),
+    ("008_rate_limits", SQL_008_POSTGRES),
+    ("009_auth_version", SQL_009_POSTGRES),
+    ("010_strict_schema_columns", SQL_010_POSTGRES),
+    ("011_rate_limit_retention", SQL_011_POSTGRES),
+    ("012_sessions_family", SQL_012_POSTGRES),
+    ("013_email_proof", SQL_013_POSTGRES),
+    ("014_clear_provider_access_tokens", SQL_014_POSTGRES),
+    (API_KEY_EXPIRY_CANONICAL, SQL_015_POSTGRES),
 ];
 #[cfg(not(feature = "postgres"))]
-pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[];
+pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];
 
 /// Apply the auth schema through the shared migration-state gate.
 ///
@@ -113,9 +113,13 @@ pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[];
 /// repo layer — test-fixture setup is an explicit exception to the
 /// no-raw-migration-runner rule (CLAUDE.md).
 pub async fn apply(ctx: &dyn wafer_run::context::Context) -> Result<(), String> {
-    let sqlite: Vec<&str> = SQLITE_MIGRATIONS.iter().map(|(_, sql)| *sql).collect();
-    crate::migration_helper::apply_migrations(ctx, "wafer-run/auth", &sqlite, POSTGRES_MIGRATIONS)
-        .await
+    crate::migration_helper::apply_migrations(
+        ctx,
+        "wafer-run/auth",
+        SQLITE_MIGRATIONS,
+        POSTGRES_MIGRATIONS,
+    )
+    .await
 }
 
 #[cfg(test)]
@@ -395,8 +399,8 @@ mod api_key_expiry_tests {
     //! column one format, and a key whose expiry names no instant visibly
     //! revoked rather than quietly inert.
     //!
-    //! Driven through `apply_migrations` — the path `--run-migrations`
-    //! takes — and read back through `repo::api_keys`, so what is asserted
+    //! Driven through `apply_migrations` — the path a migrating deploy or
+    //! boot takes — and read back through `repo::api_keys`, so what is asserted
     //! is what the block sees.
 
     use std::collections::HashMap;
@@ -406,8 +410,8 @@ mod api_key_expiry_tests {
     use super::{API_KEY_EXPIRY_CANONICAL, SQLITE_MIGRATIONS};
     use crate::{blocks::auth::repo::api_keys, migration_helper, test_support::TestContext};
 
-    /// A fixture with the auth schema in place whose operator has opted into
-    /// migrations, as `--run-migrations` does.
+    /// A fixture with the auth schema in place, in a build that applies
+    /// migrations, as every deploy and native boot is.
     async fn upgrading_deployment() -> TestContext {
         let mut ctx = TestContext::with_auth()
             .await
@@ -420,11 +424,11 @@ mod api_key_expiry_tests {
     /// The repair onwards, sliced out of the shipped list rather than read
     /// from `SQL_015_SQLITE` directly: an unwired migration yields an empty
     /// slice and trips this assert instead of silently testing nothing.
-    fn the_repair() -> Vec<&'static str> {
-        let sql: Vec<&str> = SQLITE_MIGRATIONS
+    fn the_repair() -> Vec<(&'static str, &'static str)> {
+        let sql: Vec<(&str, &str)> = SQLITE_MIGRATIONS
             .iter()
             .skip_while(|(name, _)| *name != API_KEY_EXPIRY_CANONICAL)
-            .map(|(_, sql)| *sql)
+            .copied()
             .collect();
         assert!(
             !sql.is_empty(),
@@ -746,7 +750,8 @@ mod re_run_survival_tests {
     //! that fires on every later schema change.
     //!
     //! Seeded and read back through the repo doors, and re-applied through
-    //! `apply_migrations` — the path `--run-migrations` takes — so what is
+    //! `apply_migrations` — the path a migrating deploy or boot takes — so
+    //! what is
     //! asserted is what the block sees. The second apply is given its own
     //! state key because the hash gate would otherwise skip identical SQL;
     //! in production the hash differs precisely because a migration changed.
@@ -771,8 +776,7 @@ mod re_run_survival_tests {
     }
 
     async fn re_run_the_whole_set(ctx: &TestContext) {
-        let sql: Vec<&str> = SQLITE_MIGRATIONS.iter().map(|(_, s)| *s).collect();
-        migration_helper::apply_migrations(ctx, "wafer-run/auth#rerun", &sql, &[])
+        migration_helper::apply_migrations(ctx, "wafer-run/auth#rerun", SQLITE_MIGRATIONS, &[])
             .await
             .expect("re-apply the auth schema");
     }

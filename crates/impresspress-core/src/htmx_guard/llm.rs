@@ -38,14 +38,10 @@ fn fixture() -> Pin<Box<dyn Future<Output = Fixture>>> {
         let mut ctx = ctx_with_messages().await.fixture();
         let as_llm =
             |ctx: &crate::test_support::TestContext| ctx.clone().running_as(LlmBlock::BLOCK_NAME);
-        let sqlite: Vec<&str> = crate::blocks::llm::migrations::SQLITE_MIGRATIONS
-            .iter()
-            .map(|(_, sql)| *sql)
-            .collect();
         crate::migration_helper::apply_migrations(
             &as_llm(&ctx),
             LlmBlock::BLOCK_NAME,
-            &sqlite,
+            crate::blocks::llm::migrations::SQLITE_MIGRATIONS,
             crate::blocks::llm::migrations::POSTGRES_MIGRATIONS,
         )
         .await

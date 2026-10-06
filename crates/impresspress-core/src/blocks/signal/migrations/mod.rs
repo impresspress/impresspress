@@ -18,9 +18,9 @@ pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[("001_signal_rooms", SQL
 /// when the `postgres` feature is off — see `files::migrations`'s doc for the
 /// rationale (Cloudflare/D1 never selects postgres; don't embed dead SQL).
 #[cfg(feature = "postgres")]
-pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[SQL_001_POSTGRES];
+pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[("001_signal_rooms", SQL_001_POSTGRES)];
 #[cfg(not(feature = "postgres"))]
-pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[];
+pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];
 
 #[cfg(test)]
 mod tests {

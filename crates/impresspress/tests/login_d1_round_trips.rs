@@ -358,7 +358,6 @@ async fn start() -> Site {
         database.clone(),
         &app_env,
         PasswordPeppers::default(),
-        false,
         AppHooks::none(),
     )
     .await

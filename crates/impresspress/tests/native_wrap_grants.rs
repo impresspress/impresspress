@@ -47,7 +47,7 @@ async fn wrap_grants_are_read_through_the_database_service() {
     .expect("construct sqlite service");
     impresspress_core::migration_helper::apply_ddl_via_service(
         &database,
-        impresspress_core::blocks::admin::migrations::ddl_files("sqlite"),
+        &impresspress_core::blocks::admin::migrations::ddl_files("sqlite"),
     )
     .await
     .expect("apply admin tables");
@@ -71,7 +71,6 @@ async fn wrap_grants_are_read_through_the_database_service() {
         database,
         &HashMap::new(),
         Default::default(),
-        false,
         AppHooks::none(),
     )
     .await

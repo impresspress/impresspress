@@ -82,7 +82,6 @@ async fn build_runtime_with_env(
         database.clone(),
         app_env,
         Default::default(),
-        false,
         AppHooks::none(),
     )
     .await
@@ -428,9 +427,12 @@ async fn the_native_build_fills_the_synchronous_config_surface() {
         "block settings must reach the synchronous surface: {:?}",
         snapshot.keys().collect::<Vec<_>>()
     );
-    assert!(
-        !snapshot.contains_key(impresspress_core::migration_helper::RUN_MIGRATIONS_KEY),
-        "this harness builds with run_migrations = false",
+    assert_eq!(
+        snapshot
+            .get(impresspress_core::migration_helper::RUN_MIGRATIONS_KEY)
+            .map(String::as_str),
+        Some("1"),
+        "a native runtime applies pending migrations at every boot",
     );
     // The JWT secret is seeded pre-wafer by `build_native_runtime` and is one
     // of the variables it fans into both surfaces.

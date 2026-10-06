@@ -1,10 +1,12 @@
 //! The native impresspress server: the boot body the `impresspress` binary
 //! runs, as a library a downstream native site runs too.
 //!
-//! [`run`] constructs the database service, seeds the admin variables /
-//! block_settings tables pre-wafer through the shared `impresspress_core`
-//! seeders, builds the WAFER runtime, registers the HTTP listener, and runs
-//! the `serve_until_shutdown` loop. A consumer adds its own blocks, config
+//! [`run`] constructs the database service, applies admin's pending
+//! migrations and seeds the variables / block_settings tables pre-wafer
+//! through the shared `impresspress_core` seeders, builds the WAFER runtime,
+//! boots it — which applies every other block's pending migrations — and,
+//! once all of that succeeded, registers the HTTP listener and runs the
+//! `serve_until_shutdown` loop. A consumer adds its own blocks, config
 //! and flows through [`AppHooks`] — the same two hooks
 //! `impresspress_cloudflare::run` takes — and names the flow the listener
 //! dispatches to.
@@ -67,24 +69,18 @@ pub const IMPRESSPRESS_LISTENER_FLOW: &str = "site-main";
 mod declared_keys;
 pub use declared_keys::filter_to_declared_keys;
 
+pub mod migration_lock;
+
 /// Boot the native server end-to-end and serve until shutdown.
 ///
 /// `listener_flow` is the flow the HTTP listener dispatches every request to
 /// ([`IMPRESSPRESS_LISTENER_FLOW`] for impresspress itself); `hooks` add the
 /// consumer's blocks and flows.
 ///
-/// `run_migrations` mirrors `impresspress serve --run-migrations`. When `true`
-/// the boot path stamps `IMPRESSPRESS_RUN_MIGRATIONS=1` into the config
-/// snapshot directly (so [`migration_helper::apply_if_blessed`] sees it),
-/// instead of the prior `std::env::set_var` smuggle. Rust 2024 makes
-/// process-env mutation `unsafe`, and the smuggle leaked into any child
-/// process the boot path might spawn — neither was the right channel.
-pub async fn run(
-    repo_root: &Path,
-    run_migrations: bool,
-    listener_flow: &str,
-    hooks: AppHooks,
-) -> anyhow::Result<()> {
+/// Every boot applies the database's pending block migrations before it
+/// serves a request, and refuses to start if one fails (see
+/// [`start_native`]).
+pub async fn run(repo_root: &Path, listener_flow: &str, hooks: AppHooks) -> anyhow::Result<()> {
     // 1. Load .env file (before reading any env vars). Anchored to
     // `repo_root` so the boot path doesn't depend on the process cwd —
     // mutating cwd globally would leak into anything else this binary
@@ -136,7 +132,6 @@ pub async fn run(
         database,
         &app_env,
         password_peppers,
-        run_migrations,
         listener_flow,
         hooks,
     )
@@ -155,24 +150,58 @@ pub async fn run(
 /// `listener_flow`, boot it and bind its socket: everything [`run`] does
 /// between reading its environment and serving until shutdown. The runtime
 /// it returns is serving on `infra.listen`.
+///
+/// Building and booting is where the database's pending migrations are
+/// applied — admin's pre-build, every other block's at its `Init` — so this
+/// process holds the database's [`migration_lock::MigrationLock`] from
+/// before the first of them until the boot has run, and a second process
+/// booting against the same database waits for it. Nothing binds the socket
+/// until [`boot_native`] has succeeded: a failed migration is a refused
+/// start, never a server answering requests on a half-migrated schema.
 pub async fn start_native(
     infra: &InfraConfig,
     database: Arc<dyn DatabaseService>,
     app_env: &HashMap<String, String>,
     password_peppers: PasswordPeppers,
-    run_migrations: bool,
     listener_flow: &str,
     hooks: AppHooks,
 ) -> anyhow::Result<Arc<Wafer>> {
-    let mut wafer = build_native_runtime(
+    let lock = migration_lock::MigrationLock::acquire(&database)
+        .await
+        .context("take the database's migration lock")?;
+    let booted = build_and_boot(
         infra,
         database,
         app_env,
         password_peppers,
-        run_migrations,
+        listener_flow,
         hooks,
     )
-    .await?;
+    .await;
+    // Released whether or not the boot succeeded; a boot that failed reports
+    // its own error first.
+    let released = lock.release().await;
+    let wafer = booted?;
+    released?;
+    wafer.run_start_lifecycle().await;
+    let wafer = wafer.bind_all();
+    tracing::info!("WAFER runtime started — all blocks resolved");
+    Ok(wafer)
+}
+
+/// The part of [`start_native`] that runs under the migration lock: build
+/// the runtime, register the listener and the observability hooks, and boot
+/// it through the shared funnel.
+async fn build_and_boot(
+    infra: &InfraConfig,
+    database: Arc<dyn DatabaseService>,
+    app_env: &HashMap<String, String>,
+    password_peppers: PasswordPeppers,
+    listener_flow: &str,
+    hooks: AppHooks,
+) -> anyhow::Result<Wafer> {
+    let mut wafer =
+        build_native_runtime(infra, database.clone(), app_env, password_peppers, hooks).await?;
 
     // 8. Native-only: register http-listener on the consumer's flow.
     register_http_listener(&mut wafer, &infra.listen, listener_flow, &infra.listener);
@@ -193,20 +222,21 @@ pub async fn start_native(
     //     strictly), skip auth's bootstrap, and surface as a login 401 on the
     //     freshly-booted server in CI E2E.
     //
-    //     Native then runs the Start lifecycle and binds the HTTP socket — the
-    //     steps `boot` deliberately omits because the stateless targets
-    //     dispatch per-request instead of binding (wafer-run #239 exposed them
-    //     as `run_start_lifecycle` + `bind_all`).
-    boot_native(&mut wafer).await?;
-    wafer.run_start_lifecycle().await;
-    let wafer = wafer.bind_all();
-    tracing::info!("WAFER runtime started — all blocks resolved");
+    //     `start_native` then runs the Start lifecycle and binds the HTTP
+    //     socket — the steps `boot` deliberately omits because the stateless
+    //     targets dispatch per-request instead of binding (wafer-run #239
+    //     exposed them as `run_start_lifecycle` + `bind_all`).
+    boot_native(&mut wafer, &database).await?;
     Ok(wafer)
 }
 
 /// Build the native runtime over an already-constructed platform database
-/// service: pre-wafer admin DDL, variable seeding, the block-settings
-/// hash-gate load, admin-created WRAP grants, and `ImpresspressBuilder::build()`.
+/// service: admin's pending migrations, variable seeding, the block-settings
+/// load, admin-created WRAP grants, and `ImpresspressBuilder::build()`.
+///
+/// The runtime it builds applies pending migrations: its config snapshot
+/// carries `IMPRESSPRESS_RUN_MIGRATIONS`, so every block's `Init` applies its
+/// own pending list when [`boot_native`] runs it.
 ///
 /// `app_env` is the process environment's app config — every key carrying
 /// `__` (`collect_app_env_vars`). Its declared keys seed the variables table;
@@ -230,19 +260,19 @@ pub async fn build_native_runtime(
     database: Arc<dyn DatabaseService>,
     app_env: &HashMap<String, String>,
     password_peppers: PasswordPeppers,
-    run_migrations: bool,
     hooks: AppHooks,
 ) -> anyhow::Result<Wafer> {
-    // Create the admin variables / block_settings tables pre-wafer by running
-    // admin's migration-file SQL through the service (migration-file-runner
-    // exception). Reuses the embedded `.sql` constants admin's gated `Init`
-    // re-asserts later — single schema source, no hand-rolled CREATE TABLE.
-    impresspress_core::migration_helper::apply_ddl_via_service(
+    // Apply admin's pending migrations pre-wafer: the variables /
+    // block_settings tables they create are read below to build the runtime.
+    // The same list, hash and `block_settings` row admin's `Init` uses, so
+    // `Init` finds it applied — and an unchanged list is not run again.
+    impresspress_core::migration_helper::apply_pending_via_service(
         &database,
-        impresspress_core::blocks::admin::migrations::ddl_files(&infra.db_type),
+        impresspress_core::blocks::admin::ADMIN_BLOCK_ID,
+        impresspress_core::blocks::admin::migrations::migration_files(&infra.db_type),
     )
     .await
-    .map_err(|e| anyhow!("create admin tables pre-wafer: {e}"))?;
+    .map_err(|e| anyhow!("apply the admin migrations: {e}"))?;
 
     // Seed env/auto-gen/JWT variables + run the #222 block-settings hash-gate,
     // all through the shared `impresspress_core` seeders over the service.
@@ -351,10 +381,20 @@ pub async fn build_native_runtime(
         .both(
             impresspress_core::platform_state::variables::HAS_PROCESS_ENV_CONFIG_KEY,
             "1",
+        )
+        // A native boot is a build that applies pending migrations, as a
+        // Cloudflare deploy and a browser boot are: every block's `Init`
+        // applies its own pending list (`migration_helper`).
+        .both(impresspress_core::migration_helper::RUN_MIGRATIONS_KEY, "1")
+        // The SQL dialect every block renders and migrates in, from the one
+        // place native knows it: `IMPRESSPRESS_DB_TYPE`, which also chose
+        // the database service above and admin's pre-build list. Like the
+        // process-environment marker, a fact about this target rather than
+        // a setting.
+        .both(
+            impresspress_core::migration_helper::DATABASE_BACKEND_KEY,
+            infra.db_type.as_str(),
         );
-    if run_migrations {
-        runtime_config.both(impresspress_core::migration_helper::RUN_MIGRATIONS_KEY, "1");
-    }
     if let Some(v) = request_log {
         runtime_config.both(impresspress_core::config_vars::REQUEST_LOG_CONFIG_KEY, v);
     }
@@ -467,20 +507,36 @@ pub fn password_peppers_from_env(
 const LISTENER_BLOCK: &str = "wafer-run/http-listener";
 
 /// Boot the native runtime through the shared funnel, tolerantly, and refuse
-/// a boot whose HTTP listener did not initialize.
+/// a boot whose HTTP listener did not initialize or in which a block's
+/// migrations failed.
 ///
 /// Tolerant, because a long-lived server can be inspected and fixed in place,
-/// so one broken feature block must not wedge the whole process. The listener
-/// is the exception: its `Init` validates its settings (the `IMPRESSPRESS_*`
-/// listener variables among them), and a listener that failed it binds
-/// nothing — a process that went on would report itself started and serve no
-/// request. So its failure fails the boot, naming the listener's error.
+/// so one broken feature block must not wedge the whole process. Two failures
+/// are the exception:
+///
+/// - **The listener.** Its `Init` validates its settings (the
+///   `IMPRESSPRESS_*` listener variables among them), and a listener that
+///   failed it binds nothing — a process that went on would report itself
+///   started and serve no request.
+/// - **A migration.** Every block applies its pending migrations at `Init`;
+///   one whose list failed has a half-applied schema, and a server that went
+///   on would answer requests against tables that do not match its code — the
+///   rule a Cloudflare deploy applies when its `/_deploy/prepare` report is
+///   not all-ok. Such a block is told from any other `Init` failure by its
+///   `block_settings` row, which still holds
+///   [`migration_helper::APPLYING`](impresspress_core::migration_helper::APPLYING)
+///   (read from `database`, after the boot). The error names each such block
+///   with its own error, which names the file and the statement the database
+///   refused; the next boot re-runs the list.
 ///
 /// `build_native_runtime` reads the admin-created grants from the platform
 /// database and hands them to `ImpresspressBuilder::wrap_grants` before
 /// `build()`, because native seeds and reads everything pre-wafer: the grants
 /// are `PreInstalled`.
-pub async fn boot_native(wafer: &mut Wafer) -> anyhow::Result<builder::BootReport> {
+pub async fn boot_native(
+    wafer: &mut Wafer,
+    database: &Arc<dyn DatabaseService>,
+) -> anyhow::Result<builder::BootReport> {
     let report = builder::boot(
         wafer,
         &NativeBootHooks,
@@ -502,7 +558,36 @@ pub async fn boot_native(wafer: &mut Wafer) -> anyhow::Result<builder::BootRepor
             listener.error.as_deref().unwrap_or("its Init failed")
         ));
     }
-    Ok(report)
+    if report.ok {
+        return Ok(report);
+    }
+    let settings = impresspress_core::platform_state::block_settings::load(database)
+        .await
+        .map_err(|e| anyhow!("read which blocks' migrations failed: {e}"))?;
+    let failed_migrations: Vec<String> = report
+        .blocks
+        .iter()
+        .filter(|outcome| {
+            !outcome.ok
+                && settings.state(&outcome.block).migration.current_hash
+                    == impresspress_core::migration_helper::APPLYING
+        })
+        .map(|outcome| {
+            format!(
+                "`{}`: {}",
+                outcome.block,
+                outcome.error.as_deref().unwrap_or("its Init failed")
+            )
+        })
+        .collect();
+    if failed_migrations.is_empty() {
+        return Ok(report);
+    }
+    Err(anyhow!(
+        "refusing to start: migrations failed, and the server would serve on a schema that \
+         does not match its code:\n  {}",
+        failed_migrations.join("\n  ")
+    ))
 }
 
 /// Native [`BootHooks`](builder::BootHooks). Native seeds the variables /

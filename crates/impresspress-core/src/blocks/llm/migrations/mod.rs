@@ -36,9 +36,8 @@ const SQL_002_POSTGRES: &str = include_str!("002_provider_max_tokens_field.postg
 ///
 /// Application is gated by the shared migration-state gate
 /// ([`crate::migration_helper::apply_if_blessed`]): idempotent across cold
-/// starts, and schema changes require a redeploy that re-runs migrations
-/// (native: `--run-migrations`; Cloudflare: the `/_deploy/init` funnel
-/// applies them on every deploy).
+/// starts, and a changed list is applied by the next deploy or boot (native:
+/// every boot; Cloudflare: the `/_deploy/init` funnel on every deploy).
 pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
     ("001_llm_schema", SQL_001_SQLITE),
     ("002_provider_max_tokens_field", SQL_002_SQLITE),
@@ -48,9 +47,12 @@ pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
 /// when the `postgres` feature is off — see `files::migrations`'s doc for the
 /// rationale (Cloudflare/D1 never selects postgres; don't embed dead SQL).
 #[cfg(feature = "postgres")]
-pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[SQL_001_POSTGRES, SQL_002_POSTGRES];
+pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[
+    ("001_llm_schema", SQL_001_POSTGRES),
+    ("002_provider_max_tokens_field", SQL_002_POSTGRES),
+];
 #[cfg(not(feature = "postgres"))]
-pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[];
+pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];
 
 #[cfg(test)]
 mod tests {

@@ -10,15 +10,55 @@ Impresspress uses [Semantic Versioning](https://semver.org/): `MAJOR.MINOR.PATCH
 
 ## Upgrade Notes
 
-Notes for operators upgrading an **existing** deployment. On native,
-migrations are gated: they run on a fresh install, or when the operator opts
-in with `impresspress serve --run-migrations`. A Cloudflare deploy
-(`impresspress deploy`, which has no such flag) always runs them: its
-`/_deploy/prepare` funnel applies every block's migrations before the new
-version is promoted. A browser install applies them on the first boot of a
-bundle that changes them. So whenever a release's code half assumes a data
-repair the migration half performs, it has to be called out here — on native
-the two ship together but only one of them runs by default.
+Notes for operators upgrading an **existing** deployment. Every target
+applies a release's pending block migrations before it serves it: a native
+server at every boot (refusing to start if one fails), a Cloudflare deploy
+(`impresspress deploy`) in its `/_deploy/prepare` funnel before the new
+version is promoted, a browser install on the first boot of a bundle that
+changes them. A data repair a release's code half assumes therefore always
+runs with it; it is still called out here, because a migration can change
+what users see (see the auth caveat below).
+
+Older entries say "upgrade with `--run-migrations`". That flag no longer
+exists: what it did now happens on every native boot.
+
+### Native: pending migrations apply at every boot; `--run-migrations` is gone
+
+**What changes.** `impresspress serve` (and any server built on
+`impresspress_server::run`) applies every block's pending migrations at boot,
+before it binds its socket — the same rule a Cloudflare deploy and a browser
+boot already follow. Before, an existing install applied them only when
+started with `--run-migrations`; without it each boot logged `schema drift`
+and served on the old schema. The flag is removed: `impresspress serve
+--run-migrations` is now an unknown-argument error, so drop it from scripts,
+service units and process managers.
+
+- **Nothing re-runs when nothing changed.** A block's list is applied only
+  when its hash differs from the one recorded in
+  `impresspress__admin__block_settings`. That includes the admin block's
+  list, which the server applies before the runtime is built and which it
+  used to re-run, unrecorded, on every boot.
+- **A failed migration stops the boot.** The server refuses to start with
+  `refusing to start: migrations failed …`, naming each block, the migration
+  file and the statement the database refused. Nothing is served on the
+  half-applied schema; fix the cause and start again, and that block's list
+  runs again. Any other block `Init` failure is tolerated as before.
+- **Two processes do not migrate at once.** A boot holds a lock row in the
+  new `impresspress__server__migration_lock` table while it applies
+  migrations; a second process booting against the same database waits for
+  it, then finds the lists applied. A lock left by a process that died
+  mid-boot is taken over after about 30 seconds.
+- **PostgreSQL picks the PostgreSQL migrations.** The dialect every block
+  migrates and queries in now comes from `IMPRESSPRESS_DB_TYPE`, the setting
+  that already chose the database; before, a native PostgreSQL server ran
+  the SQLite migration files.
+
+**The auth caveat, unchanged.** A block re-runs its whole list when any file
+in it changes, and auth's `004` drops the refresh-token table: a release that
+changes an auth migration signs every user out on the first boot that applies
+it — now the first boot after the upgrade, with no flag to put it off.
+
+**Who has to act.** Anyone who passes `--run-migrations`: remove it.
 
 ### Browser builds: request log defaults to errors only
 
@@ -1895,9 +1935,9 @@ Before tagging a release, verify:
   ./target/release/impresspress
   ```
 - [ ] If this release changes config variables or CLI flags, update the docs
-- [ ] If this release ships a migration that repairs existing data, add an entry
-      to [Upgrade Notes](#upgrade-notes) so operators know to pass
-      `--run-migrations`
+- [ ] If this release ships a migration that repairs existing data or changes
+      what users see (any auth migration signs everyone out), add an entry to
+      [Upgrade Notes](#upgrade-notes): every target applies it on upgrade
 
 ## Dry run — the pre-flight step
 

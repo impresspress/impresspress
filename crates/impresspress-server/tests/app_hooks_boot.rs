@@ -86,7 +86,6 @@ async fn the_consumers_hooks_and_listener_flow_serve_requests() {
         database,
         &HashMap::new(),
         Default::default(),
-        false,
         PROBE_FLOW,
         hooks,
     )

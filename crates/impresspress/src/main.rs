@@ -31,7 +31,7 @@ async fn run() -> anyhow::Result<()> {
     // Bare `impresspress` (no args) defaults to `serve --target native`.
     // Parse the synthetic argv `["impresspress", "serve"]` rather than
     // hand-constructing a default `Cli`, so clap's verb-level defaults
-    // (port, release, run-migrations) and any future flag additions stay
+    // (port, release) and any future flag additions stay
     // in one place — `Cli::default()` would silently bypass them.
     let cli = if std::env::args_os().count() == 1 {
         Cli::try_parse_from(["impresspress", "serve"])?
@@ -57,10 +57,9 @@ async fn run() -> anyhow::Result<()> {
             target,
             release,
             port,
-            run_migrations,
         } => {
             let target = default_target(&ctx, target)?;
-            dispatch_serve(&ctx, target, release, port, run_migrations).await
+            dispatch_serve(&ctx, target, release, port).await
         }
         Command::Deploy {
             target,
@@ -95,25 +94,16 @@ async fn dispatch_serve(
     target: Target,
     release: bool,
     port: Option<u16>,
-    run_migrations: bool,
 ) -> anyhow::Result<()> {
     let repo_root = &ctx.cwd;
     match (detect_mode(ctx), target) {
-        (Mode::Sealed, Target::Native) => {
-            sealed_native::serve(repo_root, release, port, run_migrations).await
-        }
-        (Mode::Sealed, Target::Web) => {
-            sealed_web::serve(repo_root, release, port, run_migrations).await
-        }
+        (Mode::Sealed, Target::Native) => sealed_native::serve(repo_root, release, port).await,
+        (Mode::Sealed, Target::Web) => sealed_web::serve(repo_root, release, port).await,
         (Mode::Sealed, Target::Cloudflare) => anyhow::bail!(
             "--target cloudflare requires a Cargo package; sealed mode not yet implemented"
         ),
-        (Mode::Embed, Target::Native) => {
-            embed_native::serve(repo_root, release, port, run_migrations).await
-        }
-        (Mode::Embed, Target::Web) => {
-            embed_web::serve(repo_root, release, port, run_migrations).await
-        }
+        (Mode::Embed, Target::Native) => embed_native::serve(repo_root, release, port).await,
+        (Mode::Embed, Target::Web) => embed_web::serve(repo_root, release, port).await,
         (Mode::Embed, Target::Cloudflare) => {
             embed_cloudflare::serve(repo_root, release, port).await
         }

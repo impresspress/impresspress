@@ -45,12 +45,7 @@ pub async fn build(repo_root: &Path, release: bool) -> Result<()> {
     Ok(())
 }
 
-pub async fn serve(
-    repo_root: &Path,
-    release: bool,
-    _port: Option<u16>,
-    run_migrations: bool,
-) -> Result<()> {
+pub async fn serve(repo_root: &Path, release: bool, _port: Option<u16>) -> Result<()> {
     build(repo_root, release).await?;
 
     // Locate target/<profile>/<bin-name>. Read Cargo.toml to find the bin.
@@ -78,10 +73,8 @@ pub async fn serve(
     if !bin.is_file() {
         return Err(anyhow!("expected binary at {bin:?} after cargo build"));
     }
-    // Embed flow exec's the user's bin as a subprocess. Pass the
-    // run-migrations flag via the child's env (scoped to that child),
-    // rather than mutating the CLI's own process env via `set_var` (unsafe
-    // in Rust 2024, and would leak into any other child the CLI spawns).
+    // Embed flow exec's the user's bin as a subprocess; it applies its
+    // database's pending migrations itself, at boot.
     //
     // Use `tokio::process::Command` because the child is long-running
     // (it's the actual impresspress server) and blocking on `wait` from a
@@ -89,9 +82,6 @@ pub async fn serve(
     // this async fn is parked on.
     let mut cmd = tokio::process::Command::new(&bin);
     cmd.current_dir(repo_root);
-    if run_migrations {
-        cmd.env(impresspress_core::migration_helper::RUN_MIGRATIONS_KEY, "1");
-    }
     let mut child = cmd.spawn()?;
     let status = child.wait().await?;
     if !status.success() {

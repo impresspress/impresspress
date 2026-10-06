@@ -1946,14 +1946,10 @@ mod tests {
             .running_as(crate::blocks::llm::LlmBlock::BLOCK_NAME);
         {
             use crate::blocks::llm::migrations;
-            let sqlite: Vec<&str> = migrations::SQLITE_MIGRATIONS
-                .iter()
-                .map(|(_, sql)| *sql)
-                .collect();
             crate::migration_helper::apply_migrations(
                 &ctx,
                 "impresspress/llm",
-                &sqlite,
+                migrations::SQLITE_MIGRATIONS,
                 migrations::POSTGRES_MIGRATIONS,
             )
             .await

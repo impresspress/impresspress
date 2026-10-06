@@ -43,16 +43,15 @@ async fn boot_with(listener: ListenerEnv) -> anyhow::Result<()> {
         .expect("construct sqlite database service");
     let mut wafer = build_native_runtime(
         &infra,
-        database,
+        database.clone(),
         &HashMap::new(),
         Default::default(),
-        false,
         AppHooks::none(),
     )
     .await
     .expect("build impresspress runtime");
     register_http_listener(&mut wafer, &infra.listen, "site-main", &infra.listener);
-    boot_native(&mut wafer).await.map(|_| ())
+    boot_native(&mut wafer, &database).await.map(|_| ())
 }
 
 #[tokio::test]

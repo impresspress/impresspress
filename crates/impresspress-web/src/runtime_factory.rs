@@ -306,7 +306,7 @@ impl RuntimeFactory {
         // to short-cut that chicken-and-egg with `CREATE TABLE IF NOT EXISTS`
         // pre-creates that duplicated the admin migration schema by hand. Any
         // drift between the two schemas was silent until the first per-block
-        // `migration_helper::write_state` upserted into the stale table and
+        // `migration_helper::record` upserted into the stale table and
         // failed on a missing column, taking the whole runtime with it.
         //
         // The proper fix is what the native CLI and Cloudflare runner already
@@ -325,12 +325,12 @@ impl RuntimeFactory {
         // settings this build used to start from. The boot hook still seeds,
         // and republishes whatever that changes, after admin's Init.
         //
-        // And the browser consents to its own migrations, as the native CLI
-        // does with `--run-migrations`: loading a new bundle IS deploying it.
-        // There is no operator step, no `/_deploy/init`, and no other place a
-        // browser install could ever bless a changed migration, so without the
-        // consent a database created by an older bundle would log "schema
-        // drift" and keep its old schema for good. With it, the gate still
+        // And the browser applies its own pending migrations, as a native boot
+        // does: loading a new bundle IS deploying it. There is no operator
+        // step, no `/_deploy/init`, and no other place a browser install
+        // could ever apply a changed migration, so without it a database
+        // created by an older bundle would log "schema drift" and keep its
+        // old schema for good. With it, the gate still
         // skips a block whose recorded hash matches the code, so a migration
         // runs once per change, not once per boot.
         let db = impresspress_browser::make_database_service();

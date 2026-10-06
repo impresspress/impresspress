@@ -374,6 +374,48 @@ async fn apply_seed_decision(
     Ok(())
 }
 
+/// [`upsert_fields`] over the platform [`DatabaseService`], for the native
+/// server's pre-build migration apply
+/// (`migration_helper::apply_pending_via_service`), which runs before any
+/// `Context` exists. Same row selection, same create-or-update.
+pub async fn upsert_fields_via_service(
+    db: &Arc<dyn DatabaseService>,
+    block_name: &str,
+    patch: BlockSettingsPatch,
+) -> Result<(), DatabaseError> {
+    let existing = db.list(TABLE, &block_row_opts(block_name)).await?;
+    match existing.records.first() {
+        Some(record) => {
+            db.update(TABLE, &record.id, patch.to_update_data()).await?;
+        }
+        None => {
+            db.create(TABLE, patch.into_row(block_name).to_data())
+                .await?;
+        }
+    }
+    Ok(())
+}
+
+/// The read both upserts select `block_name`'s row with: one row, oldest
+/// first.
+fn block_row_opts(block_name: &str) -> ListOptions {
+    ListOptions {
+        filters: vec![Filter {
+            field: "block_name".into(),
+            operator: FilterOp::Equal,
+            value: Value::String(block_name.to_string()),
+        }],
+        sort: vec![SortField {
+            field: "created_at".into(),
+            desc: false,
+        }],
+        limit: Some(1),
+        offset: 0,
+        skip_count: true,
+        ..Default::default()
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Runtime flavour: over `Context`, under WRAP.
 // ---------------------------------------------------------------------------
@@ -428,7 +470,7 @@ pub async fn set_enabled(
 /// (`enabled = true`) when absent and preserving every column the patch
 /// leaves unset otherwise.
 ///
-/// Shared by `migration_helper::write_state` (the migration hash columns),
+/// Shared by `migration_helper::record` (the migration hash columns),
 /// `admin::settings::seed_defaults` (`seed_defaults_hash`) and
 /// [`set_enabled`], so every writer goes through the same
 /// single-row-per-block primitive.
@@ -444,22 +486,7 @@ pub async fn upsert_fields(
     block_name: &str,
     patch: BlockSettingsPatch,
 ) -> Result<(), WaferError> {
-    let opts = ListOptions {
-        filters: vec![Filter {
-            field: "block_name".into(),
-            operator: FilterOp::Equal,
-            value: Value::String(block_name.to_string()),
-        }],
-        sort: vec![SortField {
-            field: "created_at".into(),
-            desc: false,
-        }],
-        limit: Some(1),
-        offset: 0,
-        skip_count: true,
-        ..Default::default()
-    };
-    let existing = db::list(ctx, TABLE, &opts).await?;
+    let existing = db::list(ctx, TABLE, &block_row_opts(block_name)).await?;
     match existing.records.first() {
         Some(record) => {
             db::update(ctx, TABLE, &record.id, patch.to_update_data()).await?;
@@ -718,7 +745,7 @@ mod load_and_seed_tests {
     }
 
     /// A `DatabaseService` with the admin schema applied through the
-    /// pre-wafer DDL runner (the migration-file-runner exception to the
+    /// untracked migration runner (the migration-file-runner exception to the
     /// no-raw-SQL rule), so the table under test is the one production
     /// creates rather than a hand-rolled mirror of it.
     async fn migrated_db() -> Arc<dyn DatabaseService> {
@@ -728,7 +755,7 @@ mod load_and_seed_tests {
         );
         crate::migration_helper::apply_ddl_via_service(
             &db,
-            crate::blocks::admin::migrations::ddl_files("sqlite"),
+            &crate::blocks::admin::migrations::ddl_files("sqlite"),
         )
         .await
         .expect("apply admin migrations");

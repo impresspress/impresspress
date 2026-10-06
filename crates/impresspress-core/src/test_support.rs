@@ -481,14 +481,13 @@ impl TestContext {
         &self,
         block_name: &str,
         sqlite: &[(&str, &str)],
-        postgres: &[&str],
+        postgres: &[(&str, &str)],
     ) {
-        let sqlite_sql: Vec<&str> = sqlite.iter().map(|(_, sql)| *sql).collect();
         // In the block's own frame, as its `lifecycle(Init)` runs them.
         crate::migration_helper::apply_migrations(
             &self.fixture().running_as(block_name),
             block_name,
-            &sqlite_sql,
+            sqlite,
             postgres,
         )
         .await

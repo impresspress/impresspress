@@ -417,19 +417,15 @@ impl AuthService for AuthServiceImpl {
         // service `init` needs an `AuthError` return shape, not the
         // `WaferError` that `migration_helper::lifecycle_init` produces — so
         // this calls the shared `apply_migrations` directly with the block's
-        // single-source migration consts.
-        let sqlite: Vec<&str> = super::migrations::SQLITE_MIGRATIONS
-            .iter()
-            .map(|(_, sql)| *sql)
-            .collect();
+        // single-source migration consts. Its error already names the block.
         crate::migration_helper::apply_migrations(
             ctx,
             "wafer-run/auth",
-            &sqlite,
+            super::migrations::SQLITE_MIGRATIONS,
             super::migrations::POSTGRES_MIGRATIONS,
         )
         .await
-        .map_err(|e| AuthError::Internal(format!("auth migrations: {e}")))?;
+        .map_err(AuthError::Internal)?;
         let cfg = super::config::AuthConfig::from_ctx(ctx)
             .await
             .map_err(|e| backend_error(e, "auth init: config"))?;

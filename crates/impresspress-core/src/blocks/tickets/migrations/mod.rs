@@ -7,6 +7,6 @@ const SQL_001_POSTGRES: &str = include_str!("001_tickets_schema.postgres.sql");
 pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[("001_tickets_schema", SQL_001_SQLITE)];
 
 #[cfg(feature = "postgres")]
-pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[SQL_001_POSTGRES];
+pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[("001_tickets_schema", SQL_001_POSTGRES)];
 #[cfg(not(feature = "postgres"))]
-pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[];
+pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];

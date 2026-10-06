@@ -1187,14 +1187,10 @@ mod tests {
     async fn register_messages_block(ctx: &mut crate::test_support::TestContext) {
         use std::sync::Arc;
 
-        let sqlite: Vec<&str> = crate::blocks::messages::migrations::SQLITE_MIGRATIONS
-            .iter()
-            .map(|(_, sql)| *sql)
-            .collect();
         crate::migration_helper::apply_migrations(
             ctx,
             "impresspress/messages",
-            &sqlite,
+            crate::blocks::messages::migrations::SQLITE_MIGRATIONS,
             crate::blocks::messages::migrations::POSTGRES_MIGRATIONS,
         )
         .await

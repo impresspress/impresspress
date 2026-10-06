@@ -74,8 +74,8 @@ const SQL_003_POSTGRES: &str = include_str!("003_legacy_share_token_expiry.postg
 // until 004 runs or a fresh upload has added it; `uploads_before_migration_004_has_run`
 // in `storage::objects` exercises both. Under strict schema there is no lazy
 // add, so every reservation fails until 004 runs. Cloudflare deploys set strict schema, but every
-// `impresspress deploy` runs the block migrations in its prepare funnel (the
-// command has no `--run-migrations` opt-out), so they get the column on deploy.
+// `impresspress deploy` runs the block migrations in its prepare funnel, so
+// they get the column on deploy.
 const SQL_004_SQLITE: &str = include_str!("004_object_claim_id.sqlite.sql");
 #[cfg(any(feature = "postgres", test))]
 const SQL_004_POSTGRES: &str = include_str!("004_object_claim_id.postgres.sql");
@@ -143,12 +143,12 @@ pub(crate) const LEGACY_SHARE_TOKEN_EXPIRY: &str = "003_legacy_share_token_expir
 /// literals a postgres deployment really applies rather than a test-only copy
 /// of them.
 #[cfg(any(feature = "postgres", test))]
-const POSTGRES_MIGRATION_FILES: &[&str] = &[
-    SQL_001_POSTGRES,
-    SQL_002_POSTGRES,
-    SQL_003_POSTGRES,
-    SQL_004_POSTGRES,
-    SQL_005_POSTGRES,
+const POSTGRES_MIGRATION_FILES: &[(&str, &str)] = &[
+    ("001_initial_schema", SQL_001_POSTGRES),
+    ("002_bucket_name_unique", SQL_002_POSTGRES),
+    (LEGACY_SHARE_TOKEN_EXPIRY, SQL_003_POSTGRES),
+    ("004_object_claim_id", SQL_004_POSTGRES),
+    ("005_object_blob_key", SQL_005_POSTGRES),
 ];
 
 /// Ordered PostgreSQL migration scripts, matching [`SQLITE_MIGRATIONS`]. Empty
@@ -157,9 +157,9 @@ const POSTGRES_MIGRATION_FILES: &[&str] = &[
 /// that build entirely (rather than embedding-then-ignoring them) drops dead
 /// SQL bytes from the wasm binary.
 #[cfg(feature = "postgres")]
-pub(crate) const POSTGRES_MIGRATIONS: &[&str] = POSTGRES_MIGRATION_FILES;
+pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = POSTGRES_MIGRATION_FILES;
 #[cfg(not(feature = "postgres"))]
-pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[];
+pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];
 
 #[cfg(test)]
 mod tests {
@@ -179,8 +179,8 @@ mod tests {
     /// duplicate `ALTER … ADD COLUMN`).
     ///
     /// So this applies 001 alone, plants the takeover the index exists to
-    /// stop, and then applies the real migration list the way an operator
-    /// upgrading with `--run-migrations` does.
+    /// stop, and then applies the real migration list the way an upgrading
+    /// deployment's first migrating boot or deploy does.
     #[tokio::test]
     async fn migration_002_repairs_a_database_that_already_holds_a_duplicate_name() {
         let mut ctx = TestContext::with_auth()
@@ -189,7 +189,7 @@ mod tests {
         crate::migration_helper::apply_migrations(
             &ctx,
             "impresspress/files",
-            &[SQL_001_SQLITE],
+            &SQLITE_MIGRATIONS[..1],
             &[],
         )
         .await
@@ -215,10 +215,14 @@ mod tests {
         }
 
         ctx.set_config(crate::migration_helper::RUN_MIGRATIONS_KEY, "1");
-        let sqlite: Vec<&str> = SQLITE_MIGRATIONS.iter().map(|(_, sql)| *sql).collect();
-        crate::migration_helper::apply_migrations(&ctx, "impresspress/files", &sqlite, &[])
-            .await
-            .expect("002 applies to a database holding a duplicate");
+        crate::migration_helper::apply_migrations(
+            &ctx,
+            "impresspress/files",
+            SQLITE_MIGRATIONS,
+            &[],
+        )
+        .await
+        .expect("002 applies to a database holding a duplicate");
 
         assert!(
             repo::buckets::find_owned(&ctx, "assets", "alice")
@@ -249,7 +253,7 @@ mod replay_tests {
     //!
     //! `apply_if_blessed` hashes the JOINED text of every file, so shipping
     //! any new migration — 004 included — re-runs 001 onwards on the next
-    //! `--run-migrations` boot, over whatever the tables hold. For auth that
+    //! deploy or boot, over whatever the tables hold. For auth that
     //! re-run signs every user out (its 004 drops the refresh-token table);
     //! nothing here may do the equivalent to share links, buckets or uploads.
 
@@ -368,10 +372,14 @@ mod replay_tests {
         .expect("a quota override");
         let before = every_row(&ctx).await;
 
-        let every_file: Vec<&str> = SQLITE_MIGRATIONS.iter().map(|(_, sql)| *sql).collect();
-        migration_helper::apply_migrations(&ctx, "impresspress/files-replay", &every_file, &[])
-            .await
-            .expect("the whole set replays over live rows");
+        migration_helper::apply_migrations(
+            &ctx,
+            "impresspress/files-replay",
+            SQLITE_MIGRATIONS,
+            &[],
+        )
+        .await
+        .expect("the whole set replays over live rows");
 
         assert_eq!(every_row(&ctx).await, before);
         assert!(
@@ -399,8 +407,9 @@ mod legacy_share_expiry_tests {
     //! used to impose. The end-to-end half — the repaired row refused by
     //! `share::handle_direct_access` — lives beside that handler.
     //!
-    //! The repair is driven through `apply_migrations`, the path an operator
-    //! upgrading with `--run-migrations` takes, and the rows are read back
+    //! The repair is driven through `apply_migrations`, the path an upgrading
+    //! deployment's first migrating boot or deploy takes, and the rows are
+    //! read back
     //! through `repo::shares`, so what is asserted is what the block sees.
 
     use std::collections::HashMap;
@@ -418,8 +427,8 @@ mod legacy_share_expiry_tests {
     /// A token minted under the new one: 32 bytes, hex, no dots.
     const OPAQUE_TOKEN: &str = "9f86d081884c7d659a2feaa0c55ad015a3bf4f1b2b0b822cd15d6c15b0f00a08";
 
-    /// A fixture whose schema is in place and whose operator has opted into
-    /// migrations, as `--run-migrations` does.
+    /// A fixture whose schema is in place, in a build that applies
+    /// migrations, as every deploy and native boot is.
     async fn upgrading_deployment() -> TestContext {
         let mut ctx = TestContext::with_files().await;
         ctx.set_config(migration_helper::RUN_MIGRATIONS_KEY, "1");
@@ -429,11 +438,11 @@ mod legacy_share_expiry_tests {
     /// The repair onwards, sliced out of the shipped list rather than read
     /// from `SQL_002_SQLITE` directly: an unwired migration yields an empty
     /// slice and trips this assert instead of silently testing nothing.
-    fn the_repair() -> Vec<&'static str> {
-        let sql: Vec<&str> = SQLITE_MIGRATIONS
+    fn the_repair() -> Vec<(&'static str, &'static str)> {
+        let sql: Vec<(&str, &str)> = SQLITE_MIGRATIONS
             .iter()
             .skip_while(|(name, _)| *name != LEGACY_SHARE_TOKEN_EXPIRY)
-            .map(|(_, sql)| *sql)
+            .copied()
             .collect();
         assert!(
             !sql.is_empty(),
@@ -707,6 +716,6 @@ mod legacy_share_expiry_tests {
             .position(|(name, _)| *name == LEGACY_SHARE_TOKEN_EXPIRY)
             .expect("a repair is shipped");
         repair(&SQLITE_MIGRATIONS[at].1);
-        repair(&POSTGRES_MIGRATION_FILES[at]);
+        repair(&POSTGRES_MIGRATION_FILES[at].1);
     }
 }

@@ -26,8 +26,8 @@ const SQL_001_POSTGRES: &str = include_str!("001_admin_schema.postgres.sql");
 //
 // The .sql files are deliberately NOT edited to say so. A shipped migration
 // is hash-addressed over its whole text, comments included, so retouching a
-// `--` line logs `schema drift` on every boot of every deployment that
-// already applied it and needs a `--run-migrations` redeploy to clear. See
+// `--` line re-runs admin's whole list on the next deploy or boot of every
+// deployment that already applied it. See
 // `crate::migration_helper`'s "A shipped .sql file is immutable, comments
 // included", which prescribes exactly this note. It is also why
 // `scripts/check-doc-pointers.sh` skips `migrations/*.sql` — a guard cannot
@@ -83,19 +83,13 @@ const SQL_003_POSTGRES: &str = include_str!("003_block_settings_seed_hash.postgr
 // roles change — what goes is the second row a revoke could miss. `RELEASE.md`
 // carries the operator-facing version.
 //
-// Where it runs: native applies it before every boot, and a Cloudflare deploy
-// applies it through `/_deploy/init`. A browser install applies it on the
-// first boot of a bundle that carries it: the browser sets
-// `IMPRESSPRESS_RUN_MIGRATIONS` on every boot, since loading a new bundle is
-// its deploy, and the gate then re-runs admin's set once because its hash
-// changed.
+// Where it runs: the first native boot, Cloudflare deploy (`/_deploy/init`)
+// or browser boot of a build that carries it — each is a build that applies
+// pending migrations, and admin's list is pending because its hash changed.
 //
-// Re-runnable, which admin's migrations must be twice over: the gate re-runs
-// the whole concatenated set from 001 whenever its hash changes, and the
-// native CLI runs `ddl_files` ungated on every boot, before the wafer exists
-// (`migration_helper::apply_ddl_via_service`). Once the index exists the
-// `DELETE` finds nothing and the `CREATE UNIQUE INDEX IF NOT EXISTS` is a
-// no-op.
+// Re-runnable, as every migration must be: the gate re-runs the whole list
+// from 001 whenever its hash changes. Once the index exists the `DELETE`
+// finds nothing and the `CREATE UNIQUE INDEX IF NOT EXISTS` is a no-op.
 //
 // This reasoning lives here rather than in the .sql files for the reason 002's
 // note above gives.
@@ -163,9 +157,8 @@ const SQL_006_POSTGRES: &str = include_str!("006_storage_access_logs_duration.po
 // diagnostics, on deployments with no production users yet.
 //
 // Re-runnable: once no row holds an action name, every statement matches
-// nothing. That matters because the native CLI re-applies the admin DDL
-// files on every boot (`ddl_files`, before the gated runner exists); each
-// re-run is a scan of `method` that changes nothing.
+// nothing, so a later re-run of admin's list (any new admin migration causes
+// one) is a scan of `method` that changes nothing.
 //
 // This reasoning lives here rather than in the .sql files for the reason 002's
 // note above gives.
@@ -182,10 +175,10 @@ const SQL_007_POSTGRES: &str = include_str!("007_request_logs_http_method.postgr
 // value — the segment after `/b/`, up to the next `/` — and leaves every other
 // path (`/`, the unmatched-route label) at `''`.
 //
-// Re-runnable, as the native CLI's re-apply of the DDL files on every boot
-// needs: a second `ADD COLUMN` is swallowed as a duplicate column by both
-// migration runners, the `UPDATE` only touches `/b/` rows still at `''`, and
-// the index is `IF NOT EXISTS`.
+// Re-runnable, as a later re-run of admin's list needs: a second
+// `ADD COLUMN` is swallowed as a duplicate column by every migration runner,
+// the `UPDATE` only touches `/b/` rows still at `''`, and the index is
+// `IF NOT EXISTS`.
 //
 // This reasoning lives here rather than in the .sql files for the reason 002's
 // note above gives.
@@ -228,23 +221,23 @@ pub(crate) const USER_ROLES_UNIQUE: &str = "004_user_roles_unique";
 pub(crate) const WRAP_GRANTS_APPEND_COLUMN: &str = "005_wrap_grants_append_column";
 
 /// Ordered PostgreSQL migration scripts, matching [`SQLITE_MIGRATIONS`] one
-/// for one. Selected at runtime by `apply_migrations` and reused by
-/// [`ddl_files`] for the pre-wafer native CLI path. Empty when the `postgres`
+/// for one. Selected at runtime by `apply_migrations` and by
+/// [`migration_files`] for the native server's pre-build apply. Empty when the `postgres`
 /// feature is off — see `files::migrations`'s doc for the rationale
 /// (Cloudflare/D1 never selects postgres; don't embed dead SQL).
 #[cfg(feature = "postgres")]
-pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[
-    SQL_001_POSTGRES,
-    SQL_002_POSTGRES,
-    SQL_003_POSTGRES,
-    SQL_004_POSTGRES,
-    SQL_005_POSTGRES,
-    SQL_006_POSTGRES,
-    SQL_007_POSTGRES,
-    SQL_008_POSTGRES,
+pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[
+    ("001_admin_schema", SQL_001_POSTGRES),
+    (VARIABLES_BLOCK_COLUMN, SQL_002_POSTGRES),
+    ("003_block_settings_seed_hash", SQL_003_POSTGRES),
+    (USER_ROLES_UNIQUE, SQL_004_POSTGRES),
+    (WRAP_GRANTS_APPEND_COLUMN, SQL_005_POSTGRES),
+    ("006_storage_access_logs_duration", SQL_006_POSTGRES),
+    (REQUEST_LOGS_HTTP_METHOD, SQL_007_POSTGRES),
+    (REQUEST_LOGS_BLOCK, SQL_008_POSTGRES),
 ];
 #[cfg(not(feature = "postgres"))]
-pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[];
+pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];
 
 /// Apply the admin schema through the shared migration-state gate.
 ///
@@ -256,41 +249,41 @@ pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[];
 /// test-fixture setup is an explicit exception to the no-raw-migration-runner
 /// rule (CLAUDE.md).
 pub async fn apply(ctx: &dyn wafer_run::context::Context) -> Result<(), String> {
-    let sqlite: Vec<&str> = SQLITE_MIGRATIONS.iter().map(|(_, sql)| *sql).collect();
     crate::migration_helper::apply_migrations(
         ctx,
         "impresspress/admin",
-        &sqlite,
+        SQLITE_MIGRATIONS,
         POSTGRES_MIGRATIONS,
     )
     .await
 }
 
-/// The admin migration SQL files for the given `db_type`, in apply order —
-/// the same constants the gated `lifecycle_init` runner feeds. `"postgres"`
+/// The admin migration list for the given `db_type`, in apply order — the
+/// very list the block's `lifecycle_init` applies. `"postgres"`
 /// (case-insensitive) selects the postgres dialect; everything else selects
 /// SQLite, matching [`crate::migration_helper::db_backend`].
 ///
-/// Exposed so the native CLI can create the admin tables *before* the wafer
-/// exists (it seeds the JWT secret + block_settings pre-build), via
-/// [`crate::migration_helper::apply_ddl_via_service`]. Cloudflare and browser
-/// don't need this — their seeders run after the gated apply has already
-/// created the tables at `init_block(admin)`.
-pub fn ddl_files(db_type: &str) -> &'static [&'static str] {
+/// Exposed so the native server can apply it *before* the runtime exists (it
+/// seeds the JWT secret + block_settings pre-build), through
+/// [`crate::migration_helper::apply_pending_via_service`], which records it
+/// as applied so admin's `Init` then skips it. Cloudflare and browser don't
+/// need this — their seeders run after `init_block(admin)` has applied it.
+pub fn migration_files(db_type: &str) -> &'static [(&'static str, &'static str)] {
     if db_type.eq_ignore_ascii_case("postgres") {
         POSTGRES_MIGRATIONS
     } else {
-        &[
-            SQL_001_SQLITE,
-            SQL_002_SQLITE,
-            SQL_003_SQLITE,
-            SQL_004_SQLITE,
-            SQL_005_SQLITE,
-            SQL_006_SQLITE,
-            SQL_007_SQLITE,
-            SQL_008_SQLITE,
-        ]
+        SQLITE_MIGRATIONS
     }
+}
+
+/// The SQL of [`migration_files`], for test fixtures that build the admin
+/// schema with the untracked
+/// [`crate::migration_helper::apply_ddl_via_service`].
+pub fn ddl_files(db_type: &str) -> Vec<&'static str> {
+    migration_files(db_type)
+        .iter()
+        .map(|(_, sql)| *sql)
+        .collect()
 }
 
 #[cfg(test)]
@@ -300,18 +293,6 @@ mod tests {
         SQL_001_POSTGRES, SQL_002_POSTGRES, SQL_003_POSTGRES, SQL_004_POSTGRES, SQL_005_POSTGRES,
     };
     use super::{SQL_001_SQLITE, SQL_002_SQLITE, SQL_003_SQLITE, SQL_004_SQLITE, SQL_005_SQLITE};
-
-    /// The pre-wafer DDL list the native CLI applies is the gated runner's
-    /// list, file for file: a migration wired into one and not the other
-    /// would exist on some boots and not others.
-    #[test]
-    fn the_cli_ddl_list_is_the_migration_list() {
-        let gated: Vec<&str> = super::SQLITE_MIGRATIONS
-            .iter()
-            .map(|(_, sql)| *sql)
-            .collect();
-        assert_eq!(super::ddl_files("sqlite"), gated.as_slice());
-    }
 
     #[test]
     fn sqlite_migrations_contain_expected_ddl() {
@@ -361,15 +342,12 @@ mod user_roles_unique_tests {
 
     /// The migrations before 004, sliced out of the shipped list by name so
     /// an unwired 004 cannot pass as applied.
-    fn before_004() -> Vec<&'static str> {
+    fn before_004() -> &'static [(&'static str, &'static str)] {
         let at = SQLITE_MIGRATIONS
             .iter()
             .position(|(name, _)| *name == USER_ROLES_UNIQUE)
             .expect("004 is wired into SQLITE_MIGRATIONS");
-        SQLITE_MIGRATIONS[..at]
-            .iter()
-            .map(|(_, sql)| *sql)
-            .collect()
+        &SQLITE_MIGRATIONS[..at]
     }
 
     fn grant(id: &str, user_id: &str, role: &str, created_at: &str) -> UserRoleRow {
@@ -389,7 +367,7 @@ mod user_roles_unique_tests {
         let mut ctx = TestContext::new()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
-        migration_helper::apply_migrations(&ctx, ADMIN, &before_004(), &[])
+        migration_helper::apply_migrations(&ctx, ADMIN, before_004(), &[])
             .await
             .expect("001-003 apply");
 
@@ -411,8 +389,7 @@ mod user_roles_unique_tests {
         }
 
         ctx.set_config(migration_helper::RUN_MIGRATIONS_KEY, "1");
-        let all: Vec<&str> = SQLITE_MIGRATIONS.iter().map(|(_, sql)| *sql).collect();
-        migration_helper::apply_migrations(&ctx, ADMIN, &all, &[])
+        migration_helper::apply_migrations(&ctx, ADMIN, SQLITE_MIGRATIONS, &[])
             .await
             .expect("004 applies to a database holding repeated grants");
 
@@ -471,20 +448,13 @@ mod variables_block_column_tests {
     /// The shipped migrations before 002 (`through: false`) or up to and
     /// including it (`through: true`), sliced out of the list by name so an
     /// unwired 002 cannot pass as applied.
-    fn up_to_002(through: bool) -> Vec<&'static str> {
+    fn up_to_002(through: bool) -> &'static [(&'static str, &'static str)] {
         let at = SQLITE_MIGRATIONS
             .iter()
             .position(|(name, _)| *name == VARIABLES_BLOCK_COLUMN)
             .expect("002 is wired into SQLITE_MIGRATIONS");
         let end = if through { at + 1 } else { at };
-        SQLITE_MIGRATIONS[..end]
-            .iter()
-            .map(|(_, sql)| *sql)
-            .collect()
-    }
-
-    fn all() -> Vec<&'static str> {
-        SQLITE_MIGRATIONS.iter().map(|(_, sql)| *sql).collect()
+        &SQLITE_MIGRATIONS[..end]
     }
 
     /// The key shapes the backfill has to tell apart, with the `block` each
@@ -547,7 +517,7 @@ mod variables_block_column_tests {
         let ctx = TestContext::new()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
-        migration_helper::apply_migrations(&ctx, ADMIN, &all(), &[])
+        migration_helper::apply_migrations(&ctx, ADMIN, SQLITE_MIGRATIONS, &[])
             .await
             .expect("apply migrations");
 
@@ -583,21 +553,21 @@ mod variables_block_column_tests {
         assert_eq!(idx.len(), 1, "expected the block index to exist");
     }
 
-    /// 001 alone, then rows, then the shipped list the way an operator
-    /// upgrading with `--run-migrations` applies it: the backfill in 002 is
+    /// 001 alone, then rows, then the shipped list the way an upgrading
+    /// deployment's first migrating boot applies it: the backfill in 002 is
     /// what populates `block`, not anything the test runs itself.
     #[tokio::test]
     async fn migration_002_backfills_block_on_rows_written_before_it() {
         let mut ctx = TestContext::new()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
-        migration_helper::apply_migrations(&ctx, ADMIN, &up_to_002(false), &[])
+        migration_helper::apply_migrations(&ctx, ADMIN, up_to_002(false), &[])
             .await
             .expect("001 applies");
         seed_pre_002(&ctx).await;
 
         ctx.set_config(migration_helper::RUN_MIGRATIONS_KEY, "1");
-        migration_helper::apply_migrations(&ctx, ADMIN, &all(), &[])
+        migration_helper::apply_migrations(&ctx, ADMIN, SQLITE_MIGRATIONS, &[])
             .await
             .expect("002 applies to a database holding variables");
 
@@ -614,16 +584,16 @@ mod variables_block_column_tests {
         let mut ctx = TestContext::new()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
-        migration_helper::apply_migrations(&ctx, ADMIN, &up_to_002(false), &[])
+        migration_helper::apply_migrations(&ctx, ADMIN, up_to_002(false), &[])
             .await
             .expect("001 applies");
         seed_pre_002(&ctx).await;
         ctx.set_config(migration_helper::RUN_MIGRATIONS_KEY, "1");
-        migration_helper::apply_migrations(&ctx, ADMIN, &up_to_002(true), &[])
+        migration_helper::apply_migrations(&ctx, ADMIN, up_to_002(true), &[])
             .await
             .expect("001-002 apply");
 
-        migration_helper::apply_migrations(&ctx, ADMIN, &all(), &[])
+        migration_helper::apply_migrations(&ctx, ADMIN, SQLITE_MIGRATIONS, &[])
             .await
             .expect("re-running 001-002 inside the full list succeeds");
 

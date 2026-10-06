@@ -125,7 +125,6 @@ async fn a_signup_past_what_the_invocation_has_left_is_a_429_that_writes_nothing
         database,
         &HashMap::new(),
         Default::default(),
-        false,
         AppHooks::none(),
     )
     .await

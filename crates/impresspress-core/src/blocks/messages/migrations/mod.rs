@@ -26,9 +26,12 @@ pub(crate) const OWNER_ID: &str = "002_owner_id";
 /// `postgres` cargo feature is off — see `files::migrations`'s doc for the
 /// rationale (Cloudflare/D1 never selects postgres; don't embed dead SQL).
 #[cfg(feature = "postgres")]
-pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[SQL_001_POSTGRES, SQL_002_POSTGRES];
+pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[
+    ("001_messages_schema", SQL_001_POSTGRES),
+    (OWNER_ID, SQL_002_POSTGRES),
+];
 #[cfg(not(feature = "postgres"))]
-pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[];
+pub(crate) const POSTGRES_MIGRATIONS: &[(&str, &str)] = &[];
 
 #[cfg(test)]
 mod tests {
@@ -122,8 +125,9 @@ mod owner_id_backfill_tests {
     //! out of their own history (`owner_id = ''` matches no caller) or, worse,
     //! hand an entry to someone else.
     //!
-    //! The repair is driven through `apply_migrations`, the path an operator
-    //! upgrading with `--run-migrations` takes, and the result is read back
+    //! The repair is driven through `apply_migrations`, the path an upgrading
+    //! deployment's first migrating boot or deploy takes, and the result is
+    //! read back
     //! through the block's own routes, whose owner check is what the column
     //! exists for.
 
@@ -177,14 +181,11 @@ mod owner_id_backfill_tests {
         let mut ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::messages::MessagesBlock::BLOCK_NAME);
-        let before: Vec<&str> = SQLITE_MIGRATIONS[..SQLITE_MIGRATIONS
+        let before = &SQLITE_MIGRATIONS[..SQLITE_MIGRATIONS
             .iter()
             .position(|(name, _)| *name == OWNER_ID)
-            .expect("002 is wired into SQLITE_MIGRATIONS")]
-            .iter()
-            .map(|(_, sql)| *sql)
-            .collect();
-        migration_helper::apply_migrations(&ctx, MESSAGES, &before, &[])
+            .expect("002 is wired into SQLITE_MIGRATIONS")];
+        migration_helper::apply_migrations(&ctx, MESSAGES, before, &[])
             .await
             .expect("001 applies");
 
@@ -214,8 +215,7 @@ mod owner_id_backfill_tests {
         }
 
         ctx.set_config(migration_helper::RUN_MIGRATIONS_KEY, "1");
-        let all: Vec<&str> = SQLITE_MIGRATIONS.iter().map(|(_, sql)| *sql).collect();
-        migration_helper::apply_migrations(&ctx, MESSAGES, &all, &[])
+        migration_helper::apply_migrations(&ctx, MESSAGES, SQLITE_MIGRATIONS, &[])
             .await
             .expect("002 applies to a database holding conversations");
 
