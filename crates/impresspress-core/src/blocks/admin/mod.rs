@@ -37,6 +37,7 @@ pub(crate) mod fixture_keys {
 }
 mod iam;
 pub(crate) mod logs;
+pub mod masked_config;
 pub mod migrations;
 mod ops;
 mod pages;
@@ -743,6 +744,11 @@ crate::impresspress_feature_block! {
             .endpoints(endpoint_match::declare(ROUTES))
     },
     handle: |this, ctx, mut msg, input| {
+        // A block reading its own settings, masked (`masked_config`): a call
+        // from another block, never a routed request.
+        if msg.kind == masked_config::KIND {
+            return masked_config::answer(ctx).await;
+        }
         // Auth is enforced centrally by `route_to_block` from the `Admin`
         // prefix tier and each row's declared level (both `Admin`). The
         // matcher binds `{id}`, `{key}` and `{name}` into `req.param.*` for

@@ -308,13 +308,37 @@ pub async fn detail(ctx: &dyn Context, id: &str) -> Result<TicketDetail, WaferEr
     })
 }
 
+/// What [`update_workflow`] did.
+#[derive(Debug)]
+pub enum WorkflowOutcome {
+    /// At least one field changed; the ticket as stored after the write.
+    Updated(db::Record),
+    /// Every field already had the requested value, so nothing was written
+    /// and nothing recorded; the ticket as stored.
+    Unchanged(db::Record),
+}
+
+impl WorkflowOutcome {
+    /// The ticket as stored, whichever happened.
+    pub fn into_record(self) -> db::Record {
+        match self {
+            WorkflowOutcome::Updated(record) | WorkflowOutcome::Unchanged(record) => record,
+        }
+    }
+}
+
+/// The refusal of a reason given with no change: the reason is recorded on
+/// the timeline only with the change it explains.
+pub const REASON_WITHOUT_CHANGE: &str =
+    "Nothing changed. To record a comment, add an internal note.";
+
 pub async fn update_workflow(
     ctx: &dyn Context,
     id: &str,
     input: WorkflowUpdate,
     actor_type: ActorType,
     actor_id: &str,
-) -> Result<db::Record, ServiceError> {
+) -> Result<WorkflowOutcome, ServiceError> {
     let current = repo::get_ticket(ctx, id).await.map_err(ServiceError::Db)?;
     let current_status =
         TicketStatus::from_str(str_field(&current, "status")).map_err(ServiceError::Validation)?;
@@ -409,7 +433,10 @@ pub async fn update_workflow(
         changes.insert("legal_hold".into(), serde_json::json!(effective_hold));
     }
     if data.is_empty() {
-        return Ok(current);
+        if !input.reason.trim().is_empty() {
+            return Err(ServiceError::Validation(REASON_WITHOUT_CHANGE.into()));
+        }
+        return Ok(WorkflowOutcome::Unchanged(current));
     }
 
     let now = crate::util::now_rfc3339();
@@ -461,7 +488,7 @@ pub async fn update_workflow(
         expiry.as_deref(),
     )
     .await;
-    Ok(updated)
+    Ok(WorkflowOutcome::Updated(updated))
 }
 
 pub async fn add_note(

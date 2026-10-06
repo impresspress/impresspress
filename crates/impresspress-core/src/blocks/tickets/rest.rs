@@ -104,7 +104,7 @@ pub async fn update_ticket(ctx: &dyn Context, msg: &Message, input: InputStream)
     };
     match service::update_workflow(ctx, msg.var("id"), body, ActorType::Admin, msg.user_id()).await
     {
-        Ok(record) => ok_json(&TicketView::from_record(&record)),
+        Ok(outcome) => ok_json(&TicketView::from_record(&outcome.into_record())),
         Err(error) => service_error(error),
     }
 }

@@ -5,7 +5,7 @@
 //! changed and a toast — never `fetch` plus a page reload.
 
 use maud::{html, Markup};
-use wafer_core::clients::{config as config_client, database as db};
+use wafer_core::clients::database as db;
 use wafer_run::{context::Context, ConfigVar, Message, OutputStream, WaferError};
 
 use super::{
@@ -14,6 +14,7 @@ use super::{
     repo, service,
 };
 use crate::{
+    blocks::admin::masked_config::MaskedValue,
     endpoint_match,
     ui::{
         self,
@@ -189,22 +190,21 @@ pub async fn settings(ctx: &dyn Context, msg: &Message) -> OutputStream {
         }
     };
     let vars = super::config::config_vars();
-    let mut current = Vec::with_capacity(vars.len());
-    for var in &vars {
-        match config_client::get_optional(ctx, &var.key).await {
-            Ok(value) => current.push(value.filter(|v| !v.trim().is_empty())),
-            Err(e) => {
-                return error_page(
-                    ctx,
-                    msg,
-                    Section::Settings,
-                    e,
-                    "ticket settings page: config read failed",
-                )
-                .await
-            }
+    // Masked by the admin block, which owns the variables table and the
+    // rule (the stored sensitive flag included) for what may be shown.
+    let current = match crate::blocks::admin::masked_config::read_own(ctx).await {
+        Ok(values) => values,
+        Err(e) => {
+            return error_page(
+                ctx,
+                msg,
+                Section::Settings,
+                e,
+                "ticket settings page: masked config read failed",
+            )
+            .await
         }
-    }
+    };
     let public_form = html! {
         a .btn .btn--secondary href="/b/tickets/submit" target="_blank" rel="noopener" {
             "Open the public form"
@@ -212,14 +212,14 @@ pub async fn settings(ctx: &dyn Context, msg: &Message) -> OutputStream {
     };
     let rows = vars
         .iter()
-        .zip(&current)
-        .map(|(var, value)| {
+        .map(|var| {
+            let value = current.iter().find(|value| value.key == var.key);
             TableRow::new(vec![
                 html! {
                     span .data-table__title { (var.name) }
                     code .ticket-setting-key { (components::breakable_id(&var.key)) }
                 },
-                setting_value(var, value.as_deref()),
+                setting_value(var, value),
                 html! { (var.description) },
             ])
         })
@@ -1066,17 +1066,21 @@ const SETTING_COLUMNS: [TableCol<'static>; 3] = [
     TableCol::new("What it does"),
 ];
 
-/// A setting's current value as the settings table shows it. A sensitive
-/// setting — by the shared rule, `config_vars::is_sensitive_var`: declared
-/// sensitive or named `…_SECRET`/`…_KEY` — says only whether it is set; an
-/// unset value says what applies instead.
-fn setting_value(var: &ConfigVar, value: Option<&str>) -> Markup {
-    match (value, crate::config_vars::is_sensitive_var(var)) {
-        (Some(_), true) => components::badge(BadgeVariant::Success, "Set"),
-        (None, true) => components::badge(BadgeVariant::Secondary, "Not set"),
-        (Some(value), false) => html! { code { (components::breakable_id(value)) } },
-        (None, false) if var.default.is_empty() => html! { span .text-muted { "Not set" } },
-        (None, false) => html! {
+/// A setting's current value as the settings table shows it: a sensitive
+/// one (as the admin block judged it) says only whether it is set, an unset
+/// one says what applies instead.
+fn setting_value(var: &ConfigVar, value: Option<&MaskedValue>) -> Markup {
+    match value {
+        Some(value) if value.sensitive && value.set => {
+            components::badge(BadgeVariant::Success, "Set")
+        }
+        Some(value) if value.sensitive => components::badge(BadgeVariant::Secondary, "Not set"),
+        Some(MaskedValue {
+            value: Some(stored),
+            ..
+        }) => html! { code { (components::breakable_id(stored)) } },
+        _ if var.default.is_empty() => html! { span .text-muted { "Not set" } },
+        _ => html! {
             span .text-muted { "Default: " } code { (components::breakable_id(&var.default)) }
         },
     }
@@ -1635,48 +1639,57 @@ pub(super) mod render_tests {
         assert!(empty.contains("No ticket types yet"), "{empty}");
     }
 
-    /// A secret says whether it is set and never what it is; an unset value
-    /// says which default applies; every key can wrap.
+    /// Store `key` = `value` in the variables table, flagged `sensitive` as
+    /// an administrator would.
+    async fn store(ctx: &TestContext, key: &str, value: &str, sensitive: bool) {
+        crate::platform_state::variables::insert(
+            &ctx.fixture(),
+            crate::platform_state::variables::NewVariable {
+                key: key.into(),
+                value: value.into(),
+                name: String::new(),
+                description: String::new(),
+                warning: String::new(),
+                sensitive,
+                updated_by: "test".into(),
+                block: None,
+            },
+        )
+        .await
+        .expect("store variable");
+    }
+
+    /// Values come masked from the admin block: a secret, a `…_KEY`, and a
+    /// plain-named setting an administrator flagged sensitive each say only
+    /// whether they are set; a plain value is shown; an unset value says
+    /// which default applies; every key can wrap.
     #[tokio::test]
-    async fn settings_say_set_or_default_and_never_show_a_secret() {
-        let mut ctx = TestContext::with_tickets().await;
-        ctx.set_config(super::super::config::TURNSTILE_SECRET_KEY, "do-not-show-me");
+    async fn settings_show_only_what_the_admin_block_unmasks() {
+        use super::super::config;
+
+        let ctx = TestContext::with_tickets().await;
+        store(&ctx, config::TURNSTILE_SECRET_KEY, "do-not-show-me", false).await;
+        store(&ctx, config::TURNSTILE_SITE_KEY, "site-key-value", false).await;
+        store(&ctx, config::SUPPORT_EMAIL, "flagged@example.test", true).await;
+        store(&ctx, config::BACK_URL, "/help", false).await;
         let html = page(&ctx, "/b/tickets/admin/settings").await;
-        assert!(!html.contains("do-not-show-me"), "secret leaked: {html}");
-        assert!(
-            html.contains(r#"<span class="badge badge-success">Set</span>"#),
+        for hidden in ["do-not-show-me", "site-key-value", "flagged@example.test"] {
+            assert!(!html.contains(hidden), "{hidden} shown: {html}");
+        }
+        assert_eq!(
+            html.matches(r#"<span class="badge badge-success">Set</span>"#)
+                .count(),
+            3,
             "{html}"
         );
         assert!(
             html.contains(r#"<span class="badge badge-secondary">Not set</span>"#),
-            "{html}"
+            "the identity secret is unset: {html}"
         );
+        assert!(html.contains("<code>/help</code>"), "{html}");
         assert!(html.contains("Default: </span><code>3600</code>"), "{html}");
         assert!(html.contains("IMPRESSPRESS__<wbr>TICKETS__<wbr>"), "{html}");
-        let mut with_site_key = TestContext::with_tickets().await;
-        with_site_key.set_config(super::super::config::TURNSTILE_SITE_KEY, "site-key-value");
-        let html = page(&with_site_key, "/b/tickets/admin/settings").await;
-        assert!(
-            !html.contains("site-key-value"),
-            "a `_KEY` value is shown: {html}"
-        );
         assert!(html.contains("Public reporting is off"), "{html}");
-    }
-
-    /// The shared sensitivity rule, not the input type: a key named
-    /// `…_KEY` or `…_SECRET` is masked though it is declared as plain text.
-    #[test]
-    fn a_suffix_named_setting_is_masked_whatever_its_input_type() {
-        for key in ["ACME__THING__API_KEY", "ACME__THING__WEBHOOK_SECRET"] {
-            let var = ConfigVar::new(key, "A credential", "");
-            let html = setting_value(&var, Some("hunter2")).into_string();
-            assert!(!html.contains("hunter2"), "{key}: {html}");
-            assert!(html.contains(">Set<"), "{key}: {html}");
-        }
-        let plain = ConfigVar::new("ACME__THING__COLOUR", "A colour", "");
-        assert!(setting_value(&plain, Some("blue"))
-            .into_string()
-            .contains("blue"));
     }
 
     /// With filters applied, the phone's Filters disclosure says how many.

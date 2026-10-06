@@ -287,6 +287,9 @@ crate::impresspress_feature_block! {
             "wafer-run/database".into(),
             "wafer-run/config".into(),
             "wafer-run/network".into(),
+            // The Settings page reads its own settings, masked, through the
+            // admin block (`admin::masked_config`).
+            crate::blocks::admin::ADMIN_BLOCK_ID.into(),
         ])
         .collections(vec![
             CollectionSchema::new(repo::TYPES),

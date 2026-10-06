@@ -160,7 +160,8 @@ async fn migration_and_workflow_preserve_original_report() {
         "admin-1",
     )
     .await
-    .expect("reprioritize closed ticket");
+    .expect("reprioritize closed ticket")
+    .into_record();
     assert_eq!(
         service::str_field(&reprioritized, "expires_at"),
         closed_expiry
@@ -197,7 +198,8 @@ async fn migration_and_workflow_preserve_original_report() {
         "admin-1",
     )
     .await
-    .expect("place legal hold");
+    .expect("place legal hold")
+    .into_record();
     assert!(service::nullable_str_field(&held, "expires_at").is_none());
     assert_eq!(service::str_field(&held, "resolved_at"), resolved_at);
 
@@ -216,7 +218,8 @@ async fn migration_and_workflow_preserve_original_report() {
         "admin-1",
     )
     .await
-    .expect("release legal hold");
+    .expect("release legal hold")
+    .into_record();
     assert!(!service::str_field(&released, "expires_at").is_empty());
     assert_eq!(service::str_field(&released, "resolved_at"), resolved_at);
 }
@@ -350,7 +353,8 @@ async fn duplicate_invariant_survives_every_patch_shape() {
         "admin-1",
     )
     .await
-    .expect("mark duplicate");
+    .expect("mark duplicate")
+    .into_record();
     assert_eq!(
         service::nullable_str_field(&duplicate, "duplicate_of"),
         Some(target.id.as_str())
@@ -398,7 +402,8 @@ async fn duplicate_invariant_survives_every_patch_shape() {
         "admin-1",
     )
     .await
-    .expect("reopen duplicate");
+    .expect("reopen duplicate")
+    .into_record();
     assert_eq!(service::str_field(&reopened, "status"), "triaged");
     assert!(service::nullable_str_field(&reopened, "duplicate_of").is_none());
 }

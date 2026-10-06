@@ -679,6 +679,12 @@ impl TestContext {
             "impresspress/tickets",
             Arc::new(crate::blocks::tickets::TicketsBlock::new()),
         );
+        // The Settings page reads its values through the admin block
+        // (`admin::masked_config`), registered in every deployment.
+        ctx.register_block(
+            crate::blocks::admin::ADMIN_BLOCK_ID,
+            Arc::new(crate::blocks::admin::AdminBlock::new()),
+        );
         ctx.running_as("impresspress/tickets")
     }
 

@@ -82,7 +82,12 @@ pub async fn update_ticket(ctx: &dyn Context, msg: &Message, input: InputStream)
         reason: text(&form, "reason"),
     };
     match service::update_workflow(ctx, id, update, ActorType::Admin, msg.user_id()).await {
-        Ok(_) => ticket_swap(ctx, id, "Ticket updated").await,
+        Ok(service::WorkflowOutcome::Updated(_)) => {
+            ticket_swap(ctx, id, "Ticket updated", "success").await
+        }
+        Ok(service::WorkflowOutcome::Unchanged(_)) => {
+            ticket_swap(ctx, id, "No changes to save", "info").await
+        }
         Err(error) => rest::service_error(error),
     }
 }
@@ -103,7 +108,7 @@ pub async fn add_note(ctx: &dyn Context, msg: &Message, input: InputStream) -> O
     )
     .await
     {
-        Ok(_) => ticket_swap(ctx, id, "Note added").await,
+        Ok(_) => ticket_swap(ctx, id, "Note added", "success").await,
         Err(error) => rest::service_error(error),
     }
 }
@@ -169,14 +174,15 @@ pub async fn update_type(ctx: &dyn Context, msg: &Message, input: InputStream) -
     }
 }
 
-/// The ticket page re-rendered after a write, with `applied` as the toast.
+/// The ticket page re-rendered after a write, with `applied` as a toast of
+/// `kind`.
 ///
 /// Called only once the write has landed, so a failed re-read must not look
 /// like a failed write: the region becomes a notice saying the change was
 /// made and the page needs a reload.
-async fn ticket_swap(ctx: &dyn Context, id: &str, applied: &str) -> OutputStream {
+async fn ticket_swap(ctx: &dyn Context, id: &str, applied: &str, kind: &str) -> OutputStream {
     match TicketPage::load(ctx, id).await {
-        Ok(view) => ui::html_response_with_toast(pages::detail_region(&view), applied, "success"),
+        Ok(view) => ui::html_response_with_toast(pages::detail_region(&view), applied, kind),
         Err(error) => {
             let reason = crud::db_error_notice(error, "tickets admin: ticket re-read failed");
             ui::swap_error_response(
@@ -414,9 +420,25 @@ mod tests {
             .await
             .expect("events")
             .len();
-        assert_eq!(submit(&ctx, "update", &path, &unchanged).await.status, 200);
+        let parts = submit(&ctx, "update", &path, &unchanged).await;
+        assert_eq!(parts.status, 200);
+        assert!(
+            header(&parts, "HX-Trigger").contains("No changes to save"),
+            "{}",
+            header(&parts, "HX-Trigger")
+        );
         let after = repo::list_events(&ctx, &ticket, 50).await.expect("events");
         assert_eq!(after.len(), before, "an unchanged save is not an event");
+
+        // A reason with no change is refused, not dropped: the form keeps
+        // it (a refusal is not swapped) and says where a comment goes.
+        let mut reason_only = unchanged;
+        reason_only[4] = ("reason", "Just a comment");
+        let refused = submit(&ctx, "update", &path, &reason_only).await;
+        assert_eq!(refused.status, 400);
+        assert!(String::from_utf8_lossy(&refused.body).contains(service::REASON_WITHOUT_CHANGE));
+        let after = repo::list_events(&ctx, &ticket, 50).await.expect("events");
+        assert_eq!(after.len(), before, "a refused save is not an event");
 
         let mut changed = unchanged;
         changed[1] = ("priority", "low");
@@ -439,6 +461,48 @@ mod tests {
             "{:?}",
             events[0]
         );
+    }
+
+    /// The JSON API answers the same: a reason with no change is a 400 with
+    /// the same sentence, and an empty patch changes and records nothing.
+    #[tokio::test]
+    async fn the_api_refuses_a_reason_without_a_change() {
+        let (ctx, _, ticket) = seeded().await;
+        let path = format!("/b/tickets/api/admin/tickets/{ticket}");
+        let patch = |body: &'static str| {
+            let mut msg = admin_msg("update", &path);
+            assert!(endpoint_match::dispatch(&mut msg, crate::blocks::tickets::ROUTES).is_some());
+            (msg, InputStream::from_bytes(body.as_bytes().to_vec()))
+        };
+        let before = repo::list_events(&ctx, &ticket, 50)
+            .await
+            .expect("events")
+            .len();
+
+        let (msg, body) = patch(r#"{"reason":"Just a comment"}"#);
+        let parts = wafer_block::http_codec::collect_http_response(
+            TicketsBlock::new().handle(&ctx, msg, body).await,
+        )
+        .await;
+        assert_eq!(parts.status, 400);
+        assert!(String::from_utf8_lossy(&parts.body).contains(service::REASON_WITHOUT_CHANGE));
+
+        let (msg, body) = patch("{}");
+        let parts = wafer_block::http_codec::collect_http_response(
+            TicketsBlock::new().handle(&ctx, msg, body).await,
+        )
+        .await;
+        assert_eq!(
+            parts.status,
+            200,
+            "{}",
+            String::from_utf8_lossy(&parts.body)
+        );
+        let after = repo::list_events(&ctx, &ticket, 50)
+            .await
+            .expect("events")
+            .len();
+        assert_eq!(after, before);
     }
 
     /// Closing without a reason is refused with the service's sentence, and
