@@ -116,7 +116,10 @@
 }
 
 #dev-console-args:focus-visible {
-	outline: none;
+	/* The transparent outline is the ring in forced-colors mode, which drops
+	   box-shadows (the shared rule in ui/styles/base.css). */
+	outline: 2px solid transparent;
+	outline-offset: -2px;
 	box-shadow: var(--focus-ring);
 }
 
@@ -204,7 +207,10 @@
 }
 
 #dev-editor-text:focus-visible {
-	outline: none;
+	/* The transparent outline is the ring in forced-colors mode, which drops
+	   box-shadows (the shared rule in ui/styles/base.css). */
+	outline: 2px solid transparent;
+	outline-offset: -2px;
 	box-shadow: var(--focus-ring);
 }
 
