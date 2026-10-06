@@ -436,13 +436,12 @@ pub async fn handle_block_detail(ctx: &dyn Context, msg: &Message) -> OutputStre
                             "This block is currently disabled."
                         }
                     }
-                    label .toggle {
-                        input type="checkbox"
+                    label .form-switch {
+                        input .form-switch__input type="checkbox" role="switch"
                             aria-label={"Enable " (block_name)}
                             checked[is_enabled]
                             hx-post={"/b/admin/blocks/" (encoded) "/toggle"}
                             hx-target="#content";
-                        span .toggle-slider {}
                     }
                 }
                 p .modal-note {
@@ -473,14 +472,13 @@ pub async fn handle_block_detail(ctx: &dyn Context, msg: &Message) -> OutputStre
             @if block.can_disable {
                 div .flex .items-center .gap-2 {
                     span .text-sm .text-muted { "Enabled" }
-                    label .toggle {
+                    label .form-switch {
                         @let encoded = encode_block_name(&block.name);
-                        input type="checkbox"
+                        input .form-switch__input type="checkbox" role="switch"
                             aria-label={"Enable " (block.name)}
                             checked[is_enabled]
                             hx-post={"/b/admin/blocks/" (encoded) "/toggle"}
                             hx-target="#content";
-                        span .toggle-slider {}
                     }
                 }
             } @else {

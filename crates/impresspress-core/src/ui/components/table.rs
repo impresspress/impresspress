@@ -367,7 +367,7 @@ impl<'a> DataTable<'a> {
     }
 
     /// Make each row link to a destination, by row index. Adds the trailing
-    /// chevron cell (a labelled 44px link) and makes the whole row clickable.
+    /// chevron cell (a labelled link held to the target floor) and makes the whole row clickable.
     pub fn row_href(mut self, href: impl Fn(usize) -> Option<String> + 'a) -> Self {
         self.row_href = Some(Box::new(href));
         self

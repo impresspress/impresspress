@@ -169,4 +169,24 @@
 	--font-ui: system-ui, -apple-system, BlinkMacSystemFont, 'Segoe UI',
 	           Roboto, 'Helvetica Neue', Arial, sans-serif;
 	--font-brand: 'Itim', var(--font-ui);
+
+	/* The smallest a control may be in either direction: every button,
+	   link-as-control, form control, checkbox row and disclosure summary
+	   takes `min-height` (and, when it may be narrow, `min-width`) from
+	   this one token. A mouse or trackpad (a fine pointer) gets 24px --
+	   WCAG 2.5.8's minimum, so the admin keeps its compact ~32-36px
+	   controls. A finger gets 44px, below. */
+	--target-min: 24px;
+}
+
+/* Touch targets follow the POINTER, not the window width: a narrow desktop
+   window still has a mouse, and a tablet in landscape is wide. `any-pointer`
+   rather than `pointer` so a touchscreen laptop -- whose primary pointer is
+   the trackpad -- still gets targets a finger can hit. Layout (columns,
+   stacking, the phone header) stays on width queries; only target SIZES
+   come from here. This is the one place a 44px floor is set: the guard in
+   ui/assets.rs fails on a 44px min-height or min-width anywhere else, and
+   on a pointer query anywhere else. */
+@media (any-pointer: coarse) {
+	:root { --target-min: 44px; }
 }

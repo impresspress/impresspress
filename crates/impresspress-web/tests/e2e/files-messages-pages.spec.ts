@@ -1,5 +1,6 @@
 import { expect, request as playwrightRequest, test, type Page } from '@playwright/test';
 import { ADMIN_STATE_PATH, adminBearer, loginAsAdmin } from './fixtures/auth';
+import { PHONE, targetFloor } from './fixtures/targets';
 
 /**
  * The storage and messages pages, driven in a browser against the real server.
@@ -59,8 +60,9 @@ test('a bucket created from the modal takes an upload with labelled row controls
   // The row's menu, from the keyboard.
   const trigger = page.getByRole('button', { name: 'Actions for notes.txt' });
   const box = await trigger.boundingBox();
-  expect(box!.width).toBeGreaterThanOrEqual(44);
-  expect(box!.height).toBeGreaterThanOrEqual(44);
+  const floor = await targetFloor(page);
+  expect(box!.width).toBeGreaterThan(floor - 0.5);
+  expect(box!.height).toBeGreaterThan(floor - 0.5);
   await expect(trigger.locator('svg')).toHaveCount(1);
   await expect(trigger).toHaveAttribute('aria-expanded', 'false');
 
@@ -104,7 +106,7 @@ test('a bucket created from the modal takes an upload with labelled row controls
   await expect(page.locator('[data-bulk-count]')).toHaveText('1 file selected');
   const del = page.getByRole('button', { name: 'Delete selected' });
   await expect(del).toBeVisible();
-  expect((await del.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+  expect((await del.boundingBox())!.height).toBeGreaterThan(floor - 0.5);
 });
 
 /** A bucket holding `keys` (tiny text files), made through the API. */
@@ -222,8 +224,8 @@ test('revoking a share link confirms in the dialog and updates the list in place
   expect(await page.evaluate(() => (window as unknown as { __noReload?: boolean }).__noReload)).toBe(true);
 });
 
-test.describe('at 390px', () => {
-  test.use({ viewport: { width: 390, height: 844 } });
+test.describe('on a phone', () => {
+  test.use(PHONE);
 
   test('a context created from the list takes a message in a one-pane conversation', async ({ page }) => {
     const title = `e2e chat ${Date.now().toString(36)}`;
@@ -250,7 +252,7 @@ test.describe('at 390px', () => {
     const sendBox = (await send.boundingBox())!;
     // The box keeps most of the row; the button sits beside it, on screen.
     expect(inputBox.width).toBeGreaterThan(200);
-    expect(sendBox.height).toBeGreaterThanOrEqual(44);
+    expect(sendBox.height).toBeGreaterThan(43.5);
     expect(sendBox.x + sendBox.width).toBeLessThanOrEqual(390);
     expect(await overflowX(page)).toBe(0);
 

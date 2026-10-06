@@ -7,8 +7,8 @@
 /// One row: the total on the left, the controls on the right, at every
 /// width. Renders nothing when everything fits on one page — a "1 / 1" bar
 /// with two dead links is noise. At an end of the range the dead control is
-/// a `span`, not a link: there is nowhere for it to go. Each control is a
-/// 44px target.
+/// a `span`, not a link: there is nowhere for it to go. Each control is held
+/// to the target floor (`--target-min`).
 pub fn pagination(
     page: u32,
     per_page: std::num::NonZeroU32,

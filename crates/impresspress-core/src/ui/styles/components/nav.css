@@ -2,6 +2,7 @@
    off-screen until keyboard focus brings it into view. */
 .skip-link { position: absolute; left: -9999px; top: 0; z-index: 100;
   background: var(--primary-button); color: #fff; padding: var(--space-2) var(--space-4);
+  min-height: var(--target-min); display: inline-flex; align-items: center;
   border-radius: 0 0 4px 0; }
 .skip-link:focus { left: 0; }
 
@@ -15,11 +16,11 @@
  * from the bucket into the folders, so it draws the same `›` separator as
  * `.topbar__crumbs` between list items, and its last item is the current
  * folder (`aria-current="page"`), plain text inside the nav. Each link is
- * padded to a 44px-tall target. */
+ * held to the target floor. */
 .breadcrumbs ol { display: flex; flex-wrap: wrap; align-items: center; list-style: none; padding: 0; margin: 0; font-size: var(--text-sm); color: var(--text-secondary); }
-.breadcrumbs li { display: inline-flex; align-items: center; min-height: 44px; }
+.breadcrumbs li { display: inline-flex; align-items: center; min-height: var(--target-min); }
 .breadcrumbs li + li::before { content: "›"; padding: 0 var(--space-2); color: var(--text-muted); }
-.breadcrumbs a { color: var(--text-secondary); text-decoration: none; display: inline-flex; align-items: center; min-height: 44px; }
+.breadcrumbs a { color: var(--text-secondary); text-decoration: none; display: inline-flex; align-items: center; min-height: var(--target-min); }
 .breadcrumbs a:hover { color: var(--primary-button); text-decoration: underline; }
 .breadcrumbs [aria-current="page"] { color: var(--text-primary); font-weight: 500; }
 
@@ -54,6 +55,7 @@
 	font-weight: 500; cursor: pointer; position: relative;
 	transition: color 0.2s; text-decoration: none;
 	display: inline-flex; align-items: center; gap: var(--space-2);
+	min-height: var(--target-min);
 }
 
 .tab:hover { color: var(--text-primary); }
@@ -74,7 +76,7 @@
  * The `.tabs` strip as a row of its own between the page header and the
  * content card (`ui::PageBody::with_subnav`), on the shell's surface. One
  * horizontal scroller below the card width, never a wrapped second line;
- * each link is a 44px target. */
+ * each link is a `.tab`, held to the target floor. */
 .subnav {
 	min-width: 0; overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
 	/* Scroll hint, as the sidebar draws it (layouts/shell.css): a shaded edge
@@ -89,7 +91,7 @@
 }
 .subnav::-webkit-scrollbar { display: none; }
 .subnav .tabs { margin-bottom: 0; min-width: max-content; overflow-x: visible; }
-.subnav .tab { min-height: 44px; flex-shrink: 0; }
+.subnav .tab { flex-shrink: 0; }
 
 /* ===== Editor tab strip (blocks/legalpages/pages.rs) =====
  * Migrated from that file's page-local `EDITOR_CSS` `<style>` block (task
@@ -103,14 +105,14 @@
  * --text-primary, `white` = --surface-1) -- re-typed onto the tokens rather
  * than carried over as literals. */
 .editor-tabs { display: flex; gap: var(--space-1); margin-bottom: -1px; border-bottom: 1px solid var(--border-color); }
-.editor-tab { min-height: 44px; min-width: 44px; background: none; border: 1px solid transparent; border-bottom: none; border-radius: 6px 6px 0 0; padding: var(--space-2) var(--space-4); cursor: pointer; font-size: 0.875rem; color: var(--text-muted); }
+.editor-tab { min-height: var(--target-min); min-width: var(--target-min); background: none; border: 1px solid transparent; border-bottom: none; border-radius: 6px 6px 0 0; padding: var(--space-2) var(--space-4); cursor: pointer; font-size: 0.875rem; color: var(--text-muted); }
 .editor-tab:hover { background: var(--bg-hover); color: var(--text-primary); }
 .editor-tab--active { background: var(--surface-1); border-color: var(--border-color); color: var(--text-primary); font-weight: 600; }
 
 /* ===== Portal overview links (userportal dashboard) =====
    One bordered list per section (Account, Apps): each item a full-width
    link -- icon, label with an optional one-line description, chevron --
-   at least 44px tall. */
+   at least the target floor tall. */
 .account-nav {
 	list-style: none; margin: 0; padding: 0;
 	border: 1px solid var(--border-light); border-radius: var(--radius-md);
@@ -119,7 +121,7 @@
 .account-nav > li + li { border-top: 1px solid var(--border-light); }
 .account-nav__item {
 	display: flex; align-items: center; gap: var(--space-4);
-	min-height: 44px; padding: var(--space-3) var(--space-4);
+	min-height: var(--target-min); padding: var(--space-3) var(--space-4);
 	color: var(--text-primary); text-decoration: none;
 	transition: background var(--transition-fast);
 }

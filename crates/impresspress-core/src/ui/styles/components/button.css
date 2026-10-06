@@ -35,6 +35,10 @@
 	cursor: pointer;
 	transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
 	text-decoration: none; white-space: nowrap;
+	/* The shared target floor (tokens.css): a no-op for a mouse, where every
+	   size below is already taller than 24px; 44px under a finger, whatever
+	   the window's width. */
+	min-height: var(--target-min);
 }
 .btn:disabled { opacity: 0.55; cursor: not-allowed; }
 
@@ -49,9 +53,9 @@
 .btn--lg { padding: var(--space-3) var(--space-6); font-size: var(--text-lg); }
 /* Square: an icon-only button, so the horizontal padding matches the
    vertical rather than the text-button ratio. It has no words to make it
-   wide, so it is held at the 44px touch target on every width; it always
+   wide, so it takes the target floor across as well as down; it always
    carries an `aria-label`, its only name. */
-.btn--icon { padding: var(--space-2); min-width: 44px; min-height: 44px; }
+.btn--icon { padding: var(--space-2); min-width: var(--target-min); }
 
 /* ── Variants ──────────────────────────────────────────── */
 .btn--primary { background: var(--primary-button); color: #fff; border-color: var(--primary-button); }
@@ -110,9 +114,8 @@
 /* ── Filter toggle (`components::filter_toggle`) ───────── */
 /* A list filter that is on or off. Off reads as a secondary button; on is
    filled with the neutral ink and carries a check, so the state is shape and
-   text as well as colour, and `aria-pressed` says it to a screen reader. */
-.filter-toggle { min-height: 44px; }
-/* The same look for the current one of a set of links that choose between
+   text as well as colour, and `aria-pressed` says it to a screen reader.
+   The same look serves the current one of a set of links that choose between
    orderings (`aria-current`), where only one can be on. */
 .filter-toggle[aria-pressed="true"],
 .filter-toggle[aria-current="true"] { background: var(--text-primary); color: var(--surface-1); border-color: var(--text-primary); }

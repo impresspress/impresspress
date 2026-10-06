@@ -260,6 +260,10 @@ test.describe('visual baseline — admin', () => {
 // ===== Phase 4 PR-3: 375px mobile pass =====
 
 const MOBILE_VIEWPORT = { width: 375, height: 812 } as const;
+// A phone has touch, and touch -- not the width -- is what raises every
+// control to its 44px target (`--target-min`, tokens.css). Without it these
+// would be a narrow desktop window: a mouse's compact controls.
+const MOBILE_DEVICE = { hasTouch: true } as const;
 
 const MOBILE_ANON_ROUTES = [
   { path: '/b/auth/login', name: 'auth-login' },
@@ -326,6 +330,7 @@ test.describe('visual baseline — admin vector', () => {
 });
 
 test.describe('visual baseline mobile — anonymous (375px)', () => {
+  test.use(MOBILE_DEVICE);
   for (const r of MOBILE_ANON_ROUTES) {
     test(`anon-mobile ${r.name}`, async ({ page }) => {
       await page.setViewportSize(MOBILE_VIEWPORT);
@@ -336,7 +341,7 @@ test.describe('visual baseline mobile — anonymous (375px)', () => {
 });
 
 test.describe('visual baseline mobile — admin (375px)', () => {
-  test.use({ storageState: ADMIN_STATE_PATH });
+  test.use({ storageState: ADMIN_STATE_PATH, ...MOBILE_DEVICE });
   test.beforeEach(async ({ page }) => {
     await page.setViewportSize(MOBILE_VIEWPORT);
     await loginAsAdmin(page);

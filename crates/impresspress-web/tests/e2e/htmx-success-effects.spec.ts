@@ -249,8 +249,9 @@ test.describe('htmx after-success effects under the served CSP', () => {
       await card.click();
       const modal = page.locator('dialog#block-detail');
       await expect(modal).toBeVisible();
-      await expect(modal.getByRole('checkbox', { name: 'Enable impresspress/legalpages' })).toHaveCount(1);
-      await modal.locator('label.toggle').click();
+      const enable = modal.getByRole('switch', { name: 'Enable impresspress/legalpages' });
+      await expect(enable).toHaveCount(1);
+      await enable.click();
       await expect(page.locator('dialog#block-detail')).toHaveCount(0);
       await expect(page.locator('#block-card-impresspress--legalpages')).toBeFocused();
     }

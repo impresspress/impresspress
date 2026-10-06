@@ -558,6 +558,84 @@ mod tests {
         );
     }
 
+    /// Target sizes follow the pointer (PLAN D4, refined): a finger gets
+    /// 44px, a mouse keeps the compact controls with WCAG 2.5.8's 24px
+    /// floor. Both values live in ONE token, `--target-min`, which tokens.css
+    /// sets to 24px in `:root` and to 44px under `@media (any-pointer:
+    /// coarse)` -- the only pointer query anywhere. A control states its
+    /// floor as `min-height: var(--target-min)`, never as a number: a 44px
+    /// floor written out (or behind a width query, where it misses a tablet
+    /// in landscape and burdens a narrow desktop window) is what this
+    /// replaced. Covers the shared bundle and every block stylesheet.
+    #[cfg(feature = "embed-assets")]
+    #[test]
+    fn touch_target_floors_come_from_the_pointer_token() {
+        let bundle = strip_css_comments(super::css());
+        let normalise = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+
+        assert_eq!(
+            parse_root_tokens(super::css())
+                .get("--target-min")
+                .map(String::as_str),
+            Some("24px"),
+            "tokens.css :root must set the fine-pointer floor, --target-min: 24px"
+        );
+        const QUERY: &str = "@media (any-pointer: coarse)";
+        let at = bundle
+            .find(QUERY)
+            .expect("tokens.css has no coarse-pointer query");
+        let open = at + bundle[at..].find('{').expect("query has a body");
+        let mut depth = 0;
+        let close = bundle[open..]
+            .char_indices()
+            .find_map(|(i, c)| {
+                match c {
+                    '{' => depth += 1,
+                    '}' => depth -= 1,
+                    _ => {}
+                }
+                (depth == 0).then_some(open + i)
+            })
+            .expect("query body closes");
+        assert_eq!(
+            normalise(&bundle[open + 1..close]),
+            ":root { --target-min: 44px; }",
+            "the coarse-pointer query sets the token and nothing else"
+        );
+
+        let mut uses = 0;
+        for (name, sheet) in all_stylesheets() {
+            let sheet = strip_css_comments(&sheet);
+            let queries = sheet.matches("pointer:").count() + sheet.matches("pointer :").count();
+            let allowed = usize::from(name == "app.css");
+            assert_eq!(
+                queries, allowed,
+                "{name}: a pointer media query outside tokens.css; size the control with var(--target-min)"
+            );
+            for (selector, body) in css_leaf_blocks(&sheet) {
+                for decl in body.split(';') {
+                    let Some((prop, value)) = decl.split_once(':') else {
+                        continue;
+                    };
+                    let (prop, value) = (prop.trim(), normalise(value));
+                    uses += value.matches("var(--target-min)").count();
+                    let floor = matches!(
+                        prop,
+                        "min-height" | "min-width" | "min-block-size" | "min-inline-size"
+                    );
+                    assert!(
+                        !(floor && (value.contains("44px") || value.contains("2.75rem"))),
+                        "{name}: `{selector}` writes a 44px floor (`{prop}: {value}`); use var(--target-min)"
+                    );
+                }
+            }
+        }
+        assert!(
+            uses >= 30,
+            "expected the controls to use --target-min, found {uses} uses"
+        );
+    }
+
     /// Relative luminance per WCAG 2.1.
     #[cfg(feature = "embed-assets")]
     fn luminance(hex: &str) -> f64 {

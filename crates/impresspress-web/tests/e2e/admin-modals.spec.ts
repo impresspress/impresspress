@@ -1,5 +1,6 @@
 import { test, expect, type Locator, type Page } from '@playwright/test';
 import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
+import { PHONE, targetFloor } from './fixtures/targets';
 
 /**
  * Every admin modal is the one `components::modal`: a native `<dialog>` that
@@ -38,11 +39,12 @@ async function expectModal(dialog: Locator): Promise<void> {
   const labelledBy = await dialog.getAttribute('aria-labelledby');
   expect(labelledBy).toBeTruthy();
   await expect(dialog.locator(`h2#${labelledBy}`)).toHaveCount(1);
-  // The close button is labelled and at least 44px square.
+  // The close button is labelled and a full target for the pointer, across
+  // and down: 44px under a finger, 24px for a mouse.
   const close = dialog.getByRole('button', { name: 'Close' });
   const box = await close.boundingBox();
-  // (Sub-pixel layout rounds a 44px box to 43.99…)
-  expect(box && box.width >= 43.5 && box.height >= 43.5, JSON.stringify(box)).toBe(true);
+  const floor = await targetFloor(dialog.page());
+  expect(box && box.width > floor - 0.5 && box.height > floor - 0.5, JSON.stringify(box)).toBe(true);
 }
 
 test.describe('admin modals', () => {
@@ -278,8 +280,8 @@ test.describe('admin modals', () => {
     }
   });
 
-  test.describe('at 390px', () => {
-    test.use({ viewport: { width: 390, height: 844 } });
+  test.describe('on a phone', () => {
+    test.use(PHONE);
 
     /**
      * The failing case the rebuild is for: the Add Access Grant form is
