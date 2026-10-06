@@ -6,7 +6,7 @@
 
 use maud::{html, Markup};
 use wafer_core::clients::{config as config_client, database as db};
-use wafer_run::{context::Context, ConfigVar, InputType, Message, OutputStream, WaferError};
+use wafer_run::{context::Context, ConfigVar, Message, OutputStream, WaferError};
 
 use super::{
     config::SecurityReadiness,
@@ -175,7 +175,7 @@ pub async fn types(ctx: &dyn Context, msg: &Message) -> OutputStream {
 }
 
 pub async fn settings(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let readiness = match SecurityReadiness::load(ctx).await {
+    let readiness = match SecurityReadiness::load(ctx, msg).await {
         Ok(readiness) => readiness,
         Err(e) => {
             return error_page(
@@ -286,14 +286,14 @@ pub async fn endpoints(ctx: &dyn Context, msg: &Message) -> OutputStream {
                     "For scripts and agents. Admin routes need an administrator's session or "
                     "API key."
                 }
-                (components::endpoint_table(&api))
+                (components::endpoint_table("JSON API endpoints", &api))
             }
             section {
                 (components::section_header("Pages and form actions", None))
                 p .ticket-section__intro {
                     "The public report form, and what these admin pages load and submit."
                 }
-                (components::endpoint_table(&pages))
+                (components::endpoint_table("Page and form action endpoints", &pages))
             }
         }
     };
@@ -354,7 +354,18 @@ fn filter_form(msg: &Message, types: &[db::Record], filtered: bool) -> Markup {
         .iter()
         .map(|s| (s.as_str(), source_label(s.as_str()).to_string()))
         .collect();
+    let active = FILTER_KEYS
+        .iter()
+        .filter(|key| !msg.query(key).is_empty())
+        .count();
     html! {
+        // A disclosure below 720px, so a phone sees the tickets first; above
+        // it the summary is hidden and the filters always show
+        // (`.ticket-filters-disclosure` in card.css).
+        details .ticket-filters-disclosure {
+        summary .ticket-filters-disclosure__summary {
+            "Filters" @if active > 0 { " (" (active) ")" }
+        }
         form .ticket-filters method="get" action=(INBOX) {
             (filter_select("status", "Status", "All statuses", &statuses, msg))
             (filter_select("priority", "Priority", "All priorities", &priorities, msg))
@@ -369,6 +380,7 @@ fn filter_form(msg: &Message, types: &[db::Record], filtered: bool) -> Markup {
                 button .btn .btn--secondary type="submit" { "Apply filters" }
                 @if filtered { a .btn .btn--ghost href=(INBOX) { "Clear" } }
             }
+        }
         }
     }
 }
@@ -660,7 +672,7 @@ pub(super) fn detail_region(view: &TicketPage) -> Markup {
     });
 
     html! {
-        div id=(DETAIL_REGION) {
+        div .ticket-detail id=(DETAIL_REGION) {
             (templates::detail_page(
                 DetailHero {
                     icon: None,
@@ -1054,10 +1066,12 @@ const SETTING_COLUMNS: [TableCol<'static>; 3] = [
     TableCol::new("What it does"),
 ];
 
-/// A setting's current value as the settings table shows it. A secret says
-/// only whether it is set; an unset value says what applies instead.
+/// A setting's current value as the settings table shows it. A sensitive
+/// setting — by the shared rule, `config_vars::is_sensitive_var`: declared
+/// sensitive or named `…_SECRET`/`…_KEY` — says only whether it is set; an
+/// unset value says what applies instead.
 fn setting_value(var: &ConfigVar, value: Option<&str>) -> Markup {
-    match (value, var.input_type == InputType::Password) {
+    match (value, crate::config_vars::is_sensitive_var(var)) {
         (Some(_), true) => components::badge(BadgeVariant::Success, "Set"),
         (None, true) => components::badge(BadgeVariant::Secondary, "Not set"),
         (Some(value), false) => html! { code { (components::breakable_id(value)) } },
@@ -1486,7 +1500,7 @@ pub(super) mod render_tests {
         assert!(html.contains(&format!(r#"hx-post="{INBOX}""#)), "{html}");
         for absent in [
             "<style",
-            "<details",
+            "Create internal ticket</summary>",
             "data-json-form",
             "alert(",
             "location.reload",
@@ -1639,7 +1653,40 @@ pub(super) mod render_tests {
         );
         assert!(html.contains("Default: </span><code>3600</code>"), "{html}");
         assert!(html.contains("IMPRESSPRESS__<wbr>TICKETS__<wbr>"), "{html}");
+        let mut with_site_key = TestContext::with_tickets().await;
+        with_site_key.set_config(super::super::config::TURNSTILE_SITE_KEY, "site-key-value");
+        let html = page(&with_site_key, "/b/tickets/admin/settings").await;
+        assert!(
+            !html.contains("site-key-value"),
+            "a `_KEY` value is shown: {html}"
+        );
         assert!(html.contains("Public reporting is off"), "{html}");
+    }
+
+    /// The shared sensitivity rule, not the input type: a key named
+    /// `…_KEY` or `…_SECRET` is masked though it is declared as plain text.
+    #[test]
+    fn a_suffix_named_setting_is_masked_whatever_its_input_type() {
+        for key in ["ACME__THING__API_KEY", "ACME__THING__WEBHOOK_SECRET"] {
+            let var = ConfigVar::new(key, "A credential", "");
+            let html = setting_value(&var, Some("hunter2")).into_string();
+            assert!(!html.contains("hunter2"), "{key}: {html}");
+            assert!(html.contains(">Set<"), "{key}: {html}");
+        }
+        let plain = ConfigVar::new("ACME__THING__COLOUR", "A colour", "");
+        assert!(setting_value(&plain, Some("blue"))
+            .into_string()
+            .contains("blue"));
+    }
+
+    /// With filters applied, the phone's Filters disclosure says how many.
+    #[tokio::test]
+    async fn the_filter_disclosure_counts_the_active_filters() {
+        let (ctx, _, _) = seeded().await;
+        let html = page(&ctx, &format!("{INBOX}?status=new&priority=urgent")).await;
+        assert!(html.contains("Filters (2)</summary>"), "{html}");
+        let html = page(&ctx, INBOX).await;
+        assert!(html.contains(">Filters</summary>"), "{html}");
     }
 
     /// The endpoint reference is generated from the route table: every row

@@ -144,8 +144,11 @@ pub async fn prune(ctx: &dyn Context, now: chrono::DateTime<chrono::Utc>) -> Mai
     result
 }
 
-pub async fn status(ctx: &dyn Context) -> Result<OperationalStatus, WaferError> {
-    let security = SecurityReadiness::load(ctx).await?;
+pub async fn status(
+    ctx: &dyn Context,
+    msg: &wafer_run::Message,
+) -> Result<OperationalStatus, WaferError> {
+    let security = SecurityReadiness::load(ctx, msg).await?;
     let new_tickets = repo::count_tickets(ctx, vec![repo::eq("status", "new")]).await?;
     let urgent_tickets = repo::count_tickets(ctx, vec![repo::eq("priority", "urgent")]).await?;
     let open_tickets = repo::count_tickets(

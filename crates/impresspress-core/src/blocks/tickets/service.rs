@@ -365,26 +365,53 @@ pub async fn update_workflow(
         ));
     }
 
+    // Only the fields this request changes are written and recorded: a form
+    // that re-sends every field it shows must not log the unchanged ones.
+    let priority_changed = input
+        .priority
+        .as_deref()
+        .filter(|priority| *priority != str_field(&current, "priority"));
+    let assignee_changed = input
+        .assignee_id
+        .as_deref()
+        .filter(|assignee| *assignee != str_field(&current, "assignee_id"));
+    let duplicate_changed = effective_duplicate != current_duplicate;
+    let current_hold = bool_field(&current, "legal_hold");
+    let effective_hold = input.legal_hold.unwrap_or(current_hold);
+    let hold_changed = effective_hold != current_hold;
+
     let mut data = HashMap::new();
+    let mut changes = serde_json::Map::new();
     if let Some(status) = status_changed {
         data.insert("status".into(), serde_json::json!(status.as_str()));
+        changes.insert("status".into(), serde_json::json!(status.as_str()));
     }
-    if let Some(priority) = input.priority.as_deref() {
+    if let Some(priority) = priority_changed {
         data.insert("priority".into(), serde_json::json!(priority));
+        changes.insert("priority".into(), serde_json::json!(priority));
     }
-    insert_opt(&mut data, "assignee_id", input.assignee_id.clone());
-    let duplicate_changed = effective_duplicate != current_duplicate;
+    if let Some(assignee) = assignee_changed {
+        data.insert("assignee_id".into(), serde_json::json!(assignee));
+        changes.insert("assignee_id".into(), serde_json::json!(assignee));
+    }
     if duplicate_changed {
         data.insert(
             "duplicate_of".into(),
             serde_json::json!(effective_duplicate),
         );
+        changes.insert(
+            "duplicate_of".into(),
+            serde_json::json!(effective_duplicate),
+        );
     }
-    insert_opt(&mut data, "legal_hold", input.legal_hold);
+    if hold_changed {
+        data.insert("legal_hold".into(), serde_json::json!(effective_hold));
+        changes.insert("legal_hold".into(), serde_json::json!(effective_hold));
+    }
+    if data.is_empty() {
+        return Ok(current);
+    }
 
-    let current_hold = bool_field(&current, "legal_hold");
-    let effective_hold = input.legal_hold.unwrap_or(current_hold);
-    let hold_changed = effective_hold != current_hold;
     let now = crate::util::now_rfc3339();
     let lifecycle_changed = status_changed.is_some() || hold_changed;
     let expiry = if lifecycle_changed {
@@ -430,13 +457,7 @@ pub async fn update_workflow(
         actor_type,
         actor_id,
         input.reason.trim(),
-        &serde_json::json!({
-            "status": status_changed.map(TicketStatus::as_str),
-            "priority": input.priority,
-            "assignee_id": input.assignee_id,
-            "duplicate_of": input.duplicate_of,
-            "legal_hold": input.legal_hold,
-        }),
+        &serde_json::Value::Object(changes),
         expiry.as_deref(),
     )
     .await;

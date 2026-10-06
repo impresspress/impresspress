@@ -57,7 +57,7 @@ fn settings_unavailable(error: &wafer_run::WaferError) -> OutputStream {
 pub async fn form(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let (readiness, chrome) = match async {
         Ok::<_, wafer_run::WaferError>((
-            SecurityReadiness::load(ctx).await?,
+            SecurityReadiness::load(ctx, msg).await?,
             PublicChrome::load(ctx).await?,
         ))
     }
@@ -177,7 +177,7 @@ pub async fn submit(
     msg: &Message,
     input: InputStream,
 ) -> OutputStream {
-    let readiness = match SecurityReadiness::load(ctx).await {
+    let readiness = match SecurityReadiness::load(ctx, msg).await {
         Ok(readiness) => readiness,
         Err(e) => return settings_unavailable(&e),
     };

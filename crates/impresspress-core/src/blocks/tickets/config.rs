@@ -2,9 +2,12 @@
 
 use serde::Serialize;
 use wafer_core::clients::config;
-use wafer_run::{context::Context, ConfigVar, InputType};
+use wafer_run::{context::Context, ConfigVar, InputType, Message};
 
 use super::repo;
+
+/// The block name the router gates.
+const BLOCK_NAME: &str = "impresspress/tickets";
 
 pub const PUBLIC_ENABLED: &str = "IMPRESSPRESS__TICKETS__PUBLIC_SUBMISSIONS_ENABLED";
 pub const BACK_URL: &str = "IMPRESSPRESS__TICKETS__PUBLIC_BACK_URL";
@@ -158,25 +161,18 @@ pub struct SecurityReadiness {
 impl SecurityReadiness {
     /// A failed config read is returned: readiness is what lets the public
     /// form accept anonymous submissions, so it is never guessed.
-    pub async fn load(ctx: &dyn Context) -> Result<Self, wafer_run::WaferError> {
-        // The boot snapshot, deliberately, where the sidebar and the portal's
-        // feature list read `routing::gate_from_request` instead.
-        //
-        // This value can go stale against the router after an admin toggle,
-        // and that staleness is unobservable: every surface that reads a
-        // `SecurityReadiness` — the admin readiness panel, the public submit
-        // form — is itself a `/b/tickets` route, so a disabled tickets block
-        // means the router refuses the page before the flag can be rendered.
-        // The one caller that is not a route (`maintenance`, a scheduled
-        // sweep) has no routed message to read a gate from at all. Threading
-        // one through it to correct a discrepancy nothing can see would buy
-        // nothing.
-        let block_enabled = ctx
-            .config_get(crate::features::BLOCK_SETTINGS_CONFIG_KEY)
-            .map(|value| {
-                crate::features::BlockSettings::state_for(value, "impresspress/tickets").enabled
-            })
-            .unwrap_or(true);
+    ///
+    /// Whether the block is enabled is read from the gate the router
+    /// published for `msg` (`routing::gate_from_request`), not the boot
+    /// config snapshot: the snapshot is frozen at boot, so after an admin
+    /// enables the block it would keep reporting it disabled while the router
+    /// serves its pages.
+    pub async fn load(ctx: &dyn Context, msg: &Message) -> Result<Self, wafer_run::WaferError> {
+        let block_enabled = crate::features::is_enabled(
+            &crate::routing::gate_from_request(ctx, msg),
+            ctx.registered_blocks(),
+            crate::routing::feature_gate_name(BLOCK_NAME),
+        );
         let public_enabled = crate::config_vars::get_bool(ctx, PUBLIC_ENABLED, false).await?;
         let site_key_configured = !config::get_default(ctx, TURNSTILE_SITE_KEY, "")
             .await?
@@ -267,6 +263,45 @@ async fn positive(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The boot snapshot says the block is off (it shipped disabled), the
+    /// router's gate for this request says it is on (an admin enabled it):
+    /// readiness follows the gate, so no "disabled" reason is shown; and a
+    /// gate that refuses the block is reported.
+    #[tokio::test]
+    async fn readiness_follows_the_live_gate_not_the_boot_snapshot() {
+        use crate::{
+            routing::META_DISABLED_BLOCKS,
+            test_support::{admin_msg, TestContext},
+        };
+
+        let mut ctx = TestContext::with_tickets().await;
+        ctx.set_config(
+            crate::features::BLOCK_SETTINGS_CONFIG_KEY,
+            &serde_json::json!({ BLOCK_NAME: { "enabled": false } }).to_string(),
+        );
+        let mut msg = admin_msg("retrieve", "/b/tickets/admin/settings");
+        msg.set_meta(META_DISABLED_BLOCKS, "[]");
+        let live = SecurityReadiness::load(&ctx, &msg)
+            .await
+            .expect("readiness");
+        assert!(live.block_enabled);
+        assert!(
+            !live.reasons.iter().any(|r| r.contains("block is disabled")),
+            "{:?}",
+            live.reasons
+        );
+
+        msg.set_meta(META_DISABLED_BLOCKS, r#"["impresspress/tickets"]"#);
+        let refused = SecurityReadiness::load(&ctx, &msg)
+            .await
+            .expect("readiness");
+        assert!(!refused.block_enabled);
+        assert!(refused
+            .reasons
+            .iter()
+            .any(|r| r == "tickets block is disabled"));
+    }
 
     #[test]
     fn secrets_are_declared_as_passwords() {

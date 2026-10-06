@@ -340,7 +340,7 @@ crate::impresspress_feature_block! {
             Route::ApiTypes => rest::list_types(ctx, &msg).await,
             Route::ApiCreateType => rest::create_type(ctx, input).await,
             Route::ApiUpdateType => rest::update_type(ctx, &msg, input).await,
-            Route::ApiStatus => rest::status(ctx).await,
+            Route::ApiStatus => rest::status(ctx, &msg).await,
             Route::ApiPrune => rest::prune(ctx).await,
         }
     },

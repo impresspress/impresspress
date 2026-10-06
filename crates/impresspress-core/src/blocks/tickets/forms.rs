@@ -383,7 +383,10 @@ mod tests {
         .await;
         let html = String::from_utf8_lossy(&parts.body);
         assert_eq!(parts.status, 200, "{html}");
-        assert!(html.starts_with(r#"<div id="ticket-detail">"#), "{html}");
+        assert!(
+            html.starts_with(r#"<div class="ticket-detail" id="ticket-detail">"#),
+            "{html}"
+        );
         assert!(html.contains(">Investigating</span>"), "{html}");
         assert!(html.contains(">Legal hold</span>"), "{html}");
         assert!(header(&parts, "HX-Trigger").contains("Ticket updated"));
@@ -391,6 +394,51 @@ mod tests {
         assert_eq!(service::str_field(&stored, "status"), "investigating");
         assert_eq!(service::str_field(&stored, "assignee_id"), "admin_1");
         assert!(service::bool_field(&stored, "legal_hold"));
+    }
+
+    /// The form re-sends every field it shows. Saving it unchanged writes
+    /// nothing and adds no timeline entry; changing one field records only
+    /// that field.
+    #[tokio::test]
+    async fn only_changed_workflow_fields_are_written_and_recorded() {
+        let (ctx, _, ticket) = seeded().await;
+        let unchanged = [
+            ("status", "new"),
+            ("priority", "urgent"),
+            ("assignee_id", ""),
+            ("duplicate_of", ""),
+            ("reason", ""),
+        ];
+        let path = format!("{}/{ticket}", pages::INBOX);
+        let before = repo::list_events(&ctx, &ticket, 50)
+            .await
+            .expect("events")
+            .len();
+        assert_eq!(submit(&ctx, "update", &path, &unchanged).await.status, 200);
+        let after = repo::list_events(&ctx, &ticket, 50).await.expect("events");
+        assert_eq!(after.len(), before, "an unchanged save is not an event");
+
+        let mut changed = unchanged;
+        changed[1] = ("priority", "low");
+        assert_eq!(submit(&ctx, "update", &path, &changed).await.status, 200);
+        let events = repo::list_events(&ctx, &ticket, 50).await.expect("events");
+        assert_eq!(events.len(), before + 1);
+        let metadata = events[0]
+            .data
+            .get("metadata_json")
+            .or_else(|| events[0].data.get("metadata"))
+            .cloned()
+            .unwrap_or_default();
+        let metadata: serde_json::Value = match metadata {
+            serde_json::Value::String(text) => serde_json::from_str(&text).unwrap_or_default(),
+            value => value,
+        };
+        assert_eq!(
+            metadata,
+            serde_json::json!({ "priority": "low" }),
+            "{:?}",
+            events[0]
+        );
     }
 
     /// Closing without a reason is refused with the service's sentence, and

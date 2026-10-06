@@ -1,4 +1,4 @@
-import { expect, request as playwrightRequest, test, type APIRequestContext } from '@playwright/test';
+import { expect, request as playwrightRequest, test, type APIRequestContext, type Page } from '@playwright/test';
 import { ADMIN_STATE_PATH, adminBearer, loginAsAdmin } from './fixtures/auth';
 
 /**
@@ -15,6 +15,15 @@ import { ADMIN_STATE_PATH, adminBearer, loginAsAdmin } from './fixtures/auth';
  */
 
 const UNIQUE = `${Date.now()}-${Math.floor(Math.random() * 1e6)}`;
+
+/** Open the inbox filters: a disclosure on a phone, always shown on a desktop. */
+async function openFilters(page: Page): Promise<void> {
+  const summary = page.locator('.ticket-filters-disclosure__summary');
+  if (await summary.isVisible()) {
+    const open = await page.locator('.ticket-filters-disclosure').getAttribute('open');
+    if (open === null) await summary.click();
+  }
+}
 
 async function seeder(baseURL: string | undefined): Promise<{
   api: APIRequestContext;
@@ -51,73 +60,81 @@ test.describe('tickets admin', () => {
     await api.dispose();
   });
 
-  test('create, note, move and filter a ticket', async ({ page }) => {
-    const subject = `Footer link is broken ${UNIQUE}`;
-    await page.goto('/b/tickets/admin/tickets', { waitUntil: 'networkidle' });
-    await loginAsAdmin(page);
-    await expect(page.getByRole('heading', { level: 1 })).toHaveText('Tickets');
+  for (const [label, viewport] of [
+    ['1440', { width: 1440, height: 900 }],
+    ['390', { width: 390, height: 844 }],
+  ] as const) {
+    test(`create, note, move and filter a ticket at ${label}px`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      const subject = `Footer link is broken ${UNIQUE} ${label}`;
+      await page.goto('/b/tickets/admin/tickets', { waitUntil: 'networkidle' });
+      await loginAsAdmin(page);
+      await expect(page.getByRole('heading', { level: 1 })).toHaveText('Tickets');
 
-    // The New ticket modal, opened from the topbar.
-    await page.getByRole('button', { name: 'New ticket' }).first().click();
-    const dialog = page.getByRole('dialog', { name: 'New internal ticket' });
-    await expect(dialog).toBeVisible();
-    await dialog.getByLabel('Type').selectOption({ label: typeTitle });
-    await dialog.getByLabel('Subject').fill(subject);
-    await dialog.getByLabel('Description').fill('The privacy link in the footer answers 404 on every page.');
-    await dialog.getByLabel('Priority').selectOption('high');
-    await dialog.getByRole('button', { name: 'Create ticket' }).click();
+      // The New ticket modal, opened from the topbar.
+      await page.getByRole('button', { name: 'New ticket' }).first().click();
+      const dialog = page.getByRole('dialog', { name: 'New internal ticket' });
+      await expect(dialog).toBeVisible();
+      await dialog.getByLabel('Type').selectOption({ label: typeTitle });
+      await dialog.getByLabel('Subject').fill(subject);
+      await dialog.getByLabel('Description').fill('The privacy link in the footer answers 404 on every page.');
+      await dialog.getByLabel('Priority').selectOption('high');
+      await dialog.getByRole('button', { name: 'Create ticket' }).click();
 
-    // A created ticket opens on its own page.
-    await expect(page).toHaveURL(/\/b\/tickets\/admin\/tickets\/[^/?]+$/);
-    await expect(page.getByRole('heading', { level: 1 })).toHaveText(/^TKT-/);
-    await expect(page.getByRole('heading', { level: 2, name: subject })).toBeVisible();
-    const hero = page.locator('.detail-hero');
-    await expect(hero.getByText('New', { exact: true })).toBeVisible();
-    await expect(hero.getByText('High', { exact: true })).toBeVisible();
+      // A created ticket opens on its own page.
+      await expect(page).toHaveURL(/\/b\/tickets\/admin\/tickets\/[^/?]+$/);
+      await expect(page.getByRole('heading', { level: 1 })).toHaveText(/^TKT-/);
+      await expect(page.getByRole('heading', { level: 2, name: subject })).toBeVisible();
+      const hero = page.locator('.detail-hero');
+      await expect(hero.getByText('New', { exact: true })).toBeVisible();
+      await expect(hero.getByText('High', { exact: true })).toBeVisible();
 
-    // An internal note lands on the timeline, with a toast.
-    await page.getByRole('textbox', { name: 'Internal note' }).fill('Checked the footer template.');
-    await page.getByRole('button', { name: 'Add note' }).click();
-    await expect(page.locator('.toast-success', { hasText: 'Note added' })).toBeVisible();
-    await expect(page.locator('.ticket-timeline')).toContainText('Checked the footer template.');
+      // An internal note lands on the timeline, with a toast.
+      await page.getByRole('textbox', { name: 'Internal note' }).fill('Checked the footer template.');
+      await page.getByRole('button', { name: 'Add note' }).click();
+      await expect(page.locator('.toast-success', { hasText: 'Note added' })).toBeVisible();
+      await expect(page.locator('.ticket-timeline')).toContainText('Checked the footer template.');
 
-    // Moving to Investigating re-renders the ticket with its new badge.
-    await page.getByRole('combobox', { name: 'Status' }).selectOption('investigating');
-    await page.getByRole('button', { name: 'Save changes' }).click();
-    await expect(page.locator('.toast-success', { hasText: 'Ticket updated' })).toBeVisible();
-    await expect(hero.getByText('Investigating', { exact: true })).toBeVisible();
-    await expect(page.locator('.ticket-timeline')).toContainText('Moved to Investigating');
+      // Moving to Investigating re-renders the ticket with its new badge.
+      await page.getByRole('combobox', { name: 'Status' }).selectOption('investigating');
+      await page.getByRole('button', { name: 'Save changes' }).click();
+      await expect(page.locator('.toast-success', { hasText: 'Ticket updated' })).toBeVisible();
+      await expect(hero.getByText('Investigating', { exact: true })).toBeVisible();
+      await expect(page.locator('.ticket-timeline')).toContainText('Moved to Investigating');
 
-    // Closing without a reason is refused with the server's sentence, and
-    // nothing changes.
-    await page.getByRole('combobox', { name: 'Status' }).selectOption('resolved');
-    await page.getByRole('button', { name: 'Save changes' }).click();
-    await expect(page.locator('.toast-error', { hasText: 'a reason is required' })).toBeVisible();
-    await expect(hero.getByText('Investigating', { exact: true })).toBeVisible();
+      // Closing without a reason is refused with the server's sentence, and
+      // nothing changes.
+      await page.getByRole('combobox', { name: 'Status' }).selectOption('resolved');
+      await page.getByRole('button', { name: 'Save changes' }).click();
+      await expect(page.locator('.toast-error', { hasText: 'a reason is required' })).toBeVisible();
+      await expect(hero.getByText('Investigating', { exact: true })).toBeVisible();
 
-    await page.getByRole('textbox', { name: 'Reason' }).fill('Fixed the link.');
-    await page.getByRole('button', { name: 'Save changes' }).click();
-    await expect(hero.getByText('Resolved', { exact: true })).toBeVisible();
+      await page.getByRole('textbox', { name: 'Reason' }).fill('Fixed the link.');
+      await page.getByRole('button', { name: 'Save changes' }).click();
+      await expect(hero.getByText('Resolved', { exact: true })).toBeVisible();
 
-    // The inbox filters by the real status set.
-    await page.goto('/b/tickets/admin/tickets', { waitUntil: 'networkidle' });
-    await page.getByRole('combobox', { name: 'Status' }).selectOption('resolved');
-    await page.getByRole('button', { name: 'Apply filters' }).click();
-    await expect(page).toHaveURL(/status=resolved/);
-    const row = page.locator('.data-table__row', { hasText: subject });
-    await expect(row).toBeVisible();
+      // The inbox filters by the real status set.
+      await page.goto('/b/tickets/admin/tickets', { waitUntil: 'networkidle' });
+      await openFilters(page);
+      await page.getByRole('combobox', { name: 'Status' }).selectOption('resolved');
+      await page.getByRole('button', { name: 'Apply filters' }).click();
+      await expect(page).toHaveURL(/status=resolved/);
+      const row = page.locator('.data-table__row', { hasText: subject });
+      await expect(row).toBeVisible();
 
-    await page.getByRole('combobox', { name: 'Status' }).selectOption('spam');
-    await page.getByRole('combobox', { name: 'Type' }).selectOption({ label: typeTitle });
-    await page.getByRole('button', { name: 'Apply filters' }).click();
-    await expect(page.getByRole('heading', { name: 'No tickets match these filters' })).toBeVisible();
-    await page.getByRole('link', { name: 'Clear filters' }).click();
-    await expect(page).toHaveURL(/\/b\/tickets\/admin\/tickets$/);
+      await openFilters(page);
+      await page.getByRole('combobox', { name: 'Status' }).selectOption('spam');
+      await page.getByRole('combobox', { name: 'Type' }).selectOption({ label: typeTitle });
+      await page.getByRole('button', { name: 'Apply filters' }).click();
+      await expect(page.getByRole('heading', { name: 'No tickets match these filters' })).toBeVisible();
+      await page.getByRole('link', { name: 'Clear filters' }).click();
+      await expect(page).toHaveURL(/\/b\/tickets\/admin\/tickets$/);
 
-    // A row opens its ticket.
-    await page.locator('.data-table__row', { hasText: subject }).click();
-    await expect(page.getByRole('heading', { level: 2, name: subject })).toBeVisible();
-  });
+      // A row opens its ticket.
+      await page.locator('.data-table__row', { hasText: subject }).click();
+      await expect(page.getByRole('heading', { level: 2, name: subject })).toBeVisible();
+    });
+  }
 
   test('create a ticket type from its modal', async ({ page }) => {
     const title = `Billing ${UNIQUE}`;

@@ -625,6 +625,15 @@
    the type and settings tables' secondary lines. Everything else on these
    pages is a shared component (list/detail templates, DataTable, modal,
    callout, section header). */
+/* The filters' disclosure: a summary button below 720px, nothing above it
+   (`::details-content` shows the closed details' content). */
+.ticket-filters-disclosure { width: 100%; }
+.ticket-filters-disclosure__summary { display: inline-flex; align-items: center; min-height: 44px; padding: 0 var(--space-4); border: 1px solid var(--border-color); border-radius: var(--radius-full); cursor: pointer; font-weight: 500; }
+.ticket-filters-disclosure[open] .ticket-filters-disclosure__summary { margin-bottom: var(--space-3); }
+@media (min-width: 721px) {
+	.ticket-filters-disclosure__summary { display: none; }
+	.ticket-filters-disclosure::details-content { content-visibility: visible; display: contents; }
+}
 .ticket-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: var(--space-3); align-items: end; width: 100%; }
 .ticket-filters .form-group { margin: 0; }
 .ticket-filters__actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
@@ -637,7 +646,11 @@
 .ticket-workflow__grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 var(--space-4); align-items: start; }
 .ticket-workflow__grid .form-group, .ticket-workflow__grid .form-group:last-child { margin-bottom: var(--space-5); }
 @media (max-width: 720px) { .ticket-workflow__grid { grid-template-columns: minmax(0, 1fr); } }
-.ticket-link { color: var(--primary-button); font-weight: 500; text-decoration: none; }
+.ticket-link { display: inline-flex; align-items: center; min-height: 44px; color: var(--primary-button); font-weight: 500; text-decoration: none; }
+/* The legal-hold box: a 24px box in a 44px label row, all of it the target. */
+.ticket-section .form-checkbox input { width: 1.5rem; height: 1.5rem; flex: none; }
+/* Below the two-column width the metadata comes first, under the hero. */
+@media (max-width: 1023px) { .ticket-detail .detail-meta { order: -1; } }
 .ticket-link:hover { text-decoration: underline; }
 .ticket-icon-button { min-width: 44px; min-height: 44px; }
 .ticket-form-actions { display: flex; justify-content: flex-start; margin-top: var(--space-3); }

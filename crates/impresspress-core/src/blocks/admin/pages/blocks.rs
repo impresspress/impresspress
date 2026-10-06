@@ -488,7 +488,7 @@ pub async fn handle_block_detail(ctx: &dyn Context, msg: &Message) -> OutputStre
         // Endpoints
         @if !block.endpoints.is_empty() {
             h3 .modal-section-title { "Endpoints" }
-            (components::endpoint_table(&block.endpoints))
+            (components::endpoint_table("Endpoints", &block.endpoints))
         }
 
         // Config Keys

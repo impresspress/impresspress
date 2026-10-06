@@ -197,8 +197,8 @@ pub async fn update_type(ctx: &dyn Context, msg: &Message, input: InputStream) -
     }
 }
 
-pub async fn status(ctx: &dyn Context) -> OutputStream {
-    match maintenance::status(ctx).await {
+pub async fn status(ctx: &dyn Context, msg: &Message) -> OutputStream {
+    match maintenance::status(ctx, msg).await {
         Ok(status) => ok_json(&status),
         Err(error) => crud::db_error_internal(error, "Could not load ticket status"),
     }
