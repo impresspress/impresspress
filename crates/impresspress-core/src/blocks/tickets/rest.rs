@@ -22,7 +22,7 @@ use crate::{
     http::{err_bad_request, err_conflict, ok_json, ResponseBuilder},
 };
 
-const MAX_ADMIN_BODY: usize = 32 * 1_024;
+pub(super) const MAX_ADMIN_BODY: usize = 32 * 1_024;
 
 pub async fn list_tickets(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let query = TicketListQuery::from_message(msg);
@@ -104,7 +104,7 @@ pub async fn update_ticket(ctx: &dyn Context, msg: &Message, input: InputStream)
     };
     match service::update_workflow(ctx, msg.var("id"), body, ActorType::Admin, msg.user_id()).await
     {
-        Ok(record) => ok_json(&TicketView::from_record(&record)),
+        Ok(outcome) => ok_json(&TicketView::from_record(&outcome.into_record())),
         Err(error) => service_error(error),
     }
 }
@@ -164,19 +164,25 @@ pub async fn create_type(ctx: &dyn Context, input: InputStream) -> OutputStream 
         Ok(value) => value,
         Err(response) => return response,
     };
-    // `types.key` is UNIQUE and the one unique value this write sets, so a
-    // refused duplicate is that key being taken.
     let key = body.key.clone();
     match service::create_type(ctx, body).await {
         Ok(record) => ResponseBuilder::new()
             .status(201)
             .json(&TicketTypeView::from_record(&record)),
-        Err(service::ServiceError::Db(error)) => crud::taken_key_or(
+        Err(error) => create_type_failure(error, &key),
+    }
+}
+
+/// A refused type creation. `types.key` is UNIQUE and the one unique value
+/// the write sets, so a refused duplicate is `key` being taken.
+pub(super) fn create_type_failure(error: service::ServiceError, key: &str) -> OutputStream {
+    match error {
+        service::ServiceError::Db(error) => crud::taken_key_or(
             error,
-            crud::TakenKey::new("ticket type", "key", &key),
+            crud::TakenKey::new("ticket type", "key", key),
             |error| service_error(service::ServiceError::Db(error)),
         ),
-        Err(error) => service_error(error),
+        error => service_error(error),
     }
 }
 
@@ -191,8 +197,8 @@ pub async fn update_type(ctx: &dyn Context, msg: &Message, input: InputStream) -
     }
 }
 
-pub async fn status(ctx: &dyn Context) -> OutputStream {
-    match maintenance::status(ctx).await {
+pub async fn status(ctx: &dyn Context, msg: &Message) -> OutputStream {
+    match maintenance::status(ctx, msg).await {
         Ok(status) => ok_json(&status),
         Err(error) => crud::db_error_internal(error, "Could not load ticket status"),
     }
@@ -213,12 +219,17 @@ async fn collect_json<T: DeserializeOwned>(input: InputStream) -> Result<T, Outp
         .await
         .map_err(OutputStream::error)?;
     if raw.len() > MAX_ADMIN_BODY {
-        return Err(ResponseBuilder::new()
-            .status(413)
-            .body(b"Request is too large".to_vec(), "text/plain"));
+        return Err(too_large());
     }
     serde_json::from_slice(&raw)
         .map_err(|error| err_bad_request(&format!("Invalid JSON request: {error}")))
+}
+
+/// The answer to a body past [`MAX_ADMIN_BODY`].
+pub(super) fn too_large() -> OutputStream {
+    ResponseBuilder::new()
+        .status(413)
+        .body(b"Request is too large".to_vec(), "text/plain")
 }
 
 /// The one mapping from a service failure to a response.
@@ -228,7 +239,7 @@ async fn collect_json<T: DeserializeOwned>(input: InputStream) -> Result<T, Outp
 /// makes a WRAP refusal on `impresspress__tickets__*` a **403** instead of
 /// the `500 Internal server error (ref: …)` this function used to answer for
 /// everything that was not a `NotFound`.
-fn service_error(error: service::ServiceError) -> OutputStream {
+pub(super) fn service_error(error: service::ServiceError) -> OutputStream {
     match error {
         service::ServiceError::Validation(message) => err_bad_request(&message),
         service::ServiceError::Conflict(message) => err_conflict(&message),

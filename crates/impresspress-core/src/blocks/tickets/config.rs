@@ -2,9 +2,12 @@
 
 use serde::Serialize;
 use wafer_core::clients::config;
-use wafer_run::{context::Context, ConfigVar, InputType};
+use wafer_run::{context::Context, ConfigVar, InputType, Message};
 
 use super::repo;
+
+/// The block name the router gates.
+const BLOCK_NAME: &str = "impresspress/tickets";
 
 pub const PUBLIC_ENABLED: &str = "IMPRESSPRESS__TICKETS__PUBLIC_SUBMISSIONS_ENABLED";
 pub const BACK_URL: &str = "IMPRESSPRESS__TICKETS__PUBLIC_BACK_URL";
@@ -25,13 +28,13 @@ pub fn config_vars() -> Vec<ConfigVar> {
     vec![
         ConfigVar::new(
             PUBLIC_ENABLED,
-            "Allow protected public ticket submissions after readiness checks pass",
+            "Turns on the public report form; it accepts reports only once every readiness check passes",
             "false",
         )
         .name("Public submissions enabled"),
         ConfigVar::new(
             BACK_URL,
-            "Safe same-site back link for the public form",
+            "Where the public form's back link goes; must be a path on this site",
             "/",
         )
         .name("Public back URL")
@@ -45,14 +48,14 @@ pub fn config_vars() -> Vec<ConfigVar> {
         .optional(),
         ConfigVar::new(
             TURNSTILE_SITE_KEY,
-            "Cloudflare Turnstile public widget site key",
+            "The Cloudflare Turnstile site key the public form's bot check uses",
             "",
         )
         .name("Turnstile site key")
         .optional(),
         ConfigVar::new(
             TURNSTILE_SECRET_KEY,
-            "Cloudflare Turnstile server-side Siteverify secret",
+            "The Cloudflare Turnstile secret the server verifies the bot check with",
             "",
         )
         .name("Turnstile secret")
@@ -60,29 +63,65 @@ pub fn config_vars() -> Vec<ConfigVar> {
         .optional(),
         ConfigVar::new(
             IDENTITY_SECRET,
-            "Independent high-entropy secret for rotating abuse and form-token digests",
+            "A long random secret that keys the anonymised reporter identities and form tokens; use a value not used anywhere else",
             "",
         )
         .name("Identity secret")
         .input_type(InputType::Password)
         .optional(),
-        number(IDENTITY_MAX, "Reports per identity", "3"),
-        number(IDENTITY_WINDOW, "Identity limit window (seconds)", "3600"),
-        number(GLOBAL_MAX, "Global reports per window", "100"),
-        number(GLOBAL_WINDOW, "Global limit window (seconds)", "3600"),
-        number(FORM_TTL, "Public form lifetime (seconds)", "7200"),
-        number(RETENTION_SPAM, "Spam retention (days)", "30"),
+        number(
+            IDENTITY_MAX,
+            "Reports per reporter",
+            "How many reports one reporter may send within the reporter window",
+            "3",
+        ),
+        number(
+            IDENTITY_WINDOW,
+            "Reporter window (seconds)",
+            "The period the per-reporter limit counts over",
+            "3600",
+        ),
+        number(
+            GLOBAL_MAX,
+            "Reports per site window",
+            "How many public reports the whole site accepts within the site window",
+            "100",
+        ),
+        number(
+            GLOBAL_WINDOW,
+            "Site window (seconds)",
+            "The period the site-wide limit counts over",
+            "3600",
+        ),
+        number(
+            FORM_TTL,
+            "Form lifetime (seconds)",
+            "How long a loaded public form can still be submitted before it must be reloaded",
+            "7200",
+        ),
+        number(
+            RETENTION_SPAM,
+            "Spam retention (days)",
+            "How long a ticket closed as spam is kept before it is deleted",
+            "30",
+        ),
         number(
             RETENTION_REJECTED,
-            "Rejected/duplicate retention (days)",
+            "Rejected and duplicate retention (days)",
+            "How long a ticket closed as rejected or duplicate is kept before it is deleted",
             "180",
         ),
-        number(RETENTION_RESOLVED, "Resolved retention (days)", "365"),
+        number(
+            RETENTION_RESOLVED,
+            "Resolved retention (days)",
+            "How long a resolved ticket is kept before it is deleted",
+            "365",
+        ),
     ]
 }
 
-fn number(key: &str, name: &str, default: &str) -> ConfigVar {
-    ConfigVar::new(key, name, default)
+fn number(key: &str, name: &str, description: &str, default: &str) -> ConfigVar {
+    ConfigVar::new(key, description, default)
         .name(name)
         .input_type(InputType::Number)
 }
@@ -122,25 +161,18 @@ pub struct SecurityReadiness {
 impl SecurityReadiness {
     /// A failed config read is returned: readiness is what lets the public
     /// form accept anonymous submissions, so it is never guessed.
-    pub async fn load(ctx: &dyn Context) -> Result<Self, wafer_run::WaferError> {
-        // The boot snapshot, deliberately, where the sidebar and the portal's
-        // feature list read `routing::gate_from_request` instead.
-        //
-        // This value can go stale against the router after an admin toggle,
-        // and that staleness is unobservable: every surface that reads a
-        // `SecurityReadiness` — the admin readiness panel, the public submit
-        // form — is itself a `/b/tickets` route, so a disabled tickets block
-        // means the router refuses the page before the flag can be rendered.
-        // The one caller that is not a route (`maintenance`, a scheduled
-        // sweep) has no routed message to read a gate from at all. Threading
-        // one through it to correct a discrepancy nothing can see would buy
-        // nothing.
-        let block_enabled = ctx
-            .config_get(crate::features::BLOCK_SETTINGS_CONFIG_KEY)
-            .map(|value| {
-                crate::features::BlockSettings::state_for(value, "impresspress/tickets").enabled
-            })
-            .unwrap_or(true);
+    ///
+    /// Whether the block is enabled is read from the gate the router
+    /// published for `msg` (`routing::gate_from_request`), not the boot
+    /// config snapshot: the snapshot is frozen at boot, so after an admin
+    /// enables the block it would keep reporting it disabled while the router
+    /// serves its pages.
+    pub async fn load(ctx: &dyn Context, msg: &Message) -> Result<Self, wafer_run::WaferError> {
+        let block_enabled = crate::features::is_enabled(
+            &crate::routing::gate_from_request(ctx, msg),
+            ctx.registered_blocks(),
+            crate::routing::feature_gate_name(BLOCK_NAME),
+        );
         let public_enabled = crate::config_vars::get_bool(ctx, PUBLIC_ENABLED, false).await?;
         let site_key_configured = !config::get_default(ctx, TURNSTILE_SITE_KEY, "")
             .await?
@@ -231,6 +263,45 @@ async fn positive(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// The boot snapshot says the block is off (it shipped disabled), the
+    /// router's gate for this request says it is on (an admin enabled it):
+    /// readiness follows the gate, so no "disabled" reason is shown; and a
+    /// gate that refuses the block is reported.
+    #[tokio::test]
+    async fn readiness_follows_the_live_gate_not_the_boot_snapshot() {
+        use crate::{
+            routing::META_DISABLED_BLOCKS,
+            test_support::{admin_msg, TestContext},
+        };
+
+        let mut ctx = TestContext::with_tickets().await;
+        ctx.set_config(
+            crate::features::BLOCK_SETTINGS_CONFIG_KEY,
+            &serde_json::json!({ BLOCK_NAME: { "enabled": false } }).to_string(),
+        );
+        let mut msg = admin_msg("retrieve", "/b/tickets/admin/settings");
+        msg.set_meta(META_DISABLED_BLOCKS, "[]");
+        let live = SecurityReadiness::load(&ctx, &msg)
+            .await
+            .expect("readiness");
+        assert!(live.block_enabled);
+        assert!(
+            !live.reasons.iter().any(|r| r.contains("block is disabled")),
+            "{:?}",
+            live.reasons
+        );
+
+        msg.set_meta(META_DISABLED_BLOCKS, r#"["impresspress/tickets"]"#);
+        let refused = SecurityReadiness::load(&ctx, &msg)
+            .await
+            .expect("readiness");
+        assert!(!refused.block_enabled);
+        assert!(refused
+            .reasons
+            .iter()
+            .any(|r| r == "tickets block is disabled"));
+    }
 
     #[test]
     fn secrets_are_declared_as_passwords() {

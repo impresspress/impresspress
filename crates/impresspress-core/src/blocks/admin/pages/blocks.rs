@@ -496,19 +496,7 @@ pub async fn handle_block_detail(ctx: &dyn Context, msg: &Message) -> OutputStre
         // Endpoints
         @if !block.endpoints.is_empty() {
             h3 .modal-section-title { "Endpoints" }
-            @let rows: Vec<Vec<Markup>> = block.endpoints.iter().map(|ep| vec![
-                Badge::new(BadgeVariant::for_method(ep.method)).classes("text-11").render(html! { (ep.method) }),
-                html! { code .text-xs { (ep.path) } },
-                html! { span .text-muted { (ep.summary) } },
-                Badge::new(BadgeVariant::for_auth(ep.auth)).classes("text-10").render(html! { (ep.auth) }),
-            ]).collect();
-
-            (components::data_table::<fn(usize) -> Option<String>>(
-                &ENDPOINT_COLUMNS,
-                rows,
-                None,
-                html! {},
-            ))
+            (components::endpoint_table("Endpoints", &block.endpoints))
         }
 
         // Config Keys
@@ -591,17 +579,9 @@ fn custom_tab_content() -> maud::Markup {
     }
 }
 
-/// The block-detail modal's two tables' columns. Declared once each so the
-/// `<td data-label>` the component stamps on every cell names the same column
-/// its header does; the two widths are the ones the old `th .w-70` / `.w-80`
-/// utility classes gave those headers.
-const ENDPOINT_COLUMNS: [components::TableCol<'static>; 4] = [
-    components::TableCol::new("Method").width("70px"),
-    components::TableCol::new("Path"),
-    components::TableCol::new("Description"),
-    components::TableCol::new("Auth").width("80px"),
-];
-
+/// The block-detail modal's configuration table's columns, declared once so
+/// the `<td data-label>` the component stamps on every cell names the same
+/// column its header does.
 const CONFIG_KEY_COLUMNS: [components::TableCol<'static>; 3] = [
     components::TableCol::new("Key"),
     components::TableCol::new("Description"),

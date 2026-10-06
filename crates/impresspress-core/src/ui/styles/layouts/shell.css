@@ -396,7 +396,7 @@
 		align-items: center;
 		gap: var(--space-4);
 		padding: 0 var(--space-4);
-		height: 56px;
+		height: var(--mobile-header-height);
 		background: var(--surface-1);
 		border-bottom: 1px solid var(--border-light);
 		position: sticky;

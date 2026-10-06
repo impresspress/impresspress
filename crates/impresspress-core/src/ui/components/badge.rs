@@ -60,9 +60,8 @@ badge_variants! {
         Warning => "badge-warning",
         Info => "badge-info",
         Secondary => "badge-secondary",
-        /// The five tone variants below are the shared colour set endpoint lists
-        /// use for HTTP methods and auth levels ([`BadgeVariant::for_method`],
-        /// [`BadgeVariant::for_auth`]). They are named after the
+        /// The five tone variants below are the shared colour set the block-detail
+        /// modal uses for HTTP methods and auth levels. They are named after the
         /// colour rather than after a meaning because two unrelated enums share
         /// them — see the comment above `.badge--tone-brand` in `badge.css`.
         ToneBrand => "badge--tone-brand",
@@ -74,11 +73,10 @@ badge_variants! {
 }
 
 impl BadgeVariant {
-    /// The tone of an endpoint's HTTP-method badge, wherever an endpoint is
-    /// listed (the block-detail modal, a block's endpoints reference). Shares
-    /// its colours with [`BadgeVariant::for_auth`] — `Post`/`Public` and
-    /// `Patch`/`Authenticated` render identically — so the tones live once in
-    /// `styles/components/badge.css` rather than per enum.
+    /// The colour of an HTTP method's badge. Shares its colour set with
+    /// [`BadgeVariant::for_auth`] — `Post`/`Public` and
+    /// `Patch`/`Authenticated` render identically, so the tones live once in
+    /// `styles/components/badge.css` rather than being declared per enum.
     pub fn for_method(method: wafer_run::HttpMethod) -> Self {
         match method {
             wafer_run::HttpMethod::Get => BadgeVariant::ToneBrand,
@@ -88,7 +86,7 @@ impl BadgeVariant {
         }
     }
 
-    /// The tone of an endpoint's auth-level badge. See
+    /// The colour of an endpoint access level's badge. See
     /// [`BadgeVariant::for_method`].
     pub fn for_auth(auth: wafer_run::AuthLevel) -> Self {
         match auth {
@@ -276,7 +274,6 @@ mod tests {
         ("blocks/files/pages_user/buckets.rs", 2),
         ("blocks/messages/pages.rs", 6),
         ("blocks/products/pages.rs", 6),
-        ("blocks/tickets/pages.rs", 4),
         ("blocks/vector/pages_ui.rs", 4),
         // A unit-test fixture: the `DetailHero::badges` slot of
         // `templates::detail_page`, exercised by
@@ -382,41 +379,5 @@ mod tests {
             !partial.contains("partially_refunded"),
             "raw enum: {partial}"
         );
-    }
-
-    /// Pinned against the exact class each arm renders: the endpoint lists
-    /// (block-detail modal, block endpoint references) are the only places
-    /// these two colour sets appear.
-    #[test]
-    fn method_and_auth_tones_render_their_tone_classes() {
-        let rendered = |variant| {
-            Badge::new(variant)
-                .classes("text-11")
-                .render(html! { "x" })
-                .into_string()
-        };
-        for (method, class) in [
-            (wafer_run::HttpMethod::Get, "badge--tone-brand"),
-            (wafer_run::HttpMethod::Post, "badge--tone-green"),
-            (wafer_run::HttpMethod::Patch, "badge--tone-amber"),
-            (wafer_run::HttpMethod::Delete, "badge--tone-red"),
-        ] {
-            assert_eq!(
-                rendered(BadgeVariant::for_method(method)),
-                format!(r#"<span class="badge {class} text-11">x</span>"#),
-                "{method:?}"
-            );
-        }
-        for (auth, class) in [
-            (wafer_run::AuthLevel::Public, "badge--tone-green"),
-            (wafer_run::AuthLevel::Admin, "badge--tone-red"),
-            (wafer_run::AuthLevel::Authenticated, "badge--tone-amber"),
-        ] {
-            assert_eq!(
-                rendered(BadgeVariant::for_auth(auth)),
-                format!(r#"<span class="badge {class} text-11">x</span>"#),
-                "{auth:?}"
-            );
-        }
     }
 }

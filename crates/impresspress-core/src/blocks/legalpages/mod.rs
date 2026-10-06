@@ -1775,28 +1775,33 @@ mod tests {
     #[test]
     fn endpoints_reference_lists_every_route() {
         let s = super::pages::endpoints_view().into_string();
-        for route in ROUTES {
-            let row = format!(
-                r#"<code class="cell-wrap">{}</code></td><td data-label="Method"><span class="badge {}">{}</span></td><td data-label="Description">{}</td>"#,
-                route.template,
-                match route.method {
-                    HttpMethod::Get => "badge--tone-brand",
-                    HttpMethod::Post => "badge--tone-green",
-                    HttpMethod::Patch => "badge--tone-amber",
-                    HttpMethod::Delete => "badge--tone-red",
-                },
-                route.method,
-                route.summary,
+        let declared = endpoint_match::declare(ROUTES);
+        assert_eq!(declared.len(), ROUTES.len());
+        let mut listed = 0;
+        for (level, title) in [
+            (wafer_run::AuthLevel::Public, "Public"),
+            (wafer_run::AuthLevel::Authenticated, "Signed in"),
+            (wafer_run::AuthLevel::Admin, "Admin"),
+        ] {
+            let group: Vec<wafer_run::BlockEndpoint> = declared
+                .iter()
+                .filter(|ep| ep.auth == level)
+                .cloned()
+                .collect();
+            if group.is_empty() {
+                assert!(!s.contains(&format!("{title} endpoints")), "{title}");
+                continue;
+            }
+            listed += group.len();
+            let table =
+                crate::ui::components::endpoint_table(&format!("{title} endpoints"), &group)
+                    .into_string();
+            assert!(
+                s.contains(&table),
+                "the {title} group is the shared table\n{s}"
             );
-            assert!(s.contains(&row), "missing {row}\n{s}");
         }
-        let rows = s.matches("<tr").count();
-        // One header row per table: two route tiers and the fields table.
-        assert_eq!(
-            rows,
-            ROUTES.len() + contracts::DOCUMENT_FIELDS.len() + 3,
-            "{s}"
-        );
+        assert_eq!(listed, ROUTES.len(), "every route is listed once");
         assert!(!s.contains("HTML content"), "content is Markdown");
     }
 }

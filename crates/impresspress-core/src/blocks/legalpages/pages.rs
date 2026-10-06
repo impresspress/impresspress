@@ -4,7 +4,9 @@
 //! Markdown editors, the public pages' settings, and the endpoints reference.
 
 use maud::{html, Markup, PreEscaped};
-use wafer_run::{context::Context, AuthLevel, InputStream, Message, OutputStream, WaferError};
+use wafer_run::{
+    context::Context, AuthLevel, BlockEndpoint, InputStream, Message, OutputStream, WaferError,
+};
 
 use super::{
     contracts::{DocumentStatus, DocumentType, DOCUMENT_FIELDS},
@@ -13,10 +15,11 @@ use super::{
 };
 use crate::{
     blocks::crud,
+    endpoint_match,
     http::{err_bad_request, ok_json, ResponseBuilder},
     ui::{
         self,
-        components::{self, Badge, BadgeVariant, DataTable, TableCol, TableRow},
+        components::{self, BadgeVariant, DataTable, TableCol, TableRow},
         icons, settings_form,
     },
     util::wire_str,
@@ -308,22 +311,18 @@ pub async fn endpoints_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     .await
 }
 
-const ENDPOINT_COLUMNS: [TableCol<'static>; 3] = [
-    TableCol::new("Path").primary().width("45%"),
-    TableCol::new("Method").width("7rem"),
-    TableCol::new("Description"),
-];
-
 const FIELD_COLUMNS: [TableCol<'static>; 3] = [
     TableCol::new("Field").primary().width("25%"),
     TableCol::new("Type"),
     TableCol::new("Description"),
 ];
 
-/// The endpoints reference, generated from the block's `ROUTES` — the table
-/// `handle()` dispatches on — so it lists what the block serves, grouped by
-/// who may call it, and cannot drift from it.
+/// The endpoints reference: what the block declares from `ROUTES` — the
+/// table `handle()` dispatches on — grouped by who may call it, each group in
+/// the shared [`components::endpoint_table`]. It cannot drift from what the
+/// block serves.
 pub(super) fn endpoints_view() -> Markup {
+    let declared = endpoint_match::declare(super::ROUTES);
     let groups = [
         (
             AuthLevel::Public,
@@ -353,21 +352,16 @@ pub(super) fn endpoints_view() -> Markup {
         .collect();
     html! {
         @for (level, title, description) in groups {
-            @let rows: Vec<TableRow> = super::ROUTES
+            @let endpoints: Vec<BlockEndpoint> = declared
                 .iter()
-                .filter(|route| route.auth == level)
-                .map(|route| TableRow::new(vec![
-                    html! { code .cell-wrap { (route.template) } },
-                    Badge::new(BadgeVariant::for_method(route.method))
-                        .render(html! { (route.method) }),
-                    html! { (route.summary) },
-                ]))
+                .filter(|ep| ep.auth == level)
+                .cloned()
                 .collect();
-            @if !rows.is_empty() {
+            @if !endpoints.is_empty() {
                 section .legal-endpoints__group {
                     (components::section_header(title, None))
                     p .text-muted .text-sm .mb-3 { (description) }
-                    (DataTable::new(&ENDPOINT_COLUMNS).rows(rows).render())
+                    (components::endpoint_table(&format!("{title} endpoints"), &endpoints))
                 }
             }
         }
