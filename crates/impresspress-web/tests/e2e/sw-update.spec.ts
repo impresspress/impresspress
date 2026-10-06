@@ -1,4 +1,4 @@
-import { test, expect, type Page, type Worker } from '@playwright/test';
+import { test, expect, type BrowserContext, type Page } from '@playwright/test';
 import { once } from 'node:events';
 import { type ChildProcess } from 'node:child_process';
 import { readFileSync, utimesSync } from 'node:fs';
@@ -10,7 +10,7 @@ import {
   serveDirectory,
   SW_UPDATE_PORT,
 } from './fixtures/dev-sandbox';
-import { killRuntime } from './fixtures/stopped-runtime';
+import { killRuntime, recordShellStatus, served } from './fixtures/stopped-runtime';
 
 /**
  * A new deployment replaces the one a browser already has — and the browser
@@ -98,17 +98,6 @@ async function stop(server: ChildProcess) {
   }
 }
 
-/**
- * Every URL a service worker fetched for itself, read inside that worker.
- *
- * The runtime is loaded by the worker (`init()` fetches the hashed `.wasm`),
- * not by any page, so the page's own network log never names it. A worker
- * that has not handled a request yet has loaded none: `sw.js` initialises on
- * its first fetch.
- */
-const fetchedBy = (worker: Worker) =>
-  worker.evaluate(() => performance.getEntriesByType('resource').map((entry) => new URL(entry.name).pathname));
-
 /** The page's registration, as states — `null` where there is no such worker. */
 const registrationOf = (page: Page) =>
   page.evaluate(async () => {
@@ -123,6 +112,75 @@ const registrationOf = (page: Page) =>
         !!registration?.active && navigator.serviceWorker.controller === registration.active,
     };
   });
+
+/**
+ * Which worker answers the page, and which runtime it was installed with:
+ * the active worker's script URL (path and query), whether that worker
+ * controls the page, and the runtime binaries the origin's workers keep for
+ * themselves (`RUNTIME_CACHE` in `sw.js.tmpl`) as URL paths.
+ *
+ * A version keeps its own binary at `install`, loads it from there, and
+ * drops every other version's at `activate`; so once the registration has
+ * settled, the one binary kept is the active worker's, and the active worker
+ * is the one answering the page. Read together — the kept binary alone says
+ * what the last version to activate kept, not who answers. (Asking a worker
+ * what it FETCHED does not say it either: a worker loads its runtime from
+ * what it kept, and the browser may have stopped and restarted the instance
+ * a test holds, which then reports nothing — the recovery case below asked
+ * that way and intermittently read an empty list.)
+ */
+const answering = (page: Page) =>
+  page.evaluate(async () => {
+    const active = (await navigator.serviceWorker.getRegistration())?.active ?? null;
+    const script = active ? new URL(active.scriptURL) : null;
+    let kept: string[] = [];
+    if (await caches.has('__impresspress_runtime')) {
+      const cache = await caches.open('__impresspress_runtime');
+      kept = (await cache.keys()).map((request) => new URL(request.url).pathname);
+    }
+    return {
+      script: script ? script.pathname + script.search : null,
+      controls: active !== null && navigator.serviceWorker.controller === active,
+      kept,
+    };
+  });
+
+/** What `answering` reads when the plain `/sw.js` worker with `runtime` answers. */
+const plainWorkerWith = (runtime: string) => ({ script: '/sw.js', controls: true, kept: [runtime] });
+
+/**
+ * Every death a worker of `context` reports from here on — the console line
+ * `selfDestruct` in `sw.js.tmpl` writes when its runtime stops.
+ */
+function deathsIn(context: BrowserContext): string[] {
+  const deaths: string[] = [];
+  context.on('console', (message) => {
+    if (message.text().includes('SW self-destructing')) deaths.push(message.text());
+  });
+  return deaths;
+}
+
+/**
+ * Every service-worker version of the page's origin as DevTools reports it
+ * (`ServiceWorker.workerVersionUpdated`), latest state first-hand rather
+ * than inferred from a page: `status` is installing / installed /
+ * activating / activated / redundant, `runningStatus` whether it runs.
+ */
+async function versionsOf(page: Page) {
+  const cdp = await page.context().newCDPSession(page);
+  const versions = new Map<string, { id: string; scriptURL: string; status: string; runningStatus: string }>();
+  cdp.on('ServiceWorker.workerVersionUpdated', (event: any) => {
+    for (const v of event.versions) {
+      versions.set(v.versionId, { id: v.versionId, scriptURL: v.scriptURL, status: v.status, runningStatus: v.runningStatus });
+    }
+  });
+  await cdp.send('ServiceWorker.enable');
+  return {
+    all: () => [...versions.values()],
+    /** Stop every worker, as a browser does with idle ones. */
+    stopAll: () => cdp.send('ServiceWorker.stopAllWorkers'),
+  };
+}
 
 const SETTLED = { installing: null, waiting: null, active: 'activated', activeControlsThisPage: true };
 
@@ -161,16 +219,12 @@ test('a returning browser moves to the new deployment’s worker and runtime, wi
 
   let server = await serveDirectory(DEV_DIST, SW_UPDATE_PORT);
   const context = await browser.newContext({ baseURL: ORIGIN });
-  // Every service worker this browser starts for the origin, in order.
-  const workers: Worker[] = [];
-  context.on('serviceworker', (worker) => workers.push(worker));
   try {
     const page = await context.newPage();
 
     // ---- the first deployment, used --------------------------------------
     await bootServiceWorker(page);
-    expect(workers).toHaveLength(1);
-    expect(await fetchedBy(workers[0])).toContain(first);
+    expect(await answering(page)).toEqual(plainWorkerWith(first));
     expect(await registrationOf(page)).toEqual(SETTLED);
 
     // Something only this browser has: a page written into the workspace and
@@ -191,8 +245,9 @@ test('a returning browser moves to the new deployment’s worker and runtime, wi
       const registration = await navigator.serviceWorker.getRegistration();
       await registration!.update();
     });
+    // Nothing installed: the same worker, the same runtime.
     expect(await registrationOf(page)).toEqual(SETTLED);
-    expect(workers).toHaveLength(1);
+    expect(await answering(page)).toEqual(plainWorkerWith(first));
 
     // ---- the next deployment ----------------------------------------------
     await stop(server);
@@ -216,7 +271,7 @@ test('a returning browser moves to the new deployment’s worker and runtime, wi
     // is answered by the worker the browser already had; the browser's own
     // check after the navigation is what finds the new script.
     await page.goto('/', { waitUntil: 'load' });
-    await expect.poll(() => workers.length, { timeout: 120_000 }).toBe(2);
+    await expect.poll(() => answering(page), { timeout: 120_000 }).toEqual(plainWorkerWith(next));
     // The new worker did not wait for this tab to close (`skipWaiting`): it
     // is the active one, nothing is left waiting, and the open page is its.
     await expect.poll(() => registrationOf(page), { timeout: 60_000 }).toEqual(SETTLED);
@@ -224,10 +279,9 @@ test('a returning browser moves to the new deployment’s worker and runtime, wi
     // ---- the site, on the new runtime ---------------------------------------
     // The next request is the new worker's first, so this is where it loads
     // its runtime — the new deployment's, over the storage the old one left.
+    // The previous one's binary is gone from the host and from the origin.
     expect(await viaWorker(page, '/kept.html')).toEqual({ status: 200, text: KEPT });
-    const fetched = await fetchedBy(workers[1]);
-    expect(fetched).toContain(next);
-    expect(fetched).not.toContain(first);
+    expect(await answering(page)).toEqual(plainWorkerWith(next));
 
     // Still the same person's sandbox: the session is kept, the workspace has
     // the file, and a write through the new runtime is published.
@@ -243,7 +297,120 @@ test('a returning browser moves to the new deployment’s worker and runtime, wi
 
     // Neither a recovery nor a second update happened on the way.
     expect(await registrationOf(page)).toEqual(SETTLED);
-    expect(workers).toHaveLength(2);
+    expect(await answering(page)).toEqual(plainWorkerWith(next));
+  } finally {
+    await context.close();
+    await stop(server);
+  }
+});
+
+// The same deployment, met the way a returning visitor usually meets it: the
+// browser has STOPPED their idle worker long before they come back. The visit
+// after the deploy starts that old worker again, and it boots the runtime it
+// was installed with — whose hashed binary the deploy has deleted from the
+// host. It must still boot (it keeps its own runtime, `RUNTIME_CACHE` in
+// `sw.js.tmpl`), answer the visit, and be replaced by the update the visit
+// triggers: no death, no recovery, nothing lost.
+//
+// Before the worker kept its runtime, the restarted worker asked the host for
+// the deleted binary, got a 404, died at stage `load` and sent the page into
+// the boot shell's recovery while the browser was installing the update: two
+// replacements of one worker at once, and the path behind an intermittent
+// timeout of the case above, which met it only when Chrome happened to stop
+// the worker. Stopping it here takes that path on every run.
+//
+// What the update then does has two outcomes, and the test tells them apart
+// from DevTools' own report of the versions:
+//
+// (a) the new version activates and controls the page, with only its
+//     runtime kept — the normal outcome;
+// (b) Chromium's lost activation (the PR that added this, #127, traces it):
+//     the new version stays `installed`, waiting, with the old one idle and
+//     still in charge. The guarantee a person gets then is the NEXT visit:
+//     the browser stops idle workers, and the next navigation brings the new
+//     version in. So the test stops them and navigates again, and that must
+//     end in (a) — if the stall comes back on that second visit too, it
+//     fails, which is also what a regression that stops activation
+//     altogether looks like.
+//
+// The branch taken is recorded as the test's `activation` annotation.
+test('a returning browser whose worker was stopped moves to the new deployment, with no recovery', async ({
+  browser,
+  request,
+}) => {
+  test.setTimeout(420_000);
+  const first = runtimeOf(DEV_DIST);
+  const next = runtimeOf(UPDATE_DIST);
+
+  let server = await serveDirectory(DEV_DIST, SW_UPDATE_PORT);
+  const context = await browser.newContext({ baseURL: ORIGIN });
+  try {
+    const page = await context.newPage();
+    const shellSaid = await recordShellStatus(page);
+    const deaths = deathsIn(context);
+    await bootServiceWorker(page);
+    const KEPT = '<!doctype html><title>kept</title><p>written before the update</p>\n';
+    await enterFromWelcome(page);
+    const written = await runFromConsole(page, 'dev_write_file', { path: 'site/kept.html', content: KEPT });
+    expect(written.isError, JSON.stringify(written)).toBe(false);
+    expect(await viaWorker(page, '/kept.html')).toEqual({ status: 200, text: KEPT });
+
+    const versions = await versionsOf(page);
+    await expect.poll(() => versions.all().some((v) => v.status === 'activated')).toBe(true);
+    const oldId = versions.all().find((v) => v.status === 'activated')!.id;
+
+    // The browser stops the idle worker; then the deploy.
+    await versions.stopAll();
+    await stop(server);
+    const deployedAt = new Date();
+    utimesSync(path.join(UPDATE_DIST, 'sw.js'), deployedAt, deployedAt);
+    server = await serveDirectory(UPDATE_DIST, SW_UPDATE_PORT);
+    expect((await request.get(`${ORIGIN}${first}`)).status()).toBe(404);
+
+    /** Whatever the outcome: nothing died, nothing recovered, the data is intact. */
+    const assertNoDeathNoRecovery = async () => {
+      expect(deaths).toEqual([]);
+      expect(shellSaid.filter((line) => line.includes('runtime stopped'))).toEqual([]);
+      expect(versions.all().filter((v) => v.scriptURL.includes('?recovery='))).toEqual([]);
+      expect(await viaWorker(page, '/kept.html')).toEqual({ status: 200, text: KEPT });
+    };
+    /** (a): the new version controls the page, with only its runtime kept. */
+    const updated = async () =>
+      JSON.stringify(await answering(page)) === JSON.stringify(plainWorkerWith(next)) &&
+      JSON.stringify(await registrationOf(page)) === JSON.stringify(SETTLED);
+
+    // The visit. The old worker starts again to answer it, from the runtime
+    // it kept — the page is the app, not the boot shell.
+    await page.goto('/', { waitUntil: 'load' });
+    await served(page);
+
+    let branch = 'normal';
+    const reached = await expect
+      .poll(updated, { timeout: 60_000 })
+      .toBe(true)
+      .then(() => true, () => false);
+    if (!reached) {
+      // (b) — read from DevTools, not inferred: a new version waiting, and
+      // the old one still the active one, serving the page.
+      const newer = versions.all().filter((v) => v.id !== oldId && v.scriptURL.endsWith('/sw.js'));
+      expect(newer.map((v) => v.status), JSON.stringify(versions.all())).toContain('installed');
+      expect(versions.all().find((v) => v.id === oldId)?.status).toBe('activated');
+      expect(await answering(page)).toMatchObject({ script: '/sw.js', controls: true });
+      await assertNoDeathNoRecovery();
+      branch = 'chromium-stall';
+
+      // The next visit: idle workers stopped, a navigation.
+      await versions.stopAll();
+      await page.goto('/', { waitUntil: 'load' });
+      await served(page);
+      await expect.poll(updated, { timeout: 60_000 }).toBe(true);
+    }
+    test.info().annotations.push({ type: 'activation', description: branch });
+    console.log(`sw-update stopped-worker case: activation ${branch}`);
+
+    await assertNoDeathNoRecovery();
+    expect(await answering(page)).toEqual(plainWorkerWith(next));
+    expect(await registrationOf(page)).toEqual(SETTLED);
   } finally {
     await context.close();
     await stop(server);
@@ -260,21 +427,18 @@ test('a returning browser moves to the new deployment’s worker and runtime, wi
 // The one known cost of the query, which this host cannot show: a CDN that
 // keys its cache on the query string and is purged of `/sw.js` only could
 // answer `/sw.js?recovery=T` with the previous deployment's worker once.
-// That worker imports a glue file the new deployment no longer serves, fails
-// at stage `load`, and is replaced again — under another new URL, which the
-// CDN has never cached — with nothing erased.
+// That worker cannot install — the runtime binary it keeps at install is
+// gone from the host — so it replaces nothing (`WORKER_URL` in
+// `loader.js.tmpl`), and nothing is erased.
 test('a new deployment replaces a worker that a recovery registered', async ({ browser }) => {
   test.setTimeout(300_000);
   const next = runtimeOf(UPDATE_DIST);
 
   let server = await serveDirectory(DEV_DIST, SW_UPDATE_PORT);
   const context = await browser.newContext({ baseURL: ORIGIN });
-  const workers: Worker[] = [];
-  context.on('serviceworker', (worker) => workers.push(worker));
   try {
     const page = await context.newPage();
     await bootServiceWorker(page);
-    expect(workers).toHaveLength(1);
 
     // A recovery: the runtime dies on a navigation, the shell replaces the
     // worker and the page comes back.
@@ -290,7 +454,6 @@ test('a new deployment replaces a worker that a recovery registered', async ({ b
       page.evaluate(async () => (await navigator.serviceWorker.getRegistration())!.active!.scriptURL);
     const recovered = await scriptUrl();
     expect(recovered).toMatch(/\/sw\.js\?recovery=\d+$/);
-    expect(workers).toHaveLength(2);
     expect(await registrationOf(page)).toEqual(SETTLED);
 
     // The next deployment (dated as in the tests above), and a visit.
@@ -299,14 +462,16 @@ test('a new deployment replaces a worker that a recovery registered', async ({ b
     utimesSync(path.join(UPDATE_DIST, 'sw.js'), deployedAt, deployedAt);
     server = await serveDirectory(UPDATE_DIST, SW_UPDATE_PORT);
     await page.goto('/', { waitUntil: 'load' });
-    await expect.poll(() => workers.length, { timeout: 120_000 }).toBe(3);
+    const recoveredScript = new URL(recovered).pathname + new URL(recovered).search;
+    await expect
+      .poll(() => answering(page), { timeout: 120_000 })
+      .toEqual({ script: recoveredScript, controls: true, kept: [next] });
     await expect.poll(() => registrationOf(page), { timeout: 60_000 }).toEqual(SETTLED);
 
     // The new deployment's runtime answers, under the same script URL: the
     // deploy changed the bytes behind it, not the registration.
     expect((await viaWorker(page, '/b/auth/login')).status).toBe(200);
-    expect(await fetchedBy(workers[2])).toContain(next);
-    expect(await scriptUrl()).toBe(recovered);
+    expect(await answering(page)).toEqual({ script: recoveredScript, controls: true, kept: [next] });
   } finally {
     await context.close();
     await stop(server);
@@ -327,12 +492,9 @@ test('a new deployment replaces a worker whose runtime has died', async ({ brows
 
   let server = await serveDirectory(DEV_DIST, SW_UPDATE_PORT);
   const context = await browser.newContext({ baseURL: ORIGIN });
-  const workers: Worker[] = [];
-  context.on('serviceworker', (worker) => workers.push(worker));
   try {
     const page = await context.newPage();
     await bootServiceWorker(page);
-    expect(workers).toHaveLength(1);
 
     // The runtime dies on a request from the page. The page is left where it
     // is, and the worker — dead — is still the registered, active one.
@@ -364,15 +526,65 @@ test('a new deployment replaces a worker whose runtime has died', async ({ brows
       const registration = await navigator.serviceWorker.getRegistration();
       await registration!.update();
     });
-    await expect.poll(() => workers.length, { timeout: 120_000 }).toBe(2);
+    await expect.poll(() => answering(page), { timeout: 120_000 }).toEqual(plainWorkerWith(next));
     await expect.poll(() => registrationOf(page), { timeout: 60_000 }).toEqual(SETTLED);
 
     // The same page, never reloaded, is now answered by a live runtime — the
     // new deployment's.
     expect((await viaWorker(page, '/b/auth/login')).status).toBe(200);
-    expect(await fetchedBy(workers[1])).toContain(next);
+    expect(await answering(page)).toEqual(plainWorkerWith(next));
     expect(await page.evaluate(() => (window as any).__sameDocument)).toBe(true);
-    expect(workers).toHaveLength(2);
+  } finally {
+    await context.close();
+    await stop(server);
+  }
+});
+
+// The same dead worker, met by a NAVIGATION after the deploy instead of an
+// update check: the worker answers it with the boot shell, and the browser's
+// update check after it is installing the new deployment's worker at the
+// same time. Both the shell's recovery and the update could replace the
+// dead worker here, and only one may: the shell asks first whether an update
+// owns the transition (`updateUnderway` in `loader.js.tmpl`), finds the new
+// version installed, and boots onto it — no recovery, no `?recovery=`
+// worker, nothing erased.
+test('a navigation to a dead worker after a deployment is the update’s, not a recovery’s', async ({ browser }) => {
+  test.setTimeout(300_000);
+  const next = runtimeOf(UPDATE_DIST);
+  const cause = 'injected by sw-update.spec.ts before a navigation';
+
+  let server = await serveDirectory(DEV_DIST, SW_UPDATE_PORT);
+  const context = await browser.newContext({ baseURL: ORIGIN });
+  try {
+    const page = await context.newPage();
+    const shellSaid = await recordShellStatus(page);
+    await bootServiceWorker(page);
+
+    // Dead on a request from the page, which keeps the answer.
+    await killRuntime(page, cause);
+    expect((await viaWorker(page, '/b/auth/login')).status).toBe(503);
+
+    await stop(server);
+    const deployedAt = new Date();
+    utimesSync(path.join(UPDATE_DIST, 'sw.js'), deployedAt, deployedAt);
+    server = await serveDirectory(UPDATE_DIST, SW_UPDATE_PORT);
+
+    // The reload the 503 speaks of, to a path only the runtime serves.
+    await page.goto('/b/auth/login', { waitUntil: 'commit' });
+    await served(page);
+    await expect(page.locator('input#email')).toBeVisible();
+    await expect.poll(() => registrationOf(page), { timeout: 60_000 }).toEqual(SETTLED);
+
+    const active = await page.evaluate(
+      async () => (await navigator.serviceWorker.getRegistration())!.active!.scriptURL,
+    );
+    expect(active).toBe(`${ORIGIN}/sw.js`);
+    expect(await answering(page)).toEqual(plainWorkerWith(next));
+    // The shell said why it was waiting, and never that it restarted or
+    // recovered the worker itself.
+    const said = shellSaid.filter((line) => line.includes('runtime stopped'));
+    expect(said.length, JSON.stringify(shellSaid)).toBeGreaterThan(0);
+    for (const line of said) expect(line).toContain('a new version is replacing it');
   } finally {
     await context.close();
     await stop(server);

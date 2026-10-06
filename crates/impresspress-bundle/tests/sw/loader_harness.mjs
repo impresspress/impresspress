@@ -36,6 +36,17 @@ export const RECOVERY_DONE = '__impresspress_recovery_done';
 export const RECOVERY_LOCK = '__impresspress_recovery';
 export const RECOVERED_CACHE = '__impresspress_recovered';
 export const RECOVERED_KEY = '/__impresspress_recovered';
+/// The runtime binary the registered worker was built for — the version a
+/// death in these tests is a death of — and the one a newer version an update
+/// brings in was built for. Each worker answers its own when asked
+/// (`impresspress-runtime`).
+export const OLD_RUNTIME = '/app_bg-aaaaaaaa.wasm';
+export const NEW_RUNTIME = '/app_bg-bbbbbbbb.wasm';
+
+/// A worker answering the shell's `impresspress-runtime` question.
+function answerRuntime(message, ports, runtime) {
+  if (message.type === 'impresspress-runtime') ports[0].postMessage({ runtime });
+}
 
 function storage(initial = {}) {
   const map = new Map(Object.entries(initial));
@@ -106,6 +117,22 @@ function element() {
 /// - `onProbe`   — called when the probe is made, with `post` (sw.js posting a
 ///                 message to this page), before the probe is answered
 /// - `registerFails` — `navigator.serviceWorker.register` rejects with this
+/// - `update`    — what the registration's update check finds: `'installs'`,
+///                 a newer version that installs and then activates (taking
+///                 the page); `'fails'`, one the browser discards while
+///                 installing; `'active'`, a newer version that had already
+///                 activated before this page asked — and, where the page
+///                 is `controlled`, already took it; nothing, by default
+/// - `answersRuntime` — whether the registered (older) worker answers the
+///                 shell's question about its version; `false` is a worker
+///                 from before the question existed, and the wait for its
+///                 answer runs out at once
+/// - `heldElsewhere` — the Web Locks another tab holds: a request for one
+///                 asked only if available gets `null`
+/// - `installs: 'stalls'` — a newly registered worker that installs and then
+///                 never activates (as Chromium has been seen to leave one);
+///                 the wait for it runs out at once. `'late'`: one that
+///                 activates a moment after that wait has run out
 export function loadShell({
   session = {},
   stop,
@@ -124,6 +151,9 @@ export function loadShell({
   eraseFails = [],
   registeredUrl,
   installs = true,
+  update,
+  answersRuntime = true,
+  heldElsewhere = [],
   opfsFiles = ['app.sqlite'],
   title = 'Kiln & Co',
   documentTitle = title
@@ -211,11 +241,15 @@ export function loadShell({
   const events = [];
   const registeredUrls = [];
   const asked = [];
+  const workerListeners = new Set();
   const worker = {
-    state: installs ? 'activated' : 'redundant',
-    addEventListener: () => {},
+    state:
+      installs === 'stalls' || installs === 'late' ? 'installed' : installs ? 'activated' : 'redundant',
+    addEventListener: (type, l) => type === 'statechange' && workerListeners.add(l),
+    removeEventListener: (type, l) => workerListeners.delete(l),
     // The page asking the worker to take it.
-    postMessage: (message) => {
+    postMessage: (message, ports) => {
+      if (answersRuntime) answerRuntime(message, ports, OLD_RUNTIME);
       asked.push(message);
       if (!claims || message.type !== 'impresspress-claim') return;
       queueMicrotask(() => {
@@ -225,7 +259,61 @@ export function loadShell({
     }
   };
   let controller = null;
-  if (controlled === true) controller = worker;
+  let registration = null;
+  let updates = 0;
+  // A version of the registration other than the stub `worker`: it keeps
+  // its own state, tells its listeners when that changes, and takes the page
+  // when asked to.
+  const version = (state) => {
+    const listeners = new Set();
+    const next = {
+      state,
+      fire: () => [...listeners].forEach((l) => l({})),
+      scriptURL: `${ORIGIN}/sw.js`,
+      addEventListener: (type, l) => type === 'statechange' && listeners.add(l),
+      removeEventListener: (type, l) => listeners.delete(l),
+      postMessage: (message, ports) => {
+        answerRuntime(message, ports, NEW_RUNTIME);
+        asked.push(message);
+        if (message.type !== 'impresspress-claim') return;
+        queueMicrotask(() => {
+          controller = next;
+          controlListeners.forEach((l) => l({}));
+        });
+      }
+    };
+    return next;
+  };
+  // The newer version already in place (`update: 'active'`), and the page
+  // it took, if any.
+  const already = update === 'active' ? version('activated') : null;
+  // The newer version an update check finds (`update`): `installing` at
+  // first, then — a turn later — installed and activated, taking the page;
+  // or discarded.
+  const incoming = () => {
+    const next = version('installing');
+    const fire = next.fire;
+    setTimeout(() => {
+      events.push(update === 'installs' ? 'update installed' : 'update discarded');
+      registration.installing = null;
+      if (update !== 'installs') {
+        next.state = 'redundant';
+        fire();
+        return;
+      }
+      next.state = 'installed';
+      registration.waiting = next;
+      fire();
+      setTimeout(() => {
+        registration.waiting = null;
+        registration.active = next;
+        next.state = 'activated';
+        fire();
+      }, 1);
+    }, 1);
+    return next;
+  };
+  if (controlled === true) controller = already ?? worker;
   if (controlled === 'dead') controller = { state: 'activated', scriptURL: `${ORIGIN}/sw.js` };
   const serviceWorker = {
     get controller() {
@@ -236,20 +324,52 @@ export function loadShell({
       if (type === 'controllerchange') controlListeners.push(listener);
     },
     register: async (url) => {
+      registeredHolding.push([...held]);
       if (registerFails) throw registerFails;
       registered += 1;
       registeredUrls.push(url);
       events.push(`register ${url}`);
+      if (installs === 'late') {
+        // Activates a moment after the wait for it has already run out.
+        setTimeout(() => {
+          events.push('activated late');
+          worker.state = 'activated';
+          [...workerListeners].forEach((l) => l({}));
+        }, 20);
+      }
       return { active: worker, update: async () => {} };
     },
     // The registration the origin already has, if any: `registeredUrl` is
-    // its worker's script URL.
+    // its worker's script URL. Its active worker is the one that controls
+    // the page, unless `update` is `'active'`.
     getRegistration: async () => {
       if (registeredUrl === undefined) return undefined;
+      if (registration) return registration;
       const urls = typeof registeredUrl === 'string' ? { active: registeredUrl } : registeredUrl;
-      return Object.fromEntries(
-        Object.entries(urls).map(([slot, scriptURL]) => [slot, { scriptURL }])
+      registration = Object.fromEntries(
+        Object.entries(urls).map(([slot, scriptURL]) => [
+          slot,
+          slot === 'active' && update === 'active'
+            ? already
+            : slot === 'active' && controlled === true
+              ? Object.assign(worker, { scriptURL })
+              : {
+                  scriptURL,
+                  addEventListener: () => {},
+                  removeEventListener: () => {},
+                  postMessage: (message, ports) => {
+                    if (answersRuntime) answerRuntime(message, ports, OLD_RUNTIME);
+                  }
+                }
+        ])
       );
+      registration.installing ??= null;
+      registration.waiting ??= null;
+      registration.update = async () => {
+        updates += 1;
+        if (update === 'installs' || update === 'fails') registration.installing = incoming();
+      };
+      return registration;
     },
     getRegistrations: async () => [
       {
@@ -262,6 +382,9 @@ export function loadShell({
   };
   const opfs = new Set(opfsFiles);
   const lockRequests = [];
+  // The locks held at each OPFS removal, and at each registration.
+  const erasedHolding = [];
+  const registeredHolding = [];
   const navigator = {
     serviceWorker,
     storage: {
@@ -271,6 +394,7 @@ export function loadShell({
         },
         removeEntry: async (name) => {
           events.push(`erase ${name}`);
+          erasedHolding.push([...held]);
           if (eraseFails.includes(name)) {
             throw new DOMException('the file is in use', 'NoModificationAllowedError');
           }
@@ -279,19 +403,28 @@ export function loadShell({
       })
     }
   };
+  // The Web Locks this tab holds now, by name.
+  const held = new Set();
   if (locks) {
-    // One tab, so the lock is always free: what a test reads is that the
-    // work was done holding it.
-    let held = false;
+    // One tab, so a lock is always free: what a test reads is that the
+    // work was done holding it. The recovery lock's requests are recorded
+    // with the state they were made in.
     navigator.locks = {
-      request: async (name, act) => {
-        if (held) throw new Error('the recovery lock was requested while held');
-        lockRequests.push({ name, registrations: registered, unregistered, opfs: [...opfs] });
-        held = true;
+      request: async (name, options, callback) => {
+        const act = typeof options === 'function' ? options : callback;
+        const ifAvailable = typeof options === 'object' && options.ifAvailable;
+        if (heldElsewhere.includes(name) || held.has(name)) {
+          if (ifAvailable) return act(null);
+          throw new Error(`the lock ${name} was requested while held`);
+        }
+        if (name === RECOVERY_LOCK) {
+          lockRequests.push({ name, registrations: registered, unregistered, opfs: [...opfs] });
+        }
+        held.add(name);
         try {
-          return await act();
+          return await act({ name });
         } finally {
-          held = false;
+          held.delete(name);
         }
       }
     };
@@ -321,7 +454,13 @@ export function loadShell({
   // The 10 s wait for control runs out at once for a worker that never
   // claims.
   const setTimeoutStub = (fn, ms) => {
-    const now = ms === 0 || (ms === 10_000 ? !claims : probeTimesOut(probes.length));
+    const now =
+      ms === 0 ||
+      (ms === 10_000
+        ? !claims || installs === 'stalls' || installs === 'late'
+        : ms === 2_000
+          ? !answersRuntime
+          : probeTimesOut(probes.length));
     return now ? (fn(), 0) : setTimeout(fn, ms).unref();
   };
   const DateStub = { now: () => now };
@@ -373,6 +512,11 @@ export function loadShell({
       (cacheStore.get(RECOVERED_CACHE)?.get(RECOVERED_KEY)?.deaths ?? []).map((d) => d.id),
     /// Each request for the recovery lock, with the state it was made in.
     lockRequests,
+    /// The locks this tab held at each OPFS removal, and at each
+    /// registration (made or refused), and those it holds now.
+    erasedHolding,
+    registeredHolding,
+    heldNow: () => [...held],
     /// What the page asked the registered worker.
     asked,
     /// Another tab recording, in the origin's Cache Storage, that it has
@@ -386,6 +530,10 @@ export function loadShell({
     events,
     /// The script URLs this load registered.
     registeredUrls,
+    /// How many update checks were asked of the existing registration.
+    updates: () => updates,
+    /// The worker that controls the page now.
+    controller: () => controller,
     /// The record of deaths recovered from, whole.
     recoveryRecord: () => cacheStore.get(RECOVERED_CACHE)?.get(RECOVERED_KEY)?.deaths ?? [],
     opfs: () => [...opfs],
