@@ -344,10 +344,6 @@
 	padding: var(--space-6);
 }
 .shell__body--flush { padding: 0; }
-/* `main` is a Tab stop (it is the page's scroller), so a keyboard user sees
-   where focus is; a mouse click into the card focuses it without a ring. */
-.shell__body:focus { outline: none; }
-.shell__body:focus-visible { box-shadow: var(--focus-ring); }
 
 /* The page header (`ui::shell::Topbar`): crumbs + title + subtitle on the
    left, the page's actions and the palette trigger on the right. */
@@ -384,7 +380,6 @@
 }
 .topbar__palette svg { width: 16px; height: 16px; }
 .topbar__palette:hover { background: var(--bg-hover); }
-.topbar__palette:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .topbar__palette kbd { background: var(--bg-secondary); padding: 1px var(--space-1); border-radius: 4px; font-size: 0.7rem; font-family: ui-monospace, Menlo, monospace; display: inline-flex; align-items: center; gap: var(--space-1); }
 .topbar__palette-cmd { font-size: 0.95rem; line-height: 1; margin-top: 1px; }
 
@@ -465,9 +460,6 @@
 	body[data-drawer-open="true"] {
 		overflow: hidden;
 	}
-
-	.shell__drawer-toggle:focus-visible,
-	.shell__palette-icon:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 
 	/* The drawer is always the full, labelled nav: the desktop collapse
 	   toggle has no meaning here, and a collapsed state remembered from a

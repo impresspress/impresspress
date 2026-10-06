@@ -161,7 +161,7 @@ pub fn shell(
             // `header` — the topbar is the page's one banner, and below
             // 720px both are on screen; and not a bare `div`, which would
             // leave the app name outside every landmark.
-            nav .shell__mobile-header aria-label="Menu" {
+            nav .shell__mobile-header aria-label="Site" {
                 button .shell__drawer-toggle type="button"
                     data-action="drawer-open"
                     aria-label="Open menu"
@@ -475,7 +475,7 @@ mod tests {
         assert_eq!(s.matches("<header").count(), 1, "one banner: {s}");
         assert!(s.contains(r#"<header class="topbar">"#));
         assert!(!s.contains(r#"role="banner""#));
-        assert!(s.contains(r#"<nav class="shell__mobile-header" aria-label="Menu">"#));
+        assert!(s.contains(r#"<nav class="shell__mobile-header" aria-label="Site">"#));
         // Distinct from the sidebar's nav, so the two landmarks are told apart.
         assert!(s.contains(r#"aria-label="Primary""#));
         assert!(s.contains(r#"data-action="drawer-open" aria-label="Open menu""#));

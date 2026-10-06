@@ -521,6 +521,47 @@ mod tests {
         }
     }
 
+    /// A focus ring drawn as the `--focus-ring` box-shadow is invisible in
+    /// forced-colors mode (Windows High Contrast drops box-shadows), so every
+    /// rule that draws one also carries the transparent outline that mode
+    /// paints, and no `:focus-visible` rule removes the outline. Covers the
+    /// shared bundle and the block stylesheet that draws its own ring.
+    #[cfg(feature = "embed-assets")]
+    #[test]
+    fn every_box_shadow_focus_ring_keeps_a_forced_colors_outline() {
+        let sheets = [
+            ("app.css", super::css()),
+            ("dev.css", include_str!("../blocks/dev/assets/dev.css")),
+        ];
+        let mut rings = 0;
+        for (name, sheet) in sheets {
+            for (selector, body) in css_leaf_blocks(sheet) {
+                let decls: Vec<String> = body
+                    .split(';')
+                    .map(|d| d.split_whitespace().collect::<Vec<_>>().join(" "))
+                    .collect();
+                let has = |d: &str| decls.iter().any(|x| x == d);
+                if has("box-shadow: var(--focus-ring)") {
+                    rings += 1;
+                    assert!(
+                        has("outline: 2px solid transparent") && has("outline-offset: -2px"),
+                        "{name}: `{selector}` draws a box-shadow focus ring with no transparent outline"
+                    );
+                }
+                if selector.contains(":focus-visible") {
+                    assert!(
+                        !has("outline: none") && !has("outline: 0"),
+                        "{name}: `{selector}` removes the focus outline"
+                    );
+                }
+            }
+        }
+        assert!(
+            rings >= 2,
+            "expected the shared ring rule and dev.css's, found {rings}"
+        );
+    }
+
     /// Relative luminance per WCAG 2.1.
     #[cfg(feature = "embed-assets")]
     fn luminance(hex: &str) -> f64 {

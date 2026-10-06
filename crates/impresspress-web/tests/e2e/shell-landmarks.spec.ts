@@ -10,7 +10,8 @@ import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
  * in its body (the legal pages' Endpoints reference is a static table) would
  * otherwise be unscrollable from the keyboard once focus is anywhere but
  * `<body>`. The topbar is the one banner at every width; the phone's mobile
- * header is a labelled `nav`, not a second `header`.
+ * header is a labelled `nav`, not a second `header`. The ring is a box-shadow
+ * plus a transparent outline, which is what forced-colors mode paints.
  *
  * Writes nothing (see `e2e:visual`).
  */
@@ -37,8 +38,15 @@ test.describe('shell landmarks and keyboard scrolling', () => {
     await expect(page.locator('a.skip-link')).toBeFocused();
     await page.keyboard.press('Enter');
     await expect(main).toBeFocused();
-    // Focus there is visible: the ring replaces the old `outline: none`.
-    expect(await main.evaluate((el) => getComputedStyle(el).boxShadow)).not.toBe('none');
+    // Focus there is visible: the box-shadow ring, plus the transparent
+    // outline forced-colors mode (which drops box-shadows) paints instead.
+    const ring = await main.evaluate((el) => {
+      const s = getComputedStyle(el);
+      return { shadow: s.boxShadow, outlineStyle: s.outlineStyle, outlineWidth: s.outlineWidth };
+    });
+    expect(ring.shadow).not.toBe('none');
+    expect(ring.outlineStyle).toBe('solid');
+    expect(ring.outlineWidth).toBe('2px');
 
     // The browser's own scrolling of the focused element (chrome.js's
     // fallback only handles keys aimed at `<body>`).
@@ -80,15 +88,25 @@ test.describe('shell landmarks and keyboard scrolling', () => {
       await page.goto('/b/admin/users', { waitUntil: 'networkidle' });
       await expect(page.getByRole('banner')).toHaveCount(1);
       await expect(page.getByRole('banner')).toHaveClass(/topbar/);
+      if (width === 1440) {
+        // A shared box-shadow ring on a button keeps its forced-colors outline.
+        const palette = page.locator('button.topbar__palette');
+        await palette.focus();
+        await page.keyboard.press('Shift+Tab');
+        await page.keyboard.press('Tab');
+        await expect(palette).toBeFocused();
+        expect(await palette.evaluate((el) => el.matches(':focus-visible'))).toBe(true);
+        expect(await palette.evaluate((el) => getComputedStyle(el).outlineStyle)).toBe('solid');
+      }
       if (width === 390) {
-        const menu = page.getByRole('navigation', { name: 'Menu' });
+        const menu = page.getByRole('navigation', { name: 'Site' });
         await expect(menu).toBeVisible();
         await expect(menu.getByRole('button', { name: 'Open menu' })).toBeVisible();
         await expect(
           menu.getByRole('button', { name: 'Search pages (command palette)' }),
         ).toBeVisible();
       } else {
-        await expect(page.getByRole('navigation', { name: 'Menu' })).toBeHidden();
+        await expect(page.getByRole('navigation', { name: 'Site' })).toBeHidden();
       }
     });
   }

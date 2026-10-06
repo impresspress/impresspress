@@ -36,7 +36,6 @@
 	transition: background var(--transition-fast), color var(--transition-fast), border-color var(--transition-fast);
 	text-decoration: none; white-space: nowrap;
 }
-.btn:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .btn:disabled { opacity: 0.55; cursor: not-allowed; }
 
 /* ── Sizes ─────────────────────────────────────────────── */

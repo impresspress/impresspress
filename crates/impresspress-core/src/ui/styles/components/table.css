@@ -81,7 +81,6 @@ table.data-table { border-collapse: separate; border-spacing: 0; }
     border-radius: var(--radius-md);
     color: inherit;
 }
-.data-table__row-href a:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .data-table__empty { padding: var(--space-8); }
 /* Caller-declared per-column width (ui/components/table.rs's `TableCol`) --
    a genuine runtime value, handed to CSS as `--col-width`. */
@@ -107,7 +106,6 @@ table.data-table { border-collapse: separate; border-spacing: 0; }
    keys) whose scrollbar is always shown, so it is visibly scrollable. Header
    names stay on one line; values wrap only past a readable width. */
 .data-table--scroll { overflow-x: scroll; scrollbar-width: thin; scrollbar-color: var(--border-color) transparent; }
-.data-table--scroll:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .data-table--scroll table { width: max-content; min-width: 100%; }
 /* Query column names are identifiers: shown as written, on one line. */
 .data-table--scroll thead th { white-space: nowrap; text-transform: none; letter-spacing: 0; }
@@ -146,7 +144,6 @@ table.data-table { border-collapse: separate; border-spacing: 0; }
    text link; --primary-button (4.99:1, computed) is the text-safe sibling. */
 a.pagination__link { color: var(--primary-button); }
 a.pagination__link:hover { background: var(--bg-hover); }
-a.pagination__link:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .pagination__link.is-disabled { color: var(--text-muted); }
 
 /* ── Database admin ─────────────────────────────────────── */
