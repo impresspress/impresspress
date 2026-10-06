@@ -464,6 +464,9 @@ fn quota_user_id_path_schema() -> serde_json::Value {
     })
 }
 
+/// This block's id, as storage and the access log name it.
+pub const FILES_BLOCK_ID: &str = "impresspress/files";
+
 crate::impresspress_feature_block! {
     /// File storage: buckets, objects, shares, quotas (`impresspress/files`).
     pub struct FilesBlock;
@@ -472,7 +475,7 @@ crate::impresspress_feature_block! {
     info: |_this| {
         use wafer_run::CollectionSchema;
 
-        BlockInfo::new("impresspress/files", "0.0.1", "http-handler@v1", "File storage, sharing, quotas, and access logging")
+        BlockInfo::new(FILES_BLOCK_ID, "0.0.1", "http-handler@v1", "File storage, sharing, quotas, and access logging")
             .instance_mode(InstanceMode::Singleton)
             // `wafer-run/crypto`: a share link's token is 256 bits of CSPRNG
             // output, drawn by `share::generate_share_token` through

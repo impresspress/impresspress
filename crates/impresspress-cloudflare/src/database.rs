@@ -2196,12 +2196,13 @@ mod tests {
                     BatchAnswer::Succeed,
                     Rc::clone(&batches),
                     // `impresspress__admin__request_logs` as the admin block's
-                    // migration 001 creates it.
+                    // migrations leave it: 001's columns and 008's `block`.
                     &[
                         "id",
                         "flow_id",
                         "method",
                         "path",
+                        "block",
                         "status",
                         "status_code",
                         "duration_ms",

@@ -114,15 +114,48 @@ pub(crate) async fn admin_error_page(
 }
 
 /// The badge a request-log row's status code renders in, on every page that
-/// lists rows: a 5xx is `Danger`, any other error row
-/// ([`request_logs::is_error_status`]) is `Warning`, the rest `Success`.
+/// lists rows, by [`request_logs::StatusClass`]: a server error is `Danger`,
+/// a client error `Warning`, the rest `Success`.
 pub(crate) fn status_code_badge_variant(status_code: i64) -> BadgeVariant {
-    if status_code >= 500 {
-        BadgeVariant::Danger
-    } else if request_logs::is_error_status(status_code) {
-        BadgeVariant::Warning
-    } else {
-        BadgeVariant::Success
+    match request_logs::StatusClass::of(status_code) {
+        request_logs::StatusClass::ServerError => BadgeVariant::Danger,
+        request_logs::StatusClass::ClientError => BadgeVariant::Warning,
+        request_logs::StatusClass::Served => BadgeVariant::Success,
+    }
+}
+
+/// A logged request's path as a table cell. The pipeline stores every request
+/// to a path no block serves under one label
+/// ([`crate::pipeline::UNMATCHED_PATH_LABEL`]), so probes cannot flood the
+/// log with one row per made-up path; that label is not a path anyone
+/// requested, so it reads as what it stands for.
+pub(crate) fn request_path_cell(path: &str) -> Markup {
+    maud::html! {
+        @if path == crate::pipeline::UNMATCHED_PATH_LABEL {
+            div .text-muted { "Unmatched route" }
+            div .text-muted .text-xs { "Paths no block serves, counted together" }
+        } @else {
+            (ui::components::breakable_id(path))
+        }
+    }
+}
+
+/// The account a stored user id names, as a table cell: its email from
+/// `emails` ([`crate::blocks::auth::repo::users::emails_by_id`]); when no
+/// account has the id any more, the id itself (shortened, whole in its
+/// `title`); nothing for an anonymous row.
+pub(crate) fn user_cell(
+    user_id: &str,
+    emails: &std::collections::HashMap<String, String>,
+) -> Markup {
+    maud::html! {
+        @if let Some(email) = emails.get(user_id) {
+            (ui::components::breakable_id(email))
+        } @else if !user_id.is_empty() {
+            span .text-muted .font-mono title=(format!("{user_id} (no account has this id)")) {
+                (user_id.get(..8).unwrap_or(user_id))
+            }
+        }
     }
 }
 

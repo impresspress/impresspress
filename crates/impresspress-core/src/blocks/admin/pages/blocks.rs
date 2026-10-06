@@ -191,7 +191,8 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
 
                 // Runtime filter dropdown
                 div .block-cards__filter {
-                    select .form-input
+                    label .form-label for="blocks-runtime-filter" { "Runtime" }
+                    select .form-input #blocks-runtime-filter
                         data-action="blocks-runtime-filter"
                         data-blocks-tab=(active_tab)
                     {
@@ -233,9 +234,15 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
                                     { (block.name) }
                                 }
                                 @if is_enabled {
-                                    span .block-card__check title="Enabled" { (ui::icons::check()) }
+                                    span .block-card__check title="Enabled" {
+                                        span aria-hidden="true" { (ui::icons::check()) }
+                                        span .sr-only { "Enabled" }
+                                    }
                                 } @else {
-                                    span .block-card__check .block-card__check--off title="Disabled" { (ui::icons::x()) }
+                                    span .block-card__check .block-card__check--off title="Disabled" {
+                                        span aria-hidden="true" { (ui::icons::x()) }
+                                        span .sr-only { "Disabled" }
+                                    }
                                 }
                             }
                             p .block-card__summary { (block.summary) }
@@ -247,8 +254,9 @@ pub async fn blocks_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
                                 }
                                 span .block-card__version { "v" (block.version) }
                                 @if is_enabled && !block.admin_url.is_empty() {
-                                    a .btn .btn--sm .btn--primary .block-card__open
+                                    a .btn .btn--sm .btn--secondary .block-card__open
                                         href=(block.admin_url)
+                                        aria-label=(format!("Open {} admin", block.name))
                                     { "Open" }
                                 }
                             }

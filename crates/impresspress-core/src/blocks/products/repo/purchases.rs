@@ -1720,6 +1720,8 @@ async fn order_totals(
         ],
         sort: vec![],
         limit: 0,
+        having: vec![],
+        offset: 0,
     };
     db::aggregate(ctx, req).await
 }
@@ -1754,6 +1756,8 @@ async fn subscription_totals(
         ],
         sort: vec![],
         limit: 0,
+        having: vec![],
+        offset: 0,
     };
     db::aggregate(ctx, req).await
 }
@@ -1856,6 +1860,8 @@ async fn line_item_totals(
         ],
         sort: vec![],
         limit: 0,
+        having: vec![],
+        offset: 0,
     };
     db::aggregate(ctx, req).await
 }

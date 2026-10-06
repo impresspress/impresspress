@@ -219,6 +219,7 @@ fn single_user_row(record: &UserRow, roles: &[String], current_uid: &str) -> com
                 } @else {
                     @if disabled {
                         button .btn .btn--sm .btn--success
+                            type="button"
                             hx-post={"/b/admin/users/" (record.id) "/enable"}
                             hx-target={"#user-row-" (record.id)}
                             hx-swap="outerHTML"
@@ -226,6 +227,7 @@ fn single_user_row(record: &UserRow, roles: &[String], current_uid: &str) -> com
                         { "Enable" }
                     } @else {
                         button .btn .btn--sm .btn--secondary
+                            type="button"
                             hx-post={"/b/admin/users/" (record.id) "/disable"}
                             hx-target={"#user-row-" (record.id)}
                             hx-swap="outerHTML"
@@ -233,13 +235,14 @@ fn single_user_row(record: &UserRow, roles: &[String], current_uid: &str) -> com
                             title="Disable user"
                         { "Disable" }
                     }
-                    " "
-                    button .btn .btn--sm .btn--danger
+                    button .btn .btn--ghost-danger .btn--icon
+                        type="button"
                         hx-delete={"/b/admin/users/" (record.id)}
                         hx-target={"#user-row-" (record.id)}
                         hx-swap="outerHTML"
                         hx-confirm={"Delete " (email) "? This cannot be undone."}
                         title="Delete user"
+                        aria-label=(format!("Delete user {email}"))
                     { (icons::trash()) }
                 }
         },
@@ -503,10 +506,13 @@ async fn roles_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
                 },
                 html! {
                     @if !is_system {
-                        button .btn .btn--sm .btn--danger
+                        button .btn .btn--ghost-danger .btn--icon
+                            type="button"
                             hx-delete={"/b/admin/iam/roles/" (record.id)}
                             hx-target="#iam-content"
                             hx-confirm={"Delete role \"" (name) "\"? Everyone it is assigned to loses it."}
+                            title="Delete role"
+                            aria-label=(format!("Delete role {name}"))
                         { (icons::trash()) }
                     }
                 },
@@ -546,6 +552,8 @@ async fn api_keys_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
     // view, not one account's (`api_keys::list_for_user` is what the
     // userportal and the auth-ui CRUD endpoints use).
     let list = api_keys::list_recent(ctx, 100).await?;
+    let user_ids: Vec<&str> = list.iter().map(|record| record.user_id.as_str()).collect();
+    let emails = users::emails_by_id(ctx, &user_ids).await?;
     let now = chrono::Utc::now();
 
     Ok(html! {
@@ -556,7 +564,6 @@ async fn api_keys_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
         })))
 
         @let rows: Vec<Vec<Markup>> = list.iter().map(|record| {
-            let user_id = record.user_id.as_str();
             let created = record.created_at.as_str();
             // A key authenticates only while it is neither revoked nor past
             // its expiry — the two checks `auth` makes before it accepts one
@@ -571,7 +578,7 @@ async fn api_keys_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
             vec![
                 html! { code { (record.key_prefix) "..." } },
                 html! { (record.name) },
-                html! { span .text-muted { (user_id.get(..8).unwrap_or(user_id)) } },
+                super::user_cell(&record.user_id, &emails),
                 html! { span .text-muted { (components::timestamp(created)) } },
                 html! {
                     @if let Some(reason) = retired {
@@ -588,6 +595,7 @@ async fn api_keys_tab(ctx: &dyn Context) -> Result<Markup, WaferError> {
                         // this tab re-rendered: see
                         // `handle_revoke_api_key`.
                         button .btn .btn--sm .btn--secondary
+                            type="button"
                             hx-post={"/b/admin/api-keys/" (record.id) "/revoke"}
                             hx-target="#users-tab-content"
                             hx-confirm="Revoke this API key?"
@@ -733,12 +741,56 @@ mod tests {
         ] {
             let row = row(prefix);
             assert!(row.contains(badge), "{prefix} must render {badge}: {row}");
+            assert!(
+                row.contains("u-1<wbr>@example<wbr>.com"),
+                "{prefix}: the owner reads as their email, not an id prefix: {row}"
+            );
             assert_eq!(
                 row.contains("Revoke this API key?"),
                 revocable,
                 "{prefix}: a Revoke button only on a live key: {row}"
             );
         }
+    }
+
+    /// Every icon-only delete names what it deletes: a role's by the role, a
+    /// user's by the user.
+    #[tokio::test]
+    async fn icon_deletes_name_their_row() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        ctx.seed_auth_user("u-1").await;
+        ops::create_role(
+            &ctx,
+            &admin_msg("create", "/b/admin/iam/roles"),
+            "editor",
+            None,
+            None,
+        )
+        .await
+        .unwrap_or_else(|_| panic!("seed a role"));
+
+        let users = crate::blocks::admin::test_support::browser_request(
+            &ctx,
+            admin_msg("retrieve", "/b/admin/users"),
+        )
+        .await;
+        let users = String::from_utf8(users.body).expect("UTF-8 body");
+        assert!(
+            users.contains(r#"aria-label="Delete user u-1@example.com""#),
+            "{users}"
+        );
+
+        let mut msg = admin_msg("retrieve", "/b/admin/users");
+        msg.set_meta("req.query.tab", "roles");
+        let roles = crate::blocks::admin::test_support::browser_request(&ctx, msg).await;
+        let roles = String::from_utf8(roles.body).expect("UTF-8 body");
+        assert!(
+            roles.contains(r#"aria-label="Delete role editor""#),
+            "{roles}"
+        );
+        assert!(roles.contains("btn--ghost-danger btn--icon"), "{roles}");
     }
 
     /// Disable answers one `<tr>`, swapped over the user's row. When the row
