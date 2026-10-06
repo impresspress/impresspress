@@ -319,10 +319,7 @@ mod tests {
         let foreign = wafer.register_block(
             PROBE,
             Arc::new(Probe {
-                keys: vec![
-                    "ACME__WIDGET__COLOUR",
-                    "IMPRESSPRESS__TICKETS__SUPPORT_EMAIL",
-                ],
+                keys: vec!["ACME__WIDGET__COLOUR", crate::blocks::email::MAILGUN_FROM],
             }),
         );
         assert!(
