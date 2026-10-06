@@ -366,7 +366,6 @@ a.pagination__link:hover { background: var(--bg-hover); }
 	background: none; border: none; border-radius: var(--radius-md);
 	font: inherit; font-weight: 600; color: var(--text-primary); cursor: pointer;
 }
-.network-group__toggle:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .network-group__name { font-family: ui-monospace, SFMono-Regular, Menlo, monospace; }
 .network-group__chevron { display: inline-flex; line-height: 0; transition: transform 150ms ease-out; }
 .network-group__toggle[aria-expanded="false"] .network-group__chevron { transform: rotate(-90deg); }
@@ -401,7 +400,6 @@ a.pagination__link:hover { background: var(--bg-hover); }
 	min-height: 44px; padding: 0 var(--space-1);
 	font-weight: 600; cursor: pointer; border-radius: var(--radius-md);
 }
-.db-tables__summary:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .db-tables[open] > .db-tables__summary { margin-bottom: var(--space-2); }
 .db-tables__summary::-webkit-details-marker { display: none; }
 .db-tables__summary::after {

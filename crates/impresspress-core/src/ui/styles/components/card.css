@@ -718,7 +718,6 @@
 	transform: rotate(-45deg); transition: transform 150ms ease-out;
 }
 .var-group[open] > .var-group__summary::before { transform: rotate(45deg); }
-.var-group__summary:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .var-group__title { margin: 0; font-size: var(--text-base); font-weight: 600; }
 .var-group__stats { font-size: var(--text-sm); color: var(--text-secondary); font-variant-numeric: tabular-nums; }
 .var-group__body { padding: 0 var(--space-4) var(--space-4); }
