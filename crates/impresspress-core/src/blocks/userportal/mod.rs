@@ -12,7 +12,7 @@ use crate::{
         ENABLE_OAUTH_KEY, PRIMARY_COLOR_KEY,
     },
     endpoint_match::{self, EndpointRoute},
-    http::{err_bad_request, err_forbidden, err_unauthenticated, ok_json},
+    http::{err_bad_request, err_unauthenticated, ok_json},
     util::parse_form_body,
 };
 
@@ -305,7 +305,13 @@ async fn handle_update_profile(
         .map(String::as_str)
         .unwrap_or("");
     if !crate::csrf::verify(ctx, msg, submitted_csrf) {
-        return err_forbidden("invalid or missing csrf token");
+        return crate::ui::forbidden_response(
+            ctx,
+            msg,
+            "This form has expired. Reload the page and try again.",
+            crate::ui::SignedOutAction::SignIn,
+        )
+        .await;
     }
 
     // A blank name is refused rather than written: nothing legitimately

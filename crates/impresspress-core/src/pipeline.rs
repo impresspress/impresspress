@@ -476,7 +476,13 @@ pub async fn handle_request(
     // below exactly like a dispatched response would.
     //
     // 3. Route to block.
-    let mut stream = match crate::csrf::enforce_origin_policy(&msg, cookie_authenticated) {
+    //
+    // The CSRF refusal draws its 403 page before the router runs, so the
+    // live gate is published first: its sidebar shows what the router
+    // serves, not the boot snapshot.
+    routing::publish_gate(&mut msg, features, block_infos);
+    let mut stream = match crate::csrf::enforce_origin_policy(ctx, &msg, cookie_authenticated).await
+    {
         Some(denied) => denied,
         None => routing::route_to_block(ctx, msg, input, features, block_infos, extra_routes).await,
     };
@@ -2849,6 +2855,60 @@ mod csrf_wiring_tests {
         assert!(
             crate::test_support::output_is_error(out, "PermissionDenied").await,
             "cross-site cookie-authenticated POST must be rejected before block dispatch"
+        );
+    }
+
+    /// The same refusal met by a browser form post: the 403 page inside the
+    /// viewer's shell, saying why, with the probe never dispatched and no
+    /// cookie set or cleared. The page's sidebar is drawn from the live gate
+    /// the router applies (here every block on), not the boot snapshot (which
+    /// says Files is off): the pipeline publishes that gate before the refusal.
+    #[cfg(feature = "block-files")]
+    #[tokio::test]
+    async fn a_cross_site_browser_post_gets_the_403_page_in_the_shell() {
+        let (mut ctx, session) = ctx_with_probe().await;
+        ctx.register_block(
+            crate::blocks::files::FILES_BLOCK_ID,
+            std::sync::Arc::new(crate::blocks::files::FilesBlock::new()),
+        );
+        ctx.set_config(
+            crate::features::BLOCK_SETTINGS_CONFIG_KEY,
+            &serde_json::json!({ "impresspress/files": { "enabled": false } }).to_string(),
+        );
+
+        let mut msg = session.cookie(probe_post("cross-site"));
+        msg.set_meta("http.header.accept", "text/html,application/xhtml+xml");
+        let buf = ctx
+            .request(msg)
+            .await
+            .collect_buffered()
+            .await
+            .expect("a browser is answered with a page");
+
+        let meta = |key: &str| {
+            buf.meta
+                .iter()
+                .find(|e| e.key.eq_ignore_ascii_case(key))
+                .map(|e| e.value.clone())
+        };
+        let html = String::from_utf8(buf.body.clone()).unwrap_or_default();
+        assert_eq!(meta("resp.status").as_deref(), Some("403"), "{html}");
+        assert!(
+            !buf.meta
+                .iter()
+                .any(|e| e.key.to_ascii_lowercase().contains("set-cookie")),
+            "a refused request sets no cookie: {:?}",
+            buf.meta
+        );
+        assert!(html.contains(crate::csrf::ORIGIN_BLOCKED_REASON), "{html}");
+        assert!(html.contains(r#"data-nav="portal""#), "{html}");
+        assert!(
+            !html.contains("DISPATCHED"),
+            "the probe must not be dispatched: {html}"
+        );
+        assert!(
+            html.contains(r#"href="/b/storage/""#),
+            "the sidebar follows the live gate (Files on), not the boot snapshot: {html}"
         );
     }
 

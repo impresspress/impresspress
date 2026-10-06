@@ -594,6 +594,18 @@ fn disabled_blocks_json(features: &dyn FeatureConfig, block_infos: &[BlockInfo])
     serde_json::to_string(&disabled).unwrap_or_else(|_| "[]".to_string())
 }
 
+/// Stamp `msg` with the live gate `features` decides ([`META_DISABLED_BLOCKS`]),
+/// so any enablement-dependent UI drawn for this request agrees with what the
+/// router serves. [`route_to_block`] publishes it before its access check and
+/// dispatch; the pipeline publishes it before the CSRF origin policy, whose
+/// 403 page is drawn before the router runs.
+pub fn publish_gate(msg: &mut Message, features: &dyn FeatureConfig, block_infos: &[BlockInfo]) {
+    msg.set_meta(
+        META_DISABLED_BLOCKS,
+        disabled_blocks_json(features, block_infos),
+    );
+}
+
 /// The gate decision [`route_to_block`] published for this request.
 ///
 /// For any handler that renders enablement-dependent UI — the sidebar, the
@@ -640,12 +652,27 @@ pub fn feature_gate_name(block_name: &str) -> &str {
 /// Enforce a route's [`RouteAccess`] tier against the request. Returns
 /// `Some(refusal)` when the caller fails the tier, or `None` to proceed.
 /// Shared by the built-in and extra-route dispatch loops.
-fn check_access(access: RouteAccess, msg: &Message) -> Option<OutputStream> {
-    denial(access, msg).map(|denial| match denial {
-        Denial::Unauthenticated => crate::ui::unauthenticated_response(msg),
-        Denial::Forbidden => crate::ui::forbidden_response(msg),
-    })
+async fn check_access(
+    ctx: &dyn Context,
+    access: RouteAccess,
+    msg: &Message,
+) -> Option<OutputStream> {
+    match denial(access, msg)? {
+        Denial::Unauthenticated => Some(crate::ui::unauthenticated_response(msg)),
+        Denial::Forbidden => Some(
+            crate::ui::forbidden_response(
+                ctx,
+                msg,
+                ADMIN_REQUIRED_REASON,
+                crate::ui::SignedOutAction::SignIn,
+            )
+            .await,
+        ),
+    }
 }
+
+/// Why a signed-in caller without the admin role is refused an admin route.
+const ADMIN_REQUIRED_REASON: &str = "Administrator access is required.";
 
 /// Why a caller fails a [`RouteAccess`] tier.
 enum Denial {
@@ -708,6 +735,11 @@ pub async fn route_to_block(
 ) -> OutputStream {
     let path = msg.path().to_string();
 
+    // Every page this request draws — the dispatched block's, and the 403
+    // `check_access` answers — takes its sidebar from the gate this router
+    // applies. See `META_DISABLED_BLOCKS`.
+    publish_gate(&mut msg, features, block_infos);
+
     // Root: redirect logged-in users to portal dashboard, anonymous to login.
     // When the deployment ships a static landing page, serve it directly via
     // `wafer-run/web` instead. Gated by the `WAFER_RUN_SHARED__HAS_LANDING_PAGE`
@@ -765,17 +797,9 @@ pub async fn route_to_block(
         let access = route
             .access
             .max(declared_access(block_infos, route.block, &msg));
-        if let Some(denied) = check_access(access, &msg) {
+        if let Some(denied) = check_access(ctx, access, &msg).await {
             return denied;
         }
-
-        // Hand the block the gate decision just made, so any enablement-
-        // dependent UI it renders agrees with what this router will serve.
-        // See `META_DISABLED_BLOCKS`.
-        msg.set_meta(
-            META_DISABLED_BLOCKS,
-            disabled_blocks_json(features, block_infos),
-        );
 
         // Dispatch via call_block so WRAP sees the correct caller identity.
         return ctx.call_block(route.dispatch_to, msg, input).await;
@@ -798,16 +822,11 @@ pub async fn route_to_block(
 
         // Access gate, refined by the target block's own declarations exactly
         // as the built-in loop above does — see `extra_route_access`.
-        if let Some(denied) = check_access(extra_route_access(block_infos, route, &msg), &msg) {
+        if let Some(denied) =
+            check_access(ctx, extra_route_access(block_infos, route, &msg), &msg).await
+        {
             return denied;
         }
-
-        // Same stamp as the built-in loop above — a downstream-registered
-        // route's pages render the same chrome.
-        msg.set_meta(
-            META_DISABLED_BLOCKS,
-            disabled_blocks_json(features, block_infos),
-        );
 
         return ctx.call_block(&route.block_name, msg, input).await;
     }
@@ -1417,6 +1436,44 @@ mod tests {
             "router must actually admit an anonymous caller here, matching effective_access's Public verdict",
         );
         assert_eq!(buf.body, b"DISPATCHED");
+    }
+
+    /// A signed-in member who opens an admin page in a browser is refused
+    /// inside their own (portal) shell, with the reason — not a JSON body,
+    /// and not a "Sign in" page they have no use for. The same request from
+    /// an API client is the JSON 403 carrying that reason.
+    #[tokio::test]
+    async fn a_member_opening_an_admin_page_gets_the_403_page_in_the_portal_shell() {
+        use crate::test_support::{anon_msg, output_is_error, TestContext};
+
+        let ctx = TestContext::with_auth().await.with_sign_in_added();
+        ctx.seed_account("member@example.com", "correct-horse-battery-staple", "user")
+            .await;
+        let member = ctx
+            .sign_in("member@example.com", "correct-horse-battery-staple")
+            .await;
+
+        let mut page = member.cookie(anon_msg("retrieve", "/b/admin/"));
+        page.set_meta("http.header.accept", "text/html,application/xhtml+xml");
+        let buf = ctx
+            .request(page)
+            .await
+            .collect_buffered()
+            .await
+            .expect("a browser is answered with a page");
+        let status = buf
+            .meta
+            .iter()
+            .find(|e| e.key == "resp.status")
+            .map(|e| e.value.clone());
+        let html = String::from_utf8(buf.body).unwrap_or_default();
+        assert_eq!(status.as_deref(), Some("403"), "{html}");
+        assert!(html.contains(r#"data-nav="portal""#), "{html}");
+        assert!(html.contains(ADMIN_REQUIRED_REASON), "{html}");
+        assert!(!html.contains("Sign in"), "{html}");
+
+        let api = member.bearer(anon_msg("retrieve", "/b/admin/"));
+        assert!(output_is_error(ctx.request(api).await, "PermissionDenied").await);
     }
 
     #[tokio::test]
