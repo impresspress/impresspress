@@ -10,8 +10,7 @@ use crate::{
     ui::{
         self,
         components::{timestamp, DataTable, TableCol, TableRow},
-        shell::Crumb,
-        NavKind, Shell,
+        Shell,
     },
 };
 
@@ -39,16 +38,8 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
     ui::shell_page(
         ctx,
         msg,
-        Shell {
-            title: "Organizations",
-            nav: NavKind::Portal,
-            crumbs: vec![Crumb {
-                label: "Organizations",
-                href: None,
-            }],
-            subtitle: Some("Orgs you've claimed via GitHub, Google, or Microsoft sign-in."),
-            actions: Vec::new(),
-        },
+        Shell::portal("Organizations", "Organizations")
+            .subtitle("Orgs you've claimed via GitHub, Google, or Microsoft sign-in."),
         render_orgs_body(&orgs_list),
     )
     .await

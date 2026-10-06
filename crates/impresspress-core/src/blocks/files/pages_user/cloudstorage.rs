@@ -7,7 +7,7 @@ use wafer_run::{context::Context, Message, OutputStream};
 use crate::{
     blocks::files::repo,
     db_read::CappedList,
-    ui::{self, shell::Crumb, templates::list_page},
+    ui::{self, templates::list_page},
 };
 
 #[derive(Clone, Debug)]
@@ -180,16 +180,8 @@ pub async fn cloudstorage_page(ctx: &dyn Context, msg: &Message) -> OutputStream
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell {
-            title: "Shares",
-            nav: ui::NavKind::Portal,
-            crumbs: vec![Crumb {
-                label: "Shares",
-                href: None,
-            }],
-            subtitle: Some("Public links you've created and your storage quota."),
-            actions: Vec::new(),
-        },
+        ui::Shell::portal("Shares", "Shares")
+            .subtitle("Public links you've created and your storage quota."),
         body,
     )
     .await

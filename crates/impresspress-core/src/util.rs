@@ -742,16 +742,11 @@ pub(crate) fn is_sensitive_key(key: &str, sensitive_flag: i64) -> bool {
 /// masked field blank), and that spelling is what the refusal names.
 ///
 /// `save_settings` is the one that does not use this predicate, and
-/// deliberately: WRAP denies four of its five callers (all but
-/// `admin::pages::email`, which runs as the admin block itself) the admin
-/// `variables` table, and a shared helper has to work for the four — so it
-/// cannot supply the stored flag the third argument stands for. It asks a
-/// question that needs no flag instead: would this mask REPLACE the value the
-/// field currently holds? That covers more than this predicate does, which is
-/// the only shape that lets it promise no half-applied save, and it stops
-/// short of refusing a submission that changes nothing. The exactness this
-/// predicate provides needs the row, and only the surfaces that can read the
-/// row get it.
+/// deliberately: it asks a broader question — would this mask REPLACE the
+/// value the field currently holds? — whatever the flag. That covers every
+/// mask this predicate refuses (so the writer can never refuse one mid-save)
+/// and stops short of refusing a submission that changes nothing; what it
+/// gives up is storing eight asterisks in a plain setting through a form.
 pub(crate) fn is_masked_submission(key: &str, sensitive_flag: i64, value: &str) -> bool {
     value == MASKED_VALUE && is_sensitive_key(key, sensitive_flag)
 }

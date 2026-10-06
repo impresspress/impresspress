@@ -120,6 +120,7 @@ pub fn active_item<'a>(groups: &'a [NavGroup], path: &str) -> Option<&'a NavItem
 /// with one fewer state. `logo_icon_2x_url`/`brand_icon` (the retina pixel-art
 /// icon) are ported from origin/main during the main merge — 2026-09-02.
 pub fn sidebar_grouped(
+    kind: super::NavKind,
     groups: &[NavGroup],
     signed_in: Option<SignedIn<'_>>,
     current_path: &str,
@@ -131,7 +132,9 @@ pub fn sidebar_grouped(
 
     let active = active_item(groups, current_path);
     html! {
-        nav .sidebar aria-label="Primary" {
+        // `data-nav` names the audience the page chose (`Shell::nav`), so a
+        // test can hold every admin route to the admin sidebar.
+        nav .sidebar aria-label="Primary" data-nav=(kind.as_str()) {
             div .sidebar__brand .sidebar__brand--text {
                 @if !logo_icon_url.is_empty() {
                     (crate::ui::templates::brand_icon(logo_icon_url, "sidebar__brand-icon", 32))
@@ -289,8 +292,16 @@ mod tests {
                 items: vec![item("Blocks", "/b/admin/blocks")],
             },
         ];
-        let s =
-            sidebar_grouped(&groups, None, "/b/admin/users", "", "", "Impresspress").into_string();
+        let s = sidebar_grouped(
+            crate::ui::NavKind::Admin,
+            &groups,
+            None,
+            "/b/admin/users",
+            "",
+            "",
+            "Impresspress",
+        )
+        .into_string();
         assert!(s.contains(">Workspace<"));
         assert!(s.contains(">Data<"));
         assert!(s.contains("/b/admin/users"));
@@ -306,6 +317,7 @@ mod tests {
     #[test]
     fn brand_without_wordmark_renders_pixel_art_icon_and_app_name() {
         let s = sidebar_grouped(
+            crate::ui::NavKind::Admin,
             &[],
             None,
             "/",
@@ -334,8 +346,16 @@ mod tests {
     /// no nearest-neighbour class, no built-in srcset.
     #[test]
     fn custom_icon_url_gets_no_pixel_art_treatment() {
-        let s =
-            sidebar_grouped(&[], None, "/", "", "https://acme.test/mark.png", "Acme").into_string();
+        let s = sidebar_grouped(
+            crate::ui::NavKind::Admin,
+            &[],
+            None,
+            "/",
+            "",
+            "https://acme.test/mark.png",
+            "Acme",
+        )
+        .into_string();
         assert!(s.contains(r#"src="https://acme.test/mark.png""#), "{s}");
         assert!(!s.contains("pixel-art"), "{s}");
         assert!(!s.contains("<picture>"), "{s}");
@@ -364,6 +384,7 @@ mod tests {
             items: vec![item("Users", "/b/admin/users")],
         }];
         let s = sidebar_grouped(
+            crate::ui::NavKind::Admin,
             &groups,
             None,
             "/b/admin/users",
@@ -390,6 +411,7 @@ mod tests {
             items: vec![item("Storage", "/b/storage")],
         }];
         let s = sidebar_grouped(
+            crate::ui::NavKind::Admin,
             &groups,
             None,
             "/b/storage/files/foo.png",
@@ -419,7 +441,16 @@ mod tests {
                 Some("Settings"),
                 "{path}"
             );
-            let s = sidebar_grouped(&groups, None, &path, "", "", "Impresspress").into_string();
+            let s = sidebar_grouped(
+                crate::ui::NavKind::Admin,
+                &groups,
+                None,
+                &path,
+                "",
+                "",
+                "Impresspress",
+            )
+            .into_string();
             assert_eq!(s.matches("is-active").count(), 1, "{path}: {s}");
             assert!(
                 s.contains(r#"<a href="/b/admin/settings/email" class="sidebar__nav-item is-active" aria-current="page">"#),
@@ -495,6 +526,7 @@ mod tests {
         // the lock — not the package fallback — now renders.
         let groups = crate::ui::nav_groups::portal();
         let s = sidebar_grouped(
+            crate::ui::NavKind::Admin,
             &groups,
             None,
             "/b/userportal/security",
@@ -525,6 +557,7 @@ mod tests {
             .collect();
         let render = |account_links: &[NavItem]| {
             sidebar_grouped(
+                crate::ui::NavKind::Portal,
                 &[],
                 Some(SignedIn {
                     user: &user,

@@ -26,7 +26,7 @@ use crate::{
         messages::contracts::{EntryKind, EntryRole},
     },
     endpoint_match::{self, request_schema_of, response_schema_of, EndpointRoute},
-    http::{err_bad_request, err_not_found, ok_json},
+    http::{err_bad_request, ok_json},
     llm_target::{DefaultTarget, DEFAULT_MAX_TOKENS_VAR},
 };
 
@@ -846,8 +846,9 @@ impl Block for LlmBlock {
         // no `user_id`/`is_admin` preamble and the provider/model handlers no
         // longer re-check `is_admin`. `{id}`/`{backend_id}`/`{model_id}` are
         // bound into `req.param.*` for the handlers' `msg.var` readers.
-        let Some(route) = endpoint_match::dispatch(&mut msg, ROUTES) else {
-            return err_not_found("not found");
+        let route = match endpoint_match::resolve(&mut msg, ROUTES) {
+            Ok(route) => route,
+            Err(not_found) => return not_found,
         };
         match route {
             Route::ChatPage | Route::ThreadPage => pages::page(ctx, &msg).await,

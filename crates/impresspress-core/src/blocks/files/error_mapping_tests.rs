@@ -9,7 +9,8 @@
 //!
 //! A JSON route must end in the door's own "Access denied": the status alone
 //! would also match a route gate's refusal, which carries its own message. A
-//! full page must be the styled 403 `ui::refused_response` draws ("Go home"),
+//! full page must be the styled 403 — `ui::refused_response` ("Go home"), or
+//! the same refusal inside the admin shell (`ui::shell_error_page`) —
 //! with none of the denial's own text in it.
 
 use wafer_block::ServiceOp;
@@ -88,7 +89,10 @@ async fn expect_refused_page(misses: &mut Vec<String>, ctx: &dyn Context, msg: M
         .await;
     let parts = wafer_block::http_codec::collect_http_response(out).await;
     let html = String::from_utf8_lossy(&parts.body);
-    if parts.status != 403 || !html.contains("Go home") || html.contains("holds no grant") {
+    if parts.status != 403
+        || !(html.contains("Go home") || html.contains("status-page--in-shell"))
+        || html.contains("holds no grant")
+    {
         misses.push(format!("{path}: {} {html}", parts.status));
     }
 }

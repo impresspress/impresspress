@@ -238,7 +238,10 @@ pub fn html_response(markup: maud::Markup) -> wafer_run::OutputStream {
 pub struct Page<'a> {
     pub config: &'a SiteConfig,
     pub title: &'a str,
-    /// The audience's sidebar groups (admin or portal).
+    /// Whose sidebar this is — rendered as the sidebar's `data-nav`.
+    pub nav_kind: NavKind,
+    /// The audience's sidebar groups (admin or portal), already filtered to
+    /// what this viewer can reach.
     pub nav: &'a [NavGroup],
     /// The signed-in viewer and their profile menu; `None` renders no user
     /// row.
@@ -257,6 +260,7 @@ pub struct Page<'a> {
 /// drop the padding, because it never chooses.
 pub struct PageBody {
     layout: shell::BodyLayout,
+    subnav: Option<maud::Markup>,
     markup: maud::Markup,
 }
 
@@ -266,7 +270,20 @@ impl PageBody {
     pub(crate) fn full_bleed(markup: maud::Markup) -> Self {
         Self {
             layout: shell::BodyLayout::Flush,
+            subnav: None,
             markup,
+        }
+    }
+
+    /// The same body under a block's own section links
+    /// ([`components::subnav`]) — Tickets' Inbox / Types / Settings /
+    /// Endpoints, say. The shell renders them between the page header and
+    /// the content card, outside the body, so a full-bleed body (the LLM
+    /// chat) carries them as well as a padded one does.
+    pub fn with_subnav(self, subnav: maud::Markup) -> Self {
+        Self {
+            subnav: Some(subnav),
+            ..self
         }
     }
 
@@ -276,6 +293,7 @@ impl PageBody {
         let markup = self.markup;
         Self {
             layout: self.layout,
+            subnav: self.subnav,
             markup: maud::html! { (markup) (extra) },
         }
     }
@@ -295,6 +313,7 @@ impl From<maud::Markup> for PageBody {
     fn from(markup: maud::Markup) -> Self {
         Self {
             layout: shell::BodyLayout::Padded,
+            subnav: None,
             markup,
         }
     }
@@ -315,6 +334,7 @@ impl<'a> Page<'a> {
             self.config,
             html! {
                 (shell::shell(
+                    self.nav_kind,
                     self.nav,
                     self.signed_in,
                     self.current_path,
@@ -323,6 +343,7 @@ impl<'a> Page<'a> {
                     &self.config.app_name,
                     self.topbar,
                     self.body.layout,
+                    self.body.subnav,
                     self.body.markup,
                 ))
                 (palette_markup)
@@ -361,6 +382,14 @@ pub enum NavKind {
 }
 
 impl NavKind {
+    /// The name the sidebar carries in its `data-nav` attribute.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            NavKind::Portal => "portal",
+            NavKind::Admin => "admin",
+        }
+    }
+
     fn groups(self) -> Vec<NavGroup> {
         match self {
             NavKind::Portal => nav_groups::portal(),
@@ -372,24 +401,41 @@ impl NavKind {
 /// Declarative inputs for [`shell_page`] — everything a block page needs to
 /// render the standard chrome, minus the body and the data ([`SiteConfig`] /
 /// [`UserInfo`] are loaded internally).
+///
+/// Built only through [`Shell::admin`] or [`Shell::portal`]: the audience —
+/// and so the sidebar — is the first thing a page says, explicitly, at the
+/// one place it builds its chrome. There is no route-to-nav mapping and no
+/// default; the fields are private so a struct literal cannot skip the
+/// choice. `htmx_guard::every_admin_page_renders_the_admin_sidebar` holds
+/// every admin route to `admin`.
 pub struct Shell<'a> {
     /// `<title>` text.
-    pub title: &'a str,
+    title: &'a str,
     /// Which sidebar to render.
-    pub nav: NavKind,
+    nav: NavKind,
     /// Breadcrumb trail; the LAST crumb is the page title (the page's only
-    /// `h1`). A single `Crumb { label, href: None }` is the common case; a
-    /// detail page passes its ancestors first. See [`shell::Topbar`].
-    pub crumbs: Vec<shell::Crumb<'a>>,
+    /// `h1`). See [`shell::Topbar`].
+    crumbs: Vec<shell::Crumb<'a>>,
     /// One-line page description, on its own line under the title.
-    pub subtitle: Option<&'a str>,
+    subtitle: Option<&'a str>,
     /// Page-level actions in the topbar, left to right — primary action last.
-    pub actions: Vec<maud::Markup>,
+    actions: Vec<maud::Markup>,
 }
 
 impl<'a> Shell<'a> {
-    /// The single-crumb, no-subtitle, no-action shell that almost every page uses.
-    pub fn simple(title: &'a str, nav: NavKind, crumb_label: &'a str) -> Self {
+    /// An admin page: the admin sidebar, `title` as the `<title>` and a
+    /// single crumb `crumb_label` as the page heading.
+    pub fn admin(title: &'a str, crumb_label: &'a str) -> Self {
+        Self::new(NavKind::Admin, title, crumb_label)
+    }
+
+    /// A signed-in end user's page: the portal sidebar, `title` as the
+    /// `<title>` and a single crumb `crumb_label` as the page heading.
+    pub fn portal(title: &'a str, crumb_label: &'a str) -> Self {
+        Self::new(NavKind::Portal, title, crumb_label)
+    }
+
+    fn new(nav: NavKind, title: &'a str, crumb_label: &'a str) -> Self {
         Self {
             title,
             nav,
@@ -400,6 +446,25 @@ impl<'a> Shell<'a> {
             subtitle: None,
             actions: Vec::new(),
         }
+    }
+
+    /// Replace the single crumb with a full trail — ancestors first, the
+    /// page itself last (a detail page: `[Products → /b/…, Widget]`).
+    pub fn trail(self, crumbs: Vec<shell::Crumb<'a>>) -> Self {
+        Self { crumbs, ..self }
+    }
+
+    /// The one-line description under the title.
+    pub fn subtitle(self, subtitle: &'a str) -> Self {
+        Self {
+            subtitle: Some(subtitle),
+            ..self
+        }
+    }
+
+    /// The page's topbar actions, primary last.
+    pub fn actions(self, actions: Vec<maud::Markup>) -> Self {
+        Self { actions, ..self }
     }
 }
 
@@ -468,16 +533,21 @@ pub async fn shell_document(
         .map(|b| b.name.as_str())
         .collect();
     let features = crate::routing::gate_from_request(ctx, msg);
-    nav_groups::retain_reachable(&mut groups, &registered, &features);
+    // ... and the links this viewer's role would be refused: the router's
+    // own access decision for the item's page, asked with this request's
+    // identity, so a non-admin is never shown an admin-only link.
+    let admits = |href: &str| crate::routing::admits_page(ctx.registered_blocks(), msg, href);
+    nav_groups::retain_reachable(&mut groups, &registered, &features, &admits);
     // The profile menu's account links go through the same filter: a link
     // the router would refuse is no way to change a password.
     let mut account_menu = nav_groups::account_menu();
-    nav_groups::retain_reachable(&mut account_menu, &registered, &features);
+    nav_groups::retain_reachable(&mut account_menu, &registered, &features, &admits);
     let account_links: Vec<NavItem> = account_menu.into_iter().flat_map(|g| g.items).collect();
     let path = msg.path().to_string();
     Ok(Page {
         config: &config,
         title: shell.title,
+        nav_kind: shell.nav,
         nav: &groups,
         signed_in: user.as_ref().map(|user| sidebar::SignedIn {
             user,
@@ -598,10 +668,23 @@ pub fn unauthenticated_response(msg: &wafer_run::Message) -> wafer_run::OutputSt
     }
 }
 
-/// Return styled 404 for browser requests, JSON for API requests.
-pub fn not_found_response(msg: &wafer_run::Message) -> wafer_run::OutputStream {
+/// Whether `msg` is a browser asking for a page rather than an API call: it
+/// accepts HTML and not JSON, and its path is not under an `/api/` segment.
+/// An API path answers JSON whatever the client accepts — a browser tab
+/// opened on `/b/admin/api/nope` is still talking to the API.
+fn wants_page(msg: &wafer_run::Message) -> bool {
     let accept = msg.get_meta("http.header.accept");
-    if accept.contains("text/html") && !accept.contains("application/json") {
+    accept.contains("text/html")
+        && !accept.contains("application/json")
+        && !msg.path().split('/').any(|segment| segment == "api")
+}
+
+/// Return styled 404 for browser requests, JSON for API requests (by
+/// `Accept` and path — see [`wants_page`]). The answer every block gives a
+/// path its route table does not match ([`crate::endpoint_match::resolve`])
+/// and the router gives a path no block owns.
+pub fn not_found_response(msg: &wafer_run::Message) -> wafer_run::OutputStream {
+    if wants_page(msg) {
         status_response(
             404,
             "Not found",
@@ -631,11 +714,11 @@ pub fn server_error_response(msg: &wafer_run::Message) -> wafer_run::OutputStrea
     let accept = msg.get_meta("http.header.accept");
     if accept.contains("text/html") && !accept.contains("application/json") {
         status_response(
-            500,
+            SERVER_ERROR_COPY.status,
             "Server error",
-            "500",
-            "Something went wrong",
-            "An unexpected error occurred. Please try again.",
+            SERVER_ERROR_COPY.code,
+            SERVER_ERROR_COPY.title,
+            SERVER_ERROR_COPY.body,
             ("Go home", "/"),
         )
     } else {
@@ -661,6 +744,40 @@ pub fn refused_response(
     if !accept.contains("text/html") || accept.contains("application/json") {
         return wafer_run::OutputStream::error(error);
     }
+    match refusal_copy(&error) {
+        Some(copy) => status_response(
+            copy.status,
+            copy.title,
+            copy.code,
+            copy.title,
+            copy.body,
+            ("Go home", "/"),
+        ),
+        None => wafer_run::OutputStream::error(error),
+    }
+}
+
+/// What a status page says: its HTTP status, the code shown large, the
+/// title and one sentence.
+struct StatusCopy {
+    status: u16,
+    code: &'static str,
+    title: &'static str,
+    body: &'static str,
+}
+
+/// The 500 a page whose read failed answers.
+const SERVER_ERROR_COPY: StatusCopy = StatusCopy {
+    status: 500,
+    code: "500",
+    title: "Something went wrong",
+    body: "An unexpected error occurred. Please try again.",
+};
+
+/// The page a classified refusal is shown as — [`refused_response`] standing
+/// alone, [`shell_error_page`] inside the shell — or `None` for a refusal no
+/// page is drawn for (it is answered as the error it is).
+fn refusal_copy(error: &wafer_run::WaferError) -> Option<StatusCopy> {
     let is_statement_budget = matches!(
         error.detail_code(),
         Some(
@@ -675,43 +792,115 @@ pub fn refused_response(
         } else {
             (400, "400")
         };
-        return status_response(
+        return Some(StatusCopy {
             status,
-            "Too much at once",
             code,
-            "Too much at once",
-            "This page needs more database work than one request may do, so reloading it \
-             will not help. Please let the site administrator know.",
-            ("Go home", "/"),
-        );
+            title: "Too much at once",
+            body: "This page needs more database work than one request may do, so reloading \
+                   it will not help. Please let the site administrator know.",
+        });
     }
     match error.code {
-        wafer_run::ErrorCode::PermissionDenied => status_response(
-            403,
-            "Forbidden",
-            "403",
-            "Forbidden",
-            "You don't have access to this page.",
+        wafer_run::ErrorCode::PermissionDenied => Some(StatusCopy {
+            status: 403,
+            code: "403",
+            title: "Forbidden",
+            body: "You don't have access to this page.",
+        }),
+        wafer_run::ErrorCode::ResourceExhausted => Some(StatusCopy {
+            status: 429,
+            code: "429",
+            title: "Too many requests",
+            body: "This page is over its usage limit right now. Please try again later.",
+        }),
+        wafer_run::ErrorCode::AlreadyExists => Some(StatusCopy {
+            status: 409,
+            code: "409",
+            title: "Already exists",
+            body: "This page tried to write an entry that already exists, so reloading it \
+                   will not help. Please let the site administrator know.",
+        }),
+        _ => None,
+    }
+}
+
+/// Where an error page inside the shell sends the operator: a detail page's
+/// list, a section's first page, or — for a top-level page — the dashboard.
+/// `label` is the link's whole text ("Back to Vector indexes").
+pub struct BackLink<'a> {
+    pub label: &'a str,
+    pub href: &'a str,
+}
+
+impl BackLink<'static> {
+    /// The admin dashboard: where a top-level admin page's error points.
+    pub const ADMIN_DASHBOARD: BackLink<'static> = BackLink {
+        label: "Back to the dashboard",
+        href: "/b/admin/",
+    };
+}
+
+/// [`crate::blocks::crud::db_error_page`] for a signed-in page that renders
+/// inside the shell: the same classification and status, but the error is
+/// drawn in the page's own frame — its sidebar, its header (`shell`, the
+/// crumbs the page would have shown) — with a link `back` to where the
+/// operator came from, instead of a bare full-screen page whose only way out
+/// is "Go home". `subnav` is the block's section links the page carries
+/// ([`PageBody::with_subnav`]), if any. An API caller gets exactly what
+/// `db_error_page` answers.
+///
+/// When the chrome itself cannot be drawn (its site-config read failed too)
+/// the bare page is the answer, since there is no frame to draw it in.
+pub async fn shell_error_page(
+    ctx: &dyn wafer_run::context::Context,
+    msg: &wafer_run::Message,
+    shell: Shell<'_>,
+    subnav: Option<maud::Markup>,
+    back: BackLink<'_>,
+    error: wafer_run::WaferError,
+    context: &str,
+) -> wafer_run::OutputStream {
+    use crate::blocks::crud::{classify_db_error, DbFailure};
+    if !wants_page(msg) {
+        return crate::blocks::crud::db_error_page(msg, error, context);
+    }
+    let copy = match classify_db_error(error, None, context) {
+        DbFailure::Refused(refusal) => {
+            let error = refusal.into_error();
+            match refusal_copy(&error) {
+                Some(copy) => copy,
+                None => return wafer_run::OutputStream::error(error),
+            }
+        }
+        DbFailure::Internal(fault) => {
+            tracing::error!(context = %context, error = %fault, "page read failed");
+            SERVER_ERROR_COPY
+        }
+    };
+    let mut body = PageBody::from(templates::status_panel(
+        copy.code,
+        copy.title,
+        copy.body,
+        (back.label, back.href),
+    ));
+    if let Some(subnav) = subnav {
+        body = body.with_subnav(subnav);
+    }
+    match shell_document(ctx, msg, shell, body).await {
+        Ok(document) => crate::http::ResponseBuilder::new()
+            .status(copy.status)
+            .body(
+                document.into_string().into_bytes(),
+                "text/html; charset=utf-8",
+            ),
+        Err(_) => status_response(
+            copy.status,
+            copy.title,
+            copy.code,
+            copy.title,
+            copy.body,
             ("Go home", "/"),
         ),
-        wafer_run::ErrorCode::ResourceExhausted => status_response(
-            429,
-            "Too many requests",
-            "429",
-            "Too many requests",
-            "This page is over its usage limit right now. Please try again later.",
-            ("Go home", "/"),
-        ),
-        wafer_run::ErrorCode::AlreadyExists => status_response(
-            409,
-            "Already exists",
-            "409",
-            "Already exists",
-            "This page tried to write an entry that already exists, so reloading it will not \
-             help. Please let the site administrator know.",
-            ("Go home", "/"),
-        ),
-        _ => wafer_run::OutputStream::error(error),
     }
 }
 
@@ -1061,6 +1250,7 @@ mod tests {
         Page {
             config,
             title: "Dashboard",
+            nav_kind: NavKind::Admin,
             nav: groups,
             signed_in: None,
             current_path: "/b/admin/",

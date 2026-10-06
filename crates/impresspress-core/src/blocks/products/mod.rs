@@ -5,7 +5,7 @@ mod handlers;
 pub(crate) mod migrations;
 pub mod money;
 pub mod offer_pricing;
-mod pages;
+pub(crate) mod pages;
 mod purchase;
 mod repo;
 mod routes;
@@ -79,11 +79,7 @@ use self::config::{
     STRIPE_SECRET_KEY, STRIPE_WEBHOOK_SECRET, WEBHOOK_SECRET, WEBHOOK_URL,
 };
 use super::rate_limit::{apply_route_limit, UserRateLimiter};
-use crate::{
-    blocks::crud,
-    endpoint_match,
-    http::{err_forbidden, err_not_found},
-};
+use crate::{blocks::crud, endpoint_match, http::err_forbidden};
 
 /// Adapter-injected runtime identity. The browser service-worker adapter sets
 /// this directly on its in-memory ConfigService after loading persisted
@@ -383,8 +379,9 @@ crate::impresspress_feature_block! {
         // `{offer_id}`, `{preset_id}` and `{link_id}` into `req.param.*` for
         // the handlers' `msg.var` readers; nothing else in this block reads
         // a path.
-        let Some(route) = endpoint_match::dispatch(&mut msg, routes::ROUTES) else {
-            return err_not_found("not found");
+        let route = match endpoint_match::resolve(&mut msg, routes::ROUTES) {
+            Ok(route) => route,
+            Err(not_found) => return not_found,
         };
         // Guest pricing, checkout and receipt polling spend route-specific
         // IP buckets; every other JSON route spends the per-user read/write

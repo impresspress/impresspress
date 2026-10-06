@@ -12,6 +12,15 @@ use super::{assets, SiteConfig};
 const HTMX_CONFIG: &str = r#"{"allowEval":false}"#;
 
 /// Render a full HTML page with head (CSS + htmx) and body.
+/// Whether a response body is a whole document — what [`page`] renders —
+/// rather than a fragment or a JSON error. For tests outside `ui/` that tell
+/// a page from an API answer: the document's markers are spelled here, beside
+/// the template that writes them, and nowhere else.
+#[cfg(test)]
+pub(crate) fn is_document(body: &str) -> bool {
+    body.starts_with(DOCTYPE.0)
+}
+
 pub fn page(title: &str, config: &SiteConfig, body: Markup) -> Markup {
     // Brand accent override. Sanitized to a safe CSS-color charset so a
     // stored value can't break out of the <style> tag. `--primary-hover`

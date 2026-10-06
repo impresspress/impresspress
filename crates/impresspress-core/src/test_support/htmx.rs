@@ -263,6 +263,69 @@ pub fn serialize_form(inner: &str) -> Vec<Field> {
     fields
 }
 
+/// What a shared settings form (`ui::settings_form`) on `html` posts when
+/// the operator presses Save without changing anything: its `fetch` URL and
+/// the JSON body its submit script builds — every named field's value, a
+/// switch as `"true"`/`"false"`, and nothing from a gated region whose switch
+/// is off. `None` when the page has no settings form.
+///
+/// The form is not an htmx control (it posts JSON through `fetch`), so
+/// [`fire_every_control`] never sees it — which is how every save on the
+/// auth and branding settings pages could answer 500 with the guard green.
+pub fn settings_form_submission(html: &str) -> Option<(String, serde_json::Value)> {
+    const FORM: &str = r#"<form class="settings-form" id="settings-form">"#;
+    let start = html.find(FORM)? + FORM.len();
+    let inner = &html[start..start + html[start..].find("</form>")?];
+    let script = &html[start..];
+    let url_start = script.find("fetch(\"")? + "fetch(\"".len();
+    let url = script[url_start..url_start + script[url_start..].find('"')?].to_string();
+
+    // A gated region whose switch is off, as `[open, end)` byte ranges.
+    let mut skipped: Vec<(usize, usize)> = Vec::new();
+    for (i, _) in inner.match_indices(r#"<div class="settings-section__gated" id=""#) {
+        let tag = &inner[i..=i + inner[i..].find('>')?];
+        let region = attr_value(tag, "id")?;
+        let gate_at = inner.find(&format!(r#"aria-controls="{region}""#))?;
+        let gate_tag = &inner[inner[..gate_at].rfind('<')?..gate_at];
+        if !has_bool_attr(gate_tag, "checked") {
+            let end = ["</section>", "</details>"]
+                .iter()
+                .filter_map(|close| inner[i..].find(close))
+                .min()
+                .map_or(inner.len(), |n| i + n);
+            skipped.push((i, end));
+        }
+    }
+    let values: std::collections::HashMap<String, String> = serialize_form(inner)
+        .into_iter()
+        .map(|field| (field.name, field.value))
+        .collect();
+    let mut body = serde_json::Map::new();
+    for open in ["<input", "<textarea", "<select"] {
+        for (i, _) in inner.match_indices(open) {
+            if skipped.iter().any(|(from, to)| (*from..*to).contains(&i)) {
+                continue;
+            }
+            let tag = &inner[i..=i + inner[i..].find('>')?];
+            let Some(name) = attr_value(tag, "name") else {
+                continue;
+            };
+            let value = if attr_value(tag, "type").as_deref() == Some("checkbox") {
+                if has_bool_attr(tag, "checked") {
+                    "true"
+                } else {
+                    "false"
+                }
+                .to_string()
+            } else {
+                values.get(&name).cloned().unwrap_or_default()
+            };
+            body.insert(name, serde_json::Value::String(value));
+        }
+    }
+    Some((url, serde_json::Value::Object(body)))
+}
+
 /// The `application/x-www-form-urlencoded` fields htmx sends for `control`:
 /// none for a bare button, the form's fields otherwise — with `operator_input`
 /// standing in for what the operator fills in.

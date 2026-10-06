@@ -40,10 +40,16 @@ pub(super) fn entry() -> Entry {
     Entry {
         block: "impresspress/userportal",
         fixture: Some(fixture),
-        exempt: &[(
-            "/b/userportal/config",
-            Exempt::NotAPage("public JSON the chrome reads for the portal's branding"),
-        )],
+        exempt: &[
+            (
+                "/b/userportal/config",
+                Exempt::NotAPage("public JSON the chrome reads for the portal's branding"),
+            ),
+            (
+                "/b/userportal/admin/settings",
+                Exempt::MovedTo("/b/admin/settings/branding"),
+            ),
+        ],
         must_reach: &[],
         cannot_succeed: &[],
         must_fire: &[
@@ -152,7 +158,6 @@ fn fixture() -> std::pin::Pin<Box<dyn std::future::Future<Output = Fixture>>> {
                 Page::at("/b/userportal/profile"),
                 Page::at("/b/userportal/sessions"),
                 Page::at("/b/userportal/security"),
-                Page::at("/b/userportal/admin/settings"),
                 Page::at("/b/userportal/admin/buttons"),
                 Page::at(format!("/b/userportal/admin/buttons/{button_id}/edit")),
             ],

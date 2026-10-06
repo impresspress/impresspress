@@ -9,7 +9,7 @@
 //!
 //! A JSON route must end in the door's own "Access denied": the status alone
 //! would also match a route gate's refusal, which carries its own message. A
-//! full page must be the styled 403 `ui::refused_response` draws ("Go home"),
+//! full page must be the 403 drawn inside the shell (`ui::shell_error_page`),
 //! not the sign-in 403 `ui::forbidden_response` draws for a missing role.
 
 use wafer_run::{
@@ -103,7 +103,7 @@ async fn assert_refused_page(
 ) {
     let parts = browser_request(ctx, page_msg(path)).await;
     let html = String::from_utf8_lossy(&parts.body);
-    if parts.status != 403 || !html.contains("Go home") || shows_the_denial(&html) {
+    if parts.status != 403 || !html.contains("status-page--in-shell") || shows_the_denial(&html) {
         misses.push(format!("{path}: {} {html}", parts.status));
     }
 }
@@ -526,7 +526,10 @@ async fn page_read_denials_are_the_403_page() {
     let mut misses = Vec::new();
     let (ctx, _) = fixture().await;
     for (ops, path) in [
-        (every_op_on(STORAGE_ACCESS_LOGS_TABLE), "/b/admin/storage"),
+        (
+            every_op_on(STORAGE_ACCESS_LOGS_TABLE),
+            "/b/admin/logs?tab=storage",
+        ),
         (every_op_on(block_settings::TABLE), "/b/admin/blocks"),
         (vec![("database.query_raw", "")], "/b/admin/database"),
         (

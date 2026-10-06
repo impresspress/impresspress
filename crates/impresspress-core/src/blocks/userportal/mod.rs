@@ -1,4 +1,3 @@
-use maud::html;
 use wafer_block::db::{ListOptions, SortField};
 use wafer_core::clients::{config, database as db};
 use wafer_run::{
@@ -9,13 +8,11 @@ use wafer_run::{
 use crate::{
     blocks::crud,
     config_vars::{
-        ALLOW_SIGNUP_KEY, ALLOW_USER_PRODUCTS_KEY, APP_NAME_KEY, AUTH_LOGO_URL_KEY,
-        DEFAULT_APP_NAME, ENABLE_OAUTH_KEY, FAVICON_URL_KEY, LOGO_ICON_URL_KEY, LOGO_URL_KEY,
-        PRIMARY_COLOR_KEY,
+        ALLOW_SIGNUP_KEY, ALLOW_USER_PRODUCTS_KEY, APP_NAME_KEY, DEFAULT_APP_NAME,
+        ENABLE_OAUTH_KEY, PRIMARY_COLOR_KEY,
     },
     endpoint_match::{self, EndpointRoute},
-    http::{err_bad_request, err_forbidden, err_not_found, err_unauthenticated, ok_json},
-    ui::{self, settings_form},
+    http::{err_bad_request, err_forbidden, err_unauthenticated, ok_json},
     util::parse_form_body,
 };
 
@@ -41,8 +38,8 @@ enum Route {
     Security,
     UnlinkProvider,
     Config,
-    AdminSettingsPage,
-    AdminSaveSettings,
+    /// Branding moved to the admin block's Settings › Branding.
+    AdminSettingsRedirect,
     AdminButtonsPage,
     AdminCreateButton,
     AdminEditButtonForm,
@@ -84,18 +81,15 @@ const ROUTES: &[EndpointRoute<Route>] = &[
     .summary("Unlink an OAuth provider"),
     EndpointRoute::public(HttpMethod::Get, "/b/userportal/config", Route::Config)
         .summary("Portal configuration"),
+    // Branding is the admin block's Settings › Branding now: every key on it
+    // is `WAFER_RUN_SHARED__*`, which only the admin block may write. The old
+    // URL redirects there.
     EndpointRoute::admin(
         HttpMethod::Get,
         "/b/userportal/admin/settings",
-        Route::AdminSettingsPage,
+        Route::AdminSettingsRedirect,
     )
-    .summary("Branding settings"),
-    EndpointRoute::admin(
-        HttpMethod::Post,
-        "/b/userportal/admin/settings",
-        Route::AdminSaveSettings,
-    )
-    .summary("Save branding settings"),
+    .summary("Branding settings (moved to the admin Settings › Branding tab)"),
     EndpointRoute::admin(
         HttpMethod::Get,
         "/b/userportal/admin/buttons",
@@ -151,7 +145,7 @@ crate::impresspress_feature_block! {
         .description("User-facing profile page with editable display name, admin-configurable navigation buttons, and portal configuration endpoint.")
         .endpoints(endpoint_match::declare(ROUTES))
         .config_keys(vec![])
-        .admin_url("/b/userportal/admin/settings")
+        .admin_url("/b/userportal/admin/buttons")
         // Not disableable, like `impresspress/auth-ui`: this block is the
         // signed-in account surface — profile, sessions, and the Security
         // page that holds the account's one change-password form
@@ -166,8 +160,9 @@ crate::impresspress_feature_block! {
         // declared `AuthLevel`; the block holds no `user_id` / `is_admin`
         // preamble. `{family}` / `{id}` are bound into `req.param.*` for the
         // handlers' `msg.var` readers.
-        let Some(route) = endpoint_match::dispatch(&mut msg, ROUTES) else {
-            return err_not_found("not found");
+        let route = match endpoint_match::resolve(&mut msg, ROUTES) {
+            Ok(route) => route,
+            Err(not_found) => return not_found,
         };
         match route {
             Route::Dashboard => pages::dashboard::dashboard_page(ctx, &msg).await,
@@ -178,8 +173,9 @@ crate::impresspress_feature_block! {
             Route::Security => pages::security::security_page(ctx, &msg).await,
             Route::UnlinkProvider => pages::security::handle_unlink(ctx, &msg).await,
             Route::Config => this.handle_config(ctx, &msg).await,
-            Route::AdminSettingsPage => admin_settings_page(ctx, &msg).await,
-            Route::AdminSaveSettings => handle_save_settings(ctx, &msg, input).await,
+            Route::AdminSettingsRedirect => {
+                crate::http::redirect(308, "/b/admin/settings/branding")
+            }
             Route::AdminButtonsPage => pages::admin_buttons::admin_buttons_page(ctx, &msg).await,
             Route::AdminCreateButton => {
                 pages::admin_buttons::handle_create_button(ctx, &msg, input).await
@@ -494,72 +490,6 @@ mod update_profile_csrf_tests {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Admin: Branding Settings
-// ---------------------------------------------------------------------------
-
-/// The shared branding config vars rendered on the portal settings page,
-/// pulled from their central `config_vars::shared_var` declarations (single
-/// source of truth — no parallel tuple table that had drifted on the logo-URL
-/// input types and the favicon default).
-fn branding_vars() -> Vec<wafer_run::ConfigVar> {
-    [
-        APP_NAME_KEY,
-        LOGO_URL_KEY,
-        LOGO_ICON_URL_KEY,
-        AUTH_LOGO_URL_KEY,
-        FAVICON_URL_KEY,
-        PRIMARY_COLOR_KEY,
-    ]
-    .into_iter()
-    .map(crate::config_vars::shared_var)
-    .collect()
-}
-
-async fn admin_settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
-    let vars = branding_vars();
-    let sections = [settings_form::SettingsSection::new("Branding", &vars)];
-    let form = match settings_form::settings_form(
-        ctx,
-        "/b/userportal/admin/settings",
-        &sections,
-        html! {},
-    )
-    .await
-    {
-        Ok(form) => form,
-        Err(e) => {
-            return crud::db_error_page(
-                msg,
-                e,
-                "userportal branding settings: current values read failed",
-            )
-        }
-    };
-    ui::shell_page(
-        ctx,
-        msg,
-        ui::Shell {
-            subtitle: Some("Customize your application appearance"),
-            ..ui::Shell::simple(
-                "Branding settings",
-                ui::NavKind::Portal,
-                "Branding settings",
-            )
-        },
-        form,
-    )
-    .await
-}
-
-async fn handle_save_settings(
-    ctx: &dyn Context,
-    msg: &Message,
-    input: InputStream,
-) -> OutputStream {
-    settings_form::save_settings(ctx, msg, input, &branding_vars(), "userportal").await
-}
-
 #[cfg(test)]
 mod test_support {
     use wafer_run::{context::Context, InputStream, Message};
@@ -610,49 +540,26 @@ mod table_tests {
     use wafer_run::Block as _;
 
     use super::*;
-    use crate::config_vars::APP_NAME_KEY;
 
-    /// The branding page is a settings form whose Save posts every field.
-    /// When the stored branding cannot be read it is a 500, never the form
-    /// filled from the boot map and the declared defaults.
+    /// Branding is the admin block's Settings › Branding;
+    /// `/b/userportal/admin/settings` redirects there.
     #[tokio::test]
-    async fn a_failed_branding_read_renders_no_form() {
-        let ctx = crate::test_support::TestContext::with_userportal()
-            .await
-            .break_reads();
-
-        let (status, html) = test_support::browser_request(
-            &ctx,
-            crate::test_support::admin_msg("retrieve", "/b/userportal/admin/settings"),
-            "",
-        )
-        .await;
-
-        assert_eq!(status, 500);
-        assert!(!html.contains("<form"), "{html}");
-    }
-
-    /// Control: a healthy read renders the form with the stored value.
-    #[tokio::test]
-    async fn the_branding_form_shows_the_stored_app_name() {
+    async fn the_branding_url_redirects_to_the_admin_settings_tab() {
         let ctx = crate::test_support::TestContext::with_userportal().await;
-        let app_name = crate::test_support::unique_config_value();
-        // Staged as the operator would: the shared key is the admin block's
-        // to write, not the portal's.
-        wafer_core::clients::config::set(&ctx.fixture(), APP_NAME_KEY, &app_name)
-            .await
-            .expect("store the app name");
-
-        let (status, html) = test_support::browser_request(
-            &ctx,
-            crate::test_support::admin_msg("retrieve", "/b/userportal/admin/settings"),
-            "",
+        let mut msg = crate::test_support::admin_msg("retrieve", "/b/userportal/admin/settings");
+        msg.set_meta("http.header.accept", "text/html");
+        let parts = wafer_block::http_codec::collect_http_response(
+            wafer_run::Block::handle(&UserPortalBlock::new(), &ctx, msg, InputStream::empty())
+                .await,
         )
         .await;
-
-        assert_eq!(status, 200);
-        assert!(html.contains("<form"), "{html}");
-        assert!(html.contains(&format!(r#"value="{app_name}""#)), "{html}");
+        assert_eq!(parts.status, 308);
+        let location = parts
+            .headers
+            .iter()
+            .find(|(k, _)| k.eq_ignore_ascii_case("location"))
+            .map(|(_, v)| v.as_str());
+        assert_eq!(location, Some("/b/admin/settings/branding"));
     }
 
     /// `info().endpoints` is generated from `ROUTES`; nothing else declares

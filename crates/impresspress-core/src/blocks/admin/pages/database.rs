@@ -416,7 +416,14 @@ pub async fn database_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let backend = match crate::db_backend(ctx).await {
         Ok(backend) => backend,
         Err(e) => {
-            return crate::blocks::crud::db_error_page(msg, e, "database page: backend read failed")
+            return super::admin_error_page(
+                ctx,
+                msg,
+                "Database",
+                e,
+                "database page: backend read failed",
+            )
+            .await
         }
     };
     let selected = msg.query("table");
@@ -433,11 +440,14 @@ pub async fn database_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let (tables, right) = match read.await {
         Ok(read) => read,
         Err(e) => {
-            return crate::blocks::crud::db_error_page(
+            return super::admin_error_page(
+                ctx,
                 msg,
+                "Database",
                 e,
                 "admin database page: introspection read failed",
             )
+            .await
         }
     };
 

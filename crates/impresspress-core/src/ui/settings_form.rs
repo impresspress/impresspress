@@ -516,6 +516,10 @@ pub async fn settings_form(
 /// status, not a 200-with-`error`-key body — the residual finding folded in
 /// from S1-I).
 ///
+/// Called only by the admin block — every settings form posts to it, since
+/// WRAP lets only the admin block write `WAFER_RUN_SHARED__*` keys — so it
+/// runs in a frame that may read the `variables` rows it is about to write.
+///
 /// Writes one `settings.update` audit row naming `block_label` and the keys
 /// this save actually wrote — the same trail
 /// `ops::update_variable` writes for the identical
@@ -552,21 +556,13 @@ pub async fn save_settings(
     // round-tripped a read, and storing it would replace the secret with eight
     // asterisks. See `util::is_masked_submission`.
     //
-    // Checked for EVERY allowlisted var, not only the ones this module can see
-    // are sensitive, and the asymmetry is the point. The writer
-    // (`blocks::config::ConfigWrite::write`) decides on the STORED row's flag;
-    // this module only has the declared `ConfigVar`, and the two diverge for a
-    // declared var that is neither `Password`, `auto_generate`, `_SECRET` nor
-    // `_KEY` but whose row an operator flagged sensitive — reachable from the
-    // Variables edit modal and from `handle_create`'s absent-means-sensitive
-    // default. It cannot close that gap by looking: WRAP denies four of
-    // `save_settings`' five callers (legalpages, auth_ui, userportal, products;
-    // `admin::pages::email` is the exception, since it runs as the admin block
-    // itself) the admin `variables` table, which is the whole reason
-    // `blocks::config` reads it through the raw `DatabaseService` — and a
-    // shared helper has to work for the four. So it refuses what it cannot RULE
-    // OUT, never a subset of the writer's refusals, which is the only shape
-    // that guarantees no write has started when a refusal goes out.
+    // Checked for EVERY allowlisted var, not only the ones the declaration
+    // says are sensitive: the writer (`blocks::config::ConfigWrite::write`)
+    // decides on the STORED row's flag, and a declared-plain row an operator
+    // flagged sensitive (the Variables edit modal, `handle_create`'s
+    // absent-means-sensitive default) is one the declaration cannot see. Any
+    // mask that differs from the stored value is refused — a superset of the
+    // writer's mask refusals, so none of them can come from inside the loop.
     //
     // What keeps that from taking the page down with it: the refusal is for a
     // mask that would REPLACE a value, so a submission equal to what is already
@@ -589,12 +585,19 @@ pub async fn save_settings(
     // refused to render.
     //
     // `ConfigWrite::write` asks it the same way, against a non-empty row else
-    // the boot map, and that is load-bearing rather than tidy: it compared
-    // against the row alone once, so for a key with no row (or an empty one)
-    // whose BOOT value is the mask, this pre-pass allowed and the writer
-    // refused — mid-loop, page half saved. See
-    // `a_boot_map_value_equal_to_the_mask_is_not_a_half_applied_save`. The two
-    // sides ask one question; neither is left inferring the other's answer.
+    // the boot map, so for a key with no row (or an empty one) whose BOOT
+    // value is the mask the two sides agree. See
+    // `a_boot_map_value_equal_to_the_mask_is_not_a_half_applied_save`.
+    //
+    // The writer's other refusal a form can provoke is clearing a field whose
+    // stored row is flagged sensitive ("Cannot set {key} to an empty value").
+    // A declared-sensitive field submitted blank means "unchanged" and never
+    // reaches the writer; a declared-PLAIN field whose row an operator flagged
+    // does. So an empty submission for a plain field is checked here against
+    // the stored row's flag — the same flag and the same provisioning-only
+    // exemption the writer applies — and refused before any write. With that,
+    // every refusal the writer can give this form is given first by this pass,
+    // and a save is whole or not at all.
     let masked: Vec<&ConfigVar> = allowed
         .iter()
         .filter(|var| {
@@ -614,6 +617,22 @@ pub async fn save_settings(
         let Some(value) = body.get(&var.key) else {
             continue;
         };
+        if value.is_empty()
+            && !is_sensitive_key(&var.key, var.is_sensitive() as i64)
+            && !crate::config_vars::is_provisioning_only_key(&var.key)
+        {
+            match crate::platform_state::variables::get_by_key(ctx, &var.key).await {
+                Ok(Some(row)) if is_sensitive_key(&var.key, i64::from(row.sensitive)) => {
+                    return err_bad_request(&format!(
+                        "{}: this value is stored as sensitive and cannot be cleared here. \
+                         Type the value you want stored.",
+                        var.key
+                    ));
+                }
+                Ok(_) => {}
+                Err(e) => return err_internal("Could not read the current settings", e),
+            }
+        }
         // The declared type's URL rule, plus everything `config::set`'s
         // writer runs — checked here so a refusal cannot land mid-loop after
         // earlier fields have already been written.
@@ -679,19 +698,12 @@ pub async fn save_settings(
         // Surface the first write failure instead of reporting a false
         // "saved" — htmx clients branch on the status, not a 200 body.
         //
-        // A REFUSAL is forwarded with its own code and message rather than
-        // flattened into `err_internal`. `ConfigWrite::write` answers
-        // `InvalidArgument` for the guards it enforces — "Cannot set {key} to
-        // an empty value" is the one that still reaches here, since clearing a
-        // declared-plain field whose ROW an operator flagged is a thing the
-        // rendered form can produce and the pre-pass above cannot predict
-        // (it would have to refuse every clear to catch it, and clearing a
-        // plain field is legitimate). Reported as a 500 "Failed to save X
-        // settings", that told the operator the server broke and named nothing
-        // they could act on; forwarded, it is a 400 naming the key and the
-        // reason. The write it refuses has not happened, but writes ahead of it
-        // in the allowlist have — the residual half-applied save this module
-        // cannot close without the stored flag it is not allowed to read.
+        // A REFUSAL (`InvalidArgument`) is forwarded with its own code and
+        // message rather than flattened into `err_internal`, so the operator
+        // reads the key and the reason. The pre-pass above gives every refusal
+        // the writer can give this form first, so one arriving here means the
+        // two have drifted apart; it still names the key, and the audit row
+        // below still records what landed before it.
         if let Err(e) = config::set(ctx, &var.key, value).await {
             write_failure = Some(if e.code == wafer_run::ErrorCode::InvalidArgument {
                 OutputStream::error(e)
@@ -1417,18 +1429,12 @@ mod tests {
         );
     }
 
-    /// The residual half-applied save this module cannot close still has to
-    /// be readable afterwards: the writer refuses a var mid-loop, everything
-    /// ahead of it in the allowlist is already written, and the audit row
-    /// names exactly those keys rather than being skipped along with the
-    /// failure.
-    ///
-    /// Same fixture as `an_operator_flagged_var_is_refused_before_anything_
-    /// is_written`, submitting an EMPTY value instead of the mask: the
-    /// pre-pass only looks for the mask, so this one reaches the writer,
-    /// which refuses an empty value for a row the operator flagged.
+    /// Clearing a declared-plain field whose stored row an operator flagged
+    /// sensitive is refused by the writer; the pre-pass refuses it first, so
+    /// nothing ahead of it in the allowlist is written and no audit row says
+    /// otherwise. A save is whole or not at all.
     #[tokio::test]
-    async fn a_half_applied_save_audits_the_keys_that_landed() {
+    async fn clearing_an_operator_flagged_row_is_refused_before_anything_is_written() {
         use crate::platform_state::variables::{self, NewVariable};
 
         let ctx = TestContext::with_admin()
@@ -1463,25 +1469,17 @@ mod tests {
             }),
         )
         .await;
-        assert_eq!(
-            crate::test_support::output_http_status(out).await,
-            400,
-            "precondition: the writer refuses the second var mid-loop"
-        );
-        assert_eq!(
+        assert_eq!(crate::test_support::output_http_status(out).await, 400);
+        assert_ne!(
             config::get_default(&ctx, APP_NAME_KEY, "")
                 .await
                 .expect("config read"),
             "Renamed",
-            "precondition: the first var was written before the refusal"
+            "nothing ahead of the refused var was written"
         );
-
-        let rows = crate::test_support::audit_rows(&ctx, "settings.update").await;
-        assert_eq!(rows.len(), 1, "the writes that landed are recorded");
         assert_eq!(
-            crate::util::RecordExt::str_field(&rows[0], "resource"),
-            "settings/test (WAFER_RUN_SHARED__APP_NAME)",
-            "and only the keys that landed are named"
+            crate::test_support::audit_count(&ctx, "settings.update").await,
+            0,
         );
     }
 
@@ -1737,16 +1735,14 @@ mod tests {
     /// field, and that is a deliberate difference from the JSON API.
     ///
     /// `blocks::admin::settings` judges the mask exactly — `"********"` is an
-    /// ordinary value for a row nothing masks, and it can see the row's flag to
-    /// tell. This module cannot: WRAP denies four of its five callers the admin
-    /// `variables` table, and a shared helper has to work for the four. A
-    /// pre-pass that guessed would miss an operator-flagged row and half-apply
-    /// the save (`an_operator_flagged_var_is_refused_before_anything_is_written`),
-    /// so it covers more than the writer does instead — only that can promise
-    /// no write has started.
+    /// ordinary value for a row nothing masks. This pre-pass refuses any mask
+    /// that would replace the stored value instead, whatever the row's flag: a
+    /// superset of the writer's mask refusals, so none of them can arrive
+    /// mid-save after earlier fields were written
+    /// (`an_operator_flagged_var_is_refused_before_anything_is_written`).
     ///
     /// What it gives up is CHANGING a plain setting to eight asterisks through
-    /// a block settings form. Not saving a page that already holds them: a
+    /// a settings form. Not saving a page that already holds them: a
     /// submission equal to the stored value replaces nothing and is allowed —
     /// see `a_plain_field_already_holding_the_mask_does_not_break_the_page`,
     /// which is the whole page this would otherwise have made unsavable.
@@ -1805,8 +1801,9 @@ mod config_store_reproduction {
 
     /// A setting saved through an admin settings form must survive a restart.
     ///
-    /// `save_settings` is the write path behind five admin forms (products,
-    /// legalpages, userportal, email, auth-ui). It calls `config::set`, which
+    /// `save_settings` is the write path behind every settings form (email,
+    /// authentication, branding, products, legal), all saved by the admin
+    /// block. It calls `config::set`, which
     /// on native writes the `EnvConfigService`'s in-memory override map and
     /// nothing else — the `variables` table, the only durable store, never
     /// sees the value. The save therefore takes effect immediately and is

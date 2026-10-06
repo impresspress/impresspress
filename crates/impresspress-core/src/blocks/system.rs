@@ -70,8 +70,9 @@ crate::impresspress_feature_block! {
             .endpoints(endpoint_match::declare(ROUTES))
     },
     handle: |_this, _ctx, mut msg, _input| {
-        let Some(route) = endpoint_match::dispatch(&mut msg, ROUTES) else {
-            return err_not_found("not found");
+        let route = match endpoint_match::resolve(&mut msg, ROUTES) {
+            Ok(route) => route,
+            Err(not_found) => return not_found,
         };
         match route {
             Route::Health => ok_json(&serde_json::json!({"status": "ok"})),

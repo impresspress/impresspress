@@ -131,7 +131,7 @@ test.describe('delegated actions', () => {
     page,
   }) => {
     await loginAsAdmin(page);
-    await page.goto('/b/auth/admin/settings', { waitUntil: 'networkidle' });
+    await page.goto('/b/admin/settings/authentication', { waitUntil: 'networkidle' });
 
     const oauth = page.getByRole('switch', { name: 'Enable OAuth' });
     const clientId = page.getByLabel('GitHub Client ID');

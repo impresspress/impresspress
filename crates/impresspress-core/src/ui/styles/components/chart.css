@@ -11,10 +11,15 @@
 	color: var(--text-muted);
 }
 
-/* First / last date labels under the chart. */
+/* First / last date labels under the chart. The last label sits flush with
+ * the row's right edge, and a glyph's anti-aliased ink can reach a pixel past
+ * its box; `overflow: hidden` keeps every pixel of the labels inside the row,
+ * which is the box the visual-baseline suite masks — otherwise the label's
+ * edge showed beside the mask and changed with the date. */
 .chart__range {
 	display: flex;
 	justify-content: space-between;
+	overflow: hidden;
 	font-size: var(--text-xs);
 	color: var(--text-muted);
 	margin-top: var(--space-1);

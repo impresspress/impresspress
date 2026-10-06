@@ -168,11 +168,16 @@ pub async fn index_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let rows = match super::service::list_index_rows(ctx).await {
         Ok(rs) => rs,
         Err(e) => {
-            return crate::blocks::crud::db_error_page(
+            return ui::shell_error_page(
+                ctx,
                 msg,
+                list_shell(Vec::new()),
+                None,
+                ui::BackLink::ADMIN_DASHBOARD,
                 e,
                 "vector index list page: registry read failed",
             )
+            .await
         }
     };
 
@@ -224,23 +229,35 @@ pub async fn index_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     } else {
         Vec::new()
     };
-    ui::shell_page(
-        ctx,
-        msg,
-        ui::Shell {
-            title: "Vector indexes",
-            nav: ui::NavKind::Admin,
-            crumbs: vec![Crumb {
-                label: "Vector indexes",
-                href: None,
-            }],
-            subtitle: Some("Per-index counts, model, dimensions"),
-            actions,
-        },
-        body,
-    )
-    .await
+    ui::shell_page(ctx, msg, list_shell(actions), body).await
 }
+
+/// The index list's chrome — its page and its error page share it.
+fn list_shell(actions: Vec<Markup>) -> ui::Shell<'static> {
+    ui::Shell::admin("Vector indexes", "Vector indexes")
+        .subtitle("Per-index counts, model, dimensions")
+        .actions(actions)
+}
+
+/// A detail page's chrome: the index's name under its list.
+fn detail_shell(display: &str) -> ui::Shell<'_> {
+    ui::Shell::admin(display, display).trail(vec![
+        Crumb {
+            label: "Vector indexes",
+            href: Some("/b/vector/"),
+        },
+        Crumb {
+            label: display,
+            href: None,
+        },
+    ])
+}
+
+/// Where a detail page's error sends the operator.
+const BACK_TO_INDEXES: ui::BackLink<'static> = ui::BackLink {
+    label: "Back to Vector indexes",
+    href: "/b/vector/",
+};
 
 /// GET `/b/vector/{name}/` — admin-facing single-index detail page.
 ///
@@ -261,11 +278,16 @@ pub async fn index_detail_page(ctx: &dyn Context, msg: &Message, name: &str) -> 
         Ok(Some(r)) => r,
         Ok(None) => return ui::not_found_response(msg),
         Err(e) => {
-            return crate::blocks::crud::db_error_page(
+            return ui::shell_error_page(
+                ctx,
                 msg,
+                detail_shell(name),
+                None,
+                BACK_TO_INDEXES,
                 e,
                 "vector index detail page: registry read failed",
             )
+            .await
         }
     };
 
@@ -281,11 +303,16 @@ pub async fn index_detail_page(ctx: &dyn Context, msg: &Message, name: &str) -> 
                 .map(|c| (c.name, c.sql_type))
                 .collect(),
             Err(e) => {
-                return crate::blocks::crud::db_error_page(
+                return ui::shell_error_page(
+                    ctx,
                     msg,
+                    detail_shell(name),
+                    None,
+                    BACK_TO_INDEXES,
                     e,
                     "vector index detail page: describe_index failed",
                 )
+                .await
             }
         }
     } else {
@@ -316,28 +343,7 @@ pub async fn index_detail_page(ctx: &dyn Context, msg: &Message, name: &str) -> 
         Vec::<DetailMeta<'_>>::new(),
     );
 
-    ui::shell_page(
-        ctx,
-        msg,
-        ui::Shell {
-            title: display,
-            nav: ui::NavKind::Admin,
-            crumbs: vec![
-                Crumb {
-                    label: "Vector indexes",
-                    href: Some("/b/vector/"),
-                },
-                Crumb {
-                    label: display,
-                    href: None,
-                },
-            ],
-            subtitle: None,
-            actions: Vec::new(),
-        },
-        body,
-    )
-    .await
+    ui::shell_page(ctx, msg, detail_shell(display), body).await
 }
 
 #[cfg(test)]
@@ -455,12 +461,23 @@ mod integration_tests {
     /// be authorized as `wafer-run/vector`, which owns no such table.
     struct FakeVectorBlock {
         store: Arc<dyn wafer_core::interfaces::database::service::DatabaseService>,
+        /// Answer `vector.describe_index` with an internal fault.
+        describe_fails: bool,
     }
 
     impl FakeVectorBlock {
         fn over(ctx: &TestContext) -> Arc<Self> {
             Arc::new(Self {
                 store: ctx.database_service(),
+                describe_fails: false,
+            })
+        }
+
+        /// A backend whose `describe_index` breaks — the detail page's 500.
+        fn failing_describe(ctx: &TestContext) -> Arc<Self> {
+            Arc::new(Self {
+                store: ctx.database_service(),
+                describe_fails: true,
             })
         }
     }
@@ -495,6 +512,9 @@ mod integration_tests {
                         wafer_block::codec::encode(&resp).expect("encode count response"),
                     )
                 }
+                "vector.describe_index" if self.describe_fails => OutputStream::error(
+                    WaferError::new(ErrorCode::Internal, "describe_index broke"),
+                ),
                 "vector.describe_index" => {
                     let resp = wafer_block::wire::vector::DescribeIndexResponse {
                         exists: true,
@@ -666,6 +686,51 @@ mod integration_tests {
             body.contains("Not found") || body.contains("404"),
             "expected 404 status_page: {body}"
         );
+    }
+
+    /// A detail page whose read fails is drawn inside the admin shell —
+    /// its sidebar, its "Vector indexes ›" trail — with a link back to the
+    /// list, not as a bare full-screen 500 whose only exit is "Go home".
+    #[tokio::test]
+    async fn index_detail_page_failure_renders_inside_the_shell_with_a_back_link() {
+        let mut ctx = TestContext::with_vector().await;
+        ctx.register_block("wafer-run/vector", FakeVectorBlock::failing_describe(&ctx));
+        seed_docs_index(&ctx).await;
+
+        let mut msg = admin_msg("retrieve", "/b/vector/docs/");
+        msg.set_meta("http.header.accept", "text/html");
+        let parts = wafer_block::http_codec::collect_http_response(
+            index_detail_page(&ctx, &msg, "docs").await,
+        )
+        .await;
+        let body = String::from_utf8(parts.body).expect("utf-8");
+        assert_eq!(parts.status, 500, "{body}");
+        assert!(
+            body.contains(r#"data-nav="admin""#),
+            "admin sidebar: {body}"
+        );
+        assert!(body.contains("status-page--in-shell"), "{body}");
+        assert!(
+            body.contains(r#"href="/b/vector/">Back to Vector indexes</a>"#),
+            "back link to the list: {body}"
+        );
+        assert_eq!(
+            body.matches("<h1").count(),
+            1,
+            "the topbar's h1 only: {body}"
+        );
+
+        // An API caller still gets the JSON error.
+        let mut api = admin_msg("retrieve", "/b/vector/docs/");
+        api.set_meta("http.header.accept", "application/json");
+        let parts = wafer_block::http_codec::collect_http_response(
+            index_detail_page(&ctx, &api, "docs").await,
+        )
+        .await;
+        assert_eq!(parts.status, 500);
+        assert!(!crate::ui::layout::is_document(&String::from_utf8_lossy(
+            &parts.body
+        )));
     }
 
     #[tokio::test]

@@ -216,8 +216,9 @@ crate::impresspress_feature_block! {
         // endpoint `AuthLevel` (every row → Admin; see `ROUTES`), so the
         // block holds no `user_id`/`is_admin` preamble. The matcher binds
         // `{name}`/`{index}`/`{id}` into `req.param.*`.
-        let Some(route) = endpoint_match::dispatch(&mut msg, ROUTES) else {
-            return crate::http::err_not_found("not found");
+        let route = match endpoint_match::resolve(&mut msg, ROUTES) {
+            Ok(route) => route,
+            Err(not_found) => return not_found,
         };
         match route {
             Route::IndexListPage => pages_ui::index_list_page(ctx, &msg).await,

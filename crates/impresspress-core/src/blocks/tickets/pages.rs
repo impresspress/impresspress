@@ -5,10 +5,7 @@ use wafer_core::clients::database as db;
 use wafer_run::{context::Context, Message, OutputStream};
 
 use super::{config::SecurityReadiness, repo, service};
-use crate::{
-    blocks::crud,
-    ui::{self, components},
-};
+use crate::ui::{self, components};
 
 const ADMIN_FORM_JS: &str = r#"
 document.querySelectorAll('form[data-json-form]').forEach((form) => {
@@ -51,13 +48,24 @@ pub async fn inbox(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let tickets =
         match repo::list_tickets(ctx, &filters, page_size.min(100) as u32, offset as i64).await {
             Ok(rows) => rows,
-            Err(error) => return crud::db_error_page(msg, error, "Could not load tickets"),
+            Err(error) => {
+                return error_page(ctx, msg, Section::Inbox, error, "Could not load tickets").await
+            }
         };
     // The type filter is drawn from this list, so an empty one would say the
     // deployment has no ticket types; a failed read fails the page instead.
     let types = match repo::list_types(ctx, false, 100, 0).await {
         Ok(rows) => rows.records,
-        Err(error) => return crud::db_error_page(msg, error, "Could not load ticket types"),
+        Err(error) => {
+            return error_page(
+                ctx,
+                msg,
+                Section::Inbox,
+                error,
+                "Could not load ticket types",
+            )
+            .await
+        }
     };
     let pagination_base = inbox_pagination_base(msg);
     let content = html! {
@@ -179,14 +187,19 @@ pub async fn inbox(ctx: &dyn Context, msg: &Message) -> OutputStream {
         }
         script { (PreEscaped(ADMIN_FORM_JS)) }
     };
-    shell(ctx, msg, "Tickets", content).await
+    shell(ctx, msg, "Tickets", Section::Inbox, content).await
 }
 
 pub async fn detail(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let id = msg.var("id");
     let detail = match service::detail(ctx, id).await {
         Ok(detail) => detail,
-        Err(error) => return crud::db_error(error, "Ticket not found", "Could not load ticket"),
+        Err(error) if error.code == wafer_run::ErrorCode::NotFound => {
+            return ui::not_found_response(msg)
+        }
+        Err(error) => {
+            return error_page(ctx, msg, Section::Inbox, error, "Could not load ticket").await
+        }
     };
     let ticket = &detail.ticket;
     let report = &detail.untrusted_report;
@@ -196,7 +209,16 @@ pub async fn detail(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let ticket_type = match repo::get_type(ctx, service::str_field(ticket, "type_id")).await {
         Ok(row) => Some(row),
         Err(error) if error.code == wafer_run::ErrorCode::NotFound => None,
-        Err(error) => return crud::db_error_page(msg, error, "Could not load ticket type"),
+        Err(error) => {
+            return error_page(
+                ctx,
+                msg,
+                Section::Inbox,
+                error,
+                "Could not load ticket type",
+            )
+            .await
+        }
     };
     let escalation = ticket_type
         .as_ref()
@@ -390,13 +412,29 @@ pub async fn detail(ctx: &dyn Context, msg: &Message) -> OutputStream {
             })();"#))
         }
     };
-    shell(ctx, msg, service::str_field(ticket, "reference"), content).await
+    shell(
+        ctx,
+        msg,
+        service::str_field(ticket, "reference"),
+        Section::Inbox,
+        content,
+    )
+    .await
 }
 
 pub async fn types(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let types = match repo::list_types(ctx, false, 100, 0).await {
         Ok(rows) => rows.records,
-        Err(error) => return crud::db_error_page(msg, error, "Could not load ticket types"),
+        Err(error) => {
+            return error_page(
+                ctx,
+                msg,
+                Section::Types,
+                error,
+                "Could not load ticket types",
+            )
+            .await
+        }
     };
     let content = html! {
         (components::page_header(
@@ -477,14 +515,23 @@ pub async fn types(ctx: &dyn Context, msg: &Message) -> OutputStream {
         }
         script { (PreEscaped(ADMIN_FORM_JS)) }
     };
-    shell(ctx, msg, "Ticket types", content).await
+    shell(ctx, msg, "Ticket types", Section::Types, content).await
 }
 
 pub async fn settings(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let vars = super::config::config_vars();
     let readiness = match SecurityReadiness::load(ctx).await {
         Ok(readiness) => readiness,
-        Err(e) => return crud::db_error_page(msg, e, "ticket settings page: config read failed"),
+        Err(e) => {
+            return error_page(
+                ctx,
+                msg,
+                Section::Settings,
+                e,
+                "ticket settings page: config read failed",
+            )
+            .await
+        }
     };
     let content = html! {
         (components::page_header(
@@ -538,7 +585,7 @@ pub async fn settings(ctx: &dyn Context, msg: &Message) -> OutputStream {
             "resolved 365 days. Open tickets and legal holds do not expire."
         }
     };
-    shell(ctx, msg, "Ticket settings", content).await
+    shell(ctx, msg, "Ticket settings", Section::Settings, content).await
 }
 
 pub async fn endpoints(ctx: &dyn Context, msg: &Message) -> OutputStream {
@@ -553,15 +600,77 @@ pub async fn endpoints(ctx: &dyn Context, msg: &Message) -> OutputStream {
             }
         } }
     };
-    shell(ctx, msg, "Ticket endpoints", content).await
+    shell(ctx, msg, "Ticket endpoints", Section::Endpoints, content).await
 }
 
-async fn shell(ctx: &dyn Context, msg: &Message, title: &str, content: Markup) -> OutputStream {
+/// The block's admin sections — one link each above every tickets admin
+/// page.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Section {
+    Inbox,
+    Types,
+    Settings,
+    Endpoints,
+}
+
+fn sections(active: Section) -> Markup {
+    let tab = |section: Section, href: &'static str, label: &'static str| components::Tab {
+        active: section == active,
+        href,
+        label,
+        icon: None,
+    };
+    components::subnav(
+        "Tickets sections",
+        vec![
+            tab(Section::Inbox, "/b/tickets/admin/tickets", "Inbox"),
+            tab(Section::Types, "/b/tickets/admin/types", "Types"),
+            tab(Section::Settings, "/b/tickets/admin/settings", "Settings"),
+            tab(
+                Section::Endpoints,
+                "/b/tickets/admin/endpoints",
+                "Endpoints",
+            ),
+        ],
+    )
+}
+
+/// A tickets page whose read failed: drawn in the shell under its section's
+/// links, with a link back to the inbox.
+async fn error_page(
+    ctx: &dyn Context,
+    msg: &Message,
+    section: Section,
+    error: wafer_run::WaferError,
+    context: &str,
+) -> OutputStream {
+    ui::shell_error_page(
+        ctx,
+        msg,
+        ui::Shell::admin("Tickets", "Tickets"),
+        Some(sections(section)),
+        ui::BackLink {
+            label: "Back to the inbox",
+            href: "/b/tickets/admin/tickets",
+        },
+        error,
+        context,
+    )
+    .await
+}
+
+async fn shell(
+    ctx: &dyn Context,
+    msg: &Message,
+    title: &str,
+    section: Section,
+    content: Markup,
+) -> OutputStream {
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::simple(title, ui::NavKind::Admin, "Tickets"),
-        content,
+        ui::Shell::admin(title, "Tickets"),
+        ui::PageBody::from(content).with_subnav(sections(section)),
     )
     .await
 }
@@ -706,7 +815,10 @@ mod denial_tests {
                 .await;
             let parts = wafer_block::http_codec::collect_http_response(out).await;
             let html = String::from_utf8_lossy(&parts.body);
-            if parts.status != 403 || !html.contains("Go home") || html.contains("holds no grant") {
+            if parts.status != 403
+                || !html.contains("status-page--in-shell")
+                || html.contains("holds no grant")
+            {
                 misses.push(format!("{path}: {} {html}", parts.status));
             }
         }

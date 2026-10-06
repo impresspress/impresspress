@@ -274,9 +274,9 @@ pub fn auth_split(brand: BrandPanel<'_>, form: Markup) -> Markup {
     }
 }
 
-/// Tiny template for `/`, 404, 403, 500 — auth-split-shaped, just an
-/// illustrated message + primary action. Replaces the inline 404/403
-/// markup currently in `ui/mod.rs`.
+/// Tiny template for `/`, 404, 403, 500 — a full page of its own (no shell),
+/// just the message and a primary action. The panel is the page's `main`
+/// landmark, so a page with nothing else still has one.
 pub fn status_page(
     code: &str, // "404", "403", "500", or "" for "/"
     title: &str,
@@ -284,7 +284,7 @@ pub fn status_page(
     primary_action: Option<(String, String)>, // (label, href)
 ) -> Markup {
     html! {
-        div .status-page {
+        main .status-page {
             div .status-page__inner {
                 @if !code.is_empty() { div .status-page__code { (code) } }
                 h1 .status-page__title { (title) }
@@ -292,6 +292,23 @@ pub fn status_page(
                 @if let Some((label, href)) = primary_action {
                     a .btn .btn--primary .btn--md href=(href) { (label) }
                 }
+            }
+        }
+    }
+}
+
+/// [`status_page`] inside the shell ([`crate::ui::shell_error_page`]): the
+/// same panel, but its title is an `h2` — the shell's topbar holds the page's
+/// one `h1` — and it fills the content card rather than the viewport. The
+/// action is required: an error inside a page always says where to go back.
+pub fn status_panel(code: &str, title: &str, body: &str, action: (&str, &str)) -> Markup {
+    html! {
+        div .status-page .status-page--in-shell {
+            div .status-page__inner {
+                div .status-page__code { (code) }
+                h2 .status-page__title { (title) }
+                p .status-page__body { (body) }
+                a .btn .btn--primary .btn--md href=(action.1) { (action.0) }
             }
         }
     }

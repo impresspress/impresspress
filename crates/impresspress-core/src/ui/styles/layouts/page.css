@@ -145,4 +145,6 @@
 .status-page__title { font-size: var(--text-xl); font-weight: 500; margin: 0; }
 .status-page__body { font-size: var(--text-base); color: var(--text-secondary); margin: 0; }
 .status-page .btn { margin-top: var(--space-4); text-decoration: none; }
+/* Inside the shell's content card (`templates::status_panel`): the card is the frame. */
+.status-page--in-shell { min-height: 0; padding: var(--space-12) var(--space-4); background: none; }
 

@@ -21,6 +21,52 @@ use crate::{
 };
 
 // ---------------------------------------------------------------------------
+// Section links
+// ---------------------------------------------------------------------------
+
+/// The block's admin sections, one link each, `active` marked current —
+/// rendered above every legal admin page ([`ui::PageBody::with_subnav`]).
+fn section_links(active: &str) -> Markup {
+    let tab = |key: &str, href: &'static str, label: &'static str| components::Tab {
+        active: active == key,
+        href,
+        label,
+        icon: None,
+    };
+    components::subnav(
+        "Legal pages sections",
+        vec![
+            tab("privacy", "/b/legalpages/admin/privacy", "Privacy"),
+            tab("terms", "/b/legalpages/admin/terms", "Terms"),
+            tab("settings", "/b/legalpages/admin/settings", "Settings"),
+            tab("endpoints", "/b/legalpages/admin/endpoints", "Endpoints"),
+        ],
+    )
+}
+
+/// A legal admin page whose read failed: drawn in the shell under the
+/// block's section links, with a link back to the dashboard.
+async fn error_page(
+    ctx: &dyn Context,
+    msg: &Message,
+    title: &str,
+    section: &str,
+    error: WaferError,
+    context: &str,
+) -> OutputStream {
+    ui::shell_error_page(
+        ctx,
+        msg,
+        ui::Shell::admin(title, title),
+        Some(section_links(section)),
+        ui::BackLink::ADMIN_DASHBOARD,
+        error,
+        context,
+    )
+    .await
+}
+
+// ---------------------------------------------------------------------------
 // Document lookup
 // ---------------------------------------------------------------------------
 
@@ -48,7 +94,17 @@ async fn find_current_doc(
 pub async fn editor_page(ctx: &dyn Context, msg: &Message, doc_type: DocumentType) -> OutputStream {
     let doc = match find_current_doc(ctx, doc_type).await {
         Ok(doc) => doc,
-        Err(e) => return crud::db_error_internal(e, "Failed to load the legal document"),
+        Err(e) => {
+            return error_page(
+                ctx,
+                msg,
+                doc_type.title(),
+                wire_str(&doc_type).as_str(),
+                e,
+                "legal editor page: document read failed",
+            )
+            .await
+        }
     };
     let default_title = doc_type.title();
 
@@ -78,11 +134,8 @@ pub async fn editor_page(ctx: &dyn Context, msg: &Message, doc_type: DocumentTyp
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell {
-            actions: view.actions,
-            ..ui::Shell::simple(default_title, ui::NavKind::Portal, default_title)
-        },
-        view.body,
+        ui::Shell::admin(default_title, default_title).actions(view.actions),
+        ui::PageBody::from(view.body).with_subnav(section_links(wire_str(&doc_type).as_str())),
     )
     .await
 }
@@ -460,8 +513,8 @@ pub async fn endpoints_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::simple("Endpoints", ui::NavKind::Portal, "Endpoints"),
-        content,
+        ui::Shell::admin("Endpoints", "Endpoints"),
+        ui::PageBody::from(content).with_subnav(section_links("endpoints")),
     )
     .await
 }
@@ -614,19 +667,21 @@ pub async fn settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     };
 
     let saved = msg.query("saved") == "1";
-    let form =
-        match settings_form::settings_form(ctx, "/b/legalpages/admin/settings", &sections, preview)
+    let form = match settings_form::settings_form(ctx, SETTINGS_SAVE_PATH, &sections, preview).await
+    {
+        Ok(form) => form,
+        Err(e) => {
+            return error_page(
+                ctx,
+                msg,
+                "Legal settings",
+                "settings",
+                e,
+                "legalpages settings: current values read failed",
+            )
             .await
-        {
-            Ok(form) => form,
-            Err(e) => {
-                return crud::db_error_page(
-                    msg,
-                    e,
-                    "legalpages settings: current values read failed",
-                )
-            }
-        };
+        }
+    };
 
     let content = html! {
         @if saved {
@@ -642,22 +697,17 @@ pub async fn settings_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell {
-            subtitle: Some("Customize the public legal pages appearance"),
-            ..ui::Shell::simple("Legal settings", ui::NavKind::Portal, "Legal settings")
-        },
-        content,
+        ui::Shell::admin("Legal settings", "Legal settings")
+            .subtitle("Customize the public legal pages appearance"),
+        ui::PageBody::from(content).with_subnav(section_links("settings")),
     )
     .await
 }
 
-pub async fn handle_save_settings(
-    ctx: &dyn Context,
-    msg: &Message,
-    input: InputStream,
-) -> OutputStream {
-    settings_form::save_settings(ctx, msg, input, &super::config_vars(), "legalpages").await
-}
+/// Where the settings form posts: the admin block, which saves every
+/// settings form (`admin::pages::legal_settings`) — one save path, in the one
+/// frame WRAP lets write any key. The page stays in the Legal section.
+pub(crate) const SETTINGS_SAVE_PATH: &str = "/b/admin/settings/legal";
 
 // ---------------------------------------------------------------------------
 // Preview rendering (used by editor's Preview tab via htmx)

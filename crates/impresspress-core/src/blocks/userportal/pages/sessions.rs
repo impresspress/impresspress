@@ -23,8 +23,7 @@ use crate::{
     ui::{
         self,
         components::{self, badge, BadgeVariant, DataTable, TableCol, TableRow},
-        shell::Crumb,
-        NavKind, Shell,
+        Shell,
     },
 };
 
@@ -58,16 +57,8 @@ pub async fn sessions_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     ui::shell_page(
         ctx,
         msg,
-        Shell {
-            title: "Sessions",
-            nav: NavKind::Portal,
-            crumbs: vec![Crumb {
-                label: "Sessions",
-                href: None,
-            }],
-            subtitle: Some("Devices signed in to your account. Revoke any you don't recognize."),
-            actions: Vec::new(),
-        },
+        Shell::portal("Sessions", "Sessions")
+            .subtitle("Devices signed in to your account. Revoke any you don't recognize."),
         render_table(&rows, current_family),
     )
     .await

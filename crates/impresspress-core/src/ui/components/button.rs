@@ -50,6 +50,38 @@ pub fn tab_navigation(tabs: Vec<Tab<'_>>) -> Markup {
     }
 }
 
+/// A block's own sections — separate pages of one block (Tickets' Inbox /
+/// Types / Settings / Endpoints) — as the same `.tabs` strip
+/// [`tab_navigation`] draws, but as plain links in a labelled `nav`, the
+/// current one `aria-current="page"`.
+///
+/// Not [`tab_navigation`]'s htmx swap: that replaces `#content` only, which
+/// is right for views of ONE page (they share its header) and wrong between
+/// pages, whose title, actions and scripts differ — the previous page's
+/// header and `<title>` would stay on screen over the next page's body. Rendered by
+/// the shell above the content card through
+/// [`crate::ui::PageBody::with_subnav`]; `label` names the landmark ("Tickets
+/// sections").
+pub fn subnav(label: &str, tabs: Vec<Tab<'_>>) -> Markup {
+    html! {
+        nav .subnav aria-label=(label) {
+            div .tabs {
+                @for tab in tabs {
+                    a .tab .(if tab.active { "active" } else { "" })
+                        href=(tab.href)
+                        aria-current=[tab.active.then_some("page")]
+                    {
+                        @if let Some(icon) = tab.icon {
+                            (icon) " "
+                        }
+                        (tab.label)
+                    }
+                }
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Canonical button (Phase 1)
 // ---------------------------------------------------------------------------

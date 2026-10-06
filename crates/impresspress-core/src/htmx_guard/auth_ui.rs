@@ -32,6 +32,10 @@ pub(super) fn entry() -> Entry {
             // The old change-password page: the form is the Security page's.
             ("/b/auth/change-password", Exempt::Redirect),
             ("/b/auth/api/api-keys", Exempt::JsonApi),
+            (
+                "/b/auth/admin/settings",
+                Exempt::MovedTo("/b/admin/settings/authentication"),
+            ),
             ("/b/auth/api/oauth/providers", Exempt::JsonApi),
             (
                 "/b/auth/oauth/login",
@@ -101,7 +105,6 @@ fn fixture() -> std::pin::Pin<Box<dyn std::future::Future<Output = Fixture>>> {
                 Page::at("/b/auth/reset-password"),
                 Page::at("/b/auth/bootstrap"),
                 Page::at("/b/auth/orgs"),
-                Page::at("/b/auth/admin/settings"),
                 Page::at("/b/auth/api/verify").with("token", VERIFY_TOKEN),
             ],
             probes: vec![(

@@ -48,7 +48,7 @@ use wafer_run::{BlockInfo, HttpMethod};
 
 use crate::{
     endpoint_match::match_template,
-    test_support::htmx::{crawl, fire_every_control, send, MakeFixture},
+    test_support::htmx::{crawl, fire_every_control, send, settings_form_submission, MakeFixture},
 };
 
 /// Why a `GET` row that is not a page publishes no response schema. Each is
@@ -61,6 +61,9 @@ enum Exempt {
     JsonApi,
     /// Answered with a redirect to a page the guard renders (for any block).
     Redirect,
+    /// A page that moved to ANOTHER block, answered with a redirect to this
+    /// exact path there (that block's own entry renders it).
+    MovedTo(&'static str),
     /// A static asset (script, stylesheet), not a page. It must succeed, and
     /// not with HTML.
     Asset,
@@ -77,6 +80,7 @@ impl Exempt {
         match self {
             Exempt::JsonApi => "JSON API without a declared schema",
             Exempt::Redirect => "redirect to a page the guard renders",
+            Exempt::MovedTo(_) => "a page moved to another block, redirecting there",
             Exempt::Asset => "static asset",
             Exempt::NotAPage(what) => what,
         }
@@ -132,6 +136,8 @@ fn entries() -> Vec<Entry> {
             ("/b/admin/network", Exempt::Redirect),
             ("/b/admin/email", Exempt::Redirect),
             ("/b/admin/permissions", Exempt::Redirect),
+            ("/b/admin/storage", Exempt::Redirect),
+            ("/b/admin/grants", Exempt::Redirect),
         ],
         must_reach: &[
             "/b/admin/users?tab=roles",
@@ -142,6 +148,7 @@ fn entries() -> Vec<Entry> {
             "/b/admin/database?tab=schema",
             "/b/admin/database?tab=sql",
             "/b/admin/logs?tab=audit",
+            "/b/admin/logs?tab=storage",
             "/b/admin/settings/variables?tab=all",
             "/b/admin/settings/permissions?subtab=database",
         ],
@@ -384,6 +391,10 @@ async fn every_get_row_that_is_not_a_page_succeeds_without_answering_a_page() {
                     "must redirect to a page the crawl renders ({rendered:?}); location {to:?}"
                 )),
                 Some(Exempt::Redirect) => None,
+                Some(Exempt::MovedTo(target)) if !redirect || to != target => {
+                    Some(format!("must redirect to {target}; location {to:?}"))
+                }
+                Some(Exempt::MovedTo(_)) => None,
                 Some(Exempt::NotAPage(_)) if redirect && !to.starts_with("https://") => {
                     Some(format!(
                         "redirects within the site to {to:?}; an internal redirect is an \
@@ -466,4 +477,117 @@ async fn every_htmx_control_on_every_page_is_answered_the_way_it_swaps() {
             );
         }
     }
+}
+
+/// Every shared settings form (`ui::settings_form`) on every page posts to
+/// the admin block — the one save path — and saves:
+/// the body its submit script sends, unchanged, is posted to the URL it
+/// posts to, through the block that serves that URL and in that block's
+/// frame — so WRAP decides exactly as it does live — and must answer
+/// "Settings saved".
+///
+/// The forms post JSON through `fetch`, not htmx, so the control guard above
+/// does not fire them; and a form that shows a `WAFER_RUN_SHARED__*` key only
+/// saves when it posts to the admin block, the one block WRAP lets write it.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_settings_form_saves_what_it_shows() {
+    let mut saved: BTreeSet<String> = BTreeSet::new();
+    for entry in entries() {
+        let Some(make) = entry.fixture else {
+            continue;
+        };
+        for view in crawl(&make().await).await {
+            // A fresh fixture per save: a save is a write.
+            let fixture = make().await;
+            let page = view.page(&fixture);
+            let html = crate::test_support::htmx::render(&fixture, &page).await;
+            let Some((url, body)) = settings_form_submission(&html) else {
+                continue;
+            };
+            // One save path: the admin block writes every settings form.
+            assert!(
+                url.starts_with("/b/admin/"),
+                "{}: the settings form on {} posts to {url}, not to the admin block",
+                entry.block,
+                page.url()
+            );
+            let (_, answer) = send(&fixture, "create", &url, &body.to_string(), false).await;
+            assert_eq!(
+                (answer.status, answer.body.contains("Settings saved")),
+                (200, true),
+                "{}: saving the settings form on {} (POST {url} {body}) answered {} {}",
+                entry.block,
+                page.url(),
+                answer.status,
+                answer.body
+            );
+            saved.insert(url);
+        }
+    }
+    // The guard proves something only while it finds the forms.
+    for url in [
+        "/b/admin/email",
+        "/b/admin/settings/authentication",
+        "/b/admin/settings/branding",
+        #[cfg(feature = "block-legalpages")]
+        "/b/admin/settings/legal",
+        #[cfg(feature = "block-products")]
+        "/b/admin/settings/products",
+    ] {
+        assert!(
+            saved.contains(url),
+            "no settings form posting to {url} was saved: {saved:?}"
+        );
+    }
+}
+
+/// Every admin page renders the ADMIN sidebar, whichever block owns it: each
+/// page the crawl renders whose route is under `/b/{block}/admin` or is
+/// declared `AuthLevel::Admin` (the LLM, vector and messages consoles) must
+/// carry `data-nav="admin"` — the audience its `Shell` names explicitly.
+///
+/// The completeness of what is checked comes from the guard above: every `GET`
+/// row is a page some entry renders, schema'd JSON, or exempt.
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn every_admin_page_renders_the_admin_sidebar() {
+    let infos = registered();
+    let mut wrong: Vec<String> = Vec::new();
+    let mut checked = 0;
+    for entry in entries() {
+        let Some(make) = entry.fixture else {
+            continue;
+        };
+        let Some(info) = infos.iter().find(|i| i.name == entry.block) else {
+            continue;
+        };
+        let fixture = make().await;
+        for view in crawl(&fixture).await {
+            let page = view.page(&fixture);
+            let under_admin =
+                page.path.split('/').nth(3) == Some("admin") || page.path.starts_with("/b/admin");
+            let admin_row = info.endpoints.iter().any(|row| {
+                row.method == HttpMethod::Get
+                    && row.auth == wafer_run::AuthLevel::Admin
+                    && is_row_of(&row.path, &page.path)
+            });
+            if !under_admin && !admin_row {
+                continue;
+            }
+            let html = crate::test_support::htmx::render(&fixture, &page).await;
+            if !crate::ui::layout::is_document(&html) {
+                // An htmx fragment (a modal's body, a row): no chrome to check.
+                continue;
+            }
+            checked += 1;
+            if !html.contains(r#"data-nav="admin""#) {
+                wrong.push(format!(
+                    "{}: {} does not render the admin sidebar",
+                    entry.block,
+                    page.url()
+                ));
+            }
+        }
+    }
+    assert!(wrong.is_empty(), "{}", wrong.join("\n"));
+    assert!(checked > 20, "only {checked} admin pages were checked");
 }

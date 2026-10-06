@@ -142,7 +142,11 @@ fn fixture() -> std::pin::Pin<Box<dyn std::future::Future<Output = Fixture>>> {
 
         Fixture {
             ctx,
-            site: Site(vec![Arc::new(ProductsBlock::new()) as Arc<dyn Block>]),
+            // The admin block too: the settings page saves through it.
+            site: Site(vec![
+                Arc::new(ProductsBlock::new()) as Arc<dyn Block>,
+                Arc::new(crate::blocks::admin::AdminBlock::new()),
+            ]),
             caller,
             pages: pages(),
             probes: probes(&live_offer, &live_preset, &mine_offer, &mine_preset),

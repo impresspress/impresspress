@@ -38,7 +38,7 @@ pub(super) fn entry() -> Entry {
 /// The public pages are read by anyone, so they are fetched signed out; the
 /// editor is the admin's.
 fn caller(action: &str, path: &str) -> Message {
-    if path.starts_with("/b/legalpages/admin") {
+    if path.starts_with("/b/legalpages/admin") || path.starts_with("/b/admin/") {
         admin_msg(action, path)
     } else {
         anon_msg(action, path)
@@ -81,7 +81,11 @@ async fn fixture() -> Fixture {
 
     Fixture {
         ctx,
-        site: Site(vec![Arc::new(LegalPagesBlock::new()) as Arc<dyn Block>]),
+        // The admin block too: the settings page saves through it.
+        site: Site(vec![
+            Arc::new(LegalPagesBlock::new()) as Arc<dyn Block>,
+            Arc::new(crate::blocks::admin::AdminBlock::new()),
+        ]),
         caller,
         pages: vec![
             Page::at("/b/legalpages/terms"),

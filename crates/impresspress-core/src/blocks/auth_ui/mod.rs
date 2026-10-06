@@ -37,7 +37,7 @@ use wafer_run::{
 use super::rate_limit::{apply_route_limit, LimitKey, RateLimit, UserRateLimiter};
 use crate::{
     endpoint_match::{self, request_schema_of, response_schema_of, EndpointRoute},
-    http::{err_not_found, ok_json},
+    http::ok_json,
 };
 
 pub const AUTH_UI_BLOCK_ID: &str = "impresspress/auth-ui";
@@ -89,8 +89,8 @@ pub async fn sweep_result_from_output(
 /// or in the body).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum Route {
-    AdminSettingsPage,
-    AdminSaveSettings,
+    /// The page moved to the admin block's Settings › Authentication.
+    AdminSettingsRedirect,
     LoginPage,
     SignupPage,
     ChangePasswordPage,
@@ -168,18 +168,16 @@ const ROUTES: &[EndpointRoute<Route>] = &[
     // ── Admin settings ── declared `Admin` so the central router enforces the
     // tier; the handler re-checks nothing. (The auth-ui prefix route is
     // Public, so this declared level is the gate for the admin surface.)
+    //
+    // The settings page itself is the admin block's Settings ›
+    // Authentication now: it shows `WAFER_RUN_SHARED__*` keys, which only
+    // the admin block may write. The old URL redirects there.
     EndpointRoute::admin(
         HttpMethod::Get,
         "/b/auth/admin/settings",
-        Route::AdminSettingsPage,
+        Route::AdminSettingsRedirect,
     )
-    .summary("Auth settings page"),
-    EndpointRoute::admin(
-        HttpMethod::Post,
-        "/b/auth/admin/settings",
-        Route::AdminSaveSettings,
-    )
-    .summary("Save auth settings"),
+    .summary("Auth settings (moved to the admin Settings › Authentication tab)"),
     // ── SSR pages ──
     EndpointRoute::public(HttpMethod::Get, "/b/auth/login", Route::LoginPage).summary("Login page"),
     EndpointRoute::public(HttpMethod::Get, "/b/auth/signup", Route::SignupPage)
@@ -370,8 +368,7 @@ const fn rate_limit_for(route: Route) -> Option<(LimitKey, &'static str, RateLim
         | Route::CreateApiKey
         | Route::RevokeApiKey
         | Route::DeleteApiKey => Some((LimitKey::User, "auth_write", RateLimit::API_WRITE)),
-        Route::AdminSettingsPage
-        | Route::AdminSaveSettings
+        Route::AdminSettingsRedirect
         | Route::LoginPage
         | Route::SignupPage
         | Route::ChangePasswordPage
@@ -396,6 +393,9 @@ async fn apply_rate_limit(
     let (key, category, limit) = rate_limit_for(route)?;
     apply_route_limit(limiter, ctx, msg, key, category, limit).await
 }
+
+/// The auth settings page: the admin block's Settings › Authentication tab.
+const AUTHENTICATION_SETTINGS_PATH: &str = "/b/admin/settings/authentication";
 
 /// Block config key: the Google OAuth client ID.
 pub(crate) const OAUTH_GOOGLE_CLIENT_ID_KEY: &str = "IMPRESSPRESS__AUTH_UI__OAUTH_GOOGLE_CLIENT_ID";
@@ -502,7 +502,7 @@ crate::impresspress_feature_block! {
         )
         .endpoints(endpoint_match::declare(ROUTES))
         .config_keys(config_vars())
-        .admin_url("/b/auth/admin/settings")
+        .admin_url(AUTHENTICATION_SETTINGS_PATH)
     },
     handle: |this, ctx, mut msg, input| {
         if msg.kind == MAINTENANCE_MESSAGE_KIND {
@@ -511,15 +511,17 @@ crate::impresspress_feature_block! {
         // Auth is enforced centrally by `route_to_block` from each row's
         // declared `AuthLevel`. `{id}` is bound into `req.param.*` for the
         // api-key handlers' `msg.var` reader.
-        let Some(route) = endpoint_match::dispatch(&mut msg, ROUTES) else {
-            return err_not_found("not found");
+        let route = match endpoint_match::resolve(&mut msg, ROUTES) {
+            Ok(route) => route,
+            Err(not_found) => return not_found,
         };
         if let Some(limited) = apply_rate_limit(&this.limiter, ctx, &msg, route).await {
             return limited;
         }
         match route {
-            Route::AdminSettingsPage => pages::settings::handle_get(ctx, &msg).await,
-            Route::AdminSaveSettings => pages::settings::handle_post(ctx, &msg, input).await,
+            Route::AdminSettingsRedirect => {
+                crate::http::redirect(308, AUTHENTICATION_SETTINGS_PATH)
+            }
             Route::LoginPage => pages::login::handle(ctx, &msg).await,
             Route::SignupPage => pages::signup::handle(ctx, &msg).await,
             Route::ChangePasswordPage => pages::change_password::handle(),

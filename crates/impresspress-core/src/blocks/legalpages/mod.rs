@@ -21,7 +21,7 @@ use crate::{
     config_vars::PRIMARY_COLOR_KEY,
     endpoint_match::{self, request_schema_of, EndpointRoute},
     http::{err_bad_request, ok_json, require_row, ResponseBuilder},
-    ui::{self, templates, SiteConfig},
+    ui::{templates, SiteConfig},
 };
 
 /// In-block dispatch targets, one per declared HTTP endpoint.
@@ -36,7 +36,6 @@ enum Route {
     AdminSave,
     AdminRenderPreview,
     AdminPublish,
-    AdminSaveSettings,
     ApiList,
     ApiGet,
     ApiCreate,
@@ -115,12 +114,6 @@ const ROUTES: &[EndpointRoute<Route>] = &[
         Route::AdminPublish,
     )
     .summary("Publish from editor"),
-    EndpointRoute::admin(
-        HttpMethod::Post,
-        "/b/legalpages/admin/settings",
-        Route::AdminSaveSettings,
-    )
-    .summary("Save settings"),
     // JSON API (specific `{id}/publish` before the generic `{id}` rows)
     EndpointRoute::admin(
         HttpMethod::Get,
@@ -697,8 +690,9 @@ crate::impresspress_feature_block! {
         // endpoint `AuthLevel` (public reads, admin everything else) — the
         // block holds no `is_admin` preamble. Dispatch matches the same
         // declared templates, extracting `{id}` into `req.param.id`.
-        let Some(route) = endpoint_match::dispatch(&mut msg, ROUTES) else {
-            return ui::not_found_response(&msg);
+        let route = match endpoint_match::resolve(&mut msg, ROUTES) {
+            Ok(route) => route,
+            Err(not_found) => return not_found,
         };
         match route {
             Route::PublicTerms => this.handle_get_public(ctx, DocumentType::Terms).await,
@@ -710,7 +704,6 @@ crate::impresspress_feature_block! {
             Route::AdminSave => pages::handle_save(ctx, &msg, input).await,
             Route::AdminRenderPreview => pages::handle_render_preview(ctx, input).await,
             Route::AdminPublish => pages::handle_publish(ctx, &msg, input).await,
-            Route::AdminSaveSettings => pages::handle_save_settings(ctx, &msg, input).await,
             Route::ApiList => this.handle_admin_list(ctx, &msg).await,
             Route::ApiGet => this.handle_admin_get(ctx, &msg).await,
             Route::ApiCreate => this.handle_admin_create(ctx, &msg, input).await,
