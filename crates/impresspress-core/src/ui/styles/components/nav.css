@@ -147,7 +147,6 @@
 .account-nav > li:first-child .account-nav__item { border-radius: var(--radius-md) var(--radius-md) 0 0; }
 .account-nav > li:last-child .account-nav__item { border-radius: 0 0 var(--radius-md) var(--radius-md); }
 .account-nav__item:hover { background: var(--bg-hover); }
-.account-nav__item:focus-visible { outline: none; box-shadow: var(--focus-ring); }
 .account-nav__icon {
 	display: inline-flex; align-items: center; justify-content: center;
 	width: 24px; height: 24px; flex-shrink: 0; color: var(--text-secondary);
