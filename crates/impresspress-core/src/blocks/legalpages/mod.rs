@@ -1483,29 +1483,265 @@ mod tests {
         assert!(html.starts_with(r#"<div class="public-page__content">"#));
     }
 
+    fn draft_row(title: &str, content: &str) -> documents::DocumentRow {
+        documents::DocumentRow {
+            id: "doc-123".to_string(),
+            doc_type: DocumentType::Terms,
+            title: title.to_string(),
+            content: content.to_string(),
+            status: contracts::DocumentStatus::Draft,
+            version: 1,
+            created_by: "admin_1".to_string(),
+            published_at: None,
+            created_at: "2026-05-19T00:00:00Z".to_string(),
+            updated_at: "2026-05-19T00:00:00Z".to_string(),
+        }
+    }
+
+    fn editor(current: Option<documents::DocumentRow>) -> super::pages::EditorView {
+        super::pages::editor_view(
+            DocumentType::Terms,
+            &super::pages::EditorState {
+                current,
+                live_version: Some(3),
+                next_version: 4,
+            },
+        )
+    }
+
+    fn actions_html(view: &super::pages::EditorView) -> String {
+        view.actions
+            .iter()
+            .map(|a| a.clone().into_string())
+            .collect()
+    }
+
     #[test]
     fn editor_page_uses_textarea_not_contenteditable() {
-        let view = super::pages::editor_view(
-            DocumentType::Terms,
-            "doc-123",
-            "Terms of Service",
-            "# heading\n\nbody",
-            Some(contracts::DocumentStatus::Draft),
-            "2026-05-19T00:00:00Z",
-            1,
-        );
+        let view = editor(Some(draft_row("Terms of Service", "## Use\n\nbody")));
+        let actions = actions_html(&view);
         let s = view.body.into_string();
         assert!(s.contains("<textarea"), "editor must use <textarea>");
         assert!(!s.contains("contenteditable"), "no contenteditable allowed");
-        assert!(s.contains(r#"data-tab="edit""#));
-        assert!(s.contains(r#"data-tab="preview""#));
-        // Vanilla JS fetch path — the URL lives in EDITOR_JS, reached
-        // through the delegated `legalpages-editor-tab` action
         assert!(s.contains("/b/legalpages/admin/render-preview"));
         // The page actions ride in the topbar, not in a body header row.
-        let actions: String = view.actions.into_iter().map(|a| a.into_string()).collect();
         assert!(actions.contains(r#"id="btn-save""#) && actions.contains(r#"id="btn-publish""#));
         assert!(!s.contains(r#"id="btn-publish""#));
+    }
+
+    /// Every editor control has a visible `<label for>`; none relies on a
+    /// placeholder for its name.
+    #[test]
+    fn editor_fields_are_labelled() {
+        let s = editor(Some(draft_row("Terms of Service", "body")))
+            .body
+            .into_string();
+        for (id, label) in [
+            ("title-input", "Title"),
+            ("publish-version", "Publish as version"),
+            ("editor", "Content"),
+        ] {
+            assert!(
+                s.contains(&format!(
+                    r#"<label class="form-label" for="{id}">{label}</label>"#
+                )),
+                "{id} must be labelled {label:?}: {s}"
+            );
+            assert!(s.contains(&format!(r#"id="{id}""#)), "{id} must render");
+        }
+        assert!(!s.contains("placeholder="), "no placeholder-only field");
+        // The version is a native number field, not a chip that opens prompt().
+        assert!(s.contains(r#"class="form-input" id="publish-version" type="number""#));
+        assert!(!s.contains("prompt"), "no prompt() version control");
+    }
+
+    /// The Edit/Preview strip is a WAI-ARIA tablist: each tab names the panel
+    /// it controls, the panels name their tab, and only the selected tab is
+    /// in the tab order.
+    #[test]
+    fn editor_tabs_follow_the_tabs_pattern() {
+        let s = editor(Some(draft_row("Terms of Service", "body")))
+            .body
+            .into_string();
+        assert!(s.contains(r#"role="tablist" aria-label="Content view""#));
+        assert!(s.contains(
+            r#"class="editor-tab editor-tab--active" id="editor-tab-edit" type="button" role="tab" aria-selected="true" aria-controls="editor-edit-pane""#
+        ));
+        assert!(s.contains(
+            r#"class="editor-tab" id="editor-tab-preview" type="button" role="tab" aria-selected="false" aria-controls="editor-preview-pane" tabindex="-1""#
+        ));
+        assert!(s.contains(
+            r#"class="editor-pane" id="editor-edit-pane" role="tabpanel" aria-labelledby="editor-tab-edit""#
+        ));
+        assert!(s.contains(
+            r#"class="editor-pane" id="editor-preview-pane" role="tabpanel" aria-labelledby="editor-tab-preview" tabindex="0" hidden"#
+        ));
+    }
+
+    /// The document's name is the topbar's `h1` and the Title field's value;
+    /// the body says it nowhere else.
+    #[test]
+    fn editor_body_names_the_document_once() {
+        let s = editor(Some(draft_row("Terms of Service", "## Use")))
+            .body
+            .into_string();
+        assert_eq!(s.matches("Terms of Service").count(), 1, "{s}");
+        assert!(s.contains(r#"value="Terms of Service""#));
+    }
+
+    /// A draft is stored as version 1 until it is published, so the status
+    /// row shows the LIVE version and "Publish as version" starts one past
+    /// the highest — never the draft's own 1, which would publish over an
+    /// older number.
+    #[test]
+    fn publish_version_starts_past_the_live_version() {
+        let s = editor(Some(draft_row("Terms of Service", "body")))
+            .body
+            .into_string();
+        assert!(s.contains("Live: v3"), "{s}");
+        assert!(s.contains(r#"value="4""#), "{s}");
+        assert!(s.contains(r#"<span class="badge badge-warning">Draft</span>"#));
+    }
+
+    /// No row yet: an empty state with the action that starts the first
+    /// version; the editor and its Save/Publish actions wait for it.
+    #[test]
+    fn a_missing_document_renders_the_empty_state() {
+        let view = super::pages::editor_view(
+            DocumentType::Privacy,
+            &super::pages::EditorState {
+                current: None,
+                live_version: None,
+                next_version: 1,
+            },
+        );
+        let actions = actions_html(&view);
+        let s = view.body.into_string();
+        assert!(
+            s.contains(r#"<h2 class="empty__title">No privacy policy yet</h2>"#),
+            "{s}"
+        );
+        assert!(s.contains(r#"data-action="legalpages-start">Write the privacy policy</button>"#));
+        assert!(
+            s.contains(r#"class="legal-editor" id="legal-editor" hidden"#),
+            "{s}"
+        );
+        assert!(s.contains("Not published yet"));
+        for id in ["btn-save", "btn-publish"] {
+            let at = actions
+                .find(&format!(r#"id="{id}""#))
+                .expect("action renders");
+            let tag = &actions[at..at + actions[at..].find('>').expect("tag closes")];
+            assert!(
+                tag.contains(" hidden"),
+                "{id} waits for the empty state: {tag}"
+            );
+        }
+    }
+
+    /// With a document, the empty state is absent and the editor is shown.
+    #[test]
+    fn an_existing_document_skips_the_empty_state() {
+        let view = editor(Some(draft_row("Terms", "body")));
+        let actions = actions_html(&view);
+        let s = view.body.into_string();
+        assert!(!s.contains(r#"id="legal-editor-empty""#));
+        assert!(s.contains(r#"class="legal-editor" id="legal-editor" data-doc-type="terms" data-doc-id="doc-123""#), "{s}");
+        assert!(!actions.contains(" hidden"), "{actions}");
+    }
+
+    /// The endpoints reference is generated from `ROUTES`: every route is a
+    /// row with its method badge and summary, and no row is invented.
+    #[test]
+    fn endpoints_reference_lists_every_route() {
+        let s = super::pages::endpoints_view().into_string();
+        for route in ROUTES {
+            let row = format!(
+                r#"<code class="cell-wrap">{}</code></td><td data-label="Method"><span class="badge {}">{}</span></td><td data-label="Description">{}</td>"#,
+                route.template,
+                match route.method {
+                    HttpMethod::Get => "badge--tone-brand",
+                    HttpMethod::Post => "badge--tone-green",
+                    HttpMethod::Patch => "badge--tone-amber",
+                    HttpMethod::Delete => "badge--tone-red",
+                },
+                route.method,
+                route.summary,
+            );
+            assert!(s.contains(&row), "missing {row}\n{s}");
+        }
+        let rows = s.matches("<tr").count();
+        // One header row per table: two route tiers and the fields table.
+        assert_eq!(
+            rows,
+            ROUTES.len() + contracts::DOCUMENT_FIELDS.len() + 3,
+            "{s}"
+        );
+        assert!(!s.contains("HTML content"), "content is Markdown");
+    }
+}
+
+#[cfg(test)]
+mod editor_state_tests {
+    use super::*;
+
+    /// The editor edits the newest draft, shows the published version as
+    /// live, and offers one past the highest version for the next publish.
+    #[tokio::test]
+    async fn the_editor_edits_the_draft_and_offers_the_next_version() {
+        let ctx = test_ctx().await;
+        seed_doc(
+            &ctx,
+            DocumentType::Terms,
+            "Old",
+            contracts::DocumentStatus::Archived,
+            1,
+        )
+        .await;
+        seed_doc(
+            &ctx,
+            DocumentType::Terms,
+            "Live",
+            contracts::DocumentStatus::Published,
+            3,
+        )
+        .await;
+        let draft = seed_doc(
+            &ctx,
+            DocumentType::Terms,
+            "Next",
+            contracts::DocumentStatus::Draft,
+            1,
+        )
+        .await;
+
+        let state = pages::load_editor_state(&ctx, DocumentType::Terms)
+            .await
+            .expect("state reads");
+        assert_eq!(state.current.map(|row| row.id), Some(draft.id));
+        assert_eq!(state.live_version, Some(3));
+        assert_eq!(state.next_version, 4);
+    }
+
+    /// No row of the type: nothing to edit, nothing live, version 1 next.
+    #[tokio::test]
+    async fn an_empty_type_starts_at_version_one() {
+        let ctx = test_ctx().await;
+        seed_doc(
+            &ctx,
+            DocumentType::Terms,
+            "Live",
+            contracts::DocumentStatus::Published,
+            5,
+        )
+        .await;
+
+        let state = pages::load_editor_state(&ctx, DocumentType::Privacy)
+            .await
+            .expect("state reads");
+        assert!(state.current.is_none());
+        assert_eq!(state.live_version, None);
+        assert_eq!(state.next_version, 1);
     }
 }
 

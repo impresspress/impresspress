@@ -617,9 +617,6 @@
 /* ===== Messages block: task/notification single-pane entries list ===== */
 .entries-list--scroll { max-height: 60vh; overflow-y: auto; }
 
-/* ===== Legal pages editor status row (blocks/legalpages/pages.rs) ===== */
-.editor-status__version { background: var(--bg-hover); color: var(--text-muted); }
-
 /* ===== Tickets admin (blocks/tickets/pages.rs) =====
    The page's own `<style>` blocks (rendered via `html! { style { ... } }`)
    already carry `max-width: 720px` media-query overrides for

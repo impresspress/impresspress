@@ -60,8 +60,9 @@ badge_variants! {
         Warning => "badge-warning",
         Info => "badge-info",
         Secondary => "badge-secondary",
-        /// The five tone variants below are the shared colour set the block-detail
-        /// modal uses for HTTP methods and auth levels. They are named after the
+        /// The five tone variants below are the shared colour set endpoint lists
+        /// use for HTTP methods and auth levels ([`BadgeVariant::for_method`],
+        /// [`BadgeVariant::for_auth`]). They are named after the
         /// colour rather than after a meaning because two unrelated enums share
         /// them — see the comment above `.badge--tone-brand` in `badge.css`.
         ToneBrand => "badge--tone-brand",
@@ -73,6 +74,30 @@ badge_variants! {
 }
 
 impl BadgeVariant {
+    /// The tone of an endpoint's HTTP-method badge, wherever an endpoint is
+    /// listed (the block-detail modal, a block's endpoints reference). Shares
+    /// its colours with [`BadgeVariant::for_auth`] — `Post`/`Public` and
+    /// `Patch`/`Authenticated` render identically — so the tones live once in
+    /// `styles/components/badge.css` rather than per enum.
+    pub fn for_method(method: wafer_run::HttpMethod) -> Self {
+        match method {
+            wafer_run::HttpMethod::Get => BadgeVariant::ToneBrand,
+            wafer_run::HttpMethod::Post => BadgeVariant::ToneGreen,
+            wafer_run::HttpMethod::Patch => BadgeVariant::ToneAmber,
+            wafer_run::HttpMethod::Delete => BadgeVariant::ToneRed,
+        }
+    }
+
+    /// The tone of an endpoint's auth-level badge. See
+    /// [`BadgeVariant::for_method`].
+    pub fn for_auth(auth: wafer_run::AuthLevel) -> Self {
+        match auth {
+            wafer_run::AuthLevel::Public => BadgeVariant::ToneGreen,
+            wafer_run::AuthLevel::Admin => BadgeVariant::ToneRed,
+            wafer_run::AuthLevel::Authenticated => BadgeVariant::ToneAmber,
+        }
+    }
+
     /// Map a free-form status string to a variant. Centralizes the
     /// status→color policy in one place (the only implicit mapping, and it's
     /// presentation, not data translation).
@@ -94,9 +119,10 @@ impl BadgeVariant {
 /// `blocks/admin/` — the area this type was widened for, and whose 39
 /// hand-written pills it replaced — there is exactly one place that emits
 /// `<span class="badge …">`. Elsewhere in the crate the pill is still written
-/// out by hand: `HAND_WRITTEN_BADGES` names the eight files that do it and
+/// out by hand: `HAND_WRITTEN_BADGES` names the files that do it and
 /// counts each one's pills, and `blocks/llm/assets/llm-chat.js` builds more in
-/// JavaScript, which no Rust-side scan sees at all.
+/// JavaScript (`blocks/legalpages/assets/editor.js` re-colours the editor's
+/// status pill), which no Rust-side scan sees at all.
 pub struct Badge<'a> {
     variant: BadgeVariant,
     classes: &'a str,
@@ -248,7 +274,6 @@ mod tests {
     /// The rest are phase 5 §8 candidates and out of scope here.
     const HAND_WRITTEN_BADGES: &[(&str, usize)] = &[
         ("blocks/files/pages_user/buckets.rs", 2),
-        ("blocks/legalpages/pages.rs", 12),
         ("blocks/llm/ui.rs", 10),
         ("blocks/messages/pages.rs", 6),
         ("blocks/products/pages.rs", 6),
@@ -358,5 +383,41 @@ mod tests {
             !partial.contains("partially_refunded"),
             "raw enum: {partial}"
         );
+    }
+
+    /// Pinned against the exact class each arm renders: the endpoint lists
+    /// (block-detail modal, block endpoint references) are the only places
+    /// these two colour sets appear.
+    #[test]
+    fn method_and_auth_tones_render_their_tone_classes() {
+        let rendered = |variant| {
+            Badge::new(variant)
+                .classes("text-11")
+                .render(html! { "x" })
+                .into_string()
+        };
+        for (method, class) in [
+            (wafer_run::HttpMethod::Get, "badge--tone-brand"),
+            (wafer_run::HttpMethod::Post, "badge--tone-green"),
+            (wafer_run::HttpMethod::Patch, "badge--tone-amber"),
+            (wafer_run::HttpMethod::Delete, "badge--tone-red"),
+        ] {
+            assert_eq!(
+                rendered(BadgeVariant::for_method(method)),
+                format!(r#"<span class="badge {class} text-11">x</span>"#),
+                "{method:?}"
+            );
+        }
+        for (auth, class) in [
+            (wafer_run::AuthLevel::Public, "badge--tone-green"),
+            (wafer_run::AuthLevel::Admin, "badge--tone-red"),
+            (wafer_run::AuthLevel::Authenticated, "badge--tone-amber"),
+        ] {
+            assert_eq!(
+                rendered(BadgeVariant::for_auth(auth)),
+                format!(r#"<span class="badge {class} text-11">x</span>"#),
+                "{auth:?}"
+            );
+        }
     }
 }

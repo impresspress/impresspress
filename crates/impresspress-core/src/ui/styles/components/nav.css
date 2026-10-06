@@ -124,7 +124,7 @@
  * --text-primary, `white` = --surface-1) -- re-typed onto the tokens rather
  * than carried over as literals. */
 .editor-tabs { display: flex; gap: var(--space-1); margin-bottom: -1px; border-bottom: 1px solid var(--border-color); }
-.editor-tab { background: none; border: 1px solid transparent; border-bottom: none; border-radius: 6px 6px 0 0; padding: var(--space-2) var(--space-4); cursor: pointer; font-size: 0.875rem; color: var(--text-muted); }
+.editor-tab { min-height: 44px; min-width: 44px; background: none; border: 1px solid transparent; border-bottom: none; border-radius: 6px 6px 0 0; padding: var(--space-2) var(--space-4); cursor: pointer; font-size: 0.875rem; color: var(--text-muted); }
 .editor-tab:hover { background: var(--bg-hover); color: var(--text-primary); }
 .editor-tab--active { background: var(--surface-1); border-color: var(--border-color); color: var(--text-primary); font-weight: 600; }
 
