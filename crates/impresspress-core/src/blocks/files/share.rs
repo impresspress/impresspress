@@ -95,7 +95,13 @@ pub async fn handle_direct_access(
         return err_internal_no_cause("Share link is unavailable");
     };
     if exp_time < chrono::Utc::now() {
-        return crate::ui::forbidden_response(ctx, msg, "Share link has expired").await;
+        return crate::ui::forbidden_response(
+            ctx,
+            msg,
+            "Share link has expired",
+            crate::ui::SignedOutAction::GoHome,
+        )
+        .await;
     }
 
     // Refuse a share already at its cap before paying for the object. The
@@ -105,7 +111,13 @@ pub async fn handle_direct_access(
     // storage read per request for the rest of its life.
     if let Some(max) = share.max_access_count {
         if share.access_count >= max {
-            return crate::ui::forbidden_response(ctx, msg, SHARE_LIMIT_REACHED).await;
+            return crate::ui::forbidden_response(
+                ctx,
+                msg,
+                SHARE_LIMIT_REACHED,
+                crate::ui::SignedOutAction::GoHome,
+            )
+            .await;
         }
     }
 
@@ -147,7 +159,15 @@ pub async fn handle_direct_access(
     let max = share.max_access_count.unwrap_or(0);
     match repo::shares::increment_access_count_capped(ctx, &share.id, max).await {
         Ok(true) => {}
-        Ok(false) => return crate::ui::forbidden_response(ctx, msg, SHARE_LIMIT_REACHED).await,
+        Ok(false) => {
+            return crate::ui::forbidden_response(
+                ctx,
+                msg,
+                SHARE_LIMIT_REACHED,
+                crate::ui::SignedOutAction::GoHome,
+            )
+            .await
+        }
         Err(e) => return crud::db_error_internal(e, "Share access accounting failed"),
     }
 

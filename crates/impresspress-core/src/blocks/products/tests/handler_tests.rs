@@ -3938,45 +3938,86 @@ async fn order_pages_use_exact_currency_and_enforce_buyer_seller_actions() {
     assert!(seller_html.contains("dp_page_order"));
     assert!(seller_html.contains("/b/products/api/seller/orders/order_page_jpy/refund"));
 
-    let (other_seller, _) = get_msg(
-        "/b/products/selling/orders/order_page_jpy",
-        "seller_other_user",
-    );
-    assert!(
-        output_is_error(
-            super::super::pages::seller_order_detail(&ctx, &other_seller, "order_page_jpy").await,
-            ErrorCode::PermissionDenied,
-        )
-        .await
-    );
-
-    // The same refusals, met in a browser: the 403 page in the shell, with
-    // the reason.
-    for (path, user) in [
-        (
-            "/b/products/selling/orders/order_page_jpy",
-            "seller_other_user",
-        ),
-        (
-            "/b/products/my-purchases/order_page_jpy",
-            "seller_other_user",
-        ),
-    ] {
-        let (mut msg, _) = get_msg(path, user);
-        msg.set_meta("http.header.accept", "text/html");
-        let out = if path.starts_with("/b/products/selling/") {
-            super::super::pages::seller_order_detail(&ctx, &msg, "order_page_jpy").await
-        } else {
-            super::super::pages::my_purchase_detail(&ctx, &msg, "order_page_jpy").await
-        };
-        let (status, html) = output_status_and_html(out).await;
-        assert_eq!(status, 403, "{path}: {html}");
-        assert!(html.contains(r#"data-nav="portal""#), "{path}: {html}");
-        assert!(
-            html.contains("This order belongs to another account"),
-            "{path}: {html}"
-        );
+    // Someone else's order answers exactly as a made-up id does — the 404 —
+    // to an API caller and to a browser alike, for the buyer's page and the
+    // seller's: a refusal naming it would confirm the id exists.
+    for accept in ["", "text/html"] {
+        for (path, user) in [
+            ("/b/products/selling/orders/{id}", "seller_other_user"),
+            ("/b/products/my-purchases/{id}", "seller_other_user"),
+        ] {
+            let mut answers = Vec::new();
+            for id in ["order_page_jpy", "order_that_does_not_exist"] {
+                let (mut msg, _) = get_msg(&path.replace("{id}", id), user);
+                if !accept.is_empty() {
+                    msg.set_meta("http.header.accept", accept);
+                }
+                let out = if path.starts_with("/b/products/selling/") {
+                    super::super::pages::seller_order_detail(&ctx, &msg, id).await
+                } else {
+                    super::super::pages::my_purchase_detail(&ctx, &msg, id).await
+                };
+                answers.push(order_answer(out).await);
+            }
+            assert_eq!(
+                answers[0], answers[1],
+                "{path} (accept {accept:?}): someone else's order and a missing one must \
+                 answer the same"
+            );
+            assert_eq!(
+                answers[0].0, "404",
+                "{path} (accept {accept:?}): {:?}",
+                answers[0]
+            );
+        }
     }
+}
+
+/// An order page's answer, reduced to what tells two answers apart: the
+/// status (or the error code an API caller gets) and the body.
+async fn order_answer(out: wafer_run::OutputStream) -> (String, String) {
+    use wafer_run::streams::output::TerminalNotResponse;
+
+    match out.collect_buffered().await {
+        Ok(buf) => {
+            let status = buf
+                .meta
+                .iter()
+                .find(|e| e.key == "resp.status")
+                .map_or_else(|| "200".to_string(), |e| e.value.clone());
+            (status, String::from_utf8(buf.body).unwrap_or_default())
+        }
+        Err(TerminalNotResponse::Error(error)) => {
+            let status = if error.code == ErrorCode::NotFound {
+                "404".to_string()
+            } else {
+                format!("{:?}", error.code)
+            };
+            (status, error.message)
+        }
+        Err(other) => (format!("{other:?}"), String::new()),
+    }
+}
+
+/// A seller without a seller account is refused before any order is looked
+/// up, with the same answer whether or not the id exists.
+#[tokio::test]
+async fn seller_order_page_refuses_a_non_seller_before_reading_the_order() {
+    let ctx = ctx_with(&[("WAFER_RUN_SHARED__ALLOW_USER_PRODUCTS", "true")]).await;
+    let mut answers = Vec::new();
+    for id in ["order_that_does_not_exist", "another_missing_order"] {
+        let (mut msg, _) = get_msg(&format!("/b/products/selling/orders/{id}"), "not_a_seller");
+        msg.set_meta("http.header.accept", "text/html");
+        let out = super::super::pages::seller_order_detail(&ctx, &msg, id).await;
+        let (status, html) = output_status_and_html(out).await;
+        assert_eq!(status, 403, "{html}");
+        assert!(
+            html.contains("Complete seller setup before viewing seller orders"),
+            "{html}"
+        );
+        answers.push(html);
+    }
+    assert_eq!(answers[0], answers[1]);
 }
 
 /// A line item's `input_snapshot` is a JSON-object column: written by

@@ -3339,9 +3339,6 @@ pub async fn seller_order_detail(
     order_detail(ctx, msg, purchase_id, OrderPageAccess::Seller).await
 }
 
-/// Why an order page refuses a buyer or seller the order is not theirs.
-const ORDER_OF_ANOTHER_ACCOUNT: &str = "This order belongs to another account";
-
 async fn order_detail(
     ctx: &dyn Context,
     msg: &Message,
@@ -3354,6 +3351,30 @@ async fn order_detail(
         OrderPageAccess::Admin => Sections::Admin(AdminSection::Orders),
         OrderPageAccess::Buyer => Sections::Portal(PortalSection::Purchases, false),
         OrderPageAccess::Seller => Sections::Portal(PortalSection::SellerOrders, true),
+    };
+    // A seller without an account has no seller orders at all: that refusal
+    // is about the viewer, so it is answered before any order is looked up
+    // and says nothing about whether this id exists.
+    let seller_account_id = match access {
+        OrderPageAccess::Seller => {
+            match repo::seller_accounts::get_for_user(ctx, msg.user_id()).await {
+                Ok(Some(account)) => Some(account.id),
+                Ok(None) => {
+                    return ui::forbidden_response(
+                        ctx,
+                        msg,
+                        "Complete seller setup before viewing seller orders",
+                        ui::SignedOutAction::SignIn,
+                    )
+                    .await
+                }
+                Err(error) => {
+                    return error_page(ctx, msg, error_sections, "Order", error, "Database error")
+                        .await
+                }
+            }
+        }
+        OrderPageAccess::Admin | OrderPageAccess::Buyer => None,
     };
     let purchase = match repo::purchases::get(ctx, purchase_id).await {
         Ok(purchase) => purchase,
@@ -3369,38 +3390,24 @@ async fn order_detail(
             .await
         }
     };
-    match access {
-        OrderPageAccess::Admin => {}
+    // Someone else's order is answered exactly as a missing one is: a
+    // refusal naming it would confirm that the id exists.
+    let visible = match access {
+        OrderPageAccess::Admin => true,
         OrderPageAccess::Buyer => {
             let owner = if purchase.str_field("buyer_user_id").is_empty() {
                 purchase.str_field("user_id")
             } else {
                 purchase.str_field("buyer_user_id")
             };
-            if owner != msg.user_id() {
-                return ui::forbidden_response(ctx, msg, ORDER_OF_ANOTHER_ACCOUNT).await;
-            }
+            owner == msg.user_id()
         }
         OrderPageAccess::Seller => {
-            let account = match repo::seller_accounts::get_for_user(ctx, msg.user_id()).await {
-                Ok(Some(account)) => account,
-                Ok(None) => {
-                    return ui::forbidden_response(
-                        ctx,
-                        msg,
-                        "Complete seller setup before viewing seller orders",
-                    )
-                    .await
-                }
-                Err(error) => {
-                    return error_page(ctx, msg, error_sections, "Order", error, "Database error")
-                        .await
-                }
-            };
-            if purchase.str_field("seller_account_id") != account.id {
-                return ui::forbidden_response(ctx, msg, ORDER_OF_ANOTHER_ACCOUNT).await;
-            }
+            seller_account_id.as_deref() == Some(purchase.str_field("seller_account_id"))
         }
+    };
+    if !visible {
+        return ui::not_found_response(msg);
     }
     let line_items = match repo::purchases::list_line_items(ctx, purchase_id).await {
         Ok(items) => items,

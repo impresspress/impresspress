@@ -309,6 +309,7 @@ async fn handle_update_profile(
             ctx,
             msg,
             "This form has expired. Reload the page and try again.",
+            crate::ui::SignedOutAction::SignIn,
         )
         .await;
     }

@@ -89,7 +89,15 @@ pub async fn enforce_origin_policy(
     if !origin_policy_refuses(msg, cookie_authenticated) {
         return None;
     }
-    Some(crate::ui::forbidden_response(ctx, msg, ORIGIN_BLOCKED_REASON).await)
+    Some(
+        crate::ui::forbidden_response(
+            ctx,
+            msg,
+            ORIGIN_BLOCKED_REASON,
+            crate::ui::SignedOutAction::SignIn,
+        )
+        .await,
+    )
 }
 
 /// Whether the CSRF origin policy refuses this request.

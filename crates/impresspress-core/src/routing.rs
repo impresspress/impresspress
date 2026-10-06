@@ -594,6 +594,18 @@ fn disabled_blocks_json(features: &dyn FeatureConfig, block_infos: &[BlockInfo])
     serde_json::to_string(&disabled).unwrap_or_else(|_| "[]".to_string())
 }
 
+/// Stamp `msg` with the live gate `features` decides ([`META_DISABLED_BLOCKS`]),
+/// so any enablement-dependent UI drawn for this request agrees with what the
+/// router serves. [`route_to_block`] publishes it before its access check and
+/// dispatch; the pipeline publishes it before the CSRF origin policy, whose
+/// 403 page is drawn before the router runs.
+pub fn publish_gate(msg: &mut Message, features: &dyn FeatureConfig, block_infos: &[BlockInfo]) {
+    msg.set_meta(
+        META_DISABLED_BLOCKS,
+        disabled_blocks_json(features, block_infos),
+    );
+}
+
 /// The gate decision [`route_to_block`] published for this request.
 ///
 /// For any handler that renders enablement-dependent UI — the sidebar, the
@@ -647,9 +659,15 @@ async fn check_access(
 ) -> Option<OutputStream> {
     match denial(access, msg)? {
         Denial::Unauthenticated => Some(crate::ui::unauthenticated_response(msg)),
-        Denial::Forbidden => {
-            Some(crate::ui::forbidden_response(ctx, msg, ADMIN_REQUIRED_REASON).await)
-        }
+        Denial::Forbidden => Some(
+            crate::ui::forbidden_response(
+                ctx,
+                msg,
+                ADMIN_REQUIRED_REASON,
+                crate::ui::SignedOutAction::SignIn,
+            )
+            .await,
+        ),
     }
 }
 
@@ -717,6 +735,11 @@ pub async fn route_to_block(
 ) -> OutputStream {
     let path = msg.path().to_string();
 
+    // Every page this request draws — the dispatched block's, and the 403
+    // `check_access` answers — takes its sidebar from the gate this router
+    // applies. See `META_DISABLED_BLOCKS`.
+    publish_gate(&mut msg, features, block_infos);
+
     // Root: redirect logged-in users to portal dashboard, anonymous to login.
     // When the deployment ships a static landing page, serve it directly via
     // `wafer-run/web` instead. Gated by the `WAFER_RUN_SHARED__HAS_LANDING_PAGE`
@@ -778,14 +801,6 @@ pub async fn route_to_block(
             return denied;
         }
 
-        // Hand the block the gate decision just made, so any enablement-
-        // dependent UI it renders agrees with what this router will serve.
-        // See `META_DISABLED_BLOCKS`.
-        msg.set_meta(
-            META_DISABLED_BLOCKS,
-            disabled_blocks_json(features, block_infos),
-        );
-
         // Dispatch via call_block so WRAP sees the correct caller identity.
         return ctx.call_block(route.dispatch_to, msg, input).await;
     }
@@ -812,13 +827,6 @@ pub async fn route_to_block(
         {
             return denied;
         }
-
-        // Same stamp as the built-in loop above — a downstream-registered
-        // route's pages render the same chrome.
-        msg.set_meta(
-            META_DISABLED_BLOCKS,
-            disabled_blocks_json(features, block_infos),
-        );
 
         return ctx.call_block(&route.block_name, msg, input).await;
     }

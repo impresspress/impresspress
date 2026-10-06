@@ -399,7 +399,7 @@ crate::impresspress_feature_block! {
         if let Some(refusal) = routes::user_products_refusal(route) {
             match handlers::user_products_enabled(ctx).await {
                 Ok(true) => {}
-                Ok(false) => return crate::ui::forbidden_response(ctx, &msg, refusal).await,
+                Ok(false) => return crate::ui::forbidden_response(ctx, &msg, refusal, crate::ui::SignedOutAction::SignIn).await,
                 Err(e) => {
                     return crate::blocks::crud::db_error_internal(
                         e,
@@ -413,7 +413,7 @@ crate::impresspress_feature_block! {
         if routes::requires_unsuspended_seller(route) {
             match repo::seller_accounts::is_suspended(ctx, msg.user_id()).await {
                 Ok(true) => {
-                    return crate::ui::forbidden_response(ctx, &msg, "Seller account is suspended")
+                    return crate::ui::forbidden_response(ctx, &msg, "Seller account is suspended", crate::ui::SignedOutAction::SignIn)
                         .await
                 }
                 Ok(false) => {}

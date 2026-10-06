@@ -67,7 +67,13 @@ pub async fn handle(
         Err(e) => return crud::db_error_internal(e, "Could not read the OAuth switch"),
     };
     if !enable_oauth {
-        return crate::ui::forbidden_response(ctx, msg, "OAuth login is not enabled").await;
+        return crate::ui::forbidden_response(
+            ctx,
+            msg,
+            "OAuth login is not enabled",
+            crate::ui::SignedOutAction::SignIn,
+        )
+        .await;
     }
 
     let code = msg.query("code");

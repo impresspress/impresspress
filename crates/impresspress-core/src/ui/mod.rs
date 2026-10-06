@@ -612,6 +612,15 @@ const FORBIDDEN_TITLE: &str = "Access denied";
 /// [`FORBIDDEN_TITLE`].
 const FORBIDDEN_PANEL_TITLE: &str = "You don't have access to this page";
 
+/// The way forward a [`forbidden_response`] offers a signed-out viewer.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SignedOutAction {
+    /// "Sign in": an account could be let in where a visitor is not.
+    SignIn,
+    /// "Go home": no account changes the answer (an expired share link).
+    GoHome,
+}
+
 /// The 403 a request is refused with, for `reason`: one sentence the caller
 /// can act on ("Seller account is suspended"). It is the JSON error message
 /// for an API caller and the body of the page for a browser, decided by
@@ -621,26 +630,24 @@ const FORBIDDEN_PANEL_TITLE: &str = "You don't have access to this page";
 /// (the admin sidebar for an administrator, the portal's for anyone else)
 /// with a link back to that shell's home; the denied page's own frame is not
 /// one this viewer is entitled to. A signed-out viewer gets the bare status
-/// page with a "Sign in" action, since signing in is the one way forward a
-/// visitor without an account has. The bare page is also the answer when the
-/// chrome cannot be drawn (its site-config read failed).
+/// page with the `signed_out` action — the caller knows whether signing in
+/// could change the answer. The bare page is also the answer when the chrome
+/// cannot be drawn (its site-config read failed).
 pub async fn forbidden_response(
     ctx: &dyn wafer_run::context::Context,
     msg: &wafer_run::Message,
     reason: &str,
+    signed_out: SignedOutAction,
 ) -> wafer_run::OutputStream {
     if !wants_page(msg) {
         return crate::http::err_forbidden(reason);
     }
     let Some(user) = UserInfo::from_message(msg) else {
-        return status_response(
-            403,
-            FORBIDDEN_TITLE,
-            "403",
-            FORBIDDEN_TITLE,
-            reason,
-            ("Sign in", "/b/auth/login"),
-        );
+        let action = match signed_out {
+            SignedOutAction::SignIn => ("Sign in", "/b/auth/login"),
+            SignedOutAction::GoHome => ("Go home", "/"),
+        };
+        return status_response(403, FORBIDDEN_TITLE, "403", FORBIDDEN_TITLE, reason, action);
     };
     let (shell, back) = if user.is_admin() {
         (
@@ -1396,13 +1403,17 @@ mod tests {
     }
 
     /// [`forbidden_response`] for `msg`: its status and body.
-    async fn forbidden_page(msg: wafer_run::Message, reason: &str) -> (u16, String) {
+    async fn forbidden_page(
+        msg: wafer_run::Message,
+        reason: &str,
+        signed_out: SignedOutAction,
+    ) -> (u16, String) {
         // Run as a block that draws pages, as every caller does: the chrome
         // reads the site config under the caller's grants.
         let ctx = crate::test_support::TestContext::new()
             .await
             .running_as(crate::blocks::router::ROUTER_BLOCK_ID);
-        let out = forbidden_response(&ctx, &msg, reason).await;
+        let out = forbidden_response(&ctx, &msg, reason, signed_out).await;
         let buf = out
             .collect_buffered()
             .await
@@ -1436,7 +1447,7 @@ mod tests {
             "u1",
         ));
         for msg in [json, api_path] {
-            let out = forbidden_response(&ctx, &msg, REASON).await;
+            let out = forbidden_response(&ctx, &msg, REASON, SignedOutAction::SignIn).await;
             match out.collect_buffered().await {
                 Err(wafer_run::streams::output::TerminalNotResponse::Error(error)) => {
                     assert_eq!(error.code, wafer_run::ErrorCode::PermissionDenied);
@@ -1455,7 +1466,7 @@ mod tests {
             "retrieve",
             "/b/storage/direct/tok",
         ));
-        let (status, body) = forbidden_page(msg, REASON).await;
+        let (status, body) = forbidden_page(msg, REASON, SignedOutAction::SignIn).await;
         assert_eq!(status, 403);
         assert!(body.contains(">403<"), "{body}");
         assert!(body.contains(REASON), "the reason must be shown: {body}");
@@ -1467,6 +1478,23 @@ mod tests {
         );
     }
 
+    /// A refusal no account could change (an expired share link) offers a
+    /// signed-out visitor the way home, not a sign-in that cannot help.
+    #[tokio::test]
+    async fn forbidden_response_offers_the_callers_signed_out_action() {
+        let msg = browser(crate::test_support::anon_msg(
+            "retrieve",
+            "/b/storage/direct/tok",
+        ));
+        let (status, body) =
+            forbidden_page(msg, "Share link has expired", SignedOutAction::GoHome).await;
+        assert_eq!(status, 403);
+        assert!(body.contains("Share link has expired"), "{body}");
+        assert!(body.contains(r#"href="/""#), "{body}");
+        assert!(body.contains("Go home"), "{body}");
+        assert!(!body.contains("Sign in"), "{body}");
+    }
+
     /// A signed-in end user gets the page inside the portal shell, with the
     /// reason and a way back to their account — never "Sign in".
     #[tokio::test]
@@ -1476,7 +1504,7 @@ mod tests {
             "/b/products/my",
             "u1",
         ));
-        let (status, body) = forbidden_page(msg, REASON).await;
+        let (status, body) = forbidden_page(msg, REASON, SignedOutAction::SignIn).await;
         assert_eq!(status, 403);
         assert!(body.contains(r#"data-nav="portal""#), "{body}");
         assert!(body.contains("status-page--in-shell"), "{body}");
@@ -1494,7 +1522,7 @@ mod tests {
             "retrieve",
             "/b/products/selling/orders/x",
         ));
-        let (status, body) = forbidden_page(msg, REASON).await;
+        let (status, body) = forbidden_page(msg, REASON, SignedOutAction::SignIn).await;
         assert_eq!(status, 403);
         assert!(body.contains(r#"data-nav="admin""#), "{body}");
         assert!(body.contains(REASON), "{body}");
