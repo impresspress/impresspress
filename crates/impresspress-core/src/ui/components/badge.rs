@@ -94,7 +94,7 @@ impl BadgeVariant {
 /// `blocks/admin/` — the area this type was widened for, and whose 39
 /// hand-written pills it replaced — there is exactly one place that emits
 /// `<span class="badge …">`. Elsewhere in the crate the pill is still written
-/// out by hand: `HAND_WRITTEN_BADGES` names the eight files that do it and
+/// out by hand: `HAND_WRITTEN_BADGES` names the files that do it and
 /// counts each one's pills, and `blocks/llm/assets/llm-chat.js` builds more in
 /// JavaScript, which no Rust-side scan sees at all.
 pub struct Badge<'a> {
@@ -249,7 +249,6 @@ mod tests {
     const HAND_WRITTEN_BADGES: &[(&str, usize)] = &[
         ("blocks/files/pages_user/buckets.rs", 2),
         ("blocks/legalpages/pages.rs", 12),
-        ("blocks/llm/ui.rs", 10),
         ("blocks/messages/pages.rs", 6),
         ("blocks/products/pages.rs", 6),
         ("blocks/tickets/pages.rs", 4),

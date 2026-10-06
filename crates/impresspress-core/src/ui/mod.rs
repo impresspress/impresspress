@@ -1286,7 +1286,16 @@ mod tests {
     fn the_body_template_chooses_the_content_card_frame() {
         let config = site_config();
         let groups = nav_groups::admin();
-        let chat = templates::chat_page(html! {}, html! {}, html! {}, None);
+        let chat = templates::chat_page(
+            templates::ChatFocus::Threads,
+            templates::ChatPane {
+                label: "Threads",
+                body: html! {},
+            },
+            html! {},
+            html! {},
+            None,
+        );
         let flush = Page {
             body: chat,
             ..dashboard_page(&config, &groups, html! {})

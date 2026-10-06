@@ -16,13 +16,14 @@ use crate::{
         crud,
         llm::{
             contracts::{
-                ModelInfoView, ModelListResponse, ModelStatusResponse, ModelStatusView,
-                ModelUnloadResponse,
+                ModelInfoView, ModelListResponse, ModelStateView, ModelStatusResponse,
+                ModelStatusView, ModelUnloadResponse,
             },
             LlmBlock,
         },
     },
     http::{err_bad_request, ok_json},
+    ui::components::{self, BadgeVariant},
 };
 
 /// `(backend_id, model_id)` as bound by the block's route table for
@@ -96,11 +97,45 @@ pub(in crate::blocks::llm) async fn model_status(
         backend_id,
         model_id,
     };
+    let htmx = crate::ui::is_htmx(msg);
     match llm_client::status(ctx, &req).await {
+        Ok(status) if htmx => {
+            crate::ui::html_response(status_badge(&ModelStatusView::from(status)))
+        }
         Ok(status) => ok_json(&ModelStatusResponse {
             status: ModelStatusView::from(status),
         }),
+        // The models page's status cell asked. htmx swaps only a 2xx, and
+        // the cell must not read "Checking…" for good: it says the status
+        // could not be read, and the cause goes to the log rather than into
+        // the page.
+        Err(e) if htmx => {
+            tracing::warn!(error = %e, "llm status failed");
+            crate::ui::html_response(maud::html! {
+                (components::badge(BadgeVariant::Danger, "Unavailable"))
+            })
+        }
         Err(e) => llm_service_error("llm status failed", e),
+    }
+}
+
+/// The models page's status cell (`blocks::llm::ui::model_cells`), which
+/// loads itself from this route and swaps the answer over itself — so an
+/// htmx request is answered with the badge, not with the JSON body.
+fn status_badge(status: &ModelStatusView) -> maud::Markup {
+    match &status.state {
+        ModelStateView::Ready => components::badge(BadgeVariant::Success, "Ready"),
+        ModelStateView::Loading => {
+            let label = match status.progress {
+                Some(p) => format!("Loading {}%", (p.clamp(0.0, 1.0) * 100.0).round()),
+                None => "Loading".to_string(),
+            };
+            components::badge(BadgeVariant::Warning, &label)
+        }
+        ModelStateView::Unloaded => components::badge(BadgeVariant::Secondary, "Unloaded"),
+        ModelStateView::Error { message } => components::Badge::new(BadgeVariant::Danger)
+            .title(message)
+            .render(maud::html! { "Error" }),
     }
 }
 

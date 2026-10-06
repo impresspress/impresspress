@@ -249,30 +249,34 @@ pub(in crate::blocks::llm) async fn list_providers(
     ok_json(&ProviderListResponse { providers })
 }
 
-/// Parse the create-provider body as JSON or as the admin page's
-/// URL-encoded form.
+/// Parse a provider body — the create's or the patch's — as JSON or as the
+/// admin page's URL-encoded form.
 ///
 /// A leading `{` is JSON and deserializes into the contract directly, with no
 /// coercions — a string where the schema says array or bool is a 400, as the
-/// published schema promises. Anything else is a form body: the add-provider
-/// form is a plain htmx `hx-post`, so it sends
-/// `application/x-www-form-urlencoded` and every field arrives as a string.
+/// published schema promises. Anything else is a form body: the Add provider
+/// and Edit forms are plain htmx requests (`hx-post`, `hx-patch`), so they
+/// send `application/x-www-form-urlencoded` and every field arrives as a
+/// string.
 ///
 /// The form values that are not strings in the contract are coerced here, and
-/// only here: `models` is one comma-separated text input, `enabled` is a
-/// checkbox, which posts nothing at all when the admin unticks it, and
-/// `max_tokens_field` is a select whose "follow the protocol" option has no
-/// token to post — a `<select>` always sends *something*, and `""` is not one
-/// of the two wire spellings, so an empty one is dropped and the contract
-/// sees the field omitted. `models` is
-/// read through [`crate::util::form_values`] rather than the last-wins map, so
-/// a client that spells the list as a repeated key (`models=a&models=b`, which
-/// is how urlencoded serialisation writes an array) is understood to mean both
-/// rather than silently reduced to the last one. The rest
-/// of the map is handed to serde untouched, so `deny_unknown_fields` still
-/// refuses an `api_key` by name on the form path too — which is the whole
-/// point of that attribute (see [`CreateProviderRequest`]).
-fn parse_create_provider_body(raw: &[u8]) -> Result<CreateProviderRequest, String> {
+/// only here, the same way for both routes: `models` is one comma-separated
+/// text input, `enabled` is a checkbox, which posts nothing at all when the
+/// admin unticks it, and `max_tokens_field` is a select whose "follow the
+/// protocol" option has no token to post — a `<select>` always sends
+/// *something*, and `""` is not one of the two wire spellings, so an empty one
+/// is `null`: no override on a create, and "clear the override" on a patch,
+/// which is what choosing that option in the edit form means. An emptied
+/// `key_var` stays `""`, which both handlers already read as "none".
+/// `models` is read through [`crate::util::form_values`] rather than the
+/// last-wins map, so a client that spells the list as a repeated key
+/// (`models=a&models=b`, which is how urlencoded serialisation writes an
+/// array) is understood to mean both rather than silently reduced to the last
+/// one. The rest of the map is handed to serde untouched, so
+/// `deny_unknown_fields` still refuses an `api_key` by name on the form path
+/// too — which is the whole point of that attribute (see
+/// [`CreateProviderRequest`] and [`UpdateProviderRequest`]).
+fn parse_provider_body<T: serde::de::DeserializeOwned>(raw: &[u8]) -> Result<T, String> {
     if raw.iter().find(|b| !b.is_ascii_whitespace()) == Some(&b'{') {
         return serde_json::from_slice(raw).map_err(|e| format!("Invalid body: {e}"));
     }
@@ -282,10 +286,12 @@ fn parse_create_provider_body(raw: &[u8]) -> Result<CreateProviderRequest, Strin
         if key == "models" || key == "enabled" {
             continue;
         }
-        if key == "max_tokens_field" && value.is_empty() {
-            continue;
-        }
-        fields.insert(key.clone(), serde_json::Value::String(value.clone()));
+        let value = if key == "max_tokens_field" && value.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::String(value.clone())
+        };
+        fields.insert(key.clone(), value);
     }
     let posted_models = crate::util::form_values(raw, "models");
     if !posted_models.is_empty() {
@@ -334,8 +340,8 @@ fn check_max_tokens_field(cfg: &ProviderConfig) -> Result<(), String> {
 /// `protocol` (one of the `ProviderProtocol` tokens) and `endpoint`;
 /// `key_var`, `models`, `enabled` are optional. Admin-only.
 ///
-/// Accepts the admin page's form body as well as JSON — see
-/// [`parse_create_provider_body`].
+/// Accepts the admin page's Add provider form body as well as JSON — see
+/// [`parse_provider_body`].
 pub(in crate::blocks::llm) async fn create_provider(
     block: &LlmBlock,
     ctx: &dyn Context,
@@ -352,7 +358,7 @@ pub(in crate::blocks::llm) async fn create_provider(
         Ok(bytes) => bytes,
         Err(e) => return OutputStream::error(e),
     };
-    let body: CreateProviderRequest = match parse_create_provider_body(&raw) {
+    let body: CreateProviderRequest = match parse_provider_body(&raw) {
         Ok(b) => b,
         Err(e) => return err_bad_request(&e),
     };
@@ -415,6 +421,9 @@ pub(in crate::blocks::llm) async fn create_provider(
 }
 
 /// `PATCH /b/llm/api/providers/:id` — partial update. Admin-only.
+///
+/// Accepts the admin page's Edit form body as well as JSON — see
+/// [`parse_provider_body`].
 pub(in crate::blocks::llm) async fn update_provider(
     block: &LlmBlock,
     ctx: &dyn Context,
@@ -434,9 +443,9 @@ pub(in crate::blocks::llm) async fn update_provider(
         Ok(bytes) => bytes,
         Err(e) => return OutputStream::error(e),
     };
-    let body: UpdateProviderRequest = match serde_json::from_slice(&raw) {
+    let body: UpdateProviderRequest = match parse_provider_body(&raw) {
         Ok(b) => b,
-        Err(e) => return err_bad_request(&format!("Invalid body: {e}")),
+        Err(e) => return err_bad_request(&e),
     };
     // Refused before any row is read, like the protocol.
     if let Some(name) = body.name.as_deref().filter(|s| !s.is_empty()) {
@@ -471,10 +480,16 @@ pub(in crate::blocks::llm) async fn update_provider(
     }
     // Both nullable fields: present at all — `null` included — replaces the
     // stored value; a body that omits the key leaves it alone. An empty
-    // `key_var` string clears it too, which is what it means to the create
-    // form; this route takes JSON only, and the admin page has no edit form.
-    // See `UpdateProviderRequest`.
-    let names_key_var = body.key_var.is_some();
+    // `key_var` string clears it too, which is what it means to both admin
+    // forms. See `UpdateProviderRequest`.
+    //
+    // Only a key_var the patch CHANGES is checked for readability below. The
+    // edit form sends every field, the stored key_var included, so "names
+    // it" would hold for every save from the page.
+    let changes_key_var = body
+        .key_var
+        .as_ref()
+        .is_some_and(|k| k.as_deref().filter(|s| !s.is_empty()) != cfg.key_var.as_deref());
     if let Some(k) = body.key_var {
         cfg.key_var = k.filter(|s| !s.is_empty());
     }
@@ -494,12 +509,13 @@ pub(in crate::blocks::llm) async fn update_provider(
         return err_bad_request(&e);
     }
 
-    // Only a body that names `key_var` is checked: a patch that leaves the
-    // stored variable alone must still reach a row whose key has become
-    // unreadable since it was saved, so the admin can disable, rename or
-    // repoint it rather than meet a 403 on every edit. The reload leaves such
-    // a row out whatever this patch sets.
-    if names_key_var {
+    // Only a patch that changes `key_var` is checked: a patch that leaves the
+    // stored variable alone — by omitting it, or by sending it back as it is
+    // — must still reach a row whose key has become unreadable since it was
+    // saved, so the admin can disable, rename or repoint it rather than meet
+    // a 403 on every edit. The reload leaves such a row out whatever this
+    // patch sets.
+    if changes_key_var {
         if let Err(e) = check_key_var_readable(ctx, &cfg).await {
             return crud::db_error_internal(e, "Failed to read the provider's key_var");
         }
@@ -528,10 +544,9 @@ pub(in crate::blocks::llm) async fn update_provider(
 
 /// `DELETE /b/llm/api/providers/:id` — remove. Admin-only.
 ///
-/// The providers table's Delete button swaps the answer over its own row
-/// (`hx-target="closest tr"`, `outerHTML`), so an `HX-Request` gets an empty
-/// HTML body — the row goes — while an API caller gets the JSON receipt. A
-/// JSON body swapped over the row replaced it with `{"deleted":true}` as text.
+/// The providers table's Delete button reloads the page on a 2xx and swaps
+/// nothing, so an `HX-Request` gets an empty HTML body while an API caller
+/// gets the JSON receipt.
 pub(in crate::blocks::llm) async fn delete_provider(
     block: &LlmBlock,
     ctx: &dyn Context,
@@ -1085,6 +1100,79 @@ mod tests {
         let stored = row_to_config(&stored).expect("stored row decodes");
         assert!(!stored.enabled, "the disable must be stored");
         assert_eq!(stored.key_var.as_deref(), Some(UNREADABLE_VAR));
+    }
+
+    /// The same row saved from the page's Edit form, which sends every field
+    /// back — the stored `key_var` included. Sending a variable back as it is
+    /// does not change it, so it is not re-checked, and the save goes through.
+    #[tokio::test]
+    async fn the_edit_form_can_still_disable_a_provider_whose_key_went_stale() {
+        let (mut ctx, _admin, block) = keyed_fixture().await;
+        let mut cfg = ProviderConfig::new(
+            "stale".to_string(),
+            ProviderProtocol::OpenAi,
+            "https://api.openai.com/v1".to_string(),
+        );
+        cfg.key_var = Some(UNREADABLE_VAR.to_string());
+        let id = db::create(&ctx, PROVIDERS_TABLE, config_to_row(&cfg))
+            .await
+            .expect("seed provider row")
+            .id;
+        ctx.refuse_config_reads_of(UNREADABLE_VAR, refused());
+
+        // The edit form, "Enabled" unticked, every other field as stored.
+        let form = format!(
+            "name=stale&protocol=open_ai&endpoint=https%3A%2F%2Fapi.openai.com%2Fv1\
+&key_var={UNREADABLE_VAR}&max_tokens_field=&models="
+        );
+        let out = update_provider(
+            &block,
+            &ctx,
+            &routed(admin_msg("update", &format!("/b/llm/api/providers/{id}"))),
+            InputStream::from_bytes(form.into_bytes()),
+        )
+        .await;
+        let body = output_json(out).await;
+        assert_eq!(body["enabled"], serde_json::json!(false), "{body}");
+        assert_eq!(body["key_var"], UNREADABLE_VAR, "{body}");
+    }
+
+    /// Changing the variable from the Edit form is a change, and is checked.
+    #[tokio::test]
+    async fn the_edit_form_cannot_repoint_a_provider_at_an_unreadable_key() {
+        let (mut ctx, _admin, block) = keyed_fixture().await;
+        let created = output_json(
+            create_provider(
+                &block,
+                &ctx,
+                &admin_msg("create", "/b/llm/api/providers"),
+                create_body(),
+            )
+            .await,
+        )
+        .await;
+        let id = created["id"].as_str().expect("created id").to_string();
+        ctx.refuse_config_reads_of(UNREADABLE_VAR, refused());
+
+        let form = format!(
+            "name=openai-main&protocol=open_ai&endpoint=https%3A%2F%2Fapi.openai.com%2Fv1\
+&key_var={UNREADABLE_VAR}&max_tokens_field=&models=gpt-4o&enabled=true"
+        );
+        let out = update_provider(
+            &block,
+            &ctx,
+            &routed(admin_msg("update", &format!("/b/llm/api/providers/{id}"))),
+            InputStream::from_bytes(form.into_bytes()),
+        )
+        .await;
+        assert_eq!(
+            crate::test_support::output_http_json(out).await,
+            serde_json::json!({ "error": "PermissionDenied", "message": "Access denied" }),
+        );
+        assert_eq!(
+            stored_key_vars(&ctx).await,
+            vec![("openai-main".to_string(), Some(KEY_VAR.to_string()))]
+        );
     }
 
     /// A stored provider whose key can no longer be read is left out of the
@@ -2194,9 +2282,13 @@ mod form_body_tests {
 
     async fn create_from_form(body: &str) -> OutputStream {
         let (ctx, block) = fixture().await;
+        create_from_form_on(&ctx, &block, body).await
+    }
+
+    async fn create_from_form_on(ctx: &TestContext, block: &LlmBlock, body: &str) -> OutputStream {
         create_provider(
-            &block,
-            &ctx,
+            block,
+            ctx,
             &admin_msg("create", "/b/llm/api/providers"),
             InputStream::from_bytes(body.as_bytes().to_vec()),
         )
@@ -2272,7 +2364,7 @@ mod form_body_tests {
     /// The budget-field select's "Follow the protocol" option has no token to
     /// post, so it posts the empty string — which is not one of the two wire
     /// spellings. Handing it to serde as-is would 400 every ordinary submit,
-    /// so the parser drops it and the contract sees the field omitted.
+    /// so the parser reads it as `null`: no override.
     #[tokio::test]
     async fn an_empty_budget_field_select_leaves_the_provider_on_its_protocol() {
         let created = output_json(create_from_form(TICKED_FORM).await).await;
@@ -2336,6 +2428,113 @@ mod form_body_tests {
             message.contains("open_ai_compatible"),
             "the refusal must name the accepted values, got: {message}"
         );
+    }
+
+    /// The Edit form patches with the same encoding and the same field set.
+    /// Every field is sent, so the save is the form as the admin left it:
+    /// renamed, re-listed, unticked, its key variable emptied.
+    #[tokio::test]
+    async fn an_edit_form_submit_patches_the_provider() {
+        let (ctx, block) = fixture().await;
+        let created = output_json(
+            create_provider(
+                &block,
+                &ctx,
+                &admin_msg("create", "/b/llm/api/providers"),
+                InputStream::from_bytes(TICKED_FORM.as_bytes().to_vec()),
+            )
+            .await,
+        )
+        .await;
+        let id = created["id"].as_str().expect("created id");
+
+        let edit = "name=openai-renamed&protocol=open_ai\
+&endpoint=https%3A%2F%2Fapi.openai.com%2Fv1\
+&key_var=&max_tokens_field=&models=gpt-4.1";
+        let patched = output_json(
+            update_provider(
+                &block,
+                &ctx,
+                &crate::blocks::llm::routes::test_support::routed(admin_msg(
+                    "update",
+                    &format!("/b/llm/api/providers/{id}"),
+                )),
+                InputStream::from_bytes(edit.as_bytes().to_vec()),
+            )
+            .await,
+        )
+        .await;
+
+        assert_eq!(patched["name"], "openai-renamed");
+        assert_eq!(patched["models"], serde_json::json!(["gpt-4.1"]));
+        assert_eq!(patched["enabled"], false, "an unticked box disables");
+        assert_eq!(
+            patched["key_var"],
+            serde_json::Value::Null,
+            "an emptied key variable clears it"
+        );
+    }
+
+    /// "Follow the protocol" in the Edit form clears an override the row
+    /// holds — the option means no override, not "leave it as it is".
+    #[tokio::test]
+    async fn the_edit_forms_follow_the_protocol_option_clears_the_override() {
+        let (ctx, block) = fixture().await;
+        let body = TICKED_FORM
+            .replace("protocol=open_ai&", "protocol=open_ai_compatible&")
+            .replace(
+                "max_tokens_field=",
+                "max_tokens_field=max_completion_tokens",
+            );
+        let created = output_json(
+            create_provider(
+                &block,
+                &ctx,
+                &admin_msg("create", "/b/llm/api/providers"),
+                InputStream::from_bytes(body.into_bytes()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(created["max_tokens_field"], "max_completion_tokens");
+        let id = created["id"].as_str().expect("created id");
+
+        let edit = TICKED_FORM.replace("protocol=open_ai&", "protocol=open_ai_compatible&");
+        let patched = output_json(
+            update_provider(
+                &block,
+                &ctx,
+                &crate::blocks::llm::routes::test_support::routed(admin_msg(
+                    "update",
+                    &format!("/b/llm/api/providers/{id}"),
+                )),
+                InputStream::from_bytes(edit.into_bytes()),
+            )
+            .await,
+        )
+        .await;
+        assert_eq!(patched["max_tokens_field"], serde_json::Value::Null);
+    }
+
+    /// `deny_unknown_fields` holds on the patch's form path too.
+    #[tokio::test]
+    async fn an_edit_form_body_cannot_smuggle_an_inline_api_key() {
+        let (ctx, block) = fixture().await;
+        let created = output_json(create_from_form_on(&ctx, &block, TICKED_FORM).await).await;
+        let id = created["id"].as_str().expect("created id");
+        let out = update_provider(
+            &block,
+            &ctx,
+            &crate::blocks::llm::routes::test_support::routed(admin_msg(
+                "update",
+                &format!("/b/llm/api/providers/{id}"),
+            )),
+            InputStream::from_bytes(format!("{TICKED_FORM}&api_key=sk-live-x").into_bytes()),
+        )
+        .await;
+        let (code, message) = refusal(out).await;
+        assert_eq!(code, ErrorCode::InvalidArgument);
+        assert!(message.contains("api_key"), "{message}");
     }
 
     /// SSRF validation is on the value, not on the encoding: the same gate
