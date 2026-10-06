@@ -74,18 +74,22 @@ async function json(response) {
 // ---- the log --------------------------------------------------------------
 
 var logEl = document.getElementById('dev-log');
-var logLines = [];
 var LOG_LIMIT = 200;
 
+// One text node per line, appended. `#dev-log` is a `role="log"` live
+// region, which a screen reader announces by what is ADDED to it: rewriting
+// the whole text for every line would re-read the entire log each time.
+// Past `LOG_LIMIT` the oldest line is removed — a removal is not announced.
 function log(line) {
   // Wall-clock time-of-day: the panel's job is to let a human line up what
   // the page did with what they asked the agent for, so the absolute time
   // is more use than a relative one.
-  logLines.push(new Date().toISOString().slice(11, 19) + '  ' + line);
-  if (logLines.length > LOG_LIMIT) {
-    logLines.splice(0, logLines.length - LOG_LIMIT);
+  logEl.appendChild(
+    document.createTextNode(new Date().toISOString().slice(11, 19) + '  ' + line + '\n')
+  );
+  while (logEl.childNodes.length > LOG_LIMIT) {
+    logEl.removeChild(logEl.firstChild);
   }
-  logEl.textContent = logLines.join('\n');
   logEl.scrollTop = logEl.scrollHeight;
 }
 
@@ -713,6 +717,10 @@ var consoleSchema = document.getElementById('dev-console-schema');
 var consoleArgs = document.getElementById('dev-console-args');
 var consoleRun = document.getElementById('dev-console-run');
 var consoleResult = document.getElementById('dev-console-result');
+// The announcement for a finished run (a visually hidden `role="status"`):
+// the result box itself is `aria-live="off"`, because reading pages of JSON
+// aloud is not what a screen reader user asked for.
+var consoleStatus = document.getElementById('dev-console-status');
 var webmcpStatus = document.getElementById('dev-webmcp-status');
 
 // A value the schema would accept for one property, as a starting point for
@@ -855,6 +863,7 @@ function consoleReport(result) {
 function showConsoleReport(report) {
   consoleResult.setAttribute('data-is-error', String(report.isError));
   consoleResult.textContent = JSON.stringify(report, null, 2);
+  consoleStatus.textContent = 'Run finished: ' + (report.isError ? 'error' : 'ok');
 }
 
 // Run the selected tool with the arguments in the box, and show its result.
@@ -867,6 +876,9 @@ async function runConsoleTool() {
   if (!tool) {
     return;
   }
+  // Emptied first, so a second run with the same outcome is still a change
+  // the status region announces.
+  consoleStatus.textContent = '';
   var args;
   try {
     args = JSON.parse(consoleArgs.value.trim() === '' ? '{}' : consoleArgs.value);

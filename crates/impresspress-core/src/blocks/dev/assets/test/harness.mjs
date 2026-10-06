@@ -193,10 +193,15 @@ export function instantiate({
   // faithful model of both — and it is what lets a test read the options the
   // Compile select was actually given, rather than trusting that a function
   // that appended into a black hole did the right thing.
+  //
+  // `textContent` follows the DOM: reading it concatenates the children's
+  // text, and writing it replaces the children. `createTextNode` and
+  // `removeChild` are the log's verbs (it appends one line at a time), so a
+  // test can tell an append from a rewrite.
   const fakeElement = () => {
+    let ownText = '';
     const element = {
       value: '',
-      textContent: '',
       className: '',
       disabled: false,
       title: '',
@@ -213,6 +218,27 @@ export function instantiate({
       appendChild(child) {
         this.children.push(child);
         return child;
+      },
+      removeChild(child) {
+        const index = this.children.indexOf(child);
+        if (index === -1) {
+          throw new Error('removeChild: not a child of this element');
+        }
+        this.children.splice(index, 1);
+        return child;
+      },
+      get childNodes() {
+        return this.children;
+      },
+      get firstChild() {
+        return this.children[0] ?? null;
+      },
+      get textContent() {
+        return ownText + this.children.map((child) => child.textContent ?? '').join('');
+      },
+      set textContent(value) {
+        ownText = String(value);
+        this.children.length = 0;
       },
       addEventListener() {}
     };
@@ -275,6 +301,9 @@ export function instantiate({
       getElementById: elementById,
       // An anchor the tail can set `href`/`download` on, append, click and
       // remove. `click()` records the download instead of starting one.
+      createTextNode(text) {
+        return { nodeType: 3, textContent: String(text) };
+      },
       createElement(tag) {
         const element = fakeElement();
         if (tag === 'a') {
@@ -474,6 +503,8 @@ export function instantiate({
     `${core}
 ${tail}
 return {
+  log,
+  LOG_LIMIT,
   withProgress,
   get outstanding() { return outstanding },
   get isPolling() { return polling !== null },

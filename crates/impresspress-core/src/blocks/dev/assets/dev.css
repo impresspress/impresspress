@@ -131,10 +131,9 @@
 	min-width: 0;
 }
 
-/* The shared `.form-select` is 44px tall; the tool names are identifiers,
-   so they read in the monospace the rest of the console uses. */
+/* The tool names are identifiers, so they read in the monospace the rest of
+   the console uses. Its touch height is set in the pointer query below. */
 #dev-console-tool {
-	min-height: 44px;
 	font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
 }
 
@@ -193,6 +192,7 @@
 .dev-file {
 	display: block;
 	width: 100%;
+	/* 24px is the floor for a fine pointer; a coarse one gets 44px below. */
 	min-height: 36px;
 	padding: var(--space-2) var(--space-3);
 	border: 0;
@@ -358,7 +358,6 @@
 	width: auto;
 	min-width: 10rem;
 	max-width: 16rem;
-	min-height: 44px;
 }
 
 /* Which toolchain this build carries, written by `dev.js` from the compiler
@@ -394,12 +393,19 @@
 		padding: var(--space-4);
 	}
 
-	/* Touch-sized file rows. */
-	.dev-file {
-		min-height: 44px;
-	}
-
 	#dev-file-list {
 		max-height: clamp(220px, 40vh, 400px);
+	}
+}
+
+/* Touch targets: 44px wherever a coarse pointer (a finger) is available,
+   whatever the window's width — a narrow desktop window has a mouse, and a
+   tablet in landscape is wide. Fine pointers keep the denser rows above,
+   none of them under 24px. */
+@media (any-pointer: coarse) {
+	.dev-file,
+	#dev-console-tool,
+	#dev-compile-block {
+		min-height: 44px;
 	}
 }

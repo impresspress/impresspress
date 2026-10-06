@@ -182,14 +182,23 @@ fn body(seed: Option<&SeedInfo>, credentials: Option<(&str, &str)>) -> Markup {
                             // `dev.js` has fetched the tools.
                             button #dev-console-run .btn .btn--primary type="button" disabled { "Run" }
                         }
-                        // `output` rather than `pre`: it is labelable, so the
-                        // "Result" label names it, and it is a status region,
-                        // so a screen reader hears the run finish. The block
-                        // around it stays hidden while it is empty
+                        // What a screen reader hears when a run ends: one
+                        // short sentence ("Run finished: ok" / "…: error"),
+                        // written by `dev.js`. Always rendered — a live
+                        // region that only appears with its text is not
+                        // reliably announced.
+                        div #dev-console-status .sr-only role="status" {}
+                        // `output` rather than `pre` because it is labelable,
+                        // so the "Result" label names it. `aria-live="off"`
+                        // overrides the implicit status role an `output`
+                        // carries: the result can be pages of JSON, which is
+                        // for reading, not for announcing — the run's outcome
+                        // is announced by `#dev-console-status` above. The
+                        // block around it stays hidden while it is empty
                         // (dev.css), so no "Result" label stands over nothing.
                         div .dev-console__result {
                             label .form-label for="dev-console-result" { "Result" }
-                            output #dev-console-result for="dev-console-args" {}
+                            output #dev-console-result for="dev-console-args" aria-live="off" {}
                         }
                     }
                 }
@@ -398,6 +407,7 @@ mod tests {
             "dev-console-args",
             "dev-console-run",
             "dev-console-result",
+            "dev-console-status",
         ] {
             assert!(
                 assets::dev_js().contains(&format!("'{id}'")),
