@@ -187,27 +187,67 @@ pub fn dashboard_page(
 /// to address it — the messages composer scrolls it after a post.
 pub const CHAT_MESSAGES_ID: &str = "chat-messages";
 
+/// Which of [`chat_page`]'s panes a phone shows. Below 720px the layout is
+/// one pane at a time, the way a chat app on a phone is: the thread list, or
+/// one conversation (with its rail above it as a toolbar). On a wider screen
+/// every pane is shown side by side and this changes nothing.
+///
+/// The way back from a conversation to the list is the page's own trail and
+/// section link (the topbar crumb, the block's sub-nav), not a second scroll
+/// region squeezed above the conversation.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ChatFocus {
+    /// No conversation is open: a phone shows the thread list.
+    Threads,
+    /// A conversation is open: a phone shows it, and not the list.
+    Conversation,
+}
+
+impl ChatFocus {
+    /// The `data-chat-focus` value the stylesheet keys the phone layout on.
+    /// `llm-chat.js` sets the same attribute when it opens a thread in place.
+    fn as_str(self) -> &'static str {
+        match self {
+            ChatFocus::Threads => "threads",
+            ChatFocus::Conversation => "conversation",
+        }
+    }
+}
+
+/// One of [`chat_page`]'s side panes: its markup and the accessible name of
+/// the landmark it is drawn in. Two unnamed `aside`s on one page are two
+/// complementary landmarks a screen reader cannot tell apart.
+pub struct ChatPane<'a> {
+    /// The landmark's name ("Threads", "Conversations", "Chat options").
+    pub label: &'a str,
+    /// The pane's content.
+    pub body: Markup,
+}
+
 /// The chat layout: thread list, messages + composer, optional right rail.
 ///
 /// Full-bleed — it draws its own panes edge to edge — so it returns a
 /// [`PageBody`](super::PageBody) that carries that frame to the shell; a page
 /// passes it to `shell_page` as is (or [`append`](super::PageBody::append)s
 /// its own scripts) and never picks the frame itself.
+///
+/// `focus` decides which pane a phone shows — see [`ChatFocus`].
 pub fn chat_page(
-    thread_list: Markup,
+    focus: ChatFocus,
+    threads: ChatPane<'_>,
     messages: Markup,
     composer: Markup,
-    right_rail: Option<Markup>,
+    right_rail: Option<ChatPane<'_>>,
 ) -> super::PageBody {
     super::PageBody::full_bleed(html! {
-        div .page--chat {
-            aside .chat-threads { (thread_list) }
+        div .page--chat data-chat-focus=(focus.as_str()) {
+            aside .chat-threads aria-label=(threads.label) { (threads.body) }
             section .chat-main {
                 div .chat-messages #(CHAT_MESSAGES_ID) { (messages) }
                 div .chat-composer { (composer) }
             }
             @if let Some(r) = right_rail {
-                aside .chat-rail { (r) }
+                aside .chat-rail aria-label=(r.label) { (r.body) }
             }
         }
     })
@@ -569,13 +609,18 @@ mod tests {
         assert!(s.contains(r#"id="top-card""#));
     }
 
+    fn pane(label: &str, body: Markup) -> ChatPane<'_> {
+        ChatPane { label, body }
+    }
+
     #[test]
     fn chat_page_with_rail() {
         let body = chat_page(
-            html! { div { "threads" } },
+            ChatFocus::Conversation,
+            pane("Threads", html! { div { "threads" } }),
             html! { div { "messages" } },
             html! { textarea {} },
-            Some(html! { div { "rail" } }),
+            Some(pane("Chat options", html! { div { "rail" } })),
         );
         assert_eq!(
             body.layout(),
@@ -591,10 +636,53 @@ mod tests {
         assert!(s.contains(">rail<"));
     }
 
+    /// Both side panes are complementary landmarks, and each is named by the
+    /// caller — two unnamed `aside`s fail axe's `landmark-unique`.
+    #[test]
+    fn chat_page_names_both_side_panes() {
+        let s = chat_page(
+            ChatFocus::Threads,
+            pane("Threads", html! {}),
+            html! {},
+            html! {},
+            Some(pane("Chat options", html! {})),
+        )
+        .into_markup()
+        .into_string();
+        assert!(
+            s.contains(r#"<aside class="chat-threads" aria-label="Threads">"#),
+            "{s}"
+        );
+        assert!(
+            s.contains(r#"<aside class="chat-rail" aria-label="Chat options">"#),
+            "{s}"
+        );
+    }
+
+    /// The phone layout is keyed on which pane the page leads with.
+    #[test]
+    fn chat_page_says_which_pane_a_phone_shows() {
+        for (focus, value) in [
+            (ChatFocus::Threads, "threads"),
+            (ChatFocus::Conversation, "conversation"),
+        ] {
+            let s = chat_page(focus, pane("Threads", html! {}), html! {}, html! {}, None)
+                .into_markup()
+                .into_string();
+            assert!(
+                s.contains(&format!(
+                    r#"<div class="page--chat" data-chat-focus="{value}">"#
+                )),
+                "{s}"
+            );
+        }
+    }
+
     #[test]
     fn chat_page_no_rail_omits_aside() {
         let s = chat_page(
-            html! { div { "threads" } },
+            ChatFocus::Conversation,
+            pane("Threads", html! { div { "threads" } }),
             html! { div {} },
             html! { textarea {} },
             None,

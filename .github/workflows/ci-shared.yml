@@ -325,6 +325,14 @@ jobs:
       - name: Run auth form unit tests (node --test)
         run: node --test crates/impresspress-core/src/blocks/auth_ui/assets/test/*.test.mjs
 
+      # `llm-chat.js` builds the chat's message cards and opens threads in
+      # place. What these pin: the cards carry the shared card and badge
+      # classes and no inline style, a user turn is text and never markup,
+      # and on a phone showing the thread list a thread link navigates (a
+      # real history entry) instead of being swapped into a hidden pane.
+      - name: Run LLM chat unit tests (node --test)
+        run: node --test crates/impresspress-core/src/blocks/llm/assets/test/*.test.mjs
+
   # Every `#[cfg(feature = "postgres")]` assertion in the repo — the seven
   # migration tests that check each block's `*.postgres.sql` twin is the one
   # its Rust list actually references — was dead code in CI: nothing anywhere
