@@ -1481,7 +1481,7 @@ jobs:
       # `e2e:visual` (this server) is the baselines plus specs that leave no
       # trace a page shows — no write, no refused request:
       # - delegated-actions filters a list, opens a modal, toggles fields and
-      #   hops between two products admin tabs, refusing that hop's one
+      #   hops between two products admin sections, refusing that hop's one
       #   mutating request in the browser;
       # - admin-modals opens and closes every admin modal (keyboard, Esc,
       #   focus return, the 390px footer); its one submit is answered in the

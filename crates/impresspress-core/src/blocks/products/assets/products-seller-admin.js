@@ -1,9 +1,11 @@
-// Guarded, because this whole script re-runs on every htmx partial swap: a tab
-// navigation asks for the page with `HX-Request`, `ui::shell_page` answers with
-// the body verbatim (`ui/mod.rs:226`), htmx executes the scripts in what it
-// swapped in, and `document` outlives the swap. Without the flag a user who
-// visits a second tab and comes back has this listener bound twice and every
-// mutating action fires twice. The declarations below are safe to re-run --
+// Guarded, so the listener is registered once per document however often the
+// script runs: an htmx swap of a page body (a request with `HX-Request`, which
+// `ui::shell_page` answers with the body verbatim) executes the scripts in
+// what it swapped in, and `document` outlives the swap, so an unguarded
+// registration would bind a second listener and every mutating action would
+// fire twice. The products section links are plain navigations, so no products
+// page is reached that way; the guard keeps any swap that does reach one from
+// doubling its actions. The declarations below are safe to re-run --
 // re-declaring a function replaces it -- so only the registration is guarded.
 (function(){
   if(window.__sellerAdminDelegated)return;

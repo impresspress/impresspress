@@ -6,6 +6,7 @@ mod handler_tests;
 mod harness;
 mod offer_management_tests;
 mod offer_pricing_tests;
+mod page_chrome_tests;
 mod page_link_tests;
 mod provider_tests;
 mod purchase_tests;

@@ -180,25 +180,20 @@ test.describe('delegated actions', () => {
   });
 
   /**
-   * The hole the other three cases cannot see.
+   * The products section links are plain navigations, not the htmx swap of
+   * `#content` they used to be. That swap replaced only the body: the
+   * previous page's title, subtitle and actions stayed in the topbar (Groups'
+   * "New group" over the Orders list), and the next page's scripts ran again
+   * on a `document` that already had their listeners — one click on Save
+   * then issued two POSTs.
    *
-   * The products admin tabs are `hx-get` + `hx-target="#content"`, so a tab is
-   * a partial swap, not a navigation. `ui::shell_page` answers a request
-   * carrying `HX-Request` with the page body verbatim; the page's `<script>`
-   * blocks are IN that body; htmx executes scripts in what it swapped in; and
-   * `document` survives the swap. So a `document.addEventListener` written at
-   * the top level of one of those blocks is registered again on every visit.
-   *
-   * Groups, Orders, Groups leaves the catalog script's listeners bound twice
-   * without an initialisation guard, and one click on Save then issues two
-   * POSTs — or, on Delete, two confirmation dialogs and two DELETEs, the second
-   * of which 404s and paints an error. This asserts exactly one request leaves
-   * the page, which is the observable that fails without the guard and cannot
-   * be seen by a screenshot, by the markup gate, or by a single-visit case.
-   *
-   * The API call is intercepted and refused, so the run writes nothing.
+   * So a hop Groups → Orders → Groups must change the topbar each time, and
+   * one click must still send exactly one request. The API call is
+   * intercepted and refused, so the run writes nothing.
    */
-  test('a delegated listener survives a tab hop without binding twice', async ({ page }) => {
+  test('a products section hop changes the whole page and binds each listener once', async ({
+    page,
+  }) => {
     await loginAsAdmin(page);
 
     const groupPosts: string[] = [];
@@ -211,19 +206,28 @@ test.describe('delegated actions', () => {
       });
     });
 
-    await page.goto('/b/products/admin/groups', { waitUntil: 'networkidle' });
-    await expect(page.locator('[data-action="pc-new"]').first()).toBeVisible();
+    const sections = page.getByRole('navigation', { name: 'Products sections' });
+    const title = page.locator('h1');
+    const newGroup = page.locator('.topbar__actions [data-action="pc-new"]');
 
-    // Hop to another tab and back. Both are htmx swaps of `#content`, so the
-    // catalog script is parsed and executed a second time.
-    await page.locator('.tab', { hasText: 'Orders' }).click();
+    await page.goto('/b/products/admin/groups', { waitUntil: 'networkidle' });
+    await expect(title).toHaveText('Groups');
+    await expect(newGroup).toBeVisible();
+    await expect(sections.getByRole('link', { name: 'Groups' })).toHaveAttribute('aria-current', 'page');
+
+    await sections.getByRole('link', { name: 'Orders' }).click();
     await expect(page).toHaveURL(/\/b\/products\/admin\/purchases$/);
-    await page.locator('.tab', { hasText: 'Groups' }).click();
+    // No stale header: the title is the new page's, Groups' action is gone.
+    await expect(title).toHaveText('Orders');
+    await expect(newGroup).toHaveCount(0);
+    await expect(sections.getByRole('link', { name: 'Orders' })).toHaveAttribute('aria-current', 'page');
+
+    await sections.getByRole('link', { name: 'Groups' }).click();
     await expect(page).toHaveURL(/\/b\/products\/admin\/groups$/);
-    await expect(page.locator('[data-action="pc-new"]').first()).toBeVisible();
+    await expect(title).toHaveText('Groups');
 
     // One click on a control whose handler makes a request.
-    await page.locator('[data-action="pc-new"]').first().click();
+    await newGroup.click();
     await page.locator('#group-editor-name').fill('delegation guard');
     await page.locator('#group-editor button[type="submit"]').click();
 
