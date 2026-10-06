@@ -344,7 +344,10 @@
 	padding: var(--space-6);
 }
 .shell__body--flush { padding: 0; }
+/* `main` is a Tab stop (it is the page's scroller), so a keyboard user sees
+   where focus is; a mouse click into the card focuses it without a ring. */
 .shell__body:focus { outline: none; }
+.shell__body:focus-visible { box-shadow: var(--focus-ring); }
 
 /* The page header (`ui::shell::Topbar`): crumbs + title + subtitle on the
    left, the page's actions and the palette trigger on the right. */
