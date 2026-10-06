@@ -89,6 +89,11 @@ pub fn page(title: &str, config: &SiteConfig, body: Markup) -> Markup {
             body {
                 (body)
                 div #toast-container .toast-container role="status" aria-live="polite" {}
+                // What a list search found (`components::SearchInput`),
+                // written by chrome.js. Outside `main#content`, which each
+                // search re-renders: a live region announces changes to
+                // itself, not its own replacement.
+                div #search-status .sr-only role="status" aria-live="polite" {}
                 script src=(assets::webmcp_js_url()) defer {}
                 @for src in &config.embedded_scripts {
                     script type="module" src=(src) {}

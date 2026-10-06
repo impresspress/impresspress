@@ -27,6 +27,13 @@ use crate::ui::icons;
 ///   for a term the box no longer holds — the operator typed on while it was
 ///   in flight. Swapping it in would put the shorter term back in the box
 ///   and eat what was typed; the pending trigger searches the longer one.
+///
+/// For a screen reader: the box sits in a `search` landmark; after each
+/// search `chrome.js` puts the box's `data-search-status` ("12 results for
+/// “ali”") into the page's `#search-status` live region, which `ui::layout`
+/// renders outside `main#content` so the swap cannot take it away; and
+/// after Clear it puts focus back in the box (`data-search-clear` names it),
+/// since the Clear link itself is gone.
 pub struct SearchInput<'a> {
     /// Unique on the page and the same on every render of it.
     pub id: &'a str,
@@ -39,6 +46,8 @@ pub struct SearchInput<'a> {
     pub href: &'a str,
     /// The term the page is showing, as it read it from `name`.
     pub value: &'a str,
+    /// How many rows match `value`, across every page of the list.
+    pub result_count: u64,
 }
 
 impl SearchInput<'_> {
@@ -55,6 +64,21 @@ impl SearchInput<'_> {
             self.name,
             crate::util::urlencode(self.value)
         )
+    }
+
+    /// What a search announces once its list is on screen: how many rows it
+    /// found, for which term.
+    pub fn status(&self) -> String {
+        let count = match self.result_count {
+            0 => "No results".to_string(),
+            1 => "1 result".to_string(),
+            n => format!("{n} results"),
+        };
+        if self.value.is_empty() {
+            count
+        } else {
+            format!("{count} for \u{201c}{}\u{201d}", self.value)
+        }
     }
 
     /// The box, preceded by a "Results for …" summary with a Clear link
@@ -75,10 +99,11 @@ impl SearchInput<'_> {
                         hx-get=(self.href)
                         hx-target="#content"
                         hx-replace-url="true"
+                        data-search-clear=(self.id)
                     { (icons::x()) " Clear" }
                 }
             }
-            div .search-input {
+            div .search-input role="search" {
                 span .search-input-icon { (icons::search()) }
                 input .form-input
                     type="search"
@@ -98,6 +123,7 @@ impl SearchInput<'_> {
                     hx-target="#content"
                     hx-replace-url="true"
                     data-search-input
+                    data-search-status=(self.status())
                     autocomplete="off";
             }
         }
@@ -224,6 +250,7 @@ mod tests {
             label: "Search users",
             href,
             value,
+            result_count: 3,
         }
     }
 
@@ -274,6 +301,38 @@ mod tests {
             ),
             "{s}"
         );
+    }
+
+    /// The box is a search landmark, Clear names the box it returns focus
+    /// to, and the box carries what its search announces.
+    #[test]
+    fn the_search_box_is_a_landmark_and_carries_its_announcement() {
+        let s = search("ali", "/b/admin/users").render().into_string();
+        assert!(
+            s.contains(r#"<div class="search-input" role="search">"#),
+            "{s}"
+        );
+        assert!(s.contains(r#"data-search-clear="users-search""#), "{s}");
+        assert!(
+            s.contains("data-search-status=\"3 results for \u{201c}ali\u{201d}\""),
+            "{s}"
+        );
+    }
+
+    #[test]
+    fn the_status_counts_the_results_for_the_term() {
+        let with = |value, result_count| {
+            SearchInput {
+                result_count,
+                ..search(value, "/x")
+            }
+            .status()
+        };
+        assert_eq!(with("ali", 12), "12 results for \u{201c}ali\u{201d}");
+        assert_eq!(with("ali", 1), "1 result for \u{201c}ali\u{201d}");
+        assert_eq!(with("ali", 0), "No results for \u{201c}ali\u{201d}");
+        assert_eq!(with("", 40), "40 results");
+        assert_eq!(with("", 0), "No results");
     }
 
     #[test]

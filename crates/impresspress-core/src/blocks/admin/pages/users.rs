@@ -136,6 +136,7 @@ async fn users_tab(
         label: "Search by email or user ID...",
         href: "/b/admin/users",
         value: &search,
+        result_count: u64::try_from(list.total_count).unwrap_or(0),
     };
 
     Ok(html! {

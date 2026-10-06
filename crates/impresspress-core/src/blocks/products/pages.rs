@@ -603,6 +603,7 @@ pub async fn manage_products(ctx: &dyn Context, msg: &Message) -> OutputStream {
         label: "Search by product name",
         href: base_href,
         value: &search,
+        result_count: u64::try_from(list.total_count).unwrap_or(0),
     };
     let content = html! {
         div .filter-bar {

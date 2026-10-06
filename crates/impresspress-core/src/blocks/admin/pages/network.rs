@@ -176,6 +176,7 @@ pub async fn settings_body(
         label: "Search by path...",
         href: &search_href,
         value: &query.search,
+        result_count: u64::try_from(routes.total).unwrap_or(0),
     };
 
     Ok(NetworkBody::Page(html! {

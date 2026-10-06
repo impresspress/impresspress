@@ -170,6 +170,7 @@ async fn system_logs_tab(ctx: &dyn Context, msg: &Message) -> Result<Markup, Waf
         label: "Search by path...",
         href: &search_href,
         value: &search,
+        result_count: u64::try_from(list.total_count).unwrap_or(0),
     };
     let empty = match (errors.server, errors.client) {
         (true, true) => "No server or client errors logged",
@@ -252,6 +253,7 @@ async fn audit_logs_tab(ctx: &dyn Context, msg: &Message) -> Result<Markup, Wafe
         label: "Search by resource...",
         href: "/b/admin/logs?tab=audit",
         value: &search,
+        result_count: u64::try_from(list.total_count).unwrap_or(0),
     };
 
     Ok(html! {

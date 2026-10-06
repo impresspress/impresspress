@@ -19,7 +19,7 @@
 // `#cmdk` gives them — so loading the whole real file costs nothing and keeps
 // the tests honest about the file as shipped, rather than about an extract of
 // it. What the tests drive is section 3 (toasts and the htmx error listeners),
-// section 5 (htmx after-success effects) and section 6 (stale search responses).
+// section 5 (htmx after-success effects) and section 6 (list search).
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -185,6 +185,11 @@ export function loadChrome({ toastContainer = true } = {}) {
       return name in this.attributes;
     }
   });
+
+  // Where the layout renders it: a child of `body`. Section 4's
+  // `htmx:afterSwap` listener moves the container into an open modal and back,
+  // and with no modal open it finds it already home.
+  if (container) container.parentNode = body;
 
   const sandbox = {
     window: {

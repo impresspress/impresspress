@@ -15,7 +15,9 @@ import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
  * and a reload keeps it, and typing replaces the history entry rather than
  * adding one per term — Back leaves the searched page in one step. htmx keeps
  * no history snapshots (`ui::layout`'s htmx config), so admin lists never land
- * in localStorage, and Back to an htmx-pushed URL loads it whole.
+ * in localStorage, and Back to an htmx-pushed URL loads it whole. For a
+ * screen reader the box is a search landmark, each search announces what it
+ * found, and Clear puts focus back in the box.
  *
  * Signs up accounts (users) and makes requests the request log records
  * (logs), so it is part of `e2e:writes`, which CI runs on its own server.
@@ -150,12 +152,19 @@ for (const target of PAGES) {
       await expectOnlyMatches(page, term);
       await expect(page.locator('.search-summary')).toContainText(term);
 
+      // The live region sits outside the swapped body and says what the
+      // search found.
+      await expect(page.locator('#search-status')).toHaveText(`1 result for “${term}”`);
+      await expect(page.getByRole('search').getByRole('searchbox')).toHaveCount(1);
+
       await page.reload({ waitUntil: 'networkidle' });
       await expect(target.box(page)).toHaveValue(term);
       await expectOnlyMatches(page, term);
 
       await page.locator('.search-summary').getByRole('link', { name: 'Clear' }).click();
       await expectUnfiltered(page, target, term);
+      await expect(target.box(page)).toBeFocused();
+      await expect(page.locator('#search-status')).toHaveText(/^\d+ results$/);
     });
 
     test('Back after searching returns to the page before the search, in one step', async ({
