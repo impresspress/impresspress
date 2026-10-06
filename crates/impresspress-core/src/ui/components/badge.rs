@@ -270,9 +270,7 @@ mod tests {
     ///
     /// `blocks/admin/` is absent because this pull request migrated its 39.
     /// The rest are phase 5 §8 candidates and out of scope here.
-    const HAND_WRITTEN_BADGES: &[(&str, usize)] = &[
-        ("blocks/products/pages.rs", 6),
-    ];
+    const HAND_WRITTEN_BADGES: &[(&str, usize)] = &[("blocks/products/pages.rs", 6)];
 
     #[test]
     fn only_the_declared_files_still_hand_write_badge_markup() {
