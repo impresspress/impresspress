@@ -6,7 +6,7 @@
     "e2e": "playwright test --config=tests/playwright.config.ts",
     "e2e:dev": "playwright test --config=tests/playwright.config.ts tests/e2e/dev-foundations.spec.ts",
     "e2e:visual": "playwright test --config=tests/playwright.visual-baseline.config.ts tests/e2e/visual-baseline.spec.ts tests/e2e/delegated-actions.spec.ts tests/e2e/admin-modals.spec.ts",
-    "e2e:writes": "playwright test --config=tests/playwright.visual-baseline.config.ts tests/e2e/admin-variables.spec.ts tests/e2e/webmcp.spec.ts tests/e2e/htmx-success-effects.spec.ts tests/e2e/auth-forms.spec.ts tests/e2e/settings-form.spec.ts tests/e2e/account-pages.spec.ts tests/e2e/legal-editor.spec.ts"
+    "e2e:writes": "playwright test --config=tests/playwright.visual-baseline.config.ts tests/e2e/admin-variables.spec.ts tests/e2e/webmcp.spec.ts tests/e2e/htmx-success-effects.spec.ts tests/e2e/auth-forms.spec.ts tests/e2e/settings-form.spec.ts tests/e2e/account-pages.spec.ts tests/e2e/llm-pages.spec.ts tests/e2e/legal-editor.spec.ts"
   },
   "devDependencies": {
     "@playwright/test": "^1.59.1"

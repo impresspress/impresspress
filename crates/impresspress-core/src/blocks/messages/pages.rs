@@ -375,7 +375,11 @@ fn render_conversation_view(
     let composer = render_conversation_composer(&post_url);
 
     Ok(crate::ui::templates::chat_page(
-        thread_list,
+        crate::ui::templates::ChatFocus::Conversation,
+        crate::ui::templates::ChatPane {
+            label: "Conversations",
+            body: thread_list,
+        },
         messages_pane,
         composer,
         None,

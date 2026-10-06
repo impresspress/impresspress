@@ -274,7 +274,6 @@ mod tests {
     /// The rest are phase 5 §8 candidates and out of scope here.
     const HAND_WRITTEN_BADGES: &[(&str, usize)] = &[
         ("blocks/files/pages_user/buckets.rs", 2),
-        ("blocks/llm/ui.rs", 10),
         ("blocks/messages/pages.rs", 6),
         ("blocks/products/pages.rs", 6),
         ("blocks/tickets/pages.rs", 4),

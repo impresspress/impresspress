@@ -19,13 +19,14 @@ use wafer_core::clients::llm::ModelInfo;
 use wafer_run::{context::Context, Message, OutputStream};
 
 use super::{
-    providers::config::ProviderConfig,
+    providers::config::{ProviderConfig, ProviderProtocol},
     schema::{row_to_config, TABLE as PROVIDERS_TABLE},
     LlmBlock, EXAMPLE_KEY_VAR,
 };
 use crate::{
     db_read::{self, Bound},
-    ui::{self, components},
+    llm_wire::openai::MaxTokensField,
+    ui::{self, components, icons},
 };
 
 // ---------------------------------------------------------------------------
@@ -83,45 +84,66 @@ pub(super) async fn providers_page(
 
     let manages = block.provider_admin.manages_providers();
 
+    // The list is the page; the create and edit forms wait in modals, opened
+    // from the topbar's Add provider and from each row's Edit.
     let content = html! {
-        (components::page_header(
-            "LLM Providers",
-            Some(if manages {
-                "Configure OpenAI, Anthropic, and OpenAI-compatible endpoints."
-            } else {
-                "Read-only on this deployment."
-            }),
-            None,
-        ))
-
-        @if manages {
-            // Add-provider form. Posts `application/x-www-form-urlencoded`,
-            // which `POST /b/llm/api/providers` accepts alongside JSON.
-            div .card .mb-6 {
-                h3 .card-title .mb-3 { "Add provider" }
-                (add_provider_form())
-            }
-        } @else {
+        @if !manages {
             (cannot_manage_providers_notice())
         }
-
-        // Providers table. Rendered by a pure helper for testability.
-        div .card .card--flush {
-            (render_providers_table(&configs, manages))
+        (render_providers_table(&configs, manages))
+        @if manages {
+            (components::modal(ADD_PROVIDER_MODAL_ID, "Add provider", provider_form(ProviderForm::New)))
+            @for (id, cfg) in &configs {
+                (components::modal(
+                    &edit_modal_id(id),
+                    &format!("Edit {}", cfg.name),
+                    provider_form(ProviderForm::Edit { id, cfg }),
+                ))
+            }
         }
     };
 
+    let shell = ui::Shell::admin("LLM Providers", "Providers").subtitle(if manages {
+        "OpenAI, Anthropic and OpenAI-compatible endpoints the chat can route to"
+    } else {
+        "Read-only on this deployment"
+    });
+    let shell = if manages {
+        shell.actions(vec![add_provider_button()])
+    } else {
+        shell
+    };
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::admin("LLM Providers", "Providers"),
+        shell,
         ui::PageBody::from(content)
             .with_subnav(super::pages::sections(super::pages::Section::Providers)),
     )
     .await
 }
 
-/// What the page says instead of the create form when the runtime holds a
+/// The Add provider modal's element id, which its triggers name in
+/// `data-modal-target`.
+const ADD_PROVIDER_MODAL_ID: &str = "add-provider";
+
+/// The element id of provider `id`'s edit modal.
+fn edit_modal_id(id: &str) -> String {
+    format!("edit-provider-{id}")
+}
+
+/// The page's primary action: opens the Add provider modal.
+fn add_provider_button() -> Markup {
+    html! {
+        button .btn.btn--primary type="button"
+            data-action="modal-open" data-modal-target=(ADD_PROVIDER_MODAL_ID)
+        {
+            (icons::plus()) "Add provider"
+        }
+    }
+}
+
+/// What the page says instead of offering controls when the runtime holds a
 /// handle that cannot manage providers.
 ///
 /// It names the two things an administrator needs: that the rows below are a
@@ -129,258 +151,298 @@ pub(super) async fn providers_page(
 /// deployment. A browser runtime configures its providers inside
 /// `BrowserLlmService`, not through this block.
 fn cannot_manage_providers_notice() -> Markup {
-    html! {
-        div .card .mb-6 {
-            h3 .card-title .mb-3 { "This deployment cannot manage providers" }
-            p .text-muted {
+    components::callout(
+        components::CalloutTone::Warning,
+        "This deployment cannot manage providers",
+        html! {
+            p {
                 "No provider backend is compiled into this runtime, so \
                  creating, editing, discovering and deleting providers are \
                  unavailable here — the API answers 501 for all four. Any \
                  rows below are stored configuration, shown read-only."
             }
-            p .text-muted .mt-2 {
+            p {
                 "A browser deployment configures its providers inside its own \
                  LLM service rather than through this page. A server \
                  deployment gets these controls by building with the `llm` \
                  feature."
             }
-        }
-    }
+        },
+        None,
+    )
 }
 
-/// Render the add-provider form. Separated out so the top-level page
-/// composition stays flat and the form markup is swappable without editing
-/// the outer shell.
+/// Which provider form to render: the empty create form, or the edit form
+/// of one stored provider, filled with what it holds.
+#[derive(Clone, Copy)]
+enum ProviderForm<'a> {
+    New,
+    Edit {
+        id: &'a str,
+        cfg: &'a ProviderConfig,
+    },
+}
+
+/// The provider form, in the Add provider modal or in one provider's edit
+/// modal.
 ///
-/// A plain htmx form: it posts `application/x-www-form-urlencoded`, which is
-/// what the handler parses. Nothing here reshapes the body in the browser —
-/// the `models` text input and the `enabled` checkbox are coerced by
-/// `routes::providers::parse_create_provider_body`, which is one description
-/// of the field shapes instead of two.
+/// A plain htmx form: it sends `application/x-www-form-urlencoded`, which
+/// both `POST /b/llm/api/providers` and `PATCH /b/llm/api/providers/{id}`
+/// parse. Nothing here reshapes the body in the browser — the `models` text
+/// input and the `enabled` checkbox are coerced by
+/// `routes::providers::parse_provider_body`, which is one description of the field
+/// shapes for both routes instead of one per form.
 ///
 /// Like every control on this page it needs htmx: there is no `action` or
 /// `method`, so the submit is htmx's or it is nothing.
 ///
-/// `hx-swap="none"` because the response is the created provider as JSON for
-/// SDK callers; the page picks up the new row by reloading.
-fn add_provider_form() -> Markup {
+/// `hx-swap="none"` because the response is the provider as JSON for SDK
+/// callers; the page picks up the change by reloading. A refusal is a toast
+/// (chrome.js), which an open modal shows inside itself.
+fn provider_form(form: ProviderForm<'_>) -> Markup {
+    let (prefix, cfg) = match form {
+        ProviderForm::New => ("new".to_string(), None),
+        ProviderForm::Edit { id, cfg } => (format!("edit-{id}"), Some(cfg)),
+    };
+    let field = |name: &str| format!("{prefix}-{name}");
+    // A new provider starts on `open_ai`, said with `selected` rather than
+    // left to the browser's first-option default: the modal's Esc guard
+    // compares every option with its `defaultSelected`, and an implicit
+    // selection reads as a change nobody made.
+    let protocol = cfg.map_or(ProviderProtocol::OpenAi, |c| c.protocol);
+    let budget = cfg.and_then(|c| c.max_tokens_field);
+    let models = cfg.map(|c| c.models.join(", ")).unwrap_or_default();
+    let enabled = cfg.is_none_or(|c| c.enabled);
+    let submit = if cfg.is_some() {
+        "Save changes"
+    } else {
+        "Add provider"
+    };
+    let key_hint = field("key-var-hint");
+    let budget_hint = field("max-tokens-field-hint");
+    let models_hint = field("models-hint");
     html! {
         form
-            hx-post="/b/llm/api/providers"
+            hx-post=[matches!(form, ProviderForm::New).then_some("/b/llm/api/providers")]
+            hx-patch=[match form {
+                ProviderForm::Edit { id, .. } => Some(format!("/b/llm/api/providers/{id}")),
+                ProviderForm::New => None,
+            }]
             hx-swap="none"
             data-reload-on-success
         {
-            div .form-row .gap-3 {
-                div .form-group {
-                    label .form-label for="new-name" { "Name" }
-                    input
-                        .form-input
-                        type="text"
-                        name="name"
-                        id="new-name"
-                        placeholder="openai-main"
-                        required;
-                }
-                div .form-group {
-                    label .form-label for="new-protocol" { "Protocol" }
-                    select .form-select name="protocol" id="new-protocol" {
-                        option value="open_ai" { "open_ai" }
-                        option value="anthropic" { "anthropic" }
-                        option value="open_ai_compatible" { "open_ai_compatible" }
-                    }
-                }
-                div .form-group {
-                    label .form-label for="new-endpoint" { "Endpoint" }
-                    input
-                        .form-input
-                        type="url"
-                        name="endpoint"
-                        id="new-endpoint"
-                        placeholder="https://api.openai.com/v1"
-                        required;
-                }
-                div .form-group {
-                    label .form-label for="new-key-var" { "Key variable" }
-                    input
-                        .form-input
-                        type="text"
-                        name="key_var"
-                        id="new-key-var"
-                        placeholder=(EXAMPLE_KEY_VAR);
-                    p .form-hint {
-                        "Admin variable name holding the API key. Leave empty for providers that don't need auth."
-                    }
-                }
-                div .form-group {
-                    label .form-label for="new-max-tokens-field" { "Token budget field" }
-                    // The empty option is the ordinary case. A select always
-                    // posts something, so `create_provider`'s form parser
-                    // drops the empty value rather than handing serde a token
-                    // the contract does not have.
-                    select .form-select name="max_tokens_field" id="new-max-tokens-field" {
-                        option value="" selected { "Follow the protocol" }
-                        option value="max_tokens" { "max_tokens" }
-                        option value="max_completion_tokens" { "max_completion_tokens" }
-                    }
-                    p .form-hint {
-                        "Only for an OpenAI-shaped endpoint that wants the other \
-                         spelling than its protocol's — an Azure OpenAI reasoning \
-                         deployment on open_ai_compatible needs \
-                         max_completion_tokens. The anthropic protocol refuses this."
-                    }
-                }
-                div .form-group .col-span-full {
-                    label .form-label for="new-models" { "Models (comma-separated)" }
-                    // One text input; the handler splits it into the contract's
-                    // `models` array.
-                    input
-                        .form-input
-                        type="text"
-                        name="models"
-                        id="new-models"
-                        placeholder="gpt-4o, gpt-4o-mini";
-                    p .form-hint {
-                        "Optional. Leave empty and use \"Discover models\" after creation."
-                    }
-                }
-                div .form-group .col-span-full {
-                    label .form-checkbox {
-                        input type="checkbox" name="enabled" id="new-enabled" checked value="true";
-                        "Enabled"
+            div .form-group {
+                label .form-label .required for=(field("name")) { "Name" }
+                input .form-input type="text" name="name" id=(field("name"))
+                    value=[cfg.map(|c| c.name.as_str())]
+                    placeholder="openai-main"
+                    autocomplete="off" spellcheck="false"
+                    required;
+            }
+            div .form-group {
+                label .form-label for=(field("protocol")) { "Protocol" }
+                select .form-select name="protocol" id=(field("protocol")) {
+                    @for p in [ProviderProtocol::OpenAi, ProviderProtocol::Anthropic, ProviderProtocol::OpenAiCompatible] {
+                        option value=(p.as_str()) selected[protocol == p] { (p.as_str()) }
                     }
                 }
             }
-            div .flex .justify-end .mt-3 {
-                button .btn.btn--primary type="submit" { "Add provider" }
+            div .form-group {
+                label .form-label .required for=(field("endpoint")) { "Endpoint" }
+                input .form-input type="url" name="endpoint" id=(field("endpoint"))
+                    value=[cfg.map(|c| c.endpoint.as_str())]
+                    placeholder="https://api.openai.com/v1"
+                    autocomplete="off" spellcheck="false"
+                    required;
             }
+            div .form-group {
+                label .form-label for=(field("key-var")) { "Key variable" }
+                input .form-input type="text" name="key_var" id=(field("key-var"))
+                    value=[cfg.and_then(|c| c.key_var.as_deref())]
+                    placeholder=(EXAMPLE_KEY_VAR)
+                    autocomplete="off" spellcheck="false"
+                    aria-describedby=(key_hint);
+                p .form-hint id=(key_hint) {
+                    "Admin variable name holding the API key. Leave empty for providers that don't need auth."
+                }
+            }
+            div .form-group {
+                label .form-label for=(field("max-tokens-field")) { "Token budget field" }
+                // The empty option is the ordinary case. A select always
+                // posts something, so the form parser reads the empty value
+                // as "no override" rather than handing serde a token the
+                // contract does not have.
+                select .form-select name="max_tokens_field" id=(field("max-tokens-field"))
+                    aria-describedby=(budget_hint)
+                {
+                    option value="" selected[budget.is_none()] { "Follow the protocol" }
+                    @for f in [MaxTokensField::MaxTokens, MaxTokensField::MaxCompletionTokens] {
+                        option value=(f.as_str()) selected[budget == Some(f)] { (f.as_str()) }
+                    }
+                }
+                p .form-hint id=(budget_hint) {
+                    "Only for an OpenAI-shaped endpoint that wants the other \
+                     spelling than its protocol's — an Azure OpenAI reasoning \
+                     deployment on open_ai_compatible needs \
+                     max_completion_tokens. The anthropic protocol refuses this."
+                }
+            }
+            div .form-group {
+                label .form-label for=(field("models")) { "Models" }
+                // One text input; the handler splits it into the contract's
+                // `models` array.
+                input .form-input type="text" name="models" id=(field("models"))
+                    value=(models)
+                    placeholder="gpt-4o, gpt-4o-mini"
+                    autocomplete="off" spellcheck="false"
+                    aria-describedby=(models_hint);
+                p .form-hint id=(models_hint) {
+                    "Comma-separated. Optional: leave empty and use Discover on the provider once it is saved."
+                }
+            }
+            div .form-group {
+                label .form-checkbox {
+                    input type="checkbox" name="enabled" id=(field("enabled")) checked[enabled] value="true";
+                    " Enabled"
+                }
+            }
+            (components::modal_footer(html! {
+                (components::modal_cancel())
+                button .btn.btn--primary.btn--block type="submit" { (submit) }
+            }))
         }
     }
 }
+
+/// The providers table's columns. The key variable and the budget field are
+/// optional: most deployments set neither on any provider.
+const PROVIDER_COLUMNS: [components::TableCol<'static>; 8] = [
+    components::TableCol::new("Name").primary(),
+    components::TableCol::new("Protocol"),
+    components::TableCol::new("Endpoint"),
+    components::TableCol::new("Key variable").optional(),
+    components::TableCol::new("Budget field").optional(),
+    components::TableCol::new("Models"),
+    components::TableCol::new("Status"),
+    components::TableCol::new("Actions").actions(),
+];
+
+/// The same columns less Actions, for a runtime that cannot manage
+/// providers: the buttons are the only things in that column, and a runtime
+/// that answers 501 to every one of them has no action to offer.
+const READ_ONLY_PROVIDER_COLUMNS: [components::TableCol<'static>; 7] = [
+    PROVIDER_COLUMNS[0],
+    PROVIDER_COLUMNS[1],
+    PROVIDER_COLUMNS[2],
+    PROVIDER_COLUMNS[3],
+    PROVIDER_COLUMNS[4],
+    PROVIDER_COLUMNS[5],
+    PROVIDER_COLUMNS[6],
+];
 
 /// Render the providers table. Pure function of the loaded configs — used
 /// directly by `providers_page` and by the unit tests that assert shape.
 ///
-/// `configs` is `(row_id, ProviderConfig)` pairs so the Delete /
+/// `configs` is `(row_id, ProviderConfig)` pairs so the Edit / Delete /
 /// Discover-models actions can target the concrete row ID.
 ///
-/// `manages` is `ProviderAdmin::manages_providers()`. When it is false the
-/// Actions column is dropped entirely rather than rendered disabled: the two
-/// buttons in it are the only things there, and a runtime that answers 501 to
-/// both has no action to offer.
+/// `manages` is `ProviderAdmin::manages_providers()`; see
+/// [`READ_ONLY_PROVIDER_COLUMNS`].
 fn render_providers_table(configs: &[(String, ProviderConfig)], manages: bool) -> Markup {
-    html! {
-        @if configs.is_empty() {
-            div .empty-state {
-                @if manages {
-                    "No providers configured yet. Use the form above to add one."
-                } @else {
-                    "No providers are configured, and this deployment cannot \
-                     add one."
-                }
-            }
-        } @else {
-            div .table-container {
-                table .table {
-                    thead {
-                        tr {
-                            th { "Name" }
-                            th { "Protocol" }
-                            th { "Endpoint" }
-                            th { "Key var" }
-                            th { "Budget field" }
-                            th { "Models" }
-                            th { "Enabled" }
-                            @if manages { th { "Actions" } }
-                        }
-                    }
-                    tbody {
-                        @for (id, cfg) in configs {
-                            (provider_row(id, cfg, manages))
-                        }
-                    }
-                }
-            }
-        }
+    let rows = configs
+        .iter()
+        .map(|(id, cfg)| components::TableRow::new(provider_cells(id, cfg, manages)))
+        .collect();
+    let columns: &[components::TableCol<'static>] = if manages {
+        &PROVIDER_COLUMNS
+    } else {
+        &READ_ONLY_PROVIDER_COLUMNS
+    };
+    let table = components::DataTable::new(columns).rows(rows);
+    if manages {
+        table
+            .empty_state(
+                "No providers yet",
+                "Add an OpenAI, Anthropic or OpenAI-compatible endpoint, and the chat can route to it.",
+                Some(add_provider_button()),
+            )
+            .render()
+    } else {
+        table
+            .empty_state(
+                "No providers",
+                "None are configured, and this deployment cannot add one.",
+                None,
+            )
+            .render()
     }
 }
 
-/// Single provider row. Extracted so the loop body stays readable and so
-/// tests can render a one-row fixture without touching the outer `<table>`.
-///
-/// `manages` gates the Actions cell — see [`render_providers_table`].
-fn provider_row(id: &str, cfg: &ProviderConfig, manages: bool) -> Markup {
-    let model_count = cfg.models.len();
-    let models_label = if model_count == 0 {
-        "(discover)".to_string()
-    } else {
-        cfg.models.join(", ")
-    };
-    html! {
-        tr {
-            td { strong { (cfg.name) } }
-            td {
-                span .badge.badge-info { (cfg.protocol.as_str()) }
+/// One provider's cells, in [`PROVIDER_COLUMNS`] order; the Actions cell
+/// only when `manages`.
+fn provider_cells(id: &str, cfg: &ProviderConfig, manages: bool) -> Vec<Markup> {
+    let mut cells = vec![
+        html! { strong { (cfg.name) } },
+        components::badge(components::BadgeVariant::Secondary, cfg.protocol.as_str()),
+        html! { span .text-sm { (components::breakable_id(&cfg.endpoint)) } },
+        match cfg.key_var.as_deref() {
+            Some(kv) => html! { code .text-xs { (components::breakable_id(kv)) } },
+            None => html! {},
+        },
+        match cfg.max_tokens_field {
+            Some(field) => html! { code .text-xs { (field.as_str()) } },
+            None => html! {},
+        },
+        if cfg.models.is_empty() {
+            html! { span .text-muted { "None yet" } }
+        } else {
+            html! { span .text-sm { (cfg.models.join(", ")) } }
+        },
+        if cfg.enabled {
+            components::badge(components::BadgeVariant::Success, "Enabled")
+        } else {
+            components::badge(components::BadgeVariant::Secondary, "Disabled")
+        },
+    ];
+    if manages {
+        cells.push(html! {
+            button .btn.btn--sm.btn--icon.btn--ghost type="button"
+                data-action="modal-open" data-modal-target=(edit_modal_id(id))
+                aria-label={"Edit " (cfg.name)}
+                title="Edit provider"
+            {
+                (icons::edit())
             }
-            td .text-xs .truncate .llm-cell--endpoint {
-                (cfg.endpoint)
+            button
+                .btn.btn--sm.btn--secondary
+                type="button"
+                hx-post={"/b/llm/api/providers/" (id) "/discover-models"}
+                // The answer is the JSON model list; the page reloads to
+                // show it, so nothing is swapped.
+                hx-swap="none"
+                hx-confirm={"Discover models for \"" (cfg.name) "\" from its /v1/models endpoint?"}
+                data-reload-on-success
+                aria-label={"Discover models for " (cfg.name)}
+            {
+                "Discover"
             }
-            td {
-                @if let Some(kv) = cfg.key_var.as_deref() {
-                    code .text-xs { (kv) }
-                } @else {
-                    span .text-muted .text-xs { "(none)" }
-                }
+            button
+                .btn.btn--sm.btn--icon.btn--ghost-danger
+                type="button"
+                hx-delete={"/b/llm/api/providers/" (id)}
+                hx-confirm={"Delete provider \"" (cfg.name) "\"?"}
+                // The page reloads rather than dropping the row in place, so
+                // deleting the last provider lands on the empty state.
+                hx-swap="none"
+                data-reload-on-success
+                aria-label={"Delete " (cfg.name)}
+                title="Delete provider"
+            {
+                (icons::trash())
             }
-            td {
-                @if let Some(field) = cfg.max_tokens_field {
-                    code .text-xs { (field.as_str()) }
-                } @else {
-                    span .text-muted .text-xs { "(protocol)" }
-                }
-            }
-            td .text-xs .truncate .llm-cell--models {
-                @if model_count == 0 {
-                    span .text-muted { (models_label) }
-                } @else {
-                    span .badge.badge-info .mr-2 { (model_count) }
-                    span .text-muted { (models_label) }
-                }
-            }
-            td {
-                @if cfg.enabled {
-                    span .badge.badge-success { "Enabled" }
-                } @else {
-                    span .badge.badge-warning { "Disabled" }
-                }
-            }
-            @if manages {
-                td {
-                    div .flex .gap-2 .flex-wrap {
-                        button
-                            .btn.btn--sm.btn--secondary
-                            hx-post={"/b/llm/api/providers/" (id) "/discover-models"}
-                            // The answer is the JSON model list; the page
-                            // reloads to show it, so nothing is swapped.
-                            hx-swap="none"
-                            hx-confirm={"Discover models for \"" (cfg.name) "\" from its /v1/models endpoint?"}
-                            data-reload-on-success
-                        {
-                            "Discover"
-                        }
-                        button
-                            .btn.btn--sm.btn--danger
-                            hx-delete={"/b/llm/api/providers/" (id)}
-                            hx-confirm={"Delete provider \"" (cfg.name) "\"?"}
-                            hx-target="closest tr"
-                            hx-swap="outerHTML"
-                        {
-                            "Delete"
-                        }
-                    }
-                }
-            }
-        }
+        });
     }
+    cells
 }
 
 // ---------------------------------------------------------------------------
@@ -418,67 +480,55 @@ pub(super) async fn models_page(
         }
     };
 
-    let content = html! {
-        (components::page_header(
-            "LLM Models",
-            Some("Aggregated across every configured provider."),
-            None,
-        ))
-
-        (render_models_table(&models))
-    };
-
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::admin("LLM Models", "Models"),
-        ui::PageBody::from(content)
+        ui::Shell::admin("LLM Models", "Models")
+            .subtitle("Every model the configured providers offer"),
+        ui::PageBody::from(render_models_table(&models))
             .with_subnav(super::pages::sections(super::pages::Section::Models)),
     )
     .await
 }
 
+/// The models table's columns.
+const MODEL_COLUMNS: [components::TableCol<'static>; 5] = [
+    components::TableCol::new("Model").primary(),
+    components::TableCol::new("Provider"),
+    components::TableCol::new("Capabilities"),
+    components::TableCol::new("Status"),
+    components::TableCol::new("Actions").actions(),
+];
+
 /// Render the models table. Pure function of the typed `ModelInfo` slice so
 /// the shape can be tested without constructing a `Context`.
+///
+/// The empty state leads to the Providers page, which is where a model list
+/// comes from: a provider's own `models`, or Discover on its row.
 fn render_models_table(models: &[ModelInfo]) -> Markup {
-    html! {
-        @if models.is_empty() {
-            div .card {
-                div .empty-state {
-                    "No models available. Configure a provider and run \"Discover models\" to populate this list."
-                }
-            }
-        } @else {
-            div .card .card--flush {
-                div .table-container {
-                    table .table {
-                        thead {
-                            tr {
-                                th { "Name" }
-                                th { "Backend" }
-                                th { "Capabilities" }
-                                th { "Status" }
-                                th { "Actions" }
-                            }
-                        }
-                        tbody {
-                            @for m in models {
-                                (model_row(m))
-                            }
-                        }
-                    }
-                }
-            }
-        }
-    }
+    components::DataTable::new(&MODEL_COLUMNS)
+        .rows(
+            models
+                .iter()
+                .map(|m| components::TableRow::new(model_cells(m)))
+                .collect(),
+        )
+        .empty_state(
+            "No models yet",
+            "Models appear here once a provider lists them. Add a provider, or use Discover on one.",
+            Some(html! {
+                a .btn.btn--primary href="/b/llm/providers" { "Go to providers" }
+            }),
+        )
+        .render()
 }
 
-/// Render a single model row. Status loads lazily on row mount; actions
-/// (Load / Unload) are only meaningful for local backends, so we render
-/// them for every row and let the server-side handler 404 / no-op for
-/// backends that don't support it — this keeps the UI uniform without
-/// hardcoding a local-backend allowlist in the renderer.
-fn model_row(model: &ModelInfo) -> Markup {
+/// One model's cells, in [`MODEL_COLUMNS`] order. Status loads lazily on row
+/// mount; actions (Load / Unload) are only meaningful for local backends,
+/// so we render them for every row and let the server-side handler 404 /
+/// no-op for backends that don't support it — this keeps the UI uniform
+/// without hardcoding a local-backend allowlist in the renderer.
+fn model_cells(model: &ModelInfo) -> Vec<Markup> {
     let backend_id = model.backend_id.as_str();
     let model_id = model.model_id.as_str();
     let display_name = if model.display_name.is_empty() {
@@ -488,73 +538,74 @@ fn model_row(model: &ModelInfo) -> Markup {
     };
 
     let caps = &model.capabilities;
-    let cap_streaming = caps.streaming;
-    let cap_tools = caps.tools;
-    let cap_vision = caps.vision;
-    let cap_json = caps.json_mode;
+    let capabilities = [
+        (caps.streaming, "streaming"),
+        (caps.tools, "tools"),
+        (caps.vision, "vision"),
+        (caps.json_mode, "json"),
+    ];
+    let any_capability = capabilities.iter().any(|(on, _)| *on);
 
     let status_url = format!("/b/llm/api/models/{backend_id}/{model_id}/status");
     let load_url = format!("/b/llm/api/models/{backend_id}/{model_id}/load");
     let unload_url = format!("/b/llm/api/models/{backend_id}/{model_id}/unload");
 
-    html! {
-        tr {
-            td { strong { (display_name) } }
-            td {
-                span .badge.badge-info { (backend_id) }
-                @if display_name != model_id {
-                    " "
-                    code .text-xs { (model_id) }
-                }
+    vec![
+        html! {
+            strong .data-table__title { (display_name) }
+            @if display_name != model_id {
+                " "
+                code .text-xs { (model_id) }
             }
-            td {
+        },
+        components::badge(components::BadgeVariant::Secondary, backend_id),
+        html! {
+            @if any_capability {
                 div .flex .gap-1 .flex-wrap {
-                    @if cap_streaming { span .badge.badge-info { "streaming" } }
-                    @if cap_tools { span .badge.badge-info { "tools" } }
-                    @if cap_vision { span .badge.badge-info { "vision" } }
-                    @if cap_json { span .badge.badge-info { "json" } }
-                    @if !(cap_streaming || cap_tools || cap_vision || cap_json) {
-                        span .text-muted .text-xs { "—" }
+                    @for (on, name) in capabilities {
+                        @if on { (components::badge(components::BadgeVariant::Secondary, name)) }
                     }
                 }
+            } @else {
+                (components::NO_VALUE)
             }
-            td {
-                // Lazy-load the per-model status so a slow backend doesn't
-                // hold up the initial render. The endpoint returns JSON;
-                // `hx-ext=json-dec` is not available here so we render
-                // status via a small helper endpoint below — for now, emit
-                // a loading placeholder that replaces itself on load.
-                span
-                    .badge.badge-loading
-                    hx-get=(status_url)
-                    hx-trigger="load"
-                    hx-swap="outerHTML"
-                {
-                    "Loading…"
-                }
+        },
+        // Lazy-load the per-model status so a slow backend doesn't hold up
+        // the initial render. The status route answers an htmx request with
+        // the badge itself (`routes::models::status_badge`).
+        html! {
+            span
+                .text-muted .text-sm
+                hx-get=(status_url)
+                hx-trigger="load"
+                hx-swap="outerHTML"
+            {
+                "Checking…"
             }
-            td {
-                div .flex .gap-2 .flex-wrap {
-                    button
-                        .btn.btn--sm.btn--secondary
-                        hx-post=(load_url)
-                        hx-swap="none"
-                        hx-confirm={"Load model \"" (model_id) "\" on backend \"" (backend_id) "\"?"}
-                    {
-                        "Load"
-                    }
-                    button
-                        .btn.btn--sm.btn--ghost
-                        hx-post=(unload_url)
-                        hx-swap="none"
-                        hx-confirm={"Unload model \"" (model_id) "\" on backend \"" (backend_id) "\"?"}
-                    {
-                        "Unload"
-                    }
-                }
+        },
+        html! {
+            button
+                .btn.btn--sm.btn--secondary
+                type="button"
+                hx-post=(load_url)
+                hx-swap="none"
+                hx-confirm={"Load model \"" (model_id) "\" on backend \"" (backend_id) "\"?"}
+                aria-label={"Load " (display_name)}
+            {
+                "Load"
             }
-        }
-    }
+            button
+                .btn.btn--sm.btn--ghost
+                type="button"
+                hx-post=(unload_url)
+                hx-swap="none"
+                hx-confirm={"Unload model \"" (model_id) "\" on backend \"" (backend_id) "\"?"}
+                aria-label={"Unload " (display_name)}
+            {
+                "Unload"
+            }
+        },
+    ]
 }
 
 // ---------------------------------------------------------------------------
@@ -583,7 +634,7 @@ mod tests {
     /// handler answered 400 to every submit.
     #[test]
     fn the_add_provider_form_declares_no_encoding_extension() {
-        let m = add_provider_form().into_string();
+        let m = provider_form(ProviderForm::New).into_string();
 
         assert!(
             !m.contains("hx-ext"),
@@ -657,8 +708,14 @@ mod tests {
     fn render_providers_table_empty_shows_hint() {
         let m = render_providers_table(&[], true).into_string();
         assert!(
-            m.contains("No providers configured"),
+            m.contains("No providers yet"),
             "empty-state hint missing; got: {m}"
+        );
+        // The empty state's call to action opens the same modal the topbar's
+        // primary action does.
+        assert!(
+            m.contains(r#"data-action="modal-open" data-modal-target="add-provider""#),
+            "the empty state must offer Add provider; got: {m}"
         );
         // No <table> element when empty — keeps the page compact.
         assert!(
@@ -708,8 +765,9 @@ mod tests {
         );
         assert!(m.contains("/discover-models"), "discover action missing");
 
-        // Key-var column renders verbatim, no masking/translation.
-        assert!(m.contains(EXAMPLE_KEY_VAR));
+        // Key-var column renders verbatim, no masking/translation (the
+        // `<wbr>` break hints `breakable_id` adds are not characters).
+        assert!(m.replace("<wbr>", "").contains(EXAMPLE_KEY_VAR));
 
         // Model-count badge for the multi-model row.
         assert!(m.contains("gpt-4o"));
@@ -778,8 +836,15 @@ mod tests {
     fn render_models_table_empty_shows_hint() {
         let m = render_models_table(&[]).into_string();
         assert!(
-            m.contains("No models available"),
+            m.contains("No models yet"),
             "empty-state hint missing; got: {m}"
+        );
+        // A real way forward, not a sentence naming a button on another page.
+        assert!(
+            m.contains(
+                r#"<a class="btn btn--primary" href="/b/llm/providers">Go to providers</a>"#
+            ),
+            "the empty state must link to the providers page; got: {m}"
         );
     }
 
@@ -822,5 +887,119 @@ mod tests {
         // Load / Unload buttons target the per-(backend, model) endpoints.
         assert!(m.contains(r#"hx-post="/b/llm/api/models/openai-main/gpt-4o/load""#));
         assert!(m.contains(r#"hx-post="/b/llm/api/models/openai-main/gpt-4o/unload""#));
+    }
+
+    fn sample_configs() -> Vec<(String, ProviderConfig)> {
+        vec![(
+            "row-1".to_string(),
+            ProviderConfig::new(
+                "openai-main",
+                ProviderProtocol::OpenAiCompatible,
+                "https://llm.example.com/v1",
+            )
+            .with_key_var(EXAMPLE_KEY_VAR)
+            .with_max_tokens_field(MaxTokensField::MaxCompletionTokens)
+            .with_models(vec!["gpt-4o".into(), "gpt-4o-mini".into()]),
+        )]
+    }
+
+    /// The list is a `DataTable`, so it collapses to cards on a phone
+    /// instead of overflowing the viewport, and every row action is named.
+    #[test]
+    fn the_providers_list_is_a_data_table_with_named_row_actions() {
+        let m = render_providers_table(&sample_configs(), true).into_string();
+        assert!(m.contains(r#"<div class="data-table">"#), "got: {m}");
+        assert!(
+            m.contains(r#"data-action="modal-open" data-modal-target="edit-provider-row-1""#),
+            "Edit opens the row's own modal; got: {m}"
+        );
+        assert!(m.contains(r#"aria-label="Edit openai-main""#), "got: {m}");
+        assert!(
+            m.contains(r#"aria-label="Discover models for openai-main""#),
+            "got: {m}"
+        );
+        // The delete control is an icon: a ghost-danger 44px button whose
+        // only name is its label.
+        assert!(
+            m.contains(r#"class="btn btn--sm btn--icon btn--ghost-danger""#),
+            "got: {m}"
+        );
+        assert!(m.contains(r#"aria-label="Delete openai-main""#), "got: {m}");
+    }
+
+    /// The create form waits in a modal and the edit form of each provider
+    /// in its own, filled with what the provider holds and patching it.
+    #[test]
+    fn the_edit_form_patches_the_row_it_was_rendered_for_and_is_filled_in() {
+        let configs = sample_configs();
+        let (id, cfg) = &configs[0];
+        let m = provider_form(ProviderForm::Edit { id, cfg }).into_string();
+
+        assert!(
+            m.contains(r#"hx-patch="/b/llm/api/providers/row-1""#),
+            "got: {m}"
+        );
+        assert!(!m.contains("hx-post"), "an edit never creates; got: {m}");
+        assert!(m.contains(r#"value="openai-main""#), "got: {m}");
+        assert!(
+            m.contains(r#"value="https://llm.example.com/v1""#),
+            "got: {m}"
+        );
+        assert!(
+            m.contains(&format!(r#"value="{EXAMPLE_KEY_VAR}""#)),
+            "got: {m}"
+        );
+        assert!(m.contains(r#"value="gpt-4o, gpt-4o-mini""#), "got: {m}");
+        assert!(
+            m.contains(r#"<option value="open_ai_compatible" selected>"#),
+            "got: {m}"
+        );
+        assert!(
+            m.contains(r#"<option value="max_completion_tokens" selected>"#),
+            "got: {m}"
+        );
+        // Field ids are the row's, so two edit modals on one page never
+        // share a label target.
+        assert!(m.contains(r#"for="edit-row-1-name""#), "got: {m}");
+        assert!(m.contains(r#"id="edit-row-1-name""#), "got: {m}");
+        assert!(m.contains("Save changes"), "got: {m}");
+    }
+
+    /// Every select in the Add provider form says which option it starts
+    /// on. The modal's Esc guard (chrome.js) compares each option with its
+    /// `defaultSelected`; a select left on the browser's implicit first
+    /// option counts as changed, and an untouched form asked "Press Esc
+    /// again to discard changes".
+    #[test]
+    fn every_select_in_the_new_provider_form_names_its_starting_option() {
+        let m = provider_form(ProviderForm::New).into_string();
+        assert_eq!(m.matches("<select").count(), 2, "got: {m}");
+        assert_eq!(m.matches(" selected>").count(), 2, "got: {m}");
+        assert!(
+            m.contains(r#"<option value="open_ai" selected>"#),
+            "got: {m}"
+        );
+    }
+
+    /// A disabled provider's edit form comes up unticked: the box is what
+    /// the save sends, so a box ticked by default would re-enable it.
+    #[test]
+    fn a_disabled_providers_edit_form_is_unticked() {
+        let mut cfg = sample_configs().remove(0).1;
+        cfg.enabled = false;
+        let m = provider_form(ProviderForm::Edit {
+            id: "row-1",
+            cfg: &cfg,
+        })
+        .into_string();
+        assert!(
+            !m.contains("checked"),
+            "the Enabled box must reflect the stored value; got: {m}"
+        );
+        let new = provider_form(ProviderForm::New).into_string();
+        assert!(
+            new.contains("checked"),
+            "a new provider starts enabled; got: {new}"
+        );
     }
 }

@@ -985,7 +985,7 @@ mod tests {
     /// stylesheet.** `ui/styles/components/table.css` still carries
     /// `.table-container`, `.table`, `.table th`, `.table td`,
     /// `.table tbody tr:hover`, and the `max-width: 720px`
-    /// `white-space: nowrap` rule, for these tables and nothing else —
+    /// `white-space: nowrap` rule, for the tables listed below and nothing else —
     /// administration's 19 moved to `.data-table` in the pull request before
     /// this one. (`.table th.sortable` went in the same change as this test:
     /// the sortable header was a `components.rs` affordance that the phase-3a
@@ -1000,13 +1000,11 @@ mod tests {
     /// rendered change. `blocks/tickets` has no visual baseline at all, so
     /// the gate there is a Rust render test, not a screenshot.
     ///
-    /// The scope is maud's bare `.table` class shorthand, the form all of them are
+    /// The scope is maud's bare `.table` class shorthand, the form every one is
     /// written in; the counter is `test_support::count_bare_class_shorthand`,
     /// shared with the badge ratchet rather than copied, and it reads every
     /// boundary maud accepts, unspaced ones included.
     const HAND_WRITTEN_TABLES: &[(&str, usize)] = &[
-        ("blocks/llm/pages.rs", 1),
-        ("blocks/llm/ui.rs", 2),
         ("blocks/tickets/pages.rs", 3),
         ("blocks/userportal/pages/admin_buttons.rs", 1),
     ];

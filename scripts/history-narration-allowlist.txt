@@ -49,7 +49,6 @@
 2	crates/impresspress-core/src/platform_state/variables.rs
 1	crates/impresspress-core/src/routing.rs
 1	crates/impresspress-core/src/ui/assets.rs
-1	crates/impresspress-core/src/ui/styles/layouts/page.css
 2	crates/impresspress-core/src/util.rs
 1	crates/impresspress-core/tests/auth/bootstrap_run.rs
 2	crates/impresspress-core/tests/block_enabled_defaults.rs
