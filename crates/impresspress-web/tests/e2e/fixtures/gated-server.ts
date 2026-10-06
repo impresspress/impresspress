@@ -33,6 +33,8 @@ export interface GatedServer {
   held(): number;
   /** Answer what is held, and hold nothing from here on. */
   release(): void;
+  /** Answer the request held last, and go on holding the others. */
+  releaseNewest(): void;
   close(): Promise<void>;
 }
 
@@ -77,6 +79,10 @@ export async function serveGated(dir: string, port: number): Promise<GatedServer
       const answers = waiting;
       waiting = [];
       for (const answer of answers) answer();
+    },
+    releaseNewest: () => {
+      const answer = waiting.pop();
+      if (answer) answer();
     },
     close: () =>
       new Promise<void>((resolve) => {

@@ -28,6 +28,83 @@ const DEV_ENABLED = __DEV_ENABLED__;
 // the ones a newer deployment may already be serving.
 const BYPASS_RULES = __BYPASS_RULES__;
 
+// The runtime binary this worker runs: the hashed `.wasm` the glue above was
+// built for, rendered from the same name the bundler wrote into the glue.
+// Content-addressed, so this URL is this version's runtime and no other's.
+const RUNTIME_URL = '__WASM_BIN__';
+// Where every version of this worker keeps its own runtime binary, keyed by
+// RUNTIME_URL: put there at `install`, read from there by `init()`, and the
+// other versions' entries dropped at `activate`.
+//
+// Why it is kept and not fetched when needed: the browser keeps a worker's
+// SCRIPTS (this file and the glue it imports) with the installed version,
+// but not what the worker fetches at runtime — and `init()` fetches the
+// binary. A deployment deletes the previous binary from the host, and a
+// returning visitor's worker is usually one the browser stopped while idle.
+// The visit after a deploy starts that OLD worker again to answer it, before
+// the browser's update check has installed the new one; fetching its runtime
+// from the host then gets a 404, the worker dies at stage `load`, and the
+// boot shell's recovery starts replacing it while the browser is installing
+// the update. Kept here, the old worker boots the runtime it was installed
+// with, answers the visit, and is replaced by the update like any live
+// worker (`sw-update.spec.ts` stops the worker before the deploy visit).
+//
+// One binary per version, and one version kept once a new one activates —
+// a few megabytes of the origin's quota, which it shares with the app's
+// local data. A version whose binary the host does not have fails to install,
+// and a browser keeps the worker it has rather than switch to one that
+// cannot start: the host no longer has the binary, or what it answered is
+// not a WebAssembly module at all — a host that falls
+// back to its app shell for unknown paths (the dev sandbox's
+// `not_found_handling = "single-page-application"`) answers a deleted binary
+// with a 200 and an HTML page (`keepRuntime`). A full quota does NOT fail
+// the install: the version keeps nothing and loads its runtime from the
+// host, as every version did before this cache.
+//
+// `loader.js`'s recovery drops this cache with every other one, so the
+// replacement it registers fetches its runtime afresh; `runtimeBinary`
+// falls back to the host for a worker whose entry has gone.
+const RUNTIME_CACHE = '__impresspress_runtime';
+
+// The Web Lock `loader.js` holds from before it registers a replacement
+// worker until it has erased the app's local data (`ERASE_LOCK` there, which
+// says why; the same name). The runtime's `initialize()` loads that data —
+// into memory, to be written back on every flush — so it must not run while
+// an erase is pending. No version WAITS for the lock, though (`eraseSettled`
+// says why): each one looks, and while it is held answers without loading.
+const ERASE_LOCK = '__impresspress_erase';
+
+// Thrown by `eraseSettled` while an erase is pending: this worker must not
+// load the data, and must not wait for the erase either (see there). It is
+// not a death — nothing is poisoned — and the request is answered by
+// `beingReset`.
+class ErasePending extends Error {}
+
+/**
+ * Throws ErasePending if an erase is pending (ERASE_LOCK is held), where the
+ * worker has Web Locks; otherwise resolves, and the runtime may load.
+ *
+ * It only LOOKS at the lock (`ifAvailable`), in every version, and never
+ * waits for it inside an event. The erase that holds it may be a reset's,
+ * waiting for its replacement to activate — which a browser does only once
+ * the worker being replaced is between events — or about to register that
+ * replacement. A worker waiting for the lock inside a request's event would
+ * make the reset wait for an activation its own lock prevents. Looking costs
+ * nothing of the kind: the request is answered that the app is being reset
+ * (`beingReset`), the event ends, and the next request looks again.
+ *
+ * And no version needs to wait: the replacement an erase is for exists only
+ * once registered, which the erase does holding the lock, and receives
+ * requests only once activated — so the first time it could load the data
+ * it looks, and loads only once the erase has let go of the lock.
+ */
+async function eraseSettled() {
+    const locks = self.navigator && self.navigator.locks;
+    if (!(locks && locks.request)) return;
+    const pending = await locks.request(ERASE_LOCK, { ifAvailable: true }, (lock) => lock === null);
+    if (pending) throw new ErasePending('the app is being reset');
+}
+
 let initialized = false;
 let initPromise = null;
 // Set after a fatal wasm error (init failure or runtime trap). A poisoned
@@ -68,9 +145,10 @@ let poisonStage = '';
 // and none of them recovers — or erases — a second time.
 let poisonId = '';
 
-// The wasm module could not be fetched or instantiated (`init()`): a network
-// failure, a deploy that replaced the hashed file mid-load, a stale module
-// cache. Says nothing about the data this browser stores for the app.
+// The wasm module could not be fetched or instantiated (`init()`): a kept
+// binary that is gone and a host that no longer has it either, a network
+// failure, a module the browser cannot compile. Says nothing about the data
+// this browser stores for the app.
 const STAGE_LOAD = 'load';
 // The runtime's `initialize()` failed: opening the database, migrating it,
 // importing the seed. The one failure that can mean the stored data is not
@@ -155,7 +233,8 @@ async function selfDestruct(reason, stage, toBootShell) {
                     type: 'sw-self-destruct',
                     reason: poisonReason,
                     stage: poisonStage,
-                    id: poisonId
+                    id: poisonId,
+                    runtime: RUNTIME_URL
                 });
             } catch (e) {
                 console.warn('[__APP_NAME__] postMessage failed:', e);
@@ -199,6 +278,7 @@ async function leaveCauseForBootShell() {
                     reason: poisonReason,
                     stage: poisonStage,
                     id: poisonId,
+                    runtime: RUNTIME_URL,
                     at: Date.now()
                 }),
                 { headers: { 'Content-Type': 'application/json' } }
@@ -215,12 +295,13 @@ async function ensureInitialized() {
     initPromise = (async () => {
         console.log('[__APP_NAME__] Loading WASM module...');
         try {
-            await init();
+            await init({ module_or_path: runtimeBinary() });
         } catch (e) {
             await selfDestruct(`wasm module load failed: ${e}`, STAGE_LOAD, true);
             throw e;
         }
         console.log('[__APP_NAME__] Initializing runtime...');
+        await eraseSettled();
         try {
             await initialize({ dev: DEV_ENABLED, bypass: BYPASS_RULES });
         } catch (e) {
@@ -230,17 +311,116 @@ async function ensureInitialized() {
         initialized = true;
         console.log('[__APP_NAME__] Runtime ready.');
     })();
-    await initPromise;
+    try {
+        await initPromise;
+    } catch (e) {
+        // Not a start that failed: the next request looks again.
+        if (e instanceof ErasePending) initPromise = null;
+        throw e;
+    }
+}
+
+/**
+ * This version's runtime binary, as a `Response` for `init()`: the one kept
+ * in RUNTIME_CACHE, or — where that entry has gone (a recovery dropped the
+ * caches, the browser evicted them) — the host's answer.
+ */
+async function runtimeBinary() {
+    try {
+        const cache = await caches.open(RUNTIME_CACHE);
+        const kept = await cache.match(RUNTIME_URL);
+        if (kept) return kept;
+    } catch (e) {
+        console.warn('[__APP_NAME__] could not read the kept runtime:', e);
+    }
+    return fetch(RUNTIME_URL);
+}
+
+// The first four bytes of every WebAssembly binary: `\0asm`.
+const WASM_MAGIC = [0x00, 0x61, 0x73, 0x6d];
+
+/**
+ * Keep this version's runtime binary (RUNTIME_CACHE says why). Throws when
+ * the host has no valid binary for it, which fails the install; a binary
+ * there is no room to keep is left on the host.
+ *
+ * What is kept must be a WebAssembly module, not merely a 200: a host that
+ * answers unknown paths with its app shell answers a binary it no longer
+ * has with an HTML page, and keeping that would install a version whose
+ * runtime can never load — and, at its `activate`, drop the binary of the
+ * version that worked. So the bytes are read and must begin with the wasm
+ * magic number; they are kept with the wasm media type whatever the host
+ * labelled them, which is what lets `init()` compile them as they stream.
+ * (A module that starts right and is still broken is not caught here; it
+ * fails `init()` at stage `load`, like any other.)
+ */
+async function keepRuntime() {
+    const cache = await caches.open(RUNTIME_CACHE);
+    if (await cache.match(RUNTIME_URL)) return;
+    const response = await fetch(RUNTIME_URL);
+    if (!response.ok) {
+        throw new Error(`the runtime ${RUNTIME_URL} could not be fetched: HTTP ${response.status}`);
+    }
+    const bytes = new Uint8Array(await response.arrayBuffer());
+    if (!WASM_MAGIC.every((byte, i) => bytes[i] === byte)) {
+        throw new Error(
+            `the runtime ${RUNTIME_URL} is not a WebAssembly module ` +
+                `(the host answered ${response.headers.get('Content-Type') || 'no content type'})`
+        );
+    }
+    try {
+        await cache.put(
+            RUNTIME_URL,
+            new Response(bytes, { headers: { 'Content-Type': 'application/wasm' } })
+        );
+    } catch (e) {
+        // A full quota is not a reason to refuse the version: the binary is
+        // on the host, and `runtimeBinary` loads it from there. Refusing would
+        // also leave no way to free the space — "Reset" erases only once its
+        // replacement worker is in.
+        if (e && e.name === 'QuotaExceededError') {
+            console.warn('[__APP_NAME__] no room to keep the runtime; it will be loaded from the host:', e);
+            return;
+        }
+        throw e;
+    }
+}
+
+/**
+ * Drop the runtime binaries kept by every other version: once this one is
+ * active, no other version of this worker runs again.
+ */
+async function dropOtherRuntimes() {
+    try {
+        const cache = await caches.open(RUNTIME_CACHE);
+        for (const request of await cache.keys()) {
+            if (new URL(request.url).pathname !== RUNTIME_URL) await cache.delete(request);
+        }
+    } catch (e) {
+        console.warn('[__APP_NAME__] could not drop the other runtimes:', e);
+    }
 }
 
 self.addEventListener('install', (event) => {
     console.log('[__APP_NAME__] Service Worker installing...');
-    event.waitUntil(self.skipWaiting());
+    event.waitUntil(Promise.all([keepRuntime(), self.skipWaiting()]));
 });
+
+// Once this version is active, a death some earlier version left for the
+// boot shell (`STOP_CAUSE_CACHE`) is no longer anyone's to recover from: the
+// worker that died has been replaced. Left there, a shell loading within the
+// minute it stays fresh would recover from it — and replace this worker.
+async function dropStaleCause() {
+    try {
+        await caches.delete(STOP_CAUSE_CACHE);
+    } catch (e) {
+        console.warn('[__APP_NAME__] could not drop a replaced worker’s cause:', e);
+    }
+}
 
 self.addEventListener('activate', (event) => {
     console.log('[__APP_NAME__] Service Worker activating...');
-    event.waitUntil(self.clients.claim());
+    event.waitUntil(Promise.all([dropOtherRuntimes(), dropStaleCause(), self.clients.claim()]));
 });
 
 // ---------------------------------------------------------------------------
@@ -258,6 +438,16 @@ self.addEventListener('message', (event) => {
     // `takeControl` in `loader.js`.
     if (msg.type === 'impresspress-claim') {
         event.waitUntil(self.clients.claim());
+        return;
+    }
+
+    // The boot shell asking which version this is — the runtime binary it
+    // was built for, the same `runtime` every report of a death carries.
+    // Answered whether or not the runtime is alive: it is how the shell
+    // tells a dead version from the one that has replaced it
+    // (`updateUnderway` in `loader.js`).
+    if (msg.type === 'impresspress-runtime') {
+        if (event.ports && event.ports[0]) event.ports[0].postMessage({ runtime: RUNTIME_URL });
         return;
     }
 
@@ -450,6 +640,7 @@ async function handleFetch(event) {
         event.waitUntil(after);
         return response;
     } catch (error) {
+        if (error instanceof ErasePending) return beingReset(request);
         console.error('[__APP_NAME__] Error handling request:', error);
         // wasm-bindgen surfaces a `RuntimeError` for an `unreachable` trap;
         // ensureInitialized() also throws for `init()` / `initialize()`
@@ -467,6 +658,30 @@ async function handleFetch(event) {
         );
         return runtimeStopped(request);
     }
+}
+
+/**
+ * The answer of a worker while an erase of the app's data is pending
+ * (`eraseSettled`): it has loaded nothing and is not dead.
+ *
+ * A navigation gets the boot shell, with no cause left for it: the shell's
+ * ordinary boot waits for the version coming in to activate, asks again, and
+ * comes back to the page once the app answers (`enterApp` in `loader.js`). Anything else gets a 503 in the runtime's error shape that is
+ * NOT the stopped-runtime answer (`runtimeStopped`) — no `stage`, no
+ * `cause`, another `code` — so no shell takes it for a death to recover
+ * from; its message says what is happening and what to do.
+ */
+async function beingReset(request) {
+    if (request.mode === 'navigate') return bootShell();
+    const body = {
+        error: 'Unavailable',
+        message: 'The app is being reset. Reload the page in a moment.',
+        code: 'app_resetting'
+    };
+    return new Response(JSON.stringify(body), {
+        status: 503,
+        headers: { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' }
+    });
 }
 
 /**
@@ -521,9 +736,9 @@ async function runtimeStopped(request) {
     const next = recoveryErases()
         ? 'Reloading the page may run a recovery that erases the data this browser stores for the app.'
         : 'Reload the page to restart it; the data this browser stores for the app is kept.';
-    // `cause`, `stage` and `id` are the fields the runtime's shape does not
-    // have: the bare reason, where it failed and which death this
-    // is, for `loader.js`, whose boot probe is a request like any other and
+    // `cause`, `stage`, `id` and `runtime` are the fields the runtime's
+    // shape does not have: the bare reason, where it failed, which death
+    // this is and which version died (`reportedRuntime`), for `loader.js`, whose boot probe is a request like any other and
     // which words the sentence around them itself.
     const body = {
         error: 'Unavailable',
@@ -531,7 +746,8 @@ async function runtimeStopped(request) {
         code: 'runtime_stopped',
         cause: poisonReason,
         stage: poisonStage,
-        id: poisonId
+        id: poisonId,
+        runtime: RUNTIME_URL
     };
     return new Response(JSON.stringify(body), {
         status: 503,
