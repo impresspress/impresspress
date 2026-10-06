@@ -241,8 +241,8 @@ pub struct PathSummary {
     pub last_seen: String,
 }
 
-/// How the network page orders the routes within each block, each
-/// descending (ties by path, then method).
+/// How the network page ranks routes, across every block, each descending
+/// (ties by path, then method).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PathSort {
     /// Busiest first.
@@ -281,7 +281,7 @@ pub struct RouteQuery<'a> {
 /// One page of routes, and how many routes the query matched in all.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RoutePage {
-    /// Ordered by block, then by the query's sort.
+    /// Ranked by the query's sort, across blocks.
     pub rows: Vec<PathSummary>,
     /// Every route the query matched, across all pages. `0` when the page is
     /// empty: a page past the last route carries no count.
@@ -531,7 +531,7 @@ fn route_counts() -> Vec<wire::AggregateColumnDef> {
 
 /// One page of `(block, method, path)` groups — request count, mean
 /// duration, server- and client-error counts and the newest timestamp of
-/// each — ordered by block and then by `query.sort`, with the number of
+/// each — ranked by `query.sort` across every block, with the number of
 /// groups the query matched, in one grouped statement. The network page's
 /// route listing.
 ///
@@ -572,7 +572,6 @@ pub async fn route_page(ctx: &dyn Context, query: RouteQuery<'_>) -> Result<Rout
             wire::GroupByDef::Column("path".into()),
         ],
         sort: vec![
-            sort("block", false),
             sort(query.sort.alias(), true),
             sort("path", false),
             sort("method", false),
@@ -1127,9 +1126,9 @@ mod tests {
         }
     }
 
-    /// Routes come back ordered by block, then by the key asked for within
-    /// it; the page is cut by limit and offset, and every page carries the
-    /// number of routes in all.
+    /// Routes come back ranked by the key asked for, across blocks; the page
+    /// is cut by limit and offset, and every page carries the number of
+    /// routes in all.
     #[tokio::test]
     async fn the_route_page_orders_within_blocks_and_pages_in_sql() {
         let ctx = TestContext::with_admin()
@@ -1196,14 +1195,14 @@ mod tests {
             order(every_route(PathSort::Requests)).await,
             (
                 vec![
-                    "/b/admin/busy".to_string(),
+                    "/b/auth/login".to_string(),
+                    "/b/admin/busy".into(),
                     "/b/admin/failing".into(),
-                    "/b/admin/recent".into(),
-                    "/b/auth/login".into()
+                    "/b/admin/recent".into()
                 ],
                 4
             ),
-            "admin before auth, busiest first within admin"
+            "busiest first, whichever block"
         );
         assert_eq!(
             order(every_route(PathSort::Errors)).await.0[0],
@@ -1222,7 +1221,7 @@ mod tests {
         assert_eq!(
             order(second).await,
             (
-                vec!["/b/admin/recent".to_string(), "/b/auth/login".into()],
+                vec!["/b/admin/failing".to_string(), "/b/admin/recent".into()],
                 4
             ),
             "the second page of two, with the count of all four"
@@ -1264,8 +1263,9 @@ mod tests {
     }
 
     /// Migrations 007 and 008 over rows written before them: an action name
-    /// becomes its HTTP method, an `update` row (PUT or PATCH, nobody can
-    /// say) is dropped, and every row gets the block its path names. Both
+    /// becomes its HTTP method, an `update` row (PUT or PATCH) and an
+    /// `execute` row (any other method) are dropped, since nobody can say
+    /// which method they were, and every row gets the block its path names. Both
     /// re-run without changing anything.
     #[tokio::test]
     async fn migrations_007_and_008_bring_old_rows_onto_the_new_shape() {
@@ -1294,6 +1294,7 @@ mod tests {
             ("c", "create", "/b/auth/api/login"),
             ("d", "delete", "/b/admin/x"),
             ("u", "update", "/b/admin/variables/K"),
+            ("x", "execute", "/b/admin/users"),
             ("g", "GET", "/"),
             ("n", "retrieve", "<unmatched>"),
         ] {

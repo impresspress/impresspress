@@ -47,6 +47,19 @@ impl Query {
     /// control that uses the link supplies it (the search box appends its
     /// own field), and `page` always is: changing what is listed starts it
     /// over, and the pagination appends its own.
+    /// [`href`](Self::href) with the search, at page `page` (the first page
+    /// carries no `page`).
+    fn href_to_page(&self, page: u32) -> String {
+        let href = self.href(true);
+        if page <= 1 {
+            href
+        } else if href.contains('?') {
+            format!("{href}&page={page}")
+        } else {
+            format!("{href}?page={page}")
+        }
+    }
+
     fn href(&self, with_search: bool) -> String {
         let mut params: Vec<String> = Vec::new();
         match self.sort {
@@ -68,6 +81,14 @@ impl Query {
     }
 }
 
+/// What the network tab renders: its body, or — for a page number past the
+/// last page — the URL of the last page, which the parent redirects to so the
+/// address bar names the page on screen.
+pub enum NetworkBody {
+    Page(Markup),
+    Moved(String),
+}
+
 /// Render JUST the network monitoring body. The parent `settings_page`
 /// handler wraps this in the form-less `tabbed_page` shell. This tab is
 /// read-only monitoring — it renders no `<form>` and has nothing to save.
@@ -79,7 +100,7 @@ impl Query {
 pub async fn settings_body(
     ctx: &dyn Context,
     msg: &Message,
-) -> Result<Markup, wafer_run::WaferError> {
+) -> Result<NetworkBody, wafer_run::WaferError> {
     let query = Query::from_msg(msg);
     let read = |page: u32| {
         request_logs::route_page(
@@ -94,12 +115,15 @@ pub async fn settings_body(
         )
     };
     // A page past the last route (a stale link, a filter that shrank the
-    // list) comes back empty and so without a count; the first page is
-    // what to show then.
-    let (mut page, mut routes) = (query.page, read(query.page).await?);
+    // list) comes back empty and so without a count: the first page says
+    // how many routes there are, and the request is sent to the last page
+    // that has any.
+    let page = query.page;
+    let routes = read(page).await?;
     if routes.rows.is_empty() && page > 1 {
-        page = 1;
-        routes = read(1).await?;
+        let total = read(1).await?.total;
+        let last_page = u32::try_from(total.max(1) - 1).unwrap_or(0) / PAGE_SIZE + 1;
+        return Ok(NetworkBody::Moved(query.href_to_page(last_page)));
     }
     let totals = request_logs::block_totals(ctx, &query.search).await?;
     let groups = group_by_block(routes.rows);
@@ -137,7 +161,7 @@ pub async fn settings_body(
     .href(true);
     let page_href = query.href(true);
 
-    Ok(html! {
+    Ok(NetworkBody::Page(html! {
         div .filter-bar {
             (components::search_input_with_value("search", "Search by path...", &query.href(false), "#content", &query.search))
             div .network-controls {
@@ -184,7 +208,7 @@ pub async fn settings_body(
         }
 
         script { (maud::PreEscaped(NETWORK_JS)) }
-    })
+    }))
 }
 
 /// The routes of one block on this page, in the order the read returned them.
@@ -194,14 +218,16 @@ struct Group {
     rows: Vec<PathSummary>,
 }
 
-/// Cut a page of routes, which the read ordered by block, into one group per
-/// block.
+/// Gather a page of routes, which the read ordered by the chosen sort across
+/// every block, under one heading per block. The blocks come in the order of
+/// their first route on the page, so the page still leads with the route
+/// that ranks first; within a block the routes keep the read's order.
 fn group_by_block(rows: Vec<PathSummary>) -> Vec<Group> {
     let mut groups: Vec<Group> = Vec::new();
     for row in rows {
-        match groups.last_mut() {
-            Some(group) if group.block == row.block => group.rows.push(row),
-            _ => groups.push(Group {
+        match groups.iter_mut().find(|group| group.block == row.block) {
+            Some(group) => group.rows.push(row),
+            None => groups.push(Group {
                 block: row.block.clone(),
                 rows: vec![row],
             }),
@@ -635,10 +661,22 @@ mod tests {
         for (name, value) in query {
             msg.set_meta(format!("req.query.{name}"), *value);
         }
-        settings_body(ctx, &msg)
-            .await
-            .expect("network body")
-            .into_string()
+        match settings_body(ctx, &msg).await.expect("network body") {
+            NetworkBody::Page(body) => body.into_string(),
+            NetworkBody::Moved(to) => panic!("expected a page, was sent to {to}"),
+        }
+    }
+
+    /// Where a request for `query` is sent, when it is.
+    async fn moved_to(ctx: &TestContext, query: &[(&str, &str)]) -> Option<String> {
+        let mut msg = admin_msg("retrieve", NETWORK_HREF);
+        for (name, value) in query {
+            msg.set_meta(format!("req.query.{name}"), *value);
+        }
+        match settings_body(ctx, &msg).await.expect("network body") {
+            NetworkBody::Page(_) => None,
+            NetworkBody::Moved(to) => Some(to),
+        }
     }
 
     /// The rendered page: the summary line, the groups, errors-only, and the
@@ -729,8 +767,14 @@ mod tests {
             second.contains("5 requests \u{b7} 0 server errors \u{b7} 5 client errors"),
             "{second}"
         );
-        let past = page(&ctx, &[("page", "9")]).await;
-        assert!(past.contains("Showing 1\u{2013}50 of 60 routes"), "{past}");
+        assert_eq!(
+            moved_to(&ctx, &[("page", "9"), ("sort", "errors")])
+                .await
+                .as_deref(),
+            Some("/b/admin/settings/network?sort=errors&page=2"),
+            "a page past the end is sent to the last page, keeping the view"
+        );
+        assert_eq!(moved_to(&ctx, &[("page", "2")]).await, None);
     }
 
     /// "Errors only" is a `HAVING` in the read, not a filter over a capped
@@ -759,6 +803,38 @@ mod tests {
             "{failing}"
         );
         assert!(failing.contains("zz-quiet-failure"), "{failing}");
+    }
+
+    /// The sort ranks routes across blocks, not within each: on a busy
+    /// deployment a failing route of a block late in the alphabet is on the
+    /// first page under "Sort by Errors", and its block's heading with it.
+    #[tokio::test]
+    async fn sort_by_errors_ranks_across_blocks() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        for i in 0..60 {
+            seed(&ctx, "GET", &format!("/b/admin/busy{i:02}"), 200).await;
+        }
+        seed(&ctx, "GET", "/b/zeta/broken", 500).await;
+
+        let by_requests = page(&ctx, &[]).await;
+        assert!(!by_requests.contains("/b/zeta/broken"), "{by_requests}");
+        let by_errors = page(&ctx, &[("sort", "errors")]).await;
+        let zeta = by_errors
+            .find(r#"<span class="network-group__name">/b/zeta/</span>"#)
+            .unwrap_or_else(|| panic!("the zeta heading on page 1: {by_errors}"));
+        let admin = by_errors
+            .find(r#"<span class="network-group__name">/b/admin/</span>"#)
+            .expect("the admin heading");
+        assert!(
+            zeta < admin,
+            "the block of the first-ranked route leads: {by_errors}"
+        );
+        assert!(
+            by_errors.contains("1 request \u{b7} 1 server error"),
+            "{by_errors}"
+        );
     }
 
     /// The sort is a set of links, the current one `aria-current`, not three
@@ -849,8 +925,39 @@ mod outage_tests {
 
     use crate::{
         blocks::admin::pages::settings::settings_page,
-        test_support::{admin_msg, output_http_status, TestContext},
+        test_support::{admin_msg, output_header, output_http_status, TestContext},
     };
+
+    /// A page number past the last page is a redirect to the last page —
+    /// `303` for a page load, `HX-Redirect` for an htmx swap — so the address
+    /// bar never says `page=9` over page 1.
+    #[tokio::test]
+    async fn a_page_past_the_end_redirects_to_the_last_page() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        let past = || {
+            let mut msg = admin_msg("retrieve", "/b/admin/settings/network");
+            msg.set_meta("req.query.page", "9");
+            msg
+        };
+        let out = settings_page(&ctx, &past(), "network").await;
+        assert_eq!(output_http_status(out).await, 303);
+        let out = settings_page(&ctx, &past(), "network").await;
+        assert_eq!(
+            output_header(out, "Location").await.as_deref(),
+            Some("/b/admin/settings/network"),
+            "no routes at all: the last page is the first"
+        );
+
+        let mut htmx = past();
+        htmx.set_meta("http.header.hx-request", "true");
+        let out = settings_page(&ctx, &htmx, "network").await;
+        assert_eq!(
+            output_header(out, "HX-Redirect").await.as_deref(),
+            Some("/b/admin/settings/network")
+        );
+    }
 
     #[tokio::test]
     async fn a_failing_inbound_summary_renders_the_error_page_not_no_traffic() {

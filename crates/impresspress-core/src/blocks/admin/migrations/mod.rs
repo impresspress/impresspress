@@ -149,16 +149,23 @@ const SQL_006_POSTGRES: &str = include_str!("006_storage_access_logs_duration.po
 // 007 names every logged request by its HTTP method.
 //
 // Rows used to store the router action (`retrieve`, `create`, `update`,
-// `delete`); the pipeline now stores the method from the request head
-// (`GET`, `POST`, …). Left as they were, the network page listed `RETRIEVE
-// /x` beside `GET /x` as two routes, and a route's detail, matched on the
-// method, found only one of them. `retrieve`, `create` and `delete` each
-// stand for exactly one method and are rewritten; `update` stood for both
-// `PUT` and `PATCH`, so those rows — diagnostics, on deployments with no
-// production users yet — are deleted rather than guessed at.
+// `delete`, `execute`); the pipeline now stores the method from the request
+// head (`GET`, `POST`, …). Left as they were, the network page listed
+// `RETRIEVE /x` beside `GET /x` as two routes, and a route's detail, matched
+// on the method, found only one of them.
+//
+// `create` is exactly `POST` and `delete` exactly `DELETE`, and are
+// rewritten. `retrieve` stood for `GET` and `HEAD`; it becomes `GET`, so an
+// old `HEAD` reads as a `GET` — acceptable for diagnostic rows, and the only
+// reading the row allows. `update` stood for `PUT` and `PATCH`, and `execute`
+// for every other method (`OPTIONS`, `TRACE`, anything unrecognised): no row
+// says which, so those rows are deleted rather than guessed at. They are
+// diagnostics, on deployments with no production users yet.
 //
 // Re-runnable: once no row holds an action name, every statement matches
-// nothing.
+// nothing. That matters because the native CLI re-applies the admin DDL
+// files on every boot (`ddl_files`, before the gated runner exists); each
+// re-run is a scan of `method` that changes nothing.
 //
 // This reasoning lives here rather than in the .sql files for the reason 002's
 // note above gives.
@@ -175,8 +182,9 @@ const SQL_007_POSTGRES: &str = include_str!("007_request_logs_http_method.postgr
 // value — the segment after `/b/`, up to the next `/` — and leaves every other
 // path (`/`, the unmatched-route label) at `''`.
 //
-// Re-runnable: a second `ADD COLUMN` is swallowed as a duplicate column by
-// both migration runners, the `UPDATE` only touches rows still at `''`, and
+// Re-runnable, as the native CLI's re-apply of the DDL files on every boot
+// needs: a second `ADD COLUMN` is swallowed as a duplicate column by both
+// migration runners, the `UPDATE` only touches `/b/` rows still at `''`, and
 // the index is `IF NOT EXISTS`.
 //
 // This reasoning lives here rather than in the .sql files for the reason 002's

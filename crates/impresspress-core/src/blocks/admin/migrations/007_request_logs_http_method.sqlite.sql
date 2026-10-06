@@ -10,4 +10,4 @@ UPDATE impresspress__admin__request_logs SET method = 'POST' WHERE method = 'cre
 
 UPDATE impresspress__admin__request_logs SET method = 'DELETE' WHERE method = 'delete';
 
-DELETE FROM impresspress__admin__request_logs WHERE method = 'update';
+DELETE FROM impresspress__admin__request_logs WHERE method IN ('update', 'execute');
