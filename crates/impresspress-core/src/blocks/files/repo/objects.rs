@@ -161,6 +161,26 @@ pub fn claim_blob_key(key: &str, claim_id: &str) -> String {
     }
 }
 
+/// The object key a storage key holds the bytes of: [`claim_blob_key`]
+/// undone — `reports/{claim_id}~q3.pdf` is `reports/q3.pdf` — and any other
+/// key (a row stored before reservations, a key no reservation minted) as it
+/// stands. What a person reading a storage path wants to see; never a lookup
+/// key, which is the row's own `blob_key`.
+pub fn object_key_of_blob(blob_key: &str) -> String {
+    let (dir, name) = match blob_key.rsplit_once('/') {
+        Some((dir, name)) => (Some(dir), name),
+        None => (None, blob_key),
+    };
+    let name = match name.split_once('~') {
+        Some((claim_id, rest)) if uuid::Uuid::try_parse(claim_id).is_ok() => rest,
+        _ => name,
+    };
+    match dir {
+        Some(dir) => format!("{dir}/{name}"),
+        None => name.to_string(),
+    }
+}
+
 /// The storage key the row's bytes are under: its `blob_key`, or — for a row
 /// written before migration 005, whose `blob_key` is NULL — its object key.
 fn stored_blob_key(key: &str, blob_key: Option<String>) -> String {
@@ -1260,6 +1280,30 @@ mod tests {
             claim_blob_key("reports/2026/q3.pdf", "c1"),
             "reports/2026/c1~q3.pdf"
         );
+    }
+
+    /// A blob key reads back as the object key it stores, whatever the
+    /// directory; a name whose prefix is not a claim id is left alone.
+    #[test]
+    fn a_blob_key_reads_back_as_its_object_key() {
+        let claim = "22d8ce89-8a0f-47ac-b57a-19b31dd5f104";
+        for key in [
+            "a.png",
+            "nested/b report.png",
+            "x~y.txt",
+            "dir/not-a-uuid~z",
+        ] {
+            assert_eq!(
+                object_key_of_blob(&claim_blob_key(key, claim)),
+                key,
+                "{key}"
+            );
+            assert_eq!(
+                object_key_of_blob(key),
+                key,
+                "an unclaimed key stands: {key}"
+            );
+        }
     }
 
     /// A take-over is conditional on the claim the row was read with, not on

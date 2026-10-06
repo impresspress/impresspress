@@ -25,28 +25,111 @@ use crate::util::{daily_grouped, to_wire_filters, RecordExt};
 
 pub const TABLE: &str = "impresspress__admin__request_logs";
 
-/// The lowest status code a row counts as an error at: every 4xx and 5xx.
-/// [`is_error_status`] and every reader's filter compare against it, and the
-/// `status` column's label is derived from it, so a row's label, the
-/// dashboard's error tiles, the network page's error column and the "Recent
-/// Errors" card cannot disagree about one row.
-/// [`RequestLogPolicy::Errors`](crate::pipeline::RequestLogPolicy::Errors)
-/// (5xx only) is a separate rule, about which rows are stored at all.
-pub const ERROR_STATUS_FLOOR: i64 = 400;
+/// The lowest client-error status code: 400.
+pub const CLIENT_ERROR_FLOOR: i64 = 400;
 
-/// Whether a response with this status code is an error row.
-pub fn is_error_status(status_code: i64) -> bool {
-    status_code >= ERROR_STATUS_FLOOR
+/// The lowest server-error status code: 500.
+pub const SERVER_ERROR_FLOOR: i64 = 500;
+
+/// `429 Too Many Requests`: the client error the dashboard counts on its own,
+/// because a run of them is a rate limiter turning someone away rather than a
+/// broken link.
+pub const TOO_MANY_REQUESTS: i64 = 429;
+
+/// Which side of the exchange a logged status code blames.
+///
+/// Every reader classifies a row by its stored `status_code` through this one
+/// rule — the label column, the dashboard's tiles and series, the network
+/// page's counts and the logs page's filters — so no two of them can disagree
+/// about one row. A server error (5xx) is this deployment failing; a client
+/// error (4xx) is a request it refused, mostly a mistyped or probing URL, a
+/// missing credential or a rate limit.
+/// [`RequestLogPolicy::Errors`](crate::pipeline::RequestLogPolicy::Errors)
+/// keeps server errors only, and is a separate rule about which rows are
+/// stored at all.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusClass {
+    /// Below 400: served.
+    Served,
+    /// 400–499: refused.
+    ClientError,
+    /// 500 and up: failed.
+    ServerError,
 }
 
-/// The `status` column's label for a status code: `ERROR` for an error row
-/// ([`is_error_status`]), `OK` otherwise. Derived here, at the one place a
+impl StatusClass {
+    pub fn of(status_code: i64) -> Self {
+        if status_code >= SERVER_ERROR_FLOOR {
+            Self::ServerError
+        } else if status_code >= CLIENT_ERROR_FLOOR {
+            Self::ClientError
+        } else {
+            Self::Served
+        }
+    }
+
+    /// Whether the row is an error of either kind.
+    pub fn is_error(self) -> bool {
+        self != Self::Served
+    }
+
+    /// The class as filters on the stored `status_code`, AND-combined.
+    fn filters(self) -> Vec<Filter> {
+        match self {
+            Self::Served => vec![code(FilterOp::LessThan, CLIENT_ERROR_FLOOR)],
+            Self::ClientError => vec![
+                code(FilterOp::GreaterEqual, CLIENT_ERROR_FLOOR),
+                code(FilterOp::LessThan, SERVER_ERROR_FLOOR),
+            ],
+            Self::ServerError => vec![code(FilterOp::GreaterEqual, SERVER_ERROR_FLOOR)],
+        }
+    }
+}
+
+/// Which error rows a list is narrowed to: the logs page's two filters,
+/// "Server errors" and "Client errors", each on or off. Both off is every
+/// row, not none.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ErrorFilter {
+    pub server: bool,
+    pub client: bool,
+}
+
+impl ErrorFilter {
+    /// Every row.
+    pub const NONE: Self = Self {
+        server: false,
+        client: false,
+    };
+
+    /// The filters on `status_code` this selection reads as. Both classes
+    /// together are one contiguous range (4xx and 5xx), so one filter.
+    fn filters(self) -> Vec<Filter> {
+        match (self.server, self.client) {
+            (false, false) => vec![],
+            (true, false) => StatusClass::ServerError.filters(),
+            (false, true) => StatusClass::ClientError.filters(),
+            (true, true) => vec![code(FilterOp::GreaterEqual, CLIENT_ERROR_FLOOR)],
+        }
+    }
+}
+
+fn code(operator: FilterOp, value: i64) -> Filter {
+    Filter {
+        field: "status_code".into(),
+        operator,
+        value: json!(value),
+    }
+}
+
+/// The `status` column's label for a status code: `ERROR` for an error row of
+/// either class ([`StatusClass::is_error`]), `OK` otherwise. Derived here, at the one place a
 /// row is encoded, so no writer can hand-write a label that contradicts the
 /// code. No reader selects on the label: it is a display column for the SQL
 /// explorer, and rows written before it was derived can carry a label that
 /// contradicts their code.
 pub fn status_label(status_code: i64) -> &'static str {
-    if is_error_status(status_code) {
+    if StatusClass::of(status_code).is_error() {
         "ERROR"
     } else {
         "OK"
@@ -59,6 +142,8 @@ pub fn status_label(status_code: i64) -> &'static str {
 /// no label: [`to_data`](Self::to_data) derives the `status` column from
 /// `status_code`.
 pub struct NewRequestLog<'a> {
+    /// The HTTP method the client sent (`GET`, `POST`, …), as the request
+    /// head spelled it.
     pub method: &'a str,
     pub path: &'a str,
     /// The status code the client was served.
@@ -135,15 +220,51 @@ pub struct PathSummary {
     /// Mean duration truncated toward zero — `CAST(AVG(duration_ms) AS
     /// INTEGER)` parity with the builder path this replaced.
     pub avg_ms: i64,
-    pub errors: i64,
+    pub server_errors: i64,
+    pub client_errors: i64,
     pub last_seen: String,
+}
+
+/// What the network page orders its route summary by, each descending.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PathSort {
+    /// Busiest first.
+    Requests,
+    /// Most errors (of either class) first.
+    Errors,
+    /// Most recently seen first.
+    Recent,
+}
+
+impl PathSort {
+    /// The aggregate alias [`summarise_by_path`] sorts on.
+    fn alias(self) -> &'static str {
+        match self {
+            Self::Requests => "cnt",
+            Self::Errors => "errors",
+            Self::Recent => "last_seen",
+        }
+    }
+}
+
+/// The route summary as read, and whether the read stopped at its cap.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PathSummaries {
+    /// In the order the read asked for, at most the cap.
+    pub rows: Vec<PathSummary>,
+    /// More routes matched than the cap: `rows` is the first `cap` of them in
+    /// that order, not the whole set.
+    pub capped: bool,
 }
 
 /// The dashboard's header tiles for the current day.
 #[derive(Debug, Clone, PartialEq, Default)]
 pub struct TodayCounts {
     pub requests: i64,
-    pub errors: i64,
+    pub server_errors: i64,
+    pub client_errors: i64,
+    /// Of `client_errors`, the [`TOO_MANY_REQUESTS`] rows.
+    pub rate_limited: i64,
     pub avg_ms: f64,
 }
 
@@ -153,7 +274,8 @@ pub struct DailyCounts {
     /// `YYYY-MM-DD`.
     pub day: String,
     pub requests: i64,
-    pub errors: i64,
+    pub server_errors: i64,
+    pub client_errors: i64,
 }
 
 fn newest_first() -> Vec<SortField> {
@@ -163,13 +285,11 @@ fn newest_first() -> Vec<SortField> {
     }]
 }
 
-/// The one error predicate every reader filters on: [`is_error_status`] as
-/// a filter on the stored `status_code`.
-fn is_error() -> Filter {
-    Filter {
-        field: "status_code".into(),
-        operator: FilterOp::GreaterEqual,
-        value: json!(ERROR_STATUS_FLOOR),
+/// A conditional count of the rows of one status class.
+fn count_of(class: StatusClass, alias: &str) -> wire::AggregateColumnDef {
+    wire::AggregateColumnDef::CaseWhenSum {
+        when: to_wire_filters(&class.filters()),
+        alias: alias.into(),
     }
 }
 
@@ -188,14 +308,14 @@ pub async fn insert(ctx: &dyn Context, row: &NewRequestLog<'_>) -> Result<(), Wa
 }
 
 /// Page `page` of `page_size` rows, newest first, optionally narrowed to
-/// paths containing `path_search` and, when `errors_only`, to error rows
-/// ([`is_error_status`]). The admin logs page.
+/// paths containing `path_search` and to the error classes `errors` selects.
+/// The admin logs page.
 pub async fn paginated(
     ctx: &dyn Context,
     page: i64,
     page_size: i64,
     path_search: &str,
-    errors_only: bool,
+    errors: ErrorFilter,
 ) -> Result<Page<RequestLogRow>, WaferError> {
     let mut filters = Vec::new();
     if !path_search.is_empty() {
@@ -205,9 +325,7 @@ pub async fn paginated(
             value: json!(format!("%{path_search}%")),
         });
     }
-    if errors_only {
-        filters.push(is_error());
-    }
+    filters.extend(errors.filters());
     let list = db::paginated_list(ctx, TABLE, page, page_size, filters, newest_first()).await?;
     Ok(Page {
         rows: list
@@ -221,9 +339,9 @@ pub async fn paginated(
     })
 }
 
-/// The `limit` most recent error rows ([`is_error_status`]). The dashboard's
-/// "Recent 4xx/5xx" card.
-pub async fn list_recent_errors(
+/// The `limit` most recent server-error rows ([`StatusClass::ServerError`]).
+/// The dashboard's "Recent server errors" card.
+pub async fn list_recent_server_errors(
     ctx: &dyn Context,
     limit: u32,
 ) -> Result<Vec<RequestLogRow>, WaferError> {
@@ -236,7 +354,7 @@ pub async fn list_recent_errors(
             "duration_ms".into(),
             "created_at".into(),
         ]),
-        filters: vec![is_error()],
+        filters: StatusClass::ServerError.filters(),
         sort: newest_first(),
         limit: Some(limit),
         skip_count: true,
@@ -267,7 +385,7 @@ pub(crate) async fn insert_at(
 }
 
 /// When the oldest stored request was logged (its `created_at`), or `None`
-/// when the log is empty: how far back the dashboard's request and 4xx/5xx
+/// when the log is empty: how far back the dashboard's request and error
 /// series actually go. One row, ascending, no count.
 pub async fn first_logged_at(ctx: &dyn Context) -> Result<Option<String>, WaferError> {
     let opts = ListOptions {
@@ -332,15 +450,21 @@ pub async fn list_for_path(
         .collect())
 }
 
-/// The `limit` busiest `(method, path)` groups, optionally narrowed to paths
-/// containing `path_search`: request count, mean duration, error count and
-/// the newest timestamp of each. The network page's inbound summary, in one
-/// grouped statement.
+/// The `(method, path)` groups, optionally narrowed to paths containing
+/// `path_search`, ordered by `sort` (descending, ties broken by path), and at
+/// most `cap` of them: request count, mean duration, server- and client-error
+/// counts and the newest timestamp of each. The network page's inbound
+/// summary, in one grouped statement.
+///
+/// The read asks for one more group than `cap` to learn whether it was cut
+/// short, and says so in [`PathSummaries::capped`] rather than presenting the
+/// first `cap` as the whole set.
 pub async fn summarise_by_path(
     ctx: &dyn Context,
     path_search: &str,
-    limit: i64,
-) -> Result<Vec<PathSummary>, WaferError> {
+    sort: PathSort,
+    cap: usize,
+) -> Result<PathSummaries, WaferError> {
     let filters = if path_search.is_empty() {
         vec![]
     } else {
@@ -363,8 +487,16 @@ pub async fn summarise_by_path(
                 alias: "avg_ms".into(),
                 cast_as: None,
             },
+            count_of(StatusClass::ServerError, "server_errors"),
+            count_of(StatusClass::ClientError, "client_errors"),
             wire::AggregateColumnDef::CaseWhenSum {
-                when: to_wire_filters(&[is_error()]),
+                when: to_wire_filters(
+                    &ErrorFilter {
+                        server: true,
+                        client: true,
+                    }
+                    .filters(),
+                ),
                 alias: "errors".into(),
             },
             wire::AggregateColumnDef::Max {
@@ -377,41 +509,57 @@ pub async fn summarise_by_path(
             wire::GroupByDef::Column("method".into()),
             wire::GroupByDef::Column("path".into()),
         ],
-        sort: vec![wire::SortFieldDef {
-            field: "cnt".into(),
-            desc: true,
-        }],
-        limit,
+        sort: vec![
+            wire::SortFieldDef {
+                field: sort.alias().into(),
+                desc: true,
+            },
+            wire::SortFieldDef {
+                field: "path".into(),
+                desc: false,
+            },
+            wire::SortFieldDef {
+                field: "method".into(),
+                desc: false,
+            },
+        ],
+        limit: i64::try_from(cap).unwrap_or(i64::MAX).saturating_add(1),
     };
     let rows = db::aggregate(ctx, req).await?;
-    Ok(rows
-        .iter()
-        .map(|r| PathSummary {
-            method: r.data.str_field("method").to_string(),
-            path: r.data.str_field("path").to_string(),
-            count: r.data.i64_field("cnt"),
-            // The Avg is requested uncast, so AVG(duration_ms) comes back as
-            // a JSON float; `as_i64()` is always `None` for the
-            // `Number::Float` variant, so read it as f64 and truncate. A
-            // `BIGINT` cast would round on PostgreSQL and truncate on SQLite;
-            // truncating here gives one answer on every backend, and
-            // `duration_ms` is always >= 0, so `as i64` (which truncates
-            // toward zero) needs no `.round()`.
-            avg_ms: r
-                .data
-                .get("avg_ms")
-                .and_then(|v| v.as_f64())
-                .map(|v| v as i64)
-                .unwrap_or(0),
-            errors: r.data.i64_field("errors"),
-            last_seen: r.data.str_field("last_seen").to_string(),
-        })
-        .collect())
+    let capped = rows.len() > cap;
+    Ok(PathSummaries {
+        rows: rows
+            .iter()
+            .take(cap)
+            .map(|r| PathSummary {
+                method: r.data.str_field("method").to_string(),
+                path: r.data.str_field("path").to_string(),
+                count: r.data.i64_field("cnt"),
+                // The Avg is requested uncast, so AVG(duration_ms) comes back
+                // as a JSON float; `as_i64()` is always `None` for the
+                // `Number::Float` variant, so read it as f64 and truncate. A
+                // `BIGINT` cast would round on PostgreSQL and truncate on
+                // SQLite; truncating here gives one answer on every backend,
+                // and `duration_ms` is always >= 0, so `as i64` (which
+                // truncates toward zero) needs no `.round()`.
+                avg_ms: r
+                    .data
+                    .get("avg_ms")
+                    .and_then(|v| v.as_f64())
+                    .map(|v| v as i64)
+                    .unwrap_or(0),
+                server_errors: r.data.i64_field("server_errors"),
+                client_errors: r.data.i64_field("client_errors"),
+                last_seen: r.data.str_field("last_seen").to_string(),
+            })
+            .collect(),
+        capped,
+    })
 }
 
-/// Requests, errors ([`is_error_status`]) and mean duration since `since` (an
-/// ISO timestamp, the start of today) in one statement. The dashboard's
-/// header tiles.
+/// Requests, server errors, client errors (and of those the rate-limited
+/// ones) and mean duration since `since` (an ISO timestamp, the start of
+/// today) in one statement. The dashboard's header tiles.
 pub async fn today_counts(ctx: &dyn Context, since_iso: &str) -> Result<TodayCounts, WaferError> {
     let req = wire::AggregateRequest {
         collection: TABLE.to_string(),
@@ -420,9 +568,11 @@ pub async fn today_counts(ctx: &dyn Context, since_iso: &str) -> Result<TodayCou
             wire::AggregateColumnDef::Count {
                 alias: "requests".into(),
             },
+            count_of(StatusClass::ServerError, "server_errors"),
+            count_of(StatusClass::ClientError, "client_errors"),
             wire::AggregateColumnDef::CaseWhenSum {
-                when: to_wire_filters(&[is_error()]),
-                alias: "errors".into(),
+                when: to_wire_filters(&[code(FilterOp::Equal, TOO_MANY_REQUESTS)]),
+                alias: "rate_limited".into(),
             },
             wire::AggregateColumnDef::Avg {
                 field: "duration_ms".into(),
@@ -437,9 +587,12 @@ pub async fn today_counts(ctx: &dyn Context, since_iso: &str) -> Result<TodayCou
     };
     let rows = db::aggregate(ctx, req).await?;
     let row = rows.first();
+    let field = |name: &str| row.map(|r| r.data.i64_field(name)).unwrap_or(0);
     Ok(TodayCounts {
-        requests: row.map(|r| r.data.i64_field("requests")).unwrap_or(0),
-        errors: row.map(|r| r.data.i64_field("errors")).unwrap_or(0),
+        requests: field("requests"),
+        server_errors: field("server_errors"),
+        client_errors: field("client_errors"),
+        rate_limited: field("rate_limited"),
         avg_ms: row
             .and_then(|r| r.data.get("avg_val"))
             .and_then(|v| v.as_f64())
@@ -447,7 +600,7 @@ pub async fn today_counts(ctx: &dyn Context, since_iso: &str) -> Result<TodayCou
     })
 }
 
-/// Requests and errors ([`is_error_status`]) per day since `since` (one
+/// Requests, server errors and client errors per day since `since` (one
 /// entry per day that has rows), from one grouped statement. The dashboard's
 /// request and error series come from the same rows.
 pub async fn daily_counts(
@@ -463,10 +616,8 @@ pub async fn daily_counts(
             wire::AggregateColumnDef::Count {
                 alias: "requests".into(),
             },
-            wire::AggregateColumnDef::CaseWhenSum {
-                when: to_wire_filters(&[is_error()]),
-                alias: "errors".into(),
-            },
+            count_of(StatusClass::ServerError, "server_errors"),
+            count_of(StatusClass::ClientError, "client_errors"),
         ],
     )
     .await?;
@@ -475,10 +626,12 @@ pub async fn daily_counts(
         .map(|r| DailyCounts {
             day: r.data.str_field("created_at").to_string(),
             requests: r.data.i64_field("requests"),
-            errors: r.data.i64_field("errors"),
+            server_errors: r.data.i64_field("server_errors"),
+            client_errors: r.data.i64_field("client_errors"),
         })
         .collect())
 }
+
 #[cfg(test)]
 mod tests {
     use wafer_core::clients::database as db;
@@ -491,7 +644,7 @@ mod tests {
             method: "GET",
             path: "/probe",
             status_code,
-            error_message: if is_error_status(status_code) {
+            error_message: if StatusClass::of(status_code).is_error() {
                 "boom"
             } else {
                 ""
@@ -550,7 +703,9 @@ mod tests {
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         insert(&ctx, &probe(500, 42)).await.expect("insert");
 
-        let page = paginated(&ctx, 1, 20, "", false).await.expect("paginated");
+        let page = paginated(&ctx, 1, 20, "", ErrorFilter::NONE)
+            .await
+            .expect("paginated");
         assert_eq!(page.total_count, 1);
         assert_eq!((page.page, page.page_size), (1, 20));
         let row = &page.rows[0];
@@ -595,29 +750,33 @@ mod tests {
         other.path = "/other";
         seed_at(&ctx, "r3", other, "2026-01-03T00:00:00Z").await;
 
-        let page = paginated(&ctx, 1, 1, "", false).await.expect("page 1");
+        let page = paginated(&ctx, 1, 1, "", ErrorFilter::NONE)
+            .await
+            .expect("page 1");
         assert_eq!(page.total_count, 3);
         assert_eq!(page.rows.len(), 1);
         assert_eq!(page.rows[0].id, "r3", "newest first");
 
-        let probes = paginated(&ctx, 1, 20, "prob", false)
+        let probes = paginated(&ctx, 1, 20, "prob", ErrorFilter::NONE)
             .await
             .expect("filtered");
         assert_eq!(probes.total_count, 2);
         assert!(probes.rows.iter().all(|r| r.path == "/probe"));
     }
 
-    /// `errors_only` narrows the list to error rows by their `status_code`,
-    /// composes with the path search, and counts the narrowed set.
+    /// The two error filters narrow the list by `status_code` — server
+    /// errors to 5xx, client errors to 4xx, both to either — whatever the
+    /// stored label says, compose with the path search, and count the
+    /// narrowed set.
     #[tokio::test]
-    async fn paginated_errors_only_selects_by_code_not_by_the_stored_label() {
+    async fn paginated_error_filters_select_by_code_not_by_the_stored_label() {
         let ctx = TestContext::with_admin()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         seed_labelled(&ctx, "served_200", 200, "OK", "2026-01-01T00:00:00Z").await;
         seed_labelled(
             &ctx,
-            "served_404_labelled_ok",
+            "refused_404_labelled_ok",
             404,
             "OK",
             "2026-01-02T00:00:00Z",
@@ -631,37 +790,66 @@ mod tests {
             "2026-01-03T00:00:00Z",
         )
         .await;
+        seed_labelled(
+            &ctx,
+            "failed_500_labelled_ok",
+            500,
+            "OK",
+            "2026-01-04T00:00:00Z",
+        )
+        .await;
+        seed_labelled(&ctx, "refused_499", 499, "ERROR", "2026-01-05T00:00:00Z").await;
 
-        let all = paginated(&ctx, 1, 20, "", false).await.expect("all rows");
-        assert_eq!(all.total_count, 3);
+        let ids = |page: Page<RequestLogRow>| {
+            let mut ids: Vec<String> = page.rows.into_iter().map(|r| r.id).collect();
+            ids.sort();
+            ids
+        };
+        let list = |errors: ErrorFilter, search: &'static str| {
+            let ctx = &ctx;
+            async move { paginated(ctx, 1, 20, search, errors).await.expect("list") }
+        };
+        const SERVER: ErrorFilter = ErrorFilter {
+            server: true,
+            client: false,
+        };
+        const CLIENT: ErrorFilter = ErrorFilter {
+            server: false,
+            client: true,
+        };
+        const BOTH: ErrorFilter = ErrorFilter {
+            server: true,
+            client: true,
+        };
 
-        let errors = paginated(&ctx, 1, 20, "", true).await.expect("error rows");
         assert_eq!(
-            errors
-                .rows
-                .iter()
-                .map(|r| r.id.as_str())
-                .collect::<Vec<_>>(),
-            vec!["served_404_labelled_ok"],
-            "only the row whose code is >= 400, whatever its label says",
+            list(ErrorFilter::NONE, "").await.total_count,
+            5,
+            "no filter is every row"
         );
-        assert_eq!(errors.total_count, 1, "the count is of the narrowed set");
+        assert_eq!(ids(list(SERVER, "").await), vec!["failed_500_labelled_ok"]);
+        assert_eq!(
+            ids(list(CLIENT, "").await),
+            vec!["refused_404_labelled_ok", "refused_499"],
+            "499 is the last client error, 500 the first server error",
+        );
+        assert_eq!(
+            ids(list(BOTH, "").await),
+            vec![
+                "failed_500_labelled_ok",
+                "refused_404_labelled_ok",
+                "refused_499"
+            ],
+        );
+        assert_eq!(
+            list(CLIENT, "").await.total_count,
+            2,
+            "the count is of the narrowed set"
+        );
 
-        // The two filters compose: same rows, narrowed by path as well.
-        assert_eq!(
-            paginated(&ctx, 1, 20, "prob", true)
-                .await
-                .expect("error rows on /probe")
-                .total_count,
-            1
-        );
-        assert_eq!(
-            paginated(&ctx, 1, 20, "nope", true)
-                .await
-                .expect("error rows on a path that matches nothing")
-                .total_count,
-            0
-        );
+        // The filters compose with the path search.
+        assert_eq!(list(BOTH, "prob").await.total_count, 3);
+        assert_eq!(list(SERVER, "nope").await.total_count, 0);
     }
 
     #[tokio::test]
@@ -714,12 +902,14 @@ mod tests {
             (today - chrono::Duration::days(29)).format("%Y-%m-%d")
         );
 
-        // Today 4 (durations 100/200/300/400, one 500); 10d ago 2 (ok,
-        // 50/50); 40d ago 5 (outside the 30-day window).
+        // Today 6 (durations 100/200/300/400/25/25: one 500, a 404 and a
+        // 429); 10d ago 2 (ok, 50/50); 40d ago 5 (outside the 30-day window).
         seed_at(&ctx, "r_t0", probe(200, 100), &at(0)).await;
         seed_at(&ctx, "r_t1", probe(200, 200), &at(0)).await;
         seed_at(&ctx, "r_t2", probe(200, 300), &at(0)).await;
         seed_at(&ctx, "r_t3", probe(500, 400), &at(0)).await;
+        seed_at(&ctx, "r_t4", probe(404, 25), &at(0)).await;
+        seed_at(&ctx, "r_t5", probe(429, 25), &at(0)).await;
         seed_at(&ctx, "r_10d_0", probe(200, 50), &at(10)).await;
         seed_at(&ctx, "r_10d_1", probe(200, 50), &at(10)).await;
         for i in 0..5 {
@@ -732,62 +922,145 @@ mod tests {
             operator: FilterOp::GreaterEqual,
             value: serde_json::json!(&today_start),
         };
-        let error_filter = Filter {
-            field: "status_code".into(),
-            operator: FilterOp::GreaterEqual,
-            value: serde_json::json!(400),
+        let today_count = |mut filters: Vec<Filter>| {
+            filters.push(today_filter.clone());
+            let ctx = &ctx;
+            async move { db::count(ctx, TABLE, &filters).await.unwrap() }
         };
-        let requests_expected = db::count(&ctx, TABLE, std::slice::from_ref(&today_filter))
-            .await
-            .unwrap();
-        let errors_expected = db::count(&ctx, TABLE, &[error_filter, today_filter])
-            .await
-            .unwrap();
         let counts = today_counts(&ctx, &today_start)
             .await
             .expect("today_counts");
-        assert_eq!(counts.requests, requests_expected);
-        assert_eq!(counts.errors, errors_expected);
-        assert_eq!((counts.requests, counts.errors), (4, 1), "hand-computed");
+        assert_eq!(counts.requests, today_count(vec![]).await);
+        assert_eq!(
+            counts.server_errors,
+            today_count(StatusClass::ServerError.filters()).await
+        );
+        assert_eq!(
+            counts.client_errors,
+            today_count(StatusClass::ClientError.filters()).await
+        );
+        assert_eq!(
+            counts.rate_limited,
+            today_count(vec![code(FilterOp::Equal, TOO_MANY_REQUESTS)]).await
+        );
+        assert_eq!(
+            (
+                counts.requests,
+                counts.server_errors,
+                counts.client_errors,
+                counts.rate_limited
+            ),
+            (6, 1, 2, 1),
+            "hand-computed"
+        );
         assert!(
-            (counts.avg_ms - 250.0).abs() < 1e-9,
-            "avg of today's durations = 250, got {}",
+            (counts.avg_ms - 175.0).abs() < 1e-9,
+            "avg of today's durations = 175, got {}",
             counts.avg_ms
         );
 
         // --- the daily series ---
         let daily = daily_counts(&ctx, &start_30d).await.expect("daily_counts");
         let on = |d: &str| daily.iter().find(|row| row.day == d);
-        assert_eq!(on(&day(0)).map(|r| (r.requests, r.errors)), Some((4, 1)));
-        assert_eq!(on(&day(10)).map(|r| (r.requests, r.errors)), Some((2, 0)));
+        let split = |r: &DailyCounts| (r.requests, r.server_errors, r.client_errors);
+        assert_eq!(on(&day(0)).map(split), Some((6, 1, 2)));
+        assert_eq!(on(&day(10)).map(split), Some((2, 0, 0)));
         assert_eq!(
             daily.iter().map(|r| r.requests).sum::<i64>(),
-            6,
+            8,
             "40d-ago excluded"
         );
-        assert_eq!(daily.iter().map(|r| r.errors).sum::<i64>(), 1);
 
         // --- the per-path summary (every row shares one method+path) ---
-        let summary = summarise_by_path(&ctx, "", 50).await.expect("summary");
-        assert_eq!(summary.len(), 1);
-        let s = &summary[0];
+        let summary = summarise_by_path(&ctx, "", PathSort::Requests, 50)
+            .await
+            .expect("summary");
+        assert!(!summary.capped);
+        assert_eq!(summary.rows.len(), 1);
+        let s = &summary.rows[0];
         assert_eq!((s.method.as_str(), s.path.as_str()), ("GET", "/probe"));
-        assert_eq!(s.count, 11);
-        assert_eq!(s.errors, 1);
+        assert_eq!(s.count, 13);
+        assert_eq!((s.server_errors, s.client_errors), (1, 2));
         assert_eq!(s.last_seen, at(0));
-        // CAST(AVG(duration_ms) AS INTEGER) parity: the eleven durations sum
-        // to 6095, a mean of 554.09…, truncated toward zero.
-        assert_eq!(s.avg_ms, 554);
-        assert!(summarise_by_path(&ctx, "nope", 50)
+        // CAST(AVG(duration_ms) AS INTEGER) parity: the thirteen durations
+        // sum to 6145, a mean of 472.69…, truncated toward zero.
+        assert_eq!(s.avg_ms, 472);
+        assert!(summarise_by_path(&ctx, "nope", PathSort::Requests, 50)
             .await
             .expect("filtered summary")
+            .rows
             .is_empty());
 
-        // --- recent errors: the 500 row and nothing else ---
-        let recent = list_recent_errors(&ctx, 5).await.expect("recent errors");
+        // --- recent server errors: the 500 row and nothing else ---
+        let recent = list_recent_server_errors(&ctx, 5)
+            .await
+            .expect("recent errors");
         assert_eq!(
             recent.iter().map(|r| r.id.as_str()).collect::<Vec<_>>(),
             vec!["r_t3"]
+        );
+    }
+
+    /// The route summary orders by the key asked for, and reports a read cut
+    /// short at its cap instead of passing the prefix off as everything.
+    #[tokio::test]
+    async fn the_route_summary_sorts_by_the_key_and_reports_its_cap() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        let row = |path: &'static str, code: i64| NewRequestLog {
+            path,
+            ..probe(code, 1)
+        };
+        // /busy: 3 requests, no errors, oldest. /failing: 2, both errors.
+        // /recent: 1, newest.
+        for (i, at) in [
+            "2026-01-01T00:00:00Z",
+            "2026-01-01T00:00:01Z",
+            "2026-01-01T00:00:02Z",
+        ]
+        .iter()
+        .enumerate()
+        {
+            seed_at(&ctx, &format!("busy{i}"), row("/busy", 200), at).await;
+        }
+        seed_at(&ctx, "fail0", row("/failing", 500), "2026-01-02T00:00:00Z").await;
+        seed_at(&ctx, "fail1", row("/failing", 404), "2026-01-02T00:00:01Z").await;
+        seed_at(&ctx, "recent", row("/recent", 200), "2026-01-03T00:00:00Z").await;
+
+        let order = |sort: PathSort| {
+            let ctx = &ctx;
+            async move {
+                summarise_by_path(ctx, "", sort, 50)
+                    .await
+                    .expect("summary")
+                    .rows
+                    .into_iter()
+                    .map(|r| r.path)
+                    .collect::<Vec<_>>()
+            }
+        };
+        assert_eq!(
+            order(PathSort::Requests).await,
+            ["/busy", "/failing", "/recent"]
+        );
+        assert_eq!(order(PathSort::Errors).await[0], "/failing");
+        assert_eq!(
+            order(PathSort::Recent).await,
+            ["/recent", "/failing", "/busy"]
+        );
+
+        let capped = summarise_by_path(&ctx, "", PathSort::Requests, 2)
+            .await
+            .expect("capped summary");
+        assert!(capped.capped, "three routes do not fit a cap of two");
+        assert_eq!(capped.rows.len(), 2);
+        assert!(
+            !summarise_by_path(&ctx, "", PathSort::Requests, 3)
+                .await
+                .expect("exact summary")
+                .capped,
+            "three routes fit a cap of three exactly"
         );
     }
 
@@ -815,7 +1088,11 @@ mod tests {
         let counts = today_counts(&ctx, &today_start)
             .await
             .expect("today_counts");
-        assert_eq!((counts.requests, counts.errors), (3, 2), "today_counts");
+        assert_eq!(
+            (counts.requests, counts.server_errors, counts.client_errors),
+            (3, 1, 1),
+            "today_counts"
+        );
 
         let daily = daily_counts(&ctx, &today_start)
             .await
@@ -823,34 +1100,52 @@ mod tests {
         assert_eq!(
             daily
                 .iter()
-                .map(|r| (r.requests, r.errors))
+                .map(|r| (r.requests, r.server_errors, r.client_errors))
                 .collect::<Vec<_>>(),
-            vec![(3, 2)],
+            vec![(3, 1, 1)],
             "daily_counts",
         );
 
-        let summary = summarise_by_path(&ctx, "", 50).await.expect("summary");
+        let summary = summarise_by_path(&ctx, "", PathSort::Requests, 50)
+            .await
+            .expect("summary");
         assert_eq!(
             summary
+                .rows
                 .iter()
-                .map(|s| (s.count, s.errors))
+                .map(|s| (s.count, s.server_errors, s.client_errors))
                 .collect::<Vec<_>>(),
-            vec![(3, 2)],
+            vec![(3, 1, 1)],
             "summarise_by_path",
         );
 
-        let mut recent: Vec<String> = list_recent_errors(&ctx, 5)
+        let recent: Vec<String> = list_recent_server_errors(&ctx, 5)
             .await
             .expect("recent errors")
             .into_iter()
             .map(|r| r.id)
             .collect();
-        recent.sort();
         assert_eq!(
             recent,
-            vec!["served_404_labelled_ok", "served_500_labelled_ok"],
-            "list_recent_errors",
+            vec!["served_500_labelled_ok"],
+            "list_recent_server_errors"
         );
+    }
+
+    /// The class boundaries every reader shares.
+    #[test]
+    fn status_classes_split_at_400_and_500() {
+        for (code, class) in [
+            (200, StatusClass::Served),
+            (399, StatusClass::Served),
+            (400, StatusClass::ClientError),
+            (429, StatusClass::ClientError),
+            (499, StatusClass::ClientError),
+            (500, StatusClass::ServerError),
+            (503, StatusClass::ServerError),
+        ] {
+            assert_eq!(StatusClass::of(code), class, "{code}");
+        }
     }
 
     /// The label is a function of the code alone.

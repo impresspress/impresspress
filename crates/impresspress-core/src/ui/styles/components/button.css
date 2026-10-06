@@ -49,8 +49,10 @@
    meant to express. */
 .btn--lg { padding: var(--space-3) var(--space-6); font-size: var(--text-lg); }
 /* Square: an icon-only button, so the horizontal padding matches the
-   vertical rather than the text-button ratio. */
-.btn--icon { padding: var(--space-2); }
+   vertical rather than the text-button ratio. It has no words to make it
+   wide, so it is held at the 44px touch target on every width; it always
+   carries an `aria-label`, its only name. */
+.btn--icon { padding: var(--space-2); min-width: 44px; min-height: 44px; }
 
 /* ── Variants ──────────────────────────────────────────── */
 .btn--primary { background: var(--primary-button); color: #fff; border-color: var(--primary-button); }
@@ -71,6 +73,13 @@
    --primary-button already does double duty for --primary-color. */
 .btn--danger { background: var(--accent-danger-text); color: #fff; }
 .btn--danger:hover:not(:disabled) { filter: brightness(0.92); }
+
+/* A destructive row action (a table's delete icon): quiet until it is
+   pointed at, so a column of them does not read as a column of alarms; the
+   confirm step it keeps is the real guard. --accent-danger-text is 6.47:1 on
+   white and on --bg-hover. */
+.btn--ghost-danger { background: transparent; color: var(--accent-danger-text); }
+.btn--ghost-danger:hover:not(:disabled) { background: var(--bg-hover); }
 
 /* --accent-success (#10b981) under white text is 2.54:1 -- below AA, and
    below even the 3:1 non-text floor. --accent-success-text (7.13:1, computed)
@@ -98,3 +107,15 @@
 @media (max-width: 720px) {
 	.btn--block { width: 100%; flex: 1 1 0; }
 }
+
+/* ── Filter toggle (`components::filter_toggle`) ───────── */
+/* A list filter that is on or off. Off reads as a secondary button; on is
+   filled with the neutral ink and carries a check, so the state is shape and
+   text as well as colour, and `aria-pressed` says it to a screen reader. */
+.filter-toggle { min-height: 44px; }
+.filter-toggle[aria-pressed="true"] { background: var(--text-primary); color: var(--surface-1); border-color: var(--text-primary); }
+.filter-toggle[aria-pressed="true"]:hover:not(:disabled) { background: var(--text-secondary); border-color: var(--text-secondary); }
+.filter-toggle__check { display: none; line-height: 0; }
+.filter-toggle[aria-pressed="true"] .filter-toggle__check { display: inline-flex; }
+.filter-toggle__check svg { width: 14px; height: 14px; }
+.filter-toggles { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2); }

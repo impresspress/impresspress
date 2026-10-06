@@ -121,7 +121,7 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
 
     let recent_users_fut = users::list_recent_active(ctx, 5);
 
-    let recent_errors_fut = request_logs::list_recent_errors(ctx, 5);
+    let recent_errors_fut = request_logs::list_recent_server_errors(ctx, 5);
 
     let first_user_fut = users::first_created_at(ctx);
     let first_request_fut = request_logs::first_logged_at(ctx);
@@ -212,9 +212,10 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
         }
     };
 
-    // Two grouped statements back all three charts: the USERS series comes from
-    // its own daily aggregate; the request-log "requests" and "errors" series
-    // are two metrics projected out of the *same* per-day counts.
+    // Two grouped statements back all four charts: the USERS series comes from
+    // its own daily aggregate; the request-log "requests", "client errors" and
+    // "server errors" series are three metrics projected out of the *same*
+    // per-day counts.
     //
     // An unreadable aggregate must NOT be zero-filled: the 30-day fill turns
     // "we could not read this" into a flat line along the axis, which is a
@@ -225,18 +226,33 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let requests_daily = request_days
         .as_ref()
         .map(|days| series_from_daily(days, |d| d.requests, start_30d));
-    let errors_daily = request_days
+    let client_errors_daily = request_days
         .as_ref()
-        .map(|days| series_from_daily(days, |d| d.errors, start_30d));
+        .map(|days| series_from_daily(days, |d| d.client_errors, start_30d));
+    let server_errors_daily = request_days
+        .as_ref()
+        .map(|days| series_from_daily(days, |d| d.server_errors, start_30d));
 
     let user_count_str = user_counts.map(|(total, _)| total.to_string());
     let new_users_str = user_counts.map(|(_, today)| today.to_string());
     let requests_str = request_counts
         .as_ref()
         .map(|c: &TodayCounts| c.requests.to_string());
-    let errors_str = request_counts
+    let server_errors = request_counts
         .as_ref()
-        .map(|c: &TodayCounts| c.errors.to_string());
+        .map(|c: &TodayCounts| c.server_errors);
+    let server_errors_str = server_errors.map(|n| n.to_string());
+    // The client errors are a breakdown of the request figure, not a figure
+    // of their own: mostly mistyped or probing URLs, missing credentials and
+    // rate limits, which say nothing about this deployment's health.
+    let requests_detail = request_counts.as_ref().map(|c: &TodayCounts| {
+        html! {
+            (plural(c.client_errors, "client error", "client errors"))
+            @if c.rate_limited > 0 {
+                " · " (c.rate_limited) " rate-limited"
+            }
+        }
+    });
     let avg_ms_str = request_counts
         .as_ref()
         .map(|c: &TodayCounts| format!("{:.0}ms", c.avg_ms));
@@ -252,7 +268,7 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
     };
     let new_users_spark = spark(&new_users_daily, "var(--primary-color)");
     let requests_spark = spark(&requests_daily, "var(--accent-warning)");
-    let errors_spark = spark(&errors_daily, "var(--accent-danger)");
+    let server_errors_spark = spark(&server_errors_daily, "var(--accent-danger)");
 
     let stats = vec![
         // A running total has no daily series of its own; the signup
@@ -270,24 +286,26 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
             icons::user_plus(),
             new_users_spark,
         ),
-        components::stat_card(
+        components::StatCard::new(
             "Requests Today",
             tile_value(&requests_str),
             icons::file_text(),
-            requests_spark,
-        ),
-        // Every 4xx and 5xx response (`request_logs::ERROR_STATUS_FLOOR`), so
-        // the label says so: "Errors" read as server failures while most of
-        // the count is clients' 404s and 401s. The same definition, and the
-        // same "4xx/5xx" name, is used by the chart below, the "Recent
-        // 4xx/5xx" card and the logs page's "4xx/5xx only" filter they link
-        // to.
-        components::stat_card(
-            "4xx/5xx Today",
-            tile_value(&errors_str),
+        )
+        .spark(requests_spark)
+        .detail(requests_detail)
+        .render(),
+        // Server errors (5xx) only: this deployment failing. Red whenever it
+        // is not zero, and the "Recent server errors" card and the logs
+        // page's "Server errors" filter it links to count the same rows
+        // (`request_logs::StatusClass`).
+        components::StatCard::new(
+            "Server Errors Today",
+            tile_value(&server_errors_str),
             icons::triangle_alert(),
-            errors_spark,
-        ),
+        )
+        .spark(server_errors_spark)
+        .alert(server_errors.is_some_and(|n| n > 0))
+        .render(),
         components::stat_card(
             "Avg Response",
             tile_value(&avg_ms_str),
@@ -328,13 +346,13 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let recent_errors_card = html! {
         section .card {
             header .card__head {
-                h2 .card__title { "Recent 4xx/5xx" }
-                a .btn .btn--ghost .btn--sm .card__actions href="/b/admin/logs?errors=1" { "View all" }
+                h2 .card__title { "Recent server errors" }
+                a .btn .btn--ghost .btn--sm .card__actions href=(SERVER_ERRORS_LOGS_HREF) { "View all" }
             }
             div .card__body {
                 @if let Some(recent_errors) = &recent_errors {
                 @if recent_errors.is_empty() {
-                    p .text-muted .text-sm { "No 4xx/5xx responses recently" }
+                    p .text-muted .text-sm { (NO_RECENT_SERVER_ERRORS) }
                 } @else {
                     @let rows: Vec<Vec<Markup>> = recent_errors.iter().map(|row| {
                         let code = row.status_code;
@@ -382,27 +400,35 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
         ),
         None => chart_unavailable_card("Requests", "Last 30 days", "/b/admin/logs"),
     };
-    let errors_chart = match &errors_daily {
+    let client_errors_chart = match &client_errors_daily {
         Some(series) => components::line_chart_card(
-            "4xx/5xx responses",
+            "Client errors",
+            "Last 30 days",
+            series,
+            requests_history,
+            "var(--text-secondary)",
+            CLIENT_ERRORS_LOGS_HREF,
+        ),
+        None => chart_unavailable_card("Client errors", "Last 30 days", CLIENT_ERRORS_LOGS_HREF),
+    };
+    let server_errors_chart = match &server_errors_daily {
+        Some(series) => components::line_chart_card(
+            "Server errors",
             "Last 30 days",
             series,
             requests_history,
             "var(--accent-danger)",
-            "/b/admin/logs?errors=1",
+            SERVER_ERRORS_LOGS_HREF,
         ),
-        None => chart_unavailable_card(
-            "4xx/5xx responses",
-            "Last 30 days",
-            "/b/admin/logs?errors=1",
-        ),
+        None => chart_unavailable_card("Server errors", "Last 30 days", SERVER_ERRORS_LOGS_HREF),
     };
 
     let charts_section = html! {
         div .dashboard-charts {
             (new_users_chart)
             (requests_chart)
-            (errors_chart)
+            (server_errors_chart)
+            (client_errors_chart)
         }
     };
 
@@ -427,6 +453,25 @@ pub async fn dashboard(ctx: &dyn Context, msg: &Message) -> OutputStream {
         body,
     )
     .await
+}
+
+/// Where the dashboard's server-error tile, card and chart send an operator:
+/// the logs page narrowed by the same rule they count by.
+const SERVER_ERRORS_LOGS_HREF: &str = "/b/admin/logs?server_errors=1";
+
+/// Where the client-error chart sends an operator.
+const CLIENT_ERRORS_LOGS_HREF: &str = "/b/admin/logs?client_errors=1";
+
+/// The "Recent server errors" card's empty state.
+const NO_RECENT_SERVER_ERRORS: &str = "No server errors recently";
+
+/// `"1 client error"` / `"3 client errors"`.
+fn plural(n: i64, one: &str, many: &str) -> String {
+    if n == 1 {
+        format!("{n} {one}")
+    } else {
+        format!("{n} {many}")
+    }
 }
 
 /// The dashboard cards' table columns. "Recent Users" renders headless — it
@@ -541,7 +586,7 @@ mod outage_tests {
     //! rest of the page still renders. What it must never do is what it did:
     //! publish the failure as the number `0` and the empty state, so a
     //! deployment in trouble rendered as a healthy, unused one — "Total Users
-    //! 0", "Errors Today 0", "No 4xx/5xx responses recently", and three flat charts
+    //! 0", "Errors Today 0", "No server errors recently", and flat charts
     //! along the axis.
 
     use super::*;
@@ -573,8 +618,12 @@ mod outage_tests {
             "all five stat tiles are fed by the two failed aggregates"
         );
         assert!(
-            !html.contains("No 4xx/5xx responses recently"),
+            !html.contains(NO_RECENT_SERVER_ERRORS),
             "an unreadable error log must not render as 'no errors recently': {html}"
+        );
+        assert!(
+            !html.contains("stat-card--alert"),
+            "an unreadable server-error count is not an alert: {html}"
         );
         assert!(
             !html.contains("No users yet"),
@@ -582,8 +631,8 @@ mod outage_tests {
         );
         assert_eq!(
             html.matches(CARD_UNAVAILABLE).count(),
-            5,
-            "two recent-row cards and three chart cards each carry a marker"
+            6,
+            "two recent-row cards and four chart cards each carry a marker"
         );
         assert!(
             !html.contains("chart__plot") && !html.contains("chart__bar"),
@@ -598,7 +647,7 @@ mod outage_tests {
     }
 
     /// The healthy render is untouched: real figures, both empty states, and
-    /// three drawn charts, with no marker anywhere.
+    /// four drawn charts, with no marker anywhere.
     #[tokio::test]
     async fn a_healthy_dashboard_carries_no_marker() {
         let ctx = TestContext::with_auth()
@@ -611,14 +660,14 @@ mod outage_tests {
             "a healthy dashboard carries no unavailable marker: {html}"
         );
         assert!(
-            html.contains("No users yet") && html.contains("No 4xx/5xx responses recently"),
+            html.contains("No users yet") && html.contains(NO_RECENT_SERVER_ERRORS),
             "the genuine empty states still render on a healthy, unused deployment: {html}"
         );
         assert_eq!(
             html.matches(r#"class="card__subtitle">Last 30 days<"#)
                 .count(),
-            3,
-            "all three chart cards render"
+            4,
+            "all four chart cards render"
         );
         assert!(
             html.contains("chart__plot") && html.contains("chart__bar"),
@@ -629,26 +678,124 @@ mod outage_tests {
     /// "Total Users" is cumulative: no per-day sparkline under it. The error
     /// tile says what it counts.
     #[tokio::test]
-    async fn the_cumulative_tile_has_no_sparkline_and_the_error_tile_says_4xx_5xx() {
+    async fn the_cumulative_tile_has_no_sparkline_and_the_error_tile_says_server_errors() {
         let ctx = TestContext::with_auth()
             .await
             .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
         let html = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
-        let tile = |label: &str| {
-            let at = html
-                .find(&format!(r#"<div class="stat-label">{label}</div>"#))
-                .unwrap_or_else(|| panic!("no {label} tile: {html}"));
-            let start = html[..at].rfind(r#"<div class="stat-card">"#).unwrap();
-            html[start..at].to_string()
-        };
-        assert!(!tile("Total Users").contains("stat-spark"), "{html}");
-        assert!(tile("New Today").contains("stat-spark"), "{html}");
-        assert!(tile("4xx/5xx Today").contains("stat-spark"), "{html}");
-        assert!(!html.contains("Errors Today"), "{html}");
+        assert!(!tile(&html, "Total Users").contains("stat-spark"), "{html}");
+        assert!(tile(&html, "New Today").contains("stat-spark"), "{html}");
+        assert!(
+            tile(&html, "Server Errors Today").contains("stat-spark"),
+            "{html}"
+        );
+        assert!(!html.contains("4xx/5xx"), "{html}");
+    }
+
+    /// The markup of the stat tile labelled `label`, from its opening
+    /// `.stat-card` to the end of its value and detail.
+    fn tile(html: &str, label: &str) -> String {
+        let at = html
+            .find(&format!(r#"<div class="stat-label">{label}</div>"#))
+            .unwrap_or_else(|| panic!("no {label} tile: {html}"));
+        let start = html[..at].rfind(r#"<div class="stat-card"#).unwrap();
+        let end = html[at..]
+            .find(r#"<div class="stat-card"#)
+            .map_or(html.len(), |n| at + n);
+        html[start..end].to_string()
+    }
+
+    /// One request of each class today: the 500 is the headline figure, red,
+    /// and the one row in the "Recent server errors" card; the 404 and the
+    /// 429 are a neutral breakdown under the request count, and never reach
+    /// the card.
+    #[tokio::test]
+    async fn server_errors_headline_and_client_errors_break_down_the_requests() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        for (path, status_code) in [
+            ("/served", 200),
+            ("/refused-missing", 404),
+            ("/refused-throttled", 429),
+            ("/failed", 500),
+        ] {
+            request_logs::insert(
+                &ctx,
+                &request_logs::NewRequestLog {
+                    method: "GET",
+                    path,
+                    status_code,
+                    error_message: "",
+                    duration_ms: 1,
+                    client_ip: "203.0.113.7",
+                    user_id: "",
+                },
+            )
+            .await
+            .expect("seed a request log row");
+        }
+        let html = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
+
+        let server = tile(&html, "Server Errors Today");
+        assert!(
+            server.starts_with(r#"<div class="stat-card stat-card--alert">"#),
+            "{server}"
+        );
+        assert!(
+            server.contains(r#"<div class="stat-value">1</div>"#),
+            "{server}"
+        );
+
+        let requests = tile(&html, "Requests Today");
+        assert!(!requests.contains("stat-card--alert"), "{requests}");
+        assert!(
+            requests.contains(r#"<div class="stat-value">4</div>"#),
+            "{requests}"
+        );
+        assert!(
+            requests.contains(
+                r#"<div class="stat-description">2 client errors · 1 rate-limited</div>"#
+            ),
+            "the client errors break the request figure down, the 429 among them: {requests}"
+        );
+
+        let card_at = html
+            .find("Recent server errors")
+            .expect("the server-error card");
+        let card = &html[card_at..];
+        assert!(card.contains("/failed"), "{card}");
+        assert!(
+            !card.contains("/refused-missing") && !card.contains("/refused-throttled"),
+            "a client error is not a server error: {card}"
+        );
+        assert!(
+            html.contains(r#"href="/b/admin/logs?server_errors=1""#),
+            "the card links to the logs page narrowed the same way: {html}"
+        );
+    }
+
+    /// No server error today: the headline reads 0 and is not red.
+    #[tokio::test]
+    async fn a_day_without_server_errors_is_not_an_alert() {
+        let ctx = TestContext::with_auth()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID);
+        let html = output_html(dashboard(&ctx, &admin_msg("retrieve", "/b/admin/")).await).await;
+        let server = tile(&html, "Server Errors Today");
+        assert!(server.starts_with(r#"<div class="stat-card">"#), "{server}");
+        assert!(
+            server.contains(r#"<div class="stat-value">0</div>"#),
+            "{server}"
+        );
+        assert!(
+            tile(&html, "Requests Today").contains("0 client errors"),
+            "{html}"
+        );
     }
 
     /// The chart notes follow how far the records go back. A request log
-    /// that began 40 days ago with no 4xx/5xx since says "None in the last 30
+    /// that began 40 days ago with no errors since says "None in the last 30
     /// days" — zero is data — and never "Collecting data".
     #[tokio::test]
     async fn chart_notes_follow_the_oldest_record_not_the_first_non_zero_day() {
@@ -660,8 +807,8 @@ mod outage_tests {
             fresh
                 .matches("Collecting data — nothing recorded yet")
                 .count(),
-            3,
-            "no accounts and no request log yet: all three charts say so: {fresh}"
+            4,
+            "no accounts and no request log yet: all four charts say so: {fresh}"
         );
 
         let at = (chrono::Utc::now() - chrono::Duration::days(40)).to_rfc3339();
@@ -686,8 +833,8 @@ mod outage_tests {
         assert_eq!(
             html.matches(r#"<p class="chart__note">None in the last 30 days</p>"#)
                 .count(),
-            2,
-            "requests and 4xx/5xx: covered and all zero: {html}"
+            3,
+            "requests, server errors and client errors: covered and all zero: {html}"
         );
         assert_eq!(
             html.matches("Collecting data — nothing recorded yet")

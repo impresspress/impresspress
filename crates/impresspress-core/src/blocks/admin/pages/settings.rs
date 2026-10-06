@@ -100,6 +100,25 @@ pub(super) async fn settings_page_closing_modal(
     }
 }
 
+/// [`settings_page_after_write`] for a row control on the page (a
+/// variable's Delete): the re-rendered page for the control's `#content`
+/// target under a `done` toast. A request that is not htmx's gets the full
+/// page, as [`settings_page_after_write`] answers it.
+pub(super) async fn settings_page_with_toast(
+    ctx: &dyn Context,
+    msg: &Message,
+    tab: &str,
+    done: &str,
+) -> OutputStream {
+    if !crate::ui::is_htmx(msg) {
+        return settings_page_after_write(ctx, msg, tab, done).await;
+    }
+    match render_document(ctx, msg, tab).await {
+        Ok(body) => crate::ui::html_response_with_toast(body, done, "success"),
+        Err(e) => after_write_notice(e, done),
+    }
+}
+
 /// The notice a landed write answers when the page could not be re-read.
 fn after_write_notice(e: WaferError, done: &str) -> OutputStream {
     let reason = crate::blocks::crud::db_error_notice(
@@ -214,7 +233,7 @@ fn tab_description(active: &str) -> Option<&'static str> {
         "email" => Some("Configure email delivery via Mailgun."),
         "authentication" => Some("Registration, the bootstrap admin, and OAuth sign-in."),
         "branding" => Some("The app name, logos, favicon and accent colour."),
-        "network" => Some("Manage network access rules for blocks."),
+        "network" => Some("Inbound requests by path, grouped by the block that serves them."),
         "variables" => Some("Configure environment variables and shared config."),
         "permissions" => {
             Some("Control which blocks can access other blocks' data, files, and services.")

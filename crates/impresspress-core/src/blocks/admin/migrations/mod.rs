@@ -129,6 +129,23 @@ const SQL_005_SQLITE: &str = include_str!("005_wrap_grants_append_column.sqlite.
 #[cfg(feature = "postgres")]
 const SQL_005_POSTGRES: &str = include_str!("005_wrap_grants_append_column.postgres.sql");
 
+// 006 gives a storage access its duration as a column of its own.
+//
+// The storage block wrote how long an access took into the status text
+// ("OK (10ms)"), so the logs page could only show the two run together or
+// parse one out of the other. The column is nullable: a request refused
+// before it reached a backend took no measurable time, and rows written
+// before this migration keep their old status text with no duration.
+//
+// Re-runnable, like the rest of admin's set: a second `ADD COLUMN` is
+// swallowed as a duplicate column by both migration runners.
+//
+// This reasoning lives here rather than in the .sql files for the reason 002's
+// note above gives.
+const SQL_006_SQLITE: &str = include_str!("006_storage_access_logs_duration.sqlite.sql");
+#[cfg(feature = "postgres")]
+const SQL_006_POSTGRES: &str = include_str!("006_storage_access_logs_duration.postgres.sql");
+
 /// Ordered SQLite migration scripts for this block, as `(basename, content)`
 /// pairs. Feeds the runtime `lifecycle_init` apply path.
 /// Order here is the apply order.
@@ -138,6 +155,7 @@ pub(crate) const SQLITE_MIGRATIONS: &[(&str, &str)] = &[
     ("003_block_settings_seed_hash", SQL_003_SQLITE),
     (USER_ROLES_UNIQUE, SQL_004_SQLITE),
     (WRAP_GRANTS_APPEND_COLUMN, SQL_005_SQLITE),
+    ("006_storage_access_logs_duration", SQL_006_SQLITE),
 ];
 
 /// Basename of the `variables.block` column + backfill, named once so the
@@ -164,6 +182,7 @@ pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[
     SQL_003_POSTGRES,
     SQL_004_POSTGRES,
     SQL_005_POSTGRES,
+    SQL_006_POSTGRES,
 ];
 #[cfg(not(feature = "postgres"))]
 pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[];
