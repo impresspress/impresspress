@@ -6,6 +6,7 @@ use maud::{html, Markup};
 use super::{
     icons,
     sidebar::{sidebar_grouped, NavGroup, SignedIn},
+    NavKind,
 };
 
 /// One breadcrumb segment.
@@ -139,6 +140,7 @@ fn render_topbar(t: &Topbar<'_>) -> Markup {
               would be the same list with a name on it"
 )]
 pub fn shell(
+    nav_kind: NavKind,
     nav_groups: &[NavGroup],
     signed_in: Option<SignedIn<'_>>,
     current_path: &str,
@@ -147,6 +149,7 @@ pub fn shell(
     app_name: &str,
     topbar: Topbar<'_>,
     body_layout: BodyLayout,
+    subnav: Option<Markup>,
     body: Markup,
 ) -> Markup {
     let flush = body_layout == BodyLayout::Flush;
@@ -172,9 +175,13 @@ pub fn shell(
                 }
             }
             div .shell__overlay data-action="drawer-close" {}
-            (sidebar_grouped(nav_groups, signed_in, current_path, logo_url, logo_icon_url, app_name))
+            (sidebar_grouped(nav_kind, nav_groups, signed_in, current_path, logo_url, logo_icon_url, app_name))
             div .shell__main {
                 (render_topbar(&topbar))
+                // A block's own sections (`PageBody::with_subnav`): a row of
+                // links between the page header and the content card, so it
+                // frames a full-bleed body as well as a padded one.
+                @if let Some(subnav) = subnav { (subnav) }
                 // `tabindex="-1"`: the skip link moves focus here, and a
                 // focused scroller is what PageDown/arrow keys scroll.
                 main .shell__body .shell__body--flush[flush] #content tabindex="-1" { (body) }
@@ -228,6 +235,7 @@ mod tests {
         };
         let body = html! { p { "page body" } };
         let s = shell(
+            NavKind::Admin,
             &groups,
             None,
             "/b/admin/users",
@@ -236,6 +244,7 @@ mod tests {
             "Impresspress",
             topbar,
             BodyLayout::Padded,
+            None,
             body,
         )
         .into_string();
@@ -266,6 +275,7 @@ mod tests {
             show_palette: true,
         };
         let s = shell(
+            NavKind::Admin,
             &groups,
             None,
             "/b/admin/users",
@@ -274,6 +284,7 @@ mod tests {
             "Impresspress",
             topbar,
             BodyLayout::Padded,
+            None,
             html! { p { "body" } },
         )
         .into_string();
@@ -305,6 +316,7 @@ mod tests {
             ..Topbar::default()
         };
         let s = shell(
+            NavKind::Admin,
             &groups,
             None,
             "/x",
@@ -313,6 +325,7 @@ mod tests {
             "Impresspress",
             tb,
             BodyLayout::Padded,
+            None,
             html! {},
         )
         .into_string();
@@ -341,6 +354,7 @@ mod tests {
             None,
         );
         let s = shell(
+            NavKind::Admin,
             &groups,
             None,
             "/b/products/",
@@ -349,6 +363,7 @@ mod tests {
             "Impresspress",
             tb,
             BodyLayout::Padded,
+            None,
             body,
         )
         .into_string();
@@ -374,6 +389,7 @@ mod tests {
             ..Default::default()
         };
         let s = shell(
+            NavKind::Admin,
             &groups,
             None,
             "/x",
@@ -382,6 +398,7 @@ mod tests {
             "Impresspress",
             tb,
             BodyLayout::Padded,
+            None,
             html! {},
         )
         .into_string();
@@ -394,6 +411,7 @@ mod tests {
     fn shell_renders_mobile_header_with_drawer_toggle() {
         let groups = one_group(vec![item("X", "/x")]);
         let s = shell(
+            NavKind::Admin,
             &groups,
             None,
             "/x",
@@ -402,6 +420,7 @@ mod tests {
             "Impresspress",
             Topbar::default(),
             BodyLayout::Padded,
+            None,
             html! { "body" },
         )
         .into_string();
@@ -425,6 +444,7 @@ mod tests {
             ..Default::default()
         };
         let s = shell(
+            NavKind::Admin,
             &groups,
             None,
             "/x",
@@ -433,6 +453,7 @@ mod tests {
             "Impresspress",
             tb,
             BodyLayout::Padded,
+            None,
             html! {},
         )
         .into_string();
@@ -450,6 +471,7 @@ mod tests {
             ..Default::default()
         };
         let s = shell(
+            NavKind::Admin,
             &groups,
             None,
             "/x",
@@ -458,6 +480,7 @@ mod tests {
             "Impresspress",
             tb,
             BodyLayout::Padded,
+            None,
             html! { "body" },
         )
         .into_string();
@@ -473,6 +496,7 @@ mod tests {
         let groups = one_group(vec![item("X", "/x")]);
         let render = |layout| {
             shell(
+                NavKind::Admin,
                 &groups,
                 None,
                 "/x",
@@ -481,6 +505,7 @@ mod tests {
                 "Impresspress",
                 Topbar::default(),
                 layout,
+                None,
                 html! { "body" },
             )
             .into_string()
@@ -513,6 +538,7 @@ mod tests {
             show_palette: true,
         };
         let s = shell(
+            NavKind::Admin,
             &groups,
             None,
             "/x",
@@ -521,6 +547,7 @@ mod tests {
             "Impresspress",
             tb,
             BodyLayout::Padded,
+            None,
             html! {},
         )
         .into_string();

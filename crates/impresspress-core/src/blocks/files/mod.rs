@@ -36,7 +36,7 @@ fn config_vars() -> Vec<ConfigVar> {
 use super::rate_limit::{check_user_rate_limit_with, RateLimit, RateLimitOutcome, UserRateLimiter};
 use crate::{
     endpoint_match::{self, response_schema_of, EndpointRoute},
-    http::{err_not_found, err_unauthenticated},
+    http::err_unauthenticated,
 };
 
 /// Handler for one row of [`ROUTES`]. `AdminOverview` serves both the
@@ -508,8 +508,9 @@ crate::impresspress_feature_block! {
         // Auth is enforced centrally by `route_to_block` from each row's
         // declared `AuthLevel`; the matcher binds the path variables the
         // handlers read through `msg.var(..)`.
-        let Some(route) = endpoint_match::dispatch(&mut msg, ROUTES) else {
-            return err_not_found("not found");
+        let route = match endpoint_match::resolve(&mut msg, ROUTES) {
+            Ok(route) => route,
+            Err(not_found) => return not_found,
         };
 
         if user_preamble(route) {

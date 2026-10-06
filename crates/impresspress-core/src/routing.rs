@@ -385,14 +385,14 @@ pub fn routes_config(block_infos: &[BlockInfo]) -> serde_json::Value {
 /// block happens to declare any endpoint at all — see [`ExtraRoute`]'s doc
 /// comment for why that distinction is load-bearing in both directions.
 fn extra_route_access(block_infos: &[BlockInfo], route: &ExtraRoute, msg: &Message) -> RouteAccess {
-    match declared_endpoint_access(block_infos, &route.block_name, msg) {
+    match declared_endpoint_access(block_infos, &route.block_name, msg.action(), msg.path()) {
         Some(declared) => route.access.max(declared),
         None if route.refines_undeclared() => route.access.max(RouteAccess::Authenticated),
         None => route.access,
     }
 }
 
-/// The tier `block_name` DECLARED for `(msg.action, msg.path)`, or `None`
+/// The tier `block_name` DECLARED for `(action, path)`, or `None`
 /// when no endpoint matches (including when the block has no [`BlockInfo`]).
 ///
 /// The undecorated answer: what the caller does with a `None` is the
@@ -402,11 +402,11 @@ fn extra_route_access(block_infos: &[BlockInfo], route: &ExtraRoute, msg: &Messa
 fn declared_endpoint_access(
     block_infos: &[BlockInfo],
     block_name: &str,
-    msg: &Message,
+    action: &str,
+    path: &str,
 ) -> Option<RouteAccess> {
     let info = block_infos.iter().find(|i| i.name == block_name)?;
-    endpoint_match::endpoint_auth(&info.endpoints, msg.action(), msg.path())
-        .map(RouteAccess::from_auth_level)
+    endpoint_match::endpoint_auth(&info.endpoints, action, path).map(RouteAccess::from_auth_level)
 }
 
 /// Resolve the declared per-endpoint access tier for `(msg.action,
@@ -426,7 +426,31 @@ fn declared_endpoint_access(
 /// hard deny, so a forgotten declaration degrades to "please log in" rather
 /// than 404ing a route that already works for logged-in callers.
 fn declared_access(block_infos: &[BlockInfo], block_name: &str, msg: &Message) -> RouteAccess {
-    declared_endpoint_access(block_infos, block_name, msg).unwrap_or(RouteAccess::Authenticated)
+    declared_endpoint_access(block_infos, block_name, msg.action(), msg.path())
+        .unwrap_or(RouteAccess::Authenticated)
+}
+
+/// Whether the router would let the caller of `msg` open the page at `href`
+/// (a `GET` of its path; any query is not part of the route): the same
+/// built-in route, the same `route.access.max(declared)` tier and the same
+/// identity check [`route_to_block`] applies, asked ahead of the request.
+///
+/// For the sidebar and the ⌘K palette ([`crate::ui::nav_groups::retain_reachable`]),
+/// so a viewer is only offered links the router will serve them — a
+/// non-admin never sees a link to an admin page. Enablement and registration
+/// are asked separately there. An `href` no built-in route covers is not
+/// admitted: a nav link the router cannot place would 404.
+pub fn admits_page(block_infos: &[BlockInfo], msg: &Message, href: &str) -> bool {
+    let path = href.split('?').next().unwrap_or(href);
+    let Some(route) = ROUTES
+        .iter()
+        .find(|route| route_prefix_matches(route.prefix, path))
+    else {
+        return false;
+    };
+    let declared = declared_endpoint_access(block_infos, route.block, "retrieve", path)
+        .unwrap_or(RouteAccess::Authenticated);
+    denial(route.access.max(declared), msg).is_none()
 }
 
 /// Resolve the [`AuthLevel`] a caller must actually have to invoke `ep`,
@@ -617,6 +641,23 @@ pub fn feature_gate_name(block_name: &str) -> &str {
 /// `Some(refusal)` when the caller fails the tier, or `None` to proceed.
 /// Shared by the built-in and extra-route dispatch loops.
 fn check_access(access: RouteAccess, msg: &Message) -> Option<OutputStream> {
+    denial(access, msg).map(|denial| match denial {
+        Denial::Unauthenticated => crate::ui::unauthenticated_response(msg),
+        Denial::Forbidden => crate::ui::forbidden_response(msg),
+    })
+}
+
+/// Why a caller fails a [`RouteAccess`] tier.
+enum Denial {
+    /// No identity: a browser page is sent to login, an API caller gets 401.
+    Unauthenticated,
+    /// An identity without the admin role: 403.
+    Forbidden,
+}
+
+/// The decision behind [`check_access`], without the response — what
+/// [`admits_page`] asks for a link before anyone follows it.
+fn denial(access: RouteAccess, msg: &Message) -> Option<Denial> {
     match access {
         RouteAccess::Public => None,
         // Missing identity (anonymous OR stale session — crypto.rs leaves
@@ -624,18 +665,12 @@ fn check_access(access: RouteAccess, msg: &Message) -> Option<OutputStream> {
         // return path; answer API callers 401 with a `WWW-Authenticate`
         // challenge. Both protected tiers share this: an `Admin` route hit
         // with no identity is a login problem, not a role problem.
-        RouteAccess::Authenticated if msg.user_id().is_empty() => {
-            Some(crate::ui::unauthenticated_response(msg))
-        }
+        RouteAccess::Authenticated if msg.user_id().is_empty() => Some(Denial::Unauthenticated),
         RouteAccess::Authenticated => None,
-        RouteAccess::Admin if msg.user_id().is_empty() => {
-            Some(crate::ui::unauthenticated_response(msg))
-        }
+        RouteAccess::Admin if msg.user_id().is_empty() => Some(Denial::Unauthenticated),
         // Authenticated but lacking the admin role is a genuine 403, not a
         // "log in" — keep the styled/JSON forbidden response (no redirect).
-        RouteAccess::Admin if !crate::util::is_admin(msg) => {
-            Some(crate::ui::forbidden_response(msg))
-        }
+        RouteAccess::Admin if !crate::util::is_admin(msg) => Some(Denial::Forbidden),
         RouteAccess::Admin => None,
     }
 }
@@ -712,9 +747,12 @@ pub async fn route_to_block(
             continue;
         }
 
-        // Feature gate — `features::is_enabled`, the one enablement rule.
+        // Feature gate — `features::is_enabled`, the one enablement rule. A
+        // disabled block's routes do not exist: the same not-found every
+        // unmatched route gets — the HTML 404 page for a browser, JSON for an
+        // API caller (`ui::not_found_response`).
         if !crate::features::is_enabled(features, block_infos, route.block) {
-            return crate::http::err_not_found("endpoint not found");
+            return crate::ui::not_found_response(&msg);
         }
 
         // Access gate. The coarse prefix tier is a floor; if the target
@@ -755,7 +793,7 @@ pub async fn route_to_block(
         // toggle exactly like the built-in `ROUTES` loop above (which they
         // bypassed before). Keep this gate in sync with that one.
         if !crate::features::is_enabled(features, block_infos, &route.block_name) {
-            return crate::http::err_not_found("endpoint not found");
+            return crate::ui::not_found_response(&msg);
         }
 
         // Access gate, refined by the target block's own declarations exactly
@@ -1070,6 +1108,45 @@ mod tests {
             !dispatched(&NoneEnabled).await,
             "disabled extra route must be feature-gated, not dispatched"
         );
+    }
+
+    /// A disabled block's page is the same not-found as any unmatched route:
+    /// the HTML 404 page for a browser opening it, JSON for an API caller —
+    /// on the built-in routes and on a downstream-registered one.
+    #[tokio::test]
+    async fn a_disabled_blocks_page_is_the_html_404_for_a_browser_and_json_for_the_api() {
+        let ctx = crate::test_support::TestContext::new().await;
+        let extra = vec![ExtraRoute::new(
+            "/x/extra",
+            "test/extra",
+            RouteAccess::Public,
+        )];
+        for path in ["/b/tickets/admin/tickets", "/x/extra/thing"] {
+            for (accept, page) in [
+                ("text/html,application/xhtml+xml,*/*;q=0.8", true),
+                ("application/json", false),
+            ] {
+                let mut msg = crate::test_support::admin_msg("retrieve", path);
+                msg.set_meta("http.header.accept", accept);
+                let out =
+                    route_to_block(&ctx, msg, InputStream::empty(), &NoneEnabled, &[], &extra)
+                        .await;
+                let parts = wafer_block::http_codec::collect_http_response(out).await;
+                let body = String::from_utf8_lossy(&parts.body);
+                assert_eq!(parts.status, 404, "{path} {accept}: {body}");
+                assert_eq!(
+                    crate::ui::layout::is_document(&body),
+                    page,
+                    "{path} {accept}: {body}"
+                );
+                if !page {
+                    assert!(
+                        serde_json::from_str::<serde_json::Value>(&body).is_ok(),
+                        "{path} {accept}: JSON: {body}"
+                    );
+                }
+            }
+        }
     }
 
     /// A block that cannot be disabled is served whatever a stored row says

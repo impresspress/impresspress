@@ -314,10 +314,8 @@ pub async fn object_list_page(
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell {
-            title: &title,
-            nav: ui::NavKind::Portal,
-            crumbs: vec![
+        ui::Shell::portal(&title, &title)
+            .trail(vec![
                 Crumb {
                     label: "Files",
                     href: Some("/b/storage/"),
@@ -326,10 +324,9 @@ pub async fn object_list_page(
                     label: bucket,
                     href: None,
                 },
-            ],
-            subtitle: Some("Drag files here to upload, or use the Upload button."),
-            actions: vec![upload_btn],
-        },
+            ])
+            .subtitle("Drag files here to upload, or use the Upload button.")
+            .actions(vec![upload_btn]),
         body,
     )
     .await

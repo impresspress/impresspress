@@ -542,8 +542,8 @@ pub fn form_bool(form: &std::collections::HashMap<String, String>, key: &str) ->
 /// declared vars that belong to no `BlockInfo`.
 ///
 /// That last group is not a corner. `auth::config::auth_identity_config_vars`
-/// is `ConfigVar`-declared and rendered by `auth_ui::pages::settings` through
-/// `ui::settings_form`, but deliberately contributed to no `BlockInfo` —
+/// is `ConfigVar`-declared and rendered by the admin Settings › Authentication
+/// tab (`admin::pages::authentication`) through `ui::settings_form`, but deliberately contributed to no `BlockInfo` —
 /// there is no standalone `wafer-run/auth` block, `auth/` being a library
 /// module. Iterating `block_infos` alone therefore called
 /// `WAFER_RUN__AUTH__REQUIRE_VERIFICATION` and `..._ALLOWED_EMAIL_DOMAINS`
@@ -1242,7 +1242,7 @@ mod sensitivity_tests {
     /// A `ConfigVar` attached to no `BlockInfo` is still DECLARED.
     ///
     /// `auth::config::auth_identity_config_vars` is rendered by
-    /// `auth_ui::pages::settings` but deliberately contributed to no
+    /// `admin::pages::authentication` but deliberately contributed to no
     /// `BlockInfo`, so a collector that walked `block_infos` alone called these
     /// two ordinary admin toggles ad hoc. Every rule keyed on
     /// `is_declared_key` then treated them as unknown keys: stored sensitive by

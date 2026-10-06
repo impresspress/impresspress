@@ -12,6 +12,5 @@
   "GET /b/userportal/sessions authenticated",
   "PATCH /b/userportal/admin/buttons/{id} admin",
   "POST /b/userportal/admin/buttons admin",
-  "POST /b/userportal/admin/settings admin",
   "POST /b/userportal/update-profile authenticated"
 ]

@@ -247,7 +247,6 @@ fn is_page(route: Route) -> bool {
             | Route::AdminSellerPage
             | Route::AdminStripePage
             | Route::AdminSettingsPage
-            | Route::AdminSaveSettings
     )
 }
 
@@ -708,9 +707,10 @@ async fn every_link_a_products_page_emits_resolves_to_a_declared_row() {
         ("create", "/b/products/api/seller/onboarding".to_string()),
         ("create", "/b/products/api/seller/dashboard".to_string()),
         ("create", "/b/products/billing-portal".to_string()),
-        // Filters and the settings form.
+        // Filters, and the settings form — which saves through the admin
+        // block, the only one WRAP lets write its shared keys.
         ("retrieve", "/b/products/admin/purchases".to_string()),
-        ("create", "/b/products/admin/settings".to_string()),
+        ("create", "/b/admin/settings/products".to_string()),
     ];
     for (action, path) in expected {
         assert!(

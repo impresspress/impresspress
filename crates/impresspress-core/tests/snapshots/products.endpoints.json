@@ -84,7 +84,6 @@
   "PATCH /b/products/api/products/{product_id}/offers/{offer_id} authenticated",
   "PATCH /b/products/api/products/{product_id}/offers/{offer_id}/presets/{preset_id} authenticated",
   "PATCH /b/products/groups/{id} authenticated",
-  "POST /b/products/admin/settings admin",
   "POST /b/products/api/admin/groups admin",
   "POST /b/products/api/admin/products admin",
   "POST /b/products/api/admin/products/{id}/approve admin",

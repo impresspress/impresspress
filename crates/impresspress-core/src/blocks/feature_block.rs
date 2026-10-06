@@ -54,7 +54,7 @@
 //! `handle`'s `msg` binding *is* the generated method's parameter pattern — a
 //! `pat_param`, so anything a function parameter accepts is accepted here,
 //! including `_` and a destructuring pattern. A body that mutates the message
-//! (e.g. `endpoint_match::dispatch(&mut msg, …)`) declares `mut msg`; the
+//! (e.g. `endpoint_match::resolve(&mut msg, …)`) declares `mut msg`; the
 //! blocks that don't mutate it say plain `msg`, and no `unused_mut`
 //! suppression is needed anywhere.
 //!

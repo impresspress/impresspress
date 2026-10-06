@@ -53,11 +53,16 @@ pub async fn admin_buttons_page(ctx: &dyn Context, msg: &Message) -> OutputStrea
     let buttons = match load_buttons(ctx).await {
         Ok(buttons) => buttons,
         Err(e) => {
-            return crud::db_error_page(
+            return ui::shell_error_page(
+                ctx,
                 msg,
+                ui::Shell::admin("Portal Buttons", "Portal Buttons"),
+                None,
+                ui::BackLink::ADMIN_DASHBOARD,
                 e,
                 "userportal admin buttons page: buttons read failed",
             )
+            .await
         }
     };
 
@@ -118,7 +123,7 @@ pub async fn admin_buttons_page(ctx: &dyn Context, msg: &Message) -> OutputStrea
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell::simple("Portal Buttons", ui::NavKind::Portal, "Portal Buttons"),
+        ui::Shell::admin("Portal Buttons", "Portal Buttons"),
         content,
     )
     .await

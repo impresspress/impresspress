@@ -13,10 +13,7 @@ use wafer_run::{context::Context, Message, OutputStream};
 use crate::{
     blocks::crud,
     http::redirect,
-    ui::{
-        self, components::section_header, icons, shell::Crumb, sidebar::nav_icon, NavKind, Shell,
-        UserInfo,
-    },
+    ui::{self, components::section_header, icons, sidebar::nav_icon, Shell, UserInfo},
     util::RecordExt,
 };
 
@@ -82,16 +79,9 @@ pub async fn dashboard_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     ui::shell_page(
         ctx,
         msg,
-        Shell {
-            title: "Overview",
-            nav: NavKind::Portal,
-            crumbs: vec![Crumb {
-                label: "Overview",
-                href: None,
-            }],
-            subtitle: Some("Your account and apps."),
-            actions,
-        },
+        Shell::portal("Overview", "Overview")
+            .subtitle("Your account and apps.")
+            .actions(actions),
         body,
     )
     .await

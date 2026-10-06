@@ -8,7 +8,7 @@ use wafer_run::{context::Context, Message, OutputStream};
 use crate::{
     blocks::{auth::repo::users, crud},
     http::redirect,
-    ui::{self, components, shell::Crumb, NavKind, Shell, UserInfo},
+    ui::{self, components, Shell, UserInfo},
 };
 
 pub async fn profile_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
@@ -85,16 +85,7 @@ pub async fn profile_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     ui::shell_page(
         ctx,
         msg,
-        Shell {
-            title: "Profile",
-            nav: NavKind::Portal,
-            crumbs: vec![Crumb {
-                label: "Profile",
-                href: None,
-            }],
-            subtitle: Some("How your name appears across the site."),
-            actions: Vec::new(),
-        },
+        Shell::portal("Profile", "Profile").subtitle("How your name appears across the site."),
         body,
     )
     .await

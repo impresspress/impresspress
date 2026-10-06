@@ -63,7 +63,7 @@ pub async fn handle(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let credentials = credentials
         .as_ref()
         .map(|(email, password)| (email.as_str(), password.as_str()));
-    let shell = ui::Shell::simple("Workspace", ui::NavKind::Admin, "Workspace");
+    let shell = ui::Shell::admin("Workspace", "Workspace");
     let markup = match ui::shell_document(ctx, msg, shell, body(seed.as_ref(), credentials)).await {
         Ok(markup) => markup,
         Err(e) => {

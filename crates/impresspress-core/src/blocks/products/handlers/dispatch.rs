@@ -173,6 +173,5 @@ pub(in crate::blocks::products) async fn run(
         Route::AdminSellerPage => pages::admin_seller_detail(ctx, msg, msg.var("id")).await,
         Route::AdminStripePage => pages::stripe_setup(ctx, msg).await,
         Route::AdminSettingsPage => pages::settings(ctx, msg).await,
-        Route::AdminSaveSettings => pages::handle_save_settings(ctx, msg, input).await,
     }
 }

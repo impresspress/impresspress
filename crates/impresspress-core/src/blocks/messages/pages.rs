@@ -13,7 +13,6 @@ use super::{
     service::{self, ListContextsParams, ListEntriesParams},
 };
 use crate::{
-    blocks::crud,
     ui::{self, shell::Crumb},
     util::{enum_column_or, wire_str, RecordExt},
 };
@@ -115,7 +114,18 @@ pub async fn context_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream
     // deployment renders; a failed read must never reach it.
     let contexts = match service::list_contexts(ctx, &params).await {
         Ok(r) => r.records,
-        Err(e) => return crud::db_error_page(msg, e, "messages context list page: read failed"),
+        Err(e) => {
+            return ui::shell_error_page(
+                ctx,
+                msg,
+                list_shell(),
+                None,
+                ui::BackLink::ADMIN_DASHBOARD,
+                e,
+                "messages context list page: read failed",
+            )
+            .await
+        }
     };
 
     let content = html! {
@@ -167,20 +177,42 @@ pub async fn context_list_page(ctx: &dyn Context, msg: &Message) -> OutputStream
         }
     };
 
-    ui::shell_page(
+    ui::shell_page(ctx, msg, list_shell(), content).await
+}
+
+/// The context list's chrome — its page and its error page share it.
+fn list_shell() -> ui::Shell<'static> {
+    ui::Shell::admin("Messages", "Contexts").subtitle("Conversations, tasks, and notifications")
+}
+
+/// A context page whose read failed: drawn in the shell under the
+/// "Contexts" trail, with a link back to the list.
+async fn detail_error_page(
+    ctx: &dyn Context,
+    msg: &Message,
+    error: WaferError,
+    context: &str,
+) -> OutputStream {
+    ui::shell_error_page(
         ctx,
         msg,
-        ui::Shell {
-            title: "Messages",
-            nav: ui::NavKind::Admin,
-            crumbs: vec![Crumb {
+        ui::Shell::admin("Messages", "Messages").trail(vec![
+            Crumb {
                 label: "Contexts",
+                href: Some("/b/messages/"),
+            },
+            Crumb {
+                label: "Context",
                 href: None,
-            }],
-            subtitle: Some("Conversations, tasks, and notifications"),
-            actions: Vec::new(),
+            },
+        ]),
+        None,
+        ui::BackLink {
+            label: "Back to Contexts",
+            href: "/b/messages/",
         },
-        content,
+        error,
+        context,
     )
     .await
 }
@@ -198,7 +230,10 @@ pub async fn context_detail_page(ctx: &dyn Context, msg: &Message) -> OutputStre
         // The 404 above is the SSR not-found *page*, so only the tail goes
         // through the one mapping — which is what makes a WRAP denial a 403
         // here instead of the 500 it used to be.
-        Err(e) => return crud::db_error_internal(e, "Database error"),
+        Err(e) => {
+            return detail_error_page(ctx, msg, e, "messages detail page: context read failed")
+                .await
+        }
     };
 
     let entries_params = ListEntriesParams {
@@ -212,7 +247,9 @@ pub async fn context_detail_page(ctx: &dyn Context, msg: &Message) -> OutputStre
     // conversation looks like, so the read failing has to fail the page.
     let entries = match service::list_entries(ctx, context_id, &entries_params).await {
         Ok(r) => r.records,
-        Err(e) => return crud::db_error_page(msg, e, "messages detail page: entry list failed"),
+        Err(e) => {
+            return detail_error_page(ctx, msg, e, "messages detail page: entry list failed").await
+        }
     };
 
     // Sibling conversations only loaded when this is a conversation context;
@@ -233,7 +270,8 @@ pub async fn context_detail_page(ctx: &dyn Context, msg: &Message) -> OutputStre
         match service::list_contexts(ctx, &sibling_params).await {
             Ok(r) => r.records,
             Err(e) => {
-                return crud::db_error_page(msg, e, "messages detail page: sibling list failed")
+                return detail_error_page(ctx, msg, e, "messages detail page: sibling list failed")
+                    .await
             }
         }
     } else {
@@ -249,7 +287,10 @@ pub async fn context_detail_page(ctx: &dyn Context, msg: &Message) -> OutputStre
 
     let body = match render_context_detail_body(&context, &entries, &siblings, context_id) {
         Ok(body) => body,
-        Err(e) => return crud::db_error_internal(e, "Entry decode"),
+        Err(e) => {
+            return detail_error_page(ctx, msg, e, "messages detail page: entry decode failed")
+                .await
+        }
     };
 
     // Build crumbs locally so the conversation branch can carry a working
@@ -277,13 +318,7 @@ pub async fn context_detail_page(ctx: &dyn Context, msg: &Message) -> OutputStre
     ui::shell_page(
         ctx,
         msg,
-        ui::Shell {
-            title: display_title,
-            nav: ui::NavKind::Admin,
-            crumbs,
-            subtitle: None,
-            actions: Vec::new(),
-        },
+        ui::Shell::admin(display_title, display_title).trail(crumbs),
         body,
     )
     .await

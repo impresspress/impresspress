@@ -18,9 +18,7 @@ use crate::{
     ui::{
         self,
         components::{empty_state, password_field, section_header, timestamp, PasswordPurpose},
-        icons,
-        shell::Crumb,
-        NavKind, Shell,
+        icons, Shell,
     },
 };
 
@@ -149,16 +147,8 @@ pub async fn security_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     ui::shell_page(
         ctx,
         msg,
-        Shell {
-            title: "Security",
-            nav: NavKind::Portal,
-            crumbs: vec![Crumb {
-                label: "Security",
-                href: None,
-            }],
-            subtitle: Some("Your password, email verification and linked sign-in accounts."),
-            actions: Vec::new(),
-        },
+        Shell::portal("Security", "Security")
+            .subtitle("Your password, email verification and linked sign-in accounts."),
         body,
     )
     .await

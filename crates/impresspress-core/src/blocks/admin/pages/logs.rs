@@ -5,7 +5,7 @@ use wafer_run::{context::Context, Message, OutputStream, WaferError};
 
 use super::{admin_page, crumb, status_code_badge_variant};
 use crate::{
-    blocks::{admin::AUDIT_LOGS_TABLE as AUDIT_LOGS, crud},
+    blocks::admin::AUDIT_LOGS_TABLE as AUDIT_LOGS,
     platform_state::request_logs,
     ui::{
         components::{self, badge, pagination, Badge, BadgeVariant},
@@ -48,17 +48,21 @@ fn system_logs_href(search: &str, errors_only: bool) -> String {
     }
 }
 
+/// The Logs page's storage-access tab — where `/b/admin/storage` redirects.
+pub const STORAGE_LOGS_HREF: &str = "/b/admin/logs?tab=storage";
+
 pub async fn logs_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     let tab = msg.query("tab");
     let active_tab = match tab {
         "audit" => "audit",
+        "storage" => "storage",
         _ => "system",
     };
 
-    let refresh_href = if active_tab == "audit" {
-        "/b/admin/logs?tab=audit".to_string()
-    } else {
-        system_logs_href(msg.query("search"), errors_only(msg))
+    let refresh_href = match active_tab {
+        "audit" => "/b/admin/logs?tab=audit".to_string(),
+        "storage" => STORAGE_LOGS_HREF.to_string(),
+        _ => system_logs_href(msg.query("search"), errors_only(msg)),
     };
     let refresh_action = html! {
         button .btn .btn--secondary .btn--sm
@@ -70,14 +74,17 @@ pub async fn logs_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
     // "No request logs yet" is what an untouched deployment renders; a log
     // that could not be read must not borrow it, nor print the failure's own
     // text into the page.
-    let tab_body = if active_tab == "system" {
-        system_logs_tab(ctx, msg).await
-    } else {
-        audit_logs_tab(ctx, msg).await
+    let tab_body = match active_tab {
+        "system" => system_logs_tab(ctx, msg).await,
+        "storage" => super::storage::storage_logs_tab(ctx, msg).await,
+        _ => audit_logs_tab(ctx, msg).await,
     };
     let tab_body = match tab_body {
         Ok(markup) => markup,
-        Err(e) => return crud::db_error_page(msg, e, "admin logs page: log read failed"),
+        Err(e) => {
+            return super::admin_error_page(ctx, msg, "Logs", e, "admin logs page: log read failed")
+                .await
+        }
     };
 
     let tabs_and_body = html! {
@@ -94,6 +101,12 @@ pub async fn logs_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
                 label: "Audit Logs",
                 icon: Some(icons::file_text()),
             },
+            components::Tab {
+                active: active_tab == "storage",
+                href: STORAGE_LOGS_HREF,
+                label: "Storage Access",
+                icon: Some(icons::hard_drive()),
+            },
         ]))
 
         div #logs-tab-content { (tab_body) }
@@ -108,7 +121,7 @@ pub async fn logs_page(ctx: &dyn Context, msg: &Message) -> OutputStream {
         Topbar {
             crumbs: crumb("Logs"),
             actions: vec![refresh_action],
-            subtitle: Some("System telemetry and admin audit trail"),
+            subtitle: Some("System telemetry, admin audit trail and storage access"),
             show_palette: true,
         },
         body,
@@ -464,5 +477,25 @@ mod tests {
             "the filter must be reachable from the page: {html}"
         );
         assert!(html.contains("3 total"), "{html}");
+    }
+}
+
+#[cfg(test)]
+mod storage_tab_tests {
+    //! "No storage access logs yet." is what a deployment whose blocks have
+    //! never touched storage renders. An outage rendered the same sentence.
+
+    use super::*;
+    use crate::test_support::{admin_msg, output_http_status, TestContext};
+
+    #[tokio::test]
+    async fn a_failing_access_log_read_renders_the_error_page_not_an_empty_log() {
+        let ctx = TestContext::with_admin()
+            .await
+            .running_as(crate::blocks::admin::ADMIN_BLOCK_ID)
+            .break_reads();
+        let mut msg = admin_msg("retrieve", "/b/admin/logs");
+        msg.set_meta("req.query.tab", "storage");
+        assert_eq!(output_http_status(logs_page(&ctx, &msg).await).await, 500);
     }
 }

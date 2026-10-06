@@ -98,7 +98,9 @@ async fn assert_refused_page(
 ) {
     let path = msg.path().to_string();
     let (status, html) = browser_request(ctx, msg, "").await;
-    if status != 403 || !html.contains("Go home") {
+    // The bare refused page ("Go home"), or — on the admin portal-buttons
+    // page — the same refusal drawn inside the admin shell.
+    if status != 403 || !(html.contains("Go home") || html.contains("status-page--in-shell")) {
         misses.push(format!("{path}: {status} {html}"));
     }
 }
@@ -155,91 +157,6 @@ async fn page_read_denials_are_the_403_page() {
         assert_refused_page(&mut misses, &denied(&ctx, table), msg).await;
     }
     report(misses);
-}
-
-/// `inner`, with every call to the config service refused with `error`. The
-/// branding keys are shared (`WAFER_RUN_SHARED__*`), so no WRAP grant can
-/// withhold them from this block; what the config service can still answer is
-/// a refusal from the store under it, and this injects one at that boundary.
-#[derive(Clone)]
-struct RefusingConfig {
-    inner: TestContext,
-    error: WaferError,
-}
-
-#[async_trait::async_trait]
-impl wafer_run::context::Context for RefusingConfig {
-    fn check_resource_access(
-        &self,
-        resource: &str,
-        resource_type: wafer_run::ResourceType,
-        access: wafer_block::ResourceAccess,
-    ) -> Result<(), WaferError> {
-        self.inner
-            .check_resource_access(resource, resource_type, access)
-    }
-
-    fn resource_access_admitted(
-        &self,
-        resource: &str,
-        resource_type: wafer_run::ResourceType,
-        access: wafer_block::ResourceAccess,
-    ) -> bool {
-        self.inner
-            .resource_access_admitted(resource, resource_type, access)
-    }
-
-    async fn call_block(&self, name: &str, msg: Message, input: InputStream) -> OutputStream {
-        if name == "wafer-run/config" {
-            return OutputStream::error(self.error.clone());
-        }
-        self.inner.call_block(name, msg, input).await
-    }
-
-    fn is_cancelled(&self) -> bool {
-        self.inner.is_cancelled()
-    }
-
-    fn registered_blocks(&self) -> &[wafer_run::BlockInfo] {
-        self.inner.registered_blocks()
-    }
-
-    fn config_get(&self, key: &str) -> Option<&str> {
-        self.inner.config_get(key)
-    }
-
-    fn clone_arc(&self) -> std::sync::Arc<dyn wafer_run::context::Context> {
-        std::sync::Arc::new(self.clone())
-    }
-}
-
-/// The branding form reads every value through the config service; a refusal
-/// there is the refusal page, not the 500 page.
-#[tokio::test]
-async fn branding_settings_refusal_is_the_refusal_page() {
-    for (code, status, copy) in [
-        (ErrorCode::PermissionDenied, 403, "Go home"),
-        (ErrorCode::ResourceExhausted, 429, "over its usage limit"),
-        (ErrorCode::AlreadyExists, 409, "Already exists"),
-    ] {
-        let ctx = RefusingConfig {
-            inner: TestContext::with_userportal().await,
-            error: WaferError::new(code, "refused by the config store"),
-        };
-        let (got, html) = browser_request(
-            &ctx,
-            admin_msg("retrieve", "/b/userportal/admin/settings"),
-            "",
-        )
-        .await;
-        assert_eq!(got, status, "{code:?}: {html}");
-        assert!(html.contains(copy), "{code:?}: {html}");
-        assert!(
-            html.contains("Go home"),
-            "the styled page, {code:?}: {html}"
-        );
-        assert!(!html.contains("<form"), "{code:?}: {html}");
-    }
 }
 
 // --- pages/sessions.rs -------------------------------------------------------

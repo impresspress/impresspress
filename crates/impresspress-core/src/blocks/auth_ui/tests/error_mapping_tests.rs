@@ -463,25 +463,6 @@ async fn orgs_page_read_denial_is_403_for_an_api_caller() {
 
 // --- pages/settings.rs -----------------------------------------------------
 
-/// The settings form reads every value through the config service, which
-/// WRAP guards like the database: a deployment that never granted the block
-/// its own settings gets the 403 page, not a 500 and not a form of defaults.
-#[tokio::test]
-async fn settings_page_config_denial_is_the_403_page_not_a_500() {
-    let ctx = TestContext::with_auth().await.running_as("test/ungranted");
-    let mut msg = crate::test_support::admin_msg("retrieve", "/b/auth/admin/settings");
-    msg.set_meta("http.header.accept", "text/html");
-    let parts = wafer_block::http_codec::collect_http_response(
-        AuthUiBlock::default()
-            .handle(&ctx, msg, InputStream::empty())
-            .await,
-    )
-    .await;
-    let html = String::from_utf8_lossy(&parts.body);
-    assert_eq!(parts.status, 403, "{html}");
-    assert!(!html.contains("settings-form"), "{html}");
-}
-
 // --- api/forgot_password.rs + api/verify.rs (resend) + api/login.rs --------
 //
 // The exception to this file's rule. A call that only a registered address

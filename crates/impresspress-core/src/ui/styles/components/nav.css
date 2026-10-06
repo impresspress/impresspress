@@ -77,6 +77,27 @@
 	height: 2px; background: var(--primary-color);
 }
 
+/* ===== Block section links (`components::subnav`) =====
+ * The `.tabs` strip as a row of its own between the page header and the
+ * content card (`ui::PageBody::with_subnav`), on the shell's surface. One
+ * horizontal scroller below the card width, never a wrapped second line;
+ * each link is a 44px target. */
+.subnav {
+	min-width: 0; overflow-x: auto; overflow-y: hidden; scrollbar-width: none;
+	/* Scroll hint, as the sidebar draws it (layouts/shell.css): a shaded edge
+	   on the side where more links are hidden. The two `local` layers in the
+	   shell's surface colour scroll with the links and cover the `scroll`
+	   edges once that end is reached -- pure CSS, no listener. */
+	background:
+		linear-gradient(to right, var(--surface-2) 30%, transparent) left / 32px 100% no-repeat local,
+		linear-gradient(to left, var(--surface-2) 30%, transparent) right / 32px 100% no-repeat local,
+		linear-gradient(to right, var(--border-color), transparent) left / 14px 100% no-repeat scroll,
+		linear-gradient(to left, var(--border-color), transparent) right / 14px 100% no-repeat scroll;
+}
+.subnav::-webkit-scrollbar { display: none; }
+.subnav .tabs { margin-bottom: 0; min-width: max-content; overflow-x: visible; }
+.subnav .tab { min-height: 44px; flex-shrink: 0; }
+
 /* ===== Products admin tab strip =====
  * Wraps the `.tabs` component (above) in a horizontally-scrolling shell —
  * migrated from `blocks/products/pages.rs`'s page-local `PRODUCTS_UI_CSS`
