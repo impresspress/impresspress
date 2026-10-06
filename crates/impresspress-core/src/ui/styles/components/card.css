@@ -621,24 +621,46 @@
 .editor-status__version { background: var(--bg-hover); color: var(--text-muted); }
 
 /* ===== Tickets admin (blocks/tickets/pages.rs) =====
-   The page's own `<style>` blocks (rendered via `html! { style { ... } }`)
-   already carry `max-width: 720px` media-query overrides for
-   `.ticket-filter-grid` / `.ticket-detail-grid` / `.ticket-note-form` — a
-   page-local stylesheet, the same drift pattern flagged for
-   `blocks/products/pages.rs`'s `PRODUCTS_UI_CSS` under task 12e. This section
-   supplies the base (non-media) rules those class names need, kept here
-   rather than folded into the page-local block so the audited stylesheet
-   stays the source of truth for the base declaration; 12e's page-local-style
-   sweep should also pick up these two page-local `<style>` blocks. */
-.ticket-filter-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(10rem, 1fr)); gap: var(--space-2); }
-.ticket-filter-actions { display: flex; gap: var(--space-2); flex-wrap: wrap; max-width: 28rem; margin-top: var(--space-2); }
-.ticket-filter-actions .btn { flex: 1 1 7rem; }
-.ticket-detail-grid { display: grid; grid-template-columns: minmax(0, 2fr) minmax(18rem, 1fr); gap: var(--space-5); }
-.ticket-note-form { display: flex; gap: var(--space-2); }
-.ticket-form-grid { display: grid; gap: var(--space-3); }
-.ticket-form-grid--create { margin-top: var(--space-4); max-width: 48rem; }
-.ticket-form-grid--type-create { margin: var(--space-4) 0; max-width: 50rem; }
-.ticket-form-grid--type-edit { margin-top: var(--space-4); }
+   The inbox filters, the ticket page's sections, timeline and analyses, and
+   the type and settings tables' secondary lines. Everything else on these
+   pages is a shared component (list/detail templates, DataTable, modal,
+   callout, section header). */
+.ticket-filters { display: grid; grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr)); gap: var(--space-3); align-items: end; width: 100%; }
+.ticket-filters .form-group { margin: 0; }
+.ticket-filters__actions { display: flex; gap: var(--space-2); flex-wrap: wrap; }
+.ticket-filters__actions .btn, .ticket-form-actions .btn { min-height: 44px; }
+.ticket-ref, .ticket-setting-key { display: block; margin-top: 2px; font-family: ui-monospace, Menlo, monospace; font-size: var(--text-xs); font-weight: 400; color: var(--text-muted); }
+.ticket-page { display: flex; flex-direction: column; gap: var(--space-6); }
+.ticket-section { margin: 0 0 var(--space-8); min-width: 0; }
+.ticket-section__intro { margin: 0 0 var(--space-4); font-size: var(--text-sm); color: var(--text-secondary); max-width: 68ch; }
+.ticket-report { margin: 0; line-height: 1.6; max-width: 72ch; overflow-wrap: anywhere; }
+.ticket-workflow__grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 0 var(--space-4); align-items: start; }
+.ticket-workflow__grid .form-group, .ticket-workflow__grid .form-group:last-child { margin-bottom: var(--space-5); }
+@media (max-width: 720px) { .ticket-workflow__grid { grid-template-columns: minmax(0, 1fr); } }
+.ticket-link { color: var(--primary-button); font-weight: 500; text-decoration: none; }
+.ticket-link:hover { text-decoration: underline; }
+.ticket-icon-button { min-width: 44px; min-height: 44px; }
+.ticket-form-actions { display: flex; justify-content: flex-start; margin-top: var(--space-3); }
+.ticket-timeline { list-style: none; margin: var(--space-6) 0 0; padding: 0; border-left: 2px solid var(--border-light); }
+.ticket-event { position: relative; padding: 0 0 var(--space-4) var(--space-4); }
+.ticket-event::before { content: ''; position: absolute; left: -5px; top: 0.45em; width: 8px; height: 8px; border-radius: 50%; background: var(--border-color); }
+.ticket-event__head { display: flex; flex-wrap: wrap; align-items: baseline; gap: var(--space-1) var(--space-2); font-size: var(--text-sm); }
+.ticket-event__actor { color: var(--text-secondary); }
+.ticket-event__head .datetime { color: var(--text-muted); }
+.ticket-event__body { margin: var(--space-1) 0 0; overflow-wrap: anywhere; }
+.ticket-analysis { padding: var(--space-4); margin-bottom: var(--space-3); border: 1px solid var(--border-light); border-radius: var(--radius-md); }
+.ticket-analysis__title { margin: 0 0 var(--space-3); font-size: var(--text-base); font-weight: 600; }
+.ticket-analysis__heading { margin: var(--space-4) 0 var(--space-1); font-size: var(--text-sm); font-weight: 600; }
+.ticket-analysis__meta { display: grid; grid-template-columns: max-content minmax(0, 1fr); gap: var(--space-1) var(--space-4); margin: 0; font-size: var(--text-sm); }
+.ticket-analysis__meta dt { color: var(--text-muted); }
+.ticket-analysis__meta dd { margin: 0; min-width: 0; }
+.ticket-analysis__actions { margin: 0; padding: var(--space-3); background: var(--surface-2); border-radius: var(--radius-md); white-space: pre-wrap; overflow-wrap: anywhere; font-size: var(--text-sm); }
+.ticket-reasons { margin: var(--space-2) 0 0; padding-left: 1.25rem; }
+.ticket-number { font-variant-numeric: tabular-nums; }
+.ticket-type-key { margin: 0 0 var(--space-4); font-size: var(--text-sm); color: var(--text-secondary); }
+.ticket-type-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: 0 var(--space-4); }
+.ticket-type-options { display: flex; flex-direction: column; margin-bottom: var(--space-4); }
+.ticket-type-options legend { margin-bottom: 0; }
 
 /* ===== API key reveal card (blocks/auth_ui/api/api_keys.rs) ===== */
 .api-key-card { margin-bottom: var(--space-4); }

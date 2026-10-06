@@ -293,17 +293,17 @@ async fn inbox_projection_omits_report_body_and_analysis_is_append_only() {
     )
     .await;
     for expected in [
-        "ticket-detail-grid",
+        "detail-hero",
         "provider-independent-model",
         "tickets-v1",
         "Suggested priority",
         "0.91",
         "prepare_patch",
-        "Advisory summary",
+        "<h4 class=\"ticket-analysis__heading\">Summary</h4>",
     ] {
         assert!(
             html.contains(expected),
-            "analysis provenance or responsive detail marker missing: {expected}"
+            "analysis provenance or detail page marker missing: {expected}"
         );
     }
 }
@@ -471,7 +471,7 @@ async fn database_checks_reject_invalid_status_and_duplicate_type_key() {
 }
 
 #[tokio::test]
-async fn admin_inbox_renders_all_filters_age_and_filter_preserving_pagination() {
+async fn admin_inbox_renders_all_filters_and_filter_preserving_pagination() {
     let ctx = TestContext::with_tickets().await;
     let kind = service::create_type(&ctx, ticket_type("admin-inbox"))
         .await
@@ -528,8 +528,8 @@ async fn admin_inbox_renders_all_filters_age_and_filter_preserving_pagination() 
         "assignee filter missing: {html}"
     );
     assert!(
-        html.contains("<th class=\"ticket-col-age\">Age</th>"),
-        "responsive age column missing: {html}"
+        html.contains("<th>Created</th>"),
+        "created column missing: {html}"
     );
     assert!(
         html.contains("pagination"),

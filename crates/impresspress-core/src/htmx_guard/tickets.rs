@@ -1,10 +1,10 @@
 //! `impresspress/tickets`: the public submit form and its confirmation page,
 //! and the admin triage pages.
 //!
-//! The submit form posts with `fetch` and the admin pages act through the
-//! JSON API with `fetch`, not htmx, so no page carries a mutating htmx
-//! control today and `must_fire` is empty. The pages are still rendered, so a
-//! control added to one of them is fired from then on.
+//! The submit form posts with `fetch`. The admin pages write through htmx
+//! forms posted to the block's own admin routes: New ticket on the inbox,
+//! Workflow and Internal note on a ticket's page, and New type and each
+//! type's Edit on the types page.
 
 use std::sync::Arc;
 
@@ -29,10 +29,15 @@ pub(super) fn entry() -> Entry {
         fixture: Some(|| Box::pin(fixture())),
         // `/b/tickets/admin` answers 302 to `/b/tickets/admin/tickets`.
         exempt: &[("/b/tickets/admin", Exempt::Redirect)],
-        // No mutating htmx control on any tickets page; see the module doc.
         must_reach: &[],
         cannot_succeed: &[],
-        must_fire: &[],
+        must_fire: &[
+            "create /b/tickets/admin/tickets",
+            "update /b/tickets/admin/tickets/{id}",
+            "create /b/tickets/admin/tickets/{id}/notes",
+            "create /b/tickets/admin/types",
+            "update /b/tickets/admin/types/{id}",
+        ],
     }
 }
 
@@ -113,6 +118,18 @@ async fn fixture() -> Fixture {
                 format!("/b/tickets/api/admin/tickets/{}/analyses", ticket.id),
             ),
         ],
-        operator_input: &[],
+        operator_input: &[
+            ("subject", "Footer link is broken"),
+            (
+                "description",
+                "The privacy link in the footer answers 404 on every page.",
+            ),
+            (
+                "note",
+                "Checked the footer template; the link is missing a slash.",
+            ),
+            ("key", "billing"),
+            ("title", "Billing"),
+        ],
     }
 }

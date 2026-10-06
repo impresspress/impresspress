@@ -252,7 +252,6 @@ mod tests {
         ("blocks/llm/ui.rs", 10),
         ("blocks/messages/pages.rs", 6),
         ("blocks/products/pages.rs", 6),
-        ("blocks/tickets/pages.rs", 4),
         ("blocks/vector/pages_ui.rs", 4),
         // A unit-test fixture: the `DetailHero::badges` slot of
         // `templates::detail_page`, exercised by

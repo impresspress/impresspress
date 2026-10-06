@@ -12,6 +12,9 @@ macro_rules! string_enum {
         }
 
         impl $name {
+            /// Every value, in declaration order — what a form offers.
+            pub const ALL: &'static [Self] = &[$(Self::$variant),+];
+
             pub const fn as_str(self) -> &'static str {
                 match self {
                     $(Self::$variant => $value),+

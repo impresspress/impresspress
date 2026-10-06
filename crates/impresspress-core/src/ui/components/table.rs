@@ -985,7 +985,7 @@ mod tests {
     /// stylesheet.** `ui/styles/components/table.css` still carries
     /// `.table-container`, `.table`, `.table th`, `.table td`,
     /// `.table tbody tr:hover`, and the `max-width: 720px`
-    /// `white-space: nowrap` rule, for these ten tables and nothing else —
+    /// `white-space: nowrap` rule, for the tables listed below and nothing else —
     /// administration's 19 moved to `.data-table` in the pull request before
     /// this one. (`.table th.sortable` went in the same change as this test:
     /// the sortable header was a `components.rs` affordance that the phase-3a
@@ -997,11 +997,11 @@ mod tests {
     /// test. Migrating one is not free: `.data-table` is a different chrome
     /// (rounded, bordered, sticky `thead`, dashed row rules, a `data-label`
     /// per cell that collapses to cards below 720px), so each entry is a
-    /// rendered change. Six of the ten sit on pages with no visual baseline
-    /// at all — `blocks/legalpages` and `blocks/tickets` have none — so the
-    /// gate there is a Rust render test, not a screenshot.
+    /// rendered change. Some sit on pages with no visual baseline at all —
+    /// `blocks/legalpages` has none — so the gate there is a Rust render
+    /// test, not a screenshot.
     ///
-    /// The scope is maud's bare `.table` class shorthand, the form all ten are
+    /// The scope is maud's bare `.table` class shorthand, the form every one is
     /// written in; the counter is `test_support::count_bare_class_shorthand`,
     /// shared with the badge ratchet rather than copied, and it reads every
     /// boundary maud accepts, unspaced ones included.
@@ -1009,7 +1009,6 @@ mod tests {
         ("blocks/legalpages/pages.rs", 3),
         ("blocks/llm/pages.rs", 1),
         ("blocks/llm/ui.rs", 2),
-        ("blocks/tickets/pages.rs", 3),
         ("blocks/userportal/pages/admin_buttons.rs", 1),
     ];
 
