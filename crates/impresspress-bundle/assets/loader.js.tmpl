@@ -84,11 +84,21 @@ const CONTROL_WAIT_MS = 10_000;
 // registration already has, so a healthy worker is not replaced for
 // nothing; with no registration, WORKER_URL.
 //
+// A recovery is never one of two replacements at once. A deployment's update
+// replaces a worker too, dead or alive, and the browser installs one version
+// at a time, discarding an installing version when another is registered
+// over it. So before a recovery registers anything it asks whether an update
+// already owns the transition (`updateUnderway`), and leaves it to the
+// update if so.
+//
 // One known cost of the query: a CDN that keys its cache on the query string
 // and is purged of `/sw.js` only could answer `/sw.js?recovery=T` with the
-// previous deployment's worker once. That worker imports a glue file the new
-// deployment no longer has, fails at stage `load`, and is replaced again —
-// under another new URL, which the CDN has never cached — without erasing.
+// previous deployment's worker once. Its static import of the previous
+// deployment's hashed glue fails — the host no longer has that file — so the
+// browser cannot even evaluate it: `register()` rejects with a TypeError and
+// nothing is replaced. The recovery then ends on the stopped screen with the
+// cause (`recoveryFailed`), whose "Try again" registers under another new
+// URL, one the CDN has never cached. Nothing is erased.
 const WORKER_URL = '/sw.js';
 // Whether the recovery may wipe OPFS. Set per-build via the
 // `opfs_wipe_on_recovery` field on the bundle config (CLI flag
@@ -127,8 +137,10 @@ const BOOT_PROBE_TIMEOUT_MS = 60_000;
 const SHELL_URL = '__SHELL_URL__';
 
 // Drop Cache Storage. RECOVERED_CACHE is not dropped: it is this script's
-// own record, not the app's state. No worker is unregistered —
-// `replaceWorker` says how a dead one is replaced.
+// own record, not the app's state. The runtime binary the worker keeps
+// (`RUNTIME_CACHE` in sw.js) goes with the rest, so the replacement fetches
+// its own afresh at install. No worker is unregistered — `replaceWorker`
+// says how a dead one is replaced.
 async function dropCaches() {
     try {
         const keys = await caches.keys();
@@ -140,10 +152,85 @@ async function dropCaches() {
     }
 }
 
-// Erase the data this browser stores for the app (OPFS). Answers whether
-// the erase COMPLETED: `true` only if every entry was removed. An entry that
-// could not be removed (a file something still holds open) does not stop
-// the others being tried.
+// The Web Lock that keeps an erase BEFORE any worker loads the data it
+// erases. The runtime holds the app's database in memory and writes it back
+// when it flushes; it keeps no file open at rest, so an erase that runs
+// after a runtime has loaded the data "succeeds" — and the runtime's next
+// flush writes the old database back. So:
+//
+// - whoever erases takes this lock BEFORE registering the replacement that
+//   will load the data next, and keeps it until the erase is done (or, when
+//   the replacement cannot be registered, until it lets go having erased
+//   nothing);
+// - sw.js looks at it — never waits for it, inside an event — before its
+//   runtime's `initialize()` loads the data (`eraseSettled` there; the same
+//   name), and while it is held answers that the app is being reset
+//   without loading anything. A shell whose probe gets that answer waits
+//   for the lock itself, and asks again (`enterApp`).
+//
+// No worker can load the data before its registration exists, so a lock
+// taken before registering is held before any loader of the data could look
+// at it.
+const ERASE_LOCK = '__impresspress_erase';
+// Held by whoever is erasing, for as long as its erase is pending — a
+// button's reset or an automatic recovery, each across the wait for its
+// replacement to activate. It is how an automatic recovery that would erase
+// sees, without waiting, that another tab is already doing it
+// (`holdIfFree`) — and the order of the three locks is what keeps them from
+// waiting on each other: a button takes RESET_LOCK and ERASE_LOCK before
+// RECOVERY_LOCK; an automatic recovery takes RECOVERY_LOCK, then RESET_LOCK
+// only if it is free, then ERASE_LOCK, which only a holder of RESET_LOCK
+// ever takes (workers only look at it); and RECOVERY_LOCK is never held
+// while waiting for an activation.
+const RESET_LOCK = '__impresspress_reset';
+
+// Take `names`, one after another, and keep them until the returned
+// `release()` is called — a lock request whose callback would otherwise
+// have to span a wait for activation and a person's choice. Resolves once
+// all are held. In a browser with no Web Locks there is nothing to take.
+function holdLocks(names) {
+    if (!(navigator.locks && navigator.locks.request)) return Promise.resolve(() => {});
+    const releases = [];
+    const take = (name) =>
+        new Promise((held) => {
+            navigator.locks.request(name, () => new Promise((release) => held(release)));
+        });
+    return (async () => {
+        for (const name of names) releases.push(await take(name));
+        return () => {
+            for (const release of releases.reverse()) release();
+            releases.length = 0;
+        };
+    })();
+}
+
+// Take `names` as `holdLocks` does — but the first only if it is free now:
+// `null`, without waiting, when another tab holds it (an erase is under way
+// there, RESET_LOCK says).
+function holdIfFree(names) {
+    if (!(navigator.locks && navigator.locks.request)) return Promise.resolve(() => {});
+    return new Promise((done) => {
+        navigator.locks.request(names[0], { ifAvailable: true }, (lock) => {
+            if (lock === null) {
+                done(null);
+                return null;
+            }
+            return new Promise((releaseFirst) => {
+                holdLocks(names.slice(1)).then((releaseRest) =>
+                    done(() => {
+                        releaseRest();
+                        releaseFirst();
+                    }),
+                );
+            });
+        });
+    });
+}
+
+// Erase the data this browser stores for the app (OPFS). Called holding
+// ERASE_LOCK. Answers whether the erase COMPLETED: `true` only if every
+// entry was removed. An entry that could not be removed (a file something
+// still holds open) does not stop the others being tried.
 async function eraseData() {
     try {
         const root = await navigator.storage.getDirectory();
@@ -238,16 +325,18 @@ function stoppedText(cause) {
 }
 
 // What sw.js reported, as this shell holds it: `cause` is its reason,
-// `stage` where it failed, `id` which death it was. Each is
+// `stage` where it failed, `id` which death it was, `runtime` which version
+// died (the runtime binary it was built for, `RUNTIME_URL` there). Each is
 // whatever arrived, held as the type it should be; a stage that is missing
 // or unknown (a worker from an older build) is one that does not erase,
 // because `erasesFor` asks for exactly one value, and a missing id is one
 // that matches no recorded death.
-function reported(cause, stage, id) {
+function reported(cause, stage, id, runtime) {
     return {
         cause: String(cause),
         stage: typeof stage === 'string' ? stage : '',
         id: typeof id === 'string' ? id : '',
+        runtime: typeof runtime === 'string' ? runtime : '',
     };
 }
 
@@ -282,7 +371,7 @@ async function takeStopCause() {
     try {
         const breaker = JSON.parse(sessionStorage.getItem(SW_RECOVER_KEY));
         if (breaker && typeof breaker.cause === 'string' && isFresh(breaker.at)) {
-            told = reported(breaker.cause, breaker.stage, breaker.id);
+            told = reported(breaker.cause, breaker.stage, breaker.id, breaker.runtime);
         }
     } catch (_) {
         // Not something this script wrote; there is no cause in it.
@@ -296,7 +385,7 @@ async function takeStopCause() {
             const stop = entry ? await entry.json() : null;
             await caches.delete(STOP_CAUSE_CACHE);
             if (stop && isFresh(stop.at)) {
-                left = reported(stop.reason, stop.stage, stop.id);
+                left = reported(stop.reason, stop.stage, stop.id, stop.runtime);
             }
         }
     } catch (e) {
@@ -314,9 +403,21 @@ function setBreaker(failure) {
             cause: failure.cause,
             stage: failure.stage,
             id: failure.id,
+            runtime: failure.runtime,
             at: Date.now(),
         }),
     );
+}
+
+// Whether `response` is sw.js's answer while an erase of the app's data is
+// pending (`beingReset` there): no runtime was asked, and nothing failed.
+async function isBeingReset(response) {
+    if (response.status !== 503) return false;
+    try {
+        return (await response.clone().json()).code === 'app_resetting';
+    } catch (_) {
+        return false;
+    }
 }
 
 // What sw.js's answer to a request for a dead runtime reports
@@ -326,7 +427,7 @@ async function stoppedCauseOf(response) {
     try {
         const body = await response.json();
         if (body.code !== 'runtime_stopped') return null;
-        return reported(body.cause, body.stage, body.id);
+        return reported(body.cause, body.stage, body.id, body.runtime);
     } catch (_) {
         return null;
     }
@@ -399,6 +500,54 @@ function registerWorker(url) {
 // The worker `registration` is bringing in — its newest version — once it
 // has activated. Fails if that version is discarded instead (its script
 // could not be fetched or evaluated).
+// Once `registration`'s newest version has activated, `go(worker)`;
+// `fail(error)` if it cannot be installed, or `go` throws.
+//
+// A version can install and then not activate for a long time — Chromium
+// has been seen to leave one `installed` with nothing in its way — and a
+// page waiting on it without a word says "Loading…" for ever. So if it has
+// not activated within CONTROL_WAIT_MS the person is told and offered the
+// choice (`renderNotStartedUI`), again every CONTROL_WAIT_MS they keep
+// waiting. The wait itself goes on underneath: the moment the version
+// activates, `go` runs, whatever is on screen — a reset waiting here holds
+// the erase lock its replacement is waiting for, so nothing may depend on a
+// click to carry on. Only "Restart it" or the reset end it: `leave` lets go
+// of what the wait holds, and `go` and `fail` are not called.
+async function whenActivated(registration, status, go, fail, leave = () => {}) {
+    let abandoned = false;
+    let timer = null;
+    const ask = (waitedMs) => {
+        timer = setTimeout(() => {
+            const waited = waitedMs + CONTROL_WAIT_MS;
+            renderNotStartedUI(
+                status,
+                waited,
+                () => ask(waited),
+                () => {
+                    abandoned = true;
+                    leave();
+                },
+            );
+        }, CONTROL_WAIT_MS);
+    };
+    if (newest(registration).state !== 'activated') ask(0);
+    let worker;
+    try {
+        worker = await activated(registration);
+    } catch (error) {
+        clearTimeout(timer);
+        if (!abandoned) fail(error);
+        return;
+    }
+    clearTimeout(timer);
+    if (abandoned) return;
+    try {
+        await go(worker);
+    } catch (error) {
+        fail(error);
+    }
+}
+
 async function activated(registration) {
     const sw = newest(registration);
     if (sw.state !== 'activated') {
@@ -416,6 +565,105 @@ async function activated(registration) {
     return sw;
 }
 
+// Whether `worker`, a version of the registration that is coming in, has
+// installed: `true` once it is past `installing`, `false` if the browser
+// discarded it instead (its install failed — its runtime binary could not
+// be kept, say). Waits for the INSTALL, never for activation: a version that
+// has installed activates once the worker it replaces is between events,
+// and this runs in a page, not in that worker.
+function hasInstalled(worker) {
+    return new Promise((resolve) => {
+        const settle = () => {
+            if (worker.state === 'installing') return;
+            worker.removeEventListener('statechange', settle);
+            resolve(worker.state !== 'redundant');
+        };
+        worker.addEventListener('statechange', settle);
+        settle();
+    });
+}
+
+// How long `runtimeOf` waits for a worker to say which version it is. It
+// times one message there and back, which a running worker answers at once
+// and a stopped one once the browser has started it — nothing of the app's
+// own start is in it.
+const RUNTIME_ANSWER_MS = 2_000;
+
+// The version `worker` is: the runtime binary it was built for, which it
+// answers whether or not its runtime is alive (`impresspress-runtime` in
+// sw.js) — or `null` when it does not answer within RUNTIME_ANSWER_MS. A
+// worker from before versions were asked never answers, and the active
+// worker CAN be one: a deployment rolled back to such a build is newer on
+// the host and older in its code. Not answering is itself an answer, then:
+// it is not the version that died, which did name its own.
+function runtimeOf(worker) {
+    return new Promise((resolve) => {
+        const channel = new MessageChannel();
+        const timer = setTimeout(() => {
+            channel.port1.close();
+            resolve(null);
+        }, RUNTIME_ANSWER_MS);
+        channel.port1.onmessage = (event) => {
+            clearTimeout(timer);
+            channel.port1.close();
+            resolve(typeof event.data?.runtime === 'string' ? event.data.runtime : '');
+        };
+        worker.postMessage({ type: 'impresspress-runtime' }, [channel.port2]);
+    });
+}
+
+// Whether an update owns the transition away from the worker that died:
+// `true` when a version newer than it is installed and on its way in, or has
+// already taken its place. `failure` is the death, or `null` (a button with
+// no failure behind it).
+//
+// Asked of the host first (`registration.update()`, which joins a check the
+// browser already has in flight rather than starting a second), so a
+// deployment the dead worker never heard of counts. A version still
+// INSTALLING is waited for: if its install fails, nothing is replacing the
+// dead worker after all, and the recovery must — a dead worker left to an
+// update that never lands would leave this page with no way out. A check
+// that cannot reach the host finds nothing. `status` says which of the two
+// waits this is; there is no timer here — a browser settles an install.
+//
+// "Already taken its place" is a question about VERSIONS, not about which
+// worker controls this page: a shell opened fresh, or one an update's
+// `clients.claim()` reached first, has no dead worker to compare with. The
+// death names the runtime the dying version was built for; an active worker
+// built for another one has replaced it. (Two versions with the same runtime
+// — a recovery's replacement, a deployment that changed only the shell — are
+// the same version here, and a death of one is a death of the other.)
+//
+// Every automatic recovery and every button asks this, holding
+// RECOVERY_LOCK, and only where it answers `false` registers a replacement:
+// one owner of each transition, whichever road — the worker's message, the
+// cause it left, its 503 to a boot probe, a button — led here.
+//
+// `alreadyIn: false` counts only a version that is still coming in. A button
+// that ERASES must not leave the transition to a version already in place:
+// that version may have loaded the data already — into memory, written back
+// on its next flush — and an erase after it would be undone. A version
+// still installing or waiting has loaded nothing, and the erase lock the
+// button holds keeps it from loading until the erase is done.
+async function updateUnderway(registration, failure, status, { alreadyIn = true } = {}) {
+    status.textContent = 'Checking for a new version…';
+    try {
+        await registration.update();
+    } catch (e) {
+        console.warn('[__APP_NAME__] SW update check failed:', e);
+    }
+    for (;;) {
+        const incoming = registration.installing || registration.waiting;
+        if (!incoming) break;
+        status.textContent = 'Updating the app…';
+        if (await hasInstalled(incoming)) return true;
+        if ((registration.installing || registration.waiting) === incoming) break;
+    }
+    if (!alreadyIn) return false;
+    if (failure === null || failure.runtime === '' || !registration.active) return false;
+    return (await runtimeOf(registration.active)) !== failure.runtime;
+}
+
 // Replace the worker in place (WORKER_URL says how and why): drop the
 // caches, note that a recovery ran, register the replacement over the live
 // registration, and record the death as recovered. Called holding
@@ -423,14 +671,17 @@ async function activated(registration) {
 // nothing was reported. Answers the registration, whose newest version is
 // the replacement.
 //
-// `eraseFirst` erases the local data BEFORE the replacement is registered,
-// and is for a worker that is DEAD: a poisoned worker never touches the data
-// again, and the replacement must not start on what is being erased. A
-// worker that may still be running is a different matter — `recoverFromButton`.
-async function replaceWorker({ eraseFirst, failure }) {
+// Nothing is erased here. Whoever erases holds ERASE_LOCK from before this
+// registers until its erase is done, and erases only once the replacement
+// has ACTIVATED: a worker of the old version — even the one that died, which
+// the browser may stop and start again unpoisoned for some tab's request —
+// may have loaded the data into memory and would write it back at its next
+// flush, and activation is when the old version is done with events for
+// good. A replacement that cannot be registered (WORKER_URL's CDN case)
+// replaces nothing, and its caller lets the lock go having erased nothing.
+async function replaceWorker({ failure }) {
     sessionStorage.setItem(RECOVERY_DONE_KEY, RECOVERY_RESTARTED);
     await dropCaches();
-    if (eraseFirst) noteErase(await eraseData());
     const registration = await registerWorker(replacementWorkerUrl());
     if (failure !== null) await recordRecovered(failure);
     return registration;
@@ -442,50 +693,95 @@ async function replaceWorker({ eraseFirst, failure }) {
 // app. If another tab has meanwhile recovered from the same death, nothing
 // is replaced or erased again: this tab boots onto what that tab left.
 //
-// The order differs from the automatic recovery's. A button can be pressed
-// while the worker is ALIVE — slow, on the waiting screen — and a running
-// worker holds its own copy of the data: erased under it, the data comes
-// back when it next writes, or the erase fails on a file it has open. So the
-// replacement is registered and ACTIVATED first, which discards the old
-// worker; then the data is erased, before the replacement has been asked
-// for anything; then the app is entered. And an erase that did not complete
-// is shown (`renderEraseFailedUI`) instead of the app being entered as
-// though it had.
+// When it erases, the erase has two runtimes to stay clear of, and each
+// holds the database in memory and writes it back when it flushes:
 //
-// "Activated first" can take a while under a worker that is alive: a browser
-// does not activate a new version while the old one is in the middle of an
-// event (measured in Chromium — `skipWaiting()` notwithstanding), so the
-// replacement takes over when the old worker finishes what it was doing, or
-// when the browser gives up on it. Until then the button stays on its busy
-// label and nothing has been erased.
+// - the OLD worker, which a button may find ALIVE (slow, on the waiting
+//   screen): erased under it, the data comes back the next time it writes.
+//   So the erase waits until the replacement has ACTIVATED — a browser
+//   activates a new version only once the old one is between events, and
+//   sends it none after — which is when the old worker is done writing.
+// - the REPLACEMENT, which must not load the data before it is erased. So
+//   ERASE_LOCK (and RESET_LOCK, which tells other tabs a reset is under
+//   way) is taken BEFORE the replacement is registered — and before
+//   RECOVERY_LOCK, as RESET_LOCK explains — and held across the
+//   wait for it to activate, until the erase is done; no worker loads the
+//   data while the lock is held.
+//
+// Then the app is entered. An erase that did not complete is shown
+// (`renderEraseFailedUI`) instead of the app being entered as though it
+// had.
+//
+// "Activated" can take a while under a worker that is alive: a browser does
+// not activate a new version while the old one is in the middle of an event
+// (measured in Chromium — `skipWaiting()` notwithstanding). Until then
+// nothing has been erased; after CONTROL_WAIT_MS the person is asked
+// (`renderNotStartedUI`), and the locks are let go only if they start over.
+// Holding them blocks no other tab's boot: an automatic recovery that would
+// erase sees RESET_LOCK held and leaves the transition to this reset.
 async function recoverFromButton({ erase, forget, failure }, status) {
+    // The erase's locks, while this button holds them (see below).
+    let release = () => {};
+    const letGo = () => {
+        release();
+        release = () => {};
+    };
     try {
         let replaced = false;
+        // Before any replacement exists — this button's own, or an update's
+        // — so none can load the data before the erase; and before
+        // RECOVERY_LOCK (RESET_LOCK says why).
+        if (erase) release = await holdLocks([RESET_LOCK, ERASE_LOCK]);
         const registration = await underRecoveryLock(async () => {
             if (failure !== null && (await recoveryOf(failure)) !== null) {
+                letGo();
                 return registerWorker((await registeredWorkerUrl()) ?? WORKER_URL);
             }
             replaced = true;
-            return replaceWorker({ eraseFirst: false, failure });
-        });
-        const worker = await activated(registration);
-        if (erase && replaced) {
-            const erased = await underRecoveryLock(eraseData);
-            noteErase(erased);
-            if (!erased) {
-                renderEraseFailedUI({ erase, forget, failure }, worker, status);
-                return;
+            // An update already bringing a new worker in is that
+            // replacement: registering another over it would discard it.
+            const current = await navigator.serviceWorker.getRegistration();
+            if (current && (await updateUnderway(current, failure, status, { alreadyIn: !erase }))) {
+                sessionStorage.setItem(RECOVERY_DONE_KEY, RECOVERY_RESTARTED);
+                if (failure !== null) await recordRecovered(failure);
+                return current;
             }
-        }
-        if (forget) {
-            try { localStorage.clear(); } catch (_) {}
-            try { sessionStorage.clear(); } catch (_) {}
-        }
-        await enterApp(bootUrl(), worker, status, 0);
+            return replaceWorker({ failure });
+        });
+        await whenActivated(
+            registration,
+            status,
+            async (worker) => {
+                if (erase && replaced) {
+                    const erased = await eraseData();
+                    letGo();
+                    noteErase(erased);
+                    if (!erased) {
+                        renderEraseFailedUI({ erase, forget, failure }, worker, status);
+                        return;
+                    }
+                }
+                if (forget) {
+                    try { localStorage.clear(); } catch (_) {}
+                    try { sessionStorage.clear(); } catch (_) {}
+                }
+                await enterApp(bootUrl(), worker, status, 0);
+            },
+            (error) => {
+                letGo();
+                recoveryError(error, status);
+            },
+            letGo,
+        );
     } catch (error) {
-        status.textContent = 'Error: ' + error.message;
-        console.error('[__APP_NAME__] Recovery error:', error);
+        letGo();
+        recoveryError(error, status);
     }
+}
+
+function recoveryError(error, status) {
+    status.textContent = 'Error: ' + error.message;
+    console.error('[__APP_NAME__] Recovery error:', error);
 }
 
 // The app's name, for text a PERSON reads — taken from the page this script
@@ -667,6 +963,54 @@ function renderWaitingUI(target, worker, status, waitedMs) {
     });
 }
 
+// Shown when the version the browser is bringing in has not activated
+// within CONTROL_WAIT_MS (`whenActivated`). Nothing has failed: the browser
+// has installed it, or is installing it, and has not yet put it in place —
+// usually a moment, sometimes, in Chromium, much longer. The wait goes on
+// underneath whatever is chosen here; "Keep waiting" only asks to be told
+// again later (`resume`). "Restart it" and the reset register a replacement
+// over it, as on the waiting screen.
+//
+// `leave` ends the wait and lets go of what it was holding — a reset's erase
+// locks — before "Restart it" or the reset starts over: a reset held up
+// behind its own predecessor's locks would wait for ever. "Keep waiting"
+// keeps them.
+function renderNotStartedUI(status, waitedMs, resume, leave) {
+    const name = appTitle();
+    const STOPPING = 'Waiting for the app to stop…';
+    renderChoices({
+        title: `${name} is taking a long time to start`,
+        said: `The new version has not started yet, after ${waitedMs / 1000} seconds.`,
+        next: 'The browser is still putting it in place. You can keep waiting. Or restart it, which keeps the data stored locally in this browser, or reset, which erases it; both start the app from its first page.',
+        buttons: [
+            {
+                id: 'impresspress-wait',
+                label: 'Keep waiting',
+                busy: 'Waiting…',
+                style: 'primary',
+                act: resume,
+            },
+            {
+                id: 'impresspress-restart',
+                label: 'Restart it',
+                busy: STOPPING,
+                style: 'plain',
+                act: () => {
+                    leave();
+                    return recoverFromButton({ erase: false, forget: false, failure: null }, status);
+                },
+            },
+            {
+                ...resetButton(null, status, STOPPING),
+                act: () => {
+                    leave();
+                    return recoverFromButton({ erase: true, forget: true, failure: null }, status);
+                },
+            },
+        ],
+    });
+}
+
 // What this load does about a dead runtime, decided — and, where it is a
 // recovery, done — holding RECOVERY_LOCK:
 //
@@ -677,9 +1021,18 @@ function renderWaitingUI(target, worker, status, waitedMs) {
 //               and this boot goes on like an ordinary one.
 // - `spent`     this tab's one automatic recovery has been used and the app
 //               has not answered since: show the cause and wait.
+// - `updating`  an update owns the transition (`updateUnderway`): a newer
+//               version is installed and on its way in, or already in.
+//               Nothing is replaced or erased — the new version may well
+//               start on the data the dead one could not — and the death is
+//               recorded as recovered from, so other tabs join it.
+//               `registration` is bringing that version in.
 // - `recovered` the worker was replaced (and the data erased, where
 //               `erasesFor` and `mayEraseAutomatically` allow).
 //               `registration` is bringing the replacement in.
+// - `unreplaced` the replacement could not be registered (`error`): the
+//               stopped screen is shown, `recoveryFailed`.
+//
 async function recoverIfStopped(status) {
     return underRecoveryLock(async () => {
         const failure = await takeStopCause();
@@ -687,15 +1040,52 @@ async function recoverIfStopped(status) {
         if ((await recoveryOf(failure)) !== null) return { kind: 'joined', failure };
         const spent = sessionStorage.getItem(RECOVERY_DONE_KEY);
         if (spent) return { kind: 'spent', failure, spent };
+        const current = await navigator.serviceWorker.getRegistration();
+        if (current && (await updateUnderway(current, failure, status))) {
+            status.textContent =
+                stoppedText(failure.cause) +
+                ' — a new version is replacing it; the data stored locally in this browser is kept…';
+            await recordRecovered(failure);
+            return { kind: 'updating', registration: current };
+        }
         const erase = erasesFor(failure) && mayEraseAutomatically();
+        // To erase, RESET_LOCK and ERASE_LOCK are taken before the
+        // replacement is registered and kept — past RECOVERY_LOCK — until the
+        // erase, which `boot` does once the replacement has activated
+        // (`replaceWorker` says why). If a reset in another tab already holds
+        // RESET_LOCK it owns this transition: it is bringing in a replacement
+        // and will erase before that replacement loads anything. Replacing
+        // over it would discard its replacement; this tab boots onto what
+        // that reset brings in.
+        let eraseAfter = null;
+        if (erase) {
+            eraseAfter = await holdIfFree([RESET_LOCK, ERASE_LOCK]);
+            if (eraseAfter === null) return { kind: 'joined', failure };
+        }
         status.textContent =
             stoppedText(failure.cause) +
             (erase
                 ? ' — recovering; the data stored locally in this browser is being erased…'
                 : ' — restarting it; the data stored locally in this browser is kept…');
-        const registration = await replaceWorker({ eraseFirst: erase, failure });
-        return { kind: 'recovered', registration };
+        try {
+            const registration = await replaceWorker({ failure });
+            return { kind: 'recovered', registration, failure, eraseAfter };
+        } catch (error) {
+            if (eraseAfter) eraseAfter();
+            return { kind: 'unreplaced', failure, error };
+        }
     });
+}
+
+// The automatic recovery's replacement could not be brought in: registering
+// it failed (the host served a worker that cannot be evaluated — WORKER_URL
+// says when a CDN does), or the browser discarded it while installing (its
+// runtime binary could not be kept). The dead worker is still the one in
+// place, so the app is not entered: the stopped screen shows the cause and
+// offers the retry — which registers under another new URL — and the reset.
+function recoveryFailed(failure, error, status) {
+    console.error('[__APP_NAME__] the replacement worker could not be brought in:', error);
+    renderStoppedUI(failure, sessionStorage.getItem(RECOVERY_DONE_KEY) || RECOVERY_RESTARTED, status);
 }
 
 // Have `worker` — the registration's newest, activated — control this page,
@@ -791,6 +1181,29 @@ async function enterApp(target, worker, status, waitedMs) {
     // notice: set the breaker, and let the next load recover once and then
     // stop with the cause on screen. (The reload is answered by the dead
     // worker with this shell, whatever the static host has at this address.)
+    // An erase of the app's data was under way, so the worker loaded nothing
+    // and answered that (`isBeingReset`). That is not the app answering:
+    // the recovery flag is left as it is, and nothing navigates. Wait for
+    // the erase to be over — this page can wait for its lock, a worker may
+    // not (sw.js's `eraseSettled`) — and for the version the erase is for
+    // to be in place, then ask again.
+    if (probe && (await isBeingReset(probe))) {
+        status.textContent = 'The app is being reset…';
+        if (navigator.locks && navigator.locks.request) {
+            await navigator.locks.request(ERASE_LOCK, () => {});
+        }
+        const registration = await navigator.serviceWorker.getRegistration();
+        await whenActivated(
+            registration,
+            status,
+            (next) => enterApp(target, next, status, waitedMs),
+            (error) => {
+                status.textContent = 'Error: ' + error.message;
+                console.error('[__APP_NAME__] Boot error:', error);
+            },
+        );
+        return;
+    }
     const stopped = probe ? await stoppedCauseOf(probe) : null;
     if (stopped !== null) {
         setBreaker(stopped);
@@ -835,6 +1248,10 @@ async function boot() {
             renderStoppedUI(recovery.failure, recovery.spent, status);
             return;
         }
+        if (recovery.kind === 'unreplaced') {
+            recoveryFailed(recovery.failure, recovery.error, status);
+            return;
+        }
 
         // Listen for self-destruct notices. The SW posts this message just
         // before re-navigating its clients, so by the time the navigation
@@ -842,12 +1259,12 @@ async function boot() {
         // recovery path above runs.
         navigator.serviceWorker.addEventListener('message', (event) => {
             if (event.data?.type === 'sw-self-destruct') {
-                setBreaker(reported(event.data.reason, event.data.stage, event.data.id));
+                setBreaker(reported(event.data.reason, event.data.stage, event.data.id, event.data.runtime));
             }
         });
 
         let registration;
-        if (recovery.kind === 'recovered') {
+        if (recovery.kind === 'recovered' || recovery.kind === 'updating') {
             registration = recovery.registration;
         } else {
             status.textContent = 'Registering Service Worker...';
@@ -864,9 +1281,37 @@ async function boot() {
                 console.warn('[__APP_NAME__] SW update check failed:', e);
             }
         }
-        const worker = await activated(registration);
-        status.textContent = `Loading ${appTitle()}...`;
-        await enterApp(destination(), worker, status, 0);
+        // The erase an automatic recovery holds the locks for, if any: it
+        // runs once the replacement has activated (`replaceWorker` says why),
+        // and lets the locks go — as does anything that ends the wait.
+        const letGo = () => {
+            const release = recovery.eraseAfter;
+            recovery.eraseAfter = null;
+            if (release) release();
+        };
+        await whenActivated(
+            registration,
+            status,
+            async (worker) => {
+                if (recovery.eraseAfter) {
+                    const erased = await eraseData();
+                    letGo();
+                    noteErase(erased);
+                }
+                status.textContent = `Loading ${appTitle()}...`;
+                await enterApp(destination(), worker, status, 0);
+            },
+            (error) => {
+                letGo();
+                if (recovery.kind === 'recovered') {
+                    recoveryFailed(recovery.failure, error, status);
+                    return;
+                }
+                status.textContent = 'Error: ' + error.message;
+                console.error('[__APP_NAME__] Boot error:', error);
+            },
+            letGo,
+        );
     } catch (error) {
         status.textContent = 'Error: ' + error.message;
         console.error('[__APP_NAME__] Boot error:', error);

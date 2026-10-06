@@ -13,7 +13,7 @@
 // WHERE it failed (`stage`) beside the cause, on every road to the loader.
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { captureConsole, CLIENT_URL, loadWorker, SHELL_HTML } from './harness.mjs';
+import { captureConsole, CLIENT_URL, loadWorker, RUNTIME_URL, SHELL_HTML } from './harness.mjs';
 
 const LOGIN = '/b/auth/api/login';
 
@@ -41,7 +41,8 @@ async function assertStoppedAnswer(response, cause, stage, next = RESTART) {
     message: `The app's runtime stopped (${cause}). ${next}`,
     code: 'runtime_stopped',
     cause,
-    stage
+    stage,
+    runtime: RUNTIME_URL
   });
   assert.match(id, /^[0-9a-f-]{36}$/);
   return id;
@@ -71,11 +72,12 @@ function assertPageLeftAlone(worker) {
 function assertSentToBootShell(worker, cause, stage) {
   assert.equal(worker.posted.length, 1);
   const { id, ...message } = worker.posted[0];
-  assert.deepEqual(message, { type: 'sw-self-destruct', reason: cause, stage });
+  assert.deepEqual(message, { type: 'sw-self-destruct', reason: cause, stage, runtime: RUNTIME_URL });
   assert.deepEqual(worker.navigated, [CLIENT_URL]);
   const left = worker.leftForBootShell();
   assert.equal(left.reason, cause);
   assert.equal(left.stage, stage);
+  assert.equal(left.runtime, RUNTIME_URL);
   assert.equal(typeof left.at, 'number');
   // The message and the entry are about the same death.
   assert.match(id, /^[0-9a-f-]{36}$/);
