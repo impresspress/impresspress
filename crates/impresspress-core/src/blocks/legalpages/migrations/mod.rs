@@ -25,8 +25,6 @@ pub(crate) const POSTGRES_MIGRATIONS: &[&str] = &[];
 
 #[cfg(test)]
 mod tests {
-    use wafer_core::clients::database as db;
-
     use super::*;
     use crate::blocks::legalpages::{
         contracts::{DocumentStatus, DocumentType},
@@ -47,34 +45,20 @@ mod tests {
             .await
             .expect("apply 001");
 
-        // Rows as the pre-002 code wrote them.
-        let row = |status: DocumentStatus, version: i64, updated_at: &'static str| {
-            serde_json::json!({
-                "doc_type": DocumentType::Terms,
-                "title": "Terms",
-                "content": "body",
-                "status": status,
-                "version": version,
-                "created_by": "seed",
-                "created_at": "2026-01-01T00:00:00Z",
-                "updated_at": updated_at,
-            })
-        };
+        // Rows as the pre-002 code wrote them, oldest first (each insert's
+        // `updated_at` is later than the one before).
         let mut ids = Vec::new();
-        for data in [
-            row(DocumentStatus::Draft, 1, "2026-03-01T00:00:00Z"),
-            row(DocumentStatus::Archived, 1, "2026-01-01T00:00:00Z"),
+        for (status, version) in [
+            (DocumentStatus::Draft, 1),
+            (DocumentStatus::Archived, 1),
             // v2 used twice: the published row keeps it.
-            row(DocumentStatus::Archived, 2, "2026-02-02T00:00:00Z"),
-            row(DocumentStatus::Published, 2, "2026-02-01T00:00:00Z"),
+            (DocumentStatus::Archived, 2),
+            (DocumentStatus::Published, 2),
             // v3 used twice by archived rows: the later one keeps it.
-            row(DocumentStatus::Archived, 3, "2026-01-03T00:00:00Z"),
-            row(DocumentStatus::Archived, 3, "2026-01-04T00:00:00Z"),
+            (DocumentStatus::Archived, 3),
+            (DocumentStatus::Archived, 3),
         ] {
-            let rec = db::create(&ctx, documents::TABLE, crate::util::json_map(data))
-                .await
-                .expect("seed legacy row");
-            ids.push(rec.id);
+            ids.push(legacy_row(&ctx, status, version).await);
         }
 
         ctx.set_config(crate::migration_helper::RUN_MIGRATIONS_KEY, "1");
@@ -105,25 +89,41 @@ mod tests {
         );
 
         // The index now refuses a second numbered row of the type …
-        let taken = db::create(
-            &ctx,
-            documents::TABLE,
-            crate::util::json_map(row(DocumentStatus::Archived, 3, "2026-05-01T00:00:00Z")),
-        )
-        .await
-        .expect_err("v3 is taken");
+        let draft = documents::insert_draft(&ctx, new_draft())
+            .await
+            .expect("draft");
+        let taken = documents::set_state_for_test(&ctx, &draft.id, DocumentStatus::Archived, 3)
+            .await
+            .expect_err("v3 is taken");
         assert_eq!(taken.code, wafer_run::ErrorCode::AlreadyExists, "{taken:?}");
         // … and leaves drafts, all unnumbered, alone.
-        documents::insert_draft(
-            &ctx,
-            NewDraft {
-                doc_type: DocumentType::Terms,
-                title: "Another draft",
-                content: "",
-                created_by: "seed",
-            },
-        )
-        .await
-        .expect("a second unnumbered draft");
+        documents::insert_draft(&ctx, new_draft())
+            .await
+            .expect("another unnumbered draft");
+    }
+
+    fn new_draft() -> NewDraft<'static> {
+        NewDraft {
+            doc_type: DocumentType::Terms,
+            title: "Terms",
+            content: "body",
+            created_by: "seed",
+        }
+    }
+
+    /// A row in `status` as `version`, written the way the pre-002 code could
+    /// leave one.
+    async fn legacy_row(
+        ctx: &crate::test_support::TestContext,
+        status: DocumentStatus,
+        version: i64,
+    ) -> String {
+        let draft = documents::insert_draft(ctx, new_draft())
+            .await
+            .expect("insert");
+        documents::set_state_for_test(ctx, &draft.id, status, version)
+            .await
+            .expect("set legacy state")
+            .id
     }
 }
