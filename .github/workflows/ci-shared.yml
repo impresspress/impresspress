@@ -1485,7 +1485,8 @@ jobs:
       #   mutating request in the browser;
       # - admin-modals opens and closes every admin modal (keyboard, Esc,
       #   focus return, the 390px footer); its one submit is answered in the
-      #   browser and the bucket form stops at its own client-side check.
+      #   browser and the bucket form stops at its own client-side check;
+      # - shell-landmarks tabs and scrolls a static page and counts banners.
       # The file lists live in package.json because
       # `regen-visual-baselines.yml` must run exactly this set.
       #

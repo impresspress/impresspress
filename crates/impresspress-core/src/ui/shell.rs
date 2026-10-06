@@ -156,7 +156,12 @@ pub fn shell(
     html! {
         div .shell {
             a .skip-link href="#content" { "Skip to content" }
-            header .shell__mobile-header {
+            // The phone's way into the navigation: the drawer toggle that
+            // opens the Primary nav, and the page search. A `nav`, not a
+            // `header` — the topbar is the page's one banner, and below
+            // 720px both are on screen; and not a bare `div`, which would
+            // leave the app name outside every landmark.
+            nav .shell__mobile-header aria-label="Site" {
                 button .shell__drawer-toggle type="button"
                     data-action="drawer-open"
                     aria-label="Open menu"
@@ -182,9 +187,11 @@ pub fn shell(
                 // links between the page header and the content card, so it
                 // frames a full-bleed body as well as a padded one.
                 @if let Some(subnav) = subnav { (subnav) }
-                // `tabindex="-1"`: the skip link moves focus here, and a
-                // focused scroller is what PageDown/arrow keys scroll.
-                main .shell__body .shell__body--flush[flush] #content tabindex="-1" { (body) }
+                // The page scrolls inside this element, not the document, so
+                // it is a Tab stop (`tabindex="0"`): a keyboard user can
+                // focus it and scroll a page with nothing focusable in it.
+                // It is also the skip link's target.
+                main .shell__body .shell__body--flush[flush] #content tabindex="0" { (body) }
             }
         }
     }
@@ -436,6 +443,47 @@ mod tests {
         assert!(s.contains("shell__overlay"), "missing overlay element");
     }
 
+    /// The topbar is the page's only banner landmark. The mobile header is
+    /// on screen with it below 720px, so it must not be a `header` (an
+    /// unscoped `header` IS a banner: axe's `landmark-no-duplicate-banner`).
+    /// It is a labelled `nav`, so its contents still sit in a landmark
+    /// (axe's `region`), and its two controls stay named buttons.
+    #[test]
+    fn shell_has_exactly_one_banner_landmark() {
+        let groups = one_group(vec![item("X", "/x")]);
+        let tb = Topbar {
+            crumbs: vec![Crumb {
+                label: "X",
+                href: None,
+            }],
+            ..Topbar::default()
+        };
+        let s = shell(
+            NavKind::Admin,
+            &groups,
+            None,
+            "/x",
+            "",
+            "",
+            "Impresspress",
+            tb,
+            BodyLayout::Padded,
+            None,
+            html! { "body" },
+        )
+        .into_string();
+        assert_eq!(s.matches("<header").count(), 1, "one banner: {s}");
+        assert!(s.contains(r#"<header class="topbar">"#));
+        assert!(!s.contains(r#"role="banner""#));
+        assert!(s.contains(r#"<nav class="shell__mobile-header" aria-label="Site">"#));
+        // Distinct from the sidebar's nav, so the two landmarks are told apart.
+        assert!(s.contains(r#"aria-label="Primary""#));
+        assert!(s.contains(r#"data-action="drawer-open" aria-label="Open menu""#));
+        assert!(s.contains(
+            r#"class="shell__palette-icon" type="button" data-action="palette-open" aria-keyshortcuts="Meta+K Control+K" aria-label="Search pages (command palette)""#
+        ));
+    }
+
     #[test]
     fn shell_mobile_header_omits_palette_icon_when_disabled() {
         let groups = one_group(vec![item("X", "/x")]);
@@ -512,7 +560,7 @@ mod tests {
         };
         let padded = render(BodyLayout::Padded);
         assert_eq!(padded.matches("<main").count(), 1);
-        assert!(padded.contains(r#"<main class="shell__body" id="content" tabindex="-1">"#));
+        assert!(padded.contains(r#"<main class="shell__body" id="content" tabindex="0">"#));
         let flush = render(BodyLayout::Flush);
         assert!(flush.contains(r#"<main class="shell__body shell__body--flush" id="content""#));
     }
