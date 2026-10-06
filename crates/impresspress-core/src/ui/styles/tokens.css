@@ -146,6 +146,9 @@
 	--z-sidebar: 200;
 	--z-modal: 300;
 	--z-notification: 500;
+	/* The phone header (`.shell__mobile-header`, below 720px): what a fixed
+	   element placed under it (the toast stack) clears. */
+	--mobile-header-height: 56px;
 
 	/* New type scale — Phase 1, Impresspress UI Cleanup */
 	--text-xs: 0.75rem;    /* 12px — labels */

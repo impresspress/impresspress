@@ -17,9 +17,12 @@
 /* On a phone a bottom-right toast sits over the lower part of the screen,
    where a form's submit button usually is -- the one the operator taps again
    after reading the toast. Below 720px the stack moves to the top, under the
-   56px mobile header, full width less the page gutter. */
+   mobile header (and a notch's safe area), full width less the page gutter. */
 @media (max-width: 720px) {
-	.toast-container { top: calc(56px + var(--space-2)); bottom: auto; left: var(--space-4); right: var(--space-4); }
+	.toast-container {
+		top: calc(var(--mobile-header-height) + env(safe-area-inset-top, 0px) + var(--space-2));
+		bottom: auto; left: var(--space-4); right: var(--space-4);
+	}
 	.toast { min-width: 0; max-width: none; }
 }
 
@@ -48,11 +51,17 @@
    colour (white on it is 14:1). */
 .toast-info { background: var(--text-primary); color: white; }
 
+/* A 44px target around a small glyph: the negative margins give the hit
+   area back to the toast's own padding, so the toast stays its height. */
 .toast-dismiss {
-	margin-left: auto; background: none; border: none;
+	display: inline-flex; align-items: center; justify-content: center;
+	min-width: 44px; min-height: 44px;
+	margin: calc(-1 * var(--space-3)) calc(-1 * var(--space-3)) calc(-1 * var(--space-3)) auto;
+	background: none; border: none;
 	color: inherit; cursor: pointer; opacity: 0.7;
-	padding: var(--space-1);
+	padding: 0;
 }
+.toast-dismiss:focus-visible { outline-color: currentColor; outline-offset: -4px; opacity: 1; }
 
 .toast-dismiss:hover { opacity: 1; }
 

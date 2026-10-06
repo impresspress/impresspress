@@ -109,7 +109,12 @@ test.describe('tickets admin', () => {
       // An internal note lands on the timeline, with a toast.
       await page.getByRole('textbox', { name: 'Internal note' }).fill('Checked the footer template.');
       await page.getByRole('button', { name: 'Add note' }).click();
-      await expect(page.locator('.toast-success', { hasText: 'Note added' })).toBeVisible();
+      const noted = page.locator('.toast-success', { hasText: 'Note added' });
+      await expect(noted).toBeVisible();
+      // Its dismiss control is a 44px target, though the glyph is small.
+      const dismiss = await noted.getByRole('button', { name: 'Dismiss' }).boundingBox();
+      expect(dismiss?.width).toBeGreaterThanOrEqual(44);
+      expect(dismiss?.height).toBeGreaterThanOrEqual(44);
       await expect(page.locator('.ticket-timeline')).toContainText('Checked the footer template.');
 
       // Moving to Investigating re-renders the ticket with its new badge.
