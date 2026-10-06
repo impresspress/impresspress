@@ -350,6 +350,8 @@ test.describe('htmx after-success effects under the served CSP', () => {
     await gotoUnderCsp(page, '/b/llm/providers');
 
     const name = `csp-provider-${Date.now().toString(36)}`;
+    // The create form waits in the Add provider modal.
+    await page.getByRole('button', { name: 'Add provider' }).first().click();
     await page.locator('#new-name').fill(name);
     await page.locator('#new-endpoint').fill('https://llm.example.com/v1');
     const reloaded = page.waitForEvent('load');

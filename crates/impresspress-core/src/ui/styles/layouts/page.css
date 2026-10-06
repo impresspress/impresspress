@@ -4,7 +4,6 @@
  * width, and a row that wants full-width buttons on a phone opts in with
  * `.btn--block` (components/button.css). */
 @media (max-width: 720px) {
-	.card { padding: var(--space-4); margin-bottom: var(--space-4); }
 	.tabs { overflow-x: auto; -webkit-overflow-scrolling: touch; white-space: nowrap; }
 	.tab { flex-shrink: 0; }
 }
@@ -89,21 +88,6 @@
    gaps and pushed the composer below the fold. */
 .page--chat { display: grid; grid-template-columns: 280px minmax(0, 1fr); gap: 0; height: 100%; }
 .page--chat:has(.chat-rail) { grid-template-columns: 280px minmax(0,1fr) 320px; }
-@media (max-width: 720px) {
-	/* Mobile: stack threads above chat so the "+ new thread" control stays
-	   reachable. Previously both side panels were `display:none`, leaving
-	   the user with no way to start a conversation. The model rail is still
-	   hidden because the chat itself ships a model selector inline. */
-	.page--chat, .page--chat:has(.chat-rail) {
-		grid-template-columns: 1fr;
-		grid-template-rows: minmax(120px, 30vh) 1fr;
-	}
-	.chat-threads {
-		border-right: none;
-		border-bottom: 1px solid var(--border-light);
-	}
-	.chat-rail { display: none; }
-}
 /* The rail had no padding at all, so `.thread-pane`'s "THREADS" heading sat
    flush against the left edge and its "+" button flush against the right and
    top -- the button's right edge was exactly the rail's (measured 0px gap).
@@ -123,6 +107,31 @@
 .chat-messages { flex: 1; overflow-y: auto; padding: var(--space-4) var(--space-6); }
 .chat-composer { border-top: 1px solid var(--border-light); padding: var(--space-4); background: var(--surface-1); }
 .chat-rail { background: var(--surface-3); border-left: 1px solid var(--border-light); overflow-y: auto; padding: var(--space-4); }
+/* Phone: one pane at a time (`templates::ChatFocus`). With no conversation
+   open the thread list fills the body and is its only scroller; with one
+   open the conversation does, the rail sits above it as a one-row toolbar,
+   and the topbar crumb / sub-nav lead back to the list. No pane scrolls
+   inside another, and the model picker stays on screen with the
+   conversation it applies to. */
+@media (max-width: 720px) {
+	.page--chat, .page--chat:has(.chat-rail) {
+		grid-template-columns: minmax(0, 1fr);
+		grid-template-rows: minmax(0, 1fr);
+	}
+	.page--chat[data-chat-focus="threads"] > .chat-main,
+	.page--chat[data-chat-focus="threads"] > .chat-rail,
+	.page--chat[data-chat-focus="conversation"] > .chat-threads { display: none; }
+	.page--chat[data-chat-focus="conversation"]:has(> .chat-rail) {
+		grid-template-rows: auto minmax(0, 1fr);
+	}
+	.page--chat > .chat-rail {
+		order: -1; overflow: visible;
+		border-left: none; border-bottom: 1px solid var(--border-light);
+		padding: var(--space-2) var(--space-4);
+	}
+	.chat-threads { border-right: none; }
+	.chat-messages { padding: var(--space-4); }
+}
 
 /* ===== Products admin =====
  * Migrated from `blocks/products/pages.rs`'s page-local `PRODUCTS_UI_CSS`

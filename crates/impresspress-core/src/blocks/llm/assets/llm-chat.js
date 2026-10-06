@@ -51,63 +51,98 @@
   // Message card rendering
   // -------------------------------------------------------------------------
 
-  function messageCardHtml(role, content, date, opts) {
+  // The card classes are the ones `entry_card` in blocks/messages/pages.rs
+  // renders for the same cards server-side (components/card.css): user =
+  // brand tint, assistant = neutral, system = warning yellow. Built with the
+  // DOM API, so nothing here carries an inline style or concatenates text
+  // into markup; only an assistant turn's sanitized markdown is HTML.
+  var CARD_VARIANT = {
+    user: 'message-card--user',
+    assistant: 'message-card--neutral',
+    system: 'message-card--warning'
+  };
+
+  function badge(text, variant) {
+    var el = document.createElement('span');
+    el.className = 'badge text-capitalize' + (variant ? ' ' + variant : '');
+    el.textContent = text;
+    return el;
+  }
+
+  function messageCard(role, content, date, opts) {
     opts = opts || {};
-    var isMarkdown = (role === 'assistant');
-    var rendered = isMarkdown ? renderMarkdown(content) : escHtml(content);
+    var card = document.createElement('div');
+    card.className = 'card ' + (CARD_VARIANT[role] || 'message-card--neutral');
+    if (opts.id) card.id = opts.id;
 
-    // Brand-consistent card accents — keep in sync with `entry_card` in
-    // blocks/messages/pages.rs (the SSR renderer of the same cards): user =
-    // brand tint, assistant = neutral, system = warning yellow.
-    var bg, badge;
-    if (role === 'user') {
-      bg = 'background:#fff1e6;border-left:3px solid var(--primary-color)';
-      badge = 'badge';
-    } else if (role === 'assistant') {
-      bg = 'background:var(--surface-3);border-left:3px solid var(--border-color)';
-      badge = 'badge';
-    } else if (role === 'system') {
-      bg = 'background:#fefce8;border-left:3px solid #eab308';
-      badge = 'badge-warning';
+    var head = document.createElement('div');
+    head.className = 'message-card__head';
+    head.appendChild(badge(role, role === 'system' ? 'badge-warning' : ''));
+    if (date) {
+      var when = document.createElement('span');
+      when.className = 'text-muted text-xs';
+      when.textContent = date;
+      head.appendChild(when);
+    }
+    if (opts.model) head.appendChild(modelBadge(opts.model));
+    card.appendChild(head);
+
+    var body = document.createElement('div');
+    if (role === 'assistant') {
+      body.className = 'message-card__content message-card__content--markdown';
+      body.innerHTML = renderMarkdown(content);
     } else {
-      bg = 'background:var(--surface-3);border-left:3px solid var(--border-color)';
-      badge = 'badge';
+      body.className = 'message-card__content';
+      body.textContent = content;
     }
+    card.appendChild(body);
+    return card;
+  }
 
-    var modelBadge = '';
-    if (opts.model) {
-      modelBadge = ' <span class="badge" style="font-size:0.7rem">' + escHtml(opts.model) + '</span>';
-    }
+  // The model a reply came from, beside the role. `text-capitalize` is for
+  // roles, not model ids, so this one is a plain badge.
+  function modelBadge(model) {
+    var el = document.createElement('span');
+    el.className = 'badge';
+    el.textContent = model;
+    return el;
+  }
 
-    var contentStyle = isMarkdown
-      ? 'margin:0;word-break:break-word;line-height:1.6'
-      : 'margin:0;white-space:pre-wrap;word-break:break-word';
-
-    var id = opts.id ? ' id="' + opts.id + '"' : '';
-
-    return '<div class="card"' + id + ' style="margin-bottom:0.75rem;' + bg + '">'
-      + '<div style="display:flex;align-items:center;gap:0.5rem;margin-bottom:0.5rem">'
-      + '<span class="badge ' + badge + '" style="text-transform:capitalize">' + escHtml(role) + '</span>'
-      + (date ? '<span class="text-muted" style="font-size:0.75rem">' + escHtml(date) + '</span>' : '')
-      + modelBadge
-      + '</div>'
-      + '<div style="' + contentStyle + '">' + rendered + '</div>'
-      + '</div>';
+  // The "nothing here yet" line in the messages pane; the first message
+  // appended replaces it.
+  function emptyLine(text) {
+    var p = document.createElement('p');
+    p.className = 'chat-empty-state text-muted';
+    p.textContent = text;
+    return p;
   }
 
   function appendMessageCard(role, content, opts) {
     var area = document.getElementById('messages-area');
     if (!area) return null;
-    var placeholder = area.querySelector('.text-center.text-muted');
+    var placeholder = area.querySelector('.chat-empty-state');
     if (placeholder) placeholder.remove();
 
-    var wrapper = document.createElement('div');
     var date = new Date().toISOString().slice(0, 10);
-    wrapper.innerHTML = messageCardHtml(role, content, date, opts);
-    var card = wrapper.firstChild;
+    var card = messageCard(role, content, date, opts);
     area.appendChild(card);
     scrollChatToBottom();
     return card;
+  }
+
+  // The content element of a card `messageCard` built.
+  function cardBody(card) {
+    return card ? card.querySelector('.message-card__content') : null;
+  }
+
+  // The assistant card while the model is still thinking.
+  function showThinking(contentDiv) {
+    if (!contentDiv) return;
+    contentDiv.textContent = '';
+    var thinking = document.createElement('span');
+    thinking.className = 'text-muted chat-thinking';
+    thinking.textContent = 'Thinking...';
+    contentDiv.appendChild(thinking);
   }
 
   // -------------------------------------------------------------------------
@@ -191,7 +226,7 @@
 
   function showModelProgress(show) {
     var container = document.getElementById('model-progress-container');
-    if (container) container.style.display = show ? 'block' : 'none';
+    if (container) container.classList.toggle('hidden', !show);
   }
 
   function updateModelStatus(text) {
@@ -270,8 +305,8 @@
         });
 
         var card = appendMessageCard('assistant', '', { id: 'streaming-msg' });
-        var contentDiv = card ? card.querySelector('div:last-child') : null;
-        if (contentDiv) contentDiv.innerHTML = '<span class="text-muted" style="animation:pulse 1.5s infinite">Thinking...</span>';
+        var contentDiv = cardBody(card);
+        showThinking(contentDiv);
         setSendStatus('AI is thinking...');
 
         return window.impresspressAI.chat(messages, function (delta, full) {
@@ -288,7 +323,7 @@
           streamCard.removeAttribute('id');
           var cursor = streamCard.querySelector('.typing-cursor');
           if (cursor) cursor.remove();
-          var cd = streamCard.querySelector('div:last-child');
+          var cd = cardBody(streamCard);
           if (cd && result.content) cd.innerHTML = renderMarkdown(result.content);
         }
 
@@ -302,8 +337,7 @@
 
   function handleRemoteChat(threadId, userText, model, backendId) {
     var card = appendMessageCard('assistant', '', { id: 'streaming-msg' });
-    var contentDiv = card ? card.querySelector('div:last-child') : null;
-    if (contentDiv) contentDiv.innerHTML = '<span class="text-muted" style="animation:pulse 1.5s infinite">Thinking...</span>';
+    showThinking(cardBody(card));
     setSendStatus('Waiting for response...');
 
     var body = { thread_id: threadId, message: userText };
@@ -319,22 +353,11 @@
     .then(function (data) {
       var streamCard = document.getElementById('streaming-msg');
       if (streamCard) {
-        var contentDiv = streamCard.querySelector('div:last-child');
-        if (contentDiv) {
-          contentDiv.innerHTML = renderMarkdown(data.content || 'No response');
-          contentDiv.style.margin = '0';
-          contentDiv.style.wordBreak = 'break-word';
-          contentDiv.style.lineHeight = '1.6';
-        }
+        var contentDiv = cardBody(streamCard);
+        if (contentDiv) contentDiv.innerHTML = renderMarkdown(data.content || 'No response');
         if (data.model) {
-          var header = streamCard.querySelector('div:first-child');
-          if (header) {
-            var badge = document.createElement('span');
-            badge.className = 'badge';
-            badge.style.fontSize = '0.7rem';
-            badge.textContent = data.model;
-            header.appendChild(badge);
-          }
+          var header = streamCard.querySelector('.message-card__head');
+          if (header) header.appendChild(modelBadge(data.model));
         }
         streamCard.removeAttribute('id');
       }
@@ -378,7 +401,7 @@
       if (id) {
         var list = document.getElementById('thread-list');
         if (list) {
-          var placeholder = list.querySelector('.text-center.text-muted');
+          var placeholder = list.querySelector('.thread-pane__empty');
           if (placeholder) placeholder.remove();
           // Built with the DOM API and the same classes the server
           // renders (`thread_list_items` in blocks/llm/pages.rs), so the id
@@ -388,7 +411,7 @@
           // duplicating the delegated `[data-thread-id]` handler below.
           var card = document.createElement('a');
           card.className = 'card thread-card';
-          card.href = '/b/llm/threads/' + encodeURIComponent(id);
+          card.href = threadUrl(id);
           card.dataset.threadId = id;
           card.dataset.active = 'false';
           var row = document.createElement('div');
@@ -404,7 +427,11 @@
           card.appendChild(row);
           list.insertBefore(card, list.firstChild);
         }
-        selectThread(id);
+        // On a phone showing the thread list, the conversation pane is not
+        // on screen to open the thread in: go to its page, which is a real
+        // history entry Back returns from.
+        if (conversationShown()) selectThread(id);
+        else window.location.assign(threadUrl(id));
       }
     })
     .catch(function (err) {
@@ -412,14 +439,26 @@
     });
   }
 
+  function threadUrl(id) {
+    return '/b/llm/threads/' + encodeURIComponent(id);
+  }
+
+  // Whether the conversation pane is on screen beside the thread list. On a
+  // wide screen it always is; on a phone (`templates::ChatFocus`) the list
+  // and the conversation are shown one at a time, and a thread is opened by
+  // going to its page rather than swapped in place.
+  function conversationShown() {
+    var main = document.querySelector('.page--chat > .chat-main');
+    return !!main && window.getComputedStyle(main).display !== 'none';
+  }
+
   function selectThread(id) {
     document.getElementById('active-thread-id').value = id;
+    var page = document.querySelector('.page--chat');
+    if (page) page.setAttribute('data-chat-focus', 'conversation');
 
     var form = document.getElementById('chat-form');
-    if (form) {
-      form.style.opacity = '1';
-      form.style.pointerEvents = 'auto';
-    }
+    if (form) form.classList.remove('chat-form--disabled');
     var input = document.getElementById('chat-input');
     if (input) { input.disabled = false; input.placeholder = 'Type your message...'; input.focus(); }
     var btn = document.getElementById('send-btn');
@@ -434,17 +473,15 @@
         var area = document.getElementById('messages-area');
         if (!area) return;
 
+        area.textContent = '';
         if (records.length === 0) {
-          area.innerHTML = '<div class="text-center text-muted" style="padding:2rem">No messages yet.</div>';
+          area.appendChild(emptyLine('No messages yet.'));
         } else {
-          var html = records.map(function (m) {
+          records.forEach(function (m) {
             var d = m.data || m;
-            var role = d.role || 'user';
-            var content = d.content || '';
             var date = (d.created_at || '').slice(0, 10);
-            return messageCardHtml(role, content, date);
-          }).join('');
-          area.innerHTML = html;
+            area.appendChild(messageCard(d.role || 'user', d.content || '', date));
+          });
         }
         scrollChatToBottom();
       })
@@ -452,14 +489,19 @@
         console.error('[impresspress] Error loading messages:', err);
       });
 
-    // Toggle the same attribute the server renders — the highlight colors
-    // live in one CSS rule (`.chat-threads .card[data-active="true"]`), so
-    // SSR and client-side switching can't drift.
+    // Toggle the same attributes the server renders: `data-active`, whose
+    // highlight colors live in one CSS rule (`.chat-threads
+    // .card[data-active="true"]`), so SSR and client-side switching can't
+    // drift, and the `aria-current` that names the open thread to a screen
+    // reader.
     document.querySelectorAll('[data-thread-id]').forEach(function (el) {
-      el.dataset.active = el.dataset.threadId === id ? 'true' : 'false';
+      var active = el.dataset.threadId === id;
+      el.dataset.active = active ? 'true' : 'false';
+      if (active) el.setAttribute('aria-current', 'page');
+      else el.removeAttribute('aria-current');
     });
 
-    history.replaceState({}, '', '/b/llm/threads/' + id);
+    history.replaceState({}, '', threadUrl(id));
   }
 
   // -------------------------------------------------------------------------
@@ -479,10 +521,10 @@
     var area = document.getElementById('messages-area');
     if (!area || messages.length === 0) return;
 
-    area.innerHTML = messages.map(function (m) {
-      var date = (m.created_at || '').slice(0, 10);
-      return messageCardHtml(m.role, m.content, date);
-    }).join('');
+    area.textContent = '';
+    messages.forEach(function (m) {
+      area.appendChild(messageCard(m.role, m.content, (m.created_at || '').slice(0, 10)));
+    });
     scrollChatToBottom();
   }
 
@@ -530,6 +572,9 @@
       if (e.button !== 0 || e.metaKey || e.ctrlKey || e.shiftKey || e.altKey) return;
       var id = t.dataset.threadId;
       if (!id) return;
+      // On a phone showing the list, the link navigates (see
+      // `conversationShown`).
+      if (!conversationShown()) return;
       e.preventDefault();
       selectThread(id);
     });
