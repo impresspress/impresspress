@@ -134,6 +134,11 @@ fn row_menu_trigger(bucket: &str, key: &str, filename: &str) -> Markup {
 /// selected, how many and the bulk delete. A bar rather than a checkbox in the
 /// table header, because below 720px the table is cards and has no header.
 /// Rendered only when the folder holds files (folders cannot be selected).
+///
+/// The count is a polite live region that is always in the page — a region
+/// inserted together with its text is not announced — and it also carries
+/// the outcome of a bulk delete or an upload. Only the button hides while
+/// nothing is selected.
 fn render_bulk_bar() -> Markup {
     html! {
         div .bulk-bar {
@@ -141,14 +146,33 @@ fn render_bulk_bar() -> Markup {
                 input type="checkbox" data-bulk-toggle;
                 "Select all files"
             }
-            div .bulk-bar__selection #bulk-action-bar hidden {
-                span .bulk-bar__count aria-live="polite" data-bulk-count {}
-                button .btn .btn--ghost-danger .btn--sm type="button" data-bulk-delete {
-                    (icons::trash()) "Delete selected"
-                }
+            span .bulk-bar__count aria-live="polite" data-bulk-count {}
+            button .btn .btn--ghost-danger .bulk-bar__delete type="button" data-bulk-delete hidden {
+                (icons::trash()) "Delete selected"
             }
         }
     }
+}
+
+/// The id of the dialog that confirms a delete (`files-browser.js` fills in
+/// the question and opens it).
+pub(crate) const DELETE_CONFIRM_MODAL_ID: &str = "delete-confirm";
+
+/// The dialog that confirms deleting one file or a selection: "Delete 40
+/// files? This can't be undone." Cancel carries `autofocus`, so it — not the
+/// destructive button — is what `showModal()` focuses: a stray Enter cancels.
+pub(crate) fn render_delete_confirm_modal() -> Markup {
+    components::modal(
+        DELETE_CONFIRM_MODAL_ID,
+        "Delete files",
+        html! {
+            p #delete-confirm-question {}
+            (components::modal_footer(html! {
+                button .btn .btn--secondary .btn--block type="button" data-action="modal-close" autofocus { "Cancel" }
+                button .btn .btn--danger .btn--block type="button" data-delete-confirm { "Delete" }
+            }))
+        },
+    )
 }
 
 /// Folder/file table for `/b/storage/{bucket}/...` views.
@@ -202,7 +226,11 @@ pub fn render_objects_table(
             row_menu_trigger(bucket, &f.key, filename),
         ])
     });
+    // `#object-listing` is what `files-browser.js` re-fetches and swaps after
+    // a delete or an upload, so the page shows what the bucket now holds
+    // without a reload wiping the outcome it reports.
     html! {
+        div #object-listing {
         @if !listing.files.is_empty() { (render_bulk_bar()) }
         (DataTable::new(&OBJECT_COLUMNS)
             .rows(folder_rows.chain(file_rows).collect())
@@ -213,6 +241,7 @@ pub fn render_objects_table(
                 Some(upload_button()),
             ))
             .render())
+        }
     }
 }
 
@@ -354,6 +383,7 @@ pub async fn object_list_page(
         input #file-upload-input type="file" multiple hidden;
         (table)
         (render_share_modal())
+        (render_delete_confirm_modal())
         (super::render_bootstrap_script(bucket, current_prefix))
     };
 
@@ -696,6 +726,47 @@ mod tests {
             html.matches("data-table__cell--empty").count(),
             4,
             "the folder row's four empty cells: {html}"
+        );
+    }
+
+    /// The selection count is a live region that is always rendered; only
+    /// the delete button hides. The listing is wrapped in the element the
+    /// script re-fetches after a delete or an upload.
+    #[test]
+    fn the_bulk_bar_keeps_its_live_region_and_hides_only_the_button() {
+        let f1 = ObjectRow {
+            key: "a.png".into(),
+            size: 1,
+            modified: "2026-05-06T10:00:00Z".into(),
+        };
+        let listing = FolderListing {
+            folders: Vec::new(),
+            files: vec![&f1],
+        };
+        let html = render_objects_table("photos", "", &listing).into_string();
+        assert!(html.starts_with(r#"<div id="object-listing">"#), "{html}");
+        assert!(
+            html.contains(r#"<span class="bulk-bar__count" aria-live="polite" data-bulk-count></span><button class="btn btn--ghost-danger bulk-bar__delete" type="button" data-bulk-delete hidden>"#),
+            "{html}"
+        );
+    }
+
+    /// Deleting asks through the shared dialog, and Cancel — not the
+    /// destructive button — is what opening it focuses.
+    #[test]
+    fn the_delete_confirmation_focuses_cancel() {
+        let html = render_delete_confirm_modal().into_string();
+        assert!(
+            html.contains(r#"<dialog class="modal" id="delete-confirm""#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"data-action="modal-close" autofocus>Cancel</button>"#),
+            "{html}"
+        );
+        assert!(
+            html.contains(r#"data-delete-confirm>Delete</button>"#),
+            "{html}"
         );
     }
 

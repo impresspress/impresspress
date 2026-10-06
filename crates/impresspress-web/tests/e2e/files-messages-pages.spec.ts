@@ -1,12 +1,14 @@
-import { expect, test, type Page } from '@playwright/test';
-import { ADMIN_STATE_PATH, loginAsAdmin } from './fixtures/auth';
+import { expect, request as playwrightRequest, test, type Page } from '@playwright/test';
+import { ADMIN_STATE_PATH, adminBearer, loginAsAdmin } from './fixtures/auth';
 
 /**
  * The storage and messages pages, driven in a browser against the real server.
  *
  * - Files: "+ New bucket" opens the shared modal and lands in the new bucket;
  *   an upload comes back as a row whose checkbox is named after the file and
- *   whose "more actions" button opens a menu the keyboard drives.
+ *   whose "more actions" button opens a menu the keyboard drives; a bulk
+ *   delete asks through the shared dialog, and its outcome — including a
+ *   file that could not be deleted — is announced, not wiped by a reload.
  * - Messages at 390px: a context is created from the list, and its
  *   conversation is one pane with a usable composer, no sideways scroll.
  *
@@ -39,14 +41,15 @@ test('a bucket created from the modal takes an upload with labelled row controls
   // The empty bucket offers the upload it is waiting for.
   await expect(page.getByRole('heading', { level: 2, name: 'This folder is empty' })).toBeVisible();
 
-  // Upload through the picker every "+ Upload" opens; the page reloads.
-  const reloaded = page.waitForEvent('load');
+  // Upload through the picker every "+ Upload" opens. The listing is
+  // swapped in place, not the page reloaded, so the outcome stays on screen.
   await page.locator('#file-upload-input').setInputFiles({
     name: 'notes.txt',
     mimeType: 'text/plain',
     buffer: Buffer.from('hello'),
   });
-  await reloaded;
+  await expect(page.locator('#toast-container')).toContainText('1 file uploaded');
+  await expect(page.locator('[data-bulk-count]')).toHaveText('1 file uploaded');
 
   await expect(page.getByRole('checkbox', { name: 'Select notes.txt' })).toBeVisible();
   await expect(page.getByRole('checkbox', { name: 'Select all files' })).toBeVisible();
@@ -85,10 +88,102 @@ test('a bucket created from the modal takes an upload with labelled row controls
   await page.keyboard.press('Escape');
   await expect(trigger).toBeFocused();
 
+  // Tab out of the open menu closes it and moves on past its trigger.
+  await page.keyboard.press('Enter');
+  await expect(menu).toBeVisible();
+  await page.keyboard.press('Tab');
+  await expect(menu).toHaveCount(0);
+  await expect(trigger).toHaveAttribute('aria-expanded', 'false');
+  await expect(trigger).not.toBeFocused();
+
   // Selecting the row shows the bulk bar with its count.
+  await expect(page.getByRole('button', { name: 'Delete selected' })).toBeHidden();
   await page.getByRole('checkbox', { name: 'Select notes.txt' }).check();
-  await expect(page.getByText('1 file selected')).toBeVisible();
-  await expect(page.getByRole('button', { name: 'Delete selected' })).toBeVisible();
+  await expect(page.locator('[data-bulk-count]')).toHaveText('1 file selected');
+  const del = page.getByRole('button', { name: 'Delete selected' });
+  await expect(del).toBeVisible();
+  expect((await del.boundingBox())!.height).toBeGreaterThanOrEqual(44);
+});
+
+/** A bucket holding `keys` (tiny text files), made through the API. */
+async function seedBucket(baseURL: string | undefined, keys: string[]): Promise<{
+  bucket: string;
+  remove: (key: string) => Promise<void>;
+}> {
+  const api = await playwrightRequest.newContext({ baseURL, storageState: { cookies: [], origins: [] } });
+  const Authorization = await adminBearer(api);
+  const bucket = `e2e-bulk-${Date.now().toString(36)}`;
+  const made = await api.post('/b/storage/api/buckets', {
+    headers: { Authorization, 'Content-Type': 'application/json' },
+    data: { name: bucket, public: false },
+  });
+  expect(made.status(), await made.text()).toBe(200);
+  for (const key of keys) {
+    const up = await api.post(`/b/storage/api/buckets/${bucket}/objects?key=${encodeURIComponent(key)}`, {
+      headers: { Authorization, 'Content-Type': 'text/plain' },
+      data: Buffer.from(key),
+    });
+    expect(up.status(), await up.text()).toBe(200);
+  }
+  return {
+    bucket,
+    remove: async (key) => {
+      const gone = await api.delete(`/b/storage/api/buckets/${bucket}/objects/${encodeURIComponent(key)}`, {
+        headers: { Authorization },
+      });
+      expect(gone.ok(), await gone.text()).toBe(true);
+    },
+  };
+}
+
+test('a bulk delete confirms in the dialog, removes the rows and says so', async ({ page, baseURL }) => {
+  const { bucket } = await seedBucket(baseURL, ['one.txt', 'two.txt', 'three.txt']);
+  await loginAsAdmin(page);
+  await page.goto(`/b/storage/${bucket}/`, { waitUntil: 'networkidle' });
+
+  await page.getByRole('checkbox', { name: 'Select one.txt' }).check();
+  await page.getByRole('checkbox', { name: 'Select two.txt' }).check();
+  const del = page.getByRole('button', { name: 'Delete selected' });
+  await del.click();
+
+  const dialog = page.getByRole('dialog', { name: 'Delete files' });
+  await expect(dialog).toBeVisible();
+  await expect(dialog).toContainText("Delete 2 files? This can't be undone.");
+  // Cancel, not the destructive button, has focus: a stray Enter cancels.
+  await expect(dialog.getByRole('button', { name: 'Cancel' })).toBeFocused();
+  await page.keyboard.press('Enter');
+  await expect(dialog).toBeHidden();
+  await expect(page.getByRole('checkbox', { name: 'Select one.txt' })).toBeChecked();
+
+  await del.click();
+  await dialog.getByRole('button', { name: 'Delete', exact: true }).click();
+  await expect(page.locator('[data-bulk-count]')).toHaveText('2 files deleted');
+  await expect(page.locator('#toast-container')).toContainText('2 files deleted');
+  await expect(page.getByRole('checkbox', { name: 'Select one.txt' })).toHaveCount(0);
+  await expect(page.getByRole('checkbox', { name: 'Select two.txt' })).toHaveCount(0);
+  await expect(page.getByRole('checkbox', { name: 'Select three.txt' })).not.toBeChecked();
+});
+
+test('a file that could not be deleted is reported, not passed over', async ({ page, baseURL }) => {
+  const { bucket, remove } = await seedBucket(baseURL, ['done.txt', 'gone.txt', 'stay.txt']);
+  await loginAsAdmin(page);
+  await page.goto(`/b/storage/${bucket}/`, { waitUntil: 'networkidle' });
+
+  await page.getByRole('checkbox', { name: 'Select done.txt' }).check();
+  await page.getByRole('checkbox', { name: 'Select gone.txt' }).check();
+  await page.getByRole('button', { name: 'Delete selected' }).click();
+  // Someone else deletes one of them while the dialog is open.
+  await remove('gone.txt');
+  await page.getByRole('dialog', { name: 'Delete files' }).getByRole('button', { name: 'Delete', exact: true }).click();
+
+  const outcome = "1 file deleted, 1 couldn't be deleted: gone.txt";
+  await expect(page.locator('[data-bulk-count]')).toHaveText(outcome);
+  await expect(page.locator('#toast-container [role="alert"]')).toContainText(outcome);
+  // The list is what the bucket now holds: both rows are gone, the
+  // untouched file is still there.
+  await expect(page.getByRole('checkbox', { name: 'Select done.txt' })).toHaveCount(0);
+  await expect(page.getByRole('checkbox', { name: 'Select gone.txt' })).toHaveCount(0);
+  await expect(page.getByRole('checkbox', { name: 'Select stay.txt' })).toBeVisible();
 });
 
 test.describe('at 390px', () => {

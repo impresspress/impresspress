@@ -27,12 +27,14 @@
   }
 
   // Upload `files` (a FileList or array of File) to `bucket`/`prefix`.
-  // Shared by drag-drop and the explicit "+ Upload" button.
+  // Shared by drag-drop and every "+ Upload" button. The listing is then
+  // re-fetched in place rather than the page reloaded, so the outcome stays
+  // on screen: the toast, and the bar's live region, say how many went up
+  // and name the ones that did not.
   async function uploadFiles(files, bucket, prefix) {
     const list = Array.from(files || []);
     if (list.length === 0) return;
-    let successes = 0;
-    let failures = 0;
+    const failed = [];
     for (const f of list) {
       const key = (prefix || '') + f.name;
       const fd = new FormData();
@@ -44,24 +46,56 @@
         encodeURIComponent(key);
       try {
         const resp = await fetch(url, { method: 'POST', body: fd });
-        if (resp.ok) {
-          successes++;
-        } else {
-          failures++;
-        }
+        if (!resp.ok) failed.push(f.name);
       } catch (err) {
-        failures++;
+        failed.push(f.name);
       }
     }
-    if (successes > 0) {
-      showToast(
-        successes + ' uploaded' + (failures > 0 ? ', ' + failures + ' failed' : ''),
-        failures > 0 ? 'error' : 'success'
-      );
-    } else {
-      showToast(failures + ' upload failed', 'error');
+    const done = list.length - failed.length;
+    let message = plural(done, 'file') + ' uploaded';
+    if (failed.length > 0) {
+      message += ', ' + failed.length + " couldn't be uploaded: " + failed.join(', ');
     }
-    window.location.reload();
+    await refreshListing([]);
+    announce(message, failed.length > 0 ? 'error' : 'success');
+  }
+
+  function plural(n, noun) {
+    return n + ' ' + noun + (n === 1 ? '' : 's');
+  }
+
+  // Say an outcome twice over: as a toast, and in the bulk bar's always-
+  // present live region when the folder has one.
+  function announce(message, type) {
+    showToast(message, type);
+    const count = document.querySelector('[data-bulk-count]');
+    if (count) count.textContent = message;
+  }
+
+  // Re-fetch this folder's page and swap its `#object-listing` (the bulk bar
+  // and the table, `objects::render_objects_table`) for the fresh one, then
+  // re-select `keepSelected` — the files an action could not finish with —
+  // where they are still listed. The handlers below are delegated, so the
+  // swapped-in markup needs no binding.
+  async function refreshListing(keepSelected) {
+    const current = document.getElementById('object-listing');
+    if (!current) return;
+    try {
+      const resp = await fetch(window.location.href, { headers: { Accept: 'text/html' } });
+      if (!resp.ok) throw new Error('status ' + resp.status);
+      const doc = new DOMParser().parseFromString(await resp.text(), 'text/html');
+      const fresh = doc.getElementById('object-listing');
+      if (!fresh) throw new Error('no listing in the page');
+      current.replaceWith(document.importNode(fresh, true));
+    } catch (e) {
+      showToast("The file list couldn't be refreshed; reload the page to see it.", 'error');
+      return;
+    }
+    const keep = new Set(keepSelected);
+    document.querySelectorAll('.bulk-select').forEach((box) => {
+      box.checked = keep.has(box.dataset.key);
+    });
+    updateBulkBar();
   }
 
   function dragDropHandler(boot) {
@@ -86,34 +120,40 @@
       await uploadFiles(e.dataTransfer.files, bucket, prefix);
     });
 
-    // Every "+ Upload" trigger (the topbar's, an empty folder's) opens the
-    // hidden file picker, then uploads what was picked.
+    // Every "+ Upload" trigger (the topbar's, an empty folder's — which a
+    // refresh swaps in) opens the hidden file picker, then uploads what was
+    // picked.
     const fileInput = document.getElementById('file-upload-input');
     if (fileInput) {
-      document.querySelectorAll('[data-action="open-upload"]').forEach((trigger) => {
-        trigger.addEventListener('click', () => fileInput.click());
+      document.addEventListener('click', (e) => {
+        if (e.target.closest('[data-action="open-upload"]')) fileInput.click();
       });
       fileInput.addEventListener('change', async () => {
         await uploadFiles(fileInput.files, bucket, prefix);
+        fileInput.value = '';
       });
     }
   }
 
   // The bar above the table (`objects::render_bulk_bar`): "Select all
-  // files", and the count and bulk delete once anything is selected.
+  // files", the selection's count (a live region that is always there), and
+  // "Delete selected" once anything is selected. Delegated, because a
+  // refresh replaces the bar and the table.
   function bulkSelect() {
-    const all = document.querySelector('[data-bulk-toggle]');
-    if (!all) return;
-    const rows = document.querySelectorAll('.bulk-select');
-    all.addEventListener('change', () => {
-      rows.forEach((r) => {
-        r.checked = all.checked;
-      });
-      updateBulkBar();
+    document.addEventListener('change', (e) => {
+      if (e.target.matches('[data-bulk-toggle]')) {
+        document.querySelectorAll('.bulk-select').forEach((r) => {
+          r.checked = e.target.checked;
+        });
+        updateBulkBar();
+      } else if (e.target.matches('.bulk-select')) {
+        updateBulkBar();
+      }
     });
-    rows.forEach((r) => r.addEventListener('change', updateBulkBar));
-    const del = document.querySelector('[data-bulk-delete]');
-    if (del) del.addEventListener('click', bulkDelete);
+    document.addEventListener('click', (e) => {
+      const del = e.target.closest('[data-bulk-delete]');
+      if (del && !del.disabled) askToDelete(selectedKeys(), del);
+    });
   }
 
   function selectedKeys() {
@@ -123,7 +163,6 @@
   }
 
   function updateBulkBar() {
-    const bar = document.getElementById('bulk-action-bar');
     const all = document.querySelector('[data-bulk-toggle]');
     const total = document.querySelectorAll('.bulk-select').length;
     const n = selectedKeys().length;
@@ -131,19 +170,52 @@
       all.checked = total > 0 && n === total;
       all.indeterminate = n > 0 && n < total;
     }
-    if (!bar) return;
-    bar.hidden = n === 0;
-    const count = bar.querySelector('[data-bulk-count]');
-    if (count) count.textContent = n + (n === 1 ? ' file selected' : ' files selected');
+    const del = document.querySelector('[data-bulk-delete]');
+    if (del) del.hidden = n === 0;
+    const count = document.querySelector('[data-bulk-count]');
+    if (count) count.textContent = n === 0 ? '' : plural(n, 'file') + ' selected';
   }
 
-  async function bulkDelete() {
+  // Deleting goes through the shared confirm dialog
+  // (`objects::render_delete_confirm_modal`): "Delete 40 files? This can't
+  // be undone.", Cancel focused. `pendingDelete` is what its Delete button
+  // acts on; `opener` is the control that asked, which is disabled and busy
+  // while the deletes run so a second click cannot start them twice.
+  let pendingDelete = null;
+  let deleting = false;
+
+  function askToDelete(keys, opener) {
     const boot = readBootstrap() || {};
-    const bucket = boot.bucket;
-    const keys = selectedKeys();
-    if (!bucket || !keys.length) return;
-    if (!window.confirm('Delete ' + keys.length + ' file(s)?')) return;
-    let failures = 0;
+    const dlg = document.getElementById('delete-confirm');
+    if (!boot.bucket || !keys.length || !dlg || deleting) return;
+    pendingDelete = { bucket: boot.bucket, keys: keys, opener: opener };
+    const name = keys.length === 1 ? keys[0].split('/').pop() : plural(keys.length, 'file');
+    // textContent, never innerHTML: file names are user-chosen.
+    dlg.querySelector('#delete-confirm-question').textContent =
+      'Delete ' + name + "? This can't be undone.";
+    document.body.dispatchEvent(
+      new CustomEvent('openModal', { detail: { id: 'delete-confirm', opener: opener } })
+    );
+  }
+
+  function deleteConfirm() {
+    document.addEventListener('click', (e) => {
+      if (!e.target.closest('[data-delete-confirm]') || !pendingDelete) return;
+      const job = pendingDelete;
+      pendingDelete = null;
+      document.getElementById('delete-confirm').close();
+      deleteKeys(job.bucket, job.keys, job.opener);
+    });
+  }
+
+  async function deleteKeys(bucket, keys, opener) {
+    deleting = true;
+    const busy = document.querySelector('[data-bulk-delete]');
+    if (busy) {
+      busy.disabled = true;
+      busy.setAttribute('aria-busy', 'true');
+    }
+    const failed = [];
     for (const key of keys) {
       const url =
         '/b/storage/api/buckets/' +
@@ -152,16 +224,28 @@
         encodeURIComponent(key);
       try {
         const resp = await fetch(url, { method: 'DELETE' });
-        if (!resp.ok) failures++;
+        if (!resp.ok) failed.push(key);
       } catch (e) {
-        failures++;
+        failed.push(key);
       }
     }
-    showToast(
-      keys.length - failures + ' deleted' + (failures > 0 ? ', ' + failures + ' failed' : ''),
-      failures > 0 ? 'error' : 'success'
-    );
-    window.location.reload();
+    // The refresh shows what the bucket now holds; a file that could not be
+    // deleted and is still there stays selected, ready to try again.
+    await refreshListing(failed);
+    deleting = false;
+    const deleted = keys.length - failed.length;
+    let message = plural(deleted, 'file') + ' deleted';
+    if (failed.length > 0) {
+      message +=
+        ', ' +
+        failed.length +
+        " couldn't be deleted: " +
+        failed.map((k) => k.split('/').pop()).join(', ');
+    }
+    announce(message, failed.length > 0 ? 'error' : 'success');
+    // The control that asked may have gone with the rows it deleted.
+    const back = opener && opener.isConnected ? opener : document.querySelector('[data-bulk-toggle]');
+    if (back) back.focus();
   }
 
   // A file row's "more actions" menu. The trigger is a button with
@@ -245,7 +329,7 @@
         showToast('Link copied', 'success');
         trigger.focus();
       }),
-      menuItem('Delete', () => confirmDelete(bucket, key, trigger), true)
+      menuItem('Delete', () => askToDelete([key], trigger), true)
     );
     const items = Array.from(menu.querySelectorAll('[role="menuitem"]'));
     menu.addEventListener('keydown', (e) => {
@@ -260,7 +344,9 @@
         closeMenu(true);
         return;
       } else if (e.key === 'Tab') {
-        closeMenu(false);
+        // Back on the trigger, and the Tab itself is not stopped: focus moves
+        // on from the trigger, as if the menu had never opened.
+        closeMenu(true);
         return;
       }
       if (next !== null) {
@@ -361,29 +447,6 @@
     });
   }
 
-  async function confirmDelete(bucket, key, trigger) {
-    if (!window.confirm('Delete ' + key + '?')) {
-      trigger.focus();
-      return;
-    }
-    const url =
-      '/b/storage/api/buckets/' +
-      encodeURIComponent(bucket) +
-      '/objects/' +
-      encodeURIComponent(key);
-    try {
-      const resp = await fetch(url, { method: 'DELETE' });
-      if (resp.ok) {
-        showToast('Deleted', 'success');
-        window.location.reload();
-      } else {
-        showToast('Delete failed', 'error');
-      }
-    } catch (e) {
-      showToast('Delete failed', 'error');
-    }
-  }
-
   // S3-style bucket name validation. Rules per AWS S3:
   //   - 3 to 63 characters
   //   - lowercase letters, digits, hyphens; must start and end with letter/digit
@@ -482,6 +545,7 @@
       if (!boot) return;
       dragDropHandler(boot);
       bulkSelect();
+      deleteConfirm();
     },
   };
 

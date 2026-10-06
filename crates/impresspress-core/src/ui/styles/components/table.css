@@ -110,13 +110,12 @@ table.data-table { border-collapse: separate; border-spacing: 0; }
 .row-menu__item:hover, .row-menu__item:focus-visible { background: var(--bg-hover); }
 .row-menu__item--danger { color: var(--accent-danger-text); }
 /* The bar above a list whose rows can be selected: "Select all" on the
-   left, the selection's count and bulk actions after it once anything is
-   selected. Above the table rather than in its header, which card mode
+   left, then the selection's count (always present: it is a live region)
+   and the bulk actions once anything is selected. Above the table rather than in its header, which card mode
    hides. */
 .bulk-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-4); margin-bottom: var(--space-2); }
-.bulk-bar__selection { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-3); }
-.bulk-bar__selection[hidden] { display: none; }
 .bulk-bar__count { font-size: var(--text-sm); color: var(--text-secondary); }
+.bulk-bar__delete { min-height: 44px; }
 /* A long free-form value in a cell -- a URL, a stored setting. It may break
    at any character, so its column can be narrower than the whole value and
    the table fits the card instead of scrolling part of itself out of view.

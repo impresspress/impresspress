@@ -616,7 +616,7 @@ mod tests {
         assert!(html.contains(">docs<"));
         assert!(html.contains("admin_1"));
         // One visibility badge, the same as the user's bucket list draws.
-        assert!(html.contains(r#"<span class="badge badge-success">Public</span>"#));
+        assert!(html.contains(r#"<span class="badge badge-warning">Public</span>"#));
         assert!(html.contains(r#"<span class="badge badge-secondary">Private</span>"#));
         assert!(html.contains("2026-05-06 10:00 UTC"));
     }
@@ -948,13 +948,13 @@ mod b13_visibility_tests {
 
     /// Does the user-facing bucket table say this bucket is public?
     /// Both tables draw `pages_user::buckets::visibility_badge`: "Public" in
-    /// `badge-success`, "Private" in the neutral `badge-secondary`.
+    /// `badge-warning`, "Private" in the neutral `badge-secondary`.
     fn user_page_says_public(html: &str) -> bool {
         assert!(
             html.contains(">photos<"),
             "the bucket is missing from the user page entirely: {html}"
         );
-        html.contains("badge-success")
+        html.contains("badge-warning")
     }
 
     /// Does the admin bucket table say this bucket is public?

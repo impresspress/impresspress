@@ -44,11 +44,12 @@ impl From<(&repo::buckets::BucketRow, i64)> for BucketRow {
 }
 
 /// A bucket's visibility as one badge, the same on every page that lists
-/// buckets: "Public" in the positive colour (anyone with an object's URL can
-/// read it), "Private" neutral (the default, nothing to call out).
+/// buckets: "Public" in the warning tone — anyone with an object's URL can
+/// read it, which is a risk to see at a glance — and "Private" neutral (the
+/// default, nothing to call out).
 pub(crate) fn visibility_badge(public: bool) -> Markup {
     if public {
-        components::badge(BadgeVariant::Success, "Public")
+        components::badge(BadgeVariant::Warning, "Public")
     } else {
         components::badge(BadgeVariant::Secondary, "Private")
     }
