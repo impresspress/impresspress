@@ -90,6 +90,32 @@ table.data-table { border-collapse: separate; border-spacing: 0; }
    flex + gap keeps it baseline-aligned with the text instead of the
    default inline SVG's slight descender offset. */
 .row--folder__link { display: inline-flex; align-items: center; gap: var(--space-2); }
+/* A table row's "more actions" menu (`files-browser.js` opens it under the
+   row's `.btn--icon` trigger): a floating list of full-width menu items, each
+   a 44px target. Placed with `position: fixed` against the trigger; the
+   script sets `top`/`right`. */
+.row-menu {
+	position: fixed; z-index: var(--z-dropdown);
+	min-width: 10rem; padding: var(--space-1);
+	display: flex; flex-direction: column;
+	background: var(--surface-1); border: 1px solid var(--border-color);
+	border-radius: var(--radius-md); box-shadow: var(--shadow-lg);
+}
+.row-menu__item {
+	display: flex; align-items: center; min-height: 44px; width: 100%;
+	padding: 0 var(--space-3); border: 0; border-radius: var(--radius-sm);
+	background: transparent; color: var(--text-primary);
+	font: inherit; font-size: var(--text-sm); text-align: left; cursor: pointer;
+}
+.row-menu__item:hover, .row-menu__item:focus-visible { background: var(--bg-hover); }
+.row-menu__item--danger { color: var(--accent-danger-text); }
+/* The bar above a list whose rows can be selected: "Select all" on the
+   left, then the selection's count (always present: it is a live region)
+   and the bulk actions once anything is selected. Above the table rather than in its header, which card mode
+   hides. */
+.bulk-bar { display: flex; flex-wrap: wrap; align-items: center; gap: var(--space-2) var(--space-4); margin-bottom: var(--space-2); }
+.bulk-bar__count { font-size: var(--text-sm); color: var(--text-secondary); }
+.bulk-bar__delete { min-height: 44px; }
 /* A long free-form value in a cell -- a URL, a stored setting. It may break
    at any character, so its column can be narrower than the whole value and
    the table fits the card instead of scrolling part of itself out of view.

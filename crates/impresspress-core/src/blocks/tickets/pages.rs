@@ -674,13 +674,13 @@ pub(super) fn detail_region(view: &TicketPage) -> Markup {
     html! {
         div .ticket-detail id=(DETAIL_REGION) {
             (templates::detail_page(
-                DetailHero {
+                Some(DetailHero {
                     icon: None,
                     title: &report.subject,
                     subtitle: None,
                     badges,
                     action_menu: None,
-                },
+                }),
                 sections,
                 meta,
             ))
