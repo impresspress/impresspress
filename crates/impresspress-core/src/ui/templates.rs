@@ -28,6 +28,20 @@ pub fn list_page(filters: Option<Markup>, table: Markup, pagination: Option<Mark
     }
 }
 
+/// A detail page's hero: what the resource IS, as distinct from the page's
+/// title — a ticket's subject under its "TKT-1" title — with the state that
+/// changes with it (status badges), so a swap of the page body carries them.
+/// Never the page title again: the topbar owns that `h1`, and a hero that
+/// only repeats it is a second heading for the same thing (a page whose
+/// resource IS its title passes no hero).
+pub struct DetailHero<'a> {
+    pub icon: Option<Markup>, // typically `components::avatar(...)` or an icon
+    pub title: &'a str,
+    pub subtitle: Option<&'a str>,
+    pub badges: Vec<Markup>, // typically `components::badge(...)` calls
+    pub action_menu: Option<Markup>, // dropdown / button group
+}
+
 /// One key/value row in the right-rail metadata panel.
 pub struct DetailMeta<'a> {
     pub key: &'a str,
@@ -35,19 +49,35 @@ pub struct DetailMeta<'a> {
 }
 
 /// `detail_page` template: one resource's sections, with its key facts in a
-/// right-hand rail (stacked under the sections below 1024px).
+/// right-hand rail (stacked under the sections below 1024px), under an
+/// optional [`DetailHero`].
 ///
-/// There is no hero: the resource's name, its one-line description and its
-/// actions are the page header, which the shell topbar owns (its `h1`,
-/// subtitle and actions — `ui::Shell::trail`/`subtitle`/`actions`). A title
-/// repeated in the body is a second heading for the same thing. Each section
-/// opens with a `components::section_header`.
+/// The resource's name, its one-line description and its page-level actions
+/// are the page header, which the shell topbar owns (its `h1`, subtitle and
+/// actions — `ui::Shell::trail`/`subtitle`/`actions`); a hero is only for
+/// what the topbar does not already say. Each section opens with a
+/// `components::section_header`.
 pub fn detail_page(
+    hero: Option<DetailHero<'_>>,
     sections: Vec<Markup>, // typically `section { (section_header(..)) .. }`
     meta: Vec<DetailMeta<'_>>,
 ) -> Markup {
     html! {
         div .page .page--detail {
+            @if let Some(hero) = hero {
+                header .detail-hero {
+                    @if let Some(icon) = hero.icon { div .detail-hero__icon { (icon) } }
+                    div .detail-hero__text {
+                        // h2, not h1: the shell topbar owns the page's single h1.
+                        h2 .detail-hero__title { (hero.title) }
+                        @if let Some(s) = hero.subtitle { p .detail-hero__subtitle { (s) } }
+                        @if !hero.badges.is_empty() {
+                            div .detail-hero__badges { @for b in &hero.badges { (b.clone()) } }
+                        }
+                    }
+                    @if let Some(a) = hero.action_menu { div .detail-hero__action { (a) } }
+                }
+            }
             div .detail-body {
                 div .detail-body__main {
                     @for s in sections { (s) }
@@ -465,6 +495,29 @@ mod tests {
         assert!(!s.contains("page-pagination"));
     }
 
+    /// A hero renders the resource (an h2 — the topbar has the h1) with its
+    /// badges.
+    #[test]
+    fn detail_page_renders_a_hero_when_given_one() {
+        let hero = DetailHero {
+            icon: None,
+            title: "Opening hours are incorrect",
+            subtitle: None,
+            badges: vec![crate::ui::components::badge(
+                crate::ui::components::BadgeVariant::Secondary,
+                "New",
+            )],
+            action_menu: None,
+        };
+        let s = detail_page(Some(hero), vec![], vec![]).into_string();
+        assert!(
+            s.contains(r#"<h2 class="detail-hero__title">Opening hours are incorrect</h2>"#),
+            "{s}"
+        );
+        assert!(s.contains(r#"<div class="detail-hero__badges"><span class="badge badge-secondary">New</span></div>"#), "{s}");
+        assert!(!s.contains("<h1"), "{s}");
+    }
+
     #[test]
     fn detail_page_renders_sections_and_meta_and_no_heading_of_its_own() {
         let sections = vec![
@@ -481,9 +534,10 @@ mod tests {
                 value: html! { "2026-01-12" },
             },
         ];
-        let s = detail_page(sections, meta).into_string();
-        // The topbar owns the resource's name; the body repeats no heading.
+        let s = detail_page(None, sections, meta).into_string();
+        // With no hero the body adds no heading: the topbar owns the name.
         assert!(!s.contains("<h1") && !s.contains("<h2"), "{s}");
+        assert!(!s.contains("detail-hero"), "{s}");
         assert!(s.contains(r#"<aside class="detail-meta" aria-label="Details">"#));
         assert!(s.contains("Activity"));
         assert!(s.contains("Sessions"));
@@ -493,7 +547,7 @@ mod tests {
 
     #[test]
     fn detail_page_omits_meta_aside_when_empty() {
-        let s = detail_page(vec![], vec![]).into_string();
+        let s = detail_page(None, vec![], vec![]).into_string();
         assert!(!s.contains("detail-meta"));
     }
 

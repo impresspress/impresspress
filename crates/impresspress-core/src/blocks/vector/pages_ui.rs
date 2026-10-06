@@ -180,7 +180,10 @@ pub fn render_index_detail_body(row: &IndexRow, schema_cols: &[(String, String)]
     } else {
         row.model.as_str()
     };
+    // No hero: the index's name is the page title, and the topbar's
+    // subtitle already gives its model and dimensions.
     detail_page(
+        None,
         vec![schema],
         vec![
             DetailMeta {
